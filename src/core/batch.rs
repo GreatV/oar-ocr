@@ -24,20 +24,20 @@ pub type Tensor1D = ndarray::ArrayD<f32>;
 /// This struct contains the instances, input paths, and indexes for a batch of data.
 /// It's used in the OCR pipeline to process multiple inputs together for efficiency.
 pub struct BatchData {
-    /// The instances in the batch, stored as Arc<str> for efficient sharing.
+    /// The instances in the batch, stored as `Arc<str>` for efficient sharing.
     pub instances: Vec<Arc<str>>,
-    /// The input paths for the instances in the batch, stored as Arc<str> for efficient sharing.
+    /// The input paths for the instances in the batch, stored as `Arc<str>` for efficient sharing.
     pub input_paths: Vec<Arc<str>>,
     /// The indexes of the instances in the original data set.
     pub indexes: Vec<usize>,
 }
 
 impl BatchData {
-    /// Creates a new BatchData instance from shared Arc<str> paths and indexes.
+    /// Creates a new BatchData instance from shared `Arc<str>` paths and indexes.
     ///
     /// # Arguments
     ///
-    /// * `paths` - A vector of Arc<str> representing the paths to the instances.
+    /// * `paths` - A vector of `Arc<str>` representing the paths to the instances.
     /// * `indexes` - A vector of usize representing the indexes of the instances in the original data set.
     ///
     /// # Returns

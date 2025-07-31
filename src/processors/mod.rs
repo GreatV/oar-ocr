@@ -7,14 +7,14 @@
 //!
 //! # Modules
 //!
-//! * [`decode`] - Text decoding utilities for converting model predictions to readable text
-//! * [`geometry`] - Geometric primitives and algorithms for OCR processing
-//! * [`normalization`] - Image normalization utilities for preparing images for OCR models
-//! * [`ocr_resize`] - OCR-specific image resizing functionality
-//! * [`postprocess`] - Post-processing utilities for OCR pipeline outputs
-//! * [`resize`] - General image resizing utilities for OCR preprocessing
-//! * [`types`] - Type definitions used across the processors module
-//! * [`utils`] - Additional utility functions for image processing
+//! * `decode` - Text decoding utilities for converting model predictions to readable text
+//! * `geometry` - Geometric primitives and algorithms for OCR processing
+//! * `normalization` - Image normalization utilities for preparing images for OCR models
+//! * `ocr_resize` - OCR-specific image resizing functionality
+//! * `postprocess` - Post-processing utilities for OCR pipeline outputs
+//! * `resize` - General image resizing utilities for OCR preprocessing
+//! * `types` - Type definitions used across the processors module
+//! * `utils` - Additional utility functions for image processing
 
 mod decode;
 mod geometry;
