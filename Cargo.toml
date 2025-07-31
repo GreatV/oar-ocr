@@ -9,7 +9,7 @@ repository = "https://github.com/greatv/oar-ocr"
 homepage = "https://github.com/greatv/oar-ocr"
 readme = "README.md"
 keywords = ["ocr", "onnx", "computer-vision", "text-recognition", "machine-learning"]
-categories = ["computer-vision", "deep-learning"]
+categories = ["computer-vision", "science"]
 
 [dependencies]
 image = "0.25.6"
