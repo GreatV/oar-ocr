@@ -118,8 +118,7 @@ impl ConfigValidator for DoctrRectifierPredictorConfig {
                 if dim > MAX_SHAPE_SIZE {
                     return Err(crate::core::ConfigError::ResourceLimitExceeded {
                         message: format!(
-                            "Recognition image shape dimension {} ({}) exceeds maximum allowed size {}",
-                            i, dim, MAX_SHAPE_SIZE
+                            "Recognition image shape dimension {i} ({dim}) exceeds maximum allowed size {MAX_SHAPE_SIZE}"
                         ),
                     });
                 }

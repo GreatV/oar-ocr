@@ -1,0 +1,42 @@
+name: Run Tests
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Run Tests, Lints, and Format Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          # Use a minimal profile to speed up toolchain installation
+          profile: minimal
+          toolchain: stable
+          override: true
+          # Install components needed for linting and formatting
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies
+        # Use a dedicated action for caching Rust projects
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy linter
+        # Run clippy with strict warnings-as-errors policy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests in debug mode
+        run: cargo test --verbose

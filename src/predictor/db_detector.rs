@@ -148,8 +148,7 @@ impl ConfigValidator for TextDetPredictorConfig {
             if c == 0 || h == 0 || w == 0 {
                 return Err(crate::core::ConfigError::InvalidConfig {
                     message: format!(
-                        "Input shape dimensions must be greater than 0, got ({}, {}, {})",
-                        c, h, w
+                        "Input shape dimensions must be greater than 0, got ({c}, {h}, {w})"
                     ),
                 });
             }

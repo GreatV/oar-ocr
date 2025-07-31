@@ -83,8 +83,7 @@ pub trait ConfigValidator {
         if batch_size > max_batch_size {
             return Err(ConfigError::ResourceLimitExceeded {
                 message: format!(
-                    "Batch size {} exceeds maximum allowed size {}",
-                    batch_size, max_batch_size
+                    "Batch size {batch_size} exceeds maximum allowed size {max_batch_size}"
                 ),
             });
         }
@@ -136,7 +135,7 @@ pub trait ConfigValidator {
     fn validate_positive_usize(&self, value: usize, field_name: &str) -> Result<(), ConfigError> {
         if value == 0 {
             return Err(ConfigError::InvalidConfig {
-                message: format!("{} must be greater than 0", field_name),
+                message: format!("{field_name} must be greater than 0"),
             });
         }
         Ok(())
@@ -157,7 +156,7 @@ pub trait ConfigValidator {
     fn validate_positive_f32(&self, value: f32, field_name: &str) -> Result<(), ConfigError> {
         if value <= 0.0 {
             return Err(ConfigError::InvalidConfig {
-                message: format!("{} must be greater than 0.0", field_name),
+                message: format!("{field_name} must be greater than 0.0"),
             });
         }
         Ok(())
@@ -186,10 +185,7 @@ pub trait ConfigValidator {
     ) -> Result<(), ConfigError> {
         if value < min || value > max {
             return Err(ConfigError::InvalidConfig {
-                message: format!(
-                    "{} must be between {} and {}, got {}",
-                    field_name, min, max, value
-                ),
+                message: format!("{field_name} must be between {min} and {max}, got {value}"),
             });
         }
         Ok(())
@@ -218,8 +214,7 @@ pub trait ConfigValidator {
         if width == 0 || height == 0 {
             return Err(ConfigError::InvalidConfig {
                 message: format!(
-                    "{} dimensions must be greater than 0, got {}x{}",
-                    field_name, width, height
+                    "{field_name} dimensions must be greater than 0, got {width}x{height}"
                 ),
             });
         }
@@ -228,8 +223,7 @@ pub trait ConfigValidator {
         if width > MAX_DIMENSION || height > MAX_DIMENSION {
             return Err(ConfigError::ResourceLimitExceeded {
                 message: format!(
-                    "{} dimensions {}x{} exceed maximum allowed size {}x{}",
-                    field_name, width, height, MAX_DIMENSION, MAX_DIMENSION
+                    "{field_name} dimensions {width}x{height} exceed maximum allowed size {MAX_DIMENSION}x{MAX_DIMENSION}"
                 ),
             });
         }
