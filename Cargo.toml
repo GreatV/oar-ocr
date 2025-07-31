@@ -21,7 +21,7 @@ serde = { version = "1.0", features = ["derive"] }
 ort = "2.0.0-rc.7"
 ndarray = "0.16"
 rayon = "1.8"
-thiserror = "1.0"
+thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
