@@ -27,7 +27,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 rand = "0.8"
-criterion = "0.5"
+criterion = "0.7"
 # Dependencies only used in examples
 clap = { version = "4.5.42", features = ["derive"] }
 nalgebra = "0.33.2"
