@@ -292,8 +292,7 @@ impl OCRError {
     pub fn config_error_with_context(field: &str, value: &str, reason: &str) -> Self {
         Self::ConfigError {
             message: format!(
-                "Configuration error in field '{}' with value '{}': {}",
-                field, value, reason
+                "Configuration error in field '{field}' with value '{value}': {reason}"
             ),
         }
     }
@@ -313,8 +312,7 @@ impl OCRError {
     pub fn validation_error(component: &str, field: &str, expected: &str, actual: &str) -> Self {
         Self::InvalidInput {
             message: format!(
-                "Validation failed in {}: field '{}' expected {}, but got '{}'",
-                component, field, expected, actual
+                "Validation failed in {component}: field '{field}' expected {expected}, but got '{actual}'"
             ),
         }
     }
@@ -333,8 +331,7 @@ impl OCRError {
     pub fn resource_limit_error(resource: &str, limit: usize, requested: usize) -> Self {
         Self::InvalidInput {
             message: format!(
-                "Resource limit exceeded for {}: requested {} but limit is {}",
-                resource, requested, limit
+                "Resource limit exceeded for {resource}: requested {requested} but limit is {limit}"
             ),
         }
     }
@@ -359,10 +356,7 @@ impl OCRError {
     ) -> Self {
         Self::Processing {
             kind: stage,
-            context: format!(
-                "Operation '{}' failed on input '{}': {}",
-                operation, input_info, error
-            ),
+            context: format!("Operation '{operation}' failed on input '{input_info}': {error}"),
             source: Box::new(error),
         }
     }

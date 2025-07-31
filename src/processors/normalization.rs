@@ -77,8 +77,7 @@ impl NormalizeImage {
             if s <= 0.0 {
                 return Err(OCRError::ConfigError {
                     message: format!(
-                        "Standard deviation at index {} must be greater than 0, got {}",
-                        i, s
+                        "Standard deviation at index {i} must be greater than 0, got {s}"
                     ),
                 });
             }
@@ -111,7 +110,7 @@ impl NormalizeImage {
         for (i, &alpha) in self.alpha.iter().enumerate() {
             if !alpha.is_finite() {
                 return Err(OCRError::ConfigError {
-                    message: format!("Alpha value at index {} is not finite: {}", i, alpha),
+                    message: format!("Alpha value at index {i} is not finite: {alpha}"),
                 });
             }
         }
@@ -119,7 +118,7 @@ impl NormalizeImage {
         for (i, &beta) in self.beta.iter().enumerate() {
             if !beta.is_finite() {
                 return Err(OCRError::ConfigError {
-                    message: format!("Beta value at index {} is not finite: {}", i, beta),
+                    message: format!("Beta value at index {i} is not finite: {beta}"),
                 });
             }
         }
@@ -482,8 +481,7 @@ impl NormalizeImage {
             if width != first_width || height != first_height {
                 return Err(OCRError::InvalidInput {
                     message: format!(
-                        "All images in batch must have the same dimensions. Image 0: {}x{}, Image {}: {}x{}",
-                        first_width, first_height, i, width, height
+                        "All images in batch must have the same dimensions. Image 0: {first_width}x{first_height}, Image {i}: {width}x{height}"
                     ),
                 });
             }

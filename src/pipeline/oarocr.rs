@@ -767,10 +767,7 @@ impl OAROCR {
     fn load_character_dict(&self, dict_path: &str) -> Result<Vec<String>, OCRError> {
         // Read the entire dictionary file into a string
         let content = std::fs::read_to_string(dict_path).map_err(|e| OCRError::ConfigError {
-            message: format!(
-                "Failed to load character dictionary from {}: {}",
-                dict_path, e
-            ),
+            message: format!("Failed to load character dictionary from {dict_path}: {e}"),
         })?;
 
         // Split the content into lines and collect them into a vector
@@ -849,7 +846,7 @@ impl OAROCR {
         // Validate the crop region
         if x2 <= x1 || y2 <= y1 {
             return Err(OCRError::ConfigError {
-                message: format!("Invalid crop region: ({}, {}) to ({}, {})", x1, y1, x2, y2),
+                message: format!("Invalid crop region: ({x1}, {y1}) to ({x2}, {y2})"),
             });
         }
 
@@ -994,7 +991,7 @@ impl OAROCR {
                 // Save cropped image to temporary file for recognition
                 // This is needed because the recognizer expects file paths
                 let temp_dir = std::env::temp_dir();
-                let temp_path = temp_dir.join(format!("oar_temp_crop_{}.jpg", i));
+                let temp_path = temp_dir.join(format!("oar_temp_crop_{i}.jpg"));
 
                 if let Err(e) = cropped_img.save(&temp_path) {
                     warn!("Failed to save temporary image {}: {}", i, e);

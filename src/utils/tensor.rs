@@ -49,18 +49,14 @@ pub fn vec_to_tensor2d(data: &[Vec<f32>]) -> Result<Tensor2D, OCRError> {
     let total_size = rows
         .checked_mul(cols)
         .ok_or_else(|| OCRError::InvalidInput {
-            message: format!(
-                "Tensor dimensions ({}, {}) would cause integer overflow",
-                rows, cols
-            ),
+            message: format!("Tensor dimensions ({rows}, {cols}) would cause integer overflow"),
         })?;
 
     const MAX_TENSOR_ELEMENTS: usize = 1_000_000_000;
     if total_size > MAX_TENSOR_ELEMENTS {
         return Err(OCRError::InvalidInput {
             message: format!(
-                "Tensor size {} exceeds maximum allowed size {}",
-                total_size, MAX_TENSOR_ELEMENTS
+                "Tensor size {total_size} exceeds maximum allowed size {MAX_TENSOR_ELEMENTS}"
             ),
         });
     }
@@ -170,8 +166,7 @@ pub fn vec_to_tensor3d(data: &[Vec<Vec<f32>>]) -> Result<Tensor3D, OCRError> {
         .and_then(|size| size.checked_mul(dim2))
         .ok_or_else(|| OCRError::InvalidInput {
             message: format!(
-                "Tensor dimensions ({}, {}, {}) would cause integer overflow",
-                dim0, dim1, dim2
+                "Tensor dimensions ({dim0}, {dim1}, {dim2}) would cause integer overflow"
             ),
         })?;
 
@@ -179,8 +174,7 @@ pub fn vec_to_tensor3d(data: &[Vec<Vec<f32>>]) -> Result<Tensor3D, OCRError> {
     if total_size > MAX_TENSOR_ELEMENTS {
         return Err(OCRError::InvalidInput {
             message: format!(
-                "Tensor size {} exceeds maximum allowed size {}",
-                total_size, MAX_TENSOR_ELEMENTS
+                "Tensor size {total_size} exceeds maximum allowed size {MAX_TENSOR_ELEMENTS}"
             ),
         });
     }
@@ -305,8 +299,7 @@ pub fn vec_to_tensor4d(data: &[Vec<Vec<Vec<f32>>>]) -> Result<Tensor4D, OCRError
         .and_then(|size| size.checked_mul(dim3))
         .ok_or_else(|| OCRError::InvalidInput {
             message: format!(
-                "Tensor dimensions ({}, {}, {}, {}) would cause integer overflow",
-                dim0, dim1, dim2, dim3
+                "Tensor dimensions ({dim0}, {dim1}, {dim2}, {dim3}) would cause integer overflow"
             ),
         })?;
 
@@ -314,8 +307,7 @@ pub fn vec_to_tensor4d(data: &[Vec<Vec<Vec<f32>>>]) -> Result<Tensor4D, OCRError
     if total_size > MAX_TENSOR_ELEMENTS {
         return Err(OCRError::InvalidInput {
             message: format!(
-                "Tensor size {} exceeds maximum allowed size {}",
-                total_size, MAX_TENSOR_ELEMENTS
+                "Tensor size {total_size} exceeds maximum allowed size {MAX_TENSOR_ELEMENTS}"
             ),
         });
     }
@@ -507,17 +499,14 @@ pub fn stack_tensor3d(tensors: &[Tensor3D]) -> Result<Tensor4D, OCRError> {
 
     if first_shape.contains(&0) {
         return Err(OCRError::InvalidInput {
-            message: format!(
-                "Cannot stack tensors with zero dimensions: shape {:?}",
-                first_shape
-            ),
+            message: format!("Cannot stack tensors with zero dimensions: shape {first_shape:?}"),
         });
     }
 
     for (i, tensor) in tensors.iter().enumerate() {
         if tensor.is_empty() {
             return Err(OCRError::InvalidInput {
-                message: format!("Tensor {} is empty and cannot be stacked", i),
+                message: format!("Tensor {i} is empty and cannot be stacked"),
             });
         }
 
@@ -548,8 +537,7 @@ pub fn stack_tensor3d(tensors: &[Tensor3D]) -> Result<Tensor4D, OCRError> {
     if result_size > MAX_TENSOR_ELEMENTS {
         return Err(OCRError::InvalidInput {
             message: format!(
-                "Stacked tensor size {} exceeds maximum allowed size {}",
-                result_size, MAX_TENSOR_ELEMENTS
+                "Stacked tensor size {result_size} exceeds maximum allowed size {MAX_TENSOR_ELEMENTS}"
             ),
         });
     }
@@ -593,17 +581,14 @@ pub fn stack_tensor2d(tensors: &[Tensor2D]) -> Result<Tensor3D, OCRError> {
 
     if first_shape.contains(&0) {
         return Err(OCRError::InvalidInput {
-            message: format!(
-                "Cannot stack tensors with zero dimensions: shape {:?}",
-                first_shape
-            ),
+            message: format!("Cannot stack tensors with zero dimensions: shape {first_shape:?}"),
         });
     }
 
     for (i, tensor) in tensors.iter().enumerate() {
         if tensor.is_empty() {
             return Err(OCRError::InvalidInput {
-                message: format!("Tensor {} is empty and cannot be stacked", i),
+                message: format!("Tensor {i} is empty and cannot be stacked"),
             });
         }
 
@@ -634,8 +619,7 @@ pub fn stack_tensor2d(tensors: &[Tensor2D]) -> Result<Tensor3D, OCRError> {
     if result_size > MAX_TENSOR_ELEMENTS {
         return Err(OCRError::InvalidInput {
             message: format!(
-                "Stacked tensor size {} exceeds maximum allowed size {}",
-                result_size, MAX_TENSOR_ELEMENTS
+                "Stacked tensor size {result_size} exceeds maximum allowed size {MAX_TENSOR_ELEMENTS}"
             ),
         });
     }

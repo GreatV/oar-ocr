@@ -298,8 +298,7 @@ impl ToBatch {
             if c == 0 || h == 0 || w == 0 {
                 return Err(crate::core::OCRError::InvalidInput {
                     message: format!(
-                        "Image {} has invalid shape dimensions ({}, {}, {}): all must be greater than 0",
-                        i, c, h, w
+                        "Image {i} has invalid shape dimensions ({c}, {h}, {w}): all must be greater than 0"
                     ),
                 });
             }
@@ -356,8 +355,7 @@ impl ToBatch {
             if c != channels {
                 return Err(crate::core::OCRError::InvalidInput {
                     message: format!(
-                        "All images must have the same channel count: image 0 has {} channels, image {} has {} channels",
-                        channels, i, c
+                        "All images must have the same channel count: image 0 has {channels} channels, image {i} has {c} channels"
                     ),
                 });
             }

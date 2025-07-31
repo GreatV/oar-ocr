@@ -275,7 +275,7 @@ impl TextLineClasPredictor {
         // Create crop operation for preprocessing
         let crop = Some(
             Crop::new(&[width, height], "C").map_err(|e| OCRError::ConfigError {
-                message: format!("Failed to create crop operation: {}", e),
+                message: format!("Failed to create crop operation: {e}"),
             })?,
         );
 
