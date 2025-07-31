@@ -1,0 +1,56 @@
+name: Publish to crates.io
+
+on:
+  push:
+    tags:
+      # This workflow runs only when a tag starting with 'v' is pushed
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Build, Test, and Publish Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify version consistency
+        run: |
+          # Extract version from Cargo.toml
+          CARGO_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          
+          # Extract version from the Git tag (e.g., 'v1.2.3' -> '1.2.3')
+          TAG_VERSION=${GITHUB_REF#refs/tags/v}
+          
+          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
+            echo "Error: Version in Cargo.toml ($CARGO_VERSION) does not match the Git tag ($TAG_VERSION)."
+            exit 1
+          fi
+          echo "Version check passed: $CARGO_VERSION"
+
+      - name: Build in release mode
+        run: cargo build --release --verbose
+
+      - name: Run tests on the release build
+        # It's a good practice to test the optimized binary to catch any release-only bugs
+        run: cargo test --release --verbose
+
+      - name: Publish to crates.io
+        # The token is passed via an environment variable for security
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish
