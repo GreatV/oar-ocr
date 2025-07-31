@@ -140,8 +140,8 @@ impl Crop {
     /// # Arguments
     ///
     /// * `crop_size` - Slice containing the crop dimensions. Can be:
-    ///   - 1 element: square crop of size crop_size[0] x crop_size[0]
-    ///   - 2 elements: rectangular crop of size crop_size[0] x crop_size[1]
+    ///   - 1 element: square crop of size crop_size\[0\] x crop_size\[0\]
+    ///   - 2 elements: rectangular crop of size crop_size\[0\] x crop_size\[1\]
     /// * `mode` - String representation of the crop mode ("center" or "topleft").
     ///
     /// # Returns

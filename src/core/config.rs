@@ -238,7 +238,7 @@ pub trait ConfigValidator {
     }
 }
 
-/// Implementation of From<ConfigError> for String.
+/// Implementation of `From<ConfigError>` for String.
 ///
 /// This allows ConfigError to be converted to a String representation.
 impl From<ConfigError> for String {

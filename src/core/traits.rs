@@ -253,7 +253,7 @@ pub trait ImageReader {
     ///
     /// # Constraints
     ///
-    /// * `P` must implement AsRef<Path> + Send + Sync.
+    /// * `P` must implement `AsRef<Path>` + Send + Sync.
     fn apply<P: AsRef<Path> + Send + Sync>(
         &self,
         imgs: impl IntoIterator<Item = P>,
@@ -271,7 +271,7 @@ pub trait ImageReader {
     ///
     /// # Constraints
     ///
-    /// * `P` must implement AsRef<Path> + Send + Sync.
+    /// * `P` must implement `AsRef<Path>` + Send + Sync.
     fn read_single<P: AsRef<Path> + Send + Sync>(
         &self,
         img_path: P,
