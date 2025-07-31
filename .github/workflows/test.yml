@@ -18,12 +18,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          # Use a minimal profile to speed up toolchain installation
-          profile: minimal
-          toolchain: stable
-          override: true
           # Install components needed for linting and formatting
           components: rustfmt, clippy
 
