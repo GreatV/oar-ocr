@@ -163,7 +163,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or("unknown");
-                let output_filename = format!("{}_detection.jpg", input_filename);
+                let output_filename = format!("{input_filename}_detection.jpg");
                 let output_path = Path::new(&args.output_dir).join(&output_filename);
 
                 if let Err(e) = visualize_detection_results(

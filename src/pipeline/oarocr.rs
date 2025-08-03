@@ -170,7 +170,7 @@ impl fmt::Display for OAROCRResult {
         )?;
 
         if let Some(angle) = self.orientation_angle {
-            writeln!(f, "Orientation angle: {:.1}°", angle)?;
+            writeln!(f, "Orientation angle: {angle:.1}°")?;
         } else {
             writeln!(f, "Orientation angle: not detected")?;
         }
@@ -214,15 +214,11 @@ impl fmt::Display for OAROCRResult {
                         .unwrap_or(&None);
 
                     let orientation_str = match orientation {
-                        Some(angle) => format!(" (orientation: {:.1}°)", angle),
+                        Some(angle) => format!(" (orientation: {angle:.1}°)"),
                         None => String::new(),
                     };
 
-                    writeln!(
-                        f,
-                        " -> '{}' (confidence: {:.3}){}",
-                        text, score, orientation_str
-                    )?;
+                    writeln!(f, " -> '{text}' (confidence: {score:.3}){orientation_str}")?;
                     rec_index += 1;
                 } else {
                     writeln!(f, " -> [no text recognized]")?;

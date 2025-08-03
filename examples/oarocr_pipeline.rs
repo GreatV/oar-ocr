@@ -199,7 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .file_stem()
                                 .and_then(|s| s.to_str())
                                 .unwrap_or("unknown");
-                            let output_filename = format!("{}_visualization.jpg", input_filename);
+                            let output_filename = format!("{input_filename}_visualization.jpg");
                             let output_path = output_dir_path.join(output_filename);
 
                             // Create visualization

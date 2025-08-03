@@ -221,11 +221,11 @@ impl fmt::Display for TextDetResult {
                 writeln!(f, "  Detection polygons:")?;
                 for (j, (bbox, &score)) in polys.iter().zip(scores.iter()).enumerate() {
                     if bbox.points.is_empty() {
-                        writeln!(f, "    Region {}: [] (empty, score: {:.3})", j, score)?;
+                        writeln!(f, "    Region {j}: [] (empty, score: {score:.3})")?;
                         continue;
                     }
 
-                    write!(f, "    Region {}: [", j)?;
+                    write!(f, "    Region {j}: [")?;
                     for (k, point) in bbox.points.iter().enumerate() {
                         if k == 0 {
                             write!(f, "[{:.0}, {:.0}]", point.x, point.y)?;
@@ -233,7 +233,7 @@ impl fmt::Display for TextDetResult {
                             write!(f, ", [{:.0}, {:.0}]", point.x, point.y)?;
                         }
                     }
-                    writeln!(f, "] (score: {:.3})", score)?;
+                    writeln!(f, "] (score: {score:.3})")?;
                 }
             }
 
