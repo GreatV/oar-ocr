@@ -14,7 +14,9 @@ use crate::predictor::{
     TextLineClasPredictor, TextLineClasPredictorBuilder, TextRecPredictor, TextRecPredictorBuilder,
 };
 use crate::processors::{BoundingBox, LimitType};
+use crate::utils::transform::{Point2f, get_rotate_crop_image};
 use image::RgbImage;
+use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -56,6 +58,8 @@ pub struct OAROCRConfig {
     pub textline_orientation_classify_model_path: Option<String>,
     /// Batch size for text line orientation classification inference.
     pub textline_orientation_classify_batch_size: Option<usize>,
+    /// Input shape for text line orientation classification model.
+    pub textline_orientation_classify_input_shape: Option<(u32, u32)>,
 
     /// Whether to use document orientation classification.
     pub use_doc_orientation_classify: Option<bool>,
@@ -113,6 +117,7 @@ impl OAROCRConfig {
             textline_orientation_classify_model_name: None,
             textline_orientation_classify_model_path: None,
             textline_orientation_classify_batch_size: Some(1),
+            textline_orientation_classify_input_shape: Some((80, 160)),
             use_doc_orientation_classify: Some(false),
             use_doc_unwarping: Some(false),
             use_textline_orientation: Some(false),
@@ -147,8 +152,96 @@ pub struct OAROCRResult {
     pub rec_scores: Vec<f32>,
     /// Document orientation angle (if orientation classification was used).
     pub orientation_angle: Option<f32>,
+    /// Text line orientation angles for each text box (if text line orientation classification was used).
+    pub text_line_orientation_angles: Vec<Option<f32>>,
     /// Rectified image (if document unwarping was used).
     pub rectified_img: Option<Arc<RgbImage>>,
+}
+
+impl fmt::Display for OAROCRResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Input path: {}", self.input_path)?;
+        writeln!(f, "Page index: {}", self.index)?;
+        writeln!(
+            f,
+            "Image dimensions: [{}, {}]",
+            self.input_img.width(),
+            self.input_img.height()
+        )?;
+
+        if let Some(angle) = self.orientation_angle {
+            writeln!(f, "Orientation angle: {angle:.1}°")?;
+        } else {
+            writeln!(f, "Orientation angle: not detected")?;
+        }
+
+        writeln!(f, "Total text regions: {}", self.text_boxes.len())?;
+        writeln!(f, "Recognized texts: {}", self.rec_texts.len())?;
+
+        if !self.text_boxes.is_empty() {
+            writeln!(f, "Text regions (detection + recognition):")?;
+
+            // Create a mapping from detection index to recognition data
+            // Since recognition results may be filtered, we need to track which
+            // detection regions have corresponding recognition results
+            let mut rec_index = 0;
+
+            for (det_index, bbox) in self.text_boxes.iter().enumerate() {
+                write!(f, "  Region {}: ", det_index + 1)?;
+
+                // Display bounding box
+                if bbox.points.is_empty() {
+                    write!(f, "[] (empty)")?;
+                } else {
+                    write!(f, "[")?;
+                    for (j, point) in bbox.points.iter().enumerate() {
+                        if j == 0 {
+                            write!(f, "[{:.0}, {:.0}]", point.x, point.y)?;
+                        } else {
+                            write!(f, ", [{:.0}, {:.0}]", point.x, point.y)?;
+                        }
+                    }
+                    write!(f, "]")?;
+                }
+
+                // Display recognition result if available
+                if rec_index < self.rec_texts.len() {
+                    let text = &self.rec_texts[rec_index];
+                    let score = self.rec_scores[rec_index];
+                    let orientation = self
+                        .text_line_orientation_angles
+                        .get(rec_index)
+                        .unwrap_or(&None);
+
+                    let orientation_str = match orientation {
+                        Some(angle) => format!(" (orientation: {angle:.1}°)"),
+                        None => String::new(),
+                    };
+
+                    writeln!(f, " -> '{text}' (confidence: {score:.3}){orientation_str}")?;
+                    rec_index += 1;
+                } else {
+                    writeln!(f, " -> [no text recognized]")?;
+                }
+            }
+        }
+
+        if let Some(rectified_img) = &self.rectified_img {
+            writeln!(
+                f,
+                "Rectified image: available [{} x {}]",
+                rectified_img.width(),
+                rectified_img.height()
+            )?;
+        } else {
+            writeln!(
+                f,
+                "Rectified image: not available (document unwarping not enabled)"
+            )?;
+        }
+
+        Ok(())
+    }
 }
 
 /// Builder for creating OAROCR instances.
@@ -365,6 +458,20 @@ impl OAROCRBuilder {
     /// The updated builder instance
     pub fn textline_orientation_classify_batch_size(mut self, batch_size: usize) -> Self {
         self.config.textline_orientation_classify_batch_size = Some(batch_size);
+        self
+    }
+
+    /// Sets the text line orientation classification input shape.
+    ///
+    /// # Arguments
+    ///
+    /// * `shape` - The input shape as (width, height)
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    pub fn textline_orientation_classify_input_shape(mut self, shape: (u32, u32)) -> Self {
+        self.config.textline_orientation_classify_input_shape = Some(shape);
         self
     }
 
@@ -713,6 +820,10 @@ impl OAROCR {
             builder = builder.model_name(model_name.clone());
         }
 
+        if let Some(input_shape) = self.config.textline_orientation_classify_input_shape {
+            builder = builder.input_shape(input_shape);
+        }
+
         builder.build(&model_path)
     }
 
@@ -892,6 +1003,43 @@ impl OAROCR {
         cropped
     }
 
+    /// Crops and rectifies an image region using rotated crop with perspective transformation.
+    ///
+    /// This function implements the same functionality as OpenCV's GetRotateCropImage.
+    /// It takes a bounding box (quadrilateral) and applies perspective transformation
+    /// to rectify it into a rectangular image. This is particularly useful for text
+    /// regions that may be rotated or have perspective distortion.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - The source image
+    /// * `bbox` - The bounding box defining the quadrilateral region
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the rotated and cropped image or an OCRError
+    fn crop_rotated_bounding_box(
+        &self,
+        image: &RgbImage,
+        bbox: &BoundingBox,
+    ) -> Result<RgbImage, OCRError> {
+        // Check if the bounding box has exactly 4 points
+        if bbox.points.len() != 4 {
+            return Err(OCRError::ConfigError {
+                message: format!(
+                    "Bounding box must have exactly 4 points, got {}",
+                    bbox.points.len()
+                ),
+            });
+        }
+
+        // Convert BoundingBox points to Point2f
+        let box_points: Vec<Point2f> = bbox.points.iter().map(|p| Point2f::new(p.x, p.y)).collect();
+
+        // Apply rotated crop transformation
+        get_rotate_crop_image(image, &box_points)
+    }
+
     /// Processes a single image through the OCR pipeline.
     ///
     /// This method runs the complete OCR pipeline on a single image,
@@ -911,7 +1059,7 @@ impl OAROCR {
         let input_img = crate::utils::load_image(image_path)?;
         let input_img_arc = Arc::new(input_img.clone());
 
-        let mut _current_img = input_img;
+        let _current_img = input_img;
         let mut orientation_angle = None;
         let mut rectified_img = None;
 
@@ -949,8 +1097,15 @@ impl OAROCR {
         };
 
         let mut cropped_images = Vec::new();
+
         for (i, bbox) in text_boxes.iter().enumerate() {
-            match self.crop_bounding_box(&_current_img, bbox) {
+            let crop_result = if bbox.points.len() == 4 {
+                self.crop_rotated_bounding_box(&_current_img, bbox)
+            } else {
+                self.crop_bounding_box(&_current_img, bbox)
+            };
+
+            match crop_result {
                 Ok(cropped_img) => {
                     debug!(
                         "Successfully cropped region {}: {}x{}",
@@ -958,14 +1113,115 @@ impl OAROCR {
                         cropped_img.width(),
                         cropped_img.height()
                     );
-                    cropped_images.push(cropped_img);
+                    cropped_images.push(Some(cropped_img));
                 }
                 Err(e) => {
                     warn!("Failed to crop bounding box {}: {}", i, e);
-
-                    cropped_images.push(RgbImage::new(1, 1));
+                    cropped_images.push(None);
                 }
             }
+        }
+
+        // Process text line orientation classification if enabled
+        let mut text_line_orientations = Vec::new();
+        if self.config.use_textline_orientation.unwrap_or(false) && !text_boxes.is_empty() {
+            if let Some(ref mut classifier) = self.text_line_classifier {
+                debug!(
+                    "Running text line orientation classification on {} detected regions",
+                    text_boxes.len()
+                );
+
+                for (i, cropped_img_opt) in cropped_images.iter().enumerate() {
+                    // Skip failed crops
+                    let cropped_img = match cropped_img_opt {
+                        Some(img) => img,
+                        None => {
+                            text_line_orientations.push(None);
+                            continue;
+                        }
+                    };
+
+                    // Save cropped image to temporary file for classification
+                    let temp_dir = std::env::temp_dir();
+                    let temp_path = temp_dir.join(format!("oar_temp_orientation_{i}.jpg"));
+
+                    if let Err(e) = cropped_img.save(&temp_path) {
+                        warn!(
+                            "Failed to save temporary image for orientation {}: {}",
+                            i, e
+                        );
+                        text_line_orientations.push(None);
+                        continue;
+                    }
+
+                    // Run text line orientation classification
+                    match classifier.predict_single(&temp_path) {
+                        Ok(result) => match result {
+                            PredictionResult::Classification {
+                                label_names,
+                                scores,
+                                ..
+                            } => {
+                                // Extract the first (most confident) orientation prediction
+                                if let (Some(labels), Some(score_list)) =
+                                    (label_names.first(), scores.first())
+                                {
+                                    if let (Some(label), Some(&score)) =
+                                        (labels.first(), score_list.first())
+                                    {
+                                        // Convert label to angle (e.g., "0" -> 0.0, "180" -> 180.0)
+                                        let angle = match label.as_ref() {
+                                            "0" => Some(0.0),
+                                            "180" => Some(180.0),
+                                            _ => {
+                                                warn!("Unknown orientation label: {}", label);
+                                                None
+                                            }
+                                        };
+                                        text_line_orientations.push(angle);
+                                        debug!(
+                                            "Text line {} orientation: {:?} (confidence: {:.3})",
+                                            i, angle, score
+                                        );
+                                    } else {
+                                        text_line_orientations.push(None);
+                                    }
+                                } else {
+                                    text_line_orientations.push(None);
+                                }
+                            }
+                            _ => {
+                                warn!(
+                                    "Unexpected result type from text line classifier for region {}",
+                                    i
+                                );
+                                text_line_orientations.push(None);
+                            }
+                        },
+                        Err(e) => {
+                            warn!(
+                                "Text line orientation classification failed for region {}: {}",
+                                i, e
+                            );
+                            text_line_orientations.push(None);
+                        }
+                    }
+
+                    // Clean up temporary file
+                    if let Err(e) = std::fs::remove_file(&temp_path) {
+                        warn!(
+                            "Failed to remove temporary orientation file {:?}: {}",
+                            temp_path, e
+                        );
+                    }
+                }
+            } else {
+                // Text line classifier not initialized, fill with None values
+                text_line_orientations.resize(text_boxes.len(), None);
+            }
+        } else {
+            // Text line orientation not enabled or no text boxes, fill with None values
+            text_line_orientations.resize(text_boxes.len(), None);
         }
 
         // Process text recognition if we have detected text boxes
@@ -982,11 +1238,12 @@ impl OAROCR {
             let mut all_scores = Vec::new();
 
             // Process each cropped image through the text recognizer
-            for (i, cropped_img) in cropped_images.iter().enumerate() {
-                // Skip placeholder images (1x1 pixels)
-                if cropped_img.width() == 1 && cropped_img.height() == 1 {
-                    continue;
-                }
+            for (i, cropped_img_opt) in cropped_images.iter().enumerate() {
+                // Skip failed crops
+                let cropped_img = match cropped_img_opt {
+                    Some(img) => img,
+                    None => continue,
+                };
 
                 // Save cropped image to temporary file for recognition
                 // This is needed because the recognizer expects file paths
@@ -1044,18 +1301,36 @@ impl OAROCR {
             });
         };
 
-        // Filter recognition results based on score threshold
+        // Filter recognition results based on score threshold and align with text line orientations
         let score_thresh = self.config.text_rec_score_thresh.unwrap_or(0.0);
-        let filtered_results: Vec<(Arc<str>, f32)> = rec_texts
+        let filtered_results: Vec<(Arc<str>, f32, Option<f32>)> = rec_texts
             .into_iter()
             .zip(rec_scores)
+            .zip(text_line_orientations.iter().cloned())
             // Keep only results with scores above the threshold
-            .filter(|(_, score)| *score >= score_thresh)
+            .filter_map(|((text, score), orientation)| {
+                if score >= score_thresh {
+                    Some((text, score, orientation))
+                } else {
+                    None
+                }
+            })
             .collect();
 
-        // Separate the filtered texts and scores into separate vectors
-        let (final_texts, final_scores): (Vec<Arc<str>>, Vec<f32>) =
-            filtered_results.into_iter().unzip();
+        // Separate the filtered texts, scores, and orientations into separate vectors
+        let (final_texts, final_scores, final_orientations): (
+            Vec<Arc<str>>,
+            Vec<f32>,
+            Vec<Option<f32>>,
+        ) = filtered_results.into_iter().fold(
+            (Vec::new(), Vec::new(), Vec::new()),
+            |(mut texts, mut scores, mut orientations), (text, score, orientation)| {
+                texts.push(text);
+                scores.push(score);
+                orientations.push(orientation);
+                (texts, scores, orientations)
+            },
+        );
 
         info!(
             "OCR pipeline completed. Found {} text regions with {} recognized texts",
@@ -1071,6 +1346,7 @@ impl OAROCR {
             rec_texts: final_texts,
             rec_scores: final_scores,
             orientation_angle,
+            text_line_orientation_angles: final_orientations,
             rectified_img,
         })
     }

@@ -149,4 +149,7 @@ pub mod prelude {
         tensor3d_to_vec, tensor4d_slice, tensor4d_to_vec, vec_to_tensor1d, vec_to_tensor2d,
         vec_to_tensor3d, vec_to_tensor4d,
     };
+
+    // Transform utilities
+    pub use crate::utils::transform::{Point2f, get_rotate_crop_image};
 }

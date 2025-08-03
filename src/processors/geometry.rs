@@ -8,6 +8,8 @@ use imageproc::contours::Contour;
 use imageproc::point::Point as ImageProcPoint;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+
 use std::f32::consts::PI;
 
 /// A 2D point with floating-point coordinates.
@@ -491,7 +493,8 @@ impl MinAreaRect {
     ///
     /// # Returns
     ///
-    /// A vector containing the four corner points of the rectangle in clockwise order.
+    /// A vector containing the four corner points of the rectangle ordered as:
+    /// top-left, top-right, bottom-right, bottom-left in the final image coordinate system.
     pub fn get_box_points(&self) -> Vec<Point> {
         let cos_a = (self.angle * PI / 180.0).cos();
         let sin_a = (self.angle * PI / 180.0).sin();
@@ -501,14 +504,126 @@ impl MinAreaRect {
 
         let corners = [(-w_2, -h_2), (w_2, -h_2), (w_2, h_2), (-w_2, h_2)];
 
-        corners
+        let mut points: Vec<Point> = corners
             .iter()
             .map(|(x, y)| {
                 let rotated_x = x * cos_a - y * sin_a + self.center.x;
                 let rotated_y = x * sin_a + y * cos_a + self.center.y;
                 Point::new(rotated_x, rotated_y)
             })
-            .collect()
+            .collect();
+
+        // Sort points to ensure consistent ordering: top-left, top-right, bottom-right, bottom-left
+        Self::sort_box_points(&mut points);
+        points
+    }
+
+    /// Sorts four points to ensure consistent ordering for OCR bounding boxes.
+    ///
+    /// Orders points as: top-left, top-right, bottom-right, bottom-left
+    /// based on their actual coordinates in the image space.
+    ///
+    /// This algorithm works by:
+    /// 1. Finding the centroid of the four points
+    /// 2. Classifying each point based on its position relative to the centroid
+    /// 3. Assigning points to corners based on their quadrant
+    ///
+    /// # Arguments
+    ///
+    /// * `points` - A mutable reference to a vector of exactly 4 points
+    fn sort_box_points(points: &mut [Point]) {
+        if points.len() != 4 {
+            return;
+        }
+
+        // Calculate the centroid of the four points
+        let center_x = points.iter().map(|p| p.x).sum::<f32>() / 4.0;
+        let center_y = points.iter().map(|p| p.y).sum::<f32>() / 4.0;
+
+        // Create a vector to store points with their classifications
+        let mut classified_points = Vec::with_capacity(4);
+
+        for point in points.iter() {
+            let is_left = point.x < center_x;
+            let is_top = point.y < center_y;
+
+            let corner_type = match (is_left, is_top) {
+                (true, true) => 0,   // top-left
+                (false, true) => 1,  // top-right
+                (false, false) => 2, // bottom-right
+                (true, false) => 3,  // bottom-left
+            };
+
+            classified_points.push((corner_type, *point));
+        }
+
+        // Sort by corner type to get the desired order
+        classified_points.sort_by_key(|&(corner_type, _)| corner_type);
+
+        // Handle the case where multiple points might be classified as the same corner
+        // This can happen with very thin or rotated rectangles
+        let mut corner_types = HashSet::new();
+        for (corner_type, _) in &classified_points {
+            corner_types.insert(*corner_type);
+        }
+
+        if corner_types.len() < 4 {
+            // Fallback to a more robust method using angles from centroid
+            Self::sort_box_points_by_angle(points, center_x, center_y);
+        } else {
+            // Update the original points vector with the sorted points
+            for (i, (_, point)) in classified_points.iter().enumerate() {
+                points[i] = *point;
+            }
+        }
+    }
+
+    /// Fallback sorting method using polar angles from the centroid.
+    ///
+    /// # Arguments
+    ///
+    /// * `points` - A mutable reference to a vector of exactly 4 points
+    /// * `center_x` - X coordinate of the centroid
+    /// * `center_y` - Y coordinate of the centroid
+    fn sort_box_points_by_angle(points: &mut [Point], center_x: f32, center_y: f32) {
+        // Calculate angle from centroid to each point
+        let mut points_with_angles: Vec<(f32, Point)> = points
+            .iter()
+            .map(|p| {
+                let angle = f32::atan2(p.y - center_y, p.x - center_x);
+                // Normalize angle to [0, 2π) and adjust so that top-left is first
+                let normalized_angle = if angle < -PI / 2.0 {
+                    angle + 2.0 * PI
+                } else {
+                    angle
+                };
+                (normalized_angle, *p)
+            })
+            .collect();
+
+        // Sort by angle (starting from top-left, going clockwise)
+        points_with_angles
+            .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Find the starting point (closest to top-left quadrant)
+        let mut start_idx = 0;
+        let mut min_top_left_score = f32::MAX;
+
+        for (i, (_, point)) in points_with_angles.iter().enumerate() {
+            // Score based on distance from theoretical top-left position
+            let top_left_score =
+                (point.x - center_x + 100.0).powi(2) + (point.y - center_y + 100.0).powi(2);
+            if top_left_score < min_top_left_score {
+                min_top_left_score = top_left_score;
+                start_idx = i;
+            }
+        }
+
+        // Reorder starting from the identified top-left point
+        for (i, point) in points.iter_mut().enumerate().take(4) {
+            let src_idx = (start_idx + i) % 4;
+            *point = points_with_angles[src_idx].1;
+        }
     }
 
     /// Gets the length of the shorter side of the rectangle.

@@ -23,12 +23,21 @@
 //! ```
 
 use clap::Parser;
-use oar_ocr::core::{Predictor, init_tracing};
+use oar_ocr::core::{
+    BatchData, init_tracing,
+    traits::{BasePredictor, Sampler},
+};
 use oar_ocr::predictor::TextDetPredictorBuilder;
-use oar_ocr::predictor::db_detector::TextDetResult;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{error, info};
+
+// Visualization-specific imports
+#[cfg(feature = "visualization")]
+use oar_ocr::utils::visualization::visualize_detection_results;
+
+#[cfg(not(feature = "visualization"))]
+use tracing::warn;
 
 /// Command-line arguments for the text detection example
 #[derive(Parser)]
@@ -50,126 +59,6 @@ struct Args {
     /// Enable batch processing mode
     #[arg(short, long)]
     batch: bool,
-}
-
-use image::{Rgb, RgbImage};
-use imageproc::drawing::{draw_filled_circle_mut, draw_hollow_rect_mut};
-use imageproc::rect::Rect;
-
-/// Color for high confidence text detection results (green)
-const HIGH_CONFIDENCE_COLOR: Rgb<u8> = Rgb([0, 255, 0]);
-/// Color for medium confidence text detection results (orange)
-const MEDIUM_CONFIDENCE_COLOR: Rgb<u8> = Rgb([255, 165, 0]);
-/// Color for low confidence text detection results (red)
-const LOW_CONFIDENCE_COLOR: Rgb<u8> = Rgb([255, 0, 0]);
-
-/// Visualizes text detection results on an image
-///
-/// This function takes an image and text detection results, then draws bounding boxes
-/// around detected text regions with different colors based on confidence scores.
-/// High confidence regions are drawn in green, medium in orange, and low in red.
-///
-/// # Arguments
-///
-/// * `image` - The original image to draw on
-/// * `result` - The text detection results containing polygons and scores
-/// * `output_path` - The path where the visualization will be saved
-///
-/// # Returns
-///
-/// A Result indicating success or failure of the visualization operation
-fn visualize_detection_results(
-    image: &RgbImage,
-    result: &TextDetResult,
-    output_path: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Create a copy of the image for drawing visualization
-    let mut vis_image = image.clone();
-
-    // Iterate through detection results for each image in the batch
-    for (polys, scores) in result.dt_polys.iter().zip(result.dt_scores.iter()) {
-        // Process each detected text region
-        for (poly, &score) in polys.iter().zip(scores.iter()) {
-            // Determine color based on confidence score
-            let color = if score > 0.8 {
-                HIGH_CONFIDENCE_COLOR
-            } else if score > 0.5 {
-                MEDIUM_CONFIDENCE_COLOR
-            } else {
-                LOW_CONFIDENCE_COLOR
-            };
-
-            // Only process polygons with at least 4 points (quadrilaterals)
-            if poly.points.len() >= 4 {
-                // Calculate bounding box coordinates
-                let min_x = poly.points.iter().map(|p| p.x as i32).min().unwrap_or(0);
-                let min_y = poly.points.iter().map(|p| p.y as i32).min().unwrap_or(0);
-                let max_x = poly.points.iter().map(|p| p.x as i32).max().unwrap_or(0);
-                let max_y = poly.points.iter().map(|p| p.y as i32).max().unwrap_or(0);
-
-                // Calculate width and height of the bounding box
-                let width = (max_x - min_x).max(1) as u32;
-                let height = (max_y - min_y).max(1) as u32;
-
-                // Check if the bounding box is within image boundaries
-                if min_x >= 0
-                    && min_y >= 0
-                    && min_x < vis_image.width() as i32
-                    && min_y < vis_image.height() as i32
-                {
-                    // Draw a thick hollow rectangle around the text region
-                    for thickness in 0..2 {
-                        let thick_rect = Rect::at(min_x - thickness, min_y - thickness)
-                            .of_size(width + 2 * thickness as u32, height + 2 * thickness as u32);
-                        draw_hollow_rect_mut(&mut vis_image, thick_rect, color);
-                    }
-
-                    // Draw filled circles at each corner of the polygon
-                    for point in &poly.points {
-                        let x = point.x as i32;
-                        let y = point.y as i32;
-                        // Check if the point is within image boundaries
-                        if x >= 0
-                            && y >= 0
-                            && x < vis_image.width() as i32
-                            && y < vis_image.height() as i32
-                        {
-                            draw_filled_circle_mut(&mut vis_image, (x, y), 3, color);
-                        }
-                    }
-
-                    // Draw a small indicator square near the top-left corner
-                    let indicator_size = 10;
-                    let indicator_x = min_x - 15;
-                    let indicator_y = min_y - 15;
-
-                    // Check if the indicator square is within image boundaries
-                    if indicator_x >= 0 && indicator_y >= 0 {
-                        for dx in 0..indicator_size {
-                            for dy in 0..indicator_size {
-                                let px = indicator_x + dx;
-                                let py = indicator_y + dy;
-                                // Check if the pixel is within image boundaries
-                                if px >= 0
-                                    && py >= 0
-                                    && px < vis_image.width() as i32
-                                    && py < vis_image.height() as i32
-                                {
-                                    vis_image.put_pixel(px as u32, py as u32, color);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Save the visualization to the specified output path
-    vis_image.save(output_path)?;
-    info!("Visualization saved to: {}", output_path);
-
-    Ok(())
 }
 
 /// Main function for the text detection example
@@ -233,32 +122,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Process images in batch mode if requested and multiple images are provided
     if args.batch && existing_images.len() > 1 {
         info!("Batch detection for {} images...", existing_images.len());
-        // Convert image paths to Path references for batch processing
-        let batch_paths: Vec<&Path> = existing_images.iter().map(Path::new).collect();
-        // Perform batch detection
-        let batch_results = predictor.predict_batch(&batch_paths)?;
+        // Create batches using the predictor's batch sampler
+        let string_paths: Vec<String> = existing_images.iter().map(|s| s.to_string()).collect();
+        let batches = predictor.batch_sampler().sample(string_paths);
 
-        // Process and log results for each batch
-        for (batch_idx, batch_result) in batch_results.iter().enumerate() {
-            // Extract detection polygons and scores from the result
-            let (batch_dt_polys, _) = match batch_result {
-                oar_ocr::core::PredictionResult::Detection {
-                    dt_polys,
-                    dt_scores,
-                    ..
-                } => (dt_polys, dt_scores),
-                _ => continue,
-            };
+        // Process each batch directly using BasePredictor::process
+        for batch_data in batches.into_iter() {
+            // Use BasePredictor::process to get TextDetResult directly
+            let text_det_result = predictor.process(batch_data)?;
 
-            // Log the number of text regions detected in each image of the batch
-            for (i, polys) in batch_dt_polys.iter().enumerate() {
-                info!(
-                    "Batch {}, Image {}: {} text regions detected",
-                    batch_idx + 1,
-                    i + 1,
-                    polys.len()
-                );
-            }
+            // Display results
+            info!("{}", text_det_result);
         }
     } else {
         // Process images individually
@@ -270,81 +144,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 image_path
             );
 
-            // Perform text detection on a single image
-            let result = predictor.predict_single(Path::new(image_path))?;
+            // Create BatchData for single image processing
+            let path_str = image_path.to_string();
+            let batch_data =
+                BatchData::from_shared_arc_paths(vec![Arc::from(path_str.as_str())], vec![0]);
 
-            // Extract detection polygons and scores from the result
-            let (dt_polys, dt_scores) = match &result {
-                oar_ocr::core::PredictionResult::Detection {
-                    dt_polys,
-                    dt_scores,
-                    ..
-                } => (dt_polys, dt_scores),
-                _ => return Err("Unexpected result type".into()),
-            };
+            // Use BasePredictor::process to get TextDetResult directly
+            let text_det_result = predictor.process(batch_data)?;
 
-            // Log the number of text regions detected
-            let region_count = dt_polys[0].len();
-            info!("Detected {} text regions", region_count);
+            // Display results
+            info!("{}", text_det_result);
 
-            // Load the original image for visualization
-            let original_image = image::open(image_path)?.to_rgb8();
-            // Create a TextDetResult for visualization
-            let text_det_result = TextDetResult {
-                input_path: result
-                    .input_paths()
-                    .iter()
-                    .map(|p| Arc::from(p.as_ref()))
-                    .collect(),
-                index: result.indices().to_vec(),
-                input_img: result.input_images().to_vec(),
-                dt_polys: dt_polys.clone(),
-                dt_scores: dt_scores.clone(),
-            };
+            // Save visualization if feature is enabled
+            #[cfg(feature = "visualization")]
+            {
+                let original_image = image::open(image_path)?.to_rgb8();
+                let input_filename = Path::new(image_path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown");
+                let output_filename = format!("{input_filename}_detection.jpg");
+                let output_path = Path::new(&args.output_dir).join(&output_filename);
 
-            // Generate output filename and path for visualization
-            let output_filename = format!("detection_result_{}.jpg", i + 1);
-            let output_path = Path::new(&args.output_dir).join(&output_filename);
-
-            // Visualize the detection results
-            if let Err(e) = visualize_detection_results(
-                &original_image,
-                &text_det_result,
-                output_path.to_str().unwrap(),
-            ) {
-                error!("Visualization failed for {}: {}", image_path, e);
+                if let Err(e) = visualize_detection_results(
+                    &original_image,
+                    &text_det_result,
+                    output_path.to_str().unwrap(),
+                ) {
+                    error!("Visualization failed for {}: {}", image_path, e);
+                }
             }
-        }
-    }
 
-    // Test with adjusted parameters on the first image to show the effect of parameter tuning
-    if !existing_images.is_empty() {
-        info!("Testing adjusted parameters on first image...");
-        // Adjust parameters for potentially better results
-        predictor.set_thresh(0.4); // Increase binarization threshold
-        predictor.set_box_thresh(0.7); // Increase box score threshold
-        predictor.set_unclip_ratio(1.8); // Decrease unclip ratio
-
-        // Process the first image with adjusted parameters
-        let first_image = &existing_images[0];
-        let adjusted_result = predictor.predict_single(Path::new(first_image))?;
-        // Extract detection polygons and scores from the adjusted result
-        let (adjusted_dt_polys, _) = match &adjusted_result {
-            oar_ocr::core::PredictionResult::Detection {
-                dt_polys,
-                dt_scores,
-                ..
-            } => (dt_polys, dt_scores),
-            _ => return Err("Unexpected result type".into()),
-        };
-
-        // Log the number of text regions detected with adjusted parameters
-        for (i, polys) in adjusted_dt_polys.iter().enumerate() {
-            info!(
-                "Adjusted parameters - Image {}: {} regions detected",
-                i + 1,
-                polys.len()
-            );
+            #[cfg(not(feature = "visualization"))]
+            {
+                if !args.output_dir.is_empty() {
+                    warn!(
+                        "Visualization feature is disabled. To enable visualization, compile with --features visualization"
+                    );
+                }
+            }
         }
     }
 
