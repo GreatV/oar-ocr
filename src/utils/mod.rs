@@ -5,6 +5,9 @@
 
 pub mod image;
 pub mod tensor;
+pub mod transform;
+#[cfg(feature = "visualization")]
+pub mod visualization;
 
 // Re-export image processing functions
 pub use image::{
@@ -14,3 +17,6 @@ pub use image::{
 
 // Re-export tensor utility functions
 pub use tensor::*;
+
+// Re-export transform utility functions
+pub use transform::{Point2f, get_rotate_crop_image};

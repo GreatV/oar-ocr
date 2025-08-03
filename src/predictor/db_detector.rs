@@ -15,6 +15,7 @@ use crate::core::batch::ToBatch;
 use crate::processors::{BoundingBox, DBPostProcess, DetResizeForTest, LimitType, NormalizeImage};
 use image::{DynamicImage, RgbImage};
 use std::borrow::Cow;
+use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -201,6 +202,47 @@ impl TextDetResult {
             dt_polys: Vec::new(),
             dt_scores: Vec::new(),
         }
+    }
+}
+
+impl fmt::Display for TextDetResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, ((path, polys), scores)) in self
+            .input_path
+            .iter()
+            .zip(self.dt_polys.iter())
+            .zip(self.dt_scores.iter())
+            .enumerate()
+        {
+            writeln!(f, "Image {} of {}: {}", i + 1, self.input_path.len(), path)?;
+            writeln!(f, "  Total regions: {}", polys.len())?;
+
+            if !polys.is_empty() {
+                writeln!(f, "  Detection polygons:")?;
+                for (j, (bbox, &score)) in polys.iter().zip(scores.iter()).enumerate() {
+                    if bbox.points.is_empty() {
+                        writeln!(f, "    Region {}: [] (empty, score: {:.3})", j, score)?;
+                        continue;
+                    }
+
+                    write!(f, "    Region {}: [", j)?;
+                    for (k, point) in bbox.points.iter().enumerate() {
+                        if k == 0 {
+                            write!(f, "[{:.0}, {:.0}]", point.x, point.y)?;
+                        } else {
+                            write!(f, ", [{:.0}, {:.0}]", point.x, point.y)?;
+                        }
+                    }
+                    writeln!(f, "] (score: {:.3})", score)?;
+                }
+            }
+
+            if i < self.input_path.len() - 1 {
+                writeln!(f)?;
+            }
+        }
+
+        Ok(())
     }
 }
 

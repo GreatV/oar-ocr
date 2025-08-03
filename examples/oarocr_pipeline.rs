@@ -11,6 +11,8 @@
 //!     --text-detection-model path/to/detection_model.onnx \
 //!     --text-recognition-model path/to/recognition_model.onnx \
 //!     --char-dict path/to/char_dict.txt \
+//!     --output-dir ./visualizations \
+//!     --font-path path/to/font.ttf \
 //!     image1.jpg image2.png
 //! ```
 //!
@@ -23,14 +25,18 @@
 //!     --textline-orientation-model path/to/orientation_model.onnx \
 //!     --char-dict path/to/char_dict.txt \
 //!     --use-textline-orientation \
+//!     --output-dir ./visualizations \
+//!     --font-path path/to/font.ttf \
 //!     image1.jpg
 //! ```
 
 use clap::Parser;
 use oar_ocr::core::init_tracing;
 use oar_ocr::pipeline::OAROCRBuilder;
+#[cfg(feature = "visualization")]
+use oar_ocr::utils::visualization::visualize_ocr_results;
 use std::path::Path;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Command-line arguments for the OCR pipeline example.
 ///
@@ -79,6 +85,21 @@ struct Args {
     /// using the specified model.
     #[arg(long)]
     use_textline_orientation: bool,
+
+    /// Output directory for visualization images.
+    ///
+    /// If specified, the pipeline will generate visualization images showing
+    /// the original image on the left and detected text with bounding boxes on the right.
+    /// If not specified, no visualization will be performed.
+    #[arg(long)]
+    output_dir: Option<String>,
+
+    /// Path to the font file for text rendering in visualizations.
+    ///
+    /// If not specified, a default font will be used for rendering text
+    /// in the visualization images.
+    #[arg(long)]
+    font_path: Option<String>,
 }
 
 /// Main function for the OCR pipeline example.
@@ -133,6 +154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder = builder
             .textline_orientation_classify_model_path(args.textline_orientation_model)
             .textline_orientation_classify_batch_size(1)
+            .textline_orientation_classify_input_shape((160, 80))
             .use_textline_orientation(true);
     }
 
@@ -153,23 +175,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Run OCR on the current image
                 match oarocr.predict(Path::new(image_path)) {
                     Ok(result) => {
-                        info!("OCR completed for {}!", image_path);
-                        info!("Detected {} text boxes", result.text_boxes.len());
-                        info!("Recognized {} texts", result.rec_texts.len());
+                        // Display OCR results using the Display trait
+                        info!("{}", result);
 
-                        // Print recognized texts with their confidence scores
-                        for (j, (text, score)) in result
-                            .rec_texts
-                            .iter()
-                            .zip(result.rec_scores.iter())
-                            .enumerate()
-                        {
-                            info!("  {}. '{}' (confidence: {:.3})", j + 1, text, score);
+                        // Generate visualization if output directory is specified
+                        #[cfg(feature = "visualization")]
+                        if let Some(ref output_dir) = args.output_dir {
+                            let output_dir_path = Path::new(output_dir);
+
+                            // Create output directory if it doesn't exist
+                            if !output_dir_path.exists() {
+                                if let Err(e) = std::fs::create_dir_all(output_dir_path) {
+                                    warn!(
+                                        "Failed to create output directory {}: {}",
+                                        output_dir, e
+                                    );
+                                    continue;
+                                }
+                            }
+
+                            // Generate output filename based on input image
+                            let input_filename = Path::new(image_path)
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("unknown");
+                            let output_filename = format!("{}_visualization.jpg", input_filename);
+                            let output_path = output_dir_path.join(output_filename);
+
+                            // Create visualization
+                            let font_path = args.font_path.as_ref().map(Path::new);
+                            match visualize_ocr_results(&result, &output_path, font_path) {
+                                Ok(()) => {
+                                    info!("Visualization saved to: {}", output_path.display());
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to create visualization for {}: {}",
+                                        image_path, e
+                                    );
+                                }
+                            }
                         }
 
-                        // Print document orientation angle if available
-                        if let Some(angle) = result.orientation_angle {
-                            info!("Document orientation: {:.1}°", angle);
+                        // Handle case when visualization feature is disabled but user wants to save
+                        #[cfg(not(feature = "visualization"))]
+                        if args.output_dir.is_some() {
+                            warn!(
+                                "Visualization feature is disabled. To enable visualization, compile with --features visualization"
+                            );
                         }
                     }
                     Err(e) => {
