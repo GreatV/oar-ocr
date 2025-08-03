@@ -1059,7 +1059,7 @@ impl OAROCR {
         let input_img = crate::utils::load_image(image_path)?;
         let input_img_arc = Arc::new(input_img.clone());
 
-        let mut _current_img = input_img;
+        let _current_img = input_img;
         let mut orientation_angle = None;
         let mut rectified_img = None;
 
@@ -1113,11 +1113,11 @@ impl OAROCR {
                         cropped_img.width(),
                         cropped_img.height()
                     );
-                    cropped_images.push(cropped_img);
+                    cropped_images.push(Some(cropped_img));
                 }
                 Err(e) => {
                     warn!("Failed to crop bounding box {}: {}", i, e);
-                    cropped_images.push(RgbImage::new(1, 1));
+                    cropped_images.push(None);
                 }
             }
         }
@@ -1131,12 +1131,15 @@ impl OAROCR {
                     text_boxes.len()
                 );
 
-                for (i, cropped_img) in cropped_images.iter().enumerate() {
-                    // Skip placeholder images (1x1 pixels)
-                    if cropped_img.width() == 1 && cropped_img.height() == 1 {
-                        text_line_orientations.push(None);
-                        continue;
-                    }
+                for (i, cropped_img_opt) in cropped_images.iter().enumerate() {
+                    // Skip failed crops
+                    let cropped_img = match cropped_img_opt {
+                        Some(img) => img,
+                        None => {
+                            text_line_orientations.push(None);
+                            continue;
+                        }
+                    };
 
                     // Save cropped image to temporary file for classification
                     let temp_dir = std::env::temp_dir();
@@ -1235,11 +1238,12 @@ impl OAROCR {
             let mut all_scores = Vec::new();
 
             // Process each cropped image through the text recognizer
-            for (i, cropped_img) in cropped_images.iter().enumerate() {
-                // Skip placeholder images (1x1 pixels)
-                if cropped_img.width() == 1 && cropped_img.height() == 1 {
-                    continue;
-                }
+            for (i, cropped_img_opt) in cropped_images.iter().enumerate() {
+                // Skip failed crops
+                let cropped_img = match cropped_img_opt {
+                    Some(img) => img,
+                    None => continue,
+                };
 
                 // Save cropped image to temporary file for recognition
                 // This is needed because the recognizer expects file paths

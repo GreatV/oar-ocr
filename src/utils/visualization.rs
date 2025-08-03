@@ -1,13 +1,13 @@
 //! Visualization utilities for OCR results.
 //!
 //! This module provides functions for creating visual representations of OCR results,
-//! including bounding boxes, detected text, and confidence indicators. It supports
-//! both full OCR pipeline results and text detection results.
+//! including bounding boxes and detected text. It supports both full OCR pipeline
+//! results and text detection results.
 //!
 //! # Features
 //!
 //! - Visualization of complete OCR results with original and processed images side-by-side
-//! - Visualization of text detection results with confidence indicators
+//! - Visualization of text detection results with bounding boxes
 //! - Configurable fonts, colors, and styling
 //! - Support for both horizontal and vertical text layouts
 //!
@@ -39,12 +39,6 @@ const BBOX_COLOR: Rgb<u8> = Rgb([0, 255, 0]);
 const TEXT_COLOR: Rgb<u8> = Rgb([0, 0, 0]);
 
 const BACKGROUND_COLOR: Rgb<u8> = Rgb([255, 255, 255]);
-
-const HIGH_CONFIDENCE_COLOR: Rgb<u8> = Rgb([0, 255, 0]);
-
-const MEDIUM_CONFIDENCE_COLOR: Rgb<u8> = Rgb([255, 165, 0]);
-
-const LOW_CONFIDENCE_COLOR: Rgb<u8> = Rgb([255, 0, 0]);
 
 /// Represents the layout of text for visualization purposes.
 ///
@@ -107,7 +101,8 @@ impl VisualizationConfig {
     /// A Result containing the VisualizationConfig if successful, or an error if the font could not be loaded.
     pub fn with_font_path(font_path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let font_data = std::fs::read(font_path)?;
-        let font = FontVec::try_from_vec(font_data).map_err(|_| "Failed to parse font file")?;
+        let font = FontVec::try_from_vec(font_data)
+            .map_err(|_| format!("Failed to parse font file: {}", font_path.display()))?;
 
         Ok(Self {
             font: Some(font),
@@ -155,7 +150,6 @@ impl VisualizationConfig {
 /// image with text detection results on the right. The right side includes:
 /// - Bounding boxes around detected text regions
 /// - Recognized text overlaid on the image
-/// - Different colors for different confidence levels (if applicable)
 ///
 /// # Arguments
 ///
@@ -289,7 +283,6 @@ fn draw_text_for_bbox(
     }
 
     let text = &result.rec_texts[index];
-    let _score = result.rec_scores.get(index).unwrap_or(&0.0);
     let Some(ref font) = config.font else { return };
 
     let Some(layout) = calculate_text_layout(bbox, x_offset, text, font) else {
@@ -487,11 +480,12 @@ fn calculate_horizontal_text_layout(
 ///
 /// This function determines the appropriate font size, line height, and position for vertically
 /// laid out text within a bounding box. Each character is positioned on a separate line.
+/// The font is used to measure character widths for proper scaling.
 ///
 /// # Arguments
 ///
 /// * `text` - The text to be laid out vertically
-/// * `_font` - The font to be used (currently unused in this implementation)
+/// * `font` - The font to be used for measuring character dimensions
 /// * `bbox_rect` - The bounding rectangle for the text
 ///
 /// # Returns
@@ -499,7 +493,7 @@ fn calculate_horizontal_text_layout(
 /// An Option containing the calculated TextLayout, or None if layout could not be determined.
 fn calculate_vertical_text_layout(
     text: &str,
-    _font: &FontVec,
+    font: &FontVec,
     bbox_rect: &Rect,
 ) -> Option<TextLayout> {
     // Define padding and minimum font size
@@ -512,11 +506,27 @@ fn calculate_vertical_text_layout(
     let mut font_scale = (available_width * 0.8).max(MIN_FONT_SIZE);
     let mut line_height = font_scale * 1.1;
 
+    // Check if characters fit within the available width at the current scale
+    let display_chars: Vec<char> = text.chars().collect();
+    if !display_chars.is_empty() {
+        // Find the widest character to ensure all characters fit
+        let max_char_width = display_chars
+            .iter()
+            .filter_map(|&ch| measure_text_width(&ch.to_string(), font, font_scale))
+            .fold(0.0, f32::max);
+
+        // Scale down if the widest character doesn't fit
+        if max_char_width > available_width {
+            let scale_factor = available_width / max_char_width;
+            font_scale = (font_scale * scale_factor).max(MIN_FONT_SIZE);
+            line_height = font_scale * 1.1;
+        }
+    }
+
     if line_height <= 0.0 {
         return None;
     }
 
-    let display_chars: Vec<char> = text.chars().collect();
     let char_count = display_chars.len();
 
     if char_count == 0 {
@@ -645,15 +655,9 @@ fn create_visualization_config(font_path: Option<&Path>) -> VisualizationConfig 
 /// Creates a visualization of text detection results and saves it to a file.
 ///
 /// This function generates a visualization that shows the detected text regions
-/// with bounding boxes and confidence indicators. Different colors are used
-/// to represent different confidence levels:
-/// - Green for high confidence (> 0.8)
-/// - Orange for medium confidence (> 0.5)
-/// - Red for low confidence (≤ 0.5)
-///
-/// The visualization also includes:
+/// with bounding boxes. The visualization includes:
 /// - Corner points of each detected polygon
-/// - Confidence indicators in the top-left corner of each detection
+/// - Bounding boxes around detected text regions
 ///
 /// # Arguments
 ///
@@ -673,9 +677,9 @@ pub fn visualize_detection_results(
     let img_bounds = (vis_image.width() as i32, vis_image.height() as i32);
 
     for (polys, scores) in result.dt_polys.iter().zip(result.dt_scores.iter()) {
-        for (poly, &score) in polys.iter().zip(scores.iter()) {
+        for (poly, _score) in polys.iter().zip(scores.iter()) {
             if poly.points.len() >= 4 {
-                let color = get_confidence_color(score);
+                let color = BBOX_COLOR;
                 draw_detection_polygon(&mut vis_image, poly, color, img_bounds);
             }
         }
@@ -687,24 +691,16 @@ pub fn visualize_detection_results(
     Ok(())
 }
 
-fn get_confidence_color(score: f32) -> Rgb<u8> {
-    match score {
-        s if s > 0.8 => HIGH_CONFIDENCE_COLOR,
-        s if s > 0.5 => MEDIUM_CONFIDENCE_COLOR,
-        _ => LOW_CONFIDENCE_COLOR,
-    }
-}
-
-/// Draws a detection polygon with confidence indicators on the image.
+/// Draws a detection polygon on the image.
 ///
-/// This function draws the bounding box of the detected text region with a thick rectangle,
-/// marks the corner points of the polygon, and adds a confidence indicator.
+/// This function draws the bounding box of the detected text region with a thick rectangle
+/// and marks the corner points of the polygon.
 ///
 /// # Arguments
 ///
 /// * `img` - The image on which to draw
 /// * `poly` - The bounding box polygon to draw
-/// * `color` - The color to use for drawing, based on confidence level
+/// * `color` - The color to use for drawing
 /// * `img_bounds` - The dimensions of the image as (width, height)
 fn draw_detection_polygon(
     img: &mut RgbImage,
@@ -728,9 +724,6 @@ fn draw_detection_polygon(
 
     // Draw corner points of the polygon
     draw_corner_points(img, &poly.points, color, img_bounds);
-
-    // Draw confidence indicator in the top-left corner
-    draw_confidence_indicator(img, rect.left() - 15, rect.top() - 15, color);
 }
 
 /// Draws a thick rectangle on an image.
@@ -791,25 +784,6 @@ fn draw_corner_points(
             draw_filled_circle_mut(img, (x, y), 3, color);
         }
     }
-}
-
-/// Draws a confidence indicator (colored square) on an image.
-///
-/// This function draws a small colored square that indicates the confidence level
-/// of a detection. The color corresponds to the confidence level.
-///
-/// # Arguments
-///
-/// * `img` - The image to draw on
-/// * `x` - The x-coordinate of the indicator's top-left corner
-/// * `y` - The y-coordinate of the indicator's top-left corner
-/// * `color` - The color of the indicator (based on confidence level)
-fn draw_confidence_indicator(img: &mut RgbImage, x: i32, y: i32, color: Rgb<u8>) {
-    // Define the size of the confidence indicator
-    const INDICATOR_SIZE: u32 = 10;
-    let indicator_rect = Rect::at(x, y).of_size(INDICATOR_SIZE, INDICATOR_SIZE);
-
-    draw_filled_rect_mut(img, indicator_rect, color);
 }
 
 /// Checks if a point is within the bounds of an image.

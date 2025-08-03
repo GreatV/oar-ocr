@@ -408,13 +408,9 @@ impl Topk {
     ///
     /// * `Ok(TopkResult)` containing the top-k predictions.
     /// * `Err(ImageProcessError::InvalidInput)` if the input cannot be converted to a tensor.
-    pub fn apply_single(
-        &self,
-        pred: &[f32],
-        topk: usize,
-    ) -> Result<TopkResult, crate::processors::ImageProcessError> {
+    pub fn apply_single(&self, pred: &[f32], topk: usize) -> Result<TopkResult, ImageProcessError> {
         let tensor = ndarray::Array2::from_shape_vec((1, pred.len()), pred.to_vec())
-            .map_err(|_| crate::processors::ImageProcessError::InvalidInput)?;
+            .map_err(|_| ImageProcessError::InvalidInput)?;
         Ok(self.apply(&tensor, topk))
     }
 }
