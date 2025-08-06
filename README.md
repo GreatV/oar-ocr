@@ -77,7 +77,7 @@ cargo run --example text_recognition -- \
 
 ## Pre-trained Models
 
-OAR OCR provides several pre-trained models for different OCR tasks. Download them from the [GitHub Releases](https://github.com/GreatV/oar-ocr/releases/tag/v0.1.0) page.
+OAR OCR provides several pre-trained models for different OCR tasks. Download them from the [GitHub Releases](https://github.com/GreatV/oar-ocr/releases) page.
 
 ### Text Detection Models
 
