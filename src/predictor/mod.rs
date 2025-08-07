@@ -25,11 +25,17 @@ pub mod doctr_rectifier;
 pub mod text_line_classifier;
 
 // Re-exports for easier access to predictor types
-pub use crnn_recognizer::{TextRecPredictor, TextRecPredictorBuilder};
-pub use db_detector::{TextDetPredictor, TextDetPredictorBuilder};
-pub use doc_orientation_classifier::{DocOrientationClassifier, DocOrientationClassifierBuilder};
-pub use doctr_rectifier::{DoctrRectifierPredictor, DoctrRectifierPredictorBuilder};
-pub use text_line_classifier::{TextLineClasPredictor, TextLineClasPredictorBuilder};
+pub use crnn_recognizer::{TextRecPredictor, TextRecPredictorBuilder, TextRecPredictorConfig};
+pub use db_detector::{TextDetPredictor, TextDetPredictorBuilder, TextDetPredictorConfig};
+pub use doc_orientation_classifier::{
+    DocOrientationClassifier, DocOrientationClassifierBuilder, DocOrientationClassifierConfig,
+};
+pub use doctr_rectifier::{
+    DoctrRectifierPredictor, DoctrRectifierPredictorBuilder, DoctrRectifierPredictorConfig,
+};
+pub use text_line_classifier::{
+    TextLineClasPredictor, TextLineClasPredictorBuilder, TextLineClasPredictorConfig,
+};
 
 /// Implements the `BasePredictor` trait for a predictor type.
 ///
@@ -76,7 +82,7 @@ macro_rules! impl_standard_predictor {
             type Error = $error_type;
 
             #[track_caller]
-            fn process(&mut self, batch_data: $crate::core::batch::BatchData) -> Result<Self::Result, Self::Error> {
+            fn process(&self, batch_data: $crate::core::batch::BatchData) -> Result<Self::Result, Self::Error> {
                 use tracing::error;
 
                 let span = tracing::span!(
@@ -125,7 +131,7 @@ macro_rules! impl_standard_predictor {
             type Error = $error_type;
 
             #[track_caller]
-            fn process(&mut self, batch_data: $crate::core::batch::BatchData) -> Result<Self::Result, Self::Error> {
+            fn process(&self, batch_data: $crate::core::batch::BatchData) -> Result<Self::Result, Self::Error> {
                 use tracing::error;
 
                 let span = tracing::span!(
@@ -175,7 +181,7 @@ macro_rules! impl_standard_predictor {
             type Error = $error_type;
 
             #[track_caller]
-            fn process(&mut self, batch_data: $crate::core::batch::BatchData) -> Result<Self::Result, Self::Error> {
+            fn process(&self, batch_data: $crate::core::batch::BatchData) -> Result<Self::Result, Self::Error> {
                 use tracing::error;
 
                 let span = tracing::span!(
@@ -250,14 +256,6 @@ macro_rules! impl_standard_predictor_builder {
                 model_path: &std::path::Path,
             ) -> Result<Self::Predictor, $crate::core::errors::OCRError> {
                 self.build_internal(model_path)
-            }
-
-            fn build_predictor(
-                self,
-                model_path: &std::path::Path,
-            ) -> Result<Box<dyn $crate::core::traits::Predictor>, $crate::core::errors::OCRError>
-            {
-                Ok(Box::new(self.build_internal(model_path)?))
             }
 
             fn predictor_type(&self) -> &str {

@@ -8,17 +8,11 @@
 
 use crate::core::traits::StandardPredictor;
 use crate::core::{
-    BasePredictor, BatchData, BatchSampler, CommonBuilderConfig, DefaultImageReader, ImageReader,
-    IntoPrediction, OCRError, OrtInfer, PredictionResult, Sampler, Tensor2D, Tensor4D, ToBatch,
-    config::ConfigValidator,
+    BatchData, BatchSampler, CommonBuilderConfig, DefaultImageReader, ImageReader, OCRError,
+    OrtInfer, Tensor2D, Tensor4D, ToBatch, config::ConfigValidator,
 };
-
-use crate::impl_predictor_from_generic;
-use crate::impl_standard_predictor;
-use crate::impl_standard_predictor_builder;
 use crate::processors::{Crop, NormalizeImage, Topk};
 use image::{DynamicImage, RgbImage};
-use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -46,7 +40,7 @@ pub struct TextLineClasResult {
 ///
 /// This struct holds configuration parameters for the text line classifier.
 /// It includes common configuration options as well as classifier-specific parameters.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TextLineClasPredictorConfig {
     /// Common configuration options shared across predictors
     pub common: CommonBuilderConfig,
@@ -179,45 +173,6 @@ impl Default for TextLineClasResult {
     }
 }
 
-impl IntoPrediction for TextLineClasResult {
-    /// Output type for the prediction result
-    type Out = PredictionResult<'static>;
-
-    /// Converts the text line classification result into a prediction result
-    ///
-    /// Transforms the text line classification result into a standardized prediction result
-    /// that can be used by other parts of the system.
-    ///
-    /// # Returns
-    ///
-    /// A `PredictionResult` containing the classification results
-    fn into_prediction(self) -> Self::Out {
-        PredictionResult::Classification {
-            // Convert Arc<str> to String for input paths
-            input_path: self
-                .input_path
-                .into_iter()
-                .map(|arc| Cow::Owned(arc.to_string()))
-                .collect(),
-            index: self.index,
-            input_img: self.input_img,
-            class_ids: self.class_ids,
-            scores: self.scores,
-            // Convert Arc<str> to String for label names
-            label_names: self
-                .label_names
-                .into_iter()
-                .map(|names| {
-                    names
-                        .into_iter()
-                        .map(|arc| Cow::Owned(arc.to_string()))
-                        .collect()
-                })
-                .collect(),
-        }
-    }
-}
-
 /// Text line classifier
 ///
 /// This struct implements a classifier for determining the orientation of text lines in images.
@@ -309,13 +264,6 @@ impl TextLineClasPredictor {
     ///
     /// * `batch_data` - Batch of images to process
     ///
-    /// # Returns
-    ///
-    /// Classification results for the batch or an error if processing fails
-    fn process_internal(&mut self, batch_data: BatchData) -> Result<TextLineClasResult, OCRError> {
-        self.predict(batch_data, None)
-    }
-
     /// Sets the number of top predictions to return
     ///
     /// Updates the classifier to return the specified number of top predictions
@@ -361,7 +309,7 @@ impl StandardPredictor for TextLineClasPredictor {
     ///
     /// Vector of loaded images or an error if reading fails
     fn read_images<'a>(
-        &mut self,
+        &self,
         paths: impl Iterator<Item = &'a str>,
     ) -> Result<Vec<RgbImage>, OCRError> {
         self.read_image.apply(paths)
@@ -380,7 +328,7 @@ impl StandardPredictor for TextLineClasPredictor {
     ///
     /// Preprocessed images as a 4D tensor or an error if preprocessing fails
     fn preprocess(
-        &mut self,
+        &self,
         images: Vec<RgbImage>,
         _config: Option<&Self::Config>,
     ) -> Result<Self::PreprocessOutput, OCRError> {
@@ -421,7 +369,7 @@ impl StandardPredictor for TextLineClasPredictor {
     /// # Returns
     ///
     /// Inference output as a 2D tensor or an error if inference fails
-    fn infer(&mut self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError> {
+    fn infer(&self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError> {
         self.infer.infer_2d(input.clone())
     }
 
@@ -442,7 +390,7 @@ impl StandardPredictor for TextLineClasPredictor {
     ///
     /// Classification results or an error if postprocessing fails
     fn postprocess(
-        &mut self,
+        &self,
         output: Self::InferenceOutput,
         _preprocessed: &Self::PreprocessOutput,
         batch_data: &BatchData,
@@ -466,6 +414,10 @@ impl StandardPredictor for TextLineClasPredictor {
                 .map(|names| names.into_iter().map(Arc::from).collect())
                 .collect(),
         })
+    }
+
+    fn empty_result(&self) -> Result<Self::Result, OCRError> {
+        Ok(TextLineClasResult::new())
     }
 }
 
@@ -656,18 +608,3 @@ impl Default for TextLineClasPredictorBuilder {
         Self::new()
     }
 }
-
-impl_standard_predictor!(
-    TextLineClasPredictor,
-    TextLineClasResult,
-    OCRError,
-    "TextLineClassification"
-);
-
-impl_predictor_from_generic!(TextLineClasPredictor);
-
-impl_standard_predictor_builder!(
-    TextLineClasPredictorBuilder,
-    TextLineClasPredictor,
-    "TextLineClassification"
-);

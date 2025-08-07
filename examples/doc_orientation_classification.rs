@@ -10,14 +10,13 @@
 //! cargo run --example doc_orientation_classification -- --model-path <path_to_model> <image_paths>...
 //! ```
 //!
-//! For batch processing, add the `--batch` flag:
-//! ```
-//! cargo run --example doc_orientation_classification -- --model-path <path_to_model> --batch <image_paths>...
-//! ```
+//! The example automatically handles both single and multiple images efficiently.
 
 use clap::Parser;
-use oar_ocr::core::{Predictor, init_tracing};
+use oar_ocr::core::traits::StandardPredictor;
 use oar_ocr::predictor::DocOrientationClassifierBuilder;
+use oar_ocr::utils::init_tracing;
+use oar_ocr::utils::load_image;
 use std::path::Path;
 use tracing::{error, info};
 
@@ -33,10 +32,6 @@ struct Args {
     /// Image file paths to process
     #[arg(required = true)]
     images: Vec<String>,
-
-    /// Enable batch processing
-    #[arg(short, long)]
-    batch: bool,
 }
 
 /// Display the classification results for document orientation
@@ -67,7 +62,7 @@ fn display_classification_results(
             (ids.first(), scores_list.first(), labels.first())
         {
             // Convert numeric labels to degree representations
-            let orientation = match label.as_str() {
+            let orientation = match label.as_ref() {
                 "0" => "0°",
                 "90" => "90°",
                 "180" => "180°",
@@ -124,101 +119,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a document orientation classifier with specified parameters
     // topk(4) means we want to get the top 4 predictions (all possible orientations)
     // input_shape((224, 224)) specifies the input size expected by the model
-    let mut classifier = DocOrientationClassifierBuilder::new()
+    let classifier = DocOrientationClassifierBuilder::new()
         .topk(4)
         .input_shape((224, 224))
         .build(Path::new(model_path))?;
 
-    // Process images in batch mode if requested and there are multiple images
-    if args.batch && existing_images.len() > 1 {
-        info!(
-            "Batch classification for {} images...",
-            existing_images.len()
-        );
-        // Convert image paths to a vector of Path references
-        let batch_paths: Vec<&Path> = existing_images.iter().map(Path::new).collect();
-        // Perform batch classification
-        match classifier.predict_batch(&batch_paths) {
-            Ok(results) => {
-                // Extract the results from the first prediction (batch results are structured differently)
-                let (batch_input_path, batch_class_ids, batch_scores, batch_label_names) =
-                    match &results[0] {
-                        oar_ocr::core::PredictionResult::Classification {
-                            input_path,
-                            class_ids,
-                            scores,
-                            label_names,
-                            ..
-                        } => (input_path, class_ids, scores, label_names),
-                        _ => return Err("Unexpected result type".into()),
-                    };
+    // Load all images into memory
+    info!("Processing {} images...", existing_images.len());
+    let mut images = Vec::new();
+    let mut image_paths = Vec::new();
 
-                // Convert Cow<str> to String for display
-                let batch_input_path_strings: Vec<String> =
-                    batch_input_path.iter().map(|cow| cow.to_string()).collect();
-                let batch_label_names_strings: Vec<Vec<String>> = batch_label_names
-                    .iter()
-                    .map(|vec| vec.iter().map(|cow| cow.to_string()).collect())
-                    .collect();
-
-                // Display the classification results
-                display_classification_results(
-                    &batch_input_path_strings,
-                    batch_class_ids,
-                    batch_scores,
-                    &batch_label_names_strings,
-                );
+    for image_path in &existing_images {
+        match load_image(Path::new(image_path)) {
+            Ok(img) => {
+                images.push(img);
+                image_paths.push(image_path.clone());
             }
             Err(e) => {
-                error!("Batch classification failed: {}", e);
-                return Err("Batch classification failed".into());
+                error!("Failed to load image {}: {}", image_path, e);
+                continue;
             }
         }
-    } else {
-        // Process images individually
-        for (i, image_path) in existing_images.iter().enumerate() {
-            info!(
-                "Processing image {} of {}: {}",
-                i + 1,
-                existing_images.len(),
-                image_path
+    }
+
+    if images.is_empty() {
+        error!("No images could be loaded for processing");
+        return Err("No images could be loaded".into());
+    }
+
+    // Perform classification using the predict API (handles both single and batch automatically)
+    match classifier.predict(images, None) {
+        Ok(result) => {
+            info!("Processing completed for {} images", result.class_ids.len());
+
+            // Display the classification results
+            display_classification_results(
+                &image_paths,
+                &result.class_ids,
+                &result.scores,
+                &result.label_names,
             );
-            // Classify the orientation of a single image
-            match classifier.predict_single(Path::new(image_path)) {
-                Ok(result) => {
-                    // Extract the results from the prediction
-                    let (input_path, class_ids, scores, label_names) = match &result {
-                        oar_ocr::core::PredictionResult::Classification {
-                            input_path,
-                            class_ids,
-                            scores,
-                            label_names,
-                            ..
-                        } => (input_path, class_ids, scores, label_names),
-                        _ => return Err("Unexpected result type".into()),
-                    };
-
-                    // Convert Cow<str> to String for display
-                    let input_path_strings: Vec<String> =
-                        input_path.iter().map(|cow| cow.to_string()).collect();
-                    let label_names_strings: Vec<Vec<String>> = label_names
-                        .iter()
-                        .map(|vec| vec.iter().map(|cow| cow.to_string()).collect())
-                        .collect();
-
-                    // Display the classification results
-                    display_classification_results(
-                        &input_path_strings,
-                        class_ids,
-                        scores,
-                        &label_names_strings,
-                    );
-                }
-                Err(e) => {
-                    error!("Classification failed for {}: {}", image_path, e);
-                    continue;
-                }
-            }
+        }
+        Err(e) => {
+            error!("Classification failed: {}", e);
+            return Err("Classification failed".into());
         }
     }
 
@@ -226,47 +170,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // This time we use topk(2) to get only the top 2 predictions
     if !existing_images.is_empty() {
         info!("Testing with topk=2 on first image...");
-        let mut adjusted_classifier = DocOrientationClassifierBuilder::new()
+        let adjusted_classifier = DocOrientationClassifierBuilder::new()
             .topk(2)
             .input_shape((224, 224))
             .build(Path::new(model_path))?;
 
         let first_image = &existing_images[0];
-        match adjusted_classifier.predict_single(Path::new(first_image)) {
-            Ok(result) => {
-                // Extract the results from the prediction
-                let (
-                    adjusted_input_path,
-                    adjusted_class_ids,
-                    adjusted_scores,
-                    adjusted_label_names,
-                ) = match &result {
-                    oar_ocr::core::PredictionResult::Classification {
-                        input_path,
-                        class_ids,
-                        scores,
-                        label_names,
-                        ..
-                    } => (input_path, class_ids, scores, label_names),
-                    _ => return Err("Unexpected result type".into()),
-                };
 
-                // Convert Cow<str> to String for display
-                let adjusted_input_path_strings: Vec<String> = adjusted_input_path
-                    .iter()
-                    .map(|cow| cow.to_string())
-                    .collect();
-                let adjusted_label_names_strings: Vec<Vec<String>> = adjusted_label_names
-                    .iter()
-                    .map(|vec| vec.iter().map(|cow| cow.to_string()).collect())
-                    .collect();
+        // Load the image into memory
+        let image = match load_image(Path::new(first_image)) {
+            Ok(img) => img,
+            Err(e) => {
+                error!("Failed to load image for adjusted parameter test: {}", e);
+                return Err("Failed to load image".into());
+            }
+        };
+
+        match adjusted_classifier.predict(vec![image], None) {
+            Ok(result) => {
+                // Create display data
+                let display_paths = vec![first_image.clone()];
 
                 // Display the classification results with adjusted parameters
                 display_classification_results(
-                    &adjusted_input_path_strings,
-                    adjusted_class_ids,
-                    adjusted_scores,
-                    &adjusted_label_names_strings,
+                    &display_paths,
+                    &result.class_ids,
+                    &result.scores,
+                    &result.label_names,
                 );
             }
             Err(e) => error!("Adjusted parameter test failed: {}", e),

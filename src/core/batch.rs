@@ -375,14 +375,7 @@ impl ToBatch {
         let mut batch_tensor = vec![0.0; tensor_size];
 
         if all_same_dimensions {
-            self.apply_contiguous(
-                imgs,
-                shapes,
-                &mut batch_tensor,
-                channels,
-                max_height,
-                max_width,
-            );
+            self.apply_contiguous(imgs, &mut batch_tensor, channels, max_height, max_width);
         } else {
             self.apply_mixed_dimensions(
                 imgs,
@@ -405,7 +398,6 @@ impl ToBatch {
     /// # Arguments
     ///
     /// * `imgs` - A slice of vectors of f32 values representing the images.
-    /// * `_shapes` - A slice of tuples representing the shapes of the images (channels, height, width).
     /// * `batch_tensor` - A mutable slice of f32 values representing the batched tensor.
     /// * `channels` - The number of channels in the images.
     /// * `height` - The height of the images.
@@ -413,7 +405,6 @@ impl ToBatch {
     fn apply_contiguous(
         &self,
         imgs: &[Vec<f32>],
-        _shapes: &[(usize, usize, usize)],
         batch_tensor: &mut [f32],
         channels: usize,
         height: usize,
@@ -468,5 +459,66 @@ impl ToBatch {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_to_batch_apply_contiguous() {
+        let to_batch = ToBatch::new();
+
+        // Create test images with same dimensions
+        let img1 = vec![1.0, 2.0, 3.0, 4.0]; // 1x2x2 image
+        let img2 = vec![5.0, 6.0, 7.0, 8.0]; // 1x2x2 image
+        let imgs = vec![img1, img2];
+        let shapes = vec![(1, 2, 2), (1, 2, 2)]; // Same shapes
+
+        let result = to_batch.apply(&imgs, &shapes).unwrap();
+
+        // Expected: batch_size=2, channels=1, height=2, width=2
+        // Total size: 2 * 1 * 2 * 2 = 8
+        assert_eq!(result.len(), 8);
+
+        // First image should be at positions 0-3
+        assert_eq!(result[0], 1.0);
+        assert_eq!(result[1], 2.0);
+        assert_eq!(result[2], 3.0);
+        assert_eq!(result[3], 4.0);
+
+        // Second image should be at positions 4-7
+        assert_eq!(result[4], 5.0);
+        assert_eq!(result[5], 6.0);
+        assert_eq!(result[6], 7.0);
+        assert_eq!(result[7], 8.0);
+    }
+
+    #[test]
+    fn test_to_batch_apply_mixed_dimensions() {
+        let to_batch = ToBatch::new();
+
+        // Create test images with different dimensions
+        let img1 = vec![1.0, 2.0]; // 1x1x2 image
+        let img2 = vec![3.0, 4.0, 5.0, 6.0]; // 1x2x2 image
+        let imgs = vec![img1, img2];
+        let shapes = vec![(1, 1, 2), (1, 2, 2)]; // Different shapes
+
+        let result = to_batch.apply(&imgs, &shapes).unwrap();
+
+        // Expected: batch_size=2, channels=1, max_height=2, max_width=2
+        // Total size: 2 * 1 * 2 * 2 = 8
+        assert_eq!(result.len(), 8);
+
+        // First image (1x2) should be padded to (2x2)
+        // Second image (2x2) should fit exactly
+        // The exact layout depends on the mixed dimensions implementation
+        assert!(result.contains(&1.0));
+        assert!(result.contains(&2.0));
+        assert!(result.contains(&3.0));
+        assert!(result.contains(&4.0));
+        assert!(result.contains(&5.0));
+        assert!(result.contains(&6.0));
     }
 }

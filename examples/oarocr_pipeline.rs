@@ -31,8 +31,8 @@
 //! ```
 
 use clap::Parser;
-use oar_ocr::core::init_tracing;
 use oar_ocr::pipeline::OAROCRBuilder;
+use oar_ocr::utils::init_tracing;
 #[cfg(feature = "visualization")]
 use oar_ocr::utils::visualization::visualize_ocr_results;
 use std::path::Path;
@@ -146,8 +146,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .text_recognition_batch_size(1)
     // Set minimum score threshold for text recognition results
     .text_rec_score_thresh(0.0)
-    // Set input shape for text recognition model (channels, height, width)
-    .text_rec_input_shape((3, 48, 320));
+    // Set model input shape for text recognition (channels, height, width)
+    .text_rec_model_input_shape((3, 48, 320));
 
     // Configure text line orientation classification if requested
     if args.use_textline_orientation {
@@ -158,23 +158,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .use_textline_orientation(true);
     }
 
+    // Enable parallel processing for better performance with multiple images
+    builder = builder
+        .enable_parallel_processing(true)
+        .max_parallel_threads(None); // Use all available CPU cores
+
     // Build the OCR pipeline and process images
     match builder.build() {
-        Ok(mut oarocr) => {
+        Ok(oarocr) => {
             info!("Pipeline built successfully!");
 
-            // Process each image in sequence
-            for (i, image_path) in existing_images.iter().enumerate() {
-                info!(
-                    "Processing image {} of {}: {}",
-                    i + 1,
-                    existing_images.len(),
-                    image_path
-                );
+            // Process all images at once using the new parallel processing capabilities
+            info!(
+                "Processing {} images using parallel processing...",
+                existing_images.len()
+            );
+            let image_paths: Vec<&Path> = existing_images.iter().map(Path::new).collect();
 
-                // Run OCR on the current image
-                match oarocr.predict(Path::new(image_path)) {
-                    Ok(result) => {
+            let start_time = std::time::Instant::now();
+            match oarocr.predict(&image_paths) {
+                Ok(results) => {
+                    let processing_time = start_time.elapsed();
+                    info!(
+                        "Successfully processed {} images in {:?} ({:.2} images/sec)",
+                        results.len(),
+                        processing_time,
+                        results.len() as f64 / processing_time.as_secs_f64()
+                    );
+
+                    // Process each result
+                    for (i, result) in results.iter().enumerate() {
+                        info!(
+                            "Results for image {} of {}: {}",
+                            i + 1,
+                            results.len(),
+                            existing_images[i]
+                        );
+
                         // Display OCR results using the Display trait
                         info!("{}", result);
 
@@ -182,6 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         #[cfg(feature = "visualization")]
                         if let Some(ref output_dir) = args.output_dir {
                             let output_dir_path = Path::new(output_dir);
+                            let image_path = Path::new(&existing_images[i]);
 
                             // Create output directory if it doesn't exist
                             if !output_dir_path.exists() {
@@ -190,34 +211,159 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "Failed to create output directory {}: {}",
                                         output_dir, e
                                     );
-                                    continue;
+                                } else {
+                                    // Generate output filename based on input image
+                                    let input_filename = image_path
+                                        .file_stem()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("unknown");
+                                    let output_filename =
+                                        format!("{input_filename}_visualization.jpg");
+                                    let output_path = output_dir_path.join(output_filename);
+
+                                    // Create visualization
+                                    let font_path = args.font_path.as_ref().map(Path::new);
+                                    match visualize_ocr_results(result, &output_path, font_path) {
+                                        Ok(()) => {
+                                            info!(
+                                                "Visualization saved to: {}",
+                                                output_path.display()
+                                            );
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "Failed to create visualization for {}: {}",
+                                                image_path.display(),
+                                                e
+                                            );
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Generate output filename based on input image
+                                let input_filename = image_path
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("unknown");
+                                let output_filename = format!("{input_filename}_visualization.jpg");
+                                let output_path = output_dir_path.join(output_filename);
+
+                                // Create visualization
+                                let font_path = args.font_path.as_ref().map(Path::new);
+                                match visualize_ocr_results(result, &output_path, font_path) {
+                                    Ok(()) => {
+                                        info!(
+                                            "📊 Visualization saved to: {}",
+                                            output_path.display()
+                                        );
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "Failed to create visualization for {}: {}",
+                                            image_path.display(),
+                                            e
+                                        );
+                                    }
                                 }
                             }
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to process images: {}", e);
+                    return Err(e.into());
+                }
+            }
 
-                            // Generate output filename based on input image
-                            let input_filename = Path::new(image_path)
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("unknown");
-                            let output_filename = format!("{input_filename}_visualization.jpg");
-                            let output_path = output_dir_path.join(output_filename);
+            // Also demonstrate single image processing for comparison
+            if !existing_images.is_empty() {
+                info!("\nDemonstrating single image processing for comparison...");
+                let single_image = &existing_images[0];
+                let start_time = std::time::Instant::now();
 
-                            // Create visualization
-                            let font_path = args.font_path.as_ref().map(Path::new);
-                            match visualize_ocr_results(&result, &output_path, font_path) {
-                                Ok(()) => {
-                                    info!("Visualization saved to: {}", output_path.display());
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        "Failed to create visualization for {}: {}",
-                                        image_path, e
-                                    );
+                match oarocr.predict(&[Path::new(single_image)]) {
+                    Ok(results) => {
+                        if let Some(result) = results.first() {
+                            // Display OCR results using the Display trait
+                            info!("{}", result);
+
+                            // Generate visualization if output directory is specified
+                            #[cfg(feature = "visualization")]
+                            if let Some(ref output_dir) = args.output_dir {
+                                let output_dir_path = Path::new(output_dir);
+                                let image_path = Path::new(single_image);
+
+                                // Create output directory if it doesn't exist
+                                if !output_dir_path.exists() {
+                                    if let Err(e) = std::fs::create_dir_all(output_dir_path) {
+                                        warn!(
+                                            "Failed to create output directory {}: {}",
+                                            output_dir, e
+                                        );
+                                    } else {
+                                        // Generate output filename based on input image
+                                        let input_filename = image_path
+                                            .file_stem()
+                                            .and_then(|s| s.to_str())
+                                            .unwrap_or("unknown");
+                                        let output_filename =
+                                            format!("{input_filename}_single_visualization.jpg");
+                                        let output_path = output_dir_path.join(output_filename);
+
+                                        // Create visualization
+                                        let font_path = args.font_path.as_ref().map(Path::new);
+                                        match visualize_ocr_results(result, &output_path, font_path)
+                                        {
+                                            Ok(()) => {
+                                                info!(
+                                                    "Single image visualization saved to: {}",
+                                                    output_path.display()
+                                                );
+                                            }
+                                            Err(e) => {
+                                                warn!(
+                                                    "Failed to create visualization for {}: {}",
+                                                    image_path.display(),
+                                                    e
+                                                );
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Generate output filename based on input image
+                                    let input_filename = image_path
+                                        .file_stem()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("unknown");
+                                    let output_filename =
+                                        format!("{input_filename}_single_visualization.jpg");
+                                    let output_path = output_dir_path.join(output_filename);
+
+                                    // Create visualization
+                                    let font_path = args.font_path.as_ref().map(Path::new);
+                                    match visualize_ocr_results(result, &output_path, font_path) {
+                                        Ok(()) => {
+                                            info!(
+                                                "Single image visualization saved to: {}",
+                                                output_path.display()
+                                            );
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "Failed to create visualization for {}: {}",
+                                                image_path.display(),
+                                                e
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }
 
                         // Handle case when visualization feature is disabled but user wants to save
+                        let processing_time = start_time.elapsed();
+                        info!("Single image processed in {:?}", processing_time);
+
                         #[cfg(not(feature = "visualization"))]
                         if args.output_dir.is_some() {
                             warn!(
@@ -226,8 +372,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     Err(e) => {
-                        error!("OCR failed for {}: {}", image_path, e);
-                        continue;
+                        error!("Single image OCR failed for {}: {}", single_image, e);
                     }
                 }
             }

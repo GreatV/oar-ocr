@@ -14,20 +14,16 @@
 use crate::core::batch::ToBatch;
 use crate::processors::{BoundingBox, DBPostProcess, DetResizeForTest, LimitType, NormalizeImage};
 use image::{DynamicImage, RgbImage};
-use std::borrow::Cow;
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
 use crate::core::traits::StandardPredictor;
 use crate::core::{
-    BasePredictor, BatchData, CommonBuilderConfig, IntoPrediction, OCRError, PredictionResult,
-    Tensor4D,
+    BatchData, CommonBuilderConfig, OCRError, Tensor4D,
     config::ConfigValidator,
     constants::{DEFAULT_BATCH_SIZE, DEFAULT_MAX_SIDE_LIMIT},
 };
-use crate::impl_predictor_from_generic;
-use crate::impl_standard_predictor;
 
 const DEFAULT_THRESH: f32 = 0.3;
 
@@ -57,7 +53,7 @@ pub struct TextDetConfig {
 /// Configuration for the text detection predictor
 ///
 /// This struct holds configuration parameters for the text detection predictor.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TextDetPredictorConfig {
     /// Common configuration parameters
     pub common: CommonBuilderConfig,
@@ -252,7 +248,7 @@ impl Default for TextDetResult {
     }
 }
 
-use crate::core::{BatchSampler, DefaultImageReader, ImageReader, OrtInfer, Sampler};
+use crate::core::{BatchSampler, DefaultImageReader, ImageReader, OrtInfer};
 
 /// Text detection predictor
 ///
@@ -356,17 +352,6 @@ impl TextDetPredictor {
         })
     }
 
-    /// Processes a batch of data internally
-    ///
-    /// This function processes a batch of data and returns the detection results.
-    fn process_internal(
-        &mut self,
-        batch_data: BatchData,
-        config: Option<TextDetConfig>,
-    ) -> Result<TextDetResult, OCRError> {
-        self.predict(batch_data, config)
-    }
-
     /// Sets the threshold for binarization
     ///
     /// This function sets the threshold value used for binarization in text detection.
@@ -415,11 +400,13 @@ impl TextDetPredictor {
     /// This function processes a batch of data with the provided configuration
     /// and returns the detection results.
     pub fn process_with_config(
-        &mut self,
+        &self,
         batch_data: BatchData,
         config: Option<TextDetConfig>,
     ) -> Result<TextDetResult, OCRError> {
-        self.process_internal(batch_data, config)
+        // Read images from the batch data paths
+        let images = self.read_images(batch_data.input_paths.iter().map(|s| s.as_ref()))?;
+        self.predict(images, config)
     }
 }
 
@@ -441,14 +428,14 @@ impl StandardPredictor for TextDetPredictor {
     type InferenceOutput = Tensor4D;
 
     fn read_images<'a>(
-        &mut self,
+        &self,
         paths: impl Iterator<Item = &'a str>,
     ) -> Result<Vec<RgbImage>, OCRError> {
         self.read_image.apply(paths)
     }
 
     fn preprocess(
-        &mut self,
+        &self,
         images: Vec<RgbImage>,
         config: Option<&Self::Config>,
     ) -> Result<Self::PreprocessOutput, OCRError> {
@@ -476,12 +463,12 @@ impl StandardPredictor for TextDetPredictor {
         Ok(TextDetPreprocessOutput { tensor, shapes })
     }
 
-    fn infer(&mut self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError> {
+    fn infer(&self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError> {
         self.infer.infer_4d(input.tensor.clone())
     }
 
     fn postprocess(
-        &mut self,
+        &self,
         output: Self::InferenceOutput,
         preprocessed: &Self::PreprocessOutput,
         batch_data: &BatchData,
@@ -515,6 +502,10 @@ impl StandardPredictor for TextDetPredictor {
             dt_polys: polys,
             dt_scores: scores,
         })
+    }
+
+    fn empty_result(&self) -> Result<Self::Result, OCRError> {
+        Ok(TextDetResult::new())
     }
 }
 
@@ -685,31 +676,3 @@ impl Default for TextDetPredictorBuilder {
         Self::new()
     }
 }
-
-impl_standard_predictor!(
-    TextDetPredictor,
-    TextDetResult,
-    OCRError,
-    "TextDetection",
-    process_internal(None)
-);
-
-impl IntoPrediction for TextDetResult {
-    type Out = PredictionResult<'static>;
-
-    fn into_prediction(self) -> Self::Out {
-        PredictionResult::Detection {
-            input_path: self
-                .input_path
-                .into_iter()
-                .map(|arc| Cow::Owned(arc.to_string()))
-                .collect(),
-            index: self.index,
-            input_img: self.input_img,
-            dt_polys: self.dt_polys,
-            dt_scores: self.dt_scores,
-        }
-    }
-}
-
-impl_predictor_from_generic!(TextDetPredictor);

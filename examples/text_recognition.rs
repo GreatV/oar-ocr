@@ -2,7 +2,8 @@
 //!
 //! This example demonstrates how to use the OCR pipeline to recognize text in images.
 //! It loads a text recognition model, processes input images, and displays the recognized text
-//! along with confidence scores.
+//! along with confidence scores. The example automatically handles both single and multiple
+//! images efficiently.
 //!
 //! # Usage
 //!
@@ -14,7 +15,6 @@
 //!
 //! * `-m, --model-path` - Path to the text recognition model file
 //! * `-d, --char-dict-path` - Path to the character dictionary file
-//! * `-b, --batch` - Enable batch processing mode
 //! * `<IMAGES>...` - Paths to input images to process
 //!
 //! # Example
@@ -24,8 +24,10 @@
 //! ```
 
 use clap::Parser;
-use oar_ocr::core::{Predictor, init_tracing};
+use oar_ocr::core::traits::StandardPredictor;
 use oar_ocr::predictor::TextRecPredictorBuilder;
+use oar_ocr::utils::init_tracing;
+use oar_ocr::utils::load_image;
 use std::path::Path;
 use tracing::{error, info};
 
@@ -45,10 +47,6 @@ struct Args {
     /// Paths to input images to process
     #[arg(required = true)]
     images: Vec<String>,
-
-    /// Enable batch processing mode
-    #[arg(short, long)]
-    batch: bool,
 }
 
 /// Display the recognition results for text in images
@@ -57,12 +55,12 @@ struct Args {
 /// the image path, recognized text, and confidence score.
 ///
 /// # Parameters
-/// * `image_paths` - Paths to the processed images
+/// * `image_paths` - Paths to the processed images (as strings)
 /// * `texts` - Recognized texts for each image
 /// * `scores` - Confidence scores for each recognition
 fn display_recognition_results(
-    image_paths: &[std::borrow::Cow<'_, str>],
-    texts: &[std::borrow::Cow<'_, str>],
+    image_paths: &[String],
+    texts: &[std::sync::Arc<str>],
     scores: &[f32],
 ) {
     for (i, ((path, text), &score)) in image_paths
@@ -137,80 +135,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create a text recognition predictor with specified parameters
     let mut predictor = TextRecPredictorBuilder::new()
-        .rec_image_shape([3, 48, 320]) // Input image shape for the model
+        .model_input_shape([3, 48, 320]) // Model input shape for image resizing
         .batch_size(8) // Process 8 images at a time
         .character_dict(char_dict_lines) // Character dictionary for recognition
         .model_name("PP-OCRv5_mobile_rec".to_string()) // Model name
         .build(Path::new(model_path))?;
 
-    // Process images in batch mode if requested and multiple images are provided
-    if args.batch && existing_images.len() > 1 {
-        info!("Batch recognition for {} images...", existing_images.len());
-        // Convert image paths to Path references for batch processing
-        let batch_paths: Vec<&Path> = existing_images.iter().map(Path::new).collect();
-        // Perform batch recognition
-        match predictor.predict_batch(&batch_paths) {
-            Ok(results) => {
-                // Process and display results for each batch
-                for (batch_idx, result) in results.iter().enumerate() {
-                    // Extract recognition text and scores from the result
-                    let (batch_input_path, batch_rec_text, batch_rec_score) = match result {
-                        oar_ocr::core::PredictionResult::Recognition {
-                            input_path,
-                            rec_text,
-                            rec_score,
-                            ..
-                        } => (input_path, rec_text, rec_score),
-                        _ => continue,
-                    };
+    // Load all images into memory
+    info!("Processing {} images...", existing_images.len());
+    let mut images = Vec::new();
+    let mut image_paths = Vec::new();
 
-                    info!("Batch {}:", batch_idx + 1);
-                    // Display the recognition results for this batch
-                    display_recognition_results(batch_input_path, batch_rec_text, batch_rec_score);
-                }
+    for image_path in &existing_images {
+        match load_image(Path::new(image_path)) {
+            Ok(img) => {
+                images.push(img);
+                image_paths.push(image_path.clone());
             }
             Err(e) => {
-                error!("Batch recognition failed: {}", e);
-                return Err("Batch recognition failed".into());
-            }
-        }
-    } else {
-        // Process images individually
-        for (i, image_path) in existing_images.iter().enumerate() {
-            info!(
-                "Processing image {} of {}: {}",
-                i + 1,
-                existing_images.len(),
-                image_path
-            );
-            // Perform text recognition on a single image
-            match predictor.predict_single(Path::new(image_path)) {
-                Ok(result) => {
-                    // Extract recognition text and scores from the result
-                    let (input_path, rec_text, rec_score) = match &result {
-                        oar_ocr::core::PredictionResult::Recognition {
-                            input_path,
-                            rec_text,
-                            rec_score,
-                            ..
-                        } => (input_path, rec_text, rec_score),
-                        _ => return Err("Unexpected result type".into()),
-                    };
-
-                    // Display the recognition results
-                    display_recognition_results(input_path, rec_text, rec_score);
-                }
-                Err(e) => {
-                    error!("Recognition failed for {}: {}", image_path, e);
-                    continue;
-                }
+                error!("Failed to load image {}: {}", image_path, e);
+                continue;
             }
         }
     }
 
-    // Demonstrate changing the image shape after processing
-    predictor.set_rec_image_shape([3, 32, 256]);
-    info!("Updated image shape to [3, 32, 256]");
+    if images.is_empty() {
+        error!("No images could be loaded for processing");
+        return Err("No images could be loaded".into());
+    }
+
+    // Perform recognition using the predict API (handles both single and batch automatically)
+    match predictor.predict(images, None) {
+        Ok(result) => {
+            info!("Processing completed for {} images", result.rec_text.len());
+
+            // Display the recognition results
+            display_recognition_results(&image_paths, &result.rec_text, &result.rec_score);
+        }
+        Err(e) => {
+            error!("Recognition failed: {}", e);
+            return Err("Recognition failed".into());
+        }
+    }
+
+    // Demonstrate changing the model input shape after processing
+    predictor.set_model_input_shape([3, 32, 256]);
+    info!("Updated model input shape to [3, 32, 256]");
 
     info!("Example completed!");
     Ok(())

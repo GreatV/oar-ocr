@@ -7,17 +7,11 @@
 
 use crate::core::traits::StandardPredictor;
 use crate::core::{
-    BasePredictor, BatchData, BatchSampler, CommonBuilderConfig, DefaultImageReader, ImageReader,
-    IntoPrediction, OCRError, OrtInfer, PredictionResult, Sampler, Tensor4D, ToBatch,
-    config::ConfigValidator,
+    BatchData, BatchSampler, CommonBuilderConfig, DefaultImageReader, ImageReader, OCRError,
+    OrtInfer, Tensor4D, ToBatch, config::ConfigValidator,
 };
-
-use crate::impl_predictor_from_generic;
-use crate::impl_standard_predictor;
-use crate::impl_standard_predictor_builder;
 use crate::processors::{DocTrPostProcess, NormalizeImage};
 use image::{DynamicImage, RgbImage};
-use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -41,7 +35,7 @@ pub struct DoctrRectifierResult {
 ///
 /// This struct holds configuration parameters for the document rectifier.
 /// It includes common configuration options as well as rectifier-specific parameters.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DoctrRectifierPredictorConfig {
     /// Common configuration options shared across predictors
     pub common: CommonBuilderConfig,
@@ -168,23 +162,6 @@ impl Default for DoctrRectifierResult {
     }
 }
 
-impl IntoPrediction for DoctrRectifierResult {
-    type Out = PredictionResult<'static>;
-
-    fn into_prediction(self) -> Self::Out {
-        PredictionResult::Rectification {
-            input_path: self
-                .input_path
-                .into_iter()
-                .map(|arc| Cow::Owned(arc.to_string()))
-                .collect(),
-            index: self.index,
-            input_img: self.input_img,
-            rectified_img: self.rectified_img,
-        }
-    }
-}
-
 /// Document rectifier
 ///
 /// This struct implements a rectifier for correcting distortions in document images.
@@ -265,16 +242,6 @@ impl DoctrRectifierPredictor {
     ///
     /// * `batch_data` - Batch of images to process
     ///
-    /// # Returns
-    ///
-    /// Rectification results for the batch or an error if processing fails
-    fn process_internal(
-        &mut self,
-        batch_data: BatchData,
-    ) -> Result<DoctrRectifierResult, OCRError> {
-        self.predict(batch_data, None)
-    }
-
     /// Gets the model name
     ///
     /// Returns the name of the model being used by this rectifier.
@@ -302,14 +269,14 @@ impl StandardPredictor for DoctrRectifierPredictor {
     type InferenceOutput = Tensor4D;
 
     fn read_images<'a>(
-        &mut self,
+        &self,
         paths: impl Iterator<Item = &'a str>,
     ) -> Result<Vec<RgbImage>, OCRError> {
         self.read_image.apply(paths)
     }
 
     fn preprocess(
-        &mut self,
+        &self,
         images: Vec<RgbImage>,
         _config: Option<&Self::Config>,
     ) -> Result<Self::PreprocessOutput, OCRError> {
@@ -319,12 +286,12 @@ impl StandardPredictor for DoctrRectifierPredictor {
         self.normalize.normalize_batch_to(batch_imgs)
     }
 
-    fn infer(&mut self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError> {
+    fn infer(&self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError> {
         self.infer.infer_4d(input.clone())
     }
 
     fn postprocess(
-        &mut self,
+        &self,
         output: Self::InferenceOutput,
         _preprocessed: &Self::PreprocessOutput,
         batch_data: &BatchData,
@@ -342,6 +309,10 @@ impl StandardPredictor for DoctrRectifierPredictor {
             input_img: raw_images.into_iter().map(Arc::new).collect(),
             rectified_img: rectified_imgs.into_iter().map(Arc::new).collect(),
         })
+    }
+
+    fn empty_result(&self) -> Result<Self::Result, OCRError> {
+        Ok(DoctrRectifierResult::new())
     }
 }
 
@@ -512,18 +483,3 @@ impl Default for DoctrRectifierPredictorBuilder {
         Self::new()
     }
 }
-
-impl_standard_predictor!(
-    DoctrRectifierPredictor,
-    DoctrRectifierResult,
-    OCRError,
-    "DoctrRectifier"
-);
-
-impl_predictor_from_generic!(DoctrRectifierPredictor);
-
-impl_standard_predictor_builder!(
-    DoctrRectifierPredictorBuilder,
-    DoctrRectifierPredictor,
-    "DoctrRectifier"
-);

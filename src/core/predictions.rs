@@ -535,6 +535,45 @@ impl PipelineStats {
             average_inference_time_ms: 0.0,
         }
     }
+
+    /// Gets the success rate as a percentage.
+    ///
+    /// # Returns
+    ///
+    /// Success rate as a percentage (0.0 to 100.0)
+    pub fn success_rate(&self) -> f64 {
+        if self.total_processed == 0 {
+            0.0
+        } else {
+            (self.successful_predictions as f64 / self.total_processed as f64) * 100.0
+        }
+    }
+
+    /// Gets the failure rate as a percentage.
+    ///
+    /// # Returns
+    ///
+    /// Failure rate as a percentage (0.0 to 100.0)
+    pub fn failure_rate(&self) -> f64 {
+        if self.total_processed == 0 {
+            0.0
+        } else {
+            (self.failed_predictions as f64 / self.total_processed as f64) * 100.0
+        }
+    }
+
+    /// Gets the average processing speed in images per second.
+    ///
+    /// # Returns
+    ///
+    /// Processing speed in images per second
+    pub fn images_per_second(&self) -> f64 {
+        if self.average_inference_time_ms == 0.0 {
+            0.0
+        } else {
+            1000.0 / self.average_inference_time_ms
+        }
+    }
 }
 
 /// Implementation of Default for PipelineStats.
@@ -543,5 +582,38 @@ impl PipelineStats {
 impl Default for PipelineStats {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Implementation of Display for PipelineStats.
+///
+/// This implementation allows PipelineStats to be easily printed.
+impl std::fmt::Display for PipelineStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Pipeline Statistics:")?;
+        writeln!(f, "  Total processed: {}", self.total_processed)?;
+        writeln!(
+            f,
+            "  Successful: {} ({:.1}%)",
+            self.successful_predictions,
+            self.success_rate()
+        )?;
+        writeln!(
+            f,
+            "  Failed: {} ({:.1}%)",
+            self.failed_predictions,
+            self.failure_rate()
+        )?;
+        writeln!(
+            f,
+            "  Average inference time: {:.2} ms",
+            self.average_inference_time_ms
+        )?;
+        writeln!(
+            f,
+            "  Processing speed: {:.2} images/sec",
+            self.images_per_second()
+        )?;
+        Ok(())
     }
 }

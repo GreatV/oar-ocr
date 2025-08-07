@@ -4,58 +4,11 @@
 //! to provide a consistent interface for different components.
 
 use crate::core::{
-    batch::BatchData,
-    batch::BatchSampler,
-    errors::OCRError,
-    predictions::{PipelineStats, PredictionResult},
+    batch::BatchData, batch::BatchSampler, errors::OCRError, predictions::PredictionResult,
 };
 use image::RgbImage;
 use std::path::Path;
-
-/// Trait for predictors in the OCR pipeline.
-///
-/// This trait defines the interface for predictors that can process images
-/// and generate predictions.
-pub trait Predictor {
-    /// Predicts the result for a single image.
-    ///
-    /// # Arguments
-    ///
-    /// * `image_path` - The path to the image to process.
-    ///
-    /// # Returns
-    ///
-    /// A Result containing the prediction result or an error.
-    fn predict_single(&mut self, image_path: &Path) -> Result<PredictionResult<'static>, OCRError>;
-
-    /// Predicts the results for a batch of images.
-    ///
-    /// # Arguments
-    ///
-    /// * `image_paths` - A slice of paths to the images to process.
-    ///
-    /// # Returns
-    ///
-    /// A Result containing a vector of prediction results or an error.
-    fn predict_batch(
-        &mut self,
-        image_paths: &[&Path],
-    ) -> Result<Vec<PredictionResult<'static>>, OCRError>;
-
-    /// Gets the name of the model used by this predictor.
-    ///
-    /// # Returns
-    ///
-    /// The name of the model.
-    fn model_name(&self) -> &str;
-
-    /// Gets the type name of this predictor.
-    ///
-    /// # Returns
-    ///
-    /// The type name of the predictor.
-    fn predictor_type_name(&self) -> &str;
-}
+use std::sync::Arc;
 
 /// Trait for building predictors.
 ///
@@ -65,7 +18,7 @@ pub trait PredictorBuilder: Sized {
     type Config;
 
     /// The predictor type that this builder creates.
-    type Predictor: Predictor;
+    type Predictor;
 
     /// Builds a typed predictor.
     ///
@@ -77,17 +30,6 @@ pub trait PredictorBuilder: Sized {
     ///
     /// A Result containing the built predictor or an error.
     fn build_typed(self, model_path: &Path) -> Result<Self::Predictor, OCRError>;
-
-    /// Builds a predictor as a boxed trait object.
-    ///
-    /// # Arguments
-    ///
-    /// * `model_path` - The path to the model file.
-    ///
-    /// # Returns
-    ///
-    /// A Result containing the boxed predictor or an error.
-    fn build_predictor(self, model_path: &Path) -> Result<Box<dyn Predictor>, OCRError>;
 
     /// Gets the type of predictor that this builder creates.
     ///
@@ -199,7 +141,7 @@ pub trait BasePredictor {
     /// # Returns
     ///
     /// A Result containing the processing result or an error.
-    fn process(&mut self, batch_data: BatchData) -> Result<Self::Result, Self::Error>;
+    fn process(&self, batch_data: BatchData) -> Result<Self::Result, Self::Error>;
 
     /// Converts the processing result to a prediction result.
     ///
@@ -275,11 +217,18 @@ pub trait ImageReader {
     fn read_single<P: AsRef<Path> + Send + Sync>(
         &self,
         img_path: P,
-    ) -> Result<RgbImage, Self::Error> {
+    ) -> Result<RgbImage, Self::Error>
+    where
+        Self::Error: From<crate::core::OCRError>,
+    {
         let mut results = self.apply(std::iter::once(img_path))?;
-        results
-            .pop()
-            .ok_or_else(|| panic!("ImageReader::apply returned empty result for single image"))
+        results.pop().ok_or_else(|| {
+            // Create a proper error instead of panicking
+            crate::core::OCRError::invalid_input(
+                "ImageReader::apply returned empty result for single image",
+            )
+            .into()
+        })
     }
 }
 
@@ -380,7 +329,7 @@ pub trait StandardPredictor {
     ///
     /// A Result containing a vector of RGB images or an error.
     fn read_images<'a>(
-        &mut self,
+        &self,
         paths: impl Iterator<Item = &'a str>,
     ) -> Result<Vec<RgbImage>, OCRError>;
 
@@ -395,7 +344,7 @@ pub trait StandardPredictor {
     ///
     /// A Result containing the preprocessed output or an error.
     fn preprocess(
-        &mut self,
+        &self,
         images: Vec<RgbImage>,
         config: Option<&Self::Config>,
     ) -> Result<Self::PreprocessOutput, OCRError>;
@@ -409,7 +358,7 @@ pub trait StandardPredictor {
     /// # Returns
     ///
     /// A Result containing the inference output or an error.
-    fn infer(&mut self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError>;
+    fn infer(&self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError>;
 
     /// Postprocesses the inference output.
     ///
@@ -425,7 +374,7 @@ pub trait StandardPredictor {
     ///
     /// A Result containing the final result or an error.
     fn postprocess(
-        &mut self,
+        &self,
         output: Self::InferenceOutput,
         preprocessed: &Self::PreprocessOutput,
         batch_data: &BatchData,
@@ -433,33 +382,32 @@ pub trait StandardPredictor {
         config: Option<&Self::Config>,
     ) -> Result<Self::Result, OCRError>;
 
-    /// Performs a complete prediction pipeline.
+    /// Performs prediction directly from in-memory images.
     ///
-    /// This method orchestrates the complete prediction pipeline:
-    /// 1. Reads images from the batch data
-    /// 2. Preprocesses the images
-    /// 3. Performs inference
-    /// 4. Postprocesses the results
+    /// This method bypasses file I/O by working directly with RgbImage instances,
+    /// providing better performance when images are already in memory. This is
+    /// the primary prediction method for most use cases.
     ///
     /// # Arguments
     ///
-    /// * `batch_data` - The batch data to process.
-    /// * `config` - Optional configuration for the pipeline.
+    /// * `images` - Vector of images to process
+    /// * `config` - Optional configuration for the prediction
     ///
     /// # Returns
     ///
-    /// A Result containing the final result or an error.
+    /// A Result containing the prediction result or an OCRError
     fn predict(
-        &mut self,
-        batch_data: BatchData,
+        &self,
+        images: Vec<RgbImage>,
         config: Option<Self::Config>,
     ) -> Result<Self::Result, OCRError> {
-        let images = self.read_images(batch_data.instances_as_str())?;
+        if images.is_empty() {
+            return self.empty_result();
+        }
 
+        let batch_data = self.create_dummy_batch_data(images.len());
         let preprocessed = self.preprocess(images.clone(), config.as_ref())?;
-
         let inference_output = self.infer(&preprocessed)?;
-
         self.postprocess(
             inference_output,
             &preprocessed,
@@ -468,63 +416,79 @@ pub trait StandardPredictor {
             config.as_ref(),
         )
     }
-}
 
-/// Trait for pipeline executors.
-///
-/// This trait defines the interface for pipeline executors that can execute
-/// the complete OCR pipeline on images.
-pub trait PipelineExecutor {
-    /// Executes the pipeline on a single image.
+    /// Creates dummy batch data for in-memory processing.
+    ///
+    /// This method creates BatchData with dummy paths for in-memory processing,
+    /// allowing the postprocessing step to work correctly without actual file paths.
     ///
     /// # Arguments
     ///
-    /// * `image_path` - The path to the image to process.
+    /// * `count` - Number of images to create batch data for
     ///
     /// # Returns
     ///
-    /// A Result containing the prediction result or an error.
-    fn execute_pipeline(
-        &mut self,
-        image_path: &Path,
-    ) -> Result<PredictionResult<'static>, OCRError>;
-
-    /// Executes the pipeline on a batch of images.
-    ///
-    /// # Arguments
-    ///
-    /// * `image_paths` - A slice of paths to the images to process.
-    ///
-    /// # Returns
-    ///
-    /// A Result containing a vector of prediction results or an error.
-    fn execute_batch_pipeline(
-        &mut self,
-        image_paths: &[&Path],
-    ) -> Result<Vec<PredictionResult<'static>>, OCRError>;
-
-    /// Gets the pipeline statistics.
-    ///
-    /// # Returns
-    ///
-    /// The pipeline statistics.
-    fn get_pipeline_stats(&self) -> PipelineStats;
-
-    /// Checks if this pipeline executor supports parallel execution.
-    ///
-    /// # Returns
-    ///
-    /// True if parallel execution is supported, false otherwise.
-    fn supports_parallel_execution(&self) -> bool {
-        false
+    /// BatchData with dummy paths and sequential indexes
+    fn create_dummy_batch_data(&self, count: usize) -> BatchData {
+        let dummy_paths: Vec<Arc<str>> = (0..count)
+            .map(|i| Arc::from(format!("in_memory_{i}")))
+            .collect();
+        BatchData {
+            instances: dummy_paths.clone(),
+            input_paths: dummy_paths,
+            indexes: (0..count).collect(),
+        }
     }
 
-    /// Gets the recommended batch size for this pipeline executor.
+    /// Returns an empty result for the predictor type.
+    ///
+    /// This method should return an empty instance of the result type,
+    /// typically used when processing an empty list of images.
     ///
     /// # Returns
     ///
-    /// The recommended batch size.
-    fn recommended_batch_size(&self) -> usize {
-        1
+    /// A Result containing an empty result instance
+    fn empty_result(&self) -> Result<Self::Result, OCRError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::OCRError;
+    use image::RgbImage;
+    use std::path::Path;
+
+    /// Mock ImageReader that always returns empty results to test error handling
+    struct MockEmptyImageReader;
+
+    impl ImageReader for MockEmptyImageReader {
+        type Error = OCRError;
+
+        fn apply<P: AsRef<Path> + Send + Sync>(
+            &self,
+            _imgs: impl IntoIterator<Item = P>,
+        ) -> Result<Vec<RgbImage>, Self::Error> {
+            // Always return empty vector to trigger the error condition
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn test_read_single_handles_empty_result_properly() {
+        let reader = MockEmptyImageReader;
+        let result = reader.read_single("test_path.jpg");
+
+        // Should return an error instead of panicking
+        assert!(result.is_err());
+
+        // Check that it's the correct error type
+        match result.unwrap_err() {
+            OCRError::InvalidInput { message } => {
+                assert!(
+                    message.contains("ImageReader::apply returned empty result for single image")
+                );
+            }
+            _ => panic!("Expected InvalidInput error"),
+        }
     }
 }

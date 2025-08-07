@@ -1,15 +1,17 @@
 //! Text Line Classification Example
 //!
 //! This example demonstrates how to use the TextLineClasPredictor to classify
-//! the orientation of text lines in images. It supports both single image processing
-//! and batch processing modes.
+//! the orientation of text lines in images. It automatically handles both single
+//! and multiple images efficiently.
 //!
 //! The example uses the PP-LCNet model for text line classification, which can
 //! identify text orientations such as 0° and 180°.
 
 use clap::Parser;
-use oar_ocr::core::{Predictor, init_tracing};
+use oar_ocr::core::traits::StandardPredictor;
 use oar_ocr::predictor::TextLineClasPredictorBuilder;
+use oar_ocr::utils::init_tracing;
+use oar_ocr::utils::load_image;
 use std::path::Path;
 use tracing::{error, info};
 
@@ -25,10 +27,6 @@ struct Args {
     /// Paths to input image files
     #[arg(required = true)]
     images: Vec<String>,
-
-    /// Enable batch processing mode
-    #[arg(short, long)]
-    batch: bool,
 }
 
 /// Display the classification results for text line orientation
@@ -37,15 +35,15 @@ struct Args {
 /// the image path, detected orientation, and confidence score.
 ///
 /// # Parameters
-/// * `image_paths` - Paths to the processed images
+/// * `image_paths` - Paths to the processed images (as strings)
 /// * `class_ids` - Classification IDs for each image
 /// * `scores` - Confidence scores for each classification
 /// * `label_names` - Label names for each classification
 fn display_classification_results(
-    image_paths: &[std::borrow::Cow<'_, str>],
+    image_paths: &[String],
     class_ids: &[Vec<usize>],
     scores: &[Vec<f32>],
-    label_names: &[Vec<std::borrow::Cow<'_, str>>],
+    label_names: &[Vec<std::sync::Arc<str>>],
 ) {
     for (i, (((path, ids), scores_list), labels)) in image_paths
         .iter()
@@ -107,85 +105,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create a text line classifier predictor with specified parameters
-    let mut predictor = TextLineClasPredictorBuilder::new()
+    let predictor = TextLineClasPredictorBuilder::new()
         .topk(2) // Return top 2 predictions
         .batch_size(4) // Process 4 images at a time
         .model_name("PP-LCNet_x0_25_text_line_clas") // Model name
         .input_shape((160, 80)) // Input image dimensions
         .build(Path::new(model_path))?;
 
-    // Process images in batch mode if requested and multiple images are provided
-    if args.batch && existing_images.len() > 1 {
-        info!(
-            "Batch classification for {} images...",
-            existing_images.len()
-        );
-        // Convert image paths to Path objects for batch processing
-        let batch_paths: Vec<_> = existing_images.iter().map(Path::new).collect();
-        match predictor.predict_batch(&batch_paths) {
-            Ok(results) => {
-                // Process each batch result
-                for (batch_idx, result) in results.iter().enumerate() {
-                    // Extract classification data from the prediction result
-                    let (batch_input_path, batch_class_ids, batch_scores, batch_label_names) =
-                        match result {
-                            oar_ocr::core::PredictionResult::Classification {
-                                input_path,
-                                class_ids,
-                                scores,
-                                label_names,
-                                ..
-                            } => (input_path, class_ids, scores, label_names),
-                            _ => continue,
-                        };
+    // Load all images into memory
+    info!("Processing {} images...", existing_images.len());
+    let mut images = Vec::new();
+    let mut image_paths = Vec::new();
 
-                    info!("Batch {}:", batch_idx + 1);
-                    // Display the classification results for this batch
-                    display_classification_results(
-                        batch_input_path,
-                        batch_class_ids,
-                        batch_scores,
-                        batch_label_names,
-                    );
-                }
+    for image_path in &existing_images {
+        match load_image(Path::new(image_path)) {
+            Ok(img) => {
+                images.push(img);
+                image_paths.push(image_path.clone());
             }
             Err(e) => {
-                error!("Batch classification failed: {}", e);
-                return Err("Batch classification failed".into());
+                error!("Failed to load image {}: {}", image_path, e);
+                continue;
             }
         }
-    } else {
-        // Process images one by one
-        for (i, image_path) in existing_images.iter().enumerate() {
-            info!(
-                "Processing image {} of {}: {}",
-                i + 1,
-                existing_images.len(),
-                image_path
-            );
-            // Classify a single image
-            match predictor.predict_single(Path::new(image_path)) {
-                Ok(result) => {
-                    // Extract classification data from the prediction result
-                    let (input_path, class_ids, scores, label_names) = match &result {
-                        oar_ocr::core::PredictionResult::Classification {
-                            input_path,
-                            class_ids,
-                            scores,
-                            label_names,
-                            ..
-                        } => (input_path, class_ids, scores, label_names),
-                        _ => return Err("Unexpected result type".into()),
-                    };
+    }
 
-                    // Display the classification results
-                    display_classification_results(input_path, class_ids, scores, label_names);
-                }
-                Err(e) => {
-                    error!("Classification failed for {}: {}", image_path, e);
-                    continue;
-                }
-            }
+    if images.is_empty() {
+        error!("No images could be loaded for processing");
+        return Err("No images could be loaded".into());
+    }
+
+    // Perform classification using the predict API (handles both single and batch automatically)
+    match predictor.predict(images, None) {
+        Ok(result) => {
+            info!("Processing completed for {} images", result.class_ids.len());
+
+            // Display the classification results
+            display_classification_results(
+                &image_paths,
+                &result.class_ids,
+                &result.scores,
+                &result.label_names,
+            );
+        }
+        Err(e) => {
+            error!("Classification failed: {}", e);
+            return Err("Classification failed".into());
         }
     }
 
@@ -193,7 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !existing_images.is_empty() {
         info!("Testing with topk=3 on first image...");
         // Create another predictor with different parameters
-        let mut adjusted_predictor = TextLineClasPredictorBuilder::new()
+        let adjusted_predictor = TextLineClasPredictorBuilder::new()
             .topk(3) // Return top 3 predictions instead of 2
             .batch_size(2) // Different batch size
             .model_name("PP-LCNet_x0_25_text_line_clas_adjusted") // Different model name
@@ -202,31 +167,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Use the first image for testing
         let first_image = &existing_images[0];
-        match adjusted_predictor.predict_single(Path::new(first_image)) {
+
+        // Load the image into memory
+        let image = match load_image(Path::new(first_image)) {
+            Ok(img) => img,
+            Err(e) => {
+                error!("Failed to load image for adjusted parameter test: {}", e);
+                return Err("Failed to load image".into());
+            }
+        };
+
+        match adjusted_predictor.predict(vec![image], None) {
             Ok(result) => {
-                // Extract classification data from the prediction result
-                let (
-                    adjusted_input_path,
-                    adjusted_class_ids,
-                    adjusted_scores,
-                    adjusted_label_names,
-                ) = match &result {
-                    oar_ocr::core::PredictionResult::Classification {
-                        input_path,
-                        class_ids,
-                        scores,
-                        label_names,
-                        ..
-                    } => (input_path, class_ids, scores, label_names),
-                    _ => return Err("Unexpected result type".into()),
-                };
+                // Create display data
+                let display_paths = vec![first_image.clone()];
 
                 // Display the classification results with adjusted parameters
                 display_classification_results(
-                    adjusted_input_path,
-                    adjusted_class_ids,
-                    adjusted_scores,
-                    adjusted_label_names,
+                    &display_paths,
+                    &result.class_ids,
+                    &result.scores,
+                    &result.label_names,
                 );
             }
             Err(e) => error!("Adjusted parameter test failed: {}", e),
