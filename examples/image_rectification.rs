@@ -8,22 +8,22 @@
 //! cargo run --example image_rectification -- \
 //!   --model-path /path/to/model.onnx \
 //!   --output-dir /path/to/output \
-//!   [--batch] \
 //!   /path/to/image1.jpg [/path/to/image2.jpg ...]
 //! ```
 //!
 //! # Arguments
 //! * `--model-path` - Path to the DocTr rectification model file
 //! * `--output-dir` - Directory to save rectified images
-//! * `--batch` - Process multiple images in batch mode
 //! * `images` - Paths to input images to rectify
 
 use clap::Parser;
-use oar_ocr::core::{Predictor, init_tracing};
+use oar_ocr::core::traits::StandardPredictor;
 use oar_ocr::predictor::DoctrRectifierPredictorBuilder;
 use oar_ocr::predictor::doctr_rectifier::DoctrRectifierResult;
+use oar_ocr::utils::init_tracing;
+use oar_ocr::utils::load_image;
 use std::path::Path;
-use std::sync::Arc;
+
 use tracing::{error, info};
 
 /// Command-line arguments for the image rectification example
@@ -42,10 +42,6 @@ struct Args {
     /// Directory to save rectified images
     #[arg(short, long)]
     output_dir: String,
-
-    /// Process multiple images in batch mode
-    #[arg(short, long)]
-    batch: bool,
 }
 
 use image::{Rgb, RgbImage};
@@ -188,86 +184,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Initialize the DocTr rectifier predictor
-    let mut predictor = DoctrRectifierPredictorBuilder::new()
+    let predictor = DoctrRectifierPredictorBuilder::new()
         .model_name("DocTr_Image_Rectification".to_string())
         .build(Path::new(model_path))?;
 
-    // Process images in batch mode if requested and we have multiple images
-    if args.batch && existing_images.len() > 1 {
-        info!(
-            "Batch rectification for {} images...",
-            existing_images.len()
-        );
+    // Load all images into memory
+    info!("Processing {} images...", existing_images.len());
+    let mut images = Vec::new();
 
-        // Convert image paths to Path objects
-        let batch_paths: Vec<_> = existing_images.iter().map(Path::new).collect();
-
-        // Perform batch prediction
-        let batch_results = predictor.predict_batch(&batch_paths)?;
-
-        // Log information about batch results
-        for (i, batch_result) in batch_results.iter().enumerate() {
-            let (_, batch_rectified_img) = match batch_result {
-                oar_ocr::core::PredictionResult::Rectification {
-                    input_img,
-                    rectified_img,
-                    ..
-                } => (input_img, rectified_img),
-                _ => continue,
-            };
-
-            info!(
-                "Batch {}: {} rectified images",
-                i + 1,
-                batch_rectified_img.len()
-            );
+    for image_path in &existing_images {
+        match load_image(Path::new(image_path)) {
+            Ok(img) => {
+                images.push(img);
+            }
+            Err(e) => {
+                error!("Failed to load image {}: {}", image_path, e);
+                continue;
+            }
         }
-    } else {
-        // Process images individually
-        for (i, image_path) in existing_images.iter().enumerate() {
-            info!(
-                "Processing image {} of {}: {}",
-                i + 1,
-                existing_images.len(),
-                image_path
-            );
+    }
 
-            // Perform single image prediction
-            let result = predictor.predict_single(Path::new(image_path))?;
+    if images.is_empty() {
+        error!("No images could be loaded for processing");
+        return Err("No images could be loaded".into());
+    }
 
-            // Extract input and rectified images from the result
-            let (input_img, rectified_img) = match &result {
-                oar_ocr::core::PredictionResult::Rectification {
-                    input_img,
-                    rectified_img,
-                    ..
-                } => (input_img, rectified_img),
-                _ => return Err("Unexpected result type".into()),
-            };
+    // Perform rectification using the predict API (handles both single and batch automatically)
+    let result = match predictor.predict(images, None) {
+        Ok(res) => res,
+        Err(e) => {
+            error!("Rectification failed: {}", e);
+            return Err("Rectification failed".into());
+        }
+    };
 
-            info!("Processed {} images", input_img.len());
+    info!(
+        "Processing completed: {} rectified images",
+        result.rectified_img.len()
+    );
 
-            // Create a DoctrRectifierResult for visualization
-            let doctr_result = DoctrRectifierResult {
-                input_path: result
-                    .input_paths()
-                    .iter()
-                    .map(|p| Arc::from(p.as_ref()))
-                    .collect(),
-                index: result.indices().to_vec(),
-                input_img: input_img.clone(),
-                rectified_img: rectified_img.clone(),
-            };
-
-            // Generate output filename and path
+    // Generate output files for each rectified image
+    for (i, _) in existing_images.iter().enumerate() {
+        if i < result.rectified_img.len() {
             let output_filename = format!("rectified_result_{}.jpg", i + 1);
             let output_path = Path::new(&args.output_dir).join(&output_filename);
 
+            // Create a single-image result for visualization
+            let single_result = DoctrRectifierResult {
+                input_path: vec![result.input_path[i].clone()],
+                index: vec![result.index[i]],
+                input_img: vec![result.input_img[i].clone()],
+                rectified_img: vec![result.rectified_img[i].clone()],
+            };
+
             // Visualize the rectification results
             if let Err(e) =
-                visualize_rectification_results(&doctr_result, output_path.to_str().unwrap())
+                visualize_rectification_results(&single_result, output_path.to_str().unwrap())
             {
-                error!("Visualization failed for {}: {}", image_path, e);
+                error!("Visualization failed for image {}: {}", i + 1, e);
             }
         }
     }

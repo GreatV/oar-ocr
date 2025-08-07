@@ -15,6 +15,7 @@ use ort::{
     value::Value,
 };
 use std::path::Path;
+use std::sync::Mutex;
 
 /// A default implementation of the ImageReader trait.
 ///
@@ -99,7 +100,7 @@ impl ImageReader for DefaultImageReader {
 #[derive(Debug)]
 pub struct OrtInfer {
     /// The ONNX Runtime session.
-    session: Session,
+    session: Mutex<Session>,
     /// The name of the input tensor.
     input_name: String,
     /// The name of the output tensor (optional).
@@ -120,7 +121,7 @@ impl OrtInfer {
     pub fn new(model_path: impl AsRef<Path>, input_name: Option<&str>) -> Result<Self, OCRError> {
         let session = Session::builder()?.commit_from_file(model_path.as_ref())?;
         Ok(OrtInfer {
-            session,
+            session: Mutex::new(session),
             input_name: input_name.unwrap_or("x").to_string(),
             output_name: None,
         })
@@ -144,7 +145,7 @@ impl OrtInfer {
     ) -> Result<Self, OCRError> {
         let session = Session::builder()?.commit_from_file(model_path.as_ref())?;
         Ok(OrtInfer {
-            session,
+            session: Mutex::new(session),
             input_name: input_name.unwrap_or("x").to_string(),
             output_name: output_name.map(|s| s.to_string()),
         })
@@ -178,7 +179,7 @@ impl OrtInfer {
             .find(|&name| available_inputs.iter().any(|input| input == *name))
             .unwrap_or(&"x");
         Ok(OrtInfer {
-            session,
+            session: Mutex::new(session),
             input_name: input_name.to_string(),
             output_name: None,
         })
@@ -210,7 +211,7 @@ impl OrtInfer {
         let session = configured_builder.commit_from_file(model_path.as_ref())?;
 
         Ok(OrtInfer {
-            session,
+            session: Mutex::new(session),
             input_name: input_name.unwrap_or("x").to_string(),
             output_name: output_name.map(|s| s.to_string()),
         })
@@ -224,13 +225,18 @@ impl OrtInfer {
     fn get_output_name(&self) -> Result<String, OCRError> {
         if let Some(ref name) = self.output_name {
             Ok(name.clone())
-        } else if !self.session.outputs.is_empty() {
-            Ok(self.session.outputs[0].name.clone())
         } else {
-            Err(OCRError::InvalidInput {
-                message: "No outputs available in session - model may be invalid or corrupted"
-                    .to_string(),
-            })
+            let session = self.session.lock().map_err(|_| OCRError::InvalidInput {
+                message: "Failed to acquire session lock".to_string(),
+            })?;
+            if !session.outputs.is_empty() {
+                Ok(session.outputs[0].name.clone())
+            } else {
+                Err(OCRError::InvalidInput {
+                    message: "No outputs available in session - model may be invalid or corrupted"
+                        .to_string(),
+                })
+            }
         }
     }
 
@@ -245,14 +251,17 @@ impl OrtInfer {
     ///
     /// A Result containing the processed output or an OCRError.
     fn run_inference_with_processor<T>(
-        &mut self,
+        &self,
         x: Tensor4D,
         processor: impl FnOnce(&[i64], &[f32]) -> Result<T, OCRError>,
     ) -> Result<T, OCRError> {
         let output_name = self.get_output_name()?;
         let input_tensor = Value::from_array(x).map_err(OCRError::Session)?;
         let inputs = ort::inputs![self.input_name.as_str() => input_tensor];
-        let outputs = self.session.run(inputs).map_err(OCRError::Session)?;
+        let mut session = self.session.lock().map_err(|_| OCRError::InvalidInput {
+            message: "Failed to acquire session lock".to_string(),
+        })?;
+        let outputs = session.run(inputs).map_err(OCRError::Session)?;
         let output = outputs[output_name.as_str()]
             .try_extract_tensor::<f32>()
             .map_err(OCRError::Session)?;
@@ -270,7 +279,7 @@ impl OrtInfer {
     /// # Returns
     ///
     /// A Result containing the output 4D tensor or an OCRError.
-    pub fn infer_4d(&mut self, x: Tensor4D) -> Result<Tensor4D, OCRError> {
+    pub fn infer_4d(&self, x: Tensor4D) -> Result<Tensor4D, OCRError> {
         self.run_inference_with_processor(x, |output_shape, output_data| {
             if output_shape.len() != 4 {
                 return Err(OCRError::InvalidInput {
@@ -312,7 +321,7 @@ impl OrtInfer {
     /// # Returns
     ///
     /// A Result containing the output 2D tensor or an OCRError.
-    pub fn infer_2d(&mut self, x: Tensor4D) -> Result<Tensor2D, OCRError> {
+    pub fn infer_2d(&self, x: Tensor4D) -> Result<Tensor2D, OCRError> {
         let batch_size = x.shape()[0];
         self.run_inference_with_processor(x, |output_shape, output_data| {
             let num_classes = output_shape[1] as usize;
@@ -344,7 +353,7 @@ impl OrtInfer {
     /// # Returns
     ///
     /// A Result containing the output 3D tensor or an OCRError.
-    pub fn infer_3d(&mut self, x: Tensor4D) -> Result<Tensor3D, OCRError> {
+    pub fn infer_3d(&self, x: Tensor4D) -> Result<Tensor3D, OCRError> {
         self.run_inference_with_processor(x, |output_shape, output_data| {
             if output_shape.len() != 3 {
                 return Err(OCRError::InvalidInput {

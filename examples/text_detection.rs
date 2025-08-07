@@ -13,7 +13,6 @@
 //!
 //! * `-m, --model-path` - Path to the text detection model file
 //! * `-o, --output-dir` - Directory to save visualization results
-//! * `-b, --batch` - Enable batch processing mode
 //! * `<IMAGES>...` - Paths to input images to process
 //!
 //! # Example
@@ -23,13 +22,11 @@
 //! ```
 
 use clap::Parser;
-use oar_ocr::core::{
-    BatchData, init_tracing,
-    traits::{BasePredictor, Sampler},
-};
+use oar_ocr::core::traits::StandardPredictor;
 use oar_ocr::predictor::TextDetPredictorBuilder;
+use oar_ocr::utils::init_tracing;
+use oar_ocr::utils::load_image;
 use std::path::Path;
-use std::sync::Arc;
 use tracing::{error, info};
 
 // Visualization-specific imports
@@ -55,17 +52,13 @@ struct Args {
     /// Directory to save visualization results
     #[arg(short, long)]
     output_dir: String,
-
-    /// Enable batch processing mode
-    #[arg(short, long)]
-    batch: bool,
 }
 
 /// Main function for the text detection example
 ///
 /// This function initializes the OCR pipeline, loads the text detection model,
-/// processes input images, and visualizes the results. It supports both
-/// single image processing and batch processing modes.
+/// processes input images, and visualizes the results. It automatically handles
+/// both single and multiple images efficiently.
 ///
 /// # Returns
 ///
@@ -109,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create a text detection predictor with specified parameters
-    let mut predictor = TextDetPredictorBuilder::new()
+    let predictor = TextDetPredictorBuilder::new()
         .thresh(0.3) // Binarization threshold
         .box_thresh(0.6) // Box score threshold
         .unclip_ratio(2.0) // Unclip ratio for text boxes
@@ -119,46 +112,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .model_name("PP-OCRv5_mobile_det") // Model name
         .build(Path::new(model_path))?;
 
-    // Process images in batch mode if requested and multiple images are provided
-    if args.batch && existing_images.len() > 1 {
-        info!("Batch detection for {} images...", existing_images.len());
-        // Create batches using the predictor's batch sampler
-        let string_paths: Vec<String> = existing_images.iter().map(|s| s.to_string()).collect();
-        let batches = predictor.batch_sampler().sample(string_paths);
+    // Load all images into memory
+    info!("Processing {} images...", existing_images.len());
+    let mut images = Vec::new();
 
-        // Process each batch directly using BasePredictor::process
-        for batch_data in batches.into_iter() {
-            // Use BasePredictor::process to get TextDetResult directly
-            let text_det_result = predictor.process(batch_data)?;
-
-            // Display results
-            info!("{}", text_det_result);
+    for image_path in &existing_images {
+        match load_image(Path::new(image_path)) {
+            Ok(img) => {
+                images.push(img);
+            }
+            Err(e) => {
+                error!("Failed to load image {}: {}", image_path, e);
+                continue;
+            }
         }
-    } else {
-        // Process images individually
+    }
+
+    if images.is_empty() {
+        error!("No images could be loaded for processing");
+        return Err("No images could be loaded".into());
+    }
+
+    // Perform detection using the predict API (handles both single and batch automatically)
+    let text_det_result = match predictor.predict(images, None) {
+        Ok(result) => result,
+        Err(e) => {
+            error!("Detection failed: {}", e);
+            return Err("Detection failed".into());
+        }
+    };
+
+    // Display results
+    info!("{}", text_det_result);
+
+    // Save visualization if feature is enabled
+    #[cfg(feature = "visualization")]
+    {
+        // For visualization, we need to process each image individually to create separate output files
         for (i, image_path) in existing_images.iter().enumerate() {
-            info!(
-                "Processing image {} of {}: {}",
-                i + 1,
-                existing_images.len(),
-                image_path
-            );
-
-            // Create BatchData for single image processing
-            let path_str = image_path.to_string();
-            let batch_data =
-                BatchData::from_shared_arc_paths(vec![Arc::from(path_str.as_str())], vec![0]);
-
-            // Use BasePredictor::process to get TextDetResult directly
-            let text_det_result = predictor.process(batch_data)?;
-
-            // Display results
-            info!("{}", text_det_result);
-
-            // Save visualization if feature is enabled
-            #[cfg(feature = "visualization")]
-            {
-                let original_image = image::open(image_path)?.to_rgb8();
+            if i < text_det_result.input_img.len() {
+                let original_image = &text_det_result.input_img[i];
                 let input_filename = Path::new(image_path)
                     .file_stem()
                     .and_then(|s| s.to_str())
@@ -166,23 +159,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let output_filename = format!("{input_filename}_detection.jpg");
                 let output_path = Path::new(&args.output_dir).join(&output_filename);
 
+                // Create a single-image result for visualization
+                let single_result = oar_ocr::predictor::db_detector::TextDetResult {
+                    input_path: vec![text_det_result.input_path[i].clone()],
+                    index: vec![text_det_result.index[i]],
+                    input_img: vec![text_det_result.input_img[i].clone()],
+                    dt_polys: vec![text_det_result.dt_polys[i].clone()],
+                    dt_scores: vec![text_det_result.dt_scores[i].clone()],
+                };
+
                 if let Err(e) = visualize_detection_results(
-                    &original_image,
-                    &text_det_result,
+                    original_image,
+                    &single_result,
                     output_path.to_str().unwrap(),
                 ) {
                     error!("Visualization failed for {}: {}", image_path, e);
                 }
             }
+        }
+    }
 
-            #[cfg(not(feature = "visualization"))]
-            {
-                if !args.output_dir.is_empty() {
-                    warn!(
-                        "Visualization feature is disabled. To enable visualization, compile with --features visualization"
-                    );
-                }
-            }
+    #[cfg(not(feature = "visualization"))]
+    {
+        if !args.output_dir.is_empty() {
+            warn!(
+                "Visualization feature is disabled. To enable visualization, compile with --features visualization"
+            );
         }
     }
 

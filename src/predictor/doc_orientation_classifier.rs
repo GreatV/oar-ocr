@@ -8,17 +8,11 @@
 
 use crate::core::traits::StandardPredictor;
 use crate::core::{
-    BasePredictor, BatchData, BatchSampler, CommonBuilderConfig, DefaultImageReader, ImageReader,
-    IntoPrediction, OCRError, OrtInfer, PredictionResult, Sampler, Tensor2D, Tensor4D, ToBatch,
-    config::ConfigValidator,
+    BatchData, BatchSampler, CommonBuilderConfig, DefaultImageReader, ImageReader, OCRError,
+    OrtInfer, Tensor2D, Tensor4D, ToBatch, config::ConfigValidator,
 };
-
-use crate::impl_predictor_from_generic;
-use crate::impl_standard_predictor;
-use crate::impl_standard_predictor_builder;
 use crate::processors::{NormalizeImage, Topk};
 use image::RgbImage;
-use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -46,7 +40,7 @@ pub struct DocOrientationResult {
 ///
 /// This struct holds configuration parameters for the document orientation classifier.
 /// It includes common configuration options as well as classifier-specific parameters.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DocOrientationClassifierConfig {
     /// Common configuration options shared across predictors
     pub common: CommonBuilderConfig,
@@ -182,38 +176,6 @@ impl Default for DocOrientationResult {
     }
 }
 
-impl IntoPrediction for DocOrientationResult {
-    /// Output type for the prediction result
-    type Out = PredictionResult<'static>;
-
-    /// Converts the document orientation result into a prediction result
-    ///
-    /// Transforms the document orientation result into a standardized prediction result
-    /// that can be used by other parts of the system.
-    ///
-    /// # Returns
-    ///
-    /// A `PredictionResult` containing the classification results
-    fn into_prediction(self) -> Self::Out {
-        PredictionResult::Classification {
-            input_path: self
-                .input_path
-                .into_iter()
-                .map(|arc| Cow::Owned(arc.to_string()))
-                .collect(),
-            index: self.index,
-            input_img: self.input_img,
-            class_ids: self.class_ids,
-            scores: self.scores,
-            label_names: self
-                .label_names
-                .into_iter()
-                .map(|vec| vec.into_iter().map(Cow::Owned).collect())
-                .collect(),
-        }
-    }
-}
-
 /// Document orientation classifier
 ///
 /// This struct implements a classifier for determining the orientation of documents in images.
@@ -291,25 +253,6 @@ impl DocOrientationClassifier {
             ])),
         })
     }
-
-    /// Processes a batch of images internally
-    ///
-    /// This method takes a batch of images and processes them through the full
-    /// prediction pipeline, from preprocessing to postprocessing.
-    ///
-    /// # Arguments
-    ///
-    /// * `batch_data` - Batch of images to process
-    ///
-    /// # Returns
-    ///
-    /// Classification results for the batch or an error if processing fails
-    fn process_internal(
-        &mut self,
-        batch_data: BatchData,
-    ) -> Result<DocOrientationResult, OCRError> {
-        self.predict(batch_data, None)
-    }
 }
 
 /// Configuration for document orientation classification
@@ -338,7 +281,7 @@ impl StandardPredictor for DocOrientationClassifier {
     ///
     /// Vector of loaded images or an error if reading fails
     fn read_images<'a>(
-        &mut self,
+        &self,
         paths: impl Iterator<Item = &'a str>,
     ) -> Result<Vec<RgbImage>, OCRError> {
         self.read_image.apply(paths)
@@ -357,7 +300,7 @@ impl StandardPredictor for DocOrientationClassifier {
     ///
     /// Preprocessed images as a 4D tensor or an error if preprocessing fails
     fn preprocess(
-        &mut self,
+        &self,
         images: Vec<RgbImage>,
         _config: Option<&Self::Config>,
     ) -> Result<Self::PreprocessOutput, OCRError> {
@@ -392,7 +335,7 @@ impl StandardPredictor for DocOrientationClassifier {
     /// # Returns
     ///
     /// Inference output as a 2D tensor or an error if inference fails
-    fn infer(&mut self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError> {
+    fn infer(&self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError> {
         self.infer.infer_2d(input.clone())
     }
 
@@ -413,7 +356,7 @@ impl StandardPredictor for DocOrientationClassifier {
     ///
     /// Classification results or an error if postprocessing fails
     fn postprocess(
-        &mut self,
+        &self,
         output: Self::InferenceOutput,
         _preprocessed: &Self::PreprocessOutput,
         batch_data: &BatchData,
@@ -431,16 +374,11 @@ impl StandardPredictor for DocOrientationClassifier {
             label_names: topk_result.label_names,
         })
     }
+
+    fn empty_result(&self) -> Result<Self::Result, OCRError> {
+        Ok(DocOrientationResult::new())
+    }
 }
-
-impl_standard_predictor!(
-    DocOrientationClassifier,
-    DocOrientationResult,
-    OCRError,
-    "DocOrientationClassifier"
-);
-
-impl_predictor_from_generic!(DocOrientationClassifier);
 
 /// Builder for document orientation classifier
 ///
@@ -629,9 +567,3 @@ impl Default for DocOrientationClassifierBuilder {
         Self::new()
     }
 }
-
-impl_standard_predictor_builder!(
-    DocOrientationClassifierBuilder,
-    DocOrientationClassifier,
-    "DocOrientationClassifier"
-);

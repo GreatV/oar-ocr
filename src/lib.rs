@@ -42,12 +42,19 @@
 //!     "char_dict.txt".to_string(),
 //! ).build()?;
 //!
-//! // Process image
-//! let result = ocr.predict(Path::new("document.jpg"))?;
+//! // Process single image
+//! let results = ocr.predict(&[Path::new("document.jpg")])?;
+//! let result = &results[0];
 //!
 //! // Print results
 //! for (text, score) in result.rec_texts.iter().zip(result.rec_scores.iter()) {
 //!     println!("Text: {} (confidence: {:.2})", text, score);
+//! }
+//!
+//! // Process multiple images
+//! let results = ocr.predict(&[Path::new("doc1.jpg"), Path::new("doc2.jpg")])?;
+//! for result in results {
+//!     println!("Image {}: {} text regions found", result.index, result.text_boxes.len());
 //! }
 //! # Ok(())
 //! # }
@@ -57,6 +64,8 @@
 //!
 //! ```rust,no_run
 //! use oar_ocr::prelude::*;
+//! use oar_ocr::core::traits::StandardPredictor;
+//! use oar_ocr::utils::load_image;
 //! use std::path::Path;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -64,7 +73,8 @@
 //! let mut detector = TextDetPredictorBuilder::new()
 //!     .build(Path::new("detection_model.onnx"))?;
 //!
-//! let result = detector.predict_single(Path::new("image.jpg"))?;
+//! let image = load_image(Path::new("image.jpg"))?;
+//! let result = detector.predict(vec![image], None)?;
 //! println!("Detection result: {:?}", result);
 //!
 //! // Text recognition only
@@ -73,7 +83,8 @@
 //!     .character_dict(char_dict)
 //!     .build(Path::new("recognition_model.onnx"))?;
 //!
-//! let result = recognizer.predict_single(Path::new("text_crop.jpg"))?;
+//! let image = load_image(Path::new("text_crop.jpg"))?;
+//! let result = recognizer.predict(vec![image], None)?;
 //! println!("Recognition result: {:?}", result);
 //! # Ok(())
 //! # }
@@ -99,7 +110,7 @@ pub mod utils;
 ///
 /// This includes:
 /// - All predictor types and builders
-/// - Core traits like `Predictor` and `PipelineExecutor`
+/// - Core traits like `BasePredictor` and `StandardPredictor`
 /// - Image processing utilities
 /// - Error types and result types
 /// - Tensor utilities
@@ -109,10 +120,14 @@ pub mod prelude {
     // Core components
     pub use crate::core::{
         BasePredictor, BatchData, BatchSampler, CommonBuilderConfig, ConfigError,
-        DefaultImageReader, ImageReader, OCRError, OrtInfer, PipelineExecutor, PipelineStats,
-        PredictionResult, Predictor, PredictorBuilder, PredictorConfig, ProcessingStage, Sampler,
-        Tensor1D, Tensor2D, Tensor3D, Tensor4D, ToBatch, TransformConfig, TransformRegistry,
-        TransformType, create_rgb_image, dynamic_to_gray, dynamic_to_rgb, load_image,
+        DefaultImageReader, ImageReader, OCRError, OrtInfer, PipelineStats, PredictionResult,
+        PredictorBuilder, PredictorConfig, ProcessingStage, Sampler, Tensor1D, Tensor2D, Tensor3D,
+        Tensor4D, ToBatch, TransformConfig, TransformRegistry, TransformType,
+    };
+
+    // Image utilities and logging
+    pub use crate::utils::{
+        create_rgb_image, dynamic_to_gray, dynamic_to_rgb, init_tracing, load_image,
         load_images_batch,
     };
 
@@ -138,7 +153,9 @@ pub mod prelude {
     };
 
     // Pipeline components
-    pub use crate::pipeline::{OAROCR, OAROCRBuilder, OAROCRConfig, OAROCRResult};
+    pub use crate::pipeline::{
+        ConfigFormat, ConfigLoader, OAROCR, OAROCRBuilder, OAROCRConfig, OAROCRResult,
+    };
 
     // Utility functions
     pub use crate::utils;

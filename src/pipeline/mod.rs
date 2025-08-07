@@ -4,7 +4,9 @@
 //! multiple components to perform document orientation classification, text
 //! detection, text recognition, and text line classification.
 
+mod config;
 mod oarocr;
 
 // Re-export the main OCR pipeline components for easier access
+pub use config::{ConfigFormat, ConfigLoader};
 pub use oarocr::{OAROCR, OAROCRBuilder, OAROCRConfig, OAROCRResult};

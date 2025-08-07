@@ -12,16 +12,11 @@
 
 use crate::core::traits::StandardPredictor;
 use crate::core::{
-    BasePredictor, BatchData, BatchSampler, CommonBuilderConfig, DefaultImageReader, ImageReader,
-    IntoPrediction, OCRError, OrtInfer, PredictionResult, Sampler, Tensor3D, Tensor4D, ToBatch,
+    BatchData, BatchSampler, CommonBuilderConfig, DefaultImageReader, ImageReader, OCRError,
+    OrtInfer, Tensor3D, Tensor4D, ToBatch,
 };
-
-use crate::impl_predictor_from_generic;
-use crate::impl_standard_predictor;
-use crate::impl_standard_predictor_builder;
 use crate::processors::{CTCLabelDecode, NormalizeImage, OCRResize};
 use image::RgbImage;
-use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -46,16 +41,17 @@ pub struct TextRecResult {
 /// Configuration for the text recognition predictor
 ///
 /// This struct holds the configuration parameters for the text recognition predictor.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TextRecPredictorConfig {
     /// Common configuration parameters
     pub common: CommonBuilderConfig,
-    /// Input shape for the model
-    pub input_shape: Option<[usize; 3]>,
-    /// Recognition image shape
-    pub rec_image_shape: Option<[usize; 3]>,
+    /// Model input shape for image resizing [channels, height, width]
+    /// When specified, images are resized to fit this shape while maintaining aspect ratio.
+    pub model_input_shape: Option<[usize; 3]>,
     /// Character dictionary for recognition
     pub character_dict: Option<Vec<String>>,
+    /// Score threshold for filtering recognition results
+    pub score_thresh: Option<f32>,
 }
 
 impl TextRecPredictorConfig {
@@ -63,9 +59,9 @@ impl TextRecPredictorConfig {
     pub fn new() -> Self {
         Self {
             common: CommonBuilderConfig::with_defaults(Some("crnn".to_string()), Some(32)),
-            input_shape: None,
-            rec_image_shape: Some([3, 32, 320]),
+            model_input_shape: Some([3, 48, 320]),
             character_dict: None,
+            score_thresh: None,
         }
     }
 
@@ -73,9 +69,9 @@ impl TextRecPredictorConfig {
     pub fn with_common(common: CommonBuilderConfig) -> Self {
         Self {
             common,
-            input_shape: None,
-            rec_image_shape: Some([3, 32, 320]),
+            model_input_shape: Some([3, 32, 320]),
             character_dict: None,
+            score_thresh: None,
         }
     }
 
@@ -86,21 +82,12 @@ impl TextRecPredictorConfig {
     pub fn validate(&self) -> Result<(), crate::core::ConfigError> {
         self.common.validate()?;
 
-        if let Some(rec_shape) = self.rec_image_shape {
-            if rec_shape[0] == 0 || rec_shape[1] == 0 || rec_shape[2] == 0 {
-                return Err(crate::core::ConfigError::InvalidConfig {
-                    message: "Recognition image shape dimensions must be greater than 0"
-                        .to_string(),
-                });
-            }
-        }
-
-        if let Some(input_shape) = self.input_shape {
-            if input_shape[0] == 0 || input_shape[1] == 0 || input_shape[2] == 0 {
-                return Err(crate::core::ConfigError::InvalidConfig {
-                    message: "Input shape dimensions must be greater than 0".to_string(),
-                });
-            }
+        if let Some(shape) = self.model_input_shape
+            && (shape[0] == 0 || shape[1] == 0 || shape[2] == 0)
+        {
+            return Err(crate::core::ConfigError::InvalidConfig {
+                message: "Model input shape dimensions must be greater than 0".to_string(),
+            });
         }
 
         Ok(())
@@ -126,37 +113,13 @@ impl Default for TextRecResult {
     }
 }
 
-impl IntoPrediction for TextRecResult {
-    type Out = PredictionResult<'static>;
-
-    fn into_prediction(self) -> Self::Out {
-        PredictionResult::Recognition {
-            input_path: self
-                .input_path
-                .into_iter()
-                .map(|arc| Cow::Owned(arc.to_string()))
-                .collect(),
-            index: self.index,
-            input_img: self.input_img,
-            rec_text: self
-                .rec_text
-                .into_iter()
-                .map(|arc| Cow::Owned(arc.to_string()))
-                .collect(),
-            rec_score: self.rec_score,
-        }
-    }
-}
-
 /// Text recognition predictor
 ///
 /// This struct holds the components needed for text recognition.
 #[derive(Debug)]
 pub struct TextRecPredictor {
-    /// Input shape for the model
-    pub input_shape: Option<[usize; 3]>,
-    /// Recognition image shape
-    pub rec_image_shape: [usize; 3],
+    /// Model input shape for image resizing [channels, height, width]
+    pub model_input_shape: [usize; 3],
     /// Character dictionary for recognition
     pub character_dict: Option<Vec<String>>,
     /// Name of the model
@@ -184,8 +147,7 @@ impl TextRecPredictor {
     /// This function initializes a new text recognition predictor with the provided configuration
     /// and model path.
     pub fn new(config: TextRecPredictorConfig, model_path: &Path) -> Result<Self, OCRError> {
-        let rec_image_shape = config.rec_image_shape.unwrap_or([3, 32, 320]);
-        let input_shape = config.input_shape;
+        let model_input_shape = config.model_input_shape.unwrap_or([3, 32, 320]);
         let character_dict = config.character_dict;
         let model_name = config
             .common
@@ -195,15 +157,15 @@ impl TextRecPredictor {
 
         let batch_sampler = BatchSampler::new(batch_size);
         let read_image = DefaultImageReader::new();
-        let resize = OCRResize::new(Some(rec_image_shape), input_shape);
+        // Use dynamic resizing (old rec_image_shape behavior) - maintains aspect ratio
+        let resize = OCRResize::new(Some(model_input_shape), None);
         let normalize = NormalizeImage::for_ocr_recognition()?;
         let to_batch = ToBatch::new();
         let infer = OrtInfer::new(model_path, None)?;
         let post_op = CTCLabelDecode::from_string_list(character_dict.as_deref(), true, false);
 
         Ok(Self {
-            input_shape,
-            rec_image_shape,
+            model_input_shape,
             character_dict,
             model_name,
             batch_sampler,
@@ -216,19 +178,12 @@ impl TextRecPredictor {
         })
     }
 
-    /// Processes a batch of data internally
+    /// Sets the model input shape
     ///
-    /// This function processes a batch of data and returns the recognition results.
-    fn process_internal(&mut self, batch_data: BatchData) -> Result<TextRecResult, OCRError> {
-        self.predict(batch_data, None)
-    }
-
-    /// Sets the recognition image shape
-    ///
-    /// This function updates the recognition image shape and the resize component.
-    pub fn set_rec_image_shape(&mut self, shape: [usize; 3]) {
-        self.rec_image_shape = shape;
-        self.resize = OCRResize::new(Some(shape), self.input_shape);
+    /// This function updates the model input shape and the resize component.
+    pub fn set_model_input_shape(&mut self, shape: [usize; 3]) {
+        self.model_input_shape = shape;
+        self.resize = OCRResize::new(Some(shape), None);
     }
 
     /// Returns the model name
@@ -250,14 +205,14 @@ impl StandardPredictor for TextRecPredictor {
     type InferenceOutput = Tensor3D;
 
     fn read_images<'a>(
-        &mut self,
+        &self,
         paths: impl Iterator<Item = &'a str>,
     ) -> Result<Vec<RgbImage>, OCRError> {
         self.read_image.apply(paths)
     }
 
     fn preprocess(
-        &mut self,
+        &self,
         images: Vec<RgbImage>,
         _config: Option<&Self::Config>,
     ) -> Result<Self::PreprocessOutput, OCRError> {
@@ -271,12 +226,12 @@ impl StandardPredictor for TextRecPredictor {
         self.normalize.normalize_batch_to(dynamic_imgs)
     }
 
-    fn infer(&mut self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError> {
+    fn infer(&self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError> {
         self.infer.infer_3d(input.clone())
     }
 
     fn postprocess(
-        &mut self,
+        &self,
         output: Self::InferenceOutput,
         _preprocessed: &Self::PreprocessOutput,
         batch_data: &BatchData,
@@ -293,6 +248,10 @@ impl StandardPredictor for TextRecPredictor {
             rec_score: scores,
         })
     }
+
+    fn empty_result(&self) -> Result<Self::Result, OCRError> {
+        Ok(TextRecResult::new())
+    }
 }
 
 /// Builder for `TextRecPredictor`
@@ -302,12 +261,12 @@ pub struct TextRecPredictorBuilder {
     /// Common configuration parameters
     common: CommonBuilderConfig,
 
-    /// Input shape for the model
-    input_shape: Option<[usize; 3]>,
-    /// Recognition image shape
-    rec_image_shape: Option<[usize; 3]>,
+    /// Model input shape for image resizing [channels, height, width]
+    model_input_shape: Option<[usize; 3]>,
     /// Character dictionary for recognition
     character_dict: Option<Vec<String>>,
+    /// Score threshold for filtering recognition results
+    score_thresh: Option<f32>,
 }
 
 impl TextRecPredictorBuilder {
@@ -317,9 +276,9 @@ impl TextRecPredictorBuilder {
     pub fn new() -> Self {
         Self {
             common: CommonBuilderConfig::new(),
-            input_shape: None,
-            rec_image_shape: None,
+            model_input_shape: None,
             character_dict: None,
+            score_thresh: None,
         }
     }
 
@@ -355,19 +314,12 @@ impl TextRecPredictorBuilder {
         self
     }
 
-    /// Sets the input shape
+    /// Sets the model input shape
     ///
-    /// This function sets the input shape for the model.
-    pub fn input_shape(mut self, input_shape: [usize; 3]) -> Self {
-        self.input_shape = Some(input_shape);
-        self
-    }
-
-    /// Sets the recognition image shape
-    ///
-    /// This function sets the recognition image shape for the model.
-    pub fn rec_image_shape(mut self, rec_image_shape: [usize; 3]) -> Self {
-        self.rec_image_shape = Some(rec_image_shape);
+    /// This function sets the model input shape for image resizing.
+    /// Images will be resized to fit this shape while maintaining aspect ratio.
+    pub fn model_input_shape(mut self, shape: [usize; 3]) -> Self {
+        self.model_input_shape = Some(shape);
         self
     }
 
@@ -376,6 +328,15 @@ impl TextRecPredictorBuilder {
     /// This function sets the character dictionary for recognition.
     pub fn character_dict(mut self, character_dict: Vec<String>) -> Self {
         self.character_dict = Some(character_dict);
+        self
+    }
+
+    /// Sets the score threshold for filtering recognition results
+    ///
+    /// This function sets the minimum score threshold for recognition results.
+    /// Results with scores below this threshold will be filtered out.
+    pub fn score_thresh(mut self, score_thresh: f32) -> Self {
+        self.score_thresh = Some(score_thresh);
         self
     }
 
@@ -397,9 +358,9 @@ impl TextRecPredictorBuilder {
 
         let config = TextRecPredictorConfig {
             common: self.common,
-            input_shape: self.input_shape,
-            rec_image_shape: self.rec_image_shape,
+            model_input_shape: self.model_input_shape,
             character_dict: self.character_dict,
+            score_thresh: self.score_thresh,
         };
 
         config.validate().map_err(|e| OCRError::ConfigError {
@@ -416,8 +377,27 @@ impl Default for TextRecPredictorBuilder {
     }
 }
 
-impl_standard_predictor!(TextRecPredictor, TextRecResult, OCRError, "TextRecognition");
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl_predictor_from_generic!(TextRecPredictor);
+    #[test]
+    fn test_text_rec_predictor_config_score_thresh() {
+        // Test default configuration
+        let config = TextRecPredictorConfig::new();
+        assert_eq!(config.score_thresh, None);
 
-impl_standard_predictor_builder!(TextRecPredictorBuilder, TextRecPredictor, "TextRecognition");
+        // Test configuration with score threshold
+        let mut config = TextRecPredictorConfig::new();
+        config.score_thresh = Some(0.5);
+        assert_eq!(config.score_thresh, Some(0.5));
+    }
+
+    #[test]
+    fn test_text_rec_predictor_builder_score_thresh() {
+        // Test builder with score threshold
+        let builder = TextRecPredictorBuilder::new().score_thresh(0.7);
+
+        assert_eq!(builder.score_thresh, Some(0.7));
+    }
+}
