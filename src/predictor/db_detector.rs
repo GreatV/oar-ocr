@@ -141,14 +141,14 @@ impl ConfigValidator for TextDetPredictorConfig {
             self.validate_positive_usize(limit_side_len as usize, "limit side length")?;
         }
 
-        if let Some((c, h, w)) = self.input_shape {
-            if c == 0 || h == 0 || w == 0 {
-                return Err(crate::core::ConfigError::InvalidConfig {
-                    message: format!(
-                        "Input shape dimensions must be greater than 0, got ({c}, {h}, {w})"
-                    ),
-                });
-            }
+        if let Some((c, h, w)) = self.input_shape
+            && (c == 0 || h == 0 || w == 0)
+        {
+            return Err(crate::core::ConfigError::InvalidConfig {
+                message: format!(
+                    "Input shape dimensions must be greater than 0, got ({c}, {h}, {w})"
+                ),
+            });
         }
 
         Ok(())

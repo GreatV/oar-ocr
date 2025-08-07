@@ -127,15 +127,15 @@ impl VisualizationConfig {
         ];
 
         for path in &font_paths {
-            if let Ok(font_data) = std::fs::read(path) {
-                if let Ok(font) = FontVec::try_from_vec(font_data) {
-                    info!("Loaded system font: {}", path);
-                    return Self {
-                        font: Some(font),
-                        font_scale: 16.0,
-                        bbox_thickness: 2,
-                    };
-                }
+            if let Ok(font_data) = std::fs::read(path)
+                && let Ok(font) = FontVec::try_from_vec(font_data)
+            {
+                info!("Loaded system font: {}", path);
+                return Self {
+                    font: Some(font),
+                    font_scale: 16.0,
+                    bbox_thickness: 2,
+                };
             }
         }
 
@@ -457,11 +457,11 @@ fn calculate_horizontal_text_layout(
 
     let mut font_scale = (available_height * 0.7).max(MIN_FONT_SIZE);
 
-    if let Some(actual_width) = measure_text_width(text, font, font_scale) {
-        if actual_width > available_width {
-            let scale_factor = available_width / actual_width;
-            font_scale = (font_scale * scale_factor).max(MIN_FONT_SIZE);
-        }
+    if let Some(actual_width) = measure_text_width(text, font, font_scale)
+        && actual_width > available_width
+    {
+        let scale_factor = available_width / actual_width;
+        font_scale = (font_scale * scale_factor).max(MIN_FONT_SIZE);
     }
 
     let display_text = text.to_string();

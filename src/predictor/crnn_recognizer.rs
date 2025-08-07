@@ -47,7 +47,6 @@ pub struct TextRecPredictorConfig {
     pub common: CommonBuilderConfig,
     /// Model input shape for image resizing [channels, height, width]
     /// When specified, images are resized to fit this shape while maintaining aspect ratio.
-    /// When None, uses default shape [3, 32, 320].
     pub model_input_shape: Option<[usize; 3]>,
     /// Character dictionary for recognition
     pub character_dict: Option<Vec<String>>,
@@ -60,7 +59,7 @@ impl TextRecPredictorConfig {
     pub fn new() -> Self {
         Self {
             common: CommonBuilderConfig::with_defaults(Some("crnn".to_string()), Some(32)),
-            model_input_shape: Some([3, 32, 320]),
+            model_input_shape: Some([3, 48, 320]),
             character_dict: None,
             score_thresh: None,
         }
@@ -83,12 +82,12 @@ impl TextRecPredictorConfig {
     pub fn validate(&self) -> Result<(), crate::core::ConfigError> {
         self.common.validate()?;
 
-        if let Some(shape) = self.model_input_shape {
-            if shape[0] == 0 || shape[1] == 0 || shape[2] == 0 {
-                return Err(crate::core::ConfigError::InvalidConfig {
-                    message: "Model input shape dimensions must be greater than 0".to_string(),
-                });
-            }
+        if let Some(shape) = self.model_input_shape
+            && (shape[0] == 0 || shape[1] == 0 || shape[2] == 0)
+        {
+            return Err(crate::core::ConfigError::InvalidConfig {
+                message: "Model input shape dimensions must be greater than 0".to_string(),
+            });
         }
 
         Ok(())

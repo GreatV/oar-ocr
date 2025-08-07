@@ -1275,16 +1275,16 @@ impl OAROCR {
         );
 
         // Configure rayon thread pool if parallel processing is enabled and max_threads is specified
-        if self.config.enable_parallel_processing {
-            if let Some(max_threads) = self.config.max_parallel_threads {
-                debug!("Configuring rayon thread pool with {} threads", max_threads);
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(max_threads)
-                    .build_global()
-                    .map_err(|e| OCRError::ConfigError {
-                        message: format!("Failed to configure thread pool: {e}"),
-                    })?;
-            }
+        if self.config.enable_parallel_processing
+            && let Some(max_threads) = self.config.max_parallel_threads
+        {
+            debug!("Configuring rayon thread pool with {} threads", max_threads);
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(max_threads)
+                .build_global()
+                .map_err(|e| OCRError::ConfigError {
+                    message: format!("Failed to configure thread pool: {e}"),
+                })?;
         }
 
         let result = if self.config.enable_parallel_processing && image_paths.len() > 1 {
