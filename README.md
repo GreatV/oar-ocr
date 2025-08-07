@@ -11,7 +11,7 @@ A comprehensive OCR (Optical Character Recognition) library, built in Rust with 
 
 ### Installation
 
-Add OAR OCR to your project's `Cargo.toml`:
+Add OAROCR to your project's `Cargo.toml`:
 
 ```bash
 cargo add oar-ocr
@@ -26,7 +26,7 @@ oar-ocr = "0.2"
 
 ### Basic Usage
 
-Here's a simple example of how to use OAR OCR to extract text from an image:
+Here's a simple example of how to use OAROCR to extract text from an image:
 
 ```rust
 use oar_ocr::prelude::*;
@@ -71,7 +71,7 @@ This example creates an OCR pipeline using pre-trained models for text detection
 
 ## Pre-trained Models
 
-OAR OCR provides several pre-trained models for different OCR tasks. Download them from the [GitHub Releases](https://github.com/GreatV/oar-ocr/releases) page.
+OAROCR provides several pre-trained models for different OCR tasks. Download them from the [GitHub Releases](https://github.com/GreatV/oar-ocr/releases) page.
 
 ### Text Detection Models
 
@@ -82,10 +82,10 @@ Choose between mobile and server variants based on your needs:
 
 | Model Type | Version | Category | Model File | Size | Description |
 |------------|---------|-------------------|------------|------|-------------|
-| Text Detection | PPOCRv4 | Mobile | [`ppocrv4_mobile_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv4_mobile_det.onnx) | 4.8MB | Mobile variant for real-time applications |
-| Text Detection | PPOCRv4 | Server | [`ppocrv4_server_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv4_server_det.onnx) | 113.2MB | Server variant for high-precision requirements |
-| Text Detection | PPOCRv5 | Mobile | [`ppocrv5_mobile_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv5_mobile_det.onnx) | 4.8MB | Mobile variant for real-time applications |
-| Text Detection | PPOCRv5 | Server | [`ppocrv5_server_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv5_server_det.onnx) | 87.7MB | Server variant for high-precision requirements |
+| Text Detection | PP-OCRv4 | Mobile | [`ppocrv4_mobile_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv4_mobile_det.onnx) | 4.8MB | Mobile variant for real-time applications |
+| Text Detection | PP-OCRv4 | Server | [`ppocrv4_server_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv4_server_det.onnx) | 113.2MB | Server variant for high-precision requirements |
+| Text Detection | PP-OCRv5 | Mobile | [`ppocrv5_mobile_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv5_mobile_det.onnx) | 4.8MB | Mobile variant for real-time applications |
+| Text Detection | PP-OCRv5 | Server | [`ppocrv5_server_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv5_server_det.onnx) | 87.7MB | Server variant for high-precision requirements |
 
 ### Text Recognition Models
 
@@ -95,20 +95,20 @@ Recognition models are available in multiple versions and languages:
 
 | Model Type | Version | Language/Category | Model File | Size | Description |
 |------------|---------|-------------------|------------|------|-------------|
-| Text Recognition | PPOCRv4 | Chinese/General | [`ppocrv4_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv4_mobile_rec.onnx) | 10.8MB | Mobile variant |
-| Text Recognition | PPOCRv4 | Chinese/General | [`ppocrv4_server_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv4_server_rec.onnx) | 90.4MB | Server variant |
-| Text Recognition | PPOCRv4 | Chinese/General | [`ppocrv4_server_rec_doc.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv4_server_rec_doc.onnx) | 94.7MB | Server variant for document text |
-| Text Recognition | PPOCRv5 | Chinese/General | [`ppocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv5_mobile_rec.onnx) | 16.5MB | Mobile variant |
-| Text Recognition | PPOCRv5 | Chinese/General | [`ppocrv5_server_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv5_server_rec.onnx) | 84.1MB | Server variant |
+| Text Recognition | PP-OCRv4 | Chinese/General | [`ppocrv4_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv4_mobile_rec.onnx) | 10.8MB | Mobile variant |
+| Text Recognition | PP-OCRv4 | Chinese/General | [`ppocrv4_server_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv4_server_rec.onnx) | 90.4MB | Server variant |
+| Text Recognition | PP-OCRv4 | Chinese/General | [`ppocrv4_server_rec_doc.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv4_server_rec_doc.onnx) | 94.7MB | Server variant for document text |
+| Text Recognition | PP-OCRv5 | Chinese/General | [`ppocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv5_mobile_rec.onnx) | 16.5MB | Mobile variant |
+| Text Recognition | PP-OCRv5 | Chinese/General | [`ppocrv5_server_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv5_server_rec.onnx) | 84.1MB | Server variant |
 
 #### Language-Specific Models
 
 | Model Type | Version | Language | Model File | Size | Description |
 |------------|---------|-------------------|------------|------|-------------|
-| Text Recognition | PPOCRv4 | English | [`en_ppocrv4_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/en_ppocrv4_mobile_rec.onnx) | 7.7MB | Language-specific model |
-| Text Recognition | PPOCRv5 | Eastern Slavic | [`eslav_ppocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/eslav_ppocrv5_mobile_rec.onnx) | 7.9MB | Language-specific model |
-| Text Recognition | PPOCRv5 | Korean | [`korean_ppocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/korean_ppocrv5_mobile_rec.onnx) | 13.4MB | Language-specific model |
-| Text Recognition | PPOCRv5 | Latin | [`latin_ppocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/latin_ppocrv5_mobile_rec.onnx) | 7.9MB | Language-specific model |
+| Text Recognition | PP-OCRv4 | English | [`en_ppocrv4_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/en_ppocrv4_mobile_rec.onnx) | 7.7MB | Language-specific model |
+| Text Recognition | PP-OCRv5 | Eastern Slavic | [`eslav_ppocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/eslav_ppocrv5_mobile_rec.onnx) | 7.9MB | Language-specific model |
+| Text Recognition | PP-OCRv5 | Korean | [`korean_ppocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/korean_ppocrv5_mobile_rec.onnx) | 13.4MB | Language-specific model |
+| Text Recognition | PP-OCRv5 | Latin | [`latin_ppocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/latin_ppocrv5_mobile_rec.onnx) | 7.9MB | Language-specific model |
 
 ### Character Dictionaries
 
@@ -118,18 +118,18 @@ Character dictionaries are required for text recognition models. Choose the appr
 
 | File Type | Version | Category | Model File | Size | Description |
 |------------|---------|-------------------|------------|------|-------------|
-| Character Dictionary | PPOCRv4 | Document | [`ppocrv4_doc_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv4_doc_dict.txt) | - | For PPOCRv4 document models |
-| Character Dictionary | PPOCRv5 | General | [`ppocrv5_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv5_dict.txt) | - | For PPOCRv5 models |
-| Character Dictionary | PPOCR Keys v1 | General | [`ppocr_keys_v1.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocr_keys_v1.txt) | - | For older PPOCR models |
+| Character Dictionary | PP-OCRv4 | Document | [`ppocrv4_doc_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv4_doc_dict.txt) | - | For PP-OCRv4 document models |
+| Character Dictionary | PP-OCRv5 | General | [`ppocrv5_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv5_dict.txt) | - | For PP-OCRv5 models |
+| Character Dictionary | PP-OCR Keys v1 | General | [`ppocr_keys_v1.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocr_keys_v1.txt) | - | For older PP-OCR models |
 
 #### Language-Specific Dictionaries
 
 | File Type | Version | Language | Model File | Size | Description |
 |------------|---------|-------------------|------------|------|-------------|
-| Character Dictionary | PPOCRv4/PPOCRv5 | English | [`en_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/en_dict.txt) | - | For PPOCRv4 English recognition models |
-| Character Dictionary | PPOCRv5 | Eastern Slavic | [`ppocrv5_eslav_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv5_eslav_dict.txt) | - | For PPOCRv5 Eastern Slavic models |
-| Character Dictionary | PPOCRv5 | Korean | [`ppocrv5_korean_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv5_korean_dict.txt) | - | For PPOCRv5 Korean models |
-| Character Dictionary | PPOCRv5 | Latin | [`ppocrv5_latin_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv5_latin_dict.txt) | - | For PPOCRv5 Latin script models |
+| Character Dictionary | PP-OCRv4 | English | [`en_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/en_dict.txt) | - | For PP-OCRv4 English recognition models |
+| Character Dictionary | PP-OCRv5 | Eastern Slavic | [`ppocrv5_eslav_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv5_eslav_dict.txt) | - | For PP-OCRv5 Eastern Slavic models |
+| Character Dictionary | PP-OCRv5 | Korean | [`ppocrv5_korean_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv5_korean_dict.txt) | - | For PP-OCRv5 Korean models |
+| Character Dictionary | PP-OCRv5 | Latin | [`ppocrv5_latin_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/ppocrv5_latin_dict.txt) | - | For PP-OCRv5 Latin script models |
 
 ### Optional Models
 
