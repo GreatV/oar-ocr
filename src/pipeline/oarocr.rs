@@ -1248,7 +1248,7 @@ impl OAROCR {
                 })?;
         }
 
-        let result = self.procss_images(image_paths);
+        let result = self.process_images(image_paths);
 
         // Update statistics based on the result
         let processing_time = start_time.elapsed();
@@ -1495,7 +1495,7 @@ impl OAROCR {
     /// # Returns
     ///
     /// A Result containing a vector of OAROCRResult or an OCRError
-    fn procss_images(&self, image_paths: &[&Path]) -> Result<Vec<OAROCRResult>, OCRError> {
+    fn process_images(&self, image_paths: &[&Path]) -> Result<Vec<OAROCRResult>, OCRError> {
         debug!("Processing {} images in parallel", image_paths.len());
 
         // Process images in parallel using rayon, maintaining order with enumerate
