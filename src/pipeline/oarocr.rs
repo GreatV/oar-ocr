@@ -27,12 +27,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tracing::{debug, info, warn};
 
-/// Default value for parallel processing configuration.
-/// Returns true to enable parallel processing by default.
-fn default_parallel_processing() -> bool {
-    true
-}
-
 /// Configuration for the OAROCR pipeline.
 ///
 /// This struct holds all the configuration parameters needed to initialize
@@ -75,15 +69,8 @@ pub struct OAROCRConfig {
     #[serde(default)]
     pub use_textline_orientation: bool,
 
-    /// Whether to enable parallel processing of multiple images.
-    /// When enabled, multiple images will be processed concurrently using rayon.
-    /// Default: true
-    #[serde(default = "default_parallel_processing")]
-    pub enable_parallel_processing: bool,
-
     /// Maximum number of threads to use for parallel processing.
     /// If None, rayon will use the default thread pool size (typically number of CPU cores).
-    /// This setting only applies when enable_parallel_processing is true.
     /// Default: None (use rayon's default)
     #[serde(default)]
     pub max_parallel_threads: Option<usize>,
@@ -129,7 +116,6 @@ impl OAROCRConfig {
             use_doc_orientation_classify: false,
             use_doc_unwarping: false,
             use_textline_orientation: false,
-            enable_parallel_processing: default_parallel_processing(),
             max_parallel_threads: None,
         }
     }
@@ -586,23 +572,6 @@ impl OAROCRBuilder {
     /// The updated builder instance
     pub fn use_textline_orientation(mut self, use_it: bool) -> Self {
         self.config.use_textline_orientation = use_it;
-        self
-    }
-
-    /// Sets whether to enable parallel processing of multiple images.
-    ///
-    /// When enabled, multiple images will be processed concurrently using rayon.
-    /// This can significantly improve performance when processing multiple images.
-    ///
-    /// # Arguments
-    ///
-    /// * `enable` - Whether to enable parallel processing
-    ///
-    /// # Returns
-    ///
-    /// The updated builder instance
-    pub fn enable_parallel_processing(mut self, enable: bool) -> Self {
-        self.config.enable_parallel_processing = enable;
         self
     }
 
@@ -1251,8 +1220,7 @@ impl OAROCR {
     /// a batch of images, including document orientation classification, text detection,
     /// text recognition, and text line classification (if enabled).
     ///
-    /// The processing can be done sequentially or in parallel based on the
-    /// `enable_parallel_processing` configuration option.
+    /// Multiple images are processed in parallel using rayon for optimal performance.
     ///
     /// # Arguments
     ///
@@ -1265,19 +1233,12 @@ impl OAROCR {
         let start_time = std::time::Instant::now();
 
         info!(
-            "Starting OCR pipeline for {} image(s) using {} processing",
-            image_paths.len(),
-            if self.config.enable_parallel_processing {
-                "parallel"
-            } else {
-                "sequential"
-            }
+            "Starting OCR pipeline for {} image(s) using parallel processing",
+            image_paths.len()
         );
 
-        // Configure rayon thread pool if parallel processing is enabled and max_threads is specified
-        if self.config.enable_parallel_processing
-            && let Some(max_threads) = self.config.max_parallel_threads
-        {
+        // Configure rayon thread pool if max_threads is specified
+        if let Some(max_threads) = self.config.max_parallel_threads {
             debug!("Configuring rayon thread pool with {} threads", max_threads);
             rayon::ThreadPoolBuilder::new()
                 .num_threads(max_threads)
@@ -1287,11 +1248,7 @@ impl OAROCR {
                 })?;
         }
 
-        let result = if self.config.enable_parallel_processing && image_paths.len() > 1 {
-            self.predict_parallel_internal(image_paths)
-        } else {
-            self.predict_sequential_internal(image_paths)
-        };
+        let result = self.procss_images(image_paths);
 
         // Update statistics based on the result
         let processing_time = start_time.elapsed();
@@ -1311,47 +1268,24 @@ impl OAROCR {
         result
     }
 
-    /// Processes images sequentially through the OCR pipeline (internal implementation).
-    ///
-    /// # Arguments
-    ///
-    /// * `image_paths` - A slice of paths to the image files
-    ///
-    /// # Returns
-    ///
-    /// A Result containing a vector of OAROCRResult or an OCRError
-    fn predict_sequential_internal(
+    fn process_single_image(
         &self,
-        image_paths: &[&Path],
-    ) -> Result<Vec<OAROCRResult>, OCRError> {
-        let mut results = Vec::with_capacity(image_paths.len());
+        image_path: &Path,
+        index: usize,
+    ) -> Result<OAROCRResult, OCRError> {
+        let input_img = crate::utils::load_image(image_path)?;
+        let input_img_arc = Arc::new(input_img.clone());
 
-        for (index, &image_path) in image_paths.iter().enumerate() {
-            debug!(
-                "Processing image {} of {}: {:?}",
-                index + 1,
-                image_paths.len(),
-                image_path
-            );
-
-            let input_img = crate::utils::load_image(image_path)?;
-            let input_img_arc = Arc::new(input_img.clone());
-
-            let mut current_img = input_img;
-            let mut orientation_angle = None;
-            let mut rectified_img = None;
-
+        // Stage 1: Document orientation classification
+        // Note: We process orientation first since text detection may benefit from corrected orientation
+        let (orientation_angle, mut current_img) =
             if let Some(ref classifier) = self.doc_orientation_classifier {
-                debug!("Running document orientation classification");
-                let result = classifier.predict(vec![current_img.clone()], None)?;
-
-                // Extract the orientation angle from the result
-                if let (Some(labels), Some(scores)) =
+                let result = classifier.predict(vec![input_img.clone()], None)?;
+                let angle = if let (Some(labels), Some(scores)) =
                     (result.label_names.first(), result.scores.first())
                 {
-                    if let (Some(label), Some(&score)) = (labels.first(), scores.first()) {
-                        // Convert label to angle (e.g., "0" -> 0.0, "90" -> 90.0, etc.)
-                        let angle = match label.as_ref() {
+                    if let (Some(label), Some(&_score)) = (labels.first(), scores.first()) {
+                        match label.as_ref() {
                             "0" => 0.0,
                             "90" => 90.0,
                             "180" => 180.0,
@@ -1360,315 +1294,193 @@ impl OAROCR {
                                 warn!("Unknown orientation label: {}", label);
                                 0.0
                             }
-                        };
-                        orientation_angle = Some(angle);
-                        debug!(
-                            "Document orientation: {:.1}° (confidence: {:.3})",
-                            angle, score
-                        );
-
-                        // Apply the orientation correction to the current image
-                        if angle != 0.0 {
-                            debug!("Applying document orientation correction: {:.1}°", angle);
-                            current_img = self.apply_document_orientation(current_img, angle);
                         }
                     } else {
-                        orientation_angle = Some(0.0);
+                        0.0
                     }
                 } else {
-                    orientation_angle = Some(0.0);
-                }
-            }
-
-            if let Some(ref rectifier) = self.doc_rectifier {
-                debug!("Running document rectification");
-                let result = rectifier.predict(vec![current_img.clone()], None)?;
-
-                // Extract the rectified image from the result
-                if let Some(rectified) = result.rectified_img.first() {
-                    rectified_img = Some(rectified.clone());
-                    // Update current_img to use the rectified image for subsequent processing
-                    current_img = (**rectified).clone();
-                    debug!("Document rectification completed, updated current image");
-                } else {
-                    // Fallback to current image if rectification failed
-                    rectified_img = Some(Arc::new(current_img.clone()));
-                    warn!("Document rectification failed, using current image");
-                }
-            }
-
-            let text_boxes: Vec<crate::processors::BoundingBox> =
-                if let Some(ref detector) = self.text_detector {
-                    debug!("Running text detection");
-                    let result = detector.predict(vec![current_img.clone()], None)?;
-
-                    // Extract text boxes from the result
-                    result.dt_polys.into_iter().flatten().collect()
-                } else {
-                    return Err(OCRError::ConfigError {
-                        message: "Text detector not initialized".to_string(),
-                    });
+                    0.0
                 };
 
-            let mut cropped_images = Vec::new();
+                let corrected_img = if angle != 0.0 {
+                    self.apply_document_orientation(input_img.clone(), angle)
+                } else {
+                    input_img.clone()
+                };
 
-            for (i, bbox) in text_boxes.iter().enumerate() {
+                (Some(angle), corrected_img)
+            } else {
+                (None, input_img.clone())
+            };
+
+        // Stage 2: Document rectification (depends on orientation correction)
+        let rectified_img = if let Some(ref rectifier) = self.doc_rectifier {
+            let result = rectifier.predict(vec![current_img.clone()], None)?;
+            if let Some(rectified) = result.rectified_img.first() {
+                current_img = (**rectified).clone();
+                Some(rectified.clone())
+            } else {
+                Some(Arc::new(current_img.clone()))
+            }
+        } else {
+            None
+        };
+
+        // Stage 3: Text detection (on the processed image)
+        let text_boxes: Vec<crate::processors::BoundingBox> =
+            if let Some(ref detector) = self.text_detector {
+                let result = detector.predict(vec![current_img.clone()], None)?;
+                result.dt_polys.into_iter().flatten().collect()
+            } else {
+                return Err(OCRError::ConfigError {
+                    message: "Text detector not initialized".to_string(),
+                });
+            };
+
+        // Stage 4: Text box cropping (can be parallelized)
+        let cropped_images: Vec<Option<RgbImage>> = text_boxes
+            .par_iter()
+            .map(|bbox| {
                 let crop_result = if bbox.points.len() == 4 {
                     self.crop_rotated_bounding_box(&current_img, bbox)
                 } else {
                     self.crop_bounding_box(&current_img, bbox)
                 };
+                crop_result.ok()
+            })
+            .collect();
 
-                match crop_result {
-                    Ok(cropped_img) => {
-                        debug!(
-                            "Successfully cropped region {}: {}x{}",
-                            i,
-                            cropped_img.width(),
-                            cropped_img.height()
-                        );
-                        cropped_images.push(Some(cropped_img));
-                    }
-                    Err(e) => {
-                        warn!("Failed to crop bounding box {}: {}", i, e);
-                        cropped_images.push(None);
-                    }
-                }
-            }
-
-            // Process text line orientation classification if enabled
-            let mut text_line_orientations = Vec::new();
-            if self.config.use_textline_orientation && !text_boxes.is_empty() {
-                if let Some(ref classifier) = self.text_line_classifier {
-                    debug!(
-                        "Running text line orientation classification on {} detected regions",
-                        text_boxes.len()
-                    );
-
-                    // Collect valid cropped images for batch processing
-                    let valid_images: Vec<RgbImage> = cropped_images
-                        .iter()
-                        .filter_map(|img_opt| img_opt.as_ref().cloned())
-                        .collect();
-
-                    if !valid_images.is_empty() {
-                        // Run text line orientation classification on all valid images at once
-                        match classifier.predict(valid_images, None) {
-                            Ok(result) => {
-                                let mut result_idx = 0;
-                                for (i, cropped_img_opt) in cropped_images.iter().enumerate() {
-                                    if cropped_img_opt.is_some() {
-                                        // Extract the orientation prediction for this image
-                                        if let (Some(labels), Some(score_list)) = (
-                                            result.label_names.get(result_idx),
-                                            result.scores.get(result_idx),
-                                        ) {
-                                            if let (Some(label), Some(&score)) =
-                                                (labels.first(), score_list.first())
-                                            {
-                                                // Convert label to angle (e.g., "0" -> 0.0, "180" -> 180.0)
-                                                let angle = match label.as_ref() {
-                                                    "0" => Some(0.0),
-                                                    "180" => Some(180.0),
-                                                    _ => {
-                                                        warn!(
-                                                            "Unknown orientation label: {}",
-                                                            label
-                                                        );
-                                                        None
-                                                    }
-                                                };
-                                                text_line_orientations.push(angle);
-                                                debug!(
-                                                    "Text line {} orientation: {:?} (confidence: {:.3})",
-                                                    i, angle, score
-                                                );
-                                            } else {
-                                                text_line_orientations.push(None);
-                                            }
+        // Stage 5: Text line orientation classification
+        let mut text_line_orientations: Vec<Option<f32>> = Vec::new();
+        if self.config.use_textline_orientation && !text_boxes.is_empty() {
+            if let Some(ref classifier) = self.text_line_classifier {
+                let valid_images: Vec<RgbImage> = cropped_images
+                    .iter()
+                    .filter_map(|o| o.as_ref().cloned())
+                    .collect();
+                if !valid_images.is_empty() {
+                    match classifier.predict(valid_images, None) {
+                        Ok(result) => {
+                            let mut result_idx = 0usize;
+                            for cropped_img_opt in &cropped_images {
+                                if cropped_img_opt.is_some() {
+                                    if let (Some(labels), Some(score_list)) = (
+                                        result.label_names.get(result_idx),
+                                        result.scores.get(result_idx),
+                                    ) {
+                                        if let (Some(label), Some(_score)) =
+                                            (labels.first(), score_list.first())
+                                        {
+                                            let angle = match label.as_ref() {
+                                                "0" => Some(0.0),
+                                                "180" => Some(180.0),
+                                                _ => None,
+                                            };
+                                            text_line_orientations.push(angle);
                                         } else {
                                             text_line_orientations.push(None);
                                         }
-                                        result_idx += 1;
                                     } else {
-                                        // Failed crop, push None
                                         text_line_orientations.push(None);
                                     }
+                                    result_idx += 1;
+                                } else {
+                                    text_line_orientations.push(None);
                                 }
                             }
-                            Err(e) => {
-                                warn!("Text line orientation classification failed: {}", e);
-                                // Fill with None values for all regions
-                                text_line_orientations.resize(text_boxes.len(), None);
-                            }
                         }
-                    } else {
-                        // No valid images, fill with None values
-                        text_line_orientations.resize(text_boxes.len(), None);
+                        Err(_) => {
+                            text_line_orientations.resize(text_boxes.len(), None);
+                        }
                     }
                 } else {
-                    // Text line classifier not initialized, fill with None values
                     text_line_orientations.resize(text_boxes.len(), None);
                 }
             } else {
-                // Text line orientation not enabled or no text boxes, fill with None values
                 text_line_orientations.resize(text_boxes.len(), None);
             }
-
-            // Process text recognition if we have detected text boxes
-            let (rec_texts, rec_scores) = if text_boxes.is_empty() {
-                // No text boxes detected, return empty results
-                (Vec::new(), Vec::new())
-            } else if let Some(ref recognizer) = self.text_recognizer {
-                debug!(
-                    "Running text recognition on {} detected regions",
-                    text_boxes.len()
-                );
-
-                let mut all_texts = Vec::new();
-                let mut all_scores = Vec::new();
-
-                // Process text recognition on cropped images
-                //
-                // IMPORTANT: Cropped text regions can have different dimensions (e.g., 408x48 vs 135x48).
-                // The text recognition model requires all images in a batch to have identical dimensions.
-                // To solve this, we group images by their dimensions and process each group separately,
-                // enabling efficient batching while avoiding the "All images in batch must have the same dimensions" error.
-                use std::collections::HashMap;
-
-                // Group images by their dimensions (height, width)
-                let mut dimension_groups: HashMap<(u32, u32), Vec<(usize, RgbImage)>> =
-                    HashMap::new();
-
-                for (i, cropped_img_opt) in cropped_images.iter().enumerate() {
-                    if let Some(cropped_img) = cropped_img_opt {
-                        let dimensions = (cropped_img.height(), cropped_img.width());
-                        dimension_groups
-                            .entry(dimensions)
-                            .or_default()
-                            .push((i, cropped_img.clone()));
-                    }
-                }
-
-                // Initialize results vectors with proper capacity
-                let total_valid_images = dimension_groups.values().map(|v| v.len()).sum::<usize>();
-                let mut recognition_results: Vec<(usize, Arc<str>, f32)> =
-                    Vec::with_capacity(total_valid_images);
-
-                // Process each dimension group separately
-                for ((height, width), group) in dimension_groups {
-                    debug!(
-                        "Processing {} images with dimensions {}x{} for text recognition",
-                        group.len(),
-                        width,
-                        height
-                    );
-
-                    // Extract images and indices for this group
-                    let (indices, images): (Vec<usize>, Vec<RgbImage>) = group.into_iter().unzip();
-
-                    // Process this group as a batch (all images have the same dimensions)
-                    match recognizer.predict(images, None) {
-                        Ok(result) => {
-                            // Store results with their original indices
-                            for (original_idx, (text, score)) in indices
-                                .into_iter()
-                                .zip(result.rec_text.iter().zip(result.rec_score.iter()))
-                            {
-                                recognition_results.push((original_idx, text.clone(), *score));
-                                debug!(
-                                    "Recognized text for region {}: '{}' (score: {:.3})",
-                                    original_idx, text, score
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Text recognition failed for {}x{} dimension group: {}",
-                                width, height, e
-                            );
-                            // Add empty results for failed group
-                            for original_idx in indices {
-                                recognition_results.push((original_idx, Arc::from(""), 0.0));
-                            }
-                        }
-                    }
-                }
-
-                // Sort results by original index to maintain order
-                recognition_results.sort_by_key(|(idx, _, _)| *idx);
-
-                // Extract texts and scores in the correct order
-                for (_, text, score) in recognition_results {
-                    all_texts.push(text);
-                    all_scores.push(score);
-                }
-
-                debug!(
-                    "Text recognition completed: {} texts recognized from {} regions (using in-memory processing)",
-                    all_texts.len(),
-                    text_boxes.len()
-                );
-                (all_texts, all_scores)
-            } else {
-                return Err(OCRError::ConfigError {
-                    message: "Text recognizer not initialized".to_string(),
-                });
-            };
-
-            // Filter recognition results based on score threshold and align with text line orientations
-            let score_thresh = self.config.recognition.score_thresh.unwrap_or(0.0);
-            let filtered_results: Vec<(Arc<str>, f32, Option<f32>)> = rec_texts
-                .into_iter()
-                .zip(rec_scores)
-                .zip(text_line_orientations.iter().cloned())
-                // Keep only results with scores above the threshold
-                .filter_map(|((text, score), orientation)| {
-                    if score >= score_thresh {
-                        Some((text, score, orientation))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            // Separate the filtered texts, scores, and orientations into separate vectors
-            let (final_texts, final_scores, final_orientations): (
-                Vec<Arc<str>>,
-                Vec<f32>,
-                Vec<Option<f32>>,
-            ) = filtered_results.into_iter().fold(
-                (Vec::new(), Vec::new(), Vec::new()),
-                |(mut texts, mut scores, mut orientations), (text, score, orientation)| {
-                    texts.push(text);
-                    scores.push(score);
-                    orientations.push(orientation);
-                    (texts, scores, orientations)
-                },
-            );
-
-            debug!(
-                "OCR pipeline completed for image {}: Found {} text regions with {} recognized texts",
-                index + 1,
-                text_boxes.len(),
-                final_texts.len()
-            );
-
-            results.push(OAROCRResult {
-                input_path: Arc::from(image_path.to_string_lossy().as_ref()),
-                index,
-                input_img: input_img_arc,
-                text_boxes,
-                rec_texts: final_texts,
-                rec_scores: final_scores,
-                orientation_angle,
-                text_line_orientation_angles: final_orientations,
-                rectified_img,
-            });
+        } else {
+            text_line_orientations.resize(text_boxes.len(), None);
         }
 
-        info!("OCR pipeline completed for {} images", results.len());
-        Ok(results)
+        // Stage 6: Text recognition (with dimension-based batching)
+        let (rec_texts, rec_scores) = if text_boxes.is_empty() {
+            (Vec::new(), Vec::new())
+        } else if let Some(ref recognizer) = self.text_recognizer {
+            let mut dimension_groups: std::collections::HashMap<
+                (u32, u32),
+                Vec<(usize, RgbImage)>,
+            > = std::collections::HashMap::new();
+            for (i, cropped_img_opt) in cropped_images.iter().enumerate() {
+                if let Some(cropped_img) = cropped_img_opt {
+                    let dims = (cropped_img.height(), cropped_img.width());
+                    dimension_groups
+                        .entry(dims)
+                        .or_default()
+                        .push((i, cropped_img.clone()));
+                }
+            }
+            let mut recognition_results: Vec<(usize, Arc<str>, f32)> = Vec::new();
+            for ((_h, _w), group) in dimension_groups {
+                let (indices, images): (Vec<usize>, Vec<RgbImage>) = group.into_iter().unzip();
+                match recognizer.predict(images, None) {
+                    Ok(result) => {
+                        for (original_idx, (text, score)) in indices
+                            .into_iter()
+                            .zip(result.rec_text.iter().zip(result.rec_score.iter()))
+                        {
+                            recognition_results.push((original_idx, text.clone(), *score));
+                        }
+                    }
+                    Err(_) => {
+                        for original_idx in indices {
+                            recognition_results.push((original_idx, Arc::from(""), 0.0));
+                        }
+                    }
+                }
+            }
+            recognition_results.sort_by_key(|(idx, _, _)| *idx);
+            let mut texts = Vec::new();
+            let mut scores = Vec::new();
+            for (_, text, score) in recognition_results {
+                texts.push(text);
+                scores.push(score);
+            }
+            (texts, scores)
+        } else {
+            return Err(OCRError::ConfigError {
+                message: "Text recognizer not initialized".to_string(),
+            });
+        };
+
+        // Stage 7: Final filtering and result assembly
+        let score_thresh = self.config.recognition.score_thresh.unwrap_or(0.0);
+        let mut final_texts: Vec<Arc<str>> = Vec::new();
+        let mut final_scores: Vec<f32> = Vec::new();
+        let mut final_orientations: Vec<Option<f32>> = Vec::new();
+        for ((text, score), orientation) in rec_texts
+            .into_iter()
+            .zip(rec_scores)
+            .zip(text_line_orientations.iter().cloned())
+        {
+            if score >= score_thresh {
+                final_texts.push(text);
+                final_scores.push(score);
+                final_orientations.push(orientation);
+            }
+        }
+
+        Ok(OAROCRResult {
+            input_path: Arc::from(image_path.to_string_lossy().as_ref()),
+            index,
+            input_img: input_img_arc,
+            text_boxes,
+            rec_texts: final_texts,
+            rec_scores: final_scores,
+            orientation_angle,
+            text_line_orientation_angles: final_orientations,
+            rectified_img,
+        })
     }
 
     /// Processes images in parallel through the OCR pipeline (internal implementation).
@@ -1683,10 +1495,7 @@ impl OAROCR {
     /// # Returns
     ///
     /// A Result containing a vector of OAROCRResult or an OCRError
-    fn predict_parallel_internal(
-        &self,
-        image_paths: &[&Path],
-    ) -> Result<Vec<OAROCRResult>, OCRError> {
+    fn procss_images(&self, image_paths: &[&Path]) -> Result<Vec<OAROCRResult>, OCRError> {
         debug!("Processing {} images in parallel", image_paths.len());
 
         // Process images in parallel using rayon, maintaining order with enumerate
@@ -1701,20 +1510,10 @@ impl OAROCR {
                     image_path
                 );
 
-                // Process single image by calling the sequential method with one image
-                // This reuses all the existing logic while enabling parallelism
-                let single_result = self.predict_sequential_internal(&[image_path])?;
-                let mut result =
-                    single_result
-                        .into_iter()
-                        .next()
-                        .ok_or_else(|| OCRError::ConfigError {
-                            message: "No result returned from single image processing".to_string(),
-                        })?;
-
-                // Update the index to maintain correct ordering in the batch
+                // Process single image using helper
+                let mut result = self.process_single_image(image_path, index)?;
+                // Ensure index is set correctly
                 result.index = index;
-
                 Ok((index, result))
             })
             .collect();

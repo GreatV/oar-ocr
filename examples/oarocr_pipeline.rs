@@ -158,10 +158,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .use_textline_orientation(true);
     }
 
-    // Enable parallel processing for better performance with multiple images
-    builder = builder
-        .enable_parallel_processing(true)
-        .max_parallel_threads(None); // Use all available CPU cores
+    // Configure parallel processing for better performance with multiple images
+    builder = builder.max_parallel_threads(None); // Use all available CPU cores
 
     // Build the OCR pipeline and process images
     match builder.build() {
