@@ -253,6 +253,7 @@ use crate::core::{BatchSampler, DefaultImageReader, ImageReader, OrtInfer};
 /// Text detection predictor
 ///
 /// This struct holds the components needed for text detection.
+#[derive(Debug)]
 pub struct TextDetPredictor {
     /// Limit for the side length of the image
     pub limit_side_len: Option<u32>,
@@ -327,7 +328,15 @@ impl TextDetPredictor {
         );
         let normalize = NormalizeImage::new(None, None, None, None)?;
         let to_batch = ToBatch::new();
-        let infer = OrtInfer::new(model_path, None)?;
+        let infer = OrtInfer::from_common(
+            &TextDetPredictorConfig {
+                common: config.common.clone(),
+                ..config.clone()
+            }
+            .common,
+            model_path,
+            None,
+        )?;
         let post_op = DBPostProcess::new(None, None, None, None, None, None, None);
 
         Ok(TextDetPredictor {
@@ -454,17 +463,40 @@ impl StandardPredictor for TextDetPredictor {
         let (resized_imgs, shapes) = self.resize.apply(
             batch_imgs,
             Some(limit_side_len),
-            Some(limit_type),
+            Some(limit_type.clone()),
             Some(max_side_limit),
         );
 
-        let tensor = self.normalize.normalize_batch_to(resized_imgs)?;
+        let tensor = self.normalize.normalize_batch_to(resized_imgs).map_err(|e| {
+            OCRError::model_inference_error(
+                &self.model_name,
+                "preprocessing_normalization",
+                0,
+                &[shapes.len()], // batch size as shape info
+                &format!("Normalization failed for {} images with limit_side_len={}, limit_type={:?}",
+                    shapes.len(), limit_side_len, limit_type),
+                e,
+            )
+        })?;
 
         Ok(TextDetPreprocessOutput { tensor, shapes })
     }
 
     fn infer(&self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError> {
-        self.infer.infer_4d(input.tensor.clone())
+        let input_shape = input.tensor.shape().to_vec();
+        self.infer.infer_4d(input.tensor.clone()).map_err(|e| {
+            OCRError::model_inference_error(
+                &self.model_name,
+                "inference_4d",
+                0,
+                &input_shape,
+                &format!(
+                    "Text detection inference failed with input shape {:?}",
+                    input_shape
+                ),
+                e,
+            )
+        })
     }
 
     fn postprocess(
@@ -578,6 +610,31 @@ impl TextDetPredictorBuilder {
     /// This function enables or disables logging for the predictor.
     pub fn enable_logging(mut self, enable: bool) -> Self {
         self.common = self.common.enable_logging(enable);
+        self
+    }
+
+    /// Sets the ONNX Runtime session configuration
+    ///
+    /// This function sets the ONNX Runtime session configuration for the predictor.
+    pub fn ort_session(mut self, config: crate::core::config::onnx::OrtSessionConfig) -> Self {
+        self.common = self.common.ort_session(config);
+        self
+    }
+
+    /// Sets the session pool size for concurrent predictions
+    ///
+    /// This function sets the size of the session pool used for concurrent predictions.
+    /// The pool size must be >= 1.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - The session pool size (minimum 1)
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    pub fn session_pool_size(mut self, size: usize) -> Self {
+        self.common = self.common.session_pool_size(size);
         self
     }
 

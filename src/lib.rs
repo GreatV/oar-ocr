@@ -43,19 +43,55 @@
 //! ).build()?;
 //!
 //! // Process single image
-//! let results = ocr.predict(&[Path::new("document.jpg")])?;
+//! let image = load_image(Path::new("document.jpg"))?;
+//! let results = ocr.predict(&[image])?;
 //! let result = &results[0];
 //!
 //! // Print results
-//! for (text, score) in result.rec_texts.iter().zip(result.rec_scores.iter()) {
-//!     println!("Text: {} (confidence: {:.2})", text, score);
+//! for region in &result.text_regions {
+//!     if let (Some(text), Some(confidence)) = (&region.text, region.confidence) {
+//!         println!("Text: {} (confidence: {:.2})", text, confidence);
+//!     }
 //! }
 //!
 //! // Process multiple images
-//! let results = ocr.predict(&[Path::new("doc1.jpg"), Path::new("doc2.jpg")])?;
+//! let images = load_images_batch(&[Path::new("doc1.jpg"), Path::new("doc2.jpg")])?;
+//! let results = ocr.predict(&images)?;
 //! for result in results {
-//!     println!("Image {}: {} text regions found", result.index, result.text_boxes.len());
+//!     println!("Image {}: {} text regions found", result.index, result.text_regions.len());
 //! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Advanced Configuration with Confidence Thresholding
+//!
+//! ```rust,no_run
+//! use oar_ocr::prelude::*;
+//! use std::path::Path;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // Build OCR pipeline with confidence thresholding for orientation detection
+//! let mut ocr = OAROCRBuilder::new(
+//!     "detection_model.onnx".to_string(),
+//!     "recognition_model.onnx".to_string(),
+//!     "char_dict.txt".to_string(),
+//! )
+//! // Configure document orientation with confidence threshold
+//! .doc_orientation_classify_model_path("orientation_model.onnx")
+//! .doc_orientation_confidence_threshold(0.8) // Only accept predictions with 80% confidence
+//! .use_doc_orientation_classify(true)
+//! // Configure text line orientation with confidence threshold
+//! .textline_orientation_classify_model_path("textline_orientation_model.onnx")
+//! .textline_orientation_confidence_threshold(0.7) // Only accept predictions with 70% confidence
+//! .use_textline_orientation(true)
+//! // Set recognition score threshold
+//! .text_rec_score_thresh(0.5)
+//! .build()?;
+//!
+//! // Process image - low confidence orientations will fall back to defaults
+//! let image = load_image(Path::new("document.jpg"))?;
+//! let results = ocr.predict(&[image])?;
 //! # Ok(())
 //! # }
 //! ```
@@ -90,10 +126,8 @@
 //! # }
 //! ```
 
-// Core modules with macro support
-#[macro_use]
+// Core modules
 pub mod core;
-#[macro_use]
 pub mod predictor;
 
 pub mod pipeline;
@@ -108,65 +142,38 @@ pub mod utils;
 /// use oar_ocr::prelude::*;
 /// ```
 ///
-/// This includes:
-/// - All predictor types and builders
-/// - Core traits like `BasePredictor` and `StandardPredictor`
-/// - Image processing utilities
-/// - Error types and result types
-/// - Tensor utilities
-/// - The main `OAROCR` pipeline
+/// This includes the stable public API:
+/// - Main OCR pipeline (`OAROCR`, `OAROCRBuilder`, `OAROCRConfig`, `OAROCRResult`)
+/// - Individual predictor builders for custom workflows
+/// - Core traits for extending functionality
+/// - Essential error and result types
+/// - Image loading utilities
+/// - Logging initialization
 pub mod prelude {
+    // === Main OCR Pipeline ===
+    // The primary interface for most users
+    pub use crate::pipeline::{OAROCR, OAROCRBuilder, OAROCRConfig, OAROCRResult, TextRegion};
 
-    // Core components
-    pub use crate::core::{
-        BasePredictor, BatchData, BatchSampler, CommonBuilderConfig, ConfigError,
-        DefaultImageReader, ImageReader, OCRError, OrtInfer, PipelineStats, PredictionResult,
-        PredictorBuilder, PredictorConfig, ProcessingStage, Sampler, Tensor1D, Tensor2D, Tensor3D,
-        Tensor4D, ToBatch, TransformConfig, TransformRegistry, TransformType,
-    };
-
-    // Image utilities and logging
-    pub use crate::utils::{
-        create_rgb_image, dynamic_to_gray, dynamic_to_rgb, init_tracing, load_image,
-        load_images_batch,
-    };
-
-    // Image processing utilities
-    pub use crate::processors::{
-        BaseRecLabelDecode, BoundingBox, BoxType, CTCLabelDecode, ChannelOrder, Crop, CropMode,
-        DBPostProcess, DetResizeForTest, DocTrPostProcess, ImageProcessError, LimitType,
-        MinAreaRect, NormalizeImage, OCRResize, Point, ResizeType, ScoreMode, Topk, TopkResult,
-    };
-
-    // Builder macros
-    pub use crate::impl_builder;
-    pub use crate::impl_builder_config;
-    pub use crate::impl_config_validation;
-    pub use crate::impl_enhanced_builder;
-
-    // Predictor implementations
+    // === Individual Predictor Builders ===
+    // For users who want to build custom OCR workflows
     pub use crate::predictor::{
-        DocOrientationClassifier, DocOrientationClassifierBuilder, DoctrRectifierPredictor,
-        DoctrRectifierPredictorBuilder, TextDetPredictor, TextDetPredictorBuilder,
-        TextLineClasPredictor, TextLineClasPredictorBuilder, TextRecPredictor,
-        TextRecPredictorBuilder,
+        DocOrientationClassifierBuilder, DoctrRectifierPredictorBuilder, TextDetPredictorBuilder,
+        TextLineClasPredictorBuilder, TextRecPredictorBuilder,
     };
 
-    // Pipeline components
-    pub use crate::pipeline::{
-        ConfigFormat, ConfigLoader, OAROCR, OAROCRBuilder, OAROCRConfig, OAROCRResult,
-    };
+    // === Core Traits ===
+    // Essential traits for extending functionality
+    pub use crate::core::traits::{BasePredictor, PredictorBuilder, StandardPredictor};
 
-    // Utility functions
-    pub use crate::utils;
+    // === Error Handling ===
+    // Essential error types that users need to handle
+    pub use crate::core::{OCRError, PredictionResult};
 
-    // Tensor utilities
-    pub use crate::utils::tensor::{
-        stack_tensor2d, stack_tensor3d, tensor1d_to_vec, tensor2d_to_vec, tensor3d_slice,
-        tensor3d_to_vec, tensor4d_slice, tensor4d_to_vec, vec_to_tensor1d, vec_to_tensor2d,
-        vec_to_tensor3d, vec_to_tensor4d,
-    };
+    // === Image Utilities ===
+    // Essential utilities for loading and working with images
+    pub use crate::utils::{init_tracing, load_image, load_images_batch};
 
-    // Transform utilities
-    pub use crate::utils::transform::{Point2f, get_rotate_crop_image};
+    // === Configuration ===
+    // For loading/saving pipeline configurations
+    pub use crate::pipeline::{ConfigFormat, ConfigLoader};
 }

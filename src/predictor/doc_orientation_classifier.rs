@@ -10,6 +10,7 @@ use crate::core::traits::StandardPredictor;
 use crate::core::{
     BatchData, BatchSampler, CommonBuilderConfig, DefaultImageReader, ImageReader, OCRError,
     OrtInfer, Tensor2D, Tensor4D, ToBatch, config::ConfigValidator,
+    get_document_orientation_labels,
 };
 use crate::processors::{NormalizeImage, Topk};
 use image::RgbImage;
@@ -33,7 +34,7 @@ pub struct DocOrientationResult {
     /// Confidence scores for each prediction
     pub scores: Vec<Vec<f32>>,
     /// Label names for each prediction (e.g., "0", "90", "180", "270")
-    pub label_names: Vec<Vec<String>>,
+    pub label_names: Vec<Vec<Arc<str>>>,
 }
 
 /// Configuration for the document orientation classifier
@@ -119,7 +120,7 @@ impl ConfigValidator for DocOrientationClassifierConfig {
         }
 
         if let Some((width, height)) = self.input_shape {
-            self.validate_image_dimensions(width, height, "input shape")?;
+            self.validate_image_dimensions(width, height)?;
         }
 
         Ok(())
@@ -180,6 +181,7 @@ impl Default for DocOrientationResult {
 ///
 /// This struct implements a classifier for determining the orientation of documents in images.
 /// It uses a pre-trained model to predict whether an image is rotated by 0°, 90°, 180°, or 270°.
+#[derive(Debug)]
 pub struct DocOrientationClassifier {
     /// Number of top predictions to return for each image
     pub topk: Option<usize>,
@@ -224,6 +226,8 @@ impl DocOrientationClassifier {
         let model_name = config
             .common
             .model_name
+            .as_ref()
+            .cloned()
             .unwrap_or_else(|| "DocOrientationClassifier".to_string());
         let batch_size = config.common.batch_size.unwrap_or(32);
         let topk = config.topk;
@@ -244,13 +248,16 @@ impl DocOrientationClassifier {
                 None,
             )?,
             to_batch: ToBatch::new(),
-            infer: OrtInfer::new(model_path, None)?,
-            post_op: Topk::new(Some(&[
-                "0".to_string(),
-                "90".to_string(),
-                "180".to_string(),
-                "270".to_string(),
-            ])),
+            infer: OrtInfer::from_common(
+                &DocOrientationClassifierConfig {
+                    common: config.common.clone(),
+                    ..config.clone()
+                }
+                .common,
+                model_path,
+                None,
+            )?,
+            post_op: Topk::from_class_names(get_document_orientation_labels()),
         })
     }
 }
@@ -304,22 +311,14 @@ impl StandardPredictor for DocOrientationClassifier {
         images: Vec<RgbImage>,
         _config: Option<&Self::Config>,
     ) -> Result<Self::PreprocessOutput, OCRError> {
-        let resized_images: Vec<_> = images
-            .iter()
-            .map(|img| {
-                image::imageops::resize(
-                    img,
-                    self.input_shape.0,
-                    self.input_shape.1,
-                    image::imageops::FilterType::Lanczos3,
-                )
-            })
-            .collect();
+        use crate::utils::resize_images_batch_to_dynamic;
 
-        let dynamic_images: Vec<_> = resized_images
-            .into_iter()
-            .map(image::DynamicImage::ImageRgb8)
-            .collect();
+        let dynamic_images = resize_images_batch_to_dynamic(
+            &images,
+            self.input_shape.0,
+            self.input_shape.1,
+            None, // Uses default Lanczos3 filter
+        );
 
         self.normalize.normalize_batch_to(dynamic_images)
     }
@@ -363,7 +362,13 @@ impl StandardPredictor for DocOrientationClassifier {
         raw_images: Vec<RgbImage>,
         _config: Option<&Self::Config>,
     ) -> Result<Self::Result, OCRError> {
-        let topk_result = self.post_op.apply(&output, self.topk.unwrap_or(4));
+        // Convert ndarray output to Vec<Vec<f32>> format expected by Topk
+        let predictions: Vec<Vec<f32>> = output.outer_iter().map(|row| row.to_vec()).collect();
+
+        let topk_result = self
+            .post_op
+            .process(&predictions, self.topk.unwrap_or(4))
+            .map_err(|e| OCRError::ConfigError { message: e })?;
 
         Ok(DocOrientationResult {
             input_path: batch_data.input_paths.clone(),
@@ -371,7 +376,13 @@ impl StandardPredictor for DocOrientationClassifier {
             input_img: raw_images.into_iter().map(Arc::new).collect(),
             class_ids: topk_result.indexes,
             scores: topk_result.scores,
-            label_names: topk_result.label_names,
+            // Convert label names to Arc<str> for efficient sharing
+            label_names: topk_result
+                .class_names
+                .unwrap_or_default()
+                .into_iter()
+                .map(|names| names.into_iter().map(Arc::from).collect())
+                .collect(),
         })
     }
 
@@ -472,6 +483,31 @@ impl DocOrientationClassifierBuilder {
     /// The updated builder instance
     pub fn enable_logging(mut self, enable: bool) -> Self {
         self.common = self.common.enable_logging(enable);
+        self
+    }
+
+    /// Sets the ONNX Runtime session configuration
+    ///
+    /// This function sets the ONNX Runtime session configuration for the predictor.
+    pub fn ort_session(mut self, config: crate::core::config::onnx::OrtSessionConfig) -> Self {
+        self.common = self.common.ort_session(config);
+        self
+    }
+
+    /// Sets the session pool size for concurrent predictions
+    ///
+    /// This function sets the size of the session pool used for concurrent predictions.
+    /// The pool size must be >= 1.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - The session pool size (minimum 1)
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    pub fn session_pool_size(mut self, size: usize) -> Self {
+        self.common = self.common.session_pool_size(size);
         self
     }
 

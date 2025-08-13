@@ -21,6 +21,12 @@ pub enum ImageProcessError {
     UnsupportedMode,
     /// The input data is invalid
     InvalidInput,
+    /// The crop size is too large for the image
+    CropSizeTooLarge,
+    /// The crop coordinates are out of bounds
+    CropOutOfBounds,
+    /// The crop coordinates are invalid
+    InvalidCropCoordinates,
 }
 
 /// Implementation of Display trait for ImageProcessError to provide user-friendly error messages
@@ -40,6 +46,11 @@ impl std::fmt::Display for ImageProcessError {
             }
             ImageProcessError::UnsupportedMode => write!(f, "Unsupported interpolation method"),
             ImageProcessError::InvalidInput => write!(f, "Invalid input"),
+            ImageProcessError::CropSizeTooLarge => {
+                write!(f, "Crop size is too large for the image")
+            }
+            ImageProcessError::CropOutOfBounds => write!(f, "Crop coordinates are out of bounds"),
+            ImageProcessError::InvalidCropCoordinates => write!(f, "Invalid crop coordinates"),
         }
     }
 }
@@ -47,12 +58,20 @@ impl std::fmt::Display for ImageProcessError {
 impl std::error::Error for ImageProcessError {}
 
 /// Specifies how to crop an image when the aspect ratios don't match
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CropMode {
     /// Crop from the center of the image
     Center,
     /// Crop from the top-left corner of the image
     TopLeft,
+    /// Crop from the top-right corner of the image
+    TopRight,
+    /// Crop from the bottom-left corner of the image
+    BottomLeft,
+    /// Crop from the bottom-right corner of the image
+    BottomRight,
+    /// Crop from custom coordinates
+    Custom { x: u32, y: u32 },
 }
 
 /// Implementation of FromStr trait for CropMode to parse crop mode from string

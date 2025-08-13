@@ -13,11 +13,14 @@
 //! The example automatically handles both single and multiple images efficiently.
 
 use clap::Parser;
+use oar_ocr::core::config::onnx::{OrtExecutionProvider, OrtSessionConfig};
+use oar_ocr::core::format_orientation_label;
 use oar_ocr::core::traits::StandardPredictor;
 use oar_ocr::predictor::DocOrientationClassifierBuilder;
 use oar_ocr::utils::init_tracing;
 use oar_ocr::utils::load_image;
 use std::path::Path;
+use std::sync::Arc;
 use tracing::{error, info};
 
 /// Command-line arguments for the document orientation classification example
@@ -32,6 +35,10 @@ struct Args {
     /// Image file paths to process
     #[arg(required = true)]
     images: Vec<String>,
+
+    /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
+    #[arg(short, long, default_value = "cpu")]
+    device: String,
 }
 
 /// Display the classification results for document orientation
@@ -46,7 +53,7 @@ fn display_classification_results(
     image_paths: &[String],
     class_ids: &[Vec<usize>],
     scores: &[Vec<f32>],
-    label_names: &[Vec<String>],
+    label_names: &[Vec<Arc<str>>],
 ) {
     // Iterate through each image and its corresponding results
     for (i, (((path, ids), scores_list), labels)) in image_paths
@@ -62,15 +69,77 @@ fn display_classification_results(
             (ids.first(), scores_list.first(), labels.first())
         {
             // Convert numeric labels to degree representations
-            let orientation = match label.as_ref() {
-                "0" => "0°",
-                "90" => "90°",
-                "180" => "180°",
-                "270" => "270°",
-                _ => label,
-            };
+            let orientation = format_orientation_label(label.as_ref());
             info!("   Orientation: {} (confidence: {:.3})", orientation, score);
         }
+    }
+}
+
+/// Parse device string and create appropriate ONNX execution provider
+///
+/// # Arguments
+///
+/// * `device` - Device string (e.g., "cpu", "cuda", "cuda:0")
+///
+/// # Returns
+///
+/// Vector of execution providers in order of preference
+fn parse_device(device: &str) -> Result<Vec<OrtExecutionProvider>, Box<dyn std::error::Error>> {
+    let device = device.to_lowercase();
+
+    if device == "cpu" {
+        Ok(vec![OrtExecutionProvider::CPU])
+    } else if device == "cuda" {
+        #[cfg(feature = "cuda")]
+        {
+            Ok(vec![
+                OrtExecutionProvider::CUDA {
+                    device_id: Some(0),
+                    gpu_mem_limit: None,
+                    arena_extend_strategy: None,
+                    cudnn_conv_algo_search: None,
+                    do_copy_in_default_stream: None,
+                    cudnn_conv_use_max_workspace: None,
+                },
+                OrtExecutionProvider::CPU,
+            ])
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            error!("CUDA support not compiled in. Falling back to CPU.");
+            Ok(vec![OrtExecutionProvider::CPU])
+        }
+    } else if device.starts_with("cuda:") {
+        #[cfg(feature = "cuda")]
+        {
+            let device_id_str = device.strip_prefix("cuda:").unwrap();
+            let device_id: i32 = device_id_str
+                .parse()
+                .map_err(|_| format!("Invalid CUDA device ID: {}", device_id_str))?;
+
+            Ok(vec![
+                OrtExecutionProvider::CUDA {
+                    device_id: Some(device_id),
+                    gpu_mem_limit: None,
+                    arena_extend_strategy: None,
+                    cudnn_conv_algo_search: None,
+                    do_copy_in_default_stream: None,
+                    cudnn_conv_use_max_workspace: None,
+                },
+                OrtExecutionProvider::CPU,
+            ])
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            error!("CUDA support not compiled in. Falling back to CPU.");
+            Ok(vec![OrtExecutionProvider::CPU])
+        }
+    } else {
+        Err(format!(
+            "Unsupported device: {}. Supported devices: cpu, cuda, cuda:N",
+            device
+        )
+        .into())
     }
 }
 
@@ -116,12 +185,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No valid image files found".into());
     }
 
+    // Parse device configuration
+    let execution_providers = parse_device(&args.device)?;
+    info!(
+        "Using device: {} with providers: {:?}",
+        args.device, execution_providers
+    );
+
+    // Create ONNX session configuration with device settings
+    let ort_config = OrtSessionConfig::new().with_execution_providers(execution_providers);
+
     // Create a document orientation classifier with specified parameters
     // topk(4) means we want to get the top 4 predictions (all possible orientations)
     // input_shape((224, 224)) specifies the input size expected by the model
     let classifier = DocOrientationClassifierBuilder::new()
         .topk(4)
         .input_shape((224, 224))
+        .ort_session(ort_config) // Set device configuration
         .build(Path::new(model_path))?;
 
     // Load all images into memory

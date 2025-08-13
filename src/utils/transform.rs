@@ -298,44 +298,53 @@ fn warp_perspective(
     let (src_width, src_height) = src_image.dimensions();
     let buffer: &mut [u8] = dst_image.as_mut();
 
-    // Process each row in parallel using rayon
-    buffer
-        .par_chunks_mut((dst_width * 3) as usize)
-        .enumerate()
-        .for_each(|(dst_y, row_buffer)| {
-            // Process each pixel in the row
-            for dst_x in 0..dst_width {
-                // Create a point in the destination image
-                let dst_point = Vector3::new(dst_x as f32, dst_y as f32, 1.0);
-
-                // Apply inverse transformation to find corresponding point in source image
-                let src_point = inv_matrix * dst_point;
-
-                // Initialize pixel as black
-                let mut final_pixel = Rgb([0, 0, 0]);
-
-                // Check if the source point is valid (not at infinity)
-                if src_point.z.abs() > f32::EPSILON {
-                    // Convert homogeneous coordinates to Cartesian coordinates
-                    let src_x = src_point.x / src_point.z;
-                    let src_y = src_point.y / src_point.z;
-
-                    // Check if the source point is within the image bounds
-                    if src_x >= 0.0
-                        && src_y >= 0.0
-                        && src_x < (src_width - 1) as f32
-                        && src_y < (src_height - 1) as f32
-                    {
-                        // Use bilinear interpolation to get the pixel value
-                        final_pixel = bilinear_interpolate(src_image, src_x, src_y);
-                    }
+    // Process rows with a small-image sequential fast path to avoid rayon overhead
+    if dst_height <= 1 {
+        let row_buffer = &mut buffer[0..(dst_width * 3) as usize];
+        let dst_y = 0u32;
+        for dst_x in 0..dst_width {
+            let dst_point = Vector3::new(dst_x as f32, dst_y as f32, 1.0);
+            let src_point = inv_matrix * dst_point;
+            let mut final_pixel = Rgb([0, 0, 0]);
+            if src_point.z.abs() > f32::EPSILON {
+                let src_x = src_point.x / src_point.z;
+                let src_y = src_point.y / src_point.z;
+                if src_x >= 0.0
+                    && src_y >= 0.0
+                    && src_x < (src_width - 1) as f32
+                    && src_y < (src_height - 1) as f32
+                {
+                    final_pixel = bilinear_interpolate(src_image, src_x, src_y);
                 }
-
-                // Write the pixel to the destination image
-                let index = (dst_x * 3) as usize;
-                row_buffer[index..index + 3].copy_from_slice(&final_pixel.0);
             }
-        });
+            let index = (dst_x * 3) as usize;
+            row_buffer[index..index + 3].copy_from_slice(&final_pixel.0);
+        }
+    } else {
+        buffer
+            .par_chunks_mut((dst_width * 3) as usize)
+            .enumerate()
+            .for_each(|(dst_y, row_buffer)| {
+                for dst_x in 0..dst_width {
+                    let dst_point = Vector3::new(dst_x as f32, dst_y as f32, 1.0);
+                    let src_point = inv_matrix * dst_point;
+                    let mut final_pixel = Rgb([0, 0, 0]);
+                    if src_point.z.abs() > f32::EPSILON {
+                        let src_x = src_point.x / src_point.z;
+                        let src_y = src_point.y / src_point.z;
+                        if src_x >= 0.0
+                            && src_y >= 0.0
+                            && src_x < (src_width - 1) as f32
+                            && src_y < (src_height - 1) as f32
+                        {
+                            final_pixel = bilinear_interpolate(src_image, src_x, src_y);
+                        }
+                    }
+                    let index = (dst_x * 3) as usize;
+                    row_buffer[index..index + 3].copy_from_slice(&final_pixel.0);
+                }
+            });
+    }
 
     Ok(dst_image)
 }

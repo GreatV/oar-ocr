@@ -26,7 +26,7 @@ use ndarray::{Array2, Array3, Array4, ArrayD, Axis};
 /// # Examples
 ///
 /// ```
-/// use oar_ocr::prelude::vec_to_tensor2d;
+/// use oar_ocr::utils::tensor::vec_to_tensor2d;
 /// let data = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
 /// let tensor = vec_to_tensor2d(&data);
 /// ```
@@ -75,7 +75,19 @@ pub fn vec_to_tensor2d(data: &[Vec<f32>]) -> Result<Tensor2D, OCRError> {
     }
 
     let flat_data: Vec<f32> = data.iter().flat_map(|row| row.iter().cloned()).collect();
-    Array2::from_shape_vec((rows, cols), flat_data).map_err(OCRError::Tensor)
+    let flat_data_len = flat_data.len();
+    Array2::from_shape_vec((rows, cols), flat_data).map_err(|e| {
+        OCRError::tensor_operation_error(
+            "vec_to_tensor2d",
+            &[rows, cols],
+            &[flat_data_len],
+            &format!(
+                "Failed to create 2D tensor from {} rows x {} cols data",
+                rows, cols
+            ),
+            e,
+        )
+    })
 }
 
 /// Converts a 2D tensor into a 2D vector of f32 values.
@@ -91,7 +103,7 @@ pub fn vec_to_tensor2d(data: &[Vec<f32>]) -> Result<Tensor2D, OCRError> {
 /// # Examples
 ///
 /// ```
-/// use oar_ocr::prelude::{tensor2d_to_vec, vec_to_tensor2d};
+/// use oar_ocr::utils::tensor::{tensor2d_to_vec, vec_to_tensor2d};
 /// // Create a tensor first
 /// let data = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
 /// let tensor = vec_to_tensor2d(&data).unwrap();
@@ -115,7 +127,7 @@ pub fn tensor2d_to_vec(tensor: &Tensor2D) -> Vec<Vec<f32>> {
 /// # Examples
 ///
 /// ```
-/// use oar_ocr::prelude::vec_to_tensor3d;
+/// use oar_ocr::utils::tensor::vec_to_tensor3d;
 /// let data = vec![vec![vec![1.0, 2.0], vec![3.0, 4.0]]];
 /// let tensor = vec_to_tensor3d(&data);
 /// ```
@@ -183,8 +195,20 @@ pub fn vec_to_tensor3d(data: &[Vec<Vec<f32>>]) -> Result<Tensor3D, OCRError> {
         .iter()
         .flat_map(|slice| slice.iter().flat_map(|row| row.iter().cloned()))
         .collect();
+    let flat_data_len = flat_data.len();
 
-    Array3::from_shape_vec((dim0, dim1, dim2), flat_data).map_err(OCRError::Tensor)
+    Array3::from_shape_vec((dim0, dim1, dim2), flat_data).map_err(|e| {
+        OCRError::tensor_operation_error(
+            "vec_to_tensor3d",
+            &[dim0, dim1, dim2],
+            &[flat_data_len],
+            &format!(
+                "Failed to create 3D tensor from {}x{}x{} data",
+                dim0, dim1, dim2
+            ),
+            e,
+        )
+    })
 }
 
 /// Converts a 3D tensor into a 3D vector of f32 values.
@@ -200,7 +224,7 @@ pub fn vec_to_tensor3d(data: &[Vec<Vec<f32>>]) -> Result<Tensor3D, OCRError> {
 /// # Examples
 ///
 /// ```
-/// use oar_ocr::prelude::{tensor3d_to_vec, vec_to_tensor3d};
+/// use oar_ocr::utils::tensor::{tensor3d_to_vec, vec_to_tensor3d};
 /// // Create a tensor first
 /// let data = vec![vec![vec![1.0, 2.0], vec![3.0, 4.0]]];
 /// let tensor = vec_to_tensor3d(&data).unwrap();
@@ -227,7 +251,7 @@ pub fn tensor3d_to_vec(tensor: &Tensor3D) -> Vec<Vec<Vec<f32>>> {
 /// # Examples
 ///
 /// ```
-/// use oar_ocr::prelude::vec_to_tensor4d;
+/// use oar_ocr::utils::tensor::vec_to_tensor4d;
 /// let data = vec![vec![vec![vec![1.0, 2.0], vec![3.0, 4.0]]]];
 /// let tensor = vec_to_tensor4d(&data);
 /// ```
@@ -331,7 +355,7 @@ pub fn vec_to_tensor4d(data: &[Vec<Vec<Vec<f32>>>]) -> Result<Tensor4D, OCRError
 /// # Examples
 ///
 /// ```
-/// use oar_ocr::prelude::{tensor4d_to_vec, vec_to_tensor4d};
+/// use oar_ocr::utils::tensor::{tensor4d_to_vec, vec_to_tensor4d};
 /// // Create a tensor first
 /// let data = vec![vec![vec![vec![1.0, 2.0], vec![3.0, 4.0]]]];
 /// let tensor = vec_to_tensor4d(&data).unwrap();
@@ -364,13 +388,25 @@ pub fn tensor4d_to_vec(tensor: &Tensor4D) -> Vec<Vec<Vec<Vec<f32>>>> {
 /// # Examples
 ///
 /// ```
-/// use oar_ocr::prelude::vec_to_tensor1d;
+/// use oar_ocr::utils::tensor::vec_to_tensor1d;
 /// let data = vec![1.0, 2.0, 3.0, 4.0];
 /// let shape = &[2, 2];
 /// let tensor = vec_to_tensor1d(data, shape);
 /// ```
 pub fn vec_to_tensor1d(data: Vec<f32>, shape: &[usize]) -> Result<Tensor1D, OCRError> {
-    ArrayD::from_shape_vec(shape, data).map_err(OCRError::Tensor)
+    let data_len = data.len();
+    ArrayD::from_shape_vec(shape, data).map_err(|e| {
+        OCRError::tensor_operation_error(
+            "vec_to_tensor1d",
+            shape,
+            &[data_len],
+            &format!(
+                "Failed to create 1D tensor with shape {:?} from {} elements",
+                shape, data_len
+            ),
+            e,
+        )
+    })
 }
 
 /// Converts a 1D tensor into a 1D vector of f32 values.
@@ -386,7 +422,7 @@ pub fn vec_to_tensor1d(data: Vec<f32>, shape: &[usize]) -> Result<Tensor1D, OCRE
 /// # Examples
 ///
 /// ```
-/// use oar_ocr::prelude::{tensor1d_to_vec, vec_to_tensor1d};
+/// use oar_ocr::utils::tensor::{tensor1d_to_vec, vec_to_tensor1d};
 /// // Create a tensor first
 /// let data = vec![1.0, 2.0, 3.0, 4.0];
 /// let shape = &[4];
@@ -412,7 +448,7 @@ pub fn tensor1d_to_vec(tensor: &Tensor1D) -> Vec<f32> {
 /// # Examples
 ///
 /// ```
-/// use oar_ocr::prelude::{tensor4d_slice, vec_to_tensor4d};
+/// use oar_ocr::utils::tensor::{tensor4d_slice, vec_to_tensor4d};
 /// // Create a tensor first
 /// let data = vec![vec![vec![vec![1.0, 2.0], vec![3.0, 4.0]]]];
 /// let tensor = vec_to_tensor4d(&data).unwrap();
@@ -446,7 +482,7 @@ pub fn tensor4d_slice(tensor: &Tensor4D, index: usize) -> Result<Tensor3D, OCREr
 /// # Examples
 ///
 /// ```
-/// use oar_ocr::prelude::{tensor3d_slice, vec_to_tensor3d};
+/// use oar_ocr::utils::tensor::{tensor3d_slice, vec_to_tensor3d};
 /// // Create a tensor first
 /// let data = vec![vec![vec![1.0, 2.0], vec![3.0, 4.0]]];
 /// let tensor = vec_to_tensor3d(&data).unwrap();
@@ -479,7 +515,7 @@ pub fn tensor3d_slice(tensor: &Tensor3D, index: usize) -> Result<Tensor2D, OCREr
 /// # Examples
 ///
 /// ```
-/// use oar_ocr::prelude::{stack_tensor3d, vec_to_tensor3d};
+/// use oar_ocr::utils::tensor::{stack_tensor3d, vec_to_tensor3d};
 /// // Create tensors first
 /// let data1 = vec![vec![vec![1.0, 2.0], vec![3.0, 4.0]]];
 /// let data2 = vec![vec![vec![5.0, 6.0], vec![7.0, 8.0]]];
@@ -511,14 +547,16 @@ pub fn stack_tensor3d(tensors: &[Tensor3D]) -> Result<Tensor4D, OCRError> {
         }
 
         if i > 0 && tensor.shape() != first_shape {
-            return Err(OCRError::InvalidInput {
-                message: format!(
-                    "All tensors must have the same shape for stacking. Tensor 0 has shape {:?}, tensor {} has shape {:?}",
-                    first_shape,
-                    i,
-                    tensor.shape()
+            return Err(OCRError::tensor_operation_error(
+                "stack_tensor3d_shape_validation",
+                first_shape,
+                tensor.shape(),
+                &format!(
+                    "Tensor shape mismatch during 3D tensor stacking at index {}",
+                    i
                 ),
-            });
+                crate::core::errors::SimpleError::new("Inconsistent tensor shapes for stacking"),
+            ));
         }
     }
 
@@ -544,7 +582,24 @@ pub fn stack_tensor3d(tensors: &[Tensor3D]) -> Result<Tensor4D, OCRError> {
 
     let views: Vec<_> = tensors.iter().map(|t| t.view()).collect();
 
-    ndarray::stack(Axis(0), &views).map_err(OCRError::Tensor)
+    ndarray::stack(Axis(0), &views).map_err(|e| {
+        OCRError::tensor_operation_error(
+            "stack_tensor3d",
+            &[
+                tensors.len(),
+                first_shape[0],
+                first_shape[1],
+                first_shape[2],
+            ],
+            &[result_size],
+            &format!(
+                "Failed to stack {} 3D tensors of shape {:?}",
+                tensors.len(),
+                first_shape
+            ),
+            e,
+        )
+    })
 }
 
 /// Stacks a slice of 2D tensors into a single 3D tensor.
@@ -561,7 +616,7 @@ pub fn stack_tensor3d(tensors: &[Tensor3D]) -> Result<Tensor4D, OCRError> {
 /// # Examples
 ///
 /// ```
-/// use oar_ocr::prelude::{stack_tensor2d, vec_to_tensor2d};
+/// use oar_ocr::utils::tensor::{stack_tensor2d, vec_to_tensor2d};
 /// // Create tensors first
 /// let data1 = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
 /// let data2 = vec![vec![5.0, 6.0], vec![7.0, 8.0]];

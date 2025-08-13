@@ -202,10 +202,10 @@ fn draw_detection_results(
     // Get image dimensions for bounds checking
     let img_bounds = (img.width() as i32, img.height() as i32);
 
-    for (i, bbox) in result.text_boxes.iter().enumerate() {
-        draw_bounding_box(img, bbox, config, x_offset, img_bounds);
+    for region in result.text_regions.iter() {
+        draw_bounding_box(img, &region.bounding_box, config, x_offset, img_bounds);
 
-        draw_text_for_bbox(img, result, bbox, config, i, x_offset, img_bounds);
+        draw_text_for_region(img, region, config, x_offset, img_bounds);
     }
 
     Ok(())
@@ -253,39 +253,33 @@ fn draw_bounding_box(
     }
 }
 
-/// Draws recognized text within a bounding box on an image.
+/// Draws recognized text within a text region on an image.
 ///
-/// This function retrieves the recognized text for a given bounding box and draws it
-/// on the image. It handles both horizontal and vertical text layouts based on the
+/// This function draws the recognized text from a TextRegion on the image.
+/// It handles both horizontal and vertical text layouts based on the
 /// bounding box dimensions.
 ///
 /// # Arguments
 ///
 /// * `img` - The image to draw on
-/// * `result` - The OCR results containing recognized text
-/// * `bbox` - The bounding box for positioning the text
+/// * `region` - The text region containing the text and bounding box
 /// * `config` - Visualization configuration including font settings
-/// * `index` - Index of the text in the results to draw
 /// * `x_offset` - Horizontal offset for positioning
 /// * `img_bounds` - Image dimensions as (width, height) for bounds checking
-fn draw_text_for_bbox(
+fn draw_text_for_region(
     img: &mut RgbImage,
-    result: &OAROCRResult,
-    bbox: &BoundingBox,
+    region: &crate::prelude::TextRegion,
     config: &VisualizationConfig,
-    index: usize,
     x_offset: i32,
     img_bounds: (i32, i32),
 ) {
-    // Check if we have text for this bounding box
-    if index >= result.rec_texts.len() {
+    // Check if the text is available (not filtered out)
+    let Some(text) = &region.text else {
         return;
-    }
-
-    let text = &result.rec_texts[index];
+    };
     let Some(ref font) = config.font else { return };
 
-    let Some(layout) = calculate_text_layout(bbox, x_offset, text, font) else {
+    let Some(layout) = calculate_text_layout(&region.bounding_box, x_offset, text, font) else {
         return;
     };
 

@@ -410,11 +410,15 @@ impl NormalizeImage {
 
                 ndarray::Array4::from_shape_vec(
                     (1, channels as usize, height as usize, width as usize),
-                    result,
+                    result.clone(),
                 )
                 .map_err(|e| {
-                    OCRError::tensor_operation(
-                        "Failed to create normalization tensor in CHW format",
+                    OCRError::tensor_operation_error(
+                        "normalization_tensor_creation_chw",
+                        &[1, channels as usize, height as usize, width as usize],
+                        &[result.len()],
+                        &format!("Failed to create CHW normalization tensor for {}x{} image with {} channels",
+                            width, height, channels),
                         e,
                     )
                 })
@@ -437,11 +441,15 @@ impl NormalizeImage {
 
                 ndarray::Array4::from_shape_vec(
                     (1, height as usize, width as usize, channels as usize),
-                    result,
+                    result.clone(),
                 )
                 .map_err(|e| {
-                    OCRError::tensor_operation(
-                        "Failed to create normalization tensor in HWC format",
+                    OCRError::tensor_operation_error(
+                        "normalization_tensor_creation_hwc",
+                        &[1, height as usize, width as usize, channels as usize],
+                        &[result.len()],
+                        &format!("Failed to create HWC normalization tensor for {}x{} image with {} channels",
+                            width, height, channels),
                         e,
                     )
                 })
@@ -495,25 +503,40 @@ impl NormalizeImage {
                 let mut result = vec![0.0f32; batch_size * (channels * height * width) as usize];
 
                 let img_size = (channels * height * width) as usize;
-                result
-                    .par_chunks_mut(img_size)
-                    .enumerate()
-                    .for_each(|(batch_idx, batch_slice)| {
-                        let rgb_img = &rgb_imgs[batch_idx];
-
-                        for c in 0..channels {
-                            for y in 0..height {
-                                for x in 0..width {
-                                    let pixel = rgb_img.get_pixel(x, y);
-                                    let channel_value = pixel[c as usize] as f32;
-                                    let dst_idx = (c * height * width + y * width + x) as usize;
-
-                                    batch_slice[dst_idx] = channel_value * self.alpha[c as usize]
-                                        + self.beta[c as usize];
-                                }
+                if batch_size <= 1 {
+                    // Avoid rayon overhead for single-image batches
+                    let rgb_img = &rgb_imgs[0];
+                    let batch_slice = &mut result[0..img_size];
+                    for c in 0..channels {
+                        for y in 0..height {
+                            for x in 0..width {
+                                let pixel = rgb_img.get_pixel(x, y);
+                                let channel_value = pixel[c as usize] as f32;
+                                let dst_idx = (c * height * width + y * width + x) as usize;
+                                batch_slice[dst_idx] =
+                                    channel_value * self.alpha[c as usize] + self.beta[c as usize];
                             }
                         }
-                    });
+                    }
+                } else {
+                    result.par_chunks_mut(img_size).enumerate().for_each(
+                        |(batch_idx, batch_slice)| {
+                            let rgb_img = &rgb_imgs[batch_idx];
+                            for c in 0..channels {
+                                for y in 0..height {
+                                    for x in 0..width {
+                                        let pixel = rgb_img.get_pixel(x, y);
+                                        let channel_value = pixel[c as usize] as f32;
+                                        let dst_idx = (c * height * width + y * width + x) as usize;
+                                        batch_slice[dst_idx] = channel_value
+                                            * self.alpha[c as usize]
+                                            + self.beta[c as usize];
+                                    }
+                                }
+                            }
+                        },
+                    );
+                }
 
                 ndarray::Array4::from_shape_vec(
                     (
@@ -535,26 +558,41 @@ impl NormalizeImage {
                 let mut result = vec![0.0f32; batch_size * (height * width * channels) as usize];
 
                 let img_size = (height * width * channels) as usize;
-                result
-                    .par_chunks_mut(img_size)
-                    .enumerate()
-                    .for_each(|(batch_idx, batch_slice)| {
-                        let rgb_img = &rgb_imgs[batch_idx];
-
-                        for y in 0..height {
-                            for x in 0..width {
-                                let pixel = rgb_img.get_pixel(x, y);
-                                for c in 0..channels {
-                                    let channel_value = pixel[c as usize] as f32;
-                                    let dst_idx =
-                                        (y * width * channels + x * channels + c) as usize;
-
-                                    batch_slice[dst_idx] = channel_value * self.alpha[c as usize]
-                                        + self.beta[c as usize];
-                                }
+                if batch_size <= 1 {
+                    // Avoid rayon overhead for single-image batches
+                    let rgb_img = &rgb_imgs[0];
+                    let batch_slice = &mut result[0..img_size];
+                    for y in 0..height {
+                        for x in 0..width {
+                            let pixel = rgb_img.get_pixel(x, y);
+                            for c in 0..channels {
+                                let channel_value = pixel[c as usize] as f32;
+                                let dst_idx = (y * width * channels + x * channels + c) as usize;
+                                batch_slice[dst_idx] =
+                                    channel_value * self.alpha[c as usize] + self.beta[c as usize];
                             }
                         }
-                    });
+                    }
+                } else {
+                    result.par_chunks_mut(img_size).enumerate().for_each(
+                        |(batch_idx, batch_slice)| {
+                            let rgb_img = &rgb_imgs[batch_idx];
+                            for y in 0..height {
+                                for x in 0..width {
+                                    let pixel = rgb_img.get_pixel(x, y);
+                                    for c in 0..channels {
+                                        let channel_value = pixel[c as usize] as f32;
+                                        let dst_idx =
+                                            (y * width * channels + x * channels + c) as usize;
+                                        batch_slice[dst_idx] = channel_value
+                                            * self.alpha[c as usize]
+                                            + self.beta[c as usize];
+                                    }
+                                }
+                            }
+                        },
+                    );
+                }
 
                 ndarray::Array4::from_shape_vec(
                     (

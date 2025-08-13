@@ -1,366 +1,306 @@
 //! Macros for the OCR pipeline.
 //!
-//! This module defines various macros that are used throughout the OCR pipeline
-//! to reduce code duplication and provide common functionality for implementing
-//! predictors, builders, and configuration validation.
+//! This module provides utility macros to reduce code duplication across
+//! the OCR pipeline, particularly for builder patterns and metrics collection.
 
-/// Implements a builder pattern for a predictor.
+/// Macro to handle optional nested config initialization in builders.
 ///
-/// This macro generates a builder struct and implementations for a predictor,
-/// providing a fluent API for configuring and building the predictor.
+/// This macro eliminates the repeated pattern of:
+/// ```rust,ignore
+/// if self.config.field.is_none() {
+///     self.config.field = Some(Type::new());
+/// }
+/// ```
 ///
-/// # Parameters
-///
-/// * `$builder_name` - The name of the builder struct to generate.
-/// * `$predictor_name` - The name of the predictor struct.
-/// * `{ $( $field:ident : $t:ty ),* }` - A list of fields for the builder.
-///
-/// # Example
+/// # Usage
 ///
 /// ```rust,ignore
-/// use oar_ocr::impl_builder;
-/// # struct MyBuilder { model_path: Option<String>, batch_size: Option<usize> }
-/// # struct MyPredictor;
-/// impl_builder!(MyBuilder, MyPredictor, { model_path: String, batch_size: usize });
+/// // Instead of:
+/// if self.config.orientation.is_none() {
+///     self.config.orientation = Some(DocOrientationClassifierConfig::new());
+/// }
+/// if let Some(ref mut config) = self.config.orientation {
+///     config.confidence_threshold = Some(threshold);
+/// }
+///
+/// // Use:
+/// with_nested!(self.config.orientation, DocOrientationClassifierConfig, config => {
+///     config.confidence_threshold = Some(threshold);
+/// });
 /// ```
 #[macro_export]
-macro_rules! impl_builder {
-    ($builder_name:ident, $predictor_name:ident, { $( $field:ident : $t:ty ),* $(,)? } ) => {
-        impl $builder_name {
-            pub fn new() -> Self {
-                Self {
-                    $( $field: None, )*
-                }
-            }
-
-            $(
-                pub fn $field(mut self, $field: $t) -> Self {
-                    self.$field = Some($field);
-                    self
-                }
-            )*
-
-            pub fn build(self, model_path: impl AsRef<Path>) -> Result<$predictor_name, OCRError> {
-                self.build_internal(model_path.as_ref())
-            }
+macro_rules! with_nested {
+    ($field:expr, $type:ty, $var:ident => $body:block) => {
+        if $field.is_none() {
+            $field = Some(<$type>::new());
         }
-
-        impl Default for $builder_name {
-            fn default() -> Self {
-                Self::new()
-            }
+        if let Some(ref mut $var) = $field {
+            $body
         }
     };
 }
 
-/// Implements an enhanced builder pattern for a predictor with validation.
+/// Macro to create pre-populated StageMetrics with common patterns.
 ///
-/// This macro generates a builder struct and implementations for a predictor,
-/// providing a fluent API for configuring and building the predictor with validation.
+/// This macro reduces duplication in metrics construction across stages.
 ///
-/// # Parameters
-///
-/// * `$builder_name` - The name of the builder struct to generate.
-/// * `$predictor_name` - The name of the predictor struct.
-/// * `$error_type` - The type of error to return for validation errors.
-/// * `$predictor_type` - A string expression representing the predictor type.
-/// * `{ $( $field:ident : $t:ty ),* }` - A list of fields for the builder.
-/// * `{ $( $val_field:ident => $validation:tt ),* }` - A list of fields and their validation rules.
-///
-/// # Example
+/// # Usage
 ///
 /// ```rust,ignore
-/// use oar_ocr::impl_enhanced_builder;
-/// # struct MyBuilder { model_path: Option<String>, batch_size: Option<usize> }
-/// # struct MyPredictor;
-/// # struct MyError;
-/// impl_enhanced_builder!(MyBuilder, MyPredictor, MyError, "my_predictor",
-///     { model_path: String, batch_size: usize },
-///     { batch_size => positive_int });
+/// // Instead of:
+/// StageMetrics::new(success_count, failure_count)
+///     .with_processing_time(start_time.elapsed())
+///     .with_info("stage", "cropping")
+///     .with_info("batch_size", batch_size.to_string())
+///     .with_info("parallel", parallel.to_string())
+///
+/// // Use:
+/// metrics!(success_count, failure_count, start_time; stage = "cropping", batch_size = batch_size, parallel = parallel)
+/// // Or without timing:
+/// metrics!(success_count, failure_count; stage = "cropping", batch_size = batch_size)
 /// ```
 #[macro_export]
-macro_rules! impl_enhanced_builder {
-
-    ($builder_name:ident, $predictor_name:ident, $error_type:ident, $predictor_type:expr,
-     { $( $field:ident : $t:ty ),* $(,)? },
-     { $( $val_field:ident => $validation:tt ),* $(,)? }) => {
-
-        impl $builder_name {
-            pub fn new() -> Self {
-                Self {
-                    $( $field: None, )*
-                }
-            }
-
+macro_rules! metrics {
+    // With timing
+    ($success:expr, $failure:expr, $start_time:expr; $($key:ident = $value:expr),*) => {
+        {
+            let mut metrics = $crate::pipeline::stages::StageMetrics::new($success, $failure);
+            metrics = metrics.with_processing_time($start_time.elapsed());
             $(
-                pub fn $field(mut self, $field: $t) -> Self {
-                    self.$field = Some($field);
-                    self
-                }
+                metrics = metrics.with_info(stringify!($key), $value.to_string());
             )*
-
-            pub fn build(self, model_path: impl AsRef<Path>) -> Result<$predictor_name, $error_type> {
-
-                self.validate()?;
-                self.build_internal(model_path.as_ref())
-            }
-
-
-            pub fn validate(&self) -> Result<(), $error_type> {
-                $(
-                    $crate::impl_enhanced_builder!(@validate_field self, $val_field, self.$val_field, $validation, $error_type);
-                )*
-                Ok(())
-            }
-
-
-            #[allow(dead_code)]
-            fn validate_batch_size(&self, batch_size: Option<usize>) -> Result<(), $error_type> {
-                if let Some(size) = batch_size {
-                    if size == 0 {
-                        return Err($error_type::ConfigError {
-                            message: "Batch size must be greater than 0".to_string(),
-                        });
-                    }
-                }
-                Ok(())
-            }
-
-            #[allow(dead_code)]
-            fn validate_positive(&self, value: Option<f32>, field_name: &str) -> Result<(), $error_type> {
-                if let Some(val) = value {
-                    if val <= 0.0 {
-                        return Err($error_type::ConfigError {
-                            message: format!("{} must be greater than 0", field_name),
-                        });
-                    }
-                }
-                Ok(())
-            }
-
-            #[allow(dead_code)]
-            fn validate_positive_int(&self, value: Option<usize>, field_name: &str) -> Result<(), $error_type> {
-                if let Some(val) = value {
-                    if val == 0 {
-                        return Err($error_type::ConfigError {
-                            message: format!("{} must be greater than 0", field_name),
-                        });
-                    }
-                }
-                Ok(())
-            }
-        }
-
-        impl Default for $builder_name {
-            fn default() -> Self {
-                Self::new()
-            }
-        }
-
-        impl $crate::core::traits::PredictorBuilder for $builder_name {
-            type Predictor = $predictor_name;
-
-            fn build_typed(self, model_path: &Path) -> Result<Self::Predictor, $crate::core::errors::OCRError> {
-                self.build_internal(model_path)
-            }
-
-            fn build_predictor(self, model_path: &Path) -> Result<Box<dyn $crate::core::traits::Predictor>, $crate::core::errors::OCRError> {
-                Ok(Box::new(self.build_internal(model_path)?))
-            }
-
-            fn predictor_type(&self) -> &str {
-                $predictor_type
-            }
+            metrics
         }
     };
-
-
-    ($builder_name:ident, $predictor_name:ident, $error_type:ident, $predictor_type:expr, { $( $field:ident : $t:ty ),* $(,)? }) => {
-        $crate::impl_enhanced_builder!($builder_name, $predictor_name, $error_type, $predictor_type, { $( $field: $t ),* }, {});
-    };
-
-
-    ($builder_name:ident, $predictor_name:ident, $error_type:ident, $predictor_type:expr,
-     { $( $field:ident : $t:ty ),* $(,)? },
-     { $( $val_field:ident => $validation:tt ),* $(,)? },
-     defaults: { $( $default_field:ident = $default_value:expr ),* $(,)? }) => {
-
-        impl $builder_name {
-            pub fn new() -> Self {
-                Self {
-                    $( $field: None, )*
-                }
-            }
-
+    // Without timing
+    ($success:expr, $failure:expr; $($key:ident = $value:expr),*) => {
+        {
+            let mut metrics = $crate::pipeline::stages::StageMetrics::new($success, $failure);
             $(
-                pub fn $field(mut self, $field: $t) -> Self {
-                    self.$field = Some($field);
-                    self
-                }
+                metrics = metrics.with_info(stringify!($key), $value.to_string());
             )*
-
-
-            $(
-                pub fn $default_field(&self) -> $t {
-                    self.$default_field.clone().unwrap_or($default_value)
-                }
-            )*
-
-            pub fn build(self, model_path: impl AsRef<Path>) -> Result<$predictor_name, $error_type> {
-                self.validate()?;
-                self.build_internal(model_path.as_ref())
-            }
-
-            pub fn validate(&self) -> Result<(), $error_type> {
-                $(
-                    $crate::impl_enhanced_builder!(@validate_field self, $val_field, self.$val_field, $validation, $error_type);
-                )*
-                Ok(())
-            }
-        }
-
-        impl Default for $builder_name {
-            fn default() -> Self {
-                Self::new()
-            }
-        }
-
-        impl $crate::core::traits::PredictorBuilder for $builder_name {
-            type Predictor = $predictor_name;
-
-            fn build_typed(self, model_path: &Path) -> Result<Self::Predictor, $crate::core::errors::OCRError> {
-                self.build_internal(model_path)
-            }
-
-            fn build_predictor(self, model_path: &Path) -> Result<Box<dyn $crate::core::traits::Predictor>, $crate::core::errors::OCRError> {
-                Ok(Box::new(self.build_internal(model_path)?))
-            }
-
-            fn predictor_type(&self) -> &str {
-                $predictor_type
-            }
-        }
-    };
-
-
-    (@validate_field $self:ident, $field:ident, $value:expr, positive, $error_type:ident) => {
-        if let Some(val) = $value {
-            if val <= 0.0 {
-                return Err($error_type::ConfigError {
-                    message: format!("{} must be greater than 0", stringify!($field)),
-                });
-            }
-        }
-    };
-
-    (@validate_field $self:ident, $field:ident, $value:expr, positive_int, $error_type:ident) => {
-        if let Some(val) = $value {
-            if val == 0 {
-                return Err($error_type::ConfigError {
-                    message: format!("{} must be greater than 0", stringify!($field)),
-                });
-            }
-        }
-    };
-
-    (@validate_field $self:ident, $field:ident, $value:expr, range($min:expr, $max:expr), $error_type:ident) => {
-        if let Some(val) = $value {
-            if val < $min || val > $max {
-                return Err($error_type::ConfigError {
-                    message: format!("{} must be between {} and {}", stringify!($field), $min, $max),
-                });
-            }
+            metrics
         }
     };
 }
 
-/// Implements configuration validation for a struct.
+/// Comprehensive builder macro for generating common builder method patterns.
 ///
-/// This macro generates validation methods for a configuration struct.
+/// This macro generates multiple types of builder methods to reduce code duplication:
+/// 1. Simple setters for direct field assignment
+/// 2. Nested config setters using the `with_nested!` macro
+/// 3. Enable/disable methods for optional features
+/// 4. Dynamic batching configuration methods
 ///
-/// # Parameters
-///
-/// * `$config_name` - The name of the configuration struct.
-/// * `$error_type` - The type of error to return for validation errors.
-/// * `{ $( $field:ident : $t:ty ),* }` - A list of fields for the configuration.
-///
-/// # Example
+/// # Usage
 ///
 /// ```rust,ignore
-/// use oar_ocr::impl_config_validation;
-/// # struct MyConfig { batch_size: usize, threshold: f32 }
-/// # struct MyError;
-/// impl_config_validation!(MyConfig, MyError, { batch_size: usize, threshold: f32 });
+/// impl_complete_builder! {
+///     builder: MyBuilder,
+///     config_field: config,
+///
+///     // Simple setters
+///     simple_setters: {
+///         field_name: FieldType => "Documentation for the setter",
+///     },
+///
+///     // Nested config setters
+///     nested_setters: {
+///         config_path: ConfigType => {
+///             field_name: FieldType => "Documentation",
+///         },
+///     },
+///
+///     // Enable/disable methods
+///     enable_methods: {
+///         method_name => config_field: DefaultType => "Documentation",
+///     },
+/// }
 /// ```
 #[macro_export]
-macro_rules! impl_config_validation {
-    ($config_name:ident, $error_type:ident, { $( $field:ident : $t:ty ),* $(,)? } ) => {
-        impl $config_name {
-            pub fn validate(&self) -> Result<(), $error_type> {
-                $(
-                    self.validate_$field()?;
-                )*
-                Ok(())
-            }
-
+macro_rules! impl_complete_builder {
+    // Simple setters only
+    (
+        builder: $builder:ident,
+        config_field: $config_field:ident,
+        simple_setters: {
+            $($simple_field:ident: $simple_type:ty => $simple_doc:literal),* $(,)?
+        }
+    ) => {
+        impl $builder {
             $(
-                fn validate_$field(&self) -> Result<(), $error_type> {
-                    Ok(())
+                #[doc = $simple_doc]
+                pub fn $simple_field(mut self, value: $simple_type) -> Self {
+                    self.$config_field.$simple_field = Some(value);
+                    self
+                }
+            )*
+        }
+    };
+
+    // Nested setters only
+    (
+        builder: $builder:ident,
+        config_field: $config_field:ident,
+        nested_setters: {
+            $($nested_path:ident: $nested_type:ty => {
+                $($nested_field:ident: $nested_field_type:ty => $nested_doc:literal),* $(,)?
+            }),* $(,)?
+        }
+    ) => {
+        impl $builder {
+            $($(
+                #[doc = $nested_doc]
+                pub fn $nested_field(mut self, value: $nested_field_type) -> Self {
+                    $crate::with_nested!(self.$config_field.$nested_path, $nested_type, config => {
+                        config.$nested_field = Some(value);
+                    });
+                    self
+                }
+            )*)*
+        }
+    };
+
+    // Enable methods only
+    (
+        builder: $builder:ident,
+        config_field: $config_field:ident,
+        enable_methods: {
+            $($enable_method:ident => $enable_field:ident: $enable_type:ty => $enable_doc:literal),* $(,)?
+        }
+    ) => {
+        impl $builder {
+            $(
+                #[doc = $enable_doc]
+                pub fn $enable_method(mut self) -> Self {
+                    self.$config_field.$enable_field = Some(<$enable_type>::default());
+                    self
                 }
             )*
         }
     };
 }
 
-/// Implements a builder configuration struct.
-///
-/// This macro generates a configuration struct with optional fields and default values.
-///
-/// # Parameters
-///
-/// * `$config_name` - The name of the configuration struct to generate.
-/// * `{ $( $field:ident : $t:ty = $default:expr ),* }` - A list of fields with their types and default values.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use oar_ocr::impl_builder_config;
-/// impl_builder_config!(MyConfig, { batch_size: usize = 32, threshold: f32 = 0.5 });
-/// ```
-#[macro_export]
-macro_rules! impl_builder_config {
-    ($config_name:ident, { $( $field:ident : $t:ty = $default:expr ),* $(,)? } ) => {
-        #[derive(Debug, Clone)]
-        pub struct $config_name {
-            $( pub $field: Option<$t>, )*
+#[cfg(test)]
+mod tests {
+
+    // Test configuration structs
+    #[derive(Debug, Default)]
+    struct TestConfig {
+        simple_field: Option<String>,
+        nested_config: Option<NestedConfig>,
+        enable_field: Option<EnabledFeature>,
+    }
+
+    #[derive(Debug, Default)]
+    struct NestedConfig {
+        nested_field: Option<i32>,
+    }
+
+    impl NestedConfig {
+        fn new() -> Self {
+            Self::default()
         }
+    }
 
-        impl $config_name {
-            pub fn new() -> Self {
-                Self {
-                    $( $field: None, )*
-                }
-            }
+    #[derive(Debug, Default)]
+    struct EnabledFeature {
+        #[allow(dead_code)]
+        enabled: bool,
+    }
 
-            $(
-                pub fn $field(mut self, value: $t) -> Self {
-                    self.$field = Some(value);
-                    self
-                }
-            )*
+    // Test builder struct
+    #[derive(Debug)]
+    struct TestBuilder {
+        config: TestConfig,
+    }
 
-
-            $(
-                pub fn $field(&self) -> $t {
-                    self.$field.clone().unwrap_or($default)
-                }
-            )*
-        }
-
-        impl Default for $config_name {
-            fn default() -> Self {
-                Self::new()
+    impl TestBuilder {
+        fn new() -> Self {
+            Self {
+                config: TestConfig::default(),
             }
         }
-    };
+
+        fn get_config(&self) -> &TestConfig {
+            &self.config
+        }
+    }
+
+    // Apply the macro to generate builder methods (separate calls for each type)
+    impl_complete_builder! {
+        builder: TestBuilder,
+        config_field: config,
+        simple_setters: {
+            simple_field: String => "Sets a simple field value",
+        }
+    }
+
+    impl_complete_builder! {
+        builder: TestBuilder,
+        config_field: config,
+        nested_setters: {
+            nested_config: NestedConfig => {
+                nested_field: i32 => "Sets a nested field value",
+            },
+        }
+    }
+
+    impl_complete_builder! {
+        builder: TestBuilder,
+        config_field: config,
+        enable_methods: {
+            enable_feature => enable_field: EnabledFeature => "Enables a feature with default configuration",
+        }
+    }
+
+    #[test]
+    fn test_impl_complete_builder_simple_setter() {
+        let builder = TestBuilder::new().simple_field("test_value".to_string());
+
+        assert_eq!(
+            builder.get_config().simple_field,
+            Some("test_value".to_string())
+        );
+    }
+
+    #[test]
+    fn test_impl_complete_builder_nested_setter() {
+        let builder = TestBuilder::new().nested_field(42);
+
+        assert!(builder.get_config().nested_config.is_some());
+        assert_eq!(
+            builder
+                .get_config()
+                .nested_config
+                .as_ref()
+                .unwrap()
+                .nested_field,
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn test_impl_complete_builder_enable_method() {
+        let builder = TestBuilder::new().enable_feature();
+
+        assert!(builder.get_config().enable_field.is_some());
+    }
+
+    #[test]
+    fn test_impl_complete_builder_chaining() {
+        let builder = TestBuilder::new()
+            .simple_field("test".to_string())
+            .nested_field(123)
+            .enable_feature();
+
+        let config = builder.get_config();
+        assert_eq!(config.simple_field, Some("test".to_string()));
+        assert!(config.nested_config.is_some());
+        assert_eq!(
+            config.nested_config.as_ref().unwrap().nested_field,
+            Some(123)
+        );
+        assert!(config.enable_field.is_some());
+    }
 }

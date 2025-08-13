@@ -20,6 +20,13 @@ categories = ["computer-vision", "science"]
 [features]
 default = []
 visualization = ["dep:ab_glyph"]
+# ONNX Runtime execution provider features
+cuda = ["ort/cuda"]
+tensorrt = ["ort/tensorrt"]
+directml = ["ort/directml"]
+coreml = ["ort/coreml"]
+webgpu = ["ort/webgpu"]
+openvino = ["ort/openvino"]
 
 [dependencies]
 image = "0.25.6"
@@ -38,6 +45,7 @@ thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ab_glyph = { version = "0.2", optional = true }
+paste = "1.0"
 
 [dev-dependencies]
 rand = "0.9"

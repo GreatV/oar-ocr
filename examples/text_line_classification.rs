@@ -8,6 +8,7 @@
 //! identify text orientations such as 0° and 180°.
 
 use clap::Parser;
+use oar_ocr::core::config::onnx::{OrtExecutionProvider, OrtSessionConfig};
 use oar_ocr::core::traits::StandardPredictor;
 use oar_ocr::predictor::TextLineClasPredictorBuilder;
 use oar_ocr::utils::init_tracing;
@@ -27,6 +28,10 @@ struct Args {
     /// Paths to input image files
     #[arg(required = true)]
     images: Vec<String>,
+
+    /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
+    #[arg(short, long, default_value = "cpu")]
+    device: String,
 }
 
 /// Display the classification results for text line orientation
@@ -63,6 +68,74 @@ fn display_classification_results(
             };
             info!("   Orientation: {} (confidence: {:.3})", orientation, score);
         }
+    }
+}
+
+/// Parse device string and create appropriate ONNX execution provider
+///
+/// # Arguments
+///
+/// * `device` - Device string (e.g., "cpu", "cuda", "cuda:0")
+///
+/// # Returns
+///
+/// Vector of execution providers in order of preference
+fn parse_device(device: &str) -> Result<Vec<OrtExecutionProvider>, Box<dyn std::error::Error>> {
+    let device = device.to_lowercase();
+
+    if device == "cpu" {
+        Ok(vec![OrtExecutionProvider::CPU])
+    } else if device == "cuda" {
+        #[cfg(feature = "cuda")]
+        {
+            Ok(vec![
+                OrtExecutionProvider::CUDA {
+                    device_id: Some(0),
+                    gpu_mem_limit: None,
+                    arena_extend_strategy: None,
+                    cudnn_conv_algo_search: None,
+                    do_copy_in_default_stream: None,
+                    cudnn_conv_use_max_workspace: None,
+                },
+                OrtExecutionProvider::CPU,
+            ])
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            error!("CUDA support not compiled in. Falling back to CPU.");
+            Ok(vec![OrtExecutionProvider::CPU])
+        }
+    } else if device.starts_with("cuda:") {
+        #[cfg(feature = "cuda")]
+        {
+            let device_id_str = device.strip_prefix("cuda:").unwrap();
+            let device_id: i32 = device_id_str
+                .parse()
+                .map_err(|_| format!("Invalid CUDA device ID: {}", device_id_str))?;
+
+            Ok(vec![
+                OrtExecutionProvider::CUDA {
+                    device_id: Some(device_id),
+                    gpu_mem_limit: None,
+                    arena_extend_strategy: None,
+                    cudnn_conv_algo_search: None,
+                    do_copy_in_default_stream: None,
+                    cudnn_conv_use_max_workspace: None,
+                },
+                OrtExecutionProvider::CPU,
+            ])
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            error!("CUDA support not compiled in. Falling back to CPU.");
+            Ok(vec![OrtExecutionProvider::CPU])
+        }
+    } else {
+        Err(format!(
+            "Unsupported device: {}. Supported devices: cpu, cuda, cuda:N",
+            device
+        )
+        .into())
     }
 }
 
@@ -104,12 +177,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No valid image files found".into());
     }
 
+    // Parse device configuration
+    let execution_providers = parse_device(&args.device)?;
+    info!(
+        "Using device: {} with providers: {:?}",
+        args.device, execution_providers
+    );
+
+    // Create ONNX session configuration with device settings
+    let ort_config = OrtSessionConfig::new().with_execution_providers(execution_providers);
+
     // Create a text line classifier predictor with specified parameters
     let predictor = TextLineClasPredictorBuilder::new()
         .topk(2) // Return top 2 predictions
         .batch_size(4) // Process 4 images at a time
         .model_name("PP-LCNet_x0_25_text_line_clas") // Model name
         .input_shape((160, 80)) // Input image dimensions
+        .ort_session(ort_config) // Set device configuration
         .build(Path::new(model_path))?;
 
     // Load all images into memory

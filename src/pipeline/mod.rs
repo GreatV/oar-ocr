@@ -5,8 +5,16 @@
 //! detection, text recognition, and text line classification.
 
 mod config;
-mod oarocr;
+pub mod oarocr;
+pub mod stages;
 
 // Re-export the main OCR pipeline components for easier access
 pub use config::{ConfigFormat, ConfigLoader};
-pub use oarocr::{OAROCR, OAROCRBuilder, OAROCRConfig, OAROCRResult};
+pub use oarocr::{
+    ErrorMetrics, ExtensibleOAROCR, ExtensibleOAROCRBuilder, ImageProcessor, OAROCR, OAROCRBuilder,
+    OAROCRConfig, OAROCRResult, TextRegion, configure_thread_pool_once,
+};
+pub use stages::{
+    CroppingStageProcessor, OrientationStageProcessor, RecognitionStageProcessor, StageMetrics,
+    StageResult,
+};

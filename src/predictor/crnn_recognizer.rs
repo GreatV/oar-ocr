@@ -148,10 +148,12 @@ impl TextRecPredictor {
     /// and model path.
     pub fn new(config: TextRecPredictorConfig, model_path: &Path) -> Result<Self, OCRError> {
         let model_input_shape = config.model_input_shape.unwrap_or([3, 32, 320]);
-        let character_dict = config.character_dict;
+        let character_dict = config.character_dict.clone();
         let model_name = config
             .common
             .model_name
+            .as_ref()
+            .cloned()
             .unwrap_or_else(|| "crnn".to_string());
         let batch_size = config.common.batch_size.unwrap_or(32);
 
@@ -161,7 +163,15 @@ impl TextRecPredictor {
         let resize = OCRResize::new(Some(model_input_shape), None);
         let normalize = NormalizeImage::for_ocr_recognition()?;
         let to_batch = ToBatch::new();
-        let infer = OrtInfer::new(model_path, None)?;
+        let infer = OrtInfer::from_common(
+            &TextRecPredictorConfig {
+                common: config.common.clone(),
+                ..config.clone()
+            }
+            .common,
+            model_path,
+            None,
+        )?;
         let post_op = CTCLabelDecode::from_string_list(character_dict.as_deref(), true, false);
 
         Ok(Self {
@@ -223,11 +233,37 @@ impl StandardPredictor for TextRecPredictor {
             .map(image::DynamicImage::ImageRgb8)
             .collect();
 
-        self.normalize.normalize_batch_to(dynamic_imgs)
+        let batch_size = dynamic_imgs.len();
+        self.normalize
+            .normalize_batch_to(dynamic_imgs)
+            .map_err(|e| {
+                OCRError::model_inference_error(
+                    &self.model_name,
+                    "preprocessing_normalization",
+                    0,
+                    &[batch_size], // batch size as shape info
+                    &format!(
+                        "Text recognition normalization failed for {} images with input shape {:?}",
+                        batch_size, self.model_input_shape
+                    ),
+                    e,
+                )
+            })
     }
 
     fn infer(&self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError> {
-        self.infer.infer_3d(input.clone())
+        let input_shape = input.shape().to_vec();
+        self.infer.infer_3d(input.clone()).map_err(|e| {
+            OCRError::model_inference_error(
+                &self.model_name,
+                "inference_3d",
+                0,
+                &input_shape,
+                &format!("Text recognition inference failed with input shape {:?}, model input shape {:?}",
+                    input_shape, self.model_input_shape),
+                e,
+            )
+        })
     }
 
     fn postprocess(
@@ -311,6 +347,31 @@ impl TextRecPredictorBuilder {
     /// This function enables or disables logging for the predictor.
     pub fn enable_logging(mut self, enable: bool) -> Self {
         self.common = self.common.enable_logging(enable);
+        self
+    }
+
+    /// Sets the ONNX Runtime session configuration
+    ///
+    /// This function sets the ONNX Runtime session configuration for the predictor.
+    pub fn ort_session(mut self, config: crate::core::config::onnx::OrtSessionConfig) -> Self {
+        self.common = self.common.ort_session(config);
+        self
+    }
+
+    /// Sets the session pool size for concurrent predictions
+    ///
+    /// This function sets the size of the session pool used for concurrent predictions.
+    /// The pool size must be >= 1.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - The session pool size (minimum 1)
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    pub fn session_pool_size(mut self, size: usize) -> Self {
+        self.common = self.common.session_pool_size(size);
         self
     }
 

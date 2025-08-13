@@ -10,6 +10,7 @@ use crate::core::traits::StandardPredictor;
 use crate::core::{
     BatchData, BatchSampler, CommonBuilderConfig, DefaultImageReader, ImageReader, OCRError,
     OrtInfer, Tensor2D, Tensor4D, ToBatch, config::ConfigValidator,
+    get_text_line_orientation_labels,
 };
 use crate::processors::{Crop, NormalizeImage, Topk};
 use image::{DynamicImage, RgbImage};
@@ -116,7 +117,7 @@ impl ConfigValidator for TextLineClasPredictorConfig {
         }
 
         if let Some((width, height)) = self.input_shape {
-            self.validate_image_dimensions(width, height, "input shape")?;
+            self.validate_image_dimensions(width, height)?;
         }
 
         Ok(())
@@ -224,13 +225,17 @@ impl TextLineClasPredictor {
         let model_name = config
             .common
             .model_name
+            .as_ref()
+            .cloned()
             .unwrap_or_else(|| "PP-LCNet_x0_25".to_string());
         let batch_size = config.common.batch_size.unwrap_or(1);
 
         // Create crop operation for preprocessing
         let crop = Some(
-            Crop::new(&[width, height], "C").map_err(|e| OCRError::ConfigError {
-                message: format!("Failed to create crop operation: {e}"),
+            Crop::new([width, height], crate::processors::CropMode::Center).map_err(|e| {
+                OCRError::ConfigError {
+                    message: format!("Failed to create crop operation: {e}"),
+                }
             })?,
         );
 
@@ -249,9 +254,17 @@ impl TextLineClasPredictor {
                 None,
             )?,
             to_batch: ToBatch::new(),
-            infer: OrtInfer::new(model_path, None)?,
+            infer: OrtInfer::from_common(
+                &TextLineClasPredictorConfig {
+                    common: config.common.clone(),
+                    ..config.clone()
+                }
+                .common,
+                model_path,
+                None,
+            )?,
             // Create Topk operator with label names for 0° and 180° rotations
-            post_op: Topk::new(Some(&["0".to_string(), "180".to_string()])),
+            post_op: Topk::from_class_names(get_text_line_orientation_labels()),
         })
     }
 
@@ -332,19 +345,16 @@ impl StandardPredictor for TextLineClasPredictor {
         images: Vec<RgbImage>,
         _config: Option<&Self::Config>,
     ) -> Result<Self::PreprocessOutput, OCRError> {
+        use crate::utils::resize_images_batch;
+
         let (width, height) = self.input_shape;
 
-        // Resize images to model input size
-        let mut batch_imgs = Vec::new();
-        for img in &images {
-            let resized =
-                image::imageops::resize(img, width, height, image::imageops::FilterType::Lanczos3);
-            batch_imgs.push(resized);
-        }
+        // Resize images to model input size using shared utility
+        let mut batch_imgs = resize_images_batch(&images, width, height, None);
 
         // Apply crop operation if available
         if let Some(crop_op) = &self.crop {
-            batch_imgs = crop_op.apply_rgb(&batch_imgs).map_err(|e| {
+            batch_imgs = crop_op.process_batch(&batch_imgs).map_err(|e| {
                 OCRError::post_processing("Crop operation failed during text classification", e)
             })?;
         }
@@ -398,7 +408,13 @@ impl StandardPredictor for TextLineClasPredictor {
         _config: Option<&Self::Config>,
     ) -> Result<Self::Result, OCRError> {
         // Apply Top-k operation to get the most confident predictions
-        let topk_result = self.post_op.apply(&output, self.topk.unwrap_or(2));
+        // Convert ndarray output to Vec<Vec<f32>> format expected by Topk
+        let predictions: Vec<Vec<f32>> = output.outer_iter().map(|row| row.to_vec()).collect();
+
+        let topk_result = self
+            .post_op
+            .process(&predictions, self.topk.unwrap_or(2))
+            .map_err(|e| OCRError::ConfigError { message: e })?;
 
         Ok(TextLineClasResult {
             input_path: batch_data.input_paths.clone(),
@@ -409,7 +425,8 @@ impl StandardPredictor for TextLineClasPredictor {
             scores: topk_result.scores,
             // Convert label names to Arc<str> for efficient sharing
             label_names: topk_result
-                .label_names
+                .class_names
+                .unwrap_or_default()
                 .into_iter()
                 .map(|names| names.into_iter().map(Arc::from).collect())
                 .collect(),
@@ -513,6 +530,31 @@ impl TextLineClasPredictorBuilder {
     /// The updated builder instance
     pub fn enable_logging(mut self, enable: bool) -> Self {
         self.common = self.common.enable_logging(enable);
+        self
+    }
+
+    /// Sets the ONNX Runtime session configuration
+    ///
+    /// This function sets the ONNX Runtime session configuration for the predictor.
+    pub fn ort_session(mut self, config: crate::core::config::onnx::OrtSessionConfig) -> Self {
+        self.common = self.common.ort_session(config);
+        self
+    }
+
+    /// Sets the session pool size for concurrent predictions
+    ///
+    /// This function sets the size of the session pool used for concurrent predictions.
+    /// The pool size must be >= 1.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - The session pool size (minimum 1)
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    pub fn session_pool_size(mut self, size: usize) -> Self {
+        self.common = self.common.session_pool_size(size);
         self
     }
 
