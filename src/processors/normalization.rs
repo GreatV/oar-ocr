@@ -503,7 +503,7 @@ impl NormalizeImage {
                 let mut result = vec![0.0f32; batch_size * (channels * height * width) as usize];
 
                 let img_size = (channels * height * width) as usize;
-                if batch_size <= 1 {
+                if batch_size == 1 {
                     // Avoid rayon overhead for single-image batches
                     let rgb_img = &rgb_imgs[0];
                     let batch_slice = &mut result[0..img_size];
@@ -558,7 +558,7 @@ impl NormalizeImage {
                 let mut result = vec![0.0f32; batch_size * (height * width * channels) as usize];
 
                 let img_size = (height * width * channels) as usize;
-                if batch_size <= 1 {
+                if batch_size == 1 {
                     // Avoid rayon overhead for single-image batches
                     let rgb_img = &rgb_imgs[0];
                     let batch_slice = &mut result[0..img_size];
