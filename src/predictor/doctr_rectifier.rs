@@ -206,8 +206,9 @@ impl DoctrRectifierPredictor {
         let model_name = config
             .common
             .model_name
-            .clone()
-            .unwrap_or_else(|| "doctr_rectifier".to_string());
+            .as_deref()
+            .unwrap_or("doctr_rectifier")
+            .to_string();
         let batch_size = config.common.batch_size.unwrap_or(32);
 
         let batch_sampler = BatchSampler::new(batch_size);

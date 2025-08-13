@@ -410,13 +410,13 @@ impl NormalizeImage {
 
                 ndarray::Array4::from_shape_vec(
                     (1, channels as usize, height as usize, width as usize),
-                    result.clone(),
+                    result,
                 )
                 .map_err(|e| {
                     OCRError::tensor_operation_error(
                         "normalization_tensor_creation_chw",
                         &[1, channels as usize, height as usize, width as usize],
-                        &[result.len()],
+                        &[(channels * height * width) as usize],
                         &format!("Failed to create CHW normalization tensor for {}x{} image with {} channels",
                             width, height, channels),
                         e,
@@ -441,13 +441,13 @@ impl NormalizeImage {
 
                 ndarray::Array4::from_shape_vec(
                     (1, height as usize, width as usize, channels as usize),
-                    result.clone(),
+                    result,
                 )
                 .map_err(|e| {
                     OCRError::tensor_operation_error(
                         "normalization_tensor_creation_hwc",
                         &[1, height as usize, width as usize, channels as usize],
-                        &[result.len()],
+                        &[(height * width * channels) as usize],
                         &format!("Failed to create HWC normalization tensor for {}x{} image with {} channels",
                             width, height, channels),
                         e,

@@ -49,6 +49,33 @@ where
     }
 }
 
+/// A dummy configuration type that represents an invalid BoxedConfig.
+/// This is used when BoxedConfig::default() or BoxedConfig::get_defaults()
+/// are called directly, which should never happen in normal usage.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // This is intentionally only used in error cases
+struct InvalidBoxedConfig;
+
+impl ErasedConfig for InvalidBoxedConfig {
+    fn validate_erased(&self) -> Result<(), ConfigError> {
+        Err(ConfigError::InvalidConfig {
+            message: "Invalid BoxedConfig: This configuration was created through BoxedConfig::default() or BoxedConfig::get_defaults(), which should never be called directly. Use ErasedConfig::default_erased() or box a concrete config type instead.".to_string(),
+        })
+    }
+
+    fn default_erased() -> Box<dyn ErasedConfig> {
+        Box::new(InvalidBoxedConfig)
+    }
+
+    fn clone_erased(&self) -> Box<dyn ErasedConfig> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 /// Type alias for a boxed stage configuration.
 type BoxedConfig = Box<dyn ErasedConfig>;
 
@@ -58,13 +85,21 @@ impl ConfigValidator for BoxedConfig {
     }
 
     fn get_defaults() -> Self {
-        unreachable!("BoxedConfig::get_defaults() should not be called directly")
+        // This method should never be called directly on BoxedConfig.
+        // BoxedConfig instances should be created through ErasedConfig::default_erased()
+        // or by boxing concrete config types.
+        // Return an invalid config that will fail validation with a clear error message.
+        Box::new(InvalidBoxedConfig)
     }
 }
 
 impl Default for BoxedConfig {
     fn default() -> Self {
-        unreachable!("BoxedConfig::default() should not be called directly")
+        // This method should never be called directly on BoxedConfig.
+        // BoxedConfig instances should be created through ErasedConfig::default_erased()
+        // or by boxing concrete config types.
+        // Return an invalid config that will fail validation with a clear error message.
+        Box::new(InvalidBoxedConfig)
     }
 }
 
@@ -445,14 +480,22 @@ mod tests {
     use super::*;
 
     #[test]
-    #[should_panic(expected = "BoxedConfig::default() should not be called directly")]
-    fn test_boxed_config_default_panics() {
-        let _ = BoxedConfig::default();
+    fn test_boxed_config_default_returns_invalid_config() {
+        let config = BoxedConfig::default();
+        let result = config.validate();
+        assert!(result.is_err());
+        let error_message = result.unwrap_err().to_string();
+        assert!(error_message.contains("Invalid BoxedConfig"));
+        assert!(error_message.contains("should never be called directly"));
     }
 
     #[test]
-    #[should_panic(expected = "BoxedConfig::get_defaults() should not be called directly")]
-    fn test_boxed_config_get_defaults_panics() {
-        let _ = BoxedConfig::get_defaults();
+    fn test_boxed_config_get_defaults_returns_invalid_config() {
+        let config = BoxedConfig::get_defaults();
+        let result = config.validate();
+        assert!(result.is_err());
+        let error_message = result.unwrap_err().to_string();
+        assert!(error_message.contains("Invalid BoxedConfig"));
+        assert!(error_message.contains("should never be called directly"));
     }
 }

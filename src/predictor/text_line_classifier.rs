@@ -225,8 +225,9 @@ impl TextLineClasPredictor {
         let model_name = config
             .common
             .model_name
-            .clone()
-            .unwrap_or_else(|| "PP-LCNet_x0_25".to_string());
+            .as_deref()
+            .unwrap_or("PP-LCNet_x0_25")
+            .to_string();
         let batch_size = config.common.batch_size.unwrap_or(1);
 
         // Create crop operation for preprocessing
