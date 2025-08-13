@@ -436,14 +436,10 @@ mod tests {
 
     #[test]
     fn test_recognition_config_serialization() {
-        // Create a custom bucketing config without infinity to avoid JSON serialization issues
-        let mut bucketing_config = AspectRatioBucketingConfig::default();
-        // Replace the last bucket that uses infinity with a large finite value
-        if let Some(last_bucket) = bucketing_config.buckets.last_mut() {
-            last_bucket.max_ratio = 1000.0; // Use a large finite value instead of infinity
-        }
-
-        let config = RecognitionConfig::from_legacy_config(true, Some(bucketing_config));
+        let config = RecognitionConfig::from_legacy_config(
+            true,
+            Some(AspectRatioBucketingConfig::default()),
+        );
 
         // Test that the config can be serialized and deserialized
         let serialized = serde_json::to_string(&config).unwrap();

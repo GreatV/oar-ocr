@@ -66,7 +66,7 @@ impl Default for AspectRatioBucketingConfig {
                 },
                 AspectRatioBucket {
                     min_ratio: 4.5,
-                    max_ratio: f32::INFINITY,
+                    max_ratio: f32::MAX, // Use f32::MAX instead of infinity for JSON compatibility
                     target_dims: (32, 320),
                     name: "ultra_wide".to_string(),
                 },
@@ -118,10 +118,10 @@ impl AspectRatioBucketing {
 
     /// Find the appropriate bucket for an aspect ratio
     pub fn find_bucket(&self, aspect_ratio: f32) -> Option<&AspectRatioBucket> {
-        self.config.buckets.iter().find(|bucket| {
-            aspect_ratio >= bucket.min_ratio
-                && (aspect_ratio < bucket.max_ratio || bucket.max_ratio == f32::INFINITY)
-        })
+        self.config
+            .buckets
+            .iter()
+            .find(|bucket| aspect_ratio >= bucket.min_ratio && aspect_ratio < bucket.max_ratio)
     }
 
     /// Resize and pad an image to fit bucket dimensions
@@ -239,6 +239,10 @@ mod tests {
         assert_eq!(bucketing.find_bucket(2.0).unwrap().name, "normal");
         assert_eq!(bucketing.find_bucket(3.0).unwrap().name, "wide");
         assert_eq!(bucketing.find_bucket(5.0).unwrap().name, "ultra_wide");
+
+        // Test very large aspect ratios (should still go to ultra_wide)
+        assert_eq!(bucketing.find_bucket(100.0).unwrap().name, "ultra_wide");
+        assert_eq!(bucketing.find_bucket(5000.0).unwrap().name, "ultra_wide");
     }
 
     #[test]
@@ -321,6 +325,29 @@ mod tests {
         // Exact grouping should have mostly single-image groups
         let exact_single_groups = exact_groups.values().filter(|v| v.len() == 1).count();
         assert!(exact_single_groups > 15); // Most groups should have only one image
+    }
+
+    #[test]
+    fn test_json_serialization_roundtrip() {
+        let config = AspectRatioBucketingConfig::default();
+
+        // Test that JSON serialization and deserialization work correctly
+        let json_str = serde_json::to_string(&config).expect("Should serialize to JSON");
+        let deserialized: AspectRatioBucketingConfig =
+            serde_json::from_str(&json_str).expect("Should deserialize from JSON");
+
+        // Verify that the deserialized config matches the original
+        assert_eq!(config.buckets.len(), deserialized.buckets.len());
+        assert_eq!(config.padding_color, deserialized.padding_color);
+        assert_eq!(config.fallback_to_exact, deserialized.fallback_to_exact);
+        assert_eq!(
+            config.max_images_per_bucket,
+            deserialized.max_images_per_bucket
+        );
+
+        // Verify that the last bucket still works for very large aspect ratios
+        let bucketing = AspectRatioBucketing::new(deserialized);
+        assert_eq!(bucketing.find_bucket(5000.0).unwrap().name, "ultra_wide");
     }
 
     #[test]
