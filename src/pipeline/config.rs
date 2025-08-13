@@ -1,7 +1,7 @@
 //! Configuration file loading utilities for the OCR pipeline.
 //!
 //! This module provides utilities for loading OCR pipeline configuration
-//! from various file formats including TOML, JSON, and YAML.
+//! from various file formats including TOML and JSON.
 
 use crate::core::OCRError;
 use crate::pipeline::OAROCRConfig;

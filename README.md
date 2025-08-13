@@ -17,11 +17,20 @@ Add OAROCR to your project's `Cargo.toml`:
 cargo add oar-ocr
 ```
 
+For CUDA support, add with the `cuda` feature:
+
+```bash
+cargo add oar-ocr --features cuda
+```
+
 Or manually add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
 oar-ocr = "0.2"
+
+# For CUDA support
+oar-ocr = { version = "0.2", features = ["cuda"] }
 ```
 
 ### Basic Usage
@@ -41,25 +50,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ).build()?;
 
     // Process a single image
-    let results = ocr.predict(&[Path::new("document.jpg")])?;
+    let image = oar_ocr::utils::load_image(Path::new("document.jpg"))?;
+    let results = ocr.predict(&[image])?;
     let result = &results[0];
 
-    // Print extracted text with confidence scores
-    for (text, score) in result.rec_texts.iter().zip(result.rec_scores.iter()) {
-        println!("Text: {} (confidence: {:.2})", text, score);
+    // Print extracted text with confidence scores using the modern TextRegion API
+    for text_region in &result.text_regions {
+        if let (Some(text), Some(confidence)) = (&text_region.text, text_region.confidence) {
+            println!("Text: {} (confidence: {:.2})", text, confidence);
+        }
     }
 
     // Process multiple images at once
-    let results = ocr.predict(&[
+    let images = oar_ocr::utils::load_images_batch(&[
         Path::new("document1.jpg"),
         Path::new("document2.jpg"),
         Path::new("document3.jpg"),
     ])?;
+    let results = ocr.predict(&images)?;
 
     for result in results {
-        println!("Image {}: {} text regions found", result.index, result.text_boxes.len());
-        for (text, score) in result.rec_texts.iter().zip(result.rec_scores.iter()) {
-            println!("  Text: {} (confidence: {:.2})", text, score);
+        println!("Image {}: {} text regions found", result.index, result.text_regions.len());
+        for text_region in &result.text_regions {
+            if let (Some(text), Some(confidence)) = (&text_region.text, text_region.confidence) {
+                println!("  Text: {} (confidence: {:.2})", text, confidence);
+            }
         }
     }
 
@@ -67,7 +82,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-This example creates an OCR pipeline using pre-trained models for text detection and recognition. The pipeline processes the input image and returns the recognized text along with confidence scores.
+This example creates an OCR pipeline using pre-trained models for text detection and recognition. The pipeline processes the input image and returns structured `TextRegion` objects containing the recognized text, confidence scores, and bounding boxes for each detected text region.
+
+### Using CUDA for GPU Acceleration
+
+For better performance, you can enable CUDA support to run inference on GPU:
+
+```rust
+use oar_ocr::prelude::*;
+use oar_ocr::core::config::onnx::{OrtSessionConfig, OrtExecutionProvider};
+use std::path::Path;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Configure CUDA execution provider for GPU acceleration
+    let ort_config = OrtSessionConfig::new()
+        .with_execution_providers(vec![
+            OrtExecutionProvider::CUDA {
+                device_id: Some(0),  // Use GPU 0
+                gpu_mem_limit: None,
+                arena_extend_strategy: None,
+                cudnn_conv_algo_search: None,
+                do_copy_in_default_stream: None,
+                cudnn_conv_use_max_workspace: None,
+            },
+            OrtExecutionProvider::CPU,  // Fallback to CPU if CUDA fails
+        ]);
+
+    // Build OCR pipeline with CUDA support
+    let ocr = OAROCRBuilder::new(
+        "detection_model.onnx".to_string(),
+        "recognition_model.onnx".to_string(),
+        "char_dict.txt".to_string(),
+    )
+    .global_ort_session(ort_config)  // Apply CUDA config to all components
+    .build()?;
+
+    // Process images (same as CPU example)
+    let image = oar_ocr::utils::load_image(Path::new("document.jpg"))?;
+    let results = ocr.predict(&[image])?;
+    let result = &results[0];
+
+    // Extract text from results
+    for text_region in &result.text_regions {
+        if let (Some(text), Some(confidence)) = (&text_region.text, text_region.confidence) {
+            println!("Text: {} (confidence: {:.2})", text, confidence);
+        }
+    }
+
+    Ok(())
+}
+```
+
+**Note**: To use CUDA support, you need to:
+
+1. Install oar-ocr with CUDA feature: `cargo add oar-ocr --features cuda`
+2. Have CUDA toolkit and cuDNN installed on your system
+3. Ensure your ONNX models are compatible with CUDA execution
 
 ## Pre-trained Models
 

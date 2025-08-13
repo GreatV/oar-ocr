@@ -13,15 +13,17 @@
 //!
 //! * `-m, --model-path` - Path to the text detection model file
 //! * `-o, --output-dir` - Directory to save visualization results
+//! * `-d, --device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
 //! * `<IMAGES>...` - Paths to input images to process
 //!
 //! # Example
 //!
 //! ```bash
-//! cargo run --example text_detection -- -m model.onnx -o output/ image1.jpg image2.jpg
+//! cargo run --example text_detection -- -m model.onnx -o output/ -d cuda image1.jpg image2.jpg
 //! ```
 
 use clap::Parser;
+use oar_ocr::core::config::onnx::{OrtExecutionProvider, OrtSessionConfig};
 use oar_ocr::core::traits::StandardPredictor;
 use oar_ocr::predictor::TextDetPredictorBuilder;
 use oar_ocr::utils::init_tracing;
@@ -52,6 +54,78 @@ struct Args {
     /// Directory to save visualization results
     #[arg(short, long)]
     output_dir: String,
+
+    /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
+    #[arg(short, long, default_value = "cpu")]
+    device: String,
+}
+
+/// Parse device string and create appropriate ONNX execution provider
+///
+/// # Arguments
+///
+/// * `device` - Device string (e.g., "cpu", "cuda", "cuda:0")
+///
+/// # Returns
+///
+/// Vector of execution providers in order of preference
+fn parse_device(device: &str) -> Result<Vec<OrtExecutionProvider>, Box<dyn std::error::Error>> {
+    let device = device.to_lowercase();
+
+    if device == "cpu" {
+        Ok(vec![OrtExecutionProvider::CPU])
+    } else if device == "cuda" {
+        #[cfg(feature = "cuda")]
+        {
+            Ok(vec![
+                OrtExecutionProvider::CUDA {
+                    device_id: Some(0),
+                    gpu_mem_limit: None,
+                    arena_extend_strategy: None,
+                    cudnn_conv_algo_search: None,
+                    do_copy_in_default_stream: None,
+                    cudnn_conv_use_max_workspace: None,
+                },
+                OrtExecutionProvider::CPU,
+            ])
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            error!("CUDA support not compiled in. Falling back to CPU.");
+            Ok(vec![OrtExecutionProvider::CPU])
+        }
+    } else if device.starts_with("cuda:") {
+        #[cfg(feature = "cuda")]
+        {
+            let device_id_str = device.strip_prefix("cuda:").unwrap();
+            let device_id: i32 = device_id_str
+                .parse()
+                .map_err(|_| format!("Invalid CUDA device ID: {}", device_id_str))?;
+
+            Ok(vec![
+                OrtExecutionProvider::CUDA {
+                    device_id: Some(device_id),
+                    gpu_mem_limit: None,
+                    arena_extend_strategy: None,
+                    cudnn_conv_algo_search: None,
+                    do_copy_in_default_stream: None,
+                    cudnn_conv_use_max_workspace: None,
+                },
+                OrtExecutionProvider::CPU,
+            ])
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            error!("CUDA support not compiled in. Falling back to CPU.");
+            Ok(vec![OrtExecutionProvider::CPU])
+        }
+    } else {
+        Err(format!(
+            "Unsupported device: {}. Supported devices: cpu, cuda, cuda:N",
+            device
+        )
+        .into())
+    }
 }
 
 /// Main function for the text detection example
@@ -101,6 +175,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No valid image files found".into());
     }
 
+    // Parse device configuration
+    let execution_providers = parse_device(&args.device)?;
+    info!(
+        "Using device: {} with providers: {:?}",
+        args.device, execution_providers
+    );
+
+    // Create ONNX session configuration with device settings
+    let ort_config = OrtSessionConfig::new().with_execution_providers(execution_providers);
+
     // Create a text detection predictor with specified parameters
     let predictor = TextDetPredictorBuilder::new()
         .thresh(0.3) // Binarization threshold
@@ -110,6 +194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .limit_type(oar_ocr::processors::LimitType::Max) // Limit type for resizing
         .max_side_limit(4000) // Maximum side limit for images
         .model_name("PP-OCRv5_mobile_det") // Model name
+        .ort_session(ort_config) // Set device configuration
         .build(Path::new(model_path))?;
 
     // Load all images into memory

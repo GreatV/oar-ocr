@@ -617,3 +617,158 @@ impl std::fmt::Display for PipelineStats {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pipeline_stats_new() {
+        let stats = PipelineStats::new();
+        assert_eq!(stats.total_processed, 0);
+        assert_eq!(stats.successful_predictions, 0);
+        assert_eq!(stats.failed_predictions, 0);
+        assert_eq!(stats.average_inference_time_ms, 0.0);
+    }
+
+    #[test]
+    fn test_pipeline_stats_default() {
+        let stats = PipelineStats::default();
+        assert_eq!(stats.total_processed, 0);
+        assert_eq!(stats.successful_predictions, 0);
+        assert_eq!(stats.failed_predictions, 0);
+        assert_eq!(stats.average_inference_time_ms, 0.0);
+    }
+
+    #[test]
+    fn test_pipeline_stats_success_rate_zero_processed() {
+        let stats = PipelineStats {
+            total_processed: 0,
+            successful_predictions: 0,
+            failed_predictions: 0,
+            average_inference_time_ms: 0.0,
+        };
+        assert_eq!(stats.success_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_pipeline_stats_success_rate_all_successful() {
+        let stats = PipelineStats {
+            total_processed: 10,
+            successful_predictions: 10,
+            failed_predictions: 0,
+            average_inference_time_ms: 50.0,
+        };
+        assert_eq!(stats.success_rate(), 100.0);
+    }
+
+    #[test]
+    fn test_pipeline_stats_success_rate_partial() {
+        let stats = PipelineStats {
+            total_processed: 10,
+            successful_predictions: 7,
+            failed_predictions: 3,
+            average_inference_time_ms: 50.0,
+        };
+        assert_eq!(stats.success_rate(), 70.0);
+    }
+
+    #[test]
+    fn test_pipeline_stats_failure_rate_zero_processed() {
+        let stats = PipelineStats {
+            total_processed: 0,
+            successful_predictions: 0,
+            failed_predictions: 0,
+            average_inference_time_ms: 0.0,
+        };
+        assert_eq!(stats.failure_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_pipeline_stats_failure_rate_all_failed() {
+        let stats = PipelineStats {
+            total_processed: 5,
+            successful_predictions: 0,
+            failed_predictions: 5,
+            average_inference_time_ms: 100.0,
+        };
+        assert_eq!(stats.failure_rate(), 100.0);
+    }
+
+    #[test]
+    fn test_pipeline_stats_failure_rate_partial() {
+        let stats = PipelineStats {
+            total_processed: 8,
+            successful_predictions: 6,
+            failed_predictions: 2,
+            average_inference_time_ms: 75.0,
+        };
+        assert_eq!(stats.failure_rate(), 25.0);
+    }
+
+    #[test]
+    fn test_pipeline_stats_images_per_second_zero_time() {
+        let stats = PipelineStats {
+            total_processed: 10,
+            successful_predictions: 10,
+            failed_predictions: 0,
+            average_inference_time_ms: 0.0,
+        };
+        assert_eq!(stats.images_per_second(), 0.0);
+    }
+
+    #[test]
+    fn test_pipeline_stats_images_per_second_normal() {
+        let stats = PipelineStats {
+            total_processed: 10,
+            successful_predictions: 10,
+            failed_predictions: 0,
+            average_inference_time_ms: 100.0, // 100ms per image
+        };
+        assert_eq!(stats.images_per_second(), 10.0); // 1000ms / 100ms = 10 images/sec
+    }
+
+    #[test]
+    fn test_pipeline_stats_images_per_second_fast() {
+        let stats = PipelineStats {
+            total_processed: 100,
+            successful_predictions: 100,
+            failed_predictions: 0,
+            average_inference_time_ms: 50.0, // 50ms per image
+        };
+        assert_eq!(stats.images_per_second(), 20.0); // 1000ms / 50ms = 20 images/sec
+    }
+
+    #[test]
+    fn test_pipeline_stats_display() {
+        let stats = PipelineStats {
+            total_processed: 10,
+            successful_predictions: 8,
+            failed_predictions: 2,
+            average_inference_time_ms: 125.0,
+        };
+
+        let display_str = format!("{}", stats);
+        assert!(display_str.contains("Pipeline Statistics:"));
+        assert!(display_str.contains("Total processed: 10"));
+        assert!(display_str.contains("Successful: 8 (80.0%)"));
+        assert!(display_str.contains("Failed: 2 (20.0%)"));
+        assert!(display_str.contains("Average inference time: 125.00 ms"));
+        assert!(display_str.contains("Processing speed: 8.00 images/sec"));
+    }
+
+    #[test]
+    fn test_pipeline_stats_edge_case_inconsistent_counts() {
+        // Test edge case where successful + failed != total (shouldn't happen in practice)
+        let stats = PipelineStats {
+            total_processed: 10,
+            successful_predictions: 7,
+            failed_predictions: 2, // 7 + 2 = 9, not 10
+            average_inference_time_ms: 100.0,
+        };
+
+        // Should still calculate rates based on total_processed
+        assert_eq!(stats.success_rate(), 70.0);
+        assert_eq!(stats.failure_rate(), 20.0);
+    }
+}

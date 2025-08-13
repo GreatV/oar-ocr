@@ -84,6 +84,28 @@ impl BoundingBox {
         Self { points }
     }
 
+    /// Creates a bounding box from coordinates.
+    ///
+    /// # Arguments
+    ///
+    /// * `x1` - The x-coordinate of the top-left corner.
+    /// * `y1` - The y-coordinate of the top-left corner.
+    /// * `x2` - The x-coordinate of the bottom-right corner.
+    /// * `y2` - The y-coordinate of the bottom-right corner.
+    ///
+    /// # Returns
+    ///
+    /// A new `BoundingBox` instance representing a rectangle.
+    pub fn from_coords(x1: f32, y1: f32, x2: f32, y2: f32) -> Self {
+        let points = vec![
+            Point::new(x1, y1),
+            Point::new(x2, y1),
+            Point::new(x2, y2),
+            Point::new(x1, y2),
+        ];
+        Self { points }
+    }
+
     /// Creates a bounding box from a contour.
     ///
     /// # Arguments
@@ -137,6 +159,32 @@ impl BoundingBox {
             perimeter += (dx * dx + dy * dy).sqrt();
         }
         perimeter
+    }
+
+    /// Gets the minimum x-coordinate of all points in the bounding box.
+    ///
+    /// # Returns
+    ///
+    /// The minimum x-coordinate, or 0.0 if there are no points.
+    pub fn x_min(&self) -> f32 {
+        self.points
+            .iter()
+            .map(|p| p.x)
+            .fold(f32::INFINITY, f32::min)
+            .min(0.0)
+    }
+
+    /// Gets the minimum y-coordinate of all points in the bounding box.
+    ///
+    /// # Returns
+    ///
+    /// The minimum y-coordinate, or 0.0 if there are no points.
+    pub fn y_min(&self) -> f32 {
+        self.points
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::INFINITY, f32::min)
+            .min(0.0)
     }
 
     /// Computes the convex hull of the bounding box using Graham's scan algorithm.

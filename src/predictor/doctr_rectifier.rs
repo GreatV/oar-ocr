@@ -206,6 +206,7 @@ impl DoctrRectifierPredictor {
         let model_name = config
             .common
             .model_name
+            .clone()
             .unwrap_or_else(|| "doctr_rectifier".to_string());
         let batch_size = config.common.batch_size.unwrap_or(32);
 
@@ -218,8 +219,8 @@ impl DoctrRectifierPredictor {
             None,
         )?;
         let to_batch = ToBatch::new();
-        let infer = OrtInfer::with_auto_input_name(model_path)?;
-        let post_op = DocTrPostProcess::new(None);
+        let infer = OrtInfer::from_common_with_auto_input(&config.common, model_path)?;
+        let post_op = DocTrPostProcess::new(1.0);
 
         Ok(Self {
             rec_image_shape,
@@ -298,10 +299,12 @@ impl StandardPredictor for DoctrRectifierPredictor {
         raw_images: Vec<RgbImage>,
         _config: Option<&Self::Config>,
     ) -> Result<Self::Result, OCRError> {
-        let rectified_imgs = self
-            .post_op
-            .apply_batch(&output)
-            .map_err(|e| OCRError::post_processing("DocTr post-processing failed", e))?;
+        let rectified_imgs =
+            self.post_op
+                .apply_batch(&output)
+                .map_err(|e| OCRError::ConfigError {
+                    message: format!("DocTr post-processing failed: {}", e),
+                })?;
 
         Ok(DoctrRectifierResult {
             input_path: batch_data.input_paths.clone(),
@@ -405,6 +408,31 @@ impl DoctrRectifierPredictorBuilder {
     /// The updated builder instance
     pub fn enable_logging(mut self, enable: bool) -> Self {
         self.common = self.common.enable_logging(enable);
+        self
+    }
+
+    /// Sets the ONNX Runtime session configuration
+    ///
+    /// This function sets the ONNX Runtime session configuration for the predictor.
+    pub fn ort_session(mut self, config: crate::core::config::onnx::OrtSessionConfig) -> Self {
+        self.common = self.common.ort_session(config);
+        self
+    }
+
+    /// Sets the session pool size for concurrent predictions
+    ///
+    /// This function sets the size of the session pool used for concurrent predictions.
+    /// The pool size must be >= 1.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - The session pool size (minimum 1)
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    pub fn session_pool_size(mut self, size: usize) -> Self {
+        self.common = self.common.session_pool_size(size);
         self
     }
 

@@ -14,6 +14,34 @@ use imageproc::morphology;
 use itertools::Itertools;
 use rayon::prelude::*;
 
+/// Helper struct to group region coordinates
+#[derive(Debug, Clone, Copy)]
+struct Region {
+    start_y: usize,
+    end_y: usize,
+    start_x: usize,
+    end_x: usize,
+}
+
+impl Region {
+    fn new(start_y: usize, end_y: usize, start_x: usize, end_x: usize) -> Self {
+        Self {
+            start_y,
+            end_y,
+            start_x,
+            end_x,
+        }
+    }
+
+    fn height(&self) -> usize {
+        self.end_y - self.start_y
+    }
+
+    fn width(&self) -> usize {
+        self.end_x - self.start_x
+    }
+}
+
 /// Post-processor for DB (Differentiable Binarization) text detection models.
 ///
 /// This struct contains parameters and methods for converting the output of a DB model
@@ -460,20 +488,59 @@ impl DBPostProcess {
         start_x: usize,
         end_x: usize,
     ) -> f32 {
-        let region_height = end_y - start_y;
-        let region_width = end_x - start_x;
+        // Use default threshold for backward compatibility
+        let region = Region::new(start_y, end_y, start_x, end_x);
+        self.box_score_fast_contour_with_policy(pred, bbox, region, None)
+    }
+
+    /// Compute the average score of a bounding box using parallel processing based on policy.
+    ///
+    /// This function computes the average score of pixels within a bounding box region.
+    /// It uses parallel processing for large regions based on the provided parallel policy,
+    /// or falls back to a default threshold if no policy is provided.
+    ///
+    /// # Arguments
+    /// * `pred` - The prediction array containing scores for each pixel
+    /// * `bbox` - The bounding box to compute the score for
+    /// * `start_y` - The starting y-coordinate of the region to process
+    /// * `end_y` - The ending y-coordinate of the region to process
+    /// * `start_x` - The starting x-coordinate of the region to process
+    /// * `end_x` - The ending x-coordinate of the region to process
+    /// * `policy` - Optional parallel policy for threshold configuration
+    ///
+    /// # Returns
+    /// The average score of the bounding box
+    fn box_score_fast_contour_with_policy(
+        &self,
+        pred: &ndarray::Array2<f32>,
+        bbox: &BoundingBox,
+        region: Region,
+        policy: Option<&crate::pipeline::oarocr::ParallelPolicy>,
+    ) -> f32 {
+        let region_height = region.height();
+        let region_width = region.width();
 
         let max_polygon_points = bbox.points.len();
         let mut scanline_buffer = ScanlineBuffer::new(max_polygon_points);
 
-        if region_height * region_width < 8_000 {
+        // Use policy threshold if provided, otherwise use default
+        let pixel_threshold = policy
+            .map(|p| p.postprocess_pixel_threshold)
+            .unwrap_or(8_000);
+
+        if region_height * region_width < pixel_threshold {
             let mut total_score = 0.0;
             let mut total_pixels = 0;
 
-            for y in start_y..end_y {
+            for y in region.start_y..region.end_y {
                 let scanline_y = y as f32 + 0.5;
-                let (line_score, line_pixels) =
-                    scanline_buffer.process_scanline(scanline_y, bbox, start_x, end_x, pred);
+                let (line_score, line_pixels) = scanline_buffer.process_scanline(
+                    scanline_y,
+                    bbox,
+                    region.start_x,
+                    region.end_x,
+                    pred,
+                );
                 total_score += line_score;
                 total_pixels += line_pixels;
             }
@@ -484,13 +551,19 @@ impl DBPostProcess {
                 0.0
             }
         } else {
-            let scanline_results: Vec<(f32, usize)> = (start_y..end_y)
+            let scanline_results: Vec<(f32, usize)> = (region.start_y..region.end_y)
                 .into_par_iter()
                 .map(|y| {
                     let scanline_y = y as f32 + 0.5;
 
                     let mut thread_buffer = ScanlineBuffer::new(max_polygon_points);
-                    thread_buffer.process_scanline(scanline_y, bbox, start_x, end_x, pred)
+                    thread_buffer.process_scanline(
+                        scanline_y,
+                        bbox,
+                        region.start_x,
+                        region.end_x,
+                        pred,
+                    )
                 })
                 .collect();
 

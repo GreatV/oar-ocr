@@ -14,10 +14,13 @@
 pub mod batch;
 pub mod config;
 pub mod constants;
+pub mod dynamic_batch;
 pub mod errors;
+pub mod granular_traits;
 pub mod inference;
 #[macro_use]
 pub mod macros;
+pub mod orientation;
 pub mod predictions;
 pub mod traits;
 
@@ -27,11 +30,26 @@ pub mod traits;
 // };
 pub use batch::{BatchData, BatchSampler, Tensor1D, Tensor2D, Tensor3D, Tensor4D, ToBatch};
 pub use config::{
-    CommonBuilderConfig, ConfigError, TransformConfig, TransformRegistry, TransformType,
+    CommonBuilderConfig, ConfigError, ConfigValidator, TransformConfig, TransformRegistry,
+    TransformType,
 };
 pub use constants::*;
+pub use dynamic_batch::{
+    BatchPerformanceMetrics, CompatibleBatch, CrossImageBatch, CrossImageItem,
+    DefaultDynamicBatcher, DynamicBatchConfig, DynamicBatchResult, DynamicBatcher, MemoryStrategy,
+    PaddingStrategy, ShapeCompatibilityStrategy,
+};
 pub use errors::{OCRError, ProcessingStage};
+pub use granular_traits::{
+    ImageReader as GranularImageReader, InferenceEngine, ModularPredictor, Postprocessor,
+    Preprocessor,
+};
 pub use inference::{DefaultImageReader, OrtInfer, load_session};
+pub use orientation::{
+    OrientationResult, apply_document_orientation, apply_text_line_orientation,
+    format_orientation_label, get_document_orientation_labels, get_text_line_orientation_labels,
+    parse_document_orientation, parse_orientation_angle, parse_text_line_orientation,
+};
 pub use predictions::{
     IntoOwnedPrediction, IntoPrediction, OwnedPredictionResult, PipelineStats, PredictionResult,
 };

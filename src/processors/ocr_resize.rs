@@ -7,6 +7,7 @@ use crate::core::{
     OCRError,
     constants::{DEFAULT_MAX_IMG_WIDTH, DEFAULT_REC_IMAGE_SHAPE},
 };
+use crate::utils::{OCRResizePadConfig, ocr_resize_and_pad};
 use image::RgbImage;
 
 /// OCR-specific image resizer.
@@ -77,50 +78,10 @@ impl OCRResize {
     ///
     /// A resized and padded RGB image.
     pub fn resize_img(&self, img: &RgbImage, max_wh_ratio: f32) -> RgbImage {
-        let [img_c, img_h, _img_w] = self.rec_image_shape;
-        assert_eq!(img_c, 3);
+        let [_img_c, img_h, _img_w] = self.rec_image_shape;
 
-        let (original_w, original_h) = img.dimensions();
-        let original_w_usize = original_w as usize;
-        let original_h_usize = original_h as usize;
-
-        let mut target_w_usize = (img_h as f32 * max_wh_ratio) as usize;
-        let resized_w_usize;
-
-        let resized_image = if target_w_usize > self.max_img_w {
-            resized_w_usize = self.max_img_w;
-            target_w_usize = self.max_img_w;
-            image::imageops::resize(
-                img,
-                self.max_img_w as u32,
-                img_h as u32,
-                image::imageops::FilterType::Triangle,
-            )
-        } else {
-            let ratio = original_w_usize as f32 / original_h_usize as f32;
-            resized_w_usize = if (img_h as f32 * ratio).ceil() as usize > target_w_usize {
-                target_w_usize
-            } else {
-                (img_h as f32 * ratio).ceil() as usize
-            };
-            image::imageops::resize(
-                img,
-                resized_w_usize as u32,
-                img_h as u32,
-                image::imageops::FilterType::Triangle,
-            )
-        };
-
-        let mut padded_image = RgbImage::new(target_w_usize as u32, img_h as u32);
-
-        for y in 0..img_h {
-            for x in 0..resized_w_usize.min(target_w_usize) {
-                if x < resized_image.width() as usize && y < resized_image.height() as usize {
-                    let pixel = resized_image.get_pixel(x as u32, y as u32);
-                    padded_image.put_pixel(x as u32, y as u32, *pixel);
-                }
-            }
-        }
+        let config = OCRResizePadConfig::new(img_h as u32, self.max_img_w as u32);
+        let (padded_image, _actual_width) = ocr_resize_and_pad(img, &config, Some(max_wh_ratio));
 
         padded_image
     }
@@ -156,8 +117,11 @@ impl OCRResize {
     ///
     /// A resized RGB image or an OCRError if input_shape is not configured.
     pub fn static_resize(&self, img: &RgbImage) -> Result<RgbImage, OCRError> {
-        let [_img_c, img_h, img_w] = self.input_shape.ok_or_else(|| OCRError::ConfigError {
-            message: "Input shape not configured for static resize".to_string(),
+        let [_img_c, img_h, img_w] = self.input_shape.ok_or_else(|| {
+            OCRError::resize_error(
+                "Input shape not configured for static resize",
+                crate::core::errors::SimpleError::new("Missing input shape configuration"),
+            )
         })?;
 
         let resized_image = image::imageops::resize(
@@ -206,51 +170,10 @@ impl OCRResize {
     ///
     /// A resized and padded RGB image or an OCRError.
     pub fn resize_to_tensor_shape(&self, img: &RgbImage) -> Result<RgbImage, OCRError> {
-        let [img_c, img_h, _img_w] = self.rec_image_shape;
-        assert_eq!(img_c, 3);
+        let [_img_c, img_h, _img_w] = self.rec_image_shape;
 
-        let (original_w, original_h) = img.dimensions();
-        let original_w_usize = original_w as usize;
-        let original_h_usize = original_h as usize;
-
-        let mut target_w_usize =
-            (img_h as f32 * (original_w_usize as f32 / original_h_usize as f32)).ceil() as usize;
-        let resized_w_usize;
-
-        let resized_image = if target_w_usize > self.max_img_w {
-            resized_w_usize = self.max_img_w;
-            target_w_usize = self.max_img_w;
-            image::imageops::resize(
-                img,
-                self.max_img_w as u32,
-                img_h as u32,
-                image::imageops::FilterType::Triangle,
-            )
-        } else {
-            let ratio = original_w_usize as f32 / original_h_usize as f32;
-            resized_w_usize = if (img_h as f32 * ratio).ceil() as usize > target_w_usize {
-                target_w_usize
-            } else {
-                (img_h as f32 * ratio).ceil() as usize
-            };
-            image::imageops::resize(
-                img,
-                resized_w_usize as u32,
-                img_h as u32,
-                image::imageops::FilterType::Triangle,
-            )
-        };
-
-        let mut padded_image = RgbImage::new(target_w_usize as u32, img_h as u32);
-
-        for y in 0..img_h {
-            for x in 0..resized_w_usize.min(target_w_usize) {
-                if x < resized_image.width() as usize && y < resized_image.height() as usize {
-                    let pixel = resized_image.get_pixel(x as u32, y as u32);
-                    padded_image.put_pixel(x as u32, y as u32, *pixel);
-                }
-            }
-        }
+        let config = OCRResizePadConfig::new(img_h as u32, self.max_img_w as u32);
+        let (padded_image, _actual_width) = ocr_resize_and_pad(img, &config, None);
 
         Ok(padded_image)
     }
