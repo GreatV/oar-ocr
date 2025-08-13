@@ -164,10 +164,13 @@ impl OrientationStageProcessor {
 
         let processor = BatchProcessor::new(&batch_config);
 
+        // Keep a cheap Arc-cloned copy of inputs for safe fallbacks
+        let originals = images.clone();
+
         processor.process_items(
             images,
             |image| Self::process_single(image, classifier, config).map(|result| result.data),
-            |e, index| {
+            move |e, index| {
                 // Create enhanced error using the common helper
                 let enhanced_error = crate::core::OCRError::batch_item_error(
                     "orientation",
@@ -184,11 +187,14 @@ impl OrientationStageProcessor {
                     enhanced_error
                 );
 
-                // Create a fallback result with no orientation correction
-                Some(OrientationResult {
-                    orientation_angle: None,
-                    corrected_image: RgbImage::new(1, 1), // Placeholder - should be handled by caller
-                })
+                // Fallback: return the original image unchanged to avoid misleading placeholders
+                originals
+                    .get(index)
+                    .cloned()
+                    .map(|img_arc| OrientationResult {
+                        orientation_angle: None,
+                        corrected_image: img_arc.as_ref().clone(),
+                    })
             },
         )
     }

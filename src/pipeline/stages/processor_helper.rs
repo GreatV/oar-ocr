@@ -205,6 +205,30 @@ where
     )
 }
 
+// Shared helper to aggregate outputs and success/failure counts from (Option<O>, bool) pairs.
+// The bool indicates success (true) or failure (false).
+fn collect_outputs_and_counts<O>(results: Vec<(Option<O>, bool)>) -> (Vec<O>, usize, usize)
+where
+    O: Send,
+{
+    let mut outputs = Vec::new();
+    let mut success_count = 0;
+    let mut failure_count = 0;
+
+    for (maybe_output, success) in results {
+        if let Some(output) = maybe_output {
+            outputs.push(output);
+        }
+        if success {
+            success_count += 1;
+        } else {
+            failure_count += 1;
+        }
+    }
+
+    (outputs, success_count, failure_count)
+}
+
 /// Generic utility function for processing collections with common patterns.
 ///
 /// This function encapsulates the most common batch processing pattern found across
@@ -270,56 +294,27 @@ where
         total_items, stage_name, use_parallel
     );
 
-    let (results, success_count, failure_count) = if use_parallel {
-        // Parallel processing
-        let results: Vec<_> = items
+    let mapped_results: Vec<(Option<O>, bool)> = if use_parallel {
+        items
             .into_par_iter()
             .enumerate()
             .map(|(index, item)| match processor(item) {
                 Ok(output) => (Some(output), true),
                 Err(error) => (error_handler(error, index), false),
             })
-            .collect();
-
-        let mut final_results = Vec::new();
-        let mut success_count = 0;
-        let mut failure_count = 0;
-
-        for (result, success) in results {
-            if let Some(output) = result {
-                final_results.push(output);
-            }
-            if success {
-                success_count += 1;
-            } else {
-                failure_count += 1;
-            }
-        }
-
-        (final_results, success_count, failure_count)
+            .collect()
     } else {
-        // Sequential processing
-        let mut results = Vec::new();
-        let mut success_count = 0;
-        let mut failure_count = 0;
-
-        for (index, item) in items.into_iter().enumerate() {
-            match processor(item) {
-                Ok(output) => {
-                    results.push(output);
-                    success_count += 1;
-                }
-                Err(error) => {
-                    if let Some(fallback) = error_handler(error, index) {
-                        results.push(fallback);
-                    }
-                    failure_count += 1;
-                }
-            }
-        }
-
-        (results, success_count, failure_count)
+        items
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| match processor(item) {
+                Ok(output) => (Some(output), true),
+                Err(error) => (error_handler(error, index), false),
+            })
+            .collect()
     };
+
+    let (results, success_count, failure_count) = collect_outputs_and_counts(mapped_results);
 
     let metrics = metrics!(success_count, failure_count, start_time;
         stage = stage_name,
