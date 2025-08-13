@@ -2,6 +2,7 @@
 
 use crate::core::OCRError;
 use std::time::{Duration, Instant};
+use tracing::warn;
 
 /// Result wrapper for stage processing operations.
 ///
@@ -169,14 +170,20 @@ where
                 .map(|item| processor(item, config))
                 .collect();
 
-            for result in processed_results {
+            for (index, result) in processed_results.into_iter().enumerate() {
                 match result {
                     Ok(output) => {
                         results.push(output);
                         success_count += 1;
                     }
-                    Err(_e) => {
-                        // Create fallback result - this should be customizable per processor
+                    Err(e) => {
+                        // Log the error with context about which item failed
+                        warn!(
+                            "Processing failed for item {} in stage '{}': {}",
+                            index,
+                            self.stage_name(),
+                            e
+                        );
                         failure_count += 1;
                         // For now, skip failed items - processors can override this behavior
                     }
@@ -184,13 +191,20 @@ where
             }
         } else {
             // Sequential processing
-            for item in items {
+            for (index, item) in items.into_iter().enumerate() {
                 match processor(item, config) {
                     Ok(output) => {
                         results.push(output);
                         success_count += 1;
                     }
-                    Err(_e) => {
+                    Err(e) => {
+                        // Log the error with context about which item failed
+                        warn!(
+                            "Processing failed for item {} in stage '{}': {}",
+                            index,
+                            self.stage_name(),
+                            e
+                        );
                         failure_count += 1;
                         // For now, skip failed items - processors can override this behavior
                     }

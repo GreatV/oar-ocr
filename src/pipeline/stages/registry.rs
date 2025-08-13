@@ -89,6 +89,14 @@ impl ConfigValidator for BoxedConfig {
         // BoxedConfig instances should be created through ErasedConfig::default_erased()
         // or by boxing concrete config types.
         // Return an invalid config that will fail validation with a clear error message.
+        //
+        // DESIGN NOTE: This intentionally returns an InvalidBoxedConfig that will always
+        // fail validation. The reason for this design choice is that BoxedConfig is a
+        // type-erased trait object, and it doesn't make sense to create a "default"
+        // BoxedConfig without knowing the concrete type underneath. Instead, users should:
+        // 1. Create a default of a concrete config type and then box it
+        // 2. Use ErasedConfig::default_erased() on a concrete type
+        // This prevents runtime errors from using an incorrectly typed configuration.
         Box::new(InvalidBoxedConfig)
     }
 }
@@ -99,6 +107,14 @@ impl Default for BoxedConfig {
         // BoxedConfig instances should be created through ErasedConfig::default_erased()
         // or by boxing concrete config types.
         // Return an invalid config that will fail validation with a clear error message.
+        //
+        // DESIGN NOTE: This intentionally returns an InvalidBoxedConfig that will always
+        // fail validation. The reason for this design choice is that BoxedConfig is a
+        // type-erased trait object, and it doesn't make sense to create a "default"
+        // BoxedConfig without knowing the concrete type underneath. Instead, users should:
+        // 1. Create a default of a concrete config type and then box it
+        // 2. Use ErasedConfig::default_erased() on a concrete type
+        // This prevents runtime errors from using an incorrectly typed configuration.
         Box::new(InvalidBoxedConfig)
     }
 }

@@ -92,17 +92,30 @@ impl OrientationCorrector {
         let mut corrections_applied = 0;
 
         for (i, image) in images.iter_mut().enumerate() {
-            if let Some(original_idx) = indices.get(i)
-                && let Some(Some(angle)) = orientations.get(*original_idx)
-                && *angle != 0.0
-            {
-                *image = apply_text_line_orientation(image.clone(), *angle);
-                corrections_applied += 1;
-                debug!(
-                    "Applied text line orientation correction: {} degrees for image {}",
-                    angle, original_idx
-                );
+            // Early-continue style for clarity and to avoid nested if-let chains
+            let Some(&original_idx) = indices.get(i) else {
+                continue;
+            };
+
+            let Some(angle) = orientations
+                .get(original_idx) // Option<&Option<f32>>
+                .copied() // Option<Option<f32>>
+                .flatten()
+            // Option<f32>
+            else {
+                continue;
+            };
+
+            if angle == 0.0 {
+                continue;
             }
+
+            *image = apply_text_line_orientation(image.clone(), angle);
+            corrections_applied += 1;
+            debug!(
+                "Applied text line orientation correction: {} degrees for image {}",
+                angle, original_idx
+            );
         }
 
         if corrections_applied > 0 {
