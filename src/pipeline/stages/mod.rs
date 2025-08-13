@@ -31,7 +31,6 @@
 pub mod config;
 mod cropping;
 mod extensible;
-mod layout_analysis;
 mod orientation;
 mod processor_helper;
 mod recognition;
@@ -59,7 +58,6 @@ pub use extensible::{PipelineStage, StageContext, StageData, StageDependency, St
 pub use registry::{ExtensiblePipeline, PipelineExecutor};
 
 // Re-export example stages
-pub use layout_analysis::{ExtensibleLayoutAnalysisStage, LayoutAnalysisConfig};
 pub use text_detection::{
     ExtensibleTextDetectionStage, ExtensibleTextLineOrientationStage, TextDetectionConfig,
     TextLineOrientationConfig,

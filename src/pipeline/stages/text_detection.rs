@@ -135,11 +135,8 @@ impl PipelineStage for ExtensibleTextDetectionStage {
     }
 
     fn dependencies(&self) -> Vec<StageDependency> {
-        // Text detection should run after orientation and layout analysis (if present)
-        vec![
-            StageDependency::After(StageId::new("orientation")),
-            StageDependency::After(StageId::new("layout_analysis")),
-        ]
+        // Text detection should run after orientation
+        vec![StageDependency::After(StageId::new("orientation"))]
     }
 
     fn is_enabled(&self, _context: &StageContext, _config: Option<&Self::Config>) -> bool {

@@ -10,11 +10,10 @@ use tracing::{debug, info};
 use crate::core::OCRError;
 use crate::pipeline::oarocr::{OAROCRConfig, OAROCRResult};
 use crate::pipeline::stages::{
-    CroppingConfig, ExtensibleCroppingStage, ExtensibleLayoutAnalysisStage,
-    ExtensibleOrientationStage, ExtensiblePipeline, ExtensiblePipelineConfig,
-    ExtensibleRecognitionStage, ExtensibleTextDetectionStage, ExtensibleTextLineOrientationStage,
-    LayoutAnalysisConfig, OrientationConfig, PipelineExecutor, RecognitionConfig, StageContext,
-    StageData, TextDetectionConfig, TextLineOrientationConfig,
+    CroppingConfig, ExtensibleCroppingStage, ExtensibleOrientationStage, ExtensiblePipeline,
+    ExtensiblePipelineConfig, ExtensibleRecognitionStage, ExtensibleTextDetectionStage,
+    ExtensibleTextLineOrientationStage, OrientationConfig, PipelineExecutor, RecognitionConfig,
+    StageContext, StageData, TextDetectionConfig, TextLineOrientationConfig,
 };
 
 /// Integration wrapper that bridges the extensible pipeline with OAROCR.
@@ -61,17 +60,7 @@ impl ExtensibleOAROCR {
             debug!("Registered orientation stage");
         }
 
-        // 2. Layout Analysis Stage (if enabled)
-        if extensible_config.is_stage_enabled("layout_analysis") {
-            let layout_stage = ExtensibleLayoutAnalysisStage::new();
-            let layout_config = extensible_config
-                .get_stage_config::<LayoutAnalysisConfig>("layout_analysis")
-                .unwrap_or_default();
-            pipeline.register_stage(layout_stage, Some(layout_config))?;
-            debug!("Registered layout analysis stage");
-        }
-
-        // 3. Text Detection Stage
+        // 2. Text Detection Stage
         if extensible_config.is_stage_enabled("text_detection") {
             let detection_stage = ExtensibleTextDetectionStage::new(None); // Would use actual detector
             let detection_config = extensible_config
@@ -81,7 +70,7 @@ impl ExtensibleOAROCR {
             debug!("Registered text detection stage");
         }
 
-        // 4. Cropping Stage
+        // 3. Cropping Stage
         if extensible_config.is_stage_enabled("cropping") {
             let cropping_stage = ExtensibleCroppingStage::new();
             let cropping_config = extensible_config
@@ -91,7 +80,7 @@ impl ExtensibleOAROCR {
             debug!("Registered cropping stage");
         }
 
-        // 5. Text Line Orientation Stage
+        // 4. Text Line Orientation Stage
         if extensible_config.is_stage_enabled("text_line_orientation") {
             let text_line_stage = ExtensibleTextLineOrientationStage::new(None); // Would use actual classifier
             let text_line_config = extensible_config
@@ -101,7 +90,7 @@ impl ExtensibleOAROCR {
             debug!("Registered text line orientation stage");
         }
 
-        // 6. Recognition Stage
+        // 5. Recognition Stage
         if extensible_config.is_stage_enabled("recognition") {
             let recognition_stage = ExtensibleRecognitionStage::new(None); // Would use actual recognizer
             let recognition_config = extensible_config

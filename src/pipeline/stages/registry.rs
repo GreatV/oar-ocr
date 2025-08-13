@@ -58,16 +58,13 @@ impl ConfigValidator for BoxedConfig {
     }
 
     fn get_defaults() -> Self {
-        // This is a placeholder - actual default should come from the concrete type
-        // In practice, this won't be called because we use default_config() from stages
-        panic!("BoxedConfig::get_defaults() should not be called directly")
+        unreachable!("BoxedConfig::get_defaults() should not be called directly")
     }
 }
 
 impl Default for BoxedConfig {
     fn default() -> Self {
-        // This is a placeholder - actual default should come from the concrete type
-        panic!("BoxedConfig::default() should not be called directly")
+        unreachable!("BoxedConfig::default() should not be called directly")
     }
 }
 
@@ -440,5 +437,22 @@ impl PipelineExecutor {
         }
 
         Ok(current_data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "BoxedConfig::default() should not be called directly")]
+    fn test_boxed_config_default_panics() {
+        let _ = BoxedConfig::default();
+    }
+
+    #[test]
+    #[should_panic(expected = "BoxedConfig::get_defaults() should not be called directly")]
+    fn test_boxed_config_get_defaults_panics() {
+        let _ = BoxedConfig::get_defaults();
     }
 }
