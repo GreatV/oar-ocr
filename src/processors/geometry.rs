@@ -167,11 +167,13 @@ impl BoundingBox {
     ///
     /// The minimum x-coordinate, or 0.0 if there are no points.
     pub fn x_min(&self) -> f32 {
+        if self.points.is_empty() {
+            return 0.0;
+        }
         self.points
             .iter()
             .map(|p| p.x)
             .fold(f32::INFINITY, f32::min)
-            .min(0.0)
     }
 
     /// Gets the minimum y-coordinate of all points in the bounding box.
@@ -180,11 +182,13 @@ impl BoundingBox {
     ///
     /// The minimum y-coordinate, or 0.0 if there are no points.
     pub fn y_min(&self) -> f32 {
+        if self.points.is_empty() {
+            return 0.0;
+        }
         self.points
             .iter()
             .map(|p| p.y)
             .fold(f32::INFINITY, f32::min)
-            .min(0.0)
     }
 
     /// Computes the convex hull of the bounding box using Graham's scan algorithm.

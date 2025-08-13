@@ -82,6 +82,8 @@ impl Default for AspectRatioBucketingConfig {
 #[derive(Debug, Clone)]
 pub struct AspectRatioBucketing {
     config: AspectRatioBucketingConfig,
+    /// Cached ResizePadConfig for each bucket to avoid repeated creation
+    resize_configs: HashMap<String, ResizePadConfig>,
 }
 
 impl Default for AspectRatioBucketing {
@@ -93,7 +95,19 @@ impl Default for AspectRatioBucketing {
 impl AspectRatioBucketing {
     /// Create a new aspect ratio bucketing processor
     pub fn new(config: AspectRatioBucketingConfig) -> Self {
-        Self { config }
+        // Pre-compute ResizePadConfig for each bucket to avoid repeated creation
+        let mut resize_configs = HashMap::new();
+        for bucket in &config.buckets {
+            let (target_height, target_width) = bucket.target_dims;
+            let resize_config = ResizePadConfig::new((target_width, target_height))
+                .with_padding_strategy(PaddingStrategy::SolidColor(config.padding_color));
+            resize_configs.insert(bucket.name.clone(), resize_config);
+        }
+
+        Self {
+            config,
+            resize_configs,
+        }
     }
 
     /// Calculate aspect ratio of an image
@@ -116,12 +130,15 @@ impl AspectRatioBucketing {
         image: &RgbImage,
         bucket: &AspectRatioBucket,
     ) -> Result<RgbImage, OCRError> {
-        let (target_height, target_width) = bucket.target_dims;
+        // Use cached ResizePadConfig to avoid repeated creation
+        let config =
+            self.resize_configs
+                .get(&bucket.name)
+                .ok_or_else(|| OCRError::ConfigError {
+                    message: format!("No cached resize config found for bucket: {}", bucket.name),
+                })?;
 
-        let config = ResizePadConfig::new((target_width, target_height))
-            .with_padding_strategy(PaddingStrategy::SolidColor(self.config.padding_color));
-
-        let padded = resize_and_pad(image, &config);
+        let padded = resize_and_pad(image, config);
 
         Ok(padded)
     }
@@ -304,5 +321,42 @@ mod tests {
         // Exact grouping should have mostly single-image groups
         let exact_single_groups = exact_groups.values().filter(|v| v.len() == 1).count();
         assert!(exact_single_groups > 15); // Most groups should have only one image
+    }
+
+    #[test]
+    fn test_resize_config_caching_optimization() {
+        let bucketing = AspectRatioBucketing::default();
+
+        // Verify that resize configs are pre-computed for all buckets
+        assert_eq!(
+            bucketing.resize_configs.len(),
+            bucketing.config.buckets.len()
+        );
+
+        // Verify that each bucket has a corresponding cached config
+        for bucket in &bucketing.config.buckets {
+            assert!(bucketing.resize_configs.contains_key(&bucket.name));
+
+            // Verify the cached config has correct dimensions and padding
+            let cached_config = &bucketing.resize_configs[&bucket.name];
+            let (target_height, target_width) = bucket.target_dims;
+            assert_eq!(cached_config.target_dims, (target_width, target_height));
+
+            if let PaddingStrategy::SolidColor(color) = cached_config.padding_strategy {
+                assert_eq!(color, bucketing.config.padding_color);
+            } else {
+                panic!("Expected SolidColor padding strategy");
+            }
+        }
+
+        // Test that resize_and_pad_to_bucket works correctly with cached configs
+        let test_image = create_test_image(100, 50); // 2:1 aspect ratio
+        let bucket = bucketing.find_bucket(2.0).unwrap();
+        let result = bucketing
+            .resize_and_pad_to_bucket(&test_image, bucket)
+            .unwrap();
+
+        let (target_height, target_width) = bucket.target_dims;
+        assert_eq!(result.dimensions(), (target_width, target_height));
     }
 }
