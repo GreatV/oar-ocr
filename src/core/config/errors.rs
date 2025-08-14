@@ -321,6 +321,52 @@ impl ConfigValidator for DefaultValidator {
     }
 }
 
+/// Extension trait for ConfigValidator that provides error wrapping utilities.
+///
+/// This trait extends ConfigValidator to provide convenient methods for wrapping
+/// validation errors into OCRError types, reducing duplication across the codebase.
+pub trait ConfigValidatorExt: ConfigValidator {
+    /// Validates configuration and wraps any errors into OCRError::ConfigError.
+    ///
+    /// This method provides a convenient way to validate configuration and
+    /// automatically wrap any validation errors into the appropriate OCRError type.
+    /// This eliminates the repeated `config.validate().map_err(|e| OCRError::ConfigError { message: e.to_string() })`
+    /// pattern found throughout the codebase.
+    ///
+    /// # Returns
+    ///
+    /// A Result indicating success or an OCRError if validation fails.
+    fn validate_and_wrap_ocr_error(self) -> Result<Self, super::super::errors::OCRError>
+    where
+        Self: Sized,
+    {
+        self.validate()
+            .map_err(|e| super::super::errors::OCRError::ConfigError {
+                message: e.to_string(),
+            })?;
+        Ok(self)
+    }
+
+    /// Validates configuration and wraps any errors into a generic error.
+    ///
+    /// This method provides a convenient way to validate configuration when
+    /// working with generic error types.
+    ///
+    /// # Returns
+    ///
+    /// A Result indicating success or a wrapped error if validation fails.
+    fn validate_and_wrap_generic(self) -> Result<Self, Box<dyn std::error::Error + Send + Sync>>
+    where
+        Self: Sized,
+    {
+        self.validate()?;
+        Ok(self)
+    }
+}
+
+// Blanket implementation for all ConfigValidator types
+impl<T: ConfigValidator> ConfigValidatorExt for T {}
+
 impl From<ConfigError> for String {
     /// Converts a ConfigError to a String.
     ///

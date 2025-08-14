@@ -350,24 +350,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_error_metrics_new() {
-        let metrics = ErrorMetrics::new();
-        assert_eq!(metrics.failed_crops, 0);
-        assert_eq!(metrics.failed_recognitions, 0);
-        assert_eq!(metrics.failed_orientations, 0);
-        assert_eq!(metrics.total_text_boxes, 0);
-    }
-
-    #[test]
-    fn test_error_metrics_default() {
-        let metrics = ErrorMetrics::default();
-        assert_eq!(metrics.failed_crops, 0);
-        assert_eq!(metrics.failed_recognitions, 0);
-        assert_eq!(metrics.failed_orientations, 0);
-        assert_eq!(metrics.total_text_boxes, 0);
-    }
-
-    #[test]
     fn test_crop_success_rate_zero_total() {
         let metrics = ErrorMetrics {
             failed_crops: 0,

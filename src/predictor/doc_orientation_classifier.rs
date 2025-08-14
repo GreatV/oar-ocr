@@ -9,7 +9,8 @@
 use crate::core::traits::StandardPredictor;
 use crate::core::{
     BatchData, BatchSampler, CommonBuilderConfig, DefaultImageReader, ImageReader, OCRError,
-    OrtInfer, Tensor2D, Tensor4D, ToBatch, config::ConfigValidator,
+    OrtInfer, Tensor2D, Tensor4D, ToBatch,
+    config::{ConfigValidator, ConfigValidatorExt},
     get_document_orientation_labels,
 };
 use crate::processors::{NormalizeImage, Topk};
@@ -583,9 +584,7 @@ impl DocOrientationClassifierBuilder {
             input_shape: self.input_shape,
         };
 
-        config.validate().map_err(|e| OCRError::ConfigError {
-            message: e.to_string(),
-        })?;
+        let config = config.validate_and_wrap_ocr_error()?;
 
         DocOrientationClassifier::new(config, model_path)
     }

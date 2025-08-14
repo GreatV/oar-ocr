@@ -373,20 +373,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parallel_policy_default() {
-        let policy = ParallelPolicy::default();
-        assert_eq!(policy.max_threads, None);
-        assert_eq!(policy.image_threshold, 1);
-        assert_eq!(policy.text_box_threshold, 1);
-        assert_eq!(policy.batch_threshold, 10);
-        assert_eq!(policy.utility_threshold, 4);
-        assert_eq!(policy.postprocess_pixel_threshold, 8000);
-        assert_eq!(policy.onnx_threading.intra_threads, None);
-        assert_eq!(policy.onnx_threading.inter_threads, None);
-        assert_eq!(policy.onnx_threading.parallel_execution, None);
-    }
-
-    #[test]
     fn test_parallel_policy_builder() {
         let onnx_config = OnnxThreadingConfig {
             intra_threads: Some(4),

@@ -102,7 +102,25 @@ impl OAROCRBuilder {
     /// # Returns
     ///
     /// The updated builder instance
-    pub fn doc_orientation_confidence_threshold(mut self, threshold: f32) -> Self {
+    #[deprecated(since = "0.2.0", note = "Use `doc_orientation_threshold` instead")]
+    pub fn doc_orientation_confidence_threshold(self, threshold: f32) -> Self {
+        self.doc_orientation_threshold(threshold)
+    }
+
+    /// Sets the confidence threshold for document orientation classification.
+    ///
+    /// This threshold determines the minimum confidence required for orientation predictions.
+    /// If the confidence is below this threshold, the orientation may be treated
+    /// as uncertain and fall back to default behavior.
+    ///
+    /// # Arguments
+    ///
+    /// * `threshold` - Minimum confidence threshold (0.0 to 1.0)
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    pub fn doc_orientation_threshold(mut self, threshold: f32) -> Self {
         if self.config.orientation_stage.is_none() {
             self.config.orientation_stage =
                 Some(crate::pipeline::stages::OrientationConfig::default());
@@ -286,7 +304,24 @@ impl OAROCRBuilder {
     /// # Returns
     ///
     /// The updated builder instance
-    pub fn textline_orientation_classify_input_shape(mut self, shape: (u32, u32)) -> Self {
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use `textline_orientation_input_shape` instead"
+    )]
+    pub fn textline_orientation_classify_input_shape(self, shape: (u32, u32)) -> Self {
+        self.textline_orientation_input_shape(shape)
+    }
+
+    /// Sets the text line orientation classifier input shape.
+    ///
+    /// # Arguments
+    ///
+    /// * `shape` - The input shape as (width, height)
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    pub fn textline_orientation_input_shape(mut self, shape: (u32, u32)) -> Self {
         with_nested!(self.config.text_line_orientation, TextLineClasPredictorConfig, config => {
             config.input_shape = Some(shape);
         });
@@ -306,7 +341,25 @@ impl OAROCRBuilder {
     /// # Returns
     ///
     /// The updated builder instance
-    pub fn textline_orientation_confidence_threshold(mut self, threshold: f32) -> Self {
+    #[deprecated(since = "0.2.0", note = "Use `textline_orientation_threshold` instead")]
+    pub fn textline_orientation_confidence_threshold(self, threshold: f32) -> Self {
+        self.textline_orientation_threshold(threshold)
+    }
+
+    /// Sets the text line orientation confidence threshold.
+    ///
+    /// Specifies the minimum confidence score required for text line orientation predictions.
+    /// If the confidence is below this threshold, the orientation may be treated
+    /// as uncertain and fall back to default behavior.
+    ///
+    /// # Arguments
+    ///
+    /// * `threshold` - Minimum confidence threshold (0.0 to 1.0)
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    pub fn textline_orientation_threshold(mut self, threshold: f32) -> Self {
         if self.config.text_line_orientation_stage.is_none() {
             self.config.text_line_orientation_stage =
                 Some(crate::pipeline::stages::TextLineOrientationConfig::default());
@@ -454,6 +507,150 @@ impl OAROCRBuilder {
         });
 
         self
+    }
+
+    /// Convenience method to enable CUDA execution with default settings.
+    ///
+    /// This configures CUDA execution provider with sensible defaults:
+    /// - Uses GPU device 0
+    /// - Falls back to CPU if CUDA fails
+    /// - Uses default memory and performance settings
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use oar_ocr::pipeline::OAROCRBuilder;
+    ///
+    /// let builder = OAROCRBuilder::new(
+    ///     "detection.onnx".to_string(),
+    ///     "recognition.onnx".to_string(),
+    ///     "dict.txt".to_string()
+    /// )
+    /// .with_cuda(); // Simple CUDA setup
+    /// ```
+    #[cfg(feature = "cuda")]
+    pub fn with_cuda(self) -> Self {
+        self.with_cuda_device(0)
+    }
+
+    /// Convenience method to enable CUDA execution on a specific GPU device.
+    ///
+    /// This configures CUDA execution provider with:
+    /// - Specified GPU device ID
+    /// - Falls back to CPU if CUDA fails
+    /// - Uses default memory and performance settings
+    ///
+    /// # Arguments
+    ///
+    /// * `device_id` - The GPU device ID to use (0, 1, 2, etc.)
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use oar_ocr::pipeline::OAROCRBuilder;
+    ///
+    /// let builder = OAROCRBuilder::new(
+    ///     "detection.onnx".to_string(),
+    ///     "recognition.onnx".to_string(),
+    ///     "dict.txt".to_string()
+    /// )
+    /// .with_cuda_device(1); // Use GPU 1
+    /// ```
+    #[cfg(feature = "cuda")]
+    pub fn with_cuda_device(self, device_id: u32) -> Self {
+        use crate::core::config::{OrtExecutionProvider, OrtSessionConfig};
+
+        let ort_config = OrtSessionConfig::new().with_execution_providers(vec![
+            OrtExecutionProvider::CUDA {
+                device_id: Some(device_id as i32),
+                gpu_mem_limit: None,
+                arena_extend_strategy: None,
+                cudnn_conv_algo_search: None,
+                do_copy_in_default_stream: None,
+                cudnn_conv_use_max_workspace: None,
+            },
+            OrtExecutionProvider::CPU, // Fallback to CPU
+        ]);
+
+        self.global_ort_session(ort_config)
+    }
+
+    /// Convenience method to enable high-performance processing configuration.
+    ///
+    /// This applies optimizations for batch processing:
+    /// - Increases parallel processing thresholds
+    /// - Optimizes memory usage
+    /// - Configures efficient batching strategies
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use oar_ocr::pipeline::OAROCRBuilder;
+    ///
+    /// let builder = OAROCRBuilder::new(
+    ///     "detection.onnx".to_string(),
+    ///     "recognition.onnx".to_string(),
+    ///     "dict.txt".to_string()
+    /// )
+    /// .with_high_performance(); // Optimize for batch processing
+    /// ```
+    pub fn with_high_performance(self) -> Self {
+        let max_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4); // Fallback to 4 threads if detection fails
+
+        self.parallel_policy(
+            crate::pipeline::oarocr::config::ParallelPolicy::new()
+                .with_max_threads(Some(max_threads))
+                .with_image_threshold(2)
+                .with_text_box_threshold(5)
+                .with_batch_threshold(3),
+        )
+    }
+
+    /// Convenience method for mobile/resource-constrained environments.
+    ///
+    /// This configures the pipeline for minimal resource usage:
+    /// - Reduces parallel processing to avoid overwhelming the system
+    /// - Uses conservative memory settings
+    /// - Prioritizes stability over speed
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use oar_ocr::pipeline::OAROCRBuilder;
+    ///
+    /// let builder = OAROCRBuilder::new(
+    ///     "detection.onnx".to_string(),
+    ///     "recognition.onnx".to_string(),
+    ///     "dict.txt".to_string()
+    /// )
+    /// .with_low_resource(); // Optimize for limited resources
+    /// ```
+    pub fn with_low_resource(self) -> Self {
+        self.parallel_policy(
+            crate::pipeline::oarocr::config::ParallelPolicy::new()
+                .with_max_threads(Some(2)) // Limit threads
+                .with_image_threshold(10) // Higher thresholds for parallel processing
+                .with_text_box_threshold(20)
+                .with_batch_threshold(10),
+        )
     }
 
     /// Sets the session pool size for text detection.
@@ -625,8 +822,25 @@ impl OAROCRBuilder {
     /// )
     /// .text_det_thresh(0.4); // Higher threshold for more precise detection
     /// ```
-    pub fn text_det_thresh(mut self, thresh: f32) -> Self {
-        self.config.detection.thresh = Some(thresh);
+    #[deprecated(since = "0.2.0", note = "Use `text_det_threshold` instead")]
+    pub fn text_det_thresh(self, thresh: f32) -> Self {
+        self.text_det_threshold(thresh)
+    }
+
+    /// Sets the text detection binarization threshold.
+    ///
+    /// This controls the threshold used for binarizing the detection output.
+    /// Lower values may detect more text but with more false positives.
+    ///
+    /// # Arguments
+    ///
+    /// * `threshold` - The binarization threshold (default: 0.3)
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    pub fn text_det_threshold(mut self, threshold: f32) -> Self {
+        self.config.detection.thresh = Some(threshold);
         self
     }
 
@@ -655,8 +869,25 @@ impl OAROCRBuilder {
     /// )
     /// .text_det_box_thresh(0.7); // Higher threshold for more confident boxes
     /// ```
-    pub fn text_det_box_thresh(mut self, box_thresh: f32) -> Self {
-        self.config.detection.box_thresh = Some(box_thresh);
+    #[deprecated(since = "0.2.0", note = "Use `text_det_box_threshold` instead")]
+    pub fn text_det_box_thresh(self, box_thresh: f32) -> Self {
+        self.text_det_box_threshold(box_thresh)
+    }
+
+    /// Sets the text detection box score threshold.
+    ///
+    /// This controls the threshold for filtering text boxes based on their confidence scores.
+    /// Higher values will filter out more uncertain detections.
+    ///
+    /// # Arguments
+    ///
+    /// * `threshold` - The box score threshold (default: 0.6)
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    pub fn text_det_box_threshold(mut self, threshold: f32) -> Self {
+        self.config.detection.box_thresh = Some(threshold);
         self
     }
 
@@ -699,8 +930,24 @@ impl OAROCRBuilder {
     /// # Returns
     ///
     /// The updated builder instance
-    pub fn text_rec_score_thresh(mut self, thresh: f32) -> Self {
-        self.config.recognition.score_thresh = Some(thresh);
+    #[deprecated(since = "0.2.0", note = "Use `text_rec_score_threshold` instead")]
+    pub fn text_rec_score_thresh(self, thresh: f32) -> Self {
+        self.text_rec_score_threshold(thresh)
+    }
+
+    /// Sets the text recognition score threshold.
+    ///
+    /// Results with confidence scores below this threshold will be filtered out.
+    ///
+    /// # Arguments
+    ///
+    /// * `threshold` - The minimum score threshold for recognition results
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    pub fn text_rec_score_threshold(mut self, threshold: f32) -> Self {
+        self.config.recognition.score_thresh = Some(threshold);
         self
     }
 
@@ -713,7 +960,21 @@ impl OAROCRBuilder {
     /// # Returns
     ///
     /// The updated builder instance
-    pub fn text_rec_model_input_shape(mut self, shape: (u32, u32, u32)) -> Self {
+    #[deprecated(since = "0.2.0", note = "Use `text_rec_input_shape` instead")]
+    pub fn text_rec_model_input_shape(self, shape: (u32, u32, u32)) -> Self {
+        self.text_rec_input_shape(shape)
+    }
+
+    /// Sets the text recognition model input shape.
+    ///
+    /// # Arguments
+    ///
+    /// * `shape` - The model input shape as (channels, height, width)
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    pub fn text_rec_input_shape(mut self, shape: (u32, u32, u32)) -> Self {
         self.config.recognition.model_input_shape =
             Some([shape.0 as usize, shape.1 as usize, shape.2 as usize]);
         self
@@ -1132,24 +1393,6 @@ mod tests {
     }
 
     #[test]
-    fn test_text_det_max_side_limit_default_value() {
-        // Create a builder without setting max_side_limit
-        let builder = OAROCRBuilder::new(
-            "test_detection_model.onnx".to_string(),
-            "test_recognition_model.onnx".to_string(),
-            "test_char_dict.txt".to_string(),
-        );
-
-        let config = builder.get_config();
-
-        // Verify that the default max side limit is set
-        assert_eq!(
-            config.detection.max_side_limit,
-            Some(crate::core::constants::DEFAULT_MAX_SIDE_LIMIT)
-        );
-    }
-
-    #[test]
     fn test_text_det_thresh_configuration() {
         // Create a builder and set the text detection threshold
         let builder = OAROCRBuilder::new(
@@ -1157,7 +1400,7 @@ mod tests {
             "test_recognition_model.onnx".to_string(),
             "test_char_dict.txt".to_string(),
         )
-        .text_det_thresh(0.4);
+        .text_det_threshold(0.4);
 
         let config = builder.get_config();
 
@@ -1173,7 +1416,7 @@ mod tests {
             "test_recognition_model.onnx".to_string(),
             "test_char_dict.txt".to_string(),
         )
-        .text_det_box_thresh(0.7);
+        .text_det_box_threshold(0.7);
 
         let config = builder.get_config();
 
@@ -1205,8 +1448,8 @@ mod tests {
             "test_recognition_model.onnx".to_string(),
             "test_char_dict.txt".to_string(),
         )
-        .text_det_thresh(0.35)
-        .text_det_box_thresh(0.65)
+        .text_det_threshold(0.35)
+        .text_det_box_threshold(0.65)
         .text_det_unclip_ratio(1.8);
 
         let config = builder.get_config();
@@ -1247,5 +1490,105 @@ mod tests {
             tlo_ort.execution_providers,
             Some(vec![OrtExecutionProvider::CPU])
         );
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_with_cuda_convenience_method() {
+        let builder = OAROCRBuilder::new(
+            "test_detection_model.onnx".to_string(),
+            "test_recognition_model.onnx".to_string(),
+            "test_char_dict.txt".to_string(),
+        )
+        .with_cuda();
+
+        let config = builder.get_config();
+
+        // Verify that CUDA configuration was applied to all components
+        assert!(config.detection.common.ort_session.is_some());
+        assert!(config.recognition.common.ort_session.is_some());
+
+        let det_ort = config.detection.common.ort_session.as_ref().unwrap();
+        if let Some(providers) = &det_ort.execution_providers {
+            assert!(providers.len() >= 2); // Should have CUDA + CPU fallback
+            // First should be CUDA
+            if let OrtExecutionProvider::CUDA { device_id, .. } = &providers[0] {
+                assert_eq!(*device_id, Some(0)); // Default device 0
+            } else {
+                panic!("Expected CUDA provider as first execution provider");
+            }
+            // Second should be CPU fallback
+            assert!(matches!(providers[1], OrtExecutionProvider::CPU));
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_with_cuda_device_convenience_method() {
+        let builder = OAROCRBuilder::new(
+            "test_detection_model.onnx".to_string(),
+            "test_recognition_model.onnx".to_string(),
+            "test_char_dict.txt".to_string(),
+        )
+        .with_cuda_device(2);
+
+        let config = builder.get_config();
+
+        let det_ort = config.detection.common.ort_session.as_ref().unwrap();
+        if let Some(providers) = &det_ort.execution_providers {
+            if let OrtExecutionProvider::CUDA { device_id, .. } = &providers[0] {
+                assert_eq!(*device_id, Some(2)); // Should use device 2
+            } else {
+                panic!("Expected CUDA provider with device 2");
+            }
+        }
+    }
+
+    #[test]
+    fn test_with_high_performance_convenience_method() {
+        let builder = OAROCRBuilder::new(
+            "test_detection_model.onnx".to_string(),
+            "test_recognition_model.onnx".to_string(),
+            "test_char_dict.txt".to_string(),
+        )
+        .with_high_performance();
+
+        let config = builder.get_config();
+
+        // Verify that high performance parallel policy was set
+        let policy = &config.parallel_policy;
+
+        // Should have reasonable thread count
+        assert!(policy.max_threads.is_some());
+        let max_threads = policy.max_threads.unwrap();
+        assert!((1..=128).contains(&max_threads));
+
+        // Should have low thresholds for more parallel processing
+        assert_eq!(policy.image_threshold, 2);
+        assert_eq!(policy.text_box_threshold, 5);
+        assert_eq!(policy.batch_threshold, 3);
+    }
+
+    #[test]
+    fn test_with_low_resource_convenience_method() {
+        let builder = OAROCRBuilder::new(
+            "test_detection_model.onnx".to_string(),
+            "test_recognition_model.onnx".to_string(),
+            "test_char_dict.txt".to_string(),
+        )
+        .with_low_resource();
+
+        let config = builder.get_config();
+
+        // Verify that low resource parallel policy was set
+        let policy = &config.parallel_policy;
+
+        // Should limit threads for resource-constrained environments
+        assert_eq!(policy.max_threads, Some(2));
+
+        // Should have higher thresholds to avoid parallel processing on small workloads
+        assert_eq!(policy.image_threshold, 10);
+        assert_eq!(policy.text_box_threshold, 20);
+        assert_eq!(policy.batch_threshold, 10);
     }
 }

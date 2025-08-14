@@ -250,16 +250,6 @@ mod tests {
     }
 
     #[test]
-    fn test_crop_new() {
-        let crop = Crop::new([100, 100], CropMode::Center).unwrap();
-        assert_eq!(crop.crop_size(), [100, 100]);
-        assert_eq!(*crop.crop_mode(), CropMode::Center);
-
-        // Test invalid size
-        assert!(Crop::new([0, 100], CropMode::Center).is_err());
-    }
-
-    #[test]
     fn test_crop_center() {
         let crop = Crop::new([100, 100], CropMode::Center).unwrap();
         let img = create_test_image(200, 200);

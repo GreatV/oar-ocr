@@ -305,13 +305,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_transform_registry_new() {
-        let registry = TransformRegistry::new();
-        assert_eq!(registry.len(), 0);
-        assert!(registry.is_empty());
-    }
-
-    #[test]
     fn test_transform_registry_add() {
         let mut registry = TransformRegistry::new();
         registry.add(

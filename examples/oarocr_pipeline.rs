@@ -232,8 +232,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .text_detection_batch_size(1)
     .text_recognition_batch_size(1)
     // Configure text detection parameters for fine-tuning detection behavior
-    .text_det_thresh(0.3)           // Binarization threshold (default: 0.3)
-    .text_det_box_thresh(0.6)       // Box score threshold (default: 0.6)
+    .text_det_threshold(0.3)           // Binarization threshold (default: 0.3)
+    .text_det_box_threshold(0.6)       // Box score threshold (default: 0.6)
     .text_det_unclip_ratio(1.5)     // Unclip ratio for text box expansion (default: 1.5)
     .text_det_max_side_limit(4000)  // Maximum side limit for image processing (default: 4000)
     // Enable dynamic batching for improved performance with multiple images
@@ -241,9 +241,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .max_detection_batch_size(4)
     .max_recognition_batch_size(16)
     // Set minimum score threshold for text recognition results
-    .text_rec_score_thresh(0.0)
+    .text_rec_score_threshold(0.0)
     // Set model input shape for text recognition (channels, height, width)
-    .text_rec_model_input_shape((3, 48, 320))
+    .text_rec_input_shape((3, 48, 320))
     // Example: Set document orientation confidence threshold (if using doc orientation)
     // .doc_orientation_confidence_threshold(0.8) // Only accept predictions with 80% confidence
     ;
@@ -253,8 +253,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder = builder
             .textline_orientation_classify_model_path(args.textline_orientation_model)
             .textline_orientation_classify_batch_size(1)
-            .textline_orientation_classify_input_shape((160, 80))
-            .textline_orientation_confidence_threshold(0.7) // Only accept predictions with 70% confidence
+            .textline_orientation_input_shape((160, 80))
+            .textline_orientation_threshold(0.7) // Only accept predictions with 70% confidence
             .use_textline_orientation(true);
     }
 

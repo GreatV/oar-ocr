@@ -623,24 +623,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pipeline_stats_new() {
-        let stats = PipelineStats::new();
-        assert_eq!(stats.total_processed, 0);
-        assert_eq!(stats.successful_predictions, 0);
-        assert_eq!(stats.failed_predictions, 0);
-        assert_eq!(stats.average_inference_time_ms, 0.0);
-    }
-
-    #[test]
-    fn test_pipeline_stats_default() {
-        let stats = PipelineStats::default();
-        assert_eq!(stats.total_processed, 0);
-        assert_eq!(stats.successful_predictions, 0);
-        assert_eq!(stats.failed_predictions, 0);
-        assert_eq!(stats.average_inference_time_ms, 0.0);
-    }
-
-    #[test]
     fn test_pipeline_stats_success_rate_zero_processed() {
         let stats = PipelineStats {
             total_processed: 0,

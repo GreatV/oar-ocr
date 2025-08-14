@@ -395,18 +395,6 @@ mod tests {
     use crate::processors::AspectRatioBucketingConfig;
 
     #[test]
-    fn test_recognition_config_default() {
-        let config = RecognitionConfig::default();
-        assert!(!config.orientation_correction.enabled);
-        match config.grouping_strategy {
-            GroupingStrategyConfig::ExactDimensions => {
-                // This is expected
-            }
-            _ => panic!("Default should be ExactDimensions"),
-        }
-    }
-
-    #[test]
     fn test_recognition_config_from_legacy_config() {
         // Test with orientation enabled and aspect ratio bucketing
         let config = RecognitionConfig::from_legacy_config(

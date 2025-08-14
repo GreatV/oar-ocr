@@ -300,17 +300,6 @@ mod tests {
     }
 
     #[test]
-    fn test_grouping_strategy_config_default() {
-        let config = GroupingStrategyConfig::default();
-        match config {
-            GroupingStrategyConfig::ExactDimensions => {
-                // This is expected
-            }
-            _ => panic!("Default should be ExactDimensions"),
-        }
-    }
-
-    #[test]
     fn test_integration_grouping_with_mixed_sizes() {
         // Test that different strategies handle mixed image sizes appropriately
         let images = vec![

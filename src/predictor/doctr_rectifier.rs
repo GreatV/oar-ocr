@@ -8,7 +8,8 @@
 use crate::core::traits::StandardPredictor;
 use crate::core::{
     BatchData, BatchSampler, CommonBuilderConfig, DefaultImageReader, ImageReader, OCRError,
-    OrtInfer, Tensor4D, ToBatch, config::ConfigValidator,
+    OrtInfer, Tensor4D, ToBatch,
+    config::{ConfigValidator, ConfigValidatorExt},
 };
 use crate::processors::{DocTrPostProcess, NormalizeImage};
 use image::{DynamicImage, RgbImage};
@@ -492,9 +493,7 @@ impl DoctrRectifierPredictorBuilder {
             rec_image_shape: self.rec_image_shape,
         };
 
-        config.validate().map_err(|e| OCRError::ConfigError {
-            message: e.to_string(),
-        })?;
+        let config = config.validate_and_wrap_ocr_error()?;
 
         DoctrRectifierPredictor::new(config, model_path)
     }

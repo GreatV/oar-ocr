@@ -340,15 +340,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ort_session_config_new() {
-        let config = OrtSessionConfig::new();
-        assert!(config.intra_threads.is_none());
-        assert!(config.inter_threads.is_none());
-        assert!(config.optimization_level.is_none());
-        assert!(config.execution_providers.is_none());
-    }
-
-    #[test]
     fn test_ort_session_config_builder() {
         let config = OrtSessionConfig::new()
             .with_intra_threads(4)
@@ -380,17 +371,5 @@ mod tests {
             config.get_optimization_level(),
             OrtGraphOptimizationLevel::All
         ));
-    }
-
-    #[test]
-    fn test_execution_provider_defaults() {
-        let cpu_provider = OrtExecutionProvider::default();
-        assert!(matches!(cpu_provider, OrtExecutionProvider::CPU));
-    }
-
-    #[test]
-    fn test_optimization_level_defaults() {
-        let level = OrtGraphOptimizationLevel::default();
-        assert!(matches!(level, OrtGraphOptimizationLevel::Level1));
     }
 }

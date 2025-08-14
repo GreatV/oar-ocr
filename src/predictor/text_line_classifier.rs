@@ -9,7 +9,8 @@
 use crate::core::traits::StandardPredictor;
 use crate::core::{
     BatchData, BatchSampler, CommonBuilderConfig, DefaultImageReader, ImageReader, OCRError,
-    OrtInfer, Tensor2D, Tensor4D, ToBatch, config::ConfigValidator,
+    OrtInfer, Tensor2D, Tensor4D, ToBatch,
+    config::{ConfigValidator, ConfigValidatorExt},
     get_text_line_orientation_labels,
 };
 use crate::processors::{Crop, NormalizeImage, Topk};
@@ -630,9 +631,7 @@ impl TextLineClasPredictorBuilder {
             input_shape: self.input_shape,
         };
 
-        config.validate().map_err(|e| OCRError::ConfigError {
-            message: e.to_string(),
-        })?;
+        let config = config.validate_and_wrap_ocr_error()?;
 
         TextLineClasPredictor::new(config, model_path)
     }

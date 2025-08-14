@@ -21,7 +21,7 @@ use std::sync::Arc;
 use crate::core::traits::StandardPredictor;
 use crate::core::{
     BatchData, CommonBuilderConfig, OCRError, Tensor4D,
-    config::ConfigValidator,
+    config::{ConfigValidator, ConfigValidatorExt},
     constants::{DEFAULT_BATCH_SIZE, DEFAULT_MAX_SIDE_LIMIT},
 };
 
@@ -721,9 +721,7 @@ impl TextDetPredictorBuilder {
             input_shape: self.input_shape,
             max_side_limit: self.max_side_limit,
         };
-        config.validate().map_err(|e| OCRError::ConfigError {
-            message: e.to_string(),
-        })?;
+        let config = config.validate_and_wrap_ocr_error()?;
         TextDetPredictor::new(config, model_path)
     }
 }

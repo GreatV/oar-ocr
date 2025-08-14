@@ -224,10 +224,13 @@ impl DynamicBatcher for DefaultDynamicBatcher {
 
             // Add to the compatible group or create a new one
             if let Some(group_key) = target_group_key {
-                compatibility_groups
-                    .get_mut(&group_key)
-                    .unwrap()
-                    .push((index, image));
+                if let Some(group) = compatibility_groups.get_mut(&group_key) {
+                    group.push((index, image));
+                } else {
+                    // This should not happen, but handle it defensively
+                    let group_key = format!("group_{}", compatibility_groups.len());
+                    compatibility_groups.insert(group_key, vec![(index, image)]);
+                }
             } else {
                 let group_key = format!("group_{}", compatibility_groups.len());
                 compatibility_groups.insert(group_key, vec![(index, image)]);
@@ -310,7 +313,13 @@ impl DynamicBatcher for DefaultDynamicBatcher {
 
             // Add to the compatible group or create a new one
             if let Some(group_key) = target_group_key {
-                compatibility_groups.get_mut(&group_key).unwrap().push(item);
+                if let Some(group) = compatibility_groups.get_mut(&group_key) {
+                    group.push(item);
+                } else {
+                    // This should not happen, but handle it defensively
+                    let group_key = format!("cross_group_{}", compatibility_groups.len());
+                    compatibility_groups.insert(group_key, vec![item]);
+                }
             } else {
                 let group_key = format!("cross_group_{}", compatibility_groups.len());
                 compatibility_groups.insert(group_key, vec![item]);

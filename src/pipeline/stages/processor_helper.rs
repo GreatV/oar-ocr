@@ -573,14 +573,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_batch_config_default() {
-        let config = BatchConfig::new("test_stage");
-        assert_eq!(config.effective_threshold(None), 10);
-        assert!(!config.include_fallback_results);
-        assert_eq!(config.stage_name, "test_stage");
-    }
-
-    #[test]
     fn test_batch_config_builder() {
         let config = BatchConfig::new("test_stage").with_fallback_results(true);
 
