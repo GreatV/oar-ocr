@@ -11,6 +11,6 @@ pub mod transform;
 
 // Re-export commonly used types
 pub use builder::CommonBuilderConfig;
-pub use errors::{ConfigError, ConfigValidator};
+pub use errors::{ConfigError, ConfigValidator, ConfigValidatorExt};
 pub use onnx::*;
 pub use transform::{TransformConfig, TransformRegistry, TransformType};

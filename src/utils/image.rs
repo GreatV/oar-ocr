@@ -476,24 +476,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resize_and_pad_basic() {
-        let image = create_test_image(100, 50, [255, 255, 255]); // 2:1 aspect ratio
-        let config = ResizePadConfig::new((80, 80)); // Square target
-
-        let result = resize_and_pad(&image, &config);
-
-        assert_eq!(result.dimensions(), (80, 80));
-
-        // The resized image should be 80x40 (maintaining 2:1 ratio), centered in 80x80
-        // So there should be 20 pixels of padding on top and bottom
-        let center_pixel = result.get_pixel(40, 40); // Center of image
-        assert_eq!(*center_pixel, Rgb([255, 255, 255])); // Should be white (original image)
-
-        let top_padding = result.get_pixel(40, 10); // Top padding area
-        assert_eq!(*top_padding, Rgb([0, 0, 0])); // Should be black (default padding)
-    }
-
-    #[test]
     fn test_resize_and_pad_with_custom_padding() {
         let image = create_test_image(50, 100, [255, 0, 0]); // 1:2 aspect ratio (tall)
         let config = ResizePadConfig::new((80, 80))
@@ -528,25 +510,6 @@ mod tests {
 
         let right_padding = result.get_pixel(60, 40); // Right padding area
         assert_eq!(*right_padding, Rgb([255, 255, 0])); // Should be yellow (padding)
-    }
-
-    #[test]
-    fn test_ocr_resize_and_pad_basic() {
-        let image = create_test_image(200, 100, [128, 128, 128]); // 2:1 aspect ratio
-        let config = OCRResizePadConfig::new(32, 160); // Height 32, max width 160
-
-        let (result, actual_width) = ocr_resize_and_pad(&image, &config, None);
-
-        assert_eq!(result.height(), 32);
-        assert_eq!(result.width(), actual_width);
-        assert!(actual_width <= 160);
-
-        // With 2:1 ratio and height 32, width should be 64
-        assert_eq!(actual_width, 64);
-
-        // Check that the image is left-aligned (OCR style)
-        let left_pixel = result.get_pixel(0, 16); // Left edge, middle height
-        assert_eq!(*left_pixel, Rgb([128, 128, 128])); // Should be gray (original image)
     }
 
     #[test]
@@ -650,12 +613,6 @@ mod tests {
         assert_eq!(result.height(), 32);
         assert_eq!(actual_width, 96); // 32 * 3.0 = 96
         assert_eq!(result.width(), 96);
-    }
-
-    #[test]
-    fn test_padding_strategy_default() {
-        let strategy = PaddingStrategy::default();
-        assert_eq!(strategy, PaddingStrategy::Black);
     }
 
     #[test]

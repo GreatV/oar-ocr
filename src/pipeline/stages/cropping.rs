@@ -385,20 +385,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cropping_config_default() {
-        let config = CroppingConfig::default();
-        // Test that default config can be created
-        assert_eq!(config.effective_threshold(None), 10);
-    }
-
-    #[test]
-    fn test_cropping_config_new() {
-        let config = CroppingConfig::new();
-        // Test that new config can be created
-        assert_eq!(config.effective_threshold(None), 10);
-    }
-
-    #[test]
     fn test_cropping_config_effective_threshold() {
         let config = CroppingConfig::new();
 

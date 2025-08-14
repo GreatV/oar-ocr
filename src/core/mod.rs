@@ -30,8 +30,8 @@ pub mod traits;
 // };
 pub use batch::{BatchData, BatchSampler, Tensor1D, Tensor2D, Tensor3D, Tensor4D, ToBatch};
 pub use config::{
-    CommonBuilderConfig, ConfigError, ConfigValidator, TransformConfig, TransformRegistry,
-    TransformType,
+    CommonBuilderConfig, ConfigError, ConfigValidator, ConfigValidatorExt, TransformConfig,
+    TransformRegistry, TransformType,
 };
 pub use constants::*;
 pub use dynamic_batch::{

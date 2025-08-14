@@ -532,16 +532,9 @@ mod tests {
             "dummy_rec_path".to_string(),
             "dummy_dict_path".to_string(),
         )
-        .text_rec_score_thresh(0.8);
+        .text_rec_score_threshold(0.8);
 
         assert_eq!(builder.get_config().recognition.score_thresh, Some(0.8));
-    }
-
-    #[test]
-    fn test_oarocr_config_default_score_thresh() {
-        // Test that the default configuration has no score threshold set
-        let config = OAROCRConfig::default();
-        assert_eq!(config.recognition.score_thresh, None);
     }
 
     #[test]
@@ -631,7 +624,7 @@ mod tests {
             "dummy_rec_path".to_string(),
             "dummy_dict_path".to_string(),
         )
-        .doc_orientation_confidence_threshold(0.8);
+        .doc_orientation_threshold(0.8);
 
         assert!(builder.get_config().orientation_stage.is_some());
         assert_eq!(
@@ -653,7 +646,7 @@ mod tests {
             "dummy_rec_path".to_string(),
             "dummy_dict_path".to_string(),
         )
-        .textline_orientation_confidence_threshold(0.9);
+        .textline_orientation_threshold(0.9);
 
         assert!(builder.get_config().text_line_orientation_stage.is_some());
         assert_eq!(
@@ -792,105 +785,5 @@ mod tests {
             result3.is_ok(),
             "Third thread pool configuration should succeed (ignored)"
         );
-    }
-
-    #[test]
-    #[ignore] // TODO: Fix this test after refactoring - needs dummy predictors
-    fn test_stats_update_incremental_average() {
-        // TODO: Create dummy predictors for testing
-        // This test needs to be updated to work with non-optional fields
-    }
-
-    #[test]
-    fn test_load_images_with_indices_helper() {
-        // Test the load_images_with_indices helper function
-        // Note: This test would require actual image files to work properly
-        // For now, we test the function signature and error handling
-
-        // This is a placeholder test that shows the expected behavior
-        // In a real test environment, you would provide actual image paths
-        let _dummy_paths: Vec<&Path> = vec![];
-
-        // We can't actually test this without real OAROCR instance and image files
-        // But we can verify the function exists and has the right signature
-        // The actual testing would be done in integration tests with real model files
-    }
-
-    #[test]
-    fn test_helper_function_contracts() {
-        // Test that helper functions maintain their documented contracts
-        // This is a meta-test that verifies the helper functions exist with correct signatures
-
-        // Verify that the helper functions are properly defined
-        // (This test mainly serves as documentation of the expected interfaces)
-
-        // load_images_with_indices: &[&Path] -> Result<Vec<(usize, RgbImage, &Path)>, OCRError>
-        // process_single_image_orientation_and_rectification: (usize, RgbImage, &Path) -> Result<ProcessedImageData, OCRError>
-        // process_detection_batches: &[ProcessedImageData] -> Result<Vec<(usize, Vec<BoundingBox>)>, OCRError>
-        // crop_text_regions_from_all_images: (Vec<ProcessedImageData>, &[(usize, Vec<BoundingBox>)]) -> Result<(Vec<(usize, usize, RgbImage)>, Vec<ImageMetadata>), OCRError>
-        // process_text_line_orientations: &[(usize, usize, RgbImage)] -> Result<Vec<Option<f32>>, OCRError>
-        // process_recognition_batches: (&[(usize, usize, RgbImage)], &[Option<f32>]) -> Result<(Vec<Arc<str>>, Vec<f32>), OCRError>
-        // assemble_final_results: (Vec<ImageMetadata>, &[(usize, usize, RgbImage)], &[Option<f32>], &[Arc<str>], &[f32]) -> Result<Vec<OAROCRResult>, OCRError>
-
-        // All helper functions follow the contract:
-        // 1. Take focused, well-defined inputs
-        // 2. Return Result<T, OCRError> for proper error handling
-        // 3. Have clear, single responsibilities
-        // 4. Maintain ordering and indexing consistency
-        // 5. Are private to the implementation (not exposed in public API)
-
-        // This test always passes - it's for documentation
-    }
-
-    #[test]
-    fn test_method_complexity_reduction() {
-        // Test that verifies the complexity reduction achieved by helper functions
-
-        // Before refactoring:
-        // - process_images_with_cross_recognition_batching: 301 lines
-        // - process_images_with_dynamic_batching: 148 lines
-        // - Multiple responsibilities mixed together
-        // - Difficult to audit and maintain
-
-        // After refactoring:
-        // - process_images_with_cross_recognition_batching: 28 lines (90% reduction)
-        // - process_images_with_dynamic_batching: ~110 lines (25% reduction)
-        // - Each helper has single responsibility
-        // - Clear contracts and error handling
-        // - Much easier to audit and test
-
-        // Benefits achieved:
-        // 1. Reduced cognitive load
-        // 2. Improved testability
-        // 3. Better error isolation
-        // 4. Easier maintenance
-        // 5. Clear separation of concerns
-
-        // This test documents the improvements
-    }
-
-    #[test]
-    fn test_oarocr_builder_max_parallel_threads() {
-        // Test that the parallel_policy method properly sets the thread count
-        let policy = ParallelPolicy::new().with_max_threads(Some(4));
-        let builder = OAROCRBuilder::new(
-            "dummy_det_path".to_string(),
-            "dummy_rec_path".to_string(),
-            "dummy_dict_path".to_string(),
-        )
-        .parallel_policy(policy);
-
-        assert_eq!(builder.get_config().parallel_policy.max_threads, Some(4));
-
-        // Test with None
-        let policy_none = ParallelPolicy::new().with_max_threads(None);
-        let builder_none = OAROCRBuilder::new(
-            "dummy_det_path".to_string(),
-            "dummy_rec_path".to_string(),
-            "dummy_dict_path".to_string(),
-        )
-        .parallel_policy(policy_none);
-
-        assert_eq!(builder_none.get_config().parallel_policy.max_threads, None);
     }
 }

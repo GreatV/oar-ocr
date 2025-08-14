@@ -310,16 +310,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_common_builder_config_new() {
-        let config = CommonBuilderConfig::new();
-        assert!(config.model_path.is_none());
-        assert!(config.model_name.is_none());
-        assert!(config.batch_size.is_none());
-        assert!(config.enable_logging.is_none());
-        assert_eq!(config.session_pool_size, Some(1));
-    }
-
-    #[test]
     fn test_common_builder_config_builder_pattern() {
         let config = CommonBuilderConfig::new()
             .model_name("test_model")

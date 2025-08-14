@@ -12,8 +12,8 @@
 
 use crate::core::traits::StandardPredictor;
 use crate::core::{
-    BatchData, BatchSampler, CommonBuilderConfig, DefaultImageReader, ImageReader, OCRError,
-    OrtInfer, Tensor3D, Tensor4D, ToBatch,
+    BatchData, BatchSampler, CommonBuilderConfig, ConfigValidator, ConfigValidatorExt,
+    DefaultImageReader, ImageReader, OCRError, OrtInfer, Tensor3D, Tensor4D, ToBatch,
 };
 use crate::processors::{CTCLabelDecode, NormalizeImage, OCRResize};
 use image::RgbImage;
@@ -74,12 +74,10 @@ impl TextRecPredictorConfig {
             score_thresh: None,
         }
     }
+}
 
-    /// Validates the configuration
-    ///
-    /// This function checks that the configuration parameters are valid.
-    /// It returns an error if any of the parameters are invalid.
-    pub fn validate(&self) -> Result<(), crate::core::ConfigError> {
+impl ConfigValidator for TextRecPredictorConfig {
+    fn validate(&self) -> Result<(), crate::core::ConfigError> {
         self.common.validate()?;
 
         if let Some(shape) = self.model_input_shape
@@ -91,6 +89,10 @@ impl TextRecPredictorConfig {
         }
 
         Ok(())
+    }
+
+    fn get_defaults() -> Self {
+        Self::new()
     }
 }
 
@@ -413,10 +415,12 @@ impl TextRecPredictorBuilder {
     /// This function builds the `TextRecPredictor` with the provided configuration.
     /// It also validates the configuration and handles the model path.
     fn build_internal(mut self, model_path: &Path) -> Result<TextRecPredictor, OCRError> {
+        // Ensure model path is set first
         if self.common.model_path.is_none() {
             self.common = self.common.model_path(model_path.to_path_buf());
         }
 
+        // Build the configuration
         let config = TextRecPredictorConfig {
             common: self.common,
             model_input_shape: self.model_input_shape,
@@ -424,10 +428,10 @@ impl TextRecPredictorBuilder {
             score_thresh: self.score_thresh,
         };
 
-        config.validate().map_err(|e| OCRError::ConfigError {
-            message: e.to_string(),
-        })?;
+        // Validate the configuration
+        let config = config.validate_and_wrap_ocr_error()?;
 
+        // Create the predictor
         TextRecPredictor::new(config, model_path)
     }
 }

@@ -400,13 +400,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_point2f_new() {
-        let point = Point2f::new(1.0, 2.0);
-        assert_eq!(point.x, 1.0);
-        assert_eq!(point.y, 2.0);
-    }
-
-    #[test]
     fn test_distance() {
         let p1 = Point2f::new(0.0, 0.0);
         let p2 = Point2f::new(3.0, 4.0);

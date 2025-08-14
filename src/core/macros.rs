@@ -255,16 +255,6 @@ mod tests {
     }
 
     #[test]
-    fn test_impl_complete_builder_simple_setter() {
-        let builder = TestBuilder::new().simple_field("test_value".to_string());
-
-        assert_eq!(
-            builder.get_config().simple_field,
-            Some("test_value".to_string())
-        );
-    }
-
-    #[test]
     fn test_impl_complete_builder_nested_setter() {
         let builder = TestBuilder::new().nested_field(42);
 

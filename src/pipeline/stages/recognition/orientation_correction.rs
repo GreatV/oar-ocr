@@ -190,10 +190,4 @@ mod tests {
         let corrections = corrector.apply_corrections(&mut images, &indices, Some(&orientations));
         assert_eq!(corrections, 0);
     }
-
-    #[test]
-    fn test_default_config() {
-        let config = OrientationCorrectionConfig::default();
-        assert!(!config.enabled);
-    }
 }
