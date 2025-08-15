@@ -143,45 +143,168 @@ impl DefaultDynamicBatcher {
 
         let mut padded = ImageBuffer::new(target_width, target_height);
 
+        // Calculate offsets for centering the original image
+        let x_offset = (target_width - current_width) / 2;
+        let y_offset = (target_height - current_height) / 2;
+
         match strategy {
             PaddingStrategy::Zero => {
                 // Fill with zeros (black)
                 for pixel in padded.pixels_mut() {
                     *pixel = Rgb([0, 0, 0]);
                 }
+                // Copy the original image to the center
+                Self::copy_centered_image(&mut padded, image, x_offset, y_offset);
             }
             PaddingStrategy::Center { fill_color } => {
                 // Fill with specified color
                 for pixel in padded.pixels_mut() {
                     *pixel = Rgb(*fill_color);
                 }
+                // Copy the original image to the center
+                Self::copy_centered_image(&mut padded, image, x_offset, y_offset);
             }
             PaddingStrategy::Edge => {
-                // Fill with edge pixels (not implemented in this simple version)
-                for pixel in padded.pixels_mut() {
-                    *pixel = Rgb([128, 128, 128]); // Gray as placeholder
-                }
+                // Edge padding: directly compute all pixels with edge replication
+                Self::apply_optimized_edge_padding(&mut padded, image, x_offset, y_offset);
             }
             PaddingStrategy::Smart => {
-                // Smart padding (not implemented in this simple version)
+                // Smart padding: content-aware padding based on image analysis
+                let smart_color = Self::calculate_smart_padding_color(image);
                 for pixel in padded.pixels_mut() {
-                    *pixel = Rgb([64, 64, 64]); // Dark gray as placeholder
+                    *pixel = smart_color;
                 }
-            }
-        }
-
-        // Copy the original image to the center of the padded image
-        let x_offset = (target_width - current_width) / 2;
-        let y_offset = (target_height - current_height) / 2;
-
-        for y in 0..current_height {
-            for x in 0..current_width {
-                let pixel = image.get_pixel(x, y);
-                padded.put_pixel(x + x_offset, y + y_offset, *pixel);
+                // Copy the original image to the center
+                Self::copy_centered_image(&mut padded, image, x_offset, y_offset);
             }
         }
 
         Ok(padded)
+    }
+
+    /// Copy the original image to the center of the padded image
+    fn copy_centered_image(
+        padded: &mut RgbImage,
+        original: &RgbImage,
+        x_offset: u32,
+        y_offset: u32,
+    ) {
+        let (orig_width, orig_height) = original.dimensions();
+        for y in 0..orig_height {
+            for x in 0..orig_width {
+                let pixel = original.get_pixel(x, y);
+                padded.put_pixel(x + x_offset, y + y_offset, *pixel);
+            }
+        }
+    }
+
+    /// Apply optimized edge padding by directly computing all pixels
+    fn apply_optimized_edge_padding(
+        padded: &mut RgbImage,
+        original: &RgbImage,
+        x_offset: u32,
+        y_offset: u32,
+    ) {
+        let (padded_width, padded_height) = padded.dimensions();
+        let (orig_width, orig_height) = original.dimensions();
+
+        // Fill the entire padded image with edge pixel replication
+        for y in 0..padded_height {
+            for x in 0..padded_width {
+                // Determine source coordinates with edge replication
+                let source_x = if x < x_offset {
+                    // Left padding area - use leftmost column
+                    0
+                } else if x >= x_offset + orig_width {
+                    // Right padding area - use rightmost column
+                    orig_width - 1
+                } else {
+                    // Within original image bounds
+                    x - x_offset
+                };
+
+                let source_y = if y < y_offset {
+                    // Top padding area - use topmost row
+                    0
+                } else if y >= y_offset + orig_height {
+                    // Bottom padding area - use bottommost row
+                    orig_height - 1
+                } else {
+                    // Within original image bounds
+                    y - y_offset
+                };
+
+                let pixel = original.get_pixel(source_x, source_y);
+                padded.put_pixel(x, y, *pixel);
+            }
+        }
+    }
+
+    /// Calculate smart padding color based on image content analysis
+    fn calculate_smart_padding_color(image: &RgbImage) -> Rgb<u8> {
+        let (width, height) = image.dimensions();
+
+        if width == 0 || height == 0 {
+            return Rgb([0, 0, 0]); // Default to black for empty images
+        }
+
+        // Sample edge pixels to determine the most appropriate padding color
+        let mut edge_pixels = Vec::new();
+
+        // Sample top and bottom edges
+        for x in 0..width {
+            edge_pixels.push(*image.get_pixel(x, 0)); // Top edge
+            if height > 1 {
+                edge_pixels.push(*image.get_pixel(x, height - 1)); // Bottom edge
+            }
+        }
+
+        // Sample left and right edges (excluding corners to avoid double counting)
+        for y in 1..height.saturating_sub(1) {
+            edge_pixels.push(*image.get_pixel(0, y)); // Left edge
+            if width > 1 {
+                edge_pixels.push(*image.get_pixel(width - 1, y)); // Right edge
+            }
+        }
+
+        if edge_pixels.is_empty() {
+            return Rgb([0, 0, 0]);
+        }
+
+        // Calculate the median color of edge pixels for robustness against outliers
+        let mut r_values: Vec<u8> = edge_pixels.iter().map(|p| p.0[0]).collect();
+        let mut g_values: Vec<u8> = edge_pixels.iter().map(|p| p.0[1]).collect();
+        let mut b_values: Vec<u8> = edge_pixels.iter().map(|p| p.0[2]).collect();
+
+        r_values.sort_unstable();
+        g_values.sort_unstable();
+        b_values.sort_unstable();
+
+        let len = r_values.len();
+        let median_r = r_values[len / 2];
+        let median_g = g_values[len / 2];
+        let median_b = b_values[len / 2];
+
+        // Apply some heuristics to improve the padding color choice
+        // If the median color is very bright, slightly darken it to avoid harsh contrast
+        // If the median color is very dark, slightly brighten it for better visibility
+        let adjusted_r = Self::adjust_padding_component(median_r);
+        let adjusted_g = Self::adjust_padding_component(median_g);
+        let adjusted_b = Self::adjust_padding_component(median_b);
+
+        Rgb([adjusted_r, adjusted_g, adjusted_b])
+    }
+
+    /// Adjust a color component for better padding appearance
+    fn adjust_padding_component(component: u8) -> u8 {
+        match component {
+            // Very dark colors (0-63): brighten slightly
+            0..=63 => (component as u16 + 16).min(255) as u8,
+            // Very bright colors (192-255): darken slightly
+            192..=255 => (component as i16 - 16).max(0) as u8,
+            // Medium colors (64-191): use as-is
+            _ => component,
+        }
     }
 
     /// Generate a batch ID based on target dimensions
@@ -382,5 +505,191 @@ impl DynamicBatcher for DefaultDynamicBatcher {
         // batching logic, memory management, etc.
         let result = predictor.predict(images, config)?;
         Ok(vec![result])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{ImageBuffer, Rgb};
+
+    /// Helper function to create a test image with a specific pattern
+    fn create_test_image(width: u32, height: u32, pattern: &str) -> RgbImage {
+        let mut image = ImageBuffer::new(width, height);
+
+        match pattern {
+            "solid_red" => {
+                for pixel in image.pixels_mut() {
+                    *pixel = Rgb([255, 0, 0]);
+                }
+            }
+            "gradient" => {
+                for (x, y, pixel) in image.enumerate_pixels_mut() {
+                    let r = (x * 255 / width.max(1)) as u8;
+                    let g = (y * 255 / height.max(1)) as u8;
+                    *pixel = Rgb([r, g, 128]);
+                }
+            }
+            "border" => {
+                // Create an image with distinct border colors
+                for (x, y, pixel) in image.enumerate_pixels_mut() {
+                    if x == 0 {
+                        *pixel = Rgb([255, 0, 0]); // Red left edge
+                    } else if x == width - 1 {
+                        *pixel = Rgb([0, 255, 0]); // Green right edge
+                    } else if y == 0 {
+                        *pixel = Rgb([0, 0, 255]); // Blue top edge
+                    } else if y == height - 1 {
+                        *pixel = Rgb([255, 255, 0]); // Yellow bottom edge
+                    } else {
+                        *pixel = Rgb([128, 128, 128]); // Gray center
+                    }
+                }
+            }
+            _ => {
+                // Default: black image
+                for pixel in image.pixels_mut() {
+                    *pixel = Rgb([0, 0, 0]);
+                }
+            }
+        }
+
+        image
+    }
+
+    #[test]
+    fn test_pad_image_zero_strategy() {
+        let image = create_test_image(10, 10, "solid_red");
+        let strategy = PaddingStrategy::Zero;
+        let result = DefaultDynamicBatcher::pad_image(&image, (20, 20), &strategy).unwrap();
+
+        assert_eq!(result.dimensions(), (20, 20));
+
+        // Check that padding areas are black (zero)
+        assert_eq!(*result.get_pixel(0, 0), Rgb([0, 0, 0])); // Top-left corner
+        assert_eq!(*result.get_pixel(19, 19), Rgb([0, 0, 0])); // Bottom-right corner
+
+        // Check that the original image is centered
+        assert_eq!(*result.get_pixel(10, 10), Rgb([255, 0, 0])); // Center of original
+    }
+
+    #[test]
+    fn test_pad_image_center_strategy() {
+        let image = create_test_image(10, 10, "solid_red");
+        let strategy = PaddingStrategy::Center {
+            fill_color: [0, 255, 0],
+        }; // Green padding
+        let result = DefaultDynamicBatcher::pad_image(&image, (20, 20), &strategy).unwrap();
+
+        assert_eq!(result.dimensions(), (20, 20));
+
+        // Check that padding areas are green
+        assert_eq!(*result.get_pixel(0, 0), Rgb([0, 255, 0])); // Top-left corner
+        assert_eq!(*result.get_pixel(19, 19), Rgb([0, 255, 0])); // Bottom-right corner
+
+        // Check that the original image is centered
+        assert_eq!(*result.get_pixel(10, 10), Rgb([255, 0, 0])); // Center of original
+    }
+
+    #[test]
+    fn test_pad_image_edge_strategy() {
+        let image = create_test_image(6, 6, "border");
+        let strategy = PaddingStrategy::Edge;
+        let result = DefaultDynamicBatcher::pad_image(&image, (12, 12), &strategy).unwrap();
+
+        assert_eq!(result.dimensions(), (12, 12));
+
+        // Check edge replication
+        // Left padding should replicate the left edge (red)
+        assert_eq!(*result.get_pixel(0, 6), Rgb([255, 0, 0])); // Left edge replication
+
+        // Right padding should replicate the right edge (green)
+        assert_eq!(*result.get_pixel(11, 6), Rgb([0, 255, 0])); // Right edge replication
+
+        // Top padding should replicate the top edge (blue)
+        assert_eq!(*result.get_pixel(6, 0), Rgb([0, 0, 255])); // Top edge replication
+
+        // Bottom padding should replicate the bottom edge (yellow)
+        assert_eq!(*result.get_pixel(6, 11), Rgb([255, 255, 0])); // Bottom edge replication
+
+        // Check that the original image content is preserved
+        assert_eq!(*result.get_pixel(6, 6), Rgb([128, 128, 128])); // Center of original
+    }
+
+    #[test]
+    fn test_pad_image_smart_strategy() {
+        let image = create_test_image(10, 10, "border");
+        let strategy = PaddingStrategy::Smart;
+        let result = DefaultDynamicBatcher::pad_image(&image, (20, 20), &strategy).unwrap();
+
+        assert_eq!(result.dimensions(), (20, 20));
+
+        // The smart strategy should calculate a color based on edge analysis
+        // We can't predict the exact color, but we can verify it's not the default placeholder
+        let padding_pixel = *result.get_pixel(0, 0);
+        assert_ne!(padding_pixel, Rgb([64, 64, 64])); // Should not be the old placeholder
+
+        // Check that the original image is centered and preserved
+        // The original image is 10x10, centered in 20x20, so it starts at (5,5)
+        assert_eq!(*result.get_pixel(10, 10), Rgb([128, 128, 128])); // Center of original (5+5, 5+5)
+    }
+
+    #[test]
+    fn test_pad_image_no_padding_needed() {
+        let image = create_test_image(10, 10, "solid_red");
+        let strategy = PaddingStrategy::Zero;
+        let result = DefaultDynamicBatcher::pad_image(&image, (10, 10), &strategy).unwrap();
+
+        // Should return a clone of the original image
+        assert_eq!(result.dimensions(), (10, 10));
+        assert_eq!(*result.get_pixel(5, 5), Rgb([255, 0, 0]));
+    }
+
+    #[test]
+    fn test_pad_image_error_on_oversized_image() {
+        let image = create_test_image(20, 20, "solid_red");
+        let strategy = PaddingStrategy::Zero;
+        let result = DefaultDynamicBatcher::pad_image(&image, (10, 10), &strategy);
+
+        // Should return an error when trying to pad to smaller dimensions
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_calculate_smart_padding_color() {
+        // Test with a uniform color image
+        let uniform_image = create_test_image(10, 10, "solid_red");
+        let smart_color = DefaultDynamicBatcher::calculate_smart_padding_color(&uniform_image);
+
+        // For a uniform red image, the smart color should be close to red but adjusted
+        assert!(smart_color.0[0] > 200); // Should still be predominantly red
+        assert!(smart_color.0[1] < 50); // Should have low green
+        assert!(smart_color.0[2] < 50); // Should have low blue
+
+        // Test with a gradient image
+        let gradient_image = create_test_image(10, 10, "gradient");
+        let gradient_smart_color =
+            DefaultDynamicBatcher::calculate_smart_padding_color(&gradient_image);
+
+        // Should return a reasonable color (not extreme values)
+        assert!(gradient_smart_color.0[0] < 255);
+        assert!(gradient_smart_color.0[1] < 255);
+        assert!(gradient_smart_color.0[2] < 255);
+    }
+
+    #[test]
+    fn test_adjust_padding_component() {
+        // Test dark color adjustment (should brighten)
+        assert!(DefaultDynamicBatcher::adjust_padding_component(30) > 30);
+
+        // Test bright color adjustment (should darken)
+        assert!(DefaultDynamicBatcher::adjust_padding_component(220) < 220);
+
+        // Test medium color (should remain unchanged)
+        assert_eq!(DefaultDynamicBatcher::adjust_padding_component(128), 128);
+
+        // Test edge cases
+        assert_eq!(DefaultDynamicBatcher::adjust_padding_component(0), 16);
+        assert_eq!(DefaultDynamicBatcher::adjust_padding_component(255), 239);
     }
 }

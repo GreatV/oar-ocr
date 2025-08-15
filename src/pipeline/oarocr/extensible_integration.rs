@@ -3,6 +3,7 @@
 //! This module provides utilities to integrate the extensible pipeline system
 //! with the existing OAROCR pipeline while maintaining backward compatibility.
 
+use image::RgbImage;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -10,10 +11,11 @@ use tracing::{debug, info};
 use crate::core::OCRError;
 use crate::pipeline::oarocr::{OAROCRConfig, OAROCRResult};
 use crate::pipeline::stages::{
-    CroppingConfig, ExtensibleCroppingStage, ExtensibleOrientationStage, ExtensiblePipeline,
-    ExtensiblePipelineConfig, ExtensibleRecognitionStage, ExtensibleTextDetectionStage,
-    ExtensibleTextLineOrientationStage, OrientationConfig, PipelineExecutor, RecognitionConfig,
-    StageContext, StageData, TextDetectionConfig, TextLineOrientationConfig,
+    CroppingConfig, CroppingResult, ExtensibleCroppingStage, ExtensibleOrientationStage,
+    ExtensiblePipeline, ExtensiblePipelineConfig, ExtensibleRecognitionStage,
+    ExtensibleTextDetectionStage, ExtensibleTextLineOrientationStage, OrientationConfig,
+    OrientationResult, RecognitionConfig, RecognitionResult, StageContext, StageData, StageId,
+    TextDetectionConfig, TextDetectionResult, TextLineOrientationConfig,
 };
 
 /// Integration wrapper that bridges the extensible pipeline with OAROCR.
@@ -125,26 +127,227 @@ impl ExtensibleOAROCR {
         // Create initial data
         let initial_data = StageData::new(input_img);
 
-        // Execute pipeline
-        let _result = PipelineExecutor::execute(&mut self.pipeline, context, initial_data)?;
+        // Execute pipeline - we need to modify the execute method to return the context
+        // For now, we'll use a workaround by executing the pipeline manually
+        self.execute_pipeline_and_convert(image_path, input_img_arc, context, initial_data)
+    }
 
-        // For now, return a placeholder result
-        // In a full implementation, this would convert the extensible pipeline results
-        // to the OAROCRResult format
+    /// Execute the pipeline and convert results to OAROCRResult format.
+    fn execute_pipeline_and_convert(
+        &mut self,
+        image_path: &Path,
+        input_img_arc: Arc<RgbImage>,
+        mut context: StageContext,
+        initial_data: StageData,
+    ) -> Result<OAROCRResult, OCRError> {
+        // Execute pipeline stages manually to retain access to context
+        let execution_order = self.pipeline.registry_mut().resolve_execution_order()?;
+        let mut current_data = initial_data;
+
+        info!("Executing pipeline with {} stages", execution_order.len());
+
+        for stage_id in execution_order {
+            let stage = self
+                .pipeline
+                .registry()
+                .get_stage(&stage_id)
+                .ok_or_else(|| OCRError::ConfigError {
+                    message: format!("Stage not found: {}", stage_id.as_str()),
+                })?;
+
+            let config = self.pipeline.registry().get_config(&stage_id);
+
+            // Check if stage is enabled
+            if !stage.is_enabled(&context, config) {
+                debug!("Skipping disabled stage: {}", stage.stage_name());
+                continue;
+            }
+
+            debug!("Executing stage: {}", stage.stage_name());
+
+            // Execute the stage
+            let stage_result = stage.process(&mut context, current_data, config)?;
+
+            // Store the result in context for other stages
+            context.set_stage_result(stage_id.clone(), stage_result.data);
+
+            // Update current data - stages that modify the image should update the context
+            current_data = StageData::new(context.current_image.as_ref().clone());
+
+            debug!(
+                "Stage {} completed in {:?}",
+                stage.stage_name(),
+                stage_result.metrics.processing_time
+            );
+        }
+
+        // Convert extensible pipeline results to OAROCRResult format
+        self.convert_pipeline_results_to_oarocr(image_path, input_img_arc, &context)
+    }
+
+    /// Convert extensible pipeline results to OAROCRResult format.
+    fn convert_pipeline_results_to_oarocr(
+        &self,
+        image_path: &Path,
+        input_img_arc: Arc<RgbImage>,
+        context: &StageContext,
+    ) -> Result<OAROCRResult, OCRError> {
+        // Extract results from each stage
+        let orientation_result = self.extract_orientation_result(context);
+        let text_detection_result = self.extract_text_detection_result(context);
+        let cropping_result = self.extract_cropping_result(context);
+        let recognition_result = self.extract_recognition_result(context);
+
+        // Build text regions by combining results from all stages
+        let text_regions = self.build_text_regions(
+            &text_detection_result,
+            &cropping_result,
+            &recognition_result,
+        )?;
+
+        // Calculate error metrics
+        let error_metrics = self.calculate_error_metrics(
+            &text_detection_result,
+            &cropping_result,
+            &recognition_result,
+        );
+
+        // Get the final processed image (may have been modified by orientation stage)
+        let rectified_img = if context.current_image.as_ptr() != context.original_image.as_ptr() {
+            Some(context.current_image.clone())
+        } else {
+            None
+        };
+
         Ok(OAROCRResult {
             input_path: Arc::from(image_path.to_string_lossy().as_ref()),
             index: 0,
             input_img: input_img_arc,
-            text_regions: Vec::new(),
-            orientation_angle: None,
-            rectified_img: None,
-            error_metrics: crate::pipeline::oarocr::ErrorMetrics {
-                failed_crops: 0,
-                failed_recognitions: 0,
-                failed_orientations: 0,
-                total_text_boxes: 0,
-            },
+            text_regions,
+            orientation_angle: orientation_result.and_then(|r| r.orientation_angle),
+            rectified_img,
+            error_metrics,
         })
+    }
+
+    /// Extract orientation result from the stage context.
+    fn extract_orientation_result(&self, context: &StageContext) -> Option<OrientationResult> {
+        context
+            .get_stage_result::<OrientationResult>(&StageId("orientation".to_string()))
+            .cloned()
+    }
+
+    /// Extract text detection result from the stage context.
+    fn extract_text_detection_result(&self, context: &StageContext) -> Option<TextDetectionResult> {
+        context
+            .get_stage_result::<TextDetectionResult>(&StageId("text_detection".to_string()))
+            .cloned()
+    }
+
+    /// Extract cropping result from the stage context.
+    fn extract_cropping_result(&self, context: &StageContext) -> Option<CroppingResult> {
+        context
+            .get_stage_result::<CroppingResult>(&StageId("cropping".to_string()))
+            .cloned()
+    }
+
+    /// Extract recognition result from the stage context.
+    fn extract_recognition_result(&self, context: &StageContext) -> Option<RecognitionResult> {
+        context
+            .get_stage_result::<RecognitionResult>(&StageId("recognition".to_string()))
+            .cloned()
+    }
+
+    /// Build text regions by combining results from all stages.
+    fn build_text_regions(
+        &self,
+        text_detection_result: &Option<TextDetectionResult>,
+        _cropping_result: &Option<CroppingResult>,
+        recognition_result: &Option<RecognitionResult>,
+    ) -> Result<Vec<crate::pipeline::oarocr::TextRegion>, OCRError> {
+        use crate::pipeline::oarocr::TextRegion;
+
+        // Get text boxes from detection result
+        let empty_boxes = Vec::new();
+        let text_boxes = text_detection_result
+            .as_ref()
+            .map(|r| &r.text_boxes)
+            .unwrap_or(&empty_boxes);
+
+        if text_boxes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Build text regions
+        let mut text_regions = Vec::new();
+        for (i, bbox) in text_boxes.iter().enumerate() {
+            // Get recognition results if available
+            let (text, confidence) = if let Some(rec_result) = recognition_result {
+                let text = if i < rec_result.rec_texts.len() && !rec_result.rec_texts[i].is_empty()
+                {
+                    Some(rec_result.rec_texts[i].clone())
+                } else {
+                    None
+                };
+
+                let confidence =
+                    if i < rec_result.rec_scores.len() && rec_result.rec_scores[i] > 0.0 {
+                        Some(rec_result.rec_scores[i])
+                    } else {
+                        None
+                    };
+
+                (text, confidence)
+            } else {
+                (None, None)
+            };
+
+            // For now, we don't extract text line orientation from the extensible pipeline
+            // This could be added later if text line orientation stage is implemented
+            let orientation_angle = None;
+
+            let text_region =
+                TextRegion::with_all(bbox.clone(), text, confidence, orientation_angle);
+
+            text_regions.push(text_region);
+        }
+
+        Ok(text_regions)
+    }
+
+    /// Calculate error metrics from stage results.
+    fn calculate_error_metrics(
+        &self,
+        text_detection_result: &Option<TextDetectionResult>,
+        cropping_result: &Option<CroppingResult>,
+        recognition_result: &Option<RecognitionResult>,
+    ) -> crate::pipeline::oarocr::ErrorMetrics {
+        use crate::pipeline::oarocr::ErrorMetrics;
+
+        let total_text_boxes = text_detection_result
+            .as_ref()
+            .map(|r| r.text_boxes.len())
+            .unwrap_or(0);
+
+        let failed_crops = cropping_result
+            .as_ref()
+            .map(|r| r.failed_crops)
+            .unwrap_or(0);
+
+        let failed_recognitions = recognition_result
+            .as_ref()
+            .map(|r| r.failed_recognitions)
+            .unwrap_or(0);
+
+        // Text line orientation failures are not tracked in the current extensible pipeline
+        let failed_orientations = 0;
+
+        ErrorMetrics {
+            failed_crops,
+            failed_recognitions,
+            failed_orientations,
+            total_text_boxes,
+        }
     }
 
     /// Get the extensible pipeline configuration.
@@ -222,3 +425,55 @@ impl ExtensibleOAROCRBuilder {
 
 /// Utility functions for converting between pipeline formats.
 pub mod conversion {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::stages::ExtensiblePipelineConfig;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_extensible_oarocr_creation() {
+        let oarocr_config = OAROCRConfig::default();
+        let extensible_config = ExtensiblePipelineConfig::default();
+
+        let result = ExtensibleOAROCR::new(oarocr_config, extensible_config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_builder_pattern() {
+        let oarocr_config = OAROCRConfig::default();
+
+        let result = ExtensibleOAROCRBuilder::new(oarocr_config)
+            .default_ocr_pipeline()
+            .build();
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_conversion_with_empty_results() {
+        let oarocr_config = OAROCRConfig::default();
+        let extensible_config = ExtensiblePipelineConfig::default();
+        let extensible_oarocr = ExtensibleOAROCR::new(oarocr_config, extensible_config).unwrap();
+
+        // Test conversion with empty stage results
+        let input_img = image::RgbImage::new(100, 100);
+        let input_img_arc = Arc::new(input_img);
+        let context = StageContext::new(input_img_arc.clone(), input_img_arc.clone(), 0);
+        let image_path = PathBuf::from("test.jpg");
+
+        let result = extensible_oarocr.convert_pipeline_results_to_oarocr(
+            &image_path,
+            input_img_arc,
+            &context,
+        );
+
+        assert!(result.is_ok());
+        let oarocr_result = result.unwrap();
+        assert_eq!(oarocr_result.text_regions.len(), 0);
+        assert_eq!(oarocr_result.orientation_angle, None);
+        assert_eq!(oarocr_result.error_metrics.total_text_boxes, 0);
+    }
+}
