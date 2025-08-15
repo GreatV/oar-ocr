@@ -39,8 +39,12 @@ mod text_detection;
 mod types;
 
 // Re-export public types and processors
-pub use cropping::{CroppingConfig, CroppingStageProcessor, ExtensibleCroppingStage};
-pub use orientation::{ExtensibleOrientationStage, OrientationConfig, OrientationStageProcessor};
+pub use cropping::{
+    CroppingConfig, CroppingResult, CroppingStageProcessor, ExtensibleCroppingStage,
+};
+pub use orientation::{
+    ExtensibleOrientationStage, OrientationConfig, OrientationResult, OrientationStageProcessor,
+};
 pub use processor_helper::{
     BatchConfig, BatchProcessor, SingleItemProcessor, StageAlgorithm, process_items,
     run_with_metrics, run_with_metrics_and_fallback,
@@ -53,12 +57,12 @@ pub use recognition::{
 pub use types::{StageMetrics, StageProcessor, StageProcessorHelper, StageResult};
 
 // Re-export extensible pipeline components
-pub use config::ExtensiblePipelineConfig;
+pub use config::{ExtensiblePipelineConfig, GlobalPipelineSettings};
 pub use extensible::{PipelineStage, StageContext, StageData, StageDependency, StageId};
 pub use registry::{ExtensiblePipeline, PipelineExecutor};
 
 // Re-export example stages
 pub use text_detection::{
     ExtensibleTextDetectionStage, ExtensibleTextLineOrientationStage, TextDetectionConfig,
-    TextLineOrientationConfig,
+    TextDetectionResult, TextLineOrientationConfig,
 };
