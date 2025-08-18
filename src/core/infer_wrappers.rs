@@ -5,7 +5,36 @@ use crate::core::{
 };
 
 #[derive(Debug)]
-pub struct OrtInfer2D(pub OrtInfer);
+pub struct OrtInfer2D(OrtInfer);
+
+impl OrtInfer2D {
+    /// Creates a new OrtInfer2D wrapper around an OrtInfer instance.
+    pub fn new(inner: OrtInfer) -> Self {
+        Self(inner)
+    }
+
+    /// Returns a reference to the inner OrtInfer instance.
+    pub fn inner(&self) -> &OrtInfer {
+        &self.0
+    }
+
+    /// Returns a mutable reference to the inner OrtInfer instance.
+    pub fn inner_mut(&mut self) -> &mut OrtInfer {
+        &mut self.0
+    }
+
+    /// Consumes the wrapper and returns the inner OrtInfer instance.
+    pub fn into_inner(self) -> OrtInfer {
+        self.0
+    }
+}
+
+impl From<OrtInfer> for OrtInfer2D {
+    fn from(inner: OrtInfer) -> Self {
+        Self::new(inner)
+    }
+}
+
 impl GInferenceEngine for OrtInfer2D {
     type Input = Tensor4D;
     type Output = Tensor2D;
@@ -18,7 +47,36 @@ impl GInferenceEngine for OrtInfer2D {
 }
 
 #[derive(Debug)]
-pub struct OrtInfer3D(pub OrtInfer);
+pub struct OrtInfer3D(OrtInfer);
+
+impl OrtInfer3D {
+    /// Creates a new OrtInfer3D wrapper around an OrtInfer instance.
+    pub fn new(inner: OrtInfer) -> Self {
+        Self(inner)
+    }
+
+    /// Returns a reference to the inner OrtInfer instance.
+    pub fn inner(&self) -> &OrtInfer {
+        &self.0
+    }
+
+    /// Returns a mutable reference to the inner OrtInfer instance.
+    pub fn inner_mut(&mut self) -> &mut OrtInfer {
+        &mut self.0
+    }
+
+    /// Consumes the wrapper and returns the inner OrtInfer instance.
+    pub fn into_inner(self) -> OrtInfer {
+        self.0
+    }
+}
+
+impl From<OrtInfer> for OrtInfer3D {
+    fn from(inner: OrtInfer) -> Self {
+        Self::new(inner)
+    }
+}
+
 impl GInferenceEngine for OrtInfer3D {
     type Input = Tensor4D;
     type Output = Tensor3D;
@@ -31,7 +89,36 @@ impl GInferenceEngine for OrtInfer3D {
 }
 
 #[derive(Debug)]
-pub struct OrtInfer4D(pub OrtInfer);
+pub struct OrtInfer4D(OrtInfer);
+
+impl OrtInfer4D {
+    /// Creates a new OrtInfer4D wrapper around an OrtInfer instance.
+    pub fn new(inner: OrtInfer) -> Self {
+        Self(inner)
+    }
+
+    /// Returns a reference to the inner OrtInfer instance.
+    pub fn inner(&self) -> &OrtInfer {
+        &self.0
+    }
+
+    /// Returns a mutable reference to the inner OrtInfer instance.
+    pub fn inner_mut(&mut self) -> &mut OrtInfer {
+        &mut self.0
+    }
+
+    /// Consumes the wrapper and returns the inner OrtInfer instance.
+    pub fn into_inner(self) -> OrtInfer {
+        self.0
+    }
+}
+
+impl From<OrtInfer> for OrtInfer4D {
+    fn from(inner: OrtInfer) -> Self {
+        Self::new(inner)
+    }
+}
+
 impl GInferenceEngine for OrtInfer4D {
     type Input = Tensor4D;
     type Output = Tensor4D;

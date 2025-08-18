@@ -249,7 +249,7 @@ impl DoctrRectifierPredictor {
         )?;
         let preprocessor = DRPreprocessor { normalize };
         let infer = OrtInfer::from_common_with_auto_input(&config.common, model_path)?;
-        let inference_engine = OrtInfer4D(infer);
+        let inference_engine = OrtInfer4D::new(infer);
         let postprocessor = DRPostprocessor {
             op: DocTrPostProcess::new(1.0),
         };

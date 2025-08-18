@@ -213,8 +213,8 @@ impl GPreprocessor for TLPreprocessor {
             })?;
         }
         let imgs_dynamic: Vec<DynamicImage> = batch_imgs
-            .into_iter()
-            .map(DynamicImage::ImageRgb8)
+            .iter()
+            .map(|img| DynamicImage::ImageRgb8(img.clone()))
             .collect();
         self.normalize.normalize_batch_to(imgs_dynamic)
     }
@@ -400,7 +400,7 @@ impl TextLineClasPredictorBuilder {
             normalize,
         };
         let infer_inner = OrtInfer::from_common(&config.common, model_path, None)?;
-        let inference_engine = OrtInfer2D(infer_inner);
+        let inference_engine = OrtInfer2D::new(infer_inner);
         let postprocessor = TLPostprocessor {
             topk: config.topk.unwrap_or(2),
             topk_op: Topk::from_class_names(get_text_line_orientation_labels()),
