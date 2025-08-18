@@ -186,6 +186,20 @@ pub enum OCRError {
     /// IO error.
     #[error("io")]
     Io(#[from] std::io::Error),
+
+    /// Error loading a model file, with context and suggestions.
+    #[error("model load failed for '{model_path}': {reason}{suggestion}")]
+    ModelLoad {
+        /// Path to the model that failed to load
+        model_path: String,
+        /// Short reason string
+        reason: String,
+        /// Optional suggestion (prefixed with '; ' when present)
+        suggestion: String,
+        /// Underlying source error
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 }
 
 // From trait implementations for automatic error conversions

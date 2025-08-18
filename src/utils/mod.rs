@@ -12,7 +12,7 @@ pub mod visualization;
 // Re-export image processing functions
 pub use image::{
     OCRResizePadConfig, PaddingStrategy, ResizePadConfig, create_rgb_image, dynamic_to_gray,
-    dynamic_to_rgb, load_image, load_images_batch, load_images_batch_with_policy,
+    dynamic_to_rgb, load_image, load_images, load_images_batch_with_policy,
     load_images_batch_with_threshold, ocr_resize_and_pad, resize_and_pad, resize_images_batch,
     resize_images_batch_to_dynamic,
 };

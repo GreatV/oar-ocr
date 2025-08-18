@@ -181,6 +181,141 @@ macro_rules! impl_complete_builder {
     };
 }
 
+/// Macro to inject common predictor component fields into predictor structs.
+///
+/// Reduces duplication across predictors by defining the shared pipeline components
+/// (batch sampler, reader, normalization, batching, inference, and post-op).
+///
+/// Usage inside a struct definition:
+/// predictor_common_fields!(crate::processors::Topk);
+#[macro_export]
+macro_rules! predictor_common_fields {
+    ($PostOpTy:ty) => {
+        /// Batch sampler for processing images in batches
+        pub batch_sampler: $crate::core::BatchSampler,
+        /// Image reader for loading images from file paths
+        pub read_image: $crate::core::DefaultImageReader,
+        /// Image normalizer for preprocessing images before inference
+        pub normalize: $crate::processors::NormalizeImage,
+        /// Batch converter for converting images to tensors
+        pub to_batch: $crate::core::ToBatch,
+        /// ONNX Runtime inference engine
+        pub infer: $crate::core::OrtInfer,
+        /// Post-processing operation
+        pub post_op: $PostOpTy,
+    };
+}
+
+/// Macro to implement `new()` and `with_common()` for config structs with per-module defaults.
+#[macro_export]
+macro_rules! impl_config_new_and_with_common {
+    (
+        $Config:ident,
+        common_defaults: ($model_name_opt:expr, $batch_size_opt:expr),
+        fields: { $( $field:ident : $default_expr:expr ),* $(,)? }
+    ) => {
+        impl $Config {
+            /// Creates a new config instance with default values
+            pub fn new() -> Self {
+                Self {
+                    common: $crate::core::config::builder::CommonBuilderConfig::with_defaults(
+                        $model_name_opt, $batch_size_opt
+                    ),
+                    $( $field: $default_expr ),*
+                }
+            }
+            /// Creates a new config instance using provided common configuration
+            pub fn with_common(common: $crate::core::config::builder::CommonBuilderConfig) -> Self {
+                Self {
+                    common,
+                    $( $field: $default_expr ),*
+                }
+            }
+        }
+    };
+}
+
+/// Macro to implement common builder methods for structs with a `CommonBuilderConfig` field.
+#[macro_export]
+macro_rules! impl_common_builder_methods {
+    ($Builder:ident, $common_field:ident) => {
+        impl $Builder {
+            /// Sets the model path
+            pub fn model_path(mut self, model_path: impl Into<std::path::PathBuf>) -> Self {
+                self.$common_field = self.$common_field.model_path(model_path);
+                self
+            }
+            /// Sets the model name
+            pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
+                self.$common_field = self.$common_field.model_name(model_name);
+                self
+            }
+            /// Sets the batch size
+            pub fn batch_size(mut self, batch_size: usize) -> Self {
+                self.$common_field = self.$common_field.batch_size(batch_size);
+                self
+            }
+            /// Enables or disables logging
+            pub fn enable_logging(mut self, enable: bool) -> Self {
+                self.$common_field = self.$common_field.enable_logging(enable);
+                self
+            }
+            /// Sets the ONNX Runtime session configuration
+            pub fn ort_session(
+                mut self,
+                config: $crate::core::config::onnx::OrtSessionConfig,
+            ) -> Self {
+                self.$common_field = self.$common_field.ort_session(config);
+                self
+            }
+            /// Sets the session pool size for concurrent predictions (>=1)
+            pub fn session_pool_size(mut self, size: usize) -> Self {
+                self.$common_field = self.$common_field.session_pool_size(size);
+                self
+            }
+        }
+    };
+}
+
+/// Macro to inject common builder methods into an existing `impl Builder` block.
+/// Use this inside `impl YourBuilder { ... }` and pass the field name that holds
+/// `CommonBuilderConfig` (e.g., `common`).
+#[macro_export]
+macro_rules! common_builder_methods {
+    ($common_field:ident) => {
+        /// Sets the model path
+        pub fn model_path(mut self, model_path: impl Into<std::path::PathBuf>) -> Self {
+            self.$common_field = self.$common_field.model_path(model_path);
+            self
+        }
+        /// Sets the model name
+        pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
+            self.$common_field = self.$common_field.model_name(model_name);
+            self
+        }
+        /// Sets the batch size
+        pub fn batch_size(mut self, batch_size: usize) -> Self {
+            self.$common_field = self.$common_field.batch_size(batch_size);
+            self
+        }
+        /// Enables or disables logging
+        pub fn enable_logging(mut self, enable: bool) -> Self {
+            self.$common_field = self.$common_field.enable_logging(enable);
+            self
+        }
+        /// Sets the ONNX Runtime session configuration
+        pub fn ort_session(mut self, config: $crate::core::config::onnx::OrtSessionConfig) -> Self {
+            self.$common_field = self.$common_field.ort_session(config);
+            self
+        }
+        /// Sets the session pool size for concurrent predictions (>=1)
+        pub fn session_pool_size(mut self, size: usize) -> Self {
+            self.$common_field = self.$common_field.session_pool_size(size);
+            self
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
 

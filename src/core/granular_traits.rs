@@ -12,12 +12,12 @@
 //! # Architecture
 //!
 //! ```text
-//! ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-//! │ImageReader  │───▶│Preprocessor │───▶│InferenceEng │───▶│Postprocessor│
-//! │             │    │             │    │             │    │             │
-//! │• read_images│    │• preprocess │    │• infer      │    │• postprocess│
+//! ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────-┐
+//! │ImageReader  │───▶│Preprocessor │───▶│InferenceEng │───▶│Postprocessor │
+//! │             │    │             │    │             │    │              │
+//! │• read_images│    │• preprocess │    │• infer      │    │• postprocess │
 //! │• validate   │    │• validate   │    │• engine_info│    │• empty_result│
-//! └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
+//! └─────────────┘    └─────────────┘    └─────────────┘    └─────────────-┘
 //! ```
 //!
 //! # Examples
@@ -235,7 +235,7 @@ pub trait Postprocessor: Send + Sync + Debug {
         batch_data: &BatchData,
         raw_images: Vec<RgbImage>,
         config: Option<&Self::Config>,
-    ) -> Result<Self::Result, OCRError>;
+    ) -> crate::core::OcrResult<Self::Result>;
 
     /// Create an empty result for when no input is provided.
     ///
@@ -258,6 +258,7 @@ pub trait Postprocessor: Send + Sync + Debug {
 ///
 /// This struct demonstrates how to build a complete predictor using the granular traits.
 /// It provides the same interface as StandardPredictor but with composable components.
+#[derive(Debug)]
 pub struct ModularPredictor<R, P, I, O> {
     /// Image reader component
     pub image_reader: R,
@@ -325,12 +326,12 @@ where
         batch_data: &BatchData,
         raw_images: Vec<RgbImage>,
         config: Option<&Self::Config>,
-    ) -> Result<Self::Result, OCRError> {
+    ) -> crate::core::OcrResult<Self::Result> {
         self.postprocessor
             .postprocess(output, Some(preprocessed), batch_data, raw_images, config)
     }
 
-    fn empty_result(&self) -> Result<Self::Result, OCRError> {
+    fn empty_result(&self) -> crate::core::OcrResult<Self::Result> {
         self.postprocessor.empty_result()
     }
 }

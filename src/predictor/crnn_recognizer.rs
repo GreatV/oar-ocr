@@ -10,12 +10,20 @@
 //! - `TextRecResult`: Results from text recognition
 //! - `TextRecPredictorBuilder`: Builder for creating predictor instances
 
-use crate::core::traits::StandardPredictor;
+use crate::core::ImageReader as CoreImageReader;
+use crate::core::StandardPredictor;
 use crate::core::{
-    BatchData, BatchSampler, CommonBuilderConfig, ConfigValidator, ConfigValidatorExt,
-    DefaultImageReader, ImageReader, OCRError, OrtInfer, Tensor3D, Tensor4D, ToBatch,
+    BatchData, CommonBuilderConfig, ConfigValidator, ConfigValidatorExt, DefaultImageReader,
+    OCRError, OrtInfer, Tensor3D, Tensor4D,
 };
+use crate::core::{
+    GranularImageReader as GIReader, InferenceEngine as GInferenceEngine, ModularPredictor,
+    OrtInfer3D, Postprocessor as GPostprocessor, Preprocessor as GPreprocessor,
+};
+use crate::impl_common_builder_methods;
+use crate::impl_config_new_and_with_common;
 use crate::processors::{CTCLabelDecode, NormalizeImage, OCRResize};
+
 use image::RgbImage;
 use std::path::Path;
 use std::sync::Arc;
@@ -47,6 +55,7 @@ pub struct TextRecPredictorConfig {
     pub common: CommonBuilderConfig,
     /// Model input shape for image resizing [channels, height, width]
     /// When specified, images are resized to fit this shape while maintaining aspect ratio.
+    /// If None, the predictor defaults to [3, 48, 320] (DEFAULT_REC_IMAGE_SHAPE).
     pub model_input_shape: Option<[usize; 3]>,
     /// Character dictionary for recognition
     pub character_dict: Option<Vec<String>>,
@@ -54,27 +63,15 @@ pub struct TextRecPredictorConfig {
     pub score_thresh: Option<f32>,
 }
 
-impl TextRecPredictorConfig {
-    /// Creates a new `TextRecPredictorConfig` with default values
-    pub fn new() -> Self {
-        Self {
-            common: CommonBuilderConfig::with_defaults(Some("crnn".to_string()), Some(32)),
-            model_input_shape: Some([3, 48, 320]),
-            character_dict: None,
-            score_thresh: None,
-        }
+impl_config_new_and_with_common!(
+    TextRecPredictorConfig,
+    common_defaults: (Some("crnn".to_string()), Some(32)),
+    fields: {
+        model_input_shape: Some([3, 48, 320]),
+        character_dict: None,
+        score_thresh: None
     }
-
-    /// Creates a new `TextRecPredictorConfig` with the provided common configuration
-    pub fn with_common(common: CommonBuilderConfig) -> Self {
-        Self {
-            common,
-            model_input_shape: Some([3, 32, 320]),
-            character_dict: None,
-            score_thresh: None,
-        }
-    }
-}
+);
 
 impl ConfigValidator for TextRecPredictorConfig {
     fn validate(&self) -> Result<(), crate::core::ConfigError> {
@@ -115,41 +112,96 @@ impl Default for TextRecResult {
     }
 }
 
-/// Text recognition predictor
-///
-/// This struct holds the components needed for text recognition.
+/// Text recognition predictor built from modular components
 #[derive(Debug)]
 pub struct TextRecPredictor {
-    /// Model input shape for image resizing [channels, height, width]
     pub model_input_shape: [usize; 3],
-    /// Character dictionary for recognition
-    pub character_dict: Option<Vec<String>>,
-    /// Name of the model
+    pub character_dict: Option<Vec<String>>, // preserved for API completeness
     pub model_name: String,
+    inner: ModularPredictor<TRImageReader, TRPreprocessor, OrtInfer3D, TRPostprocessor>,
+}
 
-    /// Batch sampler
-    pub batch_sampler: BatchSampler,
-    /// Image reader
-    pub read_image: DefaultImageReader,
-    /// Image resizer
+#[derive(Debug)]
+pub struct TRImageReader {
+    inner: DefaultImageReader,
+}
+impl TRImageReader {
+    pub fn new() -> Self {
+        Self {
+            inner: DefaultImageReader::new(),
+        }
+    }
+}
+impl Default for TRImageReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl GIReader for TRImageReader {
+    fn read_images<'a>(
+        &self,
+        paths: impl Iterator<Item = &'a str>,
+    ) -> Result<Vec<RgbImage>, OCRError> {
+        self.inner.apply(paths)
+    }
+}
+
+#[derive(Debug)]
+pub struct TRPreprocessor {
     pub resize: OCRResize,
-    /// Image normalizer
     pub normalize: NormalizeImage,
-    /// Batch converter
-    pub to_batch: ToBatch,
-    /// Model inference engine
-    pub infer: OrtInfer,
-    /// Post-processing operation
-    pub post_op: CTCLabelDecode,
+}
+impl GPreprocessor for TRPreprocessor {
+    type Config = TextRecConfig;
+    type Output = Tensor4D;
+    fn preprocess(
+        &self,
+        images: Vec<RgbImage>,
+        _config: Option<&Self::Config>,
+    ) -> Result<Self::Output, OCRError> {
+        let resized_imgs = self.resize.apply_to_images(&images)?;
+        let dynamic_imgs: Vec<image::DynamicImage> = resized_imgs
+            .into_iter()
+            .map(image::DynamicImage::ImageRgb8)
+            .collect();
+        self.normalize.normalize_batch_to(dynamic_imgs)
+    }
+}
+
+#[derive(Debug)]
+pub struct TRPostprocessor {
+    pub decoder: CTCLabelDecode,
+}
+impl GPostprocessor for TRPostprocessor {
+    type Config = TextRecConfig;
+    type InferenceOutput = Tensor3D;
+    type PreprocessOutput = Tensor4D;
+    type Result = TextRecResult;
+    fn postprocess(
+        &self,
+        output: Self::InferenceOutput,
+        _pre: Option<&Self::PreprocessOutput>,
+        batch_data: &BatchData,
+        raw_images: Vec<RgbImage>,
+        _config: Option<&Self::Config>,
+    ) -> crate::core::OcrResult<Self::Result> {
+        let (texts, scores) = self.decoder.apply(&output);
+        Ok(TextRecResult {
+            input_path: batch_data.input_paths.clone(),
+            index: batch_data.indexes.clone(),
+            input_img: raw_images.into_iter().map(Arc::new).collect(),
+            rec_text: texts.into_iter().map(Arc::from).collect(),
+            rec_score: scores,
+        })
+    }
+    fn empty_result(&self) -> crate::core::OcrResult<Self::Result> {
+        Ok(TextRecResult::new())
+    }
 }
 
 impl TextRecPredictor {
-    /// Creates a new `TextRecPredictor`
-    ///
-    /// This function initializes a new text recognition predictor with the provided configuration
-    /// and model path.
-    pub fn new(config: TextRecPredictorConfig, model_path: &Path) -> Result<Self, OCRError> {
-        let model_input_shape = config.model_input_shape.unwrap_or([3, 32, 320]);
+    pub fn new(config: TextRecPredictorConfig, model_path: &Path) -> crate::core::OcrResult<Self> {
+        let model_input_shape = config.model_input_shape.unwrap_or([3, 48, 320]);
         let character_dict = config.character_dict.clone();
         let model_name = config
             .common
@@ -157,48 +209,31 @@ impl TextRecPredictor {
             .as_ref()
             .cloned()
             .unwrap_or_else(|| "crnn".to_string());
-        let batch_size = config.common.batch_size.unwrap_or(32);
 
-        let batch_sampler = BatchSampler::new(batch_size);
-        let read_image = DefaultImageReader::new();
-        // Use dynamic resizing (old rec_image_shape behavior) - maintains aspect ratio
+        let image_reader = TRImageReader::new();
         let resize = OCRResize::new(Some(model_input_shape), None);
         let normalize = NormalizeImage::for_ocr_recognition()?;
-        let to_batch = ToBatch::new();
-        let infer = OrtInfer::from_common(
-            &TextRecPredictorConfig {
-                common: config.common.clone(),
-                ..config.clone()
-            }
-            .common,
-            model_path,
-            None,
-        )?;
-        let post_op = CTCLabelDecode::from_string_list(character_dict.as_deref(), true, false);
+        let preprocessor = TRPreprocessor { resize, normalize };
+        let infer = OrtInfer::from_common(&config.common, model_path, None)?;
+        let inference_engine = OrtInfer3D(infer);
+        let decoder = CTCLabelDecode::from_string_list(character_dict.as_deref(), true, false);
+        let postprocessor = TRPostprocessor { decoder };
+        let inner =
+            ModularPredictor::new(image_reader, preprocessor, inference_engine, postprocessor);
 
         Ok(Self {
             model_input_shape,
             character_dict,
             model_name,
-            batch_sampler,
-            read_image,
-            resize,
-            normalize,
-            to_batch,
-            infer,
-            post_op,
+            inner,
         })
     }
 
-    /// Sets the model input shape
-    ///
-    /// This function updates the model input shape and the resize component.
     pub fn set_model_input_shape(&mut self, shape: [usize; 3]) {
         self.model_input_shape = shape;
-        self.resize = OCRResize::new(Some(shape), None);
+        self.inner.preprocessor.resize = OCRResize::new(Some(shape), None);
     }
 
-    /// Returns the model name
     pub fn model_name(&self) -> &str {
         &self.model_name
     }
@@ -219,53 +254,23 @@ impl StandardPredictor for TextRecPredictor {
     fn read_images<'a>(
         &self,
         paths: impl Iterator<Item = &'a str>,
-    ) -> Result<Vec<RgbImage>, OCRError> {
-        self.read_image.apply(paths)
+    ) -> crate::core::OcrResult<Vec<RgbImage>> {
+        self.inner.image_reader.read_images(paths)
     }
 
     fn preprocess(
         &self,
         images: Vec<RgbImage>,
-        _config: Option<&Self::Config>,
-    ) -> Result<Self::PreprocessOutput, OCRError> {
-        let resized_imgs = self.resize.apply_to_images(&images)?;
-
-        let dynamic_imgs: Vec<image::DynamicImage> = resized_imgs
-            .into_iter()
-            .map(image::DynamicImage::ImageRgb8)
-            .collect();
-
-        let batch_size = dynamic_imgs.len();
-        self.normalize
-            .normalize_batch_to(dynamic_imgs)
-            .map_err(|e| {
-                OCRError::model_inference_error(
-                    &self.model_name,
-                    "preprocessing_normalization",
-                    0,
-                    &[batch_size], // batch size as shape info
-                    &format!(
-                        "Text recognition normalization failed for {} images with input shape {:?}",
-                        batch_size, self.model_input_shape
-                    ),
-                    e,
-                )
-            })
+        config: Option<&Self::Config>,
+    ) -> crate::core::OcrResult<Self::PreprocessOutput> {
+        self.inner.preprocessor.preprocess(images, config)
     }
 
-    fn infer(&self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError> {
-        let input_shape = input.shape().to_vec();
-        self.infer.infer_3d(input.clone()).map_err(|e| {
-            OCRError::model_inference_error(
-                &self.model_name,
-                "inference_3d",
-                0,
-                &input_shape,
-                &format!("Text recognition inference failed with input shape {:?}, model input shape {:?}",
-                    input_shape, self.model_input_shape),
-                e,
-            )
-        })
+    fn infer(
+        &self,
+        input: &Self::PreprocessOutput,
+    ) -> crate::core::OcrResult<Self::InferenceOutput> {
+        self.inner.inference_engine.infer(input)
     }
 
     fn postprocess(
@@ -274,21 +279,15 @@ impl StandardPredictor for TextRecPredictor {
         _preprocessed: &Self::PreprocessOutput,
         batch_data: &BatchData,
         raw_images: Vec<RgbImage>,
-        _config: Option<&Self::Config>,
-    ) -> Result<Self::Result, OCRError> {
-        let (texts, scores) = self.post_op.apply(&output);
-
-        Ok(TextRecResult {
-            input_path: batch_data.input_paths.clone(),
-            index: batch_data.indexes.clone(),
-            input_img: raw_images.into_iter().map(Arc::new).collect(),
-            rec_text: texts.into_iter().map(Arc::from).collect(),
-            rec_score: scores,
-        })
+        config: Option<&Self::Config>,
+    ) -> crate::core::OcrResult<Self::Result> {
+        self.inner
+            .postprocessor
+            .postprocess(output, None, batch_data, raw_images, config)
     }
 
-    fn empty_result(&self) -> Result<Self::Result, OCRError> {
-        Ok(TextRecResult::new())
+    fn empty_result(&self) -> crate::core::OcrResult<Self::Result> {
+        self.inner.postprocessor.empty_result()
     }
 }
 
@@ -307,6 +306,8 @@ pub struct TextRecPredictorBuilder {
     score_thresh: Option<f32>,
 }
 
+impl_common_builder_methods!(TextRecPredictorBuilder, common);
+
 impl TextRecPredictorBuilder {
     /// Creates a new `TextRecPredictorBuilder`
     ///
@@ -318,63 +319,6 @@ impl TextRecPredictorBuilder {
             character_dict: None,
             score_thresh: None,
         }
-    }
-
-    /// Sets the model path
-    ///
-    /// This function sets the path to the model file.
-    pub fn model_path(mut self, model_path: impl Into<std::path::PathBuf>) -> Self {
-        self.common = self.common.model_path(model_path);
-        self
-    }
-
-    /// Sets the model name
-    ///
-    /// This function sets the name of the model.
-    pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
-        self.common = self.common.model_name(model_name);
-        self
-    }
-
-    /// Sets the batch size
-    ///
-    /// This function sets the batch size for processing.
-    pub fn batch_size(mut self, batch_size: usize) -> Self {
-        self.common = self.common.batch_size(batch_size);
-        self
-    }
-
-    /// Enables or disables logging
-    ///
-    /// This function enables or disables logging for the predictor.
-    pub fn enable_logging(mut self, enable: bool) -> Self {
-        self.common = self.common.enable_logging(enable);
-        self
-    }
-
-    /// Sets the ONNX Runtime session configuration
-    ///
-    /// This function sets the ONNX Runtime session configuration for the predictor.
-    pub fn ort_session(mut self, config: crate::core::config::onnx::OrtSessionConfig) -> Self {
-        self.common = self.common.ort_session(config);
-        self
-    }
-
-    /// Sets the session pool size for concurrent predictions
-    ///
-    /// This function sets the size of the session pool used for concurrent predictions.
-    /// The pool size must be >= 1.
-    ///
-    /// # Arguments
-    ///
-    /// * `size` - The session pool size (minimum 1)
-    ///
-    /// # Returns
-    ///
-    /// The updated builder instance
-    pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.common = self.common.session_pool_size(size);
-        self
     }
 
     /// Sets the model input shape
@@ -406,7 +350,7 @@ impl TextRecPredictorBuilder {
     /// Builds the `TextRecPredictor`
     ///
     /// This function builds the `TextRecPredictor` with the provided configuration.
-    pub fn build(self, model_path: &Path) -> Result<TextRecPredictor, OCRError> {
+    pub fn build(self, model_path: &Path) -> crate::core::OcrResult<TextRecPredictor> {
         self.build_internal(model_path)
     }
 
@@ -414,7 +358,7 @@ impl TextRecPredictorBuilder {
     ///
     /// This function builds the `TextRecPredictor` with the provided configuration.
     /// It also validates the configuration and handles the model path.
-    fn build_internal(mut self, model_path: &Path) -> Result<TextRecPredictor, OCRError> {
+    fn build_internal(mut self, model_path: &Path) -> crate::core::OcrResult<TextRecPredictor> {
         // Ensure model path is set first
         if self.common.model_path.is_none() {
             self.common = self.common.model_path(model_path.to_path_buf());
@@ -445,6 +389,20 @@ impl Default for TextRecPredictorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(test)]
+    mod tests_local {
+        use super::*;
+
+        #[test]
+        fn test_text_rec_config_defaults_and_validate() {
+            let config = TextRecPredictorConfig::new();
+            assert_eq!(config.model_input_shape, Some([3, 48, 320]));
+            assert_eq!(config.common.model_name.as_deref(), Some("crnn"));
+            assert_eq!(config.common.batch_size, Some(32));
+            assert!(config.validate().is_ok());
+        }
+    }
 
     #[test]
     fn test_text_rec_predictor_config_score_thresh() {

@@ -245,7 +245,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Set model input shape for text recognition (channels, height, width)
     .text_rec_input_shape((3, 48, 320))
     // Example: Set document orientation confidence threshold (if using doc orientation)
-    // .doc_orientation_confidence_threshold(0.8) // Only accept predictions with 80% confidence
+    // .doc_orientation_threshold(0.8) // Only accept predictions with 80% confidence
     ;
 
     // Configure text line orientation classification if requested
@@ -273,7 +273,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 existing_images.len()
             );
             let image_paths: Vec<&Path> = existing_images.iter().map(Path::new).collect();
-            let images = oar_ocr::utils::load_images_batch(&image_paths)?;
+            let images = oar_ocr::utils::load_images(&image_paths)?;
 
             let start_time = std::time::Instant::now();
             match oarocr.predict(&images) {

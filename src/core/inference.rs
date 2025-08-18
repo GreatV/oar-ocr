@@ -118,7 +118,16 @@ impl OrtInfer {
     /// Creates a new OrtInfer instance with default ONNX Runtime settings and a single session.
     pub fn new(model_path: impl AsRef<Path>, input_name: Option<&str>) -> Result<Self, OCRError> {
         let path = model_path.as_ref();
-        let session = Session::builder()?.commit_from_file(path)?;
+        let session = Session::builder()
+            .and_then(|b| b.commit_from_file(path))
+            .map_err(|e| {
+                OCRError::model_load_error(
+                    path,
+                    "failed to create ONNX session",
+                    Some("verify model path and compatibility with selected execution providers"),
+                    Some(e),
+                )
+            })?;
         let model_name = path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -152,7 +161,14 @@ impl OrtInfer {
             } else {
                 builder
             };
-            let session = builder.commit_from_file(path)?;
+            let session = builder.commit_from_file(path).map_err(|e| {
+                OCRError::model_load_error(
+                    path,
+                    "failed to create ONNX session",
+                    Some("check device/EP configuration and model file"),
+                    Some(e),
+                )
+            })?;
             sessions.push(Mutex::new(session));
         }
 
@@ -196,7 +212,14 @@ impl OrtInfer {
         } else {
             builder
         };
-        let first_session = builder.commit_from_file(path)?;
+        let first_session = builder.commit_from_file(path).map_err(|e| {
+            OCRError::model_load_error(
+                path,
+                "failed to create ONNX session",
+                Some("ensure model is compatible and file exists"),
+                Some(e),
+            )
+        })?;
 
         // Auto-detect input name from the first session
         let common_names = ["x", "input", "images", "data", "image"];
@@ -222,7 +245,14 @@ impl OrtInfer {
             } else {
                 builder
             };
-            let session = builder.commit_from_file(path)?;
+            let session = builder.commit_from_file(path).map_err(|e| {
+                OCRError::model_load_error(
+                    path,
+                    "failed to create ONNX session",
+                    Some("ensure model is compatible and file exists"),
+                    Some(e),
+                )
+            })?;
             sessions.push(Mutex::new(session));
         }
 
@@ -429,7 +459,16 @@ impl OrtInfer {
         output_name: Option<&str>,
     ) -> Result<Self, OCRError> {
         let path = model_path.as_ref();
-        let session = Session::builder()?.commit_from_file(path)?;
+        let session = Session::builder()
+            .and_then(|b| b.commit_from_file(path))
+            .map_err(|e| {
+                OCRError::model_load_error(
+                    path,
+                    "failed to create ONNX session",
+                    Some("verify model path and compatibility"),
+                    Some(e),
+                )
+            })?;
         let model_name = path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -460,7 +499,16 @@ impl OrtInfer {
     /// A Result containing the new OrtInfer instance or an OCRError.
     pub fn with_auto_input_name(model_path: impl AsRef<Path>) -> Result<Self, OCRError> {
         let path = model_path.as_ref();
-        let session = Session::builder()?.commit_from_file(path)?;
+        let session = Session::builder()
+            .and_then(|b| b.commit_from_file(path))
+            .map_err(|e| {
+                OCRError::model_load_error(
+                    path,
+                    "failed to create ONNX session",
+                    Some("verify model path and compatibility"),
+                    Some(e),
+                )
+            })?;
         let model_name = path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -513,7 +561,14 @@ impl OrtInfer {
         let path = model_path.as_ref();
         let builder = Session::builder()?;
         let configured_builder = configure_session(builder)?;
-        let session = configured_builder.commit_from_file(path)?;
+        let session = configured_builder.commit_from_file(path).map_err(|e| {
+            OCRError::model_load_error(
+                path,
+                "failed to create ONNX session",
+                Some("verify model path and configured execution providers"),
+                Some(e),
+            )
+        })?;
         let model_name = path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -809,7 +864,16 @@ impl OrtInfer {
 ///
 /// A Result containing the loaded Session or an OCRError.
 pub fn load_session(model_path: impl AsRef<Path>) -> Result<Session, OCRError> {
-    let session = Session::builder()?.commit_from_file(model_path.as_ref())?;
+    let session = Session::builder()
+        .and_then(|b| b.commit_from_file(model_path.as_ref()))
+        .map_err(|e| {
+            OCRError::model_load_error(
+                model_path,
+                "failed to create ONNX session",
+                Some("verify model file exists and is readable"),
+                Some(e),
+            )
+        })?;
     Ok(session)
 }
 

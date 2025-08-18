@@ -5,16 +5,23 @@
 //!
 //! The rectifier supports batch processing for efficient handling of multiple images.
 
-use crate::core::traits::StandardPredictor;
+use crate::core::ImageReader as CoreImageReader;
+use crate::core::StandardPredictor;
 use crate::core::{
-    BatchData, BatchSampler, CommonBuilderConfig, DefaultImageReader, ImageReader, OCRError,
-    OrtInfer, Tensor4D, ToBatch,
+    BatchData, CommonBuilderConfig, DefaultImageReader, OCRError, OrtInfer, Tensor4D,
     config::{ConfigValidator, ConfigValidatorExt},
 };
+use crate::core::{
+    GranularImageReader as GIReader, InferenceEngine as GInferenceEngine, ModularPredictor,
+    OrtInfer4D, Postprocessor as GPostprocessor, Preprocessor as GPreprocessor,
+};
 use crate::processors::{DocTrPostProcess, NormalizeImage};
+
 use image::{DynamicImage, RgbImage};
 use std::path::Path;
 use std::sync::Arc;
+
+use crate::impl_config_new_and_with_common;
 
 /// Results from document rectification
 ///
@@ -44,44 +51,15 @@ pub struct DoctrRectifierPredictorConfig {
     pub rec_image_shape: Option<[usize; 3]>,
 }
 
+impl_config_new_and_with_common!(
+    DoctrRectifierPredictorConfig,
+    common_defaults: (Some("doctr_rectifier".to_string()), Some(32)),
+    fields: {
+        rec_image_shape: Some([3, 512, 512])
+    }
+);
+
 impl DoctrRectifierPredictorConfig {
-    /// Creates a new document rectifier configuration with default settings
-    ///
-    /// Initializes a new instance of the document rectifier configuration
-    /// with default values for all parameters.
-    ///
-    /// # Returns
-    ///
-    /// A new instance of `DoctrRectifierPredictorConfig` with default settings
-    pub fn new() -> Self {
-        Self {
-            common: CommonBuilderConfig::with_defaults(
-                Some("doctr_rectifier".to_string()),
-                Some(32),
-            ),
-            rec_image_shape: Some([3, 512, 512]),
-        }
-    }
-
-    /// Creates a new document rectifier configuration with custom common settings
-    ///
-    /// Initializes a new instance of the document rectifier configuration
-    /// with the provided common configuration and default values for other parameters.
-    ///
-    /// # Arguments
-    ///
-    /// * `common` - Common configuration options
-    ///
-    /// # Returns
-    ///
-    /// A new instance of `DoctrRectifierPredictorConfig` with custom common settings
-    pub fn with_common(common: CommonBuilderConfig) -> Self {
-        Self {
-            common,
-            rec_image_shape: Some([3, 512, 512]),
-        }
-    }
-
     /// Validates the document rectifier configuration
     ///
     /// Checks that all configuration parameters are valid and within acceptable ranges.
@@ -169,39 +147,90 @@ impl Default for DoctrRectifierResult {
 /// It uses a pre-trained model to transform distorted document images into properly aligned versions.
 #[derive(Debug)]
 pub struct DoctrRectifierPredictor {
-    /// Input shape for the recognition model [channels, height, width]
     pub rec_image_shape: [usize; 3],
-    /// Name of the model being used
     pub model_name: String,
+    inner: ModularPredictor<DRImageReader, DRPreprocessor, OrtInfer4D, DRPostprocessor>,
+}
 
-    /// Batch sampler for processing images in batches
-    pub batch_sampler: BatchSampler,
-    /// Image reader for loading images from file paths
-    pub read_image: DefaultImageReader,
-    /// Image normalizer for preprocessing images before inference
+#[derive(Debug)]
+pub struct DRImageReader {
+    inner: DefaultImageReader,
+}
+impl DRImageReader {
+    pub fn new() -> Self {
+        Self {
+            inner: DefaultImageReader::new(),
+        }
+    }
+}
+impl Default for DRImageReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl GIReader for DRImageReader {
+    fn read_images<'a>(
+        &self,
+        paths: impl Iterator<Item = &'a str>,
+    ) -> Result<Vec<RgbImage>, OCRError> {
+        self.inner.apply(paths)
+    }
+}
+
+#[derive(Debug)]
+pub struct DRPreprocessor {
     pub normalize: NormalizeImage,
-    /// Batch converter for converting images to tensors
-    pub to_batch: ToBatch,
-    /// ONNX Runtime inference engine
-    pub infer: OrtInfer,
-    /// Post-processing operator for rectifying images
-    pub post_op: DocTrPostProcess,
+}
+impl GPreprocessor for DRPreprocessor {
+    type Config = DoctrRectifierConfig;
+    type Output = Tensor4D;
+    fn preprocess(
+        &self,
+        images: Vec<RgbImage>,
+        _config: Option<&Self::Config>,
+    ) -> Result<Self::Output, OCRError> {
+        let batch_imgs: Vec<DynamicImage> =
+            images.into_iter().map(DynamicImage::ImageRgb8).collect();
+        self.normalize.normalize_batch_to(batch_imgs)
+    }
+}
+
+#[derive(Debug)]
+pub struct DRPostprocessor {
+    pub op: DocTrPostProcess,
+}
+impl GPostprocessor for DRPostprocessor {
+    type Config = DoctrRectifierConfig;
+    type InferenceOutput = Tensor4D;
+    type PreprocessOutput = Tensor4D;
+    type Result = DoctrRectifierResult;
+    fn postprocess(
+        &self,
+        output: Self::InferenceOutput,
+        _pre: Option<&Self::PreprocessOutput>,
+        batch_data: &BatchData,
+        raw_images: Vec<RgbImage>,
+        _config: Option<&Self::Config>,
+    ) -> crate::core::OcrResult<Self::Result> {
+        let rectified_imgs = self
+            .op
+            .apply_batch(&output)
+            .map_err(|e| OCRError::ConfigError {
+                message: format!("DocTr post-processing failed: {}", e),
+            })?;
+        Ok(DoctrRectifierResult {
+            input_path: batch_data.input_paths.clone(),
+            index: batch_data.indexes.clone(),
+            input_img: raw_images.into_iter().map(Arc::new).collect(),
+            rectified_img: rectified_imgs.into_iter().map(Arc::new).collect(),
+        })
+    }
+    fn empty_result(&self) -> crate::core::OcrResult<Self::Result> {
+        Ok(DoctrRectifierResult::new())
+    }
 }
 
 impl DoctrRectifierPredictor {
-    /// Creates a new document rectifier
-    ///
-    /// Initializes a new instance of the document rectifier with the provided
-    /// configuration and model path.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - Configuration for the rectifier
-    /// * `model_path` - Path to the ONNX model file
-    ///
-    /// # Returns
-    ///
-    /// A new instance of `DoctrRectifierPredictor` or an error if initialization fails
     pub fn new(config: DoctrRectifierPredictorConfig, model_path: &Path) -> Result<Self, OCRError> {
         let rec_image_shape = config.rec_image_shape.unwrap_or([3, 512, 512]);
         let model_name = config
@@ -210,48 +239,30 @@ impl DoctrRectifierPredictor {
             .as_deref()
             .unwrap_or("doctr_rectifier")
             .to_string();
-        let batch_size = config.common.batch_size.unwrap_or(32);
 
-        let batch_sampler = BatchSampler::new(batch_size);
-        let read_image = DefaultImageReader::new();
+        let image_reader = DRImageReader::new();
         let normalize = NormalizeImage::new(
             Some(1.0 / 255.0),
             Some(vec![0.0, 0.0, 0.0]),
             Some(vec![1.0, 1.0, 1.0]),
             None,
         )?;
-        let to_batch = ToBatch::new();
+        let preprocessor = DRPreprocessor { normalize };
         let infer = OrtInfer::from_common_with_auto_input(&config.common, model_path)?;
-        let post_op = DocTrPostProcess::new(1.0);
+        let inference_engine = OrtInfer4D(infer);
+        let postprocessor = DRPostprocessor {
+            op: DocTrPostProcess::new(1.0),
+        };
+        let inner =
+            ModularPredictor::new(image_reader, preprocessor, inference_engine, postprocessor);
 
         Ok(Self {
             rec_image_shape,
             model_name,
-            batch_sampler,
-            read_image,
-            normalize,
-            to_batch,
-            infer,
-            post_op,
+            inner,
         })
     }
 
-    /// Processes a batch of images internally
-    ///
-    /// This method takes a batch of images and processes them through the full
-    /// prediction pipeline, from preprocessing to postprocessing.
-    ///
-    /// # Arguments
-    ///
-    /// * `batch_data` - Batch of images to process
-    ///
-    /// Gets the model name
-    ///
-    /// Returns the name of the model being used by this rectifier.
-    ///
-    /// # Returns
-    ///
-    /// The model name as a string slice
     pub fn model_name(&self) -> &str {
         &self.model_name
     }
@@ -275,22 +286,19 @@ impl StandardPredictor for DoctrRectifierPredictor {
         &self,
         paths: impl Iterator<Item = &'a str>,
     ) -> Result<Vec<RgbImage>, OCRError> {
-        self.read_image.apply(paths)
+        self.inner.image_reader.read_images(paths)
     }
 
     fn preprocess(
         &self,
         images: Vec<RgbImage>,
-        _config: Option<&Self::Config>,
+        config: Option<&Self::Config>,
     ) -> Result<Self::PreprocessOutput, OCRError> {
-        let batch_imgs: Vec<DynamicImage> =
-            images.into_iter().map(DynamicImage::ImageRgb8).collect();
-
-        self.normalize.normalize_batch_to(batch_imgs)
+        self.inner.preprocessor.preprocess(images, config)
     }
 
     fn infer(&self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError> {
-        self.infer.infer_4d(input.clone())
+        self.inner.inference_engine.infer(input)
     }
 
     fn postprocess(
@@ -299,25 +307,15 @@ impl StandardPredictor for DoctrRectifierPredictor {
         _preprocessed: &Self::PreprocessOutput,
         batch_data: &BatchData,
         raw_images: Vec<RgbImage>,
-        _config: Option<&Self::Config>,
-    ) -> Result<Self::Result, OCRError> {
-        let rectified_imgs =
-            self.post_op
-                .apply_batch(&output)
-                .map_err(|e| OCRError::ConfigError {
-                    message: format!("DocTr post-processing failed: {}", e),
-                })?;
-
-        Ok(DoctrRectifierResult {
-            input_path: batch_data.input_paths.clone(),
-            index: batch_data.indexes.clone(),
-            input_img: raw_images.into_iter().map(Arc::new).collect(),
-            rectified_img: rectified_imgs.into_iter().map(Arc::new).collect(),
-        })
+        config: Option<&Self::Config>,
+    ) -> crate::core::OcrResult<Self::Result> {
+        self.inner
+            .postprocessor
+            .postprocess(output, None, batch_data, raw_images, config)
     }
 
-    fn empty_result(&self) -> Result<Self::Result, OCRError> {
-        Ok(DoctrRectifierResult::new())
+    fn empty_result(&self) -> crate::core::OcrResult<Self::Result> {
+        self.inner.postprocessor.empty_result()
     }
 }
 
@@ -333,6 +331,8 @@ pub struct DoctrRectifierPredictorBuilder {
     rec_image_shape: Option<[usize; 3]>,
 }
 
+crate::impl_common_builder_methods!(DoctrRectifierPredictorBuilder, common);
+
 impl DoctrRectifierPredictorBuilder {
     /// Creates a new document rectifier builder
     ///
@@ -347,95 +347,6 @@ impl DoctrRectifierPredictorBuilder {
             common: CommonBuilderConfig::new(),
             rec_image_shape: None,
         }
-    }
-
-    /// Sets the model path for the rectifier
-    ///
-    /// Specifies the path to the ONNX model file that will be used for inference.
-    ///
-    /// # Arguments
-    ///
-    /// * `model_path` - Path to the ONNX model file
-    ///
-    /// # Returns
-    ///
-    /// The updated builder instance
-    pub fn model_path(mut self, model_path: impl Into<std::path::PathBuf>) -> Self {
-        self.common = self.common.model_path(model_path);
-        self
-    }
-
-    /// Sets the model name for the rectifier
-    ///
-    /// Specifies the name of the model being used.
-    ///
-    /// # Arguments
-    ///
-    /// * `model_name` - Name of the model
-    ///
-    /// # Returns
-    ///
-    /// The updated builder instance
-    pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
-        self.common = self.common.model_name(model_name);
-        self
-    }
-
-    /// Sets the batch size for the rectifier
-    ///
-    /// Specifies the number of images to process in each batch.
-    ///
-    /// # Arguments
-    ///
-    /// * `batch_size` - Number of images to process in each batch
-    ///
-    /// # Returns
-    ///
-    /// The updated builder instance
-    pub fn batch_size(mut self, batch_size: usize) -> Self {
-        self.common = self.common.batch_size(batch_size);
-        self
-    }
-
-    /// Enables or disables logging for the rectifier
-    ///
-    /// Controls whether logging is enabled during rectification.
-    ///
-    /// # Arguments
-    ///
-    /// * `enable` - Whether to enable logging
-    ///
-    /// # Returns
-    ///
-    /// The updated builder instance
-    pub fn enable_logging(mut self, enable: bool) -> Self {
-        self.common = self.common.enable_logging(enable);
-        self
-    }
-
-    /// Sets the ONNX Runtime session configuration
-    ///
-    /// This function sets the ONNX Runtime session configuration for the predictor.
-    pub fn ort_session(mut self, config: crate::core::config::onnx::OrtSessionConfig) -> Self {
-        self.common = self.common.ort_session(config);
-        self
-    }
-
-    /// Sets the session pool size for concurrent predictions
-    ///
-    /// This function sets the size of the session pool used for concurrent predictions.
-    /// The pool size must be >= 1.
-    ///
-    /// # Arguments
-    ///
-    /// * `size` - The session pool size (minimum 1)
-    ///
-    /// # Returns
-    ///
-    /// The updated builder instance
-    pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.common = self.common.session_pool_size(size);
-        self
     }
 
     /// Sets the input shape for the recognition model

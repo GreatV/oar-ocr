@@ -106,7 +106,7 @@ pub fn create_rgb_image(width: u32, height: u32, data: Vec<u8>) -> Option<RgbIma
 ///
 /// This function will return an `OCRError` if any image cannot be loaded
 /// from its specified path.
-pub fn load_images_batch<P: AsRef<std::path::Path> + Send + Sync>(
+pub fn load_images<P: AsRef<std::path::Path> + Send + Sync>(
     paths: &[P],
 ) -> Result<Vec<RgbImage>, OCRError> {
     load_images_batch_with_threshold(paths, None)

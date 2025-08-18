@@ -27,6 +27,9 @@ pub mod doctr_rectifier;
 /// Text line classifier for classifying properties of text lines
 pub mod text_line_classifier;
 
+/// Shared components used by multiple predictors
+pub mod components;
+
 // Re-exports for easier access to predictor types
 pub use crnn_recognizer::{TextRecPredictor, TextRecPredictorBuilder, TextRecPredictorConfig};
 pub use db_detector::{TextDetPredictor, TextDetPredictorBuilder, TextDetPredictorConfig};
