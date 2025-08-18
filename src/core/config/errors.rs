@@ -30,6 +30,22 @@ pub enum ConfigError {
     ResourceLimitExceeded { message: String },
 }
 
+/// A trait for configuration types that can provide recommended defaults.
+///
+/// This trait complements ConfigValidator::get_defaults, allowing generic
+/// code to talk about defaults without depending on validation details.
+pub trait ConfigDefaults: Sized {
+    /// Return the recommended defaults for this configuration type.
+    fn defaults() -> Self;
+}
+
+// Blanket implementation: any ConfigValidator can provide defaults via get_defaults
+impl<T: ConfigValidator> ConfigDefaults for T {
+    fn defaults() -> Self {
+        T::get_defaults()
+    }
+}
+
 /// A trait for validating configuration parameters.
 ///
 /// This trait provides methods for validating various configuration parameters

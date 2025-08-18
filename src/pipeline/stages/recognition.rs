@@ -54,7 +54,7 @@ use super::extensible::{PipelineStage, StageContext, StageData, StageDependency,
 
 use super::types::StageResult;
 use crate::core::config::ConfigValidator;
-use crate::core::{OCRError, traits::StandardPredictor};
+use crate::core::{OCRError, StandardPredictor};
 use crate::predictor::TextRecPredictor;
 
 mod grouping;

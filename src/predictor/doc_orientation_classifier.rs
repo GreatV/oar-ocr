@@ -6,13 +6,15 @@
 //! The classifier uses a pre-trained model to analyze images and determine their orientation.
 //! It supports batch processing for efficient handling of multiple images.
 
-use crate::core::traits::StandardPredictor;
+use crate::core::traits::ImageReader as CoreImageReader;
 use crate::core::{
-    BatchData, BatchSampler, CommonBuilderConfig, DefaultImageReader, ImageReader, OCRError,
-    OrtInfer, Tensor2D, Tensor4D, ToBatch,
+    BatchData, CommonBuilderConfig, DefaultImageReader, OCRError, OrtInfer, Tensor2D, Tensor4D,
     config::{ConfigValidator, ConfigValidatorExt},
-    get_document_orientation_labels,
 };
+
+use crate::impl_config_new_and_with_common;
+
+use crate::core::get_document_orientation_labels;
 use crate::processors::{NormalizeImage, Topk};
 use image::RgbImage;
 use std::path::Path;
@@ -52,46 +54,16 @@ pub struct DocOrientationClassifierConfig {
     pub input_shape: Option<(u32, u32)>,
 }
 
+impl_config_new_and_with_common!(
+    DocOrientationClassifierConfig,
+    common_defaults: (Some("doc_orientation_classifier".to_string()), Some(1)),
+    fields: {
+        topk: Some(4),
+        input_shape: Some((224, 224))
+    }
+);
+
 impl DocOrientationClassifierConfig {
-    /// Creates a new document orientation classifier configuration with default settings
-    ///
-    /// Initializes a new instance of the document orientation classifier configuration
-    /// with default values for all parameters.
-    ///
-    /// # Returns
-    ///
-    /// A new instance of `DocOrientationClassifierConfig` with default settings
-    pub fn new() -> Self {
-        Self {
-            common: CommonBuilderConfig::with_defaults(
-                Some("doc_orientation_classifier".to_string()),
-                Some(1),
-            ),
-            topk: Some(4),
-            input_shape: Some((224, 224)),
-        }
-    }
-
-    /// Creates a new document orientation classifier configuration with custom common settings
-    ///
-    /// Initializes a new instance of the document orientation classifier configuration
-    /// with the provided common configuration and default values for other parameters.
-    ///
-    /// # Arguments
-    ///
-    /// * `common` - Common configuration options
-    ///
-    /// # Returns
-    ///
-    /// A new instance of `DocOrientationClassifierConfig` with custom common settings
-    pub fn with_common(common: CommonBuilderConfig) -> Self {
-        Self {
-            common,
-            topk: Some(4),
-            input_shape: Some((224, 224)),
-        }
-    }
-
     /// Validates the document orientation classifier configuration
     ///
     /// Checks that all configuration parameters are valid and within acceptable ranges.
@@ -178,197 +150,105 @@ impl Default for DocOrientationResult {
     }
 }
 
-/// Document orientation classifier
+/// Document orientation classifier built from modular components
 ///
-/// This struct implements a classifier for determining the orientation of documents in images.
-/// It uses a pre-trained model to predict whether an image is rotated by 0°, 90°, 180°, or 270°.
-#[derive(Debug)]
-pub struct DocOrientationClassifier {
-    /// Number of top predictions to return for each image
-    pub topk: Option<usize>,
-    /// Input shape for the model (width, height)
-    pub input_shape: (u32, u32),
-    /// Name of the model being used
-    pub model_name: String,
+/// This is a type alias over `ModularPredictor` with concrete, composable components
+/// to eliminate duplicated StandardPredictor implementations across predictors.
+pub type DocOrientationClassifier =
+    ModularPredictor<DocOrImageReader, DocOrPreprocessor, OrtInfer2D, DocOrPostprocessor>;
 
-    /// Batch sampler for processing images in batches
-    pub batch_sampler: BatchSampler,
-    /// Image reader for loading images from file paths
-    pub read_image: DefaultImageReader,
-    /// Image normalizer for preprocessing images before inference
-    pub normalize: NormalizeImage,
-    /// Batch converter for converting images to tensors
-    pub to_batch: ToBatch,
-    /// ONNX Runtime inference engine
-    pub infer: OrtInfer,
-    /// Top-k operator for selecting top predictions
-    pub post_op: Topk,
-}
+// Granular trait adapters for the document orientation classifier
+use crate::core::{
+    GranularImageReader as GIReader, ModularPredictor, OrtInfer2D, Postprocessor as GPostprocessor,
+    Preprocessor as GPreprocessor,
+};
+use image::DynamicImage;
 
-impl DocOrientationClassifier {
-    /// Creates a new document orientation classifier
-    ///
-    /// Initializes a new instance of the document orientation classifier with the provided
-    /// configuration and model path.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - Configuration for the classifier
-    /// * `model_path` - Path to the ONNX model file
-    ///
-    /// # Returns
-    ///
-    /// A new instance of `DocOrientationClassifier` or an error if initialization fails
-    pub fn new(
-        config: DocOrientationClassifierConfig,
-        model_path: &Path,
-    ) -> Result<Self, OCRError> {
-        let input_shape = config.input_shape.unwrap_or((224, 224));
-        let model_name = config
-            .common
-            .model_name
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| "DocOrientationClassifier".to_string());
-        let batch_size = config.common.batch_size.unwrap_or(32);
-        let topk = config.topk;
-
-        let batch_sampler = BatchSampler::new(batch_size);
-        let read_image = DefaultImageReader::new();
-
-        Ok(Self {
-            topk,
-            input_shape,
-            model_name,
-            batch_sampler,
-            read_image,
-            normalize: NormalizeImage::new(
-                Some(1.0 / 255.0),
-                Some(vec![0.485, 0.456, 0.406]),
-                Some(vec![0.229, 0.224, 0.225]),
-                None,
-            )?,
-            to_batch: ToBatch::new(),
-            infer: OrtInfer::from_common(
-                &DocOrientationClassifierConfig {
-                    common: config.common.clone(),
-                    ..config.clone()
-                }
-                .common,
-                model_path,
-                None,
-            )?,
-            post_op: Topk::from_class_names(get_document_orientation_labels()),
-        })
-    }
-}
-
-/// Configuration for document orientation classification
-///
-/// This struct is used as a placeholder for configuration options specific to
-/// document orientation classification. Currently, it doesn't have any fields
-/// as the configuration is handled by `DocOrientationClassifierConfig`.
 #[derive(Debug, Clone)]
 pub struct DocOrientationConfig;
 
-impl StandardPredictor for DocOrientationClassifier {
-    type Config = DocOrientationConfig;
-    type Result = DocOrientationResult;
-    type PreprocessOutput = Tensor4D;
-    type InferenceOutput = Tensor2D;
+#[derive(Debug)]
+pub struct DocOrImageReader {
+    inner: DefaultImageReader,
+}
 
-    /// Reads images from file paths
-    ///
-    /// Loads images from the provided file paths into memory.
-    ///
-    /// # Arguments
-    ///
-    /// * `paths` - Iterator over file paths to read
-    ///
-    /// # Returns
-    ///
-    /// Vector of loaded images or an error if reading fails
+impl DocOrImageReader {
+    pub fn new() -> Self {
+        Self {
+            inner: DefaultImageReader::new(),
+        }
+    }
+}
+
+impl Default for DocOrImageReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GIReader for DocOrImageReader {
     fn read_images<'a>(
         &self,
         paths: impl Iterator<Item = &'a str>,
     ) -> Result<Vec<RgbImage>, OCRError> {
-        self.read_image.apply(paths)
+        self.inner.apply(paths)
     }
+}
 
-    /// Preprocesses images for inference
-    ///
-    /// Resizes images to the required input shape and normalizes them for the model.
-    ///
-    /// # Arguments
-    ///
-    /// * `images` - Vector of images to preprocess
-    /// * `_config` - Configuration (unused in this implementation)
-    ///
-    /// # Returns
-    ///
-    /// Preprocessed images as a 4D tensor or an error if preprocessing fails
+#[derive(Debug)]
+pub struct DocOrPreprocessor {
+    pub input_shape: (u32, u32),
+    pub normalize: NormalizeImage,
+}
+
+impl GPreprocessor for DocOrPreprocessor {
+    type Config = DocOrientationConfig;
+    type Output = Tensor4D;
+
     fn preprocess(
         &self,
         images: Vec<RgbImage>,
         _config: Option<&Self::Config>,
-    ) -> Result<Self::PreprocessOutput, OCRError> {
+    ) -> Result<Self::Output, OCRError> {
         use crate::utils::resize_images_batch_to_dynamic;
-
-        let dynamic_images = resize_images_batch_to_dynamic(
-            &images,
-            self.input_shape.0,
-            self.input_shape.1,
-            None, // Uses default Lanczos3 filter
-        );
-
+        let dynamic_images: Vec<DynamicImage> =
+            resize_images_batch_to_dynamic(&images, self.input_shape.0, self.input_shape.1, None);
         self.normalize.normalize_batch_to(dynamic_images)
     }
 
-    /// Runs inference on preprocessed images
-    ///
-    /// Performs inference using the ONNX model on the preprocessed input tensor.
-    ///
-    /// # Arguments
-    ///
-    /// * `input` - Preprocessed input tensor
-    ///
-    /// # Returns
-    ///
-    /// Inference output as a 2D tensor or an error if inference fails
-    fn infer(&self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError> {
-        self.infer.infer_2d(input.clone())
+    fn preprocessing_info(&self) -> String {
+        format!(
+            "resize_to=({},{}) + normalize",
+            self.input_shape.0, self.input_shape.1
+        )
     }
+}
 
-    /// Postprocesses inference output
-    ///
-    /// Converts the raw inference output into classification results, including
-    /// class IDs, scores, and label names.
-    ///
-    /// # Arguments
-    ///
-    /// * `output` - Raw inference output
-    /// * `_preprocessed` - Preprocessed input (unused in this implementation)
-    /// * `batch_data` - Batch data containing input paths and indexes
-    /// * `raw_images` - Original images
-    /// * `_config` - Configuration (unused in this implementation)
-    ///
-    /// # Returns
-    ///
-    /// Classification results or an error if postprocessing fails
+#[derive(Debug)]
+pub struct DocOrPostprocessor {
+    pub topk: usize,
+    pub topk_op: Topk,
+}
+
+impl GPostprocessor for DocOrPostprocessor {
+    type Config = DocOrientationConfig;
+    type InferenceOutput = Tensor2D;
+    type PreprocessOutput = Tensor4D;
+    type Result = DocOrientationResult;
+
     fn postprocess(
         &self,
         output: Self::InferenceOutput,
-        _preprocessed: &Self::PreprocessOutput,
+        _preprocess_output: Option<&Self::PreprocessOutput>,
         batch_data: &BatchData,
         raw_images: Vec<RgbImage>,
         _config: Option<&Self::Config>,
-    ) -> Result<Self::Result, OCRError> {
+    ) -> crate::core::OcrResult<Self::Result> {
         // Convert ndarray output to Vec<Vec<f32>> format expected by Topk
         let predictions: Vec<Vec<f32>> = output.outer_iter().map(|row| row.to_vec()).collect();
-
         let topk_result = self
-            .post_op
-            .process(&predictions, self.topk.unwrap_or(4))
+            .topk_op
+            .process(&predictions, self.topk)
             .map_err(|e| OCRError::ConfigError { message: e })?;
 
         Ok(DocOrientationResult {
@@ -377,7 +257,6 @@ impl StandardPredictor for DocOrientationClassifier {
             input_img: raw_images.into_iter().map(Arc::new).collect(),
             class_ids: topk_result.indexes,
             scores: topk_result.scores,
-            // Convert label names to Arc<str> for efficient sharing
             label_names: topk_result
                 .class_names
                 .unwrap_or_default()
@@ -586,7 +465,32 @@ impl DocOrientationClassifierBuilder {
 
         let config = config.validate_and_wrap_ocr_error()?;
 
-        DocOrientationClassifier::new(config, model_path)
+        // Build modular components
+        let input_shape = config.input_shape.unwrap_or((224, 224));
+        let image_reader = DocOrImageReader::new();
+        let normalize = NormalizeImage::new(
+            Some(1.0 / 255.0),
+            Some(vec![0.485, 0.456, 0.406]),
+            Some(vec![0.229, 0.224, 0.225]),
+            None,
+        )?;
+        let preprocessor = DocOrPreprocessor {
+            input_shape,
+            normalize,
+        };
+        let infer_inner = OrtInfer::from_common(&config.common, model_path, None)?;
+        let inference_engine = OrtInfer2D(infer_inner);
+        let postprocessor = DocOrPostprocessor {
+            topk: config.topk.unwrap_or(4),
+            topk_op: Topk::from_class_names(get_document_orientation_labels()),
+        };
+
+        Ok(ModularPredictor::new(
+            image_reader,
+            preprocessor,
+            inference_engine,
+            postprocessor,
+        ))
     }
 }
 
@@ -600,5 +504,23 @@ impl Default for DocOrientationClassifierBuilder {
     /// A new instance of `DocOrientationClassifierBuilder` with default settings
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_doc_orientation_config_defaults_and_validate() {
+        let config = DocOrientationClassifierConfig::new();
+        assert_eq!(config.topk, Some(4));
+        assert_eq!(config.input_shape, Some((224, 224)));
+        assert_eq!(
+            config.common.model_name.as_deref(),
+            Some("doc_orientation_classifier")
+        );
+        assert_eq!(config.common.batch_size, Some(1));
+        assert!(config.validate().is_ok());
     }
 }

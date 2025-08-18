@@ -58,5 +58,8 @@ pub mod types;
 // Re-export all public types and functions for backward compatibility
 pub use types::{OCRError, ProcessingStage, SimpleError};
 
+/// Convenient result alias for OCR operations.
+pub type OcrResult<T> = Result<T, OCRError>;
+
 // Note: Constructor methods are implemented directly on OCRError in the constructors module,
 // so they are automatically available when OCRError is imported.

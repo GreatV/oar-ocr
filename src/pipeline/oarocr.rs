@@ -114,7 +114,7 @@ pub struct SingleImageProcessingParams<'a> {
 /// # Returns
 ///
 /// A Result indicating success or an OCRError if configuration fails
-pub fn configure_thread_pool_once(max_threads: usize) -> Result<(), OCRError> {
+pub fn configure_thread_pool_once(max_threads: usize) -> crate::core::OcrResult<()> {
     let mut result = Ok(());
 
     THREAD_POOL_INIT.call_once(|| {
@@ -126,9 +126,9 @@ pub fn configure_thread_pool_once(max_threads: usize) -> Result<(), OCRError> {
             .num_threads(max_threads)
             .build_global()
         {
-            result = Err(OCRError::ConfigError {
-                message: format!("Failed to configure global thread pool: {e}"),
-            });
+            result = Err(OCRError::config_error(format!(
+                "Failed to configure global thread pool: {e}"
+            )));
         }
     });
 
@@ -172,7 +172,7 @@ impl OAROCR {
     /// # Returns
     ///
     /// A Result containing the OAROCR instance or an OCRError
-    pub fn new(config: OAROCRConfig) -> Result<Self, OCRError> {
+    pub fn new(config: OAROCRConfig) -> crate::core::OcrResult<Self> {
         info!("Initializing OAROCR pipeline with config: {:?}", config);
 
         // Configure global rayon thread pool if max_threads is specified
@@ -241,7 +241,7 @@ impl OAROCR {
     /// Processes one or more images already loaded in memory.
     ///
     /// Prefer this API when you have RgbImage instances to avoid file I/O.
-    pub fn predict(&self, images: &[RgbImage]) -> Result<Vec<OAROCRResult>, OCRError> {
+    pub fn predict(&self, images: &[RgbImage]) -> crate::core::OcrResult<Vec<OAROCRResult>> {
         let start_time = std::time::Instant::now();
 
         info!(
@@ -271,7 +271,7 @@ impl OAROCR {
     fn process_images_from_memory(
         &self,
         images: &[RgbImage],
-    ) -> Result<Vec<OAROCRResult>, OCRError> {
+    ) -> crate::core::OcrResult<Vec<OAROCRResult>> {
         // Use the new orchestration abstraction
         let orchestrator = ImageProcessingOrchestrator::new(self);
 
@@ -293,7 +293,7 @@ impl OAROCR {
     fn process_single_image_from_detection(
         &self,
         params: SingleImageProcessingParams,
-    ) -> Result<OAROCRResult, OCRError> {
+    ) -> crate::core::OcrResult<OAROCRResult> {
         // Destructure parameters
         let SingleImageProcessingParams {
             index,

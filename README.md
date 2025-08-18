@@ -62,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Process multiple images at once
-    let images = oar_ocr::utils::load_images_batch(&[
+    let images = oar_ocr::utils::load_images(&[
         Path::new("document1.jpg"),
         Path::new("document2.jpg"),
         Path::new("document3.jpg"),

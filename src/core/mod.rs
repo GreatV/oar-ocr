@@ -17,6 +17,7 @@ pub mod constants;
 pub mod dynamic_batch;
 pub mod errors;
 pub mod granular_traits;
+pub mod infer_wrappers;
 pub mod inference;
 #[macro_use]
 pub mod macros;
@@ -26,7 +27,7 @@ pub mod traits;
 
 // Image utilities are now available directly from oar_ocr::utils
 // pub use crate::utils::{
-//     create_rgb_image, dynamic_to_gray, dynamic_to_rgb, load_image, load_images_batch,
+//     create_rgb_image, dynamic_to_gray, dynamic_to_rgb, load_image, load_images,
 // };
 pub use batch::{BatchData, BatchSampler, Tensor1D, Tensor2D, Tensor3D, Tensor4D, ToBatch};
 pub use config::{
@@ -39,11 +40,12 @@ pub use dynamic_batch::{
     DefaultDynamicBatcher, DynamicBatchConfig, DynamicBatchResult, DynamicBatcher, MemoryStrategy,
     PaddingStrategy, ShapeCompatibilityStrategy,
 };
-pub use errors::{OCRError, ProcessingStage};
+pub use errors::{OCRError, OcrResult, ProcessingStage};
 pub use granular_traits::{
     ImageReader as GranularImageReader, InferenceEngine, ModularPredictor, Postprocessor,
     Preprocessor,
 };
+pub use infer_wrappers::{OrtInfer2D, OrtInfer3D, OrtInfer4D};
 pub use inference::{DefaultImageReader, OrtInfer, load_session};
 pub use orientation::{
     OrientationResult, apply_document_orientation, apply_text_line_orientation,
@@ -53,6 +55,8 @@ pub use orientation::{
 pub use predictions::{
     IntoOwnedPrediction, IntoPrediction, OwnedPredictionResult, PipelineStats, PredictionResult,
 };
-pub use traits::{BasePredictor, ImageReader, PredictorBuilder, PredictorConfig, Sampler};
+pub use traits::{
+    BasePredictor, ImageReader, PredictorBuilder, PredictorConfig, Sampler, StandardPredictor,
+};
 
 // init_tracing function has been moved to oar_ocr::utils::init_tracing

@@ -81,6 +81,34 @@ impl OCRError {
         Self::tensor_operation_error("unknown", &[], &[], context, error)
     }
 
+    /// Internal helper to build a Processing error with minimal boilerplate.
+    #[inline]
+    fn processing_with_context(
+        kind: ProcessingStage,
+        context: impl Into<String>,
+        error: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Processing {
+            kind,
+            context: context.into(),
+            source: Box::new(error),
+        }
+    }
+
+    /// Internal helper to build an Inference error with minimal boilerplate.
+    #[inline]
+    fn inference_with_context(
+        model_name: impl Into<String>,
+        context: impl Into<String>,
+        error: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Inference {
+            model_name: model_name.into(),
+            context: context.into(),
+            source: Box::new(error),
+        }
+    }
+
     /// Creates an OCRError for post-processing operations.
     ///
     /// # Arguments
@@ -95,11 +123,7 @@ impl OCRError {
         context: &str,
         error: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
-        Self::Processing {
-            kind: ProcessingStage::PostProcessing,
-            context: context.to_string(),
-            source: Box::new(error),
-        }
+        Self::processing_with_context(ProcessingStage::PostProcessing, context, error)
     }
 
     /// Creates an OCRError for normalization operations.
@@ -116,11 +140,7 @@ impl OCRError {
         context: &str,
         error: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
-        Self::Processing {
-            kind: ProcessingStage::Normalization,
-            context: context.to_string(),
-            source: Box::new(error),
-        }
+        Self::processing_with_context(ProcessingStage::Normalization, context, error)
     }
 
     /// Creates an OCRError for resize operations.
@@ -137,11 +157,7 @@ impl OCRError {
         context: &str,
         error: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
-        Self::Processing {
-            kind: ProcessingStage::Resize,
-            context: context.to_string(),
-            source: Box::new(error),
-        }
+        Self::processing_with_context(ProcessingStage::Resize, context, error)
     }
 
     /// Creates an OCRError for image processing operations.
@@ -158,11 +174,7 @@ impl OCRError {
         context: &str,
         error: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
-        Self::Processing {
-            kind: ProcessingStage::ImageProcessing,
-            context: context.to_string(),
-            source: Box::new(error),
-        }
+        Self::processing_with_context(ProcessingStage::ImageProcessing, context, error)
     }
 
     /// Creates an OCRError for image processing operations with a simple message.
@@ -233,11 +245,7 @@ impl OCRError {
     ///
     /// An OCRError instance.
     pub fn basic_inference_error(error: impl std::error::Error + Send + Sync + 'static) -> Self {
-        Self::Inference {
-            model_name: "Unknown".to_string(),
-            context: "Basic inference error".to_string(),
-            source: Box::new(error),
-        }
+        Self::inference_with_context("Unknown", "Basic inference error", error)
     }
 
     /// Creates an OCRError for invalid input.
@@ -346,11 +354,8 @@ impl OCRError {
         input_info: &str,
         error: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
-        Self::Processing {
-            kind: stage,
-            context: format!("Operation '{operation}' failed on input '{input_info}': {error}"),
-            source: Box::new(error),
-        }
+        let ctx = format!("Operation '{operation}' failed on input '{input_info}': {error}");
+        Self::processing_with_context(stage, ctx, error)
     }
 
     /// Creates an OCRError for model inference operations with detailed context.
@@ -387,7 +392,7 @@ impl OCRError {
 
     /// Creates an OCRError for inference operations with model context (simple variant).
     ///
-    /// This is an alias for `model_inference_error` with default operation and shape information.
+    /// This is an alias for `inference_with_context` which wraps a simple model inference error.
     /// For detailed inference errors, use `model_inference_error` directly.
     ///
     /// # Arguments
@@ -404,7 +409,31 @@ impl OCRError {
         context: &str,
         error: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
-        Self::model_inference_error(model_name, "unknown", 0, &[], context, error)
+        Self::inference_with_context(model_name, context, error)
+    }
+
+    /// Creates an OCRError for model load failures with contextual suggestions.
+    ///
+    /// # Arguments
+    /// * `model_path` - Path to the model file
+    /// * `reason` - Short reason description
+    /// * `suggestion` - Optional suggestion message (without punctuation)
+    /// * `source` - Optional underlying error
+    pub fn model_load_error(
+        model_path: impl AsRef<std::path::Path>,
+        reason: impl Into<String>,
+        suggestion: Option<&str>,
+        source: Option<impl std::error::Error + Send + Sync + 'static>,
+    ) -> Self {
+        let suggestion = suggestion
+            .map(|s| format!("; suggested fix: {}", s))
+            .unwrap_or_default();
+        Self::ModelLoad {
+            model_path: model_path.as_ref().display().to_string(),
+            reason: reason.into(),
+            suggestion,
+            source: source.map(|e| Box::new(e) as _),
+        }
     }
 
     /// Creates an OCRError for tensor operations with detailed shape information.
@@ -456,13 +485,10 @@ impl OCRError {
         operation: &str,
         error: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
-        Self::Processing {
-            kind: stage,
-            context: format!(
-                "Batch processing failed: operation '{operation}' failed on item {batch_index}/{batch_size}"
-            ),
-            source: Box::new(error),
-        }
+        let ctx = format!(
+            "Batch processing failed: operation '{operation}' failed on item {batch_index}/{batch_size}"
+        );
+        Self::processing_with_context(stage, ctx, error)
     }
 
     /// Creates an OCRError for pipeline stage operations with detailed context.
@@ -485,13 +511,10 @@ impl OCRError {
         operation: &str,
         error: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
-        Self::Processing {
-            kind: ProcessingStage::PipelineExecution,
-            context: format!(
-                "Pipeline stage '{stage_name}' (id: {stage_id}) failed: operation '{operation}' on {input_count} items"
-            ),
-            source: Box::new(error),
-        }
+        let ctx = format!(
+            "Pipeline stage '{stage_name}' (id: {stage_id}) failed: operation '{operation}' on {input_count} items"
+        );
+        Self::processing_with_context(ProcessingStage::PipelineExecution, ctx, error)
     }
 }
 

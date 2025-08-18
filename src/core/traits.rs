@@ -29,7 +29,7 @@ pub trait PredictorBuilder: Sized {
     /// # Returns
     ///
     /// A Result containing the built predictor or an error.
-    fn build_typed(self, model_path: &Path) -> Result<Self::Predictor, OCRError>;
+    fn build_typed(self, model_path: &Path) -> crate::core::OcrResult<Self::Predictor>;
 
     /// Gets the type of predictor that this builder creates.
     ///
@@ -58,7 +58,7 @@ pub trait PredictorBuilder: Sized {
     /// # Returns
     ///
     /// A Result containing the built predictor or an error.
-    fn build(self, model_path: &Path) -> Result<Self::Predictor, OCRError> {
+    fn build(self, model_path: &Path) -> crate::core::OcrResult<Self::Predictor> {
         self.build_typed(model_path)
     }
 }
@@ -255,7 +255,7 @@ pub trait PredictorConfig {
     /// # Returns
     ///
     /// A Result indicating success or an error.
-    fn validate(&self) -> Result<(), OCRError>;
+    fn validate(&self) -> crate::core::OcrResult<()>;
 
     /// Validates the batch size.
     ///
@@ -267,7 +267,7 @@ pub trait PredictorConfig {
     ///
     /// * Batch size must be greater than 0.
     /// * Batch size should not exceed 1000 for memory efficiency.
-    fn validate_batch_size(&self) -> Result<(), OCRError> {
+    fn validate_batch_size(&self) -> crate::core::OcrResult<()> {
         let batch_size = self.batch_size();
         if batch_size == 0 {
             return Err(OCRError::ConfigError {
@@ -291,7 +291,7 @@ pub trait PredictorConfig {
     /// # Validation Rules
     ///
     /// * Model name cannot be empty.
-    fn validate_model_name(&self) -> Result<(), OCRError> {
+    fn validate_model_name(&self) -> crate::core::OcrResult<()> {
         let name = self.model_name();
         if name.is_empty() {
             return Err(OCRError::ConfigError {
@@ -347,7 +347,7 @@ pub trait StandardPredictor {
         &self,
         images: Vec<RgbImage>,
         config: Option<&Self::Config>,
-    ) -> Result<Self::PreprocessOutput, OCRError>;
+    ) -> crate::core::OcrResult<Self::PreprocessOutput>;
 
     /// Performs inference on the preprocessed input.
     ///
@@ -358,7 +358,10 @@ pub trait StandardPredictor {
     /// # Returns
     ///
     /// A Result containing the inference output or an error.
-    fn infer(&self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError>;
+    fn infer(
+        &self,
+        input: &Self::PreprocessOutput,
+    ) -> crate::core::OcrResult<Self::InferenceOutput>;
 
     /// Postprocesses the inference output.
     ///
@@ -380,7 +383,7 @@ pub trait StandardPredictor {
         batch_data: &BatchData,
         raw_images: Vec<RgbImage>,
         config: Option<&Self::Config>,
-    ) -> Result<Self::Result, OCRError>;
+    ) -> crate::core::OcrResult<Self::Result>;
 
     /// Performs prediction directly from in-memory images.
     ///
@@ -400,7 +403,7 @@ pub trait StandardPredictor {
         &self,
         images: Vec<RgbImage>,
         config: Option<Self::Config>,
-    ) -> Result<Self::Result, OCRError> {
+    ) -> crate::core::OcrResult<Self::Result> {
         if images.is_empty() {
             return self.empty_result();
         }
@@ -448,7 +451,7 @@ pub trait StandardPredictor {
     /// # Returns
     ///
     /// A Result containing an empty result instance
-    fn empty_result(&self) -> Result<Self::Result, OCRError>;
+    fn empty_result(&self) -> crate::core::OcrResult<Self::Result>;
 }
 
 #[cfg(test)]
