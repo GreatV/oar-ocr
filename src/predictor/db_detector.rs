@@ -59,6 +59,40 @@ pub struct TextDetConfig {
     pub max_side_limit: Option<u32>,
 }
 
+impl TextDetConfig {
+    /// Gets a reference to the config or a default instance if None.
+    /// This avoids unnecessary cloning when the config is Some.
+    fn as_ref_or_default(config: Option<&Self>) -> std::borrow::Cow<'_, Self> {
+        match config {
+            Some(cfg) => std::borrow::Cow::Borrowed(cfg),
+            None => std::borrow::Cow::Owned(Self::default()),
+        }
+    }
+
+    /// Creates a merged config by taking values from the runtime config first,
+    /// then falling back to predictor defaults. This avoids unnecessary cloning
+    /// when possible.
+    fn merge_with_defaults(
+        runtime_config: Option<&Self>,
+        limit_side_len: Option<u32>,
+        limit_type: Option<LimitType>,
+        thresh: Option<f32>,
+        box_thresh: Option<f32>,
+        unclip_ratio: Option<f32>,
+        max_side_limit: u32,
+    ) -> Self {
+        let runtime = Self::as_ref_or_default(runtime_config);
+        Self {
+            limit_side_len: runtime.limit_side_len.or(limit_side_len),
+            limit_type: runtime.limit_type.clone().or(limit_type),
+            thresh: runtime.thresh.or(thresh),
+            box_thresh: runtime.box_thresh.or(box_thresh),
+            unclip_ratio: runtime.unclip_ratio.or(unclip_ratio),
+            max_side_limit: runtime.max_side_limit.or(Some(max_side_limit)),
+        }
+    }
+}
+
 /// Configuration for the text detection predictor
 ///
 /// This struct holds configuration parameters for the text detection predictor.
@@ -296,12 +330,14 @@ impl GPreprocessor for TDPreprocessor {
         images: Vec<RgbImage>,
         config: Option<&Self::Config>,
     ) -> crate::core::OcrResult<Self::Output> {
-        let cfg = config.cloned().unwrap_or_default();
+        let cfg = TextDetConfig::as_ref_or_default(config);
         let limit_side_len = cfg
             .limit_side_len
             .unwrap_or(self.resize.limit_side_len.unwrap_or(960));
         let limit_type = cfg
             .limit_type
+            .as_ref()
+            .cloned()
             .unwrap_or(self.resize.limit_type.clone().unwrap_or(LimitType::Min));
         let max_side_limit = cfg.max_side_limit.unwrap_or(self.resize.max_side_limit);
         let batch_imgs: Vec<DynamicImage> =
@@ -359,7 +395,7 @@ impl GPostprocessor for TDPostprocessor {
         raw_images: Vec<RgbImage>,
         config: Option<&Self::Config>,
     ) -> crate::core::OcrResult<Self::Result> {
-        let cfg = config.cloned().unwrap_or_default();
+        let cfg = TextDetConfig::as_ref_or_default(config);
         let thresh = cfg.thresh.unwrap_or(DEFAULT_THRESH);
         let box_thresh = cfg.box_thresh.unwrap_or(DEFAULT_BOX_THRESH);
         let unclip_ratio = cfg.unclip_ratio.unwrap_or(DEFAULT_UNCLIP_RATIO);
@@ -522,15 +558,15 @@ impl StandardPredictor for TextDetPredictor {
         config: Option<&Self::Config>,
     ) -> crate::core::OcrResult<Self::PreprocessOutput> {
         // Merge runtime config with predictor defaults
-        let cfg = config.cloned().unwrap_or_default();
-        let merged = TextDetConfig {
-            limit_side_len: cfg.limit_side_len.or(self.limit_side_len),
-            limit_type: cfg.limit_type.or(self.limit_type.clone()),
-            thresh: cfg.thresh.or(self.thresh),
-            box_thresh: cfg.box_thresh.or(self.box_thresh),
-            unclip_ratio: cfg.unclip_ratio.or(self.unclip_ratio),
-            max_side_limit: cfg.max_side_limit.or(Some(self.max_side_limit)),
-        };
+        let merged = TextDetConfig::merge_with_defaults(
+            config,
+            self.limit_side_len,
+            self.limit_type.clone(),
+            self.thresh,
+            self.box_thresh,
+            self.unclip_ratio,
+            self.max_side_limit,
+        );
         self.inner.preprocessor.preprocess(images, Some(&merged))
     }
 
@@ -550,15 +586,15 @@ impl StandardPredictor for TextDetPredictor {
         config: Option<&Self::Config>,
     ) -> crate::core::OcrResult<Self::Result> {
         // Merge runtime config with predictor defaults for thresholds
-        let cfg = config.cloned().unwrap_or_default();
-        let merged = TextDetConfig {
-            limit_side_len: cfg.limit_side_len.or(self.limit_side_len),
-            limit_type: cfg.limit_type.or(self.limit_type.clone()),
-            thresh: cfg.thresh.or(self.thresh),
-            box_thresh: cfg.box_thresh.or(self.box_thresh),
-            unclip_ratio: cfg.unclip_ratio.or(self.unclip_ratio),
-            max_side_limit: cfg.max_side_limit.or(Some(self.max_side_limit)),
-        };
+        let merged = TextDetConfig::merge_with_defaults(
+            config,
+            self.limit_side_len,
+            self.limit_type.clone(),
+            self.thresh,
+            self.box_thresh,
+            self.unclip_ratio,
+            self.max_side_limit,
+        );
         self.inner.postprocessor.postprocess(
             output,
             Some(preprocessed),

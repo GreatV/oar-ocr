@@ -215,7 +215,7 @@ impl TextRecPredictor {
         let normalize = NormalizeImage::for_ocr_recognition()?;
         let preprocessor = TRPreprocessor { resize, normalize };
         let infer = OrtInfer::from_common(&config.common, model_path, None)?;
-        let inference_engine = OrtInfer3D(infer);
+        let inference_engine = OrtInfer3D::new(infer);
         let decoder = CTCLabelDecode::from_string_list(character_dict.as_deref(), true, false);
         let postprocessor = TRPostprocessor { decoder };
         let inner =

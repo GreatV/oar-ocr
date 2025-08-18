@@ -479,7 +479,7 @@ impl DocOrientationClassifierBuilder {
             normalize,
         };
         let infer_inner = OrtInfer::from_common(&config.common, model_path, None)?;
-        let inference_engine = OrtInfer2D(infer_inner);
+        let inference_engine = OrtInfer2D::new(infer_inner);
         let postprocessor = DocOrPostprocessor {
             topk: config.topk.unwrap_or(4),
             topk_op: Topk::from_class_names(get_document_orientation_labels()),
