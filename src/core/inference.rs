@@ -13,7 +13,7 @@ use image::RgbImage;
 use ort::{
     execution_providers::ExecutionProviderDispatch,
     session::{Session, builder::SessionBuilder},
-    value::Value,
+    value::TensorRef,
 };
 use std::path::Path;
 use std::sync::Mutex;
@@ -641,7 +641,7 @@ impl OrtInfer {
     /// A Result containing the processed output or an OCRError.
     fn run_inference_with_processor<T>(
         &self,
-        x: Tensor4D,
+        x: &Tensor4D,
         processor: impl FnOnce(&[i64], &[f32]) -> Result<T, OCRError>,
     ) -> Result<T, OCRError> {
         let input_shape = x.shape().to_vec();
@@ -658,7 +658,7 @@ impl OrtInfer {
             )
         })?;
 
-        let input_tensor = Value::from_array(x).map_err(|e| {
+        let input_tensor = TensorRef::from_array_view(x.view()).map_err(|e| {
             OCRError::model_inference_error(
                 &self.model_name,
                 "tensor_conversion",
@@ -731,7 +731,7 @@ impl OrtInfer {
     /// # Returns
     ///
     /// A Result containing the output 4D tensor or an OCRError.
-    pub fn infer_4d(&self, x: Tensor4D) -> Result<Tensor4D, OCRError> {
+    pub fn infer_4d(&self, x: &Tensor4D) -> Result<Tensor4D, OCRError> {
         let _input_shape = x.shape().to_vec();
         self.run_inference_with_processor(x, |output_shape, output_data| {
             if output_shape.len() != 4 {
@@ -779,7 +779,7 @@ impl OrtInfer {
     /// # Returns
     ///
     /// A Result containing the output 2D tensor or an OCRError.
-    pub fn infer_2d(&self, x: Tensor4D) -> Result<Tensor2D, OCRError> {
+    pub fn infer_2d(&self, x: &Tensor4D) -> Result<Tensor2D, OCRError> {
         let batch_size = x.shape()[0];
         let input_shape = x.shape().to_vec();
         self.run_inference_with_processor(x, |output_shape, output_data| {
@@ -815,7 +815,7 @@ impl OrtInfer {
     /// # Returns
     ///
     /// A Result containing the output 3D tensor or an OCRError.
-    pub fn infer_3d(&self, x: Tensor4D) -> Result<Tensor3D, OCRError> {
+    pub fn infer_3d(&self, x: &Tensor4D) -> Result<Tensor3D, OCRError> {
         let _input_shape = x.shape().to_vec();
         self.run_inference_with_processor(x, |output_shape, output_data| {
             if output_shape.len() != 3 {

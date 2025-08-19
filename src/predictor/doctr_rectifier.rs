@@ -5,15 +5,14 @@
 //!
 //! The rectifier supports batch processing for efficient handling of multiple images.
 
-use crate::core::ImageReader as CoreImageReader;
-use crate::core::StandardPredictor;
+use crate::core::traits::ImageReader as CoreImageReader;
 use crate::core::{
     BatchData, CommonBuilderConfig, DefaultImageReader, OCRError, OrtInfer, Tensor4D,
     config::{ConfigValidator, ConfigValidatorExt},
 };
 use crate::core::{
-    GranularImageReader as GIReader, InferenceEngine as GInferenceEngine, ModularPredictor,
-    OrtInfer4D, Postprocessor as GPostprocessor, Preprocessor as GPreprocessor,
+    GranularImageReader as GIReader, ModularPredictor, OrtInfer4D, Postprocessor as GPostprocessor,
+    Preprocessor as GPreprocessor,
 };
 use crate::processors::{DocTrPostProcess, NormalizeImage};
 
@@ -141,16 +140,12 @@ impl Default for DoctrRectifierResult {
     }
 }
 
-/// Document rectifier
+/// Document rectifier built from modular components
 ///
-/// This struct implements a rectifier for correcting distortions in document images.
-/// It uses a pre-trained model to transform distorted document images into properly aligned versions.
-#[derive(Debug)]
-pub struct DoctrRectifierPredictor {
-    pub rec_image_shape: [usize; 3],
-    pub model_name: String,
-    inner: ModularPredictor<DRImageReader, DRPreprocessor, OrtInfer4D, DRPostprocessor>,
-}
+/// This is a type alias over `ModularPredictor` with concrete, composable components
+/// to eliminate duplicated StandardPredictor implementations across predictors.
+pub type DoctrRectifierPredictor =
+    ModularPredictor<DRImageReader, DRPreprocessor, OrtInfer4D, DRPostprocessor>;
 
 #[derive(Debug)]
 pub struct DRImageReader {
@@ -230,44 +225,6 @@ impl GPostprocessor for DRPostprocessor {
     }
 }
 
-impl DoctrRectifierPredictor {
-    pub fn new(config: DoctrRectifierPredictorConfig, model_path: &Path) -> Result<Self, OCRError> {
-        let rec_image_shape = config.rec_image_shape.unwrap_or([3, 512, 512]);
-        let model_name = config
-            .common
-            .model_name
-            .as_deref()
-            .unwrap_or("doctr_rectifier")
-            .to_string();
-
-        let image_reader = DRImageReader::new();
-        let normalize = NormalizeImage::new(
-            Some(1.0 / 255.0),
-            Some(vec![0.0, 0.0, 0.0]),
-            Some(vec![1.0, 1.0, 1.0]),
-            None,
-        )?;
-        let preprocessor = DRPreprocessor { normalize };
-        let infer = OrtInfer::from_common_with_auto_input(&config.common, model_path)?;
-        let inference_engine = OrtInfer4D::new(infer);
-        let postprocessor = DRPostprocessor {
-            op: DocTrPostProcess::new(1.0),
-        };
-        let inner =
-            ModularPredictor::new(image_reader, preprocessor, inference_engine, postprocessor);
-
-        Ok(Self {
-            rec_image_shape,
-            model_name,
-            inner,
-        })
-    }
-
-    pub fn model_name(&self) -> &str {
-        &self.model_name
-    }
-}
-
 /// Configuration for document rectification
 ///
 /// This struct is used as a placeholder for configuration options specific to
@@ -275,49 +232,6 @@ impl DoctrRectifierPredictor {
 /// as the configuration is handled by `DoctrRectifierPredictorConfig`.
 #[derive(Debug, Clone)]
 pub struct DoctrRectifierConfig;
-
-impl StandardPredictor for DoctrRectifierPredictor {
-    type Config = DoctrRectifierConfig;
-    type Result = DoctrRectifierResult;
-    type PreprocessOutput = Tensor4D;
-    type InferenceOutput = Tensor4D;
-
-    fn read_images<'a>(
-        &self,
-        paths: impl Iterator<Item = &'a str>,
-    ) -> Result<Vec<RgbImage>, OCRError> {
-        self.inner.image_reader.read_images(paths)
-    }
-
-    fn preprocess(
-        &self,
-        images: Vec<RgbImage>,
-        config: Option<&Self::Config>,
-    ) -> Result<Self::PreprocessOutput, OCRError> {
-        self.inner.preprocessor.preprocess(images, config)
-    }
-
-    fn infer(&self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError> {
-        self.inner.inference_engine.infer(input)
-    }
-
-    fn postprocess(
-        &self,
-        output: Self::InferenceOutput,
-        _preprocessed: &Self::PreprocessOutput,
-        batch_data: &BatchData,
-        raw_images: Vec<RgbImage>,
-        config: Option<&Self::Config>,
-    ) -> crate::core::OcrResult<Self::Result> {
-        self.inner
-            .postprocessor
-            .postprocess(output, None, batch_data, raw_images, config)
-    }
-
-    fn empty_result(&self) -> crate::core::OcrResult<Self::Result> {
-        self.inner.postprocessor.empty_result()
-    }
-}
 
 /// Builder for document rectifier
 ///
@@ -406,7 +320,27 @@ impl DoctrRectifierPredictorBuilder {
 
         let config = config.validate_and_wrap_ocr_error()?;
 
-        DoctrRectifierPredictor::new(config, model_path)
+        // Build modular components
+        let image_reader = DRImageReader::new();
+        let normalize = NormalizeImage::new(
+            Some(1.0 / 255.0),
+            Some(vec![0.0, 0.0, 0.0]),
+            Some(vec![1.0, 1.0, 1.0]),
+            None,
+        )?;
+        let preprocessor = DRPreprocessor { normalize };
+        let infer = OrtInfer::from_common_with_auto_input(&config.common, model_path)?;
+        let inference_engine = OrtInfer4D::new(infer);
+        let postprocessor = DRPostprocessor {
+            op: DocTrPostProcess::new(1.0),
+        };
+
+        Ok(ModularPredictor::new(
+            image_reader,
+            preprocessor,
+            inference_engine,
+            postprocessor,
+        ))
     }
 }
 

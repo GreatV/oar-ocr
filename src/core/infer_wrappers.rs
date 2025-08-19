@@ -39,7 +39,8 @@ impl GInferenceEngine for OrtInfer2D {
     type Input = Tensor4D;
     type Output = Tensor2D;
     fn infer(&self, input: &Self::Input) -> Result<Self::Output, OCRError> {
-        self.0.infer_2d(input.clone())
+        // Performance improvement: Pass reference instead of cloning the tensor
+        self.0.infer_2d(input)
     }
     fn engine_info(&self) -> String {
         "ONNXRuntime-2D".to_string()
@@ -81,7 +82,8 @@ impl GInferenceEngine for OrtInfer3D {
     type Input = Tensor4D;
     type Output = Tensor3D;
     fn infer(&self, input: &Self::Input) -> Result<Self::Output, OCRError> {
-        self.0.infer_3d(input.clone())
+        // Performance improvement: Pass reference instead of cloning the tensor
+        self.0.infer_3d(input)
     }
     fn engine_info(&self) -> String {
         "ONNXRuntime-3D".to_string()
@@ -123,7 +125,8 @@ impl GInferenceEngine for OrtInfer4D {
     type Input = Tensor4D;
     type Output = Tensor4D;
     fn infer(&self, input: &Self::Input) -> Result<Self::Output, OCRError> {
-        self.0.infer_4d(input.clone())
+        // Performance improvement: Pass reference instead of cloning the tensor
+        self.0.infer_4d(input)
     }
     fn engine_info(&self) -> String {
         "ONNXRuntime-4D".to_string()
