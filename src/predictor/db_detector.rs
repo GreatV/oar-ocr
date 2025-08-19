@@ -22,7 +22,6 @@ use crate::impl_config_new_and_with_common;
 use crate::impl_common_builder_methods;
 
 use crate::core::ImageReader as CoreImageReader;
-use crate::core::StandardPredictor;
 use crate::core::{
     BatchData, CommonBuilderConfig, OCRError, Tensor4D,
     config::{ConfigValidator, ConfigValidatorExt},
@@ -57,40 +56,6 @@ pub struct TextDetConfig {
     pub unclip_ratio: Option<f32>,
     /// Maximum side limit for the image
     pub max_side_limit: Option<u32>,
-}
-
-impl TextDetConfig {
-    /// Gets a reference to the config or a default instance if None.
-    /// This avoids unnecessary cloning when the config is Some.
-    fn as_ref_or_default(config: Option<&Self>) -> std::borrow::Cow<'_, Self> {
-        match config {
-            Some(cfg) => std::borrow::Cow::Borrowed(cfg),
-            None => std::borrow::Cow::Owned(Self::default()),
-        }
-    }
-
-    /// Creates a merged config by taking values from the runtime config first,
-    /// then falling back to predictor defaults. This avoids unnecessary cloning
-    /// when possible.
-    fn merge_with_defaults(
-        runtime_config: Option<&Self>,
-        limit_side_len: Option<u32>,
-        limit_type: Option<LimitType>,
-        thresh: Option<f32>,
-        box_thresh: Option<f32>,
-        unclip_ratio: Option<f32>,
-        max_side_limit: u32,
-    ) -> Self {
-        let runtime = Self::as_ref_or_default(runtime_config);
-        Self {
-            limit_side_len: runtime.limit_side_len.or(limit_side_len),
-            limit_type: runtime.limit_type.clone().or(limit_type),
-            thresh: runtime.thresh.or(thresh),
-            box_thresh: runtime.box_thresh.or(box_thresh),
-            unclip_ratio: runtime.unclip_ratio.or(unclip_ratio),
-            max_side_limit: runtime.max_side_limit.or(Some(max_side_limit)),
-        }
-    }
 }
 
 /// Configuration for the text detection predictor
@@ -271,21 +236,12 @@ impl Default for TextDetResult {
     }
 }
 
-/// Text detection predictor
+/// Text detection predictor built from modular components
 ///
-/// This struct holds the components needed for text detection.
-#[derive(Debug)]
-pub struct TextDetPredictor {
-    pub limit_side_len: Option<u32>,
-    pub limit_type: Option<LimitType>,
-    pub thresh: Option<f32>,
-    pub box_thresh: Option<f32>,
-    pub unclip_ratio: Option<f32>,
-    pub input_shape: Option<(u32, u32, u32)>,
-    pub max_side_limit: u32,
-    pub model_name: String,
-    inner: ModularPredictor<TDImageReader, TDPreprocessor, TDOrtInfer, TDPostprocessor>,
-}
+/// This is a type alias over `ModularPredictor` with concrete, composable components
+/// to eliminate duplicated StandardPredictor implementations across predictors.
+pub type TextDetPredictor =
+    ModularPredictor<TDImageReader, TDPreprocessor, TDOrtInfer, TDPostprocessor>;
 
 #[derive(Debug)]
 pub struct TDImageReader {
@@ -316,6 +272,8 @@ impl GIReader for TDImageReader {
 pub struct TDPreprocessor {
     pub resize: DetResizeForTest,
     pub normalize: NormalizeImage,
+    // Store default configuration values for merging with runtime config
+    pub default_config: TextDetConfig,
 }
 #[derive(Debug)]
 pub struct TextDetPreprocessOutput {
@@ -330,16 +288,35 @@ impl GPreprocessor for TDPreprocessor {
         images: Vec<RgbImage>,
         config: Option<&Self::Config>,
     ) -> crate::core::OcrResult<Self::Output> {
-        let cfg = TextDetConfig::as_ref_or_default(config);
-        let limit_side_len = cfg
+        // Merge runtime config with stored defaults
+        let merged = match config {
+            Some(runtime_config) => TextDetConfig {
+                limit_side_len: runtime_config
+                    .limit_side_len
+                    .or(self.default_config.limit_side_len),
+                limit_type: runtime_config
+                    .limit_type
+                    .clone()
+                    .or(self.default_config.limit_type.clone()),
+                thresh: runtime_config.thresh.or(self.default_config.thresh),
+                box_thresh: runtime_config.box_thresh.or(self.default_config.box_thresh),
+                unclip_ratio: runtime_config
+                    .unclip_ratio
+                    .or(self.default_config.unclip_ratio),
+                max_side_limit: runtime_config
+                    .max_side_limit
+                    .or(self.default_config.max_side_limit),
+            },
+            None => self.default_config.clone(),
+        };
+
+        let limit_side_len = merged
             .limit_side_len
             .unwrap_or(self.resize.limit_side_len.unwrap_or(960));
-        let limit_type = cfg
+        let limit_type = merged
             .limit_type
-            .as_ref()
-            .cloned()
             .unwrap_or(self.resize.limit_type.clone().unwrap_or(LimitType::Min));
-        let max_side_limit = cfg.max_side_limit.unwrap_or(self.resize.max_side_limit);
+        let max_side_limit = merged.max_side_limit.unwrap_or(self.resize.max_side_limit);
         let batch_imgs: Vec<DynamicImage> =
             images.into_iter().map(DynamicImage::ImageRgb8).collect();
         let (resized_imgs, shapes) = self.resize.apply(
@@ -371,7 +348,8 @@ impl GInferenceEngine for TDOrtInfer {
     type Input = TextDetPreprocessOutput;
     type Output = Tensor4D;
     fn infer(&self, input: &Self::Input) -> Result<Self::Output, OCRError> {
-        self.0.infer_4d(input.tensor.clone())
+        // Performance improvement: Pass reference instead of cloning the tensor
+        self.0.infer_4d(&input.tensor)
     }
     fn engine_info(&self) -> String {
         "ONNXRuntime-4D".to_string()
@@ -381,6 +359,8 @@ impl GInferenceEngine for TDOrtInfer {
 #[derive(Debug)]
 pub struct TDPostprocessor {
     pub op: DBPostProcess,
+    // Store default configuration values for merging with runtime config
+    pub default_config: TextDetConfig,
 }
 impl GPostprocessor for TDPostprocessor {
     type Config = TextDetConfig;
@@ -395,10 +375,31 @@ impl GPostprocessor for TDPostprocessor {
         raw_images: Vec<RgbImage>,
         config: Option<&Self::Config>,
     ) -> crate::core::OcrResult<Self::Result> {
-        let cfg = TextDetConfig::as_ref_or_default(config);
-        let thresh = cfg.thresh.unwrap_or(DEFAULT_THRESH);
-        let box_thresh = cfg.box_thresh.unwrap_or(DEFAULT_BOX_THRESH);
-        let unclip_ratio = cfg.unclip_ratio.unwrap_or(DEFAULT_UNCLIP_RATIO);
+        // Merge runtime config with stored defaults
+        let merged = match config {
+            Some(runtime_config) => TextDetConfig {
+                limit_side_len: runtime_config
+                    .limit_side_len
+                    .or(self.default_config.limit_side_len),
+                limit_type: runtime_config
+                    .limit_type
+                    .clone()
+                    .or(self.default_config.limit_type.clone()),
+                thresh: runtime_config.thresh.or(self.default_config.thresh),
+                box_thresh: runtime_config.box_thresh.or(self.default_config.box_thresh),
+                unclip_ratio: runtime_config
+                    .unclip_ratio
+                    .or(self.default_config.unclip_ratio),
+                max_side_limit: runtime_config
+                    .max_side_limit
+                    .or(self.default_config.max_side_limit),
+            },
+            None => self.default_config.clone(),
+        };
+
+        let thresh = merged.thresh.unwrap_or(DEFAULT_THRESH);
+        let box_thresh = merged.box_thresh.unwrap_or(DEFAULT_BOX_THRESH);
+        let unclip_ratio = merged.unclip_ratio.unwrap_or(DEFAULT_UNCLIP_RATIO);
         let shapes = pre.map(|p| p.shapes.clone()).unwrap_or_default();
         let (polys, scores) = self.op.apply(
             &output,
@@ -417,195 +418,6 @@ impl GPostprocessor for TDPostprocessor {
     }
     fn empty_result(&self) -> crate::core::OcrResult<Self::Result> {
         Ok(TextDetResult::new())
-    }
-}
-
-impl TextDetPredictor {
-    /// Creates a new `TextDetPredictor`
-    ///
-    /// This function initializes a new text detection predictor with the provided
-    /// configuration and model path.
-    pub fn new(config: TextDetPredictorConfig, model_path: &Path) -> crate::core::OcrResult<Self> {
-        let (default_limit_side_len, default_limit_type) =
-            if let Some(model_name) = &config.common.model_name {
-                match model_name.as_str() {
-                    "PP-OCRv5_server_det"
-                    | "PP-OCRv5_mobile_det"
-                    | "PP-OCRv4_server_det"
-                    | "PP-OCRv4_mobile_det"
-                    | "PP-OCRv3_server_det"
-                    | "PP-OCRv3_mobile_det" => (960, LimitType::Max),
-                    _ => (736, LimitType::Min),
-                }
-            } else {
-                (736, LimitType::Min)
-            };
-
-        let limit_side_len = config.limit_side_len.unwrap_or(default_limit_side_len);
-        let limit_type = config.limit_type.clone().unwrap_or(default_limit_type);
-        let max_side_limit = config.max_side_limit.unwrap_or(DEFAULT_MAX_SIDE_LIMIT);
-
-        // Build modular components
-        let image_reader = TDImageReader::new();
-        let resize = DetResizeForTest::new(
-            config.input_shape,
-            None,
-            None,
-            Some(limit_side_len),
-            Some(limit_type.clone()),
-            None,
-            Some(max_side_limit),
-        );
-        let normalize = NormalizeImage::new(None, None, None, None)?;
-        let preprocessor = TDPreprocessor { resize, normalize };
-        let infer = OrtInfer::from_common(&config.common, model_path, None)?;
-        let inference_engine = TDOrtInfer(infer);
-        let post_op = DBPostProcess::new(None, None, None, None, None, None, None);
-        let postprocessor = TDPostprocessor { op: post_op };
-        let inner =
-            ModularPredictor::new(image_reader, preprocessor, inference_engine, postprocessor);
-
-        Ok(TextDetPredictor {
-            limit_side_len: config.limit_side_len,
-            limit_type: config.limit_type,
-            thresh: config.thresh,
-            box_thresh: config.box_thresh,
-            unclip_ratio: config.unclip_ratio,
-            input_shape: config.input_shape,
-            max_side_limit,
-            model_name: config
-                .common
-                .model_name
-                .unwrap_or_else(|| "TextDetection".to_string()),
-            inner,
-        })
-    }
-
-    /// Sets the threshold for binarization
-    ///
-    /// This function sets the threshold value used for binarization in text detection.
-    pub fn set_thresh(&mut self, thresh: f32) {
-        self.thresh = Some(thresh);
-    }
-
-    /// Sets the threshold for filtering text boxes
-    ///
-    /// This function sets the threshold value used for filtering text boxes in text detection.
-    pub fn set_box_thresh(&mut self, box_thresh: f32) {
-        self.box_thresh = Some(box_thresh);
-    }
-
-    /// Sets the ratio for unclipping text boxes
-    ///
-    /// This function sets the ratio used for unclipping text boxes in text detection.
-    pub fn set_unclip_ratio(&mut self, unclip_ratio: f32) {
-        self.unclip_ratio = Some(unclip_ratio);
-    }
-
-    /// Sets the limit for the side length of the image
-    ///
-    /// This function sets the limit for the side length of the image used in text detection.
-    pub fn set_limit_side_len(&mut self, limit_side_len: u32) {
-        self.limit_side_len = Some(limit_side_len);
-    }
-
-    /// Sets the type of limit to apply
-    ///
-    /// This function sets the type of limit (Max or Min) to apply to the image side length
-    /// in text detection.
-    pub fn set_limit_type(&mut self, limit_type: LimitType) {
-        self.limit_type = Some(limit_type);
-    }
-
-    /// Returns the name of the model
-    ///
-    /// This function returns the name of the model used for text detection.
-    pub fn model_name(&self) -> &str {
-        &self.model_name
-    }
-
-    /// Processes a batch of data with a specific configuration
-    ///
-    /// This function processes a batch of data with the provided configuration
-    /// and returns the detection results.
-    pub fn process_with_config(
-        &self,
-        batch_data: BatchData,
-        config: Option<TextDetConfig>,
-    ) -> crate::core::OcrResult<TextDetResult> {
-        // Read images from the batch data paths
-        let images = self.read_images(batch_data.input_paths.iter().map(|s| s.as_ref()))?;
-        self.predict(images, config)
-    }
-}
-
-impl StandardPredictor for TextDetPredictor {
-    type Config = TextDetConfig;
-    type Result = TextDetResult;
-    type PreprocessOutput = TextDetPreprocessOutput;
-    type InferenceOutput = Tensor4D;
-
-    fn read_images<'a>(
-        &self,
-        paths: impl Iterator<Item = &'a str>,
-    ) -> crate::core::OcrResult<Vec<RgbImage>> {
-        self.inner.image_reader.read_images(paths)
-    }
-
-    fn preprocess(
-        &self,
-        images: Vec<RgbImage>,
-        config: Option<&Self::Config>,
-    ) -> crate::core::OcrResult<Self::PreprocessOutput> {
-        // Merge runtime config with predictor defaults
-        let merged = TextDetConfig::merge_with_defaults(
-            config,
-            self.limit_side_len,
-            self.limit_type.clone(),
-            self.thresh,
-            self.box_thresh,
-            self.unclip_ratio,
-            self.max_side_limit,
-        );
-        self.inner.preprocessor.preprocess(images, Some(&merged))
-    }
-
-    fn infer(
-        &self,
-        input: &Self::PreprocessOutput,
-    ) -> crate::core::OcrResult<Self::InferenceOutput> {
-        self.inner.inference_engine.infer(input)
-    }
-
-    fn postprocess(
-        &self,
-        output: Self::InferenceOutput,
-        preprocessed: &Self::PreprocessOutput,
-        batch_data: &BatchData,
-        raw_images: Vec<RgbImage>,
-        config: Option<&Self::Config>,
-    ) -> crate::core::OcrResult<Self::Result> {
-        // Merge runtime config with predictor defaults for thresholds
-        let merged = TextDetConfig::merge_with_defaults(
-            config,
-            self.limit_side_len,
-            self.limit_type.clone(),
-            self.thresh,
-            self.box_thresh,
-            self.unclip_ratio,
-            self.max_side_limit,
-        );
-        self.inner.postprocessor.postprocess(
-            output,
-            Some(preprocessed),
-            batch_data,
-            raw_images,
-            Some(&merged),
-        )
-    }
-
-    fn empty_result(&self) -> crate::core::OcrResult<Self::Result> {
-        self.inner.postprocessor.empty_result()
     }
 }
 
@@ -735,7 +547,68 @@ impl TextDetPredictorBuilder {
             max_side_limit: self.max_side_limit,
         };
         let config = config.validate_and_wrap_ocr_error()?;
-        TextDetPredictor::new(config, model_path)
+
+        // Determine default values based on model name
+        let (default_limit_side_len, default_limit_type) =
+            if let Some(model_name) = &config.common.model_name {
+                match model_name.as_str() {
+                    "PP-OCRv5_server_det"
+                    | "PP-OCRv5_mobile_det"
+                    | "PP-OCRv4_server_det"
+                    | "PP-OCRv4_mobile_det"
+                    | "PP-OCRv3_server_det"
+                    | "PP-OCRv3_mobile_det" => (960, LimitType::Max),
+                    _ => (736, LimitType::Min),
+                }
+            } else {
+                (736, LimitType::Min)
+            };
+
+        let limit_side_len = config.limit_side_len.unwrap_or(default_limit_side_len);
+        let limit_type = config.limit_type.clone().unwrap_or(default_limit_type);
+        let max_side_limit = config.max_side_limit.unwrap_or(DEFAULT_MAX_SIDE_LIMIT);
+
+        // Create default configuration for components
+        let default_config = TextDetConfig {
+            limit_side_len: Some(limit_side_len),
+            limit_type: Some(limit_type.clone()),
+            thresh: config.thresh,
+            box_thresh: config.box_thresh,
+            unclip_ratio: config.unclip_ratio,
+            max_side_limit: Some(max_side_limit),
+        };
+
+        // Build modular components
+        let image_reader = TDImageReader::new();
+        let resize = DetResizeForTest::new(
+            config.input_shape,
+            None,
+            None,
+            Some(limit_side_len),
+            Some(limit_type.clone()),
+            None,
+            Some(max_side_limit),
+        );
+        let normalize = NormalizeImage::new(None, None, None, None)?;
+        let preprocessor = TDPreprocessor {
+            resize,
+            normalize,
+            default_config: default_config.clone(),
+        };
+        let infer = OrtInfer::from_common(&config.common, model_path, None)?;
+        let inference_engine = TDOrtInfer(infer);
+        let post_op = DBPostProcess::new(None, None, None, None, None, None, None);
+        let postprocessor = TDPostprocessor {
+            op: post_op,
+            default_config,
+        };
+
+        Ok(ModularPredictor::new(
+            image_reader,
+            preprocessor,
+            inference_engine,
+            postprocessor,
+        ))
     }
 }
 

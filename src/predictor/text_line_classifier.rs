@@ -170,6 +170,13 @@ pub struct TLImageReader {
     inner: DefaultImageReader,
 }
 impl TLImageReader {
+    /// Creates a new TLImageReader.
+    ///
+    /// Wraps the DefaultImageReader and is used in the text line classification
+    /// pipeline to load images from paths into RgbImage values expected by the
+    /// preprocessor.
+    ///
+    /// Returns a reader ready to be plugged into the modular TextLineClasPredictor.
     pub fn new() -> Self {
         Self {
             inner: DefaultImageReader::new(),
@@ -177,6 +184,9 @@ impl TLImageReader {
     }
 }
 impl Default for TLImageReader {
+    /// Creates a TLImageReader with default settings.
+    ///
+    /// This is equivalent to calling TLImageReader::new().
     fn default() -> Self {
         Self::new()
     }

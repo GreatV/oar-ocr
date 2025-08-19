@@ -218,7 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ort_config = OrtSessionConfig::new().with_execution_providers(execution_providers);
 
     // Create a text recognition predictor with specified parameters
-    let mut predictor = TextRecPredictorBuilder::new()
+    let predictor = TextRecPredictorBuilder::new()
         .model_input_shape([3, 48, 320]) // Model input shape for image resizing
         .batch_size(8) // Process 8 images at a time
         .character_dict(char_dict_lines) // Character dictionary for recognition
@@ -262,10 +262,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("Recognition failed".into());
         }
     }
-
-    // Demonstrate changing the model input shape after processing
-    predictor.set_model_input_shape([3, 32, 256]);
-    info!("Updated model input shape to [3, 32, 256]");
 
     info!("Example completed!");
     Ok(())

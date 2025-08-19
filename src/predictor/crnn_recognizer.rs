@@ -11,14 +11,13 @@
 //! - `TextRecPredictorBuilder`: Builder for creating predictor instances
 
 use crate::core::ImageReader as CoreImageReader;
-use crate::core::StandardPredictor;
 use crate::core::{
     BatchData, CommonBuilderConfig, ConfigValidator, ConfigValidatorExt, DefaultImageReader,
     OCRError, OrtInfer, Tensor3D, Tensor4D,
 };
 use crate::core::{
-    GranularImageReader as GIReader, InferenceEngine as GInferenceEngine, ModularPredictor,
-    OrtInfer3D, Postprocessor as GPostprocessor, Preprocessor as GPreprocessor,
+    GranularImageReader as GIReader, ModularPredictor, OrtInfer3D, Postprocessor as GPostprocessor,
+    Preprocessor as GPreprocessor,
 };
 use crate::impl_common_builder_methods;
 use crate::impl_config_new_and_with_common;
@@ -113,13 +112,11 @@ impl Default for TextRecResult {
 }
 
 /// Text recognition predictor built from modular components
-#[derive(Debug)]
-pub struct TextRecPredictor {
-    pub model_input_shape: [usize; 3],
-    pub character_dict: Option<Vec<String>>, // preserved for API completeness
-    pub model_name: String,
-    inner: ModularPredictor<TRImageReader, TRPreprocessor, OrtInfer3D, TRPostprocessor>,
-}
+///
+/// This is a type alias over `ModularPredictor` with concrete, composable components
+/// to eliminate duplicated StandardPredictor implementations across predictors.
+pub type TextRecPredictor =
+    ModularPredictor<TRImageReader, TRPreprocessor, OrtInfer3D, TRPostprocessor>;
 
 #[derive(Debug)]
 pub struct TRImageReader {
@@ -199,97 +196,11 @@ impl GPostprocessor for TRPostprocessor {
     }
 }
 
-impl TextRecPredictor {
-    pub fn new(config: TextRecPredictorConfig, model_path: &Path) -> crate::core::OcrResult<Self> {
-        let model_input_shape = config.model_input_shape.unwrap_or([3, 48, 320]);
-        let character_dict = config.character_dict.clone();
-        let model_name = config
-            .common
-            .model_name
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| "crnn".to_string());
-
-        let image_reader = TRImageReader::new();
-        let resize = OCRResize::new(Some(model_input_shape), None);
-        let normalize = NormalizeImage::for_ocr_recognition()?;
-        let preprocessor = TRPreprocessor { resize, normalize };
-        let infer = OrtInfer::from_common(&config.common, model_path, None)?;
-        let inference_engine = OrtInfer3D::new(infer);
-        let decoder = CTCLabelDecode::from_string_list(character_dict.as_deref(), true, false);
-        let postprocessor = TRPostprocessor { decoder };
-        let inner =
-            ModularPredictor::new(image_reader, preprocessor, inference_engine, postprocessor);
-
-        Ok(Self {
-            model_input_shape,
-            character_dict,
-            model_name,
-            inner,
-        })
-    }
-
-    pub fn set_model_input_shape(&mut self, shape: [usize; 3]) {
-        self.model_input_shape = shape;
-        self.inner.preprocessor.resize = OCRResize::new(Some(shape), None);
-    }
-
-    pub fn model_name(&self) -> &str {
-        &self.model_name
-    }
-}
-
 /// Configuration for text recognition
 ///
 /// This struct is used as a placeholder for text recognition configuration.
 #[derive(Debug, Clone)]
 pub struct TextRecConfig;
-
-impl StandardPredictor for TextRecPredictor {
-    type Config = TextRecConfig;
-    type Result = TextRecResult;
-    type PreprocessOutput = Tensor4D;
-    type InferenceOutput = Tensor3D;
-
-    fn read_images<'a>(
-        &self,
-        paths: impl Iterator<Item = &'a str>,
-    ) -> crate::core::OcrResult<Vec<RgbImage>> {
-        self.inner.image_reader.read_images(paths)
-    }
-
-    fn preprocess(
-        &self,
-        images: Vec<RgbImage>,
-        config: Option<&Self::Config>,
-    ) -> crate::core::OcrResult<Self::PreprocessOutput> {
-        self.inner.preprocessor.preprocess(images, config)
-    }
-
-    fn infer(
-        &self,
-        input: &Self::PreprocessOutput,
-    ) -> crate::core::OcrResult<Self::InferenceOutput> {
-        self.inner.inference_engine.infer(input)
-    }
-
-    fn postprocess(
-        &self,
-        output: Self::InferenceOutput,
-        _preprocessed: &Self::PreprocessOutput,
-        batch_data: &BatchData,
-        raw_images: Vec<RgbImage>,
-        config: Option<&Self::Config>,
-    ) -> crate::core::OcrResult<Self::Result> {
-        self.inner
-            .postprocessor
-            .postprocess(output, None, batch_data, raw_images, config)
-    }
-
-    fn empty_result(&self) -> crate::core::OcrResult<Self::Result> {
-        self.inner.postprocessor.empty_result()
-    }
-}
 
 /// Builder for `TextRecPredictor`
 ///
@@ -375,8 +286,25 @@ impl TextRecPredictorBuilder {
         // Validate the configuration
         let config = config.validate_and_wrap_ocr_error()?;
 
-        // Create the predictor
-        TextRecPredictor::new(config, model_path)
+        // Build modular components
+        let model_input_shape = config.model_input_shape.unwrap_or([3, 48, 320]);
+        let character_dict = config.character_dict.clone();
+
+        let image_reader = TRImageReader::new();
+        let resize = OCRResize::new(Some(model_input_shape), None);
+        let normalize = NormalizeImage::for_ocr_recognition()?;
+        let preprocessor = TRPreprocessor { resize, normalize };
+        let infer = OrtInfer::from_common(&config.common, model_path, None)?;
+        let inference_engine = OrtInfer3D::new(infer);
+        let decoder = CTCLabelDecode::from_string_list(character_dict.as_deref(), true, false);
+        let postprocessor = TRPostprocessor { decoder };
+
+        Ok(ModularPredictor::new(
+            image_reader,
+            preprocessor,
+            inference_engine,
+            postprocessor,
+        ))
     }
 }
 
