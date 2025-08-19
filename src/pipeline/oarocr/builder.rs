@@ -1764,12 +1764,11 @@ mod tests {
         // Verify positive float validation
         assert_eq!(config.detection.unclip_ratio, Some(1.0));
 
-        if let Some(ref dynamic_config) = config.dynamic_batching {
-            if let ShapeCompatibilityStrategy::AspectRatio { tolerance } =
+        if let Some(ref dynamic_config) = config.dynamic_batching
+            && let ShapeCompatibilityStrategy::AspectRatio { tolerance } =
                 dynamic_config.shape_compatibility
-            {
-                assert_eq!(tolerance, 0.0);
-            }
+        {
+            assert_eq!(tolerance, 0.0);
         }
     }
 }
