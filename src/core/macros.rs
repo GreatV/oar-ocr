@@ -181,31 +181,6 @@ macro_rules! impl_complete_builder {
     };
 }
 
-/// Macro to inject common predictor component fields into predictor structs.
-///
-/// Reduces duplication across predictors by defining the shared pipeline components
-/// (batch sampler, reader, normalization, batching, inference, and post-op).
-///
-/// Usage inside a struct definition:
-/// predictor_common_fields!(crate::processors::Topk);
-#[macro_export]
-macro_rules! predictor_common_fields {
-    ($PostOpTy:ty) => {
-        /// Batch sampler for processing images in batches
-        pub batch_sampler: $crate::core::BatchSampler,
-        /// Image reader for loading images from file paths
-        pub read_image: $crate::core::DefaultImageReader,
-        /// Image normalizer for preprocessing images before inference
-        pub normalize: $crate::processors::NormalizeImage,
-        /// Batch converter for converting images to tensors
-        pub to_batch: $crate::core::ToBatch,
-        /// ONNX Runtime inference engine
-        pub infer: $crate::core::OrtInfer,
-        /// Post-processing operation
-        pub post_op: $PostOpTy,
-    };
-}
-
 /// Macro to implement `new()` and `with_common()` for config structs with per-module defaults.
 #[macro_export]
 macro_rules! impl_config_new_and_with_common {
