@@ -23,13 +23,17 @@
 //! ```
 
 use clap::Parser;
-use oar_ocr::core::config::onnx::{OrtExecutionProvider, OrtSessionConfig};
+use oar_ocr::core::config::onnx::OrtSessionConfig;
 use oar_ocr::core::traits::StandardPredictor;
 use oar_ocr::predictor::TextDetPredictorBuilder;
 use oar_ocr::utils::init_tracing;
 use oar_ocr::utils::load_image;
 use std::path::Path;
 use tracing::{error, info};
+
+// Import common utilities for examples
+mod common;
+use common::parse_device;
 
 // Visualization-specific imports
 #[cfg(feature = "visualization")]
@@ -58,74 +62,6 @@ struct Args {
     /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
     #[arg(short, long, default_value = "cpu")]
     device: String,
-}
-
-/// Parse device string and create appropriate ONNX execution provider
-///
-/// # Arguments
-///
-/// * `device` - Device string (e.g., "cpu", "cuda", "cuda:0")
-///
-/// # Returns
-///
-/// Vector of execution providers in order of preference
-fn parse_device(device: &str) -> Result<Vec<OrtExecutionProvider>, Box<dyn std::error::Error>> {
-    let device = device.to_lowercase();
-
-    if device == "cpu" {
-        Ok(vec![OrtExecutionProvider::CPU])
-    } else if device == "cuda" {
-        #[cfg(feature = "cuda")]
-        {
-            Ok(vec![
-                OrtExecutionProvider::CUDA {
-                    device_id: Some(0),
-                    gpu_mem_limit: None,
-                    arena_extend_strategy: None,
-                    cudnn_conv_algo_search: None,
-                    do_copy_in_default_stream: None,
-                    cudnn_conv_use_max_workspace: None,
-                },
-                OrtExecutionProvider::CPU,
-            ])
-        }
-        #[cfg(not(feature = "cuda"))]
-        {
-            error!("CUDA support not compiled in. Falling back to CPU.");
-            Ok(vec![OrtExecutionProvider::CPU])
-        }
-    } else if device.starts_with("cuda:") {
-        #[cfg(feature = "cuda")]
-        {
-            let device_id_str = device.strip_prefix("cuda:").unwrap();
-            let device_id: i32 = device_id_str
-                .parse()
-                .map_err(|_| format!("Invalid CUDA device ID: {}", device_id_str))?;
-
-            Ok(vec![
-                OrtExecutionProvider::CUDA {
-                    device_id: Some(device_id),
-                    gpu_mem_limit: None,
-                    arena_extend_strategy: None,
-                    cudnn_conv_algo_search: None,
-                    do_copy_in_default_stream: None,
-                    cudnn_conv_use_max_workspace: None,
-                },
-                OrtExecutionProvider::CPU,
-            ])
-        }
-        #[cfg(not(feature = "cuda"))]
-        {
-            error!("CUDA support not compiled in. Falling back to CPU.");
-            Ok(vec![OrtExecutionProvider::CPU])
-        }
-    } else {
-        Err(format!(
-            "Unsupported device: {}. Supported devices: cpu, cuda, cuda:N",
-            device
-        )
-        .into())
-    }
 }
 
 /// Main function for the text detection example
