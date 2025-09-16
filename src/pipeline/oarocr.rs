@@ -54,8 +54,8 @@ mod extensible_integration;
 mod image_processing;
 mod orchestration;
 mod result;
-
 mod stats;
+mod validation;
 
 pub use builder::OAROCRBuilder;
 pub use config::{OAROCRConfig, OnnxThreadingConfig, ParallelPolicy};

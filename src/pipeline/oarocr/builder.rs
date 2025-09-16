@@ -2,13 +2,13 @@
 
 use crate::core::{DynamicBatchConfig, ShapeCompatibilityStrategy};
 use crate::pipeline::oarocr::config::OAROCRConfig;
+use crate::pipeline::oarocr::validation::*;
 use crate::predictor::{
     DocOrientationClassifierConfig, DoctrRectifierPredictorConfig, TextLineClasPredictorConfig,
 };
 use crate::processors::{AspectRatioBucketingConfig, LimitType};
 use crate::{impl_complete_builder, with_nested};
 use std::path::PathBuf;
-use tracing::warn;
 
 /// Builder for creating OAROCR instances.
 ///
@@ -20,121 +20,6 @@ pub struct OAROCRBuilder {
 }
 
 impl OAROCRBuilder {
-    /// Validates and clamps a threshold value to the range [0.0, 1.0].
-    ///
-    /// # Arguments
-    ///
-    /// * `threshold` - The threshold value to validate
-    /// * `param_name` - The name of the parameter for logging purposes
-    ///
-    /// # Returns
-    ///
-    /// The validated and potentially clamped threshold value
-    fn validate_threshold(threshold: f32, param_name: &str) -> f32 {
-        if (0.0..=1.0).contains(&threshold) {
-            threshold
-        } else {
-            warn!("{param_name} out of range [{threshold}], clamping to [0.0, 1.0]");
-            threshold.clamp(0.0, 1.0)
-        }
-    }
-
-    /// Validates and ensures a size value is at least 1.
-    ///
-    /// # Arguments
-    ///
-    /// * `size` - The size value to validate
-    /// * `param_name` - The name of the parameter for logging purposes
-    ///
-    /// # Returns
-    ///
-    /// The validated size value (minimum 1)
-    fn validate_min_size_usize(size: usize, param_name: &str) -> usize {
-        if size >= 1 {
-            size
-        } else {
-            warn!("{param_name} must be >= 1, got {size}; using 1");
-            1
-        }
-    }
-
-    /// Validates and ensures a size value is at least 1.
-    ///
-    /// # Arguments
-    ///
-    /// * `size` - The size value to validate
-    /// * `param_name` - The name of the parameter for logging purposes
-    ///
-    /// # Returns
-    ///
-    /// The validated size value (minimum 1)
-    fn validate_min_size_u32(size: u32, param_name: &str) -> u32 {
-        if size >= 1 {
-            size
-        } else {
-            warn!("{param_name} must be >= 1, got {size}; using 1");
-            1
-        }
-    }
-
-    /// Validates and ensures a dimension value is greater than 0.
-    ///
-    /// # Arguments
-    ///
-    /// * `dimension` - The dimension value to validate
-    /// * `param_name` - The name of the parameter for logging purposes
-    ///
-    /// # Returns
-    ///
-    /// The validated dimension value (minimum 1)
-    fn validate_dimension(dimension: u32, param_name: &str) -> u32 {
-        if dimension > 0 {
-            dimension
-        } else {
-            warn!("{param_name} {} <= 0; using 1", dimension);
-            1u32
-        }
-    }
-
-    /// Validates and ensures a positive float value.
-    ///
-    /// # Arguments
-    ///
-    /// * `value` - The value to validate
-    /// * `param_name` - The name of the parameter for logging purposes
-    /// * `default` - The default value to use if validation fails
-    ///
-    /// # Returns
-    ///
-    /// The validated value or the default
-    fn validate_positive_f32(value: f32, param_name: &str, default: f32) -> f32 {
-        if value > 0.0 {
-            value
-        } else {
-            warn!("{param_name} must be > 0.0, got {value}; using {default}");
-            default
-        }
-    }
-
-    /// Validates and ensures a non-negative float value.
-    ///
-    /// # Arguments
-    ///
-    /// * `value` - The value to validate
-    /// * `param_name` - The name of the parameter for logging purposes
-    ///
-    /// # Returns
-    ///
-    /// The validated value (minimum 0.0)
-    fn validate_non_negative_f32(value: f32, param_name: &str) -> f32 {
-        if value >= 0.0 {
-            value
-        } else {
-            warn!("{param_name} must be >= 0.0, got {value}; using 0.0");
-            0.0
-        }
-    }
-
     /// Creates a new OAROCRBuilder with the required parameters.
     ///
     /// # Arguments
@@ -231,7 +116,7 @@ impl OAROCRBuilder {
     ///
     /// The updated builder instance
     pub fn doc_orientation_threshold(mut self, threshold: f32) -> Self {
-        let t = Self::validate_threshold(threshold, "doc_orientation_threshold");
+        let t = validate_threshold(threshold, "doc_orientation_threshold");
         if self.config.orientation_stage.is_none() {
             self.config.orientation_stage =
                 Some(crate::pipeline::stages::OrientationConfig::default());
@@ -312,7 +197,7 @@ impl OAROCRBuilder {
     ///
     /// The updated builder instance
     pub fn text_detection_batch_size(mut self, batch_size: usize) -> Self {
-        let bs = Self::validate_min_size_usize(batch_size, "text_detection_batch_size");
+        let bs = validate_min_size_usize(batch_size, "text_detection_batch_size");
         self.config.detection.common.batch_size = Some(bs);
         self
     }
@@ -355,7 +240,7 @@ impl OAROCRBuilder {
     ///
     /// The updated builder instance
     pub fn text_recognition_batch_size(mut self, batch_size: usize) -> Self {
-        let bs = Self::validate_min_size_usize(batch_size, "text_recognition_batch_size");
+        let bs = validate_min_size_usize(batch_size, "text_recognition_batch_size");
         self.config.recognition.common.batch_size = Some(bs);
         self
     }
@@ -403,7 +288,7 @@ impl OAROCRBuilder {
     /// The updated builder instance
     pub fn textline_orientation_classify_batch_size(mut self, batch_size: usize) -> Self {
         let bs =
-            Self::validate_min_size_usize(batch_size, "textline_orientation_classify_batch_size");
+            validate_min_size_usize(batch_size, "textline_orientation_classify_batch_size");
         with_nested!(self.config.text_line_orientation, TextLineClasPredictorConfig, config => {
             config.common.batch_size = Some(bs);
         });
@@ -430,8 +315,8 @@ impl OAROCRBuilder {
     ///
     /// The updated builder instance
     pub fn textline_orientation_input_shape(mut self, shape: (u32, u32)) -> Self {
-        let w = Self::validate_dimension(shape.0, "textline_orientation_input_shape width");
-        let h = Self::validate_dimension(shape.1, "textline_orientation_input_shape height");
+        let w = validate_dimension(shape.0, "textline_orientation_input_shape width");
+        let h = validate_dimension(shape.1, "textline_orientation_input_shape height");
         with_nested!(self.config.text_line_orientation, TextLineClasPredictorConfig, config => {
             config.input_shape = Some((w, h));
         });
@@ -466,7 +351,7 @@ impl OAROCRBuilder {
     ///
     /// The updated builder instance
     pub fn textline_orientation_threshold(mut self, threshold: f32) -> Self {
-        let t = Self::validate_threshold(threshold, "textline_orientation_threshold");
+        let t = validate_threshold(threshold, "textline_orientation_threshold");
         if self.config.text_line_orientation_stage.is_none() {
             self.config.text_line_orientation_stage =
                 Some(crate::pipeline::stages::TextLineOrientationConfig::default());
@@ -770,7 +655,7 @@ impl OAROCRBuilder {
     ///
     /// The updated builder instance
     pub fn text_detection_session_pool_size(mut self, size: usize) -> Self {
-        let s = Self::validate_min_size_usize(size, "text_detection_session_pool_size");
+        let s = validate_min_size_usize(size, "text_detection_session_pool_size");
         self.config.detection.common.session_pool_size = Some(s);
         self
     }
@@ -785,7 +670,7 @@ impl OAROCRBuilder {
     ///
     /// The updated builder instance
     pub fn text_recognition_session_pool_size(mut self, size: usize) -> Self {
-        let s = Self::validate_min_size_usize(size, "text_recognition_session_pool_size");
+        let s = validate_min_size_usize(size, "text_recognition_session_pool_size");
         self.config.recognition.common.session_pool_size = Some(s);
         self
     }
@@ -800,7 +685,7 @@ impl OAROCRBuilder {
     ///
     /// The updated builder instance
     pub fn textline_orientation_session_pool_size(mut self, size: usize) -> Self {
-        let s = Self::validate_min_size_usize(size, "textline_orientation_session_pool_size");
+        let s = validate_min_size_usize(size, "textline_orientation_session_pool_size");
         with_nested!(self.config.text_line_orientation, crate::predictor::TextLineClasPredictorConfig, tlo_config => {
             tlo_config.common.session_pool_size = Some(s);
         });
@@ -820,7 +705,7 @@ impl OAROCRBuilder {
     ///
     /// The updated builder instance
     pub fn global_session_pool_size(mut self, size: usize) -> Self {
-        let s = Self::validate_min_size_usize(size, "global_session_pool_size");
+        let s = validate_min_size_usize(size, "global_session_pool_size");
         // Apply to text detection
         self.config.detection.common.session_pool_size = Some(s);
 
@@ -845,7 +730,7 @@ impl OAROCRBuilder {
     ///
     /// The updated builder instance
     pub fn text_det_limit_side_len(mut self, limit: u32) -> Self {
-        let l = Self::validate_min_size_u32(limit, "text_det_limit_side_len");
+        let l = validate_min_size_u32(limit, "text_det_limit_side_len");
         self.config.detection.limit_side_len = Some(l);
         self
     }
@@ -874,9 +759,9 @@ impl OAROCRBuilder {
     ///
     /// The updated builder instance
     pub fn text_det_input_shape(mut self, shape: (u32, u32, u32)) -> Self {
-        let c = Self::validate_dimension(shape.0, "text_det_input_shape channels");
-        let h = Self::validate_dimension(shape.1, "text_det_input_shape height");
-        let w = Self::validate_dimension(shape.2, "text_det_input_shape width");
+        let c = validate_dimension(shape.0, "text_det_input_shape channels");
+        let h = validate_dimension(shape.1, "text_det_input_shape height");
+        let w = validate_dimension(shape.2, "text_det_input_shape width");
         self.config.detection.input_shape = Some((c, h, w));
         self
     }
@@ -908,7 +793,7 @@ impl OAROCRBuilder {
     /// .text_det_max_side_limit(5000); // Allow larger images
     /// ```
     pub fn text_det_max_side_limit(mut self, max_side_limit: u32) -> Self {
-        let m = Self::validate_min_size_u32(max_side_limit, "text_det_max_side_limit");
+        let m = validate_min_size_u32(max_side_limit, "text_det_max_side_limit");
         self.config.detection.max_side_limit = Some(m);
         self
     }
@@ -952,7 +837,7 @@ impl OAROCRBuilder {
     ///
     /// The updated builder instance
     pub fn text_det_threshold(mut self, threshold: f32) -> Self {
-        let t = Self::validate_threshold(threshold, "text_det_threshold");
+        let t = validate_threshold(threshold, "text_det_threshold");
         self.config.detection.thresh = Some(t);
         self
     }
@@ -996,7 +881,7 @@ impl OAROCRBuilder {
     ///
     /// The updated builder instance
     pub fn text_det_box_threshold(mut self, threshold: f32) -> Self {
-        let t = Self::validate_threshold(threshold, "text_det_box_threshold");
+        let t = validate_threshold(threshold, "text_det_box_threshold");
         self.config.detection.box_thresh = Some(t);
         self
     }
@@ -1027,7 +912,7 @@ impl OAROCRBuilder {
     /// .text_det_unclip_ratio(2.0); // More expansion for better text capture
     /// ```
     pub fn text_det_unclip_ratio(mut self, unclip_ratio: f32) -> Self {
-        let r = Self::validate_positive_f32(unclip_ratio, "text_det_unclip_ratio", 1.0);
+        let r = validate_positive_f32(unclip_ratio, "text_det_unclip_ratio", 1.0);
         self.config.detection.unclip_ratio = Some(r);
         self
     }
@@ -1054,7 +939,7 @@ impl OAROCRBuilder {
     ///
     /// The updated builder instance
     pub fn text_rec_score_threshold(mut self, threshold: f32) -> Self {
-        let t = Self::validate_threshold(threshold, "text_rec_score_threshold");
+        let t = validate_threshold(threshold, "text_rec_score_threshold");
         self.config.recognition.score_thresh = Some(t);
         self
     }
@@ -1079,9 +964,9 @@ impl OAROCRBuilder {
     ///
     /// The updated builder instance
     pub fn text_rec_input_shape(mut self, shape: (u32, u32, u32)) -> Self {
-        let c = Self::validate_dimension(shape.0, "text_rec_input_shape channels");
-        let h = Self::validate_dimension(shape.1, "text_rec_input_shape height");
-        let w = Self::validate_dimension(shape.2, "text_rec_input_shape width");
+        let c = validate_dimension(shape.0, "text_rec_input_shape channels");
+        let h = validate_dimension(shape.1, "text_rec_input_shape height");
+        let w = validate_dimension(shape.2, "text_rec_input_shape width");
         self.config.recognition.model_input_shape = Some([c as usize, h as usize, w as usize]);
         self
     }
@@ -1177,7 +1062,7 @@ impl OAROCRBuilder {
     ///
     /// The updated builder instance
     pub fn max_detection_batch_size(mut self, batch_size: usize) -> Self {
-        let bs = Self::validate_min_size_usize(batch_size, "max_detection_batch_size");
+        let bs = validate_min_size_usize(batch_size, "max_detection_batch_size");
         with_nested!(self.config.dynamic_batching, DynamicBatchConfig, config => {
             config.max_detection_batch_size = bs;
         });
@@ -1194,7 +1079,7 @@ impl OAROCRBuilder {
     ///
     /// The updated builder instance
     pub fn max_recognition_batch_size(mut self, batch_size: usize) -> Self {
-        let bs = Self::validate_min_size_usize(batch_size, "max_recognition_batch_size");
+        let bs = validate_min_size_usize(batch_size, "max_recognition_batch_size");
         with_nested!(self.config.dynamic_batching, DynamicBatchConfig, config => {
             config.max_recognition_batch_size = bs;
         });
@@ -1211,7 +1096,7 @@ impl OAROCRBuilder {
     ///
     /// The updated builder instance
     pub fn min_batch_size(mut self, min_size: usize) -> Self {
-        let ms = Self::validate_min_size_usize(min_size, "min_batch_size");
+        let ms = validate_min_size_usize(min_size, "min_batch_size");
         if self.config.dynamic_batching.is_none() {
             self.config.dynamic_batching = Some(DynamicBatchConfig::default());
         }
@@ -1285,7 +1170,7 @@ impl OAROCRBuilder {
     ///
     /// The updated builder instance
     pub fn aspect_ratio_tolerance(mut self, tolerance: f32) -> Self {
-        let tol = Self::validate_non_negative_f32(tolerance, "aspect_ratio_tolerance");
+        let tol = validate_non_negative_f32(tolerance, "aspect_ratio_tolerance");
         if self.config.dynamic_batching.is_none() {
             self.config.dynamic_batching = Some(DynamicBatchConfig::default());
         }
