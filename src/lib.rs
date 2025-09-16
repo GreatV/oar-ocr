@@ -150,11 +150,13 @@ pub mod utils;
 /// Included items focus on the most common tasks:
 /// - Main OCR pipeline (`OAROCR`, `OAROCRBuilder`, `OAROCRConfig`, `OAROCRResult`, `TextRegion`)
 /// - Essential error and result types (`OCRError`, `OcrResult`)
-/// - Basic image loading (`load_image`)
+/// - Basic image loading (`load_image`, `load_images`)
+/// - Common traits for predictors (`StandardPredictor`)
+/// - Logging initialization (`init_tracing`)
 ///
-/// For advanced customization (predictor builders, traits, config loaders, logging helpers),
-/// import directly from the respective modules (e.g., `oar_ocr::predictor`, `oar_ocr::core::traits`,
-/// `oar_ocr::pipeline`, `oar_ocr::utils`).
+/// For advanced customization (predictor builders, specific config types, visualization helpers),
+/// import directly from the respective modules (e.g., `oar_ocr::predictor`, `oar_ocr::core::config`,
+/// `oar_ocr::utils::visualization`).
 pub mod prelude {
     // Main OCR Pipeline (essential)
     pub use crate::pipeline::{OAROCR, OAROCRBuilder, OAROCRConfig, OAROCRResult, TextRegion};
@@ -162,6 +164,9 @@ pub mod prelude {
     // Error Handling (essential)
     pub use crate::core::{OCRError, OcrResult};
 
-    // Image Utility (minimal)
-    pub use crate::utils::{load_image, load_images};
+    // Common Traits (frequently used)
+    pub use crate::core::traits::StandardPredictor;
+
+    // Image & Utility Functions (essential for examples)
+    pub use crate::utils::{init_tracing, load_image, load_images};
 }
