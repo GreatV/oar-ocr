@@ -6,7 +6,7 @@
 //! from raw data, and resize-and-pad operations.
 
 use crate::core::OCRError;
-use crate::processors::types::ImageProcessError;
+use crate::core::errors::ImageProcessError;
 use image::{DynamicImage, GrayImage, ImageBuffer, RgbImage};
 
 /// Converts a DynamicImage to an RgbImage.
@@ -317,7 +317,7 @@ pub fn load_images_batch_with_threshold<P: AsRef<std::path::Path> + Send + Sync>
 /// from its specified path.
 pub fn load_images_batch_with_policy<P: AsRef<std::path::Path> + Send + Sync>(
     paths: &[P],
-    policy: &crate::pipeline::oarocr::ParallelPolicy,
+    policy: &crate::core::config::ParallelPolicy,
 ) -> Result<Vec<RgbImage>, OCRError> {
     if paths.len() > policy.utility_threshold {
         use rayon::prelude::*;

@@ -1,6 +1,7 @@
 //! Image cropping functionality with different modes.
 
-use crate::processors::types::{CropMode, ImageProcessError};
+use crate::core::errors::ImageProcessError;
+use crate::processors::types::CropMode;
 use crate::utils::image;
 use ::image::RgbImage;
 

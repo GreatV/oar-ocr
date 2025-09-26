@@ -56,7 +56,7 @@ pub mod constructors;
 pub mod types;
 
 // Re-export all public types and functions for backward compatibility
-pub use types::{OCRError, ProcessingStage, SimpleError};
+pub use types::{ImageProcessError, OCRError, ProcessingStage, SimpleError};
 
 /// Convenient result alias for OCR operations.
 pub type OcrResult<T> = Result<T, OCRError>;

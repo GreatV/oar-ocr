@@ -40,6 +40,43 @@ impl std::fmt::Display for SimpleError {
 
 impl std::error::Error for SimpleError {}
 
+/// Errors that can occur during image processing operations.
+#[derive(Debug, Error)]
+pub enum ImageProcessError {
+    /// The crop size is invalid (e.g., zero dimensions).
+    #[error("Invalid crop size")]
+    InvalidCropSize,
+    /// The input image is smaller than the requested crop size.
+    #[error(
+        "Input image ({image_width}, {image_height}) smaller than the target size ({crop_width}, {crop_height})",
+        image_width = image_size.0,
+        image_height = image_size.1,
+        crop_width = crop_size.0,
+        crop_height = crop_size.1
+    )]
+    ImageTooSmall {
+        /// The actual size of the image.
+        image_size: (u32, u32),
+        /// The requested crop size.
+        crop_size: (u32, u32),
+    },
+    /// The requested interpolation mode is not supported.
+    #[error("Unsupported interpolation method")]
+    UnsupportedMode,
+    /// The input data is invalid.
+    #[error("Invalid input")]
+    InvalidInput,
+    /// The crop size is too large for the image.
+    #[error("Crop size is too large for the image")]
+    CropSizeTooLarge,
+    /// The crop coordinates are out of bounds.
+    #[error("Crop coordinates are out of bounds")]
+    CropOutOfBounds,
+    /// The crop coordinates are invalid.
+    #[error("Invalid crop coordinates")]
+    InvalidCropCoordinates,
+}
+
 /// Enum representing different stages of processing in the OCR pipeline.
 ///
 /// This enum is used to identify which stage of the OCR pipeline an error occurred in,
@@ -220,9 +257,9 @@ impl From<crate::core::config::ConfigError> for OCRError {
     }
 }
 
-impl From<crate::processors::ImageProcessError> for OCRError {
+impl From<ImageProcessError> for OCRError {
     /// Converts an ImageProcessError to OCRError::Processing.
-    fn from(error: crate::processors::ImageProcessError) -> Self {
+    fn from(error: ImageProcessError) -> Self {
         Self::Processing {
             kind: ProcessingStage::Generic,
             context: "Image processing failed".to_string(),

@@ -82,7 +82,7 @@ impl DBPostProcess {
         pred: &ndarray::Array2<f32>,
         bbox: &BoundingBox,
         region: Region,
-        policy: Option<&crate::pipeline::oarocr::ParallelPolicy>,
+        policy: Option<&crate::core::config::ParallelPolicy>,
     ) -> f32 {
         let region_height = region.height();
         let region_width = region.width();
