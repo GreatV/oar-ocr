@@ -25,6 +25,9 @@ impl OrtInfer {
                 OG::Level1 => GOL::Level1,
                 OG::Level2 => GOL::Level2,
                 OG::Level3 => GOL::Level3,
+                // ONNX Runtime treats "All" optimizations as an alias for the
+                // highest available level (Level3) in its public API, so we mirror
+                // that behavior to stay aligned with upstream semantics.
                 OG::All => GOL::Level3,
             };
             builder = builder.with_optimization_level(mapped)?;

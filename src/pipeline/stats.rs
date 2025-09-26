@@ -126,15 +126,20 @@ impl StatsManager {
     ) {
         let mut stats = self.stats.lock().unwrap();
 
-        stats.total_processed += processed_count;
+        let previous_total = stats.total_processed;
+        let previous_average = stats.average_inference_time_ms;
+        let new_total = previous_total + processed_count;
+
+        stats.total_processed = new_total;
         stats.successful_predictions += successful_count;
         stats.failed_predictions += failed_count;
 
-        if stats.total_processed > 0 {
-            let old_count = stats.total_processed - processed_count;
-            let accumulated_time = stats.average_inference_time_ms * old_count as f64;
+        if new_total > 0 {
+            let accumulated_time = previous_average * previous_total as f64;
             let new_total_time = accumulated_time + inference_time_ms;
-            stats.average_inference_time_ms = new_total_time / stats.total_processed as f64;
+            stats.average_inference_time_ms = new_total_time / new_total as f64;
+        } else {
+            stats.average_inference_time_ms = 0.0;
         }
     }
 
