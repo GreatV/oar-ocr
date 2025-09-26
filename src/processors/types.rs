@@ -2,60 +2,9 @@
 //!
 //! This module defines various enums that represent different options and configurations
 //! for image processing operations in the OCR pipeline.
-
 use std::str::FromStr;
 
-/// Errors that can occur during image processing operations
-#[derive(Debug)]
-pub enum ImageProcessError {
-    /// The crop size is invalid (e.g., zero or negative dimensions)
-    InvalidCropSize,
-    /// The input image is smaller than the requested crop size
-    ImageTooSmall {
-        /// The actual size of the image
-        image_size: (u32, u32),
-        /// The requested crop size
-        crop_size: (u32, u32),
-    },
-    /// The requested interpolation mode is not supported
-    UnsupportedMode,
-    /// The input data is invalid
-    InvalidInput,
-    /// The crop size is too large for the image
-    CropSizeTooLarge,
-    /// The crop coordinates are out of bounds
-    CropOutOfBounds,
-    /// The crop coordinates are invalid
-    InvalidCropCoordinates,
-}
-
-/// Implementation of Display trait for ImageProcessError to provide user-friendly error messages
-impl std::fmt::Display for ImageProcessError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ImageProcessError::InvalidCropSize => write!(f, "Invalid crop size"),
-            ImageProcessError::ImageTooSmall {
-                image_size,
-                crop_size,
-            } => {
-                write!(
-                    f,
-                    "Input image ({}, {}) smaller than the target size ({}, {})",
-                    image_size.0, image_size.1, crop_size.0, crop_size.1
-                )
-            }
-            ImageProcessError::UnsupportedMode => write!(f, "Unsupported interpolation method"),
-            ImageProcessError::InvalidInput => write!(f, "Invalid input"),
-            ImageProcessError::CropSizeTooLarge => {
-                write!(f, "Crop size is too large for the image")
-            }
-            ImageProcessError::CropOutOfBounds => write!(f, "Crop coordinates are out of bounds"),
-            ImageProcessError::InvalidCropCoordinates => write!(f, "Invalid crop coordinates"),
-        }
-    }
-}
-
-impl std::error::Error for ImageProcessError {}
+use crate::core::errors::ImageProcessError;
 
 /// Specifies how to crop an image when the aspect ratios don't match
 #[derive(Debug, Clone, Copy, PartialEq)]

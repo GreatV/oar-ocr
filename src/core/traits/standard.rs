@@ -3,9 +3,7 @@
 //! This module defines various traits that are used throughout the OCR pipeline
 //! to provide a consistent interface for different components.
 
-use crate::core::{
-    batch::BatchData, batch::BatchSampler, errors::OCRError, predictions::PredictionResult,
-};
+use crate::core::{PredictionResult, batch::BatchData, batch::BatchSampler, errors::OCRError};
 use image::RgbImage;
 use std::path::Path;
 use std::sync::Arc;

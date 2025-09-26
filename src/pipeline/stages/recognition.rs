@@ -57,11 +57,13 @@ use crate::core::config::ConfigValidator;
 use crate::core::{OCRError, StandardPredictor};
 use crate::predictor::TextRecPredictor;
 
-mod grouping;
-mod orientation_correction;
+#[path = "recognition_grouping.rs"]
+mod recognition_grouping;
+#[path = "recognition_orientation.rs"]
+mod recognition_orientation;
 
-pub use grouping::{GroupingStrategy, GroupingStrategyConfig, GroupingStrategyFactory};
-pub use orientation_correction::{OrientationCorrectionConfig, OrientationCorrector};
+pub use recognition_grouping::{GroupingStrategy, GroupingStrategyConfig, GroupingStrategyFactory};
+pub use recognition_orientation::{OrientationCorrectionConfig, OrientationCorrector};
 
 /// Result of recognition processing
 #[derive(Debug, Clone)]

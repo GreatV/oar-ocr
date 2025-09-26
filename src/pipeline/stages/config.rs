@@ -30,7 +30,7 @@ pub struct ExtensiblePipelineConfig {
 pub struct GlobalPipelineSettings {
     /// Centralized parallel processing policy
     #[serde(default)]
-    pub parallel_policy: crate::pipeline::oarocr::ParallelPolicy,
+    pub parallel_policy: crate::core::config::ParallelPolicy,
     /// Whether to continue processing if a stage fails
     pub continue_on_stage_failure: bool,
     /// Global timeout for pipeline execution (in seconds)
@@ -42,7 +42,7 @@ pub struct GlobalPipelineSettings {
 impl Default for GlobalPipelineSettings {
     fn default() -> Self {
         Self {
-            parallel_policy: crate::pipeline::oarocr::ParallelPolicy::default(),
+            parallel_policy: crate::core::config::ParallelPolicy::default(),
             continue_on_stage_failure: false,
             pipeline_timeout_seconds: None,
             collect_detailed_metrics: true,
@@ -52,7 +52,7 @@ impl Default for GlobalPipelineSettings {
 
 impl GlobalPipelineSettings {
     /// Get the effective parallel policy
-    pub fn effective_parallel_policy(&self) -> crate::pipeline::oarocr::ParallelPolicy {
+    pub fn effective_parallel_policy(&self) -> crate::core::config::ParallelPolicy {
         self.parallel_policy.clone()
     }
 }

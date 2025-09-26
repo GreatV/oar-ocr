@@ -719,7 +719,7 @@ impl OAROCRBuilder {
             .unwrap_or(4); // Fallback to 4 threads if detection fails
 
         self.parallel_policy(
-            crate::pipeline::oarocr::config::ParallelPolicy::new()
+            super::config::ParallelPolicy::new()
                 .with_max_threads(Some(max_threads))
                 .with_image_threshold(2)
                 .with_text_box_threshold(5)
@@ -752,7 +752,7 @@ impl OAROCRBuilder {
     /// ```
     pub fn with_low_resource(self) -> Self {
         self.parallel_policy(
-            crate::pipeline::oarocr::config::ParallelPolicy::new()
+            super::config::ParallelPolicy::new()
                 .with_max_threads(Some(2)) // Limit threads
                 .with_image_threshold(10) // Higher thresholds for parallel processing
                 .with_text_box_threshold(20)

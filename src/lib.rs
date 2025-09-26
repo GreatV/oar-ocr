@@ -21,6 +21,7 @@
 //! ## Modules
 //!
 //! * [`core`] - Core traits, error handling, and batch processing
+//! * [`domain`] - Domain types like orientation helpers and prediction models
 //! * [`predictor`] - OCR predictor implementations
 //! * [`pipeline`] - Complete OCR pipeline
 //! * [`processors`] - Image processing utilities
@@ -133,6 +134,7 @@
 
 // Core modules
 pub mod core;
+pub mod domain;
 pub mod predictor;
 
 pub mod pipeline;

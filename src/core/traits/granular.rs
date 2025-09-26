@@ -23,7 +23,7 @@
 //! # Examples
 //!
 //! ```rust,no_run
-//! use oar_ocr::core::granular_traits::Preprocessor;
+//! use oar_ocr::core::traits::granular::Preprocessor;
 //! use image::RgbImage;
 //!
 //! // Example of how you would implement and use a custom preprocessor

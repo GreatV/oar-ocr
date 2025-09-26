@@ -4,6 +4,8 @@
 //! in the OCR pipeline, including batching of input data, sampling, and
 //! tensor operations for batched processing.
 
+pub mod dynamic;
+
 use crate::core::traits::Sampler;
 use std::sync::Arc;
 
