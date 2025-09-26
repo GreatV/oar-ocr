@@ -23,7 +23,7 @@ impl DocTrPostProcess {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use oar_ocr::processors::utils::doctr_postprocess::DocTrPostProcess;
+    /// use oar_ocr::processors::DocTrPostProcess;
     ///
     /// let postprocessor = DocTrPostProcess::new(1.0);
     /// ```
@@ -62,7 +62,7 @@ impl DocTrPostProcess {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use oar_ocr::processors::utils::doctr_postprocess::DocTrPostProcess;
+    /// use oar_ocr::processors::DocTrPostProcess;
     ///
     /// let postprocessor = DocTrPostProcess::new(100.0);
     /// let normalized = vec![0.1, 0.2, 0.8, 0.9];
@@ -89,7 +89,7 @@ impl DocTrPostProcess {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use oar_ocr::processors::utils::doctr_postprocess::DocTrPostProcess;
+    /// use oar_ocr::processors::DocTrPostProcess;
     ///
     /// let postprocessor = DocTrPostProcess::new(100.0);
     /// let pixels = vec![10.0, 20.0, 80.0, 90.0];
@@ -119,7 +119,7 @@ impl DocTrPostProcess {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use oar_ocr::processors::utils::doctr_postprocess::DocTrPostProcess;
+    /// use oar_ocr::processors::DocTrPostProcess;
     ///
     /// let postprocessor = DocTrPostProcess::new(100.0);
     /// let normalized_bbox = [0.1, 0.2, 0.8, 0.9];
@@ -161,7 +161,7 @@ impl DocTrPostProcess {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use oar_ocr::processors::utils::doctr_postprocess::DocTrPostProcess;
+    /// use oar_ocr::processors::DocTrPostProcess;
     ///
     /// let postprocessor = DocTrPostProcess::new(100.0);
     /// let normalized_polygon = vec![[0.1, 0.2], [0.8, 0.2], [0.8, 0.9], [0.1, 0.9]];

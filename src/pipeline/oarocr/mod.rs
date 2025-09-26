@@ -55,8 +55,6 @@ mod image_processing;
 mod orchestration;
 mod result;
 
-mod stats;
-
 pub use builder::OAROCRBuilder;
 pub use config::{OAROCRConfig, OnnxThreadingConfig, ParallelPolicy};
 pub use extensible_integration::{ExtensibleOAROCR, ExtensibleOAROCRBuilder};
@@ -67,9 +65,8 @@ pub use orchestration::{
 };
 pub use result::{ErrorMetrics, OAROCRResult, TextRegion};
 
-use crate::core::{
-    OCRError, PipelineStats, parse_text_line_orientation, traits::StandardPredictor,
-};
+use crate::core::{OCRError, parse_text_line_orientation, traits::StandardPredictor};
+use crate::pipeline::PipelineStats;
 use crate::pipeline::stages::{
     CroppingConfig, CroppingStageProcessor, RecognitionConfig, RecognitionStageProcessor,
 };
@@ -80,7 +77,7 @@ use crate::predictor::{
 use components::ComponentBuilder;
 use image::RgbImage;
 
-use stats::StatsManager;
+use crate::pipeline::StatsManager;
 use std::path::Path;
 use std::sync::{Arc, Once};
 use tracing::{debug, info, warn};

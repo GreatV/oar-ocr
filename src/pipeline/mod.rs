@@ -7,6 +7,7 @@
 mod config;
 pub mod oarocr;
 pub mod stages;
+pub mod stats;
 
 // Re-export the main OCR pipeline components for easier access
 pub use config::{ConfigFormat, ConfigLoader};
@@ -18,3 +19,4 @@ pub use stages::{
     CroppingStageProcessor, OrientationStageProcessor, RecognitionStageProcessor, StageMetrics,
     StageResult,
 };
+pub use stats::{PipelineStats, StatsManager};

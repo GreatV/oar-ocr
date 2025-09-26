@@ -6,6 +6,7 @@
 //! from raw data, and resize-and-pad operations.
 
 use crate::core::OCRError;
+use crate::processors::types::ImageProcessError;
 use image::{DynamicImage, GrayImage, ImageBuffer, RgbImage};
 
 /// Converts a DynamicImage to an RgbImage.
@@ -85,6 +86,150 @@ pub fn create_rgb_image(width: u32, height: u32, data: Vec<u8>) -> Option<RgbIma
     }
 
     ImageBuffer::from_raw(width, height, data)
+}
+
+/// Checks if the given image size is valid (non-zero dimensions).
+pub fn check_image_size(size: &[u32; 2]) -> Result<(), ImageProcessError> {
+    if size[0] == 0 || size[1] == 0 {
+        return Err(ImageProcessError::InvalidCropSize);
+    }
+    Ok(())
+}
+
+/// Extracts a rectangular region from an RGB image.
+pub fn slice_image(
+    img: &RgbImage,
+    coords: (u32, u32, u32, u32),
+) -> Result<RgbImage, ImageProcessError> {
+    let (x1, y1, x2, y2) = coords;
+    let (img_width, img_height) = img.dimensions();
+
+    if x1 >= x2 || y1 >= y2 {
+        return Err(ImageProcessError::InvalidCropCoordinates);
+    }
+
+    if x2 > img_width || y2 > img_height {
+        return Err(ImageProcessError::CropOutOfBounds);
+    }
+
+    let crop_width = x2 - x1;
+    let crop_height = y2 - y1;
+
+    let mut cropped = RgbImage::new(crop_width, crop_height);
+    for y in 0..crop_height {
+        for x in 0..crop_width {
+            let src_x = x1 + x;
+            let src_y = y1 + y;
+            let pixel = img.get_pixel(src_x, src_y);
+            cropped.put_pixel(x, y, *pixel);
+        }
+    }
+
+    Ok(cropped)
+}
+
+/// Extracts a rectangular region from a grayscale image.
+pub fn slice_gray_image(
+    img: &GrayImage,
+    coords: (u32, u32, u32, u32),
+) -> Result<GrayImage, ImageProcessError> {
+    let (x1, y1, x2, y2) = coords;
+    let (img_width, img_height) = img.dimensions();
+
+    if x1 >= x2 || y1 >= y2 {
+        return Err(ImageProcessError::InvalidCropCoordinates);
+    }
+
+    if x2 > img_width || y2 > img_height {
+        return Err(ImageProcessError::CropOutOfBounds);
+    }
+
+    let crop_width = x2 - x1;
+    let crop_height = y2 - y1;
+
+    let mut cropped = GrayImage::new(crop_width, crop_height);
+    for y in 0..crop_height {
+        for x in 0..crop_width {
+            let src_x = x1 + x;
+            let src_y = y1 + y;
+            let pixel = img.get_pixel(src_x, src_y);
+            cropped.put_pixel(x, y, *pixel);
+        }
+    }
+
+    Ok(cropped)
+}
+
+/// Calculates centered crop coordinates for a target size.
+pub fn calculate_center_crop_coords(
+    img_width: u32,
+    img_height: u32,
+    crop_width: u32,
+    crop_height: u32,
+) -> Result<(u32, u32), ImageProcessError> {
+    if crop_width > img_width || crop_height > img_height {
+        return Err(ImageProcessError::CropSizeTooLarge);
+    }
+
+    let x = (img_width - crop_width) / 2;
+    let y = (img_height - crop_height) / 2;
+
+    Ok((x, y))
+}
+
+/// Validates that crop coordinates stay within image bounds.
+pub fn validate_crop_bounds(
+    img_width: u32,
+    img_height: u32,
+    x: u32,
+    y: u32,
+    crop_width: u32,
+    crop_height: u32,
+) -> Result<(), ImageProcessError> {
+    if x + crop_width > img_width || y + crop_height > img_height {
+        return Err(ImageProcessError::CropOutOfBounds);
+    }
+    Ok(())
+}
+
+/// Resizes an RGB image to the target dimensions using Lanczos3 filtering.
+pub fn resize_image(img: &RgbImage, width: u32, height: u32) -> RgbImage {
+    image::imageops::resize(img, width, height, image::imageops::FilterType::Lanczos3)
+}
+
+/// Resizes a grayscale image to the target dimensions using Lanczos3 filtering.
+pub fn resize_gray_image(img: &GrayImage, width: u32, height: u32) -> GrayImage {
+    image::imageops::resize(img, width, height, image::imageops::FilterType::Lanczos3)
+}
+
+/// Converts an RGB image to grayscale.
+pub fn rgb_to_grayscale(img: &RgbImage) -> GrayImage {
+    image::imageops::grayscale(img)
+}
+
+/// Pads an image to the specified dimensions with a fill color.
+pub fn pad_image(
+    img: &RgbImage,
+    target_width: u32,
+    target_height: u32,
+    fill_color: [u8; 3],
+) -> Result<RgbImage, ImageProcessError> {
+    let (src_width, src_height) = img.dimensions();
+
+    if target_width < src_width || target_height < src_height {
+        return Err(ImageProcessError::InvalidCropSize);
+    }
+
+    if target_width == src_width && target_height == src_height {
+        return Ok(img.clone());
+    }
+
+    let mut padded = RgbImage::from_pixel(target_width, target_height, image::Rgb(fill_color));
+    let x_offset = (target_width - src_width) / 2;
+    let y_offset = (target_height - src_height) / 2;
+    image::imageops::overlay(&mut padded, img, x_offset as i64, y_offset as i64);
+
+    Ok(padded)
 }
 
 /// Loads a batch of images from file paths.
@@ -469,10 +614,52 @@ pub fn resize_images_batch_to_dynamic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{GenericImageView, ImageBuffer, Rgb};
+    use ::image::{GenericImageView, GrayImage, ImageBuffer, Rgb, RgbImage};
 
     fn create_test_image(width: u32, height: u32, color: [u8; 3]) -> RgbImage {
         ImageBuffer::from_pixel(width, height, Rgb(color))
+    }
+
+    #[test]
+    fn basic_size_checks() {
+        assert!(check_image_size(&[100, 100]).is_ok());
+        assert!(check_image_size(&[0, 50]).is_err());
+    }
+
+    #[test]
+    fn slice_rgb_image_region() {
+        let img = RgbImage::from_pixel(10, 10, Rgb([255, 0, 0]));
+        let cropped = slice_image(&img, (2, 2, 6, 6)).unwrap();
+        assert_eq!(cropped.dimensions(), (4, 4));
+        assert!(slice_image(&img, (6, 6, 2, 2)).is_err());
+    }
+
+    #[test]
+    fn slice_gray_image_region() {
+        let img = GrayImage::from_pixel(10, 10, image::Luma([128]));
+        let cropped = slice_gray_image(&img, (1, 1, 5, 5)).unwrap();
+        assert_eq!(cropped.dimensions(), (4, 4));
+    }
+
+    #[test]
+    fn center_crop_coordinates() {
+        let coords = calculate_center_crop_coords(100, 60, 40, 20).unwrap();
+        assert_eq!(coords, (30, 20));
+        assert!(calculate_center_crop_coords(20, 20, 40, 10).is_err());
+    }
+
+    #[test]
+    fn crop_bounds_validation() {
+        assert!(validate_crop_bounds(100, 80, 10, 10, 40, 40).is_ok());
+        assert!(validate_crop_bounds(100, 80, 70, 10, 40, 40).is_err());
+    }
+
+    #[test]
+    fn pad_image_to_target() {
+        let img = RgbImage::from_pixel(20, 20, Rgb([10, 20, 30]));
+        let padded = pad_image(&img, 40, 40, [0, 0, 0]).unwrap();
+        assert_eq!(padded.dimensions(), (40, 40));
+        assert!(pad_image(&img, 10, 10, [0, 0, 0]).is_err());
     }
 
     #[test]

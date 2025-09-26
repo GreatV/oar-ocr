@@ -40,7 +40,7 @@ impl Topk {
     ///
     /// ```rust,no_run
     /// use std::collections::HashMap;
-    /// use oar_ocr::processors::utils::topk::Topk;
+    /// use oar_ocr::utils::topk::Topk;
     ///
     /// let mut class_map = HashMap::new();
     /// class_map.insert(0, "cat".to_string());
@@ -57,7 +57,7 @@ impl Topk {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use oar_ocr::processors::utils::topk::Topk;
+    /// use oar_ocr::utils::topk::Topk;
     ///
     /// let topk = Topk::without_class_names();
     /// ```
@@ -76,7 +76,7 @@ impl Topk {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use oar_ocr::processors::utils::topk::Topk;
+    /// use oar_ocr::utils::topk::Topk;
     ///
     /// let class_names = vec!["cat".to_string(), "dog".to_string(), "bird".to_string()];
     /// let topk = Topk::from_class_names(class_names);
@@ -102,7 +102,7 @@ impl Topk {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use oar_ocr::processors::utils::topk::Topk;
+    /// use oar_ocr::utils::topk::Topk;
     ///
     /// let topk = Topk::without_class_names();
     /// let predictions = vec![

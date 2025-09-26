@@ -1,8 +1,8 @@
 //! Image cropping functionality with different modes.
 
 use crate::processors::types::{CropMode, ImageProcessError};
-use crate::processors::utils::image_utils;
-use image::RgbImage;
+use crate::utils::image;
+use ::image::RgbImage;
 
 /// A processor for cropping images with different positioning modes.
 ///
@@ -32,13 +32,13 @@ impl Crop {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use oar_ocr::processors::utils::crop::Crop;
+    /// use oar_ocr::utils::crop::Crop;
     /// use oar_ocr::processors::types::CropMode;
     ///
     /// let crop = Crop::new([224, 224], CropMode::Center).unwrap();
     /// ```
     pub fn new(crop_size: [u32; 2], crop_mode: CropMode) -> Result<Self, ImageProcessError> {
-        image_utils::check_image_size(&crop_size)?;
+        image::check_image_size(&crop_size)?;
         Ok(Self {
             crop_size,
             crop_mode,
@@ -78,7 +78,7 @@ impl Crop {
     ///
     /// ```rust,no_run
     /// use image::RgbImage;
-    /// use oar_ocr::processors::utils::crop::Crop;
+    /// use oar_ocr::utils::crop::Crop;
     /// use oar_ocr::processors::types::CropMode;
     ///
     /// let crop = Crop::new([100, 100], CropMode::Center).unwrap();
@@ -103,11 +103,11 @@ impl Crop {
         let (x, y) = self.calculate_crop_position(img_width, img_height)?;
 
         // Validate the calculated position
-        image_utils::validate_crop_bounds(img_width, img_height, x, y, crop_width, crop_height)?;
+        image::validate_crop_bounds(img_width, img_height, x, y, crop_width, crop_height)?;
 
         // Perform the crop
         let coords = (x, y, x + crop_width, y + crop_height);
-        image_utils::slice_image(img, coords)
+        image::slice_image(img, coords)
     }
 
     /// Calculates the top-left position for the crop based on the crop mode.
@@ -129,12 +129,9 @@ impl Crop {
         let [crop_width, crop_height] = self.crop_size;
 
         match self.crop_mode {
-            CropMode::Center => image_utils::calculate_center_crop_coords(
-                img_width,
-                img_height,
-                crop_width,
-                crop_height,
-            ),
+            CropMode::Center => {
+                image::calculate_center_crop_coords(img_width, img_height, crop_width, crop_height)
+            }
             CropMode::TopLeft => Ok((0, 0)),
             CropMode::TopRight => {
                 if crop_width > img_width {
@@ -189,7 +186,7 @@ impl Crop {
     /// * `Ok(())` - If the size is valid.
     /// * `Err(ImageProcessError::InvalidCropSize)` - If either dimension is zero.
     pub fn set_crop_size(&mut self, crop_size: [u32; 2]) -> Result<(), ImageProcessError> {
-        image_utils::check_image_size(&crop_size)?;
+        image::check_image_size(&crop_size)?;
         self.crop_size = crop_size;
         Ok(())
     }
@@ -243,7 +240,7 @@ impl Default for Crop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{Rgb, RgbImage};
+    use ::image::{Rgb, RgbImage};
 
     fn create_test_image(width: u32, height: u32) -> RgbImage {
         RgbImage::from_pixel(width, height, Rgb([255, 0, 0]))
