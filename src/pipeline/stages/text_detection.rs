@@ -44,7 +44,7 @@ impl Default for TextDetectionConfig {
     }
 }
 
-impl crate::core::config::ConfigValidator for TextDetectionConfig {
+impl ConfigValidator for TextDetectionConfig {
     fn validate(&self) -> Result<(), crate::core::config::ConfigError> {
         if let Some(threshold) = self.confidence_threshold
             && !(0.0..=1.0).contains(&threshold)
@@ -203,7 +203,7 @@ impl Default for TextLineOrientationConfig {
     }
 }
 
-impl crate::core::config::ConfigValidator for TextLineOrientationConfig {
+impl ConfigValidator for TextLineOrientationConfig {
     fn validate(&self) -> Result<(), crate::core::config::ConfigError> {
         if let Some(threshold) = self.confidence_threshold
             && !(0.0..=1.0).contains(&threshold)

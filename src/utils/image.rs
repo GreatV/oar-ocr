@@ -707,7 +707,7 @@ mod tests {
         let images = vec![img1, img2];
 
         // Resize batch to 64x64
-        let resized = super::resize_images_batch(&images, 64, 64, None);
+        let resized = resize_images_batch(&images, 64, 64, None);
 
         assert_eq!(resized.len(), 2);
         assert_eq!(resized[0].dimensions(), (64, 64));
@@ -731,7 +731,7 @@ mod tests {
         let images = vec![img1, img2];
 
         // Resize batch to 32x32 and convert to DynamicImage
-        let resized = super::resize_images_batch_to_dynamic(&images, 32, 32, None);
+        let resized = resize_images_batch_to_dynamic(&images, 32, 32, None);
 
         assert_eq!(resized.len(), 2);
 
@@ -739,7 +739,7 @@ mod tests {
         for dynamic_img in &resized {
             assert_eq!(dynamic_img.dimensions(), (32, 32));
             match dynamic_img {
-                image::DynamicImage::ImageRgb8(_) => {} // Expected
+                DynamicImage::ImageRgb8(_) => {} // Expected
                 _ => panic!("Expected ImageRgb8 variant"),
             }
         }
@@ -748,7 +748,7 @@ mod tests {
     #[test]
     fn test_resize_images_batch_empty() {
         let images: Vec<RgbImage> = vec![];
-        let resized = super::resize_images_batch(&images, 64, 64, None);
+        let resized = resize_images_batch(&images, 64, 64, None);
         assert!(resized.is_empty());
     }
 
@@ -758,14 +758,10 @@ mod tests {
         let images = vec![img];
 
         // Test with different filter types
-        let resized_lanczos = super::resize_images_batch(
-            &images,
-            50,
-            50,
-            Some(image::imageops::FilterType::Lanczos3),
-        );
+        let resized_lanczos =
+            resize_images_batch(&images, 50, 50, Some(image::imageops::FilterType::Lanczos3));
         let resized_nearest =
-            super::resize_images_batch(&images, 50, 50, Some(image::imageops::FilterType::Nearest));
+            resize_images_batch(&images, 50, 50, Some(image::imageops::FilterType::Nearest));
 
         assert_eq!(resized_lanczos.len(), 1);
         assert_eq!(resized_nearest.len(), 1);

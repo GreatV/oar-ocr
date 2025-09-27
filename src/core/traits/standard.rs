@@ -217,15 +217,13 @@ pub trait ImageReader {
         img_path: P,
     ) -> Result<RgbImage, Self::Error>
     where
-        Self::Error: From<crate::core::OCRError>,
+        Self::Error: From<OCRError>,
     {
         let mut results = self.apply(std::iter::once(img_path))?;
         results.pop().ok_or_else(|| {
             // Create a proper error instead of panicking
-            crate::core::OCRError::invalid_input(
-                "ImageReader::apply returned empty result for single image",
-            )
-            .into()
+            OCRError::invalid_input("ImageReader::apply returned empty result for single image")
+                .into()
         })
     }
 }

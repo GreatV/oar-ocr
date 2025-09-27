@@ -306,7 +306,7 @@ mod tests {
         let bucket_groups = bucketing.group_images_by_buckets(images.clone()).unwrap();
 
         // With exact dimension grouping, each image would be in its own group
-        let mut exact_groups = std::collections::HashMap::new();
+        let mut exact_groups = HashMap::new();
         for (i, image) in images {
             let dims = (image.height(), image.width());
             exact_groups

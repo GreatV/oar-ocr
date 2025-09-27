@@ -211,7 +211,7 @@ impl ErrorMetrics {
         if self.total_text_boxes == 0 {
             1.0
         } else {
-            (self.total_text_boxes.saturating_sub(self.failed_crops)) as f32
+            self.total_text_boxes.saturating_sub(self.failed_crops) as f32
                 / self.total_text_boxes as f32
         }
     }
@@ -222,7 +222,7 @@ impl ErrorMetrics {
         if successful_crops == 0 {
             1.0
         } else {
-            (successful_crops.saturating_sub(self.failed_recognitions)) as f32
+            successful_crops.saturating_sub(self.failed_recognitions) as f32
                 / successful_crops as f32
         }
     }
@@ -233,7 +233,7 @@ impl ErrorMetrics {
         if successful_crops == 0 {
             1.0
         } else {
-            (successful_crops.saturating_sub(self.failed_orientations)) as f32
+            successful_crops.saturating_sub(self.failed_orientations) as f32
                 / successful_crops as f32
         }
     }

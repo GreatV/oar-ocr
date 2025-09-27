@@ -32,8 +32,8 @@ pub use crate::domain::{
 };
 pub use batch::dynamic::{
     BatchPerformanceMetrics, CompatibleBatch, CrossImageBatch, CrossImageItem,
-    DefaultDynamicBatcher, DynamicBatchConfig, DynamicBatchResult, DynamicBatcher, MemoryStrategy,
-    PaddingStrategy, ShapeCompatibilityStrategy,
+    DefaultDynamicBatcher, DynamicBatchConfig, DynamicBatchResult, DynamicBatcher, PaddingStrategy,
+    ShapeCompatibilityStrategy,
 };
 pub use batch::{BatchData, BatchSampler, Tensor1D, Tensor2D, Tensor3D, Tensor4D, ToBatch};
 pub use config::{

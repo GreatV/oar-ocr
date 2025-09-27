@@ -110,7 +110,7 @@ impl RecognitionConfig {
     }
 }
 
-impl crate::core::config::ConfigValidator for RecognitionConfig {
+impl ConfigValidator for RecognitionConfig {
     fn validate(&self) -> Result<(), crate::core::config::ConfigError> {
         // RecognitionConfig validation - basic validation for now
         // Could add more specific validation for grouping strategy if needed
@@ -288,7 +288,7 @@ impl RecognitionStageProcessor {
                 *failed_recognitions += indices.len();
 
                 // Create enhanced error message using the common helper
-                let enhanced_error = crate::core::OCRError::format_batch_error_message(
+                let enhanced_error = OCRError::format_batch_error_message(
                     "text recognition",
                     &group_name,
                     &indices,

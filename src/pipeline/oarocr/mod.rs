@@ -41,11 +41,11 @@
 //! The public API remains unchanged. All existing code using [`OAROCR::predict`]
 //! and related methods will continue to work without modification.
 //!
-//! [`orchestration`]: crate::pipeline::oarocr::orchestration
-//! [`ImageProcessingOrchestrator`]: crate::pipeline::oarocr::ImageProcessingOrchestrator
-//! [`PipelineExecutor`]: crate::pipeline::oarocr::PipelineExecutor
-//! [`ProcessingStrategy`]: crate::pipeline::oarocr::ProcessingStrategy
-//! [`ImageInputSource`]: crate::pipeline::oarocr::ImageInputSource
+//! [`orchestration`]: orchestration
+//! [`ImageProcessingOrchestrator`]: ImageProcessingOrchestrator
+//! [`PipelineExecutor`]: PipelineExecutor
+//! [`ProcessingStrategy`]: ProcessingStrategy
+//! [`ImageInputSource`]: ImageInputSource
 
 mod builder;
 mod components;

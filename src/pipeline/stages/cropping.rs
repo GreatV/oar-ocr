@@ -29,7 +29,7 @@ pub struct CroppingConfig {
     // Currently empty, but kept for future configuration options
 }
 
-impl crate::core::config::ConfigValidator for CroppingConfig {
+impl ConfigValidator for CroppingConfig {
     fn validate(&self) -> Result<(), crate::core::config::ConfigError> {
         // No validation needed for empty config
         Ok(())

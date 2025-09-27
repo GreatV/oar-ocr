@@ -56,23 +56,6 @@ impl Default for PaddingStrategy {
     }
 }
 
-/// Strategy for memory usage optimization
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum MemoryStrategy {
-    /// Optimize for speed (may use more memory)
-    Speed,
-    /// Optimize for memory usage (may be slower)
-    Memory,
-    /// Balanced approach
-    Balanced,
-}
-
-impl Default for MemoryStrategy {
-    fn default() -> Self {
-        Self::Balanced
-    }
-}
-
 /// Configuration for dynamic batching
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DynamicBatchConfig {
@@ -86,12 +69,6 @@ pub struct DynamicBatchConfig {
     pub shape_compatibility: ShapeCompatibilityStrategy,
     /// Padding strategy for uniform batch sizes
     pub padding_strategy: PaddingStrategy,
-    /// Memory optimization strategy
-    pub memory_strategy: MemoryStrategy,
-    /// Enable detection batching
-    pub enable_detection_batching: bool,
-    /// Enable recognition batching
-    pub enable_recognition_batching: bool,
 }
 
 impl Default for DynamicBatchConfig {
@@ -102,9 +79,6 @@ impl Default for DynamicBatchConfig {
             min_batch_size: 2,
             shape_compatibility: ShapeCompatibilityStrategy::default(),
             padding_strategy: PaddingStrategy::default(),
-            memory_strategy: MemoryStrategy::default(),
-            enable_detection_batching: true,
-            enable_recognition_batching: true,
         }
     }
 }
@@ -142,24 +116,6 @@ impl DynamicBatchConfig {
     /// Sets the padding strategy
     pub fn with_padding_strategy(mut self, strategy: PaddingStrategy) -> Self {
         self.padding_strategy = strategy;
-        self
-    }
-
-    /// Sets the memory strategy
-    pub fn with_memory_strategy(mut self, strategy: MemoryStrategy) -> Self {
-        self.memory_strategy = strategy;
-        self
-    }
-
-    /// Enables or disables detection batching
-    pub fn with_detection_batching(mut self, enabled: bool) -> Self {
-        self.enable_detection_batching = enabled;
-        self
-    }
-
-    /// Enables or disables recognition batching
-    pub fn with_recognition_batching(mut self, enabled: bool) -> Self {
-        self.enable_recognition_batching = enabled;
         self
     }
 }

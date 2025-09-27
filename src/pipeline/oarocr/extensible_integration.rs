@@ -459,7 +459,7 @@ mod tests {
         let extensible_oarocr = ExtensibleOAROCR::new(oarocr_config, extensible_config).unwrap();
 
         // Test conversion with empty stage results
-        let input_img = image::RgbImage::new(100, 100);
+        let input_img = RgbImage::new(100, 100);
         let input_img_arc = Arc::new(input_img);
         let context = StageContext::new(input_img_arc.clone(), input_img_arc.clone(), 0);
         let image_path = PathBuf::from("test.jpg");

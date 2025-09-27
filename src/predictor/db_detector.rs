@@ -626,10 +626,7 @@ mod tests_local {
     fn test_text_det_config_defaults_and_validate() {
         let config = TextDetPredictorConfig::new();
         // Defaults via get_defaults
-        assert_eq!(
-            config.max_side_limit,
-            Some(crate::core::constants::DEFAULT_MAX_SIDE_LIMIT)
-        );
+        assert_eq!(config.max_side_limit, Some(DEFAULT_MAX_SIDE_LIMIT));
         assert!(config.validate().is_ok());
     }
 }
