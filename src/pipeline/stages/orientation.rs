@@ -31,7 +31,7 @@ pub struct OrientationConfig {
     pub confidence_threshold: Option<f32>,
 }
 
-impl crate::core::config::ConfigValidator for OrientationConfig {
+impl ConfigValidator for OrientationConfig {
     fn validate(&self) -> Result<(), crate::core::config::ConfigError> {
         if let Some(threshold) = self.confidence_threshold
             && !(0.0..=1.0).contains(&threshold)
@@ -172,7 +172,7 @@ impl OrientationStageProcessor {
             |image| Self::process_single(image, classifier, config).map(|result| result.data),
             move |e, index| {
                 // Create enhanced error using the common helper
-                let enhanced_error = crate::core::OCRError::batch_item_error(
+                let enhanced_error = OCRError::batch_item_error(
                     "orientation",
                     Some("orientation_batch"),
                     index,

@@ -1,14 +1,13 @@
 //! Dynamic batching for OCR pipeline components.
 //!
 //! This module provides functionality for dynamically batching images based on
-//! shape compatibility, memory constraints, and performance requirements.
+//! shape compatibility and performance requirements.
 //! It supports both same-image batching (multiple images) and cross-image
 //! batching (text regions from multiple images).
 //!
 //! # Features
 //!
 //! - **Shape Compatibility**: Group images by exact dimensions, aspect ratio, or custom strategies
-//! - **Memory Management**: Optimize for speed or memory usage
 //! - **Flexible Batching**: Support for detection and recognition batching
 //! - **Performance Metrics**: Track batching performance and efficiency
 //! - **Cross-Image Batching**: Batch text regions from multiple images together
@@ -31,7 +30,7 @@ mod processor;
 mod types;
 
 // Re-export public types
-pub use config::{DynamicBatchConfig, MemoryStrategy, PaddingStrategy, ShapeCompatibilityStrategy};
+pub use config::{DynamicBatchConfig, PaddingStrategy, ShapeCompatibilityStrategy};
 pub use processor::{DefaultDynamicBatcher, DynamicBatcher};
 pub use types::{
     BatchPerformanceMetrics, CompatibleBatch, CrossImageBatch, CrossImageItem, DynamicBatchResult,

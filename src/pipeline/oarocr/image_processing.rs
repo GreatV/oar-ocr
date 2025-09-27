@@ -380,7 +380,7 @@ mod tests {
         };
         let cropped_fast = ImageProcessor::crop_rotated_bounding_box(&img, &bbox).unwrap();
         // Expected via simple crop
-        let expected = image::imageops::crop_imm(&img, 10, 20, 50, 30).to_image();
+        let expected = imageops::crop_imm(&img, 10, 20, 50, 30).to_image();
         assert_eq!(cropped_fast.dimensions(), expected.dimensions());
         // Sample a couple of pixels to ensure identical content
         assert_eq!(cropped_fast.get_pixel(0, 0), expected.get_pixel(0, 0));

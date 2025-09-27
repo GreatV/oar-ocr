@@ -580,7 +580,7 @@ impl OAROCRBuilder {
         mut self,
         config: crate::core::config::onnx::OrtSessionConfig,
     ) -> Self {
-        with_nested!(self.config.text_line_orientation, crate::predictor::TextLineClasPredictorConfig, tlo_config => {
+        with_nested!(self.config.text_line_orientation, TextLineClasPredictorConfig, tlo_config => {
             tlo_config.common.ort_session = Some(config);
         });
         self
@@ -609,7 +609,7 @@ impl OAROCRBuilder {
         self.config.recognition.common.ort_session = Some(config.clone());
 
         // Apply to text line orientation (if configured)
-        with_nested!(self.config.text_line_orientation, crate::predictor::TextLineClasPredictorConfig, tlo_config => {
+        with_nested!(self.config.text_line_orientation, TextLineClasPredictorConfig, tlo_config => {
             tlo_config.common.ort_session = Some(config.clone());
         });
 
@@ -801,7 +801,7 @@ impl OAROCRBuilder {
     /// The updated builder instance
     pub fn textline_orientation_session_pool_size(mut self, size: usize) -> Self {
         let s = Self::validate_min_size_usize(size, "textline_orientation_session_pool_size");
-        with_nested!(self.config.text_line_orientation, crate::predictor::TextLineClasPredictorConfig, tlo_config => {
+        with_nested!(self.config.text_line_orientation, TextLineClasPredictorConfig, tlo_config => {
             tlo_config.common.session_pool_size = Some(s);
         });
         self
@@ -828,7 +828,7 @@ impl OAROCRBuilder {
         self.config.recognition.common.session_pool_size = Some(s);
 
         // Apply to text line orientation (if configured)
-        with_nested!(self.config.text_line_orientation, crate::predictor::TextLineClasPredictorConfig, tlo_config => {
+        with_nested!(self.config.text_line_orientation, TextLineClasPredictorConfig, tlo_config => {
             tlo_config.common.session_pool_size = Some(s);
         });
 
@@ -1236,38 +1236,6 @@ impl OAROCRBuilder {
         }
         if let Some(ref mut config) = self.config.dynamic_batching {
             config.shape_compatibility = strategy;
-        }
-        self
-    }
-
-    /// Enables only detection batching (disables recognition batching).
-    ///
-    /// # Returns
-    ///
-    /// The updated builder instance
-    pub fn enable_detection_batching_only(mut self) -> Self {
-        if self.config.dynamic_batching.is_none() {
-            self.config.dynamic_batching = Some(DynamicBatchConfig::default());
-        }
-        if let Some(ref mut config) = self.config.dynamic_batching {
-            config.enable_detection_batching = true;
-            config.enable_recognition_batching = false;
-        }
-        self
-    }
-
-    /// Enables only recognition batching (disables detection batching).
-    ///
-    /// # Returns
-    ///
-    /// The updated builder instance
-    pub fn enable_recognition_batching_only(mut self) -> Self {
-        if self.config.dynamic_batching.is_none() {
-            self.config.dynamic_batching = Some(DynamicBatchConfig::default());
-        }
-        if let Some(ref mut config) = self.config.dynamic_batching {
-            config.enable_detection_batching = false;
-            config.enable_recognition_batching = true;
         }
         self
     }
