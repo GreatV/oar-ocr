@@ -41,6 +41,29 @@ pub fn dynamic_to_gray(img: DynamicImage) -> GrayImage {
     img.to_luma8()
 }
 
+/// Loads an image from the given bytes and converts it to RgbImage.
+///
+/// This function decodes an image from a byte slice and converts it
+/// to an RgbImage. It handles any image format supported by the image crate.
+///
+/// # Arguments
+///
+/// * `bytes` - A byte slice containing the encoded image data
+///
+/// # Returns
+///
+/// * `Ok(RgbImage)` - The decoded and converted RGB image
+/// * `Err(OCRError)` - An error if the image could not be decoded or converted
+///
+/// # Errors
+///
+/// This function will return an `OCRError::ImageLoad` error if the image cannot
+/// be decoded from the provided bytes, or if there is an error during conversion.
+pub fn load_image_from_memory(bytes: &[u8]) -> Result<RgbImage, OCRError> {
+    let img = image::load_from_memory(bytes).map_err(OCRError::ImageLoad)?;
+    Ok(dynamic_to_rgb(img))
+}
+
 /// Loads an image from a file path and converts it to RgbImage.
 ///
 /// This function opens an image from the specified file path and converts it
