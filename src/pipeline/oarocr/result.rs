@@ -120,6 +120,7 @@ impl OAROCRResult {
     /// Creates text regions from parallel vectors.
     ///
     /// This is a helper method used internally during result construction.
+    #[allow(dead_code)]
     pub(crate) fn create_text_regions_from_vectors(
         text_boxes: &[BoundingBox],
         rec_texts: &[Option<Arc<str>>],

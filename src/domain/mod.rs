@@ -5,6 +5,8 @@
 
 pub mod orientation;
 pub mod predictions;
+pub mod tasks;
 
 pub use orientation::*;
 pub use predictions::*;
+pub use tasks::*;

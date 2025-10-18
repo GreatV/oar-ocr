@@ -6,7 +6,9 @@
 //! ## Features
 //!
 //! - Complete OCR pipeline from image to text
-//! - Modular components (use only what you need)
+//! - Task graph architecture for flexible pipeline configuration
+//! - Model adapter system for easy model swapping
+//! - Edge processors for data transformation between tasks
 //! - Batch processing support
 //! - ONNX Runtime integration for fast inference
 //!
@@ -22,112 +24,105 @@
 //!
 //! * [`core`] - Core traits, error handling, and batch processing
 //! * [`domain`] - Domain types like orientation helpers and prediction models
-//! * [`predictor`] - OCR predictor implementations
-//! * [`pipeline`] - Complete OCR pipeline
+//! * [`models`] - Model adapters for different OCR tasks
+//! * [`pipeline`] - Task graph-based OCR pipeline
 //! * [`processors`] - Image processing utilities
 //! * [`utils`] - Utility functions for images and tensors
 //!
 //! ## Quick Start
 //!
-//! ### Complete OCR Pipeline
+//! ### Task Graph-Based OCR Pipeline
 //!
 //! ```rust,no_run
 //! use oar_ocr::prelude::*;
-//! use oar_ocr::utils::load_images;
+//! use oar_ocr::core::traits::TaskType;
 //! use std::path::Path;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! // Build OCR pipeline
-//! let mut ocr = OAROCRBuilder::new(
-//!     "detection_model.onnx".to_string(),
-//!     "recognition_model.onnx".to_string(),
-//!     "char_dict.txt".to_string(),
-//! ).build()?;
+//! // Create task graph configuration
+//! let config = TaskGraphConfig::new()
+//!     .add_model_binding("detection", ModelBinding::new(
+//!         "DB",
+//!         "models/detection.onnx",
+//!         TaskType::TextDetection,
+//!     ))
+//!     .add_model_binding("recognition", ModelBinding::new(
+//!         "CRNN",
+//!         "models/recognition.onnx",
+//!         TaskType::TextRecognition,
+//!     ))
+//!     .add_task_node(TaskNode::new(
+//!         "text_detection",
+//!         TaskType::TextDetection,
+//!         "detection",
+//!     ))
+//!     .add_task_node(TaskNode::new(
+//!         "text_recognition",
+//!         TaskType::TextRecognition,
+//!         "recognition",
+//!     )
+//!     .with_dependency("text_detection")
+//!     .with_edge_processor(
+//!         "text_detection",
+//!         EdgeProcessorConfig::TextCropping { handle_rotation: true }
+//!     ))
+//!     .with_character_dict("models/dict.txt");
 //!
-//! // Process single image
+//! // Build and execute pipeline
+//! let builder = TaskGraphBuilder::new(config);
+//! let adapters = builder.build_adapters()?;
+//!
+//! // Process images
 //! let image = load_image(Path::new("document.jpg"))?;
-//! let results = ocr.predict(&[image])?;
-//! let result = &results[0];
+//! // Execute tasks using adapters...
+//! # Ok(())
+//! # }
+//! ```
 //!
-//! // Print results
-//! for region in &result.text_regions {
-//!     if let (Some(text), Some(confidence)) = (&region.text, region.confidence) {
-//!         println!("Text: {} (confidence: {:.2})", text, confidence);
+//! ### JSON Configuration
+//!
+//! ```rust,no_run
+//! use oar_ocr::prelude::*;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // Load configuration from JSON
+//! let config: TaskGraphConfig = serde_json::from_str(r#"
+//! {
+//!   "model_bindings": {
+//!     "detection": {
+//!       "model_name": "DB",
+//!       "model_path": "models/detection.onnx",
+//!       "task_type": "TextDetection"
+//!     },
+//!     "recognition": {
+//!       "model_name": "CRNN",
+//!       "model_path": "models/recognition.onnx",
+//!       "task_type": "TextRecognition"
 //!     }
+//!   },
+//!   "task_nodes": [
+//!     {
+//!       "id": "text_detection",
+//!       "task_type": "TextDetection",
+//!       "model_binding": "detection"
+//!     },
+//!     {
+//!       "id": "text_recognition",
+//!       "task_type": "TextRecognition",
+//!       "model_binding": "recognition",
+//!       "dependencies": ["text_detection"],
+//!       "edge_processors": {
+//!         "text_detection": {
+//!           "type": "TextCropping",
+//!           "handle_rotation": true
+//!         }
+//!       }
+//!     }
+//!   ]
 //! }
+//! "#)?;
 //!
-//! // Process multiple images
-//! let images = load_images(&[Path::new("doc1.jpg"), Path::new("doc2.jpg")])?;
-//! let results = ocr.predict(&images)?;
-//! for result in results {
-//!     println!("Image {}: {} text regions found", result.index, result.text_regions.len());
-//! }
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! ### Advanced Configuration with Confidence Thresholding
-//!
-//! ```rust,no_run
-//! use oar_ocr::prelude::*;
-//! use std::path::Path;
-//!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! // Build OCR pipeline with confidence thresholding for orientation detection
-//! let mut ocr = OAROCRBuilder::new(
-//!     "detection_model.onnx".to_string(),
-//!     "recognition_model.onnx".to_string(),
-//!     "char_dict.txt".to_string(),
-//! )
-//!
-//! // Configure document orientation with confidence threshold
-//! .doc_orientation_classify_model_path("orientation_model.onnx")
-//! .doc_orientation_threshold(0.8) // Only accept predictions with 80% confidence
-//! .use_doc_orientation_classify(true)
-//!
-//! // Configure text line orientation with confidence threshold
-//! .textline_orientation_classify_model_path("textline_orientation_model.onnx")
-//! .textline_orientation_threshold(0.7) // Only accept predictions with 70% confidence
-//! .use_textline_orientation(true)
-//!
-//! // Set recognition score threshold
-//! .text_rec_score_threshold(0.5)
-//! .build()?;
-//!
-//! // Process image - low confidence orientations will fall back to defaults
-//! let image = load_image(Path::new("document.jpg"))?;
-//! let results = ocr.predict(&[image])?;
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! ### Individual Components
-//!
-//! ```rust,no_run
-//! use oar_ocr::prelude::*;
-//! use oar_ocr::core::traits::StandardPredictor;
-//! use oar_ocr::predictor::{TextDetPredictorBuilder, TextRecPredictorBuilder};
-//! use oar_ocr::utils::load_image;
-//! use std::path::Path;
-//!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! // Text detection only
-//! let mut detector = TextDetPredictorBuilder::new()
-//!     .build(Path::new("detection_model.onnx"))?;
-//!
-//! let image = load_image(Path::new("image.jpg"))?;
-//! let result = detector.predict(vec![image], None)?;
-//! println!("Detection result: {:?}", result);
-//!
-//! // Text recognition only
-//! let char_dict = vec!["a".to_string(), "b".to_string()]; // Load your dictionary
-//! let mut recognizer = TextRecPredictorBuilder::new()
-//!     .character_dict(char_dict)
-//!     .build(Path::new("recognition_model.onnx"))?;
-//!
-//! let image = load_image(Path::new("text_crop.jpg"))?;
-//! let result = recognizer.predict(vec![image], None)?;
-//! println!("Recognition result: {:?}", result);
+//! let builder = TaskGraphBuilder::new(config);
 //! # Ok(())
 //! # }
 //! ```
@@ -135,7 +130,7 @@
 // Core modules
 pub mod core;
 pub mod domain;
-pub mod predictor;
+pub mod models;
 
 pub mod pipeline;
 pub mod processors;
@@ -150,16 +145,21 @@ pub mod utils;
 /// ```
 ///
 /// Included items focus on the most common tasks:
-/// - Main OCR pipeline (`OAROCR`, `OAROCRBuilder`, `OAROCRConfig`, `OAROCRResult`, `TextRegion`)
+/// - Task graph pipeline (`TaskGraphBuilder`, `TaskGraphConfig`, `TaskNode`, `ModelBinding`)
+/// - Edge processors (`EdgeProcessorConfig`)
+/// - Results (`OAROCRResult`, `TextRegion`)
 /// - Essential error and result types (`OCRError`, `OcrResult`)
 /// - Basic image loading (`load_image`)
 ///
-/// For advanced customization (predictor builders, traits, config loaders, logging helpers),
-/// import directly from the respective modules (e.g., `oar_ocr::predictor`, `oar_ocr::core::traits`,
-/// `oar_ocr::pipeline`, `oar_ocr::utils`).
+/// For advanced customization (model adapters, traits, validation),
+/// import directly from the respective modules (e.g., `oar_ocr::models`, `oar_ocr::core::traits`,
+/// `oar_ocr::pipeline`).
 pub mod prelude {
-    // Main OCR Pipeline (essential)
-    pub use crate::pipeline::{OAROCR, OAROCRBuilder, OAROCRConfig, OAROCRResult, TextRegion};
+    // Task Graph Pipeline (essential)
+    pub use crate::pipeline::{
+        EdgeProcessorConfig, ModelBinding, OAROCRResult, TaskGraphBuilder, TaskGraphConfig,
+        TaskNode, TextRegion,
+    };
 
     // Error Handling (essential)
     pub use crate::core::{OCRError, OcrResult};

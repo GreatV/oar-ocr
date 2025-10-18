@@ -1,60 +1,51 @@
-//! Text Recognition Example
+//! Document Orientation Classification Example
 //!
-//! This example demonstrates how to use the OCR pipeline to recognize text from cropped text images.
-//! It loads a text recognition model and character dictionary, processes input images, and outputs
-//! the recognized text with confidence scores.
+//! This example demonstrates how to use the OCR pipeline to classify document orientation.
+//! It loads a document orientation model, processes input images, and predicts the rotation
+//! angle (0°, 90°, 180°, or 270°) with confidence scores.
 //!
 //! # Usage
 //!
 //! ```bash
-//! cargo run --example text_recognition -- [OPTIONS] <IMAGES>...
+//! cargo run --example document_orientation -- [OPTIONS] <IMAGES>...
 //! ```
 //!
 //! # Arguments
 //!
-//! * `-m, --model-path` - Path to the text recognition model file
-//! * `-d, --dict-path` - Path to the character dictionary file
+//! * `-m, --model-path` - Path to the document orientation model file
 //! * `-o, --output-dir` - Directory to save visualization results (optional)
 //! * `--device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
-//! * `<IMAGES>...` - Paths to input text images to process
+//! * `<IMAGES>...` - Paths to input document images to process
 //!
 //! # Example
 //!
 //! ```bash
-//! cargo run --example text_recognition -- \
-//!     -m models/ppocrv4_mobile_rec.onnx \
-//!     -d models/ppocr_keys_v1.txt \
-//!     text1.jpg text2.jpg
+//! cargo run --example document_orientation -- \
+//!     -m models/pplcnet_x1_0_doc_ori.onnx \
+//!     document1.jpg document2.jpg
 //! ```
 
 use clap::Parser;
 use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
-use oar_ocr::core::traits::task::Task;
-use oar_ocr::domain::tasks::text_recognition::{
-    TextRecognitionConfig, TextRecognitionInput, TextRecognitionTask,
+use oar_ocr::core::traits::task::{ImageTaskInput, Task};
+use oar_ocr::domain::tasks::document_orientation::{
+    DocumentOrientationConfig, DocumentOrientationTask,
 };
-use oar_ocr::models::recognition::CRNNTextRecognitionAdapterBuilder;
+use oar_ocr::models::classification::DocOrientationAdapterBuilder;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
 
-#[cfg(feature = "visualization")]
-use image::RgbImage;
-
-/// Command-line arguments for the text recognition example
+/// Command-line arguments for the document orientation example
 #[derive(Parser)]
-#[command(name = "text_recognition")]
-#[command(about = "Text Recognition Example - recognizes text from cropped text images")]
+#[command(name = "document_orientation")]
+#[command(about = "Document Orientation Classification Example - detects document rotation")]
 struct Args {
-    /// Path to the text recognition model file
+    /// Path to the document orientation model file
     #[arg(short, long)]
     model_path: PathBuf,
 
-    /// Path to the character dictionary file
-    #[arg(short, long)]
-    dict_path: PathBuf,
-
-    /// Paths to input text images to process
+    /// Paths to input document images to process
     #[arg(required = true)]
     images: Vec<PathBuf>,
 
@@ -66,25 +57,25 @@ struct Args {
     #[arg(long, default_value = "cpu")]
     device: String,
 
-    /// Score threshold for recognition (default: 0.5)
+    /// Score threshold for classification (default: 0.5)
     #[arg(long, default_value = "0.5")]
     score_thresh: f32,
+
+    /// Number of top predictions to return (default: 4)
+    #[arg(long, default_value = "4")]
+    topk: usize,
 
     /// Session pool size for concurrent inference (default: 1)
     #[arg(long, default_value = "1")]
     session_pool_size: usize,
 
-    /// Maximum image width for resizing (optional, e.g., 320)
-    #[arg(long)]
-    max_img_w: Option<usize>,
+    /// Model input height (default: 224)
+    #[arg(long, default_value = "224")]
+    input_height: u32,
 
-    /// Model input height (default: 48)
-    #[arg(long, default_value = "48")]
-    input_height: usize,
-
-    /// Model input width (default: 320)
-    #[arg(long, default_value = "320")]
-    input_width: usize,
+    /// Model input width (default: 224)
+    #[arg(long, default_value = "224")]
+    input_width: u32,
 
     /// Enable verbose output
     #[arg(short, long)]
@@ -98,18 +89,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command-line arguments
     let args = Args::parse();
 
-    info!("Text Recognition Example");
+    info!("Document Orientation Classification Example");
 
     // Verify that the model file exists
     if !args.model_path.exists() {
         error!("Model file not found: {}", args.model_path.display());
         return Err("Model file not found".into());
-    }
-
-    // Verify that the dictionary file exists
-    if !args.dict_path.exists() {
-        error!("Dictionary file not found: {}", args.dict_path.display());
-        return Err("Dictionary file not found".into());
     }
 
     // Filter out non-existent image files and log errors for missing files
@@ -138,58 +123,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         warn!("GPU support not yet implemented in new architecture. Using CPU.");
     }
 
-    // Load character dictionary
-    info!(
-        "Loading character dictionary from: {}",
-        args.dict_path.display()
-    );
-    let character_dict = load_character_dict(&args.dict_path)?;
-    if args.verbose {
-        info!("Loaded {} characters", character_dict.len());
-        if character_dict.len() <= 100 {
-            info!("Characters: {}", character_dict.join(", "));
-        }
-    }
-
-    // Create recognition configuration
-    let config = TextRecognitionConfig {
+    // Create orientation classification configuration
+    let config = DocumentOrientationConfig {
         score_threshold: args.score_thresh,
-        max_text_length: 100,
+        topk: args.topk,
     };
 
     if args.verbose {
-        info!("Recognition Configuration:");
+        info!("Classification Configuration:");
         info!("  Score threshold: {}", config.score_threshold);
-        info!("  Max text length: {}", config.max_text_length);
+        info!("  Top-k: {}", config.topk);
         info!(
-            "  Input shape: [3, {}, {}]",
+            "  Input shape: ({}, {})",
             args.input_height, args.input_width
         );
     }
 
-    // Build the recognition adapter
+    // Build the orientation classifier adapter
     if args.verbose {
-        info!("Building recognition adapter...");
+        info!("Building orientation classifier adapter...");
         info!("  Model: {}", args.model_path.display());
         info!("  Session pool size: {}", args.session_pool_size);
     }
 
-    let mut builder = CRNNTextRecognitionAdapterBuilder::new()
+    let adapter = DocOrientationAdapterBuilder::new()
         .with_config(config.clone())
-        .model_input_shape([3, args.input_height, args.input_width])
-        .character_dict(character_dict.clone())
-        .session_pool_size(args.session_pool_size);
+        .input_shape((args.input_height, args.input_width))
+        .session_pool_size(args.session_pool_size)
+        .build(&args.model_path)?;
 
-    if let Some(max_w) = args.max_img_w {
-        builder = builder.max_img_w(max_w);
-        if args.verbose {
-            info!("  Max image width: {}", max_w);
-        }
-    }
-
-    let adapter = builder.build(&args.model_path)?;
-
-    info!("Recognition adapter built successfully");
+    info!("Orientation classifier adapter built successfully");
     if args.verbose {
         info!("  Task type: {:?}", adapter.info().task_type);
         info!("  Model name: {}", adapter.info().model_name);
@@ -227,38 +190,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create task input
-    let input = TextRecognitionInput::new(images.clone());
+    let input = ImageTaskInput::new(images.clone());
 
     // Create task for validation
-    let task = TextRecognitionTask::new(config.clone());
+    let task = DocumentOrientationTask::new(config.clone());
     task.validate_input(&input)?;
 
-    // Run recognition
-    info!("Running text recognition...");
+    // Run orientation classification
+    info!("Running document orientation classification...");
     let start = Instant::now();
     let output = adapter.execute(input, Some(&config))?;
     let duration = start.elapsed();
 
     info!(
-        "Recognition completed in {:.2}ms",
+        "Classification completed in {:.2}ms",
         duration.as_secs_f64() * 1000.0
     );
 
     // Display results for each image
-    info!("\n=== Recognition Results ===");
-    for (idx, (image_path, text, score)) in existing_images
+    info!("\n=== Classification Results ===");
+    for (idx, (image_path, class_ids, scores, labels)) in existing_images
         .iter()
-        .zip(output.texts.iter())
+        .zip(output.class_ids.iter())
         .zip(output.scores.iter())
-        .map(|((path, text), score)| (path, text, score))
+        .zip(output.label_names.iter())
+        .map(|(((path, ids), scores), labels)| (path, ids, scores, labels))
         .enumerate()
     {
         info!("\nImage {}: {}", idx + 1, image_path.display());
-        if text.is_empty() {
-            warn!("  No text recognized (below threshold)");
+
+        if class_ids.is_empty() {
+            warn!("  No predictions available");
         } else {
-            info!("  Text: \"{}\"", text);
-            info!("  Confidence: {:.2}%", score * 100.0);
+            // Show top prediction prominently
+            let top_label = &labels[0];
+            let top_score = scores[0];
+            info!("  Detected orientation: {}°", top_label);
+            info!("  Confidence: {:.2}%", top_score * 100.0);
+
+            // Show all predictions if verbose
+            if args.verbose && class_ids.len() > 1 {
+                info!("  All predictions:");
+                for (rank, (label, score)) in labels.iter().zip(scores.iter()).enumerate() {
+                    info!("    [{}] {}° - {:.2}%", rank + 1, label, score * 100.0);
+                }
+            }
         }
     }
 
@@ -270,27 +246,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         info!("\nSaving visualizations to: {}", output_dir.display());
 
-        for (image_path, rgb_img, text, score) in existing_images
+        for (image_path, rgb_img, labels, scores) in existing_images
             .iter()
             .zip(images.iter())
-            .zip(output.texts.iter())
+            .zip(output.label_names.iter())
             .zip(output.scores.iter())
-            .map(|(((path, img), text), score)| (path, img, text, score))
+            .map(|(((path, img), labels), scores)| (path, img, labels, scores))
         {
-            if !text.is_empty() {
+            if !labels.is_empty() {
                 let input_filename = image_path
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or("unknown");
-                let output_filename = format!("{}_recognition.jpg", input_filename);
+                let output_filename = format!("{}_orientation.jpg", input_filename);
                 let output_path = output_dir.join(&output_filename);
 
-                let visualized = visualize_recognition(rgb_img, text, *score);
+                // Get top prediction
+                let orientation = &labels[0];
+                let confidence = scores[0];
+
+                let visualized = visualize_orientation(rgb_img, orientation, confidence);
                 visualized.save(&output_path)?;
                 info!("  Saved: {}", output_path.display());
             } else {
                 warn!(
-                    "  Skipping visualization for {} (no text recognized)",
+                    "  Skipping visualization for {} (no predictions)",
                     image_path.display()
                 );
             }
@@ -300,43 +280,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Loads the character dictionary from a file.
-fn load_character_dict(dict_path: &PathBuf) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let content = std::fs::read_to_string(dict_path)
-        .map_err(|e| format!("Failed to load character dictionary: {}", e))?;
-
-    let dict: Vec<String> = content
-        .lines()
-        .map(|line| line.trim().to_string())
-        .filter(|line| !line.is_empty())
-        .collect();
-
-    if dict.is_empty() {
-        return Err("Character dictionary is empty".into());
-    }
-
-    Ok(dict)
-}
-
-/// Visualizes recognized text by drawing it on the image
+/// Visualizes document orientation by drawing the predicted angle and confidence on the image
 #[cfg(feature = "visualization")]
-fn visualize_recognition(img: &RgbImage, text: &str, score: f32) -> RgbImage {
+fn visualize_orientation(
+    img: &image::RgbImage,
+    orientation: &str,
+    confidence: f32,
+) -> image::RgbImage {
     use image::Rgb;
-    use imageproc::drawing::draw_text_mut;
+    use imageproc::drawing::{draw_filled_rect_mut, draw_text_mut};
+    use imageproc::rect::Rect;
 
     let mut output = img.clone();
-    let text_color = Rgb([255u8, 0u8, 0u8]); // Red for text
+    let text_color = Rgb([255u8, 255u8, 255u8]); // White text
+    let bg_color = Rgb([0u8, 0u8, 0u8]); // Black background
 
     // Try to load a font for text rendering
     let font = load_font();
 
     if let Some(ref font) = font {
-        // Draw the recognized text at the top
-        let label = format!("{} ({:.1}%)", text, score * 100.0);
+        // Draw the orientation label with background
+        let label = format!("Orientation: {}° ({:.1}%)", orientation, confidence * 100.0);
+
+        // Draw background rectangle for text
         let text_x = 10;
         let text_y = 10;
+        let text_width = label.len() as u32 * 10; // Approximate
+        let text_height = 30;
 
-        draw_text_mut(&mut output, text_color, text_x, text_y, 20.0, font, &label);
+        if text_x + text_width < output.width() && text_y + text_height < output.height() {
+            let bg_rect = Rect::at(text_x as i32, text_y as i32).of_size(text_width, text_height);
+            draw_filled_rect_mut(&mut output, bg_rect, bg_color);
+
+            // Draw text on top
+            draw_text_mut(
+                &mut output,
+                text_color,
+                text_x as i32,
+                (text_y + 5) as i32,
+                20.0,
+                font,
+                &label,
+            );
+        }
+
+        // Optionally rotate the image to show corrected orientation
+        // This is commented out as it would require additional dependencies
+        /*
+        if let Ok(angle) = orientation.parse::<i32>() {
+            if angle != 0 {
+                info!("Note: Image would need to be rotated {}° for correct orientation", (360 - angle) % 360);
+            }
+        }
+        */
     }
 
     output

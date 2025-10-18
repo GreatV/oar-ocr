@@ -309,17 +309,19 @@ impl DocTrPostProcess {
 
         let mut images = Vec::with_capacity(batch_size);
 
+        let scale = self.scale;
+
         for b in 0..batch_size {
             let mut img = RgbImage::new(width as u32, height as u32);
 
             for y in 0..height {
                 for x in 0..width {
-                    // Extract RGB values and denormalize
-                    let r = (output[[b, 0, y, x]] * 255.0).clamp(0.0, 255.0) as u8;
-                    let g = (output[[b, 1, y, x]] * 255.0).clamp(0.0, 255.0) as u8;
-                    let b_val = (output[[b, 2, y, x]] * 255.0).clamp(0.0, 255.0) as u8;
+                    // Model outputs are in BGR order; convert back to RGB.
+                    let b_val = (output[[b, 0, y, x]] * scale).clamp(0.0, 255.0) as u8;
+                    let g_val = (output[[b, 1, y, x]] * scale).clamp(0.0, 255.0) as u8;
+                    let r_val = (output[[b, 2, y, x]] * scale).clamp(0.0, 255.0) as u8;
 
-                    img.put_pixel(x as u32, y as u32, Rgb([r, g, b_val]));
+                    img.put_pixel(x as u32, y as u32, Rgb([r_val, g_val, b_val]));
                 }
             }
 

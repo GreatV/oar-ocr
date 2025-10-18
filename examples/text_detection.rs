@@ -19,24 +19,20 @@
 //! # Example
 //!
 //! ```bash
-//! cargo run --example text_detection -- -m model.onnx -o output/ -d cuda image1.jpg image2.jpg
+//! cargo run --example text_detection -- -m model.onnx -o output/ -d cpu image1.jpg image2.jpg
 //! ```
 
 use clap::Parser;
-use oar_ocr::core::config::onnx::{OrtExecutionProvider, OrtSessionConfig};
-use oar_ocr::core::traits::StandardPredictor;
-use oar_ocr::predictor::TextDetPredictorBuilder;
-use oar_ocr::utils::init_tracing;
-use oar_ocr::utils::load_image;
-use std::path::Path;
-use tracing::{error, info};
+use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
+use oar_ocr::core::traits::task::{ImageTaskInput, Task};
+use oar_ocr::domain::tasks::text_detection::{TextDetectionConfig, TextDetectionTask};
+use oar_ocr::models::detection::DBTextDetectionAdapterBuilder;
+use std::path::PathBuf;
+use std::time::Instant;
+use tracing::{error, info, warn};
 
-// Visualization-specific imports
 #[cfg(feature = "visualization")]
-use oar_ocr::utils::visualization::visualize_detection_results;
-
-#[cfg(not(feature = "visualization"))]
-use tracing::warn;
+use image::RgbImage;
 
 /// Command-line arguments for the text detection example
 #[derive(Parser)]
@@ -45,124 +41,68 @@ use tracing::warn;
 struct Args {
     /// Path to the text detection model file
     #[arg(short, long)]
-    model_path: String,
+    model_path: PathBuf,
 
     /// Paths to input images to process
     #[arg(required = true)]
-    images: Vec<String>,
+    images: Vec<PathBuf>,
 
     /// Directory to save visualization results
     #[arg(short, long)]
-    output_dir: String,
+    output_dir: Option<PathBuf>,
 
     /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
     #[arg(short, long, default_value = "cpu")]
     device: String,
+
+    /// Score threshold for detection (default: 0.3)
+    #[arg(long, default_value = "0.3")]
+    thresh: f32,
+
+    /// Box threshold for filtering (default: 0.6)
+    #[arg(long, default_value = "0.6")]
+    box_thresh: f32,
+
+    /// Unclip ratio for expanding detected regions (default: 2.0)
+    #[arg(long, default_value = "2.0")]
+    unclip_ratio: f32,
+
+    /// Maximum candidates to consider (default: 1000)
+    #[arg(long, default_value = "1000")]
+    max_candidates: usize,
+
+    /// Session pool size for concurrent inference (default: 1)
+    #[arg(long, default_value = "1")]
+    session_pool_size: usize,
+
+    /// Enable verbose output
+    #[arg(short, long)]
+    verbose: bool,
 }
 
-/// Parse device string and create appropriate ONNX execution provider
-///
-/// # Arguments
-///
-/// * `device` - Device string (e.g., "cpu", "cuda", "cuda:0")
-///
-/// # Returns
-///
-/// Vector of execution providers in order of preference
-fn parse_device(device: &str) -> Result<Vec<OrtExecutionProvider>, Box<dyn std::error::Error>> {
-    let device = device.to_lowercase();
-
-    if device == "cpu" {
-        Ok(vec![OrtExecutionProvider::CPU])
-    } else if device == "cuda" {
-        #[cfg(feature = "cuda")]
-        {
-            Ok(vec![
-                OrtExecutionProvider::CUDA {
-                    device_id: Some(0),
-                    gpu_mem_limit: None,
-                    arena_extend_strategy: None,
-                    cudnn_conv_algo_search: None,
-                    do_copy_in_default_stream: None,
-                    cudnn_conv_use_max_workspace: None,
-                },
-                OrtExecutionProvider::CPU,
-            ])
-        }
-        #[cfg(not(feature = "cuda"))]
-        {
-            error!("CUDA support not compiled in. Falling back to CPU.");
-            Ok(vec![OrtExecutionProvider::CPU])
-        }
-    } else if device.starts_with("cuda:") {
-        #[cfg(feature = "cuda")]
-        {
-            let device_id_str = device.strip_prefix("cuda:").unwrap();
-            let device_id: i32 = device_id_str
-                .parse()
-                .map_err(|_| format!("Invalid CUDA device ID: {}", device_id_str))?;
-
-            Ok(vec![
-                OrtExecutionProvider::CUDA {
-                    device_id: Some(device_id),
-                    gpu_mem_limit: None,
-                    arena_extend_strategy: None,
-                    cudnn_conv_algo_search: None,
-                    do_copy_in_default_stream: None,
-                    cudnn_conv_use_max_workspace: None,
-                },
-                OrtExecutionProvider::CPU,
-            ])
-        }
-        #[cfg(not(feature = "cuda"))]
-        {
-            error!("CUDA support not compiled in. Falling back to CPU.");
-            Ok(vec![OrtExecutionProvider::CPU])
-        }
-    } else {
-        Err(format!(
-            "Unsupported device: {}. Supported devices: cpu, cuda, cuda:N",
-            device
-        )
-        .into())
-    }
-}
-
-/// Main function for the text detection example
-///
-/// This function initializes the OCR pipeline, loads the text detection model,
-/// processes input images, and visualizes the results. It automatically handles
-/// both single and multiple images efficiently.
-///
-/// # Returns
-///
-/// A Result indicating success or failure of the entire operation
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing for logging
-    init_tracing();
+    oar_ocr::utils::init_tracing();
 
     // Parse command-line arguments
     let args = Args::parse();
 
     info!("Text Detection Example");
 
-    // Get the model path from arguments
-    let model_path = &args.model_path;
-
     // Verify that the model file exists
-    if !Path::new(model_path).exists() {
-        error!("Model file not found: {}", model_path);
+    if !args.model_path.exists() {
+        error!("Model file not found: {}", args.model_path.display());
         return Err("Model file not found".into());
     }
 
     // Filter out non-existent image files and log errors for missing files
-    let existing_images: Vec<String> = args
+    let existing_images: Vec<PathBuf> = args
         .images
         .iter()
         .filter(|path| {
-            let exists = Path::new(path).exists();
+            let exists = path.exists();
             if !exists {
-                error!("Image file not found: {}", path);
+                error!("Image file not found: {}", path.display());
             }
             exists
         })
@@ -175,39 +115,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No valid image files found".into());
     }
 
-    // Parse device configuration
-    let execution_providers = parse_device(&args.device)?;
-    info!(
-        "Using device: {} with providers: {:?}",
-        args.device, execution_providers
-    );
+    // Log device configuration
+    info!("Using device: {}", args.device);
+    if args.device != "cpu" {
+        warn!("GPU support not yet implemented in new architecture. Using CPU.");
+    }
 
-    // Create ONNX session configuration with device settings
-    let ort_config = OrtSessionConfig::new().with_execution_providers(execution_providers);
+    // Create detection configuration
+    let config = TextDetectionConfig {
+        score_threshold: args.thresh,
+        box_threshold: args.box_thresh,
+        unclip_ratio: args.unclip_ratio,
+        max_candidates: args.max_candidates,
+    };
 
-    // Create a text detection predictor with specified parameters
-    let predictor = TextDetPredictorBuilder::new()
-        .thresh(0.3) // Binarization threshold
-        .box_thresh(0.6) // Box score threshold
-        .unclip_ratio(2.0) // Unclip ratio for text boxes
-        .limit_side_len(960) // Limit side length for image resizing
-        .limit_type(oar_ocr::processors::LimitType::Max) // Limit type for resizing
-        .max_side_limit(4000) // Maximum side limit for images
-        .model_name("PP-OCRv5_mobile_det") // Model name
-        .ort_session(ort_config) // Set device configuration
-        .build(Path::new(model_path))?;
+    if args.verbose {
+        info!("Detection Configuration:");
+        info!("  Score threshold: {}", config.score_threshold);
+        info!("  Box threshold: {}", config.box_threshold);
+        info!("  Unclip ratio: {}", config.unclip_ratio);
+        info!("  Max candidates: {}", config.max_candidates);
+    }
+
+    // Build the detection adapter
+    if args.verbose {
+        info!("Building detection adapter...");
+        info!("  Model: {}", args.model_path.display());
+        info!("  Session pool size: {}", args.session_pool_size);
+    }
+
+    let adapter = DBTextDetectionAdapterBuilder::new()
+        .with_config(config.clone())
+        .session_pool_size(args.session_pool_size)
+        .build(&args.model_path)?;
+
+    info!("Detection adapter built successfully");
+    if args.verbose {
+        info!("  Task type: {:?}", adapter.info().task_type);
+        info!("  Model name: {}", adapter.info().model_name);
+        info!("  Version: {}", adapter.info().version);
+    }
 
     // Load all images into memory
     info!("Processing {} images...", existing_images.len());
     let mut images = Vec::new();
 
     for image_path in &existing_images {
-        match load_image(Path::new(image_path)) {
+        match image::open(image_path) {
             Ok(img) => {
-                images.push(img);
+                let rgb_img = img.to_rgb8();
+                if args.verbose {
+                    info!(
+                        "Loaded image: {} ({}x{})",
+                        image_path.display(),
+                        rgb_img.width(),
+                        rgb_img.height()
+                    );
+                }
+                images.push(rgb_img);
             }
             Err(e) => {
-                error!("Failed to load image {}: {}", image_path, e);
+                error!("Failed to load image {}: {}", image_path.display(), e);
                 continue;
             }
         }
@@ -218,61 +186,216 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No images could be loaded".into());
     }
 
-    // Perform detection using the predict API (handles both single and batch automatically)
-    let text_det_result = match predictor.predict(images, None) {
-        Ok(result) => result,
-        Err(e) => {
-            error!("Detection failed: {}", e);
-            return Err("Detection failed".into());
-        }
-    };
+    // Create task input
+    let input = ImageTaskInput::new(images.clone());
 
-    // Display results
-    info!("{}", text_det_result);
+    // Create task for validation
+    let task = TextDetectionTask::new(config.clone());
+    task.validate_input(&input)?;
 
-    // Save visualization if feature is enabled
-    #[cfg(feature = "visualization")]
+    // Run detection
+    info!("Running text detection...");
+    let start = Instant::now();
+    let output = adapter.execute(input, Some(&config))?;
+    let duration = start.elapsed();
+
+    info!(
+        "Detection completed in {:.2}ms",
+        duration.as_secs_f64() * 1000.0
+    );
+
+    // Display results for each image
+    for (idx, (image_path, boxes, scores)) in existing_images
+        .iter()
+        .zip(output.boxes.iter())
+        .zip(output.scores.iter())
+        .map(|((path, boxes), scores)| (path, boxes, scores))
+        .enumerate()
     {
-        // For visualization, we need to process each image individually to create separate output files
-        for (i, image_path) in existing_images.iter().enumerate() {
-            if i < text_det_result.input_img.len() {
-                let original_image = &text_det_result.input_img[i];
-                let input_filename = Path::new(image_path)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unknown");
-                let output_filename = format!("{input_filename}_detection.jpg");
-                let output_path = Path::new(&args.output_dir).join(&output_filename);
+        info!("\n=== Results for image {} ===", idx + 1);
+        info!("Image: {}", image_path.display());
+        info!("Total text regions detected: {}", boxes.len());
 
-                // Create a single-image result for visualization
-                let single_result = oar_ocr::predictor::db_detector::TextDetResult {
-                    input_path: vec![text_det_result.input_path[i].clone()],
-                    index: vec![text_det_result.index[i]],
-                    input_img: vec![text_det_result.input_img[i].clone()],
-                    dt_polys: vec![text_det_result.dt_polys[i].clone()],
-                    dt_scores: vec![text_det_result.dt_scores[i].clone()],
-                };
-
-                if let Err(e) = visualize_detection_results(
-                    original_image,
-                    &single_result,
-                    output_path.to_str().unwrap(),
-                ) {
-                    error!("Visualization failed for {}: {}", image_path, e);
+        if boxes.is_empty() {
+            warn!("No text regions found in this image");
+        } else {
+            // Log bounding box details
+            for (i, (bbox, score)) in boxes.iter().zip(scores.iter()).enumerate() {
+                info!("  Box #{}: confidence {:.2}%", i + 1, score * 100.0);
+                if args.verbose {
+                    info!("    Points (x, y):");
+                    for (pt_idx, point) in bbox.points.iter().enumerate() {
+                        info!("      [{}] ({:.1}, {:.1})", pt_idx, point.x, point.y);
+                    }
                 }
             }
         }
     }
 
-    #[cfg(not(feature = "visualization"))]
-    {
-        if !args.output_dir.is_empty() {
-            warn!(
-                "Visualization feature is disabled. To enable visualization, compile with --features visualization"
-            );
+    // Save visualization if output directory is provided
+    #[cfg(feature = "visualization")]
+    if let Some(output_dir) = args.output_dir {
+        // Create output directory if it doesn't exist
+        std::fs::create_dir_all(&output_dir)?;
+
+        info!("\nSaving visualizations to: {}", output_dir.display());
+
+        for (image_path, rgb_img, boxes, scores) in existing_images
+            .iter()
+            .zip(images.iter())
+            .zip(output.boxes.iter())
+            .zip(output.scores.iter())
+            .map(|(((path, img), boxes), scores)| (path, img, boxes, scores))
+        {
+            if !boxes.is_empty() {
+                let input_filename = image_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown");
+                let output_filename = format!("{}_detection.jpg", input_filename);
+                let output_path = output_dir.join(&output_filename);
+
+                let visualized = visualize_detections(rgb_img, boxes, scores);
+                visualized.save(&output_path)?;
+                info!("  Saved: {}", output_path.display());
+            } else {
+                warn!(
+                    "  Skipping visualization for {} (no detections)",
+                    image_path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Visualizes detected text regions by drawing bounding boxes on the image
+#[cfg(feature = "visualization")]
+fn visualize_detections(
+    img: &RgbImage,
+    boxes: &[oar_ocr::processors::BoundingBox],
+    scores: &[f32],
+) -> RgbImage {
+    use image::Rgb;
+    use imageproc::drawing::{draw_filled_circle_mut, draw_hollow_rect_mut, draw_text_mut};
+    use imageproc::rect::Rect;
+
+    let mut output = img.clone();
+    let box_color = Rgb([0u8, 255u8, 0u8]); // Green
+    let text_color = Rgb([255u8, 0u8, 0u8]); // Red for text labels
+    let img_bounds = (output.width() as i32, output.height() as i32);
+
+    // Try to load a font for text rendering
+    let font = load_font();
+
+    for (idx, (bbox, score)) in boxes.iter().zip(scores.iter()).enumerate() {
+        // Convert polygon to rectangle
+        if let Some(rect) = bbox_to_rect(bbox) {
+            // Draw thick rectangle (thickness = 2)
+            for t in 0..2 {
+                let thick_rect = Rect::at(rect.0 - t, rect.1 - t)
+                    .of_size(rect.2 + (2 * t) as u32, rect.3 + (2 * t) as u32);
+
+                if is_rect_in_bounds(&thick_rect, img_bounds) {
+                    draw_hollow_rect_mut(&mut output, thick_rect, box_color);
+                }
+            }
+
+            // Draw corner points
+            for point in &bbox.points {
+                let x = point.x as i32;
+                let y = point.y as i32;
+                if is_point_in_bounds(x, y, img_bounds) {
+                    draw_filled_circle_mut(&mut output, (x, y), 3, box_color);
+                }
+            }
+
+            // Draw label with index and confidence score
+            if let Some(ref font) = font {
+                let label = format!("#{} {:.1}%", idx + 1, score * 100.0);
+                let label_x = rect.0.max(0);
+                let label_y = (rect.1 - 20).max(0);
+
+                if is_point_in_bounds(label_x, label_y, img_bounds) {
+                    draw_text_mut(
+                        &mut output,
+                        text_color,
+                        label_x,
+                        label_y,
+                        20.0,
+                        font,
+                        &label,
+                    );
+                }
+            }
         }
     }
 
-    info!("Example completed!");
-    Ok(())
+    output
+}
+
+#[cfg(feature = "visualization")]
+fn load_font() -> Option<ab_glyph::FontVec> {
+    use ab_glyph::FontVec;
+
+    // Try common font paths
+    let font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/System/Library/Fonts/Arial.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+    ];
+
+    for path in &font_paths {
+        if let Ok(font_data) = std::fs::read(path)
+            && let Ok(font) = FontVec::try_from_vec(font_data)
+        {
+            return Some(font);
+        }
+    }
+
+    None
+}
+
+#[cfg(feature = "visualization")]
+fn bbox_to_rect(bbox: &oar_ocr::processors::BoundingBox) -> Option<(i32, i32, u32, u32)> {
+    if bbox.points.is_empty() {
+        return None;
+    }
+
+    let (min_x, max_x, min_y, max_y) = bbox.points.iter().fold(
+        (
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ),
+        |(min_x, max_x, min_y, max_y), p| {
+            (
+                min_x.min(p.x),
+                max_x.max(p.x),
+                min_y.min(p.y),
+                max_y.max(p.y),
+            )
+        },
+    );
+
+    let x = min_x as i32;
+    let y = min_y as i32;
+    let width = (max_x - min_x).max(0.0).round() as u32;
+    let height = (max_y - min_y).max(0.0).round() as u32;
+
+    (width > 0 && height > 0).then_some((x, y, width, height))
+}
+
+#[cfg(feature = "visualization")]
+fn is_rect_in_bounds(rect: &imageproc::rect::Rect, img_bounds: (i32, i32)) -> bool {
+    let (img_width, img_height) = img_bounds;
+    rect.left() >= 0 && rect.top() >= 0 && rect.right() < img_width && rect.bottom() < img_height
+}
+
+#[cfg(feature = "visualization")]
+fn is_point_in_bounds(x: i32, y: i32, img_bounds: (i32, i32)) -> bool {
+    let (img_width, img_height) = img_bounds;
+    x >= 0 && y >= 0 && x < img_width && y < img_height
 }

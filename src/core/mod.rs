@@ -18,6 +18,7 @@ pub mod errors;
 pub mod inference;
 #[macro_use]
 pub mod macros;
+pub mod registry;
 pub mod traits;
 
 // Image utilities are now available directly from oar_ocr::utils
@@ -46,8 +47,12 @@ pub use inference::{
     DefaultImageReader, OrtInfer, OrtInfer2D, OrtInfer3D, OrtInfer4D, load_session,
 };
 pub use traits::{
-    BasePredictor, GranularImageReader, ImageReader, InferenceEngine, ModularPredictor,
-    Postprocessor, PredictorBuilder, PredictorConfig, Preprocessor, Sampler, StandardPredictor,
+    AdapterBuilder, AdapterInfo, AdapterTask, BasePredictor, GranularImageReader, ImageReader,
+    ImageTaskInput, InferenceEngine, ModelAdapter, ModularPredictor, Postprocessor,
+    PredictorBuilder, PredictorConfig, Preprocessor, Sampler, StandardPredictor, Task, TaskRunner,
+    TaskSchema, TaskType,
 };
+
+pub use registry::{DynModelAdapter, ModelRegistry};
 
 // init_tracing function has been moved to oar_ocr::utils::init_tracing

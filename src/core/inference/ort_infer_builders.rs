@@ -121,9 +121,14 @@ impl OrtInfer {
 
         let input_name = common_names
             .iter()
-            .find(|&name| available_inputs.iter().any(|input| input == *name))
-            .unwrap_or(&"x")
-            .to_string();
+            .find_map(|&name| {
+                available_inputs
+                    .iter()
+                    .any(|input| input == name)
+                    .then(|| name.to_string())
+            })
+            .or_else(|| available_inputs.first().cloned())
+            .unwrap_or_else(|| "x".to_string());
 
         sessions.push(Mutex::new(first_session));
 
@@ -228,9 +233,14 @@ impl OrtInfer {
 
         let input_name = common_names
             .iter()
-            .find(|&name| available_inputs.iter().any(|input| input == *name))
-            .unwrap_or(&"x")
-            .to_string();
+            .find_map(|&name| {
+                available_inputs
+                    .iter()
+                    .any(|input| input == name)
+                    .then(|| name.to_string())
+            })
+            .or_else(|| available_inputs.first().cloned())
+            .unwrap_or_else(|| "x".to_string());
 
         Ok(OrtInfer {
             sessions: vec![Mutex::new(session)],
