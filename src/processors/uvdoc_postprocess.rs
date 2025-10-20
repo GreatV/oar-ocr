@@ -4,17 +4,17 @@ use std::str::FromStr;
 
 /// Post-processor for document transformation results.
 ///
-/// The `DocTrPostProcess` struct handles the post-processing of document
+/// The `UVDocPostProcess` struct handles the post-processing of document
 /// transformation model outputs, converting normalized coordinates back
 /// to pixel coordinates and applying various transformations.
 #[derive(Debug)]
-pub struct DocTrPostProcess {
+pub struct UVDocPostProcess {
     /// Scale factor to convert normalized values back to pixel values.
     pub scale: f32,
 }
 
-impl DocTrPostProcess {
-    /// Creates a new DocTrPostProcess instance.
+impl UVDocPostProcess {
+    /// Creates a new UVDocPostProcess instance.
     ///
     /// # Arguments
     ///
@@ -23,9 +23,9 @@ impl DocTrPostProcess {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use oar_ocr::processors::DocTrPostProcess;
+    /// use oar_ocr::processors::UVDocPostProcess;
     ///
-    /// let postprocessor = DocTrPostProcess::new(1.0);
+    /// let postprocessor = UVDocPostProcess::new(1.0);
     /// ```
     pub fn new(scale: f32) -> Self {
         Self { scale }
@@ -62,9 +62,9 @@ impl DocTrPostProcess {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use oar_ocr::processors::DocTrPostProcess;
+    /// use oar_ocr::processors::UVDocPostProcess;
     ///
-    /// let postprocessor = DocTrPostProcess::new(100.0);
+    /// let postprocessor = UVDocPostProcess::new(100.0);
     /// let normalized = vec![0.1, 0.2, 0.8, 0.9];
     /// let pixels = postprocessor.denormalize_coordinates(&normalized);
     /// assert_eq!(pixels, vec![10.0, 20.0, 80.0, 90.0]);
@@ -89,9 +89,9 @@ impl DocTrPostProcess {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use oar_ocr::processors::DocTrPostProcess;
+    /// use oar_ocr::processors::UVDocPostProcess;
     ///
-    /// let postprocessor = DocTrPostProcess::new(100.0);
+    /// let postprocessor = UVDocPostProcess::new(100.0);
     /// let pixels = vec![10.0, 20.0, 80.0, 90.0];
     /// let normalized = postprocessor.normalize_coordinates(&pixels);
     /// assert_eq!(normalized, vec![0.1, 0.2, 0.8, 0.9]);
@@ -119,9 +119,9 @@ impl DocTrPostProcess {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use oar_ocr::processors::DocTrPostProcess;
+    /// use oar_ocr::processors::UVDocPostProcess;
     ///
-    /// let postprocessor = DocTrPostProcess::new(100.0);
+    /// let postprocessor = UVDocPostProcess::new(100.0);
     /// let normalized_bbox = [0.1, 0.2, 0.8, 0.9];
     /// let pixel_bbox = postprocessor.process_bbox(&normalized_bbox);
     /// assert_eq!(pixel_bbox, [10.0, 20.0, 80.0, 90.0]);
@@ -161,9 +161,9 @@ impl DocTrPostProcess {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use oar_ocr::processors::DocTrPostProcess;
+    /// use oar_ocr::processors::UVDocPostProcess;
     ///
-    /// let postprocessor = DocTrPostProcess::new(100.0);
+    /// let postprocessor = UVDocPostProcess::new(100.0);
     /// let normalized_polygon = vec![[0.1, 0.2], [0.8, 0.2], [0.8, 0.9], [0.1, 0.9]];
     /// let pixel_polygon = postprocessor.process_polygon(&normalized_polygon);
     /// assert_eq!(pixel_polygon[0], [10.0, 20.0]);
@@ -332,17 +332,17 @@ impl DocTrPostProcess {
     }
 }
 
-impl Default for DocTrPostProcess {
-    /// Creates a default DocTrPostProcess with scale factor 1.0.
+impl Default for UVDocPostProcess {
+    /// Creates a default UVDocPostProcess with scale factor 1.0.
     fn default() -> Self {
         Self::new(1.0)
     }
 }
 
-impl FromStr for DocTrPostProcess {
+impl FromStr for UVDocPostProcess {
     type Err = std::num::ParseFloatError;
 
-    /// Creates a DocTrPostProcess from a string representation of the scale factor.
+    /// Creates a UVDocPostProcess from a string representation of the scale factor.
     ///
     /// # Arguments
     ///
@@ -350,7 +350,7 @@ impl FromStr for DocTrPostProcess {
     ///
     /// # Returns
     ///
-    /// * `Ok(DocTrPostProcess)` - If the string can be parsed as a float.
+    /// * `Ok(UVDocPostProcess)` - If the string can be parsed as a float.
     /// * `Err(ParseFloatError)` - If the string cannot be parsed.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let scale = s.parse::<f32>()?;
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn test_denormalize_coordinates() {
-        let postprocessor = DocTrPostProcess::new(100.0);
+        let postprocessor = UVDocPostProcess::new(100.0);
         let normalized = vec![0.1, 0.2, 0.8, 0.9];
         let pixels = postprocessor.denormalize_coordinates(&normalized);
         assert_eq!(pixels, vec![10.0, 20.0, 80.0, 90.0]);
@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn test_normalize_coordinates() {
-        let postprocessor = DocTrPostProcess::new(100.0);
+        let postprocessor = UVDocPostProcess::new(100.0);
         let pixels = vec![10.0, 20.0, 80.0, 90.0];
         let normalized = postprocessor.normalize_coordinates(&pixels);
         assert_eq!(normalized, vec![0.1, 0.2, 0.8, 0.9]);
@@ -380,7 +380,7 @@ mod tests {
 
     #[test]
     fn test_process_bbox() {
-        let postprocessor = DocTrPostProcess::new(100.0);
+        let postprocessor = UVDocPostProcess::new(100.0);
         let normalized_bbox = [0.1, 0.2, 0.8, 0.9];
         let pixel_bbox = postprocessor.process_bbox(&normalized_bbox);
         assert_eq!(pixel_bbox, [10.0, 20.0, 80.0, 90.0]);
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn test_process_polygon() {
-        let postprocessor = DocTrPostProcess::new(100.0);
+        let postprocessor = UVDocPostProcess::new(100.0);
         let normalized_polygon = vec![[0.1, 0.2], [0.8, 0.2], [0.8, 0.9], [0.1, 0.9]];
         let pixel_polygon = postprocessor.process_polygon(&normalized_polygon);
         assert_eq!(pixel_polygon[0], [10.0, 20.0]);
@@ -397,7 +397,7 @@ mod tests {
 
     #[test]
     fn test_clamp_coordinates() {
-        let postprocessor = DocTrPostProcess::new(1.0);
+        let postprocessor = UVDocPostProcess::new(1.0);
         let coords = vec![-10.0, 50.0, 150.0];
         let clamped = postprocessor.clamp_coordinates(&coords, 0.0, 100.0);
         assert_eq!(clamped, vec![0.0, 50.0, 100.0]);
@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn test_validate_coordinates() {
-        let postprocessor = DocTrPostProcess::new(1.0);
+        let postprocessor = UVDocPostProcess::new(1.0);
         let valid_coords = vec![10.0, 50.0, 90.0];
         let invalid_coords = vec![10.0, 150.0, 90.0];
 
@@ -415,7 +415,7 @@ mod tests {
 
     #[test]
     fn test_round_coordinates() {
-        let postprocessor = DocTrPostProcess::new(1.0);
+        let postprocessor = UVDocPostProcess::new(1.0);
         let coords = vec![10.3, 20.7, 30.5];
         let rounded = postprocessor.round_coordinates(&coords);
         assert_eq!(rounded, vec![10, 21, 31]);
@@ -423,15 +423,15 @@ mod tests {
 
     #[test]
     fn test_from_str() {
-        let postprocessor: DocTrPostProcess = "2.5".parse().unwrap();
+        let postprocessor: UVDocPostProcess = "2.5".parse().unwrap();
         assert_eq!(postprocessor.scale(), 2.5);
 
-        assert!("invalid".parse::<DocTrPostProcess>().is_err());
+        assert!("invalid".parse::<UVDocPostProcess>().is_err());
     }
 
     #[test]
     fn test_zero_scale_normalize() {
-        let postprocessor = DocTrPostProcess::new(0.0);
+        let postprocessor = UVDocPostProcess::new(0.0);
         let pixels = vec![10.0, 20.0];
         let normalized = postprocessor.normalize_coordinates(&pixels);
         assert_eq!(normalized, vec![0.0, 0.0]);

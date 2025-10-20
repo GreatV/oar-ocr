@@ -18,6 +18,6 @@ pub mod oarocr;
 
 // Re-export the main OCR pipeline components for easier access
 pub use oarocr::{
-    EdgeProcessor, EdgeProcessorConfig, EdgeProcessorFactory, ErrorMetrics, ImageProcessor,
-    ModelBinding, OAROCRResult, TaskGraphBuilder, TaskGraphConfig, TaskNode, TextRegion,
+    EdgeProcessor, EdgeProcessorConfig, EdgeProcessorFactory, ErrorMetrics, ModelBinding,
+    OAROCRResult, TaskGraphBuilder, TaskGraphConfig, TaskNode, TextRegion,
 };

@@ -4,8 +4,8 @@
 //! For example, cropping and perspective transformation between detection and recognition.
 
 use crate::core::OCRError;
-use crate::pipeline::oarocr::image_processing::ImageProcessor;
 use crate::processors::BoundingBox;
+use crate::utils::BBoxCrop;
 use image::RgbImage;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
@@ -88,10 +88,10 @@ impl TextCroppingProcessor {
     fn crop_single(&self, image: &RgbImage, bbox: &BoundingBox) -> Result<RgbImage, OCRError> {
         if self.handle_rotation && bbox.points.len() == 4 {
             // Rotated bounding box (quadrilateral) - use perspective transform
-            ImageProcessor::crop_rotated_bounding_box(image, bbox)
+            BBoxCrop::crop_rotated_bounding_box(image, bbox)
         } else {
             // Regular axis-aligned bounding box
-            ImageProcessor::crop_bounding_box(image, bbox)
+            BBoxCrop::crop_bounding_box(image, bbox)
         }
     }
 }
@@ -210,7 +210,8 @@ where
 }
 
 /// Type alias for text cropping processor output
-type TextCroppingOutput = Box<dyn EdgeProcessor<Input = (RgbImage, Vec<BoundingBox>), Output = Vec<Option<RgbImage>>>>;
+type TextCroppingOutput =
+    Box<dyn EdgeProcessor<Input = (RgbImage, Vec<BoundingBox>), Output = Vec<Option<RgbImage>>>>;
 
 /// Type alias for image rotation processor output
 type ImageRotationOutput = Box<

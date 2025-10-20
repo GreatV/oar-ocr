@@ -1,14 +1,14 @@
-//! Image processing utilities for the OAROCR pipeline.
+//! Bounding box based image cropping utilities.
 
 use crate::core::OCRError;
 use crate::processors::BoundingBox;
 use crate::utils::transform::{Point2f, get_rotate_crop_image};
 use image::{RgbImage, imageops};
 
-/// Image processing utilities for the OAROCR pipeline.
-pub struct ImageProcessor;
+/// Bounding box based image cropping utilities.
+pub struct BBoxCrop;
 
-impl ImageProcessor {
+impl BBoxCrop {
     /// Crops an image based on a bounding box.
     ///
     /// This function calculates the bounding rectangle of a polygonal bounding box
@@ -230,7 +230,7 @@ mod tests {
             ],
         };
 
-        let result = ImageProcessor::crop_bounding_box(&img, &bbox);
+        let result = BBoxCrop::crop_bounding_box(&img, &bbox);
         assert!(result.is_ok());
 
         let cropped = result.unwrap();
@@ -243,7 +243,7 @@ mod tests {
         let img = create_test_image(100, 100);
         let bbox = BoundingBox { points: vec![] };
 
-        let result = ImageProcessor::crop_bounding_box(&img, &bbox);
+        let result = BBoxCrop::crop_bounding_box(&img, &bbox);
         assert!(result.is_err());
 
         let error_msg = result.unwrap_err().to_string();
@@ -257,7 +257,7 @@ mod tests {
             points: vec![Point { x: 50.0, y: 50.0 }],
         };
 
-        let result = ImageProcessor::crop_bounding_box(&img, &bbox);
+        let result = BBoxCrop::crop_bounding_box(&img, &bbox);
         assert!(result.is_err());
 
         let error_msg = result.unwrap_err().to_string();
@@ -276,7 +276,7 @@ mod tests {
             ],
         };
 
-        let result = ImageProcessor::crop_bounding_box(&img, &bbox);
+        let result = BBoxCrop::crop_bounding_box(&img, &bbox);
         assert!(result.is_ok());
 
         let cropped = result.unwrap();
@@ -297,7 +297,7 @@ mod tests {
             ],
         };
 
-        let result = ImageProcessor::crop_bounding_box(&img, &bbox);
+        let result = BBoxCrop::crop_bounding_box(&img, &bbox);
         assert!(result.is_ok());
 
         let cropped = result.unwrap();
@@ -319,7 +319,7 @@ mod tests {
             ],
         };
 
-        let result = ImageProcessor::crop_bounding_box(&img, &bbox);
+        let result = BBoxCrop::crop_bounding_box(&img, &bbox);
         assert!(result.is_ok());
 
         let cropped = result.unwrap();
@@ -340,7 +340,7 @@ mod tests {
             ],
         };
 
-        let result = ImageProcessor::crop_rotated_bounding_box(&img, &bbox);
+        let result = BBoxCrop::crop_rotated_bounding_box(&img, &bbox);
         assert!(result.is_ok());
 
         let cropped = result.unwrap();
@@ -359,7 +359,7 @@ mod tests {
             ], // Only 3 points instead of 4
         };
 
-        let result = ImageProcessor::crop_rotated_bounding_box(&img, &bbox);
+        let result = BBoxCrop::crop_rotated_bounding_box(&img, &bbox);
         assert!(result.is_err());
 
         let error_msg = result.unwrap_err().to_string();
@@ -378,7 +378,7 @@ mod tests {
                 Point { x: 10.0, y: 50.0 },
             ],
         };
-        let cropped_fast = ImageProcessor::crop_rotated_bounding_box(&img, &bbox).unwrap();
+        let cropped_fast = BBoxCrop::crop_rotated_bounding_box(&img, &bbox).unwrap();
         // Expected via simple crop
         let expected = imageops::crop_imm(&img, 10, 20, 50, 30).to_image();
         assert_eq!(cropped_fast.dimensions(), expected.dimensions());
@@ -392,7 +392,7 @@ mod tests {
         let img = create_test_image(100, 100);
         let coords = (10, 20, 50, 60);
 
-        let sliced = ImageProcessor::slice_rgb_image(&img, coords);
+        let sliced = BBoxCrop::slice_rgb_image(&img, coords);
         assert_eq!(sliced.width(), 40); // 50 - 10
         assert_eq!(sliced.height(), 40); // 60 - 20
 

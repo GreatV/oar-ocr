@@ -4,6 +4,7 @@
 //! including image processing helpers, tensor conversion functions, cropping helpers,
 //! classification utilities, and logging setup.
 
+pub mod bbox_crop;
 pub mod crop;
 pub mod image;
 pub mod tensor;
@@ -29,6 +30,7 @@ pub use tensor::*;
 pub use transform::{Point2f, get_rotate_crop_image};
 
 // Re-export shared processors-style utilities
+pub use bbox_crop::BBoxCrop;
 pub use crop::Crop;
 pub use topk::{Topk, TopkResult};
 

@@ -4,6 +4,7 @@
 
 pub mod document_orientation;
 pub mod document_rectification;
+pub mod formula_recognition;
 pub mod layout_detection;
 pub mod text_detection;
 pub mod text_line_orientation;
@@ -14,6 +15,9 @@ pub use document_orientation::{
 };
 pub use document_rectification::{
     DocumentRectificationConfig, DocumentRectificationOutput, DocumentRectificationTask,
+};
+pub use formula_recognition::{
+    FormulaRecognitionConfig, FormulaRecognitionOutput, FormulaRecognitionTask,
 };
 pub use layout_detection::{
     LayoutDetectionConfig, LayoutDetectionOutput, LayoutDetectionTask, LayoutElement,

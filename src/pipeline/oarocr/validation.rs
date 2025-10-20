@@ -70,19 +70,19 @@ pub fn validate_adapter_schema<A: ModelAdapter>(
 ///
 /// Result indicating success or a detailed error describing incompatibilities
 pub fn validate_registry_schemas(registry: &ModelRegistry) -> Result<(), OCRError> {
-    let adapters = registry.list_all()?;
+    let adapters = registry.list_all_with_ids()?;
 
-    for adapter_info in adapters {
+    for (registry_id, adapter_info) in adapters {
         // Create expected schema for this task type
         let expected_schema = create_expected_schema(adapter_info.task_type);
 
         // Look up the adapter
         let adapter = registry
-            .lookup(adapter_info.task_type, &adapter_info.model_name)?
+            .lookup(adapter_info.task_type, &registry_id)?
             .ok_or_else(|| OCRError::ConfigError {
                 message: format!(
-                    "Adapter '{}' not found in registry",
-                    adapter_info.model_name
+                    "Adapter '{}' (id '{}') not found in registry",
+                    adapter_info.model_name, registry_id
                 ),
             })?;
 
@@ -90,8 +90,9 @@ pub fn validate_registry_schemas(registry: &ModelRegistry) -> Result<(), OCRErro
         if adapter.task_type() != expected_schema.task_type {
             return Err(OCRError::ConfigError {
                 message: format!(
-                    "Adapter '{}' has task type {:?} but expected {:?}",
+                    "Adapter '{}' (id '{}') has task type {:?} but expected {:?}",
                     adapter_info.model_name,
+                    registry_id,
                     adapter.task_type(),
                     expected_schema.task_type
                 ),
@@ -142,6 +143,11 @@ pub fn create_expected_schema(task_type: TaskType) -> TaskSchema {
             TaskType::LayoutDetection,
             vec!["image".to_string()],
             vec!["layout_elements".to_string()],
+        ),
+        TaskType::FormulaRecognition => TaskSchema::new(
+            TaskType::FormulaRecognition,
+            vec!["image".to_string()],
+            vec!["latex_formula".to_string(), "confidence".to_string()],
         ),
     }
 }

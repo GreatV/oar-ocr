@@ -2,6 +2,6 @@
 //!
 //! This module contains adapters for document rectification models.
 
-pub mod doctr_rectifier_adapter;
+pub mod uvdoc_adapter;
 
-pub use doctr_rectifier_adapter::{DoctrRectifierAdapter, DoctrRectifierAdapterBuilder};
+pub use uvdoc_adapter::{UVDocRectifierAdapter, UVDocRectifierAdapterBuilder};

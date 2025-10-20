@@ -31,7 +31,7 @@ use oar_ocr::core::traits::task::{ImageTaskInput, Task};
 use oar_ocr::domain::tasks::document_orientation::{
     DocumentOrientationConfig, DocumentOrientationTask,
 };
-use oar_ocr::models::classification::DocOrientationAdapterBuilder;
+use oar_ocr::models::classification::pp_lcnet_adapter::PPLCNetAdapterBuilder;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
@@ -146,7 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("  Session pool size: {}", args.session_pool_size);
     }
 
-    let adapter = DocOrientationAdapterBuilder::new()
+    let adapter = PPLCNetAdapterBuilder::<DocumentOrientationTask>::new()
         .with_config(config.clone())
         .input_shape((args.input_height, args.input_width))
         .session_pool_size(args.session_pool_size)

@@ -41,14 +41,9 @@ impl CRNNTextRecognitionAdapter {
         resizer: OCRResize,
         normalizer: NormalizeImage,
         decoder: CTCLabelDecode,
+        info: AdapterInfo,
         config: TextRecognitionConfig,
     ) -> Self {
-        let info = AdapterInfo::new(
-            "CRNN",
-            "1.0.0",
-            crate::core::traits::task::TaskType::TextRecognition,
-            "Convolutional Recurrent Neural Network text recognizer",
-        );
         Self {
             inference,
             resizer,
@@ -147,6 +142,8 @@ pub struct CRNNTextRecognitionAdapterBuilder {
     session_pool_size: usize,
     /// Maximum image width
     max_img_w: Option<usize>,
+    /// Optional override for the registered model name
+    model_name_override: Option<String>,
 }
 
 impl CRNNTextRecognitionAdapterBuilder {
@@ -158,6 +155,7 @@ impl CRNNTextRecognitionAdapterBuilder {
             character_dict: None,
             session_pool_size: 1,
             max_img_w: None,
+            model_name_override: None,
         }
     }
 
@@ -188,6 +186,12 @@ impl CRNNTextRecognitionAdapterBuilder {
     /// Sets the maximum image width.
     pub fn max_img_w(mut self, max_img_w: usize) -> Self {
         self.max_img_w = Some(max_img_w);
+        self
+    }
+
+    /// Sets a custom model name for registry registration.
+    pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
+        self.model_name_override = Some(model_name.into());
         self
     }
 }
@@ -238,11 +242,22 @@ impl AdapterBuilder for CRNNTextRecognitionAdapterBuilder {
             CTCLabelDecode::new(None, true)
         };
 
+        let mut info = AdapterInfo::new(
+            "CRNN",
+            "1.0.0",
+            crate::core::traits::task::TaskType::TextRecognition,
+            "Convolutional Recurrent Neural Network text recognizer",
+        );
+        if let Some(model_name) = self.model_name_override {
+            info.model_name = model_name;
+        }
+
         Ok(CRNNTextRecognitionAdapter::new(
             inference,
             resizer,
             normalizer,
             decoder,
+            info,
             self.task_config,
         ))
     }

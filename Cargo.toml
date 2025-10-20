@@ -1,6 +1,6 @@
 [package]
 name = "oar-ocr"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["Wang Xin <xinwang614@gmail.com>"]
@@ -45,6 +45,7 @@ thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ab_glyph = { version = "0.2", optional = true }
+tokenizers = "0.20"
 
 [dev-dependencies]
 clap = { version = "4.5.42", features = ["derive"] }

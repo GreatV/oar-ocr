@@ -223,4 +223,172 @@ impl OrtInfer {
             Ok(array_view.to_owned())
         })
     }
+
+    /// Runs inference with int64 outputs (for models that output token IDs).
+    ///
+    /// This method is similar to `run_inference_with_processor` but extracts i64 tensors
+    /// instead of f32 tensors.
+    fn run_inference_with_processor_i64<T>(
+        &self,
+        x: &Tensor4D,
+        processor: impl FnOnce(&[i64], &[i64]) -> Result<T, OCRError>,
+    ) -> Result<T, OCRError> {
+        let input_shape = x.shape().to_vec();
+
+        let output_name = self.get_output_name().map_err(|e| {
+            OCRError::inference_error(
+                &self.model_name,
+                &format!(
+                    "Failed to get output name for model at '{}'",
+                    self.model_path.display()
+                ),
+                e,
+            )
+        })?;
+
+        let input_tensor = TensorRef::from_array_view(x.view()).map_err(|e| {
+            OCRError::model_inference_error(
+                &self.model_name,
+                "tensor_conversion",
+                0,
+                &input_shape,
+                &format!(
+                    "Failed to convert input tensor with shape {:?}",
+                    input_shape
+                ),
+                e,
+            )
+        })?;
+
+        let inputs = ort::inputs![self.input_name.as_str() => input_tensor];
+
+        let idx = self
+            .next_idx
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % self.sessions.len();
+        let mut session_guard = self.sessions[idx].lock().map_err(|_| {
+            OCRError::inference_error(
+                &self.model_name,
+                &format!(
+                    "Failed to acquire session lock for session {}/{}",
+                    idx,
+                    self.sessions.len()
+                ),
+                crate::core::errors::SimpleError::new("Session lock acquisition failed"),
+            )
+        })?;
+
+        // Collect declared output names before running (avoid borrow conflicts later)
+        let output_names: Vec<String> = session_guard
+            .outputs
+            .iter()
+            .map(|o| o.name.clone())
+            .collect();
+
+        let outputs = session_guard.run(inputs).map_err(|e| {
+            OCRError::model_inference_error(
+                &self.model_name,
+                "forward_pass",
+                0,
+                &input_shape,
+                &format!(
+                    "ONNX Runtime inference failed with input '{}' -> output '{}'",
+                    self.input_name, output_name
+                ),
+                e,
+            )
+        })?;
+
+        // Try the discovered output name first; if it isn't i64, scan other outputs for an i64 tensor.
+        let mut extracted: Option<(Vec<i64>, &[i64])> = None;
+
+        // Helper to try extract by name
+        let try_extract_by = |name: &str| -> Option<(Vec<i64>, &[i64])> {
+            match outputs[name].try_extract_tensor::<i64>() {
+                Ok((shape, data)) => Some((shape.to_vec(), data)),
+                Err(_) => None,
+            }
+        };
+
+        // First attempt: the default output name
+        if let Some((shape, data)) = try_extract_by(output_name.as_str()) {
+            extracted = Some((shape, data));
+        } else {
+            // Fallback: iterate declared outputs to find any i64 tensor
+            for name in &output_names {
+                if name.as_str() == output_name.as_str() {
+                    continue;
+                }
+                if let Some((shape, data)) = try_extract_by(name.as_str()) {
+                    extracted = Some((shape, data));
+                    break;
+                }
+            }
+        }
+
+        let (output_shape, output_data) = match extracted {
+            Some((shape, data)) => (shape, data),
+            None => {
+                // Build a helpful error listing available outputs
+                let available: Vec<String> = output_names.clone();
+                return Err(OCRError::model_inference_error(
+                    &self.model_name,
+                    "output_extraction",
+                    0,
+                    &input_shape,
+                    &format!(
+                        "Failed to extract any output as i64. Tried '{}' first. Available outputs: {:?}",
+                        output_name, available
+                    ),
+                    crate::core::errors::SimpleError::new("No i64 output tensor found"),
+                ));
+            }
+        };
+
+        processor(&output_shape, output_data)
+    }
+
+    /// Runs inference and returns a 2D int64 tensor.
+    ///
+    /// This is useful for models that output token IDs (e.g., formula recognition).
+    /// The output shape is typically [batch_size, sequence_length].
+    pub fn infer_2d_i64(&self, x: &Tensor4D) -> Result<ndarray::Array2<i64>, OCRError> {
+        self.run_inference_with_processor_i64(x, |output_shape, output_data| {
+            if output_shape.len() != 2 {
+                return Err(OCRError::tensor_operation_error(
+                    "output_validation",
+                    &[2],
+                    &[output_shape.len()],
+                    &format!(
+                        "Model '{}' 2D i64 inference: expected 2D output tensor, got {}D with shape {:?}",
+                        self.model_name,
+                        output_shape.len(),
+                        output_shape
+                    ),
+                    crate::core::errors::SimpleError::new("Invalid output tensor dimensions"),
+                ));
+            }
+
+            let batch_size_out = output_shape[0] as usize;
+            let seq_len = output_shape[1] as usize;
+            let expected_len = batch_size_out * seq_len;
+
+            if output_data.len() != expected_len {
+                return Err(OCRError::tensor_operation_error(
+                    "output_data_validation",
+                    &[expected_len],
+                    &[output_data.len()],
+                    &format!(
+                        "Model '{}' 2D i64 inference: output data size mismatch",
+                        self.model_name
+                    ),
+                    crate::core::errors::SimpleError::new("Output tensor data size mismatch"),
+                ));
+            }
+
+            let array_view = ArrayView2::from_shape((batch_size_out, seq_len), output_data)
+                .map_err(OCRError::Tensor)?;
+            Ok(array_view.to_owned())
+        })
+    }
 }

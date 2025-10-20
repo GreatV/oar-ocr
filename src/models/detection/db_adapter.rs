@@ -41,14 +41,9 @@ impl DBTextDetectionAdapter {
         resizer: DetResizeForTest,
         normalizer: NormalizeImage,
         postprocessor: DBPostProcess,
+        info: AdapterInfo,
         config: TextDetectionConfig,
     ) -> Self {
-        let info = AdapterInfo::new(
-            "DB",
-            "1.0.0",
-            crate::core::traits::task::TaskType::TextDetection,
-            "Differentiable Binarization text detector",
-        );
         Self {
             inference,
             resizer,
@@ -144,6 +139,8 @@ pub struct DBTextDetectionAdapterBuilder {
     max_side_limit: Option<u32>,
     /// Session pool size for ONNX Runtime
     session_pool_size: usize,
+    /// Optional override for the registered model name
+    model_name_override: Option<String>,
 }
 
 impl DBTextDetectionAdapterBuilder {
@@ -155,6 +152,7 @@ impl DBTextDetectionAdapterBuilder {
             limit_type: None,
             max_side_limit: None,
             session_pool_size: 1,
+            model_name_override: None,
         }
     }
 
@@ -179,6 +177,12 @@ impl DBTextDetectionAdapterBuilder {
     /// Sets the session pool size.
     pub fn session_pool_size(mut self, size: usize) -> Self {
         self.session_pool_size = size;
+        self
+    }
+
+    /// Sets a custom model name for registry registration.
+    pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
+        self.model_name_override = Some(model_name.into());
         self
     }
 }
@@ -237,11 +241,22 @@ impl AdapterBuilder for DBTextDetectionAdapterBuilder {
             None, // box_type
         );
 
+        let mut info = AdapterInfo::new(
+            "DB",
+            "1.0.0",
+            crate::core::traits::task::TaskType::TextDetection,
+            "Differentiable Binarization text detector",
+        );
+        if let Some(model_name) = self.model_name_override {
+            info.model_name = model_name;
+        }
+
         Ok(DBTextDetectionAdapter::new(
             inference,
             resizer,
             normalizer,
             postprocessor,
+            info,
             self.task_config,
         ))
     }

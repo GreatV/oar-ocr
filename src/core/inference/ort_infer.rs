@@ -4,7 +4,7 @@ use crate::core::{
     batch::{Tensor2D, Tensor3D, Tensor4D},
     errors::OCRError,
 };
-use ort::session::Session;
+use ort::{session::Session, value::ValueType};
 use std::sync::Mutex;
 
 #[path = "ort_infer_builders.rs"]
@@ -35,5 +35,20 @@ impl std::fmt::Debug for OrtInfer {
             .field("model_path", &self.model_path)
             .field("model_name", &self.model_name)
             .finish()
+    }
+}
+
+impl OrtInfer {
+    /// Attempts to retrieve the primary input tensor shape from the first session.
+    ///
+    /// Returns a vector of dimensions if available. Dynamic dimensions (e.g., -1) are returned as-is.
+    pub fn primary_input_shape(&self) -> Option<Vec<i64>> {
+        let session_mutex = self.sessions.first()?;
+        let session_guard = session_mutex.lock().ok()?;
+        let input = session_guard.inputs.first()?;
+        match &input.input_type {
+            ValueType::Tensor { shape, .. } => Some(shape.iter().copied().collect()),
+            _ => None,
+        }
     }
 }

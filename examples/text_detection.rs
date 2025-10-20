@@ -74,10 +74,6 @@ struct Args {
     /// Session pool size for concurrent inference (default: 1)
     #[arg(long, default_value = "1")]
     session_pool_size: usize,
-
-    /// Enable verbose output
-    #[arg(short, long)]
-    verbose: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -129,32 +125,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_candidates: args.max_candidates,
     };
 
-    if args.verbose {
-        info!("Detection Configuration:");
-        info!("  Score threshold: {}", config.score_threshold);
-        info!("  Box threshold: {}", config.box_threshold);
-        info!("  Unclip ratio: {}", config.unclip_ratio);
-        info!("  Max candidates: {}", config.max_candidates);
-    }
-
     // Build the detection adapter
-    if args.verbose {
-        info!("Building detection adapter...");
-        info!("  Model: {}", args.model_path.display());
-        info!("  Session pool size: {}", args.session_pool_size);
-    }
-
     let adapter = DBTextDetectionAdapterBuilder::new()
         .with_config(config.clone())
         .session_pool_size(args.session_pool_size)
         .build(&args.model_path)?;
 
     info!("Detection adapter built successfully");
-    if args.verbose {
-        info!("  Task type: {:?}", adapter.info().task_type);
-        info!("  Model name: {}", adapter.info().model_name);
-        info!("  Version: {}", adapter.info().version);
-    }
 
     // Load all images into memory
     info!("Processing {} images...", existing_images.len());
@@ -164,14 +141,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match image::open(image_path) {
             Ok(img) => {
                 let rgb_img = img.to_rgb8();
-                if args.verbose {
-                    info!(
-                        "Loaded image: {} ({}x{})",
-                        image_path.display(),
-                        rgb_img.width(),
-                        rgb_img.height()
-                    );
-                }
                 images.push(rgb_img);
             }
             Err(e) => {
@@ -221,13 +190,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             // Log bounding box details
             for (i, (bbox, score)) in boxes.iter().zip(scores.iter()).enumerate() {
-                info!("  Box #{}: confidence {:.2}%", i + 1, score * 100.0);
-                if args.verbose {
-                    info!("    Points (x, y):");
-                    for (pt_idx, point) in bbox.points.iter().enumerate() {
-                        info!("      [{}] ({:.1}, {:.1})", pt_idx, point.x, point.y);
-                    }
-                }
+                // Calculate bounding box rectangle for display
+                let (min_x, max_x, min_y, max_y) = bbox.points.iter().fold(
+                    (
+                        f32::INFINITY,
+                        f32::NEG_INFINITY,
+                        f32::INFINITY,
+                        f32::NEG_INFINITY,
+                    ),
+                    |(min_x, max_x, min_y, max_y), p| {
+                        (
+                            min_x.min(p.x),
+                            max_x.max(p.x),
+                            min_y.min(p.y),
+                            max_y.max(p.y),
+                        )
+                    },
+                );
+
+                info!(
+                    "  Box #{}: [{:.0}, {:.0}, {:.0}, {:.0}] confidence {:.2}%",
+                    i + 1,
+                    min_x,
+                    min_y,
+                    max_x,
+                    max_y,
+                    score * 100.0
+                );
             }
         }
     }

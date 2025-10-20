@@ -67,7 +67,7 @@ type AdapterMap = Arc<RwLock<HashMap<(TaskType, String), Arc<dyn DynModelAdapter
 /// The registry allows registering, looking up, and managing model adapters
 /// for different tasks. It supports multiple adapters per task type.
 pub struct ModelRegistry {
-    /// Map from (task_type, model_name) to adapter
+    /// Map from (task_type, registry_id) to adapter
     adapters: AdapterMap,
 }
 
@@ -90,7 +90,21 @@ impl ModelRegistry {
     /// Result indicating success or error if registration fails
     pub fn register<A: ModelAdapter + 'static>(&self, adapter: A) -> Result<(), OCRError> {
         let info = adapter.info();
-        let key = (info.task_type, info.model_name.clone());
+        self.register_with_id(info.model_name.clone(), adapter)
+    }
+
+    /// Registers a model adapter with an explicit registry identifier.
+    ///
+    /// This allows multiple adapters with the same `AdapterInfo` model name to
+    /// coexist by storing them under different registry keys (e.g., binding names).
+    pub fn register_with_id<A: ModelAdapter + 'static>(
+        &self,
+        id: impl Into<String>,
+        adapter: A,
+    ) -> Result<(), OCRError> {
+        let info = adapter.info();
+        let id = id.into();
+        let key = (info.task_type, id.clone());
 
         let mut adapters = self.adapters.write().map_err(|e| OCRError::ConfigError {
             message: format!("Failed to acquire write lock on registry: {}", e),
@@ -99,7 +113,7 @@ impl ModelRegistry {
         if adapters.contains_key(&key) {
             return Err(OCRError::ConfigError {
                 message: format!(
-                    "Adapter for task {:?} with model '{}' is already registered",
+                    "Adapter for task {:?} with id '{}' is already registered",
                     key.0, key.1
                 ),
             });
@@ -109,12 +123,12 @@ impl ModelRegistry {
         Ok(())
     }
 
-    /// Looks up an adapter by task type and model name.
+    /// Looks up an adapter by task type and registry identifier.
     ///
     /// # Arguments
     ///
     /// * `task_type` - The type of task
-    /// * `model_name` - The name of the model
+    /// * `id` - The registry identifier used when registering the adapter
     ///
     /// # Returns
     ///
@@ -122,13 +136,13 @@ impl ModelRegistry {
     pub fn lookup(
         &self,
         task_type: TaskType,
-        model_name: &str,
+        id: &str,
     ) -> Result<Option<Arc<dyn DynModelAdapter>>, OCRError> {
         let adapters = self.adapters.read().map_err(|e| OCRError::ConfigError {
             message: format!("Failed to acquire read lock on registry: {}", e),
         })?;
 
-        Ok(adapters.get(&(task_type, model_name.to_string())).cloned())
+        Ok(adapters.get(&(task_type, id.to_string())).cloned())
     }
 
     /// Lists all registered adapters for a given task type.
@@ -158,11 +172,23 @@ impl ModelRegistry {
     ///
     /// Vector of all adapter info in the registry
     pub fn list_all(&self) -> Result<Vec<AdapterInfo>, OCRError> {
+        Ok(self
+            .list_all_with_ids()?
+            .into_iter()
+            .map(|(_, info)| info)
+            .collect())
+    }
+
+    /// Lists all registered adapters along with their registry identifiers.
+    pub fn list_all_with_ids(&self) -> Result<Vec<(String, AdapterInfo)>, OCRError> {
         let adapters = self.adapters.read().map_err(|e| OCRError::ConfigError {
             message: format!("Failed to acquire read lock on registry: {}", e),
         })?;
 
-        Ok(adapters.values().map(|adapter| adapter.info()).collect())
+        Ok(adapters
+            .iter()
+            .map(|((_, id), adapter)| (id.clone(), adapter.info()))
+            .collect())
     }
 
     /// Removes an adapter from the registry.
@@ -170,22 +196,22 @@ impl ModelRegistry {
     /// # Arguments
     ///
     /// * `task_type` - The type of task
-    /// * `model_name` - The name of the model
+    /// * `id` - The registry identifier used when registering the adapter
     ///
     /// # Returns
     ///
     /// Result indicating success or error
-    pub fn unregister(&self, task_type: TaskType, model_name: &str) -> Result<(), OCRError> {
+    pub fn unregister(&self, task_type: TaskType, id: &str) -> Result<(), OCRError> {
         let mut adapters = self.adapters.write().map_err(|e| OCRError::ConfigError {
             message: format!("Failed to acquire write lock on registry: {}", e),
         })?;
 
-        let key = (task_type, model_name.to_string());
+        let key = (task_type, id.to_string());
         if adapters.remove(&key).is_none() {
             return Err(OCRError::ConfigError {
                 message: format!(
-                    "Adapter for task {:?} with model '{}' not found",
-                    task_type, model_name
+                    "Adapter for task {:?} with id '{}' not found",
+                    task_type, id
                 ),
             });
         }

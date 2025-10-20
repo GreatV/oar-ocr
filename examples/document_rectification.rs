@@ -21,7 +21,7 @@
 //!
 //! ```bash
 //! cargo run --example document_rectification -- \
-//!     -m models/doctr_rectifier.onnx \
+//!     -m models/uvdoc_rectifier.onnx \
 //!     -o output/ \
 //!     distorted_doc1.jpg distorted_doc2.jpg
 //! ```
@@ -32,7 +32,7 @@ use oar_ocr::core::traits::task::{ImageTaskInput, Task};
 use oar_ocr::domain::tasks::document_rectification::{
     DocumentRectificationConfig, DocumentRectificationTask,
 };
-use oar_ocr::models::rectification::DoctrRectifierAdapterBuilder;
+use oar_ocr::models::rectification::UVDocRectifierAdapterBuilder;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
@@ -140,7 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let builder = DoctrRectifierAdapterBuilder::new()
+    let builder = UVDocRectifierAdapterBuilder::new()
         .with_config(config.clone())
         .session_pool_size(args.session_pool_size);
 

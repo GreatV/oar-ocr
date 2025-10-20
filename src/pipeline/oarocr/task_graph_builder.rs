@@ -6,13 +6,18 @@
 
 use crate::core::traits::{TaskType, adapter::AdapterBuilder};
 use crate::core::{ModelRegistry, OCRError};
+use crate::domain::tasks::FormulaRecognitionConfig;
 use crate::models::classification::{
     DocOrientationAdapterBuilder, TextLineOrientationAdapterBuilder,
 };
 use crate::models::detection::DBTextDetectionAdapterBuilder;
-use crate::models::recognition::CRNNTextRecognitionAdapterBuilder;
-use crate::models::rectification::DoctrRectifierAdapterBuilder;
+use crate::models::recognition::{
+    CRNNTextRecognitionAdapterBuilder, PPFormulaNetAdapterBuilder, UniMERNetFormulaAdapterBuilder,
+};
+use crate::models::rectification::UVDocRectifierAdapterBuilder;
 use crate::pipeline::oarocr::task_graph_config::{ModelBinding, TaskGraphConfig};
+use serde::Deserialize;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Builder for constructing task graphs from configuration.
@@ -85,13 +90,110 @@ impl TaskGraphBuilder {
                     ),
                 });
             }
+            TaskType::FormulaRecognition => {
+                self.build_formula_adapter(name, binding)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Builds a formula recognition adapter.
+    fn build_formula_adapter(&self, name: &str, binding: &ModelBinding) -> Result<(), OCRError> {
+        let settings: FormulaAdapterSettings = binding
+            .config
+            .as_ref()
+            .map(|value| {
+                serde_json::from_value(value.clone()).map_err(|err| OCRError::ConfigError {
+                    message: format!(
+                        "Invalid formula recognition config for model '{}': {}",
+                        name, err
+                    ),
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        let variant_source = settings
+            .model_type
+            .clone()
+            .unwrap_or_else(|| binding.model_name.clone());
+
+        let variant = FormulaModelVariant::detect(&variant_source).ok_or_else(|| {
+            OCRError::ConfigError {
+                message: format!(
+                    "Unsupported formula recognition model type '{}' for binding '{}'. \
+                    Specify 'model_type' in the binding config (e.g., 'unimernet', 'pp-formulanet').",
+                    variant_source, name
+                ),
+            }
+        })?;
+
+        let mut task_config = FormulaRecognitionConfig::default();
+        if let Some(score_threshold) = settings.score_threshold {
+            task_config.score_threshold = score_threshold;
+        }
+        if let Some(max_length) = settings.max_length {
+            task_config.max_length = max_length;
+        }
+
+        let target_size = match (settings.target_width, settings.target_height) {
+            (Some(width), Some(height)) => Some((width, height)),
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(OCRError::ConfigError {
+                    message: format!(
+                        "Formula model '{}' must specify both 'target_width' and 'target_height' \
+                         or neither.",
+                        name
+                    ),
+                });
+            }
+            _ => None,
+        };
+
+        let tokenizer_path = settings.tokenizer_path.clone();
+        let session_pool_size = binding.session_pool_size;
+
+        match variant {
+            FormulaModelVariant::UniMERNet => {
+                let mut builder =
+                    UniMERNetFormulaAdapterBuilder::new().with_config(task_config.clone());
+                if let Some(session_pool_size) = session_pool_size {
+                    builder = builder.session_pool_size(session_pool_size);
+                }
+                builder = builder.model_name(binding.model_name.clone());
+                if let Some((width, height)) = target_size {
+                    builder = builder.target_size(width, height);
+                }
+                if let Some(path) = tokenizer_path.as_ref() {
+                    builder = builder.tokenizer_path(path.clone());
+                }
+                let adapter = builder.build(&binding.model_path)?;
+                self.registry.register_with_id(name.to_string(), adapter)?;
+            }
+            FormulaModelVariant::PPFormulaNet => {
+                let mut builder =
+                    PPFormulaNetAdapterBuilder::new().with_config(task_config.clone());
+                if let Some(session_pool_size) = session_pool_size {
+                    builder = builder.session_pool_size(session_pool_size);
+                }
+                builder = builder.model_name(binding.model_name.clone());
+                if let Some((width, height)) = target_size {
+                    builder = builder.target_size(width, height);
+                }
+                if let Some(path) = tokenizer_path.as_ref() {
+                    builder = builder.tokenizer_path(path.clone());
+                }
+                let adapter = builder.build(&binding.model_path)?;
+                self.registry.register_with_id(name.to_string(), adapter)?;
+            }
         }
 
         Ok(())
     }
 
     /// Builds a text detection adapter.
-    fn build_detection_adapter(&self, _name: &str, binding: &ModelBinding) -> Result<(), OCRError> {
+    fn build_detection_adapter(&self, name: &str, binding: &ModelBinding) -> Result<(), OCRError> {
         let mut builder = DBTextDetectionAdapterBuilder::new();
 
         // Apply configuration if provided
@@ -99,11 +201,13 @@ impl TaskGraphBuilder {
             builder = builder.session_pool_size(session_pool_size);
         }
 
+        builder = builder.model_name(binding.model_name.clone());
+
         // Build the adapter
         let adapter = builder.build(&binding.model_path)?;
 
-        // Register in the registry
-        self.registry.register(adapter)?;
+        // Register in the registry using the binding name as identifier
+        self.registry.register_with_id(name.to_string(), adapter)?;
 
         Ok(())
     }
@@ -111,7 +215,7 @@ impl TaskGraphBuilder {
     /// Builds a text recognition adapter.
     fn build_recognition_adapter(
         &self,
-        _name: &str,
+        name: &str,
         binding: &ModelBinding,
     ) -> Result<(), OCRError> {
         // Get character dictionary path
@@ -138,11 +242,13 @@ impl TaskGraphBuilder {
             builder = builder.session_pool_size(session_pool_size);
         }
 
+        builder = builder.model_name(binding.model_name.clone());
+
         // Build the adapter
         let adapter = builder.build(&binding.model_path)?;
 
-        // Register in the registry
-        self.registry.register(adapter)?;
+        // Register in the registry using the binding name as identifier
+        self.registry.register_with_id(name.to_string(), adapter)?;
 
         Ok(())
     }
@@ -150,7 +256,7 @@ impl TaskGraphBuilder {
     /// Builds a document orientation adapter.
     fn build_doc_orientation_adapter(
         &self,
-        _name: &str,
+        name: &str,
         binding: &ModelBinding,
     ) -> Result<(), OCRError> {
         let mut builder = DocOrientationAdapterBuilder::new();
@@ -160,11 +266,13 @@ impl TaskGraphBuilder {
             builder = builder.session_pool_size(session_pool_size);
         }
 
+        builder = builder.model_name(binding.model_name.clone());
+
         // Build the adapter
         let adapter = builder.build(&binding.model_path)?;
 
-        // Register in the registry
-        self.registry.register(adapter)?;
+        // Register in the registry using the binding name as identifier
+        self.registry.register_with_id(name.to_string(), adapter)?;
 
         Ok(())
     }
@@ -172,7 +280,7 @@ impl TaskGraphBuilder {
     /// Builds a text line orientation adapter.
     fn build_text_line_orientation_adapter(
         &self,
-        _name: &str,
+        name: &str,
         binding: &ModelBinding,
     ) -> Result<(), OCRError> {
         let mut builder = TextLineOrientationAdapterBuilder::new();
@@ -182,11 +290,13 @@ impl TaskGraphBuilder {
             builder = builder.session_pool_size(session_pool_size);
         }
 
+        builder = builder.model_name(binding.model_name.clone());
+
         // Build the adapter
         let adapter = builder.build(&binding.model_path)?;
 
-        // Register in the registry
-        self.registry.register(adapter)?;
+        // Register in the registry using the binding name as identifier
+        self.registry.register_with_id(name.to_string(), adapter)?;
 
         Ok(())
     }
@@ -194,21 +304,23 @@ impl TaskGraphBuilder {
     /// Builds a document rectification adapter.
     fn build_rectification_adapter(
         &self,
-        _name: &str,
+        name: &str,
         binding: &ModelBinding,
     ) -> Result<(), OCRError> {
-        let mut builder = DoctrRectifierAdapterBuilder::new();
+        let mut builder = UVDocRectifierAdapterBuilder::new();
 
         // Apply configuration if provided
         if let Some(session_pool_size) = binding.session_pool_size {
             builder = builder.session_pool_size(session_pool_size);
         }
 
+        builder = builder.model_name(binding.model_name.clone());
+
         // Build the adapter
         let adapter = builder.build(&binding.model_path)?;
 
-        // Register in the registry
-        self.registry.register(adapter)?;
+        // Register in the registry using the binding name as identifier
+        self.registry.register_with_id(name.to_string(), adapter)?;
 
         Ok(())
     }
@@ -242,5 +354,42 @@ mod tests {
         let config = TaskGraphConfig::new();
         let builder = TaskGraphBuilder::new(config);
         assert!(builder.validate().is_ok());
+    }
+}
+
+/// Additional configuration for formula adapters parsed from model bindings.
+#[derive(Debug, Default, Clone, Deserialize)]
+struct FormulaAdapterSettings {
+    #[serde(default)]
+    model_type: Option<String>,
+    #[serde(default)]
+    tokenizer_path: Option<PathBuf>,
+    #[serde(default)]
+    target_width: Option<u32>,
+    #[serde(default)]
+    target_height: Option<u32>,
+    #[serde(default)]
+    score_threshold: Option<f32>,
+    #[serde(default)]
+    max_length: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FormulaModelVariant {
+    UniMERNet,
+    PPFormulaNet,
+}
+
+impl FormulaModelVariant {
+    fn detect(source: &str) -> Option<Self> {
+        let key = source.to_ascii_lowercase();
+
+        if key.contains("unimernet") {
+            Some(Self::UniMERNet)
+        } else if key.contains("formula") && (key.contains("pp") || key.contains("net")) {
+            Some(Self::PPFormulaNet)
+        } else {
+            None
+        }
     }
 }

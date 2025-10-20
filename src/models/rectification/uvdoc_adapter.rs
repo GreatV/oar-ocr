@@ -1,4 +1,4 @@
-//! DocTR rectifier adapter implementation.
+//! UVDoc rectifier adapter implementation.
 //!
 //! This module provides an adapter for document rectification that directly
 //! implements preprocessing, ONNX inference, and postprocessing without using predictor wrappers.
@@ -9,21 +9,21 @@ use crate::core::{OCRError, Tensor4D};
 use crate::domain::tasks::document_rectification::{
     DocumentRectificationConfig, DocumentRectificationOutput, DocumentRectificationTask,
 };
-use crate::processors::{ChannelOrder, DocTrPostProcess, NormalizeImage};
+use crate::processors::{ChannelOrder, NormalizeImage, UVDocPostProcess};
 use image::{DynamicImage, RgbImage, imageops::FilterType};
 use std::path::Path;
 
-/// Adapter for DocTR document rectifier.
+/// Adapter for UVDoc document rectifier.
 ///
 /// This adapter directly implements document rectification using ONNX inference.
 #[derive(Debug)]
-pub struct DoctrRectifierAdapter {
+pub struct UVDocRectifierAdapter {
     /// ONNX Runtime inference engine
     inference: OrtInfer,
     /// Image normalizer for preprocessing
     normalizer: NormalizeImage,
-    /// DocTR postprocessor for converting tensor to images
-    postprocessor: DocTrPostProcess,
+    /// UVDoc postprocessor for converting tensor to images
+    postprocessor: UVDocPostProcess,
     /// Input shape [channels, height, width]
     rec_image_shape: [usize; 3],
     /// Adapter information
@@ -33,21 +33,16 @@ pub struct DoctrRectifierAdapter {
     config: DocumentRectificationConfig,
 }
 
-impl DoctrRectifierAdapter {
-    /// Creates a new DocTR rectifier adapter.
+impl UVDocRectifierAdapter {
+    /// Creates a new UVDoc rectifier adapter.
     pub fn new(
         inference: OrtInfer,
         normalizer: NormalizeImage,
-        postprocessor: DocTrPostProcess,
+        postprocessor: UVDocPostProcess,
         rec_image_shape: [usize; 3],
+        info: AdapterInfo,
         config: DocumentRectificationConfig,
     ) -> Self {
-        let info = AdapterInfo::new(
-            "doctr_rectifier",
-            "1.0.0",
-            crate::core::traits::task::TaskType::DocumentRectification,
-            "DocTR document rectifier for correcting image distortions",
-        );
         Self {
             inference,
             normalizer,
@@ -95,7 +90,7 @@ impl DoctrRectifierAdapter {
         predictions: &Tensor4D,
         original_sizes: &[(u32, u32)],
     ) -> Result<Vec<RgbImage>, OCRError> {
-        // Use DocTrPostProcess to convert tensor to images
+        // Use UVDocPostProcess to convert tensor to images
         let mut images =
             self.postprocessor
                 .apply_batch(predictions)
@@ -132,7 +127,7 @@ impl DoctrRectifierAdapter {
     }
 }
 
-impl ModelAdapter for DoctrRectifierAdapter {
+impl ModelAdapter for UVDocRectifierAdapter {
     type Task = DocumentRectificationTask;
 
     fn info(&self) -> AdapterInfo {
@@ -167,23 +162,26 @@ impl ModelAdapter for DoctrRectifierAdapter {
     }
 }
 
-/// Builder for DocTR rectifier adapter.
+/// Builder for UVDoc rectifier adapter.
 ///
 /// This builder provides a fluent API for configuring and creating
-/// a DocTR rectifier adapter instance.
-pub struct DoctrRectifierAdapterBuilder {
+/// a UVDoc rectifier adapter instance.
+pub struct UVDocRectifierAdapterBuilder {
     /// Task configuration
     task_config: DocumentRectificationConfig,
     /// Session pool size for ONNX Runtime
     session_pool_size: usize,
+    /// Optional override for the registered model name
+    model_name_override: Option<String>,
 }
 
-impl DoctrRectifierAdapterBuilder {
+impl UVDocRectifierAdapterBuilder {
     /// Creates a new builder with default configuration.
     pub fn new() -> Self {
         Self {
             task_config: DocumentRectificationConfig::default(),
             session_pool_size: 1,
+            model_name_override: None,
         }
     }
 
@@ -202,17 +200,23 @@ impl DoctrRectifierAdapterBuilder {
         self.session_pool_size = size;
         self
     }
+
+    /// Sets a custom model name for registry registration.
+    pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
+        self.model_name_override = Some(model_name.into());
+        self
+    }
 }
 
-impl Default for DoctrRectifierAdapterBuilder {
+impl Default for UVDocRectifierAdapterBuilder {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl AdapterBuilder for DoctrRectifierAdapterBuilder {
+impl AdapterBuilder for UVDocRectifierAdapterBuilder {
     type Config = DocumentRectificationConfig;
-    type Adapter = DoctrRectifierAdapter;
+    type Adapter = UVDocRectifierAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
         // Create ONNX inference engine
@@ -235,14 +239,25 @@ impl AdapterBuilder for DoctrRectifierAdapterBuilder {
             Some(ChannelOrder::CHW),
         )?;
 
-        // Create DocTR postprocessor
-        let postprocessor = DocTrPostProcess::new(255.0);
+        // Create UVDoc postprocessor
+        let postprocessor = UVDocPostProcess::new(255.0);
 
-        Ok(DoctrRectifierAdapter::new(
+        let mut info = AdapterInfo::new(
+            "uvdoc_rectifier",
+            "1.0.0",
+            crate::core::traits::task::TaskType::DocumentRectification,
+            "UVDoc document rectifier for correcting image distortions",
+        );
+        if let Some(model_name) = self.model_name_override {
+            info.model_name = model_name;
+        }
+
+        Ok(UVDocRectifierAdapter::new(
             inference,
             normalizer,
             postprocessor,
             self.task_config.rec_image_shape,
+            info,
             self.task_config,
         ))
     }
@@ -253,7 +268,7 @@ impl AdapterBuilder for DoctrRectifierAdapterBuilder {
     }
 
     fn adapter_type(&self) -> &str {
-        "doctr_rectifier"
+        "uvdoc_rectifier"
     }
 }
 
@@ -263,8 +278,8 @@ mod tests {
 
     #[test]
     fn test_builder_creation() {
-        let builder = DoctrRectifierAdapterBuilder::new();
-        assert_eq!(builder.adapter_type(), "doctr_rectifier");
+        let builder = UVDocRectifierAdapterBuilder::new();
+        assert_eq!(builder.adapter_type(), "uvdoc_rectifier");
     }
 
     #[test]
@@ -273,28 +288,28 @@ mod tests {
             rec_image_shape: [3, 1024, 1024],
         };
 
-        let builder = DoctrRectifierAdapterBuilder::new().with_config(config.clone());
+        let builder = UVDocRectifierAdapterBuilder::new().with_config(config.clone());
         assert_eq!(builder.task_config.rec_image_shape, [3, 1024, 1024]);
     }
 
     #[test]
     fn test_builder_fluent_api() {
-        let builder = DoctrRectifierAdapterBuilder::new().input_shape([3, 768, 768]);
+        let builder = UVDocRectifierAdapterBuilder::new().input_shape([3, 768, 768]);
 
         assert_eq!(builder.task_config.rec_image_shape, [3, 768, 768]);
     }
 
     #[test]
     fn test_default_builder() {
-        let builder = DoctrRectifierAdapterBuilder::default();
-        assert_eq!(builder.adapter_type(), "doctr_rectifier");
+        let builder = UVDocRectifierAdapterBuilder::default();
+        assert_eq!(builder.adapter_type(), "uvdoc_rectifier");
         assert_eq!(builder.task_config.rec_image_shape, [3, 0, 0]);
     }
 
     #[test]
     fn test_builder_with_session_pool() {
-        let builder = DoctrRectifierAdapterBuilder::new().session_pool_size(4);
+        let builder = UVDocRectifierAdapterBuilder::new().session_pool_size(4);
 
-        assert_eq!(builder.adapter_type(), "doctr_rectifier");
+        assert_eq!(builder.adapter_type(), "uvdoc_rectifier");
     }
 }
