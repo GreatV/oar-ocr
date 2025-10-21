@@ -1,5 +1,6 @@
 use crate::processors::geometry::{BoundingBox, Point};
 use crate::processors::types::ScoreMode;
+use clipper2::{EndType, JoinType, Path as ClipperPath};
 use image::GrayImage;
 use imageproc::contours::find_contours;
 
@@ -68,10 +69,13 @@ impl DBPostProcess {
             let scaled_points: Vec<Point> = unclipped_points
                 .iter()
                 .map(|point| {
-                    Point::new(
-                        (point.x * width_scale).max(0.0).min(dest_width as f32),
-                        (point.y * height_scale).max(0.0).min(dest_height as f32),
-                    )
+                    let x = (point.x * width_scale)
+                        .round()
+                        .clamp(0.0, dest_width as f32);
+                    let y = (point.y * height_scale)
+                        .round()
+                        .clamp(0.0, dest_height as f32);
+                    Point::new(x, y)
                 })
                 .collect();
 
@@ -136,10 +140,13 @@ impl DBPostProcess {
             let scaled_points: Vec<Point> = box_points
                 .iter()
                 .map(|point| {
-                    Point::new(
-                        (point.x * width_scale).max(0.0).min(dest_width as f32),
-                        (point.y * height_scale).max(0.0).min(dest_height as f32),
-                    )
+                    let x = (point.x * width_scale)
+                        .round()
+                        .clamp(0.0, dest_width as f32);
+                    let y = (point.y * height_scale)
+                        .round()
+                        .clamp(0.0, dest_height as f32);
+                    Point::new(x, y)
                 })
                 .collect();
 
@@ -151,36 +158,71 @@ impl DBPostProcess {
     }
 
     fn unclip(&self, bbox: &BoundingBox, unclip_ratio: f32) -> BoundingBox {
-        let area = bbox.area();
-        let length = bbox.perimeter();
-
-        if length <= f32::EPSILON {
+        if bbox.points.len() < 3 {
             return bbox.clone();
         }
 
-        let distance = area * unclip_ratio / length;
-
-        let n = bbox.points.len() as f32;
-        let center_x = bbox.points.iter().map(|p| p.x).sum::<f32>() / n;
-        let center_y = bbox.points.iter().map(|p| p.y).sum::<f32>() / n;
-
-        let expanded_points: Vec<Point> = bbox
+        let clipper_path: ClipperPath = bbox
             .points
             .iter()
-            .map(|point| {
-                let dx = point.x - center_x;
-                let dy = point.y - center_y;
-                let dist = (dx * dx + dy * dy).sqrt();
+            .map(|point| (point.x as f64, point.y as f64))
+            .collect::<Vec<_>>()
+            .into();
 
-                if dist > f32::EPSILON {
-                    let expansion = distance / dist;
-                    Point::new(point.x + dx * expansion, point.y + dy * expansion)
-                } else {
-                    *point
-                }
-            })
+        if clipper_path.len() < 3 {
+            return BoundingBox::new(Vec::new());
+        }
+
+        let area = clipper_path.signed_area().abs();
+        if area <= f64::EPSILON {
+            return BoundingBox::new(Vec::new());
+        }
+
+        let coords: Vec<(f64, f64)> = clipper_path.iter().map(|p| (p.x(), p.y())).collect();
+        let mut perimeter = 0.0f64;
+        for i in 0..coords.len() {
+            let (x1, y1) = coords[i];
+            let (x2, y2) = coords[(i + 1) % coords.len()];
+            let dx = x2 - x1;
+            let dy = y2 - y1;
+            perimeter += (dx * dx + dy * dy).sqrt();
+        }
+
+        if perimeter <= f64::EPSILON {
+            return BoundingBox::new(Vec::new());
+        }
+
+        let delta = area * unclip_ratio as f64 / perimeter;
+        if delta.abs() <= f64::EPSILON {
+            return BoundingBox::new(Vec::new());
+        }
+
+        let offset_paths = clipper_path.inflate(delta, JoinType::Round, EndType::Polygon, 2.0);
+
+        if offset_paths.len() != 1 {
+            return BoundingBox::new(Vec::new());
+        }
+
+        let path = offset_paths.into_iter().next().unwrap();
+
+        let mut points: Vec<Point> = path
+            .iter()
+            .map(|pt| Point::new(pt.x() as f32, pt.y() as f32))
             .collect();
 
-        BoundingBox::new(expanded_points)
+        // Remove duplicate closing point if present
+        if points.len() > 1 {
+            let first = points.first().unwrap();
+            let last = points.last().unwrap();
+            if (first.x - last.x).abs() < f32::EPSILON && (first.y - last.y).abs() < f32::EPSILON {
+                points.pop();
+            }
+        }
+
+        if points.len() < 3 {
+            return BoundingBox::new(Vec::new());
+        }
+
+        BoundingBox::new(points)
     }
 }

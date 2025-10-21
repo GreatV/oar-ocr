@@ -106,6 +106,14 @@ impl DBPostProcess {
         let height = pred.shape()[0] as u32;
         let width = pred.shape()[1] as u32;
 
+        tracing::debug!(
+            "DBPostProcess: pred {}x{}, src {}x{} (dest dimensions)",
+            height,
+            width,
+            src_h,
+            src_w
+        );
+
         let mut segmentation = vec![vec![false; width as usize]; height as usize];
         for y in 0..height as usize {
             for x in 0..width as usize {

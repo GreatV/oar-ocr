@@ -46,6 +46,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ab_glyph = { version = "0.2", optional = true }
 tokenizers = "0.20"
+clipper2 = "0.5.3"
 
 [dev-dependencies]
 clap = { version = "4.5.42", features = ["derive"] }

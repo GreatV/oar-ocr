@@ -6,6 +6,7 @@ pub mod document_orientation;
 pub mod document_rectification;
 pub mod formula_recognition;
 pub mod layout_detection;
+pub mod seal_text_detection;
 pub mod text_detection;
 pub mod text_line_orientation;
 pub mod text_recognition;
@@ -22,6 +23,9 @@ pub use formula_recognition::{
 pub use layout_detection::{
     LayoutDetectionConfig, LayoutDetectionOutput, LayoutDetectionTask, LayoutElement,
     LayoutElementType,
+};
+pub use seal_text_detection::{
+    SealTextDetectionConfig, SealTextDetectionOutput, SealTextDetectionTask,
 };
 pub use text_detection::{TextDetectionConfig, TextDetectionOutput, TextDetectionTask};
 pub use text_line_orientation::{

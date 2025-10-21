@@ -26,6 +26,8 @@ pub enum TaskType {
     LayoutDetection,
     /// Formula recognition - converting mathematical formulas to LaTeX
     FormulaRecognition,
+    /// Seal text detection - locating text regions in seal/stamp images
+    SealTextDetection,
 }
 
 impl TaskType {
@@ -39,6 +41,7 @@ impl TaskType {
             TaskType::DocumentRectification => "document_rectification",
             TaskType::LayoutDetection => "layout_detection",
             TaskType::FormulaRecognition => "formula_recognition",
+            TaskType::SealTextDetection => "seal_text_detection",
         }
     }
 }

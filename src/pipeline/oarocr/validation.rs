@@ -149,6 +149,11 @@ pub fn create_expected_schema(task_type: TaskType) -> TaskSchema {
             vec!["image".to_string()],
             vec!["latex_formula".to_string(), "confidence".to_string()],
         ),
+        TaskType::SealTextDetection => TaskSchema::new(
+            TaskType::SealTextDetection,
+            vec!["image".to_string()],
+            vec!["seal_text_boxes".to_string(), "scores".to_string()],
+        ),
     }
 }
 

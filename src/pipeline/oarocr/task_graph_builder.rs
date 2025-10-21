@@ -10,7 +10,7 @@ use crate::domain::tasks::FormulaRecognitionConfig;
 use crate::models::classification::{
     DocOrientationAdapterBuilder, TextLineOrientationAdapterBuilder,
 };
-use crate::models::detection::DBTextDetectionAdapterBuilder;
+use crate::models::detection::{DBTextDetectionAdapterBuilder, SealTextDetectionAdapterBuilder};
 use crate::models::recognition::{
     CRNNTextRecognitionAdapterBuilder, PPFormulaNetAdapterBuilder, UniMERNetFormulaAdapterBuilder,
 };
@@ -81,6 +81,9 @@ impl TaskGraphBuilder {
             }
             TaskType::DocumentRectification => {
                 self.build_rectification_adapter(name, binding)?;
+            }
+            TaskType::SealTextDetection => {
+                self.build_seal_detection_adapter(name, binding)?;
             }
             TaskType::LayoutDetection => {
                 return Err(OCRError::ConfigError {
@@ -195,6 +198,30 @@ impl TaskGraphBuilder {
     /// Builds a text detection adapter.
     fn build_detection_adapter(&self, name: &str, binding: &ModelBinding) -> Result<(), OCRError> {
         let mut builder = DBTextDetectionAdapterBuilder::new();
+
+        // Apply configuration if provided
+        if let Some(session_pool_size) = binding.session_pool_size {
+            builder = builder.session_pool_size(session_pool_size);
+        }
+
+        builder = builder.model_name(binding.model_name.clone());
+
+        // Build the adapter
+        let adapter = builder.build(&binding.model_path)?;
+
+        // Register in the registry using the binding name as identifier
+        self.registry.register_with_id(name.to_string(), adapter)?;
+
+        Ok(())
+    }
+
+    /// Builds a seal text detection adapter.
+    fn build_seal_detection_adapter(
+        &self,
+        name: &str,
+        binding: &ModelBinding,
+    ) -> Result<(), OCRError> {
+        let mut builder = SealTextDetectionAdapterBuilder::new();
 
         // Apply configuration if provided
         if let Some(session_pool_size) = binding.session_pool_size {
