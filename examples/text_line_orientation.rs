@@ -28,10 +28,10 @@
 use clap::Parser;
 use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
 use oar_ocr::core::traits::task::{ImageTaskInput, Task};
+use oar_ocr::domain::adapters::TextLineOrientationAdapterBuilder;
 use oar_ocr::domain::tasks::text_line_orientation::{
     TextLineOrientationConfig, TextLineOrientationTask,
 };
-use oar_ocr::models::classification::pp_lcnet_adapter::PPLCNetAdapterBuilder;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
@@ -146,7 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("  Session pool size: {}", args.session_pool_size);
     }
 
-    let adapter = PPLCNetAdapterBuilder::<TextLineOrientationTask>::new()
+    let adapter = TextLineOrientationAdapterBuilder::new()
         .with_config(config.clone())
         .input_shape((args.input_height, args.input_width))
         .session_pool_size(args.session_pool_size)
@@ -226,25 +226,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let top_label = &labels[0];
             let top_score = scores[0];
 
-            let orientation_text = if top_label == "0" {
-                "Upright (0°)"
-            } else {
-                "Upside-down (180°)"
-            };
-
-            info!("  Detected orientation: {}", orientation_text);
+            info!("  Detected orientation: {}°", top_label);
             info!("  Confidence: {:.2}%", top_score * 100.0);
 
             // Show all predictions if verbose
             if args.verbose && class_ids.len() > 1 {
                 info!("  All predictions:");
                 for (rank, (label, score)) in labels.iter().zip(scores.iter()).enumerate() {
-                    let label_text = if label == "0" {
-                        "Upright (0°)"
-                    } else {
-                        "Upside-down (180°)"
-                    };
-                    info!("    [{}] {} - {:.2}%", rank + 1, label_text, score * 100.0);
+                    info!("    [{}] {}° - {:.2}%", rank + 1, label, score * 100.0);
                 }
             }
         }
@@ -323,11 +312,7 @@ fn visualize_text_line_orientation(
 
     if let Some(ref font) = font {
         // Draw the orientation label with background
-        let label = if orientation == "0" {
-            format!("Upright (0°) - {:.1}%", confidence * 100.0)
-        } else {
-            format!("Upside-down (180°) - {:.1}%", confidence * 100.0)
-        };
+        let label = format!("{}° - {:.1}%", orientation, confidence * 100.0);
 
         // Draw background rectangle for text
         let text_x = 10;

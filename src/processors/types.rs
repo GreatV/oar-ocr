@@ -65,7 +65,7 @@ pub enum ChannelOrder {
 }
 
 /// Specifies the type of bounding box used for text detection
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum BoxType {
     /// Quadrilateral bounding box (4 points)
     Quad,
@@ -74,7 +74,7 @@ pub enum BoxType {
 }
 
 /// Specifies the mode for calculating scores in text detection/recognition
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum ScoreMode {
     /// Fast scoring algorithm (less accurate but faster)
     Fast,

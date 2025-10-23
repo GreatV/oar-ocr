@@ -256,12 +256,10 @@ impl FormulaPreprocessor {
     }
 }
 
-/// Normalizes decoded LaTeX text using PaddleOCR UniMERNet normalization rules.
+/// Normalizes decoded LaTeX text to match PaddleOCR output format.
 ///
-/// This function applies the following transformations:
-/// - Removes Chinese text wrapping (e.g., `\text{中文}` → `中文`)
-/// - Removes quotation marks
-/// - Removes unnecessary whitespace between symbols while preserving LaTeX space commands
+/// This is a direct port of the Python implementation from PaddleX:
+/// paddlex/inference/models/formula_recognition/processors.py
 ///
 /// # Arguments
 /// * `latex` - Raw LaTeX string from model output
@@ -273,32 +271,102 @@ pub fn normalize_latex(latex: &str) -> String {
 
     let mut result = latex.to_string();
 
-    // Remove \text{} wrapping around Chinese characters
+    // Step 1: Remove Chinese text wrapping (from UniMERNetDecode.remove_chinese_text_wrapping)
     let chinese_text_pattern =
         Regex::new(r"\\text\s*\{([^{}]*[\u{4e00}-\u{9fff}]+[^{}]*)\}").unwrap();
     result = chinese_text_pattern.replace_all(&result, "$1").to_string();
-
-    // Remove quotation marks
     result = result.replace('"', "");
 
-    // Define patterns for removing unnecessary spaces
-    // Pattern 1: non-letter (not backslash) followed by space(s) followed by non-letter
-    let re1 = Regex::new(r"([\W&&[^\\]])\s+?([\W_^\d])").unwrap();
-    // Pattern 2: non-letter (not backslash) followed by space(s) followed by letter
-    let re2 = Regex::new(r"([\W&&[^\\]])\s+?([a-zA-Z])").unwrap();
-    // Pattern 3: letter followed by space(s) followed by non-letter
-    let re3 = Regex::new(r"([a-zA-Z])\s+?([\W_^\d])").unwrap();
+    // Step 2: Implement LaTeXOCRDecode.post_process logic
+    // First, handle special LaTeX commands by removing spaces inside them
+    let text_reg = Regex::new(r"(\\(operatorname|mathrm|text|mathbf)\s?\*?\s*\{.*?\})").unwrap();
 
-    // Iteratively remove spaces until convergence
+    // Extract all matches and remove spaces from them
+    let mut names = Vec::new();
+    for mat in text_reg.find_iter(&result) {
+        let text = mat.as_str();
+        // Remove spaces after the command name inside braces
+        let cleaned = text.replace(" ", "");
+        names.push(cleaned);
+    }
+
+    // Replace each match with its space-removed version
+    if !names.is_empty() {
+        let mut names_iter = names.into_iter();
+        result = text_reg
+            .replace_all(&result, |_: &regex::Captures| {
+                names_iter.next().unwrap_or_default()
+            })
+            .to_string();
+    }
+
+    // Step 3: Remove unnecessary spaces using Python's exact patterns
+    // The Python patterns are:
+    // noletter = r"[\W_^\d]" which means: non-word chars, underscore, caret, digits
+    // letter = r"[a-zA-Z]"
+
     let mut prev_result = String::new();
-    let max_iterations = 10; // Safety limit to prevent infinite loops
+    let max_iterations = 10;
     let mut iterations = 0;
 
     while prev_result != result && iterations < max_iterations {
         prev_result = result.clone();
-        result = re1.replace_all(&result, "$1$2").to_string();
-        result = re2.replace_all(&result, "$1$2").to_string();
+
+        // Python pattern 1: r"(?!\\ )(%s)\s+?(%s)" % (noletter, noletter)
+        // This removes spaces between two non-letters unless preceded by backslash-space
+        // We need to be careful not to remove spaces after \\
+        let mut temp = String::new();
+        let chars: Vec<char> = result.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if i + 2 < chars.len()
+                && chars[i] == '\\'
+                && chars[i + 1] == '\\'
+                && chars[i + 2] == ' '
+            {
+                // Keep "\\ " as is
+                temp.push(chars[i]);
+                temp.push(chars[i + 1]);
+                temp.push(chars[i + 2]);
+                i += 3;
+            } else if i + 1 < chars.len() && chars[i + 1].is_whitespace() {
+                // Check if current char is noletter
+                let is_noletter_current = !chars[i].is_ascii_alphabetic();
+                // Check what comes after the space(s)
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                if j < chars.len() {
+                    let is_noletter_next = !chars[j].is_ascii_alphabetic();
+                    if is_noletter_current && is_noletter_next {
+                        // Remove the spaces between two non-letters
+                        temp.push(chars[i]);
+                        i = j;
+                    } else if is_noletter_current && chars[j].is_ascii_alphabetic() {
+                        // Remove spaces between non-letter and letter
+                        temp.push(chars[i]);
+                        i = j;
+                    } else {
+                        temp.push(chars[i]);
+                        i += 1;
+                    }
+                } else {
+                    temp.push(chars[i]);
+                    i += 1;
+                }
+            } else {
+                temp.push(chars[i]);
+                i += 1;
+            }
+        }
+        result = temp;
+
+        // Python pattern 3: r"(%s)\s+?(%s)" % (letter, noletter)
+        // Remove spaces between letter and non-letter
+        let re3 = Regex::new(r"([a-zA-Z])\s+([^a-zA-Z])").unwrap();
         result = re3.replace_all(&result, "$1$2").to_string();
+
         iterations += 1;
     }
 

@@ -41,10 +41,10 @@
 use clap::Parser;
 use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
 use oar_ocr::core::traits::task::{ImageTaskInput, Task};
+use oar_ocr::domain::adapters::{PPFormulaNetAdapterBuilder, UniMERNetFormulaAdapterBuilder};
 use oar_ocr::domain::tasks::formula_recognition::{
     FormulaRecognitionConfig, FormulaRecognitionTask,
 };
-use oar_ocr::models::recognition::{PPFormulaNetAdapterBuilder, UniMERNetFormulaAdapterBuilder};
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
@@ -314,7 +314,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Display results for each image
     info!("\n=== Formula Recognition Results ===");
-    for (idx, (image_path, formula, score)) in existing_images
+    for (idx, (image_path, formula, _score)) in existing_images
         .iter()
         .zip(output.formulas.iter())
         .zip(output.scores.iter())
@@ -326,11 +326,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             warn!("  No formula recognized (below threshold or invalid)");
         } else {
             info!("  LaTeX: {}", formula);
-            if let Some(confidence) = score {
-                info!("  Confidence: {:.2}%", confidence * 100.0);
-            } else {
-                info!("  Confidence: N/A");
-            }
         }
     }
 

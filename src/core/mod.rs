@@ -15,6 +15,7 @@ pub mod batch;
 pub mod config;
 pub mod constants;
 pub mod errors;
+pub mod image_reader;
 pub mod inference;
 #[macro_use]
 pub mod macros;
@@ -43,9 +44,8 @@ pub use config::{
 };
 pub use constants::*;
 pub use errors::{OCRError, OcrResult, ProcessingStage};
-pub use inference::{
-    DefaultImageReader, OrtInfer, OrtInfer2D, OrtInfer3D, OrtInfer4D, load_session,
-};
+pub use image_reader::DefaultImageReader;
+pub use inference::{OrtInfer, OrtInfer2D, OrtInfer3D, OrtInfer4D, load_session};
 pub use traits::{
     AdapterBuilder, AdapterInfo, AdapterTask, BasePredictor, GranularImageReader, ImageReader,
     ImageTaskInput, InferenceEngine, ModelAdapter, ModularPredictor, Postprocessor,

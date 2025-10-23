@@ -22,7 +22,6 @@ pub use formula_recognition::{
 };
 pub use layout_detection::{
     LayoutDetectionConfig, LayoutDetectionOutput, LayoutDetectionTask, LayoutElement,
-    LayoutElementType,
 };
 pub use seal_text_detection::{
     SealTextDetectionConfig, SealTextDetectionOutput, SealTextDetectionTask,

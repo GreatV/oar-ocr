@@ -29,10 +29,10 @@
 use clap::Parser;
 use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
 use oar_ocr::core::traits::task::{ImageTaskInput, Task};
+use oar_ocr::domain::adapters::UVDocRectifierAdapterBuilder;
 use oar_ocr::domain::tasks::document_rectification::{
     DocumentRectificationConfig, DocumentRectificationTask,
 };
-use oar_ocr::models::rectification::UVDocRectifierAdapterBuilder;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};

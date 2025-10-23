@@ -30,10 +30,10 @@
 use clap::Parser;
 use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
 use oar_ocr::core::traits::task::Task;
+use oar_ocr::domain::adapters::TextRecognitionAdapterBuilder;
 use oar_ocr::domain::tasks::text_recognition::{
     TextRecognitionConfig, TextRecognitionInput, TextRecognitionTask,
 };
-use oar_ocr::models::recognition::CRNNTextRecognitionAdapterBuilder;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
@@ -174,7 +174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("  Session pool size: {}", args.session_pool_size);
     }
 
-    let mut builder = CRNNTextRecognitionAdapterBuilder::new()
+    let mut builder = TextRecognitionAdapterBuilder::new()
         .with_config(config.clone())
         .model_input_shape([3, args.input_height, args.input_width])
         .character_dict(character_dict.clone())

@@ -391,4 +391,229 @@ impl OrtInfer {
             Ok(array_view.to_owned())
         })
     }
+
+    /// Runs inference with multiple inputs for layout detection models.
+    ///
+    /// Layout detection models typically require:
+    /// - `image`: The preprocessed image tensor [N, 3, H, W]
+    /// - `scale_factor`: Scale factors used during preprocessing [N, 2] (for PicoDet)
+    /// - `im_shape`: Original image shape [N, 2] (for PP-DocLayout)
+    pub fn infer_4d_layout(
+        &self,
+        x: &Tensor4D,
+        scale_factor: Option<ndarray::Array2<f32>>,
+        im_shape: Option<ndarray::Array2<f32>>,
+    ) -> Result<Tensor4D, OCRError> {
+        let idx = self
+            .next_idx
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % self.sessions.len();
+        let mut session_guard = self.sessions[idx]
+            .lock()
+            .map_err(|e| OCRError::InvalidInput {
+                message: format!(
+                    "Failed to acquire session lock for model '{}': {}",
+                    self.model_name, e
+                ),
+            })?;
+
+        let input_shape = x.shape();
+        let _batch_size = input_shape[0];
+
+        // Use the tensor as-is (assumed to be NCHW contiguous)
+        let input_tensor_view = x.view();
+
+        // Check which inputs the model expects
+        let has_im_shape = session_guard
+            .inputs
+            .iter()
+            .any(|input| input.name == "im_shape");
+
+        // Build inputs based on what's provided and what the model expects
+        let outputs = match (im_shape.as_ref(), scale_factor.as_ref(), has_im_shape) {
+            (Some(shape), Some(scale), true) => {
+                // PP-DocLayout models (L, plus-L) use both im_shape and scale_factor
+                let image_tensor = TensorRef::from_array_view(input_tensor_view).map_err(|e| {
+                    OCRError::InvalidInput {
+                        message: format!("Failed to create image tensor: {}", e),
+                    }
+                })?;
+                let shape_tensor = TensorRef::from_array_view(shape.view()).map_err(|e| {
+                    OCRError::InvalidInput {
+                        message: format!("Failed to create im_shape tensor: {}", e),
+                    }
+                })?;
+                let scale_tensor = TensorRef::from_array_view(scale.view()).map_err(|e| {
+                    OCRError::InvalidInput {
+                        message: format!("Failed to create scale_factor tensor: {}", e),
+                    }
+                })?;
+                let inputs = ort::inputs![
+                    "image" => image_tensor,
+                    "im_shape" => shape_tensor,
+                    "scale_factor" => scale_tensor
+                ];
+                session_guard
+                    .run(inputs)
+                    .map_err(|e| {
+                        OCRError::model_inference_error(
+                            &self.model_name,
+                            "forward_pass",
+                            0,
+                            input_shape,
+                            "ONNX Runtime inference failed with inputs 'image', 'im_shape', and 'scale_factor'",
+                            e,
+                        )
+                    })?
+            }
+            (Some(_), Some(scale), false) | (None, Some(scale), _) => {
+                // PP-DocLayout models (S, M) or PicoDet models use scale_factor only (no im_shape)
+                let image_tensor = TensorRef::from_array_view(input_tensor_view).map_err(|e| {
+                    OCRError::InvalidInput {
+                        message: format!("Failed to create image tensor: {}", e),
+                    }
+                })?;
+                let scale_tensor = TensorRef::from_array_view(scale.view()).map_err(|e| {
+                    OCRError::InvalidInput {
+                        message: format!("Failed to create scale_factor tensor: {}", e),
+                    }
+                })?;
+                let inputs = ort::inputs![
+                    "image" => image_tensor,
+                    "scale_factor" => scale_tensor
+                ];
+                session_guard.run(inputs).map_err(|e| {
+                    OCRError::model_inference_error(
+                        &self.model_name,
+                        "forward_pass",
+                        0,
+                        input_shape,
+                        "ONNX Runtime inference failed with inputs 'image' and 'scale_factor'",
+                        e,
+                    )
+                })?
+            }
+            _ => {
+                // Fall back to single input
+                let image_tensor = TensorRef::from_array_view(input_tensor_view).map_err(|e| {
+                    OCRError::InvalidInput {
+                        message: format!("Failed to create image tensor: {}", e),
+                    }
+                })?;
+                let inputs = ort::inputs!["image" => image_tensor];
+                session_guard.run(inputs).map_err(|e| {
+                    OCRError::model_inference_error(
+                        &self.model_name,
+                        "forward_pass",
+                        0,
+                        input_shape,
+                        "ONNX Runtime inference failed with single input 'image'",
+                        e,
+                    )
+                })?
+            }
+        };
+
+        // Extract output
+        let default_output_name = "fetch_name_0".to_string();
+        let output_name = self.output_name.as_ref().unwrap_or(&default_output_name);
+        let output = outputs[output_name.as_str()]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| {
+                OCRError::model_inference_error(
+                    &self.model_name,
+                    "output_extraction",
+                    0,
+                    input_shape,
+                    &format!("Failed to extract output tensor '{}' as f32", output_name),
+                    e,
+                )
+            })?;
+
+        let (output_shape, output_data) = output;
+
+        // Validate and convert output
+        // Some models output 2D [num_boxes, 6] format instead of 4D
+        if output_shape.len() == 2 {
+            // 2D output format: [num_boxes, 6] where each box is [class_id, score, x1, y1, x2, y2]
+            let num_boxes = output_shape[0] as usize;
+            let box_dim = output_shape[1] as usize;
+
+            if box_dim != 6 {
+                return Err(OCRError::InvalidInput {
+                    message: format!(
+                        "Expected box dimension 6, got {} with shape {:?}",
+                        box_dim, output_shape
+                    ),
+                });
+            }
+
+            // Convert to 4D format [batch=1, num_boxes, 1, 6]
+            let array =
+                ndarray::Array::from_shape_vec((1, num_boxes, 1, box_dim), output_data.to_owned())
+                    .map_err(|e| {
+                        OCRError::tensor_operation_error(
+                            "output_reshape",
+                            &[1, num_boxes, 1, box_dim],
+                            &[output_data.len()],
+                            &format!(
+                                "Failed to reshape 2D output to 4D for model '{}'",
+                                self.model_name
+                            ),
+                            e,
+                        )
+                    })?;
+
+            Ok(array.into())
+        } else if output_shape.len() == 4 {
+            // Standard 4D output format
+            let batch_size_out = output_shape[0] as usize;
+            let channels_out = output_shape[1] as usize;
+            let height_out = output_shape[2] as usize;
+            let width_out = output_shape[3] as usize;
+            let expected_len = batch_size_out * channels_out * height_out * width_out;
+
+            if output_data.len() != expected_len {
+                return Err(OCRError::InvalidInput {
+                    message: format!(
+                        "Output data size mismatch: expected {}, got {}",
+                        expected_len,
+                        output_data.len()
+                    ),
+                });
+            }
+
+            let array = ndarray::Array::from_shape_vec(
+                (batch_size_out, channels_out, height_out, width_out),
+                output_data.to_owned(),
+            )
+            .map_err(|e| {
+                OCRError::tensor_operation_error(
+                    "output_reshape",
+                    &[batch_size_out, channels_out, height_out, width_out],
+                    &[output_data.len()],
+                    &format!(
+                        "Failed to reshape 4D output for model '{}'",
+                        self.model_name
+                    ),
+                    e,
+                )
+            })?;
+
+            Ok(array.into())
+        } else {
+            return Err(OCRError::tensor_operation_error(
+                "output_validation",
+                &[2, 4],
+                &[output_shape.len()],
+                &format!(
+                    "Model '{}' layout inference: expected 2D or 4D output tensor, got {}D with shape {:?}",
+                    self.model_name,
+                    output_shape.len(),
+                    output_shape
+                ),
+                crate::core::errors::SimpleError::new("Invalid output tensor dimensions"),
+            ));
+        }
+    }
 }

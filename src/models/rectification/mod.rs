@@ -1,7 +1,7 @@
-//! Document rectification model adapters.
+//! Rectification model implementations.
 //!
-//! This module contains adapters for document rectification models.
+//! This module contains pure model implementations for rectification tasks.
 
-pub mod uvdoc_adapter;
+pub mod uvdoc;
 
-pub use uvdoc_adapter::{UVDocRectifierAdapter, UVDocRectifierAdapterBuilder};
+pub use uvdoc::{UVDocModel, UVDocModelBuilder, UVDocModelOutput, UVDocPreprocessConfig};

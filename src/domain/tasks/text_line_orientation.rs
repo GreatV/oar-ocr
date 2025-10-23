@@ -4,11 +4,7 @@
 
 use crate::core::OCRError;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
-use crate::models::classification::pp_lcnet_adapter::ClassificationTask;
-use image::imageops::FilterType;
 use serde::{Deserialize, Serialize};
-
-use crate::core::traits::adapter::AdapterInfo;
 
 /// Configuration for text line orientation classification task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,53 +168,6 @@ impl Task for TextLineOrientationTask {
 
     fn empty_output(&self) -> Self::Output {
         TextLineOrientationOutput::empty()
-    }
-}
-
-impl ClassificationTask for TextLineOrientationTask {
-    fn default_input_shape() -> (u32, u32) {
-        (80, 160)
-    }
-
-    fn resize_filter() -> FilterType {
-        FilterType::Triangle
-    }
-
-    fn labels() -> Vec<String> {
-        vec!["0".to_string(), "180".to_string()]
-    }
-
-    fn recommended_batch_size() -> usize {
-        4
-    }
-
-    fn adapter_info() -> AdapterInfo {
-        AdapterInfo::new(
-            "TextLineOrientationClassifier",
-            "1.0.0",
-            TaskType::TextLineOrientation,
-            "Text line orientation classifier (0°, 180°)",
-        )
-    }
-
-    fn get_topk(config: &Self::Config) -> usize {
-        config.topk
-    }
-
-    fn default_label_from_id(id: usize) -> String {
-        format!("{}", id * 180)
-    }
-
-    fn new_output(
-        class_ids: Vec<Vec<usize>>,
-        scores: Vec<Vec<f32>>,
-        label_names: Vec<Vec<String>>,
-    ) -> Self::Output {
-        TextLineOrientationOutput {
-            class_ids,
-            scores,
-            label_names,
-        }
     }
 }
 

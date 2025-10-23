@@ -25,8 +25,8 @@
 use clap::Parser;
 use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
 use oar_ocr::core::traits::task::{ImageTaskInput, Task};
+use oar_ocr::domain::adapters::TextDetectionAdapterBuilder;
 use oar_ocr::domain::tasks::text_detection::{TextDetectionConfig, TextDetectionTask};
-use oar_ocr::models::detection::DBTextDetectionAdapterBuilder;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
@@ -126,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Build the detection adapter
-    let adapter = DBTextDetectionAdapterBuilder::new()
+    let adapter = TextDetectionAdapterBuilder::new()
         .with_config(config.clone())
         .session_pool_size(args.session_pool_size)
         .build(&args.model_path)?;

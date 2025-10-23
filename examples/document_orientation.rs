@@ -28,10 +28,10 @@
 use clap::Parser;
 use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
 use oar_ocr::core::traits::task::{ImageTaskInput, Task};
+use oar_ocr::domain::adapters::DocumentOrientationAdapterBuilder;
 use oar_ocr::domain::tasks::document_orientation::{
     DocumentOrientationConfig, DocumentOrientationTask,
 };
-use oar_ocr::models::classification::pp_lcnet_adapter::PPLCNetAdapterBuilder;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
@@ -146,7 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("  Session pool size: {}", args.session_pool_size);
     }
 
-    let adapter = PPLCNetAdapterBuilder::<DocumentOrientationTask>::new()
+    let adapter = DocumentOrientationAdapterBuilder::new()
         .with_config(config.clone())
         .input_shape((args.input_height, args.input_width))
         .session_pool_size(args.session_pool_size)

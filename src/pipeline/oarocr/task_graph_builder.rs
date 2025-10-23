@@ -6,15 +6,12 @@
 
 use crate::core::traits::{TaskType, adapter::AdapterBuilder};
 use crate::core::{ModelRegistry, OCRError};
+use crate::domain::adapters::{
+    DocumentOrientationAdapterBuilder, PPFormulaNetAdapterBuilder, SealTextDetectionAdapterBuilder,
+    TextDetectionAdapterBuilder, TextLineOrientationAdapterBuilder, TextRecognitionAdapterBuilder,
+    UVDocRectifierAdapterBuilder, UniMERNetFormulaAdapterBuilder,
+};
 use crate::domain::tasks::FormulaRecognitionConfig;
-use crate::models::classification::{
-    DocOrientationAdapterBuilder, TextLineOrientationAdapterBuilder,
-};
-use crate::models::detection::{DBTextDetectionAdapterBuilder, SealTextDetectionAdapterBuilder};
-use crate::models::recognition::{
-    CRNNTextRecognitionAdapterBuilder, PPFormulaNetAdapterBuilder, UniMERNetFormulaAdapterBuilder,
-};
-use crate::models::rectification::UVDocRectifierAdapterBuilder;
 use crate::pipeline::oarocr::task_graph_config::{ModelBinding, TaskGraphConfig};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -197,14 +194,12 @@ impl TaskGraphBuilder {
 
     /// Builds a text detection adapter.
     fn build_detection_adapter(&self, name: &str, binding: &ModelBinding) -> Result<(), OCRError> {
-        let mut builder = DBTextDetectionAdapterBuilder::new();
+        let mut builder = TextDetectionAdapterBuilder::new();
 
         // Apply configuration if provided
         if let Some(session_pool_size) = binding.session_pool_size {
             builder = builder.session_pool_size(session_pool_size);
         }
-
-        builder = builder.model_name(binding.model_name.clone());
 
         // Build the adapter
         let adapter = builder.build(&binding.model_path)?;
@@ -227,8 +222,6 @@ impl TaskGraphBuilder {
         if let Some(session_pool_size) = binding.session_pool_size {
             builder = builder.session_pool_size(session_pool_size);
         }
-
-        builder = builder.model_name(binding.model_name.clone());
 
         // Build the adapter
         let adapter = builder.build(&binding.model_path)?;
@@ -262,14 +255,12 @@ impl TaskGraphBuilder {
                 }
             })?)?;
 
-        let mut builder = CRNNTextRecognitionAdapterBuilder::new().character_dict(character_dict);
+        let mut builder = TextRecognitionAdapterBuilder::new().character_dict(character_dict);
 
         // Apply configuration if provided
         if let Some(session_pool_size) = binding.session_pool_size {
             builder = builder.session_pool_size(session_pool_size);
         }
-
-        builder = builder.model_name(binding.model_name.clone());
 
         // Build the adapter
         let adapter = builder.build(&binding.model_path)?;
@@ -286,7 +277,7 @@ impl TaskGraphBuilder {
         name: &str,
         binding: &ModelBinding,
     ) -> Result<(), OCRError> {
-        let mut builder = DocOrientationAdapterBuilder::new();
+        let mut builder = DocumentOrientationAdapterBuilder::new();
 
         // Apply configuration if provided
         if let Some(session_pool_size) = binding.session_pool_size {

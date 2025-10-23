@@ -1,10 +1,10 @@
-//! Classification model adapters.
+//! Classification model implementations.
 //!
-//! This module contains adapters for classification models (orientation, etc.).
+//! This module contains pure model implementations for classification tasks.
 
-pub mod pp_lcnet_adapter;
+pub mod pp_lcnet;
 
-pub use pp_lcnet_adapter::{
-    DocOrientationAdapter, DocOrientationAdapterBuilder, PPLCNetAdapter, PPLCNetAdapterBuilder,
-    TextLineOrientationAdapter, TextLineOrientationAdapterBuilder,
+pub use pp_lcnet::{
+    PPLCNetModel, PPLCNetModelBuilder, PPLCNetModelOutput, PPLCNetPostprocessConfig,
+    PPLCNetPreprocessConfig,
 };

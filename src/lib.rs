@@ -16,9 +16,12 @@
 //!
 //! - **Text Detection**: Find text regions in images
 //! - **Text Recognition**: Convert text regions to readable text
+//! - **Layout Detection**: Identify document structure elements (text blocks, titles, tables, figures)
 //! - **Document Orientation**: Detect document rotation (0°, 90°, 180°, 270°)
 //! - **Document Rectification**: Fix perspective distortion
 //! - **Text Line Classification**: Detect text line orientation
+//! - **Seal Text Detection**: Detect text in circular seals
+//! - **Formula Recognition**: Recognize mathematical formulas
 //!
 //! ## Modules
 //!

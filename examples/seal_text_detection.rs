@@ -22,8 +22,8 @@
 use clap::Parser;
 use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
 use oar_ocr::core::traits::task::{ImageTaskInput, Task};
+use oar_ocr::domain::adapters::SealTextDetectionAdapterBuilder;
 use oar_ocr::domain::tasks::{SealTextDetectionConfig, SealTextDetectionTask};
-use oar_ocr::models::detection::SealTextDetectionAdapterBuilder;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info};
@@ -39,7 +39,7 @@ use std::fs;
 #[command(about = "Seal Text Detection - detects text in seal/stamp images")]
 struct Args {
     /// Path to the seal detection model file
-    #[arg(short, long, default_value = ".oar/pp-ocrv4_mobile_seal_det.onnx")]
+    #[arg(short, long)]
     model_path: PathBuf,
 
     /// Paths to input images to process
@@ -50,9 +50,9 @@ struct Args {
     #[arg(short, long)]
     output_dir: Option<PathBuf>,
 
-    /// Use server model for higher accuracy
+    /// Path to the server model for higher accuracy (overrides model_path if provided)
     #[arg(long)]
-    server: bool,
+    server_model_path: Option<PathBuf>,
 
     /// Pixel-level threshold for text detection
     #[arg(long, default_value = "0.2")]
@@ -77,9 +77,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
 
-    // Use server model if requested
-    let model_path = if args.server {
-        PathBuf::from(".oar/pp-ocrv4_server_seal_det.onnx")
+    // Determine which model to use
+    let model_path = if let Some(server_path) = args.server_model_path {
+        server_path
     } else {
         args.model_path.clone()
     };
@@ -96,12 +96,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build adapter
     let mut builder = SealTextDetectionAdapterBuilder::new();
     builder = builder.session_pool_size(args.session_pool_size);
-
-    if args.server {
-        builder = builder.model_name("PP-OCRv4_server_seal_det");
-    } else {
-        builder = builder.model_name("PP-OCRv4_mobile_seal_det");
-    }
 
     let adapter = match builder.build(&model_path) {
         Ok(adapter) => adapter,

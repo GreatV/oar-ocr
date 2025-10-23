@@ -348,7 +348,7 @@ impl DetResizeForTest {
         let ratio_h = resize_h as f32 / ori_h as f32;
         let ratio_w = resize_w as f32 / ori_w as f32;
         let resized_img =
-            img.resize_exact(resize_w, resize_h, image::imageops::FilterType::Lanczos3);
+            img.resize_exact(resize_w, resize_h, image::imageops::FilterType::Triangle);
 
         (resized_img, [ratio_h, ratio_w])
     }

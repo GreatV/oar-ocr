@@ -7,21 +7,6 @@ use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
 use crate::processors::BoundingBox;
 use serde::{Deserialize, Serialize};
 
-/// Layout element types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LayoutElementType {
-    /// Text block
-    Text,
-    /// Title/heading
-    Title,
-    /// List element
-    List,
-    /// Table
-    Table,
-    /// Figure/image
-    Figure,
-}
-
 /// Configuration for layout detection task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayoutDetectionConfig {
@@ -45,8 +30,8 @@ impl Default for LayoutDetectionConfig {
 pub struct LayoutElement {
     /// Bounding box of the element
     pub bbox: BoundingBox,
-    /// Type of layout element
-    pub element_type: LayoutElementType,
+    /// Type of layout element (string label)
+    pub element_type: String,
     /// Confidence score
     pub score: f32,
 }
@@ -196,7 +181,7 @@ mod tests {
         ]);
         let element = LayoutElement {
             bbox: box1,
-            element_type: LayoutElementType::Text,
+            element_type: "text".to_string(),
             score: 0.95,
         };
         let output = LayoutDetectionOutput {
