@@ -159,6 +159,11 @@ pub fn create_expected_schema(task_type: TaskType) -> TaskSchema {
             vec!["image".to_string()],
             vec!["seal_text_boxes".to_string(), "scores".to_string()],
         ),
+        TaskType::TableClassification => TaskSchema::new(
+            TaskType::TableClassification,
+            vec!["image".to_string()],
+            vec!["table_type_labels".to_string(), "scores".to_string()],
+        ),
     }
 }
 

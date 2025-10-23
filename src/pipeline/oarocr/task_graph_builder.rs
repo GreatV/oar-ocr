@@ -8,8 +8,9 @@ use crate::core::traits::{TaskType, adapter::AdapterBuilder};
 use crate::core::{ModelRegistry, OCRError};
 use crate::domain::adapters::{
     DocumentOrientationAdapterBuilder, PPFormulaNetAdapterBuilder, SealTextDetectionAdapterBuilder,
-    TextDetectionAdapterBuilder, TextLineOrientationAdapterBuilder, TextRecognitionAdapterBuilder,
-    UVDocRectifierAdapterBuilder, UniMERNetFormulaAdapterBuilder,
+    TableClassificationAdapterBuilder, TextDetectionAdapterBuilder,
+    TextLineOrientationAdapterBuilder, TextRecognitionAdapterBuilder, UVDocRectifierAdapterBuilder,
+    UniMERNetFormulaAdapterBuilder,
 };
 use crate::domain::tasks::FormulaRecognitionConfig;
 use crate::pipeline::oarocr::task_graph_config::{ModelBinding, TaskGraphConfig};
@@ -97,6 +98,9 @@ impl TaskGraphBuilder {
                         name
                     ),
                 });
+            }
+            TaskType::TableClassification => {
+                self.build_table_classification_adapter(name, binding)?;
             }
             TaskType::FormulaRecognition => {
                 self.build_formula_adapter(name, binding)?;
@@ -310,6 +314,30 @@ impl TaskGraphBuilder {
         binding: &ModelBinding,
     ) -> Result<(), OCRError> {
         let mut builder = TextLineOrientationAdapterBuilder::new();
+
+        // Apply configuration if provided
+        if let Some(session_pool_size) = binding.session_pool_size {
+            builder = builder.session_pool_size(session_pool_size);
+        }
+
+        builder = builder.model_name(binding.model_name.clone());
+
+        // Build the adapter
+        let adapter = builder.build(&binding.model_path)?;
+
+        // Register in the registry using the binding name as identifier
+        self.registry.register_with_id(name.to_string(), adapter)?;
+
+        Ok(())
+    }
+
+    /// Builds a table classification adapter.
+    fn build_table_classification_adapter(
+        &self,
+        name: &str,
+        binding: &ModelBinding,
+    ) -> Result<(), OCRError> {
+        let mut builder = TableClassificationAdapterBuilder::new();
 
         // Apply configuration if provided
         if let Some(session_pool_size) = binding.session_pool_size {

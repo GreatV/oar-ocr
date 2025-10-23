@@ -30,6 +30,8 @@ pub enum TaskType {
     FormulaRecognition,
     /// Seal text detection - locating text regions in seal/stamp images
     SealTextDetection,
+    /// Table classification - classifying table images as wired or wireless
+    TableClassification,
 }
 
 impl TaskType {
@@ -45,6 +47,7 @@ impl TaskType {
             TaskType::TableCellDetection => "table_cell_detection",
             TaskType::FormulaRecognition => "formula_recognition",
             TaskType::SealTextDetection => "seal_text_detection",
+            TaskType::TableClassification => "table_classification",
         }
     }
 }
