@@ -7,6 +7,7 @@
 // Detection task adapters
 pub mod layout_detection_adapter;
 pub mod seal_text_detection_adapter;
+pub mod table_cell_detection_adapter;
 pub mod text_detection_adapter;
 
 // Recognition task adapters
@@ -31,6 +32,10 @@ pub use layout_detection_adapter::{
     LayoutDetectionAdapter, LayoutDetectionAdapterBuilder, LayoutModelConfig, PPDocLayoutAdapter,
     PPDocLayoutAdapterBuilder, PicoDetLayoutAdapter, PicoDetLayoutAdapterBuilder,
     RTDetrLayoutAdapter, RTDetrLayoutAdapterBuilder,
+};
+pub use table_cell_detection_adapter::{
+    RTDetrTableCellAdapterBuilder, TableCellDetectionAdapter, TableCellDetectionAdapterBuilder,
+    TableCellModelConfig,
 };
 
 // Re-export recognition adapters

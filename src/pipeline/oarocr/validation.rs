@@ -144,6 +144,11 @@ pub fn create_expected_schema(task_type: TaskType) -> TaskSchema {
             vec!["image".to_string()],
             vec!["layout_elements".to_string()],
         ),
+        TaskType::TableCellDetection => TaskSchema::new(
+            TaskType::TableCellDetection,
+            vec!["image".to_string()],
+            vec!["table_cells".to_string()],
+        ),
         TaskType::FormulaRecognition => TaskSchema::new(
             TaskType::FormulaRecognition,
             vec!["image".to_string()],

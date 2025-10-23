@@ -24,6 +24,8 @@ pub enum TaskType {
     DocumentRectification,
     /// Layout detection/analysis
     LayoutDetection,
+    /// Table cell detection - locating cells within table regions
+    TableCellDetection,
     /// Formula recognition - converting mathematical formulas to LaTeX
     FormulaRecognition,
     /// Seal text detection - locating text regions in seal/stamp images
@@ -40,6 +42,7 @@ impl TaskType {
             TaskType::TextLineOrientation => "text_line_orientation",
             TaskType::DocumentRectification => "document_rectification",
             TaskType::LayoutDetection => "layout_detection",
+            TaskType::TableCellDetection => "table_cell_detection",
             TaskType::FormulaRecognition => "formula_recognition",
             TaskType::SealTextDetection => "seal_text_detection",
         }

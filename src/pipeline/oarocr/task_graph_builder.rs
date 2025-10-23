@@ -90,6 +90,14 @@ impl TaskGraphBuilder {
                     ),
                 });
             }
+            TaskType::TableCellDetection => {
+                return Err(OCRError::ConfigError {
+                    message: format!(
+                        "Table cell detection adapter not yet implemented for model '{}'",
+                        name
+                    ),
+                });
+            }
             TaskType::FormulaRecognition => {
                 self.build_formula_adapter(name, binding)?;
             }
