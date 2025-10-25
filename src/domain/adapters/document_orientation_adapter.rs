@@ -157,9 +157,11 @@ impl AdapterBuilder for DocumentOrientationAdapterBuilder {
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
         // Build the PP-LCNet model
-        let mut preprocess_config = PPLCNetPreprocessConfig::default();
-        preprocess_config.input_shape = self.input_shape;
-        preprocess_config.resize_filter = FilterType::Lanczos3;
+        let preprocess_config = PPLCNetPreprocessConfig {
+            input_shape: self.input_shape,
+            resize_filter: FilterType::Lanczos3,
+            ..Default::default()
+        };
 
         let model = PPLCNetModelBuilder::new()
             .session_pool_size(self.session_pool_size)
@@ -246,6 +248,6 @@ mod tests {
     #[test]
     fn test_labels() {
         let labels = DocumentOrientationAdapter::labels();
-        assert_eq!(labels, vec!["0", "180"]);
+        assert_eq!(labels, vec!["0", "90", "180", "270"]);
     }
 }

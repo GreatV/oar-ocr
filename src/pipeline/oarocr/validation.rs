@@ -164,6 +164,15 @@ pub fn create_expected_schema(task_type: TaskType) -> TaskSchema {
             vec!["image".to_string()],
             vec!["table_type_labels".to_string(), "scores".to_string()],
         ),
+        TaskType::TableStructureRecognition => TaskSchema::new(
+            TaskType::TableStructureRecognition,
+            vec!["image".to_string()],
+            vec![
+                "structure_tokens".to_string(),
+                "bboxes".to_string(),
+                "scores".to_string(),
+            ],
+        ),
     }
 }
 

@@ -120,7 +120,7 @@ impl ModelAdapter for FormulaRecognitionAdapter {
         input: <Self::Task as Task>::Input,
         config: Option<&<Self::Task as Task>::Config>,
     ) -> Result<<Self::Task as Task>::Output, OCRError> {
-        let effective_config = config.unwrap_or(&self.config);
+        let _effective_config = config.unwrap_or(&self.config);
 
         // Preprocess and infer
         let batch_tensor = self.model.preprocess(input.images)?;
@@ -140,16 +140,16 @@ impl ModelAdapter for FormulaRecognitionAdapter {
         for (batch_idx, tokens) in filtered_tokens.iter().enumerate() {
             // Warn if any token id exceeds tokenizer vocab size
             let vocab_size = self.tokenizer.get_vocab_size(true) as u32;
-            if let Some(&max_id) = tokens.iter().max() {
-                if max_id >= vocab_size {
-                    tracing::warn!(
-                        "Token id(s) exceed tokenizer vocab (max_id={} >= vocab_size={}). \
-                         This usually means model/tokenizer mismatch. If you're using PaddleOCR models, \
-                         please supply the matching tokenizer from PaddleOCR via --tokenizer-path.",
-                        max_id,
-                        vocab_size
-                    );
-                }
+            if let Some(&max_id) = tokens.iter().max()
+                && max_id >= vocab_size
+            {
+                tracing::warn!(
+                    "Token id(s) exceed tokenizer vocab (max_id={} >= vocab_size={}). \
+                     This usually means model/tokenizer mismatch. If you're using PaddleOCR models, \
+                     please supply the matching tokenizer from PaddleOCR via --tokenizer-path.",
+                    max_id,
+                    vocab_size
+                );
             }
 
             let latex = match self.tokenizer.decode(tokens, true) {
@@ -165,13 +165,8 @@ impl ModelAdapter for FormulaRecognitionAdapter {
 
             // For now, we don't have confidence scores from the model
             // In the future, we could compute them from the token probabilities
-            if latex.is_empty() || effective_config.score_threshold > 0.0 {
-                formulas.push(latex);
-                scores.push(None);
-            } else {
-                formulas.push(latex);
-                scores.push(None);
-            }
+            formulas.push(latex);
+            scores.push(None);
         }
 
         Ok(FormulaRecognitionOutput { formulas, scores })

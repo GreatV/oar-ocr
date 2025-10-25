@@ -47,6 +47,20 @@ impl std::fmt::Debug for OrtInfer {
 }
 
 impl OrtInfer {
+    /// Returns the input tensor name.
+    pub fn input_name(&self) -> &str {
+        &self.input_name
+    }
+
+    /// Gets a session from the pool.
+    pub fn get_session(&self, idx: usize) -> Result<std::sync::MutexGuard<'_, Session>, OCRError> {
+        self.sessions[idx % self.sessions.len()]
+            .lock()
+            .map_err(|_| OCRError::ConfigError {
+                message: "Failed to acquire session lock".to_string(),
+            })
+    }
+
     /// Attempts to retrieve the primary input tensor shape from the first session.
     ///
     /// Returns a vector of dimensions if available. Dynamic dimensions (e.g., -1) are returned as-is.

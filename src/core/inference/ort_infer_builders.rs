@@ -1,5 +1,6 @@
 use super::*;
 use crate::core::config::CommonBuilderConfig;
+use ort::logging::LogLevel;
 use ort::session::Session;
 use std::path::Path;
 use std::sync::Mutex;
@@ -8,8 +9,9 @@ impl OrtInfer {
     /// Creates a new OrtInfer instance with default ONNX Runtime settings and a single session.
     pub fn new(model_path: impl AsRef<Path>, input_name: Option<&str>) -> Result<Self, OCRError> {
         let path = model_path.as_ref();
-        let session = Session::builder()
-            .and_then(|b| b.commit_from_file(path))
+        let session = Session::builder()?
+            .with_log_level(LogLevel::Error)?
+            .commit_from_file(path)
             .map_err(|e| {
                 OCRError::model_load_error(
                     path,
@@ -49,7 +51,8 @@ impl OrtInfer {
             let builder = if let Some(cfg) = &common.ort_session {
                 Self::apply_ort_config(builder, cfg)?
             } else {
-                builder
+                // Set default log level to Error to suppress ORT logs
+                builder.with_log_level(LogLevel::Error)?
             };
             let session = builder.commit_from_file(path).map_err(|e| {
                 OCRError::model_load_error(
@@ -100,7 +103,8 @@ impl OrtInfer {
         let builder = if let Some(cfg) = &common.ort_session {
             Self::apply_ort_config(builder, cfg)?
         } else {
-            builder
+            // Set default log level to Error to suppress ORT logs
+            builder.with_log_level(LogLevel::Error)?
         };
         let first_session = builder.commit_from_file(path).map_err(|e| {
             OCRError::model_load_error(
@@ -138,7 +142,8 @@ impl OrtInfer {
             let builder = if let Some(cfg) = &common.ort_session {
                 Self::apply_ort_config(builder, cfg)?
             } else {
-                builder
+                // Set default log level to Error to suppress ORT logs
+                builder.with_log_level(LogLevel::Error)?
             };
             let session = builder.commit_from_file(path).map_err(|e| {
                 OCRError::model_load_error(
@@ -178,8 +183,9 @@ impl OrtInfer {
         output_name: Option<&str>,
     ) -> Result<Self, OCRError> {
         let path = model_path.as_ref();
-        let session = Session::builder()
-            .and_then(|b| b.commit_from_file(path))
+        let session = Session::builder()?
+            .with_log_level(LogLevel::Error)?
+            .commit_from_file(path)
             .map_err(|e| {
                 OCRError::model_load_error(
                     path,
@@ -207,8 +213,9 @@ impl OrtInfer {
     /// Creates a new OrtInfer instance with an automatically detected input tensor name.
     pub fn with_auto_input_name(model_path: impl AsRef<Path>) -> Result<Self, OCRError> {
         let path = model_path.as_ref();
-        let session = Session::builder()
-            .and_then(|b| b.commit_from_file(path))
+        let session = Session::builder()?
+            .with_log_level(LogLevel::Error)?
+            .commit_from_file(path)
             .map_err(|e| {
                 OCRError::model_load_error(
                     path,

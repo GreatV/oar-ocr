@@ -48,10 +48,7 @@ impl TableClassificationAdapter {
 
     /// Class labels for table classification.
     pub fn labels() -> Vec<String> {
-        vec![
-            "wired_table".to_string(),
-            "wireless_table".to_string(),
-        ]
+        vec!["wired_table".to_string(), "wireless_table".to_string()]
     }
 }
 
@@ -165,9 +162,11 @@ impl AdapterBuilder for TableClassificationAdapterBuilder {
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
         // Build the PP-LCNet model
-        let mut preprocess_config = PPLCNetPreprocessConfig::default();
-        preprocess_config.input_shape = self.input_shape;
-        preprocess_config.resize_filter = FilterType::Lanczos3;
+        let preprocess_config = PPLCNetPreprocessConfig {
+            input_shape: self.input_shape,
+            resize_filter: FilterType::Lanczos3,
+            ..Default::default()
+        };
 
         let model = PPLCNetModelBuilder::new()
             .session_pool_size(self.session_pool_size)

@@ -8,6 +8,9 @@ use crate::core::{OCRError, Tensor4D};
 use crate::processors::{ChannelOrder, DetResizeForTest, LimitType, NormalizeImage};
 use image::{DynamicImage, RgbImage};
 
+type PicoDetPreprocessArtifacts = (Tensor4D, Vec<[f32; 4]>, Vec<[f32; 2]>, Vec<[f32; 2]>);
+type PicoDetPreprocessResult = Result<PicoDetPreprocessArtifacts, OCRError>;
+
 /// Preprocessing configuration for PicoDet model.
 #[derive(Debug, Clone)]
 pub struct PicoDetPreprocessConfig {
@@ -113,10 +116,7 @@ impl PicoDetModel {
     /// - Image shapes after resizing [h, w, ratio_h, ratio_w]
     /// - Original shapes [h, w]
     /// - Resized shapes [h, w]
-    pub fn preprocess(
-        &self,
-        images: Vec<RgbImage>,
-    ) -> Result<(Tensor4D, Vec<[f32; 4]>, Vec<[f32; 2]>, Vec<[f32; 2]>), OCRError> {
+    pub fn preprocess(&self, images: Vec<RgbImage>) -> PicoDetPreprocessResult {
         // Store original dimensions
         let orig_shapes: Vec<[f32; 2]> = images
             .iter()

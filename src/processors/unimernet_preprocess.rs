@@ -207,8 +207,8 @@ impl UniMERNetPreprocessor {
 
         // Ensure dimensions are multiples of padding_multiple
         let padding_multiple = self.params.padding_multiple as u32;
-        let padded_h = ((height + padding_multiple - 1) / padding_multiple) * padding_multiple;
-        let padded_w = ((width + padding_multiple - 1) / padding_multiple) * padding_multiple;
+        let padded_h = height.div_ceil(padding_multiple) * padding_multiple;
+        let padded_w = width.div_ceil(padding_multiple) * padding_multiple;
 
         let mut tensor = Array4::<f32>::zeros((1, 1, padded_h as usize, padded_w as usize));
 

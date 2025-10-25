@@ -204,7 +204,10 @@ mod tests {
         let output = TableClassificationOutput {
             class_ids: vec![vec![0, 1]],
             scores: vec![vec![0.85, 0.15]],
-            label_names: vec![vec!["wired_table".to_string(), "wireless_table".to_string()]],
+            label_names: vec![vec![
+                "wired_table".to_string(),
+                "wireless_table".to_string(),
+            ]],
         };
         assert!(task.validate_output(&output).is_ok());
 

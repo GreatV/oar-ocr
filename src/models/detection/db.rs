@@ -14,7 +14,7 @@ use std::path::Path;
 use tracing::debug;
 
 /// Configuration for DB model preprocessing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DBPreprocessConfig {
     /// Limit for the side length of the image
     pub limit_side_len: Option<u32>,
@@ -24,17 +24,6 @@ pub struct DBPreprocessConfig {
     pub max_side_limit: Option<u32>,
     /// Resize long dimension (alternative to limit_side_len)
     pub resize_long: Option<u32>,
-}
-
-impl Default for DBPreprocessConfig {
-    fn default() -> Self {
-        Self {
-            limit_side_len: None,
-            limit_type: None,
-            max_side_limit: None,
-            resize_long: None,
-        }
-    }
 }
 
 /// Configuration for DB model postprocessing.

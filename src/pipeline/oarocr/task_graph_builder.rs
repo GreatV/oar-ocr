@@ -7,7 +7,8 @@
 use crate::core::traits::{TaskType, adapter::AdapterBuilder};
 use crate::core::{ModelRegistry, OCRError};
 use crate::domain::adapters::{
-    DocumentOrientationAdapterBuilder, PPFormulaNetAdapterBuilder, SealTextDetectionAdapterBuilder,
+    DocumentOrientationAdapterBuilder, PPFormulaNetAdapterBuilder, SLANetWiredAdapterBuilder,
+    SLANetWirelessAdapterBuilder, SealTextDetectionAdapterBuilder,
     TableClassificationAdapterBuilder, TextDetectionAdapterBuilder,
     TextLineOrientationAdapterBuilder, TextRecognitionAdapterBuilder, UVDocRectifierAdapterBuilder,
     UniMERNetFormulaAdapterBuilder,
@@ -101,6 +102,9 @@ impl TaskGraphBuilder {
             }
             TaskType::TableClassification => {
                 self.build_table_classification_adapter(name, binding)?;
+            }
+            TaskType::TableStructureRecognition => {
+                self.build_table_structure_recognition_adapter(name, binding)?;
             }
             TaskType::FormulaRecognition => {
                 self.build_formula_adapter(name, binding)?;
@@ -351,6 +355,42 @@ impl TaskGraphBuilder {
 
         // Register in the registry using the binding name as identifier
         self.registry.register_with_id(name.to_string(), adapter)?;
+
+        Ok(())
+    }
+
+    /// Builds a table structure recognition adapter.
+    fn build_table_structure_recognition_adapter(
+        &self,
+        name: &str,
+        binding: &ModelBinding,
+    ) -> Result<(), OCRError> {
+        // Determine which builder to use based on model name
+        let is_wireless = binding.model_name.to_lowercase().contains("wireless");
+
+        if is_wireless {
+            let mut builder = SLANetWirelessAdapterBuilder::new();
+
+            if let Some(session_pool_size) = binding.session_pool_size {
+                builder = builder.session_pool_size(session_pool_size);
+            }
+
+            builder = builder.model_name(binding.model_name.clone());
+
+            let adapter = builder.build(&binding.model_path)?;
+            self.registry.register_with_id(name.to_string(), adapter)?;
+        } else {
+            let mut builder = SLANetWiredAdapterBuilder::new();
+
+            if let Some(session_pool_size) = binding.session_pool_size {
+                builder = builder.session_pool_size(session_pool_size);
+            }
+
+            builder = builder.model_name(binding.model_name.clone());
+
+            let adapter = builder.build(&binding.model_path)?;
+            self.registry.register_with_id(name.to_string(), adapter)?;
+        }
 
         Ok(())
     }

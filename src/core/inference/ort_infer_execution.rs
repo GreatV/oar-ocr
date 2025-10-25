@@ -564,7 +564,7 @@ impl OrtInfer {
                         )
                     })?;
 
-            Ok(array.into())
+            Ok(array)
         } else if output_shape.len() == 4 {
             // Standard 4D output format
             let batch_size_out = output_shape[0] as usize;
@@ -600,9 +600,9 @@ impl OrtInfer {
                 )
             })?;
 
-            Ok(array.into())
+            Ok(array)
         } else {
-            return Err(OCRError::tensor_operation_error(
+            Err(OCRError::tensor_operation_error(
                 "output_validation",
                 &[2, 4],
                 &[output_shape.len()],
@@ -613,7 +613,7 @@ impl OrtInfer {
                     output_shape
                 ),
                 crate::core::errors::SimpleError::new("Invalid output tensor dimensions"),
-            ));
+            ))
         }
     }
 }

@@ -16,6 +16,7 @@ pub mod text_recognition_adapter;
 // Classification adapters
 pub mod document_orientation_adapter;
 pub mod table_classification_adapter;
+pub mod table_structure_recognition_adapter;
 pub mod text_line_orientation_adapter;
 
 // Formula recognition adapters
@@ -48,6 +49,9 @@ pub use document_orientation_adapter::{
 };
 pub use table_classification_adapter::{
     TableClassificationAdapter, TableClassificationAdapterBuilder,
+};
+pub use table_structure_recognition_adapter::{
+    SLANetWiredAdapterBuilder, SLANetWirelessAdapterBuilder, TableStructureRecognitionAdapter,
 };
 pub use text_line_orientation_adapter::{
     TextLineOrientationAdapter, TextLineOrientationAdapterBuilder,

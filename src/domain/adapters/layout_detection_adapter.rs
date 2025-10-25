@@ -547,19 +547,10 @@ impl ModelAdapter for LayoutDetectionAdapter {
 }
 
 /// Builder for layout detection adapters.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct LayoutDetectionAdapterBuilder {
     model_config: Option<LayoutModelConfig>,
     task_config: LayoutDetectionConfig,
-}
-
-impl Default for LayoutDetectionAdapterBuilder {
-    fn default() -> Self {
-        Self {
-            model_config: None,
-            task_config: LayoutDetectionConfig::default(),
-        }
-    }
 }
 
 impl LayoutDetectionAdapterBuilder {
@@ -889,10 +880,13 @@ impl PPDocLayoutAdapterBuilder {
     /// # Example
     ///
     /// ```no_run
+    /// use std::path::Path;
+    /// use oar_ocr::core::traits::adapter::AdapterBuilder;
     /// use oar_ocr::domain::adapters::PPDocLayoutAdapterBuilder;
     ///
-    /// let adapter = PPDocLayoutAdapterBuilder::new("pp-doclayout-s")
-    ///     .build("model.onnx")?;
+    /// let _adapter = PPDocLayoutAdapterBuilder::new("pp-doclayout-s")
+    ///     .build(Path::new("model.onnx"))
+    ///     .expect("Failed to create adapter");
     /// ```
     pub fn new(model_name: impl AsRef<str>) -> Self {
         let name = model_name.as_ref();

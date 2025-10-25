@@ -119,9 +119,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Detected model type: {}", variant.as_str());
 
-    let mut task_config = TableCellDetectionConfig::default();
-    task_config.score_threshold = args.score_threshold;
-    task_config.max_cells = args.max_cells;
+    let task_config = TableCellDetectionConfig {
+        score_threshold: args.score_threshold,
+        max_cells: args.max_cells,
+    };
 
     let adapter: Box<dyn ModelAdapter<Task = TableCellDetectionTask>> = match variant {
         TableCellModelVariant::RTDetrLWired => Box::new(
@@ -188,7 +189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         info!("Detection completed in {:.2?}", elapsed);
 
-        if let Some(cells) = output.cells.get(0) {
+        if let Some(cells) = output.cells.first() {
             info!("Detected {} table cells", cells.len());
             for (cell_idx, cell) in cells.iter().enumerate() {
                 if let Some((min_x, min_y, max_x, max_y)) = bbox_bounds(&cell.bbox) {
@@ -205,10 +206,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             #[cfg(feature = "visualization")]
-            if let Some(ref output_dir) = args.output_dir {
-                if let Err(e) = visualize_cells(&img, cells, output_dir, image_path) {
-                    error!("Failed to save visualization: {}", e);
-                }
+            if let Some(ref output_dir) = args.output_dir
+                && let Err(e) = visualize_cells(&img, cells, output_dir.as_path(), image_path)
+            {
+                error!("Failed to save visualization: {}", e);
             }
         } else {
             warn!("No cells detected for {:?}", image_path);
@@ -268,7 +269,7 @@ fn bbox_bounds(bbox: &oar_ocr::processors::BoundingBox) -> Option<(f32, f32, f32
 fn visualize_cells(
     img: &RgbImage,
     cells: &[oar_ocr::domain::tasks::TableCell],
-    output_dir: &PathBuf,
+    output_dir: &Path,
     image_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use imageproc::drawing::{draw_hollow_rect_mut, draw_text_mut};

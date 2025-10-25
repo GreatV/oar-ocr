@@ -152,11 +152,13 @@ impl AdapterBuilder for TextLineOrientationAdapterBuilder {
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
         // Build the PP-LCNet model
-        let mut preprocess_config = PPLCNetPreprocessConfig::default();
-        preprocess_config.input_shape = self.input_shape;
-        preprocess_config.resize_filter = FilterType::Lanczos3;
-        preprocess_config.normalize_mean = vec![0.5, 0.5, 0.5];
-        preprocess_config.normalize_std = vec![0.5, 0.5, 0.5];
+        let preprocess_config = PPLCNetPreprocessConfig {
+            input_shape: self.input_shape,
+            resize_filter: FilterType::Lanczos3,
+            normalize_mean: vec![0.5, 0.5, 0.5],
+            normalize_std: vec![0.5, 0.5, 0.5],
+            ..Default::default()
+        };
 
         let model = PPLCNetModelBuilder::new()
             .session_pool_size(self.session_pool_size)

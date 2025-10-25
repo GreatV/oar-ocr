@@ -9,6 +9,9 @@ use crate::processors::{ChannelOrder, DetResizeForTest, LimitType, NormalizeImag
 use image::{DynamicImage, RgbImage};
 use ndarray::Array2;
 
+type RTDetrPreprocessArtifacts = (Tensor4D, Vec<[f32; 4]>, Vec<[f32; 2]>, Vec<[f32; 2]>);
+type RTDetrPreprocessResult = Result<RTDetrPreprocessArtifacts, OCRError>;
+
 /// Preprocessing configuration for RT-DETR model.
 #[derive(Debug, Clone)]
 pub struct RTDetrPreprocessConfig {
@@ -115,10 +118,7 @@ impl RTDetrModel {
     /// - Image shapes after resizing [h, w, ratio_h, ratio_w]
     /// - Original shapes [h, w]
     /// - Resized shapes [h, w]
-    pub fn preprocess(
-        &self,
-        images: Vec<RgbImage>,
-    ) -> Result<(Tensor4D, Vec<[f32; 4]>, Vec<[f32; 2]>, Vec<[f32; 2]>), OCRError> {
+    pub fn preprocess(&self, images: Vec<RgbImage>) -> RTDetrPreprocessResult {
         // Store original dimensions
         let orig_shapes: Vec<[f32; 2]> = images
             .iter()

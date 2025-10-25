@@ -8,6 +8,8 @@ use crate::processors::{BoundingBox, Point};
 use ndarray::{ArrayView3, Axis};
 use std::borrow::Cow;
 
+type LayoutPostprocessOutput = (Vec<Vec<BoundingBox>>, Vec<Vec<usize>>, Vec<Vec<f32>>);
+
 /// Layout detection post-processor for models like PicoDet and RT-DETR.
 ///
 /// This processor converts model predictions into bounding boxes with class labels
@@ -56,16 +58,15 @@ impl LayoutPostProcess {
         &self,
         predictions: &Tensor4D,
         img_shapes: Vec<[f32; 4]>,
-    ) -> (Vec<Vec<BoundingBox>>, Vec<Vec<usize>>, Vec<Vec<f32>>) {
+    ) -> LayoutPostprocessOutput {
         let batch_size = predictions.shape()[0];
         let mut all_boxes = Vec::with_capacity(batch_size);
         let mut all_classes = Vec::with_capacity(batch_size);
         let mut all_scores = Vec::with_capacity(batch_size);
 
         // Process each image in batch
-        for batch_idx in 0..batch_size {
+        for (batch_idx, img_shape) in img_shapes.into_iter().enumerate().take(batch_size) {
             let pred = predictions.index_axis(Axis(0), batch_idx);
-            let img_shape = img_shapes[batch_idx];
 
             let (boxes, classes, scores) = match self.model_type.as_str() {
                 "picodet" => self.process_picodet(pred, img_shape),
@@ -109,10 +110,10 @@ impl LayoutPostProcess {
             Some(slice) => Cow::Borrowed(slice),
             None => {
                 let (mut vec, offset) = predictions.to_owned().into_raw_vec_and_offset();
-                if let Some(offset) = offset {
-                    if offset != 0 {
-                        vec.drain(0..offset);
-                    }
+                if let Some(offset) = offset
+                    && offset != 0
+                {
+                    vec.drain(0..offset);
                 }
                 Cow::Owned(vec)
             }
@@ -167,31 +168,30 @@ impl LayoutPostProcess {
                 boxes.push(bbox);
                 classes.push(max_class);
                 scores.push(max_score);
-            } else if feature_dim >= 6 {
-                if let Some((class_id, score, x1, y1, x2, y2)) = self.parse_compact_prediction(row)
-                {
-                    if score < self.score_threshold || class_id >= self.num_classes {
-                        continue;
-                    }
-
-                    let (sx1, sy1, sx2, sy2) =
-                        self.convert_bbox_coords(x1, y1, x2, y2, orig_width, orig_height);
-
-                    if !Self::is_valid_box(sx1, sy1, sx2, sy2) {
-                        continue;
-                    }
-
-                    let bbox = BoundingBox::new(vec![
-                        Point::new(sx1, sy1),
-                        Point::new(sx2, sy1),
-                        Point::new(sx2, sy2),
-                        Point::new(sx1, sy2),
-                    ]);
-
-                    boxes.push(bbox);
-                    classes.push(class_id);
-                    scores.push(score);
+            } else if feature_dim >= 6
+                && let Some((class_id, score, x1, y1, x2, y2)) = self.parse_compact_prediction(row)
+            {
+                if score < self.score_threshold || class_id >= self.num_classes {
+                    continue;
                 }
+
+                let (sx1, sy1, sx2, sy2) =
+                    self.convert_bbox_coords(x1, y1, x2, y2, orig_width, orig_height);
+
+                if !Self::is_valid_box(sx1, sy1, sx2, sy2) {
+                    continue;
+                }
+
+                let bbox = BoundingBox::new(vec![
+                    Point::new(sx1, sy1),
+                    Point::new(sx2, sy1),
+                    Point::new(sx2, sy2),
+                    Point::new(sx1, sy2),
+                ]);
+
+                boxes.push(bbox);
+                classes.push(class_id);
+                scores.push(score);
             }
         }
 
@@ -361,7 +361,7 @@ impl LayoutPostProcess {
     }
 
     fn is_valid_score(score: f32) -> bool {
-        score.is_finite() && score >= 0.0 && score <= 1.0 + f32::EPSILON
+        score.is_finite() && (0.0..=1.0 + f32::EPSILON).contains(&score)
     }
 
     fn is_valid_class(raw: f32, num_classes: usize) -> bool {

@@ -256,8 +256,8 @@ impl UniMERNetModelBuilder {
         let mut preprocess_config = self.preprocess_config.unwrap_or_default();
 
         // Try to detect target size from model input shape if not explicitly set
-        if preprocess_config.target_size == (384, 384) {
-            if let Some(detected) = inference.primary_input_shape().and_then(|shape| {
+        if preprocess_config.target_size == (384, 384)
+            && let Some(detected) = inference.primary_input_shape().and_then(|shape| {
                 tracing::debug!("Model input shape: {:?}", shape);
                 if shape.len() >= 4 {
                     let height = shape[shape.len() - 2];
@@ -271,10 +271,10 @@ impl UniMERNetModelBuilder {
                 } else {
                     None
                 }
-            }) {
-                tracing::info!("Using detected target size: {:?}", detected);
-                preprocess_config.target_size = detected;
-            }
+            })
+        {
+            tracing::info!("Using detected target size: {:?}", detected);
+            preprocess_config.target_size = detected;
         }
 
         UniMERNetModel::new(inference, preprocess_config)

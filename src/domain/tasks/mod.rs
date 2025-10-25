@@ -9,6 +9,7 @@ pub mod layout_detection;
 pub mod seal_text_detection;
 pub mod table_cell_detection;
 pub mod table_classification;
+pub mod table_structure_recognition;
 pub mod text_detection;
 pub mod text_line_orientation;
 pub mod text_recognition;
@@ -33,6 +34,9 @@ pub use table_cell_detection::{
 };
 pub use table_classification::{
     TableClassificationConfig, TableClassificationOutput, TableClassificationTask,
+};
+pub use table_structure_recognition::{
+    TableStructureRecognitionConfig, TableStructureRecognitionOutput, TableStructureRecognitionTask,
 };
 pub use text_detection::{TextDetectionConfig, TextDetectionOutput, TextDetectionTask};
 pub use text_line_orientation::{

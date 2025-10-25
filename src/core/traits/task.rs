@@ -32,6 +32,8 @@ pub enum TaskType {
     SealTextDetection,
     /// Table classification - classifying table images as wired or wireless
     TableClassification,
+    /// Table structure recognition - recognizing table structure as HTML with bboxes
+    TableStructureRecognition,
 }
 
 impl TaskType {
@@ -48,6 +50,7 @@ impl TaskType {
             TaskType::FormulaRecognition => "formula_recognition",
             TaskType::SealTextDetection => "seal_text_detection",
             TaskType::TableClassification => "table_classification",
+            TaskType::TableStructureRecognition => "table_structure_recognition",
         }
     }
 }

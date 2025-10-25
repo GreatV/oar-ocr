@@ -308,6 +308,7 @@ pub fn normalize_latex(latex: &str) -> String {
     let mut prev_result = String::new();
     let max_iterations = 10;
     let mut iterations = 0;
+    let letter_to_nonletter = Regex::new(r"([a-zA-Z])\s+([^a-zA-Z])").unwrap();
 
     while prev_result != result && iterations < max_iterations {
         prev_result = result.clone();
@@ -364,8 +365,7 @@ pub fn normalize_latex(latex: &str) -> String {
 
         // Python pattern 3: r"(%s)\s+?(%s)" % (letter, noletter)
         // Remove spaces between letter and non-letter
-        let re3 = Regex::new(r"([a-zA-Z])\s+([^a-zA-Z])").unwrap();
-        result = re3.replace_all(&result, "$1$2").to_string();
+        result = letter_to_nonletter.replace_all(&result, "$1$2").to_string();
 
         iterations += 1;
     }

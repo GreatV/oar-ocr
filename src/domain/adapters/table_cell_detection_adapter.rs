@@ -170,19 +170,10 @@ impl ModelAdapter for TableCellDetectionAdapter {
 }
 
 /// Builder for table cell detection adapters.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TableCellDetectionAdapterBuilder {
     model_config: Option<TableCellModelConfig>,
     task_config: TableCellDetectionConfig,
-}
-
-impl Default for TableCellDetectionAdapterBuilder {
-    fn default() -> Self {
-        Self {
-            model_config: None,
-            task_config: TableCellDetectionConfig::default(),
-        }
-    }
 }
 
 impl TableCellDetectionAdapterBuilder {
