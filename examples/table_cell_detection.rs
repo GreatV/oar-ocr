@@ -3,8 +3,27 @@
 //! This example runs the table cell detection models (wired / wireless) exported
 //! from PaddleOCR/PaddleX and prints the detected cell bounding boxes. When the
 //! `visualization` feature is enabled it will also produce an annotated image.
+//!
+//! # Usage
+//!
+//! ```bash
+//! cargo run --example table_cell_detection -- [OPTIONS] <IMAGES>...
+//! ```
+//!
+//! # Arguments
+//!
+//! * `-m, --model-path` - Path to the table cell detection model (.onnx)
+//! * `-o, --output-dir` - Output directory for visualizations
+//! * `--model-type` - Explicit model type override (e.g., 'rt-detr-l_wired_table_cell_det')
+//! * `--score-threshold` - Score threshold for detections (default: 0.5)
+//! * `--max-cells` - Maximum number of cells per image (default: 300)
+//! * `--device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
+//! * `<IMAGES>...` - Input document images containing tables
+
+mod common;
 
 use clap::Parser;
+use common::{load_rgb_image, parse_device_config};
 use oar_ocr::core::traits::{
     adapter::{AdapterBuilder, ModelAdapter},
     task::{ImageTaskInput, Task},
@@ -87,6 +106,10 @@ struct Args {
     /// Maximum number of cells per image
     #[arg(long, default_value_t = 300)]
     max_cells: usize,
+
+    /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
+    #[arg(long, default_value = "cpu")]
+    device: String,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -119,26 +142,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Detected model type: {}", variant.as_str());
 
+    // Log device configuration
+    info!("Using device: {}", args.device);
+    let ort_config = parse_device_config(&args.device)?;
+
+    if ort_config.is_some() {
+        info!("CUDA execution provider configured successfully");
+    }
+
     let task_config = TableCellDetectionConfig {
         score_threshold: args.score_threshold,
         max_cells: args.max_cells,
     };
 
     let adapter: Box<dyn ModelAdapter<Task = TableCellDetectionTask>> = match variant {
-        TableCellModelVariant::RTDetrLWired => Box::new(
-            RTDetrTableCellAdapterBuilder::new()
-                .task_config(task_config.clone())
-                .build(&args.model_path)
-                .map_err(|e| format!("Failed to build RT-DETR wired table cell adapter: {}", e))?,
-        ),
-        TableCellModelVariant::RTDetrLWireless => Box::new(
-            RTDetrTableCellAdapterBuilder::wireless()
-                .task_config(task_config.clone())
-                .build(&args.model_path)
-                .map_err(|e| {
-                    format!("Failed to build RT-DETR wireless table cell adapter: {}", e)
+        TableCellModelVariant::RTDetrLWired => {
+            let mut builder = RTDetrTableCellAdapterBuilder::new().task_config(task_config.clone());
+            if let Some(ort_cfg) = ort_config.clone() {
+                builder = builder.with_ort_config(ort_cfg);
+            }
+            Box::new(
+                builder.build(&args.model_path).map_err(|e| {
+                    format!("Failed to build RT-DETR wired table cell adapter: {}", e)
                 })?,
-        ),
+            )
+        }
+        TableCellModelVariant::RTDetrLWireless => {
+            let mut builder =
+                RTDetrTableCellAdapterBuilder::wireless().task_config(task_config.clone());
+            if let Some(ort_cfg) = ort_config.clone() {
+                builder = builder.with_ort_config(ort_cfg);
+            }
+            Box::new(builder.build(&args.model_path).map_err(|e| {
+                format!("Failed to build RT-DETR wireless table cell adapter: {}", e)
+            })?)
+        }
     };
 
     let task = TableCellDetectionTask::new(task_config.clone());
@@ -156,8 +194,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             image_path
         );
 
-        let img = match image::open(image_path) {
-            Ok(img) => img.to_rgb8(),
+        let img = match load_rgb_image(image_path) {
+            Ok(img) => img,
             Err(e) => {
                 error!("Failed to load image {:?}: {}", image_path, e);
                 continue;
@@ -297,17 +335,30 @@ fn visualize_cells(
         }
     }
 
-    let output_filename = format!(
-        "table_cells_{}.png",
-        image_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("result")
-    );
+    // Use the original filename for output
+    let output_filename = image_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("result.png");
     let output_path = output_dir.join(output_filename);
-    canvas
-        .save(&output_path)
-        .map_err(|e| format!("Failed to save visualization to {:?}: {}", output_path, e).into())
+
+    // Convert RGBA to RGB if saving as JPEG (JPEG doesn't support alpha channel)
+    let extension = output_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if extension == "jpg" || extension == "jpeg" {
+        let rgb_canvas = image::DynamicImage::ImageRgba8(canvas).to_rgb8();
+        rgb_canvas
+            .save(&output_path)
+            .map_err(|e| format!("Failed to save visualization to {:?}: {}", output_path, e).into())
+    } else {
+        canvas
+            .save(&output_path)
+            .map_err(|e| format!("Failed to save visualization to {:?}: {}", output_path, e).into())
+    }
 }
 
 #[cfg(feature = "visualization")]

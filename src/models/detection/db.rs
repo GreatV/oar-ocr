@@ -6,8 +6,8 @@
 use crate::core::inference::OrtInfer;
 use crate::core::{OCRError, Tensor4D};
 use crate::processors::{
-    BoundingBox, BoxType, ChannelOrder, DBPostProcess, DetResizeForTest, LimitType, NormalizeImage,
-    ScoreMode,
+    BoundingBox, BoxType, ChannelOrder, DBPostProcess, DBPostProcessConfig, DetResizeForTest,
+    ImageScaleInfo, LimitType, NormalizeImage, ScoreMode,
 };
 use image::{DynamicImage, RgbImage};
 use std::path::Path;
@@ -101,7 +101,10 @@ impl DBModel {
     }
 
     /// Preprocesses images for detection.
-    pub fn preprocess(&self, images: Vec<RgbImage>) -> Result<(Tensor4D, Vec<[f32; 4]>), OCRError> {
+    pub fn preprocess(
+        &self,
+        images: Vec<RgbImage>,
+    ) -> Result<(Tensor4D, Vec<ImageScaleInfo>), OCRError> {
         // Convert to DynamicImage
         let dynamic_images: Vec<DynamicImage> =
             images.into_iter().map(DynamicImage::ImageRgb8).collect();
@@ -121,10 +124,10 @@ impl DBModel {
                 i,
                 img.width(),
                 img.height(),
-                shape[0],
-                shape[1],
-                shape[2],
-                shape[3]
+                shape.src_h,
+                shape.src_w,
+                shape.ratio_h,
+                shape.ratio_w
             );
         }
 
@@ -156,18 +159,15 @@ impl DBModel {
     pub fn postprocess(
         &self,
         predictions: &Tensor4D,
-        img_shapes: Vec<[f32; 4]>,
+        img_shapes: Vec<ImageScaleInfo>,
         score_threshold: f32,
         box_threshold: f32,
         unclip_ratio: f32,
     ) -> DBModelOutput {
-        let (boxes, scores) = self.postprocessor.apply(
-            predictions,
-            img_shapes,
-            Some(score_threshold),
-            Some(box_threshold),
-            Some(unclip_ratio),
-        );
+        let config = DBPostProcessConfig::new(score_threshold, box_threshold, unclip_ratio);
+        let (boxes, scores) = self
+            .postprocessor
+            .apply(predictions, img_shapes, Some(&config));
         DBModelOutput { boxes, scores }
     }
 
@@ -199,6 +199,8 @@ pub struct DBModelBuilder {
     postprocess_config: DBPostprocessConfig,
     /// Session pool size for ONNX Runtime
     session_pool_size: usize,
+    /// ONNX Runtime session configuration
+    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl DBModelBuilder {
@@ -208,6 +210,7 @@ impl DBModelBuilder {
             preprocess_config: DBPreprocessConfig::default(),
             postprocess_config: DBPostprocessConfig::default(),
             session_pool_size: 1,
+            ort_config: None,
         }
     }
 
@@ -229,13 +232,20 @@ impl DBModelBuilder {
         self
     }
 
+    /// Sets the ONNX Runtime session configuration.
+    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.ort_config = Some(config);
+        self
+    }
+
     /// Builds the DB model.
     pub fn build(self, model_path: &Path) -> Result<DBModel, OCRError> {
         // Create ONNX inference engine
-        let inference = if self.session_pool_size > 1 {
+        let inference = if self.session_pool_size > 1 || self.ort_config.is_some() {
             use crate::core::config::CommonBuilderConfig;
             let common_config = CommonBuilderConfig {
                 session_pool_size: Some(self.session_pool_size),
+                ort_session: self.ort_config,
                 ..Default::default()
             };
             OrtInfer::from_common(&common_config, model_path, Some("x"))?

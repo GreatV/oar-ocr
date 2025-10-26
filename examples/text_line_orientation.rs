@@ -25,7 +25,10 @@
 //!     text_line1.jpg text_line2.jpg
 //! ```
 
+mod common;
+
 use clap::Parser;
+use common::{load_rgb_image, parse_device_config};
 use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
 use oar_ocr::core::traits::task::{ImageTaskInput, Task};
 use oar_ocr::domain::adapters::TextLineOrientationAdapterBuilder;
@@ -119,8 +122,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Log device configuration
     info!("Using device: {}", args.device);
-    if args.device != "cpu" {
-        warn!("GPU support not yet implemented in new architecture. Using CPU.");
+    let ort_config = parse_device_config(&args.device)?;
+
+    if ort_config.is_some() {
+        info!("CUDA execution provider configured successfully");
     }
 
     // Create text line orientation classification configuration
@@ -146,11 +151,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("  Session pool size: {}", args.session_pool_size);
     }
 
-    let adapter = TextLineOrientationAdapterBuilder::new()
+    let mut adapter_builder = TextLineOrientationAdapterBuilder::new()
         .with_config(config.clone())
         .input_shape((args.input_height, args.input_width))
-        .session_pool_size(args.session_pool_size)
-        .build(&args.model_path)?;
+        .session_pool_size(args.session_pool_size);
+
+    if let Some(ort_cfg) = ort_config {
+        adapter_builder = adapter_builder.with_ort_config(ort_cfg);
+    }
+
+    let adapter = adapter_builder.build(&args.model_path)?;
 
     info!("Text line orientation classifier adapter built successfully");
     if args.verbose {
@@ -164,9 +174,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut images = Vec::new();
 
     for image_path in &existing_images {
-        match image::open(image_path) {
-            Ok(img) => {
-                let rgb_img = img.to_rgb8();
+        match load_rgb_image(image_path) {
+            Ok(rgb_img) => {
                 if args.verbose {
                     info!(
                         "Loaded image: {} ({}x{})",
@@ -255,18 +264,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|(((path, img), labels), scores)| (path, img, labels, scores))
         {
             if !labels.is_empty() {
-                let input_filename = image_path
-                    .file_stem()
+                // Use the original filename for output
+                let output_filename = image_path
+                    .file_name()
                     .and_then(|s| s.to_str())
-                    .unwrap_or("unknown");
-                let output_filename = format!("{}_textline_orientation.jpg", input_filename);
-                let output_path = output_dir.join(&output_filename);
+                    .unwrap_or("unknown.jpg");
+                let output_path = output_dir.join(output_filename);
 
-                // Get top prediction
-                let orientation = &labels[0];
-                let confidence = scores[0];
-
-                let visualized = visualize_text_line_orientation(rgb_img, orientation, confidence);
+                let visualized = visualize_text_line_orientation(rgb_img, labels, scores);
                 visualized.save(&output_path)?;
                 info!("  Saved: {}", output_path.display());
             } else {
@@ -282,63 +287,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Visualizes text line orientation by drawing the predicted angle and confidence on the image
+/// The orientation result is displayed in an additional space above the original image
 #[cfg(feature = "visualization")]
 fn visualize_text_line_orientation(
     img: &image::RgbImage,
-    orientation: &str,
-    confidence: f32,
+    labels: &[String],
+    _scores: &[f32],
 ) -> image::RgbImage {
-    use image::Rgb;
-    use imageproc::drawing::{draw_filled_rect_mut, draw_text_mut};
-    use imageproc::rect::Rect;
+    use image::{Rgb, RgbImage};
+    use imageproc::drawing::draw_text_mut;
 
-    // If the text is upside-down (180°), rotate the image for visualization
-    let mut output = if orientation == "180" {
-        // Rotate image 180 degrees
-        image::imageops::rotate180(img)
-    } else {
-        img.clone()
-    };
+    let orientation_label = labels
+        .get(0)
+        .map(|label| label.as_str())
+        .unwrap_or("0");
 
-    let text_color = Rgb([255u8, 255u8, 255u8]); // White text
-    let bg_color = if orientation == "0" {
-        Rgb([0u8, 128u8, 0u8]) // Green background for upright
-    } else {
-        Rgb([255u8, 0u8, 0u8]) // Red background for upside-down
-    };
+    let original_width = img.width();
+    let original_height = img.height();
+
+    // Scale header height and font size based on image dimensions
+    // Use the smaller dimension as reference for scaling
+    let reference_size = original_width.min(original_height) as f32;
+    let scale_factor = (reference_size / 300.0).max(0.3).min(2.0); // Clamp between 0.3x and 2x
+
+    let header_height = (40.0 * scale_factor).round() as u32;
+    let font_size = (16.0 * scale_factor).max(10.0).min(48.0); // Clamp font size between 10 and 48
+    let text_x = (8.0 * scale_factor).round() as i32;
+    let text_y = ((header_height as f32 - font_size) / 2.0).round() as i32; // Center vertically
+
+    let total_height = header_height + original_height;
+
+    // Create new image with extra space on top
+    let mut output = RgbImage::new(original_width, total_height);
+
+    // Fill header area with background color
+    let bg_color = Rgb([240u8, 240u8, 240u8]); // Light gray background
+    let text_color = Rgb([0u8, 0u8, 0u8]); // Black text
+
+    for y in 0..header_height {
+        for x in 0..original_width {
+            output.put_pixel(x, y, bg_color);
+        }
+    }
+
+    // Copy original image to the bottom part
+    for y in 0..original_height {
+        for x in 0..original_width {
+            output.put_pixel(x, y + header_height, *img.get_pixel(x, y));
+        }
+    }
 
     // Try to load a font for text rendering
     let font = load_font();
 
     if let Some(ref font) = font {
-        // Draw the orientation label with background
-        let label = format!("{}° - {:.1}%", orientation, confidence * 100.0);
+        // Draw only the orientation value
+        let label = format!("{}°", orientation_label);
 
-        // Draw background rectangle for text
-        let text_x = 10;
-        let text_y = 10;
-        let text_width = label.len() as u32 * 10; // Approximate
-        let text_height = 30;
-
-        if text_x + text_width < output.width() && text_y + text_height < output.height() {
-            let bg_rect = Rect::at(text_x as i32, text_y as i32).of_size(text_width, text_height);
-            draw_filled_rect_mut(&mut output, bg_rect, bg_color);
-
-            // Draw text on top
-            draw_text_mut(
-                &mut output,
-                text_color,
-                text_x as i32,
-                (text_y + 5) as i32,
-                20.0,
-                font,
-                &label,
-            );
-        }
+        // Draw text
+        draw_text_mut(&mut output, text_color, text_x, text_y, font_size, font, &label);
     }
 
     output
 }
+
 
 #[cfg(feature = "visualization")]
 fn load_font() -> Option<ab_glyph::FontVec> {

@@ -167,38 +167,45 @@ impl TaskGraphBuilder {
             _ => None,
         };
 
-        let tokenizer_path = settings.tokenizer_path.clone();
+        // Tokenizer path is required for formula recognition
+        let tokenizer_path =
+            settings
+                .tokenizer_path
+                .clone()
+                .ok_or_else(|| OCRError::ConfigError {
+                    message: format!(
+                        "Formula model '{}' requires 'tokenizer_path' in config. \
+                     Please specify the path to the tokenizer.json file.",
+                        name
+                    ),
+                })?;
         let session_pool_size = binding.session_pool_size;
 
         match variant {
             FormulaModelVariant::UniMERNet => {
-                let mut builder =
-                    UniMERNetFormulaAdapterBuilder::new().with_config(task_config.clone());
+                let mut builder = UniMERNetFormulaAdapterBuilder::new()
+                    .with_config(task_config.clone())
+                    .tokenizer_path(tokenizer_path.clone());
                 if let Some(session_pool_size) = session_pool_size {
                     builder = builder.session_pool_size(session_pool_size);
                 }
                 builder = builder.model_name(binding.model_name.clone());
                 if let Some((width, height)) = target_size {
                     builder = builder.target_size(width, height);
-                }
-                if let Some(path) = tokenizer_path.as_ref() {
-                    builder = builder.tokenizer_path(path.clone());
                 }
                 let adapter = builder.build(&binding.model_path)?;
                 self.registry.register_with_id(name.to_string(), adapter)?;
             }
             FormulaModelVariant::PPFormulaNet => {
-                let mut builder =
-                    PPFormulaNetAdapterBuilder::new().with_config(task_config.clone());
+                let mut builder = PPFormulaNetAdapterBuilder::new()
+                    .with_config(task_config.clone())
+                    .tokenizer_path(tokenizer_path.clone());
                 if let Some(session_pool_size) = session_pool_size {
                     builder = builder.session_pool_size(session_pool_size);
                 }
                 builder = builder.model_name(binding.model_name.clone());
                 if let Some((width, height)) = target_size {
                     builder = builder.target_size(width, height);
-                }
-                if let Some(path) = tokenizer_path.as_ref() {
-                    builder = builder.tokenizer_path(path.clone());
                 }
                 let adapter = builder.build(&binding.model_path)?;
                 self.registry.register_with_id(name.to_string(), adapter)?;

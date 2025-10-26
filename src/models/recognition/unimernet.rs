@@ -199,6 +199,7 @@ impl UniMERNetModel {
 pub struct UniMERNetModelBuilder {
     preprocess_config: Option<UniMERNetPreprocessConfig>,
     session_pool_size: usize,
+    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl UniMERNetModelBuilder {
@@ -207,6 +208,7 @@ impl UniMERNetModelBuilder {
         Self {
             preprocess_config: None,
             session_pool_size: 1,
+            ort_config: None,
         }
     }
 
@@ -238,13 +240,20 @@ impl UniMERNetModelBuilder {
         self
     }
 
+    /// Sets the ONNX Runtime session configuration.
+    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.ort_config = Some(config);
+        self
+    }
+
     /// Builds the UniMERNet model.
     pub fn build(self, model_path: &std::path::Path) -> Result<UniMERNetModel, OCRError> {
         // Create ONNX inference engine
-        let inference = if self.session_pool_size > 1 {
+        let inference = if self.session_pool_size > 1 || self.ort_config.is_some() {
             use crate::core::config::CommonBuilderConfig;
             let common_config = CommonBuilderConfig {
                 session_pool_size: Some(self.session_pool_size),
+                ort_session: self.ort_config,
                 ..Default::default()
             };
             OrtInfer::from_common_with_auto_input(&common_config, model_path)?
@@ -256,7 +265,7 @@ impl UniMERNetModelBuilder {
         let mut preprocess_config = self.preprocess_config.unwrap_or_default();
 
         // Try to detect target size from model input shape if not explicitly set
-        if preprocess_config.target_size == (384, 384)
+        if preprocess_config.target_size == (672, 192)
             && let Some(detected) = inference.primary_input_shape().and_then(|shape| {
                 tracing::debug!("Model input shape: {:?}", shape);
                 if shape.len() >= 4 {

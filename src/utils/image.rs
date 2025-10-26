@@ -7,7 +7,10 @@
 
 use crate::core::OCRError;
 use crate::core::errors::ImageProcessError;
-use image::{DynamicImage, GrayImage, ImageBuffer, RgbImage};
+use image::{DynamicImage, GrayImage, ImageBuffer, ImageError, ImageReader, RgbImage};
+use std::fs::File;
+use std::io::BufReader;
+use std::path::Path;
 
 /// Converts a DynamicImage to an RgbImage.
 ///
@@ -82,9 +85,34 @@ pub fn load_image_from_memory(bytes: &[u8]) -> Result<RgbImage, OCRError> {
 ///
 /// This function will return an `OCRError::ImageLoad` error if the image cannot
 /// be loaded from the specified path, or if there is an error during conversion.
-pub fn load_image(path: &std::path::Path) -> Result<RgbImage, OCRError> {
-    let img = image::open(path).map_err(OCRError::ImageLoad)?;
+pub fn load_image(path: &Path) -> Result<RgbImage, OCRError> {
+    let img = open_image_any_format(path).map_err(OCRError::ImageLoad)?;
     Ok(dynamic_to_rgb(img))
+}
+
+fn open_image_any_format(path: &Path) -> Result<DynamicImage, ImageError> {
+    match image::open(path) {
+        Ok(img) => Ok(img),
+        Err(err) if should_retry(&err) => {
+            tracing::warn!(
+                "Standard decode failed for {} ({err}). Retrying with format sniffing.",
+                path.display()
+            );
+            decode_with_guessed_format(path)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn should_retry(err: &ImageError) -> bool {
+    matches!(err, ImageError::Decoding(_) | ImageError::Unsupported(_))
+}
+
+fn decode_with_guessed_format(path: &Path) -> Result<DynamicImage, ImageError> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let reader = ImageReader::new(reader).with_guessed_format()?;
+    reader.decode()
 }
 
 /// Creates an RgbImage from raw pixel data.

@@ -69,7 +69,6 @@ impl FormulaModel {
 pub struct FormulaModelConfig {
     pub model_name: String,
     pub description: String,
-    pub default_tokenizer_filename: String,
     pub sos_token_id: i64,
     pub eos_token_id: i64,
 }
@@ -80,7 +79,6 @@ impl FormulaModelConfig {
         Self {
             model_name: "PP-FormulaNet".to_string(),
             description: "PaddleOCR PP-FormulaNet formula recognition model".to_string(),
-            default_tokenizer_filename: "tokenizer.json".to_string(),
             sos_token_id: 0,
             eos_token_id: 2,
         }
@@ -91,7 +89,6 @@ impl FormulaModelConfig {
         Self {
             model_name: "UniMERNet".to_string(),
             description: "PaddleOCR UniMERNet formula recognition model".to_string(),
-            default_tokenizer_filename: "tokenizer.json".to_string(),
             sos_token_id: 0,
             eos_token_id: 2,
         }
@@ -198,6 +195,7 @@ pub struct FormulaRecognitionAdapterBuilder {
     session_pool_size: usize,
     model_name_override: Option<String>,
     target_size: Option<(u32, u32)>,
+    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl FormulaRecognitionAdapterBuilder {
@@ -211,6 +209,7 @@ impl FormulaRecognitionAdapterBuilder {
             session_pool_size: 1,
             model_name_override: None,
             target_size: None,
+            ort_config: None,
         }
     }
 
@@ -255,6 +254,12 @@ impl FormulaRecognitionAdapterBuilder {
         self.task_config.max_length = length;
         self
     }
+
+    /// Sets the ONNX Runtime session configuration.
+    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.ort_config = Some(config);
+        self
+    }
 }
 
 impl AdapterBuilder for FormulaRecognitionAdapterBuilder {
@@ -274,6 +279,9 @@ impl AdapterBuilder for FormulaRecognitionAdapterBuilder {
                 if let Some((width, height)) = self.target_size {
                     builder = builder.target_size(width, height);
                 }
+                if let Some(ort_config) = self.ort_config.clone() {
+                    builder = builder.with_ort_config(ort_config);
+                }
                 FormulaModel::PPFormulaNet(builder.build(model_path)?)
             }
             FormulaModelType::UniMERNet => {
@@ -282,19 +290,17 @@ impl AdapterBuilder for FormulaRecognitionAdapterBuilder {
                 if let Some((width, height)) = self.target_size {
                     builder = builder.target_size(width, height);
                 }
+                if let Some(ort_config) = self.ort_config.clone() {
+                    builder = builder.with_ort_config(ort_config);
+                }
                 FormulaModel::UniMERNet(builder.build(model_path)?)
             }
         };
 
-        // Load tokenizer
-        let tokenizer_path = if let Some(path) = self.tokenizer_path {
-            path
-        } else {
-            let model_dir = model_path.parent().ok_or_else(|| OCRError::InvalidInput {
-                message: "Cannot determine model directory".to_string(),
-            })?;
-            model_dir.join(&model_config.default_tokenizer_filename)
-        };
+        // Load tokenizer - tokenizer path is required
+        let tokenizer_path = self.tokenizer_path.ok_or_else(|| OCRError::InvalidInput {
+            message: "Tokenizer path is required. Please provide it via --tokenizer-path or tokenizer_path() builder method.".to_string(),
+        })?;
 
         let tokenizer =
             Tokenizer::from_file(&tokenizer_path).map_err(|err| OCRError::InvalidInput {
@@ -393,6 +399,12 @@ impl PPFormulaNetAdapterBuilder {
         self.inner = self.inner.task_config(config);
         self
     }
+
+    /// Sets the ONNX Runtime session configuration.
+    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.inner = self.inner.with_ort_config(config);
+        self
+    }
 }
 
 impl Default for PPFormulaNetAdapterBuilder {
@@ -478,6 +490,12 @@ impl UniMERNetFormulaAdapterBuilder {
     /// Sets the task configuration.
     pub fn task_config(mut self, config: FormulaRecognitionConfig) -> Self {
         self.inner = self.inner.task_config(config);
+        self
+    }
+
+    /// Sets the ONNX Runtime session configuration.
+    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.inner = self.inner.with_ort_config(config);
         self
     }
 }

@@ -27,7 +27,10 @@
 //!     text1.jpg text2.jpg
 //! ```
 
+mod common;
+
 use clap::Parser;
+use common::{load_rgb_image, parse_device_config};
 use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
 use oar_ocr::core::traits::task::Task;
 use oar_ocr::domain::adapters::TextRecognitionAdapterBuilder;
@@ -134,8 +137,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Log device configuration
     info!("Using device: {}", args.device);
-    if args.device != "cpu" {
-        warn!("GPU support not yet implemented in new architecture. Using CPU.");
+    let ort_config = parse_device_config(&args.device)?;
+
+    if ort_config.is_some() {
+        info!("CUDA execution provider configured successfully");
     }
 
     // Load character dictionary
@@ -187,6 +192,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    if let Some(ort_cfg) = ort_config {
+        builder = builder.with_ort_config(ort_cfg);
+    }
+
     let adapter = builder.build(&args.model_path)?;
 
     info!("Recognition adapter built successfully");
@@ -201,9 +210,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut images = Vec::new();
 
     for image_path in &existing_images {
-        match image::open(image_path) {
-            Ok(img) => {
-                let rgb_img = img.to_rgb8();
+        match load_rgb_image(image_path) {
+            Ok(rgb_img) => {
                 if args.verbose {
                     info!(
                         "Loaded image: {} ({}x{})",
@@ -278,12 +286,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|(((path, img), text), score)| (path, img, text, score))
         {
             if !text.is_empty() {
-                let input_filename = image_path
-                    .file_stem()
+                // Use the original filename for output
+                let output_filename = image_path
+                    .file_name()
                     .and_then(|s| s.to_str())
-                    .unwrap_or("unknown");
-                let output_filename = format!("{}_recognition.jpg", input_filename);
-                let output_path = output_dir.join(&output_filename);
+                    .unwrap_or("unknown.jpg");
+                let output_path = output_dir.join(output_filename);
 
                 let visualized = visualize_recognition(rgb_img, text, *score);
                 visualized.save(&output_path)?;
@@ -305,10 +313,11 @@ fn load_character_dict(dict_path: &PathBuf) -> Result<Vec<String>, Box<dyn std::
     let content = std::fs::read_to_string(dict_path)
         .map_err(|e| format!("Failed to load character dictionary: {}", e))?;
 
+    // Don't filter out lines - PaddleOCR dictionaries may have special characters
+    // like \u3000 (ideographic space) at the beginning that should be preserved
     let dict: Vec<String> = content
         .lines()
-        .map(|line| line.trim().to_string())
-        .filter(|line| !line.is_empty())
+        .map(|line| line.to_string())
         .collect();
 
     if dict.is_empty() {

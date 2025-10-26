@@ -16,7 +16,7 @@ use crate::models::detection::{
     PicoDetModelBuilder, PicoDetPostprocessConfig, RTDetrModel, RTDetrModelBuilder,
     RTDetrPostprocessConfig,
 };
-use crate::processors::LayoutPostProcess;
+use crate::processors::{ImageScaleInfo, LayoutPostProcess};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -441,7 +441,7 @@ impl LayoutDetectionAdapter {
     fn postprocess(
         &self,
         predictions: &Tensor4D,
-        img_shapes: Vec<[f32; 4]>,
+        img_shapes: Vec<ImageScaleInfo>,
         config: &LayoutDetectionConfig,
     ) -> LayoutDetectionOutput {
         let (boxes, class_ids, scores) = self.postprocessor.apply(predictions, img_shapes);
@@ -551,6 +551,7 @@ impl ModelAdapter for LayoutDetectionAdapter {
 pub struct LayoutDetectionAdapterBuilder {
     model_config: Option<LayoutModelConfig>,
     task_config: LayoutDetectionConfig,
+    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl LayoutDetectionAdapterBuilder {
@@ -583,6 +584,12 @@ impl LayoutDetectionAdapterBuilder {
         self
     }
 
+    /// Sets the ONNX Runtime session configuration.
+    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.ort_config = Some(config);
+        self
+    }
+
     /// Builds the adapter with the specified model configuration.
     fn build_with_config(
         self,
@@ -590,14 +597,27 @@ impl LayoutDetectionAdapterBuilder {
         model_config: LayoutModelConfig,
     ) -> Result<LayoutDetectionAdapter, OCRError> {
         // Create ONNX inference engine with proper input name based on model type
-        let inference = match model_config.model_type.as_str() {
-            "pp-doclayout" => {
-                // PP-DocLayout models use "image" as the input name
-                OrtInfer::new(model_path, Some("image"))?
-            }
-            _ => {
-                // Other models use default or auto-detect
-                OrtInfer::new(model_path, None)?
+        let inference = if self.ort_config.is_some() {
+            use crate::core::config::CommonBuilderConfig;
+            let input_name = match model_config.model_type.as_str() {
+                "pp-doclayout" => Some("image"),
+                _ => None,
+            };
+            let common_config = CommonBuilderConfig {
+                ort_session: self.ort_config,
+                ..Default::default()
+            };
+            OrtInfer::from_common(&common_config, model_path, input_name)?
+        } else {
+            match model_config.model_type.as_str() {
+                "pp-doclayout" => {
+                    // PP-DocLayout models use "image" as the input name
+                    OrtInfer::new(model_path, Some("image"))?
+                }
+                _ => {
+                    // Other models use default or auto-detect
+                    OrtInfer::new(model_path, None)?
+                }
             }
         };
 
@@ -760,6 +780,12 @@ impl PicoDetLayoutAdapterBuilder {
         self.inner = self.inner.max_elements(max);
         self
     }
+
+    /// Sets the ONNX Runtime session configuration.
+    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.inner = self.inner.with_ort_config(config);
+        self
+    }
 }
 
 impl AdapterBuilder for PicoDetLayoutAdapterBuilder {
@@ -828,6 +854,12 @@ impl RTDetrLayoutAdapterBuilder {
         self.inner = self.inner.max_elements(max);
         self
     }
+
+    /// Sets the ONNX Runtime session configuration.
+    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.inner = self.inner.with_ort_config(config);
+        self
+    }
 }
 
 impl AdapterBuilder for RTDetrLayoutAdapterBuilder {
@@ -891,13 +923,11 @@ impl PPDocLayoutAdapterBuilder {
     pub fn new(model_name: impl AsRef<str>) -> Self {
         let name = model_name.as_ref();
         let config = match name {
-            "pp-doclayout-s" | "pp_doclayout_s" => LayoutModelConfig::pp_doclayout_s(),
-            "pp-doclayout-m" | "pp_doclayout_m" => LayoutModelConfig::pp_doclayout_m(),
-            "pp-doclayout-l" | "pp_doclayout_l" => LayoutModelConfig::pp_doclayout_l(),
-            "pp-doclayout_plus-l" | "pp_doclayout_plus_l" => {
-                LayoutModelConfig::pp_doclayout_plus_l()
-            }
-            "pp-docblocklayout" | "pp_docblocklayout" => LayoutModelConfig::pp_docblocklayout(),
+            "PP-DocLayout-S" => LayoutModelConfig::pp_doclayout_s(),
+            "PP-DocLayout-M" => LayoutModelConfig::pp_doclayout_m(),
+            "PP-DocLayout-L" => LayoutModelConfig::pp_doclayout_l(),
+            "PP-DocLayout_plus-L" => LayoutModelConfig::pp_doclayout_plus_l(),
+            "PP-DocBlockLayout" => LayoutModelConfig::pp_docblocklayout(),
             _ => {
                 // Default to pp-doclayout-l for unknown variants
                 LayoutModelConfig::pp_doclayout_l()
@@ -924,6 +954,12 @@ impl PPDocLayoutAdapterBuilder {
     /// Sets the maximum number of elements.
     pub fn max_elements(mut self, max: usize) -> Self {
         self.inner = self.inner.max_elements(max);
+        self
+    }
+
+    /// Sets the ONNX Runtime session configuration.
+    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.inner = self.inner.with_ort_config(config);
         self
     }
 }

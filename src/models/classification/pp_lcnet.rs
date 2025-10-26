@@ -230,6 +230,8 @@ pub struct PPLCNetModelBuilder {
     session_pool_size: usize,
     /// Preprocessing configuration
     preprocess_config: PPLCNetPreprocessConfig,
+    /// ONNX Runtime session configuration
+    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl PPLCNetModelBuilder {
@@ -238,6 +240,7 @@ impl PPLCNetModelBuilder {
         Self {
             session_pool_size: 1,
             preprocess_config: PPLCNetPreprocessConfig::default(),
+            ort_config: None,
         }
     }
 
@@ -265,6 +268,12 @@ impl PPLCNetModelBuilder {
         self
     }
 
+    /// Sets the ONNX Runtime session configuration.
+    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.ort_config = Some(config);
+        self
+    }
+
     /// Builds the PP-LCNet model.
     ///
     /// # Arguments
@@ -276,14 +285,14 @@ impl PPLCNetModelBuilder {
     /// A configured PP-LCNet model instance
     pub fn build(self, model_path: &std::path::Path) -> Result<PPLCNetModel, OCRError> {
         // Create ONNX inference engine
-        let inference = if self.session_pool_size > 1 {
+        let inference = if self.session_pool_size > 1 || self.ort_config.is_some() {
             use crate::core::config::CommonBuilderConfig;
             let common_config = CommonBuilderConfig {
                 model_path: None,
                 model_name: None,
                 batch_size: None,
                 enable_logging: None,
-                ort_session: None,
+                ort_session: self.ort_config,
                 session_pool_size: Some(self.session_pool_size),
             };
             OrtInfer::from_common(&common_config, model_path, None)?

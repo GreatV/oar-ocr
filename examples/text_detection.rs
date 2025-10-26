@@ -22,7 +22,10 @@
 //! cargo run --example text_detection -- -m model.onnx -o output/ -d cpu image1.jpg image2.jpg
 //! ```
 
+mod common;
+
 use clap::Parser;
+use common::{load_rgb_image, parse_device_config};
 use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
 use oar_ocr::core::traits::task::{ImageTaskInput, Task};
 use oar_ocr::domain::adapters::TextDetectionAdapterBuilder;
@@ -111,10 +114,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No valid image files found".into());
     }
 
-    // Log device configuration
+    // Parse device configuration
     info!("Using device: {}", args.device);
-    if args.device != "cpu" {
-        warn!("GPU support not yet implemented in new architecture. Using CPU.");
+    let ort_config = parse_device_config(&args.device)?;
+
+    if ort_config.is_some() {
+        info!("CUDA execution provider configured successfully");
     }
 
     // Create detection configuration
@@ -126,10 +131,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Build the detection adapter
-    let adapter = TextDetectionAdapterBuilder::new()
+    let mut adapter_builder = TextDetectionAdapterBuilder::new()
         .with_config(config.clone())
-        .session_pool_size(args.session_pool_size)
-        .build(&args.model_path)?;
+        .session_pool_size(args.session_pool_size);
+
+    if let Some(ort_cfg) = ort_config {
+        adapter_builder = adapter_builder.with_ort_config(ort_cfg);
+    }
+
+    let adapter = adapter_builder.build(&args.model_path)?;
 
     info!("Detection adapter built successfully");
 
@@ -138,9 +148,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut images = Vec::new();
 
     for image_path in &existing_images {
-        match image::open(image_path) {
-            Ok(img) => {
-                let rgb_img = img.to_rgb8();
+        match load_rgb_image(image_path) {
+            Ok(rgb_img) => {
                 images.push(rgb_img);
             }
             Err(e) => {
@@ -237,12 +246,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|(((path, img), boxes), scores)| (path, img, boxes, scores))
         {
             if !boxes.is_empty() {
-                let input_filename = image_path
-                    .file_stem()
+                // Use the original filename for output
+                let output_filename = image_path
+                    .file_name()
                     .and_then(|s| s.to_str())
-                    .unwrap_or("unknown");
-                let output_filename = format!("{}_detection.jpg", input_filename);
-                let output_path = output_dir.join(&output_filename);
+                    .unwrap_or("unknown.jpg");
+                let output_path = output_dir.join(output_filename);
 
                 let visualized = visualize_detections(rgb_img, boxes, scores);
                 visualized.save(&output_path)?;

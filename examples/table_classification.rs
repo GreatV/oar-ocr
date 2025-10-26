@@ -21,11 +21,14 @@
 //!
 //! ```bash
 //! cargo run --example table_classification -- \
-//!     -m .oar/pp-lcnet_x1_0_table_cls.onnx \
-//!     .oar/images/table_recognition.jpg
+//!     -m models/pp-lcnet_x1_0_table_cls.onnx \
+//!     images/table_recognition.jpg
 //! ```
 
+mod common;
+
 use clap::Parser;
+use common::{load_rgb_image, parse_device_config};
 use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
 use oar_ocr::core::traits::task::{ImageTaskInput, Task};
 use oar_ocr::domain::adapters::TableClassificationAdapterBuilder;
@@ -119,8 +122,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Log device configuration
     info!("Using device: {}", args.device);
-    if args.device != "cpu" {
-        warn!("GPU support not yet implemented in new architecture. Using CPU.");
+    let ort_config = parse_device_config(&args.device)?;
+
+    if ort_config.is_some() {
+        info!("CUDA execution provider configured successfully");
     }
 
     // Create table classification configuration
@@ -146,11 +151,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("  Session pool size: {}", args.session_pool_size);
     }
 
-    let adapter = TableClassificationAdapterBuilder::new()
+    let mut adapter_builder = TableClassificationAdapterBuilder::new()
         .with_config(config.clone())
         .input_shape((args.input_height, args.input_width))
-        .session_pool_size(args.session_pool_size)
-        .build(&args.model_path)?;
+        .session_pool_size(args.session_pool_size);
+
+    if let Some(ort_cfg) = ort_config {
+        adapter_builder = adapter_builder.with_ort_config(ort_cfg);
+    }
+
+    let adapter = adapter_builder.build(&args.model_path)?;
 
     info!("Table classifier adapter built successfully");
     if args.verbose {
@@ -164,9 +174,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut images = Vec::new();
 
     for image_path in &existing_images {
-        match image::open(image_path) {
-            Ok(img) => {
-                let rgb_img = img.to_rgb8();
+        match load_rgb_image(image_path) {
+            Ok(rgb_img) => {
                 if args.verbose {
                     info!(
                         "Loaded image: {} ({}x{})",
@@ -254,12 +263,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|(((path, img), labels), scores)| (path, img, labels, scores))
         {
             if !labels.is_empty() {
-                let input_filename = image_path
-                    .file_stem()
+                // Use the original filename for output
+                let output_filename = image_path
+                    .file_name()
                     .and_then(|s| s.to_str())
-                    .unwrap_or("unknown");
-                let output_filename = format!("{}_table_cls.jpg", input_filename);
-                let output_path = output_dir.join(&output_filename);
+                    .unwrap_or("unknown.jpg");
+                let output_path = output_dir.join(output_filename);
 
                 // Get top prediction
                 let table_type = &labels[0];
@@ -281,51 +290,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Visualizes table classification by drawing the predicted type and confidence on the image
+/// The classification result is displayed in an additional space above the original image
 #[cfg(feature = "visualization")]
 fn visualize_table_classification(
     img: &image::RgbImage,
     table_type: &str,
     confidence: f32,
 ) -> image::RgbImage {
-    use image::Rgb;
+    use image::{Rgb, RgbImage};
     use imageproc::drawing::{draw_filled_rect_mut, draw_text_mut};
     use imageproc::rect::Rect;
 
-    let mut output = img.clone();
-    let text_color = Rgb([255u8, 255u8, 255u8]); // White text
-    let bg_color = Rgb([0u8, 128u8, 0u8]); // Green background
+    let original_width = img.width();
+    let original_height = img.height();
+
+    // Create additional space above the image for classification result
+    let header_height = 60;
+    let total_height = header_height + original_height;
+
+    // Create new image with extra space on top
+    let mut output = RgbImage::new(original_width, total_height);
+
+    // Fill header area with background color
+    let bg_color = Rgb([240u8, 240u8, 240u8]); // Light gray background
+
+    for y in 0..header_height {
+        for x in 0..original_width {
+            output.put_pixel(x, y, bg_color);
+        }
+    }
+
+    // Copy original image to the bottom part
+    for y in 0..original_height {
+        for x in 0..original_width {
+            output.put_pixel(x, y + header_height, *img.get_pixel(x, y));
+        }
+    }
+
+    let text_color = table_classification_color(table_type);
 
     // Try to load a font for text rendering
     let font = load_font();
 
     if let Some(ref font) = font {
-        // Draw the table type label with background
-        let label = format!("Table: {} ({:.1}%)", table_type, confidence * 100.0);
+        // Draw the table type label
+        let label = format!(
+            "Table Type: {} (Confidence: {:.1}%)",
+            table_type,
+            confidence * 100.0
+        );
 
-        // Draw background rectangle for text
+        // Center the text horizontally
         let text_x = 10;
-        let text_y = 10;
-        let text_width = label.len() as u32 * 10; // Approximate
-        let text_height = 30;
+        let text_y = 20;
 
-        if text_x + text_width < output.width() && text_y + text_height < output.height() {
-            let bg_rect = Rect::at(text_x as i32, text_y as i32).of_size(text_width, text_height);
-            draw_filled_rect_mut(&mut output, bg_rect, bg_color);
+        // Draw text
+        draw_text_mut(&mut output, text_color, text_x, text_y, 24.0, font, &label);
+    } else {
+        // Fallback: draw a simple colored rectangle to indicate classification
+        let indicator_color = table_classification_color(table_type);
 
-            // Draw text on top
-            draw_text_mut(
-                &mut output,
-                text_color,
-                text_x as i32,
-                (text_y + 5) as i32,
-                20.0,
-                font,
-                &label,
-            );
-        }
+        let indicator_rect = Rect::at(10, 15).of_size(30, 30);
+        draw_filled_rect_mut(&mut output, indicator_rect, indicator_color);
     }
 
     output
+}
+
+#[cfg(feature = "visualization")]
+fn table_classification_color(table_type: &str) -> image::Rgb<u8> {
+    use image::Rgb;
+
+    match table_type {
+        "Wired" => Rgb([0u8, 128u8, 0u8]), // Green
+        _ => Rgb([220u8, 20u8, 60u8]),     // Red for non-wired classifications
+    }
 }
 
 #[cfg(feature = "visualization")]

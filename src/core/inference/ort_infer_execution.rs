@@ -34,10 +34,29 @@ impl OrtInfer {
         &self.model_name
     }
 
-    fn run_inference_with_processor<T>(
+    /// Generic inference helper that handles the common inference workflow.
+    ///
+    /// This method:
+    /// 1. Gets output name
+    /// 2. Converts input tensor
+    /// 3. Acquires session lock
+    /// 4. Runs inference
+    /// 5. Calls the provided processor with outputs and metadata
+    ///
+    /// The processor receives the raw outputs and can extract tensors as needed.
+    /// This design avoids lifetime issues while still reducing code duplication.
+    ///
+    /// # Type Parameters
+    /// - `T`: The return type of the processor
+    fn run_inference_core<T>(
         &self,
         x: &Tensor4D,
-        processor: impl FnOnce(&[i64], &[f32]) -> Result<T, OCRError>,
+        processor: impl for<'a> FnOnce(
+            &'a ort::session::SessionOutputs<'a>,
+            &str,
+            &[String],
+            &[usize],
+        ) -> Result<T, OCRError>,
     ) -> Result<T, OCRError> {
         let input_shape = x.shape().to_vec();
 
@@ -84,6 +103,13 @@ impl OrtInfer {
             )
         })?;
 
+        // Collect declared output names before running (avoid borrow conflicts later)
+        let output_names: Vec<String> = session_guard
+            .outputs
+            .iter()
+            .map(|o| o.name.clone())
+            .collect();
+
         let outputs = session_guard.run(inputs).map_err(|e| {
             OCRError::model_inference_error(
                 &self.model_name,
@@ -98,21 +124,36 @@ impl OrtInfer {
             )
         })?;
 
-        let output = outputs[output_name.as_str()]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| {
-                OCRError::model_inference_error(
-                    &self.model_name,
-                    "output_extraction",
-                    0,
-                    &input_shape,
-                    &format!("Failed to extract output tensor '{}' as f32", output_name),
-                    e,
-                )
-            })?;
-        let (output_shape, output_data) = output;
+        processor(&outputs, &output_name, &output_names, &input_shape)
+    }
 
-        processor(output_shape, output_data)
+    /// Runs inference with f32 output extraction.
+    fn run_inference_with_processor<T>(
+        &self,
+        x: &Tensor4D,
+        processor: impl FnOnce(&[i64], &[f32]) -> Result<T, OCRError>,
+    ) -> Result<T, OCRError> {
+        let model_name = self.model_name.clone();
+
+        self.run_inference_core(
+            x,
+            move |outputs, output_name, _output_names, input_shape| {
+                let output = outputs[output_name]
+                    .try_extract_tensor::<f32>()
+                    .map_err(|e| {
+                        OCRError::model_inference_error(
+                            &model_name,
+                            "output_extraction",
+                            0,
+                            input_shape,
+                            &format!("Failed to extract output tensor '{}' as f32", output_name),
+                            e,
+                        )
+                    })?;
+                let (output_shape, output_data) = output;
+                processor(output_shape, output_data)
+            },
+        )
     }
 
     pub fn infer_4d(&self, x: &Tensor4D) -> Result<Tensor4D, OCRError> {
@@ -227,125 +268,63 @@ impl OrtInfer {
     /// Runs inference with int64 outputs (for models that output token IDs).
     ///
     /// This method is similar to `run_inference_with_processor` but extracts i64 tensors
-    /// instead of f32 tensors.
+    /// instead of f32 tensors. It includes fallback logic to scan all outputs for an i64 tensor
+    /// if the primary output is not i64.
     fn run_inference_with_processor_i64<T>(
         &self,
         x: &Tensor4D,
         processor: impl FnOnce(&[i64], &[i64]) -> Result<T, OCRError>,
     ) -> Result<T, OCRError> {
-        let input_shape = x.shape().to_vec();
+        let model_name = self.model_name.clone();
 
-        let output_name = self.get_output_name().map_err(|e| {
-            OCRError::inference_error(
-                &self.model_name,
-                &format!(
-                    "Failed to get output name for model at '{}'",
-                    self.model_path.display()
-                ),
-                e,
-            )
-        })?;
+        self.run_inference_core(x, move |outputs, output_name, output_names, input_shape| {
+            // Try the discovered output name first; if it isn't i64, scan other outputs for an i64 tensor.
+            let mut extracted: Option<(Vec<i64>, &[i64])> = None;
 
-        let input_tensor = TensorRef::from_array_view(x.view()).map_err(|e| {
-            OCRError::model_inference_error(
-                &self.model_name,
-                "tensor_conversion",
-                0,
-                &input_shape,
-                &format!(
-                    "Failed to convert input tensor with shape {:?}",
-                    input_shape
-                ),
-                e,
-            )
-        })?;
-
-        let inputs = ort::inputs![self.input_name.as_str() => input_tensor];
-
-        let idx = self
-            .next_idx
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            % self.sessions.len();
-        let mut session_guard = self.sessions[idx].lock().map_err(|_| {
-            OCRError::inference_error(
-                &self.model_name,
-                &format!(
-                    "Failed to acquire session lock for session {}/{}",
-                    idx,
-                    self.sessions.len()
-                ),
-                crate::core::errors::SimpleError::new("Session lock acquisition failed"),
-            )
-        })?;
-
-        // Collect declared output names before running (avoid borrow conflicts later)
-        let output_names: Vec<String> = session_guard
-            .outputs
-            .iter()
-            .map(|o| o.name.clone())
-            .collect();
-
-        let outputs = session_guard.run(inputs).map_err(|e| {
-            OCRError::model_inference_error(
-                &self.model_name,
-                "forward_pass",
-                0,
-                &input_shape,
-                &format!(
-                    "ONNX Runtime inference failed with input '{}' -> output '{}'",
-                    self.input_name, output_name
-                ),
-                e,
-            )
-        })?;
-
-        // Try the discovered output name first; if it isn't i64, scan other outputs for an i64 tensor.
-        let mut extracted: Option<(Vec<i64>, &[i64])> = None;
-
-        // Helper to try extract by name
-        let try_extract_by = |name: &str| -> Option<(Vec<i64>, &[i64])> {
-            match outputs[name].try_extract_tensor::<i64>() {
-                Ok((shape, data)) => Some((shape.to_vec(), data)),
-                Err(_) => None,
-            }
-        };
-
-        // First attempt: the default output name
-        if let Some((shape, data)) = try_extract_by(output_name.as_str()) {
-            extracted = Some((shape, data));
-        } else {
-            // Fallback: iterate declared outputs to find any i64 tensor
-            for name in &output_names {
-                if name.as_str() == output_name.as_str() {
-                    continue;
+            // Helper to try extract by name
+            let try_extract_by = |name: &str| -> Option<(Vec<i64>, &[i64])> {
+                match outputs[name].try_extract_tensor::<i64>() {
+                    Ok((shape, data)) => Some((shape.to_vec(), data)),
+                    Err(_) => None,
                 }
-                if let Some((shape, data)) = try_extract_by(name.as_str()) {
-                    extracted = Some((shape, data));
-                    break;
+            };
+
+            // First attempt: the default output name
+            if let Some((shape, data)) = try_extract_by(output_name) {
+                extracted = Some((shape, data));
+            } else {
+                // Fallback: iterate declared outputs to find any i64 tensor
+                for name in output_names {
+                    if name.as_str() == output_name {
+                        continue;
+                    }
+                    if let Some((shape, data)) = try_extract_by(name.as_str()) {
+                        extracted = Some((shape, data));
+                        break;
+                    }
                 }
             }
-        }
 
-        let (output_shape, output_data) = match extracted {
-            Some((shape, data)) => (shape, data),
-            None => {
-                // Build a helpful error listing available outputs
-                let available: Vec<String> = output_names.clone();
-                return Err(OCRError::model_inference_error(
-                    &self.model_name,
-                    "output_extraction",
-                    0,
-                    &input_shape,
-                    &format!(
-                        "Failed to extract any output as i64. Tried '{}' first. Available outputs: {:?}",
-                        output_name, available
-                    ),
-                    crate::core::errors::SimpleError::new("No i64 output tensor found"),
-                ));
-            }
-        };
+            let (output_shape, output_data) = match extracted {
+                Some((shape, data)) => (shape, data),
+                None => {
+                    // Build a helpful error listing available outputs
+                    return Err(OCRError::model_inference_error(
+                        &model_name,
+                        "output_extraction",
+                        0,
+                        input_shape,
+                        &format!(
+                            "Failed to extract any output as i64. Tried '{}' first. Available outputs: {:?}",
+                            output_name, output_names
+                        ),
+                        crate::core::errors::SimpleError::new("No i64 output tensor found"),
+                    ));
+                }
+            };
 
-        processor(&output_shape, output_data)
+            processor(&output_shape, output_data)
+        })
     }
 
     /// Runs inference and returns a 2D int64 tensor.

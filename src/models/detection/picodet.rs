@@ -5,10 +5,12 @@
 
 use crate::core::inference::OrtInfer;
 use crate::core::{OCRError, Tensor4D};
-use crate::processors::{ChannelOrder, DetResizeForTest, LimitType, NormalizeImage};
+use crate::processors::{
+    ChannelOrder, DetResizeForTest, ImageScaleInfo, LimitType, NormalizeImage,
+};
 use image::{DynamicImage, RgbImage};
 
-type PicoDetPreprocessArtifacts = (Tensor4D, Vec<[f32; 4]>, Vec<[f32; 2]>, Vec<[f32; 2]>);
+type PicoDetPreprocessArtifacts = (Tensor4D, Vec<ImageScaleInfo>, Vec<[f32; 2]>, Vec<[f32; 2]>);
 type PicoDetPreprocessResult = Result<PicoDetPreprocessArtifacts, OCRError>;
 
 /// Preprocessing configuration for PicoDet model.
@@ -197,7 +199,7 @@ impl PicoDetModel {
         &self,
         images: Vec<RgbImage>,
         config: &PicoDetPostprocessConfig,
-    ) -> Result<(PicoDetModelOutput, Vec<[f32; 4]>), OCRError> {
+    ) -> Result<(PicoDetModelOutput, Vec<ImageScaleInfo>), OCRError> {
         let (batch_tensor, img_shapes, orig_shapes, resized_shapes) = self.preprocess(images)?;
         let predictions = self.infer(&batch_tensor, &orig_shapes, &resized_shapes)?;
         let output = self.postprocess(predictions, config)?;

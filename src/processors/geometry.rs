@@ -731,7 +731,7 @@ impl ScanlineBuffer {
         bbox: &BoundingBox,
         start_x: usize,
         end_x: usize,
-        pred: &ndarray::Array2<f32>,
+        pred: &ndarray::ArrayView2<f32>,
     ) -> (f32, usize) {
         // Clear previous intersections
         self.intersections.clear();

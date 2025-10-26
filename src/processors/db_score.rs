@@ -32,7 +32,7 @@ impl Region {
 
 impl DBPostProcess {
     /// Calculates the score of a bounding box using a fast approximation method.
-    pub fn box_score_fast(&self, pred: &ndarray::Array2<f32>, bbox: &BoundingBox) -> f32 {
+    pub fn box_score_fast(&self, pred: &ndarray::ArrayView2<f32>, bbox: &BoundingBox) -> f32 {
         let height = pred.shape()[0];
         let width = pred.shape()[1];
 
@@ -66,7 +66,7 @@ impl DBPostProcess {
 
     fn box_score_fast_contour(
         &self,
-        pred: &ndarray::Array2<f32>,
+        pred: &ndarray::ArrayView2<f32>,
         bbox: &BoundingBox,
         start_y: usize,
         end_y: usize,
@@ -79,7 +79,7 @@ impl DBPostProcess {
 
     fn box_score_fast_contour_with_policy(
         &self,
-        pred: &ndarray::Array2<f32>,
+        pred: &ndarray::ArrayView2<f32>,
         bbox: &BoundingBox,
         region: Region,
         policy: Option<&crate::core::config::ParallelPolicy>,
@@ -146,7 +146,7 @@ impl DBPostProcess {
 
     pub(super) fn box_score_slow(
         &self,
-        pred: &ndarray::Array2<f32>,
+        pred: &ndarray::ArrayView2<f32>,
         contour: &imageproc::contours::Contour<u32>,
     ) -> f32 {
         let mut total_score = 0.0;

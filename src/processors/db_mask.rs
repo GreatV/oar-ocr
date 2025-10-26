@@ -6,6 +6,14 @@ use super::DBPostProcess;
 
 impl DBPostProcess {
     /// Applies dilation to a binary mask using a Chebyshev radius of 1.
+    ///
+    /// This method works directly with GrayImage to avoid intermediate allocations.
+    pub(super) fn dilate_mask_img(&self, mask_img: &GrayImage) -> GrayImage {
+        morphology::dilate(mask_img, Norm::LInf, 1)
+    }
+
+    /// Legacy method for backward compatibility - applies dilation to a Vec<Vec<bool>> mask.
+    #[allow(dead_code)]
     pub(super) fn dilate_mask(&self, mask: &[Vec<bool>]) -> Vec<Vec<bool>> {
         let height = mask.len();
         let width = if height > 0 { mask[0].len() } else { 0 };

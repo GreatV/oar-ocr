@@ -145,6 +145,8 @@ pub struct CRNNModelBuilder {
     character_dict: Option<Vec<String>>,
     /// Session pool size for ONNX Runtime
     session_pool_size: usize,
+    /// ONNX Runtime session configuration
+    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl CRNNModelBuilder {
@@ -154,6 +156,7 @@ impl CRNNModelBuilder {
             preprocess_config: CRNNPreprocessConfig::default(),
             character_dict: None,
             session_pool_size: 1,
+            ort_config: None,
         }
     }
 
@@ -187,13 +190,20 @@ impl CRNNModelBuilder {
         self
     }
 
+    /// Sets the ONNX Runtime session configuration.
+    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.ort_config = Some(config);
+        self
+    }
+
     /// Builds the CRNN model.
     pub fn build(self, model_path: &Path) -> Result<CRNNModel, OCRError> {
         // Create ONNX inference engine
-        let inference = if self.session_pool_size > 1 {
+        let inference = if self.session_pool_size > 1 || self.ort_config.is_some() {
             // Use session pool for concurrent inference
             let common = crate::core::config::CommonBuilderConfig {
                 session_pool_size: Some(self.session_pool_size),
+                ort_session: self.ort_config,
                 ..Default::default()
             };
             OrtInfer::from_common(&common, model_path, None)?
@@ -205,8 +215,15 @@ impl CRNNModelBuilder {
         // Create resizer
         let resizer = OCRResize::new(Some(self.preprocess_config.model_input_shape), None);
 
-        // Create normalizer
-        let normalizer = NormalizeImage::new(None, None, None, None)?;
+        // Create normalizer with PaddleOCR parameters
+        // PaddleOCR uses: (x / 255 - 0.5) / 0.5 which normalizes to [-1, 1]
+        // This is equivalent to: scale=1.0/255.0, mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]
+        let normalizer = NormalizeImage::new(
+            Some(1.0 / 255.0),
+            Some(vec![0.5, 0.5, 0.5]),
+            Some(vec![0.5, 0.5, 0.5]),
+            None,
+        )?;
 
         // Create CTC decoder
         let decoder = if let Some(character_dict) = self.character_dict {

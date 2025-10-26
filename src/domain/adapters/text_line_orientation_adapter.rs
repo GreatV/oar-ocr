@@ -108,6 +108,8 @@ pub struct TextLineOrientationAdapterBuilder {
     session_pool_size: usize,
     /// Optional override for the registered model name
     model_name_override: Option<String>,
+    /// ONNX Runtime session configuration
+    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl TextLineOrientationAdapterBuilder {
@@ -118,6 +120,7 @@ impl TextLineOrientationAdapterBuilder {
             input_shape: TextLineOrientationAdapter::DEFAULT_INPUT_SHAPE,
             session_pool_size: 1,
             model_name_override: None,
+            ort_config: None,
         }
     }
 
@@ -136,6 +139,12 @@ impl TextLineOrientationAdapterBuilder {
     /// Sets a custom model name for registry registration.
     pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
         self.model_name_override = Some(model_name.into());
+        self
+    }
+
+    /// Sets the ONNX Runtime session configuration.
+    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.ort_config = Some(config);
         self
     }
 }
@@ -160,10 +169,15 @@ impl AdapterBuilder for TextLineOrientationAdapterBuilder {
             ..Default::default()
         };
 
-        let model = PPLCNetModelBuilder::new()
+        let mut model_builder = PPLCNetModelBuilder::new()
             .session_pool_size(self.session_pool_size)
-            .preprocess_config(preprocess_config)
-            .build(model_path)?;
+            .preprocess_config(preprocess_config);
+
+        if let Some(ort_config) = self.ort_config {
+            model_builder = model_builder.with_ort_config(ort_config);
+        }
+
+        let model = model_builder.build(model_path)?;
 
         // Create postprocessing configuration
         let postprocess_config = PPLCNetPostprocessConfig {

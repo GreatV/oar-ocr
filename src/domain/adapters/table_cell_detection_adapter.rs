@@ -11,7 +11,7 @@ use crate::domain::tasks::{
     TableCell, TableCellDetectionConfig, TableCellDetectionOutput, TableCellDetectionTask,
 };
 use crate::models::detection::{RTDetrModel, RTDetrModelBuilder, RTDetrPostprocessConfig};
-use crate::processors::LayoutPostProcess;
+use crate::processors::{ImageScaleInfo, LayoutPostProcess};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -94,7 +94,7 @@ impl TableCellDetectionAdapter {
     fn postprocess(
         &self,
         predictions: &Tensor4D,
-        img_shapes: Vec<[f32; 4]>,
+        img_shapes: Vec<ImageScaleInfo>,
         config: &TableCellDetectionConfig,
     ) -> TableCellDetectionOutput {
         let (boxes, class_ids, scores) = self.postprocessor.apply(predictions, img_shapes);
@@ -174,6 +174,7 @@ impl ModelAdapter for TableCellDetectionAdapter {
 pub struct TableCellDetectionAdapterBuilder {
     model_config: Option<TableCellModelConfig>,
     task_config: TableCellDetectionConfig,
+    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl TableCellDetectionAdapterBuilder {
@@ -206,12 +207,28 @@ impl TableCellDetectionAdapterBuilder {
         self
     }
 
+    /// Sets the ONNX Runtime session configuration.
+    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.ort_config = Some(config);
+        self
+    }
+
     fn build_with_config(
         model_path: &Path,
         model_config: TableCellModelConfig,
         task_config: TableCellDetectionConfig,
+        ort_config: Option<crate::core::config::OrtSessionConfig>,
     ) -> Result<TableCellDetectionAdapter, OCRError> {
-        let inference = OrtInfer::new(model_path, None)?;
+        let inference = if ort_config.is_some() {
+            use crate::core::config::CommonBuilderConfig;
+            let common_config = CommonBuilderConfig {
+                ort_session: ort_config,
+                ..Default::default()
+            };
+            OrtInfer::from_common(&common_config, model_path, None)?
+        } else {
+            OrtInfer::new(model_path, None)?
+        };
 
         let postprocessor = LayoutPostProcess::new(
             model_config.num_classes,
@@ -272,6 +289,7 @@ impl AdapterBuilder for TableCellDetectionAdapterBuilder {
             model_path,
             model_config,
             self.task_config,
+            self.ort_config,
         )
     }
 
@@ -329,6 +347,12 @@ impl RTDetrTableCellAdapterBuilder {
     /// Sets the maximum number of cells.
     pub fn max_cells(mut self, max: usize) -> Self {
         self.inner = self.inner.max_cells(max);
+        self
+    }
+
+    /// Sets the ONNX Runtime session configuration.
+    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.inner = self.inner.with_ort_config(config);
         self
     }
 }

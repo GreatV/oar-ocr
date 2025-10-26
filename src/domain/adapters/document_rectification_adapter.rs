@@ -68,6 +68,8 @@ pub struct UVDocRectifierAdapterBuilder {
     session_pool_size: usize,
     /// Optional override for the registered model name
     model_name_override: Option<String>,
+    /// ONNX Runtime session configuration
+    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl UVDocRectifierAdapterBuilder {
@@ -78,6 +80,7 @@ impl UVDocRectifierAdapterBuilder {
             preprocess_config: UVDocPreprocessConfig::default(),
             session_pool_size: 1,
             model_name_override: None,
+            ort_config: None,
         }
     }
 
@@ -103,6 +106,12 @@ impl UVDocRectifierAdapterBuilder {
         self.model_name_override = Some(model_name.into());
         self
     }
+
+    /// Sets the ONNX Runtime session configuration.
+    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.ort_config = Some(config);
+        self
+    }
 }
 
 impl Default for UVDocRectifierAdapterBuilder {
@@ -117,10 +126,15 @@ impl AdapterBuilder for UVDocRectifierAdapterBuilder {
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
         // Build the UVDoc model
-        let model = UVDocModelBuilder::new()
+        let mut model_builder = UVDocModelBuilder::new()
             .preprocess_config(self.preprocess_config)
-            .session_pool_size(self.session_pool_size)
-            .build(model_path)?;
+            .session_pool_size(self.session_pool_size);
+
+        if let Some(ort_config) = self.ort_config {
+            model_builder = model_builder.with_ort_config(ort_config);
+        }
+
+        let model = model_builder.build(model_path)?;
 
         // Create adapter info
         let mut info = AdapterInfo::new(

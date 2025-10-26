@@ -9,27 +9,19 @@ use super::DBPostProcess;
 impl DBPostProcess {
     pub(super) fn polygons_from_bitmap(
         &self,
-        pred: &ndarray::Array2<f32>,
-        bitmap: &[Vec<bool>],
+        pred: &ndarray::ArrayView2<f32>,
+        bitmap: &GrayImage,
         dest_width: u32,
         dest_height: u32,
         box_thresh: f32,
         unclip_ratio: f32,
     ) -> (Vec<BoundingBox>, Vec<f32>) {
-        let height = bitmap.len();
-        let width = if height > 0 { bitmap[0].len() } else { 0 };
+        let height = bitmap.height() as usize;
+        let width = bitmap.width() as usize;
         let width_scale = dest_width as f32 / width as f32;
         let height_scale = dest_height as f32 / height as f32;
 
-        let mut gray_img = GrayImage::new(width as u32, height as u32);
-        for (y, row) in bitmap.iter().enumerate() {
-            for (x, &value) in row.iter().enumerate() {
-                let pixel_value = if value { 255 } else { 0 };
-                gray_img.put_pixel(x as u32, y as u32, image::Luma([pixel_value]));
-            }
-        }
-
-        let contours = find_contours::<u32>(&gray_img);
+        let contours = find_contours::<u32>(bitmap);
         let mut boxes = Vec::new();
         let mut scores = Vec::new();
 
@@ -88,27 +80,19 @@ impl DBPostProcess {
 
     pub(super) fn boxes_from_bitmap(
         &self,
-        pred: &ndarray::Array2<f32>,
-        bitmap: &[Vec<bool>],
+        pred: &ndarray::ArrayView2<f32>,
+        bitmap: &GrayImage,
         dest_width: u32,
         dest_height: u32,
         box_thresh: f32,
         unclip_ratio: f32,
     ) -> (Vec<BoundingBox>, Vec<f32>) {
-        let height = bitmap.len();
-        let width = if height > 0 { bitmap[0].len() } else { 0 };
+        let height = bitmap.height() as usize;
+        let width = bitmap.width() as usize;
         let width_scale = dest_width as f32 / width as f32;
         let height_scale = dest_height as f32 / height as f32;
 
-        let mut gray_img = GrayImage::new(width as u32, height as u32);
-        for (y, row) in bitmap.iter().enumerate() {
-            for (x, &value) in row.iter().enumerate() {
-                let pixel_value = if value { 255 } else { 0 };
-                gray_img.put_pixel(x as u32, y as u32, image::Luma([pixel_value]));
-            }
-        }
-
-        let contours = find_contours::<u32>(&gray_img);
+        let contours = find_contours::<u32>(bitmap);
         let mut boxes = Vec::new();
         let mut scores = Vec::new();
 

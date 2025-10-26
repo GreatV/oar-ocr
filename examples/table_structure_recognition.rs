@@ -29,30 +29,33 @@
 //! Basic usage:
 //! ```bash
 //! cargo run --example table_structure_recognition -- \
-//!     -m .oar/slanext_wired.onnx \
-//!     --dict-path .oar/table_structure_dict_ch.txt \
-//!     .oar/images/table_recognition.jpg
+//!     -m models/slanext_wired.onnx \
+//!     --dict-path models/table_structure_dict_ch.txt \
+//!     images/table_recognition.jpg
 //! ```
 //!
 //! With custom dictionary from PaddleOCR:
 //! ```bash
 //! cargo run --example table_structure_recognition -- \
-//!     -m .oar/slanext_wired.onnx \
+//!     -m models/slanext_wired.onnx \
 //!     --dict-path ~/repos/PaddleOCR/ppocr/utils/dict/table_structure_dict_ch.txt \
-//!     .oar/images/table_recognition.jpg
+//!     images/table_recognition.jpg
 //! ```
 //!
 //! Using English dictionary:
 //! ```bash
 //! cargo run --example table_structure_recognition -- \
-//!     -m .oar/slanext_wired.onnx \
+//!     -m models/slanext_wired.onnx \
 //!     --dict-path ~/repos/PaddleOCR/ppocr/utils/dict/table_structure_dict.txt \
-//!     .oar/images/table_recognition.jpg
+//!     images/table_recognition.jpg
 //! ```
 //!
 //! Output will show complete structure tokens and bounding boxes for verification.
 
+mod common;
+
 use clap::Parser;
+use common::{load_rgb_image, parse_device_config};
 use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
 use oar_ocr::core::traits::task::{ImageTaskInput, Task};
 use oar_ocr::domain::adapters::SLANetWiredAdapterBuilder;
@@ -61,7 +64,7 @@ use oar_ocr::domain::tasks::table_structure_recognition::{
 };
 use std::path::PathBuf;
 use std::time::Instant;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// Command-line arguments for the table structure recognition example
 #[derive(Parser)]
@@ -103,6 +106,11 @@ struct Args {
     /// Model input width (default: 512)
     #[arg(long, default_value = "512")]
     input_width: u32,
+
+    /// Directory to save visualization results (requires `visualization` feature)
+    #[cfg(feature = "visualization")]
+    #[arg(short = 'o', long = "output-dir")]
+    output_dir: Option<PathBuf>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -154,8 +162,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Log device configuration
     info!("Using device: {}", args.device);
-    if args.device != "cpu" {
-        warn!("GPU support not yet implemented in new architecture. Using CPU.");
+    let ort_config = parse_device_config(&args.device)?;
+
+    if ort_config.is_some() {
+        info!("CUDA execution provider configured successfully");
     }
 
     // Create configuration
@@ -179,12 +189,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("  Session pool size: {}", args.session_pool_size);
 
     let start_build = Instant::now();
-    let adapter = SLANetWiredAdapterBuilder::new()
+    let mut adapter_builder = SLANetWiredAdapterBuilder::new()
         .with_config(config.clone())
         .input_shape((args.input_height, args.input_width))
         .session_pool_size(args.session_pool_size)
-        .dict_path(&args.dict_path)
-        .build(&args.model_path)?;
+        .dict_path(&args.dict_path);
+
+    if let Some(ort_cfg) = ort_config {
+        adapter_builder = adapter_builder.with_ort_config(ort_cfg);
+    }
+
+    let adapter = adapter_builder.build(&args.model_path)?;
     let info_adapter = adapter.info();
 
     info!(
@@ -200,9 +215,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut images = Vec::new();
 
     for image_path in &existing_images {
-        match image::open(image_path) {
-            Ok(img) => {
-                let rgb_img = img.to_rgb8();
+        match load_rgb_image(image_path) {
+            Ok(rgb_img) => {
                 info!(
                     "Loaded image: {} ({}x{})",
                     image_path.display(),
@@ -259,6 +273,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     info!("  Cell bboxes ({}): {:?}", output.bbox.len(), output.bbox);
     info!("  Confidence: {:.6}", output.structure_score);
+
+    #[cfg(feature = "visualization")]
+    {
+        if let Some(ref output_dir) = args.output_dir {
+            std::fs::create_dir_all(output_dir)?;
+
+            let structure_html = output.structure.join("");
+            let html_stem = existing_images
+                .get(0)
+                .and_then(|path| path.file_stem())
+                .and_then(|name| name.to_str())
+                .unwrap_or("table_structure");
+            let html_path = output_dir.join(format!("{}_structure.html", html_stem));
+
+            if let Err(e) = std::fs::write(&html_path, structure_html) {
+                error!(
+                    "Failed to write structure HTML {}: {}",
+                    html_path.display(),
+                    e
+                );
+            } else {
+                info!("Structure HTML saved to: {}", html_path.display());
+            }
+        }
+    }
 
     Ok(())
 }

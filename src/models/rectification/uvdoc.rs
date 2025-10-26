@@ -195,6 +195,8 @@ pub struct UVDocModelBuilder {
     session_pool_size: usize,
     /// Preprocessing configuration
     preprocess_config: UVDocPreprocessConfig,
+    /// ONNX Runtime session configuration
+    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl UVDocModelBuilder {
@@ -203,6 +205,7 @@ impl UVDocModelBuilder {
         Self {
             session_pool_size: 1,
             preprocess_config: UVDocPreprocessConfig::default(),
+            ort_config: None,
         }
     }
 
@@ -224,6 +227,12 @@ impl UVDocModelBuilder {
         self
     }
 
+    /// Sets the ONNX Runtime session configuration.
+    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.ort_config = Some(config);
+        self
+    }
+
     /// Builds the UVDoc model.
     ///
     /// # Arguments
@@ -235,14 +244,14 @@ impl UVDocModelBuilder {
     /// A configured UVDoc model instance
     pub fn build(self, model_path: &std::path::Path) -> Result<UVDocModel, OCRError> {
         // Create ONNX inference engine
-        let inference = if self.session_pool_size > 1 {
+        let inference = if self.session_pool_size > 1 || self.ort_config.is_some() {
             use crate::core::config::CommonBuilderConfig;
             let common_config = CommonBuilderConfig {
                 model_path: None,
                 model_name: None,
                 batch_size: None,
                 enable_logging: None,
-                ort_session: None,
+                ort_session: self.ort_config,
                 session_pool_size: Some(self.session_pool_size),
             };
             OrtInfer::from_common(&common_config, model_path, Some("image"))?

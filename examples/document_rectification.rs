@@ -26,7 +26,10 @@
 //!     distorted_doc1.jpg distorted_doc2.jpg
 //! ```
 
+mod common;
+
 use clap::Parser;
+use common::{load_rgb_image, parse_device_config};
 use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
 use oar_ocr::core::traits::task::{ImageTaskInput, Task};
 use oar_ocr::domain::adapters::UVDocRectifierAdapterBuilder;
@@ -35,7 +38,7 @@ use oar_ocr::domain::tasks::document_rectification::{
 };
 use std::path::PathBuf;
 use std::time::Instant;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// Command-line arguments for the document rectification example
 #[derive(Parser)]
@@ -116,8 +119,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Log device configuration
     info!("Using device: {}", args.device);
-    if args.device != "cpu" {
-        warn!("GPU support not yet implemented in new architecture. Using CPU.");
+    let ort_config = parse_device_config(&args.device)?;
+
+    if ort_config.is_some() {
+        info!("CUDA execution provider configured successfully");
     }
 
     // Create rectification configuration
@@ -140,15 +145,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let builder = UVDocRectifierAdapterBuilder::new()
+    let mut builder = UVDocRectifierAdapterBuilder::new()
         .with_config(config.clone())
         .session_pool_size(args.session_pool_size);
 
-    let builder = if args.input_height > 0 && args.input_width > 0 {
-        builder.input_shape([3, args.input_height, args.input_width])
-    } else {
-        builder
-    };
+    if args.input_height > 0 && args.input_width > 0 {
+        builder = builder.input_shape([3, args.input_height, args.input_width]);
+    }
+
+    if let Some(ort_cfg) = ort_config {
+        builder = builder.with_ort_config(ort_cfg);
+    }
 
     let adapter = builder.build(&args.model_path)?;
 
@@ -164,9 +171,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut images = Vec::new();
 
     for image_path in &existing_images {
-        match image::open(image_path) {
-            Ok(img) => {
-                let rgb_img = img.to_rgb8();
+        match load_rgb_image(image_path) {
+            Ok(rgb_img) => {
                 if args.verbose {
                     info!(
                         "Loaded image: {} ({}x{})",
@@ -246,19 +252,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .zip(output.rectified_images.iter())
         .map(|((path, orig), rect)| (path, orig, rect))
     {
-        let input_filename = image_path
-            .file_stem()
+        // Use the original filename for output
+        let output_filename = image_path
+            .file_name()
             .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
+            .unwrap_or("unknown.jpg");
 
         // Save rectified image
-        let rectified_filename = format!("{}_rectified.jpg", input_filename);
-        let rectified_path = args.output_dir.join(&rectified_filename);
+        let rectified_path = args.output_dir.join(output_filename);
         rectified_img.save(&rectified_path)?;
         info!("  Saved rectified: {}", rectified_path.display());
 
         // Save comparison image if requested
         if args.save_comparison {
+            let input_filename = image_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown");
             let comparison_filename = format!("{}_comparison.jpg", input_filename);
             let comparison_path = args.output_dir.join(&comparison_filename);
             let comparison_img = create_comparison_image(original_img, rectified_img);

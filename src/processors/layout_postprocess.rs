@@ -4,7 +4,7 @@
 //! PicoDet, RT-DETR, and PP-DocLayout series models.
 
 use crate::core::Tensor4D;
-use crate::processors::{BoundingBox, Point};
+use crate::processors::{BoundingBox, ImageScaleInfo, Point};
 use ndarray::{ArrayView3, Axis};
 use std::borrow::Cow;
 
@@ -57,7 +57,7 @@ impl LayoutPostProcess {
     pub fn apply(
         &self,
         predictions: &Tensor4D,
-        img_shapes: Vec<[f32; 4]>,
+        img_shapes: Vec<ImageScaleInfo>,
     ) -> LayoutPostprocessOutput {
         let batch_size = predictions.shape()[0];
         let mut all_boxes = Vec::with_capacity(batch_size);
@@ -69,10 +69,10 @@ impl LayoutPostProcess {
             let pred = predictions.index_axis(Axis(0), batch_idx);
 
             let (boxes, classes, scores) = match self.model_type.as_str() {
-                "picodet" => self.process_picodet(pred, img_shape),
-                "rtdetr" => self.process_rtdetr(pred, img_shape),
-                "pp-doclayout" => self.process_pp_doclayout(pred, img_shape),
-                _ => self.process_standard(pred, img_shape),
+                "picodet" => self.process_picodet(pred, &img_shape),
+                "rtdetr" => self.process_rtdetr(pred, &img_shape),
+                "pp-doclayout" => self.process_pp_doclayout(pred, &img_shape),
+                _ => self.process_standard(pred, &img_shape),
             };
 
             all_boxes.push(boxes);
@@ -87,14 +87,14 @@ impl LayoutPostProcess {
     fn process_picodet(
         &self,
         predictions: ArrayView3<f32>,
-        img_shape: [f32; 4],
+        img_shape: &ImageScaleInfo,
     ) -> (Vec<BoundingBox>, Vec<usize>, Vec<f32>) {
         let mut boxes = Vec::new();
         let mut classes = Vec::new();
         let mut scores = Vec::new();
 
-        let orig_width = img_shape[1];
-        let orig_height = img_shape[0];
+        let orig_width = img_shape.src_w;
+        let orig_height = img_shape.src_h;
         let shape = predictions.shape();
         if shape.len() != 3 || shape[2] == 0 {
             return (boxes, classes, scores);
@@ -202,7 +202,7 @@ impl LayoutPostProcess {
     fn process_rtdetr(
         &self,
         predictions: ArrayView3<f32>,
-        img_shape: [f32; 4],
+        img_shape: &ImageScaleInfo,
     ) -> (Vec<BoundingBox>, Vec<usize>, Vec<f32>) {
         // RT-DETR has similar output format to PicoDet
         self.process_picodet(predictions, img_shape)
@@ -212,7 +212,7 @@ impl LayoutPostProcess {
     fn process_pp_doclayout(
         &self,
         predictions: ArrayView3<f32>,
-        img_shape: [f32; 4],
+        img_shape: &ImageScaleInfo,
     ) -> (Vec<BoundingBox>, Vec<usize>, Vec<f32>) {
         // PP-DocLayout outputs in [num_boxes, 1, 6] format
         // where each box is [class_id, score, x1, y1, x2, y2]
@@ -223,8 +223,8 @@ impl LayoutPostProcess {
         let mut classes = Vec::new();
         let mut scores = Vec::new();
 
-        let _orig_width = img_shape[1];
-        let _orig_height = img_shape[0];
+        let _orig_width = img_shape.src_w;
+        let _orig_height = img_shape.src_h;
 
         // Extract predictions
         for box_idx in 0..num_boxes {
@@ -267,7 +267,7 @@ impl LayoutPostProcess {
     fn process_standard(
         &self,
         predictions: ArrayView3<f32>,
-        img_shape: [f32; 4],
+        img_shape: &ImageScaleInfo,
     ) -> (Vec<BoundingBox>, Vec<usize>, Vec<f32>) {
         self.process_picodet(predictions, img_shape)
     }

@@ -413,7 +413,7 @@ mod tests {
     fn test_argmax() {
         use ndarray::Array3;
 
-        let dict_path = Path::new(".oar/table_structure_dict.txt");
+        let dict_path = Path::new("models/table_structure_dict.txt");
         if !dict_path.exists() {
             return; // Skip if dict not available
         }

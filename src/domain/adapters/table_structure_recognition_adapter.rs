@@ -192,6 +192,8 @@ pub struct SLANetWiredAdapterBuilder {
     dict_path: Option<std::path::PathBuf>,
     /// Optional override for the registered model name
     model_name_override: Option<String>,
+    /// ONNX Runtime session configuration
+    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl SLANetWiredAdapterBuilder {
@@ -203,6 +205,7 @@ impl SLANetWiredAdapterBuilder {
             session_pool_size: 1,
             dict_path: None,
             model_name_override: None,
+            ort_config: None,
         }
     }
 
@@ -229,6 +232,12 @@ impl SLANetWiredAdapterBuilder {
         self.model_name_override = Some(model_name.into());
         self
     }
+
+    /// Sets the ONNX Runtime session configuration.
+    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.ort_config = Some(config);
+        self
+    }
 }
 
 impl Default for SLANetWiredAdapterBuilder {
@@ -243,10 +252,15 @@ impl AdapterBuilder for SLANetWiredAdapterBuilder {
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
         // Build the SLANet model
-        let model = SLANetModelBuilder::new()
+        let mut model_builder = SLANetModelBuilder::new()
             .session_pool_size(self.session_pool_size)
-            .input_size(self.input_shape)
-            .build(model_path)?;
+            .input_size(self.input_shape);
+
+        if let Some(ort_config) = self.ort_config {
+            model_builder = model_builder.with_ort_config(ort_config);
+        }
+
+        let model = model_builder.build(model_path)?;
 
         // Dictionary path is required
         let dict_path = self.dict_path.ok_or_else(|| OCRError::ConfigError {
@@ -297,6 +311,8 @@ pub struct SLANetWirelessAdapterBuilder {
     dict_path: Option<std::path::PathBuf>,
     /// Optional override for the registered model name
     model_name_override: Option<String>,
+    /// ONNX Runtime session configuration
+    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl SLANetWirelessAdapterBuilder {
@@ -308,6 +324,7 @@ impl SLANetWirelessAdapterBuilder {
             session_pool_size: 1,
             dict_path: None,
             model_name_override: None,
+            ort_config: None,
         }
     }
 
@@ -334,6 +351,12 @@ impl SLANetWirelessAdapterBuilder {
         self.model_name_override = Some(model_name.into());
         self
     }
+
+    /// Sets the ONNX Runtime session configuration.
+    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.ort_config = Some(config);
+        self
+    }
 }
 
 impl Default for SLANetWirelessAdapterBuilder {
@@ -348,10 +371,15 @@ impl AdapterBuilder for SLANetWirelessAdapterBuilder {
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
         // Build the SLANet model
-        let model = SLANetModelBuilder::new()
+        let mut model_builder = SLANetModelBuilder::new()
             .session_pool_size(self.session_pool_size)
-            .input_size(self.input_shape)
-            .build(model_path)?;
+            .input_size(self.input_shape);
+
+        if let Some(ort_config) = self.ort_config {
+            model_builder = model_builder.with_ort_config(ort_config);
+        }
+
+        let model = model_builder.build(model_path)?;
 
         // Dictionary path is required
         let dict_path = self.dict_path.ok_or_else(|| OCRError::ConfigError {
@@ -411,7 +439,7 @@ mod tests {
         let builder = SLANetWiredAdapterBuilder::new()
             .input_shape((640, 640))
             .session_pool_size(4)
-            .dict_path(".oar/table_structure_dict_ch.txt");
+            .dict_path("models/table_structure_dict_ch.txt");
 
         assert_eq!(builder.input_shape, (640, 640));
         assert_eq!(builder.session_pool_size, 4);

@@ -5,11 +5,13 @@
 
 use crate::core::inference::OrtInfer;
 use crate::core::{OCRError, Tensor4D};
-use crate::processors::{ChannelOrder, DetResizeForTest, LimitType, NormalizeImage};
+use crate::processors::{
+    ChannelOrder, DetResizeForTest, ImageScaleInfo, LimitType, NormalizeImage,
+};
 use image::{DynamicImage, RgbImage};
 use ndarray::Array2;
 
-type RTDetrPreprocessArtifacts = (Tensor4D, Vec<[f32; 4]>, Vec<[f32; 2]>, Vec<[f32; 2]>);
+type RTDetrPreprocessArtifacts = (Tensor4D, Vec<ImageScaleInfo>, Vec<[f32; 2]>, Vec<[f32; 2]>);
 type RTDetrPreprocessResult = Result<RTDetrPreprocessArtifacts, OCRError>;
 
 /// Preprocessing configuration for RT-DETR model.
@@ -179,7 +181,7 @@ impl RTDetrModel {
         &self,
         images: Vec<RgbImage>,
         config: &RTDetrPostprocessConfig,
-    ) -> Result<(RTDetrModelOutput, Vec<[f32; 4]>), OCRError> {
+    ) -> Result<(RTDetrModelOutput, Vec<ImageScaleInfo>), OCRError> {
         let (batch_tensor, img_shapes, _orig_shapes, resized_shapes) = self.preprocess(images)?;
 
         let batch_size = batch_tensor.shape()[0];
@@ -187,7 +189,7 @@ impl RTDetrModel {
         // Build scale_factor array [ratio_h, ratio_w]
         let scale_data: Vec<f32> = img_shapes
             .iter()
-            .flat_map(|shape| [shape[2], shape[3]])
+            .flat_map(|shape| [shape.ratio_h, shape.ratio_w])
             .collect();
         let scale_factor = Array2::from_shape_vec((batch_size, 2), scale_data).map_err(|e| {
             OCRError::InvalidInput {

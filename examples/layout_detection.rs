@@ -14,22 +14,47 @@
 //!
 //! * `-m, --model-path` - Path to the layout detection model file
 //! * `-o, --output-dir` - Directory to save visualization results (optional)
-//! * `--model-type` - Model type to use (auto-detected from filename if not specified)
+//! * `--model-name` - Model name to explicitly specify the model type. Supported names:
+//!   - `pp_docblocklayout` - PP-DocBlockLayout model
+//!   - `pp_doclayout_s` - PP-DocLayout Small variant
+//!   - `pp_doclayout_m` - PP-DocLayout Medium variant
+//!   - `pp_doclayout_l` - PP-DocLayout Large variant
+//!   - `pp_doclayout_plus_l` - PP-DocLayout Plus Large variant
+//!   - `picodet_layout_1x` - PicoDet Layout 1x model
+//!   - `picodet_layout_1x_table` - PicoDet Layout 1x Table model
+//!   - `picodet_s_layout_3cls` - PicoDet Small Layout 3-class model
+//!   - `picodet_l_layout_3cls` - PicoDet Large Layout 3-class model
+//!   - `picodet_s_layout_17cls` - PicoDet Small Layout 17-class model
+//!   - `picodet_l_layout_17cls` - PicoDet Large Layout 17-class model
+//!   - `rtdetr_h_layout_3cls` - RT-DETR High Layout 3-class model
+//!   - `rtdetr_h_layout_17cls` - RT-DETR High Layout 17-class model
 //! * `--score-threshold` - Score threshold for layout elements (default: 0.5)
 //! * `--max-elements` - Maximum number of layout elements to detect (default: 100)
 //! * `--device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
 //! * `<IMAGES>...` - Paths to input document images to process
 //!
-//! # Example
+//! # Examples
 //!
+//! Basic usage with auto-detection:
 //! ```bash
 //! cargo run --example layout_detection -- \
-//!     -m .oar/pp-doclayout_plus-l.onnx \
+//!     -m models/pp-doclayout_plus-l.onnx \
+//!     document1.jpg document2.jpg
+//! ```
+//!
+//! With explicit model name:
+//! ```bash
+//! cargo run --example layout_detection -- \
+//!     -m models/pp-doclayout_plus-l.onnx \
+//!     --model-name pp_doclayout_plus_l \
 //!     -o output/ \
 //!     document1.jpg document2.jpg
 //! ```
 
+mod common;
+
 use clap::Parser;
+use common::{load_rgb_image, parse_device_config};
 use oar_ocr::core::traits::{
     adapter::{AdapterBuilder, ModelAdapter},
     task::{ImageTaskInput, Task},
@@ -66,9 +91,12 @@ struct Args {
     #[arg(short, long)]
     output_dir: Option<PathBuf>,
 
-    /// Model type to use (auto-detected from filename if not specified)
+    /// Model name to explicitly specify the model type (auto-detected from filename if not specified).
+    /// Supported: pp_docblocklayout, pp_doclayout_s, pp_doclayout_m, pp_doclayout_l, pp_doclayout_plus_l,
+    /// picodet_layout_1x, picodet_layout_1x_table, picodet_s_layout_3cls, picodet_l_layout_3cls,
+    /// picodet_s_layout_17cls, picodet_l_layout_17cls, rtdetr_h_layout_3cls, rtdetr_h_layout_17cls
     #[arg(long)]
-    model_type: Option<String>,
+    model_name: Option<String>,
 
     /// Score threshold for layout elements (0.0 to 1.0)
     #[arg(long, default_value_t = 0.5)]
@@ -98,8 +126,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Loading layout detection model: {:?}", args.model_path);
 
     // Auto-detect model type from filename if not specified
-    let model_type = if let Some(ref mt) = args.model_type {
-        mt.clone()
+    // Priority: --model-name > auto-detect from filename
+    let model_type = if let Some(ref mn) = args.model_name {
+        mn.clone()
     } else {
         let filename = args
             .model_path
@@ -160,32 +189,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Model type: {}", model_type);
 
+    // Parse device configuration
+    info!("Using device: {}", args.device);
+    let ort_config = parse_device_config(&args.device)?;
+
+    if ort_config.is_some() {
+        info!("CUDA execution provider configured successfully");
+    }
+
     // Create model configuration based on model type
     let _model_config = match model_type.as_str() {
-        "pp_docblocklayout" => LayoutModelConfig::pp_docblocklayout(),
-        "picodet_layout_1x_table"
-        | "picodet-layout_1x_table"
-        | "picodet_layout_1x-table"
-        | "picodet-layout-1x-table" => LayoutModelConfig::picodet_layout_1x_table(),
-        "picodet_layout_1x" => LayoutModelConfig::picodet_layout_1x(),
-        "picodet_s_layout_3cls" => LayoutModelConfig::picodet_s_layout_3cls(),
-        "picodet_l_layout_3cls" => LayoutModelConfig::picodet_l_layout_3cls(),
-        "picodet_s_layout_17cls" => LayoutModelConfig::picodet_s_layout_17cls(),
-        "picodet_l_layout_17cls" => LayoutModelConfig::picodet_l_layout_17cls(),
-        "pp_doclayout_s" | "pp-doclayout-s" => LayoutModelConfig::pp_doclayout_s(),
-        "pp_doclayout_m" | "pp-doclayout-m" => LayoutModelConfig::pp_doclayout_m(),
-        "pp_doclayout_l" | "pp-doclayout-l" => LayoutModelConfig::pp_doclayout_l(),
-        "pp_doclayout_plus_l" | "pp-doclayout_plus-l" => LayoutModelConfig::pp_doclayout_plus_l(),
-        "rtdetr_h_layout_3cls" | "rt-detr-h_layout_3cls" => {
-            LayoutModelConfig::rtdetr_h_layout_3cls()
-        }
-        "rtdetr_h_layout_17cls" | "rt-detr-h_layout_17cls" => {
-            LayoutModelConfig::rtdetr_h_layout_17cls()
-        }
+        "PP-DocBlockLayout" => LayoutModelConfig::pp_docblocklayout(),
+        "PicoDet_layout_1x_table" => LayoutModelConfig::picodet_layout_1x_table(),
+        "PicoDet_layout_1x" => LayoutModelConfig::picodet_layout_1x(),
+        "PicoDet-S_layout_3cls" => LayoutModelConfig::picodet_s_layout_3cls(),
+        "PicoDet-L_layout_3cls" => LayoutModelConfig::picodet_l_layout_3cls(),
+        "PicoDet-S_layout_17cls" => LayoutModelConfig::picodet_s_layout_17cls(),
+        "PicoDet-L_layout_17cls" => LayoutModelConfig::picodet_l_layout_17cls(),
+        "PP-DocLayout-S" => LayoutModelConfig::pp_doclayout_s(),
+        "PP-DocLayout-M" => LayoutModelConfig::pp_doclayout_m(),
+        "PP-DocLayout-L" => LayoutModelConfig::pp_doclayout_l(),
+        "PP-DocLayout_plus-L" => LayoutModelConfig::pp_doclayout_plus_l(),
+        "RT-DETR-H_layout_3cls" => LayoutModelConfig::rtdetr_h_layout_3cls(),
+        "RT-DETR-H_layout_17cls" => LayoutModelConfig::rtdetr_h_layout_17cls(),
         _ => {
             error!("Unknown model type: {}", model_type);
             error!(
-                "Available types: pp_docblocklayout, picodet_layout_1x, picodet_layout_1x_table, picodet_s_layout_3cls, picodet_l_layout_3cls, picodet_s_layout_17cls, picodet_l_layout_17cls, pp_doclayout_s, pp_doclayout_m, pp_doclayout_l, pp_doclayout_plus_l, rtdetr_h_layout_3cls, rtdetr_h_layout_17cls"
+                "Available types: PP-DocBlockLayout, PP-DocLayout-S, PP-DocLayout-M, PP-DocLayout-L, PP-DocLayout_plus-L, PicoDet_layout_1x, PicoDet_layout_1x_table, PicoDet-S_layout_3cls, PicoDet-L_layout_3cls, PicoDet-S_layout_17cls, PicoDet-L_layout_17cls, RT-DETR-H_layout_3cls, RT-DETR-H_layout_17cls"
             );
             std::process::exit(1);
         }
@@ -199,123 +229,129 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build the adapter based on model type
     let adapter: Box<dyn ModelAdapter<Task = LayoutDetectionTask>> = match model_type.as_str() {
-        "pp_docblocklayout"
-        | "pp-docblocklayout"
-        | "pp_doclayout_s"
-        | "pp-doclayout-s"
-        | "pp_doclayout_m"
-        | "pp-doclayout-m"
-        | "pp_doclayout_l"
-        | "pp-doclayout-l"
-        | "pp_doclayout_plus_l"
-        | "pp-doclayout_plus-l" => Box::new(
-            PPDocLayoutAdapterBuilder::new(&model_type)
-                .task_config(config.clone())
-                .build(&args.model_path)
-                .map_err(|e| {
-                    format!(
-                        "Failed to build PP-DocLayout adapter from model {:?}: {}",
-                        args.model_path, e
-                    )
-                })?,
-        ),
-        "rtdetr_h_layout_3cls" | "rt-detr-h_layout_3cls" => Box::new(
-            RTDetrLayoutAdapterBuilder::new()
-                .task_config(config.clone())
-                .build(&args.model_path)
-                .map_err(|e| {
-                    format!(
-                        "Failed to build RT-DETR adapter from model {:?}: {}",
-                        args.model_path, e
-                    )
-                })?,
-        ),
-        "rtdetr_h_layout_17cls" | "rt-detr-h_layout_17cls" => Box::new(
-            RTDetrLayoutAdapterBuilder::new_17cls()
-                .task_config(config.clone())
-                .build(&args.model_path)
-                .map_err(|e| {
-                    format!(
-                        "Failed to build RT-DETR adapter (17cls) from model {:?}: {}",
-                        args.model_path, e
-                    )
-                })?,
-        ),
-        "picodet_layout_1x_table"
-        | "picodet-layout_1x_table"
-        | "picodet_layout_1x-table"
-        | "picodet-layout-1x-table" => Box::new(
-            LayoutDetectionAdapterBuilder::new()
+        "PP-DocBlockLayout"
+        | "PP-DocLayout-S"
+        | "PP-DocLayout-M"
+        | "PP-DocLayout-L"
+        | "PP-DocLayout_plus-L" => {
+            let mut builder =
+                PPDocLayoutAdapterBuilder::new(&model_type).task_config(config.clone());
+
+            if let Some(ort_cfg) = ort_config.clone() {
+                builder = builder.with_ort_config(ort_cfg);
+            }
+
+            Box::new(builder.build(&args.model_path).map_err(|e| {
+                format!(
+                    "Failed to build PP-DocLayout adapter from model {:?}: {}",
+                    args.model_path, e
+                )
+            })?)
+        }
+        "RT-DETR-H_layout_3cls" => {
+            let mut builder = RTDetrLayoutAdapterBuilder::new().task_config(config.clone());
+            if let Some(ort_cfg) = ort_config.clone() {
+                builder = builder.with_ort_config(ort_cfg);
+            }
+            Box::new(builder.build(&args.model_path).map_err(|e| {
+                format!(
+                    "Failed to build RT-DETR adapter from model {:?}: {}",
+                    args.model_path, e
+                )
+            })?)
+        }
+        "RT-DETR-H_layout_17cls" => {
+            let mut builder = RTDetrLayoutAdapterBuilder::new_17cls().task_config(config.clone());
+            if let Some(ort_cfg) = ort_config.clone() {
+                builder = builder.with_ort_config(ort_cfg);
+            }
+            Box::new(builder.build(&args.model_path).map_err(|e| {
+                format!(
+                    "Failed to build RT-DETR adapter (17cls) from model {:?}: {}",
+                    args.model_path, e
+                )
+            })?)
+        }
+        "PicoDet_layout_1x_table" => {
+            let mut builder = LayoutDetectionAdapterBuilder::new()
                 .model_config(LayoutModelConfig::picodet_layout_1x_table())
-                .task_config(config.clone())
-                .build(&args.model_path)
-                .map_err(|e| {
-                    format!(
-                        "Failed to build PicoDet adapter (table) from model {:?}: {}",
-                        args.model_path, e
-                    )
-                })?,
-        ),
-        "picodet_s_layout_3cls" => Box::new(
-            PicoDetLayoutAdapterBuilder::new_3cls()
-                .task_config(config.clone())
-                .build(&args.model_path)
-                .map_err(|e| {
-                    format!(
-                        "Failed to build PicoDet-S adapter from model {:?}: {}",
-                        args.model_path, e
-                    )
-                })?,
-        ),
-        "picodet_l_layout_3cls" => Box::new(
-            LayoutDetectionAdapterBuilder::new()
+                .task_config(config.clone());
+            if let Some(ort_cfg) = ort_config.clone() {
+                builder = builder.with_ort_config(ort_cfg);
+            }
+            Box::new(builder.build(&args.model_path).map_err(|e| {
+                format!(
+                    "Failed to build PicoDet adapter (table) from model {:?}: {}",
+                    args.model_path, e
+                )
+            })?)
+        }
+        "PicoDet-S_layout_3cls" => {
+            let mut builder = PicoDetLayoutAdapterBuilder::new_3cls().task_config(config.clone());
+            if let Some(ort_cfg) = ort_config.clone() {
+                builder = builder.with_ort_config(ort_cfg);
+            }
+            Box::new(builder.build(&args.model_path).map_err(|e| {
+                format!(
+                    "Failed to build PicoDet-S adapter from model {:?}: {}",
+                    args.model_path, e
+                )
+            })?)
+        }
+        "PicoDet-L_layout_3cls" => {
+            let mut builder = LayoutDetectionAdapterBuilder::new()
                 .model_config(LayoutModelConfig::picodet_l_layout_3cls())
-                .task_config(config.clone())
-                .build(&args.model_path)
-                .map_err(|e| {
-                    format!(
-                        "Failed to build PicoDet-L adapter (3cls) from model {:?}: {}",
-                        args.model_path, e
-                    )
-                })?,
-        ),
-        "picodet_s_layout_17cls" => Box::new(
-            LayoutDetectionAdapterBuilder::new()
+                .task_config(config.clone());
+            if let Some(ort_cfg) = ort_config.clone() {
+                builder = builder.with_ort_config(ort_cfg);
+            }
+            Box::new(builder.build(&args.model_path).map_err(|e| {
+                format!(
+                    "Failed to build PicoDet-L adapter (3cls) from model {:?}: {}",
+                    args.model_path, e
+                )
+            })?)
+        }
+        "PicoDet-S_layout_17cls" => {
+            let mut builder = LayoutDetectionAdapterBuilder::new()
                 .model_config(LayoutModelConfig::picodet_s_layout_17cls())
-                .task_config(config.clone())
-                .build(&args.model_path)
-                .map_err(|e| {
-                    format!(
-                        "Failed to build PicoDet-S adapter (17cls) from model {:?}: {}",
-                        args.model_path, e
-                    )
-                })?,
-        ),
-        "picodet_l_layout_17cls" => Box::new(
-            LayoutDetectionAdapterBuilder::new()
+                .task_config(config.clone());
+            if let Some(ort_cfg) = ort_config.clone() {
+                builder = builder.with_ort_config(ort_cfg);
+            }
+            Box::new(builder.build(&args.model_path).map_err(|e| {
+                format!(
+                    "Failed to build PicoDet-S adapter (17cls) from model {:?}: {}",
+                    args.model_path, e
+                )
+            })?)
+        }
+        "PicoDet-L_layout_17cls" => {
+            let mut builder = LayoutDetectionAdapterBuilder::new()
                 .model_config(LayoutModelConfig::picodet_l_layout_17cls())
-                .task_config(config.clone())
-                .build(&args.model_path)
-                .map_err(|e| {
-                    format!(
-                        "Failed to build PicoDet-L adapter (17cls) from model {:?}: {}",
-                        args.model_path, e
-                    )
-                })?,
-        ),
+                .task_config(config.clone());
+            if let Some(ort_cfg) = ort_config.clone() {
+                builder = builder.with_ort_config(ort_cfg);
+            }
+            Box::new(builder.build(&args.model_path).map_err(|e| {
+                format!(
+                    "Failed to build PicoDet-L adapter (17cls) from model {:?}: {}",
+                    args.model_path, e
+                )
+            })?)
+        }
         _ => {
             // Default to PicoDet for other models
-            Box::new(
-                PicoDetLayoutAdapterBuilder::new()
-                    .task_config(config.clone())
-                    .build(&args.model_path)
-                    .map_err(|e| {
-                        format!(
-                            "Failed to build PicoDet adapter from model {:?}: {}",
-                            args.model_path, e
-                        )
-                    })?,
-            )
+            let mut builder = PicoDetLayoutAdapterBuilder::new().task_config(config.clone());
+            if let Some(ort_cfg) = ort_config.clone() {
+                builder = builder.with_ort_config(ort_cfg);
+            }
+            Box::new(builder.build(&args.model_path).map_err(|e| {
+                format!(
+                    "Failed to build PicoDet adapter from model {:?}: {}",
+                    args.model_path, e
+                )
+            })?)
         }
     };
 
@@ -338,8 +374,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
         // Load input image
-        let img = match image::open(image_path) {
-            Ok(img) => img.to_rgb8(),
+        let img = match load_rgb_image(image_path) {
+            Ok(img) => img,
             Err(e) => {
                 error!("Failed to load image {:?}: {}", image_path, e);
                 continue;
@@ -432,13 +468,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Visualization
             #[cfg(feature = "visualization")]
             if let Some(ref output_dir) = args.output_dir {
-                let output_filename = format!(
-                    "layout_detection_{}.png",
-                    image_path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("result")
-                );
+                // Use the original filename for output
+                let output_filename = image_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("result.png");
                 let output_path = output_dir.join(output_filename);
 
                 if let Err(e) = visualize_layout(&img, elements, &output_path) {
@@ -557,8 +591,22 @@ fn visualize_layout(
     }
 
     // Save visualization
-    img.save(output_path)
-        .map_err(|e| format!("Failed to save visualization to {:?}: {}", output_path, e))?;
+    // Convert RGBA to RGB if saving as JPEG (JPEG doesn't support alpha channel)
+    let extension = output_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if extension == "jpg" || extension == "jpeg" {
+        let rgb_img = image::DynamicImage::ImageRgba8(img).to_rgb8();
+        rgb_img
+            .save(output_path)
+            .map_err(|e| format!("Failed to save visualization to {:?}: {}", output_path, e))?;
+    } else {
+        img.save(output_path)
+            .map_err(|e| format!("Failed to save visualization to {:?}: {}", output_path, e))?;
+    }
 
     Ok(())
 }

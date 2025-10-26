@@ -17,7 +17,7 @@
 //! - ResizeLong: Resize the long side to match the limit
 
 use crate::core::constants::{DEFAULT_LIMIT_SIDE_LEN, DEFAULT_MAX_SIDE_LIMIT};
-use crate::processors::types::{LimitType, ResizeType};
+use crate::processors::types::{ImageScaleInfo, LimitType, ResizeType};
 use image::{DynamicImage, GenericImageView};
 use tracing::{error, warn};
 
@@ -109,14 +109,14 @@ impl DetResizeForTest {
     /// # Returns
     /// A tuple containing:
     /// 1. Vector of resized images
-    /// 2. Vector of original image shapes and resize ratios [height, width, ratio_h, ratio_w]
+    /// 2. Vector of image scale information (original dimensions and resize ratios)
     pub fn apply(
         &self,
         imgs: Vec<DynamicImage>,
         limit_side_len: Option<u32>,
         limit_type: Option<LimitType>,
         max_side_limit: Option<u32>,
-    ) -> (Vec<DynamicImage>, Vec<[f32; 4]>) {
+    ) -> (Vec<DynamicImage>, Vec<ImageScaleInfo>) {
         let mut resize_imgs = Vec::new();
         let mut img_shapes = Vec::new();
 
@@ -146,14 +146,14 @@ impl DetResizeForTest {
     /// # Returns
     /// A tuple containing:
     /// 1. The resized image
-    /// 2. Array with original dimensions and resize ratios [height, width, ratio_h, ratio_w]
+    /// 2. Image scale information (original dimensions and resize ratios)
     fn resize(
         &self,
         mut img: DynamicImage,
         limit_side_len: Option<u32>,
         limit_type: Option<&LimitType>,
         max_side_limit: Option<u32>,
-    ) -> (DynamicImage, [f32; 4]) {
+    ) -> (DynamicImage, ImageScaleInfo) {
         let (src_w, src_h) = img.dimensions();
 
         // Pad small images to avoid issues with OCR processing
@@ -174,8 +174,8 @@ impl DetResizeForTest {
             ResizeType::Type3 { input_shape } => self.resize_image_type3(img, *input_shape),
         };
 
-        let shape = [src_h as f32, src_w as f32, ratios[0], ratios[1]];
-        (resized_img, shape)
+        let scale_info = ImageScaleInfo::new(src_h as f32, src_w as f32, ratios[0], ratios[1]);
+        (resized_img, scale_info)
     }
 
     /// Pads small images to a minimum size
@@ -348,7 +348,7 @@ impl DetResizeForTest {
         let ratio_h = resize_h as f32 / ori_h as f32;
         let ratio_w = resize_w as f32 / ori_w as f32;
         let resized_img =
-            img.resize_exact(resize_w, resize_h, image::imageops::FilterType::Triangle);
+            img.resize_exact(resize_w, resize_h, image::imageops::FilterType::Lanczos3);
 
         (resized_img, [ratio_h, ratio_w])
     }

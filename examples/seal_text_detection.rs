@@ -13,13 +13,18 @@
 //!
 //! * `-m, --model-path` - Path to the seal detection model file
 //! * `-o, --output-dir` - Directory to save visualization results
-//! * `--server` - Use server model for higher accuracy
+//! * `--server-model-path` - Path to the server model for higher accuracy
 //! * `--score-threshold` - Pixel-level threshold for text detection
 //! * `--box-threshold` - Box-level threshold for filtering detections
 //! * `--unclip-ratio` - Expansion ratio for detected regions
+//! * `--session-pool-size` - Session pool size for concurrent inference
+//! * `--device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
 //! * `<IMAGES>...` - Paths to input images to process
 
+mod common;
+
 use clap::Parser;
+use common::parse_device_config;
 use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
 use oar_ocr::core::traits::task::{ImageTaskInput, Task};
 use oar_ocr::domain::adapters::SealTextDetectionAdapterBuilder;
@@ -69,6 +74,10 @@ struct Args {
     /// Session pool size for concurrent inference
     #[arg(long, default_value = "1")]
     session_pool_size: usize,
+
+    /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
+    #[arg(long, default_value = "cpu")]
+    device: String,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -93,9 +102,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+    // Log device configuration
+    info!("Using device: {}", args.device);
+    let ort_config = parse_device_config(&args.device)?;
+
+    if ort_config.is_some() {
+        info!("CUDA execution provider configured successfully");
+    }
+
     // Build adapter
     let mut builder = SealTextDetectionAdapterBuilder::new();
     builder = builder.session_pool_size(args.session_pool_size);
+
+    if let Some(ort_cfg) = ort_config {
+        builder = builder.with_ort_config(ort_cfg);
+    }
 
     let adapter = match builder.build(&model_path) {
         Ok(adapter) => adapter,
@@ -215,14 +236,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Save visualization if output directory is specified
             #[cfg(feature = "visualization")]
             if let Some(ref output_dir) = args.output_dir {
-                let output_path = output_dir.join(
-                    image_path
-                        .file_stem()
-                        .unwrap()
-                        .to_string_lossy()
-                        .to_string()
-                        + "_seal_det.png",
-                );
+                // Use the original filename for output
+                let output_filename = image_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown.png");
+                let output_path = output_dir.join(output_filename);
 
                 // Draw bounding boxes on the image
                 let vis_image = visualize_detections(&image, boxes, scores);

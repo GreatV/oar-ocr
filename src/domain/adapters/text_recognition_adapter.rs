@@ -71,6 +71,8 @@ pub struct TextRecognitionAdapterBuilder {
     character_dict: Option<Vec<String>>,
     /// Session pool size
     session_pool_size: usize,
+    /// ONNX Runtime session configuration
+    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl TextRecognitionAdapterBuilder {
@@ -81,6 +83,7 @@ impl TextRecognitionAdapterBuilder {
             preprocess_config: CRNNPreprocessConfig::default(),
             character_dict: None,
             session_pool_size: 1,
+            ort_config: None,
         }
     }
 
@@ -119,6 +122,12 @@ impl TextRecognitionAdapterBuilder {
         self.preprocess_config.max_img_w = Some(max_img_w);
         self
     }
+
+    /// Sets the ONNX Runtime session configuration.
+    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.ort_config = Some(config);
+        self
+    }
 }
 
 impl AdapterBuilder for TextRecognitionAdapterBuilder {
@@ -133,6 +142,10 @@ impl AdapterBuilder for TextRecognitionAdapterBuilder {
 
         if let Some(character_dict) = self.character_dict {
             model_builder = model_builder.character_dict(character_dict);
+        }
+
+        if let Some(ort_config) = self.ort_config {
+            model_builder = model_builder.with_ort_config(ort_config);
         }
 
         let model = model_builder.build(model_path)?;

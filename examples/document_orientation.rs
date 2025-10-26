@@ -25,7 +25,10 @@
 //!     document1.jpg document2.jpg
 //! ```
 
+mod common;
+
 use clap::Parser;
+use common::{load_rgb_image, parse_device_config};
 use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
 use oar_ocr::core::traits::task::{ImageTaskInput, Task};
 use oar_ocr::domain::adapters::DocumentOrientationAdapterBuilder;
@@ -117,10 +120,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No valid image files found".into());
     }
 
-    // Log device configuration
+    // Parse device configuration
     info!("Using device: {}", args.device);
-    if args.device != "cpu" {
-        warn!("GPU support not yet implemented in new architecture. Using CPU.");
+    let ort_config = parse_device_config(&args.device)?;
+
+    if ort_config.is_some() {
+        info!("CUDA execution provider configured successfully");
     }
 
     // Create orientation classification configuration
@@ -146,11 +151,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("  Session pool size: {}", args.session_pool_size);
     }
 
-    let adapter = DocumentOrientationAdapterBuilder::new()
+    let mut adapter_builder = DocumentOrientationAdapterBuilder::new()
         .with_config(config.clone())
         .input_shape((args.input_height, args.input_width))
-        .session_pool_size(args.session_pool_size)
-        .build(&args.model_path)?;
+        .session_pool_size(args.session_pool_size);
+
+    if let Some(ort_cfg) = ort_config {
+        adapter_builder = adapter_builder.with_ort_config(ort_cfg);
+    }
+
+    let adapter = adapter_builder.build(&args.model_path)?;
 
     info!("Orientation classifier adapter built successfully");
     if args.verbose {
@@ -164,9 +174,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut images = Vec::new();
 
     for image_path in &existing_images {
-        match image::open(image_path) {
-            Ok(img) => {
-                let rgb_img = img.to_rgb8();
+        match load_rgb_image(image_path) {
+            Ok(rgb_img) => {
                 if args.verbose {
                     info!(
                         "Loaded image: {} ({}x{})",
@@ -254,12 +263,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|(((path, img), labels), scores)| (path, img, labels, scores))
         {
             if !labels.is_empty() {
-                let input_filename = image_path
-                    .file_stem()
+                // Use the original filename for output
+                let output_filename = image_path
+                    .file_name()
                     .and_then(|s| s.to_str())
-                    .unwrap_or("unknown");
-                let output_filename = format!("{}_orientation.jpg", input_filename);
-                let output_path = output_dir.join(&output_filename);
+                    .unwrap_or("unknown.jpg");
+                let output_path = output_dir.join(output_filename);
 
                 // Get top prediction
                 let orientation = &labels[0];
@@ -281,58 +290,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Visualizes document orientation by drawing the predicted angle and confidence on the image
+/// The orientation result is displayed in an additional space above the original image
 #[cfg(feature = "visualization")]
 fn visualize_orientation(
     img: &image::RgbImage,
     orientation: &str,
     confidence: f32,
 ) -> image::RgbImage {
-    use image::Rgb;
-    use imageproc::drawing::{draw_filled_rect_mut, draw_text_mut};
-    use imageproc::rect::Rect;
+    use image::{Rgb, RgbImage};
+    use imageproc::drawing::draw_text_mut;
 
-    let mut output = img.clone();
-    let text_color = Rgb([255u8, 255u8, 255u8]); // White text
-    let bg_color = Rgb([0u8, 0u8, 0u8]); // Black background
+    let original_width = img.width();
+    let original_height = img.height();
+
+    // Create additional space above the image for orientation result
+    let header_height = 60;
+    let total_height = header_height + original_height;
+
+    // Create new image with extra space on top
+    let mut output = RgbImage::new(original_width, total_height);
+
+    // Fill header area with background color
+    let bg_color = Rgb([240u8, 240u8, 240u8]); // Light gray background
+    let text_color = Rgb([0u8, 0u8, 0u8]); // Black text
+
+    for y in 0..header_height {
+        for x in 0..original_width {
+            output.put_pixel(x, y, bg_color);
+        }
+    }
+
+    // Copy original image to the bottom part
+    for y in 0..original_height {
+        for x in 0..original_width {
+            output.put_pixel(x, y + header_height, *img.get_pixel(x, y));
+        }
+    }
 
     // Try to load a font for text rendering
     let font = load_font();
 
     if let Some(ref font) = font {
-        // Draw the orientation label with background
-        let label = format!("Orientation: {}° ({:.1}%)", orientation, confidence * 100.0);
+        // Draw the orientation label
+        let label = format!(
+            "Document Orientation: {}° (Confidence: {:.1}%)",
+            orientation,
+            confidence * 100.0
+        );
 
-        // Draw background rectangle for text
         let text_x = 10;
-        let text_y = 10;
-        let text_width = label.len() as u32 * 10; // Approximate
-        let text_height = 30;
+        let text_y = 20;
 
-        if text_x + text_width < output.width() && text_y + text_height < output.height() {
-            let bg_rect = Rect::at(text_x as i32, text_y as i32).of_size(text_width, text_height);
-            draw_filled_rect_mut(&mut output, bg_rect, bg_color);
-
-            // Draw text on top
-            draw_text_mut(
-                &mut output,
-                text_color,
-                text_x as i32,
-                (text_y + 5) as i32,
-                20.0,
-                font,
-                &label,
-            );
-        }
-
-        // Optionally rotate the image to show corrected orientation
-        // This is commented out as it would require additional dependencies
-        /*
-        if let Ok(angle) = orientation.parse::<i32>() {
-            if angle != 0 {
-                info!("Note: Image would need to be rotated {}° for correct orientation", (360 - angle) % 360);
-            }
-        }
-        */
+        // Draw text
+        draw_text_mut(&mut output, text_color, text_x, text_y, 24.0, font, &label);
     }
 
     output

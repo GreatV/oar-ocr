@@ -82,6 +82,56 @@ pub enum ScoreMode {
     Slow,
 }
 
+/// Information about image scaling during preprocessing
+///
+/// This struct captures the original dimensions and scaling ratios applied
+/// during image resizing operations. It replaces the opaque `[f32; 4]` tuple
+/// format with self-documenting named fields.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImageScaleInfo {
+    /// Original image height before resizing
+    pub src_h: f32,
+    /// Original image width before resizing
+    pub src_w: f32,
+    /// Height scaling ratio (resized_height / original_height)
+    pub ratio_h: f32,
+    /// Width scaling ratio (resized_width / original_width)
+    pub ratio_w: f32,
+}
+
+impl ImageScaleInfo {
+    /// Creates a new `ImageScaleInfo` from original dimensions and ratios
+    pub fn new(src_h: f32, src_w: f32, ratio_h: f32, ratio_w: f32) -> Self {
+        Self {
+            src_h,
+            src_w,
+            ratio_h,
+            ratio_w,
+        }
+    }
+
+    /// Creates an `ImageScaleInfo` from a `[f32; 4]` array
+    ///
+    /// This is provided for backward compatibility during migration.
+    /// The array format is `[src_h, src_w, ratio_h, ratio_w]`.
+    pub fn from_array(arr: [f32; 4]) -> Self {
+        Self {
+            src_h: arr[0],
+            src_w: arr[1],
+            ratio_h: arr[2],
+            ratio_w: arr[3],
+        }
+    }
+
+    /// Converts this `ImageScaleInfo` to a `[f32; 4]` array
+    ///
+    /// This is provided for backward compatibility during migration.
+    /// The array format is `[src_h, src_w, ratio_h, ratio_w]`.
+    pub fn to_array(&self) -> [f32; 4] {
+        [self.src_h, self.src_w, self.ratio_h, self.ratio_w]
+    }
+}
+
 /// Specifies different strategies for resizing images
 #[derive(Debug)]
 pub enum ResizeType {
