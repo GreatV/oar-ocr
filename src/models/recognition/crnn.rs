@@ -84,7 +84,16 @@ impl CRNNModel {
     ///
     /// A 3D tensor containing CTC predictions
     pub fn infer(&self, batch_tensor: &Tensor4D) -> Result<Tensor3D, OCRError> {
-        self.inference.infer_3d(batch_tensor)
+        self.inference
+            .infer_3d(batch_tensor)
+            .map_err(|e| OCRError::Inference {
+                model_name: "CRNN".to_string(),
+                context: format!(
+                    "failed to run inference on batch with shape {:?}",
+                    batch_tensor.shape()
+                ),
+                source: Box::new(e),
+            })
     }
 
     /// Postprocesses model predictions to text strings.
@@ -201,12 +210,12 @@ impl CRNNModelBuilder {
         // Create ONNX inference engine
         let inference = if self.session_pool_size > 1 || self.ort_config.is_some() {
             // Use session pool for concurrent inference
-            let common = crate::core::config::CommonBuilderConfig {
+            let common = crate::core::config::ModelInferenceConfig {
                 session_pool_size: Some(self.session_pool_size),
                 ort_session: self.ort_config,
                 ..Default::default()
             };
-            OrtInfer::from_common(&common, model_path, None)?
+            OrtInfer::from_config(&common, model_path, None)?
         } else {
             // Single session
             OrtInfer::new(model_path, None)?

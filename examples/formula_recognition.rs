@@ -680,7 +680,7 @@ fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
     for word in text.split_whitespace() {
         if current_line.is_empty() {
             current_line = word.to_string();
-        } else if current_line.len() + word.len() + 1 <= max_chars {
+        } else if current_line.len() + word.len() < max_chars {
             current_line.push(' ');
             current_line.push_str(word);
         } else {

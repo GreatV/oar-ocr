@@ -193,14 +193,14 @@ macro_rules! impl_config_new_and_with_common {
             /// Creates a new config instance with default values
             pub fn new() -> Self {
                 Self {
-                    common: $crate::core::config::builder::CommonBuilderConfig::with_defaults(
+                    common: $crate::core::config::builder::ModelInferenceConfig::with_defaults(
                         $model_name_opt, $batch_size_opt
                     ),
                     $( $field: $default_expr ),*
                 }
             }
             /// Creates a new config instance using provided common configuration
-            pub fn with_common(common: $crate::core::config::builder::CommonBuilderConfig) -> Self {
+            pub fn with_common(common: $crate::core::config::builder::ModelInferenceConfig) -> Self {
                 Self {
                     common,
                     $( $field: $default_expr ),*
@@ -210,7 +210,7 @@ macro_rules! impl_config_new_and_with_common {
     };
 }
 
-/// Macro to implement common builder methods for structs with a `CommonBuilderConfig` field.
+/// Macro to implement common builder methods for structs with a `ModelInferenceConfig` field.
 #[macro_export]
 macro_rules! impl_common_builder_methods {
     ($Builder:ident, $common_field:ident) => {
@@ -254,7 +254,7 @@ macro_rules! impl_common_builder_methods {
 
 /// Macro to inject common builder methods into an existing `impl Builder` block.
 /// Use this inside `impl YourBuilder { ... }` and pass the field name that holds
-/// `CommonBuilderConfig` (e.g., `common`).
+/// `ModelInferenceConfig` (e.g., `common`).
 #[macro_export]
 macro_rules! common_builder_methods {
     ($common_field:ident) => {

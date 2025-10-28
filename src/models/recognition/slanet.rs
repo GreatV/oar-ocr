@@ -7,7 +7,6 @@ use crate::core::inference::OrtInfer;
 use crate::core::{OCRError, Tensor3D, Tensor4D};
 use crate::processors::NormalizeImage;
 use image::{DynamicImage, RgbImage};
-use ndarray::Array3;
 use std::path::Path;
 
 /// Output from SLANet model containing structure predictions and bounding boxes.
@@ -106,98 +105,16 @@ impl SLANetModel {
     ///
     /// Returns dual outputs: structure logits and bbox predictions.
     pub fn infer(&self, batch_tensor: &Tensor4D) -> Result<(Tensor3D, Tensor3D), OCRError> {
-        use ort::value::TensorRef;
-
-        let input_shape = batch_tensor.shape().to_vec();
-        tracing::trace!(
-            "Running SLANet inference with input shape {:?}",
-            input_shape
-        );
-        let input_tensor =
-            TensorRef::from_array_view(batch_tensor.view()).map_err(|e| OCRError::ConfigError {
-                message: format!("Failed to convert input tensor: {}", e),
-            })?;
-
-        let inputs = ort::inputs![self.inference.input_name() => input_tensor];
-
-        // Get session and run inference
-        let idx = 0; // Use first session for simplicity
-        let mut session_guard =
-            self.inference
-                .get_session(idx)
-                .map_err(|e| OCRError::ConfigError {
-                    message: format!("Failed to acquire session: {}", e),
-                })?;
-
-        // Get output names from session before running inference
-        let output_names: Vec<String> = session_guard
-            .outputs
-            .iter()
-            .map(|output| output.name.clone())
-            .collect();
-
-        tracing::debug!("Model outputs: {:?}", output_names);
-
-        let outputs = session_guard
-            .run(inputs)
-            .map_err(|e| OCRError::ConfigError {
-                message: format!("Inference failed: {}", e),
-            })?;
-
-        // Extract structure logits and bbox predictions
-        // Try to find outputs by index since names may vary
-        let structure_output = if output_names.len() >= 2 {
-            // Assume first output is structure, second is bbox
-            outputs[output_names[0].as_str()]
-                .try_extract_tensor::<f32>()
-                .map_err(|e| OCRError::ConfigError {
-                    message: format!(
-                        "Failed to extract structure tensor from '{}': {}",
-                        output_names[0], e
-                    ),
-                })?
-        } else {
-            return Err(OCRError::ConfigError {
-                message: format!("Expected at least 2 outputs, got {}", output_names.len()),
-            });
-        };
-
-        let bbox_output = outputs[output_names[1].as_str()]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| OCRError::ConfigError {
-                message: format!(
-                    "Failed to extract bbox tensor from '{}': {}",
-                    output_names[1], e
+        self.inference
+            .infer_dual_3d(batch_tensor)
+            .map_err(|e| OCRError::Inference {
+                model_name: "SLANet".to_string(),
+                context: format!(
+                    "failed to run inference on batch with shape {:?}",
+                    batch_tensor.shape()
                 ),
-            })?;
-
-        let (structure_shape, structure_data) = structure_output;
-        let (bbox_shape, bbox_data) = bbox_output;
-
-        // Convert to 3D tensors
-        let structure_logits = Self::reshape_to_3d(structure_shape, structure_data)?;
-        let bbox_preds = Self::reshape_to_3d(bbox_shape, bbox_data)?;
-
-        Ok((structure_logits, bbox_preds))
-    }
-
-    /// Helper to reshape flat data to 3D tensor.
-    fn reshape_to_3d(shape: &[i64], data: &[f32]) -> Result<Tensor3D, OCRError> {
-        if shape.len() != 3 {
-            return Err(OCRError::InvalidInput {
-                message: format!("Expected 3D shape, got {:?}", shape),
-            });
-        }
-
-        let dim0 = shape[0] as usize;
-        let dim1 = shape[1] as usize;
-        let dim2 = shape[2] as usize;
-
-        Array3::from_shape_vec((dim0, dim1, dim2), data.to_vec()).map_err(|e| {
-            OCRError::InvalidInput {
-                message: format!("Failed to reshape tensor: {}", e),
-            }
-        })
+                source: Box::new(e),
+            })
     }
 
     /// Runs the complete forward pass: preprocess -> infer.
@@ -258,8 +175,8 @@ impl SLANetModelBuilder {
     pub fn build(self, model_path: &Path) -> Result<SLANetModel, OCRError> {
         // Create ONNX inference engine
         let inference = if self.session_pool_size > 1 || self.ort_config.is_some() {
-            use crate::core::config::CommonBuilderConfig;
-            let common_config = CommonBuilderConfig {
+            use crate::core::config::ModelInferenceConfig;
+            let common_config = ModelInferenceConfig {
                 model_path: None,
                 model_name: None,
                 batch_size: None,
@@ -267,7 +184,7 @@ impl SLANetModelBuilder {
                 ort_session: self.ort_config,
                 session_pool_size: Some(self.session_pool_size),
             };
-            OrtInfer::from_common(&common_config, model_path, None)?
+            OrtInfer::from_config(&common_config, model_path, None)?
         } else {
             OrtInfer::new(model_path, None)?
         };

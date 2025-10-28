@@ -93,7 +93,7 @@ impl DBPostProcess {
     /// * `preds` - Model predictions (batch of heatmaps)
     /// * `img_shapes` - Original image dimensions for each image in batch
     /// * `config` - Runtime configuration for thresholds and ratios.
-    ///              If `None`, uses the default values stored in this processor.
+    ///   If `None`, uses the default values stored in this processor.
     ///
     /// # Returns
     /// Tuple of (bounding_boxes, scores) for each image in batch

@@ -100,7 +100,7 @@ pub struct TaskNode {
     /// Map from dependency ID to processor configuration
     #[serde(default)]
     pub edge_processors:
-        std::collections::HashMap<String, crate::pipeline::oarocr::processors::EdgeProcessorConfig>,
+        std::collections::HashMap<String, crate::oarocr::processors::EdgeProcessorConfig>,
 
     /// Whether this task is optional (can be skipped if model not available)
     #[serde(default)]
@@ -155,7 +155,7 @@ impl TaskNode {
     pub fn with_edge_processor(
         mut self,
         dependency_id: impl Into<String>,
-        processor: crate::pipeline::oarocr::processors::EdgeProcessorConfig,
+        processor: crate::oarocr::processors::EdgeProcessorConfig,
     ) -> Self {
         self.edge_processors.insert(dependency_id.into(), processor);
         self

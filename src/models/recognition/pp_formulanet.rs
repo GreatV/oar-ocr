@@ -112,15 +112,16 @@ impl PPFormulaNetModel {
     ///
     /// Returns raw token IDs [batch_size, max_length].
     pub fn infer(&self, batch_tensor: &Tensor4D) -> Result<ndarray::Array2<i64>, OCRError> {
-        // Debug: log input tensor stats
-        tracing::info!("Input tensor shape: {:?}", batch_tensor.shape());
-        let min_val = batch_tensor.iter().fold(f32::INFINITY, |a, &b| a.min(b));
-        let max_val = batch_tensor
-            .iter()
-            .fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-        tracing::info!("Input tensor min/max: {:.4} / {:.4}", min_val, max_val);
-
-        self.inference.infer_2d_i64(batch_tensor)
+        self.inference
+            .infer_2d_i64(batch_tensor)
+            .map_err(|e| OCRError::Inference {
+                model_name: "PP-FormulaNet".to_string(),
+                context: format!(
+                    "failed to run inference on batch with shape {:?}",
+                    batch_tensor.shape()
+                ),
+                source: Box::new(e),
+            })
     }
 
     /// Postprocesses model predictions.
@@ -132,9 +133,6 @@ impl PPFormulaNetModel {
         token_ids: ndarray::Array2<i64>,
         _config: &PPFormulaNetPostprocessConfig,
     ) -> Result<PPFormulaNetModelOutput, OCRError> {
-        // Debug: print raw model output shape
-        tracing::info!("Model output shape: {:?}", token_ids.shape());
-
         Ok(PPFormulaNetModelOutput { token_ids })
     }
 
@@ -160,18 +158,11 @@ impl PPFormulaNetModel {
     where
         D: Data<Elem = i64>,
     {
-        let mut filtered_tokens = Vec::new();
+        let batch_size = token_ids.shape()[0];
+        let mut filtered_tokens = Vec::with_capacity(batch_size);
 
-        for batch_idx in 0..token_ids.shape()[0] {
+        for batch_idx in 0..batch_size {
             let row = token_ids.index_axis(Axis(0), batch_idx);
-
-            // Debug: print first 20 raw token IDs
-            let first_tokens: Vec<i64> = row.iter().copied().take(20).collect();
-            tracing::info!(
-                "First 20 raw tokens for batch {}: {:?}",
-                batch_idx,
-                first_tokens
-            );
 
             let tokens: Vec<u32> = row
                 .iter()
@@ -180,12 +171,6 @@ impl PPFormulaNetModel {
                 .filter(|&id| id >= 0 && id != config.sos_token_id)
                 .map(|id| id as u32)
                 .collect();
-
-            tracing::debug!(
-                "Filtered tokens for batch {}: {:?}",
-                batch_idx,
-                &tokens[..tokens.len().min(50)]
-            );
 
             filtered_tokens.push(tokens);
         }
@@ -250,15 +235,15 @@ impl PPFormulaNetModelBuilder {
     pub fn build(self, model_path: &std::path::Path) -> Result<PPFormulaNetModel, OCRError> {
         // Create ONNX inference engine
         let inference = if self.session_pool_size > 1 || self.ort_config.is_some() {
-            use crate::core::config::CommonBuilderConfig;
-            let common_config = CommonBuilderConfig {
+            use crate::core::config::ModelInferenceConfig;
+            let common_config = ModelInferenceConfig {
                 session_pool_size: Some(self.session_pool_size),
                 ort_session: self.ort_config,
                 ..Default::default()
             };
-            OrtInfer::from_common_with_auto_input(&common_config, model_path)?
+            OrtInfer::from_config(&common_config, model_path, None)?
         } else {
-            OrtInfer::with_auto_input_name(model_path)?
+            OrtInfer::new(model_path, None)?
         };
 
         // Determine target size
@@ -266,24 +251,14 @@ impl PPFormulaNetModelBuilder {
 
         // Try to detect target size from model input shape if not explicitly set
         if preprocess_config.target_size == (384, 384)
-            && let Some(detected) = inference.primary_input_shape().and_then(|shape| {
-                tracing::debug!("Model input shape: {:?}", shape);
-                if shape.len() >= 4 {
-                    let height = shape[shape.len() - 2];
-                    let width = shape[shape.len() - 1];
-                    tracing::debug!("Detected height={}, width={}", height, width);
-                    if height > 0 && width > 0 {
-                        Some((width as u32, height as u32))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
+            && let Some(shape) = inference.primary_input_shape()
+            && shape.len() >= 4
         {
-            tracing::info!("Using detected target size: {:?}", detected);
-            preprocess_config.target_size = detected;
+            let height = shape[shape.len() - 2];
+            let width = shape[shape.len() - 1];
+            if height > 0 && width > 0 {
+                preprocess_config.target_size = (width as u32, height as u32);
+            }
         }
 
         PPFormulaNetModel::new(inference, preprocess_config)

@@ -117,7 +117,7 @@ impl ModelAdapter for FormulaRecognitionAdapter {
         input: <Self::Task as Task>::Input,
         config: Option<&<Self::Task as Task>::Config>,
     ) -> Result<<Self::Task as Task>::Output, OCRError> {
-        let _effective_config = config.unwrap_or(&self.config);
+        let effective_config = config.unwrap_or(&self.config);
 
         // Preprocess and infer
         let batch_tensor = self.model.preprocess(input.images)?;
@@ -135,9 +135,21 @@ impl ModelAdapter for FormulaRecognitionAdapter {
 
         // Decode tokens to LaTeX
         for (batch_idx, tokens) in filtered_tokens.iter().enumerate() {
+            // Apply max_length constraint by truncating token sequences
+            let tokens_to_decode = if tokens.len() > effective_config.max_length {
+                tracing::debug!(
+                    "Truncating formula tokens from {} to {} (max_length)",
+                    tokens.len(),
+                    effective_config.max_length
+                );
+                &tokens[..effective_config.max_length]
+            } else {
+                tokens.as_slice()
+            };
+
             // Warn if any token id exceeds tokenizer vocab size
             let vocab_size = self.tokenizer.get_vocab_size(true) as u32;
-            if let Some(&max_id) = tokens.iter().max()
+            if let Some(&max_id) = tokens_to_decode.iter().max()
                 && max_id >= vocab_size
             {
                 tracing::warn!(
@@ -149,7 +161,7 @@ impl ModelAdapter for FormulaRecognitionAdapter {
                 );
             }
 
-            let latex = match self.tokenizer.decode(tokens, true) {
+            let latex = match self.tokenizer.decode(tokens_to_decode, true) {
                 Ok(text) => {
                     tracing::debug!("Decoded LaTeX before normalization: {}", text);
                     normalize_latex(&text)
@@ -162,6 +174,8 @@ impl ModelAdapter for FormulaRecognitionAdapter {
 
             // For now, we don't have confidence scores from the model
             // In the future, we could compute them from the token probabilities
+            // When scores become available, we should filter based on effective_config.score_threshold
+            // TODO: Apply score_threshold filtering when confidence scores are available
             formulas.push(latex);
             scores.push(None);
         }
@@ -521,5 +535,108 @@ impl AdapterBuilder for UniMERNetFormulaAdapterBuilder {
 
     fn adapter_type(&self) -> &str {
         "UniMERNet"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pp_formulanet_builder_creation() {
+        let builder = PPFormulaNetAdapterBuilder::new();
+        assert_eq!(builder.adapter_type(), "PPFormulaNet");
+    }
+
+    #[test]
+    fn test_pp_formulanet_builder_with_config() {
+        let config = FormulaRecognitionConfig {
+            score_threshold: 0.8,
+            max_length: 512,
+        };
+
+        let builder = PPFormulaNetAdapterBuilder::new().with_config(config.clone());
+        assert_eq!(builder.inner.task_config.score_threshold, 0.8);
+        assert_eq!(builder.inner.task_config.max_length, 512);
+    }
+
+    #[test]
+    fn test_pp_formulanet_builder_fluent_api() {
+        let builder = PPFormulaNetAdapterBuilder::new()
+            .score_threshold(0.9)
+            .max_length(1024)
+            .session_pool_size(4)
+            .target_size(640, 640);
+
+        assert_eq!(builder.inner.task_config.score_threshold, 0.9);
+        assert_eq!(builder.inner.task_config.max_length, 1024);
+        assert_eq!(builder.inner.session_pool_size, 4);
+        assert_eq!(builder.inner.target_size, Some((640, 640)));
+    }
+
+    #[test]
+    fn test_pp_formulanet_default_builder() {
+        let builder = PPFormulaNetAdapterBuilder::default();
+        assert_eq!(builder.adapter_type(), "PPFormulaNet");
+        // Default config values
+        assert_eq!(builder.inner.task_config.score_threshold, 0.0);
+        assert_eq!(builder.inner.task_config.max_length, 1536);
+    }
+
+    #[test]
+    fn test_unimernet_builder_creation() {
+        let builder = UniMERNetFormulaAdapterBuilder::new();
+        assert_eq!(builder.adapter_type(), "UniMERNet");
+    }
+
+    #[test]
+    fn test_unimernet_builder_with_config() {
+        let config = FormulaRecognitionConfig {
+            score_threshold: 0.7,
+            max_length: 2048,
+        };
+
+        let builder = UniMERNetFormulaAdapterBuilder::new().with_config(config.clone());
+        assert_eq!(builder.inner.task_config.score_threshold, 0.7);
+        assert_eq!(builder.inner.task_config.max_length, 2048);
+    }
+
+    #[test]
+    fn test_unimernet_builder_fluent_api() {
+        let builder = UniMERNetFormulaAdapterBuilder::new()
+            .score_threshold(0.85)
+            .max_length(768)
+            .session_pool_size(2)
+            .target_size(512, 512);
+
+        assert_eq!(builder.inner.task_config.score_threshold, 0.85);
+        assert_eq!(builder.inner.task_config.max_length, 768);
+        assert_eq!(builder.inner.session_pool_size, 2);
+        assert_eq!(builder.inner.target_size, Some((512, 512)));
+    }
+
+    #[test]
+    fn test_unimernet_default_builder() {
+        let builder = UniMERNetFormulaAdapterBuilder::default();
+        assert_eq!(builder.adapter_type(), "UniMERNet");
+        // Default config values
+        assert_eq!(builder.inner.task_config.score_threshold, 0.0);
+        assert_eq!(builder.inner.task_config.max_length, 1536);
+    }
+
+    #[test]
+    fn test_formula_model_config_pp_formulanet() {
+        let config = FormulaModelConfig::pp_formulanet();
+        assert_eq!(config.model_name, "PP-FormulaNet");
+        assert_eq!(config.sos_token_id, 0);
+        assert_eq!(config.eos_token_id, 2);
+    }
+
+    #[test]
+    fn test_formula_model_config_unimernet() {
+        let config = FormulaModelConfig::unimernet();
+        assert_eq!(config.model_name, "UniMERNet");
+        assert_eq!(config.sos_token_id, 0);
+        assert_eq!(config.eos_token_id, 2);
     }
 }

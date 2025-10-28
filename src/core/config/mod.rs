@@ -11,7 +11,7 @@ pub mod parallel;
 pub mod transform;
 
 // Re-export commonly used types
-pub use builder::CommonBuilderConfig;
+pub use builder::ModelInferenceConfig;
 pub use errors::{ConfigDefaults, ConfigError, ConfigValidator, ConfigValidatorExt};
 pub use onnx::*;
 pub use parallel::{OnnxThreadingConfig, ParallelPolicy};

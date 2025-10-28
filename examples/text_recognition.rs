@@ -315,10 +315,7 @@ fn load_character_dict(dict_path: &PathBuf) -> Result<Vec<String>, Box<dyn std::
 
     // Don't filter out lines - PaddleOCR dictionaries may have special characters
     // like \u3000 (ideographic space) at the beginning that should be preserved
-    let dict: Vec<String> = content
-        .lines()
-        .map(|line| line.to_string())
-        .collect();
+    let dict: Vec<String> = content.lines().map(|line| line.to_string()).collect();
 
     if dict.is_empty() {
         return Err("Character dictionary is empty".into());

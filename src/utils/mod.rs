@@ -41,15 +41,12 @@ pub use topk::{Topk, TopkResult};
 pub fn init_tracing() {
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-    // Set default log level if not already set
-    if std::env::var("RUST_LOG").is_err() {
-        unsafe {
-            std::env::set_var("RUST_LOG", "info");
-        }
-    }
+    // Default to info-level logging if RUST_LOG is not configured by the caller.
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(env_filter)
         .with(tracing_subscriber::fmt::layer())
         .init();
 }

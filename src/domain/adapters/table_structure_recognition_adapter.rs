@@ -5,7 +5,7 @@
 use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
-    task::{ImageTaskInput, Task, TaskType},
+    task::{Task, TaskType},
 };
 use crate::domain::tasks::{TableStructureRecognitionConfig, TableStructureRecognitionTask};
 use crate::models::recognition::{SLANetModel, SLANetModelBuilder};
@@ -59,115 +59,142 @@ impl ModelAdapter for TableStructureRecognitionAdapter {
     ) -> Result<<Self::Task as Task>::Output, OCRError> {
         let effective_config = config.unwrap_or(&self.config);
 
-        // For now, process only the first image (matching PaddleOCR behavior)
+        // Validate input
         if input.images.is_empty() {
             return Err(OCRError::InvalidInput {
                 message: "No images provided".to_string(),
             });
         }
 
-        let single_image_input = ImageTaskInput::new(vec![input.images[0].clone()]);
+        let num_images = input.images.len();
+        tracing::debug!("Processing {} table images", num_images);
 
-        // Run model forward pass
-        let model_output = self.model.forward(single_image_input.images)?;
+        // Run model forward pass on all images
+        let model_output = self.model.forward(input.images)?;
 
-        // Decode structure and bboxes
+        // Decode structure and bboxes for all images
         let decode_output = self.decoder.decode(
             &model_output.structure_logits,
             &model_output.bbox_preds,
             &model_output.shape_info,
         )?;
 
-        // Get the first (and only) result
-        let structure_tokens =
-            decode_output
-                .structure_tokens
-                .first()
-                .ok_or_else(|| OCRError::InvalidInput {
-                    message: "No structure tokens decoded".to_string(),
+        // Process each image's results
+        let mut structures = Vec::with_capacity(num_images);
+        let mut bboxes = Vec::with_capacity(num_images);
+        let mut structure_scores = Vec::with_capacity(num_images);
+
+        for img_idx in 0..num_images {
+            let structure_tokens =
+                decode_output.structure_tokens.get(img_idx).ok_or_else(|| {
+                    OCRError::InvalidInput {
+                        message: format!("No structure tokens decoded for image {}", img_idx),
+                    }
                 })?;
 
-        let bboxes = decode_output
-            .bboxes
-            .first()
-            .ok_or_else(|| OCRError::InvalidInput {
-                message: "No bboxes decoded".to_string(),
-            })?;
+            let image_bboxes =
+                decode_output
+                    .bboxes
+                    .get(img_idx)
+                    .ok_or_else(|| OCRError::InvalidInput {
+                        message: format!("No bboxes decoded for image {}", img_idx),
+                    })?;
 
-        let structure_score = decode_output
-            .structure_scores
-            .first()
-            .copied()
-            .unwrap_or(0.0);
+            let structure_score = decode_output
+                .structure_scores
+                .get(img_idx)
+                .copied()
+                .unwrap_or(0.0);
 
-        if structure_score < effective_config.score_threshold {
-            return Err(OCRError::InvalidInput {
-                message: format!(
-                    "Structure score {:.3} below threshold {:.3}",
-                    structure_score, effective_config.score_threshold
-                ),
-            });
-        }
+            if structure_score < effective_config.score_threshold {
+                tracing::warn!(
+                    "Image {}: Structure score {:.3} below threshold {:.3}, returning empty result",
+                    img_idx,
+                    structure_score,
+                    effective_config.score_threshold
+                );
+                // Return empty result for this image instead of failing the entire batch
+                structures.push(Vec::new());
+                bboxes.push(Vec::new());
+                structure_scores.push(structure_score);
+                continue;
+            }
 
-        let trimmed_tokens: Vec<String> = structure_tokens
-            .iter()
-            .take(effective_config.max_structure_length)
-            .cloned()
-            .collect();
+            let trimmed_tokens: Vec<String> = structure_tokens
+                .iter()
+                .take(effective_config.max_structure_length)
+                .cloned()
+                .collect();
 
-        let trimmed_len = trimmed_tokens.len();
+            let trimmed_len = trimmed_tokens.len();
 
-        if trimmed_len < structure_tokens.len() {
-            tracing::warn!(
-                "Structure tokens {} exceed max {}, truncating output",
-                structure_tokens.len(),
-                effective_config.max_structure_length
+            if trimmed_len < structure_tokens.len() {
+                tracing::warn!(
+                    "Image {}: Structure tokens {} exceed max {}, truncating output",
+                    img_idx,
+                    structure_tokens.len(),
+                    effective_config.max_structure_length
+                );
+            }
+
+            // Add HTML wrapping like PaddleX
+            let mut structure = vec![
+                "<html>".to_string(),
+                "<body>".to_string(),
+                "<table>".to_string(),
+            ];
+            structure.extend(trimmed_tokens);
+            structure.extend(vec![
+                "</table>".to_string(),
+                "</body>".to_string(),
+                "</html>".to_string(),
+            ]);
+
+            tracing::debug!(
+                "Image {}: Final HTML structure output: {:?}",
+                img_idx,
+                structure
             );
+
+            // Convert bboxes from [f32; 8] to Vec<Vec<i32>> (round to integers like PaddleX)
+            let bbox: Vec<Vec<i32>> = image_bboxes
+                .iter()
+                .take(trimmed_len)
+                .map(|&bbox_coords| {
+                    let int_coords: Vec<i32> = bbox_coords
+                        .iter()
+                        .map(|&coord| coord.round() as i32)
+                        .collect();
+                    tracing::debug!(
+                        "Image {}: Converted bbox {:?} to {:?}",
+                        img_idx,
+                        bbox_coords,
+                        int_coords
+                    );
+                    int_coords
+                })
+                .collect();
+
+            if bbox.len() < trimmed_len {
+                tracing::warn!(
+                    "Image {}: Only {} bounding boxes available for {} structure tokens",
+                    img_idx,
+                    bbox.len(),
+                    trimmed_len
+                );
+            }
+
+            tracing::debug!("Image {}: Final bbox output: {:?}", img_idx, bbox);
+
+            structures.push(structure);
+            bboxes.push(bbox);
+            structure_scores.push(structure_score);
         }
-
-        // Add HTML wrapping like PaddleX
-        let mut structure = vec![
-            "<html>".to_string(),
-            "<body>".to_string(),
-            "<table>".to_string(),
-        ];
-        structure.extend(trimmed_tokens);
-        structure.extend(vec![
-            "</table>".to_string(),
-            "</body>".to_string(),
-            "</html>".to_string(),
-        ]);
-
-        tracing::debug!("Final HTML structure output: {:?}", structure);
-
-        // Convert bboxes from [f32; 8] to Vec<Vec<i32>> (round to integers like PaddleX)
-        let bbox: Vec<Vec<i32>> = bboxes
-            .iter()
-            .take(trimmed_len)
-            .map(|&bbox_coords| {
-                let int_coords: Vec<i32> = bbox_coords
-                    .iter()
-                    .map(|&coord| coord.round() as i32)
-                    .collect();
-                tracing::debug!("Converted bbox {:?} to {:?}", bbox_coords, int_coords);
-                int_coords
-            })
-            .collect();
-
-        if bbox.len() < trimmed_len {
-            tracing::warn!(
-                "Only {} bounding boxes available for {} structure tokens",
-                bbox.len(),
-                trimmed_len
-            );
-        }
-
-        tracing::debug!("Final bbox output: {:?}", bbox);
 
         Ok(crate::domain::tasks::TableStructureRecognitionOutput {
-            structure,
-            bbox,
-            structure_score,
+            structures,
+            bboxes,
+            structure_scores,
         })
     }
 

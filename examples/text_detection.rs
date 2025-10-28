@@ -183,22 +183,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Display results for each image
-    for (idx, (image_path, boxes, scores)) in existing_images
+    for (idx, (image_path, detections)) in existing_images
         .iter()
-        .zip(output.boxes.iter())
-        .zip(output.scores.iter())
-        .map(|((path, boxes), scores)| (path, boxes, scores))
+        .zip(output.detections.iter())
         .enumerate()
     {
         info!("\n=== Results for image {} ===", idx + 1);
         info!("Image: {}", image_path.display());
-        info!("Total text regions detected: {}", boxes.len());
+        info!("Total text regions detected: {}", detections.len());
 
-        if boxes.is_empty() {
+        if detections.is_empty() {
             warn!("No text regions found in this image");
         } else {
             // Log bounding box details
-            for (i, (bbox, score)) in boxes.iter().zip(scores.iter()).enumerate() {
+            for (i, detection) in detections.iter().enumerate() {
+                let bbox = &detection.bbox;
+                let score = detection.score;
                 // Calculate bounding box rectangle for display
                 let (min_x, max_x, min_y, max_y) = bbox.points.iter().fold(
                     (
@@ -238,14 +238,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         info!("\nSaving visualizations to: {}", output_dir.display());
 
-        for (image_path, rgb_img, boxes, scores) in existing_images
+        for (image_path, rgb_img, detections) in existing_images
             .iter()
             .zip(images.iter())
-            .zip(output.boxes.iter())
-            .zip(output.scores.iter())
-            .map(|(((path, img), boxes), scores)| (path, img, boxes, scores))
+            .zip(output.detections.iter())
+            .map(|((path, img), detections)| (path, img, detections))
         {
-            if !boxes.is_empty() {
+            if !detections.is_empty() {
+                // Extract boxes and scores from detections
+                let boxes: Vec<_> = detections.iter().map(|d| d.bbox.clone()).collect();
+                let scores: Vec<_> = detections.iter().map(|d| d.score).collect();
                 // Use the original filename for output
                 let output_filename = image_path
                     .file_name()
@@ -253,7 +255,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or("unknown.jpg");
                 let output_path = output_dir.join(output_filename);
 
-                let visualized = visualize_detections(rgb_img, boxes, scores);
+                let visualized = visualize_detections(rgb_img, &boxes, &scores);
                 visualized.save(&output_path)?;
                 info!("  Saved: {}", output_path.display());
             } else {

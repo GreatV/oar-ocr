@@ -2,16 +2,15 @@
 //!
 //! This adapter uses the PP-LCNet model to classify text line orientation.
 
-use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
     task::{Task, TaskType},
 };
-use crate::domain::tasks::{TextLineOrientationConfig, TextLineOrientationTask};
-use crate::models::classification::{
-    PPLCNetModel, PPLCNetModelBuilder, PPLCNetPostprocessConfig, PPLCNetPreprocessConfig,
+use crate::core::{OCRError, ProcessingStage};
+use crate::domain::tasks::{
+    Classification, TextLineOrientationConfig, TextLineOrientationOutput, TextLineOrientationTask,
 };
-use image::imageops::FilterType;
+use crate::models::classification::{PPLCNetModel, PPLCNetModelBuilder, PPLCNetPostprocessConfig};
 use std::path::Path;
 
 /// Text line orientation classification adapter that uses the PP-LCNet model.
@@ -70,10 +69,20 @@ impl ModelAdapter for TextLineOrientationAdapter {
         let mut postprocess_config = self.postprocess_config.clone();
         postprocess_config.topk = effective_config.topk;
 
-        // Use model to get predictions
-        let model_output = self.model.forward(input.images, &postprocess_config)?;
+        // Use model to get predictions with error context
+        let model_output = self
+            .model
+            .forward(input.images, &postprocess_config)
+            .map_err(|e| OCRError::Processing {
+                kind: ProcessingStage::AdapterExecution,
+                context: format!(
+                    "TextLineOrientationAdapter failed to classify text line orientation (topk={})",
+                    effective_config.topk
+                ),
+                source: Box::new(e),
+            })?;
 
-        // Convert model output to task-specific output
+        // Convert model output to task-specific output with structured classifications
         let label_names = model_output.label_names.unwrap_or_else(|| {
             model_output
                 .class_ids
@@ -82,11 +91,23 @@ impl ModelAdapter for TextLineOrientationAdapter {
                 .collect()
         });
 
-        Ok(crate::domain::tasks::TextLineOrientationOutput {
-            class_ids: model_output.class_ids,
-            scores: model_output.scores,
-            label_names,
-        })
+        // Create structured classifications
+        let classifications = model_output
+            .class_ids
+            .into_iter()
+            .zip(model_output.scores)
+            .zip(label_names)
+            .map(|((class_ids, scores), labels)| {
+                class_ids
+                    .into_iter()
+                    .zip(scores)
+                    .zip(labels)
+                    .map(|((class_id, score), label)| Classification::new(class_id, label, score))
+                    .collect()
+            })
+            .collect();
+
+        Ok(TextLineOrientationOutput { classifications })
     }
 
     fn supports_batching(&self) -> bool {
@@ -161,13 +182,9 @@ impl AdapterBuilder for TextLineOrientationAdapterBuilder {
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
         // Build the PP-LCNet model
-        let preprocess_config = PPLCNetPreprocessConfig {
-            input_shape: self.input_shape,
-            resize_filter: FilterType::Lanczos3,
-            normalize_mean: vec![0.5, 0.5, 0.5],
-            normalize_std: vec![0.5, 0.5, 0.5],
-            ..Default::default()
-        };
+        let mut preprocess_config = super::preprocessing::pp_lcnet_preprocess(self.input_shape);
+        preprocess_config.normalize_mean = vec![0.5, 0.5, 0.5];
+        preprocess_config.normalize_std = vec![0.5, 0.5, 0.5];
 
         let mut model_builder = PPLCNetModelBuilder::new()
             .session_pool_size(self.session_pool_size)

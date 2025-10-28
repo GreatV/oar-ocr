@@ -2,6 +2,8 @@
 //!
 //! This module provides the text line orientation task that detects text line rotation.
 
+use super::document_orientation::Classification;
+use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
 use serde::{Deserialize, Serialize};
@@ -27,30 +29,22 @@ impl Default for TextLineOrientationConfig {
 /// Output from text line orientation classification task.
 #[derive(Debug, Clone)]
 pub struct TextLineOrientationOutput {
-    /// Predicted class IDs per image (0=0°, 1=180°)
-    pub class_ids: Vec<Vec<usize>>,
-    /// Confidence scores for each prediction
-    pub scores: Vec<Vec<f32>>,
-    /// Label names for each prediction (e.g., "0", "180")
-    pub label_names: Vec<Vec<String>>,
+    /// Classification results per image
+    pub classifications: Vec<Vec<Classification>>,
 }
 
 impl TextLineOrientationOutput {
     /// Creates an empty text line orientation output.
     pub fn empty() -> Self {
         Self {
-            class_ids: Vec::new(),
-            scores: Vec::new(),
-            label_names: Vec::new(),
+            classifications: Vec::new(),
         }
     }
 
     /// Creates a text line orientation output with the given capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            class_ids: Vec::with_capacity(capacity),
-            scores: Vec::with_capacity(capacity),
-            label_names: Vec::with_capacity(capacity),
+            classifications: Vec::with_capacity(capacity),
         }
     }
 }
@@ -87,76 +81,34 @@ impl Task for TextLineOrientationTask {
     }
 
     fn validate_input(&self, input: &Self::Input) -> Result<(), OCRError> {
-        if input.images.is_empty() {
-            return Err(OCRError::InvalidInput {
-                message: "No images provided for text line orientation classification".to_string(),
-            });
-        }
-
-        // Validate image dimensions
-        for (idx, img) in input.images.iter().enumerate() {
-            if img.width() == 0 || img.height() == 0 {
-                return Err(OCRError::InvalidInput {
-                    message: format!("Image at index {} has zero dimensions", idx),
-                });
-            }
-        }
+        ensure_non_empty_images(
+            &input.images,
+            "No images provided for text line orientation classification",
+        )?;
 
         Ok(())
     }
 
     fn validate_output(&self, output: &Self::Output) -> Result<(), OCRError> {
-        // Validate that all arrays have matching lengths
-        if output.class_ids.len() != output.scores.len()
-            || output.class_ids.len() != output.label_names.len()
-        {
-            return Err(OCRError::InvalidInput {
-                message: format!(
-                    "Mismatched output lengths: class_ids={}, scores={}, labels={}",
-                    output.class_ids.len(),
-                    output.scores.len(),
-                    output.label_names.len()
-                ),
-            });
-        }
-
-        // Validate each image's predictions
-        for (idx, (class_ids, scores)) in output
-            .class_ids
-            .iter()
-            .zip(output.scores.iter())
-            .enumerate()
-        {
-            if class_ids.len() != scores.len() {
-                return Err(OCRError::InvalidInput {
-                    message: format!(
-                        "Image {}: class_ids count ({}) doesn't match scores count ({})",
-                        idx,
-                        class_ids.len(),
-                        scores.len()
-                    ),
-                });
-            }
-
-            // Validate class IDs (should be 0-1 for 2 orientations: 0° and 180°)
-            for &class_id in class_ids {
-                if class_id > 1 {
+        // Validate each image's classifications
+        for (idx, classifications) in output.classifications.iter().enumerate() {
+            for (class_idx, classification) in classifications.iter().enumerate() {
+                // Validate class IDs (should be 0-1 for 2 orientations: 0° and 180°)
+                if classification.class_id > 1 {
                     return Err(OCRError::InvalidInput {
                         message: format!(
                             "Image {}: invalid class_id {}. Expected 0-1 (0°, 180°)",
-                            idx, class_id
+                            idx, classification.class_id
                         ),
                     });
                 }
-            }
 
-            // Validate score ranges
-            for (pred_idx, &score) in scores.iter().enumerate() {
-                if !(0.0..=1.0).contains(&score) {
+                // Validate score ranges
+                if !(0.0..=1.0).contains(&classification.score) {
                     return Err(OCRError::InvalidInput {
                         message: format!(
-                            "Image {}, prediction {}: score {} is out of valid range [0, 1]",
-                            idx, pred_idx, score
+                            "Image {}, classification {}: score {} is out of valid range [0, 1]",
+                            idx, class_idx, classification.score
                         ),
                     });
                 }
@@ -200,28 +152,26 @@ mod tests {
         let task = TextLineOrientationTask::default();
 
         // Valid output should pass
+        let classification1 = Classification::new(0, "0".to_string(), 0.95);
+        let classification2 = Classification::new(1, "180".to_string(), 0.05);
         let output = TextLineOrientationOutput {
-            class_ids: vec![vec![0, 1]],
-            scores: vec![vec![0.95, 0.05]],
-            label_names: vec![vec!["0".to_string(), "180".to_string()]],
+            classifications: vec![vec![classification1, classification2]],
         };
         assert!(task.validate_output(&output).is_ok());
 
         // Invalid class ID should fail
+        let bad_classification = Classification::new(2, "invalid".to_string(), 0.95); // Invalid: should be 0-1
         let bad_output = TextLineOrientationOutput {
-            class_ids: vec![vec![2]], // Invalid: should be 0-1
-            scores: vec![vec![0.95]],
-            label_names: vec![vec!["invalid".to_string()]],
+            classifications: vec![vec![bad_classification]],
         };
         assert!(task.validate_output(&bad_output).is_err());
 
-        // Mismatched lengths should fail
-        let bad_output2 = TextLineOrientationOutput {
-            class_ids: vec![vec![0]],
-            scores: vec![vec![0.95, 0.05]], // Mismatch
-            label_names: vec![vec!["0".to_string()]],
+        // Invalid score should fail
+        let bad_score_classification = Classification::new(0, "0".to_string(), 1.5); // Invalid score
+        let bad_score_output = TextLineOrientationOutput {
+            classifications: vec![vec![bad_score_classification]],
         };
-        assert!(task.validate_output(&bad_output2).is_err());
+        assert!(task.validate_output(&bad_score_output).is_err());
     }
 
     #[test]

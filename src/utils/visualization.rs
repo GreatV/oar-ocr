@@ -21,7 +21,7 @@
 //! // let visualization = create_ocr_visualization(&result, &config);
 //! ```
 
-use crate::pipeline::OAROCRResult;
+use crate::oarocr::OAROCRResult;
 use crate::processors::BoundingBox;
 
 use ab_glyph::FontVec;

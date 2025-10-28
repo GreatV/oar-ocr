@@ -598,16 +598,16 @@ impl LayoutDetectionAdapterBuilder {
     ) -> Result<LayoutDetectionAdapter, OCRError> {
         // Create ONNX inference engine with proper input name based on model type
         let inference = if self.ort_config.is_some() {
-            use crate::core::config::CommonBuilderConfig;
+            use crate::core::config::ModelInferenceConfig;
             let input_name = match model_config.model_type.as_str() {
                 "pp-doclayout" => Some("image"),
                 _ => None,
             };
-            let common_config = CommonBuilderConfig {
+            let common_config = ModelInferenceConfig {
                 ort_session: self.ort_config,
                 ..Default::default()
             };
-            OrtInfer::from_common(&common_config, model_path, input_name)?
+            OrtInfer::from_config(&common_config, model_path, input_name)?
         } else {
             match model_config.model_type.as_str() {
                 "pp-doclayout" => {

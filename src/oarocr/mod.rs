@@ -14,10 +14,17 @@
 //!
 //! See [`TaskGraphBuilder`] and [`TaskGraphConfig`] for details.
 
-pub mod oarocr;
+mod processors;
+mod result;
+mod task_graph_builder;
+mod task_graph_config;
+mod validation;
 
-// Re-export the main OCR pipeline components for easier access
-pub use oarocr::{
-    EdgeProcessor, EdgeProcessorConfig, EdgeProcessorFactory, ErrorMetrics, ModelBinding,
-    OAROCRResult, TaskGraphBuilder, TaskGraphConfig, TaskNode, TextRegion,
+pub use processors::{EdgeProcessor, EdgeProcessorConfig, EdgeProcessorFactory};
+pub use result::{ErrorMetrics, OAROCRResult, TextRegion};
+pub use task_graph_builder::TaskGraphBuilder;
+pub use task_graph_config::{ModelBinding, TaskGraphConfig, TaskNode};
+pub use validation::{
+    create_expected_schema, validate_adapter_schema, validate_registry_schemas,
+    validate_task_connection, validate_task_dependencies,
 };

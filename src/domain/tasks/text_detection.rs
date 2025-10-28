@@ -2,10 +2,27 @@
 //!
 //! This module provides the text detection task that locates text regions in images.
 
+use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
 use crate::processors::BoundingBox;
 use serde::{Deserialize, Serialize};
+
+/// A single text detection result with bounding box and confidence score.
+#[derive(Debug, Clone)]
+pub struct Detection {
+    /// The bounding box polygon coordinates
+    pub bbox: BoundingBox,
+    /// Confidence score for this detection (0.0 to 1.0)
+    pub score: f32,
+}
+
+impl Detection {
+    /// Creates a new detection.
+    pub fn new(bbox: BoundingBox, score: f32) -> Self {
+        Self { bbox, score }
+    }
+}
 
 /// Configuration for text detection task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,26 +51,22 @@ impl Default for TextDetectionConfig {
 /// Output from text detection task.
 #[derive(Debug, Clone)]
 pub struct TextDetectionOutput {
-    /// Detected text bounding boxes per image
-    pub boxes: Vec<Vec<BoundingBox>>,
-    /// Confidence scores for each box
-    pub scores: Vec<Vec<f32>>,
+    /// Detected text regions per image
+    pub detections: Vec<Vec<Detection>>,
 }
 
 impl TextDetectionOutput {
     /// Creates an empty text detection output.
     pub fn empty() -> Self {
         Self {
-            boxes: Vec::new(),
-            scores: Vec::new(),
+            detections: Vec::new(),
         }
     }
 
     /// Creates a text detection output with the given capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            boxes: Vec::with_capacity(capacity),
-            scores: Vec::with_capacity(capacity),
+            detections: Vec::with_capacity(capacity),
         }
     }
 }
@@ -90,56 +103,21 @@ impl Task for TextDetectionTask {
     }
 
     fn validate_input(&self, input: &Self::Input) -> Result<(), OCRError> {
-        if input.images.is_empty() {
-            return Err(OCRError::InvalidInput {
-                message: "No images provided for text detection".to_string(),
-            });
-        }
-
-        // Validate image dimensions
-        for (idx, img) in input.images.iter().enumerate() {
-            if img.width() == 0 || img.height() == 0 {
-                return Err(OCRError::InvalidInput {
-                    message: format!("Image at index {} has zero dimensions", idx),
-                });
-            }
-        }
+        ensure_non_empty_images(&input.images, "No images provided for text detection")?;
 
         Ok(())
     }
 
     fn validate_output(&self, output: &Self::Output) -> Result<(), OCRError> {
-        // Validate that boxes and scores have matching lengths
-        if output.boxes.len() != output.scores.len() {
-            return Err(OCRError::InvalidInput {
-                message: format!(
-                    "Mismatch between boxes count ({}) and scores count ({})",
-                    output.boxes.len(),
-                    output.scores.len()
-                ),
-            });
-        }
-
-        // Validate that each image's boxes and scores match
-        for (idx, (boxes, scores)) in output.boxes.iter().zip(output.scores.iter()).enumerate() {
-            if boxes.len() != scores.len() {
-                return Err(OCRError::InvalidInput {
-                    message: format!(
-                        "Image {}: boxes count ({}) doesn't match scores count ({})",
-                        idx,
-                        boxes.len(),
-                        scores.len()
-                    ),
-                });
-            }
-
+        // Validate each image's detections
+        for (idx, detections) in output.detections.iter().enumerate() {
             // Validate score ranges
-            for (box_idx, &score) in scores.iter().enumerate() {
-                if !(0.0..=1.0).contains(&score) {
+            for (det_idx, detection) in detections.iter().enumerate() {
+                if !(0.0..=1.0).contains(&detection.score) {
                     return Err(OCRError::InvalidInput {
                         message: format!(
-                            "Image {}, box {}: score {} is out of valid range [0, 1]",
-                            idx, box_idx, score
+                            "Image {}, detection {}: score {} is out of valid range [0, 1]",
+                            idx, det_idx, detection.score
                         ),
                     });
                 }
@@ -183,23 +161,29 @@ mod tests {
     fn test_output_validation() {
         let task = TextDetectionTask::default();
 
-        // Matching boxes and scores should pass
+        // Valid detection should pass
         let box1 = BoundingBox::new(vec![
             Point::new(0.0, 0.0),
             Point::new(10.0, 0.0),
             Point::new(10.0, 10.0),
             Point::new(0.0, 10.0),
         ]);
+        let detection1 = Detection::new(box1, 0.95);
         let output = TextDetectionOutput {
-            boxes: vec![vec![box1]],
-            scores: vec![vec![0.95]],
+            detections: vec![vec![detection1]],
         };
         assert!(task.validate_output(&output).is_ok());
 
-        // Mismatched lengths should fail
+        // Invalid score should fail
+        let box2 = BoundingBox::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 10.0),
+            Point::new(0.0, 10.0),
+        ]);
+        let detection2 = Detection::new(box2, 1.5); // Invalid score > 1.0
         let bad_output = TextDetectionOutput {
-            boxes: vec![vec![]],
-            scores: vec![vec![0.95]],
+            detections: vec![vec![detection2]],
         };
         assert!(task.validate_output(&bad_output).is_err());
     }

@@ -371,6 +371,154 @@ impl OrtInfer {
         })
     }
 
+    /// Runs inference for models with dual 3D outputs.
+    ///
+    /// This is used for models like SLANet that output two 3D tensors.
+    /// The first output is typically structure/token predictions, and the second
+    /// is bounding box predictions or similar auxiliary outputs.
+    ///
+    /// # Returns
+    ///
+    /// A tuple of two 3D tensors: (first_output, second_output)
+    pub fn infer_dual_3d(&self, x: &Tensor4D) -> Result<(Tensor3D, Tensor3D), OCRError> {
+        let model_name = self.model_name.clone();
+
+        self.run_inference_core(x, move |outputs, _output_name, output_names, input_shape| {
+            // Expect at least 2 outputs
+            if output_names.len() < 2 {
+                return Err(OCRError::tensor_operation_error(
+                    "output_validation",
+                    &[2],
+                    &[output_names.len()],
+                    &format!(
+                        "Model '{}' dual 3D inference: expected at least 2 outputs, got {}",
+                        model_name,
+                        output_names.len()
+                    ),
+                    crate::core::errors::SimpleError::new("Insufficient model outputs"),
+                ));
+            }
+
+            // Extract first output
+            let first_output = outputs[output_names[0].as_str()]
+                .try_extract_tensor::<f32>()
+                .map_err(|e| {
+                    OCRError::model_inference_error(
+                        &model_name,
+                        "output_extraction",
+                        0,
+                        input_shape,
+                        &format!(
+                            "Failed to extract first output tensor '{}' as f32",
+                            output_names[0]
+                        ),
+                        e,
+                    )
+                })?;
+
+            let (first_shape, first_data) = first_output;
+
+            // Validate first output is 3D
+            if first_shape.len() != 3 {
+                return Err(OCRError::tensor_operation_error(
+                    "output_validation",
+                    &[3],
+                    &[first_shape.len()],
+                    &format!(
+                        "Model '{}' dual 3D inference: first output expected 3D, got {}D with shape {:?}",
+                        model_name,
+                        first_shape.len(),
+                        first_shape
+                    ),
+                    crate::core::errors::SimpleError::new("Invalid first output dimensions"),
+                ));
+            }
+
+            // Extract second output
+            let second_output = outputs[output_names[1].as_str()]
+                .try_extract_tensor::<f32>()
+                .map_err(|e| {
+                    OCRError::model_inference_error(
+                        &model_name,
+                        "output_extraction",
+                        1,
+                        input_shape,
+                        &format!(
+                            "Failed to extract second output tensor '{}' as f32",
+                            output_names[1]
+                        ),
+                        e,
+                    )
+                })?;
+
+            let (second_shape, second_data) = second_output;
+
+            // Validate second output is 3D
+            if second_shape.len() != 3 {
+                return Err(OCRError::tensor_operation_error(
+                    "output_validation",
+                    &[3],
+                    &[second_shape.len()],
+                    &format!(
+                        "Model '{}' dual 3D inference: second output expected 3D, got {}D with shape {:?}",
+                        model_name,
+                        second_shape.len(),
+                        second_shape
+                    ),
+                    crate::core::errors::SimpleError::new("Invalid second output dimensions"),
+                ));
+            }
+
+            // Reshape first tensor
+            let dim0_1 = first_shape[0] as usize;
+            let dim1_1 = first_shape[1] as usize;
+            let dim2_1 = first_shape[2] as usize;
+            let expected_len_1 = dim0_1 * dim1_1 * dim2_1;
+
+            if first_data.len() != expected_len_1 {
+                return Err(OCRError::tensor_operation_error(
+                    "output_data_validation",
+                    &[expected_len_1],
+                    &[first_data.len()],
+                    &format!(
+                        "Model '{}' dual 3D inference: first output data size mismatch",
+                        model_name
+                    ),
+                    crate::core::errors::SimpleError::new("First output data size mismatch"),
+                ));
+            }
+
+            let first_tensor = ArrayView3::from_shape((dim0_1, dim1_1, dim2_1), first_data)
+                .map_err(OCRError::Tensor)?
+                .to_owned();
+
+            // Reshape second tensor
+            let dim0_2 = second_shape[0] as usize;
+            let dim1_2 = second_shape[1] as usize;
+            let dim2_2 = second_shape[2] as usize;
+            let expected_len_2 = dim0_2 * dim1_2 * dim2_2;
+
+            if second_data.len() != expected_len_2 {
+                return Err(OCRError::tensor_operation_error(
+                    "output_data_validation",
+                    &[expected_len_2],
+                    &[second_data.len()],
+                    &format!(
+                        "Model '{}' dual 3D inference: second output data size mismatch",
+                        model_name
+                    ),
+                    crate::core::errors::SimpleError::new("Second output data size mismatch"),
+                ));
+            }
+
+            let second_tensor = ArrayView3::from_shape((dim0_2, dim1_2, dim2_2), second_data)
+                .map_err(OCRError::Tensor)?
+                .to_owned();
+
+            Ok((first_tensor, second_tensor))
+        })
+    }
+
     /// Runs inference with multiple inputs for layout detection models.
     ///
     /// Layout detection models typically require:

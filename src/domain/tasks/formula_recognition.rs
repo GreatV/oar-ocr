@@ -3,6 +3,7 @@
 //! This module provides the formula recognition task that converts mathematical
 //! formulas in images to LaTeX strings.
 
+use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
 use serde::{Deserialize, Serialize};
@@ -84,20 +85,7 @@ impl Task for FormulaRecognitionTask {
     }
 
     fn validate_input(&self, input: &Self::Input) -> Result<(), OCRError> {
-        if input.images.is_empty() {
-            return Err(OCRError::InvalidInput {
-                message: "No images provided for formula recognition".to_string(),
-            });
-        }
-
-        // Validate image dimensions
-        for (idx, img) in input.images.iter().enumerate() {
-            if img.width() == 0 || img.height() == 0 {
-                return Err(OCRError::InvalidInput {
-                    message: format!("Image at index {} has zero dimensions", idx),
-                });
-            }
-        }
+        ensure_non_empty_images(&input.images, "No images provided for formula recognition")?;
 
         Ok(())
     }

@@ -218,30 +218,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Display results for each image
     info!("\n=== Classification Results ===");
-    for (idx, (image_path, class_ids, scores, labels)) in existing_images
+    for (idx, (image_path, classifications)) in existing_images
         .iter()
-        .zip(output.class_ids.iter())
-        .zip(output.scores.iter())
-        .zip(output.label_names.iter())
-        .map(|(((path, ids), scores), labels)| (path, ids, scores, labels))
+        .zip(output.classifications.iter())
         .enumerate()
     {
         info!("\nImage {}: {}", idx + 1, image_path.display());
 
-        if class_ids.is_empty() {
+        if classifications.is_empty() {
             warn!("  No predictions available");
         } else {
             // Show top prediction prominently
-            let top_label = &labels[0];
-            let top_score = scores[0];
-            info!("  Table type: {}", top_label);
-            info!("  Confidence: {:.2}%", top_score * 100.0);
+            let top = &classifications[0];
+            info!("  Table type: {}", top.label);
+            info!("  Confidence: {:.2}%", top.score * 100.0);
 
             // Show all predictions if verbose
-            if args.verbose && class_ids.len() > 1 {
+            if args.verbose && classifications.len() > 1 {
                 info!("  All predictions:");
-                for (rank, (label, score)) in labels.iter().zip(scores.iter()).enumerate() {
-                    info!("    [{}] {} - {:.2}%", rank + 1, label, score * 100.0);
+                for (rank, c) in classifications.iter().enumerate() {
+                    info!("    [{}] {} - {:.2}%", rank + 1, c.label, c.score * 100.0);
                 }
             }
         }
@@ -255,14 +251,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         info!("\nSaving visualizations to: {}", output_dir.display());
 
-        for (image_path, rgb_img, labels, scores) in existing_images
+        for (image_path, rgb_img, classifications) in existing_images
             .iter()
             .zip(images.iter())
-            .zip(output.label_names.iter())
-            .zip(output.scores.iter())
-            .map(|(((path, img), labels), scores)| (path, img, labels, scores))
+            .zip(output.classifications.iter())
+            .map(|((path, img), classifications)| (path, img, classifications))
         {
-            if !labels.is_empty() {
+            if !classifications.is_empty() {
+                // Extract labels and scores from classifications
+                let labels: Vec<_> = classifications.iter().map(|c| c.label.clone()).collect();
+                let scores: Vec<_> = classifications.iter().map(|c| c.score).collect();
                 // Use the original filename for output
                 let output_filename = image_path
                     .file_name()

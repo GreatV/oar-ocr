@@ -789,10 +789,10 @@ mod tests {
         // Check that they are DynamicImage::ImageRgb8 variants
         for dynamic_img in &resized {
             assert_eq!(dynamic_img.dimensions(), (32, 32));
-            match dynamic_img {
-                DynamicImage::ImageRgb8(_) => {} // Expected
-                _ => panic!("Expected ImageRgb8 variant"),
-            }
+            assert!(
+                matches!(dynamic_img, DynamicImage::ImageRgb8(_)),
+                "Expected ImageRgb8 variant"
+            );
         }
     }
 

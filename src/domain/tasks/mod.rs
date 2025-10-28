@@ -13,9 +13,10 @@ pub mod table_structure_recognition;
 pub mod text_detection;
 pub mod text_line_orientation;
 pub mod text_recognition;
+pub mod validation;
 
 pub use document_orientation::{
-    DocumentOrientationConfig, DocumentOrientationOutput, DocumentOrientationTask,
+    Classification, DocumentOrientationConfig, DocumentOrientationOutput, DocumentOrientationTask,
 };
 pub use document_rectification::{
     DocumentRectificationConfig, DocumentRectificationOutput, DocumentRectificationTask,
@@ -38,7 +39,7 @@ pub use table_classification::{
 pub use table_structure_recognition::{
     TableStructureRecognitionConfig, TableStructureRecognitionOutput, TableStructureRecognitionTask,
 };
-pub use text_detection::{TextDetectionConfig, TextDetectionOutput, TextDetectionTask};
+pub use text_detection::{Detection, TextDetectionConfig, TextDetectionOutput, TextDetectionTask};
 pub use text_line_orientation::{
     TextLineOrientationConfig, TextLineOrientationOutput, TextLineOrientationTask,
 };

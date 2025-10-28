@@ -13,8 +13,8 @@ use crate::domain::adapters::{
     TextLineOrientationAdapterBuilder, TextRecognitionAdapterBuilder, UVDocRectifierAdapterBuilder,
     UniMERNetFormulaAdapterBuilder,
 };
-use crate::domain::tasks::FormulaRecognitionConfig;
-use crate::pipeline::oarocr::task_graph_config::{ModelBinding, TaskGraphConfig};
+use crate::domain::tasks::{FormulaRecognitionConfig, TableStructureRecognitionConfig};
+use crate::oarocr::task_graph_config::{ModelBinding, TaskGraphConfig};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -372,14 +372,68 @@ impl TaskGraphBuilder {
         name: &str,
         binding: &ModelBinding,
     ) -> Result<(), OCRError> {
+        // Parse configuration from binding
+        let settings: TableStructureAdapterSettings = binding
+            .config
+            .as_ref()
+            .map(|value| {
+                serde_json::from_value(value.clone()).map_err(|err| OCRError::ConfigError {
+                    message: format!(
+                        "Invalid table structure recognition config for model '{}': {}",
+                        name, err
+                    ),
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        // Dictionary path is required
+        let dict_path = settings.dict_path.ok_or_else(|| OCRError::ConfigError {
+            message: format!(
+                "Table structure model '{}' requires 'dict_path' in config. \
+                 Please specify the path to the table_structure_dict_ch.txt file.",
+                name
+            ),
+        })?;
+
+        // Build task configuration
+        let mut task_config = TableStructureRecognitionConfig::default();
+        if let Some(score_threshold) = settings.score_threshold {
+            task_config.score_threshold = score_threshold;
+        }
+        if let Some(max_structure_length) = settings.max_structure_length {
+            task_config.max_structure_length = max_structure_length;
+        }
+
+        // Determine input shape
+        let input_shape = match (settings.input_width, settings.input_height) {
+            (Some(width), Some(height)) => Some((height, width)), // Note: (height, width) order
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(OCRError::ConfigError {
+                    message: format!(
+                        "Table structure model '{}' must specify both 'input_width' and 'input_height' \
+                         or neither.",
+                        name
+                    ),
+                });
+            }
+            _ => None,
+        };
+
         // Determine which builder to use based on model name
         let is_wireless = binding.model_name.to_lowercase().contains("wireless");
 
         if is_wireless {
-            let mut builder = SLANetWirelessAdapterBuilder::new();
+            let mut builder = SLANetWirelessAdapterBuilder::new()
+                .with_config(task_config)
+                .dict_path(dict_path);
 
             if let Some(session_pool_size) = binding.session_pool_size {
                 builder = builder.session_pool_size(session_pool_size);
+            }
+
+            if let Some(shape) = input_shape {
+                builder = builder.input_shape(shape);
             }
 
             builder = builder.model_name(binding.model_name.clone());
@@ -387,10 +441,16 @@ impl TaskGraphBuilder {
             let adapter = builder.build(&binding.model_path)?;
             self.registry.register_with_id(name.to_string(), adapter)?;
         } else {
-            let mut builder = SLANetWiredAdapterBuilder::new();
+            let mut builder = SLANetWiredAdapterBuilder::new()
+                .with_config(task_config)
+                .dict_path(dict_path);
 
             if let Some(session_pool_size) = binding.session_pool_size {
                 builder = builder.session_pool_size(session_pool_size);
+            }
+
+            if let Some(shape) = input_shape {
+                builder = builder.input_shape(shape);
             }
 
             builder = builder.model_name(binding.model_name.clone());
@@ -449,12 +509,93 @@ impl TaskGraphBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oarocr::task_graph_config::TaskNode;
 
     #[test]
     fn test_task_graph_builder_creation() {
         let config = TaskGraphConfig::new();
         let builder = TaskGraphBuilder::new(config);
         assert!(builder.validate().is_ok());
+    }
+
+    #[test]
+    fn test_table_structure_adapter_settings_parsing() {
+        // Test that TableStructureAdapterSettings can be parsed from JSON
+        let json = serde_json::json!({
+            "dict_path": "/path/to/dict.txt",
+            "input_width": 488,
+            "input_height": 488,
+            "score_threshold": 0.6,
+            "max_structure_length": 1000
+        });
+
+        let settings: TableStructureAdapterSettings =
+            serde_json::from_value(json).expect("Failed to parse settings");
+
+        assert_eq!(settings.dict_path, Some(PathBuf::from("/path/to/dict.txt")));
+        assert_eq!(settings.input_width, Some(488));
+        assert_eq!(settings.input_height, Some(488));
+        assert_eq!(settings.score_threshold, Some(0.6));
+        assert_eq!(settings.max_structure_length, Some(1000));
+    }
+
+    #[test]
+    fn test_table_structure_adapter_settings_defaults() {
+        // Test that missing fields use defaults
+        let json = serde_json::json!({
+            "dict_path": "/path/to/dict.txt"
+        });
+
+        let settings: TableStructureAdapterSettings =
+            serde_json::from_value(json).expect("Failed to parse settings");
+
+        assert_eq!(settings.dict_path, Some(PathBuf::from("/path/to/dict.txt")));
+        assert_eq!(settings.input_width, None);
+        assert_eq!(settings.input_height, None);
+        assert_eq!(settings.score_threshold, None);
+        assert_eq!(settings.max_structure_length, None);
+    }
+
+    #[test]
+    fn test_table_structure_config_validation_missing_dict_path() {
+        // Test that missing dict_path is properly validated
+        let config = TaskGraphConfig::new()
+            .add_model_binding(
+                "slanet",
+                ModelBinding::new(
+                    "SLANet",
+                    "/path/to/model.onnx",
+                    TaskType::TableStructureRecognition,
+                )
+                .with_config(serde_json::json!({})), // Empty config - no dict_path
+            )
+            .add_task_node(TaskNode::new(
+                "table_structure",
+                TaskType::TableStructureRecognition,
+                "slanet",
+            ));
+
+        let builder = TaskGraphBuilder::new(config);
+        assert!(builder.validate().is_ok()); // Structure validation passes
+
+        // But building the adapter should fail due to missing dict_path
+        let result = builder.build_table_structure_recognition_adapter(
+            "slanet",
+            &builder.config.model_bindings["slanet"],
+        );
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            OCRError::ConfigError { message } => {
+                assert!(
+                    message.contains("dict_path") && message.contains("requires"),
+                    "Error message should mention dict_path requirement, got: {}",
+                    message
+                );
+            }
+            _ => panic!("Expected ConfigError, got {:?}", err),
+        }
     }
 }
 
@@ -493,4 +634,24 @@ impl FormulaModelVariant {
             None
         }
     }
+}
+
+/// Additional configuration for table structure recognition adapters parsed from model bindings.
+#[derive(Debug, Default, Clone, Deserialize)]
+struct TableStructureAdapterSettings {
+    /// Path to the dictionary file (e.g., table_structure_dict_ch.txt)
+    #[serde(default)]
+    dict_path: Option<PathBuf>,
+    /// Input image height
+    #[serde(default)]
+    input_height: Option<u32>,
+    /// Input image width
+    #[serde(default)]
+    input_width: Option<u32>,
+    /// Score threshold for filtering low-confidence results
+    #[serde(default)]
+    score_threshold: Option<f32>,
+    /// Maximum structure length
+    #[serde(default)]
+    max_structure_length: Option<usize>,
 }

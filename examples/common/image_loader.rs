@@ -9,10 +9,12 @@ use std::path::Path;
 /// which fails when users store JPEG bytes in a `.png` file (or vice versa).
 /// This helper retries with format sniffing so the actual content determines
 /// the decoder.
+#[allow(dead_code)]
 pub fn load_rgb_image(path: &Path) -> Result<RgbImage, ImageError> {
     load_dynamic_image(path).map(|img| img.to_rgb8())
 }
 
+#[allow(dead_code)]
 fn load_dynamic_image(path: &Path) -> Result<DynamicImage, ImageError> {
     match image::open(path) {
         Ok(img) => Ok(img),
@@ -27,10 +29,12 @@ fn load_dynamic_image(path: &Path) -> Result<DynamicImage, ImageError> {
     }
 }
 
+#[allow(dead_code)]
 fn should_retry(err: &ImageError) -> bool {
     matches!(err, ImageError::Decoding(_) | ImageError::Unsupported(_))
 }
 
+#[allow(dead_code)]
 fn decode_with_guessed_format(path: &Path) -> Result<DynamicImage, ImageError> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);

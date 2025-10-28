@@ -2,16 +2,15 @@
 //!
 //! This adapter uses the PP-LCNet model to classify table images as wired or wireless.
 
-use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
     task::{Task, TaskType},
 };
-use crate::domain::tasks::{TableClassificationConfig, TableClassificationTask};
-use crate::models::classification::{
-    PPLCNetModel, PPLCNetModelBuilder, PPLCNetPostprocessConfig, PPLCNetPreprocessConfig,
+use crate::core::{OCRError, ProcessingStage};
+use crate::domain::tasks::{
+    Classification, TableClassificationConfig, TableClassificationOutput, TableClassificationTask,
 };
-use image::imageops::FilterType;
+use crate::models::classification::{PPLCNetModel, PPLCNetModelBuilder, PPLCNetPostprocessConfig};
 use std::path::Path;
 
 /// Table classification adapter that uses the PP-LCNet model.
@@ -70,10 +69,20 @@ impl ModelAdapter for TableClassificationAdapter {
         let mut postprocess_config = self.postprocess_config.clone();
         postprocess_config.topk = effective_config.topk;
 
-        // Use model to get predictions
-        let model_output = self.model.forward(input.images, &postprocess_config)?;
+        // Use model to get predictions with error context
+        let model_output = self
+            .model
+            .forward(input.images, &postprocess_config)
+            .map_err(|e| OCRError::Processing {
+                kind: ProcessingStage::AdapterExecution,
+                context: format!(
+                    "TableClassificationAdapter failed to classify table type (topk={})",
+                    effective_config.topk
+                ),
+                source: Box::new(e),
+            })?;
 
-        // Convert model output to task-specific output
+        // Convert model output to task-specific output with structured classifications
         let label_names = model_output.label_names.unwrap_or_else(|| {
             model_output
                 .class_ids
@@ -92,11 +101,23 @@ impl ModelAdapter for TableClassificationAdapter {
                 .collect()
         });
 
-        Ok(crate::domain::tasks::TableClassificationOutput {
-            class_ids: model_output.class_ids,
-            scores: model_output.scores,
-            label_names,
-        })
+        // Create structured classifications
+        let classifications = model_output
+            .class_ids
+            .into_iter()
+            .zip(model_output.scores)
+            .zip(label_names)
+            .map(|((class_ids, scores), labels)| {
+                class_ids
+                    .into_iter()
+                    .zip(scores)
+                    .zip(labels)
+                    .map(|((class_id, score), label)| Classification::new(class_id, label, score))
+                    .collect()
+            })
+            .collect();
+
+        Ok(TableClassificationOutput { classifications })
     }
 
     fn supports_batching(&self) -> bool {
@@ -171,11 +192,7 @@ impl AdapterBuilder for TableClassificationAdapterBuilder {
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
         // Build the PP-LCNet model
-        let preprocess_config = PPLCNetPreprocessConfig {
-            input_shape: self.input_shape,
-            resize_filter: FilterType::Lanczos3,
-            ..Default::default()
-        };
+        let preprocess_config = super::preprocessing::pp_lcnet_preprocess(self.input_shape);
 
         let mut model_builder = PPLCNetModelBuilder::new()
             .session_pool_size(self.session_pool_size)

@@ -15,6 +15,7 @@ pub mod text_recognition_adapter;
 
 // Classification adapters
 pub mod document_orientation_adapter;
+pub mod preprocessing;
 pub mod table_classification_adapter;
 pub mod table_structure_recognition_adapter;
 pub mod text_line_orientation_adapter;

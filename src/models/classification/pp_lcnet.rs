@@ -140,7 +140,16 @@ impl PPLCNetModel {
     ///
     /// Model predictions as a 2D tensor (batch_size x num_classes)
     pub fn infer(&self, batch_tensor: &Tensor4D) -> Result<Tensor2D, OCRError> {
-        self.inference.infer_2d(batch_tensor)
+        self.inference
+            .infer_2d(batch_tensor)
+            .map_err(|e| OCRError::Inference {
+                model_name: "PP-LCNet".to_string(),
+                context: format!(
+                    "failed to run inference on batch with shape {:?}",
+                    batch_tensor.shape()
+                ),
+                source: Box::new(e),
+            })
     }
 
     /// Postprocesses model predictions to class IDs and scores.
@@ -286,8 +295,8 @@ impl PPLCNetModelBuilder {
     pub fn build(self, model_path: &std::path::Path) -> Result<PPLCNetModel, OCRError> {
         // Create ONNX inference engine
         let inference = if self.session_pool_size > 1 || self.ort_config.is_some() {
-            use crate::core::config::CommonBuilderConfig;
-            let common_config = CommonBuilderConfig {
+            use crate::core::config::ModelInferenceConfig;
+            let common_config = ModelInferenceConfig {
                 model_path: None,
                 model_name: None,
                 batch_size: None,
@@ -295,7 +304,7 @@ impl PPLCNetModelBuilder {
                 ort_session: self.ort_config,
                 session_pool_size: Some(self.session_pool_size),
             };
-            OrtInfer::from_common(&common_config, model_path, None)?
+            OrtInfer::from_config(&common_config, model_path, None)?
         } else {
             OrtInfer::new(model_path, None)?
         };

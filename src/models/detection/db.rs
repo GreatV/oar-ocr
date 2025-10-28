@@ -4,7 +4,7 @@
 //! The model handles preprocessing, inference, and postprocessing independently of tasks.
 
 use crate::core::inference::OrtInfer;
-use crate::core::{OCRError, Tensor4D};
+use crate::core::{OCRError, Tensor4D, validate_positive, validate_range};
 use crate::processors::{
     BoundingBox, BoxType, ChannelOrder, DBPostProcess, DBPostProcessConfig, DetResizeForTest,
     ImageScaleInfo, LimitType, NormalizeImage, ScoreMode,
@@ -56,6 +56,25 @@ impl Default for DBPostprocessConfig {
             score_mode: ScoreMode::Fast,
             box_type: BoxType::Quad,
         }
+    }
+}
+
+impl DBPostprocessConfig {
+    /// Validates the configuration parameters.
+    pub fn validate(&self) -> Result<(), OCRError> {
+        // Validate score_threshold is in [0, 1]
+        validate_range(self.score_threshold, 0.0, 1.0, "score_threshold")?;
+
+        // Validate box_threshold is in [0, 1]
+        validate_range(self.box_threshold, 0.0, 1.0, "box_threshold")?;
+
+        // Validate unclip_ratio is positive
+        validate_positive(self.unclip_ratio, "unclip_ratio")?;
+
+        // Validate max_candidates is positive
+        validate_positive(self.max_candidates, "max_candidates")?;
+
+        Ok(())
     }
 }
 
@@ -152,7 +171,16 @@ impl DBModel {
 
     /// Runs inference on the preprocessed batch.
     pub fn infer(&self, batch_tensor: &Tensor4D) -> Result<Tensor4D, OCRError> {
-        self.inference.infer_4d(batch_tensor)
+        self.inference
+            .infer_4d(batch_tensor)
+            .map_err(|e| OCRError::Inference {
+                model_name: "DB".to_string(),
+                context: format!(
+                    "failed to run inference on batch with shape {:?}",
+                    batch_tensor.shape()
+                ),
+                source: Box::new(e),
+            })
     }
 
     /// Postprocesses model predictions to bounding boxes.
@@ -242,13 +270,13 @@ impl DBModelBuilder {
     pub fn build(self, model_path: &Path) -> Result<DBModel, OCRError> {
         // Create ONNX inference engine
         let inference = if self.session_pool_size > 1 || self.ort_config.is_some() {
-            use crate::core::config::CommonBuilderConfig;
-            let common_config = CommonBuilderConfig {
+            use crate::core::config::ModelInferenceConfig;
+            let common_config = ModelInferenceConfig {
                 session_pool_size: Some(self.session_pool_size),
                 ort_session: self.ort_config,
                 ..Default::default()
             };
-            OrtInfer::from_common(&common_config, model_path, Some("x"))?
+            OrtInfer::from_config(&common_config, model_path, Some("x"))?
         } else {
             OrtInfer::new(model_path, Some("x"))?
         };

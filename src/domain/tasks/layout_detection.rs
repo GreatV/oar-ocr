@@ -2,6 +2,7 @@
 //!
 //! This module provides the layout detection task that identifies document layout elements.
 
+use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
 use crate::processors::BoundingBox;
@@ -90,20 +91,7 @@ impl Task for LayoutDetectionTask {
     }
 
     fn validate_input(&self, input: &Self::Input) -> Result<(), OCRError> {
-        if input.images.is_empty() {
-            return Err(OCRError::InvalidInput {
-                message: "No images provided for layout detection".to_string(),
-            });
-        }
-
-        // Validate image dimensions
-        for (idx, img) in input.images.iter().enumerate() {
-            if img.width() == 0 || img.height() == 0 {
-                return Err(OCRError::InvalidInput {
-                    message: format!("Image at index {} has zero dimensions", idx),
-                });
-            }
-        }
+        ensure_non_empty_images(&input.images, "No images provided for layout detection")?;
 
         Ok(())
     }

@@ -2,15 +2,15 @@
 //!
 //! This adapter uses the DB model and adapts its output to the TextDetection task format.
 
-use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
     task::{Task, TaskType},
 };
-use crate::domain::tasks::{TextDetectionConfig, TextDetectionOutput, TextDetectionTask};
-use crate::models::detection::db::{
-    DBModel, DBModelBuilder, DBPostprocessConfig, DBPreprocessConfig,
+use crate::core::{OCRError, ProcessingStage};
+use crate::domain::tasks::{
+    Detection, TextDetectionConfig, TextDetectionOutput, TextDetectionTask,
 };
+use crate::models::detection::db::{DBModel, DBModelBuilder, DBPostprocessConfig};
 use crate::processors::{BoxType, ScoreMode};
 use std::path::Path;
 
@@ -39,19 +39,40 @@ impl ModelAdapter for TextDetectionAdapter {
     ) -> Result<<Self::Task as Task>::Output, OCRError> {
         let effective_config = config.unwrap_or(&self.config);
 
-        // Use the DB model to detect text
-        let model_output = self.model.forward(
-            input.images,
-            effective_config.score_threshold,
-            effective_config.box_threshold,
-            effective_config.unclip_ratio,
-        )?;
+        // Use the DB model to detect text with error context
+        let model_output = self.model
+            .forward(
+                input.images,
+                effective_config.score_threshold,
+                effective_config.box_threshold,
+                effective_config.unclip_ratio,
+            )
+            .map_err(|e| OCRError::Processing {
+                kind: ProcessingStage::AdapterExecution,
+                context: format!(
+                    "TextDetectionAdapter failed to detect text (score_threshold={}, box_threshold={}, unclip_ratio={})",
+                    effective_config.score_threshold,
+                    effective_config.box_threshold,
+                    effective_config.unclip_ratio
+                ),
+                source: Box::new(e),
+            })?;
 
-        // Adapt model output to task output
-        Ok(TextDetectionOutput {
-            boxes: model_output.boxes,
-            scores: model_output.scores,
-        })
+        // Convert model output to structured detections
+        let detections = model_output
+            .boxes
+            .into_iter()
+            .zip(model_output.scores)
+            .map(|(boxes, scores)| {
+                boxes
+                    .into_iter()
+                    .zip(scores)
+                    .map(|(bbox, score)| Detection::new(bbox, score))
+                    .collect()
+            })
+            .collect();
+
+        Ok(TextDetectionOutput { detections })
     }
 
     fn supports_batching(&self) -> bool {
@@ -109,12 +130,7 @@ impl AdapterBuilder for TextDetectionAdapterBuilder {
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
         // Configure DB model for text detection
         // Use default preprocessing (limit_side_len=960)
-        let preprocess_config = DBPreprocessConfig {
-            limit_side_len: Some(960),
-            limit_type: None,
-            max_side_limit: None,
-            resize_long: None,
-        };
+        let preprocess_config = super::preprocessing::db_preprocess_with_limit_side_len(960);
 
         let postprocess_config = DBPostprocessConfig {
             score_threshold: self.task_config.score_threshold,

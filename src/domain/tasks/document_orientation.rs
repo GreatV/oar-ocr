@@ -2,9 +2,32 @@
 //!
 //! This module provides the document orientation task that detects document rotation.
 
+use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
 use serde::{Deserialize, Serialize};
+
+/// A single classification result with class ID, label, and confidence score.
+#[derive(Debug, Clone)]
+pub struct Classification {
+    /// The predicted class ID
+    pub class_id: usize,
+    /// The human-readable label for this class
+    pub label: String,
+    /// Confidence score for this classification (0.0 to 1.0)
+    pub score: f32,
+}
+
+impl Classification {
+    /// Creates a new classification.
+    pub fn new(class_id: usize, label: String, score: f32) -> Self {
+        Self {
+            class_id,
+            label,
+            score,
+        }
+    }
+}
 
 /// Configuration for document orientation classification task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,30 +50,22 @@ impl Default for DocumentOrientationConfig {
 /// Output from document orientation classification task.
 #[derive(Debug, Clone)]
 pub struct DocumentOrientationOutput {
-    /// Predicted class IDs per image (0=0°, 1=90°, 2=180°, 3=270°)
-    pub class_ids: Vec<Vec<usize>>,
-    /// Confidence scores for each prediction
-    pub scores: Vec<Vec<f32>>,
-    /// Label names for each prediction (e.g., "0", "90", "180", "270")
-    pub label_names: Vec<Vec<String>>,
+    /// Classification results per image
+    pub classifications: Vec<Vec<Classification>>,
 }
 
 impl DocumentOrientationOutput {
     /// Creates an empty document orientation output.
     pub fn empty() -> Self {
         Self {
-            class_ids: Vec::new(),
-            scores: Vec::new(),
-            label_names: Vec::new(),
+            classifications: Vec::new(),
         }
     }
 
     /// Creates a document orientation output with the given capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            class_ids: Vec::with_capacity(capacity),
-            scores: Vec::with_capacity(capacity),
-            label_names: Vec::with_capacity(capacity),
+            classifications: Vec::with_capacity(capacity),
         }
     }
 }
@@ -87,76 +102,34 @@ impl Task for DocumentOrientationTask {
     }
 
     fn validate_input(&self, input: &Self::Input) -> Result<(), OCRError> {
-        if input.images.is_empty() {
-            return Err(OCRError::InvalidInput {
-                message: "No images provided for document orientation classification".to_string(),
-            });
-        }
-
-        // Validate image dimensions
-        for (idx, img) in input.images.iter().enumerate() {
-            if img.width() == 0 || img.height() == 0 {
-                return Err(OCRError::InvalidInput {
-                    message: format!("Image at index {} has zero dimensions", idx),
-                });
-            }
-        }
+        ensure_non_empty_images(
+            &input.images,
+            "No images provided for document orientation classification",
+        )?;
 
         Ok(())
     }
 
     fn validate_output(&self, output: &Self::Output) -> Result<(), OCRError> {
-        // Validate that all arrays have matching lengths
-        if output.class_ids.len() != output.scores.len()
-            || output.class_ids.len() != output.label_names.len()
-        {
-            return Err(OCRError::InvalidInput {
-                message: format!(
-                    "Mismatched output lengths: class_ids={}, scores={}, labels={}",
-                    output.class_ids.len(),
-                    output.scores.len(),
-                    output.label_names.len()
-                ),
-            });
-        }
-
-        // Validate each image's predictions
-        for (idx, (class_ids, scores)) in output
-            .class_ids
-            .iter()
-            .zip(output.scores.iter())
-            .enumerate()
-        {
-            if class_ids.len() != scores.len() {
-                return Err(OCRError::InvalidInput {
-                    message: format!(
-                        "Image {}: class_ids count ({}) doesn't match scores count ({})",
-                        idx,
-                        class_ids.len(),
-                        scores.len()
-                    ),
-                });
-            }
-
-            // Validate class IDs (should be 0-3 for 4 orientations)
-            for &class_id in class_ids {
-                if class_id > 3 {
+        // Validate each image's classifications
+        for (idx, classifications) in output.classifications.iter().enumerate() {
+            for (class_idx, classification) in classifications.iter().enumerate() {
+                // Validate class IDs (should be 0-3 for 4 orientations)
+                if classification.class_id > 3 {
                     return Err(OCRError::InvalidInput {
                         message: format!(
                             "Image {}: invalid class_id {}. Expected 0-3 (0°, 90°, 180°, 270°)",
-                            idx, class_id
+                            idx, classification.class_id
                         ),
                     });
                 }
-            }
 
-            // Validate score ranges
-            for (pred_idx, &score) in scores.iter().enumerate() {
-                if !(0.0..=1.0).contains(&score) {
+                // Validate score ranges
+                if !(0.0..=1.0).contains(&classification.score) {
                     return Err(OCRError::InvalidInput {
                         message: format!(
-                            "Image {}, prediction {}: score {} is out of valid range [0, 1]",
-                            idx, pred_idx, score
+                            "Image {}, classification {}: score {} is out of valid range [0, 1]",
+                            idx, class_idx, classification.score
                         ),
                     });
                 }
@@ -200,28 +173,26 @@ mod tests {
         let task = DocumentOrientationTask::default();
 
         // Valid output should pass
+        let classification1 = Classification::new(0, "0".to_string(), 0.95);
+        let classification2 = Classification::new(1, "90".to_string(), 0.03);
         let output = DocumentOrientationOutput {
-            class_ids: vec![vec![0, 1]],
-            scores: vec![vec![0.95, 0.03]],
-            label_names: vec![vec!["0".to_string(), "90".to_string()]],
+            classifications: vec![vec![classification1, classification2]],
         };
         assert!(task.validate_output(&output).is_ok());
 
-        // Invalid class ID should fail
+        // Invalid class ID should fail (should be 0-3)
+        let bad_classification = Classification::new(5, "invalid".to_string(), 0.95);
         let bad_output = DocumentOrientationOutput {
-            class_ids: vec![vec![5]], // Invalid: should be 0-3
-            scores: vec![vec![0.95]],
-            label_names: vec![vec!["invalid".to_string()]],
+            classifications: vec![vec![bad_classification]],
         };
         assert!(task.validate_output(&bad_output).is_err());
 
-        // Mismatched lengths should fail
-        let bad_output2 = DocumentOrientationOutput {
-            class_ids: vec![vec![0]],
-            scores: vec![vec![0.95, 0.03]], // Mismatch
-            label_names: vec![vec!["0".to_string()]],
+        // Invalid score should fail
+        let bad_score_classification = Classification::new(0, "0".to_string(), 1.5);
+        let bad_score_output = DocumentOrientationOutput {
+            classifications: vec![vec![bad_score_classification]],
         };
-        assert!(task.validate_output(&bad_output2).is_err());
+        assert!(task.validate_output(&bad_score_output).is_err());
     }
 
     #[test]

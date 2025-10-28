@@ -265,36 +265,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Display results
     info!("\n=== Structure Recognition Results ===");
-    info!("\nImage: {}", existing_images[0].display());
-    info!(
-        "  Structure tokens ({}): {:?}",
-        output.structure.len(),
-        output.structure
-    );
-    info!("  Cell bboxes ({}): {:?}", output.bbox.len(), output.bbox);
-    info!("  Confidence: {:.6}", output.structure_score);
+    for (idx, ((structure, bboxes), score)) in output
+        .structures
+        .iter()
+        .zip(output.bboxes.iter())
+        .zip(output.structure_scores.iter())
+        .enumerate()
+    {
+        info!(
+            "\nImage {}: {}",
+            idx,
+            existing_images
+                .get(idx)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "N/A".to_string())
+        );
+        info!("  Structure tokens ({}): {:?}", structure.len(), structure);
+        info!("  Cell bboxes ({}): {:?}", bboxes.len(), bboxes);
+        info!("  Confidence: {:.6}", score);
+    }
 
     #[cfg(feature = "visualization")]
     {
         if let Some(ref output_dir) = args.output_dir {
             std::fs::create_dir_all(output_dir)?;
 
-            let structure_html = output.structure.join("");
-            let html_stem = existing_images
-                .get(0)
-                .and_then(|path| path.file_stem())
-                .and_then(|name| name.to_str())
-                .unwrap_or("table_structure");
-            let html_path = output_dir.join(format!("{}_structure.html", html_stem));
+            for (idx, structure) in output.structures.iter().enumerate() {
+                let structure_html = structure.join("");
+                let html_stem = existing_images
+                    .get(idx)
+                    .and_then(|path| path.file_stem())
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("table_structure");
+                let html_path = output_dir.join(format!("{}_{}_structure.html", html_stem, idx));
 
-            if let Err(e) = std::fs::write(&html_path, structure_html) {
-                error!(
-                    "Failed to write structure HTML {}: {}",
-                    html_path.display(),
-                    e
-                );
-            } else {
-                info!("Structure HTML saved to: {}", html_path.display());
+                if let Err(e) = std::fs::write(&html_path, structure_html) {
+                    error!(
+                        "Failed to write structure HTML {}: {}",
+                        html_path.display(),
+                        e
+                    );
+                } else {
+                    info!("Structure HTML saved to: {}", html_path.display());
+                }
             }
         }
     }

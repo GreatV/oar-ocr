@@ -220,12 +220,12 @@ impl TableCellDetectionAdapterBuilder {
         ort_config: Option<crate::core::config::OrtSessionConfig>,
     ) -> Result<TableCellDetectionAdapter, OCRError> {
         let inference = if ort_config.is_some() {
-            use crate::core::config::CommonBuilderConfig;
-            let common_config = CommonBuilderConfig {
+            use crate::core::config::ModelInferenceConfig;
+            let common_config = ModelInferenceConfig {
                 ort_session: ort_config,
                 ..Default::default()
             };
-            OrtInfer::from_common(&common_config, model_path, None)?
+            OrtInfer::from_config(&common_config, model_path, None)?
         } else {
             OrtInfer::new(model_path, None)?
         };

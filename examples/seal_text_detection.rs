@@ -193,14 +193,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Display results
-        if let Some((boxes, scores)) = output.boxes.first().zip(output.scores.first()) {
+        if let Some(detections) = output.detections.first() {
             info!(
                 "  Detected {} seal text regions in {:?}",
-                boxes.len(),
+                detections.len(),
                 duration
             );
 
-            for (i, (bbox, score)) in boxes.iter().zip(scores.iter()).enumerate() {
+            for (i, detection) in detections.iter().enumerate() {
+                let bbox = &detection.bbox;
+                let score = detection.score;
                 // Calculate bounding box statistics
                 let (min_x, max_x, min_y, max_y) = bbox.points.iter().fold(
                     (f32::MAX, f32::MIN, f32::MAX, f32::MIN),
@@ -243,8 +245,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or("unknown.png");
                 let output_path = output_dir.join(output_filename);
 
+                // Extract boxes and scores from detections
+                let boxes: Vec<_> = detections.iter().map(|d| d.bbox.clone()).collect();
+                let scores: Vec<_> = detections.iter().map(|d| d.score).collect();
+
                 // Draw bounding boxes on the image
-                let vis_image = visualize_detections(&image, boxes, scores);
+                let vis_image = visualize_detections(&image, &boxes, &scores);
 
                 if let Err(e) = vis_image.save(&output_path) {
                     error!("    Failed to save visualization: {}", e);

@@ -7,6 +7,7 @@ pub mod db;
 pub mod picodet;
 pub mod pp_doclayout;
 pub mod rtdetr;
+pub mod scale_aware_detector;
 
 pub use db::{DBModel, DBModelBuilder, DBPostprocessConfig, DBPreprocessConfig};
 pub use picodet::{

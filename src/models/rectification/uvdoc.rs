@@ -113,7 +113,16 @@ impl UVDocModel {
     ///
     /// Model predictions as a 4D tensor
     pub fn infer(&self, batch_tensor: &Tensor4D) -> Result<Tensor4D, OCRError> {
-        self.inference.infer_4d(batch_tensor)
+        self.inference
+            .infer_4d(batch_tensor)
+            .map_err(|e| OCRError::Inference {
+                model_name: "UVDoc".to_string(),
+                context: format!(
+                    "failed to run inference on batch with shape {:?}",
+                    batch_tensor.shape()
+                ),
+                source: Box::new(e),
+            })
     }
 
     /// Postprocesses model predictions to rectified images.
@@ -245,8 +254,8 @@ impl UVDocModelBuilder {
     pub fn build(self, model_path: &std::path::Path) -> Result<UVDocModel, OCRError> {
         // Create ONNX inference engine
         let inference = if self.session_pool_size > 1 || self.ort_config.is_some() {
-            use crate::core::config::CommonBuilderConfig;
-            let common_config = CommonBuilderConfig {
+            use crate::core::config::ModelInferenceConfig;
+            let common_config = ModelInferenceConfig {
                 model_path: None,
                 model_name: None,
                 batch_size: None,
@@ -254,7 +263,7 @@ impl UVDocModelBuilder {
                 ort_session: self.ort_config,
                 session_pool_size: Some(self.session_pool_size),
             };
-            OrtInfer::from_common(&common_config, model_path, Some("image"))?
+            OrtInfer::from_config(&common_config, model_path, Some("image"))?
         } else {
             OrtInfer::new(model_path, Some("image"))?
         };

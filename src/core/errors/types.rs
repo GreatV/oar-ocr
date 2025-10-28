@@ -97,6 +97,8 @@ pub enum ProcessingStage {
     PostProcessing,
     /// Error occurred during pipeline execution.
     PipelineExecution,
+    /// Error occurred during adapter execution.
+    AdapterExecution,
     /// Generic processing error.
     Generic,
 }
@@ -111,6 +113,7 @@ impl std::fmt::Display for ProcessingStage {
             ProcessingStage::BatchProcessing => write!(f, "batch processing"),
             ProcessingStage::PostProcessing => write!(f, "post-processing"),
             ProcessingStage::PipelineExecution => write!(f, "pipeline execution"),
+            ProcessingStage::AdapterExecution => write!(f, "adapter execution"),
             ProcessingStage::Generic => write!(f, "processing"),
         }
     }

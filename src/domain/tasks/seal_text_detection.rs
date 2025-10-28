@@ -3,9 +3,10 @@
 //! This module provides task definitions for detecting text in seal/stamp images,
 //! which often contain curved text arranged in circular patterns.
 
+use super::text_detection::Detection;
+use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
-use crate::processors::BoundingBox;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for seal text detection models.
@@ -39,10 +40,24 @@ impl Default for SealTextDetectionConfig {
 /// Contains polygon bounding boxes that can handle curved text regions.
 #[derive(Debug, Clone)]
 pub struct SealTextDetectionOutput {
-    /// Detected text region polygons per image
-    pub boxes: Vec<Vec<BoundingBox>>,
-    /// Confidence scores for each detection
-    pub scores: Vec<Vec<f32>>,
+    /// Detected text regions per image with confidence scores
+    pub detections: Vec<Vec<Detection>>,
+}
+
+impl SealTextDetectionOutput {
+    /// Creates an empty seal text detection output.
+    pub fn empty() -> Self {
+        Self {
+            detections: Vec::new(),
+        }
+    }
+
+    /// Creates a seal text detection output with the given capacity.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            detections: Vec::with_capacity(capacity),
+        }
+    }
 }
 
 /// Seal text detection task.
@@ -84,70 +99,33 @@ impl Task for SealTextDetectionTask {
     }
 
     fn validate_input(&self, input: &Self::Input) -> Result<(), OCRError> {
-        if input.images.is_empty() {
-            return Err(OCRError::InvalidInput {
-                message: "Input images cannot be empty for seal text detection".to_string(),
-            });
-        }
-
-        for (idx, image) in input.images.iter().enumerate() {
-            if image.width() == 0 || image.height() == 0 {
-                return Err(OCRError::InvalidInput {
-                    message: format!(
-                        "Image at index {} has invalid dimensions: {}x{}",
-                        idx,
-                        image.width(),
-                        image.height()
-                    ),
-                });
-            }
-        }
+        ensure_non_empty_images(
+            &input.images,
+            "Input images cannot be empty for seal text detection",
+        )?;
 
         Ok(())
     }
 
     fn validate_output(&self, output: &Self::Output) -> Result<(), OCRError> {
-        if output.boxes.len() != output.scores.len() {
-            return Err(OCRError::InvalidInput {
-                message: format!(
-                    "Mismatch between number of box sets ({}) and score sets ({})",
-                    output.boxes.len(),
-                    output.scores.len()
-                ),
-            });
-        }
-
-        for (batch_idx, (boxes, scores)) in output.boxes.iter().zip(&output.scores).enumerate() {
-            if boxes.len() != scores.len() {
-                return Err(OCRError::InvalidInput {
-                    message: format!(
-                        "Batch {}: mismatch between number of boxes ({}) and scores ({})",
-                        batch_idx,
-                        boxes.len(),
-                        scores.len()
-                    ),
-                });
-            }
-
-            // Validate score ranges
-            for (box_idx, score) in scores.iter().enumerate() {
-                if !(*score >= 0.0 && *score <= 1.0) {
+        // Validate each image's detections
+        for (batch_idx, detections) in output.detections.iter().enumerate() {
+            // Validate score ranges and bounding boxes
+            for (det_idx, detection) in detections.iter().enumerate() {
+                if !(detection.score >= 0.0 && detection.score <= 1.0) {
                     return Err(OCRError::InvalidInput {
                         message: format!(
-                            "Batch {}, box {}: invalid score value {}. Must be in range [0, 1]",
-                            batch_idx, box_idx, score
+                            "Batch {}, detection {}: invalid score value {}. Must be in range [0, 1]",
+                            batch_idx, det_idx, detection.score
                         ),
                     });
                 }
-            }
 
-            // Validate bounding boxes
-            for (box_idx, bbox) in boxes.iter().enumerate() {
-                if bbox.points.is_empty() {
+                if detection.bbox.points.is_empty() {
                     return Err(OCRError::InvalidInput {
                         message: format!(
-                            "Batch {}, box {}: empty bounding box points",
-                            batch_idx, box_idx
+                            "Batch {}, detection {}: empty bounding box points",
+                            batch_idx, det_idx
                         ),
                     });
                 }
@@ -158,17 +136,14 @@ impl Task for SealTextDetectionTask {
     }
 
     fn empty_output(&self) -> Self::Output {
-        SealTextDetectionOutput {
-            boxes: Vec::new(),
-            scores: Vec::new(),
-        }
+        SealTextDetectionOutput::empty()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::processors::Point;
+    use crate::processors::{BoundingBox, Point};
     use image::RgbImage;
 
     #[test]
@@ -199,34 +174,37 @@ mod tests {
         let task = SealTextDetectionTask::new();
 
         // Valid output
+        let valid_bbox = BoundingBox {
+            points: vec![
+                Point { x: 10.0, y: 10.0 },
+                Point { x: 50.0, y: 10.0 },
+                Point { x: 50.0, y: 30.0 },
+                Point { x: 10.0, y: 30.0 },
+            ],
+        };
+        let valid_detection = Detection::new(valid_bbox, 0.95);
         let valid_output = SealTextDetectionOutput {
-            boxes: vec![vec![BoundingBox {
-                points: vec![
-                    Point { x: 10.0, y: 10.0 },
-                    Point { x: 50.0, y: 10.0 },
-                    Point { x: 50.0, y: 30.0 },
-                    Point { x: 10.0, y: 30.0 },
-                ],
-            }]],
-            scores: vec![vec![0.95]],
+            detections: vec![vec![valid_detection]],
         };
         assert!(task.validate_output(&valid_output).is_ok());
 
-        // Mismatched lengths
-        let invalid_output = SealTextDetectionOutput {
-            boxes: vec![vec![]],
-            scores: vec![vec![], vec![]],
-        };
-        assert!(task.validate_output(&invalid_output).is_err());
-
         // Invalid score
+        let invalid_bbox = BoundingBox {
+            points: vec![Point { x: 0.0, y: 0.0 }],
+        };
+        let invalid_detection = Detection::new(invalid_bbox, 1.5); // Score > 1.0
         let invalid_score_output = SealTextDetectionOutput {
-            boxes: vec![vec![BoundingBox {
-                points: vec![Point { x: 0.0, y: 0.0 }],
-            }]],
-            scores: vec![vec![1.5]], // Score > 1.0
+            detections: vec![vec![invalid_detection]],
         };
         assert!(task.validate_output(&invalid_score_output).is_err());
+
+        // Empty bounding box points
+        let empty_bbox = BoundingBox { points: vec![] };
+        let empty_bbox_detection = Detection::new(empty_bbox, 0.95);
+        let empty_bbox_output = SealTextDetectionOutput {
+            detections: vec![vec![empty_bbox_detection]],
+        };
+        assert!(task.validate_output(&empty_bbox_output).is_err());
     }
 
     #[test]

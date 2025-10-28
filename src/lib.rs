@@ -28,7 +28,7 @@
 //! * [`core`] - Core traits, error handling, and batch processing
 //! * [`domain`] - Domain types like orientation helpers and prediction models
 //! * [`models`] - Model adapters for different OCR tasks
-//! * [`pipeline`] - Task graph-based OCR pipeline
+//! * [`oarocr`] - Task graph-based OCR pipeline
 //! * [`processors`] - Image processing utilities
 //! * [`utils`] - Utility functions for images and tensors
 //!
@@ -135,7 +135,7 @@ pub mod core;
 pub mod domain;
 pub mod models;
 
-pub mod pipeline;
+pub mod oarocr;
 pub mod processors;
 pub mod utils;
 
@@ -156,10 +156,10 @@ pub mod utils;
 ///
 /// For advanced customization (model adapters, traits, validation),
 /// import directly from the respective modules (e.g., `oar_ocr::models`, `oar_ocr::core::traits`,
-/// `oar_ocr::pipeline`).
+/// `oar_ocr::oarocr`).
 pub mod prelude {
     // Task Graph Pipeline (essential)
-    pub use crate::pipeline::{
+    pub use crate::oarocr::{
         EdgeProcessorConfig, ModelBinding, OAROCRResult, TaskGraphBuilder, TaskGraphConfig,
         TaskNode, TextRegion,
     };
