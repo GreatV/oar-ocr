@@ -473,6 +473,7 @@ impl DocOrientationClassifierBuilder {
             Some(vec![0.485, 0.456, 0.406]),
             Some(vec![0.229, 0.224, 0.225]),
             None,
+            None,
         )?;
         let preprocessor = DocOrPreprocessor {
             input_shape,

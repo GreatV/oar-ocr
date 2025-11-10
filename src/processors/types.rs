@@ -64,6 +64,31 @@ pub enum ChannelOrder {
     HWC,
 }
 
+/// Specifies how color channels are laid out in the source image data
+#[derive(Debug, Clone, Copy)]
+pub enum ColorMode {
+    /// Red, Green, Blue order
+    RGB,
+    /// Blue, Green, Red order (OpenCV / PP-OCR default)
+    BGR,
+}
+
+impl ColorMode {
+    /// Returns the index to read for the given logical channel (0=R,1=G,2=B)
+    #[inline]
+    pub fn channel_index(self, channel: usize) -> usize {
+        match self {
+            ColorMode::RGB => channel,
+            ColorMode::BGR => match channel {
+                0 => 2,
+                1 => 1,
+                2 => 0,
+                _ => channel,
+            },
+        }
+    }
+}
+
 /// Specifies the type of bounding box used for text detection
 #[derive(Debug)]
 pub enum BoxType {

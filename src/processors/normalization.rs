@@ -5,7 +5,7 @@
 //! specialized normalization for OCR recognition tasks.
 
 use crate::core::OCRError;
-use crate::processors::types::ChannelOrder;
+use crate::processors::types::{ChannelOrder, ColorMode};
 use image::DynamicImage;
 use rayon::prelude::*;
 
@@ -22,6 +22,8 @@ pub struct NormalizeImage {
     pub beta: Vec<f32>,
     /// Channel ordering (CHW or HWC)
     pub order: ChannelOrder,
+    /// Color model describing how to interpret source pixel channels
+    pub color: ColorMode,
 }
 
 impl NormalizeImage {
@@ -33,6 +35,7 @@ impl NormalizeImage {
     /// * `mean` - Optional mean values for each channel (defaults to [0.485, 0.456, 0.406])
     /// * `std` - Optional standard deviation values for each channel (defaults to [0.229, 0.224, 0.225])
     /// * `order` - Optional channel ordering (defaults to CHW)
+    /// * `color_model` - Optional color model describing source data (defaults to BGR)
     ///
     /// # Returns
     ///
@@ -49,11 +52,13 @@ impl NormalizeImage {
         mean: Option<Vec<f32>>,
         std: Option<Vec<f32>>,
         order: Option<ChannelOrder>,
+        color: Option<ColorMode>,
     ) -> Result<Self, OCRError> {
         let scale = scale.unwrap_or(1.0 / 255.0);
         let mean = mean.unwrap_or_else(|| vec![0.485, 0.456, 0.406]);
         let std = std.unwrap_or_else(|| vec![0.229, 0.224, 0.225]);
         let order = order.unwrap_or(ChannelOrder::CHW);
+        let color = color.unwrap_or(ColorMode::BGR);
 
         if scale <= 0.0 {
             return Err(OCRError::ConfigError {
@@ -86,7 +91,12 @@ impl NormalizeImage {
         let alpha: Vec<f32> = std.iter().map(|s| scale / s).collect();
         let beta: Vec<f32> = mean.iter().zip(&std).map(|(m, s)| -m / s).collect();
 
-        Ok(Self { alpha, beta, order })
+        Ok(Self {
+            alpha,
+            beta,
+            order,
+            color,
+        })
     }
 
     /// Validates the configuration of the NormalizeImage instance.
@@ -143,6 +153,7 @@ impl NormalizeImage {
             Some(vec![1.0, 1.0, 1.0]),
             Some(vec![1.0, 1.0, 1.0]),
             Some(ChannelOrder::CHW),
+            Some(ColorMode::BGR),
         )
     }
 
@@ -292,7 +303,7 @@ impl NormalizeImage {
                         for y in 0..h.min(height_img as usize) {
                             for x in 0..w.min(width as usize) {
                                 let pixel = rgb_img.get_pixel(x as u32, y as u32);
-                                let channel_value = pixel[c] as f32;
+                                let channel_value = pixel[self.color.channel_index(c)] as f32;
                                 let dst_idx =
                                     batch_offset + c * height * max_width + y * max_width + x;
                                 if dst_idx < batch_tensor.len() {
@@ -308,7 +319,7 @@ impl NormalizeImage {
                         for x in 0..w.min(width as usize) {
                             let pixel = rgb_img.get_pixel(x as u32, y as u32);
                             for c in 0..channels.min(3) {
-                                let channel_value = pixel[c] as f32;
+                                let channel_value = pixel[self.color.channel_index(c)] as f32;
                                 let dst_idx =
                                     batch_offset + y * max_width * channels + x * channels + c;
                                 if dst_idx < batch_tensor.len() {
@@ -347,7 +358,7 @@ impl NormalizeImage {
                     for y in 0..height {
                         for x in 0..width {
                             let pixel = rgb_img.get_pixel(x, y);
-                            let channel_value = pixel[c as usize] as f32;
+                            let channel_value = pixel[self.color.channel_index(c as usize)] as f32;
                             let dst_idx = (c * height * width + y * width + x) as usize;
 
                             result[dst_idx] =
@@ -364,7 +375,7 @@ impl NormalizeImage {
                     for x in 0..width {
                         let pixel = rgb_img.get_pixel(x, y);
                         for c in 0..channels {
-                            let channel_value = pixel[c as usize] as f32;
+                            let channel_value = pixel[self.color.channel_index(c as usize)] as f32;
                             let dst_idx = (y * width * channels + x * channels + c) as usize;
 
                             result[dst_idx] =
@@ -399,7 +410,7 @@ impl NormalizeImage {
                     for y in 0..height {
                         for x in 0..width {
                             let pixel = rgb_img.get_pixel(x, y);
-                            let channel_value = pixel[c as usize] as f32;
+                            let channel_value = pixel[self.color.channel_index(c as usize)] as f32;
                             let dst_idx = (c * height * width + y * width + x) as usize;
 
                             result[dst_idx] =
@@ -430,7 +441,7 @@ impl NormalizeImage {
                     for x in 0..width {
                         let pixel = rgb_img.get_pixel(x, y);
                         for c in 0..channels {
-                            let channel_value = pixel[c as usize] as f32;
+                            let channel_value = pixel[self.color.channel_index(c as usize)] as f32;
                             let dst_idx = (y * width * channels + x * channels + c) as usize;
 
                             result[dst_idx] =
@@ -511,7 +522,8 @@ impl NormalizeImage {
                         for y in 0..height {
                             for x in 0..width {
                                 let pixel = rgb_img.get_pixel(x, y);
-                                let channel_value = pixel[c as usize] as f32;
+                                let channel_value =
+                                    pixel[self.color.channel_index(c as usize)] as f32;
                                 let dst_idx = (c * height * width + y * width + x) as usize;
                                 batch_slice[dst_idx] =
                                     channel_value * self.alpha[c as usize] + self.beta[c as usize];
@@ -526,7 +538,8 @@ impl NormalizeImage {
                                 for y in 0..height {
                                     for x in 0..width {
                                         let pixel = rgb_img.get_pixel(x, y);
-                                        let channel_value = pixel[c as usize] as f32;
+                                        let channel_value =
+                                            pixel[self.color.channel_index(c as usize)] as f32;
                                         let dst_idx = (c * height * width + y * width + x) as usize;
                                         batch_slice[dst_idx] = channel_value
                                             * self.alpha[c as usize]
@@ -566,7 +579,8 @@ impl NormalizeImage {
                         for x in 0..width {
                             let pixel = rgb_img.get_pixel(x, y);
                             for c in 0..channels {
-                                let channel_value = pixel[c as usize] as f32;
+                                let channel_value =
+                                    pixel[self.color.channel_index(c as usize)] as f32;
                                 let dst_idx = (y * width * channels + x * channels + c) as usize;
                                 batch_slice[dst_idx] =
                                     channel_value * self.alpha[c as usize] + self.beta[c as usize];
@@ -581,7 +595,8 @@ impl NormalizeImage {
                                 for x in 0..width {
                                     let pixel = rgb_img.get_pixel(x, y);
                                     for c in 0..channels {
-                                        let channel_value = pixel[c as usize] as f32;
+                                        let channel_value =
+                                            pixel[self.color.channel_index(c as usize)] as f32;
                                         let dst_idx =
                                             (y * width * channels + x * channels + c) as usize;
                                         batch_slice[dst_idx] = channel_value

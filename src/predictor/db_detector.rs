@@ -589,7 +589,7 @@ impl TextDetPredictorBuilder {
             None,
             Some(max_side_limit),
         );
-        let normalize = NormalizeImage::new(None, None, None, None)?;
+        let normalize = NormalizeImage::new(None, None, None, None, None)?;
         let preprocessor = TDPreprocessor {
             resize,
             normalize,

@@ -327,6 +327,7 @@ impl DoctrRectifierPredictorBuilder {
             Some(vec![0.0, 0.0, 0.0]),
             Some(vec![1.0, 1.0, 1.0]),
             None,
+            None,
         )?;
         let preprocessor = DRPreprocessor { normalize };
         let infer = OrtInfer::from_common_with_auto_input(&config.common, model_path)?;
