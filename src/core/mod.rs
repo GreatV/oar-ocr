@@ -15,10 +15,13 @@ pub mod batch;
 pub mod config;
 pub mod constants;
 pub mod errors;
+pub mod image_reader;
 pub mod inference;
 #[macro_use]
 pub mod macros;
+pub mod registry;
 pub mod traits;
+pub mod validation;
 
 // Image utilities are now available directly from oar_ocr::utils
 // pub use crate::utils::{
@@ -37,17 +40,26 @@ pub use batch::dynamic::{
 };
 pub use batch::{BatchData, BatchSampler, Tensor1D, Tensor2D, Tensor3D, Tensor4D, ToBatch};
 pub use config::{
-    CommonBuilderConfig, ConfigError, ConfigValidator, ConfigValidatorExt, TransformConfig,
+    ConfigError, ConfigValidator, ConfigValidatorExt, ModelInferenceConfig, TransformConfig,
     TransformRegistry, TransformType,
 };
 pub use constants::*;
 pub use errors::{OCRError, OcrResult, ProcessingStage};
-pub use inference::{
-    DefaultImageReader, OrtInfer, OrtInfer2D, OrtInfer3D, OrtInfer4D, load_session,
-};
+pub use image_reader::DefaultImageReader;
+pub use inference::{OrtInfer, OrtInfer2D, OrtInfer3D, OrtInfer4D, load_session};
 pub use traits::{
-    BasePredictor, GranularImageReader, ImageReader, InferenceEngine, ModularPredictor,
-    Postprocessor, PredictorBuilder, PredictorConfig, Preprocessor, Sampler, StandardPredictor,
+    AdapterBuilder, AdapterInfo, AdapterTask, BasePredictor, GranularImageReader, ImageReader,
+    ImageTaskInput, InferenceEngine, ModelAdapter, ModularPredictor, Postprocessor,
+    PredictorBuilder, PredictorConfig, Preprocessor, Sampler, StandardPredictor, Task, TaskRunner,
+    TaskSchema, TaskType,
+};
+
+pub use registry::{AdapterWrapper, DynModelAdapter};
+pub use validation::{
+    validate_batch_size, validate_division, validate_finite, validate_image_dimensions,
+    validate_index_bounds, validate_non_empty, validate_non_negative,
+    validate_normalization_params, validate_positive, validate_range, validate_same_length,
+    validate_tensor_shape,
 };
 
 // init_tracing function has been moved to oar_ocr::utils::init_tracing

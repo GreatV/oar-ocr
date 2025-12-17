@@ -13,7 +13,6 @@
 //!
 //! ```rust
 //! use oar_ocr::core::OCRError;
-//! use oar_ocr::core::errors::SimpleError;
 //!
 //! // Error for a specific item in a named batch
 //! let error = OCRError::batch_item_error(
@@ -22,7 +21,7 @@
 //!     2,                       // item index (0-based)
 //!     Some(5),                 // total items
 //!     "predict",               // operation
-//!     SimpleError::new("timeout"),
+//!     std::io::Error::new(std::io::ErrorKind::Other, "timeout"),
 //! );
 //! // Results in: "recognition processing failed in batch 'batch_123' (item 3/5): operation 'predict'"
 //!
@@ -33,7 +32,7 @@
 //!     0,
 //!     None,
 //!     "process",
-//!     SimpleError::new("invalid input"),
+//!     std::io::Error::new(std::io::ErrorKind::Other, "invalid input"),
 //! );
 //! // Results in: "orientation processing failed (item 1): operation 'process'"
 //! ```
@@ -43,9 +42,8 @@
 //!
 //! ```rust
 //! use oar_ocr::core::OCRError;
-//! use oar_ocr::core::errors::SimpleError;
 //!
-//! let underlying_error = SimpleError::new("network timeout");
+//! let underlying_error = std::io::Error::new(std::io::ErrorKind::Other, "network timeout");
 //! let affected_indices = vec![1, 3, 5];
 //!
 //! let message = OCRError::format_batch_error_message(
@@ -57,7 +55,60 @@
 //! // Results in: "text recognition batch 'group_aspect_1.2' failed: network timeout (affected indices: [1, 3, 5])"
 //! ```
 
-use super::types::{OCRError, ProcessingStage, SimpleError};
+use super::types::{OCRError, ProcessingStage};
+
+/// Builder for composing detailed `ModelInference` errors without duplicating boilerplate.
+#[derive(Clone, Debug)]
+pub struct ModelInferenceErrorBuilder {
+    model_name: String,
+    operation: String,
+    batch_index: usize,
+    input_shape: Vec<usize>,
+    context: String,
+}
+
+impl ModelInferenceErrorBuilder {
+    /// Creates a new builder with the required model metadata.
+    pub fn new(model_name: impl Into<String>, operation: impl Into<String>) -> Self {
+        Self {
+            model_name: model_name.into(),
+            operation: operation.into(),
+            batch_index: 0,
+            input_shape: Vec::new(),
+            context: String::new(),
+        }
+    }
+
+    /// Sets the batch index associated with the failure.
+    pub fn batch_index(mut self, batch_index: usize) -> Self {
+        self.batch_index = batch_index;
+        self
+    }
+
+    /// Stores the input tensor shape for contextual debugging.
+    pub fn input_shape(mut self, shape: &[usize]) -> Self {
+        self.input_shape = shape.to_vec();
+        self
+    }
+
+    /// Adds free-form context to the error message.
+    pub fn context(mut self, context: impl Into<String>) -> Self {
+        self.context = context.into();
+        self
+    }
+
+    /// Consumes the builder and produces the final `OCRError`.
+    pub fn build(self, error: impl std::error::Error + Send + Sync + 'static) -> OCRError {
+        OCRError::ModelInference {
+            model_name: self.model_name,
+            operation: self.operation,
+            batch_index: self.batch_index,
+            input_shape: self.input_shape,
+            context: self.context,
+            source: Box::new(error),
+        }
+    }
+}
 
 /// Implementation of OCRError with utility functions for creating errors.
 impl OCRError {
@@ -179,7 +230,7 @@ impl OCRError {
 
     /// Creates an OCRError for image processing operations with a simple message.
     ///
-    /// This is an alias for `image_processing` with a SimpleError wrapper.
+    /// This is an alias for `image_processing` with a std::io::Error wrapper.
     /// For errors with underlying causes, use `image_processing` directly.
     ///
     /// # Arguments
@@ -190,7 +241,10 @@ impl OCRError {
     ///
     /// An OCRError instance.
     pub fn image_processing_error(message: impl Into<String>) -> Self {
-        Self::image_processing(&message.into(), SimpleError::new("Image processing failed"))
+        Self::image_processing(
+            &message.into(),
+            std::io::Error::other("Image processing failed"),
+        )
     }
 
     /// Creates an OCRError for batch processing operations (simple variant).
@@ -380,14 +434,19 @@ impl OCRError {
         context: &str,
         error: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
-        Self::ModelInference {
-            model_name: model_name.to_string(),
-            operation: operation.to_string(),
-            batch_index,
-            input_shape: input_shape.to_vec(),
-            context: context.to_string(),
-            source: Box::new(error),
-        }
+        Self::model_inference_error_builder(model_name, operation)
+            .batch_index(batch_index)
+            .input_shape(input_shape)
+            .context(context)
+            .build(error)
+    }
+
+    /// Creates a builder for constructing model inference errors with optional context pieces.
+    pub fn model_inference_error_builder(
+        model_name: impl Into<String>,
+        operation: impl Into<String>,
+    ) -> ModelInferenceErrorBuilder {
+        ModelInferenceErrorBuilder::new(model_name, operation)
     }
 
     /// Creates an OCRError for inference operations with model context (simple variant).
@@ -591,11 +650,10 @@ impl OCRError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::errors::SimpleError;
 
     #[test]
     fn test_batch_item_error_with_full_context() {
-        let underlying_error = SimpleError::new("test error");
+        let underlying_error = std::io::Error::other("test error");
         let error = OCRError::batch_item_error(
             "recognition",
             Some("batch_123"),
@@ -618,7 +676,7 @@ mod tests {
 
     #[test]
     fn test_batch_item_error_minimal_context() {
-        let underlying_error = SimpleError::new("test error");
+        let underlying_error = std::io::Error::other("test error");
         let error =
             OCRError::batch_item_error("orientation", None, 0, None, "process", underlying_error);
 
@@ -635,7 +693,7 @@ mod tests {
 
     #[test]
     fn test_format_batch_error_message() {
-        let underlying_error = SimpleError::new("network timeout");
+        let underlying_error = std::io::Error::other("network timeout");
         let affected_indices = vec![1, 3, 5];
 
         let message = OCRError::format_batch_error_message(

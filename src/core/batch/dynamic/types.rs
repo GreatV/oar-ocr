@@ -4,7 +4,7 @@ use image::RgbImage;
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// Performance metrics for batch operations
+/// Speed metrics for batch operations
 #[derive(Debug, Clone, Default)]
 pub struct BatchPerformanceMetrics {
     /// Total batching time
@@ -13,10 +13,6 @@ pub struct BatchPerformanceMetrics {
     pub batch_count: usize,
     /// Total number of images processed
     pub total_images: usize,
-    /// Average batch size
-    pub average_batch_size: f32,
-    /// Memory usage in bytes
-    pub memory_usage: usize,
 }
 
 impl BatchPerformanceMetrics {
@@ -26,12 +22,10 @@ impl BatchPerformanceMetrics {
     }
 
     /// Updates metrics with new batch information
-    pub fn update(&mut self, batch_size: usize, processing_time: Duration, memory_used: usize) {
+    pub fn update(&mut self, batch_size: usize, processing_time: Duration) {
         self.batch_count += 1;
         self.total_images += batch_size;
         self.batching_time += processing_time;
-        self.memory_usage = self.memory_usage.max(memory_used);
-        self.average_batch_size = self.total_images as f32 / self.batch_count as f32;
     }
 
     /// Gets the average processing time per batch
@@ -114,7 +108,7 @@ pub struct DynamicBatchResult<T> {
     pub batches: Vec<T>,
     /// Mapping from original index to batch and position within batch
     pub index_mapping: HashMap<usize, (usize, usize)>,
-    /// Performance metrics
+    /// Speed metrics
     pub metrics: BatchPerformanceMetrics,
 }
 

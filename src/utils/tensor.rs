@@ -547,16 +547,14 @@ pub fn stack_tensor3d(tensors: &[Tensor3D]) -> Result<Tensor4D, OCRError> {
         }
 
         if i > 0 && tensor.shape() != first_shape {
-            return Err(OCRError::tensor_operation_error(
-                "stack_tensor3d_shape_validation",
-                first_shape,
-                tensor.shape(),
-                &format!(
-                    "Tensor shape mismatch during 3D tensor stacking at index {}",
-                    i
+            return Err(OCRError::InvalidInput {
+                message: format!(
+                    "Tensor shape mismatch during 3D tensor stacking at index {}: expected {:?}, got {:?}",
+                    i,
+                    first_shape,
+                    tensor.shape()
                 ),
-                crate::core::errors::SimpleError::new("Inconsistent tensor shapes for stacking"),
-            ));
+            });
         }
     }
 

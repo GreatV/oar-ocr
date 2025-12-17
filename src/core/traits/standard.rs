@@ -481,13 +481,11 @@ mod tests {
         assert!(result.is_err());
 
         // Check that it's the correct error type
-        match result.unwrap_err() {
-            OCRError::InvalidInput { message } => {
-                assert!(
-                    message.contains("ImageReader::apply returned empty result for single image")
-                );
-            }
-            _ => panic!("Expected InvalidInput error"),
+        let err = result.unwrap_err();
+        if let OCRError::InvalidInput { message } = err {
+            assert!(message.contains("ImageReader::apply returned empty result for single image"));
+        } else {
+            panic!("Expected InvalidInput error, got {:?}", err);
         }
     }
 }

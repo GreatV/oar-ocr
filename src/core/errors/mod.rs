@@ -8,15 +8,13 @@
 //!
 //! The error system is organized into several modules:
 //!
-//! - [`types`] - Core error types (OCRError, ProcessingStage, SimpleError)
+//! - [`types`] - Core error types (OCRError, ProcessingStage)
 //! - [`constructors`] - Helper methods for creating errors with context
-//! - [`tests`] - Comprehensive test suite for error handling
 //!
 //! # Main Error Types
 //!
 //! - [`OCRError`] - The main error type used throughout the OCR pipeline
 //! - [`ProcessingStage`] - Enum identifying which pipeline stage an error occurred in
-//! - [`SimpleError`] - Lightweight error type for basic error messages
 //!
 //! # Usage
 //!
@@ -46,7 +44,7 @@
 //! The error system supports several categories of errors:
 //!
 //! - **Processing Errors** - Errors during various pipeline stages
-//! - **Inference Errors** - Model inference and prediction errors  
+//! - **Inference Errors** - Model inference and prediction errors
 //! - **Configuration Errors** - Invalid configuration or validation failures
 //! - **Input Errors** - Invalid input data or parameters
 //! - **System Errors** - IO, tensor operations, and other system-level errors
@@ -56,7 +54,7 @@ pub mod constructors;
 pub mod types;
 
 // Re-export all public types and functions for backward compatibility
-pub use types::{ImageProcessError, OCRError, ProcessingStage, SimpleError};
+pub use types::{ImageProcessError, OCRError, ProcessingStage};
 
 /// Convenient result alias for OCR operations.
 pub type OcrResult<T> = Result<T, OCRError>;

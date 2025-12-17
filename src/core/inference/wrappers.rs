@@ -1,6 +1,6 @@
 //! Small helpers that wrap OrtInfer into concrete dimensional InferenceEngine implementations.
 
-use super::ort_infer::OrtInfer;
+use super::OrtInfer;
 use crate::core::{InferenceEngine as GInferenceEngine, OCRError, Tensor2D, Tensor3D, Tensor4D};
 
 #[derive(Debug)]
