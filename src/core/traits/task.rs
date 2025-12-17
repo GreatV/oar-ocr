@@ -204,7 +204,7 @@ pub struct ImageTaskInput {
 }
 
 impl ImageTaskInput {
-    /// Creates a new image task input.
+    /// Creates a new image task input from owned images.
     pub fn new(images: Vec<RgbImage>) -> Self {
         let count = images.len();
         Self {
@@ -254,6 +254,16 @@ mod tests {
     fn test_image_task_input_creation() {
         let images = vec![RgbImage::new(100, 100), RgbImage::new(200, 200)];
         let input = ImageTaskInput::new(images.clone());
+
+        assert_eq!(input.images.len(), 2);
+        assert_eq!(input.metadata.len(), 2);
+        assert!(input.metadata.iter().all(|m| m.is_none()));
+    }
+
+    #[test]
+    fn test_image_task_input_from_owned() {
+        let images = vec![RgbImage::new(100, 100), RgbImage::new(200, 200)];
+        let input = ImageTaskInput::new(images);
 
         assert_eq!(input.images.len(), 2);
         assert_eq!(input.metadata.len(), 2);

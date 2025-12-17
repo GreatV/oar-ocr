@@ -26,6 +26,7 @@ pub use formula_recognition::{
 };
 pub use layout_detection::{
     LayoutDetectionConfig, LayoutDetectionOutput, LayoutDetectionTask, LayoutElement,
+    MergeBboxMode, UnclipRatio,
 };
 pub use seal_text_detection::{
     SealTextDetectionConfig, SealTextDetectionOutput, SealTextDetectionTask,

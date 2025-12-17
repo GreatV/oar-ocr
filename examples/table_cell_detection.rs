@@ -1,7 +1,7 @@
 //! Table Cell Detection Example
 //!
 //! This example runs the table cell detection models (wired / wireless) exported
-//! from PaddleOCR/PaddleX and prints the detected cell bounding boxes. When the
+//! from table detection models and prints the detected cell bounding boxes. When the
 //! `visualization` feature is enabled it will also produce an annotated image.
 //!
 //! # Usage
@@ -20,64 +20,26 @@
 //! * `--device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
 //! * `<IMAGES>...` - Input document images containing tables
 
-mod common;
+mod utils;
 
 use clap::Parser;
-use common::{load_rgb_image, parse_device_config};
-use oar_ocr::core::traits::{
-    adapter::{AdapterBuilder, ModelAdapter},
-    task::{ImageTaskInput, Task},
-};
-use oar_ocr::domain::adapters::RTDetrTableCellAdapterBuilder;
-use oar_ocr::domain::tasks::{TableCellDetectionConfig, TableCellDetectionTask};
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use oar_ocr::predictors::{TableCellDetectionPredictor, TableCellModelVariant};
+use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
+use utils::{load_rgb_image, parse_device_config};
 
 #[cfg(feature = "visualization")]
 use image::RgbImage;
 #[cfg(feature = "visualization")]
 use std::fs;
-
-/// Supported table cell model variants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum TableCellModelVariant {
-    /// RT-DETR-L wired table cell detector.
-    RTDetrLWired,
-    /// RT-DETR-L wireless table cell detector.
-    RTDetrLWireless,
-}
-
-impl TableCellModelVariant {
-    fn detect_from_filename(path: &Path) -> Option<Self> {
-        let name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-
-        if name.contains("wired_table_cell") {
-            Some(TableCellModelVariant::RTDetrLWired)
-        } else if name.contains("wireless_table_cell") {
-            Some(TableCellModelVariant::RTDetrLWireless)
-        } else {
-            None
-        }
-    }
-
-    fn as_str(&self) -> &'static str {
-        match self {
-            TableCellModelVariant::RTDetrLWired => "rt-detr-l_wired_table_cell_det",
-            TableCellModelVariant::RTDetrLWireless => "rt-detr-l_wireless_table_cell_det",
-        }
-    }
-}
+#[cfg(feature = "visualization")]
+use std::path::Path;
 
 /// Command line arguments.
 #[derive(Parser)]
 #[command(name = "table_cell_detection")]
-#[command(about = "Detect table cells using RT-DETR models exported from PaddleOCR/PaddleX")]
+#[command(about = "Detect table cells using RT-DETR models")]
 struct Args {
     /// Path to the table cell detection model (.onnx)
     #[arg(short, long)]
@@ -132,7 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         })?
     } else {
-        TableCellModelVariant::detect_from_filename(&args.model_path).ok_or_else(|| {
+        TableCellModelVariant::detect_from_path(&args.model_path).ok_or_else(|| {
             format!(
                 "Could not infer model type from filename '{}'. Specify --model-type explicitly.",
                 args.model_path.display()
@@ -150,36 +112,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("CUDA execution provider configured successfully");
     }
 
-    let task_config = TableCellDetectionConfig {
-        score_threshold: args.score_threshold,
-        max_cells: args.max_cells,
-    };
+    // Build the table cell detection predictor
+    let mut predictor_builder = TableCellDetectionPredictor::builder()
+        .score_threshold(args.score_threshold)
+        .model_variant(variant);
 
-    let adapter: Box<dyn ModelAdapter<Task = TableCellDetectionTask>> = match variant {
-        TableCellModelVariant::RTDetrLWired => {
-            let mut builder = RTDetrTableCellAdapterBuilder::new().task_config(task_config.clone());
-            if let Some(ort_cfg) = ort_config.clone() {
-                builder = builder.with_ort_config(ort_cfg);
-            }
-            Box::new(
-                builder.build(&args.model_path).map_err(|e| {
-                    format!("Failed to build RT-DETR wired table cell adapter: {}", e)
-                })?,
-            )
-        }
-        TableCellModelVariant::RTDetrLWireless => {
-            let mut builder =
-                RTDetrTableCellAdapterBuilder::wireless().task_config(task_config.clone());
-            if let Some(ort_cfg) = ort_config.clone() {
-                builder = builder.with_ort_config(ort_cfg);
-            }
-            Box::new(builder.build(&args.model_path).map_err(|e| {
-                format!("Failed to build RT-DETR wireless table cell adapter: {}", e)
-            })?)
-        }
-    };
+    if let Some(ort_cfg) = ort_config {
+        predictor_builder = predictor_builder.with_ort_config(ort_cfg);
+    }
 
-    let task = TableCellDetectionTask::new(task_config.clone());
+    let predictor = predictor_builder.build(&args.model_path)?;
 
     #[cfg(feature = "visualization")]
     if let Some(ref output_dir) = args.output_dir {
@@ -204,14 +146,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         info!("Image size: {}x{}", img.width(), img.height());
 
-        let input = ImageTaskInput::new(vec![img.clone()]);
-        if let Err(e) = task.validate_input(&input) {
-            error!("Input validation failed for {:?}: {}", image_path, e);
-            continue;
-        }
+        #[cfg(feature = "visualization")]
+        let img_for_vis = img.clone();
 
         let start = Instant::now();
-        let output = match adapter.execute(input, Some(&task_config)) {
+        let output = match predictor.predict(vec![img]) {
             Ok(output) => output,
             Err(e) => {
                 error!("Table cell detection failed for {:?}: {}", image_path, e);
@@ -219,11 +158,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         let elapsed = start.elapsed();
-
-        if let Err(e) = task.validate_output(&output) {
-            error!("Output validation failed for {:?}: {}", image_path, e);
-            continue;
-        }
 
         info!("Detection completed in {:.2?}", elapsed);
 
@@ -245,7 +179,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             #[cfg(feature = "visualization")]
             if let Some(ref output_dir) = args.output_dir
-                && let Err(e) = visualize_cells(&img, cells, output_dir.as_path(), image_path)
+                && let Err(e) =
+                    visualize_cells(&img_for_vis, cells, output_dir.as_path(), image_path)
             {
                 error!("Failed to save visualization: {}", e);
             }
@@ -258,21 +193,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn parse_model_variant(model_type: &str) -> Result<TableCellModelVariant, Vec<&'static str>> {
-    let normalized = model_type.to_ascii_lowercase();
-    match normalized.as_str() {
-        "rt-detr-l_wired_table_cell_det" | "rtdetr_l_wired_table_cell_det" => {
-            Ok(TableCellModelVariant::RTDetrLWired)
-        }
-        "rt-detr-l_wireless_table_cell_det" | "rtdetr_l_wireless_table_cell_det" => {
-            Ok(TableCellModelVariant::RTDetrLWireless)
-        }
-        _ => Err(HashSet::from([
+    TableCellModelVariant::from_model_type(model_type).ok_or_else(|| {
+        vec![
             TableCellModelVariant::RTDetrLWired.as_str(),
             TableCellModelVariant::RTDetrLWireless.as_str(),
-        ])
-        .into_iter()
-        .collect()),
-    }
+        ]
+    })
 }
 
 fn bbox_bounds(bbox: &oar_ocr::processors::BoundingBox) -> Option<(f32, f32, f32, f32)> {

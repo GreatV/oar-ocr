@@ -2,7 +2,7 @@
 //!
 //! This example demonstrates how to use the OCR pipeline to recognize mathematical formulas
 //! in images and convert them to LaTeX strings. It supports various formula recognition models
-//! from PaddleOCR, including UniMERNet and PP-FormulaNet.
+//! from formula recognition models, including UniMERNet and PP-FormulaNet.
 //!
 //! # Usage
 //!
@@ -80,72 +80,17 @@
 //! If these tools are not available, the visualization will fall back to
 //! displaying the LaTeX formula as text.
 
-mod common;
+mod utils;
 
 use clap::Parser;
-use common::{load_rgb_image, parse_device_config};
-use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
-use oar_ocr::core::traits::task::{ImageTaskInput, Task};
-use oar_ocr::domain::adapters::{PPFormulaNetAdapterBuilder, UniMERNetFormulaAdapterBuilder};
-use oar_ocr::domain::tasks::formula_recognition::{
-    FormulaRecognitionConfig, FormulaRecognitionTask,
-};
+use oar_ocr::predictors::FormulaRecognitionPredictor;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
+use utils::{load_rgb_image, parse_device_config};
 
 #[cfg(feature = "visualization")]
 use image::RgbImage;
-
-#[derive(Clone, Debug)]
-enum FormulaModelKind {
-    UniMERNet,
-    PPFormulaNet,
-}
-
-impl FormulaModelKind {
-    /// Infer model kind from model name.
-    ///
-    /// This function maps model names to their corresponding model types.
-    /// It supports exact matches and pattern-based fallback matching.
-    ///
-    /// Supported model names:
-    /// - `UniMERNet` - UniMERNet formula recognition model
-    /// - `PP-FormulaNet-S` - PP-FormulaNet Small variant
-    /// - `PP-FormulaNet-L` - PP-FormulaNet Large variant
-    /// - `PP-FormulaNet_plus-S` - PP-FormulaNet Plus Small variant
-    /// - `PP-FormulaNet_plus-M` - PP-FormulaNet Plus Medium variant
-    /// - `PP-FormulaNet_plus-L` - PP-FormulaNet Plus Large variant
-    ///
-    /// # Fallback Behavior
-    /// If the exact model name is not recognized, the function will attempt
-    /// to infer the model type from the name pattern (case-insensitive).
-    /// If no pattern matches, it defaults to UniMERNet.
-    fn from_model_name(name: &str) -> Self {
-        match name {
-            "UniMERNet" => FormulaModelKind::UniMERNet,
-            "PP-FormulaNet-S"
-            | "PP-FormulaNet-L"
-            | "PP-FormulaNet_plus-S"
-            | "PP-FormulaNet_plus-M"
-            | "PP-FormulaNet_plus-L" => FormulaModelKind::PPFormulaNet,
-            _ => {
-                // Fallback: try to infer from name pattern
-                let name_lower = name.to_lowercase();
-                if name_lower.contains("unimernet") {
-                    FormulaModelKind::UniMERNet
-                } else if name_lower.contains("pp-formulanet")
-                    || name_lower.contains("ppformulanet")
-                {
-                    FormulaModelKind::PPFormulaNet
-                } else {
-                    // Default to UniMERNet
-                    FormulaModelKind::UniMERNet
-                }
-            }
-        }
-    }
-}
 
 /// Command-line arguments for the formula recognition example
 #[derive(Parser)]
@@ -239,88 +184,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Log device configuration
     info!("Using device: {}", args.device);
-    let ort_config = parse_device_config(&args.device)?;
+    let mut ort_config = parse_device_config(&args.device)?.unwrap_or_default();
+    ort_config.session_pool_size = Some(args.session_pool_size);
 
-    if ort_config.is_some() {
+    if ort_config.execution_providers.is_some() {
         info!("CUDA execution provider configured successfully");
     }
 
-    // Create formula recognition configuration
-    let config = FormulaRecognitionConfig {
-        score_threshold: args.score_thresh,
-        max_length: args.max_length,
-    };
-
-    // Infer model type from model name
-    let model_type = FormulaModelKind::from_model_name(&args.model_name);
-    let target_width = args.target_width;
-    let target_height = args.target_height;
-    let tokenizer_path = args.tokenizer_path.clone();
-
     if args.verbose {
         info!("Formula Recognition Configuration:");
-        info!("  Score threshold: {}", config.score_threshold);
-        info!("  Max formula length: {}", config.max_length);
-        if target_width > 0 && target_height > 0 {
-            info!("  Target size override: {}x{}", target_width, target_height);
+        info!("  Score threshold: {}", args.score_thresh);
+        info!("  Max formula length: {}", args.max_length);
+        if args.target_width > 0 && args.target_height > 0 {
+            info!(
+                "  Target size override: {}x{}",
+                args.target_width, args.target_height
+            );
         } else {
             info!("  Target size: auto-detect from model input");
         }
     }
 
-    // Build the formula recognition adapter
+    // Build the formula recognition predictor
     if args.verbose {
-        info!("Building formula recognition adapter...");
+        info!("Building formula recognition predictor...");
         info!("  Model: {}", args.model_path.display());
         info!("  Session pool size: {}", args.session_pool_size);
-        info!("  Tokenizer: {}", tokenizer_path.display());
-        info!("  Inferred model type: {:?}", model_type);
+        info!("  Tokenizer: {}", args.tokenizer_path.display());
     }
 
-    let adapter: Box<dyn ModelAdapter<Task = FormulaRecognitionTask>> = match model_type {
-        FormulaModelKind::UniMERNet => {
-            let mut builder = UniMERNetFormulaAdapterBuilder::new()
-                .with_config(config.clone())
-                .session_pool_size(args.session_pool_size)
-                .model_name(&args.model_name)
-                .tokenizer_path(tokenizer_path.clone());
+    let predictor = FormulaRecognitionPredictor::builder()
+        .score_threshold(args.score_thresh)
+        .model_name(&args.model_name)
+        .tokenizer_path(&args.tokenizer_path)
+        .with_ort_config(ort_config)
+        .build(&args.model_path)?;
 
-            if target_width > 0 && target_height > 0 {
-                builder = builder.target_size(target_width, target_height);
-            }
-
-            if let Some(ort_cfg) = ort_config.clone() {
-                builder = builder.with_ort_config(ort_cfg);
-            }
-
-            Box::new(builder.build(&args.model_path)?)
-        }
-        FormulaModelKind::PPFormulaNet => {
-            let mut builder = PPFormulaNetAdapterBuilder::new()
-                .with_config(config.clone())
-                .session_pool_size(args.session_pool_size)
-                .model_name(&args.model_name)
-                .tokenizer_path(tokenizer_path.clone());
-
-            if target_width > 0 && target_height > 0 {
-                builder = builder.target_size(target_width, target_height);
-            }
-
-            if let Some(ort_cfg) = ort_config.clone() {
-                builder = builder.with_ort_config(ort_cfg);
-            }
-
-            Box::new(builder.build(&args.model_path)?)
-        }
-    };
-
-    info!("Formula recognition adapter built successfully");
-    if args.verbose {
-        let adapter_info = adapter.info();
-        info!("  Task type: {:?}", adapter_info.task_type);
-        info!("  Model name: {}", adapter_info.model_name);
-        info!("  Version: {}", adapter_info.version);
-    }
+    info!("Formula recognition predictor built successfully");
 
     // Load all images into memory
     info!("Processing {} images...", existing_images.len());
@@ -351,17 +251,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No images could be loaded".into());
     }
 
-    // Create task input
-    let input = ImageTaskInput::new(images.clone());
-
-    // Create task for validation
-    let task = FormulaRecognitionTask::new(config.clone());
-    task.validate_input(&input)?;
-
     // Run formula recognition
     info!("Running formula recognition...");
     let start = Instant::now();
-    let output = adapter.execute(input, Some(&config))?;
+    let output = predictor.predict(images.clone())?;
     let duration = start.elapsed();
 
     info!(

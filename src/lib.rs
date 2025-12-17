@@ -6,9 +6,8 @@
 //! ## Features
 //!
 //! - Complete OCR pipeline from image to text
-//! - Task graph architecture for flexible pipeline configuration
+//! - High-level builder APIs for easy pipeline configuration
 //! - Model adapter system for easy model swapping
-//! - Edge processors for data transformation between tasks
 //! - Batch processing support
 //! - ONNX Runtime integration for fast inference
 //!
@@ -28,104 +27,73 @@
 //! * [`core`] - Core traits, error handling, and batch processing
 //! * [`domain`] - Domain types like orientation helpers and prediction models
 //! * [`models`] - Model adapters for different OCR tasks
-//! * [`oarocr`] - Task graph-based OCR pipeline
+//! * [`oarocr`] - High-level OCR pipeline builders
 //! * [`processors`] - Image processing utilities
 //! * [`utils`] - Utility functions for images and tensors
+//! * [`predictors`] - Task-specific predictor interfaces
 //!
 //! ## Quick Start
 //!
-//! ### Task Graph-Based OCR Pipeline
+//! ### OCR Pipeline
 //!
 //! ```rust,no_run
-//! use oar_ocr::prelude::*;
-//! use oar_ocr::core::traits::TaskType;
+//! use oar_ocr::oarocr::{OAROCRBuilder, OAROCR};
+//! use oar_ocr::utils::load_image;
 //! use std::path::Path;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! // Create task graph configuration
-//! let config = TaskGraphConfig::new()
-//!     .add_model_binding("detection", ModelBinding::new(
-//!         "DB",
-//!         "models/detection.onnx",
-//!         TaskType::TextDetection,
-//!     ))
-//!     .add_model_binding("recognition", ModelBinding::new(
-//!         "CRNN",
-//!         "models/recognition.onnx",
-//!         TaskType::TextRecognition,
-//!     ))
-//!     .add_task_node(TaskNode::new(
-//!         "text_detection",
-//!         TaskType::TextDetection,
-//!         "detection",
-//!     ))
-//!     .add_task_node(TaskNode::new(
-//!         "text_recognition",
-//!         TaskType::TextRecognition,
-//!         "recognition",
-//!     )
-//!     .with_dependency("text_detection")
-//!     .with_edge_processor(
-//!         "text_detection",
-//!         EdgeProcessorConfig::TextCropping { handle_rotation: true }
-//!     ))
-//!     .with_character_dict("models/dict.txt");
-//!
-//! // Build and execute pipeline
-//! let builder = TaskGraphBuilder::new(config);
-//! let adapters = builder.build_adapters()?;
+//! // Create OCR pipeline with required components
+//! let ocr = OAROCRBuilder::new(
+//!     "models/text_detection.onnx",
+//!     "models/text_recognition.onnx",
+//!     "models/character_dict.txt"
+//! )
+//! .with_document_image_orientation_classification("models/doc_orient.onnx")
+//! .with_text_line_orientation_classification("models/line_orient.onnx")
+//! .image_batch_size(4)
+//! .region_batch_size(32)
+//! .build()?;
 //!
 //! // Process images
 //! let image = load_image(Path::new("document.jpg"))?;
-//! // Execute tasks using adapters...
+//! let results = ocr.predict(vec![image])?;
+//!
+//! for result in results {
+//!     for region in result.text_regions {
+//!         if let Some(text) = region.text {
+//!             println!("Text: {}", text);
+//!         }
+//!     }
+//! }
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! ### JSON Configuration
+//! ### Document Structure Analysis
 //!
 //! ```rust,no_run
-//! use oar_ocr::prelude::*;
+//! use oar_ocr::oarocr::{OARStructureBuilder, OARStructure};
+//! use std::path::Path;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! // Load configuration from JSON
-//! let config: TaskGraphConfig = serde_json::from_str(r#"
-//! {
-//!   "model_bindings": {
-//!     "detection": {
-//!       "model_name": "DB",
-//!       "model_path": "models/detection.onnx",
-//!       "task_type": "TextDetection"
-//!     },
-//!     "recognition": {
-//!       "model_name": "CRNN",
-//!       "model_path": "models/recognition.onnx",
-//!       "task_type": "TextRecognition"
-//!     }
-//!   },
-//!   "task_nodes": [
-//!     {
-//!       "id": "text_detection",
-//!       "task_type": "TextDetection",
-//!       "model_binding": "detection"
-//!     },
-//!     {
-//!       "id": "text_recognition",
-//!       "task_type": "TextRecognition",
-//!       "model_binding": "recognition",
-//!       "dependencies": ["text_detection"],
-//!       "edge_processors": {
-//!         "text_detection": {
-//!           "type": "TextCropping",
-//!           "handle_rotation": true
-//!         }
-//!       }
-//!     }
-//!   ]
-//! }
-//! "#)?;
+//! // Create structure analysis pipeline
+//! let structure = OARStructureBuilder::new("models/layout_detection.onnx")
+//!     .with_table_classification("models/table_classification.onnx")
+//!     .with_table_cell_detection("models/table_cell_detection.onnx", "wired")
+//!     .with_table_structure_recognition("models/table_structure.onnx", "wired")
+//!     .with_formula_recognition(
+//!         "models/formula_recognition.onnx",
+//!         "models/tokenizer.json",
+//!         "pp_formulanet"
+//!     )
+//!     .build()?;
 //!
-//! let builder = TaskGraphBuilder::new(config);
+//! // Analyze document structure
+//! let result = structure.predict("document.jpg")?;
+//!
+//! println!("Layout elements: {}", result.layout_elements.len());
+//! println!("Tables: {}", result.tables.len());
+//! println!("Formulas: {}", result.formulas.len());
 //! # Ok(())
 //! # }
 //! ```
@@ -136,37 +104,40 @@ pub mod domain;
 pub mod models;
 
 pub mod oarocr;
+pub mod predictors;
 pub mod processors;
 pub mod utils;
 
 /// Prelude module for convenient imports.
 ///
-/// Bring the essentials into scope with a single use statement:
+///  Bring the essentials into scope with a single use statement:
 ///
 /// ```rust
 /// use oar_ocr::prelude::*;
 /// ```
 ///
 /// Included items focus on the most common tasks:
-/// - Task graph pipeline (`TaskGraphBuilder`, `TaskGraphConfig`, `TaskNode`, `ModelBinding`)
+/// - Builder APIs (`OAROCRBuilder`, `OARStructureBuilder`)
 /// - Edge processors (`EdgeProcessorConfig`)
 /// - Results (`OAROCRResult`, `TextRegion`)
 /// - Essential error and result types (`OCRError`, `OcrResult`)
-/// - Basic image loading (`load_image`)
+/// - Basic image loading (`load_image`, `load_images`)
 ///
-/// For advanced customization (model adapters, traits, validation),
-/// import directly from the respective modules (e.g., `oar_ocr::models`, `oar_ocr::core::traits`,
-/// `oar_ocr::oarocr`).
+/// For advanced customization (model adapters, traits),
+/// import directly from the respective modules (e.g., `oar_ocr::models`, `oar_ocr::core::traits`).
 pub mod prelude {
-    // Task Graph Pipeline (essential)
+    // High-level builder APIs
     pub use crate::oarocr::{
-        EdgeProcessorConfig, ModelBinding, OAROCRResult, TaskGraphBuilder, TaskGraphConfig,
-        TaskNode, TextRegion,
+        EdgeProcessorConfig, OAROCR, OAROCRBuilder, OAROCRResult, OARStructure,
+        OARStructureBuilder, TextRegion,
     };
 
-    // Error Handling (essential)
+    // Error Handling
     pub use crate::core::{OCRError, OcrResult};
 
-    // Image Utility (minimal)
+    // Image Utilities
     pub use crate::utils::{load_image, load_images};
+
+    // Predictors (high-level API)
+    pub use crate::predictors::*;
 }

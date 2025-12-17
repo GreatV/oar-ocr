@@ -138,7 +138,7 @@ impl AspectRatioBucketing {
                     message: format!("No cached resize config found for bucket: {}", bucket.name),
                 })?;
 
-        let padded = resize_and_pad(image, config);
+        let padded = resize_and_pad(image, config).map_err(OCRError::from)?;
 
         Ok(padded)
     }
@@ -354,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resize_config_caching_optimization() {
+    fn test_resize_config_caching() {
         let bucketing = AspectRatioBucketing::default();
 
         // Verify that resize configs are pre-computed for all buckets

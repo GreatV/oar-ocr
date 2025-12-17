@@ -32,7 +32,8 @@ pub trait DynamicBatcher {
         config: Option<P::Config>,
     ) -> Result<Vec<P::Result>, OCRError>
     where
-        P: StandardPredictor;
+        P: StandardPredictor,
+        P::Config: Clone;
 }
 
 /// Default implementation of dynamic batcher
@@ -43,6 +44,20 @@ impl DefaultDynamicBatcher {
     /// Create a new default dynamic batcher
     pub fn new() -> Self {
         Self
+    }
+
+    /// Validate shape strategy to avoid invalid configurations (e.g., zero bucket sizes).
+    fn validate_shape_strategy(strategy: &ShapeCompatibilityStrategy) -> Result<(), OCRError> {
+        if let ShapeCompatibilityStrategy::MaxDimension { bucket_size } = strategy
+            && *bucket_size == 0
+        {
+            return Err(OCRError::config_error_with_context(
+                "shape_compatibility.bucket_size",
+                &bucket_size.to_string(),
+                "bucket_size must be greater than 0 for MaxDimension strategy",
+            ));
+        }
+        Ok(())
     }
 
     /// Calculate aspect ratio of an image
@@ -65,6 +80,9 @@ impl DefaultDynamicBatcher {
                 (ratio1 - ratio2).abs() <= *tolerance
             }
             ShapeCompatibilityStrategy::MaxDimension { bucket_size } => {
+                if *bucket_size == 0 {
+                    return false;
+                }
                 let (w1, h1) = img1.dimensions();
                 let (w2, h2) = img2.dimensions();
                 let max1 = w1.max(h1);
@@ -131,13 +149,11 @@ impl DefaultDynamicBatcher {
         }
 
         if current_width > target_width || current_height > target_height {
-            return Err(OCRError::Processing {
-                kind: crate::core::ProcessingStage::ImageProcessing,
-                context: format!(
-                    "Image dimensions ({}, {}) exceed target dimensions ({}, {})",
+            return Err(OCRError::InvalidInput {
+                message: format!(
+                    "Image dimensions ({}, {}) exceed target dimensions ({}, {}) for padding",
                     current_width, current_height, target_width, target_height
                 ),
-                source: Box::new(crate::core::errors::SimpleError::new("Image too large")),
             });
         }
 
@@ -166,7 +182,7 @@ impl DefaultDynamicBatcher {
             }
             PaddingStrategy::Edge => {
                 // Edge padding: directly compute all pixels with edge replication
-                Self::apply_optimized_edge_padding(&mut padded, image, x_offset, y_offset);
+                Self::apply_edge_padding(&mut padded, image, x_offset, y_offset);
             }
             PaddingStrategy::Smart => {
                 // Smart padding: content-aware padding based on image analysis
@@ -198,8 +214,11 @@ impl DefaultDynamicBatcher {
         }
     }
 
-    /// Apply optimized edge padding by directly computing all pixels
-    fn apply_optimized_edge_padding(
+    /// Apply edge padding using region-based approach
+    ///
+    /// Divides the padded image into 9 regions and processes each separately,
+    /// eliminating conditional checks in inner loops.
+    fn apply_edge_padding(
         padded: &mut RgbImage,
         original: &RgbImage,
         x_offset: u32,
@@ -208,34 +227,126 @@ impl DefaultDynamicBatcher {
         let (padded_width, padded_height) = padded.dimensions();
         let (orig_width, orig_height) = original.dimensions();
 
-        // Fill the entire padded image with edge pixel replication
-        for y in 0..padded_height {
-            for x in 0..padded_width {
-                // Determine source coordinates with edge replication
-                let source_x = if x < x_offset {
-                    // Left padding area - use leftmost column
-                    0
-                } else if x >= x_offset + orig_width {
-                    // Right padding area - use rightmost column
-                    orig_width - 1
-                } else {
-                    // Within original image bounds
-                    x - x_offset
-                };
+        // Get raw buffer access for better performance
+        let padded_buf = padded.as_mut();
+        let original_buf: &[u8] = original.as_ref();
 
-                let source_y = if y < y_offset {
-                    // Top padding area - use topmost row
-                    0
-                } else if y >= y_offset + orig_height {
-                    // Bottom padding area - use bottommost row
-                    orig_height - 1
-                } else {
-                    // Within original image bounds
-                    y - y_offset
-                };
+        // Region 1: Top-left corner
+        if x_offset > 0 && y_offset > 0 {
+            let corner_pixel = &original_buf[0..3];
+            for y in 0..y_offset {
+                let row_offset = (y * padded_width * 3) as usize;
+                for x in 0..x_offset {
+                    let offset = row_offset + (x * 3) as usize;
+                    padded_buf[offset..offset + 3].copy_from_slice(corner_pixel);
+                }
+            }
+        }
 
-                let pixel = original.get_pixel(source_x, source_y);
-                padded.put_pixel(x, y, *pixel);
+        // Region 2: Top edge
+        if y_offset > 0 {
+            for y in 0..y_offset {
+                let padded_row_offset = (y * padded_width * 3) as usize;
+                for x in 0..orig_width {
+                    let src_offset = (x * 3) as usize;
+                    let dst_offset = padded_row_offset + ((x_offset + x) * 3) as usize;
+                    padded_buf[dst_offset..dst_offset + 3]
+                        .copy_from_slice(&original_buf[src_offset..src_offset + 3]);
+                }
+            }
+        }
+
+        // Region 3: Top-right corner
+        if x_offset + orig_width < padded_width && y_offset > 0 {
+            let corner_pixel =
+                &original_buf[(orig_width - 1) as usize * 3..(orig_width as usize * 3)];
+            for y in 0..y_offset {
+                let row_offset = (y * padded_width * 3) as usize;
+                for x in (x_offset + orig_width)..padded_width {
+                    let offset = row_offset + (x * 3) as usize;
+                    padded_buf[offset..offset + 3].copy_from_slice(corner_pixel);
+                }
+            }
+        }
+
+        // Region 4: Left edge
+        if x_offset > 0 {
+            for y in 0..orig_height {
+                let src_offset = (y * orig_width * 3) as usize;
+                let edge_pixel = &original_buf[src_offset..src_offset + 3];
+                let padded_row_offset = ((y_offset + y) * padded_width * 3) as usize;
+
+                for x in 0..x_offset {
+                    let offset = padded_row_offset + (x * 3) as usize;
+                    padded_buf[offset..offset + 3].copy_from_slice(edge_pixel);
+                }
+            }
+        }
+
+        // Region 5: Center (original image) - bulk copy
+        for y in 0..orig_height {
+            let src_row_offset = (y * orig_width * 3) as usize;
+            let dst_row_offset = ((y_offset + y) * padded_width + x_offset) as usize * 3;
+            let row_len = (orig_width * 3) as usize;
+
+            padded_buf[dst_row_offset..dst_row_offset + row_len]
+                .copy_from_slice(&original_buf[src_row_offset..src_row_offset + row_len]);
+        }
+
+        // Region 6: Right edge
+        if x_offset + orig_width < padded_width {
+            for y in 0..orig_height {
+                let src_offset = ((y * orig_width + orig_width - 1) * 3) as usize;
+                let edge_pixel = &original_buf[src_offset..src_offset + 3];
+                let padded_row_offset = ((y_offset + y) * padded_width * 3) as usize;
+
+                for x in (x_offset + orig_width)..padded_width {
+                    let offset = padded_row_offset + (x * 3) as usize;
+                    padded_buf[offset..offset + 3].copy_from_slice(edge_pixel);
+                }
+            }
+        }
+
+        // Region 7: Bottom-left corner
+        if x_offset > 0 && y_offset + orig_height < padded_height {
+            let corner_offset = ((orig_height - 1) * orig_width * 3) as usize;
+            let corner_pixel = &original_buf[corner_offset..corner_offset + 3];
+
+            for y in (y_offset + orig_height)..padded_height {
+                let row_offset = (y * padded_width * 3) as usize;
+                for x in 0..x_offset {
+                    let offset = row_offset + (x * 3) as usize;
+                    padded_buf[offset..offset + 3].copy_from_slice(corner_pixel);
+                }
+            }
+        }
+
+        // Region 8: Bottom edge
+        if y_offset + orig_height < padded_height {
+            let bottom_row_offset = ((orig_height - 1) * orig_width * 3) as usize;
+
+            for y in (y_offset + orig_height)..padded_height {
+                let padded_row_offset = (y * padded_width * 3) as usize;
+                for x in 0..orig_width {
+                    let src_offset = bottom_row_offset + (x * 3) as usize;
+                    let dst_offset = padded_row_offset + ((x_offset + x) * 3) as usize;
+                    padded_buf[dst_offset..dst_offset + 3]
+                        .copy_from_slice(&original_buf[src_offset..src_offset + 3]);
+                }
+            }
+        }
+
+        // Region 9: Bottom-right corner
+        if x_offset + orig_width < padded_width && y_offset + orig_height < padded_height {
+            let corner_offset = ((orig_height - 1) * orig_width + orig_width - 1) as usize * 3;
+            let corner_pixel = &original_buf[corner_offset..corner_offset + 3];
+
+            for y in (y_offset + orig_height)..padded_height {
+                let row_offset = (y * padded_width * 3) as usize;
+                for x in (x_offset + orig_width)..padded_width {
+                    let offset = row_offset + (x * 3) as usize;
+                    padded_buf[offset..offset + 3].copy_from_slice(corner_pixel);
+                }
             }
         }
     }
@@ -325,6 +436,7 @@ impl DynamicBatcher for DefaultDynamicBatcher {
         images: Vec<(usize, RgbImage)>,
         config: &DynamicBatchConfig,
     ) -> Result<Vec<CompatibleBatch>, OCRError> {
+        Self::validate_shape_strategy(&config.shape_compatibility)?;
         let _start_time = Instant::now();
         let mut batches = Vec::new();
         let mut batch_counter = 0;
@@ -405,6 +517,7 @@ impl DynamicBatcher for DefaultDynamicBatcher {
         items: Vec<(usize, usize, RgbImage)>,
         config: &DynamicBatchConfig,
     ) -> Result<Vec<CrossImageBatch>, OCRError> {
+        Self::validate_shape_strategy(&config.shape_compatibility)?;
         let mut batches = Vec::new();
         let mut batch_counter = 0;
 
@@ -499,12 +612,28 @@ impl DynamicBatcher for DefaultDynamicBatcher {
     ) -> Result<Vec<P::Result>, OCRError>
     where
         P: StandardPredictor,
+        P::Config: Clone,
     {
-        // For now, just call the predictor directly and wrap the result in a Vec
-        // In a more sophisticated implementation, this could handle
-        // batching logic, memory management, etc.
-        let result = predictor.predict(images, config)?;
-        Ok(vec![result])
+        // If images vector is empty, return early
+        if images.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Use a default chunk size for batch processing
+        // This should ideally come from configuration
+        const DEFAULT_CHUNK_SIZE: usize = 8;
+        let chunk_size = DEFAULT_CHUNK_SIZE;
+
+        // Split images into chunks and process sequentially
+        // Note: Parallel processing would require Send + Sync bounds on predictor
+        let mut results = Vec::new();
+        for chunk in images.chunks(chunk_size) {
+            let chunk_images = chunk.to_vec();
+            let result = predictor.predict(chunk_images, config.clone())?;
+            results.push(result);
+        }
+
+        Ok(results)
     }
 }
 

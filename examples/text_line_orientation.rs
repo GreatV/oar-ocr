@@ -25,19 +25,14 @@
 //!     text_line1.jpg text_line2.jpg
 //! ```
 
-mod common;
+mod utils;
 
 use clap::Parser;
-use common::{load_rgb_image, parse_device_config};
-use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
-use oar_ocr::core::traits::task::{ImageTaskInput, Task};
-use oar_ocr::domain::adapters::TextLineOrientationAdapterBuilder;
-use oar_ocr::domain::tasks::text_line_orientation::{
-    TextLineOrientationConfig, TextLineOrientationTask,
-};
+use oar_ocr::predictors::TextLineOrientationPredictor;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
+use utils::{load_rgb_image, parse_device_config};
 
 /// Command-line arguments for the text line orientation example
 #[derive(Parser)]
@@ -122,52 +117,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Log device configuration
     info!("Using device: {}", args.device);
-    let ort_config = parse_device_config(&args.device)?;
+    let mut ort_config = parse_device_config(&args.device)?.unwrap_or_default();
+    ort_config.session_pool_size = Some(args.session_pool_size);
 
-    if ort_config.is_some() {
+    if ort_config.execution_providers.is_some() {
         info!("CUDA execution provider configured successfully");
     }
 
-    // Create text line orientation classification configuration
-    let config = TextLineOrientationConfig {
-        score_threshold: args.score_thresh,
-        topk: args.topk,
-    };
-
     if args.verbose {
         info!("Classification Configuration:");
-        info!("  Score threshold: {}", config.score_threshold);
-        info!("  Top-k: {}", config.topk);
+        info!("  Score threshold: {}", args.score_thresh);
+        info!("  Top-k: {}", args.topk);
         info!(
             "  Input shape: ({}, {})",
             args.input_height, args.input_width
         );
     }
 
-    // Build the text line orientation classifier adapter
+    // Build the text line orientation classifier predictor
     if args.verbose {
-        info!("Building text line orientation classifier adapter...");
+        info!("Building text line orientation classifier predictor...");
         info!("  Model: {}", args.model_path.display());
         info!("  Session pool size: {}", args.session_pool_size);
     }
 
-    let mut adapter_builder = TextLineOrientationAdapterBuilder::new()
-        .with_config(config.clone())
+    let predictor = TextLineOrientationPredictor::builder()
+        .score_threshold(args.score_thresh)
+        .topk(args.topk)
         .input_shape((args.input_height, args.input_width))
-        .session_pool_size(args.session_pool_size);
+        .with_ort_config(ort_config)
+        .build(&args.model_path)?;
 
-    if let Some(ort_cfg) = ort_config {
-        adapter_builder = adapter_builder.with_ort_config(ort_cfg);
-    }
-
-    let adapter = adapter_builder.build(&args.model_path)?;
-
-    info!("Text line orientation classifier adapter built successfully");
-    if args.verbose {
-        info!("  Task type: {:?}", adapter.info().task_type);
-        info!("  Model name: {}", adapter.info().model_name);
-        info!("  Version: {}", adapter.info().version);
-    }
+    info!("Text line orientation classifier predictor built successfully");
 
     // Load all images into memory
     info!("Processing {} images...", existing_images.len());
@@ -198,17 +179,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No images could be loaded".into());
     }
 
-    // Create task input
-    let input = ImageTaskInput::new(images.clone());
-
-    // Create task for validation
-    let task = TextLineOrientationTask::new(config.clone());
-    task.validate_input(&input)?;
-
     // Run text line orientation classification
     info!("Running text line orientation classification...");
     let start = Instant::now();
-    let output = adapter.execute(input, Some(&config))?;
+    let output = predictor.predict(images.clone())?;
     let duration = start.elapsed();
 
     info!(
@@ -220,7 +194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("\n=== Classification Results ===");
     for (idx, (image_path, classifications)) in existing_images
         .iter()
-        .zip(output.classifications.iter())
+        .zip(output.orientations.iter())
         .enumerate()
     {
         info!("\nImage {}: {}", idx + 1, image_path.display());
@@ -255,7 +229,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (image_path, rgb_img, classifications) in existing_images
             .iter()
             .zip(images.iter())
-            .zip(output.classifications.iter())
+            .zip(output.orientations.iter())
             .map(|((path, img), classifications)| (path, img, classifications))
         {
             if !classifications.is_empty() {

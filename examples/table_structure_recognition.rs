@@ -21,50 +21,46 @@
 //!
 //! # Output
 //!
-//! The example outputs complete structure tokens, bounding boxes, and confidence scores
-//! that match PaddleOCR format for easy comparison and verification.
+//! that match standard output format for easy comparison and verification.
 //!
-//! # Examples
+//! # Usage
 //!
-//! Basic usage:
+//! Simple run with default settings:
+//!
 //! ```bash
 //! cargo run --example table_structure_recognition -- \
-//!     -m models/slanext_wired.onnx \
-//!     --dict-path models/table_structure_dict_ch.txt \
-//!     images/table_recognition.jpg
+//!     --model-path path/to/model.onnx \
+//!     --dict-path path/to/dict.txt \
+//!     --image-path path/to/image.jpg
 //! ```
 //!
-//! With custom dictionary from PaddleOCR:
+//! With custom dictionary:
+//!
 //! ```bash
 //! cargo run --example table_structure_recognition -- \
-//!     -m models/slanext_wired.onnx \
-//!     --dict-path ~/repos/PaddleOCR/ppocr/utils/dict/table_structure_dict_ch.txt \
-//!     images/table_recognition.jpg
+//!     --model-path path/to/model.onnx \
+//!     --dict-path /path/to/table_structure_dict_ch.txt \
+//!     --image-path path/to/image.jpg
 //! ```
 //!
-//! Using English dictionary:
+//! With wireless table model (requires different dictionary):
+//!
 //! ```bash
 //! cargo run --example table_structure_recognition -- \
-//!     -m models/slanext_wired.onnx \
-//!     --dict-path ~/repos/PaddleOCR/ppocr/utils/dict/table_structure_dict.txt \
-//!     images/table_recognition.jpg
+//!     --model-path path/to/model.onnx \
+//!     --dict-path /path/to/table_structure_dict.txt \
+//!     --table-type wireless \
+//!     --image-path path/to/image.jpg
 //! ```
-//!
-//! Output will show complete structure tokens and bounding boxes for verification.
 
-mod common;
+mod utils;
 
 use clap::Parser;
-use common::{load_rgb_image, parse_device_config};
-use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
-use oar_ocr::core::traits::task::{ImageTaskInput, Task};
-use oar_ocr::domain::adapters::SLANetWiredAdapterBuilder;
-use oar_ocr::domain::tasks::table_structure_recognition::{
-    TableStructureRecognitionConfig, TableStructureRecognitionTask,
-};
+use oar_ocr::predictors::TableStructureRecognitionPredictor;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info};
+use utils::{load_rgb_image, parse_device_config};
 
 /// Command-line arguments for the table structure recognition example
 #[derive(Parser)]
@@ -99,11 +95,11 @@ struct Args {
     #[arg(long, default_value = "1")]
     session_pool_size: usize,
 
-    /// Model input height (default: 512)
+    /// Model input height (default: 512 for wired tables)
     #[arg(long, default_value = "512")]
     input_height: u32,
 
-    /// Model input width (default: 512)
+    /// Model input width (default: 512 for wired tables)
     #[arg(long, default_value = "512")]
     input_width: u32,
 
@@ -116,13 +112,6 @@ struct Args {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command-line arguments
     let args = Args::parse();
-
-    // Set log level to info for token and bbox output
-    if std::env::var("RUST_LOG").is_err() {
-        unsafe {
-            std::env::set_var("RUST_LOG", "info");
-        }
-    }
 
     // Initialize tracing for logging
     oar_ocr::utils::init_tracing();
@@ -162,53 +151,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Log device configuration
     info!("Using device: {}", args.device);
-    let ort_config = parse_device_config(&args.device)?;
+    let mut ort_config = parse_device_config(&args.device)?.unwrap_or_default();
+    ort_config.session_pool_size = Some(args.session_pool_size);
 
-    if ort_config.is_some() {
+    if ort_config.execution_providers.is_some() {
         info!("CUDA execution provider configured successfully");
     }
 
-    // Create configuration
-    let config = TableStructureRecognitionConfig {
-        score_threshold: args.score_thresh,
-        max_structure_length: args.max_length,
-    };
-
     info!("Recognition Configuration:");
-    info!("  Score threshold: {}", config.score_threshold);
-    info!("  Max structure length: {}", config.max_structure_length);
+    info!("  Score threshold: {}", args.score_thresh);
+    info!("  Max structure length: {}", args.max_length);
     info!(
         "  Input shape: ({}, {})",
         args.input_height, args.input_width
     );
     info!("  Dictionary: {}", args.dict_path.display());
 
-    // Build the adapter
-    info!("Building table structure recognition adapter...");
+    // Build the predictor
+    info!("Building table structure recognition predictor...");
     info!("  Model: {}", args.model_path.display());
     info!("  Session pool size: {}", args.session_pool_size);
 
     let start_build = Instant::now();
-    let mut adapter_builder = SLANetWiredAdapterBuilder::new()
-        .with_config(config.clone())
-        .input_shape((args.input_height, args.input_width))
-        .session_pool_size(args.session_pool_size)
-        .dict_path(&args.dict_path);
-
-    if let Some(ort_cfg) = ort_config {
-        adapter_builder = adapter_builder.with_ort_config(ort_cfg);
-    }
-
-    let adapter = adapter_builder.build(&args.model_path)?;
-    let info_adapter = adapter.info();
+    let predictor = TableStructureRecognitionPredictor::builder()
+        .score_threshold(args.score_thresh)
+        .dict_path(&args.dict_path)
+        .input_shape(args.input_height, args.input_width)
+        .with_ort_config(ort_config)
+        .build(&args.model_path)?;
 
     info!(
-        "Adapter built in {:.2}ms",
+        "Predictor built in {:.2}ms",
         start_build.elapsed().as_secs_f64() * 1000.0
     );
-    info!("  Task type: {:?}", info_adapter.task_type);
-    info!("  Model name: {}", info_adapter.model_name);
-    info!("  Version: {}", info_adapter.version);
 
     // Load all images
     info!("Processing {} images...", existing_images.len());
@@ -237,25 +212,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No images could be loaded".into());
     }
 
-    // Create task input
-    let input = ImageTaskInput::new(images.clone());
-
-    // Create task for validation
-    let task = TableStructureRecognitionTask::new(config.clone());
-    task.validate_input(&input)?;
-
-    // Run recognition (rebuild adapter for execution)
+    // Run recognition
     info!("Running table structure recognition...");
     let start = Instant::now();
-
-    let adapter = SLANetWiredAdapterBuilder::new()
-        .with_config(config.clone())
-        .input_shape((args.input_height, args.input_width))
-        .session_pool_size(args.session_pool_size)
-        .dict_path(&args.dict_path)
-        .build(&args.model_path)?;
-    let output = adapter.execute(input, Some(&config))?;
-
+    let output = predictor.predict(images)?;
     let duration = start.elapsed();
 
     info!(
@@ -265,11 +225,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Display results
     info!("\n=== Structure Recognition Results ===");
-    for (idx, ((structure, bboxes), score)) in output
+    for (idx, (structure, bboxes)) in output
         .structures
         .iter()
         .zip(output.bboxes.iter())
-        .zip(output.structure_scores.iter())
         .enumerate()
     {
         info!(
@@ -282,7 +241,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         info!("  Structure tokens ({}): {:?}", structure.len(), structure);
         info!("  Cell bboxes ({}): {:?}", bboxes.len(), bboxes);
-        info!("  Confidence: {:.6}", score);
     }
 
     #[cfg(feature = "visualization")]

@@ -1,20 +1,125 @@
-//! Model Registry for dynamic adapter lookup and management.
+//! Dynamic adapter types for runtime adapter management.
 //!
-//! This module provides a registry system for managing model adapters,
-//! allowing dynamic lookup and configuration of models for different tasks.
+//! This module provides type-erased wrapper types for working with model adapters
+//! at runtime, enabling flexible task graph construction and execution.
+//!
+//! # Type System Design
+//!
+//! This module uses a hybrid approach for type safety and flexibility:
+//!
+//! - **Input/Output**: Enumerated types (`DynTaskInput`, `DynTaskOutput`) with
+//!   pattern matching for type-safe conversions. This avoids downcast on data paths.
+//! - **Adapters**: Trait objects (`DynModelAdapter`) with runtime downcast for execution.
+//!   This enables dynamic execution without knowing concrete types at compile time.
+//!
+//! This design balances compile-time safety (for data) with runtime flexibility
+//! (for adapter execution). Adapter downcast occurs once per execution and
+//! includes proper error handling.
 
 use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterInfo, ModelAdapter},
-    task::TaskType,
+    task::{ImageTaskInput, TaskType},
 };
-use std::collections::HashMap;
+use crate::domain::tasks::{
+    DocumentOrientationOutput, DocumentRectificationOutput, FormulaRecognitionOutput,
+    LayoutDetectionOutput, SealTextDetectionOutput, TableCellDetectionOutput,
+    TableClassificationOutput, TableStructureRecognitionOutput, TextDetectionOutput,
+    TextLineOrientationOutput, TextRecognitionInput, TextRecognitionOutput,
+};
 use std::fmt::Debug;
-use std::sync::{Arc, RwLock};
+
+/// Type-erased input for dynamic adapter execution.
+///
+/// This enum wraps all possible task input types to enable dynamic dispatch.
+#[derive(Debug, Clone)]
+pub enum DynTaskInput {
+    /// Image-based input (used by most tasks)
+    Image(ImageTaskInput),
+    /// Text recognition input (cropped text images)
+    TextRecognition(TextRecognitionInput),
+}
+
+impl DynTaskInput {
+    /// Creates a DynTaskInput from ImageTaskInput.
+    pub fn from_images(input: ImageTaskInput) -> Self {
+        Self::Image(input)
+    }
+
+    /// Creates a DynTaskInput from TextRecognitionInput.
+    pub fn from_text_recognition(input: TextRecognitionInput) -> Self {
+        Self::TextRecognition(input)
+    }
+}
+
+/// Type-erased output from dynamic adapter execution.
+///
+/// This enum wraps all possible task output types to enable dynamic dispatch.
+#[derive(Debug, Clone)]
+pub enum DynTaskOutput {
+    /// Text detection output
+    TextDetection(TextDetectionOutput),
+    /// Text recognition output
+    TextRecognition(TextRecognitionOutput),
+    /// Document orientation output
+    DocumentOrientation(DocumentOrientationOutput),
+    /// Text line orientation output
+    TextLineOrientation(TextLineOrientationOutput),
+    /// Document rectification output
+    DocumentRectification(DocumentRectificationOutput),
+    /// Layout detection output
+    LayoutDetection(LayoutDetectionOutput),
+    /// Table cell detection output
+    TableCellDetection(TableCellDetectionOutput),
+    /// Formula recognition output
+    FormulaRecognition(FormulaRecognitionOutput),
+    /// Seal text detection output
+    SealTextDetection(SealTextDetectionOutput),
+    /// Table classification output
+    TableClassification(TableClassificationOutput),
+    /// Table structure recognition output
+    TableStructureRecognition(TableStructureRecognitionOutput),
+}
+
+/// Macro to generate conversion methods for DynTaskOutput variants
+macro_rules! impl_dyn_output_conversions {
+    ($($variant:ident => $method:ident, $output_type:ty);* $(;)?) => {
+        impl DynTaskOutput {
+            $(
+                #[doc = concat!("Extracts ", stringify!($output_type), " if this is a ", stringify!($variant), " variant.")]
+                pub fn $method(self) -> Result<$output_type, OCRError> {
+                    match self {
+                        Self::$variant(output) => Ok(output),
+                        _ => Err(OCRError::InvalidInput {
+                            message: format!(
+                                concat!("Expected ", stringify!($variant), " output, got {:?}"),
+                                std::mem::discriminant(&self)
+                            ),
+                        }),
+                    }
+                }
+            )*
+        }
+    };
+}
+
+impl_dyn_output_conversions! {
+    TextDetection => into_text_detection, TextDetectionOutput;
+    TextRecognition => into_text_recognition, TextRecognitionOutput;
+    DocumentOrientation => into_document_orientation, DocumentOrientationOutput;
+    TextLineOrientation => into_text_line_orientation, TextLineOrientationOutput;
+    DocumentRectification => into_document_rectification, DocumentRectificationOutput;
+    LayoutDetection => into_layout_detection, LayoutDetectionOutput;
+    SealTextDetection => into_seal_text_detection, SealTextDetectionOutput;
+    TableCellDetection => into_table_cell_detection, TableCellDetectionOutput;
+    FormulaRecognition => into_formula_recognition, FormulaRecognitionOutput;
+    TableClassification => into_table_classification, TableClassificationOutput;
+    TableStructureRecognition => into_table_structure_recognition, TableStructureRecognitionOutput;
+}
 
 /// A type-erased model adapter that can be stored in the registry.
 ///
-/// This trait extends ModelAdapter to support dynamic dispatch and cloning.
+/// This trait extends ModelAdapter to support dynamic dispatch and execution.
 pub trait DynModelAdapter: Send + Sync + Debug {
     /// Returns information about this adapter.
     fn info(&self) -> AdapterInfo;
@@ -27,18 +132,68 @@ pub trait DynModelAdapter: Send + Sync + Debug {
 
     /// Returns the recommended batch size.
     fn recommended_batch_size(&self) -> usize;
+
+    /// Executes the adapter with type-erased input and returns type-erased output.
+    ///
+    /// This method enables dynamic execution of adapters without knowing their
+    /// concrete types at compile time.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - Type-erased input matching the adapter's task type
+    ///
+    /// # Returns
+    ///
+    /// Type-erased output from the adapter execution
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The input type doesn't match the adapter's expected input
+    /// - The adapter execution fails
+    fn execute_dyn(&self, input: DynTaskInput) -> Result<DynTaskOutput, OCRError>;
 }
 
 /// Wrapper to make ModelAdapter trait object-safe.
 #[derive(Debug)]
-struct AdapterWrapper<A: ModelAdapter> {
+pub struct AdapterWrapper<A: ModelAdapter> {
     adapter: A,
 }
 
 impl<A: ModelAdapter> AdapterWrapper<A> {
-    fn new(adapter: A) -> Self {
+    pub fn new(adapter: A) -> Self {
         Self { adapter }
     }
+}
+
+/// Macro to execute adapters that use ImageTaskInput
+macro_rules! execute_image_adapter {
+    ($self:expr, $input:expr, $task_type:expr, $adapter_type:ty, $output_variant:ident) => {{
+        let image_input = match $input {
+            DynTaskInput::Image(img) => img,
+            _ => {
+                return Err(OCRError::InvalidInput {
+                    message: format!(
+                        concat!(
+                            "Expected ImageTaskInput for ",
+                            stringify!($task_type),
+                            ", got {:?}"
+                        ),
+                        std::mem::discriminant(&$input)
+                    ),
+                });
+            }
+        };
+
+        let adapter = (&$self.adapter as &dyn std::any::Any)
+            .downcast_ref::<$adapter_type>()
+            .ok_or_else(|| OCRError::ConfigError {
+                message: concat!("Failed to downcast to ", stringify!($adapter_type)).to_string(),
+            })?;
+
+        let output = adapter.execute(image_input, None)?;
+        Ok(DynTaskOutput::$output_variant(output))
+    }};
 }
 
 impl<A: ModelAdapter + 'static> DynModelAdapter for AdapterWrapper<A> {
@@ -57,205 +212,102 @@ impl<A: ModelAdapter + 'static> DynModelAdapter for AdapterWrapper<A> {
     fn recommended_batch_size(&self) -> usize {
         self.adapter.recommended_batch_size()
     }
-}
 
-/// Type alias for the adapter storage map
-type AdapterMap = Arc<RwLock<HashMap<(TaskType, String), Arc<dyn DynModelAdapter>>>>;
+    fn execute_dyn(&self, input: DynTaskInput) -> Result<DynTaskOutput, OCRError> {
+        use crate::domain::adapters::*;
 
-/// Registry for managing model adapters.
-///
-/// The registry allows registering, looking up, and managing model adapters
-/// for different tasks. It supports multiple adapters per task type.
-pub struct ModelRegistry {
-    /// Map from (task_type, registry_id) to adapter
-    adapters: AdapterMap,
-}
-
-impl ModelRegistry {
-    /// Creates a new empty model registry.
-    pub fn new() -> Self {
-        Self {
-            adapters: Arc::new(RwLock::new(HashMap::new())),
+        match self.adapter.info().task_type {
+            TaskType::TextDetection => execute_image_adapter!(
+                self,
+                input,
+                TextDetection,
+                TextDetectionAdapter,
+                TextDetection
+            ),
+            TaskType::TextRecognition => {
+                let rec_input = match input {
+                    DynTaskInput::TextRecognition(rec) => rec,
+                    _ => {
+                        return Err(OCRError::InvalidInput {
+                            message: format!(
+                                "Expected TextRecognitionInput for TextRecognition, got {:?}",
+                                std::mem::discriminant(&input)
+                            ),
+                        });
+                    }
+                };
+                let adapter = (&self.adapter as &dyn std::any::Any)
+                    .downcast_ref::<TextRecognitionAdapter>()
+                    .ok_or_else(|| OCRError::ConfigError {
+                        message: "Failed to downcast to TextRecognitionAdapter".to_string(),
+                    })?;
+                let output = adapter.execute(rec_input, None)?;
+                Ok(DynTaskOutput::TextRecognition(output))
+            }
+            TaskType::DocumentOrientation => execute_image_adapter!(
+                self,
+                input,
+                DocumentOrientation,
+                DocumentOrientationAdapter,
+                DocumentOrientation
+            ),
+            TaskType::TextLineOrientation => execute_image_adapter!(
+                self,
+                input,
+                TextLineOrientation,
+                TextLineOrientationAdapter,
+                TextLineOrientation
+            ),
+            TaskType::DocumentRectification => execute_image_adapter!(
+                self,
+                input,
+                DocumentRectification,
+                UVDocRectifierAdapter,
+                DocumentRectification
+            ),
+            TaskType::LayoutDetection => execute_image_adapter!(
+                self,
+                input,
+                LayoutDetection,
+                LayoutDetectionAdapter,
+                LayoutDetection
+            ),
+            TaskType::TableCellDetection => execute_image_adapter!(
+                self,
+                input,
+                TableCellDetection,
+                TableCellDetectionAdapter,
+                TableCellDetection
+            ),
+            TaskType::FormulaRecognition => execute_image_adapter!(
+                self,
+                input,
+                FormulaRecognition,
+                FormulaRecognitionAdapter,
+                FormulaRecognition
+            ),
+            TaskType::SealTextDetection => execute_image_adapter!(
+                self,
+                input,
+                SealTextDetection,
+                SealTextDetectionAdapter,
+                SealTextDetection
+            ),
+            TaskType::TableClassification => execute_image_adapter!(
+                self,
+                input,
+                TableClassification,
+                TableClassificationAdapter,
+                TableClassification
+            ),
+            TaskType::TableStructureRecognition => execute_image_adapter!(
+                self,
+                input,
+                TableStructureRecognition,
+                TableStructureRecognitionAdapter,
+                TableStructureRecognition
+            ),
         }
-    }
-
-    /// Registers a model adapter in the registry.
-    ///
-    /// # Arguments
-    ///
-    /// * `adapter` - The adapter to register
-    ///
-    /// # Returns
-    ///
-    /// Result indicating success or error if registration fails
-    pub fn register<A: ModelAdapter + 'static>(&self, adapter: A) -> Result<(), OCRError> {
-        let info = adapter.info();
-        self.register_with_id(info.model_name.clone(), adapter)
-    }
-
-    /// Registers a model adapter with an explicit registry identifier.
-    ///
-    /// This allows multiple adapters with the same `AdapterInfo` model name to
-    /// coexist by storing them under different registry keys (e.g., binding names).
-    pub fn register_with_id<A: ModelAdapter + 'static>(
-        &self,
-        id: impl Into<String>,
-        adapter: A,
-    ) -> Result<(), OCRError> {
-        let info = adapter.info();
-        let id = id.into();
-        let key = (info.task_type, id.clone());
-
-        let mut adapters = self.adapters.write().map_err(|e| OCRError::ConfigError {
-            message: format!("Failed to acquire write lock on registry: {}", e),
-        })?;
-
-        if adapters.contains_key(&key) {
-            return Err(OCRError::ConfigError {
-                message: format!(
-                    "Adapter for task {:?} with id '{}' is already registered",
-                    key.0, key.1
-                ),
-            });
-        }
-
-        adapters.insert(key, Arc::new(AdapterWrapper::new(adapter)));
-        Ok(())
-    }
-
-    /// Looks up an adapter by task type and registry identifier.
-    ///
-    /// # Arguments
-    ///
-    /// * `task_type` - The type of task
-    /// * `id` - The registry identifier used when registering the adapter
-    ///
-    /// # Returns
-    ///
-    /// Option containing the adapter if found
-    pub fn lookup(
-        &self,
-        task_type: TaskType,
-        id: &str,
-    ) -> Result<Option<Arc<dyn DynModelAdapter>>, OCRError> {
-        let adapters = self.adapters.read().map_err(|e| OCRError::ConfigError {
-            message: format!("Failed to acquire read lock on registry: {}", e),
-        })?;
-
-        Ok(adapters.get(&(task_type, id.to_string())).cloned())
-    }
-
-    /// Lists all registered adapters for a given task type.
-    ///
-    /// # Arguments
-    ///
-    /// * `task_type` - The type of task to filter by
-    ///
-    /// # Returns
-    ///
-    /// Vector of adapter info for the specified task type
-    pub fn list_by_task(&self, task_type: TaskType) -> Result<Vec<AdapterInfo>, OCRError> {
-        let adapters = self.adapters.read().map_err(|e| OCRError::ConfigError {
-            message: format!("Failed to acquire read lock on registry: {}", e),
-        })?;
-
-        Ok(adapters
-            .iter()
-            .filter(|((t, _), _)| *t == task_type)
-            .map(|(_, adapter)| adapter.info())
-            .collect())
-    }
-
-    /// Lists all registered adapters.
-    ///
-    /// # Returns
-    ///
-    /// Vector of all adapter info in the registry
-    pub fn list_all(&self) -> Result<Vec<AdapterInfo>, OCRError> {
-        Ok(self
-            .list_all_with_ids()?
-            .into_iter()
-            .map(|(_, info)| info)
-            .collect())
-    }
-
-    /// Lists all registered adapters along with their registry identifiers.
-    pub fn list_all_with_ids(&self) -> Result<Vec<(String, AdapterInfo)>, OCRError> {
-        let adapters = self.adapters.read().map_err(|e| OCRError::ConfigError {
-            message: format!("Failed to acquire read lock on registry: {}", e),
-        })?;
-
-        Ok(adapters
-            .iter()
-            .map(|((_, id), adapter)| (id.clone(), adapter.info()))
-            .collect())
-    }
-
-    /// Removes an adapter from the registry.
-    ///
-    /// # Arguments
-    ///
-    /// * `task_type` - The type of task
-    /// * `id` - The registry identifier used when registering the adapter
-    ///
-    /// # Returns
-    ///
-    /// Result indicating success or error
-    pub fn unregister(&self, task_type: TaskType, id: &str) -> Result<(), OCRError> {
-        let mut adapters = self.adapters.write().map_err(|e| OCRError::ConfigError {
-            message: format!("Failed to acquire write lock on registry: {}", e),
-        })?;
-
-        let key = (task_type, id.to_string());
-        if adapters.remove(&key).is_none() {
-            return Err(OCRError::ConfigError {
-                message: format!(
-                    "Adapter for task {:?} with id '{}' not found",
-                    task_type, id
-                ),
-            });
-        }
-
-        Ok(())
-    }
-
-    /// Clears all adapters from the registry.
-    pub fn clear(&self) -> Result<(), OCRError> {
-        let mut adapters = self.adapters.write().map_err(|e| OCRError::ConfigError {
-            message: format!("Failed to acquire write lock on registry: {}", e),
-        })?;
-
-        adapters.clear();
-        Ok(())
-    }
-
-    /// Returns the number of registered adapters.
-    pub fn len(&self) -> Result<usize, OCRError> {
-        let adapters = self.adapters.read().map_err(|e| OCRError::ConfigError {
-            message: format!("Failed to acquire read lock on registry: {}", e),
-        })?;
-
-        Ok(adapters.len())
-    }
-
-    /// Returns whether the registry is empty.
-    pub fn is_empty(&self) -> Result<bool, OCRError> {
-        Ok(self.len()? == 0)
-    }
-}
-
-impl Default for ModelRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Debug for ModelRegistry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let adapters = self.adapters.read().unwrap();
-        f.debug_struct("ModelRegistry")
-            .field("adapter_count", &adapters.len())
-            .finish()
     }
 }
 
@@ -264,22 +316,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_registry_creation() {
-        let registry = ModelRegistry::new();
-        assert!(registry.is_empty().unwrap());
-        assert_eq!(registry.len().unwrap(), 0);
-    }
+    fn test_dyn_output_conversions() {
+        // Test that DynTaskOutput conversions work correctly
+        use crate::domain::tasks::TextDetectionOutput;
 
-    #[test]
-    fn test_registry_operations() {
-        let registry = ModelRegistry::new();
-
-        // Test listing empty registry
-        let all = registry.list_all().unwrap();
-        assert_eq!(all.len(), 0);
-
-        // Test listing by task
-        let detection_adapters = registry.list_by_task(TaskType::TextDetection).unwrap();
-        assert_eq!(detection_adapters.len(), 0);
+        let output = DynTaskOutput::TextDetection(TextDetectionOutput::empty());
+        assert!(output.into_text_detection().is_ok());
     }
 }

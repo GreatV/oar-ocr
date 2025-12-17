@@ -77,13 +77,18 @@ impl OCRResize {
     /// # Returns
     ///
     /// A resized and padded RGB image.
-    pub fn resize_img(&self, img: &RgbImage, max_wh_ratio: f32) -> RgbImage {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if resizing fails due to invalid dimensions.
+    pub fn resize_img(&self, img: &RgbImage, max_wh_ratio: f32) -> Result<RgbImage, OCRError> {
         let [_img_c, img_h, _img_w] = self.rec_image_shape;
 
         let config = OCRResizePadConfig::new(img_h as u32, self.max_img_w as u32);
-        let (padded_image, _actual_width) = ocr_resize_and_pad(img, &config, Some(max_wh_ratio));
+        let (padded_image, _actual_width) =
+            ocr_resize_and_pad(img, &config, Some(max_wh_ratio)).map_err(OCRError::from)?;
 
-        padded_image
+        Ok(padded_image)
     }
 
     /// Resizes an image using the default width-to-height ratio from rec_image_shape.
@@ -98,7 +103,11 @@ impl OCRResize {
     /// # Returns
     ///
     /// A resized and padded RGB image.
-    pub fn resize(&self, img: &RgbImage) -> RgbImage {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if resizing fails due to invalid dimensions.
+    pub fn resize(&self, img: &RgbImage) -> Result<RgbImage, OCRError> {
         let [_, img_h, img_w] = self.rec_image_shape;
         let max_wh_ratio = img_w as f32 / img_h as f32;
         self.resize_img(img, max_wh_ratio)
@@ -117,13 +126,11 @@ impl OCRResize {
     ///
     /// A resized RGB image or an OCRError if input_shape is not configured.
     pub fn static_resize(&self, img: &RgbImage) -> Result<RgbImage, OCRError> {
-        let [_img_c, img_h, img_w] = self.input_shape.ok_or_else(|| {
-            OCRError::resize_error(
-                "Input shape not configured for static resize",
-                crate::core::errors::SimpleError::new("Missing input shape configuration"),
-            )
+        let [_img_c, img_h, img_w] = self.input_shape.ok_or_else(|| OCRError::ConfigError {
+            message: "Input shape not configured for static resize".to_string(),
         })?;
 
+        // Use Triangle (bilinear) to match cv2.resize INTER_LINEAR
         let resized_image = image::imageops::resize(
             img,
             img_w as u32,
@@ -149,7 +156,7 @@ impl OCRResize {
     /// A vector of resized RGB images or an OCRError if static resizing fails.
     pub fn apply(&self, imgs: &[RgbImage]) -> Result<Vec<RgbImage>, OCRError> {
         if self.input_shape.is_none() {
-            Ok(imgs.iter().map(|img| self.resize(img)).collect())
+            imgs.iter().map(|img| self.resize(img)).collect()
         } else {
             imgs.iter().map(|img| self.static_resize(img)).collect()
         }
@@ -173,7 +180,8 @@ impl OCRResize {
         let [_img_c, img_h, _img_w] = self.rec_image_shape;
 
         let config = OCRResizePadConfig::new(img_h as u32, self.max_img_w as u32);
-        let (padded_image, _actual_width) = ocr_resize_and_pad(img, &config, None);
+        let (padded_image, _actual_width) =
+            ocr_resize_and_pad(img, &config, None).map_err(OCRError::from)?;
 
         Ok(padded_image)
     }

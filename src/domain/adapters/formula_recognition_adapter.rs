@@ -78,7 +78,7 @@ impl FormulaModelConfig {
     pub fn pp_formulanet() -> Self {
         Self {
             model_name: "PP-FormulaNet".to_string(),
-            description: "PaddleOCR PP-FormulaNet formula recognition model".to_string(),
+            description: "PP-FormulaNet formula recognition model".to_string(),
             sos_token_id: 0,
             eos_token_id: 2,
         }
@@ -88,7 +88,7 @@ impl FormulaModelConfig {
     pub fn unimernet() -> Self {
         Self {
             model_name: "UniMERNet".to_string(),
-            description: "PaddleOCR UniMERNet formula recognition model".to_string(),
+            description: "UniMERNet formula recognition model".to_string(),
             sos_token_id: 0,
             eos_token_id: 2,
         }
@@ -154,8 +154,8 @@ impl ModelAdapter for FormulaRecognitionAdapter {
             {
                 tracing::warn!(
                     "Token id(s) exceed tokenizer vocab (max_id={} >= vocab_size={}). \
-                     This usually means model/tokenizer mismatch. If you're using PaddleOCR models, \
-                     please supply the matching tokenizer from PaddleOCR via --tokenizer-path.",
+                     This usually means model/tokenizer mismatch. If you're using external models, \
+                     please supply the matching tokenizer via --tokenizer-path.",
                     max_id,
                     vocab_size
                 );
@@ -172,10 +172,29 @@ impl ModelAdapter for FormulaRecognitionAdapter {
                 }
             };
 
-            // For now, we don't have confidence scores from the model
-            // In the future, we could compute them from the token probabilities
-            // When scores become available, we should filter based on effective_config.score_threshold
-            // TODO: Apply score_threshold filtering when confidence scores are available
+            // Note: Confidence score computation is not currently implemented.
+            // The current model interface only returns token IDs via infer_2d_i64(),
+            // not the underlying logits or probabilities from which confidence could be computed.
+            //
+            // To implement score_threshold filtering, we would need to:
+            // 1. Modify the model inference to also return logits/probabilities
+            // 2. Compute confidence scores (e.g., mean/min token probability, or sequence probability)
+            // 3. Filter formulas based on: score >= effective_config.score_threshold
+            // 4. Only push formulas that pass the threshold
+            //
+            // Example implementation once probabilities are available:
+            // ```
+            // let confidence = compute_sequence_confidence(&token_probs);
+            // if confidence >= effective_config.score_threshold {
+            //     formulas.push(latex);
+            //     scores.push(Some(confidence));
+            // } else {
+            //     tracing::debug!("Filtered formula with confidence {} < threshold {}",
+            //                    confidence, effective_config.score_threshold);
+            // }
+            // ```
+            //
+            // For now, we accept all formulas without filtering:
             formulas.push(latex);
             scores.push(None);
         }
@@ -202,34 +221,30 @@ enum FormulaModelType {
 /// Builder for formula recognition adapter.
 #[derive(Debug)]
 pub struct FormulaRecognitionAdapterBuilder {
+    config: super::builder_config::AdapterBuilderConfig<FormulaRecognitionConfig>,
     model_config: Option<FormulaModelConfig>,
     model_type: FormulaModelType,
-    task_config: FormulaRecognitionConfig,
     tokenizer_path: Option<PathBuf>,
-    session_pool_size: usize,
     model_name_override: Option<String>,
     target_size: Option<(u32, u32)>,
-    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl FormulaRecognitionAdapterBuilder {
     /// Creates a new builder with the specified model configuration and type.
     fn new_with_config(model_config: FormulaModelConfig, model_type: FormulaModelType) -> Self {
         Self {
+            config: super::builder_config::AdapterBuilderConfig::default(),
             model_config: Some(model_config),
             model_type,
-            task_config: FormulaRecognitionConfig::default(),
             tokenizer_path: None,
-            session_pool_size: 1,
             model_name_override: None,
             target_size: None,
-            ort_config: None,
         }
     }
 
     /// Sets the task configuration.
     pub fn task_config(mut self, config: FormulaRecognitionConfig) -> Self {
-        self.task_config = config;
+        self.config = self.config.with_task_config(config);
         self
     }
 
@@ -247,7 +262,7 @@ impl FormulaRecognitionAdapterBuilder {
 
     /// Sets the session pool size.
     pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.session_pool_size = size;
+        self.config = self.config.with_session_pool_size(size);
         self
     }
 
@@ -259,19 +274,19 @@ impl FormulaRecognitionAdapterBuilder {
 
     /// Sets the score threshold.
     pub fn score_threshold(mut self, threshold: f32) -> Self {
-        self.task_config.score_threshold = threshold;
+        self.config.task_config.score_threshold = threshold;
         self
     }
 
     /// Sets the maximum sequence length.
     pub fn max_length(mut self, length: usize) -> Self {
-        self.task_config.max_length = length;
+        self.config.task_config.max_length = length;
         self
     }
 
     /// Sets the ONNX Runtime session configuration.
     pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.ort_config = Some(config);
+        self.config = self.config.with_ort_config(config);
         self
     }
 }
@@ -281,6 +296,13 @@ impl AdapterBuilder for FormulaRecognitionAdapterBuilder {
     type Adapter = FormulaRecognitionAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
+        let (task_config, session_pool_size, ort_config) = self
+            .config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
+
         let model_config = self.model_config.ok_or_else(|| OCRError::InvalidInput {
             message: "Model configuration not set".to_string(),
         })?;
@@ -289,22 +311,21 @@ impl AdapterBuilder for FormulaRecognitionAdapterBuilder {
         let model = match self.model_type {
             FormulaModelType::PPFormulaNet => {
                 let mut builder =
-                    PPFormulaNetModelBuilder::new().session_pool_size(self.session_pool_size);
+                    PPFormulaNetModelBuilder::new().session_pool_size(session_pool_size);
                 if let Some((width, height)) = self.target_size {
                     builder = builder.target_size(width, height);
                 }
-                if let Some(ort_config) = self.ort_config.clone() {
+                if let Some(ort_config) = ort_config.clone() {
                     builder = builder.with_ort_config(ort_config);
                 }
                 FormulaModel::PPFormulaNet(builder.build(model_path)?)
             }
             FormulaModelType::UniMERNet => {
-                let mut builder =
-                    UniMERNetModelBuilder::new().session_pool_size(self.session_pool_size);
+                let mut builder = UniMERNetModelBuilder::new().session_pool_size(session_pool_size);
                 if let Some((width, height)) = self.target_size {
                     builder = builder.target_size(width, height);
                 }
-                if let Some(ort_config) = self.ort_config.clone() {
+                if let Some(ort_config) = ort_config {
                     builder = builder.with_ort_config(ort_config);
                 }
                 FormulaModel::UniMERNet(builder.build(model_path)?)
@@ -338,12 +359,12 @@ impl AdapterBuilder for FormulaRecognitionAdapterBuilder {
             tokenizer,
             model_config,
             info,
-            config: self.task_config,
+            config: task_config,
         })
     }
 
     fn with_config(mut self, config: Self::Config) -> Self {
-        self.task_config = config;
+        self.config = self.config.with_task_config(config);
         self
     }
 
@@ -556,8 +577,8 @@ mod tests {
         };
 
         let builder = PPFormulaNetAdapterBuilder::new().with_config(config.clone());
-        assert_eq!(builder.inner.task_config.score_threshold, 0.8);
-        assert_eq!(builder.inner.task_config.max_length, 512);
+        assert_eq!(builder.inner.config.task_config().score_threshold, 0.8);
+        assert_eq!(builder.inner.config.task_config().max_length, 512);
     }
 
     #[test]
@@ -568,9 +589,9 @@ mod tests {
             .session_pool_size(4)
             .target_size(640, 640);
 
-        assert_eq!(builder.inner.task_config.score_threshold, 0.9);
-        assert_eq!(builder.inner.task_config.max_length, 1024);
-        assert_eq!(builder.inner.session_pool_size, 4);
+        assert_eq!(builder.inner.config.task_config().score_threshold, 0.9);
+        assert_eq!(builder.inner.config.task_config().max_length, 1024);
+        assert_eq!(builder.inner.config.session_pool_size(), 4);
         assert_eq!(builder.inner.target_size, Some((640, 640)));
     }
 
@@ -579,8 +600,8 @@ mod tests {
         let builder = PPFormulaNetAdapterBuilder::default();
         assert_eq!(builder.adapter_type(), "PPFormulaNet");
         // Default config values
-        assert_eq!(builder.inner.task_config.score_threshold, 0.0);
-        assert_eq!(builder.inner.task_config.max_length, 1536);
+        assert_eq!(builder.inner.config.task_config().score_threshold, 0.0);
+        assert_eq!(builder.inner.config.task_config().max_length, 1536);
     }
 
     #[test]
@@ -597,8 +618,8 @@ mod tests {
         };
 
         let builder = UniMERNetFormulaAdapterBuilder::new().with_config(config.clone());
-        assert_eq!(builder.inner.task_config.score_threshold, 0.7);
-        assert_eq!(builder.inner.task_config.max_length, 2048);
+        assert_eq!(builder.inner.config.task_config().score_threshold, 0.7);
+        assert_eq!(builder.inner.config.task_config().max_length, 2048);
     }
 
     #[test]
@@ -609,9 +630,9 @@ mod tests {
             .session_pool_size(2)
             .target_size(512, 512);
 
-        assert_eq!(builder.inner.task_config.score_threshold, 0.85);
-        assert_eq!(builder.inner.task_config.max_length, 768);
-        assert_eq!(builder.inner.session_pool_size, 2);
+        assert_eq!(builder.inner.config.task_config().score_threshold, 0.85);
+        assert_eq!(builder.inner.config.task_config().max_length, 768);
+        assert_eq!(builder.inner.config.session_pool_size(), 2);
         assert_eq!(builder.inner.target_size, Some((512, 512)));
     }
 
@@ -620,8 +641,8 @@ mod tests {
         let builder = UniMERNetFormulaAdapterBuilder::default();
         assert_eq!(builder.adapter_type(), "UniMERNet");
         // Default config values
-        assert_eq!(builder.inner.task_config.score_threshold, 0.0);
-        assert_eq!(builder.inner.task_config.max_length, 1536);
+        assert_eq!(builder.inner.config.task_config().score_threshold, 0.0);
+        assert_eq!(builder.inner.config.task_config().max_length, 1536);
     }
 
     #[test]

@@ -172,9 +172,8 @@ impl ModelAdapter for TableCellDetectionAdapter {
 /// Builder for table cell detection adapters.
 #[derive(Debug, Default)]
 pub struct TableCellDetectionAdapterBuilder {
+    config: super::builder_config::AdapterBuilderConfig<TableCellDetectionConfig>,
     model_config: Option<TableCellModelConfig>,
-    task_config: TableCellDetectionConfig,
-    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl TableCellDetectionAdapterBuilder {
@@ -191,25 +190,25 @@ impl TableCellDetectionAdapterBuilder {
 
     /// Sets the task configuration.
     pub fn task_config(mut self, config: TableCellDetectionConfig) -> Self {
-        self.task_config = config;
+        self.config = self.config.with_task_config(config);
         self
     }
 
     /// Sets the score threshold.
     pub fn score_threshold(mut self, threshold: f32) -> Self {
-        self.task_config.score_threshold = threshold;
+        self.config.task_config.score_threshold = threshold;
         self
     }
 
     /// Sets the maximum number of cells per image.
     pub fn max_cells(mut self, max: usize) -> Self {
-        self.task_config.max_cells = max;
+        self.config.task_config.max_cells = max;
         self
     }
 
     /// Sets the ONNX Runtime session configuration.
     pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.ort_config = Some(config);
+        self.config = self.config.with_ort_config(config);
         self
     }
 
@@ -285,16 +284,23 @@ impl AdapterBuilder for TableCellDetectionAdapterBuilder {
             message: "Table cell model configuration is required".to_string(),
         })?;
 
+        let (task_config, _session_pool_size, ort_config) = self
+            .config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
+
         TableCellDetectionAdapterBuilder::build_with_config(
             model_path,
             model_config,
-            self.task_config,
-            self.ort_config,
+            task_config,
+            ort_config,
         )
     }
 
     fn with_config(mut self, config: Self::Config) -> Self {
-        self.task_config = config;
+        self.config = self.config.with_task_config(config);
         self
     }
 

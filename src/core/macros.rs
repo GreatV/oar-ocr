@@ -6,27 +6,27 @@
 /// Macro to handle optional nested config initialization in builders.
 ///
 /// This macro eliminates the repeated pattern of:
-/// ```rust,ignore
-/// if self.config.field.is_none() {
-///     self.config.field = Some(Type::new());
-/// }
+/// ```rust,no_run
+/// // if self.config.field.is_none() {
+/// //     self.config.field = Some(Type::new());
+/// // }
 /// ```
 ///
 /// # Usage
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// // Instead of:
-/// if self.config.orientation.is_none() {
-///     self.config.orientation = Some(DocOrientationClassifierConfig::new());
-/// }
-/// if let Some(ref mut config) = self.config.orientation {
-///     config.confidence_threshold = Some(threshold);
-/// }
+/// // if self.config.orientation.is_none() {
+/// //     self.config.orientation = Some(DocOrientationClassifierConfig::new());
+/// // }
+/// // if let Some(ref mut config) = self.config.orientation {
+/// //     config.confidence_threshold = Some(threshold);
+/// // }
 ///
 /// // Use:
-/// with_nested!(self.config.orientation, DocOrientationClassifierConfig, config => {
-///     config.confidence_threshold = Some(threshold);
-/// });
+/// // with_nested!(self.config.orientation, DocOrientationClassifierConfig, config => {
+/// //     config.confidence_threshold = Some(threshold);
+/// // });
 /// ```
 #[macro_export]
 macro_rules! with_nested {
@@ -46,18 +46,18 @@ macro_rules! with_nested {
 ///
 /// # Usage
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// // Instead of:
-/// StageMetrics::new(success_count, failure_count)
-///     .with_processing_time(start_time.elapsed())
-///     .with_info("stage", "cropping")
-///     .with_info("batch_size", batch_size.to_string())
-///     .with_info("parallel", parallel.to_string())
+/// // StageMetrics::new(success_count, failure_count)
+/// //     .with_processing_time(start_time.elapsed())
+/// //     .with_info("stage", "cropping")
+/// //     .with_info("batch_size", batch_size.to_string())
+/// //     .with_info("parallel", parallel.to_string())
 ///
 /// // Use:
-/// metrics!(success_count, failure_count, start_time; stage = "cropping", batch_size = batch_size, parallel = parallel)
+/// // metrics!(success_count, failure_count, start_time; stage = "cropping", batch_size = batch_size, parallel = parallel)
 /// // Or without timing:
-/// metrics!(success_count, failure_count; stage = "cropping", batch_size = batch_size)
+/// // metrics!(success_count, failure_count; stage = "cropping", batch_size = batch_size)
 /// ```
 #[macro_export]
 macro_rules! metrics {
@@ -94,28 +94,28 @@ macro_rules! metrics {
 ///
 /// # Usage
 ///
-/// ```rust,ignore
-/// impl_complete_builder! {
-///     builder: MyBuilder,
-///     config_field: config,
+/// ```rust,no_run
+/// // impl_complete_builder! {
+/// //     builder: MyBuilder,
+/// //     config_field: config,
 ///
-///     // Simple setters
-///     simple_setters: {
-///         field_name: FieldType => "Documentation for the setter",
-///     },
+/// //     // Simple setters
+/// //     simple_setters: {
+/// //         field_name: FieldType => "Documentation for the setter",
+/// //     },
 ///
-///     // Nested config setters
-///     nested_setters: {
-///         config_path: ConfigType => {
-///             field_name: FieldType => "Documentation",
-///         },
-///     },
+/// //     // Nested config setters
+/// //     nested_setters: {
+/// //         config_path: ConfigType => {
+/// //             field_name: FieldType => "Documentation",
+/// //         },
+/// //     },
 ///
-///     // Enable/disable methods
-///     enable_methods: {
-///         method_name => config_field: DefaultType => "Documentation",
-///     },
-/// }
+/// //     // Enable/disable methods
+/// //     enable_methods: {
+/// //         method_name => config_field: DefaultType => "Documentation",
+/// //     },
+/// // }
 /// ```
 #[macro_export]
 macro_rules! impl_complete_builder {

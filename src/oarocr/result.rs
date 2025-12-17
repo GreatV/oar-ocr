@@ -2,19 +2,30 @@
 
 use crate::processors::BoundingBox;
 use image::RgbImage;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 
 /// A text region containing detection and recognition results.
 ///
 /// This struct groups together all the information related to a single detected text region,
-/// including the bounding box, recognized text, confidence score, and orientation angle.
+/// including the bounding box, recognized text, confidence score, orientation angle, and
+/// optional word-level boxes for fine-grained text localization.
 /// This design eliminates the need for parallel vectors and provides better ergonomics
 /// for iterating over text regions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextRegion {
     /// The bounding box of the detected text region.
     pub bounding_box: BoundingBox,
+    /// Detection polygon (dt_polys in overall OCR).
+    /// When available, this preserves the original detection polygon before any
+    /// layout-guided refinement. Defaults to the same as `bounding_box`.
+    #[serde(default)]
+    pub dt_poly: Option<BoundingBox>,
+    /// Recognition polygon (rec_polys in overall OCR).
+    /// After layout-guided refinement, this may differ from `dt_poly`.
+    #[serde(default)]
+    pub rec_poly: Option<BoundingBox>,
     /// The recognized text, if recognition was successful.
     /// None indicates that recognition failed or was filtered out due to low confidence.
     pub text: Option<Arc<str>>,
@@ -24,18 +35,25 @@ pub struct TextRegion {
     /// The text line orientation angle, if orientation classification was performed.
     /// None indicates that orientation classification was not performed or failed.
     pub orientation_angle: Option<f32>,
+    /// Word-level bounding boxes within this text region (optional).
+    /// Only populated when word-level detection is enabled.
+    /// Each box corresponds to a word or character in the recognized text.
+    pub word_boxes: Option<Vec<BoundingBox>>,
 }
 
 impl TextRegion {
     /// Creates a new TextRegion with the given bounding box.
     ///
-    /// The text, confidence, and orientation_angle are initially set to None.
+    /// The text, confidence, orientation_angle, and word_boxes are initially set to None.
     pub fn new(bounding_box: BoundingBox) -> Self {
         Self {
             bounding_box,
+            dt_poly: None,
+            rec_poly: None,
             text: None,
             confidence: None,
             orientation_angle: None,
+            word_boxes: None,
         }
     }
 
@@ -47,9 +65,12 @@ impl TextRegion {
     ) -> Self {
         Self {
             bounding_box,
+            dt_poly: None,
+            rec_poly: None,
             text,
             confidence,
             orientation_angle: None,
+            word_boxes: None,
         }
     }
 
@@ -62,9 +83,12 @@ impl TextRegion {
     ) -> Self {
         Self {
             bounding_box,
+            dt_poly: None,
+            rec_poly: None,
             text,
             confidence,
             orientation_angle,
+            word_boxes: None,
         }
     }
 
@@ -83,6 +107,11 @@ impl TextRegion {
         self.orientation_angle.is_some()
     }
 
+    /// Returns true if this text region has word-level boxes.
+    pub fn has_word_boxes(&self) -> bool {
+        self.word_boxes.is_some()
+    }
+
     /// Returns the text and confidence as a tuple if both are available.
     pub fn text_with_confidence(&self) -> Option<(&str, f32)> {
         match (&self.text, self.confidence) {
@@ -97,13 +126,31 @@ impl TextRegion {
 /// This struct contains all the results from processing an image through
 /// the OCR pipeline, including detected text boxes, recognized text, and
 /// any intermediate processing results.
-#[derive(Debug, Clone)]
+///
+/// # Coordinate System
+///
+/// **Important**: All bounding boxes (`text_regions.bounding_box` and `word_boxes`)
+/// are in the **original input image's coordinate system**, even if transformations
+/// were applied during processing.
+///
+/// ## Rotation Correction
+/// - If `orientation_angle` is set, the image was rotated during preprocessing (90°/180°/270°)
+/// - Bounding boxes have been **automatically transformed back** to the original coordinate system
+/// - You can safely overlay boxes on `input_img` for visualization
+///
+/// ## Rectification (Document Unwarping)
+/// - If `rectified_img` is set, neural network-based rectification (UVDoc) was applied
+/// - **Limitation**: UVDoc doesn't provide inverse transformations from rectified to distorted coordinates
+/// - Bounding boxes are in the **rectified image's coordinate system**, not the original distorted image
+/// - **Solution**: Use `rectified_img` for visualization instead of `input_img` when rectification was applied
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAROCRResult {
     /// Path to the input image file.
     pub input_path: Arc<str>,
     /// Index of the image in a batch (0 for single image processing).
     pub index: usize,
     /// The input image.
+    #[serde(skip)]
     pub input_img: Arc<RgbImage>,
     /// Structured text regions containing detection and recognition results.
     /// This is the modern, preferred way to access OCR results as it groups related data together.
@@ -111,9 +158,8 @@ pub struct OAROCRResult {
     /// Document orientation angle (if orientation classification was used).
     pub orientation_angle: Option<f32>,
     /// Rectified image (if document unwarping was used).
+    #[serde(skip)]
     pub rectified_img: Option<Arc<RgbImage>>,
-    /// Error metrics for data quality monitoring.
-    pub error_metrics: ErrorMetrics,
 }
 
 impl OAROCRResult {
@@ -185,63 +231,6 @@ impl OAROCRResult {
                 .sum();
             Some(sum / confident_regions.len() as f32)
         }
-    }
-}
-
-/// Error metrics for monitoring data quality and model performance issues.
-#[derive(Debug, Clone, Default)]
-pub struct ErrorMetrics {
-    /// Number of text boxes that failed to crop.
-    pub failed_crops: usize,
-    /// Number of text recognition failures.
-    pub failed_recognitions: usize,
-    /// Number of text line orientation classification failures.
-    pub failed_orientations: usize,
-    /// Total number of text boxes detected.
-    pub total_text_boxes: usize,
-}
-
-impl ErrorMetrics {
-    /// Creates a new ErrorMetrics instance.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Returns the success rate for cropping operations (0.0 to 1.0).
-    pub fn crop_success_rate(&self) -> f32 {
-        if self.total_text_boxes == 0 {
-            1.0
-        } else {
-            self.total_text_boxes.saturating_sub(self.failed_crops) as f32
-                / self.total_text_boxes as f32
-        }
-    }
-
-    /// Returns the success rate for recognition operations (0.0 to 1.0).
-    pub fn recognition_success_rate(&self) -> f32 {
-        let successful_crops = self.total_text_boxes.saturating_sub(self.failed_crops);
-        if successful_crops == 0 {
-            1.0
-        } else {
-            successful_crops.saturating_sub(self.failed_recognitions) as f32
-                / successful_crops as f32
-        }
-    }
-
-    /// Returns the success rate for orientation classification (0.0 to 1.0).
-    pub fn orientation_success_rate(&self) -> f32 {
-        let successful_crops = self.total_text_boxes.saturating_sub(self.failed_crops);
-        if successful_crops == 0 {
-            1.0
-        } else {
-            successful_crops.saturating_sub(self.failed_orientations) as f32
-                / successful_crops as f32
-        }
-    }
-
-    /// Returns true if there are any errors that indicate data quality issues.
-    pub fn has_quality_issues(&self) -> bool {
-        self.failed_crops > 0 || self.failed_recognitions > 0 || self.failed_orientations > 0
     }
 }
 
@@ -318,68 +307,6 @@ impl fmt::Display for OAROCRResult {
             )?;
         }
 
-        // Display error metrics if there are any quality issues
-        if self.error_metrics.has_quality_issues() {
-            writeln!(f, "Error metrics:")?;
-            writeln!(
-                f,
-                "  Failed crops: {}/{} ({:.1}% success)",
-                self.error_metrics.failed_crops,
-                self.error_metrics.total_text_boxes,
-                self.error_metrics.crop_success_rate() * 100.0
-            )?;
-            writeln!(
-                f,
-                "  Failed recognitions: {} ({:.1}% success)",
-                self.error_metrics.failed_recognitions,
-                self.error_metrics.recognition_success_rate() * 100.0
-            )?;
-            writeln!(
-                f,
-                "  Failed orientations: {} ({:.1}% success)",
-                self.error_metrics.failed_orientations,
-                self.error_metrics.orientation_success_rate() * 100.0
-            )?;
-        }
-
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_crop_success_rate_zero_total() {
-        let metrics = ErrorMetrics {
-            failed_crops: 0,
-            failed_recognitions: 0,
-            failed_orientations: 0,
-            total_text_boxes: 0,
-        };
-        assert_eq!(metrics.crop_success_rate(), 1.0);
-    }
-
-    #[test]
-    fn test_has_quality_issues_no_issues() {
-        let metrics = ErrorMetrics {
-            failed_crops: 0,
-            failed_recognitions: 0,
-            failed_orientations: 0,
-            total_text_boxes: 10,
-        };
-        assert!(!metrics.has_quality_issues());
-    }
-
-    #[test]
-    fn test_has_quality_issues_with_failures() {
-        let metrics = ErrorMetrics {
-            failed_crops: 1,
-            failed_recognitions: 0,
-            failed_orientations: 0,
-            total_text_boxes: 10,
-        };
-        assert!(metrics.has_quality_issues());
     }
 }

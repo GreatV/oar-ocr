@@ -60,27 +60,20 @@ impl ModelAdapter for UVDocRectifierAdapter {
 /// This builder provides a fluent API for configuring and creating
 /// a UVDoc rectifier adapter instance.
 pub struct UVDocRectifierAdapterBuilder {
-    /// Task configuration
-    task_config: DocumentRectificationConfig,
+    config: super::builder_config::AdapterBuilderConfig<DocumentRectificationConfig>,
     /// Preprocessing configuration
     preprocess_config: UVDocPreprocessConfig,
-    /// Session pool size for ONNX Runtime
-    session_pool_size: usize,
     /// Optional override for the registered model name
     model_name_override: Option<String>,
-    /// ONNX Runtime session configuration
-    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl UVDocRectifierAdapterBuilder {
     /// Creates a new builder with default configuration.
     pub fn new() -> Self {
         Self {
-            task_config: DocumentRectificationConfig::default(),
+            config: super::builder_config::AdapterBuilderConfig::default(),
             preprocess_config: UVDocPreprocessConfig::default(),
-            session_pool_size: 1,
             model_name_override: None,
-            ort_config: None,
         }
     }
 
@@ -90,14 +83,14 @@ impl UVDocRectifierAdapterBuilder {
     ///
     /// * `shape` - Input shape as [channels, height, width]
     pub fn input_shape(mut self, shape: [usize; 3]) -> Self {
-        self.task_config.rec_image_shape = shape;
+        self.config.task_config.rec_image_shape = shape;
         self.preprocess_config.rec_image_shape = shape;
         self
     }
 
     /// Sets the session pool size.
     pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.session_pool_size = size;
+        self.config = self.config.with_session_pool_size(size);
         self
     }
 
@@ -109,7 +102,7 @@ impl UVDocRectifierAdapterBuilder {
 
     /// Sets the ONNX Runtime session configuration.
     pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.ort_config = Some(config);
+        self.config = self.config.with_ort_config(config);
         self
     }
 }
@@ -125,12 +118,19 @@ impl AdapterBuilder for UVDocRectifierAdapterBuilder {
     type Adapter = UVDocRectifierAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
+        let (task_config, session_pool_size, ort_config) = self
+            .config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
+
         // Build the UVDoc model
         let mut model_builder = UVDocModelBuilder::new()
             .preprocess_config(self.preprocess_config)
-            .session_pool_size(self.session_pool_size);
+            .session_pool_size(session_pool_size);
 
-        if let Some(ort_config) = self.ort_config {
+        if let Some(ort_config) = ort_config {
             model_builder = model_builder.with_ort_config(ort_config);
         }
 
@@ -150,13 +150,13 @@ impl AdapterBuilder for UVDocRectifierAdapterBuilder {
         Ok(UVDocRectifierAdapter {
             model,
             info,
-            config: self.task_config,
+            config: task_config,
         })
     }
 
     fn with_config(mut self, config: Self::Config) -> Self {
         self.preprocess_config.rec_image_shape = config.rec_image_shape;
-        self.task_config = config;
+        self.config = self.config.with_task_config(config);
         self
     }
 
@@ -182,7 +182,10 @@ mod tests {
         };
 
         let builder = UVDocRectifierAdapterBuilder::new().with_config(config.clone());
-        assert_eq!(builder.task_config.rec_image_shape, [3, 1024, 1024]);
+        assert_eq!(
+            builder.config.task_config().rec_image_shape,
+            [3, 1024, 1024]
+        );
         assert_eq!(builder.preprocess_config.rec_image_shape, [3, 1024, 1024]);
     }
 
@@ -190,7 +193,7 @@ mod tests {
     fn test_builder_fluent_api() {
         let builder = UVDocRectifierAdapterBuilder::new().input_shape([3, 768, 768]);
 
-        assert_eq!(builder.task_config.rec_image_shape, [3, 768, 768]);
+        assert_eq!(builder.config.task_config().rec_image_shape, [3, 768, 768]);
         assert_eq!(builder.preprocess_config.rec_image_shape, [3, 768, 768]);
     }
 
@@ -198,7 +201,7 @@ mod tests {
     fn test_default_builder() {
         let builder = UVDocRectifierAdapterBuilder::default();
         assert_eq!(builder.adapter_type(), "uvdoc_rectifier");
-        assert_eq!(builder.task_config.rec_image_shape, [3, 0, 0]);
+        assert_eq!(builder.config.task_config().rec_image_shape, [3, 0, 0]);
     }
 
     #[test]

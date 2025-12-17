@@ -51,22 +51,14 @@
 //!     document1.jpg document2.jpg
 //! ```
 
-mod common;
+mod utils;
 
 use clap::Parser;
-use common::{load_rgb_image, parse_device_config};
-use oar_ocr::core::traits::{
-    adapter::{AdapterBuilder, ModelAdapter},
-    task::{ImageTaskInput, Task},
-};
-use oar_ocr::domain::adapters::{
-    LayoutDetectionAdapterBuilder, LayoutModelConfig, PPDocLayoutAdapterBuilder,
-    PicoDetLayoutAdapterBuilder, RTDetrLayoutAdapterBuilder,
-};
-use oar_ocr::domain::tasks::{LayoutDetectionConfig, LayoutDetectionTask};
+use oar_ocr::predictors::LayoutDetectionPredictor;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
+use utils::{load_rgb_image, parse_device_config};
 
 #[cfg(feature = "visualization")]
 use std::fs;
@@ -187,7 +179,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    info!("Model type: {}", model_type);
+    info!("Detected model type: {}", model_type);
 
     // Parse device configuration
     info!("Using device: {}", args.device);
@@ -197,166 +189,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("CUDA execution provider configured successfully");
     }
 
-    // Create model configuration based on model type
-    let _model_config = match model_type.as_str() {
-        "PP-DocBlockLayout" => LayoutModelConfig::pp_docblocklayout(),
-        "PicoDet_layout_1x_table" => LayoutModelConfig::picodet_layout_1x_table(),
-        "PicoDet_layout_1x" => LayoutModelConfig::picodet_layout_1x(),
-        "PicoDet-S_layout_3cls" => LayoutModelConfig::picodet_s_layout_3cls(),
-        "PicoDet-L_layout_3cls" => LayoutModelConfig::picodet_l_layout_3cls(),
-        "PicoDet-S_layout_17cls" => LayoutModelConfig::picodet_s_layout_17cls(),
-        "PicoDet-L_layout_17cls" => LayoutModelConfig::picodet_l_layout_17cls(),
-        "PP-DocLayout-S" => LayoutModelConfig::pp_doclayout_s(),
-        "PP-DocLayout-M" => LayoutModelConfig::pp_doclayout_m(),
-        "PP-DocLayout-L" => LayoutModelConfig::pp_doclayout_l(),
-        "PP-DocLayout_plus-L" => LayoutModelConfig::pp_doclayout_plus_l(),
-        "RT-DETR-H_layout_3cls" => LayoutModelConfig::rtdetr_h_layout_3cls(),
-        "RT-DETR-H_layout_17cls" => LayoutModelConfig::rtdetr_h_layout_17cls(),
-        _ => {
-            error!("Unknown model type: {}", model_type);
-            error!(
-                "Available types: PP-DocBlockLayout, PP-DocLayout-S, PP-DocLayout-M, PP-DocLayout-L, PP-DocLayout_plus-L, PicoDet_layout_1x, PicoDet_layout_1x_table, PicoDet-S_layout_3cls, PicoDet-L_layout_3cls, PicoDet-S_layout_17cls, PicoDet-L_layout_17cls, RT-DETR-H_layout_3cls, RT-DETR-H_layout_17cls"
-            );
-            std::process::exit(1);
-        }
-    };
+    // Build the layout detection predictor
+    let mut predictor_builder = LayoutDetectionPredictor::builder()
+        .model_name(model_type)
+        .score_threshold(args.score_threshold);
 
-    // Create task configuration
-    let config = LayoutDetectionConfig {
-        score_threshold: args.score_threshold,
-        max_elements: args.max_elements,
-    };
+    if let Some(ort_cfg) = ort_config {
+        predictor_builder = predictor_builder.with_ort_config(ort_cfg);
+    }
 
-    // Build the adapter based on model type
-    let adapter: Box<dyn ModelAdapter<Task = LayoutDetectionTask>> = match model_type.as_str() {
-        "PP-DocBlockLayout"
-        | "PP-DocLayout-S"
-        | "PP-DocLayout-M"
-        | "PP-DocLayout-L"
-        | "PP-DocLayout_plus-L" => {
-            let mut builder =
-                PPDocLayoutAdapterBuilder::new(&model_type).task_config(config.clone());
-
-            if let Some(ort_cfg) = ort_config.clone() {
-                builder = builder.with_ort_config(ort_cfg);
-            }
-
-            Box::new(builder.build(&args.model_path).map_err(|e| {
-                format!(
-                    "Failed to build PP-DocLayout adapter from model {:?}: {}",
-                    args.model_path, e
-                )
-            })?)
-        }
-        "RT-DETR-H_layout_3cls" => {
-            let mut builder = RTDetrLayoutAdapterBuilder::new().task_config(config.clone());
-            if let Some(ort_cfg) = ort_config.clone() {
-                builder = builder.with_ort_config(ort_cfg);
-            }
-            Box::new(builder.build(&args.model_path).map_err(|e| {
-                format!(
-                    "Failed to build RT-DETR adapter from model {:?}: {}",
-                    args.model_path, e
-                )
-            })?)
-        }
-        "RT-DETR-H_layout_17cls" => {
-            let mut builder = RTDetrLayoutAdapterBuilder::new_17cls().task_config(config.clone());
-            if let Some(ort_cfg) = ort_config.clone() {
-                builder = builder.with_ort_config(ort_cfg);
-            }
-            Box::new(builder.build(&args.model_path).map_err(|e| {
-                format!(
-                    "Failed to build RT-DETR adapter (17cls) from model {:?}: {}",
-                    args.model_path, e
-                )
-            })?)
-        }
-        "PicoDet_layout_1x_table" => {
-            let mut builder = LayoutDetectionAdapterBuilder::new()
-                .model_config(LayoutModelConfig::picodet_layout_1x_table())
-                .task_config(config.clone());
-            if let Some(ort_cfg) = ort_config.clone() {
-                builder = builder.with_ort_config(ort_cfg);
-            }
-            Box::new(builder.build(&args.model_path).map_err(|e| {
-                format!(
-                    "Failed to build PicoDet adapter (table) from model {:?}: {}",
-                    args.model_path, e
-                )
-            })?)
-        }
-        "PicoDet-S_layout_3cls" => {
-            let mut builder = PicoDetLayoutAdapterBuilder::new_3cls().task_config(config.clone());
-            if let Some(ort_cfg) = ort_config.clone() {
-                builder = builder.with_ort_config(ort_cfg);
-            }
-            Box::new(builder.build(&args.model_path).map_err(|e| {
-                format!(
-                    "Failed to build PicoDet-S adapter from model {:?}: {}",
-                    args.model_path, e
-                )
-            })?)
-        }
-        "PicoDet-L_layout_3cls" => {
-            let mut builder = LayoutDetectionAdapterBuilder::new()
-                .model_config(LayoutModelConfig::picodet_l_layout_3cls())
-                .task_config(config.clone());
-            if let Some(ort_cfg) = ort_config.clone() {
-                builder = builder.with_ort_config(ort_cfg);
-            }
-            Box::new(builder.build(&args.model_path).map_err(|e| {
-                format!(
-                    "Failed to build PicoDet-L adapter (3cls) from model {:?}: {}",
-                    args.model_path, e
-                )
-            })?)
-        }
-        "PicoDet-S_layout_17cls" => {
-            let mut builder = LayoutDetectionAdapterBuilder::new()
-                .model_config(LayoutModelConfig::picodet_s_layout_17cls())
-                .task_config(config.clone());
-            if let Some(ort_cfg) = ort_config.clone() {
-                builder = builder.with_ort_config(ort_cfg);
-            }
-            Box::new(builder.build(&args.model_path).map_err(|e| {
-                format!(
-                    "Failed to build PicoDet-S adapter (17cls) from model {:?}: {}",
-                    args.model_path, e
-                )
-            })?)
-        }
-        "PicoDet-L_layout_17cls" => {
-            let mut builder = LayoutDetectionAdapterBuilder::new()
-                .model_config(LayoutModelConfig::picodet_l_layout_17cls())
-                .task_config(config.clone());
-            if let Some(ort_cfg) = ort_config.clone() {
-                builder = builder.with_ort_config(ort_cfg);
-            }
-            Box::new(builder.build(&args.model_path).map_err(|e| {
-                format!(
-                    "Failed to build PicoDet-L adapter (17cls) from model {:?}: {}",
-                    args.model_path, e
-                )
-            })?)
-        }
-        _ => {
-            // Default to PicoDet for other models
-            let mut builder = PicoDetLayoutAdapterBuilder::new().task_config(config.clone());
-            if let Some(ort_cfg) = ort_config.clone() {
-                builder = builder.with_ort_config(ort_cfg);
-            }
-            Box::new(builder.build(&args.model_path).map_err(|e| {
-                format!(
-                    "Failed to build PicoDet adapter from model {:?}: {}",
-                    args.model_path, e
-                )
-            })?)
-        }
-    };
-
-    // Create the task
-    let task = LayoutDetectionTask::new(config);
+    let predictor = predictor_builder.build(&args.model_path)?;
 
     // Create output directory if needed
     #[cfg(feature = "visualization")]
@@ -385,18 +227,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (width, height) = (img.width(), img.height());
         info!("Image size: {}x{}", width, height);
 
-        // Create input
-        let input = ImageTaskInput::new(vec![img.clone()]);
-
-        // Validate input
-        if let Err(e) = task.validate_input(&input) {
-            error!("Input validation failed for {:?}: {}", image_path, e);
-            continue;
-        }
+        #[cfg(feature = "visualization")]
+        let img_for_vis = img.clone();
 
         // Run layout detection
         let start = Instant::now();
-        let output = match adapter.execute(input, None) {
+        let output = match predictor.predict(vec![img]) {
             Ok(output) => output,
             Err(e) => {
                 error!("Layout detection failed for {:?}: {}", image_path, e);
@@ -404,12 +240,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         let duration = start.elapsed();
-
-        // Validate output
-        if let Err(e) = task.validate_output(&output) {
-            error!("Output validation failed for {:?}: {}", image_path, e);
-            continue;
-        }
 
         info!("Detection completed in {:.2?}", duration);
 
@@ -475,7 +305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or("result.png");
                 let output_path = output_dir.join(output_filename);
 
-                if let Err(e) = visualize_layout(&img, elements, &output_path) {
+                if let Err(e) = visualize_layout(&img_for_vis, elements, &output_path) {
                     error!("Failed to save visualization: {}", e);
                 } else {
                     info!("Visualization saved to: {:?}", output_path);
@@ -510,7 +340,7 @@ fn visualize_layout(
     elements: &[oar_ocr::domain::tasks::LayoutElement],
     output_path: &PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use imageproc::drawing::{draw_hollow_rect_mut, draw_text_mut};
+    use imageproc::drawing::draw_hollow_rect_mut;
     use imageproc::rect::Rect;
 
     // Convert to DynamicImage for drawing
@@ -525,10 +355,7 @@ fn visualize_layout(
         image::Rgba([255, 0, 255, 255]), // Magenta for Figure
     ];
 
-    // Try to load a font for text rendering
-    let font = load_font();
-
-    // Draw bounding boxes and labels
+    // Draw bounding boxes
     for element in elements {
         // Determine color based on element type string
         let color = match element.element_type.to_lowercase().as_str() {
@@ -575,17 +402,6 @@ fn visualize_layout(
                 let rect =
                     Rect::at(min_x, min_y).of_size((max_x - min_x) as u32, (max_y - min_y) as u32);
                 draw_hollow_rect_mut(&mut img, rect, color);
-
-                // Draw label with element type and confidence score
-                if let Some(ref font) = font {
-                    let type_name = format_element_type(&element.element_type);
-                    let label = format!("{} {:.1}%", type_name, element.score * 100.0);
-                    let label_x = min_x.max(0);
-                    let label_y = (min_y - 20).max(0);
-
-                    // Draw text label
-                    draw_text_mut(&mut img, color, label_x, label_y, 20.0, font, &label);
-                }
             }
         }
     }
@@ -609,28 +425,4 @@ fn visualize_layout(
     }
 
     Ok(())
-}
-
-/// Load a font for text rendering
-#[cfg(feature = "visualization")]
-fn load_font() -> Option<ab_glyph::FontVec> {
-    use ab_glyph::FontVec;
-
-    // Try common font paths
-    let font_paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/System/Library/Fonts/Arial.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
-    ];
-
-    for path in &font_paths {
-        if let Ok(font_data) = std::fs::read(path)
-            && let Ok(font) = FontVec::try_from_vec(font_data)
-        {
-            return Some(font);
-        }
-    }
-
-    None
 }

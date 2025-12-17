@@ -7,9 +7,10 @@ use crate::core::OCRError;
 use crate::processors::BoundingBox;
 use crate::utils::BBoxCrop;
 use image::{Rgb, RgbImage};
-use imageproc::geometric_transformations::{rotate_about_center, Interpolation};
+use imageproc::geometric_transformations::{Interpolation, rotate_about_center};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
+use std::sync::Arc;
 
 /// Trait for processors that transform data between task nodes.
 pub trait EdgeProcessor: Debug + Send + Sync {
@@ -77,7 +78,7 @@ fn default_true() -> bool {
 /// Processor that crops text regions from an image based on bounding boxes.
 #[derive(Debug)]
 pub struct TextCroppingProcessor {
-    handle_rotation: bool,
+    pub(crate) handle_rotation: bool,
 }
 
 impl TextCroppingProcessor {
@@ -98,17 +99,17 @@ impl TextCroppingProcessor {
 }
 
 impl EdgeProcessor for TextCroppingProcessor {
-    type Input = (RgbImage, Vec<BoundingBox>);
-    type Output = Vec<Option<RgbImage>>;
+    type Input = (Arc<RgbImage>, Vec<BoundingBox>);
+    type Output = Vec<Option<Arc<RgbImage>>>;
 
     fn process(&self, input: Self::Input) -> Result<Self::Output, OCRError> {
         let (image, bboxes) = input;
 
-        let cropped_images: Vec<Option<RgbImage>> = bboxes
+        let cropped_images: Vec<Option<Arc<RgbImage>>> = bboxes
             .iter()
             .map(|bbox| {
                 self.crop_single(&image, bbox)
-                    .map(Some)
+                    .map(|img| Some(Arc::new(img)))
                     .unwrap_or_else(|_e| {
                         // Failed to crop, return None
                         None
@@ -137,8 +138,8 @@ impl ImageRotationProcessor {
 }
 
 impl EdgeProcessor for ImageRotationProcessor {
-    type Input = (Vec<Option<RgbImage>>, Vec<Option<f32>>);
-    type Output = Vec<Option<RgbImage>>;
+    type Input = (Vec<Option<Arc<RgbImage>>>, Vec<Option<f32>>);
+    type Output = Vec<Option<Arc<RgbImage>>>;
 
     fn process(&self, input: Self::Input) -> Result<Self::Output, OCRError> {
         let (images, angles) = input;
@@ -147,7 +148,7 @@ impl EdgeProcessor for ImageRotationProcessor {
             return Ok(images);
         }
 
-        let rotated_images: Vec<Option<RgbImage>> = images
+        let rotated_images: Vec<Option<Arc<RgbImage>>> = images
             .into_iter()
             .zip(angles.iter())
             .map(|(img_opt, angle_opt)| {
@@ -165,7 +166,7 @@ impl EdgeProcessor for ImageRotationProcessor {
                             Rgb([255u8, 255u8, 255u8]), // White background for padding
                         );
 
-                        Some(rotated)
+                        Some(Arc::new(rotated))
                     }
                     (img_opt, _) => img_opt,
                 }
@@ -227,14 +228,18 @@ where
 }
 
 /// Type alias for text cropping processor output
-type TextCroppingOutput =
-    Box<dyn EdgeProcessor<Input = (RgbImage, Vec<BoundingBox>), Output = Vec<Option<RgbImage>>>>;
+type TextCroppingOutput = Box<
+    dyn EdgeProcessor<
+            Input = (Arc<RgbImage>, Vec<BoundingBox>),
+            Output = Vec<Option<Arc<RgbImage>>>,
+        >,
+>;
 
 /// Type alias for image rotation processor output
 type ImageRotationOutput = Box<
     dyn EdgeProcessor<
-            Input = (Vec<Option<RgbImage>>, Vec<Option<f32>>),
-            Output = Vec<Option<RgbImage>>,
+            Input = (Vec<Option<Arc<RgbImage>>>, Vec<Option<f32>>),
+            Output = Vec<Option<Arc<RgbImage>>>,
         >,
 >;
 
@@ -291,7 +296,7 @@ mod tests {
         let processor = ImageRotationProcessor::new(true);
 
         // Create a simple test image (10x10 white image)
-        let img = RgbImage::from_pixel(10, 10, Rgb([255u8, 255u8, 255u8]));
+        let img = Arc::new(RgbImage::from_pixel(10, 10, Rgb([255u8, 255u8, 255u8])));
 
         // Test with rotation angle
         let images = vec![Some(img.clone())];
@@ -313,7 +318,7 @@ mod tests {
     fn test_image_rotation_processor_skips_small_angles() {
         let processor = ImageRotationProcessor::new(true);
 
-        let img = RgbImage::from_pixel(10, 10, Rgb([255u8, 255u8, 255u8]));
+        let img = Arc::new(RgbImage::from_pixel(10, 10, Rgb([255u8, 255u8, 255u8])));
         let images = vec![Some(img.clone())];
         let angles = vec![Some(0.05)]; // Very small angle, should be skipped
 
@@ -330,7 +335,7 @@ mod tests {
     fn test_image_rotation_processor_disabled() {
         let processor = ImageRotationProcessor::new(false); // auto_rotate disabled
 
-        let img = RgbImage::from_pixel(10, 10, Rgb([255u8, 255u8, 255u8]));
+        let img = Arc::new(RgbImage::from_pixel(10, 10, Rgb([255u8, 255u8, 255u8])));
         let images = vec![Some(img.clone())];
         let angles = vec![Some(45.0)];
 

@@ -4,6 +4,7 @@
 
 use super::validation::{ensure_images_with, ensure_non_empty_images};
 use crate::core::OCRError;
+use crate::core::config::{ConfigError, ConfigValidator};
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
 use image::RgbImage;
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,31 @@ impl Default for DocumentRectificationConfig {
         Self {
             rec_image_shape: [3, 0, 0],
         }
+    }
+}
+
+impl ConfigValidator for DocumentRectificationConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.rec_image_shape[0] == 0 {
+            return Err(ConfigError::InvalidConfig {
+                message: "rec_image_shape channels must be greater than 0".to_string(),
+            });
+        }
+
+        let height = self.rec_image_shape[1];
+        let width = self.rec_image_shape[2];
+        if (height == 0) ^ (width == 0) {
+            return Err(ConfigError::InvalidConfig {
+                message: "rec_image_shape height and width must both be set or both be zero"
+                    .to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn get_defaults() -> Self {
+        Self::default()
     }
 }
 

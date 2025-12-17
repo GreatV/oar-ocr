@@ -6,9 +6,10 @@
 
 use crate::core::inference::OrtInfer;
 use crate::core::{OCRError, Tensor2D, Tensor4D};
+use crate::domain::adapters::preprocessing::rgb_to_dynamic;
 use crate::processors::{ChannelOrder, NormalizeImage};
 use crate::utils::topk::Topk;
-use image::{DynamicImage, RgbImage, imageops::FilterType};
+use image::{RgbImage, imageops::FilterType};
 
 /// Configuration for PP-LCNet model preprocessing.
 #[derive(Debug, Clone)]
@@ -17,11 +18,20 @@ pub struct PPLCNetPreprocessConfig {
     pub input_shape: (u32, u32),
     /// Resizing filter to use
     pub resize_filter: FilterType,
+    /// When set, resize by short edge to this size (keep ratio) then center-crop to `input_shape`.
+    ///
+    /// This matches `ResizeImage(resize_short=256)` + `CropImage(size=224)` used by
+    /// most PP-LCNet classifiers (e.g. `PP-LCNet_x1_0_doc_ori`, `PP-LCNet_x1_0_table_cls`).
+    ///
+    /// Some specialized PP-LCNet classifiers (e.g. `PP-LCNet_x1_0_textline_ori`) use a direct
+    /// resize to a fixed `(height,width)` without short-edge resize/crop; set this to `None`
+    /// to match `ResizeImage(size=[w,h])`.
+    pub resize_short: Option<u32>,
     /// Scaling factor applied before normalization (defaults to 1.0 / 255.0)
     pub normalize_scale: f32,
-    /// Mean values for normalization (RGB order)
+    /// Mean values for normalization
     pub normalize_mean: Vec<f32>,
-    /// Standard deviation values for normalization (RGB order)
+    /// Standard deviation values for normalization
     pub normalize_std: Vec<f32>,
     /// Channel ordering for the normalized tensor
     pub channel_order: ChannelOrder,
@@ -31,7 +41,10 @@ impl Default for PPLCNetPreprocessConfig {
     fn default() -> Self {
         Self {
             input_shape: (224, 224),
-            resize_filter: FilterType::Lanczos3,
+            // Use cv2.INTER_LINEAR for PP-LCNet resize.
+            resize_filter: FilterType::Triangle,
+            // PP-LCNet classifiers default to resize_short=256 then center-crop.
+            resize_short: Some(256),
             normalize_scale: 1.0 / 255.0,
             normalize_mean: vec![0.485, 0.456, 0.406],
             normalize_std: vec![0.229, 0.224, 0.225],
@@ -84,6 +97,8 @@ pub struct PPLCNetModel {
     input_shape: (u32, u32),
     /// Resizing filter
     resize_filter: FilterType,
+    /// Optional short-edge resize (see `PPLCNetPreprocessConfig::resize_short`)
+    resize_short: Option<u32>,
 }
 
 impl PPLCNetModel {
@@ -94,6 +109,7 @@ impl PPLCNetModel {
         topk_processor: Topk,
         input_shape: (u32, u32),
         resize_filter: FilterType,
+        resize_short: Option<u32>,
     ) -> Self {
         Self {
             inference,
@@ -101,6 +117,7 @@ impl PPLCNetModel {
             topk_processor,
             input_shape,
             resize_filter,
+            resize_short,
         }
     }
 
@@ -114,20 +131,62 @@ impl PPLCNetModel {
     ///
     /// Preprocessed batch tensor
     pub fn preprocess(&self, images: Vec<RgbImage>) -> Result<Tensor4D, OCRError> {
-        let resized_images: Vec<DynamicImage> = images
-            .into_iter()
-            .map(|img| {
-                DynamicImage::ImageRgb8(image::imageops::resize(
-                    &img,
-                    self.input_shape.1,
-                    self.input_shape.0,
-                    self.resize_filter,
-                ))
-            })
-            .collect();
+        let (crop_h, crop_w) = self.input_shape;
 
-        let batch_tensor = self.normalizer.normalize_batch_to(resized_images)?;
-        Ok(batch_tensor)
+        let resized_rgb: Vec<RgbImage> = if let Some(resize_short) = self.resize_short {
+            // PP-LCNet classifier preprocessing:
+            // 1) Resize by short edge (keep ratio)
+            // 2) Center crop to the model input size
+            //
+            // This matches `ResizeImage(resize_short=256)` + `CropImage(size=224)` used by
+            // models like `PP-LCNet_x1_0_doc_ori` / `PP-LCNet_x1_0_table_cls`.
+            images
+                .into_iter()
+                .filter_map(|img| {
+                    let (w, h) = (img.width(), img.height());
+                    if w == 0 || h == 0 {
+                        return None;
+                    }
+
+                    let short = w.min(h) as f32;
+                    let scale = (resize_short as f32) / short;
+                    let new_w = ((w as f32) * scale).round().max(crop_w as f32) as u32;
+                    let new_h = ((h as f32) * scale).round().max(crop_h as f32) as u32;
+
+                    let resized = image::imageops::resize(&img, new_w, new_h, self.resize_filter);
+
+                    // Center crop to (crop_w, crop_h)
+                    let x1 = (new_w.saturating_sub(crop_w)) / 2;
+                    let y1 = (new_h.saturating_sub(crop_h)) / 2;
+                    let cropped =
+                        image::imageops::crop_imm(&resized, x1, y1, crop_w, crop_h).to_image();
+                    Some(cropped)
+                })
+                .collect()
+        } else {
+            // Direct resize to input shape (height,width) without crop.
+            // This matches `ResizeImage(size=[w,h])` used by
+            // `PP-LCNet_x1_0_textline_ori` (80x160).
+            images
+                .into_iter()
+                .filter_map(|img| {
+                    let (w, h) = (img.width(), img.height());
+                    if w == 0 || h == 0 {
+                        return None;
+                    }
+                    Some(image::imageops::resize(
+                        &img,
+                        crop_w,
+                        crop_h,
+                        self.resize_filter,
+                    ))
+                })
+                .collect()
+        };
+
+        // Convert to dynamic images and normalize using common helper
+        let dynamic_images = rgb_to_dynamic(resized_rgb);
+        self.normalizer.normalize_batch_to(dynamic_images)
     }
 
     /// Runs inference on the preprocessed batch.
@@ -309,12 +368,18 @@ impl PPLCNetModelBuilder {
             OrtInfer::new(model_path, None)?
         };
 
-        // Create normalizer (ImageNet normalization)
-        let normalizer = NormalizeImage::new(
+        // Create normalizer (ImageNet normalization).
+        //
+        // PP-LCNet classifiers read images as **RGB** by default (no `DecodeImage`
+        // op in the official inference.yml), so we keep RGB order here.
+        let mean = self.preprocess_config.normalize_mean.clone();
+        let std = self.preprocess_config.normalize_std.clone();
+        let normalizer = NormalizeImage::with_color_order(
             Some(self.preprocess_config.normalize_scale),
-            Some(self.preprocess_config.normalize_mean.clone()),
-            Some(self.preprocess_config.normalize_std.clone()),
+            Some(mean),
+            Some(std),
             Some(self.preprocess_config.channel_order.clone()),
+            Some(crate::processors::ColorOrder::RGB),
         )?;
 
         // Create top-k processor
@@ -326,6 +391,7 @@ impl PPLCNetModelBuilder {
             topk_processor,
             self.preprocess_config.input_shape,
             self.preprocess_config.resize_filter,
+            self.preprocess_config.resize_short,
         ))
     }
 }

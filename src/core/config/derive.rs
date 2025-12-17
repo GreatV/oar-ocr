@@ -10,31 +10,31 @@
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use oar_ocr::core::config::{ConfigValidator, ConfigError};
-/// use oar_ocr::impl_config_validator;
-/// use serde::{Serialize, Deserialize};
+/// ```rust,no_run
+/// // use oar_ocr::core::config::{ConfigValidator, ConfigError};
+/// // use oar_ocr::impl_config_validator;
+/// // use serde::{Serialize, Deserialize};
 ///
-/// #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-/// pub struct MyConfig {
-///     pub confidence_threshold: f32,
-///     pub batch_size: usize,
-///     pub optional_threshold: Option<f32>,
-/// }
+/// // #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// // pub struct MyConfig {
+/// //     pub confidence_threshold: f32,
+/// //     pub batch_size: usize,
+/// //     pub optional_threshold: Option<f32>,
+/// // }
 ///
-/// impl_config_validator!(MyConfig {
-///     confidence_threshold: range(0.0, 1.0),
-///     batch_size: min(1),
-///     optional_threshold: optional_range(0.0, 1.0),
-/// });
+/// // impl_config_validator!(MyConfig {
+/// //     confidence_threshold: range(0.0, 1.0),
+/// //     batch_size: min(1),
+/// //     optional_threshold: optional_range(0.0, 1.0),
+/// // });
 /// ```
 #[macro_export]
 macro_rules! impl_config_validator {
-    ($type_name:ident { $($field:ident: $validation:tt),* $(,)? }) => {
+    ($type_name:ident { $($field:ident: $validator:ident $(($($args:tt)*))?),* $(,)? }) => {
         impl $crate::core::config::ConfigValidator for $type_name {
             fn validate(&self) -> Result<(), $crate::core::config::ConfigError> {
                 $(
-                    $crate::validate_field!(self, $field, $validation);
+                    $crate::validate_field!(self, $field, $validator $(($($args)*))?);
                 )*
                 Ok(())
             }

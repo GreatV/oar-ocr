@@ -5,6 +5,8 @@
 use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
+use crate::impl_config_validator;
+use crate::utils::ScoreValidator;
 use serde::{Deserialize, Serialize};
 
 /// A single classification result with class ID, label, and confidence score.
@@ -46,6 +48,11 @@ impl Default for DocumentOrientationConfig {
         }
     }
 }
+
+impl_config_validator!(DocumentOrientationConfig {
+    score_threshold: range(0.0, 1.0),
+    topk: min(1),
+});
 
 /// Output from document orientation classification task.
 #[derive(Debug, Clone)]
@@ -111,9 +118,10 @@ impl Task for DocumentOrientationTask {
     }
 
     fn validate_output(&self, output: &Self::Output) -> Result<(), OCRError> {
-        // Validate each image's classifications
+        let validator = ScoreValidator::new_unit_range("score");
+
         for (idx, classifications) in output.classifications.iter().enumerate() {
-            for (class_idx, classification) in classifications.iter().enumerate() {
+            for classification in classifications.iter() {
                 // Validate class IDs (should be 0-3 for 4 orientations)
                 if classification.class_id > 3 {
                     return Err(OCRError::InvalidInput {
@@ -123,17 +131,13 @@ impl Task for DocumentOrientationTask {
                         ),
                     });
                 }
-
-                // Validate score ranges
-                if !(0.0..=1.0).contains(&classification.score) {
-                    return Err(OCRError::InvalidInput {
-                        message: format!(
-                            "Image {}, classification {}: score {} is out of valid range [0, 1]",
-                            idx, class_idx, classification.score
-                        ),
-                    });
-                }
             }
+
+            // Validate score ranges
+            let scores: Vec<f32> = classifications.iter().map(|c| c.score).collect();
+            validator.validate_scores_with(&scores, |class_idx| {
+                format!("Image {}, classification {}", idx, class_idx)
+            })?;
         }
 
         Ok(())

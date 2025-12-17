@@ -1,30 +1,22 @@
 //! The OCR pipeline module.
 //!
-//! This module provides the task graph-based OCR pipeline implementation that combines
-//! multiple model adapters to perform document orientation classification, text
-//! detection, text recognition, and text line classification.
+//! This module provides high-level builder APIs for constructing OCR and document
+//! structure analysis pipelines. The builders simplify the process of configuring
+//! text detection, recognition, and optional preprocessing components.
 //!
-//! # Task Graph Architecture
+//! # Main APIs
 //!
-//! The pipeline uses a flexible task graph architecture that allows:
-//! - Declarative pipeline configuration via JSON or code
-//! - Dynamic model swapping without code changes
-//! - Edge processors for data transformation between tasks
-//! - Comprehensive validation of pipeline structure
-//!
-//! See [`TaskGraphBuilder`] and [`TaskGraphConfig`] for details.
+//! - [`OAROCRBuilder`] - For text detection and recognition
+//! - [`OARStructureBuilder`] - For document structure analysis (layout, tables, formulas)
 
-mod processors;
-mod result;
-mod task_graph_builder;
-mod task_graph_config;
-mod validation;
+pub mod ocr;
+pub mod processors;
+pub mod result;
+pub mod stitching;
+pub mod structure;
 
-pub use processors::{EdgeProcessor, EdgeProcessorConfig, EdgeProcessorFactory};
-pub use result::{ErrorMetrics, OAROCRResult, TextRegion};
-pub use task_graph_builder::TaskGraphBuilder;
-pub use task_graph_config::{ModelBinding, TaskGraphConfig, TaskNode};
-pub use validation::{
-    create_expected_schema, validate_adapter_schema, validate_registry_schemas,
-    validate_task_connection, validate_task_dependencies,
-};
+pub use ocr::*;
+pub use processors::*;
+pub use result::*;
+pub use stitching::*;
+pub use structure::*;

@@ -150,20 +150,13 @@ impl DBModel {
             );
         }
 
-        // Convert resized images from RGB to BGR to match Paddle preprocessing
-        let bgr_images: Vec<DynamicImage> = resized_images
-            .into_iter()
-            .map(|img| {
-                let mut rgb = img.to_rgb8();
-                for pixel in rgb.pixels_mut() {
-                    pixel.0.swap(0, 2);
-                }
-                DynamicImage::ImageRgb8(rgb)
-            })
-            .collect();
-
-        // Apply ImageNet normalization and convert to tensor
-        let batch_tensor = self.normalizer.normalize_batch_to(bgr_images)?;
+        // Apply ImageNet normalization and convert to tensor.
+        //
+        // Note: External models often decode images as BGR and then normalize with
+        // mean/std as provided in their configs. In this repo, input images are
+        // loaded as RGB; we keep them in RGB here and rely on `NormalizeImage`
+        // with `ColorOrder::BGR` to map channels (RGB -> BGR) without a manual swap.
+        let batch_tensor = self.normalizer.normalize_batch_to(resized_images)?;
         debug!("Batch tensor shape: {:?}", batch_tensor.shape());
 
         Ok((batch_tensor, img_shapes))
@@ -292,12 +285,17 @@ impl DBModelBuilder {
             self.preprocess_config.max_side_limit, // max_side_limit
         );
 
-        // Create normalizer (standard ImageNet normalization)
-        let normalizer = NormalizeImage::new(
+        // Create normalizer.
+        // External models read images in BGR. Their configs use ImageNet stats
+        // in that *same* channel order (B, G, R). Our images are loaded as RGB,
+        // so we keep them in RGB and use `ColorOrder::BGR` to map channels
+        // into BGR order during normalization.
+        let normalizer = NormalizeImage::with_color_order(
             Some(1.0 / 255.0),               // scale
-            Some(vec![0.485, 0.456, 0.406]), // mean (RGB order)
-            Some(vec![0.229, 0.224, 0.225]), // std (RGB order)
+            Some(vec![0.485, 0.456, 0.406]), // mean
+            Some(vec![0.229, 0.224, 0.225]), // std
             Some(ChannelOrder::CHW),         // order
+            Some(crate::processors::ColorOrder::BGR),
         )?;
 
         // Create postprocessor

@@ -86,10 +86,11 @@ impl UVDocModel {
             original_sizes.push(original_size);
 
             if should_resize && (img.width() != target_width || img.height() != target_height) {
+                // Use cv2.INTER_LINEAR for UVDoc resize.
                 let resized = DynamicImage::ImageRgb8(img).resize_exact(
                     target_width,
                     target_height,
-                    FilterType::Lanczos3,
+                    FilterType::Triangle,
                 );
                 processed_images.push(resized);
             } else {
@@ -165,10 +166,11 @@ impl UVDocModel {
             }
 
             if img.width() != orig_w || img.height() != orig_h {
+                // Use cv2.INTER_LINEAR for resizing outputs back to original size.
                 let resized = DynamicImage::ImageRgb8(std::mem::take(img)).resize_exact(
                     orig_w,
                     orig_h,
-                    FilterType::Lanczos3,
+                    FilterType::Triangle,
                 );
                 *img = resized.into_rgb8();
             }
@@ -268,12 +270,15 @@ impl UVDocModelBuilder {
             OrtInfer::new(model_path, Some("image"))?
         };
 
-        // Create normalizer (scale to [0, 1] without mean shift)
-        let normalizer = NormalizeImage::new(
+        // Create normalizer (scale to [0, 1] without mean shift).
+        // Images are read in BGR and UVDoc models are trained with BGR order,
+        // so keep color order consistent here.
+        let normalizer = NormalizeImage::with_color_order(
             Some(1.0 / 255.0),
             Some(vec![0.0, 0.0, 0.0]),
             Some(vec![1.0, 1.0, 1.0]),
             Some(ChannelOrder::CHW),
+            Some(crate::processors::ColorOrder::BGR),
         )?;
 
         // Create postprocessor

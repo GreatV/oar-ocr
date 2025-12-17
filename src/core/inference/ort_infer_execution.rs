@@ -72,17 +72,13 @@ impl OrtInfer {
         })?;
 
         let input_tensor = TensorRef::from_array_view(x.view()).map_err(|e| {
-            OCRError::model_inference_error(
-                &self.model_name,
-                "tensor_conversion",
-                0,
-                &input_shape,
-                &format!(
+            OCRError::model_inference_error_builder(&self.model_name, "tensor_conversion")
+                .input_shape(&input_shape)
+                .context(format!(
                     "Failed to convert input tensor with shape {:?}",
                     input_shape
-                ),
-                e,
-            )
+                ))
+                .build(e)
         })?;
 
         let inputs = ort::inputs![self.input_name.as_str() => input_tensor];
@@ -91,17 +87,16 @@ impl OrtInfer {
             .next_idx
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             % self.sessions.len();
-        let mut session_guard = self.sessions[idx].lock().map_err(|_| {
-            OCRError::inference_error(
-                &self.model_name,
-                &format!(
-                    "Failed to acquire session lock for session {}/{}",
+        let mut session_guard = self.sessions[idx]
+            .lock()
+            .map_err(|_| OCRError::InvalidInput {
+                message: format!(
+                    "Model '{}': Failed to acquire session lock for session {}/{}",
+                    self.model_name,
                     idx,
                     self.sessions.len()
                 ),
-                crate::core::errors::SimpleError::new("Session lock acquisition failed"),
-            )
-        })?;
+            })?;
 
         // Collect declared output names before running (avoid borrow conflicts later)
         let output_names: Vec<String> = session_guard
@@ -111,17 +106,13 @@ impl OrtInfer {
             .collect();
 
         let outputs = session_guard.run(inputs).map_err(|e| {
-            OCRError::model_inference_error(
-                &self.model_name,
-                "forward_pass",
-                0,
-                &input_shape,
-                &format!(
+            OCRError::model_inference_error_builder(&self.model_name, "forward_pass")
+                .input_shape(&input_shape)
+                .context(format!(
                     "ONNX Runtime inference failed with input '{}' -> output '{}'",
                     self.input_name, output_name
-                ),
-                e,
-            )
+                ))
+                .build(e)
         })?;
 
         processor(&outputs, &output_name, &output_names, &input_shape)
@@ -141,14 +132,13 @@ impl OrtInfer {
                 let output = outputs[output_name]
                     .try_extract_tensor::<f32>()
                     .map_err(|e| {
-                        OCRError::model_inference_error(
-                            &model_name,
-                            "output_extraction",
-                            0,
-                            input_shape,
-                            &format!("Failed to extract output tensor '{}' as f32", output_name),
-                            e,
-                        )
+                        OCRError::model_inference_error_builder(&model_name, "output_extraction")
+                            .input_shape(input_shape)
+                            .context(format!(
+                                "Failed to extract output tensor '{}' as f32",
+                                output_name
+                            ))
+                            .build(e)
                     })?;
                 let (output_shape, output_data) = output;
                 processor(output_shape, output_data)
@@ -159,18 +149,14 @@ impl OrtInfer {
     pub fn infer_4d(&self, x: &Tensor4D) -> Result<Tensor4D, OCRError> {
         self.run_inference_with_processor(x, |output_shape, output_data| {
             if output_shape.len() != 4 {
-                return Err(OCRError::tensor_operation_error(
-                    "output_validation",
-                    &[4],
-                    &[output_shape.len()],
-                    &format!(
+                return Err(OCRError::InvalidInput {
+                    message: format!(
                         "Model '{}' 4D inference: expected 4D output tensor, got {}D with shape {:?}",
                         self.model_name,
                         output_shape.len(),
                         output_shape
                     ),
-                    crate::core::errors::SimpleError::new("Invalid output tensor dimensions"),
-                ));
+                });
             }
 
             let batch_size_out = output_shape[0] as usize;
@@ -206,16 +192,12 @@ impl OrtInfer {
             let expected_len = batch_size * num_classes;
 
             if output_data.len() != expected_len {
-                return Err(OCRError::tensor_operation_error(
-                    "output_data_validation",
-                    &[expected_len],
-                    &[output_data.len()],
-                    &format!(
-                        "Model '{}' 2D inference: output data size mismatch for input shape {:?} -> output shape {:?}",
-                        self.model_name, input_shape, output_shape
+                return Err(OCRError::InvalidInput {
+                    message: format!(
+                        "Model '{}' 2D inference: output data size mismatch for input shape {:?} -> output shape {:?}: expected {}, got {}",
+                        self.model_name, input_shape, output_shape, expected_len, output_data.len()
                     ),
-                    crate::core::errors::SimpleError::new("Output tensor data size mismatch"),
-                ));
+                });
             }
 
             let array_view = ArrayView2::from_shape((batch_size, num_classes), output_data)
@@ -227,18 +209,14 @@ impl OrtInfer {
     pub fn infer_3d(&self, x: &Tensor4D) -> Result<Tensor3D, OCRError> {
         self.run_inference_with_processor(x, |output_shape, output_data| {
             if output_shape.len() != 3 {
-                return Err(OCRError::tensor_operation_error(
-                    "output_validation",
-                    &[3],
-                    &[output_shape.len()],
-                    &format!(
+                return Err(OCRError::InvalidInput {
+                    message: format!(
                         "Model '{}' 3D inference: expected 3D output tensor, got {}D with shape {:?}",
                         self.model_name,
                         output_shape.len(),
                         output_shape
                     ),
-                    crate::core::errors::SimpleError::new("Invalid output tensor dimensions"),
-                ));
+                });
             }
 
             let batch_size_out = output_shape[0] as usize;
@@ -277,7 +255,7 @@ impl OrtInfer {
     ) -> Result<T, OCRError> {
         let model_name = self.model_name.clone();
 
-        self.run_inference_core(x, move |outputs, output_name, output_names, input_shape| {
+        self.run_inference_core(x, move |outputs, output_name, output_names, _input_shape| {
             // Try the discovered output name first; if it isn't i64, scan other outputs for an i64 tensor.
             let mut extracted: Option<(Vec<i64>, &[i64])> = None;
 
@@ -309,17 +287,12 @@ impl OrtInfer {
                 Some((shape, data)) => (shape, data),
                 None => {
                     // Build a helpful error listing available outputs
-                    return Err(OCRError::model_inference_error(
-                        &model_name,
-                        "output_extraction",
-                        0,
-                        input_shape,
-                        &format!(
-                            "Failed to extract any output as i64. Tried '{}' first. Available outputs: {:?}",
-                            output_name, output_names
+                    return Err(OCRError::InvalidInput {
+                        message: format!(
+                            "Model '{}': Failed to extract any output as i64. Tried '{}' first. Available outputs: {:?}",
+                            model_name, output_name, output_names
                         ),
-                        crate::core::errors::SimpleError::new("No i64 output tensor found"),
-                    ));
+                    });
                 }
             };
 
@@ -334,18 +307,14 @@ impl OrtInfer {
     pub fn infer_2d_i64(&self, x: &Tensor4D) -> Result<ndarray::Array2<i64>, OCRError> {
         self.run_inference_with_processor_i64(x, |output_shape, output_data| {
             if output_shape.len() != 2 {
-                return Err(OCRError::tensor_operation_error(
-                    "output_validation",
-                    &[2],
-                    &[output_shape.len()],
-                    &format!(
+                return Err(OCRError::InvalidInput {
+                    message: format!(
                         "Model '{}' 2D i64 inference: expected 2D output tensor, got {}D with shape {:?}",
                         self.model_name,
                         output_shape.len(),
                         output_shape
                     ),
-                    crate::core::errors::SimpleError::new("Invalid output tensor dimensions"),
-                ));
+                });
             }
 
             let batch_size_out = output_shape[0] as usize;
@@ -353,16 +322,12 @@ impl OrtInfer {
             let expected_len = batch_size_out * seq_len;
 
             if output_data.len() != expected_len {
-                return Err(OCRError::tensor_operation_error(
-                    "output_data_validation",
-                    &[expected_len],
-                    &[output_data.len()],
-                    &format!(
-                        "Model '{}' 2D i64 inference: output data size mismatch",
-                        self.model_name
+                return Err(OCRError::InvalidInput {
+                    message: format!(
+                        "Model '{}' 2D i64 inference: output data size mismatch - expected {}, got {}",
+                        self.model_name, expected_len, output_data.len()
                     ),
-                    crate::core::errors::SimpleError::new("Output tensor data size mismatch"),
-                ));
+                });
             }
 
             let array_view = ArrayView2::from_shape((batch_size_out, seq_len), output_data)
@@ -386,87 +351,69 @@ impl OrtInfer {
         self.run_inference_core(x, move |outputs, _output_name, output_names, input_shape| {
             // Expect at least 2 outputs
             if output_names.len() < 2 {
-                return Err(OCRError::tensor_operation_error(
-                    "output_validation",
-                    &[2],
-                    &[output_names.len()],
-                    &format!(
+                return Err(OCRError::InvalidInput {
+                    message: format!(
                         "Model '{}' dual 3D inference: expected at least 2 outputs, got {}",
                         model_name,
                         output_names.len()
                     ),
-                    crate::core::errors::SimpleError::new("Insufficient model outputs"),
-                ));
+                });
             }
 
             // Extract first output
             let first_output = outputs[output_names[0].as_str()]
                 .try_extract_tensor::<f32>()
                 .map_err(|e| {
-                    OCRError::model_inference_error(
-                        &model_name,
-                        "output_extraction",
-                        0,
-                        input_shape,
-                        &format!(
+                    OCRError::model_inference_error_builder(&model_name, "output_extraction")
+                        .input_shape(input_shape)
+                        .batch_index(0)
+                        .context(format!(
                             "Failed to extract first output tensor '{}' as f32",
                             output_names[0]
-                        ),
-                        e,
-                    )
+                        ))
+                        .build(e)
                 })?;
 
             let (first_shape, first_data) = first_output;
 
             // Validate first output is 3D
             if first_shape.len() != 3 {
-                return Err(OCRError::tensor_operation_error(
-                    "output_validation",
-                    &[3],
-                    &[first_shape.len()],
-                    &format!(
+                return Err(OCRError::InvalidInput {
+                    message: format!(
                         "Model '{}' dual 3D inference: first output expected 3D, got {}D with shape {:?}",
                         model_name,
                         first_shape.len(),
                         first_shape
                     ),
-                    crate::core::errors::SimpleError::new("Invalid first output dimensions"),
-                ));
+                });
             }
 
             // Extract second output
             let second_output = outputs[output_names[1].as_str()]
                 .try_extract_tensor::<f32>()
                 .map_err(|e| {
-                    OCRError::model_inference_error(
-                        &model_name,
-                        "output_extraction",
-                        1,
-                        input_shape,
-                        &format!(
+                    OCRError::model_inference_error_builder(&model_name, "output_extraction")
+                        .input_shape(input_shape)
+                        .batch_index(1)
+                        .context(format!(
                             "Failed to extract second output tensor '{}' as f32",
                             output_names[1]
-                        ),
-                        e,
-                    )
+                        ))
+                        .build(e)
                 })?;
 
             let (second_shape, second_data) = second_output;
 
             // Validate second output is 3D
             if second_shape.len() != 3 {
-                return Err(OCRError::tensor_operation_error(
-                    "output_validation",
-                    &[3],
-                    &[second_shape.len()],
-                    &format!(
+                return Err(OCRError::InvalidInput {
+                    message: format!(
                         "Model '{}' dual 3D inference: second output expected 3D, got {}D with shape {:?}",
                         model_name,
                         second_shape.len(),
                         second_shape
                     ),
-                    crate::core::errors::SimpleError::new("Invalid second output dimensions"),
-                ));
+                });
             }
 
             // Reshape first tensor
@@ -476,16 +423,12 @@ impl OrtInfer {
             let expected_len_1 = dim0_1 * dim1_1 * dim2_1;
 
             if first_data.len() != expected_len_1 {
-                return Err(OCRError::tensor_operation_error(
-                    "output_data_validation",
-                    &[expected_len_1],
-                    &[first_data.len()],
-                    &format!(
-                        "Model '{}' dual 3D inference: first output data size mismatch",
-                        model_name
+                return Err(OCRError::InvalidInput {
+                    message: format!(
+                        "Model '{}' dual 3D inference: first output data size mismatch - expected {}, got {}",
+                        model_name, expected_len_1, first_data.len()
                     ),
-                    crate::core::errors::SimpleError::new("First output data size mismatch"),
-                ));
+                });
             }
 
             let first_tensor = ArrayView3::from_shape((dim0_1, dim1_1, dim2_1), first_data)
@@ -499,16 +442,12 @@ impl OrtInfer {
             let expected_len_2 = dim0_2 * dim1_2 * dim2_2;
 
             if second_data.len() != expected_len_2 {
-                return Err(OCRError::tensor_operation_error(
-                    "output_data_validation",
-                    &[expected_len_2],
-                    &[second_data.len()],
-                    &format!(
-                        "Model '{}' dual 3D inference: second output data size mismatch",
-                        model_name
+                return Err(OCRError::InvalidInput {
+                    message: format!(
+                        "Model '{}' dual 3D inference: second output data size mismatch - expected {}, got {}",
+                        model_name, expected_len_2, second_data.len()
                     ),
-                    crate::core::errors::SimpleError::new("Second output data size mismatch"),
-                ));
+                });
             }
 
             let second_tensor = ArrayView3::from_shape((dim0_2, dim1_2, dim2_2), second_data)
@@ -580,18 +519,14 @@ impl OrtInfer {
                     "im_shape" => shape_tensor,
                     "scale_factor" => scale_tensor
                 ];
-                session_guard
-                    .run(inputs)
-                    .map_err(|e| {
-                        OCRError::model_inference_error(
-                            &self.model_name,
-                            "forward_pass",
-                            0,
-                            input_shape,
+                session_guard.run(inputs).map_err(|e| {
+                    OCRError::model_inference_error_builder(&self.model_name, "forward_pass")
+                        .input_shape(input_shape)
+                        .context(
                             "ONNX Runtime inference failed with inputs 'image', 'im_shape', and 'scale_factor'",
-                            e,
                         )
-                    })?
+                        .build(e)
+                })?
             }
             (Some(_), Some(scale), false) | (None, Some(scale), _) => {
                 // PP-DocLayout models (S, M) or PicoDet models use scale_factor only (no im_shape)
@@ -610,14 +545,12 @@ impl OrtInfer {
                     "scale_factor" => scale_tensor
                 ];
                 session_guard.run(inputs).map_err(|e| {
-                    OCRError::model_inference_error(
-                        &self.model_name,
-                        "forward_pass",
-                        0,
-                        input_shape,
-                        "ONNX Runtime inference failed with inputs 'image' and 'scale_factor'",
-                        e,
-                    )
+                    OCRError::model_inference_error_builder(&self.model_name, "forward_pass")
+                        .input_shape(input_shape)
+                        .context(
+                            "ONNX Runtime inference failed with inputs 'image' and 'scale_factor'",
+                        )
+                        .build(e)
                 })?
             }
             _ => {
@@ -629,14 +562,10 @@ impl OrtInfer {
                 })?;
                 let inputs = ort::inputs!["image" => image_tensor];
                 session_guard.run(inputs).map_err(|e| {
-                    OCRError::model_inference_error(
-                        &self.model_name,
-                        "forward_pass",
-                        0,
-                        input_shape,
-                        "ONNX Runtime inference failed with single input 'image'",
-                        e,
-                    )
+                    OCRError::model_inference_error_builder(&self.model_name, "forward_pass")
+                        .input_shape(input_shape)
+                        .context("ONNX Runtime inference failed with single input 'image'")
+                        .build(e)
                 })?
             }
         };
@@ -647,14 +576,13 @@ impl OrtInfer {
         let output = outputs[output_name.as_str()]
             .try_extract_tensor::<f32>()
             .map_err(|e| {
-                OCRError::model_inference_error(
-                    &self.model_name,
-                    "output_extraction",
-                    0,
-                    input_shape,
-                    &format!("Failed to extract output tensor '{}' as f32", output_name),
-                    e,
-                )
+                OCRError::model_inference_error_builder(&self.model_name, "output_extraction")
+                    .input_shape(input_shape)
+                    .context(format!(
+                        "Failed to extract output tensor '{}' as f32",
+                        output_name
+                    ))
+                    .build(e)
             })?;
 
         let (output_shape, output_data) = output;
@@ -729,18 +657,14 @@ impl OrtInfer {
 
             Ok(array)
         } else {
-            Err(OCRError::tensor_operation_error(
-                "output_validation",
-                &[2, 4],
-                &[output_shape.len()],
-                &format!(
+            Err(OCRError::InvalidInput {
+                message: format!(
                     "Model '{}' layout inference: expected 2D or 4D output tensor, got {}D with shape {:?}",
                     self.model_name,
                     output_shape.len(),
                     output_shape
                 ),
-                crate::core::errors::SimpleError::new("Invalid output tensor dimensions"),
-            ))
+            })
         }
     }
 }

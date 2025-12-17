@@ -9,14 +9,14 @@ use crate::core::traits::{
 };
 use crate::core::{OCRError, TaskType, Tensor4D};
 use crate::domain::tasks::{
-    LayoutDetectionConfig, LayoutDetectionOutput, LayoutDetectionTask, LayoutElement,
+    LayoutDetectionConfig, LayoutDetectionOutput, LayoutDetectionTask, LayoutElement, UnclipRatio,
 };
 use crate::models::detection::{
     PPDocLayoutModel, PPDocLayoutModelBuilder, PPDocLayoutPostprocessConfig, PicoDetModel,
     PicoDetModelBuilder, PicoDetPostprocessConfig, RTDetrModel, RTDetrModelBuilder,
     RTDetrPostprocessConfig,
 };
-use crate::processors::{ImageScaleInfo, LayoutPostProcess};
+use crate::processors::{ImageScaleInfo, LayoutPostProcess, apply_nms_with_merge, unclip_boxes};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -450,9 +450,38 @@ impl LayoutDetectionAdapter {
 
         // Convert to layout elements
         for img_idx in 0..boxes.len() {
-            let img_boxes = &boxes[img_idx];
-            let img_classes = &class_ids[img_idx];
-            let img_scores = &scores[img_idx];
+            let mut img_boxes = boxes[img_idx].clone();
+            let mut img_classes = class_ids[img_idx].clone();
+            let mut img_scores = scores[img_idx].clone();
+
+            // Apply unclip ratio if configured (PP-StructureV3 layout_unclip_ratio)
+            if let Some(ref unclip_ratio) = config.layout_unclip_ratio {
+                let (width_ratio, height_ratio, per_class_ratios) = match unclip_ratio {
+                    UnclipRatio::Uniform(r) => (*r, *r, None),
+                    UnclipRatio::Separate(w, h) => (*w, *h, None),
+                    UnclipRatio::PerClass(ratios) => (1.0, 1.0, Some(ratios)),
+                };
+                img_boxes = unclip_boxes(
+                    &img_boxes,
+                    &img_classes,
+                    width_ratio,
+                    height_ratio,
+                    per_class_ratios,
+                );
+            }
+
+            // Apply NMS with merge modes if configured (PP-StructureV3 merge_bboxes_mode)
+            if let Some(ref merge_modes) = config.class_merge_modes {
+                (img_boxes, img_classes, img_scores) = apply_nms_with_merge(
+                    img_boxes,
+                    img_classes,
+                    img_scores,
+                    &self.model_config.class_labels,
+                    merge_modes,
+                    config.nms_threshold,
+                    config.max_elements,
+                );
+            }
 
             let mut img_elements = Vec::new();
 
@@ -461,15 +490,18 @@ impl LayoutDetectionAdapter {
                 .zip(img_classes.iter())
                 .zip(img_scores.iter())
             {
-                if score >= config.score_threshold {
-                    // Map class ID to element type
-                    let element_type = self
-                        .model_config
-                        .class_labels
-                        .get(&class_id)
-                        .cloned()
-                        .unwrap_or_else(|| "unknown".to_string());
+                // Map class ID to element type
+                let element_type = self
+                    .model_config
+                    .class_labels
+                    .get(&class_id)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
 
+                // Use per-class threshold if configured, otherwise fall back to default
+                let threshold = config.get_class_threshold(&element_type);
+
+                if score >= threshold {
                     let element = LayoutElement {
                         bbox: bbox.clone(),
                         element_type,
@@ -512,14 +544,16 @@ impl ModelAdapter for LayoutDetectionAdapter {
                 let postprocess_config = PicoDetPostprocessConfig {
                     num_classes: self.model_config.num_classes,
                 };
-                let (output, img_shapes) = model.forward(input.images, &postprocess_config)?;
+                let (output, img_shapes) =
+                    model.forward(input.images.clone(), &postprocess_config)?;
                 (output.predictions, img_shapes)
             }
             LayoutModel::RTDetr(model) => {
                 let postprocess_config = RTDetrPostprocessConfig {
                     num_classes: self.model_config.num_classes,
                 };
-                let (output, img_shapes) = model.forward(input.images, &postprocess_config)?;
+                let (output, img_shapes) =
+                    model.forward(input.images.clone(), &postprocess_config)?;
                 (output.predictions, img_shapes)
             }
             LayoutModel::PPDocLayout(model) => {
@@ -549,9 +583,8 @@ impl ModelAdapter for LayoutDetectionAdapter {
 /// Builder for layout detection adapters.
 #[derive(Debug, Default)]
 pub struct LayoutDetectionAdapterBuilder {
+    config: super::builder_config::AdapterBuilderConfig<LayoutDetectionConfig>,
     model_config: Option<LayoutModelConfig>,
-    task_config: LayoutDetectionConfig,
-    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl LayoutDetectionAdapterBuilder {
@@ -568,25 +601,25 @@ impl LayoutDetectionAdapterBuilder {
 
     /// Sets the task configuration.
     pub fn task_config(mut self, config: LayoutDetectionConfig) -> Self {
-        self.task_config = config;
+        self.config = self.config.with_task_config(config);
         self
     }
 
     /// Sets the score threshold.
     pub fn score_threshold(mut self, threshold: f32) -> Self {
-        self.task_config.score_threshold = threshold;
+        self.config.task_config.score_threshold = threshold;
         self
     }
 
     /// Sets the maximum number of elements.
     pub fn max_elements(mut self, max: usize) -> Self {
-        self.task_config.max_elements = max;
+        self.config.task_config.max_elements = max;
         self
     }
 
     /// Sets the ONNX Runtime session configuration.
     pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.ort_config = Some(config);
+        self.config = self.config.with_ort_config(config);
         self
     }
 
@@ -596,15 +629,22 @@ impl LayoutDetectionAdapterBuilder {
         model_path: &Path,
         model_config: LayoutModelConfig,
     ) -> Result<LayoutDetectionAdapter, OCRError> {
+        let (task_config, _session_pool_size, ort_config) = self
+            .config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
+
         // Create ONNX inference engine with proper input name based on model type
-        let inference = if self.ort_config.is_some() {
+        let inference = if ort_config.is_some() {
             use crate::core::config::ModelInferenceConfig;
             let input_name = match model_config.model_type.as_str() {
                 "pp-doclayout" => Some("image"),
                 _ => None,
             };
             let common_config = ModelInferenceConfig {
-                ort_session: self.ort_config,
+                ort_session: ort_config,
                 ..Default::default()
             };
             OrtInfer::from_config(&common_config, model_path, input_name)?
@@ -624,9 +664,9 @@ impl LayoutDetectionAdapterBuilder {
         // Create postprocessor
         let postprocessor = LayoutPostProcess::new(
             model_config.num_classes,
-            self.task_config.score_threshold,
-            0.5, // NMS threshold
-            self.task_config.max_elements,
+            task_config.score_threshold,
+            task_config.nms_threshold, // Use config value instead of hardcoded 0.5
+            task_config.max_elements,
             model_config.model_type.clone(),
         );
 
@@ -654,7 +694,7 @@ impl LayoutDetectionAdapterBuilder {
                     postprocessor,
                     model_config,
                     info,
-                    self.task_config,
+                    task_config,
                 )
             }
             "rtdetr" => {
@@ -664,7 +704,7 @@ impl LayoutDetectionAdapterBuilder {
                     postprocessor,
                     model_config,
                     info,
-                    self.task_config,
+                    task_config,
                 )
             }
             "pp-doclayout" => {
@@ -691,7 +731,7 @@ impl LayoutDetectionAdapterBuilder {
                     postprocessor,
                     model_config,
                     info,
-                    self.task_config,
+                    task_config,
                 )
             }
             _ => {
@@ -721,7 +761,7 @@ impl AdapterBuilder for LayoutDetectionAdapterBuilder {
     }
 
     fn with_config(mut self, config: Self::Config) -> Self {
-        self.task_config = config;
+        self.config = self.config.with_task_config(config);
         self
     }
 

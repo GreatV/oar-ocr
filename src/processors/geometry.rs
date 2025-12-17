@@ -525,6 +525,313 @@ impl BoundingBox {
 
         (a * point.x + b * point.y + c).abs() / denominator
     }
+
+    /// Gets the maximum x-coordinate of all points in the bounding box.
+    ///
+    /// # Returns
+    ///
+    /// The maximum x-coordinate, or 0.0 if there are no points.
+    pub fn x_max(&self) -> f32 {
+        if self.points.is_empty() {
+            return 0.0;
+        }
+        self.points
+            .iter()
+            .map(|p| p.x)
+            .fold(f32::NEG_INFINITY, f32::max)
+    }
+
+    /// Gets the maximum y-coordinate of all points in the bounding box.
+    ///
+    /// # Returns
+    ///
+    /// The maximum y-coordinate, or 0.0 if there are no points.
+    pub fn y_max(&self) -> f32 {
+        if self.points.is_empty() {
+            return 0.0;
+        }
+        self.points
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::NEG_INFINITY, f32::max)
+    }
+
+    /// Gets the geometric center (centroid) of the bounding box.
+    ///
+    /// # Returns
+    ///
+    /// The center point of the bounding box.
+    pub fn center(&self) -> Point {
+        if self.points.is_empty() {
+            return Point::new(0.0, 0.0);
+        }
+        let sum_x: f32 = self.points.iter().map(|p| p.x).sum();
+        let sum_y: f32 = self.points.iter().map(|p| p.y).sum();
+        let count = self.points.len() as f32;
+        Point::new(sum_x / count, sum_y / count)
+    }
+
+    /// Computes the area of intersection between this bounding box and another.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other bounding box.
+    ///
+    /// # Returns
+    ///
+    /// The area of the intersection. Returns 0.0 if there is no intersection.
+    pub fn intersection_area(&self, other: &BoundingBox) -> f32 {
+        let x1_min = self.x_min();
+        let y1_min = self.y_min();
+        let x1_max = self.x_max();
+        let y1_max = self.y_max();
+
+        let x2_min = other.x_min();
+        let y2_min = other.y_min();
+        let x2_max = other.x_max();
+        let y2_max = other.y_max();
+
+        // Compute intersection rectangle
+        let inter_x_min = x1_min.max(x2_min);
+        let inter_y_min = y1_min.max(y2_min);
+        let inter_x_max = x1_max.min(x2_max);
+        let inter_y_max = y1_max.min(y2_max);
+
+        // Check if there is no intersection
+        if inter_x_min >= inter_x_max || inter_y_min >= inter_y_max {
+            return 0.0;
+        }
+
+        // Compute intersection area
+        (inter_x_max - inter_x_min) * (inter_y_max - inter_y_min)
+    }
+
+    /// Computes the Intersection over Union (IoU) between this bounding box and another.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other bounding box to compute IoU with.
+    ///
+    /// # Returns
+    ///
+    /// The IoU value between 0.0 and 1.0. Returns 0.0 if there is no intersection.
+    pub fn iou(&self, other: &BoundingBox) -> f32 {
+        let inter_area = self.intersection_area(other);
+
+        if inter_area <= 0.0 {
+            return 0.0;
+        }
+
+        // Compute areas of both bounding boxes
+        // Note: Using simple rectangle areas for union calculation might be slightly inaccurate
+        // if boxes are rotated polygons, but intersection is calculated as AABB intersection.
+        // For consistency, we should probably use AABB area for IOU if we use AABB intersection.
+        // However, existing IOU implementation used (x_max-x_min)*(y_max-y_min) which is AABB area.
+        // So let's stick to AABB area for consistency with previous implementation.
+
+        let x1_min = self.x_min();
+        let y1_min = self.y_min();
+        let x1_max = self.x_max();
+        let y1_max = self.y_max();
+        let aabb_area1 = (x1_max - x1_min) * (y1_max - y1_min);
+
+        let x2_min = other.x_min();
+        let y2_min = other.y_min();
+        let x2_max = other.x_max();
+        let y2_max = other.y_max();
+        let aabb_area2 = (x2_max - x2_min) * (y2_max - y2_min);
+
+        let union_area = aabb_area1 + aabb_area2 - inter_area;
+
+        if union_area <= 0.0 {
+            return 0.0;
+        }
+
+        inter_area / union_area
+    }
+
+    /// Computes the Intersection over Area (IoA) of this bounding box with another.
+    ///
+    /// IoA = intersection_area / self_area
+    ///
+    /// This is useful for determining what fraction of this box is inside another box.
+    /// For example, to check if a text box is mostly inside a table region.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other bounding box to compute IoA with.
+    ///
+    /// # Returns
+    ///
+    /// The IoA value between 0.0 and 1.0. Returns 0.0 if self has zero area or no intersection.
+    pub fn ioa(&self, other: &BoundingBox) -> f32 {
+        let inter_area = self.intersection_area(other);
+
+        if inter_area <= 0.0 {
+            return 0.0;
+        }
+
+        let x_min = self.x_min();
+        let y_min = self.y_min();
+        let x_max = self.x_max();
+        let y_max = self.y_max();
+        let self_area = (x_max - x_min) * (y_max - y_min);
+
+        if self_area <= 0.0 {
+            return 0.0;
+        }
+
+        inter_area / self_area
+    }
+
+    /// Computes the union (minimum bounding box) of this bounding box and another.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other bounding box to compute the union with.
+    ///
+    /// # Returns
+    ///
+    /// A new `BoundingBox` that encloses both input bounding boxes.
+    pub fn union(&self, other: &Self) -> Self {
+        let new_x_min = self.x_min().min(other.x_min());
+        let new_y_min = self.y_min().min(other.y_min());
+        let new_x_max = self.x_max().max(other.x_max());
+        let new_y_max = self.y_max().max(other.y_max());
+        BoundingBox::from_coords(new_x_min, new_y_min, new_x_max, new_y_max)
+    }
+
+    /// Checks if this bounding box is fully inside another bounding box.
+    ///
+    /// # Arguments
+    ///
+    /// * `container` - The bounding box to check if this box is inside.
+    /// * `tolerance` - Optional tolerance in pixels for boundary checks (default: 0.0).
+    ///
+    /// # Returns
+    ///
+    /// `true` if this bounding box is fully contained within the container, `false` otherwise.
+    pub fn is_fully_inside(&self, container: &BoundingBox, tolerance: f32) -> bool {
+        let self_x_min = self.x_min();
+        let self_y_min = self.y_min();
+        let self_x_max = self.x_max();
+        let self_y_max = self.y_max();
+
+        let cont_x_min = container.x_min();
+        let cont_y_min = container.y_min();
+        let cont_x_max = container.x_max();
+        let cont_y_max = container.y_max();
+
+        self_x_min + tolerance >= cont_x_min
+            && self_y_min + tolerance >= cont_y_min
+            && self_x_max - tolerance <= cont_x_max
+            && self_y_max - tolerance <= cont_y_max
+    }
+
+    /// Checks if this bounding box overlaps with another bounding box.
+    ///
+    /// Two boxes are considered overlapping if their intersection has both width and height
+    /// greater than the specified threshold.
+    ///
+    /// This follows standard approach for checking box overlap.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other bounding box to check overlap with.
+    /// * `threshold` - Minimum intersection dimension (default: 3.0 pixels).
+    ///
+    /// # Returns
+    ///
+    /// `true` if the boxes overlap significantly, `false` otherwise.
+    pub fn overlaps_with(&self, other: &BoundingBox, threshold: f32) -> bool {
+        let x1_min = self.x_min();
+        let y1_min = self.y_min();
+        let x1_max = self.x_max();
+        let y1_max = self.y_max();
+
+        let x2_min = other.x_min();
+        let y2_min = other.y_min();
+        let x2_max = other.x_max();
+        let y2_max = other.y_max();
+
+        // Compute intersection rectangle
+        let inter_x_min = x1_min.max(x2_min);
+        let inter_y_min = y1_min.max(y2_min);
+        let inter_x_max = x1_max.min(x2_max);
+        let inter_y_max = y1_max.min(y2_max);
+
+        // Compute intersection dimensions
+        let inter_width = inter_x_max - inter_x_min;
+        let inter_height = inter_y_max - inter_y_min;
+
+        // Check if intersection is significant
+        inter_width > threshold && inter_height > threshold
+    }
+
+    /// Rotates this bounding box to compensate for document orientation correction.
+    ///
+    /// When a document is rotated during preprocessing (e.g., 90°, 180°, 270°),
+    /// detection boxes are in the rotated image's coordinate system. This method
+    /// transforms boxes back to the original image's coordinate system.
+    ///
+    /// # Arguments
+    ///
+    /// * `rotation_angle` - The rotation angle that was applied to correct the image (0°, 90°, 180°, 270°)
+    /// * `rotated_width` - Width of the image after rotation (i.e., the corrected image width)
+    /// * `rotated_height` - Height of the image after rotation (i.e., the corrected image height)
+    ///
+    /// # Returns
+    ///
+    /// A new `BoundingBox` with points transformed back to the original coordinate system.
+    ///
+    /// # Note
+    ///
+    /// The rotation transformations are:
+    /// - 90° correction: boxes rotated 90° clockwise (original was 90° counter-clockwise)
+    /// - 180° correction: boxes rotated 180°
+    /// - 270° correction: boxes rotated 270° clockwise (original was 270° counter-clockwise)
+    pub fn rotate_back_to_original(
+        &self,
+        rotation_angle: f32,
+        rotated_width: u32,
+        rotated_height: u32,
+    ) -> BoundingBox {
+        let angle = rotation_angle as i32;
+
+        let transformed_points: Vec<Point> = self
+            .points
+            .iter()
+            .map(|p| match angle {
+                90 => {
+                    // Image was rotated 270° counter-clockwise (or 90° clockwise) to correct
+                    // Inverse: rotate box 90° clockwise
+                    // (x, y) in rotated → (rotated_height - 1 - y, x) in original
+                    Point::new(rotated_height as f32 - 1.0 - p.y, p.x)
+                }
+                180 => {
+                    // Image was rotated 180° to correct
+                    // Inverse: rotate box 180°
+                    // (x, y) in rotated → (rotated_width - 1 - x, rotated_height - 1 - y) in original
+                    Point::new(
+                        rotated_width as f32 - 1.0 - p.x,
+                        rotated_height as f32 - 1.0 - p.y,
+                    )
+                }
+                270 => {
+                    // Image was rotated 90° counter-clockwise (or 270° clockwise) to correct
+                    // Inverse: rotate box 270° clockwise (or 90° counter-clockwise)
+                    // (x, y) in rotated → (y, rotated_width - 1 - x) in original
+                    Point::new(p.y, rotated_width as f32 - 1.0 - p.x)
+                }
+                _ => {
+                    // No rotation (0° or unknown)
+                    *p
+                }
+            })
+            .collect();
+
+        BoundingBox::new(transformed_points)
+    }
 }
 
 /// A rectangle with minimum area that encloses a shape.
@@ -778,5 +1085,108 @@ impl ScanlineBuffer {
         }
 
         (line_score, line_pixels)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bounding_box_x_max_y_max() {
+        let bbox = BoundingBox::from_coords(10.0, 20.0, 100.0, 80.0);
+        assert_eq!(bbox.x_min(), 10.0);
+        assert_eq!(bbox.y_min(), 20.0);
+        assert_eq!(bbox.x_max(), 100.0);
+        assert_eq!(bbox.y_max(), 80.0);
+    }
+
+    #[test]
+    fn test_bounding_box_iou() {
+        // Two overlapping boxes
+        let bbox1 = BoundingBox::from_coords(0.0, 0.0, 10.0, 10.0);
+        let bbox2 = BoundingBox::from_coords(5.0, 5.0, 15.0, 15.0);
+
+        // Intersection area: 5x5 = 25
+        // Union area: 100 + 100 - 25 = 175
+        // IoU: 25/175 ≈ 0.1428
+        let iou = bbox1.iou(&bbox2);
+        assert!((iou - 0.1428).abs() < 0.01, "IoU: {}", iou);
+
+        // Same box should have IoU of 1.0
+        let iou_same = bbox1.iou(&bbox1);
+        assert!((iou_same - 1.0).abs() < 0.001, "IoU same: {}", iou_same);
+
+        // Non-overlapping boxes should have IoU of 0.0
+        let bbox3 = BoundingBox::from_coords(20.0, 20.0, 30.0, 30.0);
+        let iou_none = bbox1.iou(&bbox3);
+        assert_eq!(iou_none, 0.0, "IoU non-overlapping: {}", iou_none);
+    }
+
+    #[test]
+    fn test_bounding_box_is_fully_inside() {
+        let container = BoundingBox::from_coords(0.0, 0.0, 100.0, 100.0);
+        let inner = BoundingBox::from_coords(10.0, 10.0, 50.0, 50.0);
+        let partial = BoundingBox::from_coords(80.0, 80.0, 120.0, 120.0);
+        let outside = BoundingBox::from_coords(110.0, 110.0, 150.0, 150.0);
+
+        // Inner box should be fully inside
+        assert!(inner.is_fully_inside(&container, 0.0));
+
+        // Partial overlap should not be fully inside
+        assert!(!partial.is_fully_inside(&container, 0.0));
+
+        // Outside box should not be fully inside
+        assert!(!outside.is_fully_inside(&container, 0.0));
+
+        // Test with tolerance
+        let almost_inside = BoundingBox::from_coords(1.0, 1.0, 99.0, 99.0);
+        assert!(almost_inside.is_fully_inside(&container, 0.0));
+        assert!(almost_inside.is_fully_inside(&container, 2.0));
+    }
+
+    #[test]
+    fn test_bounding_box_iou_with_table_region() {
+        // Simulate a table region and cell detections
+        let table_region = BoundingBox::from_coords(50.0, 50.0, 200.0, 200.0);
+
+        // Cell fully inside table
+        let cell_inside = BoundingBox::from_coords(60.0, 60.0, 100.0, 100.0);
+        assert!(cell_inside.is_fully_inside(&table_region, 0.0));
+        assert!(cell_inside.iou(&table_region) > 0.0);
+
+        // Cell with significant overlap (IoU > 0.5)
+        let cell_overlap = BoundingBox::from_coords(40.0, 40.0, 150.0, 150.0);
+        let iou_overlap = cell_overlap.iou(&table_region);
+        // This cell should have reasonable overlap
+        assert!(iou_overlap > 0.3, "IoU: {}", iou_overlap);
+
+        // Cell outside table
+        let cell_outside = BoundingBox::from_coords(250.0, 250.0, 300.0, 300.0);
+        assert!(!cell_outside.is_fully_inside(&table_region, 0.0));
+        assert_eq!(cell_outside.iou(&table_region), 0.0);
+    }
+
+    #[test]
+    fn test_bounding_box_overlaps_with() {
+        // Two boxes with significant overlap
+        let box1 = BoundingBox::from_coords(0.0, 0.0, 100.0, 100.0);
+        let box2 = BoundingBox::from_coords(50.0, 50.0, 150.0, 150.0);
+
+        // Overlap width and height are both 50, which is > 3
+        assert!(box1.overlaps_with(&box2, 3.0));
+        assert!(box2.overlaps_with(&box1, 3.0));
+
+        // Boxes with minimal overlap (< 3 pixels)
+        let box3 = BoundingBox::from_coords(99.0, 99.0, 150.0, 150.0);
+        assert!(!box1.overlaps_with(&box3, 3.0));
+
+        // Non-overlapping boxes
+        let box4 = BoundingBox::from_coords(200.0, 200.0, 300.0, 300.0);
+        assert!(!box1.overlaps_with(&box4, 3.0));
+
+        // Adjacent boxes (touching but not overlapping)
+        let box5 = BoundingBox::from_coords(100.0, 0.0, 200.0, 100.0);
+        assert!(!box1.overlaps_with(&box5, 3.0));
     }
 }

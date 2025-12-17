@@ -13,9 +13,32 @@ pub enum ConfigError {
     #[error("batch size must be greater than 0")]
     InvalidBatchSize,
 
+    /// Error indicating that a batch size exceeds the maximum allowed.
+    #[error(
+        "batch size {actual} exceeds maximum allowed {max}; consider reducing batch size or increasing memory limits"
+    )]
+    BatchSizeTooLarge { actual: usize, max: usize },
+
     /// Error indicating that a model path does not exist.
-    #[error("model path does not exist: {path}")]
+    #[error("model path does not exist: {path}; ensure the model file has been downloaded")]
     ModelPathNotFound { path: std::path::PathBuf },
+
+    /// Error indicating that a model path is not a file.
+    #[error("model path '{path}' is not a file; expected a .onnx model file")]
+    ModelPathNotFile { path: std::path::PathBuf },
+
+    /// Error indicating that a configuration field has an invalid value.
+    #[error("invalid value for field '{field}': expected {expected}, got {actual}{suggestion}")]
+    InvalidFieldValue {
+        field: String,
+        expected: String,
+        actual: String,
+        suggestion: String,
+    },
+
+    /// Error indicating that a required configuration field is missing.
+    #[error("missing required configuration field '{field}'{suggestion}")]
+    MissingRequiredField { field: String, suggestion: String },
 
     /// Error indicating that a configuration is invalid.
     #[error("invalid configuration: {message}")]
@@ -28,6 +51,14 @@ pub enum ConfigError {
     /// Error indicating that a resource limit has been exceeded.
     #[error("resource limit exceeded: {message}")]
     ResourceLimitExceeded { message: String },
+
+    /// Error indicating a dependency issue in the task graph.
+    #[error("dependency error: {message}")]
+    DependencyError { message: String },
+
+    /// Error indicating a type mismatch in the task graph.
+    #[error("type mismatch: {message}")]
+    TypeMismatch { message: String },
 }
 
 /// A trait for configuration types that can provide recommended defaults.
@@ -112,11 +143,9 @@ pub trait ConfigValidator {
             return Err(ConfigError::InvalidBatchSize);
         }
         if batch_size > max_batch_size {
-            return Err(ConfigError::ResourceLimitExceeded {
-                message: format!(
-                    "Batch size {} exceeds maximum allowed batch size {}",
-                    batch_size, max_batch_size
-                ),
+            return Err(ConfigError::BatchSizeTooLarge {
+                actual: batch_size,
+                max: max_batch_size,
             });
         }
         Ok(())
@@ -139,8 +168,8 @@ pub trait ConfigValidator {
                 path: path.to_path_buf(),
             })
         } else if !path.is_file() {
-            Err(ConfigError::InvalidConfig {
-                message: format!("Model path is not a file: {}", path.display()),
+            Err(ConfigError::ModelPathNotFile {
+                path: path.to_path_buf(),
             })
         } else {
             Ok(())

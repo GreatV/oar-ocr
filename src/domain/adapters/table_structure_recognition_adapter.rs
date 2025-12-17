@@ -41,8 +41,14 @@ impl TableStructureRecognitionAdapter {
         }
     }
 
-    /// Default input shape for table structure recognition (488x488 as per PaddleOCR config).
-    pub const DEFAULT_INPUT_SHAPE: (u32, u32) = (488, 488);
+    /// Default input shape for wired table structure recognition (SLANeXt_wired).
+    pub const DEFAULT_INPUT_SHAPE: (u32, u32) = (512, 512);
+
+    /// Default input shape for wireless table structure recognition (SLANet_plus).
+    ///
+    /// PP-StructureV3 uses SLANet_plus (not SLANeXt_wireless) for wireless tables,
+    /// which requires 488×488 input size.
+    pub const DEFAULT_WIRELESS_INPUT_SHAPE: (u32, u32) = (488, 488);
 }
 
 impl ModelAdapter for TableStructureRecognitionAdapter {
@@ -107,17 +113,13 @@ impl ModelAdapter for TableStructureRecognitionAdapter {
                 .unwrap_or(0.0);
 
             if structure_score < effective_config.score_threshold {
+                // Do not drop results, just log for visibility.
                 tracing::warn!(
-                    "Image {}: Structure score {:.3} below threshold {:.3}, returning empty result",
+                    "Image {}: Structure score {:.3} below threshold {:.3}, keeping result",
                     img_idx,
                     structure_score,
                     effective_config.score_threshold
                 );
-                // Return empty result for this image instead of failing the entire batch
-                structures.push(Vec::new());
-                bboxes.push(Vec::new());
-                structure_scores.push(structure_score);
-                continue;
             }
 
             let trimmed_tokens: Vec<String> = structure_tokens
@@ -137,47 +139,29 @@ impl ModelAdapter for TableStructureRecognitionAdapter {
                 );
             }
 
-            // Add HTML wrapping like PaddleX
-            let mut structure = vec![
-                "<html>".to_string(),
-                "<body>".to_string(),
-                "<table>".to_string(),
-            ];
-            structure.extend(trimmed_tokens);
-            structure.extend(vec![
-                "</table>".to_string(),
-                "</body>".to_string(),
-                "</html>".to_string(),
-            ]);
+            // Do NOT add HTML wrapping here - it will be done by wrap_table_html later
+            // The adapter should just return the raw structure tokens
+            // TableLabelDecode adds wrapping in postprocessor, but we handle it in wrap_table_html
+            let structure = trimmed_tokens;
 
-            tracing::debug!(
-                "Image {}: Final HTML structure output: {:?}",
-                img_idx,
-                structure
-            );
+            tracing::debug!("Image {}: Final structure tokens: {:?}", img_idx, structure);
 
-            // Convert bboxes from [f32; 8] to Vec<Vec<i32>> (round to integers like PaddleX)
-            let bbox: Vec<Vec<i32>> = image_bboxes
+            // Return bboxes as [f32; 8] without rounding to preserve precision for IoA calculation
+            let bbox: Vec<Vec<f32>> = image_bboxes
                 .iter()
                 .take(trimmed_len)
                 .map(|&bbox_coords| {
-                    let int_coords: Vec<i32> = bbox_coords
-                        .iter()
-                        .map(|&coord| coord.round() as i32)
-                        .collect();
-                    tracing::debug!(
-                        "Image {}: Converted bbox {:?} to {:?}",
-                        img_idx,
-                        bbox_coords,
-                        int_coords
-                    );
-                    int_coords
+                    let coords: Vec<f32> = bbox_coords.to_vec();
+                    tracing::debug!("Image {}: BBox coords: {:?}", img_idx, coords);
+                    coords
                 })
                 .collect();
 
             if bbox.len() < trimmed_len {
-                tracing::warn!(
-                    "Image {}: Only {} bounding boxes available for {} structure tokens",
+                // This is expected: structure tokens include all tags (<tr>, </tr>, etc.)
+                // while bboxes are only for TD tokens (<td>, <td></td>)
+                tracing::debug!(
+                    "Image {}: {} bounding boxes for {} structure tokens (TD tokens only have bboxes)",
                     img_idx,
                     bbox.len(),
                     trimmed_len
@@ -208,43 +192,44 @@ impl ModelAdapter for TableStructureRecognitionAdapter {
 }
 
 /// Builder for table structure recognition adapter (wired tables).
+///
+/// Uses SLANeXt_wired model which requires 512×512 input size (per PP-StructureV3 configuration).
+/// If no input shape is specified, it will be auto-detected from the ONNX model.
 pub struct SLANetWiredAdapterBuilder {
-    /// Task configuration
-    task_config: TableStructureRecognitionConfig,
-    /// Input shape (height, width)
-    input_shape: (u32, u32),
-    /// Session pool size for ONNX Runtime
-    session_pool_size: usize,
+    config: super::builder_config::AdapterBuilderConfig<TableStructureRecognitionConfig>,
+    /// Input shape (height, width) - if None, will be auto-detected from ONNX
+    input_shape: Option<(u32, u32)>,
     /// Dictionary path
     dict_path: Option<std::path::PathBuf>,
     /// Optional override for the registered model name
     model_name_override: Option<String>,
-    /// ONNX Runtime session configuration
-    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl SLANetWiredAdapterBuilder {
     /// Creates a new builder with default configuration.
+    ///
+    /// Input shape will be auto-detected from the ONNX model if not explicitly set.
     pub fn new() -> Self {
         Self {
-            task_config: TableStructureRecognitionConfig::default(),
-            input_shape: TableStructureRecognitionAdapter::DEFAULT_INPUT_SHAPE,
-            session_pool_size: 1,
+            config: super::builder_config::AdapterBuilderConfig::default(),
+            input_shape: Some((512, 512)), // SLANeXt_wired is trained/evaluated at 512
             dict_path: None,
             model_name_override: None,
-            ort_config: None,
         }
     }
 
-    /// Sets the input shape.
+    /// Sets the input shape explicitly.
+    ///
+    /// If not set, the input shape will be auto-detected from the ONNX model.
+    /// For SLANeXt_wired, the expected shape is 512×512.
     pub fn input_shape(mut self, input_shape: (u32, u32)) -> Self {
-        self.input_shape = input_shape;
+        self.input_shape = Some(input_shape);
         self
     }
 
     /// Sets the session pool size.
     pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.session_pool_size = size;
+        self.config = self.config.with_session_pool_size(size);
         self
     }
 
@@ -262,7 +247,7 @@ impl SLANetWiredAdapterBuilder {
 
     /// Sets the ONNX Runtime session configuration.
     pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.ort_config = Some(config);
+        self.config = self.config.with_ort_config(config);
         self
     }
 }
@@ -278,12 +263,22 @@ impl AdapterBuilder for SLANetWiredAdapterBuilder {
     type Adapter = TableStructureRecognitionAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        // Build the SLANet model
-        let mut model_builder = SLANetModelBuilder::new()
-            .session_pool_size(self.session_pool_size)
-            .input_size(self.input_shape);
+        let (task_config, session_pool_size, ort_config) = self
+            .config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
 
-        if let Some(ort_config) = self.ort_config {
+        // Build the SLANet model - input shape will be auto-detected from ONNX if not set
+        let mut model_builder = SLANetModelBuilder::new().session_pool_size(session_pool_size);
+
+        // Only set input size if explicitly provided; otherwise let ONNX auto-detect
+        if let Some(input_shape) = self.input_shape {
+            model_builder = model_builder.input_size(input_shape);
+        }
+
+        if let Some(ort_config) = ort_config {
             model_builder = model_builder.with_ort_config(ort_config);
         }
 
@@ -312,12 +307,12 @@ impl AdapterBuilder for SLANetWiredAdapterBuilder {
             model,
             decoder,
             info,
-            self.task_config,
+            task_config,
         ))
     }
 
     fn with_config(mut self, config: Self::Config) -> Self {
-        self.task_config = config;
+        self.config = self.config.with_task_config(config);
         self
     }
 
@@ -327,43 +322,45 @@ impl AdapterBuilder for SLANetWiredAdapterBuilder {
 }
 
 /// Builder for table structure recognition adapter (wireless tables).
+///
+/// Uses SLANet_plus model which requires 488×488 input size (per PP-StructureV3 configuration).
+/// If no input shape is specified, it will be auto-detected from the ONNX model.
 pub struct SLANetWirelessAdapterBuilder {
-    /// Task configuration
-    task_config: TableStructureRecognitionConfig,
-    /// Input shape (height, width)
-    input_shape: (u32, u32),
-    /// Session pool size for ONNX Runtime
-    session_pool_size: usize,
+    config: super::builder_config::AdapterBuilderConfig<TableStructureRecognitionConfig>,
+    /// Input shape (height, width) - if None, will be auto-detected from ONNX
+    input_shape: Option<(u32, u32)>,
     /// Dictionary path
     dict_path: Option<std::path::PathBuf>,
     /// Optional override for the registered model name
     model_name_override: Option<String>,
-    /// ONNX Runtime session configuration
-    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl SLANetWirelessAdapterBuilder {
     /// Creates a new builder with default configuration.
+    ///
+    /// Input shape will be auto-detected from the ONNX model.
+    /// For SLANet/SLANet_plus with dynamic input, this enables no-padding preprocessing.
     pub fn new() -> Self {
         Self {
-            task_config: TableStructureRecognitionConfig::default(),
-            input_shape: TableStructureRecognitionAdapter::DEFAULT_INPUT_SHAPE,
-            session_pool_size: 1,
+            config: super::builder_config::AdapterBuilderConfig::default(),
+            input_shape: Some((488, 488)), // SLANet_plus requires 488x488 with padding
             dict_path: None,
             model_name_override: None,
-            ort_config: None,
         }
     }
 
-    /// Sets the input shape.
+    /// Sets the input shape explicitly.
+    ///
+    /// If not set, the input shape will be auto-detected from the ONNX model.
+    /// For SLANet_plus, the expected shape is 488×488.
     pub fn input_shape(mut self, input_shape: (u32, u32)) -> Self {
-        self.input_shape = input_shape;
+        self.input_shape = Some(input_shape);
         self
     }
 
     /// Sets the session pool size.
     pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.session_pool_size = size;
+        self.config = self.config.with_session_pool_size(size);
         self
     }
 
@@ -381,7 +378,7 @@ impl SLANetWirelessAdapterBuilder {
 
     /// Sets the ONNX Runtime session configuration.
     pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.ort_config = Some(config);
+        self.config = self.config.with_ort_config(config);
         self
     }
 }
@@ -397,12 +394,22 @@ impl AdapterBuilder for SLANetWirelessAdapterBuilder {
     type Adapter = TableStructureRecognitionAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        // Build the SLANet model
-        let mut model_builder = SLANetModelBuilder::new()
-            .session_pool_size(self.session_pool_size)
-            .input_size(self.input_shape);
+        let (task_config, session_pool_size, ort_config) = self
+            .config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
 
-        if let Some(ort_config) = self.ort_config {
+        // Build the SLANet model - input shape will be auto-detected from ONNX if not set
+        let mut model_builder = SLANetModelBuilder::new().session_pool_size(session_pool_size);
+
+        // Only set input size if explicitly provided; otherwise let ONNX auto-detect
+        if let Some(input_shape) = self.input_shape {
+            model_builder = model_builder.input_size(input_shape);
+        }
+
+        if let Some(ort_config) = ort_config {
             model_builder = model_builder.with_ort_config(ort_config);
         }
 
@@ -421,7 +428,7 @@ impl AdapterBuilder for SLANetWirelessAdapterBuilder {
             "table_structure_recognition_wireless",
             "1.0.0",
             TaskType::TableStructureRecognition,
-            "Table structure recognition (wireless tables) using SLANeXt model",
+            "Table structure recognition (wireless tables) using SLANet_plus model",
         );
         if let Some(model_name) = self.model_name_override {
             info.model_name = model_name;
@@ -431,12 +438,12 @@ impl AdapterBuilder for SLANetWirelessAdapterBuilder {
             model,
             decoder,
             info,
-            self.task_config,
+            task_config,
         ))
     }
 
     fn with_config(mut self, config: Self::Config) -> Self {
-        self.task_config = config;
+        self.config = self.config.with_task_config(config);
         self
     }
 
@@ -468,7 +475,7 @@ mod tests {
             .session_pool_size(4)
             .dict_path("models/table_structure_dict_ch.txt");
 
-        assert_eq!(builder.input_shape, (640, 640));
-        assert_eq!(builder.session_pool_size, 4);
+        assert_eq!(builder.input_shape, Some((640, 640)));
+        assert_eq!(builder.config.session_pool_size(), 4);
     }
 }

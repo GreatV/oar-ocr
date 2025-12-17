@@ -5,26 +5,35 @@
 use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
 use crate::core::traits::task::{Task, TaskSchema, TaskType};
+use crate::impl_config_validator;
+use crate::utils::{ScoreValidator, validate_length_match, validate_max_value};
 use image::RgbImage;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for text recognition task.
+///
+/// Default values are aligned with PP-StructureV3.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextRecognitionConfig {
-    /// Score threshold for recognition (default: 0.5)
+    /// Score threshold for recognition (default: 0.0, no filtering)
     pub score_threshold: f32,
-    /// Maximum text length (default: 100)
+    /// Maximum text length (default: 25)
     pub max_text_length: usize,
 }
 
 impl Default for TextRecognitionConfig {
     fn default() -> Self {
         Self {
-            score_threshold: 0.5,
-            max_text_length: 100,
+            score_threshold: 0.0,
+            max_text_length: 25,
         }
     }
 }
+
+impl_config_validator!(TextRecognitionConfig {
+    score_threshold: range(0.0, 1.0),
+    max_text_length: min(1),
+});
 
 /// Input for text recognition task (cropped text images).
 #[derive(Debug, Clone)]
@@ -34,7 +43,7 @@ pub struct TextRecognitionInput {
 }
 
 impl TextRecognitionInput {
-    /// Creates a new text recognition input.
+    /// Creates a new text recognition input from owned images.
     pub fn new(images: Vec<RgbImage>) -> Self {
         Self { images }
     }
@@ -47,6 +56,15 @@ pub struct TextRecognitionOutput {
     pub texts: Vec<String>,
     /// Confidence scores for each text
     pub scores: Vec<f32>,
+    /// Character/word positions within each text line (optional)
+    /// Each inner vector contains normalized x-positions (0.0-1.0) for characters
+    /// Only populated when word box detection is enabled
+    pub char_positions: Vec<Vec<f32>>,
+    /// Column indices for each character in the CTC output
+    /// Used for accurate word box generation with compatible approach
+    pub char_col_indices: Vec<Vec<usize>>,
+    /// Total number of columns (sequence length) in the CTC output for each text line
+    pub sequence_lengths: Vec<usize>,
 }
 
 impl TextRecognitionOutput {
@@ -55,6 +73,9 @@ impl TextRecognitionOutput {
         Self {
             texts: Vec::new(),
             scores: Vec::new(),
+            char_positions: Vec::new(),
+            char_col_indices: Vec::new(),
+            sequence_lengths: Vec::new(),
         }
     }
 
@@ -63,7 +84,16 @@ impl TextRecognitionOutput {
         Self {
             texts: Vec::with_capacity(capacity),
             scores: Vec::with_capacity(capacity),
+            char_positions: Vec::with_capacity(capacity),
+            char_col_indices: Vec::with_capacity(capacity),
+            sequence_lengths: Vec::with_capacity(capacity),
         }
+    }
+}
+
+impl Default for TextRecognitionOutput {
+    fn default() -> Self {
+        Self::empty()
     }
 }
 
@@ -105,37 +135,20 @@ impl Task for TextRecognitionTask {
 
     fn validate_output(&self, output: &Self::Output) -> Result<(), OCRError> {
         // Validate that texts and scores have matching lengths
-        if output.texts.len() != output.scores.len() {
-            return Err(OCRError::InvalidInput {
-                message: format!(
-                    "Mismatch between texts count ({}) and scores count ({})",
-                    output.texts.len(),
-                    output.scores.len()
-                ),
-            });
-        }
+        validate_length_match(output.texts.len(), output.scores.len(), "texts", "scores")?;
 
         // Validate score ranges
-        for (idx, &score) in output.scores.iter().enumerate() {
-            if !(0.0..=1.0).contains(&score) {
-                return Err(OCRError::InvalidInput {
-                    message: format!("Text {}: score {} is out of valid range [0, 1]", idx, score),
-                });
-            }
-        }
+        let validator = ScoreValidator::new_unit_range("score");
+        validator.validate_scores_with(&output.scores, |idx| format!("Text {}", idx))?;
 
         // Validate text lengths
         for (idx, text) in output.texts.iter().enumerate() {
-            if text.len() > self.config.max_text_length {
-                return Err(OCRError::InvalidInput {
-                    message: format!(
-                        "Text {}: length {} exceeds maximum {}",
-                        idx,
-                        text.len(),
-                        self.config.max_text_length
-                    ),
-                });
-            }
+            validate_max_value(
+                text.len(),
+                self.config.max_text_length,
+                "length",
+                &format!("Text {}", idx),
+            )?;
         }
 
         Ok(())
@@ -177,6 +190,7 @@ mod tests {
         let output = TextRecognitionOutput {
             texts: vec!["Hello".to_string()],
             scores: vec![0.95],
+            ..Default::default()
         };
         assert!(task.validate_output(&output).is_ok());
 
@@ -184,6 +198,7 @@ mod tests {
         let bad_output = TextRecognitionOutput {
             texts: vec![],
             scores: vec![0.95],
+            ..Default::default()
         };
         assert!(task.validate_output(&bad_output).is_err());
 
@@ -191,6 +206,7 @@ mod tests {
         let bad_score = TextRecognitionOutput {
             texts: vec!["Hello".to_string()],
             scores: vec![1.5],
+            ..Default::default()
         };
         assert!(task.validate_output(&bad_score).is_err());
     }

@@ -4,9 +4,11 @@
 //! PicoDet, RT-DETR, and PP-DocLayout series models.
 
 use crate::core::Tensor4D;
+use crate::domain::tasks::MergeBboxMode;
 use crate::processors::{BoundingBox, ImageScaleInfo, Point};
 use ndarray::{ArrayView3, Axis};
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 type LayoutPostprocessOutput = (Vec<Vec<BoundingBox>>, Vec<Vec<usize>>, Vec<Vec<f32>>);
 
@@ -475,6 +477,221 @@ impl LayoutPostProcess {
         }
 
         (x_min, y_min, x_max, y_max)
+    }
+}
+
+/// Apply unclip ratio to expand/shrink bounding boxes while keeping center fixed.
+///
+/// This follows PP-StructureV3's `layout_unclip_ratio` parameter behavior.
+///
+/// # Arguments
+/// * `boxes` - Input bounding boxes
+/// * `classes` - Class IDs for each box
+/// * `width_ratio` - Ratio to apply to box width (1.0 = no change)
+/// * `height_ratio` - Ratio to apply to box height (1.0 = no change)
+/// * `per_class_ratios` - Optional per-class ratios: class_id -> (width_ratio, height_ratio)
+///
+/// # Returns
+/// Transformed bounding boxes with same center but scaled dimensions
+pub fn unclip_boxes(
+    boxes: &[BoundingBox],
+    classes: &[usize],
+    width_ratio: f32,
+    height_ratio: f32,
+    per_class_ratios: Option<&std::collections::HashMap<usize, (f32, f32)>>,
+) -> Vec<BoundingBox> {
+    boxes
+        .iter()
+        .zip(classes.iter())
+        .map(|(bbox, &class_id)| {
+            // Get ratio for this class
+            let (w_ratio, h_ratio) = per_class_ratios
+                .and_then(|ratios| ratios.get(&class_id).copied())
+                .unwrap_or((width_ratio, height_ratio));
+
+            // Skip if ratios are 1.0 (no change)
+            if (w_ratio - 1.0).abs() < 1e-6 && (h_ratio - 1.0).abs() < 1e-6 {
+                return bbox.clone();
+            }
+
+            // Get current bounds
+            let x_min = bbox.x_min();
+            let y_min = bbox.y_min();
+            let x_max = bbox.x_max();
+            let y_max = bbox.y_max();
+
+            // Calculate center and dimensions
+            let width = x_max - x_min;
+            let height = y_max - y_min;
+            let center_x = x_min + width / 2.0;
+            let center_y = y_min + height / 2.0;
+
+            // Apply ratio
+            let new_width = width * w_ratio;
+            let new_height = height * h_ratio;
+
+            // Calculate new bounds
+            let new_x_min = center_x - new_width / 2.0;
+            let new_y_min = center_y - new_height / 2.0;
+            let new_x_max = center_x + new_width / 2.0;
+            let new_y_max = center_y + new_height / 2.0;
+
+            BoundingBox::from_coords(new_x_min, new_y_min, new_x_max, new_y_max)
+        })
+        .collect()
+}
+
+/// Merge two bounding boxes according to the specified mode.
+///
+/// # Arguments
+/// * `box1` - First bounding box
+/// * `box2` - Second bounding box
+/// * `mode` - Merge mode to apply
+///
+/// # Returns
+/// Merged bounding box according to the mode
+pub fn merge_boxes(box1: &BoundingBox, box2: &BoundingBox, mode: MergeBboxMode) -> BoundingBox {
+    let (x1_min, y1_min, x1_max, y1_max) = (box1.x_min(), box1.y_min(), box1.x_max(), box1.y_max());
+    let (x2_min, y2_min, x2_max, y2_max) = (box2.x_min(), box2.y_min(), box2.x_max(), box2.y_max());
+
+    let area1 = (x1_max - x1_min) * (y1_max - y1_min);
+    let area2 = (x2_max - x2_min) * (y2_max - y2_min);
+
+    match mode {
+        MergeBboxMode::Large => {
+            // Keep the larger bounding box
+            if area1 >= area2 {
+                box1.clone()
+            } else {
+                box2.clone()
+            }
+        }
+        MergeBboxMode::Small => {
+            // Keep the smaller bounding box
+            if area1 <= area2 {
+                box1.clone()
+            } else {
+                box2.clone()
+            }
+        }
+        MergeBboxMode::Union => {
+            // Merge to union of bounding boxes
+            let union_x_min = x1_min.min(x2_min);
+            let union_y_min = y1_min.min(y2_min);
+            let union_x_max = x1_max.max(x2_max);
+            let union_y_max = y1_max.max(y2_max);
+            BoundingBox::from_coords(union_x_min, union_y_min, union_x_max, union_y_max)
+        }
+    }
+}
+
+/// Apply Non-Maximum Suppression with per-class merge modes.
+///
+/// Unlike standard NMS which simply suppresses (discards) overlapping boxes,
+/// this function can merge overlapping boxes according to the specified mode.
+///
+/// # Arguments
+/// * `boxes` - Input bounding boxes
+/// * `classes` - Class IDs for each box
+/// * `scores` - Confidence scores for each box
+/// * `class_labels` - Mapping from class ID to label string
+/// * `class_merge_modes` - Per-class merge modes (label -> mode)
+/// * `nms_threshold` - IoU threshold for overlap detection
+/// * `max_detections` - Maximum number of detections to return
+///
+/// # Returns
+/// Tuple of (filtered_boxes, filtered_classes, filtered_scores)
+pub fn apply_nms_with_merge(
+    boxes: Vec<BoundingBox>,
+    classes: Vec<usize>,
+    scores: Vec<f32>,
+    class_labels: &HashMap<usize, String>,
+    class_merge_modes: &HashMap<String, MergeBboxMode>,
+    nms_threshold: f32,
+    max_detections: usize,
+) -> (Vec<BoundingBox>, Vec<usize>, Vec<f32>) {
+    if boxes.is_empty() {
+        return (boxes, classes, scores);
+    }
+
+    // Sort by score in descending order
+    let mut indices: Vec<usize> = (0..boxes.len()).collect();
+    indices.sort_by(|&a, &b| scores[b].partial_cmp(&scores[a]).unwrap());
+
+    let mut result_boxes = Vec::new();
+    let mut result_classes = Vec::new();
+    let mut result_scores = Vec::new();
+    let mut processed = vec![false; boxes.len()];
+
+    for &i in &indices {
+        if processed[i] {
+            continue;
+        }
+
+        processed[i] = true;
+
+        // Get merge mode for this class
+        let class_label = class_labels
+            .get(&classes[i])
+            .map(|s| s.as_str())
+            .unwrap_or("unknown");
+        let merge_mode = class_merge_modes
+            .get(class_label)
+            .copied()
+            .unwrap_or(MergeBboxMode::Large);
+
+        let mut merged_box = boxes[i].clone();
+        let mut best_score = scores[i];
+
+        // Find overlapping boxes of the same class and merge them
+        for &j in &indices {
+            if i != j && !processed[j] && classes[i] == classes[j] {
+                let iou = calculate_iou_static(&merged_box, &boxes[j]);
+                if iou > nms_threshold {
+                    // Merge the boxes
+                    merged_box = merge_boxes(&merged_box, &boxes[j], merge_mode);
+                    best_score = best_score.max(scores[j]);
+                    processed[j] = true;
+                }
+            }
+        }
+
+        result_boxes.push(merged_box);
+        result_classes.push(classes[i]);
+        result_scores.push(best_score);
+
+        if result_boxes.len() >= max_detections {
+            break;
+        }
+    }
+
+    (result_boxes, result_classes, result_scores)
+}
+
+/// Calculate IoU between two bounding boxes (standalone function).
+fn calculate_iou_static(box1: &BoundingBox, box2: &BoundingBox) -> f32 {
+    let (x1_min, y1_min, x1_max, y1_max) = (box1.x_min(), box1.y_min(), box1.x_max(), box1.y_max());
+    let (x2_min, y2_min, x2_max, y2_max) = (box2.x_min(), box2.y_min(), box2.x_max(), box2.y_max());
+
+    // Calculate intersection
+    let x_min = x1_min.max(x2_min);
+    let y_min = y1_min.max(y2_min);
+    let x_max = x1_max.min(x2_max);
+    let y_max = y1_max.min(y2_max);
+
+    if x_max <= x_min || y_max <= y_min {
+        return 0.0;
+    }
+
+    let intersection = (x_max - x_min) * (y_max - y_min);
+    let area1 = (x1_max - x1_min) * (y1_max - y1_min);
+    let area2 = (x2_max - x2_min) * (y2_max - y2_min);
+    let union = area1 + area2 - intersection;
+
+    if union > 0.0 {
+        intersection / union
+    } else {
+        0.0
     }
 }
 

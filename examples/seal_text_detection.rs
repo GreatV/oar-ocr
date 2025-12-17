@@ -21,17 +21,14 @@
 //! * `--device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
 //! * `<IMAGES>...` - Paths to input images to process
 
-mod common;
+mod utils;
 
 use clap::Parser;
-use common::parse_device_config;
-use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
-use oar_ocr::core::traits::task::{ImageTaskInput, Task};
-use oar_ocr::domain::adapters::SealTextDetectionAdapterBuilder;
-use oar_ocr::domain::tasks::{SealTextDetectionConfig, SealTextDetectionTask};
+use oar_ocr::predictors::SealTextDetectionPredictor;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info};
+use utils::parse_device_config;
 
 #[cfg(feature = "visualization")]
 use image::RgbImage;
@@ -104,44 +101,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Log device configuration
     info!("Using device: {}", args.device);
-    let ort_config = parse_device_config(&args.device)?;
+    let mut ort_config = parse_device_config(&args.device)?.unwrap_or_default();
+    ort_config.session_pool_size = Some(args.session_pool_size);
 
-    if ort_config.is_some() {
+    if ort_config.execution_providers.is_some() {
         info!("CUDA execution provider configured successfully");
     }
 
-    // Build adapter
-    let mut builder = SealTextDetectionAdapterBuilder::new();
-    builder = builder.session_pool_size(args.session_pool_size);
-
-    if let Some(ort_cfg) = ort_config {
-        builder = builder.with_ort_config(ort_cfg);
-    }
-
-    let adapter = match builder.build(&model_path) {
-        Ok(adapter) => adapter,
+    // Build predictor
+    let predictor = match SealTextDetectionPredictor::builder()
+        .score_threshold(args.score_threshold)
+        .with_ort_config(ort_config)
+        .build(&model_path)
+    {
+        Ok(predictor) => predictor,
         Err(e) => {
-            error!("Failed to build seal detection adapter: {}", e);
-            return Err(e.into());
+            error!("Failed to build seal detection predictor: {}", e);
+            return Err(e);
         }
-    };
-
-    // Create task
-    let task = SealTextDetectionTask::new();
-
-    // Create configuration
-    let config = SealTextDetectionConfig {
-        score_threshold: args.score_threshold,
-        box_threshold: args.box_threshold,
-        unclip_ratio: args.unclip_ratio,
-        max_candidates: 1000,
     };
 
     info!("Processing {} images", args.images.len());
     info!("Configuration:");
-    info!("  Score threshold: {}", config.score_threshold);
-    info!("  Box threshold: {}", config.box_threshold);
-    info!("  Unclip ratio: {}", config.unclip_ratio);
+    info!("  Score threshold: {}", args.score_threshold);
+    info!("  Box threshold: {}", args.box_threshold);
+    info!("  Unclip ratio: {}", args.unclip_ratio);
 
     // Create output directory if specified
     #[cfg(feature = "visualization")]
@@ -166,18 +150,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (width, height) = (image.width(), image.height());
         info!("  Image dimensions: {}x{}", width, height);
 
-        // Create input
-        let input = ImageTaskInput::new(vec![image.clone()]);
-
-        // Validate input
-        if let Err(e) = task.validate_input(&input) {
-            error!("  Input validation failed: {}", e);
-            continue;
-        }
+        #[cfg(feature = "visualization")]
+        let image_for_vis = image.clone();
 
         // Run detection
         let start = Instant::now();
-        let output = match adapter.execute(input, Some(&config)) {
+        let output = match predictor.predict(vec![image]) {
             Ok(output) => output,
             Err(e) => {
                 error!("  Detection failed: {}", e);
@@ -185,12 +163,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         let duration = start.elapsed();
-
-        // Validate output
-        if let Err(e) = task.validate_output(&output) {
-            error!("  Output validation failed: {}", e);
-            continue;
-        }
 
         // Display results
         if let Some(detections) = output.detections.first() {
@@ -250,7 +222,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let scores: Vec<_> = detections.iter().map(|d| d.score).collect();
 
                 // Draw bounding boxes on the image
-                let vis_image = visualize_detections(&image, &boxes, &scores);
+                let vis_image = visualize_detections(&image_for_vis, &boxes, &scores);
 
                 if let Err(e) = vis_image.save(&output_path) {
                     error!("    Failed to save visualization: {}", e);

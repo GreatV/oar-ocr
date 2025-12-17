@@ -64,6 +64,16 @@ pub enum ChannelOrder {
     HWC,
 }
 
+/// Specifies the color channel order in an image
+#[derive(Debug, Clone, Copy, Default)]
+pub enum ColorOrder {
+    /// Red, Green, Blue order (default for most image libraries like PIL, image-rs)
+    #[default]
+    RGB,
+    /// Blue, Green, Red order (used by OpenCV and PaddlePaddle models)
+    BGR,
+}
+
 /// Specifies the type of bounding box used for text detection
 #[derive(Debug, Clone, Copy)]
 pub enum BoxType {

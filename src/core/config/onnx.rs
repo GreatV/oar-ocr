@@ -6,11 +6,12 @@ use serde::{Deserialize, Serialize};
 ///
 /// This enum represents the different levels of graph optimization that can be applied
 /// during ONNX Runtime session creation.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 pub enum OrtGraphOptimizationLevel {
     /// Disable all optimizations.
     DisableAll,
     /// Enable basic optimizations.
+    #[default]
     Level1,
     /// Enable extended optimizations.
     Level2,
@@ -20,19 +21,14 @@ pub enum OrtGraphOptimizationLevel {
     All,
 }
 
-impl Default for OrtGraphOptimizationLevel {
-    fn default() -> Self {
-        Self::Level1
-    }
-}
-
 /// Execution providers for ONNX Runtime.
 ///
 /// This enum represents the different execution providers that can be used
 /// with ONNX Runtime for model inference.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum OrtExecutionProvider {
     /// CPU execution provider (always available)
+    #[default]
     CPU,
     /// NVIDIA CUDA execution provider
     CUDA {
@@ -85,12 +81,6 @@ pub enum OrtExecutionProvider {
     WebGPU,
 }
 
-impl Default for OrtExecutionProvider {
-    fn default() -> Self {
-        Self::CPU
-    }
-}
-
 /// Configuration for ONNX Runtime sessions.
 ///
 /// This struct contains various configuration options for ONNX Runtime sessions,
@@ -119,6 +109,8 @@ pub struct OrtSessionConfig {
     pub log_verbosity_level: Option<i32>,
     /// Session configuration entries (key-value pairs)
     pub session_config_entries: Option<std::collections::HashMap<String, String>>,
+    /// Size of the session pool for concurrent inference (default: 1)
+    pub session_pool_size: Option<usize>,
 }
 
 impl OrtSessionConfig {

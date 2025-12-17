@@ -64,8 +64,8 @@ impl ScaleAwareDetectorPreprocessConfig {
             keep_ratio: false,
             limit_side_len: 800,
             scale: 1.0 / 255.0,
-            mean: vec![0.485, 0.456, 0.406],
-            std: vec![0.229, 0.224, 0.225],
+            mean: vec![0.0, 0.0, 0.0],
+            std: vec![1.0, 1.0, 1.0],
         }
     }
 
@@ -158,12 +158,18 @@ impl ScaleAwareDetectorModel {
             None,
         );
 
-        // Create normalizer
-        let normalizer = NormalizeImage::new(
+        // Create normalizer.
+        // Paddle models expect BGR input; reorder ImageNet stats and swap channels.
+        let mean = preprocess_config.mean.clone();
+        let std = preprocess_config.std.clone();
+        let bgr_mean = vec![mean[2], mean[1], mean[0]];
+        let bgr_std = vec![std[2], std[1], std[0]];
+        let normalizer = NormalizeImage::with_color_order(
             Some(preprocess_config.scale),
-            Some(preprocess_config.mean.clone()),
-            Some(preprocess_config.std.clone()),
+            Some(bgr_mean),
+            Some(bgr_std),
             Some(ChannelOrder::CHW),
+            Some(crate::processors::ColorOrder::BGR),
         )?;
 
         Ok(Self {

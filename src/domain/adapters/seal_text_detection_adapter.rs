@@ -86,39 +86,32 @@ impl ModelAdapter for SealTextDetectionAdapter {
 
 /// Builder for seal text detection adapter.
 pub struct SealTextDetectionAdapterBuilder {
-    /// Task configuration
-    task_config: SealTextDetectionConfig,
-    /// Session pool size
-    session_pool_size: usize,
-    /// ONNX Runtime session configuration
-    ort_config: Option<crate::core::config::OrtSessionConfig>,
+    config: super::builder_config::AdapterBuilderConfig<SealTextDetectionConfig>,
 }
 
 impl SealTextDetectionAdapterBuilder {
     /// Creates a new seal text detection adapter builder.
     pub fn new() -> Self {
         Self {
-            task_config: SealTextDetectionConfig::default(),
-            session_pool_size: 1,
-            ort_config: None,
+            config: super::builder_config::AdapterBuilderConfig::default(),
         }
     }
 
     /// Sets the task configuration.
     pub fn with_config(mut self, config: SealTextDetectionConfig) -> Self {
-        self.task_config = config;
+        self.config = self.config.with_task_config(config);
         self
     }
 
     /// Sets the session pool size.
     pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.session_pool_size = size;
+        self.config = self.config.with_session_pool_size(size);
         self
     }
 
     /// Sets the ONNX Runtime session configuration.
     pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.ort_config = Some(config);
+        self.config = self.config.with_ort_config(config);
         self
     }
 }
@@ -128,14 +121,22 @@ impl AdapterBuilder for SealTextDetectionAdapterBuilder {
     type Adapter = SealTextDetectionAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
+        let (task_config, session_pool_size, ort_config) = self
+            .config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
+
         // Configure DB model for seal text detection
-        let preprocess_config = super::preprocessing::db_preprocess_with_resize_long(736);
+        // Use seal text preprocessing configuration (limit_side_len=736, limit_type=Min)
+        let preprocess_config = super::preprocessing::db_preprocess_for_text_type(Some("seal"));
 
         let postprocess_config = DBPostprocessConfig {
-            score_threshold: self.task_config.score_threshold,
-            box_threshold: self.task_config.box_threshold,
-            unclip_ratio: self.task_config.unclip_ratio,
-            max_candidates: self.task_config.max_candidates,
+            score_threshold: task_config.score_threshold,
+            box_threshold: task_config.box_threshold,
+            unclip_ratio: task_config.unclip_ratio,
+            max_candidates: task_config.max_candidates,
             use_dilation: false,
             score_mode: ScoreMode::Fast,
             box_type: BoxType::Poly, // Seal detection uses polygon boxes for curved text
@@ -145,9 +146,9 @@ impl AdapterBuilder for SealTextDetectionAdapterBuilder {
         let mut model_builder = DBModelBuilder::new()
             .preprocess_config(preprocess_config)
             .postprocess_config(postprocess_config)
-            .session_pool_size(self.session_pool_size);
+            .session_pool_size(session_pool_size);
 
-        if let Some(ort_config) = self.ort_config {
+        if let Some(ort_config) = ort_config {
             model_builder = model_builder.with_ort_config(ort_config);
         }
 
@@ -164,12 +165,12 @@ impl AdapterBuilder for SealTextDetectionAdapterBuilder {
         Ok(SealTextDetectionAdapter {
             model,
             info,
-            config: self.task_config,
+            config: task_config,
         })
     }
 
     fn with_config(mut self, config: Self::Config) -> Self {
-        self.task_config = config;
+        self.config = self.config.with_task_config(config);
         self
     }
 

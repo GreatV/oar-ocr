@@ -27,19 +27,14 @@
 //!     text1.jpg text2.jpg
 //! ```
 
-mod common;
+mod utils;
 
 use clap::Parser;
-use common::{load_rgb_image, parse_device_config};
-use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
-use oar_ocr::core::traits::task::Task;
-use oar_ocr::domain::adapters::TextRecognitionAdapterBuilder;
-use oar_ocr::domain::tasks::text_recognition::{
-    TextRecognitionConfig, TextRecognitionInput, TextRecognitionTask,
-};
+use oar_ocr::predictors::TextRecognitionPredictor;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
+use utils::{load_rgb_image, parse_device_config};
 
 #[cfg(feature = "visualization")]
 use image::RgbImage;
@@ -69,8 +64,8 @@ struct Args {
     #[arg(long, default_value = "cpu")]
     device: String,
 
-    /// Score threshold for recognition (default: 0.5)
-    #[arg(long, default_value = "0.5")]
+    /// Score threshold for recognition (default: 0.0)
+    #[arg(long, default_value = "0.0")]
     score_thresh: f32,
 
     /// Session pool size for concurrent inference (default: 1)
@@ -137,73 +132,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Log device configuration
     info!("Using device: {}", args.device);
-    let ort_config = parse_device_config(&args.device)?;
+    let mut ort_config = parse_device_config(&args.device)?.unwrap_or_default();
+    ort_config.session_pool_size = Some(args.session_pool_size);
 
-    if ort_config.is_some() {
+    if ort_config.execution_providers.is_some() {
         info!("CUDA execution provider configured successfully");
     }
 
-    // Load character dictionary
-    info!(
-        "Loading character dictionary from: {}",
-        args.dict_path.display()
-    );
-    let character_dict = load_character_dict(&args.dict_path)?;
-    if args.verbose {
-        info!("Loaded {} characters", character_dict.len());
-        if character_dict.len() <= 100 {
-            info!("Characters: {}", character_dict.join(", "));
-        }
-    }
-
-    // Create recognition configuration
-    let config = TextRecognitionConfig {
-        score_threshold: args.score_thresh,
-        max_text_length: 100,
-    };
-
     if args.verbose {
         info!("Recognition Configuration:");
-        info!("  Score threshold: {}", config.score_threshold);
-        info!("  Max text length: {}", config.max_text_length);
+        info!("  Score threshold: {}", args.score_thresh);
         info!(
             "  Input shape: [3, {}, {}]",
             args.input_height, args.input_width
         );
     }
 
-    // Build the recognition adapter
+    // Build the recognition predictor
     if args.verbose {
-        info!("Building recognition adapter...");
+        info!("Building recognition predictor...");
         info!("  Model: {}", args.model_path.display());
         info!("  Session pool size: {}", args.session_pool_size);
     }
 
-    let mut builder = TextRecognitionAdapterBuilder::new()
-        .with_config(config.clone())
-        .model_input_shape([3, args.input_height, args.input_width])
-        .character_dict(character_dict.clone())
-        .session_pool_size(args.session_pool_size);
+    let predictor = TextRecognitionPredictor::builder()
+        .score_threshold(args.score_thresh)
+        .dict_path(&args.dict_path)
+        .with_ort_config(ort_config)
+        .build(&args.model_path)?;
 
-    if let Some(max_w) = args.max_img_w {
-        builder = builder.max_img_w(max_w);
-        if args.verbose {
-            info!("  Max image width: {}", max_w);
-        }
-    }
-
-    if let Some(ort_cfg) = ort_config {
-        builder = builder.with_ort_config(ort_cfg);
-    }
-
-    let adapter = builder.build(&args.model_path)?;
-
-    info!("Recognition adapter built successfully");
-    if args.verbose {
-        info!("  Task type: {:?}", adapter.info().task_type);
-        info!("  Model name: {}", adapter.info().model_name);
-        info!("  Version: {}", adapter.info().version);
-    }
+    info!("Recognition predictor built successfully");
 
     // Load all images into memory
     info!("Processing {} images...", existing_images.len());
@@ -234,17 +192,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No images could be loaded".into());
     }
 
-    // Create task input
-    let input = TextRecognitionInput::new(images.clone());
-
-    // Create task for validation
-    let task = TextRecognitionTask::new(config.clone());
-    task.validate_input(&input)?;
-
     // Run recognition
     info!("Running text recognition...");
     let start = Instant::now();
-    let output = adapter.execute(input, Some(&config))?;
+    let output = predictor.predict(images.clone())?;
     let duration = start.elapsed();
 
     info!(
@@ -306,22 +257,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-}
-
-/// Loads the character dictionary from a file.
-fn load_character_dict(dict_path: &PathBuf) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let content = std::fs::read_to_string(dict_path)
-        .map_err(|e| format!("Failed to load character dictionary: {}", e))?;
-
-    // Don't filter out lines - PaddleOCR dictionaries may have special characters
-    // like \u3000 (ideographic space) at the beginning that should be preserved
-    let dict: Vec<String> = content.lines().map(|line| line.to_string()).collect();
-
-    if dict.is_empty() {
-        return Err("Character dictionary is empty".into());
-    }
-
-    Ok(dict)
 }
 
 /// Visualizes recognized text by drawing it on the image

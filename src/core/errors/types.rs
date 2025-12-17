@@ -1,44 +1,10 @@
 //! Core error types for the OCR pipeline.
 //!
 //! This module defines the fundamental error types used throughout the OCR system,
-//! including the main OCRError enum, ProcessingStage enum, and SimpleError struct.
+//! including the main OCRError enum and ProcessingStage enum.
 //! These types provide the foundation for error handling across all pipeline components.
 
 use thiserror::Error;
-
-/// A simple error type for basic error messages.
-///
-/// This is a lightweight error type used internally for creating error chains
-/// and providing simple error messages when more complex error types are not needed.
-#[derive(Debug)]
-pub struct SimpleError {
-    message: String,
-}
-
-impl SimpleError {
-    /// Creates a new SimpleError with the given message.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - The error message, can be any type that converts to String
-    ///
-    /// # Returns
-    ///
-    /// A new SimpleError instance
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for SimpleError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for SimpleError {}
 
 /// Errors that can occur during image processing operations.
 #[derive(Debug, Error)]
@@ -267,6 +233,171 @@ impl From<ImageProcessError> for OCRError {
             kind: ProcessingStage::Generic,
             context: "Image processing failed".to_string(),
             source: Box::new(error),
+        }
+    }
+}
+
+impl OCRError {
+    /// Creates a configuration error with enhanced context and details.
+    ///
+    /// # Arguments
+    ///
+    /// * `context` - High-level description of what was being configured
+    /// * `details` - Specific details about what went wrong
+    ///
+    /// # Returns
+    ///
+    /// A new ConfigError with enhanced context
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use oar_ocr::core::errors::OCRError;
+    /// let err = OCRError::config_error_detailed(
+    ///     "task graph validation",
+    ///     "task 'recognition' depends on 'detection' which does not exist"
+    /// );
+    /// assert!(matches!(err, OCRError::ConfigError { .. }));
+    /// ```
+    pub fn config_error_detailed(context: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::ConfigError {
+            message: format!("{}: {}", context.into(), details.into()),
+        }
+    }
+
+    /// Creates a configuration error with a suggestion for recovery.
+    ///
+    /// # Arguments
+    ///
+    /// * `context` - High-level description of what was being configured
+    /// * `details` - Specific details about what went wrong
+    /// * `suggestion` - Suggestion for how to fix the issue
+    ///
+    /// # Returns
+    ///
+    /// A new ConfigError with enhanced context and suggestion
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use oar_ocr::core::errors::OCRError;
+    /// let err = OCRError::config_error_with_suggestion(
+    ///     "model loading",
+    ///     "model file not found at 'models/detection.onnx'",
+    ///     "ensure the model has been downloaded and the path is correct"
+    /// );
+    /// assert!(matches!(err, OCRError::ConfigError { .. }));
+    /// ```
+    pub fn config_error_with_suggestion(
+        context: impl Into<String>,
+        details: impl Into<String>,
+        suggestion: impl Into<String>,
+    ) -> Self {
+        Self::ConfigError {
+            message: format!(
+                "{}: {}; suggestion: {}",
+                context.into(),
+                details.into(),
+                suggestion.into()
+            ),
+        }
+    }
+
+    /// Creates a configuration error for missing required fields.
+    ///
+    /// # Arguments
+    ///
+    /// * `field` - The name of the missing field
+    /// * `context` - Context about where the field is required
+    ///
+    /// # Returns
+    ///
+    /// A new ConfigError for missing fields
+    pub fn missing_field(field: impl Into<String>, context: impl Into<String>) -> Self {
+        Self::ConfigError {
+            message: format!(
+                "missing required field '{}' in {}",
+                field.into(),
+                context.into()
+            ),
+        }
+    }
+
+    /// Creates a configuration error for invalid field values.
+    ///
+    /// # Arguments
+    ///
+    /// * `field` - The name of the field with an invalid value
+    /// * `expected` - Description of what was expected
+    /// * `actual` - Description of what was actually provided
+    ///
+    /// # Returns
+    ///
+    /// A new ConfigError for invalid field values
+    pub fn invalid_field(
+        field: impl Into<String>,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self::ConfigError {
+            message: format!(
+                "invalid value for field '{}': expected {}, got {}",
+                field.into(),
+                expected.into(),
+                actual.into()
+            ),
+        }
+    }
+
+    /// Creates a configuration error for type mismatches in task graphs.
+    ///
+    /// # Arguments
+    ///
+    /// * `task_id` - The ID of the task with the mismatch
+    /// * `expected` - The expected type
+    /// * `actual` - The actual type
+    ///
+    /// # Returns
+    ///
+    /// A new ConfigError for type mismatches
+    pub fn type_mismatch(
+        task_id: impl Into<String>,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self::ConfigError {
+            message: format!(
+                "type mismatch in task '{}': expected {}, got {}",
+                task_id.into(),
+                expected.into(),
+                actual.into()
+            ),
+        }
+    }
+
+    /// Creates a configuration error for dependency issues.
+    ///
+    /// # Arguments
+    ///
+    /// * `dependent` - The task that has a dependency
+    /// * `dependency` - The missing or invalid dependency
+    /// * `issue` - Description of the issue
+    ///
+    /// # Returns
+    ///
+    /// A new ConfigError for dependency issues
+    pub fn dependency_error(
+        dependent: impl Into<String>,
+        dependency: impl Into<String>,
+        issue: impl Into<String>,
+    ) -> Self {
+        Self::ConfigError {
+            message: format!(
+                "dependency error: task '{}' depends on '{}' which {}",
+                dependent.into(),
+                dependency.into(),
+                issue.into()
+            ),
         }
     }
 }

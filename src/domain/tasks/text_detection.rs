@@ -5,7 +5,9 @@
 use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
+use crate::impl_config_validator;
 use crate::processors::BoundingBox;
+use crate::utils::ScoreValidator;
 use serde::{Deserialize, Serialize};
 
 /// A single text detection result with bounding box and confidence score.
@@ -25,28 +27,46 @@ impl Detection {
 }
 
 /// Configuration for text detection task.
+///
+/// Default values are aligned with PP-StructureV3.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextDetectionConfig {
     /// Score threshold for detection (default: 0.3)
     pub score_threshold: f32,
-    /// Box threshold for filtering (default: 0.7)
+    /// Box threshold for filtering (default: 0.6)
     pub box_threshold: f32,
     /// Unclip ratio for expanding detected regions (default: 1.5)
     pub unclip_ratio: f32,
     /// Maximum candidates to consider (default: 1000)
     pub max_candidates: usize,
+    /// Target side length for image resizing (optional)
+    pub limit_side_len: Option<u32>,
+    /// Limit type for resizing ("min" or "max", optional)
+    pub limit_type: Option<String>,
+    /// Maximum side length to prevent OOM (optional)
+    pub max_side_len: Option<u32>,
 }
 
 impl Default for TextDetectionConfig {
     fn default() -> Self {
         Self {
             score_threshold: 0.3,
-            box_threshold: 0.7,
+            box_threshold: 0.6,
             unclip_ratio: 1.5,
             max_candidates: 1000,
+            limit_side_len: None,
+            limit_type: None,
+            max_side_len: None,
         }
     }
 }
+
+impl_config_validator!(TextDetectionConfig {
+    score_threshold: range(0.0, 1.0),
+    box_threshold: range(0.0, 1.0),
+    unclip_ratio: min(0.0),
+    max_candidates: min(1),
+});
 
 /// Output from text detection task.
 #[derive(Debug, Clone)]
@@ -109,19 +129,14 @@ impl Task for TextDetectionTask {
     }
 
     fn validate_output(&self, output: &Self::Output) -> Result<(), OCRError> {
+        let validator = ScoreValidator::new_unit_range("score");
+
         // Validate each image's detections
         for (idx, detections) in output.detections.iter().enumerate() {
-            // Validate score ranges
-            for (det_idx, detection) in detections.iter().enumerate() {
-                if !(0.0..=1.0).contains(&detection.score) {
-                    return Err(OCRError::InvalidInput {
-                        message: format!(
-                            "Image {}, detection {}: score {} is out of valid range [0, 1]",
-                            idx, det_idx, detection.score
-                        ),
-                    });
-                }
-            }
+            let scores: Vec<f32> = detections.iter().map(|d| d.score).collect();
+            validator.validate_scores_with(&scores, |det_idx| {
+                format!("Image {}, detection {}", idx, det_idx)
+            })?;
         }
 
         Ok(())

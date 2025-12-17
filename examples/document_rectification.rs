@@ -26,19 +26,14 @@
 //!     distorted_doc1.jpg distorted_doc2.jpg
 //! ```
 
-mod common;
+mod utils;
 
 use clap::Parser;
-use common::{load_rgb_image, parse_device_config};
-use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
-use oar_ocr::core::traits::task::{ImageTaskInput, Task};
-use oar_ocr::domain::adapters::UVDocRectifierAdapterBuilder;
-use oar_ocr::domain::tasks::document_rectification::{
-    DocumentRectificationConfig, DocumentRectificationTask,
-};
+use oar_ocr::predictors::DocumentRectificationPredictor;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info};
+use utils::{load_rgb_image, parse_device_config};
 
 /// Command-line arguments for the document rectification example
 #[derive(Parser)]
@@ -119,20 +114,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Log device configuration
     info!("Using device: {}", args.device);
-    let ort_config = parse_device_config(&args.device)?;
+    let mut ort_config = parse_device_config(&args.device)?.unwrap_or_default();
+    ort_config.session_pool_size = Some(args.session_pool_size);
 
-    if ort_config.is_some() {
+    if ort_config.execution_providers.is_some() {
         info!("CUDA execution provider configured successfully");
     }
 
-    // Create rectification configuration
-    let config = DocumentRectificationConfig {
-        rec_image_shape: [3, args.input_height, args.input_width],
-    };
-
-    // Build the rectification adapter
+    // Build the rectification predictor
     if args.verbose {
-        info!("Building rectification adapter...");
+        info!("Building rectification predictor...");
         info!("  Model: {}", args.model_path.display());
         info!("  Session pool size: {}", args.session_pool_size);
         if args.input_height > 0 && args.input_width > 0 {
@@ -145,26 +136,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let mut builder = UVDocRectifierAdapterBuilder::new()
-        .with_config(config.clone())
-        .session_pool_size(args.session_pool_size);
+    let predictor = DocumentRectificationPredictor::builder()
+        .with_ort_config(ort_config)
+        .build(&args.model_path)?;
 
-    if args.input_height > 0 && args.input_width > 0 {
-        builder = builder.input_shape([3, args.input_height, args.input_width]);
-    }
-
-    if let Some(ort_cfg) = ort_config {
-        builder = builder.with_ort_config(ort_cfg);
-    }
-
-    let adapter = builder.build(&args.model_path)?;
-
-    info!("Rectification adapter built successfully");
-    if args.verbose {
-        info!("  Task type: {:?}", adapter.info().task_type);
-        info!("  Model name: {}", adapter.info().model_name);
-        info!("  Version: {}", adapter.info().version);
-    }
+    info!("Rectification predictor built successfully");
 
     // Load all images into memory
     info!("Processing {} images...", existing_images.len());
@@ -195,17 +171,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No images could be loaded".into());
     }
 
-    // Create task input
-    let input = ImageTaskInput::new(images.clone());
-
-    // Create task for validation
-    let task = DocumentRectificationTask::new(config.clone());
-    task.validate_input(&input)?;
-
     // Run rectification
     info!("Running document rectification...");
     let start = Instant::now();
-    let output = adapter.execute(input, Some(&config))?;
+    let output = predictor.predict(images.clone())?;
     let duration = start.elapsed();
 
     info!(
@@ -214,15 +183,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         duration.as_secs_f64() * 1000.0 / existing_images.len() as f64
     );
 
-    // Validate output
-    task.validate_output(&output)?;
-
     // Display results
     info!("\n=== Rectification Results ===");
     for (idx, (image_path, original_img, rectified_img)) in existing_images
         .iter()
         .zip(images.iter())
-        .zip(output.rectified_images.iter())
+        .zip(output.images.iter())
         .map(|((path, orig), rect)| (path, orig, rect))
         .enumerate()
     {
@@ -249,7 +215,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (image_path, original_img, rectified_img) in existing_images
         .iter()
         .zip(images.iter())
-        .zip(output.rectified_images.iter())
+        .zip(output.images.iter())
         .map(|((path, orig), rect)| (path, orig, rect))
     {
         // Use the original filename for output

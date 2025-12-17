@@ -1,4 +1,4 @@
-//! Formula preprocessing utilities for PaddleOCR-style models.
+//! Formula preprocessing utilities for formula recognition models.
 //!
 //! This module provides reusable preprocessing pipelines for formula recognition,
 //! including image normalization, margin cropping, and tensor formatting.
@@ -23,7 +23,7 @@ pub struct FormulaPreprocessParams {
     pub normalize_std: [f32; 3],
 }
 
-/// Preprocessor implementing the standard PaddleOCR formula recognition pipeline.
+/// Preprocessor implementing the standard formula recognition pipeline.
 ///
 /// This preprocessor applies the following transformations:
 /// 1. Margin cropping - removes background margins by binarization
@@ -256,10 +256,10 @@ impl FormulaPreprocessor {
     }
 }
 
-/// Normalizes decoded LaTeX text to match PaddleOCR output format.
+/// Normalizes decoded LaTeX text to match standard output format.
 ///
-/// This is a direct port of the Python implementation from PaddleX:
-/// paddlex/inference/models/formula_recognition/processors.py
+/// This is a direct port of the Python implementation:
+/// formula_recognition/processors.py
 ///
 /// # Arguments
 /// * `latex` - Raw LaTeX string from model output

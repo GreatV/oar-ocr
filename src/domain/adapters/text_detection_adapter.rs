@@ -86,39 +86,44 @@ impl ModelAdapter for TextDetectionAdapter {
 
 /// Builder for text detection adapter.
 pub struct TextDetectionAdapterBuilder {
-    /// Task configuration
-    task_config: TextDetectionConfig,
-    /// Session pool size
-    session_pool_size: usize,
-    /// ONNX Runtime session configuration
-    ort_config: Option<crate::core::config::OrtSessionConfig>,
+    config: super::builder_config::AdapterBuilderConfig<TextDetectionConfig>,
+    text_type: Option<String>,
 }
 
 impl TextDetectionAdapterBuilder {
     /// Creates a new text detection adapter builder.
     pub fn new() -> Self {
         Self {
-            task_config: TextDetectionConfig::default(),
-            session_pool_size: 1,
-            ort_config: None,
+            config: super::builder_config::AdapterBuilderConfig::default(),
+            text_type: None,
         }
     }
 
     /// Sets the task configuration.
     pub fn with_config(mut self, config: TextDetectionConfig) -> Self {
-        self.task_config = config;
+        self.config = self.config.with_task_config(config);
         self
     }
 
     /// Sets the session pool size.
     pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.session_pool_size = size;
+        self.config = self.config.with_session_pool_size(size);
         self
     }
 
     /// Sets the ONNX Runtime session configuration.
     pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.ort_config = Some(config);
+        self.config = self.config.with_ort_config(config);
+        self
+    }
+
+    /// Sets the text type for preprocessing and postprocessing configuration.
+    ///
+    /// This matches the text_type parameter:
+    /// - "seal": Uses seal-specific preprocessing (limit_side_len=736, limit_type=Min) and polygon boxes
+    /// - Other values or None: Uses general text configuration (limit_side_len=960, limit_type=Max) and quad boxes
+    pub fn text_type(mut self, text_type: impl Into<String>) -> Self {
+        self.text_type = Some(text_type.into());
         self
     }
 }
@@ -128,27 +133,71 @@ impl AdapterBuilder for TextDetectionAdapterBuilder {
     type Adapter = TextDetectionAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        // Configure DB model for text detection
-        // Use default preprocessing (limit_side_len=960)
-        let preprocess_config = super::preprocessing::db_preprocess_with_limit_side_len(960);
+        let (task_config, session_pool_size, ort_config) = self
+            .config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
+
+        // Determine if this is seal text (uses different preprocessing and box type)
+        let is_seal_text = self
+            .text_type
+            .as_ref()
+            .map(|t| t.to_lowercase() == "seal")
+            .unwrap_or(false);
+
+        // Configure DB model preprocessing based on text type
+        // Matches standard behavior:
+        // - General text: limit_side_len=960, limit_type=Max
+        // - Seal text: limit_side_len=736, limit_type=Min
+        let mut preprocess_config =
+            super::preprocessing::db_preprocess_for_text_type(self.text_type.as_deref());
+
+        // Override with config values if present
+        if let Some(limit) = task_config.limit_side_len {
+            preprocess_config.limit_side_len = Some(limit);
+        }
+        if let Some(ref type_str) = task_config.limit_type {
+            let limit_type = match type_str.to_lowercase().as_str() {
+                "min" => Some(crate::processors::LimitType::Min),
+                "max" => Some(crate::processors::LimitType::Max),
+                "resizelong" | "resize_long" => Some(crate::processors::LimitType::ResizeLong),
+                _ => None,
+            };
+            if let Some(lt) = limit_type {
+                preprocess_config.limit_type = Some(lt);
+            }
+        }
+        if let Some(max_limit) = task_config.max_side_len {
+            preprocess_config.max_side_limit = Some(max_limit);
+        }
+
+        // Configure postprocessing based on text type
+        // Seal text uses polygon boxes for curved text, general text uses quad boxes
+        let box_type = if is_seal_text {
+            BoxType::Poly
+        } else {
+            BoxType::Quad
+        };
 
         let postprocess_config = DBPostprocessConfig {
-            score_threshold: self.task_config.score_threshold,
-            box_threshold: self.task_config.box_threshold,
-            unclip_ratio: self.task_config.unclip_ratio,
-            max_candidates: self.task_config.max_candidates,
+            score_threshold: task_config.score_threshold,
+            box_threshold: task_config.box_threshold,
+            unclip_ratio: task_config.unclip_ratio,
+            max_candidates: task_config.max_candidates,
             use_dilation: false,
             score_mode: ScoreMode::Fast,
-            box_type: BoxType::Quad, // Text detection uses quadrilateral boxes
+            box_type,
         };
 
         // Build the DB model
         let mut model_builder = DBModelBuilder::new()
             .preprocess_config(preprocess_config)
             .postprocess_config(postprocess_config)
-            .session_pool_size(self.session_pool_size);
+            .session_pool_size(session_pool_size);
 
-        if let Some(ort_config) = self.ort_config {
+        if let Some(ort_config) = ort_config {
             model_builder = model_builder.with_ort_config(ort_config);
         }
 
@@ -165,12 +214,12 @@ impl AdapterBuilder for TextDetectionAdapterBuilder {
         Ok(TextDetectionAdapter {
             model,
             info,
-            config: self.task_config,
+            config: task_config,
         })
     }
 
     fn with_config(mut self, config: Self::Config) -> Self {
-        self.task_config = config;
+        self.config = self.config.with_task_config(config);
         self
     }
 

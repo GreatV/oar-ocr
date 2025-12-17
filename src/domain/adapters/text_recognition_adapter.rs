@@ -20,6 +20,8 @@ pub struct TextRecognitionAdapter {
     info: AdapterInfo,
     /// Task configuration
     config: TextRecognitionConfig,
+    /// Whether to return character positions for word box generation
+    return_word_box: bool,
 }
 
 impl ModelAdapter for TextRecognitionAdapter {
@@ -37,19 +39,58 @@ impl ModelAdapter for TextRecognitionAdapter {
         let effective_config = config.unwrap_or(&self.config);
 
         // Use the CRNN model to recognize text
-        let model_output = self.model.forward(input.images)?;
+        let model_output = self.model.forward(input.images, self.return_word_box)?;
 
-        // Filter by score threshold and adapt to task output
-        let filtered: Vec<(String, f32)> = model_output
+        // Apply score threshold filtering while preserving index correspondence.
+        // Items below threshold are kept but with empty text to maintain 1:1 mapping
+        // between inputs and outputs, which is critical for batched processing.
+        let mut result_texts = Vec::with_capacity(model_output.texts.len());
+        let mut result_scores = Vec::with_capacity(model_output.scores.len());
+        let mut result_positions = Vec::with_capacity(model_output.texts.len());
+        let mut result_col_indices = Vec::with_capacity(model_output.texts.len());
+        let mut result_seq_lengths = Vec::with_capacity(model_output.texts.len());
+
+        for (((text, score), positions), (col_indices, seq_len)) in model_output
             .texts
             .into_iter()
             .zip(model_output.scores)
-            .filter(|(_, score)| *score >= effective_config.score_threshold)
-            .collect();
+            .zip(
+                model_output
+                    .char_positions
+                    .into_iter()
+                    .chain(std::iter::repeat(Vec::new())),
+            )
+            .zip(
+                model_output
+                    .char_col_indices
+                    .into_iter()
+                    .zip(model_output.sequence_lengths.into_iter())
+                    .chain(std::iter::repeat((Vec::new(), 0))),
+            )
+        {
+            if score >= effective_config.score_threshold {
+                result_texts.push(text);
+                result_scores.push(score);
+                result_positions.push(positions);
+                result_col_indices.push(col_indices);
+                result_seq_lengths.push(seq_len);
+            } else {
+                // Keep entry to preserve index correspondence, but mark as filtered
+                result_texts.push(String::new());
+                result_scores.push(score);
+                result_positions.push(Vec::new());
+                result_col_indices.push(Vec::new());
+                result_seq_lengths.push(seq_len);
+            }
+        }
 
-        let (texts, scores): (Vec<String>, Vec<f32>) = filtered.into_iter().unzip();
-
-        Ok(TextRecognitionOutput { texts, scores })
+        Ok(TextRecognitionOutput {
+            texts: result_texts,
+            scores: result_scores,
+            char_positions: result_positions,
+            char_col_indices: result_col_indices,
+            sequence_lengths: result_seq_lengths,
+        })
     }
 
     fn supports_batching(&self) -> bool {
@@ -63,33 +104,29 @@ impl ModelAdapter for TextRecognitionAdapter {
 
 /// Builder for text recognition adapter.
 pub struct TextRecognitionAdapterBuilder {
-    /// Task configuration
-    task_config: TextRecognitionConfig,
+    config: super::builder_config::AdapterBuilderConfig<TextRecognitionConfig>,
     /// Model preprocessing configuration
     preprocess_config: CRNNPreprocessConfig,
     /// Character dictionary
     character_dict: Option<Vec<String>>,
-    /// Session pool size
-    session_pool_size: usize,
-    /// ONNX Runtime session configuration
-    ort_config: Option<crate::core::config::OrtSessionConfig>,
+    /// Whether to return character positions for word box generation
+    return_word_box: bool,
 }
 
 impl TextRecognitionAdapterBuilder {
     /// Creates a new text recognition adapter builder.
     pub fn new() -> Self {
         Self {
-            task_config: TextRecognitionConfig::default(),
+            config: super::builder_config::AdapterBuilderConfig::default(),
             preprocess_config: CRNNPreprocessConfig::default(),
             character_dict: None,
-            session_pool_size: 1,
-            ort_config: None,
+            return_word_box: false,
         }
     }
 
     /// Sets the task configuration.
     pub fn with_config(mut self, config: TextRecognitionConfig) -> Self {
-        self.task_config = config;
+        self.config = self.config.with_task_config(config);
         self
     }
 
@@ -107,13 +144,13 @@ impl TextRecognitionAdapterBuilder {
 
     /// Sets the score threshold.
     pub fn score_thresh(mut self, score_thresh: f32) -> Self {
-        self.task_config.score_threshold = score_thresh;
+        self.config.task_config.score_threshold = score_thresh;
         self
     }
 
     /// Sets the session pool size.
     pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.session_pool_size = size;
+        self.config = self.config.with_session_pool_size(size);
         self
     }
 
@@ -125,7 +162,13 @@ impl TextRecognitionAdapterBuilder {
 
     /// Sets the ONNX Runtime session configuration.
     pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.ort_config = Some(config);
+        self.config = self.config.with_ort_config(config);
+        self
+    }
+
+    /// Sets whether to return character positions for word box generation.
+    pub fn return_word_box(mut self, enable: bool) -> Self {
+        self.return_word_box = enable;
         self
     }
 }
@@ -135,16 +178,23 @@ impl AdapterBuilder for TextRecognitionAdapterBuilder {
     type Adapter = TextRecognitionAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
+        let (task_config, session_pool_size, ort_config) = self
+            .config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
+
         // Build the CRNN model
         let mut model_builder = CRNNModelBuilder::new()
             .preprocess_config(self.preprocess_config)
-            .session_pool_size(self.session_pool_size);
+            .session_pool_size(session_pool_size);
 
         if let Some(character_dict) = self.character_dict {
             model_builder = model_builder.character_dict(character_dict);
         }
 
-        if let Some(ort_config) = self.ort_config {
+        if let Some(ort_config) = ort_config {
             model_builder = model_builder.with_ort_config(ort_config);
         }
 
@@ -161,12 +211,13 @@ impl AdapterBuilder for TextRecognitionAdapterBuilder {
         Ok(TextRecognitionAdapter {
             model,
             info,
-            config: self.task_config,
+            config: task_config,
+            return_word_box: self.return_word_box,
         })
     }
 
     fn with_config(mut self, config: Self::Config) -> Self {
-        self.task_config = config;
+        self.config = self.config.with_task_config(config);
         self
     }
 

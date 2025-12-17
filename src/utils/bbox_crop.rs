@@ -92,11 +92,10 @@ impl BBoxCrop {
         imageops::crop_imm(img, x1, y1, width, height).to_image()
     }
 
-    /// Efficiently crops multiple bounding boxes from the same source image.
+    /// Crops multiple bounding boxes from the same source image.
     ///
-    /// This function is optimized for batch cropping operations, such as extracting
-    /// multiple text regions from a document image. It processes all bounding boxes
-    /// in a single pass and uses efficient cropping operations.
+    /// Processes all bounding boxes for batch cropping operations, such as extracting
+    /// multiple text regions from a document image.
     ///
     /// # Arguments
     ///
@@ -117,9 +116,9 @@ impl BBoxCrop {
             .collect()
     }
 
-    /// Efficiently crops multiple rotated bounding boxes from the same source image.
+    /// Crops multiple rotated bounding boxes from the same source image.
     ///
-    /// This function is optimized for batch cropping operations with perspective correction.
+    /// Processes batch cropping operations with perspective correction.
     ///
     /// # Arguments
     ///

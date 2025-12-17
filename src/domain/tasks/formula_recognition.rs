@@ -6,6 +6,8 @@
 use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
+use crate::impl_config_validator;
+use crate::utils::{ScoreValidator, validate_length_match};
 use serde::{Deserialize, Serialize};
 
 /// Configuration for formula recognition task.
@@ -25,6 +27,11 @@ impl Default for FormulaRecognitionConfig {
         }
     }
 }
+
+impl_config_validator!(FormulaRecognitionConfig {
+    score_threshold: range(0.0, 1.0),
+    max_length: min(1),
+});
 
 /// Output from formula recognition task.
 #[derive(Debug, Clone)]
@@ -92,27 +99,18 @@ impl Task for FormulaRecognitionTask {
 
     fn validate_output(&self, output: &Self::Output) -> Result<(), OCRError> {
         // Validate that formulas and scores have matching lengths
-        if output.formulas.len() != output.scores.len() {
-            return Err(OCRError::InvalidInput {
-                message: format!(
-                    "Mismatch between formulas ({}) and scores ({})",
-                    output.formulas.len(),
-                    output.scores.len()
-                ),
-            });
-        }
+        validate_length_match(
+            output.formulas.len(),
+            output.scores.len(),
+            "formulas",
+            "scores",
+        )?;
 
         // Validate scores are in valid range when present
+        let validator = ScoreValidator::new_unit_range("score");
         for (idx, score_opt) in output.scores.iter().enumerate() {
-            if let Some(score) = score_opt
-                && !(0.0..=1.0).contains(score)
-            {
-                return Err(OCRError::InvalidInput {
-                    message: format!(
-                        "Formula {}: score {} is out of valid range [0, 1]",
-                        idx, score
-                    ),
-                });
+            if let Some(score) = score_opt {
+                validator.validate_score(*score, &format!("Formula {}", idx))?;
             }
         }
 

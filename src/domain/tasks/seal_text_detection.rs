@@ -7,6 +7,8 @@ use super::text_detection::Detection;
 use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
+use crate::impl_config_validator;
+use crate::utils::ScoreValidator;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for seal text detection models.
@@ -34,6 +36,13 @@ impl Default for SealTextDetectionConfig {
         }
     }
 }
+
+impl_config_validator!(SealTextDetectionConfig {
+    score_threshold: range(0.0, 1.0),
+    box_threshold: range(0.0, 1.0),
+    unclip_ratio: min(0.0),
+    max_candidates: min(1),
+});
 
 /// Output from seal text detection models.
 ///
@@ -108,19 +117,17 @@ impl Task for SealTextDetectionTask {
     }
 
     fn validate_output(&self, output: &Self::Output) -> Result<(), OCRError> {
-        // Validate each image's detections
-        for (batch_idx, detections) in output.detections.iter().enumerate() {
-            // Validate score ranges and bounding boxes
-            for (det_idx, detection) in detections.iter().enumerate() {
-                if !(detection.score >= 0.0 && detection.score <= 1.0) {
-                    return Err(OCRError::InvalidInput {
-                        message: format!(
-                            "Batch {}, detection {}: invalid score value {}. Must be in range [0, 1]",
-                            batch_idx, det_idx, detection.score
-                        ),
-                    });
-                }
+        let validator = ScoreValidator::new_unit_range("score");
 
+        for (batch_idx, detections) in output.detections.iter().enumerate() {
+            // Validate score ranges
+            let scores: Vec<f32> = detections.iter().map(|d| d.score).collect();
+            validator.validate_scores_with(&scores, |det_idx| {
+                format!("Batch {}, detection {}", batch_idx, det_idx)
+            })?;
+
+            // Validate bounding boxes
+            for (det_idx, detection) in detections.iter().enumerate() {
                 if detection.bbox.points.is_empty() {
                     return Err(OCRError::InvalidInput {
                         message: format!(

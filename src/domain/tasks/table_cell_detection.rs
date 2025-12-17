@@ -6,7 +6,9 @@
 use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
+use crate::impl_config_validator;
 use crate::processors::BoundingBox;
+use crate::utils::{ScoreValidator, validate_max_value};
 use serde::{Deserialize, Serialize};
 
 /// Configuration for table cell detection.
@@ -21,11 +23,17 @@ pub struct TableCellDetectionConfig {
 impl Default for TableCellDetectionConfig {
     fn default() -> Self {
         Self {
-            score_threshold: 0.5,
+            // Table cell detection threshold defaults to 0.3.
+            score_threshold: 0.3,
             max_cells: 300,
         }
     }
 }
+
+impl_config_validator!(TableCellDetectionConfig {
+    score_threshold: range(0.0, 1.0),
+    max_cells: min(1),
+});
 
 /// A detected table cell.
 #[derive(Debug, Clone)]
@@ -96,28 +104,22 @@ impl Task for TableCellDetectionTask {
     }
 
     fn validate_output(&self, output: &Self::Output) -> Result<(), OCRError> {
-        for (idx, cells) in output.cells.iter().enumerate() {
-            if cells.len() > self.config.max_cells {
-                return Err(OCRError::InvalidInput {
-                    message: format!(
-                        "Image {}: cell count ({}) exceeds maximum ({})",
-                        idx,
-                        cells.len(),
-                        self.config.max_cells
-                    ),
-                });
-            }
+        let validator = ScoreValidator::new_unit_range("score");
 
-            for (cell_idx, cell) in cells.iter().enumerate() {
-                if !(0.0..=1.0).contains(&cell.score) {
-                    return Err(OCRError::InvalidInput {
-                        message: format!(
-                            "Image {}, cell {}: score {} is out of valid range [0, 1]",
-                            idx, cell_idx, cell.score
-                        ),
-                    });
-                }
-            }
+        for (idx, cells) in output.cells.iter().enumerate() {
+            // Validate cell count
+            validate_max_value(
+                cells.len(),
+                self.config.max_cells,
+                "cell count",
+                &format!("Image {}", idx),
+            )?;
+
+            // Validate scores
+            let scores: Vec<f32> = cells.iter().map(|c| c.score).collect();
+            validator.validate_scores_with(&scores, |cell_idx| {
+                format!("Image {}, cell {}", idx, cell_idx)
+            })?;
         }
 
         Ok(())

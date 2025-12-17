@@ -4,6 +4,9 @@
 //! outputs to specific task formats. Adapters bridge the gap between pure model
 //! implementations and task requirements.
 
+// Builder utilities
+pub mod builder_config;
+
 // Detection task adapters
 pub mod layout_detection_adapter;
 pub mod seal_text_detection_adapter;

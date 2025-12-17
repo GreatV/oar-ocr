@@ -43,7 +43,8 @@ impl DocumentOrientationAdapter {
     }
 
     /// Default input shape for document orientation classification.
-    pub const DEFAULT_INPUT_SHAPE: (u32, u32) = (192, 48);
+    /// PP-LCNet document orientation models are trained with 224x224 inputs.
+    pub const DEFAULT_INPUT_SHAPE: (u32, u32) = (224, 224);
 
     /// Class labels for document orientation.
     pub fn labels() -> Vec<String> {
@@ -126,27 +127,20 @@ impl ModelAdapter for DocumentOrientationAdapter {
 
 /// Builder for document orientation adapter.
 pub struct DocumentOrientationAdapterBuilder {
-    /// Task configuration
-    task_config: DocumentOrientationConfig,
+    config: super::builder_config::AdapterBuilderConfig<DocumentOrientationConfig>,
     /// Input shape (height, width)
     input_shape: (u32, u32),
-    /// Session pool size for ONNX Runtime
-    session_pool_size: usize,
     /// Optional override for the registered model name
     model_name_override: Option<String>,
-    /// ONNX Runtime session configuration
-    ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
 
 impl DocumentOrientationAdapterBuilder {
     /// Creates a new builder with default configuration.
     pub fn new() -> Self {
         Self {
-            task_config: DocumentOrientationConfig::default(),
+            config: super::builder_config::AdapterBuilderConfig::default(),
             input_shape: DocumentOrientationAdapter::DEFAULT_INPUT_SHAPE,
-            session_pool_size: 1,
             model_name_override: None,
-            ort_config: None,
         }
     }
 
@@ -158,7 +152,7 @@ impl DocumentOrientationAdapterBuilder {
 
     /// Sets the session pool size.
     pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.session_pool_size = size;
+        self.config = self.config.with_session_pool_size(size);
         self
     }
 
@@ -170,7 +164,7 @@ impl DocumentOrientationAdapterBuilder {
 
     /// Sets the ONNX Runtime session configuration.
     pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.ort_config = Some(config);
+        self.config = self.config.with_ort_config(config);
         self
     }
 }
@@ -186,14 +180,21 @@ impl AdapterBuilder for DocumentOrientationAdapterBuilder {
     type Adapter = DocumentOrientationAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
+        let (task_config, session_pool_size, ort_config) = self
+            .config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
+
         // Build the PP-LCNet model
         let preprocess_config = super::preprocessing::pp_lcnet_preprocess(self.input_shape);
 
         let mut model_builder = PPLCNetModelBuilder::new()
-            .session_pool_size(self.session_pool_size)
+            .session_pool_size(session_pool_size)
             .preprocess_config(preprocess_config);
 
-        if let Some(ort_config) = self.ort_config {
+        if let Some(ort_config) = ort_config {
             model_builder = model_builder.with_ort_config(ort_config);
         }
 
@@ -219,13 +220,13 @@ impl AdapterBuilder for DocumentOrientationAdapterBuilder {
         Ok(DocumentOrientationAdapter::new(
             model,
             info,
-            self.task_config,
+            task_config,
             postprocess_config,
         ))
     }
 
     fn with_config(mut self, config: Self::Config) -> Self {
-        self.task_config = config;
+        self.config = self.config.with_task_config(config);
         self
     }
 
@@ -252,8 +253,8 @@ mod tests {
         };
 
         let builder = DocumentOrientationAdapterBuilder::new().with_config(config.clone());
-        assert_eq!(builder.task_config.topk, 2);
-        assert_eq!(builder.task_config.score_threshold, 0.7);
+        assert_eq!(builder.config.task_config().topk, 2);
+        assert_eq!(builder.config.task_config().score_threshold, 0.7);
     }
 
     #[test]
@@ -263,7 +264,7 @@ mod tests {
             .session_pool_size(4);
 
         assert_eq!(builder.input_shape, (224, 224));
-        assert_eq!(builder.session_pool_size, 4);
+        assert_eq!(builder.config.session_pool_size(), 4);
     }
 
     #[test]

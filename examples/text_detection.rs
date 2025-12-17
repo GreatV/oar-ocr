@@ -1,6 +1,6 @@
 //! Text Detection Example
 //!
-//! This example demonstrates how to use the OCR pipeline to detect text regions in images.
+//! This example demonstrates how to use the text detection predictor to detect text regions in images.
 //! It loads a text detection model, processes input images, and visualizes the detected text regions.
 //!
 //! # Usage
@@ -22,17 +22,14 @@
 //! cargo run --example text_detection -- -m model.onnx -o output/ -d cpu image1.jpg image2.jpg
 //! ```
 
-mod common;
+mod utils;
 
 use clap::Parser;
-use common::{load_rgb_image, parse_device_config};
-use oar_ocr::core::traits::adapter::{AdapterBuilder, ModelAdapter};
-use oar_ocr::core::traits::task::{ImageTaskInput, Task};
-use oar_ocr::domain::adapters::TextDetectionAdapterBuilder;
-use oar_ocr::domain::tasks::text_detection::{TextDetectionConfig, TextDetectionTask};
+use oar_ocr::predictors::TextDetectionPredictor;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
+use utils::{load_rgb_image, parse_device_config};
 
 #[cfg(feature = "visualization")]
 use image::RgbImage;
@@ -66,8 +63,8 @@ struct Args {
     #[arg(long, default_value = "0.6")]
     box_thresh: f32,
 
-    /// Unclip ratio for expanding detected regions (default: 2.0)
-    #[arg(long, default_value = "2.0")]
+    /// Unclip ratio for expanding detected regions (default: 1.5)
+    #[arg(long, default_value = "1.5")]
     unclip_ratio: f32,
 
     /// Maximum candidates to consider (default: 1000)
@@ -116,32 +113,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Parse device configuration
     info!("Using device: {}", args.device);
-    let ort_config = parse_device_config(&args.device)?;
+    let mut ort_config = parse_device_config(&args.device)?.unwrap_or_default();
+    ort_config.session_pool_size = Some(args.session_pool_size);
 
-    if ort_config.is_some() {
+    if ort_config.execution_providers.is_some() {
         info!("CUDA execution provider configured successfully");
     }
 
-    // Create detection configuration
-    let config = TextDetectionConfig {
-        score_threshold: args.thresh,
-        box_threshold: args.box_thresh,
-        unclip_ratio: args.unclip_ratio,
-        max_candidates: args.max_candidates,
-    };
+    // Build the text detection predictor
+    let predictor = TextDetectionPredictor::builder()
+        .score_threshold(args.thresh)
+        .box_threshold(args.box_thresh)
+        .unclip_ratio(args.unclip_ratio)
+        .max_candidates(args.max_candidates)
+        .with_ort_config(ort_config)
+        .build(&args.model_path)?;
 
-    // Build the detection adapter
-    let mut adapter_builder = TextDetectionAdapterBuilder::new()
-        .with_config(config.clone())
-        .session_pool_size(args.session_pool_size);
-
-    if let Some(ort_cfg) = ort_config {
-        adapter_builder = adapter_builder.with_ort_config(ort_cfg);
-    }
-
-    let adapter = adapter_builder.build(&args.model_path)?;
-
-    info!("Detection adapter built successfully");
+    info!("Detection predictor built successfully");
 
     // Load all images into memory
     info!("Processing {} images...", existing_images.len());
@@ -164,17 +152,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No images could be loaded".into());
     }
 
-    // Create task input
-    let input = ImageTaskInput::new(images.clone());
-
-    // Create task for validation
-    let task = TextDetectionTask::new(config.clone());
-    task.validate_input(&input)?;
-
     // Run detection
     info!("Running text detection...");
     let start = Instant::now();
-    let output = adapter.execute(input, Some(&config))?;
+    let result = predictor.predict(images.clone())?;
     let duration = start.elapsed();
 
     info!(
@@ -185,7 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Display results for each image
     for (idx, (image_path, detections)) in existing_images
         .iter()
-        .zip(output.detections.iter())
+        .zip(result.detections.iter())
         .enumerate()
     {
         info!("\n=== Results for image {} ===", idx + 1);
@@ -241,7 +222,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (image_path, rgb_img, detections) in existing_images
             .iter()
             .zip(images.iter())
-            .zip(output.detections.iter())
+            .zip(result.detections.iter())
             .map(|((path, img), detections)| (path, img, detections))
         {
             if !detections.is_empty() {

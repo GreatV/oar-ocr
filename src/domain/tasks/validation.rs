@@ -18,7 +18,7 @@ pub(crate) fn ensure_non_empty_images(
     })
 }
 
-/// Generic helper for validating non-empty image collections with custom error messaging.
+/// Generic helper for validating non-empty RgbImage collections with custom error messaging.
 pub(crate) fn ensure_images_with(
     images: &[RgbImage],
     empty_batch_message: &str,
