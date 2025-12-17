@@ -11,13 +11,13 @@
 //!
 //! # Architecture
 //!
-//! ```rust,no_run
-//! // ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────-┐
-//! // │ImageReader  │───▶│Preprocessor │───▶│InferenceEng │───▶│Postprocessor │
-//! // │             │    │             │    │             │    │              │
-//! // │• read_images│    │• preprocess │    │• infer      │    │• postprocess │
-//! // │• validate   │    │• validate   │    │• engine_info│    │• empty_result│
-//! // └─────────────┘    └─────────────┘    └─────────────┘    └─────────────-┘
+//! ```text
+//! ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌──────────────┐
+//! │ImageReader  │───▶│Preprocessor │───▶│InferenceEng │───▶│Postprocessor │
+//! │             │    │             │    │             │    │              │
+//! │• read_images│    │• preprocess │    │• infer      │    │• postprocess │
+//! │• validate   │    │• validate   │    │• engine_info│    │• empty_result│
+//! └─────────────┘    └─────────────┘    └─────────────┘    └──────────────┘
 //! ```
 //!
 //! # Examples
