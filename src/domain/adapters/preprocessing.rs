@@ -56,9 +56,12 @@ pub fn db_preprocess_with_resize_long(resize_long: u32) -> DBPreprocessConfig {
 
 /// Construct a DB preprocessing config based on text type.
 ///
-/// This function matches PP-StructureV3 behavior:
-/// - "general": limit_side_len=736, limit_type=Min, max_side_limit=4000
+/// This function provides default preprocessing configurations:
+/// - "general" (default): limit_side_len=960, limit_type=Max, max_side_limit=4000
 /// - "seal": limit_side_len=736, limit_type=Min, max_side_limit=4000
+///
+/// Note: PP-StructureV3's overall OCR uses different defaults (736/min for all text).
+/// Those defaults are applied in `OARStructureBuilder`, not here.
 ///
 /// # Arguments
 ///
@@ -76,10 +79,10 @@ pub fn db_preprocess_for_text_type(text_type: Option<&str>) -> DBPreprocessConfi
             ..Default::default()
         },
         _ => {
-            // Default to "general" text configuration (PP-StructureV3 GeneralOCR)
+            // Default to "general" text configuration
             DBPreprocessConfig {
-                limit_side_len: Some(736),
-                limit_type: Some(LimitType::Min),
+                limit_side_len: Some(960),
+                limit_type: Some(LimitType::Max),
                 max_side_limit: Some(4000),
                 ..Default::default()
             }

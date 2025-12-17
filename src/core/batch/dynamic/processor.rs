@@ -80,9 +80,7 @@ impl DefaultDynamicBatcher {
                 (ratio1 - ratio2).abs() <= *tolerance
             }
             ShapeCompatibilityStrategy::MaxDimension { bucket_size } => {
-                if *bucket_size == 0 {
-                    return false;
-                }
+                // Note: bucket_size is validated by validate_shape_strategy() before this is called
                 let (w1, h1) = img1.dimensions();
                 let (w2, h2) = img2.dimensions();
                 let max1 = w1.max(h1);

@@ -748,8 +748,14 @@ impl OAROCR {
                 let rotated_width = current_image.width();
                 let rotated_height = current_image.height();
 
-                // Transform each text region's bounding box and word boxes
+                // Transform each text region's polygons, bounding box, and word boxes
                 for region in &mut text_regions {
+                    region.dt_poly = region.dt_poly.take().map(|poly| {
+                        poly.rotate_back_to_original(angle, rotated_width, rotated_height)
+                    });
+                    region.rec_poly = region.rec_poly.take().map(|poly| {
+                        poly.rotate_back_to_original(angle, rotated_width, rotated_height)
+                    });
                     region.bounding_box = region.bounding_box.rotate_back_to_original(
                         angle,
                         rotated_width,

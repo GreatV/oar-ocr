@@ -2849,8 +2849,16 @@ impl OARStructure {
                         .rotate_back_to_original(angle, rotated_width, rotated_height);
             }
 
-            // Transform text region bounding boxes and word boxes
+            // Transform text region polygons, bounding boxes, and word boxes
             for region in &mut text_regions {
+                region.dt_poly = region
+                    .dt_poly
+                    .take()
+                    .map(|poly| poly.rotate_back_to_original(angle, rotated_width, rotated_height));
+                region.rec_poly = region
+                    .rec_poly
+                    .take()
+                    .map(|poly| poly.rotate_back_to_original(angle, rotated_width, rotated_height));
                 region.bounding_box = region.bounding_box.rotate_back_to_original(
                     angle,
                     rotated_width,
