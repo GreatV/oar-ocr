@@ -18,7 +18,7 @@ keywords = [
 categories = ["computer-vision", "science"]
 
 [features]
-default = []
+default = ["download-binaries"]
 visualization = ["dep:ab_glyph"]
 # ONNX Runtime execution provider features
 cuda = ["ort/cuda"]
@@ -27,6 +27,7 @@ directml = ["ort/directml"]
 coreml = ["ort/coreml"]
 webgpu = ["ort/webgpu"]
 openvino = ["ort/openvino"]
+download-binaries = ["ort/download-binaries"]
 
 [dependencies]
 image = "0.25.6"
@@ -37,7 +38,7 @@ regex = "1.11.1"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 toml = "0.9"
-ort = "2.0.0-rc.10"
+ort = { version = "2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "tracing", "copy-dylibs"] }
 ndarray = "0.16"
 nalgebra = "0.32"
 rayon = "1.8"
