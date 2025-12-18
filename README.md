@@ -5,7 +5,16 @@
 [![dependency status](https://deps.rs/repo/github/GreatV/oar-ocr/status.svg)](https://deps.rs/repo/github/GreatV/oar-ocr)
 ![GitHub License](https://img.shields.io/github/license/GreatV/oar-ocr)
 
-A comprehensive OCR (Optical Character Recognition) library, built in Rust with ONNX Runtime for efficient inference.
+A comprehensive OCR (Optical Character Recognition) and document understanding library, built in Rust with ONNX Runtime for efficient inference.
+
+## Features
+
+- End-to-end OCR pipeline (text detection → text recognition)
+- Optional preprocessing: document orientation, text-line orientation, UVDoc rectification
+- Document structure analysis (PP-StructureV3-style): layout, regions, tables, formulas, seals
+- Typed configs for each task/model (serde-friendly)
+- ONNX Runtime execution providers (CPU by default; CUDA/TensorRT/DirectML/CoreML/OpenVINO/WebGPU via features)
+- Optional visualization helpers (feature `visualization`)
 
 ## Quick Start
 
@@ -17,20 +26,37 @@ Add OAROCR to your project's `Cargo.toml`:
 cargo add oar-ocr
 ```
 
-For CUDA support, add with the `cuda` feature:
+Enable ONNX Runtime execution providers via crate features:
+
+- `cuda`, `tensorrt`, `directml`, `coreml`, `openvino`, `webgpu`
+
+For example, for CUDA support:
 
 ```bash
 cargo add oar-ocr --features cuda
+```
+
+For visualization utilities (used by examples):
+
+```bash
+cargo add oar-ocr --features visualization
 ```
 
 Or manually add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oar-ocr = "0.2"
+oar-ocr = "0.3"
 
-# For CUDA support
-oar-ocr = { version = "0.2", features = ["cuda"] }
+# Example: CUDA + visualization
+oar-ocr = { version = "0.3", features = ["cuda", "visualization"] }
+
+# Other execution providers:
+# oar-ocr = { version = "0.3", features = ["tensorrt"] }
+# oar-ocr = { version = "0.3", features = ["directml"] }
+# oar-ocr = { version = "0.3", features = ["coreml"] }
+# oar-ocr = { version = "0.3", features = ["openvino"] }
+# oar-ocr = { version = "0.3", features = ["webgpu"] }
 ```
 
 ### Basic Usage
@@ -39,40 +65,40 @@ Here's a simple example of how to use OAROCR to extract text from an image:
 
 ```rust
 use oar_ocr::prelude::*;
-use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build OCR pipeline with required models
     let ocr = OAROCRBuilder::new(
-        "detection_model.onnx".to_string(),
-        "recognition_model.onnx".to_string(),
-        "char_dict.txt".to_string(),
-    ).build()?;
+        "detection_model.onnx",
+        "recognition_model.onnx",
+        "char_dict.txt",
+    )
+    .build()?;
 
     // Process a single image
-    let image = oar_ocr::utils::load_image(Path::new("document.jpg"))?;
-    let results = ocr.predict(&[image])?;
+    let image = load_image("document.jpg")?;
+    let results = ocr.predict(vec![image])?;
     let result = &results[0];
 
     // Print extracted text with confidence scores using the modern TextRegion API
     for text_region in &result.text_regions {
-        if let (Some(text), Some(confidence)) = (&text_region.text, text_region.confidence) {
+        if let Some((text, confidence)) = text_region.text_with_confidence() {
             println!("Text: {} (confidence: {:.2})", text, confidence);
         }
     }
 
     // Process multiple images at once
-    let images = oar_ocr::utils::load_images(&[
-        Path::new("document1.jpg"),
-        Path::new("document2.jpg"),
-        Path::new("document3.jpg"),
+    let images = load_images(&[
+        "document1.jpg",
+        "document2.jpg",
+        "document3.jpg",
     ])?;
-    let results = ocr.predict(&images)?;
+    let results = ocr.predict(images)?;
 
     for result in results {
         println!("Image {}: {} text regions found", result.index, result.text_regions.len());
         for text_region in &result.text_regions {
-            if let (Some(text), Some(confidence)) = (&text_region.text, text_region.confidence) {
+            if let Some((text, confidence)) = text_region.text_with_confidence() {
                 println!("  Text: {} (confidence: {:.2})", text, confidence);
             }
         }
@@ -84,14 +110,94 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 This example creates an OCR pipeline using pre-trained models for text detection and recognition. The pipeline processes the input image and returns structured `TextRegion` objects containing the recognized text, confidence scores, and bounding boxes for each detected text region.
 
+### High-Level Builder APIs
+
+OAROCR provides two high-level builder APIs for easy pipeline construction:
+
+#### OAROCRBuilder - Text Recognition Pipeline
+
+The `OAROCRBuilder` provides a fluent API for building OCR pipelines with optional components:
+
+```rust
+use oar_ocr::oarocr::OAROCRBuilder;
+
+// Basic OCR pipeline
+let ocr = OAROCRBuilder::new(
+    "models/det.onnx",
+    "models/rec.onnx",
+    "models/dict.txt"
+)
+.build()?;
+
+// OCR with optional components
+let ocr = OAROCRBuilder::new(
+    "models/det.onnx",
+    "models/rec.onnx",
+    "models/dict.txt"
+)
+.with_document_image_orientation_classification("models/doc_orient.onnx")
+.with_text_line_orientation_classification("models/line_orient.onnx")
+.with_document_image_rectification("models/rectify.onnx")
+.image_batch_size(4)
+.region_batch_size(64)
+.build()?;
+```
+
+Useful options:
+
+- `.text_type("seal")` - optimized pipeline defaults for curved seal/stamp text
+- `.return_word_box(true)` - enable word-level boxes from recognition output
+
+#### OARStructureBuilder - Document Structure Analysis
+
+The `OARStructureBuilder` enables document structure analysis with layout detection, table recognition, and formula extraction:
+
+```rust
+use oar_ocr::oarocr::OARStructureBuilder;
+
+// Basic layout detection
+let structure = OARStructureBuilder::new("models/layout.onnx")
+    .build()?;
+
+// Full document structure analysis with table and formula recognition
+let structure = OARStructureBuilder::new("models/layout.onnx")
+    .with_table_classification("models/table_cls.onnx")
+    .with_table_cell_detection("models/table_cell.onnx", "wired")
+    .with_table_structure_recognition("models/table_struct.onnx", "wired")
+    .table_structure_dict_path("models/table_structure_dict_ch.txt")
+    .with_formula_recognition("models/formula.onnx", "models/tokenizer.json", "pp_formulanet")
+    .build()?;
+
+// Structure analysis with integrated OCR
+let structure = OARStructureBuilder::new("models/layout.onnx")
+    .with_table_classification("models/table_cls.onnx")
+    .with_ocr("models/det.onnx", "models/rec.onnx", "models/dict.txt")
+    .build()?;
+```
+
+Both builders support:
+
+- **Configuration**: Set task configs via typed structs (serde-friendly)
+- **Batch/Concurrency**: Tune session pools via `image_batch_size` / `region_batch_size`
+- **ONNX Runtime Settings**: Apply a shared `OrtSessionConfig` via `.ort_session(...)`
+- **Validation**: Automatic validation with detailed errors
+
+### Examples
+
+This repository includes runnable CLI examples under `examples/` (they require model files). Use `--help` to see all options:
+
+```bash
+cargo run --example ocr -- --help
+cargo run --example structure -- --help
+```
+
 ### Using CUDA for GPU Acceleration
 
 For better performance, you can enable CUDA support to run inference on GPU:
 
 ```rust
 use oar_ocr::prelude::*;
-use oar_ocr::core::config::onnx::{OrtSessionConfig, OrtExecutionProvider};
-use std::path::Path;
+use oar_ocr::core::config::{OrtSessionConfig, OrtExecutionProvider};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Configure CUDA execution provider for GPU acceleration
@@ -110,21 +216,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build OCR pipeline with CUDA support
     let ocr = OAROCRBuilder::new(
-        "detection_model.onnx".to_string(),
-        "recognition_model.onnx".to_string(),
-        "char_dict.txt".to_string(),
+        "detection_model.onnx",
+        "recognition_model.onnx",
+        "char_dict.txt",
     )
-    .global_ort_session(ort_config)  // Apply CUDA config to all components
+    .ort_session(ort_config)  // Apply ORT config to all components
     .build()?;
 
     // Process images (same as CPU example)
-    let image = oar_ocr::utils::load_image(Path::new("document.jpg"))?;
-    let results = ocr.predict(&[image])?;
+    let image = load_image("document.jpg")?;
+    let results = ocr.predict(vec![image])?;
     let result = &results[0];
 
     // Extract text from results
     for text_region in &result.text_regions {
-        if let (Some(text), Some(confidence)) = (&text_region.text, text_region.confidence) {
+        if let Some((text, confidence)) = text_region.text_with_confidence() {
             println!("Text: {} (confidence: {:.2})", text, confidence);
         }
     }
@@ -138,6 +244,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 1. Install oar-ocr with CUDA feature: `cargo add oar-ocr --features cuda`
 2. Have CUDA toolkit and cuDNN installed on your system
 3. Ensure your ONNX models are compatible with CUDA execution
+4. (Optional) Use other execution providers via `tensorrt`, `directml`, `coreml`, `openvino`, `webgpu` features
 
 ## Pre-trained Models
 
@@ -211,6 +318,23 @@ These models provide additional functionality for specialized use cases:
 | Text Line Orientation  | PPLCNet | Light    | [`pplcnet_x0_25_textline_ori.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/pplcnet_x0_25_textline_ori.onnx) | 988KB  | Detect text line orientation |
 | Text Line Orientation  | PPLCNet | Standard | [`pplcnet_x1_0_textline_ori.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/pplcnet_x1_0_textline_ori.onnx)   | 6.7MB  | Detect text line orientation |
 | Document Rectification | UVDoc   | -        | [`uvdoc.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.1.0/uvdoc.onnx)                                           | 31.6MB | Fix perspective distortion   |
+
+### Document Structure Models
+
+These models are typically used with `OARStructureBuilder` (layout, tables, formulas, seals). File names below match the presets used by the builders and examples; download them from the Releases page as needed.
+
+| Component                  | Suggested Model File(s)                         | Notes |
+|---------------------------|--------------------------------------------------|-------|
+| Layout Detection          | `pp-doclayout_plus-l.onnx`                       | PP-DocLayout_plus-L (default preset) |
+| Region Detection          | `pp-docblocklayout.onnx`                         | PP-DocBlockLayout, for hierarchical ordering |
+| Table Classification      | `pp-lcnet_x1_0_table_cls.onnx`                   | Wired vs wireless table type |
+| Table Cell Detection      | `rt-detr-l_wired_table_cell_det.onnx`            | Wired tables (RT-DETR) |
+| Table Cell Detection      | `rt-detr-l_wireless_table_cell_det.onnx`         | Wireless tables (RT-DETR) |
+| Table Structure Recognition | `slanext_wired.onnx`, `slanet_plus.onnx`       | Wired / wireless structure recognition |
+| Table Structure Dictionary | `table_structure_dict_ch.txt`                  | Required when enabling table structure recognition |
+| Formula Recognition       | `pp-formulanet_plus-l.onnx`, `unimernet.onnx`    | `with_formula_recognition(..., tokenizer.json, model_type)` |
+| Formula Tokenizer         | `unimernet_tokenizer.json`                      | Must match the selected formula model |
+| Seal Text Detection       | `pp-ocrv4_server_seal_det.onnx`                  | Seal/stamp text detection |
 
 ## Acknowledgments
 

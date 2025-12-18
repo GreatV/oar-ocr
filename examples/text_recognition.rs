@@ -1,9 +1,8 @@
 //! Text Recognition Example
 //!
-//! This example demonstrates how to use the OCR pipeline to recognize text in images.
-//! It loads a text recognition model, processes input images, and displays the recognized text
-//! along with confidence scores. The example automatically handles both single and multiple
-//! images efficiently.
+//! This example demonstrates how to use the OCR pipeline to recognize text from cropped text images.
+//! It loads a text recognition model and character dictionary, processes input images, and outputs
+//! the recognized text with confidence scores.
 //!
 //! # Usage
 //!
@@ -14,181 +13,111 @@
 //! # Arguments
 //!
 //! * `-m, --model-path` - Path to the text recognition model file
-//! * `-d, --char-dict-path` - Path to the character dictionary file
+//! * `-d, --dict-path` - Path to the character dictionary file
+//! * `-o, --output-dir` - Directory to save visualization results (optional)
 //! * `--device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
-//! * `<IMAGES>...` - Paths to input images to process
+//! * `<IMAGES>...` - Paths to input text images to process
 //!
 //! # Example
 //!
 //! ```bash
-//! cargo run --example text_recognition -- -m model.onnx -d dict.txt --device cuda image1.jpg image2.jpg
+//! cargo run --example text_recognition -- \
+//!     -m models/ppocrv4_mobile_rec.onnx \
+//!     -d models/ppocr_keys_v1.txt \
+//!     text1.jpg text2.jpg
 //! ```
 
+mod utils;
+
 use clap::Parser;
-use oar_ocr::core::config::onnx::{OrtExecutionProvider, OrtSessionConfig};
-use oar_ocr::core::traits::StandardPredictor;
-use oar_ocr::predictor::TextRecPredictorBuilder;
-use oar_ocr::utils::init_tracing;
-use oar_ocr::utils::load_image;
-use std::path::Path;
-use tracing::{error, info};
+use oar_ocr::predictors::TextRecognitionPredictor;
+use std::path::PathBuf;
+use std::time::Instant;
+use tracing::{error, info, warn};
+use utils::{load_rgb_image, parse_device_config};
+
+#[cfg(feature = "visualization")]
+use image::RgbImage;
 
 /// Command-line arguments for the text recognition example
 #[derive(Parser)]
 #[command(name = "text_recognition")]
-#[command(about = "Text Recognition Example - recognizes text from images")]
+#[command(about = "Text Recognition Example - recognizes text from cropped text images")]
 struct Args {
     /// Path to the text recognition model file
     #[arg(short, long)]
-    model_path: String,
+    model_path: PathBuf,
 
     /// Path to the character dictionary file
-    #[arg(short = 'd', long)]
-    char_dict_path: String,
+    #[arg(short, long)]
+    dict_path: PathBuf,
 
-    /// Paths to input images to process
+    /// Paths to input text images to process
     #[arg(required = true)]
-    images: Vec<String>,
+    images: Vec<PathBuf>,
+
+    /// Directory to save visualization results
+    #[arg(short, long)]
+    output_dir: Option<PathBuf>,
 
     /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
     #[arg(long, default_value = "cpu")]
     device: String,
+
+    /// Score threshold for recognition (default: 0.0)
+    #[arg(long, default_value = "0.0")]
+    score_thresh: f32,
+
+    /// Session pool size for concurrent inference (default: 1)
+    #[arg(long, default_value = "1")]
+    session_pool_size: usize,
+
+    /// Maximum image width for resizing (optional, e.g., 320)
+    #[arg(long)]
+    max_img_w: Option<usize>,
+
+    /// Model input height (default: 48)
+    #[arg(long, default_value = "48")]
+    input_height: usize,
+
+    /// Model input width (default: 320)
+    #[arg(long, default_value = "320")]
+    input_width: usize,
+
+    /// Enable verbose output
+    #[arg(short, long)]
+    verbose: bool,
 }
 
-/// Display the recognition results for text in images
-///
-/// This function prints the recognition results for each image, including
-/// the image path, recognized text, and confidence score.
-///
-/// # Parameters
-/// * `image_paths` - Paths to the processed images (as strings)
-/// * `texts` - Recognized texts for each image
-/// * `scores` - Confidence scores for each recognition
-fn display_recognition_results(
-    image_paths: &[String],
-    texts: &[std::sync::Arc<str>],
-    scores: &[f32],
-) {
-    for (i, ((path, text), &score)) in image_paths
-        .iter()
-        .zip(texts.iter())
-        .zip(scores.iter())
-        .enumerate()
-    {
-        info!("{}. {}: '{}' (confidence: {:.3})", i + 1, path, text, score);
-    }
-}
-
-/// Parse device string and create appropriate ONNX execution provider
-///
-/// # Arguments
-///
-/// * `device` - Device string (e.g., "cpu", "cuda", "cuda:0")
-///
-/// # Returns
-///
-/// Vector of execution providers in order of preference
-fn parse_device(device: &str) -> Result<Vec<OrtExecutionProvider>, Box<dyn std::error::Error>> {
-    let device = device.to_lowercase();
-
-    if device == "cpu" {
-        Ok(vec![OrtExecutionProvider::CPU])
-    } else if device == "cuda" {
-        #[cfg(feature = "cuda")]
-        {
-            Ok(vec![
-                OrtExecutionProvider::CUDA {
-                    device_id: Some(0),
-                    gpu_mem_limit: None,
-                    arena_extend_strategy: None,
-                    cudnn_conv_algo_search: None,
-                    do_copy_in_default_stream: None,
-                    cudnn_conv_use_max_workspace: None,
-                },
-                OrtExecutionProvider::CPU,
-            ])
-        }
-        #[cfg(not(feature = "cuda"))]
-        {
-            error!("CUDA support not compiled in. Falling back to CPU.");
-            Ok(vec![OrtExecutionProvider::CPU])
-        }
-    } else if device.starts_with("cuda:") {
-        #[cfg(feature = "cuda")]
-        {
-            let device_id_str = device.strip_prefix("cuda:").unwrap();
-            let device_id: i32 = device_id_str
-                .parse()
-                .map_err(|_| format!("Invalid CUDA device ID: {}", device_id_str))?;
-
-            Ok(vec![
-                OrtExecutionProvider::CUDA {
-                    device_id: Some(device_id),
-                    gpu_mem_limit: None,
-                    arena_extend_strategy: None,
-                    cudnn_conv_algo_search: None,
-                    do_copy_in_default_stream: None,
-                    cudnn_conv_use_max_workspace: None,
-                },
-                OrtExecutionProvider::CPU,
-            ])
-        }
-        #[cfg(not(feature = "cuda"))]
-        {
-            error!("CUDA support not compiled in. Falling back to CPU.");
-            Ok(vec![OrtExecutionProvider::CPU])
-        }
-    } else {
-        Err(format!(
-            "Unsupported device: {}. Supported devices: cpu, cuda, cuda:N",
-            device
-        )
-        .into())
-    }
-}
-
-/// Main function for the text recognition example
-///
-/// This function initializes the OCR pipeline, loads the text recognition model,
-/// processes input images, and displays the recognized text. It supports both
-/// single image processing and batch processing modes.
-///
-/// # Returns
-///
-/// A Result indicating success or failure of the entire operation
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing for logging
-    init_tracing();
+    oar_ocr::utils::init_tracing();
 
     // Parse command-line arguments
     let args = Args::parse();
 
     info!("Text Recognition Example");
 
-    // Get the model path and character dictionary path from arguments
-    let model_path = &args.model_path;
-    let char_dict_path = &args.char_dict_path;
-
     // Verify that the model file exists
-    if !Path::new(model_path).exists() {
-        error!("Model file not found: {}", model_path);
+    if !args.model_path.exists() {
+        error!("Model file not found: {}", args.model_path.display());
         return Err("Model file not found".into());
     }
 
-    // Verify that the character dictionary file exists
-    if !Path::new(char_dict_path).exists() {
-        error!("Character dictionary file not found: {}", char_dict_path);
-        return Err("Character dictionary file not found".into());
+    // Verify that the dictionary file exists
+    if !args.dict_path.exists() {
+        error!("Dictionary file not found: {}", args.dict_path.display());
+        return Err("Dictionary file not found".into());
     }
 
     // Filter out non-existent image files and log errors for missing files
-    let existing_images: Vec<String> = args
+    let existing_images: Vec<PathBuf> = args
         .images
         .iter()
         .filter(|path| {
-            let exists = Path::new(path).exists();
+            let exists = path.exists();
             if !exists {
-                error!("Image file not found: {}", path);
+                error!("Image file not found: {}", path.display());
             }
             exists
         })
@@ -201,44 +130,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No valid image files found".into());
     }
 
-    // Read the character dictionary file
-    let char_dict_lines = std::fs::read_to_string(char_dict_path)?
-        .lines()
-        .map(|l| l.to_string())
-        .collect();
+    // Log device configuration
+    info!("Using device: {}", args.device);
+    let mut ort_config = parse_device_config(&args.device)?.unwrap_or_default();
+    ort_config.session_pool_size = Some(args.session_pool_size);
 
-    // Parse device configuration
-    let execution_providers = parse_device(&args.device)?;
-    info!(
-        "Using device: {} with providers: {:?}",
-        args.device, execution_providers
-    );
+    if ort_config.execution_providers.is_some() {
+        info!("CUDA execution provider configured successfully");
+    }
 
-    // Create ONNX session configuration with device settings
-    let ort_config = OrtSessionConfig::new().with_execution_providers(execution_providers);
+    if args.verbose {
+        info!("Recognition Configuration:");
+        info!("  Score threshold: {}", args.score_thresh);
+        info!(
+            "  Input shape: [3, {}, {}]",
+            args.input_height, args.input_width
+        );
+    }
 
-    // Create a text recognition predictor with specified parameters
-    let predictor = TextRecPredictorBuilder::new()
-        .model_input_shape([3, 48, 320]) // Model input shape for image resizing
-        .batch_size(8) // Process 8 images at a time
-        .character_dict(char_dict_lines) // Character dictionary for recognition
-        .model_name("PP-OCRv5_mobile_rec".to_string()) // Model name
-        .ort_session(ort_config) // Set device configuration
-        .build(Path::new(model_path))?;
+    // Build the recognition predictor
+    if args.verbose {
+        info!("Building recognition predictor...");
+        info!("  Model: {}", args.model_path.display());
+        info!("  Session pool size: {}", args.session_pool_size);
+    }
+
+    let predictor = TextRecognitionPredictor::builder()
+        .score_threshold(args.score_thresh)
+        .dict_path(&args.dict_path)
+        .with_ort_config(ort_config)
+        .build(&args.model_path)?;
+
+    info!("Recognition predictor built successfully");
 
     // Load all images into memory
     info!("Processing {} images...", existing_images.len());
     let mut images = Vec::new();
-    let mut image_paths = Vec::new();
 
     for image_path in &existing_images {
-        match load_image(Path::new(image_path)) {
-            Ok(img) => {
-                images.push(img);
-                image_paths.push(image_path.clone());
+        match load_rgb_image(image_path) {
+            Ok(rgb_img) => {
+                if args.verbose {
+                    info!(
+                        "Loaded image: {} ({}x{})",
+                        image_path.display(),
+                        rgb_img.width(),
+                        rgb_img.height()
+                    );
+                }
+                images.push(rgb_img);
             }
             Err(e) => {
-                error!("Failed to load image {}: {}", image_path, e);
+                error!("Failed to load image {}: {}", image_path.display(), e);
                 continue;
             }
         }
@@ -249,20 +192,116 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No images could be loaded".into());
     }
 
-    // Perform recognition using the predict API (handles both single and batch automatically)
-    match predictor.predict(images, None) {
-        Ok(result) => {
-            info!("Processing completed for {} images", result.rec_text.len());
+    // Run recognition
+    info!("Running text recognition...");
+    let start = Instant::now();
+    let output = predictor.predict(images.clone())?;
+    let duration = start.elapsed();
 
-            // Display the recognition results
-            display_recognition_results(&image_paths, &result.rec_text, &result.rec_score);
-        }
-        Err(e) => {
-            error!("Recognition failed: {}", e);
-            return Err("Recognition failed".into());
+    info!(
+        "Recognition completed in {:.2}ms",
+        duration.as_secs_f64() * 1000.0
+    );
+
+    // Display results for each image
+    info!("\n=== Recognition Results ===");
+    for (idx, (image_path, text, score)) in existing_images
+        .iter()
+        .zip(output.texts.iter())
+        .zip(output.scores.iter())
+        .map(|((path, text), score)| (path, text, score))
+        .enumerate()
+    {
+        info!("\nImage {}: {}", idx + 1, image_path.display());
+        if text.is_empty() {
+            warn!("  No text recognized (below threshold)");
+        } else {
+            info!("  Text: \"{}\"", text);
+            info!("  Confidence: {:.2}%", score * 100.0);
         }
     }
 
-    info!("Example completed!");
+    // Save visualization if output directory is provided
+    #[cfg(feature = "visualization")]
+    if let Some(output_dir) = args.output_dir {
+        // Create output directory if it doesn't exist
+        std::fs::create_dir_all(&output_dir)?;
+
+        info!("\nSaving visualizations to: {}", output_dir.display());
+
+        for (image_path, rgb_img, text, score) in existing_images
+            .iter()
+            .zip(images.iter())
+            .zip(output.texts.iter())
+            .zip(output.scores.iter())
+            .map(|(((path, img), text), score)| (path, img, text, score))
+        {
+            if !text.is_empty() {
+                // Use the original filename for output
+                let output_filename = image_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown.jpg");
+                let output_path = output_dir.join(output_filename);
+
+                let visualized = visualize_recognition(rgb_img, text, *score);
+                visualized.save(&output_path)?;
+                info!("  Saved: {}", output_path.display());
+            } else {
+                warn!(
+                    "  Skipping visualization for {} (no text recognized)",
+                    image_path.display()
+                );
+            }
+        }
+    }
+
     Ok(())
+}
+
+/// Visualizes recognized text by drawing it on the image
+#[cfg(feature = "visualization")]
+fn visualize_recognition(img: &RgbImage, text: &str, score: f32) -> RgbImage {
+    use image::Rgb;
+    use imageproc::drawing::draw_text_mut;
+
+    let mut output = img.clone();
+    let text_color = Rgb([255u8, 0u8, 0u8]); // Red for text
+
+    // Try to load a font for text rendering
+    let font = load_font();
+
+    if let Some(ref font) = font {
+        // Draw the recognized text at the top
+        let label = format!("{} ({:.1}%)", text, score * 100.0);
+        let text_x = 10;
+        let text_y = 10;
+
+        draw_text_mut(&mut output, text_color, text_x, text_y, 20.0, font, &label);
+    }
+
+    output
+}
+
+#[cfg(feature = "visualization")]
+fn load_font() -> Option<ab_glyph::FontVec> {
+    use ab_glyph::FontVec;
+
+    // Try common font paths
+    let font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/System/Library/Fonts/Arial.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+    ];
+
+    for path in &font_paths {
+        if let Ok(font_data) = std::fs::read(path)
+            && let Ok(font) = FontVec::try_from_vec(font_data)
+        {
+            return Some(font);
+        }
+    }
+
+    None
 }

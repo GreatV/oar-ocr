@@ -138,7 +138,7 @@ impl AspectRatioBucketing {
                     message: format!("No cached resize config found for bucket: {}", bucket.name),
                 })?;
 
-        let padded = resize_and_pad(image, config);
+        let padded = resize_and_pad(image, config).map_err(OCRError::from)?;
 
         Ok(padded)
     }
@@ -347,11 +347,14 @@ mod tests {
 
         // Verify that the last bucket still works for very large aspect ratios
         let bucketing = AspectRatioBucketing::new(deserialized);
-        assert_eq!(bucketing.find_bucket(5000.0).unwrap().name, "ultra_wide");
+        let bucket_name = bucketing
+            .find_bucket(5000.0)
+            .map(|bucket| bucket.name.as_str());
+        assert_eq!(bucket_name, Some("ultra_wide"));
     }
 
     #[test]
-    fn test_resize_config_caching_optimization() {
+    fn test_resize_config_caching() {
         let bucketing = AspectRatioBucketing::default();
 
         // Verify that resize configs are pre-computed for all buckets
@@ -369,19 +372,35 @@ mod tests {
             let (target_height, target_width) = bucket.target_dims;
             assert_eq!(cached_config.target_dims, (target_width, target_height));
 
-            if let PaddingStrategy::SolidColor(color) = cached_config.padding_strategy {
-                assert_eq!(color, bucketing.config.padding_color);
-            } else {
-                panic!("Expected SolidColor padding strategy");
-            }
+            let PaddingStrategy::SolidColor(color) = cached_config.padding_strategy else {
+                assert!(
+                    matches!(
+                        cached_config.padding_strategy,
+                        PaddingStrategy::SolidColor(_)
+                    ),
+                    "Expected SolidColor padding strategy"
+                );
+                continue;
+            };
+            assert_eq!(color, bucketing.config.padding_color);
         }
 
         // Test that resize_and_pad_to_bucket works correctly with cached configs
         let test_image = create_test_image(100, 50); // 2:1 aspect ratio
-        let bucket = bucketing.find_bucket(2.0).unwrap();
-        let result = bucketing
-            .resize_and_pad_to_bucket(&test_image, bucket)
-            .unwrap();
+        let maybe_bucket = bucketing.find_bucket(2.0);
+        let Some(bucket) = maybe_bucket else {
+            assert!(
+                maybe_bucket.is_some(),
+                "aspect ratio 2.0 should map to an existing bucket"
+            );
+            return;
+        };
+        let result = match bucketing.resize_and_pad_to_bucket(&test_image, bucket) {
+            Ok(image) => image,
+            Err(err) => {
+                panic!("expected resize_and_pad_to_bucket to succeed, got {err:?}");
+            }
+        };
 
         let (target_height, target_width) = bucket.target_dims;
         assert_eq!(result.dimensions(), (target_width, target_height));

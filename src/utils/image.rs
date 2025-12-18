@@ -7,7 +7,10 @@
 
 use crate::core::OCRError;
 use crate::core::errors::ImageProcessError;
-use image::{DynamicImage, GrayImage, ImageBuffer, RgbImage};
+use image::{DynamicImage, GrayImage, ImageBuffer, ImageError, ImageReader, RgbImage};
+use std::fs::File;
+use std::io::BufReader;
+use std::path::Path;
 
 /// Converts a DynamicImage to an RgbImage.
 ///
@@ -82,9 +85,34 @@ pub fn load_image_from_memory(bytes: &[u8]) -> Result<RgbImage, OCRError> {
 ///
 /// This function will return an `OCRError::ImageLoad` error if the image cannot
 /// be loaded from the specified path, or if there is an error during conversion.
-pub fn load_image(path: &std::path::Path) -> Result<RgbImage, OCRError> {
-    let img = image::open(path).map_err(OCRError::ImageLoad)?;
+pub fn load_image(path: &Path) -> Result<RgbImage, OCRError> {
+    let img = open_image_any_format(path).map_err(OCRError::ImageLoad)?;
     Ok(dynamic_to_rgb(img))
+}
+
+fn open_image_any_format(path: &Path) -> Result<DynamicImage, ImageError> {
+    match image::open(path) {
+        Ok(img) => Ok(img),
+        Err(err) if should_retry(&err) => {
+            tracing::warn!(
+                "Standard decode failed for {} ({err}). Retrying with format sniffing.",
+                path.display()
+            );
+            decode_with_guessed_format(path)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn should_retry(err: &ImageError) -> bool {
+    matches!(err, ImageError::Decoding(_) | ImageError::Unsupported(_))
+}
+
+fn decode_with_guessed_format(path: &Path) -> Result<DynamicImage, ImageError> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let reader = ImageReader::new(reader).with_guessed_format()?;
+    reader.decode()
 }
 
 /// Creates an RgbImage from raw pixel data.
@@ -138,17 +166,7 @@ pub fn slice_image(
     let crop_width = x2 - x1;
     let crop_height = y2 - y1;
 
-    let mut cropped = RgbImage::new(crop_width, crop_height);
-    for y in 0..crop_height {
-        for x in 0..crop_width {
-            let src_x = x1 + x;
-            let src_y = y1 + y;
-            let pixel = img.get_pixel(src_x, src_y);
-            cropped.put_pixel(x, y, *pixel);
-        }
-    }
-
-    Ok(cropped)
+    Ok(image::imageops::crop_imm(img, x1, y1, crop_width, crop_height).to_image())
 }
 
 /// Extracts a rectangular region from a grayscale image.
@@ -170,17 +188,7 @@ pub fn slice_gray_image(
     let crop_width = x2 - x1;
     let crop_height = y2 - y1;
 
-    let mut cropped = GrayImage::new(crop_width, crop_height);
-    for y in 0..crop_height {
-        for x in 0..crop_width {
-            let src_x = x1 + x;
-            let src_y = y1 + y;
-            let pixel = img.get_pixel(src_x, src_y);
-            cropped.put_pixel(x, y, *pixel);
-        }
-    }
-
-    Ok(cropped)
+    Ok(image::imageops::crop_imm(img, x1, y1, crop_width, crop_height).to_image())
 }
 
 /// Calculates centered crop coordinates for a target size.
@@ -216,13 +224,45 @@ pub fn validate_crop_bounds(
 }
 
 /// Resizes an RGB image to the target dimensions using Lanczos3 filtering.
-pub fn resize_image(img: &RgbImage, width: u32, height: u32) -> RgbImage {
-    image::imageops::resize(img, width, height, image::imageops::FilterType::Lanczos3)
+///
+/// # Errors
+///
+/// Returns `ImageProcessError::InvalidCropSize` if width or height is 0.
+pub fn resize_image(
+    img: &RgbImage,
+    width: u32,
+    height: u32,
+) -> Result<RgbImage, ImageProcessError> {
+    if width == 0 || height == 0 {
+        return Err(ImageProcessError::InvalidCropSize);
+    }
+    Ok(image::imageops::resize(
+        img,
+        width,
+        height,
+        image::imageops::FilterType::Lanczos3,
+    ))
 }
 
 /// Resizes a grayscale image to the target dimensions using Lanczos3 filtering.
-pub fn resize_gray_image(img: &GrayImage, width: u32, height: u32) -> GrayImage {
-    image::imageops::resize(img, width, height, image::imageops::FilterType::Lanczos3)
+///
+/// # Errors
+///
+/// Returns `ImageProcessError::InvalidCropSize` if width or height is 0.
+pub fn resize_gray_image(
+    img: &GrayImage,
+    width: u32,
+    height: u32,
+) -> Result<GrayImage, ImageProcessError> {
+    if width == 0 || height == 0 {
+        return Err(ImageProcessError::InvalidCropSize);
+    }
+    Ok(image::imageops::resize(
+        img,
+        width,
+        height,
+        image::imageops::FilterType::Lanczos3,
+    ))
 }
 
 /// Converts an RGB image to grayscale.
@@ -351,20 +391,15 @@ pub fn load_images_batch_with_policy<P: AsRef<std::path::Path> + Send + Sync>(
 }
 
 /// Padding strategy for resize-and-pad operations.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum PaddingStrategy {
     /// Pad with a solid color
     SolidColor([u8; 3]),
     /// Pad with black (equivalent to SolidColor([0, 0, 0]))
+    #[default]
     Black,
     /// Left-align the resized image (no centering)
     LeftAlign([u8; 3]),
-}
-
-impl Default for PaddingStrategy {
-    fn default() -> Self {
-        Self::Black
-    }
 }
 
 /// Configuration for resize-and-pad operations.
@@ -415,8 +450,20 @@ impl ResizePadConfig {
 /// # Returns
 ///
 /// A resized and padded RGB image with exact target dimensions.
-pub fn resize_and_pad(image: &RgbImage, config: &ResizePadConfig) -> RgbImage {
+///
+/// # Errors
+///
+/// Returns `ImageProcessError::InvalidCropSize` if target dimensions are 0.
+pub fn resize_and_pad(
+    image: &RgbImage,
+    config: &ResizePadConfig,
+) -> Result<RgbImage, ImageProcessError> {
     let (target_width, target_height) = config.target_dims;
+
+    if target_width == 0 || target_height == 0 {
+        return Err(ImageProcessError::InvalidCropSize);
+    }
+
     let (orig_width, orig_height) = image.dimensions();
 
     // Calculate scaling factor to fit within target dimensions while maintaining aspect ratio
@@ -454,7 +501,7 @@ pub fn resize_and_pad(image: &RgbImage, config: &ResizePadConfig) -> RgbImage {
     // Copy resized image to padded image using efficient overlay
     image::imageops::overlay(&mut padded, &resized, pad_x as i64, pad_y as i64);
 
-    padded
+    Ok(padded)
 }
 
 /// Configuration for OCR-style resize-and-pad operations with width constraints.
@@ -472,11 +519,14 @@ pub struct OCRResizePadConfig {
 
 impl OCRResizePadConfig {
     /// Create a new OCR resize-pad configuration.
+    ///
+    /// Uses Triangle (bilinear) interpolation to match OpenCV's cv2.resize default behavior.
     pub fn new(target_height: u32, max_width: u32) -> Self {
         Self {
             target_height,
             max_width,
             padding_strategy: PaddingStrategy::default(),
+            // Use Triangle (bilinear) to match cv2.resize INTER_LINEAR
             filter_type: image::imageops::FilterType::Triangle,
         }
     }
@@ -512,11 +562,19 @@ impl OCRResizePadConfig {
 /// A tuple containing:
 /// - The resized and padded RGB image
 /// - The actual width used for the padded image
+///
+/// # Errors
+///
+/// Returns `ImageProcessError::InvalidCropSize` if target height is 0.
 pub fn ocr_resize_and_pad(
     image: &RgbImage,
     config: &OCRResizePadConfig,
     target_width_ratio: Option<f32>,
-) -> (RgbImage, u32) {
+) -> Result<(RgbImage, u32), ImageProcessError> {
+    if config.target_height == 0 {
+        return Err(ImageProcessError::InvalidCropSize);
+    }
+
     let (original_w, original_h) = image.dimensions();
     let original_ratio = original_w as f32 / original_h as f32;
 
@@ -557,7 +615,7 @@ pub fn ocr_resize_and_pad(
     // Copy resized image to padded image (left-aligned for OCR)
     image::imageops::overlay(&mut padded_image, &resized_image, 0, 0);
 
-    (padded_image, target_w)
+    Ok((padded_image, target_w))
 }
 
 /// Resizes a batch of images to the specified dimensions.
@@ -634,6 +692,108 @@ pub fn resize_images_batch_to_dynamic(
         .collect()
 }
 
+/// Masks a rectangular region in an RGB image with a solid color.
+///
+/// This function fills the specified rectangular region with a solid color,
+/// which is useful for masking formula regions before text detection to prevent
+/// formulas from being incorrectly detected as text (as done in PP-StructureV3).
+///
+/// # Arguments
+///
+/// * `image` - A mutable reference to the RGB image to mask
+/// * `x1` - Left coordinate of the region
+/// * `y1` - Top coordinate of the region
+/// * `x2` - Right coordinate of the region
+/// * `y2` - Bottom coordinate of the region
+/// * `fill_color` - The color to fill the masked region with (default: white [255, 255, 255])
+///
+/// # Returns
+///
+/// Returns `Ok(())` if masking succeeds, or an error if coordinates are invalid.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use oar_ocr::utils::mask_region;
+/// use image::RgbImage;
+///
+/// let mut image = RgbImage::new(100, 100);
+/// // Mask a formula region from (10, 10) to (50, 30) with white
+/// mask_region(&mut image, 10, 10, 50, 30, [255, 255, 255]).unwrap();
+/// ```
+pub fn mask_region(
+    image: &mut RgbImage,
+    x1: u32,
+    y1: u32,
+    x2: u32,
+    y2: u32,
+    fill_color: [u8; 3],
+) -> Result<(), ImageProcessError> {
+    let (img_width, img_height) = image.dimensions();
+
+    // Clamp coordinates to image bounds
+    let x1 = x1.min(img_width);
+    let y1 = y1.min(img_height);
+    let x2 = x2.min(img_width);
+    let y2 = y2.min(img_height);
+
+    if x1 >= x2 || y1 >= y2 {
+        return Err(ImageProcessError::InvalidCropCoordinates);
+    }
+
+    let rgb = image::Rgb(fill_color);
+    for y in y1..y2 {
+        for x in x1..x2 {
+            image.put_pixel(x, y, rgb);
+        }
+    }
+
+    Ok(())
+}
+
+/// Masks multiple bounding box regions in an RGB image.
+///
+/// This function masks multiple regions by filling them with a solid color.
+/// It is useful for batch masking multiple formula or other regions before
+/// text detection (as done in PP-StructureV3).
+///
+/// # Arguments
+///
+/// * `image` - A mutable reference to the RGB image to mask
+/// * `bboxes` - A slice of bounding boxes to mask. Each bbox should provide
+///   `x_min()`, `y_min()`, `x_max()`, `y_max()` methods.
+/// * `fill_color` - The color to fill the masked regions with
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use oar_ocr::utils::mask_regions;
+/// use oar_ocr::processors::BoundingBox;
+/// use image::RgbImage;
+///
+/// let mut image = RgbImage::new(100, 100);
+/// let bboxes = vec![
+///     BoundingBox::from_coords(10.0, 10.0, 30.0, 30.0),
+///     BoundingBox::from_coords(50.0, 50.0, 70.0, 70.0),
+/// ];
+/// mask_regions(&mut image, &bboxes, [255, 255, 255]);
+/// ```
+pub fn mask_regions(
+    image: &mut RgbImage,
+    bboxes: &[crate::processors::BoundingBox],
+    fill_color: [u8; 3],
+) {
+    for bbox in bboxes {
+        let x1 = bbox.x_min() as u32;
+        let y1 = bbox.y_min() as u32;
+        let x2 = bbox.x_max() as u32;
+        let y2 = bbox.y_max() as u32;
+
+        // Ignore errors for individual regions (they might be out of bounds)
+        let _ = mask_region(image, x1, y1, x2, y2, fill_color);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -691,7 +851,7 @@ mod tests {
         let config = ResizePadConfig::new((80, 80))
             .with_padding_strategy(PaddingStrategy::SolidColor([0, 255, 0])); // Green padding
 
-        let result = resize_and_pad(&image, &config);
+        let result = resize_and_pad(&image, &config).unwrap();
 
         assert_eq!(result.dimensions(), (80, 80));
 
@@ -710,7 +870,7 @@ mod tests {
         let config = ResizePadConfig::new((80, 80))
             .with_padding_strategy(PaddingStrategy::LeftAlign([255, 255, 0])); // Yellow padding, left-aligned
 
-        let result = resize_and_pad(&image, &config);
+        let result = resize_and_pad(&image, &config).unwrap();
 
         assert_eq!(result.dimensions(), (80, 80));
 
@@ -761,10 +921,10 @@ mod tests {
         // Check that they are DynamicImage::ImageRgb8 variants
         for dynamic_img in &resized {
             assert_eq!(dynamic_img.dimensions(), (32, 32));
-            match dynamic_img {
-                DynamicImage::ImageRgb8(_) => {} // Expected
-                _ => panic!("Expected ImageRgb8 variant"),
-            }
+            assert!(
+                matches!(dynamic_img, DynamicImage::ImageRgb8(_)),
+                "Expected ImageRgb8 variant"
+            );
         }
     }
 
@@ -797,7 +957,7 @@ mod tests {
         let image = create_test_image(400, 100, [200, 100, 50]); // 4:1 aspect ratio
         let config = OCRResizePadConfig::new(32, 100); // Height 32, max width 100
 
-        let (result, actual_width) = ocr_resize_and_pad(&image, &config, None);
+        let (result, actual_width) = ocr_resize_and_pad(&image, &config, None).unwrap();
 
         assert_eq!(result.height(), 32);
         assert_eq!(actual_width, 100); // Should be constrained to max width
@@ -814,7 +974,8 @@ mod tests {
         let config = OCRResizePadConfig::new(32, 200); // Height 32, max width 200
         let target_ratio = 3.0; // Force 3:1 ratio
 
-        let (result, actual_width) = ocr_resize_and_pad(&image, &config, Some(target_ratio));
+        let (result, actual_width) =
+            ocr_resize_and_pad(&image, &config, Some(target_ratio)).unwrap();
 
         assert_eq!(result.height(), 32);
         assert_eq!(actual_width, 96); // 32 * 3.0 = 96

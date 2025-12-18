@@ -5,7 +5,7 @@
 //! specialized normalization for OCR recognition tasks.
 
 use crate::core::OCRError;
-use crate::processors::types::{ChannelOrder, ColorMode};
+use crate::processors::types::{ChannelOrder, ColorOrder};
 use image::DynamicImage;
 use rayon::prelude::*;
 
@@ -22,8 +22,8 @@ pub struct NormalizeImage {
     pub beta: Vec<f32>,
     /// Channel ordering (CHW or HWC)
     pub order: ChannelOrder,
-    /// Color model describing how to interpret source pixel channels
-    pub color: ColorMode,
+    /// Color channel order (RGB or BGR)
+    pub color_order: ColorOrder,
 }
 
 impl NormalizeImage {
@@ -54,11 +54,34 @@ impl NormalizeImage {
         order: Option<ChannelOrder>,
         color: Option<ColorMode>,
     ) -> Result<Self, OCRError> {
+        Self::with_color_order(scale, mean, std, order, None)
+    }
+
+    /// Creates a new NormalizeImage instance with the specified parameters including color order.
+    ///
+    /// # Arguments
+    ///
+    /// * `scale` - Optional scaling factor (defaults to 1.0/255.0)
+    /// * `mean` - Optional mean values for each channel (defaults to [0.485, 0.456, 0.406])
+    /// * `std` - Optional standard deviation values for each channel (defaults to [0.229, 0.224, 0.225])
+    /// * `order` - Optional channel ordering (defaults to CHW)
+    /// * `color_order` - Optional color channel order (defaults to RGB)
+    ///
+    /// # Returns
+    ///
+    /// A Result containing the new NormalizeImage instance or an OCRError if validation fails.
+    pub fn with_color_order(
+        scale: Option<f32>,
+        mean: Option<Vec<f32>>,
+        std: Option<Vec<f32>>,
+        order: Option<ChannelOrder>,
+        color_order: Option<ColorOrder>,
+    ) -> Result<Self, OCRError> {
         let scale = scale.unwrap_or(1.0 / 255.0);
         let mean = mean.unwrap_or_else(|| vec![0.485, 0.456, 0.406]);
         let std = std.unwrap_or_else(|| vec![0.229, 0.224, 0.225]);
         let order = order.unwrap_or(ChannelOrder::CHW);
-        let color = color.unwrap_or(ColorMode::BGR);
+        let color_order = color_order.unwrap_or_default();
 
         if scale <= 0.0 {
             return Err(OCRError::ConfigError {
@@ -95,7 +118,7 @@ impl NormalizeImage {
             alpha,
             beta,
             order,
-            color,
+            color_order,
         })
     }
 
@@ -350,15 +373,31 @@ impl NormalizeImage {
         let (width, height) = rgb_img.dimensions();
         let channels = 3;
 
+        // Map channel index based on color order
+        // RGB: c=0->R, c=1->G, c=2->B (same as pixel layout)
+        // BGR: c=0->B, c=1->G, c=2->R (swap R and B)
+        let map_channel = |c: u32| -> usize {
+            match self.color_order {
+                ColorOrder::RGB => c as usize,
+                ColorOrder::BGR => match c {
+                    0 => 2, // B -> pixel[2]
+                    1 => 1, // G -> pixel[1]
+                    2 => 0, // R -> pixel[0]
+                    _ => c as usize,
+                },
+            }
+        };
+
         match self.order {
             ChannelOrder::CHW => {
                 let mut result = vec![0.0f32; (channels * height * width) as usize];
 
                 for c in 0..channels {
+                    let src_c = map_channel(c);
                     for y in 0..height {
                         for x in 0..width {
                             let pixel = rgb_img.get_pixel(x, y);
-                            let channel_value = pixel[self.color.channel_index(c as usize)] as f32;
+                            let channel_value = pixel[src_c] as f32;
                             let dst_idx = (c * height * width + y * width + x) as usize;
 
                             result[dst_idx] =
@@ -375,7 +414,8 @@ impl NormalizeImage {
                     for x in 0..width {
                         let pixel = rgb_img.get_pixel(x, y);
                         for c in 0..channels {
-                            let channel_value = pixel[self.color.channel_index(c as usize)] as f32;
+                            let src_c = map_channel(c);
+                            let channel_value = pixel[src_c] as f32;
                             let dst_idx = (y * width * channels + x * channels + c) as usize;
 
                             result[dst_idx] =
@@ -402,15 +442,29 @@ impl NormalizeImage {
         let (width, height) = rgb_img.dimensions();
         let channels = 3;
 
+        // Map channel index based on color order
+        let map_channel = |c: u32| -> usize {
+            match self.color_order {
+                ColorOrder::RGB => c as usize,
+                ColorOrder::BGR => match c {
+                    0 => 2,
+                    1 => 1,
+                    2 => 0,
+                    _ => c as usize,
+                },
+            }
+        };
+
         match self.order {
             ChannelOrder::CHW => {
                 let mut result = vec![0.0f32; (channels * height * width) as usize];
 
                 for c in 0..channels {
+                    let src_c = map_channel(c);
                     for y in 0..height {
                         for x in 0..width {
                             let pixel = rgb_img.get_pixel(x, y);
-                            let channel_value = pixel[self.color.channel_index(c as usize)] as f32;
+                            let channel_value = pixel[src_c] as f32;
                             let dst_idx = (c * height * width + y * width + x) as usize;
 
                             result[dst_idx] =
@@ -441,7 +495,8 @@ impl NormalizeImage {
                     for x in 0..width {
                         let pixel = rgb_img.get_pixel(x, y);
                         for c in 0..channels {
-                            let channel_value = pixel[self.color.channel_index(c as usize)] as f32;
+                            let src_c = map_channel(c);
+                            let channel_value = pixel[src_c] as f32;
                             let dst_idx = (y * width * channels + x * channels + c) as usize;
 
                             result[dst_idx] =
@@ -507,7 +562,18 @@ impl NormalizeImage {
         }
 
         let (width, height) = (first_width, first_height);
-        let channels = 3;
+        let channels = 3u32;
+
+        // Pre-compute channel mapping for BGR support
+        // src_channels[c] gives the source pixel index for output channel c
+        let src_channels: [usize; 3] = match self.color_order {
+            ColorOrder::RGB => [0, 1, 2],
+            ColorOrder::BGR => [2, 1, 0], // B from pixel[2], G from pixel[1], R from pixel[0]
+        };
+
+        // Clone alpha/beta for parallel closure
+        let alpha = self.alpha.clone();
+        let beta = self.beta.clone();
 
         match self.order {
             ChannelOrder::CHW => {
@@ -519,14 +585,14 @@ impl NormalizeImage {
                     let rgb_img = &rgb_imgs[0];
                     let batch_slice = &mut result[0..img_size];
                     for c in 0..channels {
+                        let src_c = src_channels[c as usize];
                         for y in 0..height {
                             for x in 0..width {
                                 let pixel = rgb_img.get_pixel(x, y);
-                                let channel_value =
-                                    pixel[self.color.channel_index(c as usize)] as f32;
+                                let channel_value = pixel[src_c] as f32;
                                 let dst_idx = (c * height * width + y * width + x) as usize;
                                 batch_slice[dst_idx] =
-                                    channel_value * self.alpha[c as usize] + self.beta[c as usize];
+                                    channel_value * alpha[c as usize] + beta[c as usize];
                             }
                         }
                     }
@@ -535,15 +601,14 @@ impl NormalizeImage {
                         |(batch_idx, batch_slice)| {
                             let rgb_img = &rgb_imgs[batch_idx];
                             for c in 0..channels {
+                                let src_c = src_channels[c as usize];
                                 for y in 0..height {
                                     for x in 0..width {
                                         let pixel = rgb_img.get_pixel(x, y);
-                                        let channel_value =
-                                            pixel[self.color.channel_index(c as usize)] as f32;
+                                        let channel_value = pixel[src_c] as f32;
                                         let dst_idx = (c * height * width + y * width + x) as usize;
-                                        batch_slice[dst_idx] = channel_value
-                                            * self.alpha[c as usize]
-                                            + self.beta[c as usize];
+                                        batch_slice[dst_idx] =
+                                            channel_value * alpha[c as usize] + beta[c as usize];
                                     }
                                 }
                             }
@@ -579,11 +644,11 @@ impl NormalizeImage {
                         for x in 0..width {
                             let pixel = rgb_img.get_pixel(x, y);
                             for c in 0..channels {
-                                let channel_value =
-                                    pixel[self.color.channel_index(c as usize)] as f32;
+                                let src_c = src_channels[c as usize];
+                                let channel_value = pixel[src_c] as f32;
                                 let dst_idx = (y * width * channels + x * channels + c) as usize;
                                 batch_slice[dst_idx] =
-                                    channel_value * self.alpha[c as usize] + self.beta[c as usize];
+                                    channel_value * alpha[c as usize] + beta[c as usize];
                             }
                         }
                     }
@@ -595,13 +660,12 @@ impl NormalizeImage {
                                 for x in 0..width {
                                     let pixel = rgb_img.get_pixel(x, y);
                                     for c in 0..channels {
-                                        let channel_value =
-                                            pixel[self.color.channel_index(c as usize)] as f32;
+                                        let src_c = src_channels[c as usize];
+                                        let channel_value = pixel[src_c] as f32;
                                         let dst_idx =
                                             (y * width * channels + x * channels + c) as usize;
-                                        batch_slice[dst_idx] = channel_value
-                                            * self.alpha[c as usize]
-                                            + self.beta[c as usize];
+                                        batch_slice[dst_idx] =
+                                            channel_value * alpha[c as usize] + beta[c as usize];
                                     }
                                 }
                             }
