@@ -119,14 +119,35 @@ pub fn get_rotate_crop_image(
         .map(|p| Point2f::new(p.x - left as f32, p.y - top as f32))
         .collect();
 
-    // Calculate target image dimensions based on the average edge lengths
-    let width1 = distance(&points[0], &points[1]);
-    let width2 = distance(&points[3], &points[2]);
-    let img_crop_width = ((width1 + width2) / 2.0).round() as u32;
+    // Reorder points to (top-left, top-right, bottom-right, bottom-left)
+    // to keep width/height estimation stable when point order varies.
+    let mut sorted = points.clone();
+    sorted.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+    let (mut index_a, mut index_d) = (0usize, 1usize);
+    if sorted[1].y < sorted[0].y {
+        index_a = 1;
+        index_d = 0;
+    }
+    let (mut index_b, mut index_c) = (2usize, 3usize);
+    if sorted[3].y < sorted[2].y {
+        index_b = 3;
+        index_c = 2;
+    }
+    let ordered = [
+        sorted[index_a],
+        sorted[index_b],
+        sorted[index_c],
+        sorted[index_d],
+    ];
 
-    let height1 = distance(&points[0], &points[3]);
-    let height2 = distance(&points[1], &points[2]);
-    let img_crop_height = ((height1 + height2) / 2.0).round() as u32;
+    // Calculate target image dimensions based on the max opposite-edge lengths
+    let width1 = distance(&ordered[0], &ordered[1]);
+    let width2 = distance(&ordered[2], &ordered[3]);
+    let img_crop_width = width1.max(width2).round() as u32;
+
+    let height1 = distance(&ordered[0], &ordered[3]);
+    let height2 = distance(&ordered[1], &ordered[2]);
+    let img_crop_height = height1.max(height2).round() as u32;
 
     // Validate target dimensions
     if img_crop_width == 0 || img_crop_height == 0 {
@@ -144,7 +165,7 @@ pub fn get_rotate_crop_image(
     ];
 
     // Calculate perspective transformation matrix
-    let transform_matrix = get_perspective_transform(&points, &pts_std)?;
+    let transform_matrix = get_perspective_transform(&ordered, &pts_std)?;
 
     // Apply perspective transformation
     let dst_img = warp_perspective(
@@ -295,28 +316,26 @@ fn warp_perspective(
 
     // Create the destination image
     let mut dst_image = RgbImage::new(dst_width, dst_height);
-    let (src_width, src_height) = src_image.dimensions();
     let buffer: &mut [u8] = dst_image.as_mut();
 
     // Process rows with a small-image sequential fast path to avoid rayon overhead
+    // Use bicubic interpolation with border replication (matches cv2.warpPerspective
+    // with flags=INTER_CUBIC and borderMode=BORDER_REPLICATE)
     if dst_height <= 1 {
         let row_buffer = &mut buffer[0..(dst_width * 3) as usize];
         let dst_y = 0u32;
         for dst_x in 0..dst_width {
             let dst_point = Vector3::new(dst_x as f32, dst_y as f32, 1.0);
             let src_point = inv_matrix * dst_point;
-            let mut final_pixel = Rgb([0, 0, 0]);
-            if src_point.z.abs() > f32::EPSILON {
+            let final_pixel = if src_point.z.abs() > f32::EPSILON {
                 let src_x = src_point.x / src_point.z;
                 let src_y = src_point.y / src_point.z;
-                if src_x >= 0.0
-                    && src_y >= 0.0
-                    && src_x < (src_width - 1) as f32
-                    && src_y < (src_height - 1) as f32
-                {
-                    final_pixel = bilinear_interpolate(src_image, src_x, src_y);
-                }
-            }
+                // bicubic_interpolate handles out-of-bounds via border replication
+                bicubic_interpolate(src_image, src_x, src_y)
+            } else {
+                // Degenerate case: replicate top-left corner pixel
+                *src_image.get_pixel(0, 0)
+            };
             let index = (dst_x * 3) as usize;
             row_buffer[index..index + 3].copy_from_slice(&final_pixel.0);
         }
@@ -328,18 +347,15 @@ fn warp_perspective(
                 for dst_x in 0..dst_width {
                     let dst_point = Vector3::new(dst_x as f32, dst_y as f32, 1.0);
                     let src_point = inv_matrix * dst_point;
-                    let mut final_pixel = Rgb([0, 0, 0]);
-                    if src_point.z.abs() > f32::EPSILON {
+                    let final_pixel = if src_point.z.abs() > f32::EPSILON {
                         let src_x = src_point.x / src_point.z;
                         let src_y = src_point.y / src_point.z;
-                        if src_x >= 0.0
-                            && src_y >= 0.0
-                            && src_x < (src_width - 1) as f32
-                            && src_y < (src_height - 1) as f32
-                        {
-                            final_pixel = bilinear_interpolate(src_image, src_x, src_y);
-                        }
-                    }
+                        // bicubic_interpolate handles out-of-bounds via border replication
+                        bicubic_interpolate(src_image, src_x, src_y)
+                    } else {
+                        // Degenerate case: replicate top-left corner pixel
+                        *src_image.get_pixel(0, 0)
+                    };
                     let index = (dst_x * 3) as usize;
                     row_buffer[index..index + 3].copy_from_slice(&final_pixel.0);
                 }
@@ -349,10 +365,55 @@ fn warp_perspective(
     Ok(dst_image)
 }
 
-/// Performs bilinear interpolation to get a pixel value at non-integer coordinates.
+/// Gets a pixel value with border replication for out-of-bounds coordinates.
+///
+/// This function implements OpenCV's BORDER_REPLICATE behavior:
+/// when coordinates are outside the image, the nearest edge pixel is used.
+///
+/// # Arguments
+///
+/// * `image` - The source image
+/// * `x` - X coordinate (can be negative or >= width)
+/// * `y` - Y coordinate (can be negative or >= height)
+///
+/// # Returns
+///
+/// The pixel value at the clamped coordinates.
+#[inline]
+fn get_pixel_replicate(image: &RgbImage, x: i32, y: i32) -> Rgb<u8> {
+    let clamped_x = x.clamp(0, image.width() as i32 - 1) as u32;
+    let clamped_y = y.clamp(0, image.height() as i32 - 1) as u32;
+    *image.get_pixel(clamped_x, clamped_y)
+}
+
+/// Cubic interpolation kernel function.
+///
+/// This implements the standard cubic convolution kernel used in bicubic interpolation.
+/// The kernel is defined as:
+/// - For |t| <= 1: (a+2)|t|³ - (a+3)|t|² + 1
+/// - For 1 < |t| < 2: a|t|³ - 5a|t|² + 8a|t| - 4a
+/// - Otherwise: 0
+///
+/// Where a = -0.5 (Catmull-Rom spline, same as OpenCV's default)
+#[inline]
+fn cubic_kernel(t: f32) -> f32 {
+    const A: f32 = -0.5; // Catmull-Rom spline coefficient (OpenCV default)
+    let t_abs = t.abs();
+
+    if t_abs <= 1.0 {
+        (A + 2.0) * t_abs * t_abs * t_abs - (A + 3.0) * t_abs * t_abs + 1.0
+    } else if t_abs < 2.0 {
+        A * t_abs * t_abs * t_abs - 5.0 * A * t_abs * t_abs + 8.0 * A * t_abs - 4.0 * A
+    } else {
+        0.0
+    }
+}
+
+/// Performs bicubic interpolation to get a pixel value at non-integer coordinates.
 ///
 /// This function calculates the pixel value at a fractional (x, y) coordinate
-/// by interpolating between the four nearest pixels.
+/// by interpolating using a 4x4 neighborhood of pixels with cubic convolution.
+/// Uses border replication for edge handling (same as OpenCV's BORDER_REPLICATE).
 ///
 /// # Arguments
 ///
@@ -363,24 +424,84 @@ fn warp_perspective(
 /// # Returns
 ///
 /// The interpolated pixel value.
-fn bilinear_interpolate(image: &RgbImage, x: f32, y: f32) -> Rgb<u8> {
-    // Get the integer parts of the coordinates
-    let x1 = x.floor() as u32;
-    let y1 = y.floor() as u32;
+fn bicubic_interpolate(image: &RgbImage, x: f32, y: f32) -> Rgb<u8> {
+    let x_int = x.floor() as i32;
+    let y_int = y.floor() as i32;
+    let dx = x - x_int as f32;
+    let dy = y - y_int as f32;
 
-    // Get the neighboring pixel coordinates, clamping to image boundaries
-    let x2 = (x1 + 1).min(image.width() - 1);
-    let y2 = (y1 + 1).min(image.height() - 1);
+    // Calculate x-direction weights
+    let wx = [
+        cubic_kernel(dx + 1.0),
+        cubic_kernel(dx),
+        cubic_kernel(dx - 1.0),
+        cubic_kernel(dx - 2.0),
+    ];
+
+    // Calculate y-direction weights
+    let wy = [
+        cubic_kernel(dy + 1.0),
+        cubic_kernel(dy),
+        cubic_kernel(dy - 1.0),
+        cubic_kernel(dy - 2.0),
+    ];
+
+    let mut result = [0.0f32; 3];
+
+    // Sample 4x4 neighborhood
+    for (j, &weight_y) in wy.iter().enumerate() {
+        let sample_y = y_int - 1 + j as i32;
+
+        for (i, &weight_x) in wx.iter().enumerate() {
+            let sample_x = x_int - 1 + i as i32;
+            let weight = weight_x * weight_y;
+
+            // Use border replication for out-of-bounds pixels
+            let pixel = get_pixel_replicate(image, sample_x, sample_y);
+
+            for (c, result_c) in result.iter_mut().enumerate().take(3) {
+                *result_c += weight * pixel.0[c] as f32;
+            }
+        }
+    }
+
+    // Clamp and convert to u8
+    Rgb([
+        result[0].round().clamp(0.0, 255.0) as u8,
+        result[1].round().clamp(0.0, 255.0) as u8,
+        result[2].round().clamp(0.0, 255.0) as u8,
+    ])
+}
+
+/// Performs bilinear interpolation to get a pixel value at non-integer coordinates.
+///
+/// This function calculates the pixel value at a fractional (x, y) coordinate
+/// by interpolating between the four nearest pixels.
+/// Uses border replication for edge handling (same as OpenCV's BORDER_REPLICATE).
+///
+/// # Arguments
+///
+/// * `image` - The source image
+/// * `x` - X coordinate (can be fractional)
+/// * `y` - Y coordinate (can be fractional)
+///
+/// # Returns
+///
+/// The interpolated pixel value.
+#[allow(dead_code)]
+fn bilinear_interpolate(image: &RgbImage, x: f32, y: f32) -> Rgb<u8> {
+    let x_int = x.floor() as i32;
+    let y_int = y.floor() as i32;
 
     // Calculate the fractional parts
-    let dx = x - x1 as f32;
-    let dy = y - y1 as f32;
+    let dx = x - x_int as f32;
+    let dy = y - y_int as f32;
 
-    // Get the four neighboring pixels
-    let p11 = image.get_pixel(x1, y1);
-    let p12 = image.get_pixel(x1, y2);
-    let p21 = image.get_pixel(x2, y1);
-    let p22 = image.get_pixel(x2, y2);
+    // Get the four neighboring pixels with border replication
+    let p11 = get_pixel_replicate(image, x_int, y_int);
+    let p12 = get_pixel_replicate(image, x_int, y_int + 1);
+    let p21 = get_pixel_replicate(image, x_int + 1, y_int);
+    let p22 = get_pixel_replicate(image, x_int + 1, y_int + 1);
 
     // Interpolate each color channel
     let mut result = [0u8; 3];

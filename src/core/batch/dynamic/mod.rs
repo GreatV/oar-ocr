@@ -9,7 +9,7 @@
 //!
 //! - **Shape Compatibility**: Group images by exact dimensions, aspect ratio, or custom strategies
 //! - **Flexible Batching**: Support for detection and recognition batching
-//! - **Performance Metrics**: Track batching performance and efficiency
+//! - **Speed Metrics**: Track batching time and throughput
 //! - **Cross-Image Batching**: Batch text regions from multiple images together
 //!
 //! # Example

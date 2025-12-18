@@ -9,6 +9,15 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
 
+/// Decoded batch outputs along with positional metadata.
+pub type PositionedDecodeResult = (
+    Vec<String>,
+    Vec<f32>,
+    Vec<Vec<f32>>,
+    Vec<Vec<usize>>,
+    Vec<usize>,
+);
+
 static ALPHANUMERIC_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[a-zA-Z0-9 :*./%+-]").expect("Failed to compile regex pattern"));
 
@@ -322,7 +331,8 @@ impl CTCLabelDecode {
     pub fn new(character_list: Option<&str>, use_space_char: bool) -> Self {
         let mut base = BaseRecLabelDecode::new(character_list, use_space_char);
 
-        let mut new_character = vec![' '];
+        // Use null char for blank to distinguish from actual space
+        let mut new_character = vec!['\0'];
         new_character.extend(base.character);
 
         let mut new_dict = HashMap::new();
@@ -363,7 +373,8 @@ impl CTCLabelDecode {
         } else {
             let mut base = BaseRecLabelDecode::from_string_list(character_list, use_space_char);
 
-            let mut new_character = vec![' '];
+            // Use null char for blank to distinguish from actual space
+            let mut new_character = vec!['\0'];
             new_character.extend(base.character);
 
             let mut new_dict = HashMap::new();
@@ -405,6 +416,126 @@ impl CTCLabelDecode {
         self.base.character.len()
     }
 
+    /// Applies the CTC decoder to a tensor of model predictions with character position tracking.
+    ///
+    /// This method handles the special requirements of CTC decoding and additionally tracks
+    /// the timestep positions of each character for word box generation.
+    ///
+    /// # Arguments
+    /// * `pred` - A 3D tensor containing the model predictions.
+    ///
+    /// # Returns
+    /// A tuple containing:
+    /// * A vector of decoded text strings
+    /// * A vector of confidence scores for each text string
+    /// * A vector of character positions (normalized 0.0-1.0) for each text string
+    /// * A vector of column indices for each character in each text string
+    /// * A vector of sequence lengths (total columns) for each text string
+    pub fn apply_with_positions(&self, pred: &crate::core::Tensor3D) -> PositionedDecodeResult {
+        if pred.is_empty() {
+            return (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        }
+
+        let batch_size = pred.shape()[0];
+        let mut all_texts = Vec::new();
+        let mut all_scores = Vec::new();
+        let mut all_positions = Vec::new();
+        let mut all_col_indices = Vec::new();
+        let mut all_seq_lengths = Vec::new();
+
+        for batch_idx in 0..batch_size {
+            let preds = pred.index_axis(ndarray::Axis(0), batch_idx);
+            let seq_len = preds.shape()[0] as f32;
+
+            let mut sequence_idx = Vec::new();
+            let mut sequence_prob = Vec::new();
+            let mut sequence_timesteps = Vec::new();
+
+            for (timestep, row) in preds.outer_iter().enumerate() {
+                if let Some((idx, &prob)) = row
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                {
+                    sequence_idx.push(idx);
+                    sequence_prob.push(prob);
+                    sequence_timesteps.push(timestep);
+                } else {
+                    sequence_idx.push(self.blank_index);
+                    sequence_prob.push(0.0);
+                    sequence_timesteps.push(timestep);
+                }
+            }
+
+            let mut filtered_idx = Vec::new();
+            let mut filtered_prob = Vec::new();
+            let mut filtered_timesteps = Vec::new();
+            let mut selection = vec![true; sequence_idx.len()];
+
+            // Remove consecutive duplicates
+            if sequence_idx.len() > 1 {
+                for i in 1..sequence_idx.len() {
+                    if sequence_idx[i] == sequence_idx[i - 1] {
+                        selection[i] = false;
+                    }
+                }
+            }
+
+            // Remove blanks
+            for (i, &idx) in sequence_idx.iter().enumerate() {
+                if idx == self.blank_index {
+                    selection[i] = false;
+                }
+            }
+
+            // Collect filtered results
+            for (i, &idx) in sequence_idx.iter().enumerate() {
+                if selection[i] {
+                    filtered_idx.push(idx);
+                    filtered_prob.push(sequence_prob[i]);
+                    filtered_timesteps.push(sequence_timesteps[i]);
+                }
+            }
+
+            let char_list: Vec<char> = filtered_idx
+                .iter()
+                .filter_map(|&text_id| self.base.character.get(text_id).copied())
+                .collect();
+
+            let conf_list = if filtered_prob.is_empty() {
+                vec![0.0]
+            } else {
+                filtered_prob
+            };
+
+            // Calculate normalized character positions (0.0 to 1.0)
+            let char_positions: Vec<f32> = filtered_timesteps
+                .iter()
+                .map(|&timestep| timestep as f32 / seq_len)
+                .collect();
+
+            // Store column indices (raw timesteps) for accurate word box generation
+            let col_indices: Vec<usize> = filtered_timesteps.clone();
+
+            let text: String = char_list.iter().collect();
+            let mean_conf = conf_list.iter().sum::<f32>() / conf_list.len() as f32;
+
+            all_texts.push(text);
+            all_scores.push(mean_conf);
+            all_positions.push(char_positions);
+            all_col_indices.push(col_indices);
+            all_seq_lengths.push(seq_len as usize);
+        }
+
+        (
+            all_texts,
+            all_scores,
+            all_positions,
+            all_col_indices,
+            all_seq_lengths,
+        )
+    }
+
     /// Applies the CTC decoder to a tensor of model predictions.
     ///
     /// This method handles the special requirements of CTC decoding:
@@ -428,6 +559,7 @@ impl CTCLabelDecode {
         let batch_size = pred.shape()[0];
         let mut all_texts = Vec::new();
         let mut all_scores = Vec::new();
+        let mut batches_with_text = 0;
 
         for batch_idx in 0..batch_size {
             let preds = pred.index_axis(ndarray::Axis(0), batch_idx);
@@ -488,9 +620,21 @@ impl CTCLabelDecode {
             let text: String = char_list.iter().collect();
             let mean_conf = conf_list.iter().sum::<f32>() / conf_list.len() as f32;
 
+            if !text.is_empty() {
+                batches_with_text += 1;
+            }
+
             all_texts.push(text);
             all_scores.push(mean_conf);
         }
+
+        // Log summary of decoding results
+        tracing::debug!(
+            "CTC decode summary: batch_size={}, batches_with_text={}, empty_batches={}",
+            batch_size,
+            batches_with_text,
+            batch_size - batches_with_text
+        );
 
         (all_texts, all_scores)
     }

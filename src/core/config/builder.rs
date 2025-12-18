@@ -1,16 +1,16 @@
-//! Common builder configuration types and utilities.
+//! Model inference configuration types and utilities.
 
 use super::errors::{ConfigError, ConfigValidator};
 use super::onnx::OrtSessionConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Common configuration for model builders.
+/// Configuration for model inference and ONNX Runtime session setup.
 ///
-/// This struct contains configuration options that are common across different
-/// types of model builders in the OCR pipeline.
+/// This struct provides configuration options for building ONNX inference engines,
+/// including session pool management, runtime settings, and model metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommonBuilderConfig {
+pub struct ModelInferenceConfig {
     /// The path to the model file (optional).
     pub model_path: Option<PathBuf>,
     /// The name of the model (optional).
@@ -28,12 +28,12 @@ pub struct CommonBuilderConfig {
     pub session_pool_size: Option<usize>,
 }
 
-impl CommonBuilderConfig {
-    /// Creates a new CommonBuilderConfig with default values.
+impl ModelInferenceConfig {
+    /// Creates a new ModelInferenceConfig with default values.
     ///
     /// # Returns
     ///
-    /// A new CommonBuilderConfig instance.
+    /// A new ModelInferenceConfig instance.
     pub fn new() -> Self {
         Self {
             model_path: None,
@@ -45,7 +45,7 @@ impl CommonBuilderConfig {
         }
     }
 
-    /// Creates a new CommonBuilderConfig with default values for model name and batch size.
+    /// Creates a new ModelInferenceConfig with default values for model name and batch size.
     ///
     /// # Arguments
     ///
@@ -54,7 +54,7 @@ impl CommonBuilderConfig {
     ///
     /// # Returns
     ///
-    /// A new CommonBuilderConfig instance.
+    /// A new ModelInferenceConfig instance.
     pub fn with_defaults(model_name: Option<String>, batch_size: Option<usize>) -> Self {
         Self {
             model_path: None,
@@ -66,7 +66,7 @@ impl CommonBuilderConfig {
         }
     }
 
-    /// Creates a new CommonBuilderConfig with a model path.
+    /// Creates a new ModelInferenceConfig with a model path.
     ///
     /// # Arguments
     ///
@@ -74,7 +74,7 @@ impl CommonBuilderConfig {
     ///
     /// # Returns
     ///
-    /// A new CommonBuilderConfig instance.
+    /// A new ModelInferenceConfig instance.
     pub fn with_model_path(model_path: PathBuf) -> Self {
         Self {
             model_path: Some(model_path),
@@ -94,7 +94,7 @@ impl CommonBuilderConfig {
     ///
     /// # Returns
     ///
-    /// The updated CommonBuilderConfig instance.
+    /// The updated ModelInferenceConfig instance.
     pub fn model_path(mut self, model_path: impl Into<PathBuf>) -> Self {
         self.model_path = Some(model_path.into());
         self
@@ -108,7 +108,7 @@ impl CommonBuilderConfig {
     ///
     /// # Returns
     ///
-    /// The updated CommonBuilderConfig instance.
+    /// The updated ModelInferenceConfig instance.
     pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
         self.model_name = Some(model_name.into());
         self
@@ -122,7 +122,7 @@ impl CommonBuilderConfig {
     ///
     /// # Returns
     ///
-    /// The updated CommonBuilderConfig instance.
+    /// The updated ModelInferenceConfig instance.
     pub fn batch_size(mut self, batch_size: usize) -> Self {
         self.batch_size = Some(batch_size);
         self
@@ -136,7 +136,7 @@ impl CommonBuilderConfig {
     ///
     /// # Returns
     ///
-    /// The updated CommonBuilderConfig instance.
+    /// The updated ModelInferenceConfig instance.
     pub fn enable_logging(mut self, enable: bool) -> Self {
         self.enable_logging = Some(enable);
         self
@@ -159,7 +159,7 @@ impl CommonBuilderConfig {
     ///
     /// # Returns
     ///
-    /// The updated CommonBuilderConfig instance.
+    /// The updated ModelInferenceConfig instance.
     pub fn ort_session(mut self, cfg: OrtSessionConfig) -> Self {
         self.ort_session = Some(cfg);
         self
@@ -173,7 +173,7 @@ impl CommonBuilderConfig {
     ///
     /// # Returns
     ///
-    /// The updated CommonBuilderConfig instance.
+    /// The updated ModelInferenceConfig instance.
     pub fn session_pool_size(mut self, size: usize) -> Self {
         self.session_pool_size = Some(size);
         self
@@ -199,8 +199,8 @@ impl CommonBuilderConfig {
     ///
     /// # Returns
     ///
-    /// The updated CommonBuilderConfig instance.
-    pub fn merge_with(mut self, other: &CommonBuilderConfig) -> Self {
+    /// The updated ModelInferenceConfig instance.
+    pub fn merge_with(mut self, other: &ModelInferenceConfig) -> Self {
         if other.model_path.is_some() {
             self.model_path = other.model_path.clone();
         }
@@ -252,7 +252,7 @@ impl CommonBuilderConfig {
     }
 }
 
-impl ConfigValidator for CommonBuilderConfig {
+impl ConfigValidator for ModelInferenceConfig {
     /// Validates the configuration.
     ///
     /// This method checks that the batch size is valid and that the model path exists
@@ -285,7 +285,7 @@ impl ConfigValidator for CommonBuilderConfig {
     ///
     /// # Returns
     ///
-    /// The default CommonBuilderConfig instance.
+    /// The default ModelInferenceConfig instance.
     fn get_defaults() -> Self {
         Self {
             model_path: None,
@@ -298,8 +298,8 @@ impl ConfigValidator for CommonBuilderConfig {
     }
 }
 
-impl Default for CommonBuilderConfig {
-    /// This allows CommonBuilderConfig to be created with default values.
+impl Default for ModelInferenceConfig {
+    /// This allows ModelInferenceConfig to be created with default values.
     fn default() -> Self {
         Self::new()
     }
@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn test_common_builder_config_builder_pattern() {
-        let config = CommonBuilderConfig::new()
+        let config = ModelInferenceConfig::new()
             .model_name("test_model")
             .batch_size(16)
             .enable_logging(true)
@@ -325,10 +325,10 @@ mod tests {
 
     #[test]
     fn test_common_builder_config_merge() {
-        let config1 = CommonBuilderConfig::new()
+        let config1 = ModelInferenceConfig::new()
             .model_name("model1")
             .batch_size(8);
-        let config2 = CommonBuilderConfig::new()
+        let config2 = ModelInferenceConfig::new()
             .model_name("model2")
             .enable_logging(true);
 
@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn test_common_builder_config_getters() {
-        let config = CommonBuilderConfig::new()
+        let config = ModelInferenceConfig::new()
             .model_name("test")
             .batch_size(16)
             .session_pool_size(2);
@@ -353,15 +353,15 @@ mod tests {
 
     #[test]
     fn test_common_builder_config_validation() {
-        let valid_config = CommonBuilderConfig::new()
+        let valid_config = ModelInferenceConfig::new()
             .batch_size(16)
             .session_pool_size(2);
         assert!(valid_config.validate().is_ok());
 
-        let invalid_batch_config = CommonBuilderConfig::new().batch_size(0);
+        let invalid_batch_config = ModelInferenceConfig::new().batch_size(0);
         assert!(invalid_batch_config.validate().is_err());
 
-        let invalid_pool_config = CommonBuilderConfig::new().session_pool_size(0);
+        let invalid_pool_config = ModelInferenceConfig::new().session_pool_size(0);
         assert!(invalid_pool_config.validate().is_err());
     }
 }

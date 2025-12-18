@@ -3,6 +3,7 @@ use crate::core::config::{
     OrtExecutionProvider, OrtGraphOptimizationLevel as OG, OrtSessionConfig,
 };
 use ort::execution_providers::ExecutionProviderDispatch;
+use ort::logging::LogLevel;
 use ort::session::builder::{GraphOptimizationLevel as GOL, SessionBuilder};
 
 impl OrtInfer {
@@ -31,6 +32,21 @@ impl OrtInfer {
                 OG::All => GOL::Level3,
             };
             builder = builder.with_optimization_level(mapped)?;
+        }
+        if let Some(log_level) = cfg.log_severity_level {
+            // Map log severity level to LogLevel
+            // 0=Verbose, 1=Info, 2=Warning, 3=Error, 4=Fatal
+            let logging_level = match log_level {
+                0 => LogLevel::Verbose,
+                1 => LogLevel::Info,
+                2 => LogLevel::Warning,
+                3 => LogLevel::Error,
+                _ => LogLevel::Fatal,
+            };
+            builder = builder.with_log_level(logging_level)?;
+        }
+        if let Some(log_verbosity) = cfg.log_verbosity_level {
+            builder = builder.with_log_verbosity(log_verbosity)?;
         }
         if let Some(eps) = &cfg.execution_providers {
             let providers = Self::build_execution_providers(eps)?;
