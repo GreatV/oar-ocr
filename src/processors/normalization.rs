@@ -347,7 +347,8 @@ impl NormalizeImage {
                     for y in 0..h.min(height_img as usize) {
                         for x in 0..w.min(width as usize) {
                             let pixel = rgb_img.get_pixel(x as u32, y as u32);
-                            for (c, &src_c) in src_channels.iter().enumerate().take(channels.min(3)) {
+                            for (c, &src_c) in src_channels.iter().enumerate().take(channels.min(3))
+                            {
                                 let channel_value = pixel[src_c] as f32;
                                 let dst_idx =
                                     batch_offset + y * max_width * channels + x * channels + c;
