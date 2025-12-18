@@ -35,6 +35,7 @@ impl NormalizeImage {
     /// * `mean` - Optional mean values for each channel (defaults to [0.485, 0.456, 0.406])
     /// * `std` - Optional standard deviation values for each channel (defaults to [0.229, 0.224, 0.225])
     /// * `order` - Optional channel ordering (defaults to CHW)
+    /// * `color_model` - Optional color model describing source data (defaults to BGR)
     ///
     /// # Returns
     ///
@@ -51,8 +52,9 @@ impl NormalizeImage {
         mean: Option<Vec<f32>>,
         std: Option<Vec<f32>>,
         order: Option<ChannelOrder>,
+        color_order: Option<ColorOrder>,
     ) -> Result<Self, OCRError> {
-        Self::with_color_order(scale, mean, std, order, None)
+        Self::with_color_order(scale, mean, std, order, color_order)
     }
 
     /// Creates a new NormalizeImage instance with the specified parameters including color order.
@@ -174,6 +176,7 @@ impl NormalizeImage {
             Some(vec![1.0, 1.0, 1.0]),
             Some(vec![1.0, 1.0, 1.0]),
             Some(ChannelOrder::CHW),
+            Some(ColorOrder::BGR),
         )
     }
 
@@ -312,6 +315,12 @@ impl NormalizeImage {
         let img_size = channels * height * max_width;
         batch_tensor.fill(0.0);
 
+        // Pre-compute channel mapping for BGR support
+        let src_channels: [usize; 3] = match self.color_order {
+            ColorOrder::RGB => [0, 1, 2],
+            ColorOrder::BGR => [2, 1, 0],
+        };
+
         for (batch_idx, (img, &(_c, h, w))) in imgs.into_iter().zip(shapes.iter()).enumerate() {
             let rgb_img = img.to_rgb8();
             let (width, height_img) = rgb_img.dimensions();
@@ -319,11 +328,11 @@ impl NormalizeImage {
 
             match self.order {
                 ChannelOrder::CHW => {
-                    for c in 0..channels.min(3) {
+                    for (c, &src_c) in src_channels.iter().enumerate().take(channels.min(3)) {
                         for y in 0..h.min(height_img as usize) {
                             for x in 0..w.min(width as usize) {
                                 let pixel = rgb_img.get_pixel(x as u32, y as u32);
-                                let channel_value = pixel[c] as f32;
+                                let channel_value = pixel[src_c] as f32;
                                 let dst_idx =
                                     batch_offset + c * height * max_width + y * max_width + x;
                                 if dst_idx < batch_tensor.len() {
@@ -338,8 +347,9 @@ impl NormalizeImage {
                     for y in 0..h.min(height_img as usize) {
                         for x in 0..w.min(width as usize) {
                             let pixel = rgb_img.get_pixel(x as u32, y as u32);
-                            for c in 0..channels.min(3) {
-                                let channel_value = pixel[c] as f32;
+                            for (c, &src_c) in src_channels.iter().enumerate().take(channels.min(3))
+                            {
+                                let channel_value = pixel[src_c] as f32;
                                 let dst_idx =
                                     batch_offset + y * max_width * channels + x * channels + c;
                                 if dst_idx < batch_tensor.len() {
