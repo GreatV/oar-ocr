@@ -46,12 +46,19 @@ impl FromStr for CropMode {
 
 /// Specifies how to limit the size of an image during resizing operations
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum LimitType {
     /// Limit the smaller dimension of the image
     Min,
     /// Limit the larger dimension of the image
     Max,
     /// Resize the long dimension to a specific size while maintaining aspect ratio
+    #[serde(
+        rename = "resize_long",
+        alias = "resizelong",
+        alias = "resizeLong",
+        alias = "resize-long"
+    )]
     ResizeLong,
 }
 

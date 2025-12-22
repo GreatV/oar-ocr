@@ -118,10 +118,23 @@ impl ModelAdapter for FormulaRecognitionAdapter {
         config: Option<&<Self::Task as Task>::Config>,
     ) -> Result<<Self::Task as Task>::Output, OCRError> {
         let effective_config = config.unwrap_or(&self.config);
+        let batch_len = input.images.len();
 
         // Preprocess and infer
-        let batch_tensor = self.model.preprocess(input.images)?;
-        let token_ids = self.model.infer(&batch_tensor)?;
+        let batch_tensor = self.model.preprocess(input.images).map_err(|e| {
+            OCRError::adapter_execution_error(
+                "FormulaRecognitionAdapter",
+                format!("preprocess (batch_size={})", batch_len),
+                e,
+            )
+        })?;
+        let token_ids = self.model.infer(&batch_tensor).map_err(|e| {
+            OCRError::adapter_execution_error(
+                "FormulaRecognitionAdapter",
+                format!("infer (batch_size={})", batch_len),
+                e,
+            )
+        })?;
 
         // Filter tokens and decode
         let filtered_tokens = self.model.filter_tokens(

@@ -160,16 +160,12 @@ impl ScaleAwareDetectorModel {
 
         // Create normalizer.
         // Paddle models expect BGR input; reorder ImageNet stats and swap channels.
-        let mean = preprocess_config.mean.clone();
-        let std = preprocess_config.std.clone();
-        let bgr_mean = vec![mean[2], mean[1], mean[0]];
-        let bgr_std = vec![std[2], std[1], std[0]];
-        let normalizer = NormalizeImage::with_color_order(
+        let normalizer = NormalizeImage::with_color_order_from_rgb_stats(
             Some(preprocess_config.scale),
-            Some(bgr_mean),
-            Some(bgr_std),
+            preprocess_config.mean.clone(),
+            preprocess_config.std.clone(),
             Some(ChannelOrder::CHW),
-            Some(crate::processors::ColorOrder::BGR),
+            crate::processors::ColorOrder::BGR,
         )?;
 
         Ok(Self {

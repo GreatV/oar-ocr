@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::f32::consts::PI;
 
 /// A 2D point with floating-point coordinates.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct Point {
     /// X-coordinate of the point.
     pub x: f32,
@@ -104,6 +104,16 @@ impl BoundingBox {
             Point::new(x1, y2),
         ];
         Self { points }
+    }
+
+    /// Returns a new bounding box translated by `(dx, dy)`.
+    pub fn translate(&self, dx: f32, dy: f32) -> Self {
+        Self::new(
+            self.points
+                .iter()
+                .map(|p| Point::new(p.x + dx, p.y + dy))
+                .collect(),
+        )
     }
 
     /// Creates a bounding box from a contour.
@@ -1188,5 +1198,65 @@ mod tests {
         // Adjacent boxes (touching but not overlapping)
         let box5 = BoundingBox::from_coords(100.0, 0.0, 200.0, 100.0);
         assert!(!box1.overlaps_with(&box5, 3.0));
+    }
+
+    #[test]
+    fn test_bounding_box_rotate_back_to_original_0_degrees_is_identity() {
+        let bbox = BoundingBox::from_coords(0.0, 1.0, 2.0, 3.0);
+        let rotated = bbox.rotate_back_to_original(0.0, 10, 20);
+        assert_eq!(rotated.points, bbox.points);
+    }
+
+    #[test]
+    fn test_bounding_box_rotate_back_to_original_90_degrees() {
+        // Rotated image dimensions (after correction rotation): width=3, height=4.
+        let rotated_width = 3;
+        let rotated_height = 4;
+        let bbox = BoundingBox::from_coords(0.0, 0.0, 1.0, 1.0);
+        let rotated = bbox.rotate_back_to_original(90.0, rotated_width, rotated_height);
+
+        // angle=90 inverse mapping: (x, y) -> (rotated_height-1-y, x)
+        let expected = BoundingBox::new(vec![
+            Point::new(3.0, 0.0),
+            Point::new(3.0, 1.0),
+            Point::new(2.0, 1.0),
+            Point::new(2.0, 0.0),
+        ]);
+        assert_eq!(rotated.points, expected.points);
+    }
+
+    #[test]
+    fn test_bounding_box_rotate_back_to_original_180_degrees() {
+        let rotated_width = 4;
+        let rotated_height = 3;
+        let bbox = BoundingBox::from_coords(1.0, 1.0, 2.0, 2.0);
+        let rotated = bbox.rotate_back_to_original(180.0, rotated_width, rotated_height);
+
+        // angle=180 inverse mapping: (x, y) -> (rotated_width-1-x, rotated_height-1-y)
+        let expected = BoundingBox::new(vec![
+            Point::new(2.0, 1.0),
+            Point::new(1.0, 1.0),
+            Point::new(1.0, 0.0),
+            Point::new(2.0, 0.0),
+        ]);
+        assert_eq!(rotated.points, expected.points);
+    }
+
+    #[test]
+    fn test_bounding_box_rotate_back_to_original_270_degrees() {
+        // Rotated image dimensions (after correction rotation): width=3, height=4.
+        let rotated_width = 3;
+        let rotated_height = 4;
+        let bbox = BoundingBox::from_coords(0.0, 0.0, 1.0, 1.0);
+        let rotated = bbox.rotate_back_to_original(270.0, rotated_width, rotated_height);
+
+        // angle=270 inverse mapping: (x, y) -> (y, rotated_width-1-x)
+        let expected = BoundingBox::new(vec![
+            Point::new(0.0, 2.0),
+            Point::new(0.0, 1.0),
+            Point::new(1.0, 1.0),
+            Point::new(1.0, 2.0),
+        ]);
+        assert_eq!(rotated.points, expected.points);
     }
 }

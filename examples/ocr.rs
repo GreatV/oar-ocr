@@ -44,6 +44,7 @@ mod utils;
 use clap::Parser;
 use oar_ocr::domain::tasks::{TextDetectionConfig, TextRecognitionConfig};
 use oar_ocr::oarocr::OAROCRBuilder;
+use oar_ocr::processors::LimitType;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
@@ -199,7 +200,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         unclip_ratio: args.det_unclip,
         max_candidates: args.det_max_candidates,
         limit_side_len: args.det_limit_side_len,
-        limit_type: args.det_limit_type,
+        limit_type: args
+            .det_limit_type
+            .as_deref()
+            .map(|s| match s.to_lowercase().as_str() {
+                "min" => Ok(LimitType::Min),
+                "max" => Ok(LimitType::Max),
+                "resize_long" | "resizelong" | "resize-long" => Ok(LimitType::ResizeLong),
+                other => Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Invalid --det-limit-type value: '{}'", other),
+                )),
+            })
+            .transpose()?,
         max_side_len: args.det_max_side_len,
     };
 

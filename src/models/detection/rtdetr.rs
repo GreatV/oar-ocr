@@ -99,24 +99,12 @@ impl RTDetrModel {
 
         // Create normalizer.
         // Paddle models expect BGR input; treat config mean/std as RGB and reorder.
-        let mean = preprocess_config.mean.clone();
-        let std = preprocess_config.std.clone();
-        let bgr_mean = if mean.len() == 3 {
-            vec![mean[2], mean[1], mean[0]]
-        } else {
-            mean
-        };
-        let bgr_std = if std.len() == 3 {
-            vec![std[2], std[1], std[0]]
-        } else {
-            std
-        };
-        let normalizer = NormalizeImage::with_color_order(
+        let normalizer = NormalizeImage::with_color_order_from_rgb_stats(
             Some(preprocess_config.scale),
-            Some(bgr_mean),
-            Some(bgr_std),
+            preprocess_config.mean.clone(),
+            preprocess_config.std.clone(),
             Some(ChannelOrder::CHW),
-            Some(crate::processors::ColorOrder::BGR),
+            crate::processors::ColorOrder::BGR,
         )?;
 
         Ok(Self {

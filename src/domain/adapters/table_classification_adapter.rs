@@ -2,11 +2,11 @@
 //!
 //! This adapter uses the PP-LCNet model to classify table images as wired or wireless.
 
+use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
     task::{Task, TaskType},
 };
-use crate::core::{OCRError, ProcessingStage};
 use crate::domain::tasks::{
     Classification, TableClassificationConfig, TableClassificationOutput, TableClassificationTask,
 };
@@ -73,13 +73,15 @@ impl ModelAdapter for TableClassificationAdapter {
         let model_output = self
             .model
             .forward(input.images, &postprocess_config)
-            .map_err(|e| OCRError::Processing {
-                kind: ProcessingStage::AdapterExecution,
-                context: format!(
-                    "TableClassificationAdapter failed to classify table type (topk={})",
-                    effective_config.topk
-                ),
-                source: Box::new(e),
+            .map_err(|e| {
+                OCRError::adapter_execution_error(
+                    "TableClassificationAdapter",
+                    format!(
+                        "failed to classify table type (topk={})",
+                        effective_config.topk
+                    ),
+                    e,
+                )
             })?;
 
         // Convert model output to task-specific output with structured classifications

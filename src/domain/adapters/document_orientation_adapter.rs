@@ -2,11 +2,11 @@
 //!
 //! This adapter uses the PP-LCNet model to classify document image orientation.
 
+use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
     task::{Task, TaskType},
 };
-use crate::core::{OCRError, ProcessingStage};
 use crate::domain::tasks::{
     Classification, DocumentOrientationConfig, DocumentOrientationOutput, DocumentOrientationTask,
 };
@@ -79,13 +79,15 @@ impl ModelAdapter for DocumentOrientationAdapter {
         let model_output = self
             .model
             .forward(input.images, &postprocess_config)
-            .map_err(|e| OCRError::Processing {
-                kind: ProcessingStage::AdapterExecution,
-                context: format!(
-                    "DocumentOrientationAdapter failed to classify document orientation (topk={})",
-                    effective_config.topk
-                ),
-                source: Box::new(e),
+            .map_err(|e| {
+                OCRError::adapter_execution_error(
+                    "DocumentOrientationAdapter",
+                    format!(
+                        "failed to classify document orientation (topk={})",
+                        effective_config.topk
+                    ),
+                    e,
+                )
             })?;
 
         // Convert model output to task-specific output with structured classifications

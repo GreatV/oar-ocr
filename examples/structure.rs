@@ -146,6 +146,7 @@ use oar_ocr::domain::tasks::{
     FormulaRecognitionConfig, LayoutDetectionConfig, TextDetectionConfig, TextRecognitionConfig,
 };
 use oar_ocr::oarocr::OARStructureBuilder;
+use oar_ocr::processors::LimitType;
 use std::path::PathBuf;
 use tracing::{error, info, warn};
 use utils::parse_device_config;
@@ -479,7 +480,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_candidates: args.det_max_candidates,
         // PP-StructureV3 overall OCR defaults
         limit_side_len: Some(736),
-        limit_type: Some("min".to_string()),
+        limit_type: Some(LimitType::Min),
         max_side_len: None,
     };
 

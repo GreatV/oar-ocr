@@ -2,11 +2,11 @@
 //!
 //! This adapter uses the PP-LCNet model to classify text line orientation.
 
+use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
     task::{Task, TaskType},
 };
-use crate::core::{OCRError, ProcessingStage};
 use crate::domain::tasks::{
     Classification, TextLineOrientationConfig, TextLineOrientationOutput, TextLineOrientationTask,
 };
@@ -74,13 +74,15 @@ impl ModelAdapter for TextLineOrientationAdapter {
         let model_output = self
             .model
             .forward(input.images, &postprocess_config)
-            .map_err(|e| OCRError::Processing {
-                kind: ProcessingStage::AdapterExecution,
-                context: format!(
-                    "TextLineOrientationAdapter failed to classify text line orientation (topk={})",
-                    effective_config.topk
-                ),
-                source: Box::new(e),
+            .map_err(|e| {
+                OCRError::adapter_execution_error(
+                    "TextLineOrientationAdapter",
+                    format!(
+                        "failed to classify text line orientation (topk={})",
+                        effective_config.topk
+                    ),
+                    e,
+                )
             })?;
 
         // Convert model output to task-specific output with structured classifications

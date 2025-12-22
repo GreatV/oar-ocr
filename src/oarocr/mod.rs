@@ -10,10 +10,12 @@
 //! - [`OARStructureBuilder`] - For document structure analysis (layout, tables, formulas)
 
 pub mod ocr;
+pub(crate) mod preprocess;
 pub mod processors;
 pub mod result;
 pub mod stitching;
 pub mod structure;
+pub(crate) mod table_analyzer;
 
 pub use ocr::*;
 pub use processors::*;
