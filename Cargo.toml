@@ -46,7 +46,7 @@ thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ab_glyph = { version = "0.2", optional = true }
-tokenizers = "0.20"
+tokenizers = "0.22"
 clipper2 = "0.5.3"
 
 [dev-dependencies]
