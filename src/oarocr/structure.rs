@@ -23,6 +23,20 @@ use crate::domain::tasks::{
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// IoU threshold for removing overlapping layout elements (0.5 = 50% overlap).
+const LAYOUT_OVERLAP_IOU_THRESHOLD: f32 = 0.5;
+
+/// IoU threshold for determining if an OCR box overlaps with table cells.
+const CELL_OVERLAP_IOU_THRESHOLD: f32 = 0.5;
+
+/// IoA threshold for assigning layout elements to region blocks during reading order.
+/// A low threshold (0.1 = 10%) allows elements near region boundaries to be included.
+const REGION_MEMBERSHIP_IOA_THRESHOLD: f32 = 0.1;
+
+/// IoA threshold for splitting text boxes that intersect with container elements.
+/// A moderate threshold (0.3 = 30%) balances precision with avoiding over-splitting.
+const TEXT_BOX_SPLIT_IOA_THRESHOLD: f32 = 0.3;
+
 /// Internal structure holding the structure analysis pipeline adapters.
 #[derive(Debug)]
 struct StructurePipeline {
@@ -1524,7 +1538,7 @@ impl OARStructure {
         }
 
         let k_min_cells = 2usize;
-        let overlap_threshold = 0.5f32;
+        let overlap_threshold = CELL_OVERLAP_IOU_THRESHOLD;
 
         let mut new_regions: Vec<crate::oarocr::TextRegion> =
             Vec::with_capacity(text_regions.len());
@@ -1670,16 +1684,15 @@ impl OARStructure {
         }
 
         if layout_elements.len() > 1 {
-            let overlap_threshold = 0.5;
             let removed = crate::domain::structure::remove_overlapping_layout_elements(
                 &mut layout_elements,
-                overlap_threshold,
+                LAYOUT_OVERLAP_IOU_THRESHOLD,
             );
             if removed > 0 {
                 tracing::info!(
                     "Removing {} overlapping layout elements (threshold={})",
                     removed,
-                    overlap_threshold
+                    LAYOUT_OVERLAP_IOU_THRESHOLD
                 );
             }
         }
@@ -1930,11 +1943,10 @@ impl OARStructure {
                 }
             }
 
-            if let Some(region_idx) = best_region {
-                let ioa_threshold = 0.1f32;
-                if best_ioa >= ioa_threshold {
-                    region_blocks[region_idx].element_indices.push(elem_idx);
-                }
+            if let Some(region_idx) = best_region
+                && best_ioa >= REGION_MEMBERSHIP_IOA_THRESHOLD
+            {
+                region_blocks[region_idx].element_indices.push(elem_idx);
             }
         }
     }
@@ -2035,7 +2047,6 @@ impl OARStructure {
                 };
 
             if !container_boxes.is_empty() {
-                let ioa_threshold = 0.3;
                 for bbox in detection_boxes.into_iter() {
                     let mut intersections: Vec<crate::processors::BoundingBox> = Vec::new();
                     let self_area = bbox.area();
@@ -2066,7 +2077,7 @@ impl OARStructure {
                         }
 
                         let ioa = inter_area / self_area;
-                        if ioa >= ioa_threshold {
+                        if ioa >= TEXT_BOX_SPLIT_IOA_THRESHOLD {
                             intersections.push(inter_bbox);
                         }
                     }

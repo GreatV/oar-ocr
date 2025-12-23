@@ -139,3 +139,368 @@ pub(crate) fn correct_image_orientation(
 
     Ok((rotated, Some(correction)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::registry::DynTaskOutput;
+    use crate::core::{AdapterInfo, TaskType};
+    use crate::domain::tasks::document_orientation::{Classification, DocumentOrientationOutput};
+
+    /// Creates a test image with specified dimensions.
+    fn create_test_image(width: u32, height: u32) -> image::RgbImage {
+        image::RgbImage::new(width, height)
+    }
+
+    /// Mock adapter that returns a specific class_id for orientation detection.
+    #[derive(Debug)]
+    struct MockOrientationAdapter {
+        class_id: usize,
+    }
+
+    impl MockOrientationAdapter {
+        fn new(class_id: usize) -> Self {
+            Self { class_id }
+        }
+    }
+
+    impl DynModelAdapter for MockOrientationAdapter {
+        fn info(&self) -> AdapterInfo {
+            AdapterInfo {
+                model_name: "MockOrientationAdapter".to_string(),
+                version: "1.0".to_string(),
+                task_type: TaskType::DocumentOrientation,
+                description: "Mock adapter for testing".to_string(),
+            }
+        }
+
+        fn task_type(&self) -> TaskType {
+            TaskType::DocumentOrientation
+        }
+
+        fn supports_batching(&self) -> bool {
+            false
+        }
+
+        fn recommended_batch_size(&self) -> usize {
+            1
+        }
+
+        fn execute_dyn(&self, _input: DynTaskInput) -> Result<DynTaskOutput, OCRError> {
+            let classification =
+                Classification::new(self.class_id, format!("{}deg", self.class_id * 90), 0.99);
+            let output = DocumentOrientationOutput {
+                classifications: vec![vec![classification]],
+            };
+            Ok(DynTaskOutput::DocumentOrientation(output))
+        }
+    }
+
+    /// Mock adapter that returns empty classification (simulates failure to classify).
+    #[derive(Debug)]
+    struct MockEmptyOrientationAdapter;
+
+    impl DynModelAdapter for MockEmptyOrientationAdapter {
+        fn info(&self) -> AdapterInfo {
+            AdapterInfo {
+                model_name: "MockEmptyOrientationAdapter".to_string(),
+                version: "1.0".to_string(),
+                task_type: TaskType::DocumentOrientation,
+                description: "Mock adapter for testing".to_string(),
+            }
+        }
+
+        fn task_type(&self) -> TaskType {
+            TaskType::DocumentOrientation
+        }
+
+        fn supports_batching(&self) -> bool {
+            false
+        }
+
+        fn recommended_batch_size(&self) -> usize {
+            1
+        }
+
+        fn execute_dyn(&self, _input: DynTaskInput) -> Result<DynTaskOutput, OCRError> {
+            let output = DocumentOrientationOutput::empty();
+            Ok(DynTaskOutput::DocumentOrientation(output))
+        }
+    }
+
+    /// Mock adapter that returns an error.
+    #[derive(Debug)]
+    struct MockFailingAdapter;
+
+    impl DynModelAdapter for MockFailingAdapter {
+        fn info(&self) -> AdapterInfo {
+            AdapterInfo {
+                model_name: "MockFailingAdapter".to_string(),
+                version: "1.0".to_string(),
+                task_type: TaskType::DocumentOrientation,
+                description: "Mock adapter for testing".to_string(),
+            }
+        }
+
+        fn task_type(&self) -> TaskType {
+            TaskType::DocumentOrientation
+        }
+
+        fn supports_batching(&self) -> bool {
+            false
+        }
+
+        fn recommended_batch_size(&self) -> usize {
+            1
+        }
+
+        fn execute_dyn(&self, _input: DynTaskInput) -> Result<DynTaskOutput, OCRError> {
+            Err(OCRError::invalid_input("Mock adapter failure"))
+        }
+    }
+
+    #[test]
+    fn test_correct_image_orientation_class_0_no_rotation() {
+        let image = create_test_image(100, 200);
+        let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockOrientationAdapter::new(0));
+
+        let (rotated, correction) =
+            correct_image_orientation(image.clone(), &adapter).expect("should succeed");
+
+        // class_id 0 = 0° - no rotation needed
+        assert_eq!(rotated.width(), 100);
+        assert_eq!(rotated.height(), 200);
+
+        let correction = correction.expect("should have correction metadata");
+        assert_eq!(correction.angle, 0.0);
+        assert_eq!(correction.rotated_width, 100);
+        assert_eq!(correction.rotated_height, 200);
+    }
+
+    #[test]
+    fn test_correct_image_orientation_class_1_rotate_90() {
+        let image = create_test_image(100, 200);
+        let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockOrientationAdapter::new(1));
+
+        let (rotated, correction) =
+            correct_image_orientation(image.clone(), &adapter).expect("should succeed");
+
+        // class_id 1 = 90° - rotate270 to correct (swaps dimensions)
+        assert_eq!(rotated.width(), 200);
+        assert_eq!(rotated.height(), 100);
+
+        let correction = correction.expect("should have correction metadata");
+        assert_eq!(correction.angle, 90.0);
+        assert_eq!(correction.rotated_width, 200);
+        assert_eq!(correction.rotated_height, 100);
+    }
+
+    #[test]
+    fn test_correct_image_orientation_class_2_rotate_180() {
+        let image = create_test_image(100, 200);
+        let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockOrientationAdapter::new(2));
+
+        let (rotated, correction) =
+            correct_image_orientation(image.clone(), &adapter).expect("should succeed");
+
+        // class_id 2 = 180° - rotate180 to correct (dimensions unchanged)
+        assert_eq!(rotated.width(), 100);
+        assert_eq!(rotated.height(), 200);
+
+        let correction = correction.expect("should have correction metadata");
+        assert_eq!(correction.angle, 180.0);
+        assert_eq!(correction.rotated_width, 100);
+        assert_eq!(correction.rotated_height, 200);
+    }
+
+    #[test]
+    fn test_correct_image_orientation_class_3_rotate_270() {
+        let image = create_test_image(100, 200);
+        let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockOrientationAdapter::new(3));
+
+        let (rotated, correction) =
+            correct_image_orientation(image.clone(), &adapter).expect("should succeed");
+
+        // class_id 3 = 270° - rotate90 to correct (swaps dimensions)
+        assert_eq!(rotated.width(), 200);
+        assert_eq!(rotated.height(), 100);
+
+        let correction = correction.expect("should have correction metadata");
+        assert_eq!(correction.angle, 270.0);
+        assert_eq!(correction.rotated_width, 200);
+        assert_eq!(correction.rotated_height, 100);
+    }
+
+    #[test]
+    fn test_correct_image_orientation_empty_classification_returns_original() {
+        let image = create_test_image(100, 200);
+        let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockEmptyOrientationAdapter);
+
+        let (rotated, correction) =
+            correct_image_orientation(image.clone(), &adapter).expect("should succeed");
+
+        // Empty classification should return original image unchanged
+        assert_eq!(rotated.width(), 100);
+        assert_eq!(rotated.height(), 200);
+        assert!(correction.is_none());
+    }
+
+    #[test]
+    fn test_correct_image_orientation_adapter_failure_propagates_error() {
+        let image = create_test_image(100, 200);
+        let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockFailingAdapter);
+
+        let result = correct_image_orientation(image, &adapter);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_orientation_correction_metadata_accuracy() {
+        // Test with a non-square image to verify dimension tracking
+        let image = create_test_image(640, 480);
+        let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockOrientationAdapter::new(1));
+
+        let (rotated, correction) =
+            correct_image_orientation(image, &adapter).expect("should succeed");
+
+        let correction = correction.expect("should have correction");
+
+        // After 90° correction (rotate270), 640x480 becomes 480x640
+        assert_eq!(rotated.width(), 480);
+        assert_eq!(rotated.height(), 640);
+        assert_eq!(correction.rotated_width, 480);
+        assert_eq!(correction.rotated_height, 640);
+        assert_eq!(correction.angle, 90.0);
+    }
+
+    #[test]
+    fn test_document_preprocessor_no_adapters() {
+        let preprocessor = DocumentPreprocessor::new(None, None);
+        let image = create_test_image(100, 200);
+
+        let result = preprocessor.preprocess(image).expect("should succeed");
+
+        assert_eq!(result.image.width(), 100);
+        assert_eq!(result.image.height(), 200);
+        assert!(result.orientation_angle.is_none());
+        assert!(result.rotation.is_none());
+        assert!(result.rectified_img.is_none());
+    }
+
+    #[test]
+    fn test_document_preprocessor_with_orientation_adapter() {
+        let orientation_adapter: Arc<dyn DynModelAdapter> =
+            Arc::new(MockOrientationAdapter::new(1));
+        let preprocessor = DocumentPreprocessor::new(Some(orientation_adapter), None);
+        let image = create_test_image(100, 200);
+
+        let result = preprocessor.preprocess(image).expect("should succeed");
+
+        // Should be rotated (90° correction)
+        assert_eq!(result.image.width(), 200);
+        assert_eq!(result.image.height(), 100);
+        assert_eq!(result.orientation_angle, Some(90.0));
+        assert!(result.rotation.is_some());
+        assert!(result.rectified_img.is_none());
+
+        let rotation = result.rotation.unwrap();
+        assert_eq!(rotation.angle, 90.0);
+        assert_eq!(rotation.rotated_width, 200);
+        assert_eq!(rotation.rotated_height, 100);
+    }
+
+    #[test]
+    fn test_orientation_correction_struct_equality() {
+        let c1 = OrientationCorrection {
+            angle: 90.0,
+            rotated_width: 200,
+            rotated_height: 100,
+        };
+        let c2 = OrientationCorrection {
+            angle: 90.0,
+            rotated_width: 200,
+            rotated_height: 100,
+        };
+        let c3 = OrientationCorrection {
+            angle: 180.0,
+            rotated_width: 200,
+            rotated_height: 100,
+        };
+
+        assert_eq!(c1, c2);
+        assert_ne!(c1, c3);
+    }
+
+    #[test]
+    fn test_orientation_correction_copy_semantics() {
+        let original = OrientationCorrection {
+            angle: 90.0,
+            rotated_width: 200,
+            rotated_height: 100,
+        };
+        let copied = original;
+
+        // Both should be usable after copy
+        assert_eq!(original.angle, 90.0);
+        assert_eq!(copied.angle, 90.0);
+    }
+
+    #[test]
+    fn test_angle_calculation_formula() {
+        // Verify that angle = class_id * 90.0
+        for class_id in 0..4 {
+            let expected_angle = (class_id as f32) * 90.0;
+            let image = create_test_image(100, 100);
+            let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockOrientationAdapter::new(class_id));
+
+            let (_, correction) =
+                correct_image_orientation(image, &adapter).expect("should succeed");
+
+            let correction = correction.expect("should have correction");
+            assert_eq!(
+                correction.angle, expected_angle,
+                "class_id {} should produce angle {}",
+                class_id, expected_angle
+            );
+        }
+    }
+
+    #[test]
+    fn test_unknown_class_id_no_rotation() {
+        // class_id >= 4 should fall through to no rotation (match _ arm)
+        let image = create_test_image(100, 200);
+        let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockOrientationAdapter::new(5));
+
+        let (rotated, correction) =
+            correct_image_orientation(image.clone(), &adapter).expect("should succeed");
+
+        // Unknown class_id should not rotate the image
+        assert_eq!(rotated.width(), 100);
+        assert_eq!(rotated.height(), 200);
+
+        // But correction metadata is still created with calculated angle
+        let correction = correction.expect("should have correction metadata");
+        assert_eq!(correction.angle, 450.0); // 5 * 90
+    }
+
+    #[test]
+    fn test_square_image_rotation_dimensions() {
+        // Square images should have same dimensions after any rotation
+        let image = create_test_image(256, 256);
+
+        for class_id in 0..4 {
+            let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockOrientationAdapter::new(class_id));
+            let (rotated, _) =
+                correct_image_orientation(image.clone(), &adapter).expect("should succeed");
+
+            assert_eq!(rotated.width(), 256, "class_id {} width mismatch", class_id);
+            assert_eq!(
+                rotated.height(),
+                256,
+                "class_id {} height mismatch",
+                class_id
+            );
+        }
+    }
+}

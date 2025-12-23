@@ -47,7 +47,7 @@ impl ModelAdapter for TextRecognitionAdapter {
                 OCRError::adapter_execution_error(
                     "TextRecognitionAdapter",
                     format!(
-                        "model forward (batch_size={}, return_word_box={})",
+                        "forward (batch_size={}, return_word_box={})",
                         batch_len, self.return_word_box
                     ),
                     e,

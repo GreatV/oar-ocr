@@ -1035,13 +1035,12 @@ pub fn remove_overlapping_layout_elements(
     let remove_set: HashSet<usize> = remove_indices.into_iter().collect();
     let before = layout_elements.len();
 
-    let mut kept = Vec::with_capacity(before.saturating_sub(remove_set.len()));
-    for (idx, elem) in layout_elements.drain(..).enumerate() {
-        if !remove_set.contains(&idx) {
-            kept.push(elem);
-        }
-    }
-    *layout_elements = kept;
+    let mut idx = 0;
+    layout_elements.retain(|_| {
+        let keep = !remove_set.contains(&idx);
+        idx += 1;
+        keep
+    });
 
     before.saturating_sub(layout_elements.len())
 }
