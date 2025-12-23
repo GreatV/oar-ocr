@@ -388,13 +388,27 @@ pub struct OAROCR {
     region_batch_size: Option<usize>,
 }
 
-#[derive(Debug)]
 struct CroppedTextRegion {
     detection_index: usize,
     bbox: BoundingBox,
     image: image::RgbImage,
     wh_ratio: f32,
     line_orientation_angle: Option<f32>,
+}
+
+impl std::fmt::Debug for CroppedTextRegion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CroppedTextRegion")
+            .field("detection_index", &self.detection_index)
+            .field("bbox", &self.bbox)
+            .field(
+                "image",
+                &format_args!("RgbImage({}x{})", self.image.width(), self.image.height()),
+            )
+            .field("wh_ratio", &self.wh_ratio)
+            .field("line_orientation_angle", &self.line_orientation_angle)
+            .finish()
+    }
 }
 
 impl OAROCR {
@@ -499,7 +513,7 @@ impl OAROCR {
                     }
                 }
                 Err(err) => {
-                    tracing::debug!(
+                    tracing::warn!(
                         target: "ocr",
                         error = %err,
                         batch_start = start,

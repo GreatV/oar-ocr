@@ -70,9 +70,13 @@ impl NormalizeImage {
     /// # Mean/Std Semantics
     ///
     /// `mean` and `std` must be provided in the **output channel order** specified by `color_order`.
-    /// If you have stats expressed in RGB order but need BGR output, prefer
+    /// For example, if `color_order` is BGR, pass mean/std as `[B_mean, G_mean, R_mean]`.
+    ///
+    /// **Note:** This function does not validate that mean/std values match the specified
+    /// `color_order`. Ensuring consistency is the caller's responsibility. If you have stats
+    /// expressed in RGB order but need BGR output, prefer using
     /// [`NormalizeImage::with_color_order_from_rgb_stats`] or
-    /// [`NormalizeImage::imagenet_bgr_from_rgb_stats`] instead of hand-reordering.
+    /// [`NormalizeImage::imagenet_bgr_from_rgb_stats`] which handle the reordering automatically.
     ///
     /// # Returns
     ///

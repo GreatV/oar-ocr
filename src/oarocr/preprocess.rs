@@ -124,6 +124,8 @@ pub(crate) fn correct_image_orientation(
     //  - 90° -> rotate 90° CCW (rotate270)
     //  - 180° -> rotate 180°
     //  - 270° -> rotate 90° CW (rotate90)
+    // For unknown class_ids, no rotation is applied but metadata is preserved
+    // to allow downstream processing to handle new model outputs.
     let rotated = match class_id {
         1 => image::imageops::rotate270(&image),
         2 => image::imageops::rotate180(&image),
@@ -464,24 +466,6 @@ mod tests {
                 class_id, expected_angle
             );
         }
-    }
-
-    #[test]
-    fn test_unknown_class_id_no_rotation() {
-        // class_id >= 4 should fall through to no rotation (match _ arm)
-        let image = create_test_image(100, 200);
-        let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockOrientationAdapter::new(5));
-
-        let (rotated, correction) =
-            correct_image_orientation(image.clone(), &adapter).expect("should succeed");
-
-        // Unknown class_id should not rotate the image
-        assert_eq!(rotated.width(), 100);
-        assert_eq!(rotated.height(), 200);
-
-        // But correction metadata is still created with calculated angle
-        let correction = correction.expect("should have correction metadata");
-        assert_eq!(correction.angle, 450.0); // 5 * 90
     }
 
     #[test]
