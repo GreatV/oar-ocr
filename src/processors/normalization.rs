@@ -67,6 +67,17 @@ impl NormalizeImage {
     /// * `order` - Optional channel ordering (defaults to CHW)
     /// * `color_order` - Optional color channel order (defaults to RGB)
     ///
+    /// # Mean/Std Semantics
+    ///
+    /// `mean` and `std` must be provided in the **output channel order** specified by `color_order`.
+    /// For example, if `color_order` is BGR, pass mean/std as `[B_mean, G_mean, R_mean]`.
+    ///
+    /// **Note:** This function does not validate that mean/std values match the specified
+    /// `color_order`. Ensuring consistency is the caller's responsibility. If you have stats
+    /// expressed in RGB order but need BGR output, prefer using
+    /// [`NormalizeImage::with_color_order_from_rgb_stats`] or
+    /// [`NormalizeImage::imagenet_bgr_from_rgb_stats`] which handle the reordering automatically.
+    ///
     /// # Returns
     ///
     /// A Result containing the new NormalizeImage instance or an OCRError if validation fails.
@@ -91,13 +102,13 @@ impl NormalizeImage {
 
         if mean.len() != 3 {
             return Err(OCRError::ConfigError {
-                message: "Mean must have exactly 3 elements for RGB".to_string(),
+                message: "Mean must have exactly 3 elements (3-channel normalization)".to_string(),
             });
         }
 
         if std.len() != 3 {
             return Err(OCRError::ConfigError {
-                message: "Std must have exactly 3 elements for RGB".to_string(),
+                message: "Std must have exactly 3 elements (3-channel normalization)".to_string(),
             });
         }
 
@@ -136,7 +147,8 @@ impl NormalizeImage {
     pub fn validate_config(&self) -> Result<(), OCRError> {
         if self.alpha.len() != 3 || self.beta.len() != 3 {
             return Err(OCRError::ConfigError {
-                message: "Alpha and beta must have exactly 3 elements for RGB".to_string(),
+                message: "Alpha and beta must have exactly 3 elements (3-channel normalization)"
+                    .to_string(),
             });
         }
 
@@ -177,6 +189,69 @@ impl NormalizeImage {
             Some(vec![1.0, 1.0, 1.0]),
             Some(ChannelOrder::CHW),
             Some(ColorOrder::BGR),
+        )
+    }
+
+    /// Creates an ImageNet-style RGB normalizer (mean/std in RGB order).
+    pub fn imagenet_rgb() -> Result<Self, OCRError> {
+        Self::with_color_order(
+            None,
+            Some(vec![0.485, 0.456, 0.406]),
+            Some(vec![0.229, 0.224, 0.225]),
+            Some(ChannelOrder::CHW),
+            Some(ColorOrder::RGB),
+        )
+    }
+
+    /// Creates an ImageNet-style BGR normalizer from RGB stats.
+    ///
+    /// This is useful for PaddlePaddle-exported models that expect BGR input,
+    /// while configuration commonly provides ImageNet mean/std in RGB order.
+    pub fn imagenet_bgr_from_rgb_stats() -> Result<Self, OCRError> {
+        Self::with_color_order(
+            None,
+            Some(vec![0.406, 0.456, 0.485]),
+            Some(vec![0.225, 0.224, 0.229]),
+            Some(ChannelOrder::CHW),
+            Some(ColorOrder::BGR),
+        )
+    }
+
+    /// Builds a normalizer for a given output `color_order` using RGB mean/std stats.
+    ///
+    /// Invariant: `mean`/`std` passed to `with_color_order` are interpreted in the output channel
+    /// order (`ColorOrder`). This helper makes the conversion explicit at call sites.
+    pub fn with_color_order_from_rgb_stats(
+        scale: Option<f32>,
+        mean_rgb: Vec<f32>,
+        std_rgb: Vec<f32>,
+        order: Option<ChannelOrder>,
+        output_color_order: ColorOrder,
+    ) -> Result<Self, OCRError> {
+        if mean_rgb.len() != 3 || std_rgb.len() != 3 {
+            return Err(OCRError::ConfigError {
+                message: format!(
+                    "mean/std must have exactly 3 elements (got mean={}, std={})",
+                    mean_rgb.len(),
+                    std_rgb.len()
+                ),
+            });
+        }
+
+        let (mean, std) = match output_color_order {
+            ColorOrder::RGB => (mean_rgb, std_rgb),
+            ColorOrder::BGR => (
+                vec![mean_rgb[2], mean_rgb[1], mean_rgb[0]],
+                vec![std_rgb[2], std_rgb[1], std_rgb[0]],
+            ),
+        };
+
+        Self::with_color_order(
+            scale,
+            Some(mean),
+            Some(std),
+            order,
+            Some(output_color_order),
         )
     }
 
@@ -697,5 +772,71 @@ impl NormalizeImage {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{Rgb, RgbImage};
+
+    #[test]
+    fn test_normalize_image_color_order_rgb_vs_bgr_chw() {
+        let mut img = RgbImage::new(1, 1);
+        img.put_pixel(0, 0, Rgb([10, 20, 30])); // R, G, B
+
+        let rgb = NormalizeImage::with_color_order(
+            Some(1.0),
+            Some(vec![0.0, 0.0, 0.0]),
+            Some(vec![1.0, 1.0, 1.0]),
+            Some(ChannelOrder::CHW),
+            Some(ColorOrder::RGB),
+        )
+        .unwrap();
+        let bgr = NormalizeImage::with_color_order(
+            Some(1.0),
+            Some(vec![0.0, 0.0, 0.0]),
+            Some(vec![1.0, 1.0, 1.0]),
+            Some(ChannelOrder::CHW),
+            Some(ColorOrder::BGR),
+        )
+        .unwrap();
+
+        let rgb_out = rgb.apply(vec![DynamicImage::ImageRgb8(img.clone())]);
+        let bgr_out = bgr.apply(vec![DynamicImage::ImageRgb8(img)]);
+
+        assert_eq!(rgb_out.len(), 1);
+        assert_eq!(bgr_out.len(), 1);
+        assert_eq!(rgb_out[0], vec![10.0, 20.0, 30.0]);
+        assert_eq!(bgr_out[0], vec![30.0, 20.0, 10.0]);
+    }
+
+    #[test]
+    fn test_normalize_image_mean_std_applied_in_output_channel_order() {
+        let mut img = RgbImage::new(1, 1);
+        img.put_pixel(0, 0, Rgb([11, 22, 33])); // R, G, B
+
+        let rgb = NormalizeImage::with_color_order(
+            Some(1.0),
+            Some(vec![1.0, 2.0, 3.0]), // RGB means
+            Some(vec![2.0, 4.0, 5.0]), // RGB stds
+            Some(ChannelOrder::CHW),
+            Some(ColorOrder::RGB),
+        )
+        .unwrap();
+        let bgr = NormalizeImage::with_color_order(
+            Some(1.0),
+            Some(vec![3.0, 2.0, 1.0]), // BGR means
+            Some(vec![5.0, 4.0, 2.0]), // BGR stds
+            Some(ChannelOrder::CHW),
+            Some(ColorOrder::BGR),
+        )
+        .unwrap();
+
+        let rgb_out = rgb.apply(vec![DynamicImage::ImageRgb8(img.clone())]);
+        let bgr_out = bgr.apply(vec![DynamicImage::ImageRgb8(img)]);
+
+        assert_eq!(rgb_out[0], vec![5.0, 5.0, 6.0]); // (R-1)/2, (G-2)/4, (B-3)/5
+        assert_eq!(bgr_out[0], vec![6.0, 5.0, 5.0]); // (B-3)/5, (G-2)/4, (R-1)/2
     }
 }

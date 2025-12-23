@@ -35,8 +35,15 @@ impl ModelAdapter for UVDocRectifierAdapter {
         input: <Self::Task as Task>::Input,
         _config: Option<&<Self::Task as Task>::Config>,
     ) -> Result<<Self::Task as Task>::Output, OCRError> {
+        let batch_len = input.images.len();
         // Use the UVDoc model to rectify images
-        let model_output = self.model.forward(input.images)?;
+        let model_output = self.model.forward(input.images).map_err(|e| {
+            OCRError::adapter_execution_error(
+                "UVDocRectifierAdapter",
+                format!("model forward (batch_size={})", batch_len),
+                e,
+            )
+        })?;
 
         // Adapt model output to task output
         Ok(DocumentRectificationOutput {

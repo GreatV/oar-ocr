@@ -37,9 +37,22 @@ impl ModelAdapter for TextRecognitionAdapter {
         config: Option<&<Self::Task as Task>::Config>,
     ) -> Result<<Self::Task as Task>::Output, OCRError> {
         let effective_config = config.unwrap_or(&self.config);
+        let batch_len = input.images.len();
 
         // Use the CRNN model to recognize text
-        let model_output = self.model.forward(input.images, self.return_word_box)?;
+        let model_output = self
+            .model
+            .forward(input.images, self.return_word_box)
+            .map_err(|e| {
+                OCRError::adapter_execution_error(
+                    "TextRecognitionAdapter",
+                    format!(
+                        "forward (batch_size={}, return_word_box={})",
+                        batch_len, self.return_word_box
+                    ),
+                    e,
+                )
+            })?;
 
         // Apply score threshold filtering while preserving index correspondence.
         // Items below threshold are kept but with empty text to maintain 1:1 mapping

@@ -6,7 +6,7 @@ use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
 use crate::impl_config_validator;
-use crate::processors::BoundingBox;
+use crate::processors::{BoundingBox, LimitType};
 use crate::utils::ScoreValidator;
 use serde::{Deserialize, Serialize};
 
@@ -41,8 +41,8 @@ pub struct TextDetectionConfig {
     pub max_candidates: usize,
     /// Target side length for image resizing (optional)
     pub limit_side_len: Option<u32>,
-    /// Limit type for resizing ("min" or "max", optional)
-    pub limit_type: Option<String>,
+    /// Limit type for resizing (optional)
+    pub limit_type: Option<LimitType>,
     /// Maximum side length to prevent OOM (optional)
     pub max_side_len: Option<u32>,
 }

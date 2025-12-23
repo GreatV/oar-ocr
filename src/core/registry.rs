@@ -117,6 +117,64 @@ impl_dyn_output_conversions! {
     TableStructureRecognition => into_table_structure_recognition, TableStructureRecognitionOutput;
 }
 
+impl DynTaskOutput {
+    /// Returns the underlying task type for this output.
+    pub fn task_type(&self) -> TaskType {
+        match self {
+            DynTaskOutput::TextDetection(_) => TaskType::TextDetection,
+            DynTaskOutput::TextRecognition(_) => TaskType::TextRecognition,
+            DynTaskOutput::DocumentOrientation(_) => TaskType::DocumentOrientation,
+            DynTaskOutput::TextLineOrientation(_) => TaskType::TextLineOrientation,
+            DynTaskOutput::DocumentRectification(_) => TaskType::DocumentRectification,
+            DynTaskOutput::LayoutDetection(_) => TaskType::LayoutDetection,
+            DynTaskOutput::TableCellDetection(_) => TaskType::TableCellDetection,
+            DynTaskOutput::FormulaRecognition(_) => TaskType::FormulaRecognition,
+            DynTaskOutput::SealTextDetection(_) => TaskType::SealTextDetection,
+            DynTaskOutput::TableClassification(_) => TaskType::TableClassification,
+            DynTaskOutput::TableStructureRecognition(_) => TaskType::TableStructureRecognition,
+        }
+    }
+
+    /// Creates an empty `DynTaskOutput` variant for the given task type.
+    ///
+    /// This is intended for registry wiring completeness checks and test scaffolding.
+    pub fn empty_for(task_type: TaskType) -> Self {
+        match task_type {
+            TaskType::TextDetection => DynTaskOutput::TextDetection(TextDetectionOutput::empty()),
+            TaskType::TextRecognition => {
+                DynTaskOutput::TextRecognition(TextRecognitionOutput::empty())
+            }
+            TaskType::DocumentOrientation => {
+                DynTaskOutput::DocumentOrientation(DocumentOrientationOutput::empty())
+            }
+            TaskType::TextLineOrientation => {
+                DynTaskOutput::TextLineOrientation(TextLineOrientationOutput::empty())
+            }
+            TaskType::DocumentRectification => {
+                DynTaskOutput::DocumentRectification(DocumentRectificationOutput::empty())
+            }
+            TaskType::LayoutDetection => {
+                DynTaskOutput::LayoutDetection(LayoutDetectionOutput::empty())
+            }
+            TaskType::TableCellDetection => {
+                DynTaskOutput::TableCellDetection(TableCellDetectionOutput::empty())
+            }
+            TaskType::FormulaRecognition => {
+                DynTaskOutput::FormulaRecognition(FormulaRecognitionOutput::empty())
+            }
+            TaskType::SealTextDetection => {
+                DynTaskOutput::SealTextDetection(SealTextDetectionOutput::empty())
+            }
+            TaskType::TableClassification => {
+                DynTaskOutput::TableClassification(TableClassificationOutput::empty())
+            }
+            TaskType::TableStructureRecognition => {
+                DynTaskOutput::TableStructureRecognition(TableStructureRecognitionOutput::empty())
+            }
+        }
+    }
+}
+
 /// A type-erased model adapter that can be stored in the registry.
 ///
 /// This trait extends ModelAdapter to support dynamic dispatch and execution.
@@ -316,11 +374,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_dyn_output_conversions() {
-        // Test that DynTaskOutput conversions work correctly
-        use crate::domain::tasks::TextDetectionOutput;
+    fn dyn_task_output_has_variant_and_conversion_for_each_task_type() {
+        use crate::core::traits::task::TaskType::*;
 
-        let output = DynTaskOutput::TextDetection(TextDetectionOutput::empty());
-        assert!(output.into_text_detection().is_ok());
+        let all = [
+            TextDetection,
+            TextRecognition,
+            DocumentOrientation,
+            TextLineOrientation,
+            DocumentRectification,
+            LayoutDetection,
+            TableCellDetection,
+            FormulaRecognition,
+            SealTextDetection,
+            TableClassification,
+            TableStructureRecognition,
+        ];
+
+        for task_type in all {
+            let output = DynTaskOutput::empty_for(task_type);
+            assert_eq!(output.task_type(), task_type);
+
+            // Ensure the corresponding conversion method is wired and returns Ok.
+            match task_type {
+                TextDetection => {
+                    output.clone().into_text_detection().unwrap();
+                }
+                TextRecognition => {
+                    output.clone().into_text_recognition().unwrap();
+                }
+                DocumentOrientation => {
+                    output.clone().into_document_orientation().unwrap();
+                }
+                TextLineOrientation => {
+                    output.clone().into_text_line_orientation().unwrap();
+                }
+                DocumentRectification => {
+                    output.clone().into_document_rectification().unwrap();
+                }
+                LayoutDetection => {
+                    output.clone().into_layout_detection().unwrap();
+                }
+                TableCellDetection => {
+                    output.clone().into_table_cell_detection().unwrap();
+                }
+                FormulaRecognition => {
+                    output.clone().into_formula_recognition().unwrap();
+                }
+                SealTextDetection => {
+                    output.clone().into_seal_text_detection().unwrap();
+                }
+                TableClassification => {
+                    output.clone().into_table_classification().unwrap();
+                }
+                TableStructureRecognition => {
+                    output.clone().into_table_structure_recognition().unwrap();
+                }
+            }
+        }
     }
 }

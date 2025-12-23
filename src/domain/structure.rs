@@ -1006,6 +1006,96 @@ impl LayoutElementType {
     }
 }
 
+/// Removes heavily-overlapping layout elements in-place.
+///
+/// This mirrors PP-Structure-style overlap suppression where text takes priority over images.
+/// Returns the number of elements removed.
+pub fn remove_overlapping_layout_elements(
+    layout_elements: &mut Vec<LayoutElement>,
+    overlap_threshold: f32,
+) -> usize {
+    use std::collections::HashSet;
+
+    if layout_elements.len() <= 1 {
+        return 0;
+    }
+
+    let bboxes: Vec<_> = layout_elements.iter().map(|e| e.bbox.clone()).collect();
+    let labels: Vec<&str> = layout_elements
+        .iter()
+        .map(|e| e.element_type.as_str())
+        .collect();
+
+    let remove_indices =
+        crate::processors::get_overlap_removal_indices(&bboxes, &labels, overlap_threshold);
+    if remove_indices.is_empty() {
+        return 0;
+    }
+
+    let remove_set: HashSet<usize> = remove_indices.into_iter().collect();
+    let before = layout_elements.len();
+
+    let mut idx = 0;
+    layout_elements.retain(|_| {
+        let keep = !remove_set.contains(&idx);
+        idx += 1;
+        keep
+    });
+
+    before.saturating_sub(layout_elements.len())
+}
+
+/// Applies small, PP-Structure-style label fixes to layout elements.
+///
+/// This is intended to capture lightweight "glue" heuristics that shouldn't live in `predict`.
+pub fn apply_standardized_layout_label_fixes(layout_elements: &mut [LayoutElement]) {
+    if layout_elements.is_empty() {
+        return;
+    }
+
+    let mut footnote_indices: Vec<usize> = Vec::new();
+    let mut paragraph_title_indices: Vec<usize> = Vec::new();
+    let mut bottom_text_y_max: f32 = 0.0;
+    let mut max_block_area: f32 = 0.0;
+    let mut doc_title_num: usize = 0;
+
+    for (idx, elem) in layout_elements.iter().enumerate() {
+        let area =
+            (elem.bbox.x_max() - elem.bbox.x_min()) * (elem.bbox.y_max() - elem.bbox.y_min());
+        max_block_area = max_block_area.max(area);
+
+        match elem.element_type {
+            LayoutElementType::Footnote => footnote_indices.push(idx),
+            LayoutElementType::ParagraphTitle => paragraph_title_indices.push(idx),
+            LayoutElementType::Text => {
+                bottom_text_y_max = bottom_text_y_max.max(elem.bbox.y_max());
+            }
+            LayoutElementType::DocTitle => doc_title_num += 1,
+            _ => {}
+        }
+    }
+
+    for idx in footnote_indices {
+        if layout_elements[idx].bbox.y_max() < bottom_text_y_max {
+            layout_elements[idx].element_type = LayoutElementType::Text;
+            layout_elements[idx].label = Some("text".to_string());
+        }
+    }
+
+    let only_one_paragraph_title = paragraph_title_indices.len() == 1 && doc_title_num == 0;
+    if only_one_paragraph_title {
+        let idx = paragraph_title_indices[0];
+        let area = (layout_elements[idx].bbox.x_max() - layout_elements[idx].bbox.x_min())
+            * (layout_elements[idx].bbox.y_max() - layout_elements[idx].bbox.y_min());
+
+        let title_area_ratio_threshold = 0.3f32;
+        if area > max_block_area * title_area_ratio_threshold {
+            layout_elements[idx].element_type = LayoutElementType::DocTitle;
+            layout_elements[idx].label = Some("doc_title".to_string());
+        }
+    }
+}
+
 /// Result of table recognition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableResult {

@@ -2,11 +2,11 @@
 //!
 //! This adapter uses the DB model and adapts its output to the TextDetection task format.
 
+use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
     task::{Task, TaskType},
 };
-use crate::core::{OCRError, ProcessingStage};
 use crate::domain::tasks::{
     Detection, TextDetectionConfig, TextDetectionOutput, TextDetectionTask,
 };
@@ -47,15 +47,17 @@ impl ModelAdapter for TextDetectionAdapter {
                 effective_config.box_threshold,
                 effective_config.unclip_ratio,
             )
-            .map_err(|e| OCRError::Processing {
-                kind: ProcessingStage::AdapterExecution,
-                context: format!(
-                    "TextDetectionAdapter failed to detect text (score_threshold={}, box_threshold={}, unclip_ratio={})",
-                    effective_config.score_threshold,
-                    effective_config.box_threshold,
-                    effective_config.unclip_ratio
-                ),
-                source: Box::new(e),
+            .map_err(|e| {
+                OCRError::adapter_execution_error(
+                    "TextDetectionAdapter",
+                    format!(
+                        "failed to detect text (score_threshold={}, box_threshold={}, unclip_ratio={})",
+                        effective_config.score_threshold,
+                        effective_config.box_threshold,
+                        effective_config.unclip_ratio
+                    ),
+                    e,
+                )
             })?;
 
         // Convert model output to structured detections
@@ -158,16 +160,8 @@ impl AdapterBuilder for TextDetectionAdapterBuilder {
         if let Some(limit) = task_config.limit_side_len {
             preprocess_config.limit_side_len = Some(limit);
         }
-        if let Some(ref type_str) = task_config.limit_type {
-            let limit_type = match type_str.to_lowercase().as_str() {
-                "min" => Some(crate::processors::LimitType::Min),
-                "max" => Some(crate::processors::LimitType::Max),
-                "resizelong" | "resize_long" => Some(crate::processors::LimitType::ResizeLong),
-                _ => None,
-            };
-            if let Some(lt) = limit_type {
-                preprocess_config.limit_type = Some(lt);
-            }
+        if let Some(limit_type) = task_config.limit_type.clone() {
+            preprocess_config.limit_type = Some(limit_type);
         }
         if let Some(max_limit) = task_config.max_side_len {
             preprocess_config.max_side_limit = Some(max_limit);

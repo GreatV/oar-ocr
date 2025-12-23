@@ -129,9 +129,11 @@ impl OAROCRBuilder {
         self
     }
 
-    /// Sets the batch size for processing input images.
+    /// Sets the batch size for processing input images during text detection.
     ///
-    /// **Note**: Reserved for future implementation. Use `region_batch_size` instead.
+    /// This controls how many images are sent to the text detection adapter per call.
+    /// If a detector cannot batch the provided images (e.g., mismatched sizes), the
+    /// pipeline falls back to per-image detection.
     pub fn image_batch_size(mut self, size: usize) -> Self {
         self.image_batch_size = Some(size);
         self
@@ -277,7 +279,7 @@ impl OAROCRBuilder {
                         effective_det_cfg.limit_side_len = Some(736);
                     }
                     if effective_det_cfg.limit_type.is_none() {
-                        effective_det_cfg.limit_type = Some("min".to_string());
+                        effective_det_cfg.limit_type = Some(crate::processors::LimitType::Min);
                     }
                     if effective_det_cfg.max_side_len.is_none() {
                         effective_det_cfg.max_side_len = Some(4000);
@@ -291,7 +293,7 @@ impl OAROCRBuilder {
                         effective_det_cfg.limit_side_len = Some(960);
                     }
                     if effective_det_cfg.limit_type.is_none() {
-                        effective_det_cfg.limit_type = Some("max".to_string());
+                        effective_det_cfg.limit_type = Some(crate::processors::LimitType::Max);
                     }
                     if effective_det_cfg.max_side_len.is_none() {
                         effective_det_cfg.max_side_len = Some(4000);
@@ -377,11 +379,36 @@ pub struct OAROCR {
     pipeline: OCRPipeline,
     text_type: Option<String>,
     return_word_box: bool,
-    /// Reserved for future multi-image batching (not yet implemented)
-    #[allow(dead_code)]
+    /// Text detection batch size for `predict(images)`.
+    ///
+    /// This controls how many preprocessed images are sent to the text detection adapter in a
+    /// single call. If `None`, the adapter's `recommended_batch_size()` is used.
     image_batch_size: Option<usize>,
     /// Batch size for text region recognition
     region_batch_size: Option<usize>,
+}
+
+struct CroppedTextRegion {
+    detection_index: usize,
+    bbox: BoundingBox,
+    image: image::RgbImage,
+    wh_ratio: f32,
+    line_orientation_angle: Option<f32>,
+}
+
+impl std::fmt::Debug for CroppedTextRegion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CroppedTextRegion")
+            .field("detection_index", &self.detection_index)
+            .field("bbox", &self.bbox)
+            .field(
+                "image",
+                &format_args!("RgbImage({}x{})", self.image.width(), self.image.height()),
+            )
+            .field("wh_ratio", &self.wh_ratio)
+            .field("line_orientation_angle", &self.line_orientation_angle)
+            .finish()
+    }
 }
 
 impl OAROCR {
@@ -431,9 +458,7 @@ impl OAROCR {
         &self,
         images: Vec<image::RgbImage>,
     ) -> Result<Vec<crate::oarocr::OAROCRResult>, OCRError> {
-        use crate::core::registry::DynTaskInput;
-        use crate::core::traits::task::ImageTaskInput;
-        use crate::oarocr::{EdgeProcessor, TextCroppingProcessor};
+        use crate::oarocr::preprocess::DocumentPreprocessor;
         use std::sync::Arc;
 
         if images.is_empty() {
@@ -445,372 +470,377 @@ impl OAROCR {
             ));
         }
 
-        let mut results = Vec::with_capacity(images.len());
+        let preprocessor = DocumentPreprocessor::new(
+            self.pipeline.document_orientation_adapter.clone(),
+            self.pipeline.rectification_adapter.clone(),
+        );
 
-        // Process each image
-        for (img_idx, image) in images.into_iter().enumerate() {
-            let mut text_regions = Vec::new();
-            let mut orientation_angle: Option<f32> = None;
-            let mut rectified_img: Option<Arc<image::RgbImage>> = None;
+        let mut prepared: Vec<(
+            Arc<image::RgbImage>,
+            crate::oarocr::preprocess::PreprocessResult,
+        )> = Vec::with_capacity(images.len());
 
-            // Keep original image for result
+        for image in images.into_iter() {
             let input_img_arc = Arc::new(image.clone());
-            let _original_width = image.width();
-            let _original_height = image.height();
-            let mut current_image = image;
+            let preprocess = preprocessor.preprocess(image)?;
+            prepared.push((input_img_arc, preprocess));
+        }
 
-            // Execute pipeline in fixed order
+        let det_batch_size = self
+            .image_batch_size
+            .unwrap_or_else(|| {
+                self.pipeline
+                    .text_detection_adapter
+                    .recommended_batch_size()
+            })
+            .max(1);
 
-            // 1. Document orientation (optional) - Must run before rectification
-            if let Some(ref orientation_adapter) = self.pipeline.document_orientation_adapter {
-                let input =
-                    DynTaskInput::from_images(ImageTaskInput::new(vec![current_image.clone()]));
-                let output = orientation_adapter.execute_dyn(input)?;
+        let mut all_detection_boxes: Vec<Vec<BoundingBox>> = vec![Vec::new(); prepared.len()];
 
-                if let Ok(orient_output) = output.into_document_orientation()
-                    && let Some(classifications) = orient_output.classifications.first()
-                    && let Some(top_class) = classifications.first()
-                {
-                    // Convert class_id to angle (0=0°, 1=90°, 2=180°, 3=270°)
-                    let angle = (top_class.class_id as f32) * 90.0;
-                    orientation_angle = Some(angle);
+        let mut start = 0usize;
+        while start < prepared.len() {
+            let end = (start + det_batch_size).min(prepared.len());
 
-                    // Rotate the image based on detected orientation
-                    match top_class.class_id {
-                        1 => {
-                            // 90° clockwise -> rotate 270° counter-clockwise to correct
-                            current_image = image::imageops::rotate270(&current_image);
-                        }
-                        2 => {
-                            // 180° -> rotate 180° to correct
-                            current_image = image::imageops::rotate180(&current_image);
-                        }
-                        3 => {
-                            // 270° clockwise -> rotate 90° counter-clockwise to correct
-                            current_image = image::imageops::rotate90(&current_image);
-                        }
-                        _ => {
-                            // 0° or unknown -> no rotation needed
-                        }
+            let batch_images: Vec<image::RgbImage> = prepared[start..end]
+                .iter()
+                .map(|(_, preprocess)| preprocess.image.clone())
+                .collect();
+
+            match self.detect_sorted_text_boxes_batch(batch_images) {
+                Ok(batch_boxes) => {
+                    for (offset, boxes) in batch_boxes.into_iter().enumerate() {
+                        all_detection_boxes[start + offset] = boxes;
                     }
                 }
-            }
-
-            // 2. Document rectification (optional) - Runs after orientation correction
-            if let Some(ref rectification_adapter) = self.pipeline.rectification_adapter {
-                let input =
-                    DynTaskInput::from_images(ImageTaskInput::new(vec![current_image.clone()]));
-                let output = rectification_adapter.execute_dyn(input)?;
-
-                if let Ok(rect_output) = output.into_document_rectification()
-                    && let Some(rectified) = rect_output.rectified_images.first()
-                {
-                    current_image = rectified.clone();
-                    rectified_img = Some(Arc::new(current_image.clone()));
-                }
-            }
-
-            // 3. Text detection (required)
-            let input = DynTaskInput::from_images(ImageTaskInput::new(vec![current_image.clone()]));
-            let det_output = self.pipeline.text_detection_adapter.execute_dyn(input)?;
-
-            let mut detection_boxes = if let Ok(det_result) =
-                det_output.clone().into_text_detection()
-                && let Some(detections) = det_result.detections.first()
-            {
-                detections
-                    .iter()
-                    .map(|d| d.bbox.clone())
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-
-            // Sort detection boxes in reading order
-            // Strategy depends on text_type:
-            // - "seal" text uses polygon-based sorting for circular/curved text
-            // - Other types use quad-based sorting (default)
-            if !detection_boxes.is_empty() {
-                let is_seal_text = self
-                    .text_type
-                    .as_ref()
-                    .map(|t| t.to_lowercase() == "seal")
-                    .unwrap_or(false);
-
-                detection_boxes = if is_seal_text {
-                    crate::processors::sort_poly_boxes(&detection_boxes)
-                } else {
-                    crate::processors::sort_quad_boxes(&detection_boxes)
-                };
-            }
-
-            // 4. Text line orientation and recognition
-            if !detection_boxes.is_empty() {
-                // Crop text regions with perspective transform for rotated quads
-                // Preserves quadrilateral geometry:
-                // - For 4-point boxes (quads): applies perspective transform to rectify rotation
-                // - For >4-point boxes (polygons): uses axis-aligned bounding box crop
-                let processor = TextCroppingProcessor::new(true); // handle_rotation = true
-                let cropped = processor
-                    .process((Arc::new(current_image.clone()), detection_boxes.clone()))?;
-
-                // Filter out None values and collect cropped images while tracking original indices
-                let mut cropped_images: Vec<image::RgbImage> = Vec::new();
-                let mut valid_indices: Vec<usize> = Vec::new();
-                let mut wh_ratios: Vec<f32> = Vec::new();
-
-                for (idx, crop_result) in cropped.into_iter().enumerate() {
-                    if let Some(img) = crop_result {
-                        let ratio = img.width() as f32 / img.height().max(1) as f32;
-                        cropped_images.push((*img).clone());
-                        valid_indices.push(idx);
-                        wh_ratios.push(ratio);
-                    }
-                }
-
-                // Store text line orientation angles for each region
-                let mut line_orientations: Vec<Option<f32>> = vec![None; cropped_images.len()];
-
-                // 4a. Text line orientation classification (optional)
-                if !cropped_images.is_empty()
-                    && let Some(ref line_orientation_adapter) =
-                        self.pipeline.text_line_orientation_adapter
-                {
-                    let line_input =
-                        DynTaskInput::from_images(ImageTaskInput::new(cropped_images.clone()));
-                    let line_output = line_orientation_adapter.execute_dyn(line_input)?;
-
-                    if let Ok(line_orient_output) = line_output.into_text_line_orientation() {
-                        // Process orientation results and rotate images if needed
-                        for (idx, classifications) in
-                            line_orient_output.classifications.iter().enumerate()
-                        {
-                            if let Some(top_class) = classifications.first() {
-                                // Convert class_id to angle (0=0°, 1=180°)
-                                let angle = (top_class.class_id as f32) * 180.0;
-                                line_orientations[idx] = Some(angle);
-
-                                // Rotate image if needed (180 degrees)
-                                if top_class.class_id == 1
-                                    && let Some(img) = cropped_images.get_mut(idx)
-                                {
-                                    *img = image::imageops::rotate180(img);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 4b. Text recognition (required)
-                if !cropped_images.is_empty() {
-                    // Sort cropped images by aspect ratio before recognition
-                    // This improves batching efficiency by grouping similar aspect ratios together
-                    let mut sorted_indices: Vec<usize> = (0..cropped_images.len()).collect();
-                    sorted_indices.sort_by(|&a, &b| {
-                        wh_ratios[a]
-                            .partial_cmp(&wh_ratios[b])
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-
-                    // Reorder cropped images and orientations by aspect ratio (in-place, no cloning)
-                    Self::reorder_by_indices(&mut cropped_images, &sorted_indices);
-                    Self::reorder_by_indices(&mut line_orientations, &sorted_indices);
-                    Self::reorder_by_indices(&mut wh_ratios, &sorted_indices);
-
-                    let base_rec_ratio =
-                        DEFAULT_REC_IMAGE_SHAPE[2] as f32 / DEFAULT_REC_IMAGE_SHAPE[1] as f32;
-
-                    // Apply region batching if configured
-                    let batch_size = self.region_batch_size.unwrap_or(cropped_images.len());
-
-                    let mut all_texts = Vec::with_capacity(cropped_images.len());
-                    let mut all_scores = Vec::with_capacity(cropped_images.len());
-                    let mut all_char_positions: Vec<Vec<f32>> =
-                        Vec::with_capacity(cropped_images.len());
-                    let mut all_char_col_indices: Vec<Vec<usize>> =
-                        Vec::with_capacity(cropped_images.len());
-                    let mut all_sequence_lengths: Vec<usize> =
-                        Vec::with_capacity(cropped_images.len());
-                    let mut all_wh_ratios: Vec<f32> = Vec::with_capacity(cropped_images.len());
-                    let mut all_max_wh_ratios: Vec<f32> = Vec::with_capacity(cropped_images.len());
-
-                    // Process regions in batches
-                    for (chunk_idx, chunk) in cropped_images.chunks(batch_size).enumerate() {
-                        let chunk_start = chunk_idx * batch_size;
-                        let chunk_end = chunk_start + chunk.len();
-                        let chunk_wh_ratios = &wh_ratios[chunk_start..chunk_end];
-                        let chunk_max_wh_ratio = chunk_wh_ratios
-                            .iter()
-                            .fold(base_rec_ratio, |acc, &r| acc.max(r));
-
-                        let rec_input = DynTaskInput::from_text_recognition(
-                            crate::domain::tasks::TextRecognitionInput::new(chunk.to_vec()),
-                        );
-                        let rec_output = self
-                            .pipeline
-                            .text_recognition_adapter
-                            .execute_dyn(rec_input)?;
-
-                        if let Ok(rec_result) = rec_output.into_text_recognition() {
-                            let chunk_len = rec_result.texts.len();
-                            all_texts.extend(rec_result.texts);
-                            all_scores.extend(rec_result.scores);
-                            all_char_positions.extend(rec_result.char_positions);
-                            all_char_col_indices.extend(rec_result.char_col_indices);
-                            all_sequence_lengths.extend(rec_result.sequence_lengths);
-
-                            // Align wh ratios with recognized results
-                            let ratios_slice =
-                                &chunk_wh_ratios[..std::cmp::min(chunk_len, chunk_wh_ratios.len())];
-                            all_wh_ratios.extend_from_slice(ratios_slice);
-                            if chunk_len > ratios_slice.len() {
-                                all_wh_ratios.extend(std::iter::repeat_n(
-                                    *ratios_slice.last().unwrap_or(&1.0),
-                                    chunk_len - ratios_slice.len(),
-                                ));
-                            }
-                            all_max_wh_ratios
-                                .extend(std::iter::repeat_n(chunk_max_wh_ratio, chunk_len));
-                        }
-                    }
-
-                    // Create text regions by combining boxes, recognized text, and orientations
-                    // Use valid_indices to map back to original detection_boxes
-                    // Images were reordered in-place by aspect ratio, so results are in that order
-                    for (idx, text) in all_texts.iter().enumerate() {
-                        let text = text.as_str();
-                        let score = *all_scores.get(idx).unwrap_or(&0.0);
-                        let empty_positions: Vec<f32> = Vec::new();
-                        let char_positions =
-                            all_char_positions.get(idx).unwrap_or(&empty_positions);
-                        let (col_indices, seq_len) = all_char_col_indices
-                            .get(idx)
-                            .zip(all_sequence_lengths.get(idx))
-                            .map(|(c, s)| (c.as_slice(), *s))
-                            .unwrap_or((&[], 0));
-                        let wh_ratio = *all_wh_ratios.get(idx).unwrap_or(&1.0);
-                        let max_wh_ratio = *all_max_wh_ratios.get(idx).unwrap_or(&base_rec_ratio);
-
-                        // Map from current index to original detection box index
-                        // sorted_indices[idx] gives us the position in the aspect-ratio sorted order
-                        // valid_indices maps from cropped image index to original detection box index
-                        let original_crop_idx = sorted_indices[idx];
-                        let original_idx = valid_indices
-                            .get(original_crop_idx)
-                            .copied()
-                            .unwrap_or(original_crop_idx);
-
-                        let bbox = detection_boxes
-                            .get(original_idx)
-                            .cloned()
-                            .unwrap_or_else(|| BoundingBox::from_coords(0.0, 0.0, 0.0, 0.0));
-
-                        let orientation = line_orientations.get(idx).and_then(|o| *o);
-
-                        // Convert character positions to word boxes if enabled
-                        // Use column-based approach when available
-                        let word_boxes =
-                            if self.return_word_box && !col_indices.is_empty() && seq_len > 0 {
-                                Some(Self::ctc_word_boxes(
-                                    &bbox,
-                                    text,
-                                    col_indices,
-                                    seq_len,
-                                    wh_ratio,
-                                    max_wh_ratio,
-                                ))
-                            } else if self.return_word_box && !char_positions.is_empty() {
-                                // Fallback to old method if column indices not available
-                                Some(Self::char_positions_to_word_boxes(
-                                    &bbox,
-                                    char_positions,
-                                    text.chars().count(),
-                                ))
-                            } else {
-                                None
-                            };
-
-                        text_regions.push(crate::oarocr::TextRegion {
-                            bounding_box: bbox.clone(),
-                            dt_poly: Some(bbox.clone()),
-                            rec_poly: Some(bbox),
-                            text: Some(Arc::from(text)),
-                            confidence: Some(score),
-                            orientation_angle: orientation,
-                            word_boxes,
-                        });
-                    }
-                }
-            }
-
-            // Transform bounding boxes back to original coordinate system if rotation was applied
-            if let Some(angle) = orientation_angle {
-                let rotated_width = current_image.width();
-                let rotated_height = current_image.height();
-
-                // Transform each text region's polygons, bounding box, and word boxes
-                for region in &mut text_regions {
-                    region.dt_poly = region.dt_poly.take().map(|poly| {
-                        poly.rotate_back_to_original(angle, rotated_width, rotated_height)
-                    });
-                    region.rec_poly = region.rec_poly.take().map(|poly| {
-                        poly.rotate_back_to_original(angle, rotated_width, rotated_height)
-                    });
-                    region.bounding_box = region.bounding_box.rotate_back_to_original(
-                        angle,
-                        rotated_width,
-                        rotated_height,
+                Err(err) => {
+                    tracing::warn!(
+                        target: "ocr",
+                        error = %err,
+                        batch_start = start,
+                        batch_end = end,
+                        "Batched text detection failed; falling back to per-image detection"
                     );
-
-                    if let Some(ref word_boxes) = region.word_boxes {
-                        let transformed_word_boxes: Vec<_> = word_boxes
-                            .iter()
-                            .map(|wb| {
-                                wb.rotate_back_to_original(angle, rotated_width, rotated_height)
-                            })
-                            .collect();
-                        region.word_boxes = Some(transformed_word_boxes);
+                    for i in start..end {
+                        all_detection_boxes[i] =
+                            self.detect_sorted_text_boxes(&prepared[i].1.image)?;
                     }
                 }
             }
 
-            // Construct result
-            let result = crate::oarocr::OAROCRResult {
-                input_path: Arc::from(format!("image_{}", img_idx)),
-                index: img_idx,
-                input_img: input_img_arc,
-                text_regions,
-                orientation_angle,
-                rectified_img,
-            };
+            start = end;
+        }
 
-            results.push(result);
+        let mut results = Vec::with_capacity(prepared.len());
+        for (img_idx, (input_img_arc, preprocess)) in prepared.into_iter().enumerate() {
+            let detection_boxes = all_detection_boxes[img_idx].clone();
+            results.push(self.predict_single(
+                img_idx,
+                input_img_arc,
+                preprocess,
+                detection_boxes,
+            )?);
         }
 
         Ok(results)
     }
 
-    /// Reorders a vector in-place according to the provided indices.
-    ///
-    /// This is more efficient than creating a new vector with cloned elements,
-    /// as it only moves elements without cloning.
-    ///
-    /// # Arguments
-    ///
-    /// * `vec` - The vector to reorder
-    /// * `indices` - The new ordering (indices[i] = old position of element at new position i)
-    fn reorder_by_indices<T>(vec: &mut Vec<T>, indices: &[usize]) {
-        if vec.len() != indices.len() {
-            return;
+    fn predict_single(
+        &self,
+        img_idx: usize,
+        input_img: std::sync::Arc<image::RgbImage>,
+        preprocess: crate::oarocr::preprocess::PreprocessResult,
+        detection_boxes: Vec<BoundingBox>,
+    ) -> Result<crate::oarocr::OAROCRResult, OCRError> {
+        use std::sync::Arc;
+
+        let current_image = preprocess.image;
+
+        let mut cropped_regions = self.crop_text_regions(&current_image, &detection_boxes)?;
+        self.classify_line_orientations(&mut cropped_regions)?;
+
+        let recognized = self.recognize_text_regions(detection_boxes.len(), cropped_regions)?;
+
+        // Preserve reading order by emitting in detection-index order.
+        let mut text_regions: Vec<crate::oarocr::TextRegion> =
+            recognized.into_iter().flatten().collect();
+
+        if let Some(rot) = preprocess.rotation {
+            Self::rotate_text_regions_back(&mut text_regions, rot);
         }
 
-        // Create a temporary vector by moving elements in the correct order
-        let mut temp: Vec<Option<T>> = vec.drain(..).map(Some).collect();
+        Ok(crate::oarocr::OAROCRResult {
+            input_path: Arc::from(format!("image_{}", img_idx)),
+            index: img_idx,
+            input_img,
+            text_regions,
+            orientation_angle: preprocess.orientation_angle,
+            rectified_img: preprocess.rectified_img,
+        })
+    }
 
-        // Rebuild vec in the new order
-        for &idx in indices.iter() {
-            if let Some(item) = temp.get_mut(idx).and_then(|opt| opt.take()) {
-                vec.push(item);
+    fn detect_sorted_text_boxes_batch(
+        &self,
+        images: Vec<image::RgbImage>,
+    ) -> Result<Vec<Vec<BoundingBox>>, OCRError> {
+        use crate::core::registry::DynTaskInput;
+        use crate::core::traits::task::ImageTaskInput;
+
+        if images.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let input = DynTaskInput::from_images(ImageTaskInput::new(images));
+        let output = self.pipeline.text_detection_adapter.execute_dyn(input)?;
+        let det = output.into_text_detection()?;
+
+        let mut results: Vec<Vec<BoundingBox>> = Vec::with_capacity(det.detections.len());
+        for detections in det.detections.into_iter() {
+            let boxes = detections.into_iter().map(|d| d.bbox).collect::<Vec<_>>();
+            results.push(self.sort_detection_boxes(&boxes));
+        }
+
+        Ok(results)
+    }
+
+    fn detect_sorted_text_boxes(
+        &self,
+        image: &image::RgbImage,
+    ) -> Result<Vec<BoundingBox>, OCRError> {
+        use crate::core::registry::DynTaskInput;
+        use crate::core::traits::task::ImageTaskInput;
+
+        let input = DynTaskInput::from_images(ImageTaskInput::new(vec![image.clone()]));
+        let output = self.pipeline.text_detection_adapter.execute_dyn(input)?;
+        let det = output.into_text_detection()?;
+
+        let boxes = det
+            .detections
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|d| d.bbox)
+            .collect::<Vec<_>>();
+
+        Ok(self.sort_detection_boxes(&boxes))
+    }
+
+    fn sort_detection_boxes(&self, boxes: &[BoundingBox]) -> Vec<BoundingBox> {
+        if boxes.is_empty() {
+            return Vec::new();
+        }
+
+        let is_seal_text = self
+            .text_type
+            .as_ref()
+            .map(|t| t.to_lowercase() == "seal")
+            .unwrap_or(false);
+
+        if is_seal_text {
+            crate::processors::sort_poly_boxes(boxes)
+        } else {
+            crate::processors::sort_quad_boxes(boxes)
+        }
+    }
+
+    fn crop_text_regions(
+        &self,
+        image: &image::RgbImage,
+        detection_boxes: &[BoundingBox],
+    ) -> Result<Vec<CroppedTextRegion>, OCRError> {
+        use crate::oarocr::EdgeProcessor;
+        use crate::oarocr::TextCroppingProcessor;
+        use std::sync::Arc;
+
+        if detection_boxes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let processor = TextCroppingProcessor::new(true); // handle_rotation = true
+        let cropped = processor.process((Arc::new(image.clone()), detection_boxes.to_vec()))?;
+
+        let mut regions = Vec::new();
+        for (idx, crop_result) in cropped.into_iter().enumerate() {
+            let Some(img) = crop_result else {
+                continue;
+            };
+            let img = (*img).clone();
+            let wh_ratio = img.width() as f32 / img.height().max(1) as f32;
+            regions.push(CroppedTextRegion {
+                detection_index: idx,
+                bbox: detection_boxes
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| BoundingBox::from_coords(0.0, 0.0, 0.0, 0.0)),
+                image: img,
+                wh_ratio,
+                line_orientation_angle: None,
+            });
+        }
+
+        Ok(regions)
+    }
+
+    fn classify_line_orientations(
+        &self,
+        regions: &mut [CroppedTextRegion],
+    ) -> Result<(), OCRError> {
+        use crate::core::registry::DynTaskInput;
+        use crate::core::traits::task::ImageTaskInput;
+
+        let Some(ref line_orientation_adapter) = self.pipeline.text_line_orientation_adapter else {
+            return Ok(());
+        };
+
+        if regions.is_empty() {
+            return Ok(());
+        }
+
+        let input_images = regions.iter().map(|r| r.image.clone()).collect();
+        let input = DynTaskInput::from_images(ImageTaskInput::new(input_images));
+        let output = line_orientation_adapter.execute_dyn(input)?;
+        let orient = output.into_text_line_orientation()?;
+
+        for (idx, classifications) in orient
+            .classifications
+            .iter()
+            .enumerate()
+            .take(regions.len())
+        {
+            let Some(top_class) = classifications.first() else {
+                continue;
+            };
+
+            // Convert class_id to angle (0=0°, 1=180°)
+            let angle = (top_class.class_id as f32) * 180.0;
+            regions[idx].line_orientation_angle = Some(angle);
+
+            if top_class.class_id == 1 {
+                regions[idx].image = image::imageops::rotate180(&regions[idx].image);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn recognize_text_regions(
+        &self,
+        detection_count: usize,
+        mut regions: Vec<CroppedTextRegion>,
+    ) -> Result<Vec<Option<crate::oarocr::TextRegion>>, OCRError> {
+        use crate::core::registry::DynTaskInput;
+
+        let mut results: Vec<Option<crate::oarocr::TextRegion>> = vec![None; detection_count];
+        if regions.is_empty() {
+            return Ok(results);
+        }
+
+        regions.sort_by(|a, b| {
+            a.wh_ratio
+                .partial_cmp(&b.wh_ratio)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let base_rec_ratio = DEFAULT_REC_IMAGE_SHAPE[2] as f32 / DEFAULT_REC_IMAGE_SHAPE[1] as f32;
+        let batch_size = self.region_batch_size.unwrap_or(regions.len()).max(1);
+
+        for chunk in regions.chunks(batch_size) {
+            let chunk_max_wh_ratio = chunk
+                .iter()
+                .map(|r| r.wh_ratio)
+                .fold(base_rec_ratio, |acc, r| acc.max(r));
+
+            let rec_input = DynTaskInput::from_text_recognition(
+                crate::domain::tasks::TextRecognitionInput::new(
+                    chunk.iter().map(|r| r.image.clone()).collect(),
+                ),
+            );
+
+            let rec_output = self
+                .pipeline
+                .text_recognition_adapter
+                .execute_dyn(rec_input)?;
+            let rec = rec_output.into_text_recognition()?;
+
+            let n = rec.texts.len().min(chunk.len());
+            for (i, region) in chunk.iter().take(n).enumerate() {
+                let text = rec.texts.get(i).map(String::as_str).unwrap_or("");
+                let score = *rec.scores.get(i).unwrap_or(&0.0);
+
+                let char_positions: &[f32] = rec
+                    .char_positions
+                    .get(i)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let col_indices: &[usize] = rec
+                    .char_col_indices
+                    .get(i)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let seq_len = *rec.sequence_lengths.get(i).unwrap_or(&0);
+
+                let bbox = region.bbox.clone();
+                let word_boxes = if self.return_word_box && !col_indices.is_empty() && seq_len > 0 {
+                    Some(Self::ctc_word_boxes(
+                        &bbox,
+                        text,
+                        col_indices,
+                        seq_len,
+                        region.wh_ratio,
+                        chunk_max_wh_ratio,
+                    ))
+                } else if self.return_word_box && !char_positions.is_empty() {
+                    Some(Self::char_positions_to_word_boxes(
+                        &bbox,
+                        char_positions,
+                        text.chars().count(),
+                    ))
+                } else {
+                    None
+                };
+
+                if region.detection_index < results.len() {
+                    results[region.detection_index] = Some(crate::oarocr::TextRegion {
+                        bounding_box: bbox.clone(),
+                        dt_poly: Some(bbox.clone()),
+                        rec_poly: Some(bbox),
+                        text: Some(std::sync::Arc::from(text)),
+                        confidence: Some(score),
+                        orientation_angle: region.line_orientation_angle,
+                        word_boxes,
+                    });
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    fn rotate_text_regions_back(
+        regions: &mut [crate::oarocr::TextRegion],
+        rot: crate::oarocr::preprocess::OrientationCorrection,
+    ) {
+        for region in regions {
+            region.dt_poly = region.dt_poly.take().map(|poly| {
+                poly.rotate_back_to_original(rot.angle, rot.rotated_width, rot.rotated_height)
+            });
+            region.rec_poly = region.rec_poly.take().map(|poly| {
+                poly.rotate_back_to_original(rot.angle, rot.rotated_width, rot.rotated_height)
+            });
+            region.bounding_box = region.bounding_box.rotate_back_to_original(
+                rot.angle,
+                rot.rotated_width,
+                rot.rotated_height,
+            );
+
+            if let Some(ref word_boxes) = region.word_boxes {
+                let transformed_word_boxes: Vec<_> = word_boxes
+                    .iter()
+                    .map(|wb| {
+                        wb.rotate_back_to_original(rot.angle, rot.rotated_width, rot.rotated_height)
+                    })
+                    .collect();
+                region.word_boxes = Some(transformed_word_boxes);
             }
         }
     }

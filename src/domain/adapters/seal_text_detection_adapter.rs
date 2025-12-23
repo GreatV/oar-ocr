@@ -2,11 +2,11 @@
 //!
 //! This adapter uses the DB model configured for seal text detection (curved text).
 
+use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
     task::{Task, TaskType},
 };
-use crate::core::{OCRError, ProcessingStage};
 use crate::domain::tasks::{
     Detection, SealTextDetectionConfig, SealTextDetectionOutput, SealTextDetectionTask,
 };
@@ -47,15 +47,17 @@ impl ModelAdapter for SealTextDetectionAdapter {
                 effective_config.box_threshold,
                 effective_config.unclip_ratio,
             )
-            .map_err(|e| OCRError::Processing {
-                kind: ProcessingStage::AdapterExecution,
-                context: format!(
-                    "SealTextDetectionAdapter failed to detect seal text (score_threshold={}, box_threshold={}, unclip_ratio={})",
-                    effective_config.score_threshold,
-                    effective_config.box_threshold,
-                    effective_config.unclip_ratio
-                ),
-                source: Box::new(e),
+            .map_err(|e| {
+                OCRError::adapter_execution_error(
+                    "SealTextDetectionAdapter",
+                    format!(
+                        "failed to detect seal text (score_threshold={}, box_threshold={}, unclip_ratio={})",
+                        effective_config.score_threshold,
+                        effective_config.box_threshold,
+                        effective_config.unclip_ratio
+                    ),
+                    e,
+                )
             })?;
 
         // Convert model output to structured detections

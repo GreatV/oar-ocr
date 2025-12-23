@@ -76,14 +76,25 @@ impl ModelAdapter for TableStructureRecognitionAdapter {
         tracing::debug!("Processing {} table images", num_images);
 
         // Run model forward pass on all images
-        let model_output = self.model.forward(input.images)?;
+        let model_output = self.model.forward(input.images).map_err(|e| {
+            OCRError::adapter_execution_error(
+                "TableStructureRecognitionAdapter",
+                format!("model forward (batch_size={})", num_images),
+                e,
+            )
+        })?;
 
         // Decode structure and bboxes for all images
-        let decode_output = self.decoder.decode(
-            &model_output.structure_logits,
-            &model_output.bbox_preds,
-            &model_output.shape_info,
-        )?;
+        let decode_output = self
+            .decoder
+            .decode(
+                &model_output.structure_logits,
+                &model_output.bbox_preds,
+                &model_output.shape_info,
+            )
+            .map_err(|e| {
+                OCRError::adapter_execution_error("TableStructureRecognitionAdapter", "decode", e)
+            })?;
 
         // Process each image's results
         let mut structures = Vec::with_capacity(num_images);

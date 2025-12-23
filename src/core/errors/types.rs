@@ -400,4 +400,17 @@ impl OCRError {
             ),
         }
     }
+
+    /// Wraps an error that occurred while executing a model adapter.
+    pub fn adapter_execution_error(
+        adapter: impl Into<String>,
+        context: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Processing {
+            kind: ProcessingStage::AdapterExecution,
+            context: format!("{}: {}", adapter.into(), context.into()),
+            source: Box::new(source),
+        }
+    }
 }

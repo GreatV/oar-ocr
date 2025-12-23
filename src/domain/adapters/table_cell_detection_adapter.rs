@@ -146,13 +146,22 @@ impl ModelAdapter for TableCellDetectionAdapter {
         config: Option<&<Self::Task as Task>::Config>,
     ) -> Result<<Self::Task as Task>::Output, OCRError> {
         let effective_config = config.unwrap_or(&self.config);
+        let batch_len = input.images.len();
 
         let (predictions, img_shapes) = match &self.model {
             TableCellModel::RTDetr(model) => {
                 let postprocess_config = RTDetrPostprocessConfig {
                     num_classes: self.model_config.num_classes,
                 };
-                let (output, img_shapes) = model.forward(input.images, &postprocess_config)?;
+                let (output, img_shapes) = model
+                    .forward(input.images, &postprocess_config)
+                    .map_err(|e| {
+                        OCRError::adapter_execution_error(
+                            "TableCellDetectionAdapter",
+                            format!("RTDetr forward (batch_size={})", batch_len),
+                            e,
+                        )
+                    })?;
                 (output.predictions, img_shapes)
             }
         };
