@@ -24,10 +24,10 @@ mod utils;
 
 use clap::Parser;
 use oar_ocr::predictors::SealTextDetectionPredictor;
+use oar_ocr::utils::load_image;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info};
-use oar_ocr::utils::load_image;
 use utils::parse_device_config;
 
 #[cfg(feature = "visualization")]

@@ -147,9 +147,9 @@ use oar_ocr::domain::tasks::{
 };
 use oar_ocr::oarocr::OARStructureBuilder;
 use oar_ocr::processors::LimitType;
+use oar_ocr::utils::load_image;
 use std::path::PathBuf;
 use tracing::{error, info, warn};
-use oar_ocr::utils::load_image;
 use utils::parse_device_config;
 
 /// Command-line arguments for the structure analysis example
