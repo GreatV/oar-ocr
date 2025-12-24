@@ -7,7 +7,7 @@
 use crate::core::config::OrtSessionConfig;
 use crate::core::constants::DEFAULT_REC_IMAGE_SHAPE;
 use crate::core::errors::OCRError;
-use crate::core::registry::{AdapterWrapper, DynModelAdapter};
+use crate::core::registry::{DynModelAdapter, TaskAdapter};
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::domain::adapters::{
     DocumentOrientationAdapterBuilder, TextDetectionAdapterBuilder,
@@ -223,44 +223,42 @@ impl OAROCRBuilder {
         })?;
 
         // Build document rectification adapter if enabled
-        let rectification_adapter =
-            if let Some(ref rectification_model) = self.document_rectification_model {
-                let mut builder = UVDocRectifierAdapterBuilder::new();
+        let rectification_adapter = if let Some(ref rectification_model) =
+            self.document_rectification_model
+        {
+            let mut builder = UVDocRectifierAdapterBuilder::new();
 
-                if let Some(ref ort_config) = self.ort_session_config {
-                    builder = builder.with_ort_config(ort_config.clone());
-                }
+            if let Some(ref ort_config) = self.ort_session_config {
+                builder = builder.with_ort_config(ort_config.clone());
+            }
 
-                let adapter = builder.build(rectification_model)?;
-                Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
-            } else {
-                None
-            };
+            let adapter = builder.build(rectification_model)?;
+            Some(Arc::new(TaskAdapter::document_rectification(adapter)) as Arc<dyn DynModelAdapter>)
+        } else {
+            None
+        };
 
         // Build document orientation adapter if enabled
-        let document_orientation_adapter =
-            if let Some(ref orientation_model) = self.document_orientation_model {
-                let mut builder = DocumentOrientationAdapterBuilder::new();
+        let document_orientation_adapter = if let Some(ref orientation_model) =
+            self.document_orientation_model
+        {
+            let mut builder = DocumentOrientationAdapterBuilder::new();
 
-                if let Some(ref ort_config) = self.ort_session_config {
-                    builder = builder.with_ort_config(ort_config.clone());
-                }
+            if let Some(ref ort_config) = self.ort_session_config {
+                builder = builder.with_ort_config(ort_config.clone());
+            }
 
-                let adapter = builder.build(orientation_model)?;
-                Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
-            } else {
-                None
-            };
+            let adapter = builder.build(orientation_model)?;
+            Some(Arc::new(TaskAdapter::document_orientation(adapter)) as Arc<dyn DynModelAdapter>)
+        } else {
+            None
+        };
 
         // Build text detection adapter (required)
         let mut detection_builder = TextDetectionAdapterBuilder::new();
 
         if let Some(ref ort_config) = self.ort_session_config {
             detection_builder = detection_builder.with_ort_config(ort_config.clone());
-        }
-
-        if let Some(batch_size) = self.image_batch_size {
-            detection_builder = detection_builder.session_pool_size(batch_size);
         }
 
         // Align text detection defaults with OCR pipeline.
@@ -309,24 +307,25 @@ impl OAROCRBuilder {
             detection_builder = detection_builder.text_type(text_type.clone());
         }
 
-        let text_detection_adapter = Arc::new(AdapterWrapper::new(
+        let text_detection_adapter = Arc::new(TaskAdapter::text_detection(
             detection_builder.build(&self.text_detection_model)?,
         )) as Arc<dyn DynModelAdapter>;
 
         // Build text line orientation adapter if enabled
-        let text_line_orientation_adapter =
-            if let Some(ref line_orientation_model) = self.text_line_orientation_model {
-                let mut builder = TextLineOrientationAdapterBuilder::new();
+        let text_line_orientation_adapter = if let Some(ref line_orientation_model) =
+            self.text_line_orientation_model
+        {
+            let mut builder = TextLineOrientationAdapterBuilder::new();
 
-                if let Some(ref ort_config) = self.ort_session_config {
-                    builder = builder.with_ort_config(ort_config.clone());
-                }
+            if let Some(ref ort_config) = self.ort_session_config {
+                builder = builder.with_ort_config(ort_config.clone());
+            }
 
-                let adapter = builder.build(line_orientation_model)?;
-                Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
-            } else {
-                None
-            };
+            let adapter = builder.build(line_orientation_model)?;
+            Some(Arc::new(TaskAdapter::text_line_orientation(adapter)) as Arc<dyn DynModelAdapter>)
+        } else {
+            None
+        };
 
         // Build text recognition adapter (required)
         // Parse char_dict into Vec<String> - one character per line
@@ -340,15 +339,11 @@ impl OAROCRBuilder {
             recognition_builder = recognition_builder.with_ort_config(ort_config.clone());
         }
 
-        if let Some(batch_size) = self.region_batch_size {
-            recognition_builder = recognition_builder.session_pool_size(batch_size);
-        }
-
         if let Some(ref rec_config) = self.text_recognition_config {
             recognition_builder = recognition_builder.with_config(rec_config.clone());
         }
 
-        let text_recognition_adapter = Arc::new(AdapterWrapper::new(
+        let text_recognition_adapter = Arc::new(TaskAdapter::text_recognition(
             recognition_builder.build(&self.text_recognition_model)?,
         )) as Arc<dyn DynModelAdapter>;
 

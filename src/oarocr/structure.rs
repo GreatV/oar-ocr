@@ -6,7 +6,7 @@
 
 use crate::core::OCRError;
 use crate::core::config::OrtSessionConfig;
-use crate::core::registry::{AdapterWrapper, DynModelAdapter};
+use crate::core::registry::{DynModelAdapter, TaskAdapter};
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::domain::adapters::{
     LayoutDetectionAdapterBuilder, PPFormulaNetAdapterBuilder, SLANetWiredAdapterBuilder,
@@ -618,21 +618,22 @@ impl OARStructureBuilder {
         };
 
         // Build document orientation adapter if enabled
-        let document_orientation_adapter =
-            if let Some(ref model_path) = self.document_orientation_model {
-                use crate::domain::adapters::DocumentOrientationAdapterBuilder;
+        let document_orientation_adapter = if let Some(ref model_path) =
+            self.document_orientation_model
+        {
+            use crate::domain::adapters::DocumentOrientationAdapterBuilder;
 
-                let mut builder = DocumentOrientationAdapterBuilder::new();
+            let mut builder = DocumentOrientationAdapterBuilder::new();
 
-                if let Some(ref ort_config) = self.ort_session_config {
-                    builder = builder.with_ort_config(ort_config.clone());
-                }
+            if let Some(ref ort_config) = self.ort_session_config {
+                builder = builder.with_ort_config(ort_config.clone());
+            }
 
-                let adapter = builder.build(model_path)?;
-                Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
-            } else {
-                None
-            };
+            let adapter = builder.build(model_path)?;
+            Some(Arc::new(TaskAdapter::document_orientation(adapter)) as Arc<dyn DynModelAdapter>)
+        } else {
+            None
+        };
 
         // Build document rectification adapter if enabled
         let rectification_adapter = if let Some(ref model_path) = self.document_rectification_model
@@ -646,7 +647,7 @@ impl OARStructureBuilder {
             }
 
             let adapter = builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::document_rectification(adapter)) as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
@@ -691,7 +692,7 @@ impl OARStructureBuilder {
             layout_builder = layout_builder.with_ort_config(ort_config.clone());
         }
 
-        let layout_detection_adapter = Arc::new(AdapterWrapper::new(
+        let layout_detection_adapter = Arc::new(TaskAdapter::layout_detection(
             layout_builder.build(&self.layout_detection_model)?,
         )) as Arc<dyn DynModelAdapter>;
 
@@ -726,29 +727,30 @@ impl OARStructureBuilder {
             }
 
             let adapter = region_builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::layout_detection(adapter)) as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
 
         // Build table classification adapter if enabled
-        let table_classification_adapter =
-            if let Some(ref model_path) = self.table_classification_model {
-                let mut builder = TableClassificationAdapterBuilder::new();
+        let table_classification_adapter = if let Some(ref model_path) =
+            self.table_classification_model
+        {
+            let mut builder = TableClassificationAdapterBuilder::new();
 
-                if let Some(ref config) = self.table_classification_config {
-                    builder = builder.with_config(config.clone());
-                }
+            if let Some(ref config) = self.table_classification_config {
+                builder = builder.with_config(config.clone());
+            }
 
-                if let Some(ref ort_config) = self.ort_session_config {
-                    builder = builder.with_ort_config(ort_config.clone());
-                }
+            if let Some(ref ort_config) = self.ort_session_config {
+                builder = builder.with_ort_config(ort_config.clone());
+            }
 
-                let adapter = builder.build(model_path)?;
-                Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
-            } else {
-                None
-            };
+            let adapter = builder.build(model_path)?;
+            Some(Arc::new(TaskAdapter::table_classification(adapter)) as Arc<dyn DynModelAdapter>)
+        } else {
+            None
+        };
 
         // Build table orientation adapter if enabled (reuses document orientation model)
         // This detects rotated tables (0°, 90°, 180°, 270°) before structure recognition
@@ -762,7 +764,7 @@ impl OARStructureBuilder {
             }
 
             let adapter = builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::document_orientation(adapter)) as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
@@ -800,7 +802,7 @@ impl OARStructureBuilder {
             }
 
             let adapter = builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::table_cell_detection(adapter)) as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
@@ -836,7 +838,7 @@ impl OARStructureBuilder {
                     }
 
                     let adapter = builder.build(model_path)?;
-                    Arc::new(AdapterWrapper::new(adapter))
+                    Arc::new(TaskAdapter::table_structure_recognition(adapter))
                 }
                 "wireless" => {
                     let mut builder =
@@ -851,7 +853,7 @@ impl OARStructureBuilder {
                     }
 
                     let adapter = builder.build(model_path)?;
-                    Arc::new(AdapterWrapper::new(adapter))
+                    Arc::new(TaskAdapter::table_structure_recognition(adapter))
                 }
                 _ => {
                     return Err(OCRError::config_error_detailed(
@@ -891,7 +893,8 @@ impl OARStructureBuilder {
             }
 
             let adapter = builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::table_structure_recognition(adapter))
+                as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
@@ -917,7 +920,8 @@ impl OARStructureBuilder {
             }
 
             let adapter = builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::table_structure_recognition(adapter))
+                as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
@@ -938,7 +942,7 @@ impl OARStructureBuilder {
             }
 
             let adapter = builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::table_cell_detection(adapter)) as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
@@ -960,7 +964,7 @@ impl OARStructureBuilder {
             }
 
             let adapter = builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::table_cell_detection(adapter)) as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
@@ -1000,7 +1004,7 @@ impl OARStructureBuilder {
                     }
 
                     let adapter = builder.build(model_path)?;
-                    Arc::new(AdapterWrapper::new(adapter))
+                    Arc::new(TaskAdapter::formula_recognition(adapter))
                 }
                 "unimernet" => {
                     let mut builder = UniMERNetFormulaAdapterBuilder::new();
@@ -1018,7 +1022,7 @@ impl OARStructureBuilder {
                     }
 
                     let adapter = builder.build(model_path)?;
-                    Arc::new(AdapterWrapper::new(adapter))
+                    Arc::new(TaskAdapter::formula_recognition(adapter))
                 }
                 _ => {
                     return Err(OCRError::config_error_detailed(
@@ -1037,21 +1041,22 @@ impl OARStructureBuilder {
         };
 
         // Build seal text detection adapter if enabled
-        let seal_text_detection_adapter =
-            if let Some(ref model_path) = self.seal_text_detection_model {
-                use crate::domain::adapters::SealTextDetectionAdapterBuilder;
+        let seal_text_detection_adapter = if let Some(ref model_path) =
+            self.seal_text_detection_model
+        {
+            use crate::domain::adapters::SealTextDetectionAdapterBuilder;
 
-                let mut builder = SealTextDetectionAdapterBuilder::new();
+            let mut builder = SealTextDetectionAdapterBuilder::new();
 
-                if let Some(ref ort_config) = self.ort_session_config {
-                    builder = builder.with_ort_config(ort_config.clone());
-                }
+            if let Some(ref ort_config) = self.ort_session_config {
+                builder = builder.with_ort_config(ort_config.clone());
+            }
 
-                let adapter = builder.build(model_path)?;
-                Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
-            } else {
-                None
-            };
+            let adapter = builder.build(model_path)?;
+            Some(Arc::new(TaskAdapter::seal_text_detection(adapter)) as Arc<dyn DynModelAdapter>)
+        } else {
+            None
+        };
 
         // Build text detection adapter if enabled.
         //
@@ -1079,27 +1084,28 @@ impl OARStructureBuilder {
             }
 
             let adapter = builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::text_detection(adapter)) as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
 
         // Build text line orientation adapter if enabled (PP-StructureV3)
-        let text_line_orientation_adapter =
-            if let Some(ref model_path) = self.text_line_orientation_model {
-                use crate::domain::adapters::TextLineOrientationAdapterBuilder;
+        let text_line_orientation_adapter = if let Some(ref model_path) =
+            self.text_line_orientation_model
+        {
+            use crate::domain::adapters::TextLineOrientationAdapterBuilder;
 
-                let mut builder = TextLineOrientationAdapterBuilder::new();
+            let mut builder = TextLineOrientationAdapterBuilder::new();
 
-                if let Some(ref ort_config) = self.ort_session_config {
-                    builder = builder.with_ort_config(ort_config.clone());
-                }
+            if let Some(ref ort_config) = self.ort_session_config {
+                builder = builder.with_ort_config(ort_config.clone());
+            }
 
-                let adapter = builder.build(model_path)?;
-                Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
-            } else {
-                None
-            };
+            let adapter = builder.build(model_path)?;
+            Some(Arc::new(TaskAdapter::text_line_orientation(adapter)) as Arc<dyn DynModelAdapter>)
+        } else {
+            None
+        };
 
         // Build text recognition adapter if enabled
         let text_recognition_adapter = if let Some(ref model_path) = self.text_recognition_model {
@@ -1123,7 +1129,7 @@ impl OARStructureBuilder {
             }
 
             let adapter = builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::text_recognition(adapter)) as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
@@ -2306,16 +2312,33 @@ impl OARStructure {
 
         {
             let analyzer = crate::oarocr::table_analyzer::TableAnalyzer::new(
-                self.pipeline.table_classification_adapter.clone(),
-                self.pipeline.table_orientation_adapter.clone(),
-                self.pipeline.table_structure_recognition_adapter.clone(),
-                self.pipeline.wired_table_structure_adapter.clone(),
-                self.pipeline.wireless_table_structure_adapter.clone(),
-                self.pipeline.table_cell_detection_adapter.clone(),
-                self.pipeline.wired_table_cell_adapter.clone(),
-                self.pipeline.wireless_table_cell_adapter.clone(),
-                self.pipeline.use_e2e_wired_table_rec,
-                self.pipeline.use_e2e_wireless_table_rec,
+                crate::oarocr::table_analyzer::TableAnalyzerConfig {
+                    table_classification_adapter: self
+                        .pipeline
+                        .table_classification_adapter
+                        .clone(),
+                    table_orientation_adapter: self.pipeline.table_orientation_adapter.clone(),
+                    table_structure_recognition_adapter: self
+                        .pipeline
+                        .table_structure_recognition_adapter
+                        .clone(),
+                    wired_table_structure_adapter: self
+                        .pipeline
+                        .wired_table_structure_adapter
+                        .clone(),
+                    wireless_table_structure_adapter: self
+                        .pipeline
+                        .wireless_table_structure_adapter
+                        .clone(),
+                    table_cell_detection_adapter: self
+                        .pipeline
+                        .table_cell_detection_adapter
+                        .clone(),
+                    wired_table_cell_adapter: self.pipeline.wired_table_cell_adapter.clone(),
+                    wireless_table_cell_adapter: self.pipeline.wireless_table_cell_adapter.clone(),
+                    use_e2e_wired_table_rec: self.pipeline.use_e2e_wired_table_rec,
+                    use_e2e_wireless_table_rec: self.pipeline.use_e2e_wireless_table_rec,
+                },
             );
             tables.extend(analyzer.analyze_tables(
                 &current_image,

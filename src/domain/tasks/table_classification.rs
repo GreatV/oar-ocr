@@ -60,14 +60,13 @@ impl TableClassificationOutput {
 /// Table classification task implementation.
 #[derive(Debug, Default)]
 pub struct TableClassificationTask {
-    #[allow(dead_code)]
-    config: TableClassificationConfig,
+    _config: TableClassificationConfig,
 }
 
 impl TableClassificationTask {
     /// Creates a new table classification task.
     pub fn new(config: TableClassificationConfig) -> Self {
-        Self { config }
+        Self { _config: config }
     }
 }
 

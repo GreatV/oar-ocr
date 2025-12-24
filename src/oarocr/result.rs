@@ -163,29 +163,6 @@ pub struct OAROCRResult {
 }
 
 impl OAROCRResult {
-    /// Creates text regions from parallel vectors.
-    ///
-    /// This is a helper method used internally during result construction.
-    #[allow(dead_code)]
-    pub(crate) fn create_text_regions_from_vectors(
-        text_boxes: &[BoundingBox],
-        rec_texts: &[Option<Arc<str>>],
-        rec_scores: &[Option<f32>],
-        text_line_orientation_angles: &[Option<f32>],
-    ) -> Vec<TextRegion> {
-        text_boxes
-            .iter()
-            .enumerate()
-            .map(|(i, bbox)| {
-                let text = rec_texts.get(i).and_then(|t| t.clone());
-                let confidence = rec_scores.get(i).and_then(|s| *s);
-                let orientation_angle = text_line_orientation_angles.get(i).and_then(|a| *a);
-
-                TextRegion::with_all(bbox.clone(), text, confidence, orientation_angle)
-            })
-            .collect()
-    }
-
     /// Returns an iterator over text regions that have recognized text.
     pub fn recognized_text_regions(&self) -> impl Iterator<Item = &TextRegion> {
         self.text_regions.iter().filter(|region| region.has_text())

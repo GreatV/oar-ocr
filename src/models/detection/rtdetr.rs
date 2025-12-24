@@ -73,8 +73,7 @@ pub struct RTDetrModel {
     inference: OrtInfer,
     resizer: DetResizeForTest,
     normalizer: NormalizeImage,
-    #[allow(dead_code)]
-    preprocess_config: RTDetrPreprocessConfig,
+    _preprocess_config: RTDetrPreprocessConfig,
 }
 
 impl RTDetrModel {
@@ -111,7 +110,7 @@ impl RTDetrModel {
             inference,
             resizer,
             normalizer,
-            preprocess_config,
+            _preprocess_config: preprocess_config,
         })
     }
 

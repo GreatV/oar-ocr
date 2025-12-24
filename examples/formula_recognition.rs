@@ -25,7 +25,6 @@
 //!   - `PP-FormulaNet_plus-M` - PP-FormulaNet Plus Medium variant
 //!   - `PP-FormulaNet_plus-L` - PP-FormulaNet Plus Large variant
 //! * `--score-thresh` - Score threshold for recognition (default: 0.0)
-//! * `--session-pool-size` - Session pool size for concurrent inference (default: 1)
 //! * `--target-width` - Target image width (default: auto)
 //! * `--target-height` - Target image height (default: auto)
 //! * `--max-length` - Maximum formula length in tokens (default: 1536)
@@ -84,10 +83,11 @@ mod utils;
 
 use clap::Parser;
 use oar_ocr::predictors::FormulaRecognitionPredictor;
+use oar_ocr::utils::load_image;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
-use utils::{load_rgb_image, parse_device_config};
+use utils::parse_device_config;
 
 #[cfg(feature = "visualization")]
 use image::RgbImage;
@@ -121,10 +121,6 @@ struct Args {
     #[arg(long, default_value = "0.0")]
     score_thresh: f32,
 
-    /// Session pool size for concurrent inference (default: 1)
-    #[arg(long, default_value = "1")]
-    session_pool_size: usize,
-
     /// Target image width (default: auto)
     #[arg(long, default_value = "0")]
     target_width: u32,
@@ -149,7 +145,7 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing for logging
-    oar_ocr::utils::init_tracing();
+    utils::init_tracing();
 
     // Parse command-line arguments
     let args = Args::parse();
@@ -184,8 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Log device configuration
     info!("Using device: {}", args.device);
-    let mut ort_config = parse_device_config(&args.device)?.unwrap_or_default();
-    ort_config.session_pool_size = Some(args.session_pool_size);
+    let ort_config = parse_device_config(&args.device)?.unwrap_or_default();
 
     if ort_config.execution_providers.is_some() {
         info!("CUDA execution provider configured successfully");
@@ -209,7 +204,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.verbose {
         info!("Building formula recognition predictor...");
         info!("  Model: {}", args.model_path.display());
-        info!("  Session pool size: {}", args.session_pool_size);
         info!("  Tokenizer: {}", args.tokenizer_path.display());
     }
 
@@ -227,7 +221,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut images = Vec::new();
 
     for image_path in &existing_images {
-        match load_rgb_image(image_path) {
+        match load_image(image_path) {
             Ok(rgb_img) => {
                 if args.verbose {
                     info!(
@@ -457,7 +451,7 @@ ${}$
     }
 
     // Load the rendered image
-    let rendered_img = match load_rgb_image(&png_file) {
+    let rendered_img = match load_image(&png_file) {
         Ok(img) => img,
         Err(e) => {
             let _ = fs::remove_dir_all(&temp_dir);

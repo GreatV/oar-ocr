@@ -73,8 +73,7 @@ pub struct PPFormulaNetModelOutput {
 pub struct PPFormulaNetModel {
     inference: OrtInfer,
     preprocessor: FormulaPreprocessor,
-    #[allow(dead_code)]
-    preprocess_config: PPFormulaNetPreprocessConfig,
+    _preprocess_config: PPFormulaNetPreprocessConfig,
 }
 
 impl PPFormulaNetModel {
@@ -97,7 +96,7 @@ impl PPFormulaNetModel {
         Ok(Self {
             inference,
             preprocessor,
-            preprocess_config,
+            _preprocess_config: preprocess_config,
         })
     }
 

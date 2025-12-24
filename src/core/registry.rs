@@ -5,21 +5,25 @@
 //!
 //! # Type System Design
 //!
-//! This module uses a hybrid approach for type safety and flexibility:
+//! This module uses enum-based dispatch for both inputs/outputs and adapters:
 //!
 //! - **Input/Output**: Enumerated types (`DynTaskInput`, `DynTaskOutput`) with
-//!   pattern matching for type-safe conversions. This avoids downcast on data paths.
-//! - **Adapters**: Trait objects (`DynModelAdapter`) with runtime downcast for execution.
-//!   This enables dynamic execution without knowing concrete types at compile time.
+//!   pattern matching for type-safe conversions.
+//! - **Adapters**: Enumerated type (`TaskAdapter`) with direct variant matching.
+//!   This avoids runtime downcast and provides compile-time exhaustiveness checking.
 //!
-//! This design balances compile-time safety (for data) with runtime flexibility
-//! (for adapter execution). Adapter downcast occurs once per execution and
-//! includes proper error handling.
+//! The `DynModelAdapter` trait is retained for custom/mock adapters in testing scenarios.
 
 use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterInfo, ModelAdapter},
     task::{ImageTaskInput, TaskType},
+};
+use crate::domain::adapters::{
+    DocumentOrientationAdapter, FormulaRecognitionAdapter, LayoutDetectionAdapter,
+    SealTextDetectionAdapter, TableCellDetectionAdapter, TableClassificationAdapter,
+    TableStructureRecognitionAdapter, TextDetectionAdapter, TextLineOrientationAdapter,
+    TextRecognitionAdapter, UVDocRectifierAdapter,
 };
 use crate::domain::tasks::{
     DocumentOrientationOutput, DocumentRectificationOutput, FormulaRecognitionOutput,
@@ -212,77 +216,206 @@ pub trait DynModelAdapter: Send + Sync + Debug {
     fn execute_dyn(&self, input: DynTaskInput) -> Result<DynTaskOutput, OCRError>;
 }
 
-/// Wrapper to make ModelAdapter trait object-safe.
+/// Task-specific adapter enum that replaces fake dynamic dispatch with honest enum-based dispatch.
+///
+/// This enum directly holds concrete adapter types, avoiding the downcast pattern.
+/// Each variant corresponds to a specific task type and its adapter.
+///
+/// # Benefits
+///
+/// - **No runtime downcast**: Direct pattern matching on enum variants
+/// - **Compile-time exhaustiveness**: Adding a new task type requires handling it explicitly
+/// - **Type safety**: Each variant holds the exact adapter type for that task
+///
+/// # Custom Adapters
+///
+/// For testing or extension, use the `Custom` variant which wraps a `Box<dyn DynModelAdapter>`.
+/// This preserves backward compatibility with mock adapters in tests.
 #[derive(Debug)]
-pub struct AdapterWrapper<A: ModelAdapter> {
-    adapter: A,
+pub enum TaskAdapter {
+    /// Text detection adapter
+    TextDetection(TextDetectionAdapter),
+    /// Text recognition adapter
+    TextRecognition(TextRecognitionAdapter),
+    /// Document orientation classification adapter
+    DocumentOrientation(DocumentOrientationAdapter),
+    /// Text line orientation classification adapter
+    TextLineOrientation(TextLineOrientationAdapter),
+    /// Document rectification adapter (UVDoc)
+    DocumentRectification(UVDocRectifierAdapter),
+    /// Layout detection adapter
+    LayoutDetection(LayoutDetectionAdapter),
+    /// Table cell detection adapter
+    TableCellDetection(TableCellDetectionAdapter),
+    /// Formula recognition adapter (boxed due to large size)
+    FormulaRecognition(Box<FormulaRecognitionAdapter>),
+    /// Seal text detection adapter
+    SealTextDetection(SealTextDetectionAdapter),
+    /// Table classification adapter
+    TableClassification(TableClassificationAdapter),
+    /// Table structure recognition adapter
+    TableStructureRecognition(TableStructureRecognitionAdapter),
+    /// Custom adapter for testing or extension (wraps DynModelAdapter)
+    Custom(Box<dyn DynModelAdapter>),
 }
 
-impl<A: ModelAdapter> AdapterWrapper<A> {
-    pub fn new(adapter: A) -> Self {
-        Self { adapter }
+impl TaskAdapter {
+    /// Creates a TaskAdapter from a TextDetectionAdapter.
+    pub fn text_detection(adapter: TextDetectionAdapter) -> Self {
+        Self::TextDetection(adapter)
+    }
+
+    /// Creates a TaskAdapter from a TextRecognitionAdapter.
+    pub fn text_recognition(adapter: TextRecognitionAdapter) -> Self {
+        Self::TextRecognition(adapter)
+    }
+
+    /// Creates a TaskAdapter from a DocumentOrientationAdapter.
+    pub fn document_orientation(adapter: DocumentOrientationAdapter) -> Self {
+        Self::DocumentOrientation(adapter)
+    }
+
+    /// Creates a TaskAdapter from a TextLineOrientationAdapter.
+    pub fn text_line_orientation(adapter: TextLineOrientationAdapter) -> Self {
+        Self::TextLineOrientation(adapter)
+    }
+
+    /// Creates a TaskAdapter from a UVDocRectifierAdapter.
+    pub fn document_rectification(adapter: UVDocRectifierAdapter) -> Self {
+        Self::DocumentRectification(adapter)
+    }
+
+    /// Creates a TaskAdapter from a LayoutDetectionAdapter.
+    pub fn layout_detection(adapter: LayoutDetectionAdapter) -> Self {
+        Self::LayoutDetection(adapter)
+    }
+
+    /// Creates a TaskAdapter from a TableCellDetectionAdapter.
+    pub fn table_cell_detection(adapter: TableCellDetectionAdapter) -> Self {
+        Self::TableCellDetection(adapter)
+    }
+
+    /// Creates a TaskAdapter from a FormulaRecognitionAdapter.
+    pub fn formula_recognition(adapter: FormulaRecognitionAdapter) -> Self {
+        Self::FormulaRecognition(Box::new(adapter))
+    }
+
+    /// Creates a TaskAdapter from a SealTextDetectionAdapter.
+    pub fn seal_text_detection(adapter: SealTextDetectionAdapter) -> Self {
+        Self::SealTextDetection(adapter)
+    }
+
+    /// Creates a TaskAdapter from a TableClassificationAdapter.
+    pub fn table_classification(adapter: TableClassificationAdapter) -> Self {
+        Self::TableClassification(adapter)
+    }
+
+    /// Creates a TaskAdapter from a TableStructureRecognitionAdapter.
+    pub fn table_structure_recognition(adapter: TableStructureRecognitionAdapter) -> Self {
+        Self::TableStructureRecognition(adapter)
+    }
+
+    /// Creates a TaskAdapter from a custom DynModelAdapter.
+    pub fn custom<A: DynModelAdapter + 'static>(adapter: A) -> Self {
+        Self::Custom(Box::new(adapter))
     }
 }
 
-/// Macro to execute adapters that use ImageTaskInput
-macro_rules! execute_image_adapter {
-    ($self:expr, $input:expr, $task_type:expr, $adapter_type:ty, $output_variant:ident) => {{
-        let image_input = match $input {
+/// Helper macro to extract ImageTaskInput from DynTaskInput
+macro_rules! extract_image_input {
+    ($input:expr, $task_name:expr) => {
+        match $input {
             DynTaskInput::Image(img) => img,
             _ => {
                 return Err(OCRError::InvalidInput {
                     message: format!(
-                        concat!(
-                            "Expected ImageTaskInput for ",
-                            stringify!($task_type),
-                            ", got {:?}"
-                        ),
+                        "Expected ImageTaskInput for {}, got {:?}",
+                        $task_name,
                         std::mem::discriminant(&$input)
                     ),
                 });
             }
-        };
-
-        let adapter = (&$self.adapter as &dyn std::any::Any)
-            .downcast_ref::<$adapter_type>()
-            .ok_or_else(|| OCRError::ConfigError {
-                message: concat!("Failed to downcast to ", stringify!($adapter_type)).to_string(),
-            })?;
-
-        let output = adapter.execute(image_input, None)?;
-        Ok(DynTaskOutput::$output_variant(output))
-    }};
+        }
+    };
 }
 
-impl<A: ModelAdapter + 'static> DynModelAdapter for AdapterWrapper<A> {
+impl DynModelAdapter for TaskAdapter {
     fn info(&self) -> AdapterInfo {
-        self.adapter.info()
+        match self {
+            Self::TextDetection(a) => a.info(),
+            Self::TextRecognition(a) => a.info(),
+            Self::DocumentOrientation(a) => a.info(),
+            Self::TextLineOrientation(a) => a.info(),
+            Self::DocumentRectification(a) => a.info(),
+            Self::LayoutDetection(a) => a.info(),
+            Self::TableCellDetection(a) => a.info(),
+            Self::FormulaRecognition(a) => a.info(),
+            Self::SealTextDetection(a) => a.info(),
+            Self::TableClassification(a) => a.info(),
+            Self::TableStructureRecognition(a) => a.info(),
+            Self::Custom(a) => a.info(),
+        }
     }
 
     fn task_type(&self) -> TaskType {
-        self.adapter.info().task_type
+        match self {
+            Self::TextDetection(_) => TaskType::TextDetection,
+            Self::TextRecognition(_) => TaskType::TextRecognition,
+            Self::DocumentOrientation(_) => TaskType::DocumentOrientation,
+            Self::TextLineOrientation(_) => TaskType::TextLineOrientation,
+            Self::DocumentRectification(_) => TaskType::DocumentRectification,
+            Self::LayoutDetection(_) => TaskType::LayoutDetection,
+            Self::TableCellDetection(_) => TaskType::TableCellDetection,
+            Self::FormulaRecognition(_) => TaskType::FormulaRecognition,
+            Self::SealTextDetection(_) => TaskType::SealTextDetection,
+            Self::TableClassification(_) => TaskType::TableClassification,
+            Self::TableStructureRecognition(_) => TaskType::TableStructureRecognition,
+            Self::Custom(a) => a.task_type(),
+        }
     }
 
     fn supports_batching(&self) -> bool {
-        self.adapter.supports_batching()
+        match self {
+            Self::TextDetection(a) => a.supports_batching(),
+            Self::TextRecognition(a) => a.supports_batching(),
+            Self::DocumentOrientation(a) => a.supports_batching(),
+            Self::TextLineOrientation(a) => a.supports_batching(),
+            Self::DocumentRectification(a) => a.supports_batching(),
+            Self::LayoutDetection(a) => a.supports_batching(),
+            Self::TableCellDetection(a) => a.supports_batching(),
+            Self::FormulaRecognition(a) => a.supports_batching(),
+            Self::SealTextDetection(a) => a.supports_batching(),
+            Self::TableClassification(a) => a.supports_batching(),
+            Self::TableStructureRecognition(a) => a.supports_batching(),
+            Self::Custom(a) => a.supports_batching(),
+        }
     }
 
     fn recommended_batch_size(&self) -> usize {
-        self.adapter.recommended_batch_size()
+        match self {
+            Self::TextDetection(a) => a.recommended_batch_size(),
+            Self::TextRecognition(a) => a.recommended_batch_size(),
+            Self::DocumentOrientation(a) => a.recommended_batch_size(),
+            Self::TextLineOrientation(a) => a.recommended_batch_size(),
+            Self::DocumentRectification(a) => a.recommended_batch_size(),
+            Self::LayoutDetection(a) => a.recommended_batch_size(),
+            Self::TableCellDetection(a) => a.recommended_batch_size(),
+            Self::FormulaRecognition(a) => a.recommended_batch_size(),
+            Self::SealTextDetection(a) => a.recommended_batch_size(),
+            Self::TableClassification(a) => a.recommended_batch_size(),
+            Self::TableStructureRecognition(a) => a.recommended_batch_size(),
+            Self::Custom(a) => a.recommended_batch_size(),
+        }
     }
 
     fn execute_dyn(&self, input: DynTaskInput) -> Result<DynTaskOutput, OCRError> {
-        use crate::domain::adapters::*;
-
-        match self.adapter.info().task_type {
-            TaskType::TextDetection => execute_image_adapter!(
-                self,
-                input,
-                TextDetection,
-                TextDetectionAdapter,
-                TextDetection
-            ),
-            TaskType::TextRecognition => {
+        match self {
+            Self::TextDetection(adapter) => {
+                let image_input = extract_image_input!(input, "TextDetection");
+                let output = adapter.execute(image_input, None)?;
+                Ok(DynTaskOutput::TextDetection(output))
+            }
+            Self::TextRecognition(adapter) => {
                 let rec_input = match input {
                     DynTaskInput::TextRecognition(rec) => rec,
                     _ => {
@@ -294,77 +427,55 @@ impl<A: ModelAdapter + 'static> DynModelAdapter for AdapterWrapper<A> {
                         });
                     }
                 };
-                let adapter = (&self.adapter as &dyn std::any::Any)
-                    .downcast_ref::<TextRecognitionAdapter>()
-                    .ok_or_else(|| OCRError::ConfigError {
-                        message: "Failed to downcast to TextRecognitionAdapter".to_string(),
-                    })?;
                 let output = adapter.execute(rec_input, None)?;
                 Ok(DynTaskOutput::TextRecognition(output))
             }
-            TaskType::DocumentOrientation => execute_image_adapter!(
-                self,
-                input,
-                DocumentOrientation,
-                DocumentOrientationAdapter,
-                DocumentOrientation
-            ),
-            TaskType::TextLineOrientation => execute_image_adapter!(
-                self,
-                input,
-                TextLineOrientation,
-                TextLineOrientationAdapter,
-                TextLineOrientation
-            ),
-            TaskType::DocumentRectification => execute_image_adapter!(
-                self,
-                input,
-                DocumentRectification,
-                UVDocRectifierAdapter,
-                DocumentRectification
-            ),
-            TaskType::LayoutDetection => execute_image_adapter!(
-                self,
-                input,
-                LayoutDetection,
-                LayoutDetectionAdapter,
-                LayoutDetection
-            ),
-            TaskType::TableCellDetection => execute_image_adapter!(
-                self,
-                input,
-                TableCellDetection,
-                TableCellDetectionAdapter,
-                TableCellDetection
-            ),
-            TaskType::FormulaRecognition => execute_image_adapter!(
-                self,
-                input,
-                FormulaRecognition,
-                FormulaRecognitionAdapter,
-                FormulaRecognition
-            ),
-            TaskType::SealTextDetection => execute_image_adapter!(
-                self,
-                input,
-                SealTextDetection,
-                SealTextDetectionAdapter,
-                SealTextDetection
-            ),
-            TaskType::TableClassification => execute_image_adapter!(
-                self,
-                input,
-                TableClassification,
-                TableClassificationAdapter,
-                TableClassification
-            ),
-            TaskType::TableStructureRecognition => execute_image_adapter!(
-                self,
-                input,
-                TableStructureRecognition,
-                TableStructureRecognitionAdapter,
-                TableStructureRecognition
-            ),
+            Self::DocumentOrientation(adapter) => {
+                let image_input = extract_image_input!(input, "DocumentOrientation");
+                let output = adapter.execute(image_input, None)?;
+                Ok(DynTaskOutput::DocumentOrientation(output))
+            }
+            Self::TextLineOrientation(adapter) => {
+                let image_input = extract_image_input!(input, "TextLineOrientation");
+                let output = adapter.execute(image_input, None)?;
+                Ok(DynTaskOutput::TextLineOrientation(output))
+            }
+            Self::DocumentRectification(adapter) => {
+                let image_input = extract_image_input!(input, "DocumentRectification");
+                let output = adapter.execute(image_input, None)?;
+                Ok(DynTaskOutput::DocumentRectification(output))
+            }
+            Self::LayoutDetection(adapter) => {
+                let image_input = extract_image_input!(input, "LayoutDetection");
+                let output = adapter.execute(image_input, None)?;
+                Ok(DynTaskOutput::LayoutDetection(output))
+            }
+            Self::TableCellDetection(adapter) => {
+                let image_input = extract_image_input!(input, "TableCellDetection");
+                let output = adapter.execute(image_input, None)?;
+                Ok(DynTaskOutput::TableCellDetection(output))
+            }
+            Self::FormulaRecognition(adapter) => {
+                let image_input = extract_image_input!(input, "FormulaRecognition");
+                let output = adapter.execute(image_input, None)?;
+                Ok(DynTaskOutput::FormulaRecognition(output))
+            }
+            Self::SealTextDetection(adapter) => {
+                let image_input = extract_image_input!(input, "SealTextDetection");
+                let output = adapter.execute(image_input, None)?;
+                Ok(DynTaskOutput::SealTextDetection(output))
+            }
+            Self::TableClassification(adapter) => {
+                let image_input = extract_image_input!(input, "TableClassification");
+                let output = adapter.execute(image_input, None)?;
+                Ok(DynTaskOutput::TableClassification(output))
+            }
+            Self::TableStructureRecognition(adapter) => {
+                let image_input = extract_image_input!(input, "TableStructureRecognition");
+                let output = adapter.execute(image_input, None)?;
+                Ok(DynTaskOutput::TableStructureRecognition(output))
+            }
+            Self::Custom(adapter) => adapter.execute_dyn(input),
         }
     }
 }

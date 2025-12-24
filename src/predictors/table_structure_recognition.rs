@@ -110,8 +110,9 @@ impl TableStructureRecognitionPredictorBuilder {
         }
 
         let adapter = Box::new(adapter_builder.build(model_path.as_ref())?);
+        let task = TableStructureRecognitionTask::new(config.clone());
         Ok(TableStructureRecognitionPredictor {
-            core: TaskPredictorCore::new(adapter, config),
+            core: TaskPredictorCore::new(adapter, task, config),
         })
     }
 }

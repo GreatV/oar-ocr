@@ -45,10 +45,11 @@ use clap::Parser;
 use oar_ocr::domain::tasks::{TextDetectionConfig, TextRecognitionConfig};
 use oar_ocr::oarocr::OAROCRBuilder;
 use oar_ocr::processors::LimitType;
+use oar_ocr::utils::load_image;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
-use utils::{load_rgb_image, parse_device_config};
+use utils::parse_device_config;
 
 #[cfg(feature = "visualization")]
 use oar_ocr::utils::visualization::{VisualizationConfig, create_ocr_visualization};
@@ -151,7 +152,7 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing for logging
-    oar_ocr::utils::init_tracing();
+    utils::init_tracing();
 
     // Parse CLI arguments
     let args = Args::parse();
@@ -249,7 +250,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load images
     let mut images = Vec::new();
     for path in &existing_images {
-        match load_rgb_image(path) {
+        match load_image(path) {
             Ok(img) => {
                 info!(
                     "Loaded image {} ({}x{})",

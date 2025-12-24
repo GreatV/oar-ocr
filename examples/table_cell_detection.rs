@@ -15,7 +15,7 @@
 //! * `-m, --model-path` - Path to the table cell detection model (.onnx)
 //! * `-o, --output-dir` - Output directory for visualizations
 //! * `--model-type` - Explicit model type override (e.g., 'rt-detr-l_wired_table_cell_det')
-//! * `--score-threshold` - Score threshold for detections (default: 0.5)
+//! * `--score-threshold` - Score threshold for detections (default: 0.3)
 //! * `--max-cells` - Maximum number of cells per image (default: 300)
 //! * `--device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
 //! * `<IMAGES>...` - Input document images containing tables
@@ -24,10 +24,11 @@ mod utils;
 
 use clap::Parser;
 use oar_ocr::predictors::{TableCellDetectionPredictor, TableCellModelVariant};
+use oar_ocr::utils::load_image;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
-use utils::{load_rgb_image, parse_device_config};
+use utils::parse_device_config;
 
 #[cfg(feature = "visualization")]
 use image::RgbImage;
@@ -62,7 +63,7 @@ struct Args {
     model_type: Option<String>,
 
     /// Score threshold for detections
-    #[arg(long, default_value_t = 0.5)]
+    #[arg(long, default_value_t = 0.3)]
     score_threshold: f32,
 
     /// Maximum number of cells per image
@@ -75,12 +76,8 @@ struct Args {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .init();
+    // Initialize logging
+    utils::init_tracing();
 
     let args = Args::parse();
     info!("Loading table cell detection model: {:?}", args.model_path);
@@ -136,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             image_path
         );
 
-        let img = match load_rgb_image(image_path) {
+        let img = match load_image(image_path) {
             Ok(img) => img,
             Err(e) => {
                 error!("Failed to load image {:?}: {}", image_path, e);

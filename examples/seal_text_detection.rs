@@ -17,7 +17,6 @@
 //! * `--score-threshold` - Pixel-level threshold for text detection
 //! * `--box-threshold` - Box-level threshold for filtering detections
 //! * `--unclip-ratio` - Expansion ratio for detected regions
-//! * `--session-pool-size` - Session pool size for concurrent inference
 //! * `--device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
 //! * `<IMAGES>...` - Paths to input images to process
 
@@ -25,6 +24,7 @@ mod utils;
 
 use clap::Parser;
 use oar_ocr::predictors::SealTextDetectionPredictor;
+use oar_ocr::utils::load_image;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info};
@@ -68,10 +68,6 @@ struct Args {
     #[arg(long, default_value = "0.5")]
     unclip_ratio: f32,
 
-    /// Session pool size for concurrent inference
-    #[arg(long, default_value = "1")]
-    session_pool_size: usize,
-
     /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
     #[arg(long, default_value = "cpu")]
     device: String,
@@ -79,7 +75,7 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
-    oar_ocr::utils::init_tracing();
+    utils::init_tracing();
 
     let args = Args::parse();
 
@@ -101,8 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Log device configuration
     info!("Using device: {}", args.device);
-    let mut ort_config = parse_device_config(&args.device)?.unwrap_or_default();
-    ort_config.session_pool_size = Some(args.session_pool_size);
+    let ort_config = parse_device_config(&args.device)?.unwrap_or_default();
 
     if ort_config.execution_providers.is_some() {
         info!("CUDA execution provider configured successfully");
@@ -139,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Processing: {:?}", image_path);
 
         // Load input image
-        let image = match oar_ocr::utils::load_image(image_path) {
+        let image = match load_image(image_path) {
             Ok(img) => img,
             Err(e) => {
                 error!("Failed to load image {:?}: {}", image_path, e);

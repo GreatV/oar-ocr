@@ -80,14 +80,13 @@ impl DocumentOrientationOutput {
 /// Document orientation classification task implementation.
 #[derive(Debug, Default)]
 pub struct DocumentOrientationTask {
-    #[allow(dead_code)]
-    config: DocumentOrientationConfig,
+    _config: DocumentOrientationConfig,
 }
 
 impl DocumentOrientationTask {
     /// Creates a new document orientation task.
     pub fn new(config: DocumentOrientationConfig) -> Self {
-        Self { config }
+        Self { _config: config }
     }
 }
 

@@ -27,6 +27,9 @@ directml = ["ort/directml"]
 coreml = ["ort/coreml"]
 webgpu = ["ort/webgpu"]
 openvino = ["ort/openvino"]
+# Auto-download ONNX Runtime binaries during build (enabled by default).
+# Set ORT_LIB_LOCATION to use a custom installation (skips download).
+# Use --no-default-features for offline/enterprise environments.
 download-binaries = ["ort/download-binaries"]
 
 [dependencies]

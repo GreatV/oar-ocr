@@ -30,10 +30,11 @@ mod utils;
 
 use clap::Parser;
 use oar_ocr::predictors::DocumentRectificationPredictor;
+use oar_ocr::utils::load_image;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info};
-use utils::{load_rgb_image, parse_device_config};
+use utils::parse_device_config;
 
 /// Command-line arguments for the document rectification example
 #[derive(Parser)]
@@ -56,10 +57,6 @@ struct Args {
     #[arg(long, default_value = "cpu")]
     device: String,
 
-    /// Session pool size for concurrent inference (default: 1)
-    #[arg(long, default_value = "1")]
-    session_pool_size: usize,
-
     /// Model input height (default: dynamic input size)
     #[arg(long, default_value = "0")]
     input_height: usize,
@@ -79,7 +76,7 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing for logging
-    oar_ocr::utils::init_tracing();
+    utils::init_tracing();
 
     // Parse command-line arguments
     let args = Args::parse();
@@ -114,8 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Log device configuration
     info!("Using device: {}", args.device);
-    let mut ort_config = parse_device_config(&args.device)?.unwrap_or_default();
-    ort_config.session_pool_size = Some(args.session_pool_size);
+    let ort_config = parse_device_config(&args.device)?.unwrap_or_default();
 
     if ort_config.execution_providers.is_some() {
         info!("CUDA execution provider configured successfully");
@@ -125,7 +121,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.verbose {
         info!("Building rectification predictor...");
         info!("  Model: {}", args.model_path.display());
-        info!("  Session pool size: {}", args.session_pool_size);
         if args.input_height > 0 && args.input_width > 0 {
             info!(
                 "  Input shape override: [3, {}, {}]",
@@ -147,7 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut images = Vec::new();
 
     for image_path in &existing_images {
-        match load_rgb_image(image_path) {
+        match load_image(image_path) {
             Ok(rgb_img) => {
                 if args.verbose {
                     info!(

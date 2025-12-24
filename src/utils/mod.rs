@@ -40,20 +40,3 @@ pub use topk::{Topk, TopkResult};
 pub use validation::{
     ScoreValidator, validate_length_match, validate_max_value, validate_positive_dimensions,
 };
-
-/// Initializes the tracing subscriber for logging.
-///
-/// This function sets up the tracing subscriber with environment filter and formatting layer.
-/// It's typically called at the start of an application to enable logging.
-pub fn init_tracing() {
-    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-    // Default to info-level logging if RUST_LOG is not configured by the caller.
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-}

@@ -106,7 +106,7 @@ impl TableCellDetectionPredictorBuilder {
     pub fn new() -> Self {
         Self {
             state: PredictorBuilderState::new(TableCellDetectionConfig {
-                score_threshold: 0.5,
+                score_threshold: 0.3,
                 max_cells: 300,
             }),
             model_variant: None,
@@ -151,8 +151,9 @@ impl TableCellDetectionPredictorBuilder {
         }
 
         let adapter = Box::new(adapter_builder.build(path_ref)?);
+        let task = TableCellDetectionTask::new(config.clone());
         Ok(TableCellDetectionPredictor {
-            core: TaskPredictorCore::new(adapter, config),
+            core: TaskPredictorCore::new(adapter, task, config),
         })
     }
 }

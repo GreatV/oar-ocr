@@ -68,8 +68,9 @@ impl DocumentRectificationPredictorBuilder {
         }
 
         let adapter = Box::new(adapter_builder.build(model_path.as_ref())?);
+        let task = DocumentRectificationTask::new(config.clone());
         Ok(DocumentRectificationPredictor {
-            core: TaskPredictorCore::new(adapter, config),
+            core: TaskPredictorCore::new(adapter, task, config),
         })
     }
 }

@@ -59,14 +59,13 @@ impl TextLineOrientationOutput {
 /// Text line orientation classification task implementation.
 #[derive(Debug, Default)]
 pub struct TextLineOrientationTask {
-    #[allow(dead_code)]
-    config: TextLineOrientationConfig,
+    _config: TextLineOrientationConfig,
 }
 
 impl TextLineOrientationTask {
     /// Creates a new text line orientation task.
     pub fn new(config: TextLineOrientationConfig) -> Self {
-        Self { config }
+        Self { _config: config }
     }
 }
 

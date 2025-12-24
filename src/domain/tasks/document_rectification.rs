@@ -75,14 +75,13 @@ impl DocumentRectificationOutput {
 /// Document rectification task implementation.
 #[derive(Debug, Default)]
 pub struct DocumentRectificationTask {
-    #[allow(dead_code)]
-    config: DocumentRectificationConfig,
+    _config: DocumentRectificationConfig,
 }
 
 impl DocumentRectificationTask {
     /// Creates a new document rectification task.
     pub fn new(config: DocumentRectificationConfig) -> Self {
-        Self { config }
+        Self { _config: config }
     }
 }
 

@@ -93,15 +93,14 @@ impl TableClassificationPredictorBuilder {
             .input_shape(input_shape);
 
         if let Some(ort_cfg) = ort_config {
-            let pool_size = ort_cfg.session_pool_size.unwrap_or(1);
-            adapter_builder = adapter_builder.session_pool_size(pool_size);
             adapter_builder = adapter_builder.with_ort_config(ort_cfg);
         }
 
         let adapter = Box::new(adapter_builder.build(model_path.as_ref())?);
+        let task = TableClassificationTask::new(config.clone());
 
         Ok(TableClassificationPredictor {
-            core: TaskPredictorCore::new(adapter, config),
+            core: TaskPredictorCore::new(adapter, task, config),
         })
     }
 }

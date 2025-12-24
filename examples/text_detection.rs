@@ -26,10 +26,11 @@ mod utils;
 
 use clap::Parser;
 use oar_ocr::predictors::TextDetectionPredictor;
+use oar_ocr::utils::load_image;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
-use utils::{load_rgb_image, parse_device_config};
+use utils::parse_device_config;
 
 #[cfg(feature = "visualization")]
 use image::RgbImage;
@@ -70,15 +71,11 @@ struct Args {
     /// Maximum candidates to consider (default: 1000)
     #[arg(long, default_value = "1000")]
     max_candidates: usize,
-
-    /// Session pool size for concurrent inference (default: 1)
-    #[arg(long, default_value = "1")]
-    session_pool_size: usize,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing for logging
-    oar_ocr::utils::init_tracing();
+    utils::init_tracing();
 
     // Parse command-line arguments
     let args = Args::parse();
@@ -113,8 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Parse device configuration
     info!("Using device: {}", args.device);
-    let mut ort_config = parse_device_config(&args.device)?.unwrap_or_default();
-    ort_config.session_pool_size = Some(args.session_pool_size);
+    let ort_config = parse_device_config(&args.device)?.unwrap_or_default();
 
     if ort_config.execution_providers.is_some() {
         info!("CUDA execution provider configured successfully");
@@ -136,7 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut images = Vec::new();
 
     for image_path in &existing_images {
-        match load_rgb_image(image_path) {
+        match load_image(image_path) {
             Ok(rgb_img) => {
                 images.push(rgb_img);
             }

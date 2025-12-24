@@ -67,7 +67,6 @@ impl TableStructureRecognitionOutput {
 /// Table structure recognition task implementation.
 #[derive(Debug, Default)]
 pub struct TableStructureRecognitionTask {
-    #[allow(dead_code)]
     config: TableStructureRecognitionConfig,
 }
 

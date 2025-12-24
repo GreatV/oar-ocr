@@ -56,7 +56,7 @@ impl TextRecognitionPredictorBuilder {
     pub fn new() -> Self {
         Self {
             state: PredictorBuilderState::new(TextRecognitionConfig {
-                score_threshold: 0.5,
+                score_threshold: 0.0,
                 max_text_length: 100,
             }),
             dict_path: None,
@@ -102,8 +102,9 @@ impl TextRecognitionPredictorBuilder {
         }
 
         let adapter = Box::new(adapter_builder.build(model_path.as_ref())?);
+        let task = TextRecognitionTask::new(config.clone());
         Ok(TextRecognitionPredictor {
-            core: TaskPredictorCore::new(adapter, config),
+            core: TaskPredictorCore::new(adapter, task, config),
         })
     }
 }

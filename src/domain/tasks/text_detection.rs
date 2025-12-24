@@ -94,14 +94,13 @@ impl TextDetectionOutput {
 /// Text detection task implementation.
 #[derive(Debug, Default)]
 pub struct TextDetectionTask {
-    #[allow(dead_code)]
-    config: TextDetectionConfig,
+    _config: TextDetectionConfig,
 }
 
 impl TextDetectionTask {
     /// Creates a new text detection task.
     pub fn new(config: TextDetectionConfig) -> Self {
-        Self { config }
+        Self { _config: config }
     }
 }
 

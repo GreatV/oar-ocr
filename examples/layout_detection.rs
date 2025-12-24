@@ -55,10 +55,11 @@ mod utils;
 
 use clap::Parser;
 use oar_ocr::predictors::LayoutDetectionPredictor;
+use oar_ocr::utils::load_image;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
-use utils::{load_rgb_image, parse_device_config};
+use utils::parse_device_config;
 
 #[cfg(feature = "visualization")]
 use std::fs;
@@ -105,12 +106,7 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .init();
+    utils::init_tracing();
 
     // Parse command line arguments
     let args = Args::parse();
@@ -216,7 +212,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
         // Load input image
-        let img = match load_rgb_image(image_path) {
+        let img = match load_image(image_path) {
             Ok(img) => img,
             Err(e) => {
                 error!("Failed to load image {:?}: {}", image_path, e);

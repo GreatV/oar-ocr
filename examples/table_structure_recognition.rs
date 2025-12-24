@@ -57,10 +57,11 @@ mod utils;
 
 use clap::Parser;
 use oar_ocr::predictors::TableStructureRecognitionPredictor;
+use oar_ocr::utils::load_image;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info};
-use utils::{load_rgb_image, parse_device_config};
+use utils::parse_device_config;
 
 /// Command-line arguments for the table structure recognition example
 #[derive(Parser)]
@@ -91,10 +92,6 @@ struct Args {
     #[arg(long, default_value = "500")]
     max_length: usize,
 
-    /// Session pool size for concurrent inference (default: 1)
-    #[arg(long, default_value = "1")]
-    session_pool_size: usize,
-
     /// Model input height (default: 512 for wired tables)
     #[arg(long, default_value = "512")]
     input_height: u32,
@@ -114,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // Initialize tracing for logging
-    oar_ocr::utils::init_tracing();
+    utils::init_tracing();
 
     info!("Table Structure Recognition Example");
 
@@ -151,8 +148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Log device configuration
     info!("Using device: {}", args.device);
-    let mut ort_config = parse_device_config(&args.device)?.unwrap_or_default();
-    ort_config.session_pool_size = Some(args.session_pool_size);
+    let ort_config = parse_device_config(&args.device)?.unwrap_or_default();
 
     if ort_config.execution_providers.is_some() {
         info!("CUDA execution provider configured successfully");
@@ -170,7 +166,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build the predictor
     info!("Building table structure recognition predictor...");
     info!("  Model: {}", args.model_path.display());
-    info!("  Session pool size: {}", args.session_pool_size);
 
     let start_build = Instant::now();
     let predictor = TableStructureRecognitionPredictor::builder()
@@ -190,7 +185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut images = Vec::new();
 
     for image_path in &existing_images {
-        match load_rgb_image(image_path) {
+        match load_image(image_path) {
             Ok(rgb_img) => {
                 info!(
                     "Loaded image: {} ({}x{})",
