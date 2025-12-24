@@ -33,31 +33,31 @@ Choose between mobile and server variants based on your needs:
 
 ### Language-Specific Models
 
-| Version  | Language | Model File | Size |
-|----------|----------|------------|------|
-| PP-OCRv3 | Arabic | [`arabic_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/arabic_pp-ocrv3_mobile_rec.onnx) | 8.6MB |
-| PP-OCRv5 | Arabic | [`arabic_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/arabic_pp-ocrv5_mobile_rec.onnx) | 7.7MB |
-| PP-OCRv3 | Chinese Traditional | [`chinese_cht_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/chinese_cht_pp-ocrv3_mobile_rec.onnx) | 10.6MB |
-| PP-OCRv3 | Cyrillic | [`cyrillic_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/cyrillic_pp-ocrv3_mobile_rec.onnx) | 8.6MB |
-| PP-OCRv5 | Cyrillic | [`cyrillic_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/cyrillic_pp-ocrv5_mobile_rec.onnx) | 7.7MB |
-| PP-OCRv3 | Devanagari | [`devanagari_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/devanagari_pp-ocrv3_mobile_rec.onnx) | 8.6MB |
-| PP-OCRv5 | Devanagari | [`devanagari_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/devanagari_pp-ocrv5_mobile_rec.onnx) | 7.6MB |
-| PP-OCRv5 | Greek | [`el_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/el_pp-ocrv5_mobile_rec.onnx) | 7.5MB |
-| PP-OCRv3 | English | [`en_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/en_pp-ocrv3_mobile_rec.onnx) | 8.6MB |
-| PP-OCRv4 | English | [`en_pp-ocrv4_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/en_pp-ocrv4_mobile_rec.onnx) | 7.4MB |
-| PP-OCRv5 | English | [`en_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/en_pp-ocrv5_mobile_rec.onnx) | 7.5MB |
-| PP-OCRv5 | Eastern Slavic | [`eslav_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/eslav_pp-ocrv5_mobile_rec.onnx) | 7.5MB |
-| PP-OCRv3 | Japanese | [`japan_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/japan_pp-ocrv3_mobile_rec.onnx) | 9.6MB |
-| PP-OCRv3 | Georgian | [`ka_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ka_pp-ocrv3_mobile_rec.onnx) | 8.6MB |
-| PP-OCRv3 | Korean | [`korean_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/korean_pp-ocrv3_mobile_rec.onnx) | 9.5MB |
-| PP-OCRv5 | Korean | [`korean_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/korean_pp-ocrv5_mobile_rec.onnx) | 12.8MB |
-| PP-OCRv3 | Latin | [`latin_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/latin_pp-ocrv3_mobile_rec.onnx) | 8.6MB |
-| PP-OCRv5 | Latin | [`latin_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/latin_pp-ocrv5_mobile_rec.onnx) | 7.7MB |
-| PP-OCRv3 | Tamil | [`ta_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ta_pp-ocrv3_mobile_rec.onnx) | 8.6MB |
-| PP-OCRv5 | Tamil | [`ta_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ta_pp-ocrv5_mobile_rec.onnx) | 7.5MB |
-| PP-OCRv3 | Telugu | [`te_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/te_pp-ocrv3_mobile_rec.onnx) | 8.6MB |
-| PP-OCRv5 | Telugu | [`te_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/te_pp-ocrv5_mobile_rec.onnx) | 7.6MB |
-| PP-OCRv5 | Thai | [`th_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/th_pp-ocrv5_mobile_rec.onnx) | 7.6MB |
+| Version  | Language | Model File | Size | Description |
+|----------|----------|------------|------|-------------|
+| PP-OCRv3 | Arabic | [`arabic_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/arabic_pp-ocrv3_mobile_rec.onnx) | 8.6MB | Arabic text recognition |
+| PP-OCRv5 | Arabic | [`arabic_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/arabic_pp-ocrv5_mobile_rec.onnx) | 7.7MB | Arabic text recognition |
+| PP-OCRv3 | Chinese Traditional | [`chinese_cht_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/chinese_cht_pp-ocrv3_mobile_rec.onnx) | 10.6MB | Traditional Chinese text recognition |
+| PP-OCRv3 | Cyrillic | [`cyrillic_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/cyrillic_pp-ocrv3_mobile_rec.onnx) | 8.6MB | Cyrillic script recognition |
+| PP-OCRv5 | Cyrillic | [`cyrillic_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/cyrillic_pp-ocrv5_mobile_rec.onnx) | 7.7MB | Cyrillic script recognition |
+| PP-OCRv3 | Devanagari | [`devanagari_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/devanagari_pp-ocrv3_mobile_rec.onnx) | 8.6MB | Devanagari script recognition |
+| PP-OCRv5 | Devanagari | [`devanagari_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/devanagari_pp-ocrv5_mobile_rec.onnx) | 7.6MB | Devanagari script recognition |
+| PP-OCRv5 | Greek | [`el_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/el_pp-ocrv5_mobile_rec.onnx) | 7.5MB | Greek text recognition |
+| PP-OCRv3 | English | [`en_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/en_pp-ocrv3_mobile_rec.onnx) | 8.6MB | English text recognition |
+| PP-OCRv4 | English | [`en_pp-ocrv4_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/en_pp-ocrv4_mobile_rec.onnx) | 7.4MB | English text recognition |
+| PP-OCRv5 | English | [`en_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/en_pp-ocrv5_mobile_rec.onnx) | 7.5MB | English text recognition |
+| PP-OCRv5 | Eastern Slavic | [`eslav_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/eslav_pp-ocrv5_mobile_rec.onnx) | 7.5MB | Eastern Slavic languages |
+| PP-OCRv3 | Japanese | [`japan_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/japan_pp-ocrv3_mobile_rec.onnx) | 9.6MB | Japanese text recognition |
+| PP-OCRv3 | Georgian | [`ka_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ka_pp-ocrv3_mobile_rec.onnx) | 8.6MB | Georgian text recognition |
+| PP-OCRv3 | Korean | [`korean_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/korean_pp-ocrv3_mobile_rec.onnx) | 9.5MB | Korean text recognition |
+| PP-OCRv5 | Korean | [`korean_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/korean_pp-ocrv5_mobile_rec.onnx) | 12.8MB | Korean text recognition |
+| PP-OCRv3 | Latin | [`latin_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/latin_pp-ocrv3_mobile_rec.onnx) | 8.6MB | Latin script recognition |
+| PP-OCRv5 | Latin | [`latin_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/latin_pp-ocrv5_mobile_rec.onnx) | 7.7MB | Latin script recognition |
+| PP-OCRv3 | Tamil | [`ta_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ta_pp-ocrv3_mobile_rec.onnx) | 8.6MB | Tamil text recognition |
+| PP-OCRv5 | Tamil | [`ta_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ta_pp-ocrv5_mobile_rec.onnx) | 7.5MB | Tamil text recognition |
+| PP-OCRv3 | Telugu | [`te_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/te_pp-ocrv3_mobile_rec.onnx) | 8.6MB | Telugu text recognition |
+| PP-OCRv5 | Telugu | [`te_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/te_pp-ocrv5_mobile_rec.onnx) | 7.6MB | Telugu text recognition |
+| PP-OCRv5 | Thai | [`th_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/th_pp-ocrv5_mobile_rec.onnx) | 7.6MB | Thai text recognition |
 
 ## Character Dictionaries
 

@@ -69,21 +69,21 @@ use oar_ocr::oarocr::OAROCRBuilder;
 
 // Basic OCR pipeline
 let ocr = OAROCRBuilder::new(
-    "models/det.onnx",
-    "models/rec.onnx",
-    "models/dict.txt"
+    "pp-ocrv5_mobile_det.onnx",
+    "pp-ocrv5_mobile_rec.onnx",
+    "ppocrv5_dict.txt",
 )
 .build()?;
 
 // OCR with optional preprocessing
 let ocr = OAROCRBuilder::new(
-    "models/det.onnx",
-    "models/rec.onnx",
-    "models/dict.txt"
+    "pp-ocrv5_mobile_det.onnx",
+    "pp-ocrv5_mobile_rec.onnx",
+    "ppocrv5_dict.txt",
 )
-.with_document_image_orientation_classification("models/doc_orient.onnx")
-.with_text_line_orientation_classification("models/line_orient.onnx")
-.with_document_image_rectification("models/rectify.onnx")
+.with_document_image_orientation_classification("pp-lcnet_x1_0_doc_ori.onnx")
+.with_text_line_orientation_classification("pp-lcnet_x1_0_textline_ori.onnx")
+.with_document_image_rectification("uvdoc.onnx")
 .image_batch_size(4)
 .region_batch_size(64)
 .build()?;
@@ -110,22 +110,22 @@ The `OARStructureBuilder` enables document structure analysis with layout detect
 use oar_ocr::oarocr::OARStructureBuilder;
 
 // Basic layout detection
-let structure = OARStructureBuilder::new("models/layout.onnx")
+let structure = OARStructureBuilder::new("picodet-l_layout_17cls.onnx")
     .build()?;
 
 // Full document structure analysis
-let structure = OARStructureBuilder::new("models/layout.onnx")
-    .with_table_classification("models/table_cls.onnx")
-    .with_table_cell_detection("models/table_cell.onnx", "wired")
-    .with_table_structure_recognition("models/table_struct.onnx", "wired")
-    .table_structure_dict_path("models/table_structure_dict_ch.txt")
-    .with_formula_recognition("models/formula.onnx", "models/tokenizer.json", "pp_formulanet")
+let structure = OARStructureBuilder::new("picodet-l_layout_17cls.onnx")
+    .with_table_classification("pp-lcnet_x1_0_table_cls.onnx")
+    .with_table_cell_detection("rt-detr-l_wired_table_cell_det.onnx", "wired")
+    .with_table_structure_recognition("slanext_wired.onnx", "wired")
+    .table_structure_dict_path("table_structure_dict_ch.txt")
+    .with_formula_recognition("pp-formulanet-l.onnx", "unimernet_tokenizer.json", "pp_formulanet")
     .build()?;
 
 // Structure analysis with integrated OCR
-let structure = OARStructureBuilder::new("models/layout.onnx")
-    .with_table_classification("models/table_cls.onnx")
-    .with_ocr("models/det.onnx", "models/rec.onnx", "models/dict.txt")
+let structure = OARStructureBuilder::new("picodet-l_layout_17cls.onnx")
+    .with_table_classification("pp-lcnet_x1_0_table_cls.onnx")
+    .with_ocr("pp-ocrv5_mobile_det.onnx", "pp-ocrv5_mobile_rec.onnx", "ppocrv5_dict.txt")
     .build()?;
 ```
 
@@ -171,9 +171,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build OCR pipeline with CUDA
     let ocr = OAROCRBuilder::new(
-        "detection_model.onnx",
-        "recognition_model.onnx",
-        "char_dict.txt",
+        "pp-ocrv5_mobile_det.onnx",
+        "pp-ocrv5_mobile_rec.onnx",
+        "ppocrv5_dict.txt",
     )
     .ort_session(ort_config)
     .build()?;
