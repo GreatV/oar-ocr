@@ -92,8 +92,9 @@ impl LayoutDetectionPredictorBuilder {
         }
 
         let adapter = Box::new(adapter_builder.build(model_path.as_ref())?);
+        let task = LayoutDetectionTask::new(config.clone());
         Ok(LayoutDetectionPredictor {
-            core: TaskPredictorCore::new(adapter, config),
+            core: TaskPredictorCore::new(adapter, task, config),
         })
     }
 

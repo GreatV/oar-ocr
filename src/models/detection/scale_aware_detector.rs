@@ -130,8 +130,7 @@ pub struct ScaleAwareDetectorModel {
     resizer: DetResizeForTest,
     normalizer: NormalizeImage,
     inference_mode: ScaleAwareDetectorInferenceMode,
-    #[allow(dead_code)]
-    preprocess_config: ScaleAwareDetectorPreprocessConfig,
+    _preprocess_config: ScaleAwareDetectorPreprocessConfig,
 }
 
 impl ScaleAwareDetectorModel {
@@ -173,7 +172,7 @@ impl ScaleAwareDetectorModel {
             resizer,
             normalizer,
             inference_mode,
-            preprocess_config,
+            _preprocess_config: preprocess_config,
         })
     }
 

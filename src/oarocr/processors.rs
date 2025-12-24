@@ -186,13 +186,12 @@ impl EdgeProcessor for ImageRotationProcessor {
 /// All processors in the chain must have the same input and output types,
 /// allowing the output of each processor to be fed as input to the next.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ChainProcessor<T> {
     processors: Vec<Box<dyn EdgeProcessor<Input = T, Output = T>>>,
 }
 
 impl<T> ChainProcessor<T> {
-    #[allow(dead_code)]
+    /// Creates a new chain processor with the given processors.
     pub fn new(processors: Vec<Box<dyn EdgeProcessor<Input = T, Output = T>>>) -> Self {
         Self { processors }
     }

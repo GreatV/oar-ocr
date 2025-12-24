@@ -90,8 +90,9 @@ impl TextLineOrientationPredictorBuilder {
         }
 
         let adapter = Box::new(adapter_builder.build(model_path.as_ref())?);
+        let task = TextLineOrientationTask::new(config.clone());
         Ok(TextLineOrientationPredictor {
-            core: TaskPredictorCore::new(adapter, config),
+            core: TaskPredictorCore::new(adapter, task, config),
         })
     }
 }

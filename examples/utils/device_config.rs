@@ -73,7 +73,6 @@ pub fn parse_device_config(
                     gpu_mem_limit: None,
                     arena_extend_strategy: None,
                     cudnn_conv_algo_search: None,
-                    do_copy_in_default_stream: None,
                     cudnn_conv_use_max_workspace: None,
                 },
                 OrtExecutionProvider::CPU, // Fallback to CPU

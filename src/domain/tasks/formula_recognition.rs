@@ -63,14 +63,13 @@ impl FormulaRecognitionOutput {
 /// Formula recognition task implementation.
 #[derive(Debug, Default)]
 pub struct FormulaRecognitionTask {
-    #[allow(dead_code)]
-    config: FormulaRecognitionConfig,
+    _config: FormulaRecognitionConfig,
 }
 
 impl FormulaRecognitionTask {
     /// Creates a new formula recognition task.
     pub fn new(config: FormulaRecognitionConfig) -> Self {
-        Self { config }
+        Self { _config: config }
     }
 }
 

@@ -129,7 +129,6 @@ impl BBoxCrop {
     ///
     /// A vector of Results, each containing either a cropped image or an OCRError.
     /// The order corresponds to the input bounding boxes.
-    #[allow(dead_code)]
     pub fn batch_crop_rotated_bounding_boxes(
         image: &RgbImage,
         bboxes: &[BoundingBox],

@@ -100,16 +100,14 @@ impl TextDetectionPredictorBuilder {
         let mut adapter_builder = TextDetectionAdapterBuilder::new().with_config(config.clone());
 
         if let Some(ort_cfg) = ort_config {
-            // Extract session_pool_size from ort_config if present, default to 1
-            let pool_size = ort_cfg.session_pool_size.unwrap_or(1);
-            adapter_builder = adapter_builder.session_pool_size(pool_size);
             adapter_builder = adapter_builder.with_ort_config(ort_cfg);
         }
 
         let adapter = Box::new(adapter_builder.build(model_path.as_ref())?);
+        let task = TextDetectionTask::new(config.clone());
 
         Ok(TextDetectionPredictor {
-            core: TaskPredictorCore::new(adapter, config),
+            core: TaskPredictorCore::new(adapter, task, config),
         })
     }
 }

@@ -48,11 +48,11 @@ impl DBPostProcessConfig {
 pub struct DBPostProcess {
     /// Default threshold for binarizing the prediction map (default: 0.3).
     pub thresh: f32,
-    /// Default threshold for filtering bounding boxes based on their score (default: 0.7).
+    /// Default threshold for filtering bounding boxes based on their score (default: 0.6).
     pub box_thresh: f32,
     /// Maximum number of candidate bounding boxes to consider (default: 1000).
     pub max_candidates: usize,
-    /// Default ratio for unclipping (expanding) bounding boxes (default: 2.0).
+    /// Default ratio for unclipping (expanding) bounding boxes (default: 1.5).
     pub unclip_ratio: f32,
     /// Minimum side length for detected bounding boxes.
     pub min_size: f32,
@@ -77,9 +77,9 @@ impl DBPostProcess {
     ) -> Self {
         Self {
             thresh: thresh.unwrap_or(0.3),
-            box_thresh: box_thresh.unwrap_or(0.7),
+            box_thresh: box_thresh.unwrap_or(0.6),
             max_candidates: max_candidates.unwrap_or(1000),
-            unclip_ratio: unclip_ratio.unwrap_or(2.0),
+            unclip_ratio: unclip_ratio.unwrap_or(1.5),
             min_size: 3.0,
             score_mode: score_mode.unwrap_or(ScoreMode::Fast),
             box_type: box_type.unwrap_or(BoxType::Quad),

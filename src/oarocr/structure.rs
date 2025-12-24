@@ -6,7 +6,7 @@
 
 use crate::core::OCRError;
 use crate::core::config::OrtSessionConfig;
-use crate::core::registry::{AdapterWrapper, DynModelAdapter};
+use crate::core::registry::{DynModelAdapter, TaskAdapter};
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::domain::adapters::{
     LayoutDetectionAdapterBuilder, PPFormulaNetAdapterBuilder, SLANetWiredAdapterBuilder,
@@ -629,7 +629,7 @@ impl OARStructureBuilder {
                 }
 
                 let adapter = builder.build(model_path)?;
-                Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+                Some(Arc::new(TaskAdapter::document_orientation(adapter)) as Arc<dyn DynModelAdapter>)
             } else {
                 None
             };
@@ -646,7 +646,7 @@ impl OARStructureBuilder {
             }
 
             let adapter = builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::document_rectification(adapter)) as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
@@ -691,7 +691,7 @@ impl OARStructureBuilder {
             layout_builder = layout_builder.with_ort_config(ort_config.clone());
         }
 
-        let layout_detection_adapter = Arc::new(AdapterWrapper::new(
+        let layout_detection_adapter = Arc::new(TaskAdapter::layout_detection(
             layout_builder.build(&self.layout_detection_model)?,
         )) as Arc<dyn DynModelAdapter>;
 
@@ -726,7 +726,7 @@ impl OARStructureBuilder {
             }
 
             let adapter = region_builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::layout_detection(adapter)) as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
@@ -745,7 +745,7 @@ impl OARStructureBuilder {
                 }
 
                 let adapter = builder.build(model_path)?;
-                Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+                Some(Arc::new(TaskAdapter::table_classification(adapter)) as Arc<dyn DynModelAdapter>)
             } else {
                 None
             };
@@ -762,7 +762,7 @@ impl OARStructureBuilder {
             }
 
             let adapter = builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::document_orientation(adapter)) as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
@@ -800,7 +800,7 @@ impl OARStructureBuilder {
             }
 
             let adapter = builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::table_cell_detection(adapter)) as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
@@ -836,7 +836,7 @@ impl OARStructureBuilder {
                     }
 
                     let adapter = builder.build(model_path)?;
-                    Arc::new(AdapterWrapper::new(adapter))
+                    Arc::new(TaskAdapter::table_structure_recognition(adapter))
                 }
                 "wireless" => {
                     let mut builder =
@@ -851,7 +851,7 @@ impl OARStructureBuilder {
                     }
 
                     let adapter = builder.build(model_path)?;
-                    Arc::new(AdapterWrapper::new(adapter))
+                    Arc::new(TaskAdapter::table_structure_recognition(adapter))
                 }
                 _ => {
                     return Err(OCRError::config_error_detailed(
@@ -891,7 +891,7 @@ impl OARStructureBuilder {
             }
 
             let adapter = builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::table_structure_recognition(adapter)) as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
@@ -917,7 +917,7 @@ impl OARStructureBuilder {
             }
 
             let adapter = builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::table_structure_recognition(adapter)) as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
@@ -938,7 +938,7 @@ impl OARStructureBuilder {
             }
 
             let adapter = builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::table_cell_detection(adapter)) as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
@@ -960,7 +960,7 @@ impl OARStructureBuilder {
             }
 
             let adapter = builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::table_cell_detection(adapter)) as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
@@ -1000,7 +1000,7 @@ impl OARStructureBuilder {
                     }
 
                     let adapter = builder.build(model_path)?;
-                    Arc::new(AdapterWrapper::new(adapter))
+                    Arc::new(TaskAdapter::formula_recognition(adapter))
                 }
                 "unimernet" => {
                     let mut builder = UniMERNetFormulaAdapterBuilder::new();
@@ -1018,7 +1018,7 @@ impl OARStructureBuilder {
                     }
 
                     let adapter = builder.build(model_path)?;
-                    Arc::new(AdapterWrapper::new(adapter))
+                    Arc::new(TaskAdapter::formula_recognition(adapter))
                 }
                 _ => {
                     return Err(OCRError::config_error_detailed(
@@ -1048,7 +1048,7 @@ impl OARStructureBuilder {
                 }
 
                 let adapter = builder.build(model_path)?;
-                Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+                Some(Arc::new(TaskAdapter::seal_text_detection(adapter)) as Arc<dyn DynModelAdapter>)
             } else {
                 None
             };
@@ -1079,7 +1079,7 @@ impl OARStructureBuilder {
             }
 
             let adapter = builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::text_detection(adapter)) as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
@@ -1096,7 +1096,7 @@ impl OARStructureBuilder {
                 }
 
                 let adapter = builder.build(model_path)?;
-                Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+                Some(Arc::new(TaskAdapter::text_line_orientation(adapter)) as Arc<dyn DynModelAdapter>)
             } else {
                 None
             };
@@ -1123,7 +1123,7 @@ impl OARStructureBuilder {
             }
 
             let adapter = builder.build(model_path)?;
-            Some(Arc::new(AdapterWrapper::new(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(Arc::new(TaskAdapter::text_recognition(adapter)) as Arc<dyn DynModelAdapter>)
         } else {
             None
         };
@@ -2306,16 +2306,18 @@ impl OARStructure {
 
         {
             let analyzer = crate::oarocr::table_analyzer::TableAnalyzer::new(
-                self.pipeline.table_classification_adapter.clone(),
-                self.pipeline.table_orientation_adapter.clone(),
-                self.pipeline.table_structure_recognition_adapter.clone(),
-                self.pipeline.wired_table_structure_adapter.clone(),
-                self.pipeline.wireless_table_structure_adapter.clone(),
-                self.pipeline.table_cell_detection_adapter.clone(),
-                self.pipeline.wired_table_cell_adapter.clone(),
-                self.pipeline.wireless_table_cell_adapter.clone(),
-                self.pipeline.use_e2e_wired_table_rec,
-                self.pipeline.use_e2e_wireless_table_rec,
+                crate::oarocr::table_analyzer::TableAnalyzerConfig {
+                    table_classification_adapter: self.pipeline.table_classification_adapter.clone(),
+                    table_orientation_adapter: self.pipeline.table_orientation_adapter.clone(),
+                    table_structure_recognition_adapter: self.pipeline.table_structure_recognition_adapter.clone(),
+                    wired_table_structure_adapter: self.pipeline.wired_table_structure_adapter.clone(),
+                    wireless_table_structure_adapter: self.pipeline.wireless_table_structure_adapter.clone(),
+                    table_cell_detection_adapter: self.pipeline.table_cell_detection_adapter.clone(),
+                    wired_table_cell_adapter: self.pipeline.wired_table_cell_adapter.clone(),
+                    wireless_table_cell_adapter: self.pipeline.wireless_table_cell_adapter.clone(),
+                    use_e2e_wired_table_rec: self.pipeline.use_e2e_wired_table_rec,
+                    use_e2e_wireless_table_rec: self.pipeline.use_e2e_wireless_table_rec,
+                },
             );
             tables.extend(analyzer.analyze_tables(
                 &current_image,

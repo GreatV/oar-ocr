@@ -473,52 +473,41 @@ fn bicubic_interpolate(image: &RgbImage, x: f32, y: f32) -> Rgb<u8> {
     ])
 }
 
-/// Performs bilinear interpolation to get a pixel value at non-integer coordinates.
-///
-/// This function calculates the pixel value at a fractional (x, y) coordinate
-/// by interpolating between the four nearest pixels.
-/// Uses border replication for edge handling (same as OpenCV's BORDER_REPLICATE).
-///
-/// # Arguments
-///
-/// * `image` - The source image
-/// * `x` - X coordinate (can be fractional)
-/// * `y` - Y coordinate (can be fractional)
-///
-/// # Returns
-///
-/// The interpolated pixel value.
-#[allow(dead_code)]
-fn bilinear_interpolate(image: &RgbImage, x: f32, y: f32) -> Rgb<u8> {
-    let x_int = x.floor() as i32;
-    let y_int = y.floor() as i32;
-
-    // Calculate the fractional parts
-    let dx = x - x_int as f32;
-    let dy = y - y_int as f32;
-
-    // Get the four neighboring pixels with border replication
-    let p11 = get_pixel_replicate(image, x_int, y_int);
-    let p12 = get_pixel_replicate(image, x_int, y_int + 1);
-    let p21 = get_pixel_replicate(image, x_int + 1, y_int);
-    let p22 = get_pixel_replicate(image, x_int + 1, y_int + 1);
-
-    // Interpolate each color channel
-    let mut result = [0u8; 3];
-    for (i, result_channel) in result.iter_mut().enumerate() {
-        let val = (1.0 - dx) * (1.0 - dy) * p11.0[i] as f32
-            + dx * (1.0 - dy) * p21.0[i] as f32
-            + (1.0 - dx) * dy * p12.0[i] as f32
-            + dx * dy * p22.0[i] as f32;
-        *result_channel = val.round().clamp(0.0, 255.0) as u8;
-    }
-
-    Rgb(result)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Performs bilinear interpolation to get a pixel value at non-integer coordinates.
+    ///
+    /// This function calculates the pixel value at a fractional (x, y) coordinate
+    /// by interpolating between the four nearest pixels.
+    /// Uses border replication for edge handling (same as OpenCV's BORDER_REPLICATE).
+    fn bilinear_interpolate(image: &RgbImage, x: f32, y: f32) -> Rgb<u8> {
+        let x_int = x.floor() as i32;
+        let y_int = y.floor() as i32;
+
+        // Calculate the fractional parts
+        let dx = x - x_int as f32;
+        let dy = y - y_int as f32;
+
+        // Get the four neighboring pixels with border replication
+        let p11 = get_pixel_replicate(image, x_int, y_int);
+        let p12 = get_pixel_replicate(image, x_int, y_int + 1);
+        let p21 = get_pixel_replicate(image, x_int + 1, y_int);
+        let p22 = get_pixel_replicate(image, x_int + 1, y_int + 1);
+
+        // Interpolate each color channel
+        let mut result = [0u8; 3];
+        for (i, result_channel) in result.iter_mut().enumerate() {
+            let val = (1.0 - dx) * (1.0 - dy) * p11.0[i] as f32
+                + dx * (1.0 - dy) * p21.0[i] as f32
+                + (1.0 - dx) * dy * p12.0[i] as f32
+                + dx * dy * p22.0[i] as f32;
+            *result_channel = val.round().clamp(0.0, 255.0) as u8;
+        }
+
+        Rgb(result)
+    }
 
     #[test]
     fn test_distance() {

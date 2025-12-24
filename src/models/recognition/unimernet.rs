@@ -73,8 +73,7 @@ pub struct UniMERNetModelOutput {
 pub struct UniMERNetModel {
     inference: OrtInfer,
     preprocessor: UniMERNetPreprocessor,
-    #[allow(dead_code)]
-    preprocess_config: UniMERNetPreprocessConfig,
+    _preprocess_config: UniMERNetPreprocessConfig,
 }
 
 impl UniMERNetModel {
@@ -97,7 +96,7 @@ impl UniMERNetModel {
         Ok(Self {
             inference,
             preprocessor,
-            preprocess_config,
+            _preprocess_config: preprocess_config,
         })
     }
 

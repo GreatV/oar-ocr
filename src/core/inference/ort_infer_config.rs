@@ -48,6 +48,14 @@ impl OrtInfer {
         if let Some(log_verbosity) = cfg.log_verbosity_level {
             builder = builder.with_log_verbosity(log_verbosity)?;
         }
+        if let Some(enable) = cfg.enable_mem_pattern {
+            builder = builder.with_memory_pattern(enable)?;
+        }
+        if let Some(entries) = &cfg.session_config_entries {
+            for (key, value) in entries {
+                builder = builder.with_config_entry(key, value)?;
+            }
+        }
         if let Some(eps) = &cfg.execution_providers {
             let providers = Self::build_execution_providers(eps)?;
             if !providers.is_empty() {
@@ -72,16 +80,41 @@ impl OrtInfer {
                 #[cfg(feature = "cuda")]
                 EP::CUDA {
                     device_id,
-                    gpu_mem_limit: _,
-                    arena_extend_strategy: _,
-                    cudnn_conv_algo_search: _,
-                    do_copy_in_default_stream: _,
-                    cudnn_conv_use_max_workspace: _,
+                    gpu_mem_limit,
+                    arena_extend_strategy,
+                    cudnn_conv_algo_search,
+                    cudnn_conv_use_max_workspace,
                 } => {
+                    use ort::execution_providers::{
+                        ArenaExtendStrategy, cuda::CuDNNConvAlgorithmSearch,
+                    };
                     let mut cuda_provider =
                         ort::execution_providers::CUDAExecutionProvider::default();
                     if let Some(id) = device_id {
                         cuda_provider = cuda_provider.with_device_id(*id);
+                    }
+                    if let Some(limit) = gpu_mem_limit {
+                        cuda_provider = cuda_provider.with_memory_limit(*limit);
+                    }
+                    if let Some(strategy) = arena_extend_strategy {
+                        let strategy = match strategy.to_lowercase().as_str() {
+                            "sameasrequested" | "same_as_requested" => {
+                                ArenaExtendStrategy::SameAsRequested
+                            }
+                            _ => ArenaExtendStrategy::NextPowerOfTwo,
+                        };
+                        cuda_provider = cuda_provider.with_arena_extend_strategy(strategy);
+                    }
+                    if let Some(search) = cudnn_conv_algo_search {
+                        let search = match search.to_lowercase().as_str() {
+                            "heuristic" => CuDNNConvAlgorithmSearch::Heuristic,
+                            "default" => CuDNNConvAlgorithmSearch::Default,
+                            _ => CuDNNConvAlgorithmSearch::Exhaustive,
+                        };
+                        cuda_provider = cuda_provider.with_conv_algorithm_search(search);
+                    }
+                    if let Some(enable) = cudnn_conv_use_max_workspace {
+                        cuda_provider = cuda_provider.with_conv_max_workspace(*enable);
                     }
                     providers.push(cuda_provider.build());
                 }
@@ -89,8 +122,7 @@ impl OrtInfer {
                 EP::TensorRT {
                     device_id,
                     max_workspace_size,
-                    max_batch_size: _,
-                    min_subgraph_size: _,
+                    min_subgraph_size,
                     fp16_enable,
                 } => {
                     let mut trt_provider =
@@ -100,6 +132,9 @@ impl OrtInfer {
                     }
                     if let Some(workspace) = max_workspace_size {
                         trt_provider = trt_provider.with_max_workspace_size(*workspace);
+                    }
+                    if let Some(size) = min_subgraph_size {
+                        trt_provider = trt_provider.with_min_subgraph_size(*size);
                     }
                     if let Some(fp16) = fp16_enable {
                         trt_provider = trt_provider.with_fp16(*fp16);
@@ -117,11 +152,16 @@ impl OrtInfer {
                 }
                 #[cfg(feature = "coreml")]
                 EP::CoreML {
-                    ane_only: _,
+                    ane_only,
                     subgraphs,
                 } => {
+                    use ort::execution_providers::coreml::CoreMLComputeUnits;
                     let mut coreml_provider =
                         ort::execution_providers::CoreMLExecutionProvider::default();
+                    if let Some(true) = ane_only {
+                        coreml_provider = coreml_provider
+                            .with_compute_units(CoreMLComputeUnits::CPUAndNeuralEngine);
+                    }
                     if let Some(sub) = subgraphs {
                         coreml_provider = coreml_provider.with_subgraphs(*sub);
                     }
@@ -135,12 +175,15 @@ impl OrtInfer {
                 #[cfg(feature = "openvino")]
                 EP::OpenVINO {
                     device_type,
-                    num_threads: _,
+                    num_threads,
                 } => {
                     let mut openvino_provider =
                         ort::execution_providers::OpenVINOExecutionProvider::default();
                     if let Some(device) = device_type {
                         openvino_provider = openvino_provider.with_device_type(device.clone());
+                    }
+                    if let Some(threads) = num_threads {
+                        openvino_provider = openvino_provider.with_num_threads(*threads);
                     }
                     providers.push(openvino_provider.build());
                 }

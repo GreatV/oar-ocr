@@ -315,8 +315,7 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct EnabledFeature {
-        #[allow(dead_code)]
-        enabled: bool,
+        _enabled: bool,
     }
 
     // Test builder struct

@@ -22,6 +22,21 @@ use crate::processors::BoundingBox;
 use crate::utils::BBoxCrop;
 use std::sync::Arc;
 
+/// Configuration for creating a TableAnalyzer.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TableAnalyzerConfig {
+    pub table_classification_adapter: Option<Arc<dyn DynModelAdapter>>,
+    pub table_orientation_adapter: Option<Arc<dyn DynModelAdapter>>,
+    pub table_structure_recognition_adapter: Option<Arc<dyn DynModelAdapter>>,
+    pub wired_table_structure_adapter: Option<Arc<dyn DynModelAdapter>>,
+    pub wireless_table_structure_adapter: Option<Arc<dyn DynModelAdapter>>,
+    pub table_cell_detection_adapter: Option<Arc<dyn DynModelAdapter>>,
+    pub wired_table_cell_adapter: Option<Arc<dyn DynModelAdapter>>,
+    pub wireless_table_cell_adapter: Option<Arc<dyn DynModelAdapter>>,
+    pub use_e2e_wired_table_rec: bool,
+    pub use_e2e_wireless_table_rec: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct TableAnalyzer {
     table_classification_adapter: Option<Arc<dyn DynModelAdapter>>,
@@ -40,30 +55,18 @@ pub(crate) struct TableAnalyzer {
 }
 
 impl TableAnalyzer {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        table_classification_adapter: Option<Arc<dyn DynModelAdapter>>,
-        table_orientation_adapter: Option<Arc<dyn DynModelAdapter>>,
-        table_structure_recognition_adapter: Option<Arc<dyn DynModelAdapter>>,
-        wired_table_structure_adapter: Option<Arc<dyn DynModelAdapter>>,
-        wireless_table_structure_adapter: Option<Arc<dyn DynModelAdapter>>,
-        table_cell_detection_adapter: Option<Arc<dyn DynModelAdapter>>,
-        wired_table_cell_adapter: Option<Arc<dyn DynModelAdapter>>,
-        wireless_table_cell_adapter: Option<Arc<dyn DynModelAdapter>>,
-        use_e2e_wired_table_rec: bool,
-        use_e2e_wireless_table_rec: bool,
-    ) -> Self {
+    pub(crate) fn new(config: TableAnalyzerConfig) -> Self {
         Self {
-            table_classification_adapter,
-            table_orientation_adapter,
-            table_structure_recognition_adapter,
-            wired_table_structure_adapter,
-            wireless_table_structure_adapter,
-            table_cell_detection_adapter,
-            wired_table_cell_adapter,
-            wireless_table_cell_adapter,
-            use_e2e_wired_table_rec,
-            use_e2e_wireless_table_rec,
+            table_classification_adapter: config.table_classification_adapter,
+            table_orientation_adapter: config.table_orientation_adapter,
+            table_structure_recognition_adapter: config.table_structure_recognition_adapter,
+            wired_table_structure_adapter: config.wired_table_structure_adapter,
+            wireless_table_structure_adapter: config.wireless_table_structure_adapter,
+            table_cell_detection_adapter: config.table_cell_detection_adapter,
+            wired_table_cell_adapter: config.wired_table_cell_adapter,
+            wireless_table_cell_adapter: config.wireless_table_cell_adapter,
+            use_e2e_wired_table_rec: config.use_e2e_wired_table_rec,
+            use_e2e_wireless_table_rec: config.use_e2e_wireless_table_rec,
         }
     }
 
@@ -516,18 +519,11 @@ mod tests {
 
     /// Creates a minimal TableAnalyzer with no adapters for testing stub behavior.
     fn create_stub_analyzer() -> TableAnalyzer {
-        TableAnalyzer::new(
-            None, // table_classification_adapter
-            None, // table_orientation_adapter
-            None, // table_structure_recognition_adapter
-            None, // wired_table_structure_adapter
-            None, // wireless_table_structure_adapter
-            None, // table_cell_detection_adapter
-            None, // wired_table_cell_adapter
-            None, // wireless_table_cell_adapter
-            true, // use_e2e_wired_table_rec
-            true, // use_e2e_wireless_table_rec
-        )
+        TableAnalyzer::new(TableAnalyzerConfig {
+            use_e2e_wired_table_rec: true,
+            use_e2e_wireless_table_rec: true,
+            ..Default::default()
+        })
     }
 
     /// Creates a test image with specified dimensions.

@@ -18,7 +18,7 @@ keywords = [
 categories = ["computer-vision", "science"]
 
 [features]
-default = ["download-binaries"]
+default = []
 visualization = ["dep:ab_glyph"]
 # ONNX Runtime execution provider features
 cuda = ["ort/cuda"]
@@ -27,6 +27,8 @@ directml = ["ort/directml"]
 coreml = ["ort/coreml"]
 webgpu = ["ort/webgpu"]
 openvino = ["ort/openvino"]
+# Enable automatic download of ONNX Runtime binaries during build.
+# Opt-in: disabled by default for offline/enterprise environments.
 download-binaries = ["ort/download-binaries"]
 
 [dependencies]

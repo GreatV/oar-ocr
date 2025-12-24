@@ -75,8 +75,9 @@ impl SealTextDetectionPredictorBuilder {
         }
 
         let adapter = Box::new(adapter_builder.build(model_path.as_ref())?);
+        let task = SealTextDetectionTask::with_config(config.clone());
         Ok(SealTextDetectionPredictor {
-            core: TaskPredictorCore::new(adapter, config),
+            core: TaskPredictorCore::new(adapter, task, config),
         })
     }
 }

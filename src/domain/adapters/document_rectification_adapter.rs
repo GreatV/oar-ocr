@@ -18,9 +18,8 @@ pub struct UVDocRectifierAdapter {
     model: UVDocModel,
     /// Adapter information
     info: AdapterInfo,
-    /// Task configuration
-    #[allow(dead_code)]
-    config: DocumentRectificationConfig,
+    /// Task configuration (stored for potential future use)
+    _config: DocumentRectificationConfig,
 }
 
 impl ModelAdapter for UVDocRectifierAdapter {
@@ -157,7 +156,7 @@ impl AdapterBuilder for UVDocRectifierAdapterBuilder {
         Ok(UVDocRectifierAdapter {
             model,
             info,
-            config: task_config,
+            _config: task_config,
         })
     }
 

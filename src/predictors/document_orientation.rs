@@ -91,8 +91,9 @@ impl DocumentOrientationPredictorBuilder {
         }
 
         let adapter = Box::new(adapter_builder.build(model_path.as_ref())?);
+        let task = DocumentOrientationTask::new(config.clone());
         Ok(DocumentOrientationPredictor {
-            core: TaskPredictorCore::new(adapter, config),
+            core: TaskPredictorCore::new(adapter, task, config),
         })
     }
 }

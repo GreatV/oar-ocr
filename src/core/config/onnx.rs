@@ -36,12 +36,10 @@ pub enum OrtExecutionProvider {
         device_id: Option<i32>,
         /// Memory limit in bytes (optional)
         gpu_mem_limit: Option<usize>,
-        /// Whether to use arena allocator (default: true)
+        /// Arena extend strategy: "NextPowerOfTwo" or "SameAsRequested"
         arena_extend_strategy: Option<String>,
-        /// CUDNN convolution algorithm search (default: "EXHAUSTIVE")
+        /// CUDNN convolution algorithm search: "Exhaustive", "Heuristic", or "Default"
         cudnn_conv_algo_search: Option<String>,
-        /// Whether to do copy in default stream (default: true)
-        do_copy_in_default_stream: Option<bool>,
         /// CUDNN convolution use max workspace (default: true)
         cudnn_conv_use_max_workspace: Option<bool>,
     },
@@ -63,9 +61,7 @@ pub enum OrtExecutionProvider {
         device_id: Option<i32>,
         /// Maximum workspace size in bytes
         max_workspace_size: Option<usize>,
-        /// Maximum batch size
-        max_batch_size: Option<usize>,
-        /// Minimum subgraph size
+        /// Minimum subgraph size for TensorRT acceleration
         min_subgraph_size: Option<usize>,
         /// FP16 enable flag
         fp16_enable: Option<bool>,
@@ -99,18 +95,12 @@ pub struct OrtSessionConfig {
     pub execution_providers: Option<Vec<OrtExecutionProvider>>,
     /// Enable memory pattern optimization
     pub enable_mem_pattern: Option<bool>,
-    /// Enable CPU memory arena
-    pub enable_cpu_mem_arena: Option<bool>,
-    /// Memory arena extend strategy
-    pub memory_arena_extend_strategy: Option<String>,
     /// Log severity level (0=Verbose, 1=Info, 2=Warning, 3=Error, 4=Fatal)
     pub log_severity_level: Option<i32>,
     /// Log verbosity level
     pub log_verbosity_level: Option<i32>,
     /// Session configuration entries (key-value pairs)
     pub session_config_entries: Option<std::collections::HashMap<String, String>>,
-    /// Size of the session pool for concurrent inference (default: 1)
-    pub session_pool_size: Option<usize>,
 }
 
 impl OrtSessionConfig {
@@ -218,20 +208,6 @@ impl OrtSessionConfig {
     /// Self for method chaining.
     pub fn with_memory_pattern(mut self, enable: bool) -> Self {
         self.enable_mem_pattern = Some(enable);
-        self
-    }
-
-    /// Enables or disables CPU memory arena.
-    ///
-    /// # Arguments
-    ///
-    /// * `enable` - Whether to enable CPU memory arena.
-    ///
-    /// # Returns
-    ///
-    /// Self for method chaining.
-    pub fn with_cpu_memory_arena(mut self, enable: bool) -> Self {
-        self.enable_cpu_mem_arena = Some(enable);
         self
     }
 

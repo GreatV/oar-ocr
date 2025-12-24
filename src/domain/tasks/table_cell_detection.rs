@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// Configuration for table cell detection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableCellDetectionConfig {
-    /// Score threshold for detections (default: 0.5).
+    /// Score threshold for detections (default: 0.3).
     pub score_threshold: f32,
     /// Maximum number of cells to keep per image (default: 300).
     pub max_cells: usize,

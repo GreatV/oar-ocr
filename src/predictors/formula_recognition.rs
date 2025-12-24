@@ -204,7 +204,11 @@ impl FormulaRecognitionPredictorBuilder {
         };
 
         Ok(FormulaRecognitionPredictor {
-            core: TaskPredictorCore::new(adapter, config),
+            core: TaskPredictorCore::new(
+                adapter,
+                FormulaRecognitionTask::new(config.clone()),
+                config,
+            ),
         })
     }
 }
