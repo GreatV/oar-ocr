@@ -588,36 +588,80 @@ impl OrtInfer {
         let (output_shape, output_data) = output;
 
         // Validate and convert output
-        // Some models output 2D [num_boxes, 6] format instead of 4D
+        // Some models output 2D [num_boxes, N] format instead of 4D
+        // N can be 6 (standard) or 8 (with reading order: col_index, row_index)
         if output_shape.len() == 2 {
-            // 2D output format: [num_boxes, 6] where each box is [class_id, score, x1, y1, x2, y2]
             let num_boxes = output_shape[0] as usize;
             let box_dim = output_shape[1] as usize;
 
-            if box_dim != 6 {
-                return Err(OCRError::InvalidInput {
-                    message: format!(
-                        "Expected box dimension 6, got {} with shape {:?}",
-                        box_dim, output_shape
-                    ),
-                });
-            }
+            // Handle both 6-dim and 8-dim box formats
+            let final_dim = if box_dim == 8 {
+                // 8-dim format: [class_id, score, x1, y1, x2, y2, col_index, row_index]
+                // Sort by reading order (col_index ascending, row_index descending) and strip to 6
+                let mut box_data: Vec<Vec<f32>> = output_data
+                    .chunks(box_dim)
+                    .map(|chunk| chunk.to_vec())
+                    .collect();
 
-            // Convert to 4D format [batch=1, num_boxes, 1, 6]
-            let array =
-                ndarray::Array::from_shape_vec((1, num_boxes, 1, box_dim), output_data.to_owned())
+                // Sort by (col_index, -row_index) for reading order
+                box_data.sort_by(|a, b| {
+                    let col_cmp = a[6].partial_cmp(&b[6]).unwrap_or(std::cmp::Ordering::Equal);
+                    if col_cmp == std::cmp::Ordering::Equal {
+                        // For same column, sort by row descending (use negative comparison)
+                        b[7].partial_cmp(&a[7]).unwrap_or(std::cmp::Ordering::Equal)
+                    } else {
+                        col_cmp
+                    }
+                });
+
+                // Take only first 6 dimensions
+                let stripped_data: Vec<f32> = box_data
+                    .into_iter()
+                    .flat_map(|row| row.into_iter().take(6))
+                    .collect();
+
+                let array = ndarray::Array::from_shape_vec((1, num_boxes, 1, 6), stripped_data)
                     .map_err(|e| {
                         OCRError::tensor_operation_error(
                             "output_reshape",
-                            &[1, num_boxes, 1, box_dim],
-                            &[output_data.len()],
+                            &[1, num_boxes, 1, 6],
+                            &[num_boxes * 6],
                             &format!(
-                                "Failed to reshape 2D output to 4D for model '{}'",
+                                "Failed to reshape 8-dim output to 4D for model '{}'",
                                 self.model_name
                             ),
                             e,
                         )
                     })?;
+                return Ok(array);
+            } else if box_dim == 6 {
+                6
+            } else {
+                return Err(OCRError::InvalidInput {
+                    message: format!(
+                        "Expected box dimension 6 or 8, got {} with shape {:?}",
+                        box_dim, output_shape
+                    ),
+                });
+            };
+
+            // Convert to 4D format [batch=1, num_boxes, 1, 6]
+            let array = ndarray::Array::from_shape_vec(
+                (1, num_boxes, 1, final_dim),
+                output_data.to_owned(),
+            )
+            .map_err(|e| {
+                OCRError::tensor_operation_error(
+                    "output_reshape",
+                    &[1, num_boxes, 1, final_dim],
+                    &[output_data.len()],
+                    &format!(
+                        "Failed to reshape 2D output to 4D for model '{}'",
+                        self.model_name
+                    ),
+                    e,
+                )
+            })?;
 
             Ok(array)
         } else if output_shape.len() == 4 {

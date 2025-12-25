@@ -225,8 +225,8 @@ impl LayoutPostProcess {
         let mut classes = Vec::new();
         let mut scores = Vec::new();
 
-        let _orig_width = img_shape.src_w;
-        let _orig_height = img_shape.src_h;
+        let orig_width = img_shape.src_w;
+        let orig_height = img_shape.src_h;
 
         // Extract predictions
         for box_idx in 0..num_boxes {
@@ -239,23 +239,31 @@ impl LayoutPostProcess {
             let y2 = predictions[[box_idx, 0, 5]];
 
             // Filter by threshold and valid class
-            if score >= self.score_threshold
-                && class_id >= 0
-                && (class_id as usize) < self.num_classes
+            if score < self.score_threshold
+                || class_id < 0
+                || (class_id as usize) >= self.num_classes
             {
-                // Note: PP-DocLayout already outputs scaled coordinates
-                // No need to scale to original image size
-                let bbox = BoundingBox::new(vec![
-                    Point::new(x1, y1),
-                    Point::new(x2, y1),
-                    Point::new(x2, y2),
-                    Point::new(x1, y2),
-                ]);
-
-                boxes.push(bbox);
-                classes.push(class_id as usize);
-                scores.push(score);
+                continue;
             }
+
+            // PP-DocLayout-style models may emit either absolute pixel coords or normalized coords.
+            // Use the same normalization heuristic as other detectors for robustness.
+            let (sx1, sy1, sx2, sy2) =
+                self.convert_bbox_coords(x1, y1, x2, y2, orig_width, orig_height);
+            if !Self::is_valid_box(sx1, sy1, sx2, sy2) {
+                continue;
+            }
+
+            let bbox = BoundingBox::new(vec![
+                Point::new(sx1, sy1),
+                Point::new(sx2, sy1),
+                Point::new(sx2, sy2),
+                Point::new(sx1, sy2),
+            ]);
+
+            boxes.push(bbox);
+            classes.push(class_id as usize);
+            scores.push(score);
         }
 
         // Apply NMS

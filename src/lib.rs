@@ -107,6 +107,7 @@ pub mod oarocr;
 pub mod predictors;
 pub mod processors;
 pub mod utils;
+pub mod vl;
 
 /// Prelude module for convenient imports.
 ///
@@ -140,4 +141,8 @@ pub mod prelude {
 
     // Predictors (high-level API)
     pub use crate::predictors::*;
+
+    // Optional Vision-Language models
+    #[cfg(feature = "paddleocr-vl")]
+    pub use crate::vl::{PaddleOcrVl, PaddleOcrVlDocParserConfig, PaddleOcrVlTask};
 }
