@@ -8,5 +8,15 @@
 #
 # The +crt-static feature tells rustc to link the C runtime statically,
 # which ensures all native dependencies use the same runtime library.
+
+# 64-bit Windows MSVC
 [target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# 32-bit Windows MSVC
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# ARM64 Windows MSVC
+[target.aarch64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
