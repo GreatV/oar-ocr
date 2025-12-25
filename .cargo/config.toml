@@ -1,0 +1,12 @@
+# Cargo configuration for oar-ocr
+
+# Windows MSVC target configuration
+# This fixes the LNK2038 error: Runtime library mismatch between dependencies
+# By default, some dependencies (esaxx-rs) may use static CRT (/MT) while others
+# (clipper2c-sys) use dynamic CRT (/MD). This configuration ensures consistent
+# runtime library linking by forcing all dependencies to use static CRT (/MT).
+#
+# The +crt-static feature tells rustc to link the C runtime statically,
+# which ensures all native dependencies use the same runtime library.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
