@@ -75,6 +75,14 @@ cargo run --example structure -- --help
 
 See `examples/` directory for complete CLI examples.
 
+## Building
+
+### Windows
+
+The repository includes a `.cargo/config.toml` file that configures the build for Windows MSVC targets. This ensures all native dependencies use consistent C runtime library linking, preventing LNK2038 errors.
+
+If you encounter linking issues, the configuration forces static CRT linking (`+crt-static`) for all dependencies.
+
 ## Acknowledgments
 
 This project builds upon the excellent work of several open-source projects:
