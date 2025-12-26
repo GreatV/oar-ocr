@@ -824,7 +824,9 @@ impl LayoutElementType {
             "image" | "figure" => LayoutElementType::Image,
             "table" => LayoutElementType::Table,
             "chart" | "flowchart" => LayoutElementType::Chart,
-            "formula" | "equation" => LayoutElementType::Formula,
+            "formula" | "equation" | "display_formula" | "inline_formula" => {
+                LayoutElementType::Formula
+            }
 
             // Captions
             "figure_title" => LayoutElementType::FigureTitle,
@@ -837,7 +839,7 @@ impl LayoutElementType {
             "header_image" => LayoutElementType::HeaderImage,
             "footer" => LayoutElementType::Footer,
             "footer_image" => LayoutElementType::FooterImage,
-            "footnote" => LayoutElementType::Footnote,
+            "footnote" | "vision_footnote" => LayoutElementType::Footnote,
 
             // Special Elements
             "seal" => LayoutElementType::Seal,
@@ -848,6 +850,7 @@ impl LayoutElementType {
             "formula_number" => LayoutElementType::FormulaNumber,
             "aside_text" => LayoutElementType::AsideText,
             "list" => LayoutElementType::List,
+            "vertical_text" => LayoutElementType::Text,
 
             // Region (PP-DocBlockLayout)
             "region" => LayoutElementType::Region,

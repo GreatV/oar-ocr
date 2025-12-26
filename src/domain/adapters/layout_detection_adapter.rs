@@ -362,6 +362,44 @@ impl LayoutModelConfig {
             input_size: Some((800, 800)),
         }
     }
+
+    /// Create configuration for PP-DocLayoutV2 model (25 classes).
+    pub fn pp_doclayoutv2() -> Self {
+        let mut class_labels = HashMap::new();
+        class_labels.insert(0, "abstract".to_string());
+        class_labels.insert(1, "algorithm".to_string());
+        class_labels.insert(2, "aside_text".to_string());
+        class_labels.insert(3, "chart".to_string());
+        class_labels.insert(4, "content".to_string());
+        class_labels.insert(5, "display_formula".to_string());
+        class_labels.insert(6, "doc_title".to_string());
+        class_labels.insert(7, "figure_title".to_string());
+        class_labels.insert(8, "footer".to_string());
+        class_labels.insert(9, "footer_image".to_string());
+        class_labels.insert(10, "footnote".to_string());
+        class_labels.insert(11, "formula_number".to_string());
+        class_labels.insert(12, "header".to_string());
+        class_labels.insert(13, "header_image".to_string());
+        class_labels.insert(14, "image".to_string());
+        class_labels.insert(15, "inline_formula".to_string());
+        class_labels.insert(16, "number".to_string());
+        class_labels.insert(17, "paragraph_title".to_string());
+        class_labels.insert(18, "reference".to_string());
+        class_labels.insert(19, "reference_content".to_string());
+        class_labels.insert(20, "seal".to_string());
+        class_labels.insert(21, "table".to_string());
+        class_labels.insert(22, "text".to_string());
+        class_labels.insert(23, "vertical_text".to_string());
+        class_labels.insert(24, "vision_footnote".to_string());
+
+        Self {
+            model_name: "pp-doclayoutv2".to_string(),
+            num_classes: 25,
+            class_labels,
+            model_type: "pp-doclayout".to_string(),
+            input_size: Some((800, 800)),
+        }
+    }
 }
 
 /// Enum for different layout detection model types.
@@ -519,7 +557,10 @@ impl LayoutDetectionAdapter {
             elements.push(img_elements);
         }
 
-        LayoutDetectionOutput { elements }
+        LayoutDetectionOutput {
+            elements,
+            is_reading_order_sorted: false, // Will be set by execute() based on model output
+        }
     }
 }
 
@@ -578,6 +619,7 @@ impl ModelAdapter for LayoutDetectionAdapter {
                 let (output, img_shapes) = model
                     .forward(input.images, &postprocess_config)
                     .map_err(|e| {
+                        tracing::error!("PPDocLayout forward error: {:?}", e);
                         OCRError::adapter_execution_error(
                             "LayoutDetectionAdapter",
                             format!("PPDocLayout forward (batch_size={})", batch_len),
@@ -588,8 +630,13 @@ impl ModelAdapter for LayoutDetectionAdapter {
             }
         };
 
+        // Check if predictions include reading order info (8-dim format from PP-DocLayoutV2)
+        // Shape is [batch, num_boxes, 1, N] where N=8 indicates reading order is included
+        let has_reading_order = predictions.shape().get(3).copied().unwrap_or(0) == 8;
+
         // Postprocess predictions
-        let output = self.postprocess(&predictions, img_shapes, effective_config);
+        let mut output = self.postprocess(&predictions, img_shapes, effective_config);
+        output.is_reading_order_sorted = has_reading_order;
 
         Ok(output)
     }
@@ -731,23 +778,11 @@ impl LayoutDetectionAdapterBuilder {
                 )
             }
             "pp-doclayout" => {
-                // PP-DocLayout models - different variants use different input sizes
-                let model = if model_config.model_name == "pp-doclayout-s" {
-                    // pp-doclayout-s uses 480x480
-                    PPDocLayoutModelBuilder::new()
-                        .image_shape(480, 480)
-                        .build(inference)?
-                } else if model_config.model_name == "pp-docblocklayout"
-                    || model_config.model_name == "pp-doclayout-m"
-                    || model_config.model_name == "pp-doclayout-l"
-                {
-                    // pp-docblocklayout, pp-doclayout-m, and pp-doclayout-l use 640x640
-                    PPDocLayoutModelBuilder::new()
-                        .image_shape(640, 640)
-                        .build(inference)?
-                } else {
-                    // pp-doclayout_plus-l uses 800x800 (default)
-                    PPDocLayoutModelBuilder::new().build(inference)?
+                let model = match model_config.input_size {
+                    Some((height, width)) => PPDocLayoutModelBuilder::new()
+                        .image_shape(height, width)
+                        .build(inference)?,
+                    None => PPDocLayoutModelBuilder::new().build(inference)?,
                 };
                 LayoutDetectionAdapter::new_pp_doclayout(
                     model,
@@ -970,6 +1005,7 @@ impl PPDocLayoutAdapterBuilder {
     ///   - `"pp-doclayout-m"` or `"pp_doclayout_m"` - Medium model (640x640)
     ///   - `"pp-doclayout-l"` or `"pp_doclayout_l"` - Large model (640x640, default)
     ///   - `"pp-doclayout_plus-l"` or `"pp_doclayout_plus_l"` - Plus-Large model (800x800)
+    ///   - `"pp-doclayoutv2"` or `"pp_doclayoutv2"` - PP-DocLayoutV2 model (800x800)
     ///   - `"pp-docblocklayout"` or `"pp_docblocklayout"` - Block layout model (640x640)
     ///
     /// # Example
@@ -990,6 +1026,7 @@ impl PPDocLayoutAdapterBuilder {
             "PP-DocLayout-M" => LayoutModelConfig::pp_doclayout_m(),
             "PP-DocLayout-L" => LayoutModelConfig::pp_doclayout_l(),
             "PP-DocLayout_plus-L" => LayoutModelConfig::pp_doclayout_plus_l(),
+            "PP-DocLayoutV2" | "PP-DocLayout-V2" => LayoutModelConfig::pp_doclayoutv2(),
             "PP-DocBlockLayout" => LayoutModelConfig::pp_docblocklayout(),
             _ => {
                 // Default to pp-doclayout-l for unknown variants

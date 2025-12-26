@@ -32,7 +32,9 @@ jobs:
 
       - name: Run Clippy linter
         # Run clippy with strict warnings-as-errors policy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        # Use `cargo clippy --all-targets --all-features -- -D warnings` for full features
+        # Exclude GPU-related features (cuda, tensorrt, directml, coreml, webgpu, openvino)
+        run: cargo clippy --all-targets --features visualization,paddleocr-vl -- -D warnings
 
       - name: Run tests in debug mode
         run: cargo test --verbose

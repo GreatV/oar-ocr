@@ -6,6 +6,22 @@
 
 use thiserror::Error;
 
+/// A simple, opaque error wrapper for cases where the original error type
+/// is not `Send` or doesn't implement `std::error::Error`.
+///
+/// This is useful for wrapping errors from external libraries that don't meet
+/// the `Send + Sync` requirements needed for `OCRError` source fields.
+#[derive(Debug, Error)]
+#[error("{0}")]
+pub struct OpaqueError(pub String);
+
+impl OpaqueError {
+    /// Creates a new `OpaqueError` from any displayable error.
+    pub fn from_display(e: impl std::fmt::Display) -> Self {
+        Self(e.to_string())
+    }
+}
+
 /// Errors that can occur during image processing operations.
 #[derive(Debug, Error)]
 pub enum ImageProcessError {

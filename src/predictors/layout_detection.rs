@@ -16,6 +16,11 @@ use std::path::Path;
 pub struct LayoutDetectionResult {
     /// Detected layout elements for each input image
     pub elements: Vec<Vec<crate::domain::tasks::layout_detection::LayoutElement>>,
+    /// Whether elements are already sorted by reading order (e.g., from PP-DocLayoutV2)
+    ///
+    /// When `true`, downstream consumers can skip reading order sorting algorithms
+    /// as the elements are already in the correct reading order based on model output.
+    pub is_reading_order_sorted: bool,
 }
 
 /// Layout detection predictor
@@ -37,6 +42,7 @@ impl LayoutDetectionPredictor {
         let output = self.core.predict(input)?;
         Ok(LayoutDetectionResult {
             elements: output.elements,
+            is_reading_order_sorted: output.is_reading_order_sorted,
         })
     }
 }
@@ -122,8 +128,9 @@ impl LayoutDetectionPredictorBuilder {
             "pp_doclayout_m" => LayoutModelConfig::pp_doclayout_m(),
             "pp_doclayout_l" => LayoutModelConfig::pp_doclayout_l(),
             "pp_doclayout_plus_l" => LayoutModelConfig::pp_doclayout_plus_l(),
+            "pp_doclayoutv2" | "pp_doclayout_v2" => LayoutModelConfig::pp_doclayoutv2(),
             _ => {
-                return Err(format!("Unknown model name: {}. Supported models: picodet_layout_1x, picodet_layout_1x_table, picodet_s_layout_3cls, picodet_l_layout_3cls, picodet_s_layout_17cls, picodet_l_layout_17cls, rtdetr_h_layout_3cls, rtdetr_h_layout_17cls, pp_docblocklayout, pp_doclayout_s, pp_doclayout_m, pp_doclayout_l, pp_doclayout_plus_l", model_name).into());
+                return Err(format!("Unknown model name: {}. Supported models: picodet_layout_1x, picodet_layout_1x_table, picodet_s_layout_3cls, picodet_l_layout_3cls, picodet_s_layout_17cls, picodet_l_layout_17cls, rtdetr_h_layout_3cls, rtdetr_h_layout_17cls, pp_docblocklayout, pp_doclayout_s, pp_doclayout_m, pp_doclayout_l, pp_doclayout_plus_l, pp_doclayoutv2", model_name).into());
             }
         };
 

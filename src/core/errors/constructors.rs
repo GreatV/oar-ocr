@@ -55,7 +55,7 @@
 //! // Results in: "text recognition batch 'group_aspect_1.2' failed: network timeout (affected indices: [1, 3, 5])"
 //! ```
 
-use super::types::{OCRError, ProcessingStage};
+use super::types::{OCRError, OpaqueError, ProcessingStage};
 
 /// Builder for composing detailed `ModelInference` errors without duplicating boilerplate.
 #[derive(Clone, Debug)]
@@ -243,7 +243,7 @@ impl OCRError {
     pub fn image_processing_error(message: impl Into<String>) -> Self {
         Self::image_processing(
             &message.into(),
-            std::io::Error::other("Image processing failed"),
+            OpaqueError("Image processing failed".to_string()),
         )
     }
 

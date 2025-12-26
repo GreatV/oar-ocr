@@ -227,6 +227,84 @@ let ort_config = OrtSessionConfig::new()
     ]);
 ```
 
+## PaddleOCR-VL (Vision-Language)
+
+PaddleOCR-VL is an optional Vision-Language model (VLM) integration. Our implementation uses [Candle](https://github.com/huggingface/candle) for inference.
+
+### Installation
+
+Enable the feature in your `Cargo.toml`:
+
+```bash
+cargo add oar-ocr --features paddleocr-vl
+```
+
+For GPU acceleration, also enable CUDA:
+
+```bash
+cargo add oar-ocr --features paddleocr-vl,cuda
+```
+
+### Downloading the Model
+
+Download the PaddleOCR-VL model from Hugging Face:
+
+```bash
+# Using git (recommended)
+git lfs install
+git clone https://huggingface.co/PaddlePaddle/PaddleOCR-VL
+
+# Or using huggingface-cli
+huggingface-cli download PaddlePaddle/PaddleOCR-VL --local-dir PaddleOCR-VL
+```
+
+### Basic Usage
+
+```rust,no_run
+use oar_ocr::prelude::*;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let image = load_image("document.png")?;
+    let device = candle_core::Device::Cpu;
+    let vl = PaddleOcrVl::from_dir("PaddleOCR-VL", device)?;
+
+    // Element-level OCR
+    let result = vl.generate(image, PaddleOcrVlTask::Ocr, 256)?;
+    println!("{result}");
+
+    Ok(())
+}
+```
+
+### Layout-First Document Parsing
+
+For structured document parsing, combine PaddleOCR-VL with PP-DocLayoutV2 layout detection.
+
+First, download the layout model (see [Pre-trained Models](./pretrained-models.md)).
+
+```rust,no_run
+use oar_ocr::prelude::*;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let image = load_image("document.png")?;
+    let device = candle_core::Device::Cpu;
+
+    // Initialize VL model
+    let vl = PaddleOcrVl::from_dir("PaddleOCR-VL", device)?;
+
+    // Initialize layout detector
+    let layout = LayoutDetectionPredictor::builder()
+        .model_name("pp-doclayoutv2")
+        .build("pp-doclayoutv2.onnx")?;
+
+    // Parse document with layout-first approach
+    let parsed = vl.parse_document(&layout, image, 256)?;
+    println!("{}", parsed.to_markdown());
+
+    Ok(())
+}
+```
+
 ## Configuration Options
 
 ### OrtSessionConfig

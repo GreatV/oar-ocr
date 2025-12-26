@@ -1,6 +1,6 @@
 [package]
 name = "oar-ocr"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["Wang Xin <xinwang614@gmail.com>"]
@@ -20,8 +20,11 @@ categories = ["computer-vision", "science"]
 [features]
 default = ["download-binaries"]
 visualization = ["dep:ab_glyph"]
+# PaddleOCR-VL (Vision-Language) support via Candle
+paddleocr-vl = ["dep:candle-core", "dep:candle-nn"]
 # ONNX Runtime execution provider features
-cuda = ["ort/cuda"]
+# When `paddleocr-vl` is also enabled, this additionally turns on Candle's CUDA backend.
+cuda = ["ort/cuda", "candle-core?/cuda", "candle-nn?/cuda"]
 tensorrt = ["ort/tensorrt"]
 directml = ["ort/directml"]
 coreml = ["ort/coreml"]
@@ -51,6 +54,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ab_glyph = { version = "0.2", optional = true }
 tokenizers = { version = "0.22", default-features = false, features = ["progressbar", "onig"] }
 clipper2 = "0.5.3"
+candle-core = { version = "0.9.2-alpha.2", optional = true }
+candle-nn = { version = "0.9.2-alpha.2", optional = true }
 
 [dev-dependencies]
 clap = { version = "4.5.42", features = ["derive"] }

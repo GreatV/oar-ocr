@@ -588,83 +588,100 @@ impl OrtInfer {
         let (output_shape, output_data) = output;
 
         // Validate and convert output
-        // Some models output 2D [num_boxes, 6] format instead of 4D
-        if output_shape.len() == 2 {
-            // 2D output format: [num_boxes, 6] where each box is [class_id, score, x1, y1, x2, y2]
-            let num_boxes = output_shape[0] as usize;
-            let box_dim = output_shape[1] as usize;
+        // Some models output 2D [num_boxes, N] format instead of 4D
+        // N can be 6 (PP-DocLayout) or 8 (PP-DocLayoutV2 with reading order: col_index, row_index)
+        // We pass through raw data and let the postprocessor handle format-specific logic
+        match output_shape.len() {
+            2 => {
+                let num_boxes = output_shape[0] as usize;
+                let box_dim = output_shape[1] as usize;
 
-            if box_dim != 6 {
-                return Err(OCRError::InvalidInput {
-                    message: format!(
-                        "Expected box dimension 6, got {} with shape {:?}",
-                        box_dim, output_shape
-                    ),
-                });
+                match box_dim {
+                    // 8-dim format: [class_id, score, x1, y1, x2, y2, col_index, row_index]
+                    // Pass through raw data for postprocessor to handle reading order sorting
+                    8 => {
+                        ndarray::Array::from_shape_vec((1, num_boxes, 1, 8), output_data.to_owned())
+                            .map_err(|e| {
+                                OCRError::tensor_operation_error(
+                                    "output_reshape",
+                                    &[1, num_boxes, 1, 8],
+                                    &[output_data.len()],
+                                    &format!(
+                                        "Failed to reshape 8-dim output to 4D for model '{}'",
+                                        self.model_name
+                                    ),
+                                    e,
+                                )
+                            })
+                    }
+                    // 6-dim format: [class_id, score, x1, y1, x2, y2]
+                    // Convert directly to 4D format [batch=1, num_boxes, 1, 6]
+                    6 => {
+                        ndarray::Array::from_shape_vec((1, num_boxes, 1, 6), output_data.to_owned())
+                            .map_err(|e| {
+                                OCRError::tensor_operation_error(
+                                    "output_reshape",
+                                    &[1, num_boxes, 1, 6],
+                                    &[output_data.len()],
+                                    &format!(
+                                        "Failed to reshape 2D output to 4D for model '{}'",
+                                        self.model_name
+                                    ),
+                                    e,
+                                )
+                            })
+                    }
+                    _ => Err(OCRError::InvalidInput {
+                        message: format!(
+                            "Expected box dimension 6 or 8, got {} with shape {:?}",
+                            box_dim, output_shape
+                        ),
+                    }),
+                }
             }
-
-            // Convert to 4D format [batch=1, num_boxes, 1, 6]
-            let array =
-                ndarray::Array::from_shape_vec((1, num_boxes, 1, box_dim), output_data.to_owned())
-                    .map_err(|e| {
-                        OCRError::tensor_operation_error(
-                            "output_reshape",
-                            &[1, num_boxes, 1, box_dim],
-                            &[output_data.len()],
-                            &format!(
-                                "Failed to reshape 2D output to 4D for model '{}'",
-                                self.model_name
-                            ),
-                            e,
-                        )
-                    })?;
-
-            Ok(array)
-        } else if output_shape.len() == 4 {
             // Standard 4D output format
-            let batch_size_out = output_shape[0] as usize;
-            let channels_out = output_shape[1] as usize;
-            let height_out = output_shape[2] as usize;
-            let width_out = output_shape[3] as usize;
-            let expected_len = batch_size_out * channels_out * height_out * width_out;
+            4 => {
+                let batch_size_out = output_shape[0] as usize;
+                let channels_out = output_shape[1] as usize;
+                let height_out = output_shape[2] as usize;
+                let width_out = output_shape[3] as usize;
+                let expected_len = batch_size_out * channels_out * height_out * width_out;
 
-            if output_data.len() != expected_len {
-                return Err(OCRError::InvalidInput {
-                    message: format!(
-                        "Output data size mismatch: expected {}, got {}",
-                        expected_len,
-                        output_data.len()
-                    ),
-                });
-            }
+                if output_data.len() != expected_len {
+                    return Err(OCRError::InvalidInput {
+                        message: format!(
+                            "Output data size mismatch: expected {}, got {}",
+                            expected_len,
+                            output_data.len()
+                        ),
+                    });
+                }
 
-            let array = ndarray::Array::from_shape_vec(
-                (batch_size_out, channels_out, height_out, width_out),
-                output_data.to_owned(),
-            )
-            .map_err(|e| {
-                OCRError::tensor_operation_error(
-                    "output_reshape",
-                    &[batch_size_out, channels_out, height_out, width_out],
-                    &[output_data.len()],
-                    &format!(
-                        "Failed to reshape 4D output for model '{}'",
-                        self.model_name
-                    ),
-                    e,
+                ndarray::Array::from_shape_vec(
+                    (batch_size_out, channels_out, height_out, width_out),
+                    output_data.to_owned(),
                 )
-            })?;
-
-            Ok(array)
-        } else {
-            Err(OCRError::InvalidInput {
+                .map_err(|e| {
+                    OCRError::tensor_operation_error(
+                        "output_reshape",
+                        &[batch_size_out, channels_out, height_out, width_out],
+                        &[output_data.len()],
+                        &format!(
+                            "Failed to reshape 4D output for model '{}'",
+                            self.model_name
+                        ),
+                        e,
+                    )
+                })
+            }
+            _ => Err(OCRError::InvalidInput {
                 message: format!(
                     "Model '{}' layout inference: expected 2D or 4D output tensor, got {}D with shape {:?}",
                     self.model_name,
                     output_shape.len(),
                     output_shape
                 ),
-            })
+            }),
         }
     }
 }
