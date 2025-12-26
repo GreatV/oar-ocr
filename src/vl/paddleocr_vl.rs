@@ -68,7 +68,6 @@ pub struct PaddleOcrVl {
     projector: Projector,
     eos_token_id: u32,
     sep_token_id: Option<u32>,
-    comma_token_id: Option<u32>,
 }
 
 impl PaddleOcrVl {
@@ -90,7 +89,6 @@ impl PaddleOcrVl {
                 message: "PaddleOCR-VL: tokenizer is missing </s> token".to_string(),
             })?;
         let sep_token_id = tokenizer.token_to_id("<|end_of_sentence|>");
-        let comma_token_id = tokenizer.token_to_id(",");
 
         let dtype = device.bf16_default_to_f32();
         let vb = unsafe {
@@ -121,7 +119,6 @@ impl PaddleOcrVl {
             projector,
             eos_token_id,
             sep_token_id,
-            comma_token_id,
         })
     }
 
@@ -316,22 +313,6 @@ impl PaddleOcrVl {
                 .to_scalar::<u32>()
                 .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "argmax to_scalar", e))?;
 
-            if matches!(task, PaddleOcrVlTask::Ocr | PaddleOcrVlTask::Chart)
-                && self.comma_token_id.is_some_and(|comma| {
-                    generated.len() >= 2
-                        && generated[generated.len() - 1] == comma
-                        && generated[generated.len() - 2] == next_token
-                })
-            {
-                // We are about to emit an "A, A, A..." loop (e.g., "Image, Image, Image").
-                // Backtrack the last "A," to keep the last stable output visible in the crop.
-                if generated.len() >= 2 {
-                    generated.pop(); // trailing comma
-                    generated.pop(); // repeated token
-                }
-                break;
-            }
-
             if next_token == self.eos_token_id {
                 break;
             }
@@ -357,6 +338,8 @@ impl PaddleOcrVl {
             })?;
             let token_embed = self.llm.embed(&token_t)?;
 
+            // For text-only tokens during generation, all three RoPE dimensions
+            // (temporal, height, width) share the same position index.
             let pos_ids =
                 Tensor::new(&[next_pos, next_pos, next_pos], &self.device).map_err(|e| {
                     candle_to_ocr_processing(
@@ -413,7 +396,8 @@ fn causal_mask(seq_len: usize, device: &Device, dtype: DType) -> Result<Tensor, 
             if j <= i {
                 data.push(0f32);
             } else {
-                data.push(-1e9f32);
+                // Use NEG_INFINITY for masked positions - converts correctly to BF16/F16
+                data.push(f32::NEG_INFINITY);
             }
         }
     }

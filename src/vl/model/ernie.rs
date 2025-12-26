@@ -142,6 +142,19 @@ fn select_mrope(cos_or_sin: &Tensor, mrope_section: &[usize]) -> Result<Tensor, 
         });
     }
 
+    // Validate that mrope_section sums to half of head_dim (since we double it)
+    let dims = cos_or_sin.dims();
+    let head_dim = dims.get(3).copied().unwrap_or(0);
+    let section_sum: usize = mrope_section.iter().sum();
+    if section_sum * 2 != head_dim {
+        return Err(OCRError::ConfigError {
+            message: format!(
+                "PaddleOCR-VL: mrope_section sum ({}) * 2 != head_dim ({})",
+                section_sum, head_dim
+            ),
+        });
+    }
+
     // Duplicate the list like Python: mrope_section * 2
     let doubled_sections: Vec<usize> = mrope_section
         .iter()

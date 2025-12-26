@@ -534,7 +534,9 @@ impl VisionEmbeddings {
         if grid * grid != num_positions {
             return Err(OCRError::ConfigError {
                 message: format!(
-                    "PaddleOCR-VL: vision position_embedding weight is not a square grid, got num_positions={num_positions}"
+                    "PaddleOCR-VL: vision position_embedding weight is not a square grid, \
+                     got num_positions={num_positions} (nearest square is {grid}×{grid}={})",
+                    grid * grid
                 ),
             });
         }

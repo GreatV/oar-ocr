@@ -298,16 +298,10 @@ impl LayoutPostProcess {
                 let (col_i, row_i) = filtered_reading_orders[i];
                 let (col_j, row_j) = filtered_reading_orders[j];
                 // Sort by col_index ascending, then row_index ascending
-                let col_cmp = col_i
-                    .partial_cmp(&col_j)
-                    .unwrap_or(std::cmp::Ordering::Equal);
-                if col_cmp == std::cmp::Ordering::Equal {
-                    row_i
-                        .partial_cmp(&row_j)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                } else {
-                    col_cmp
-                }
+                // Use total_cmp to handle NaN/infinity values gracefully
+                col_i
+                    .total_cmp(&col_j)
+                    .then_with(|| row_i.total_cmp(&row_j))
             });
 
             let sorted_boxes = indices.iter().map(|&i| filtered_boxes[i].clone()).collect();
@@ -332,33 +326,7 @@ impl LayoutPostProcess {
             return (boxes, classes, scores, reading_orders);
         }
 
-        // Sort by score in descending order
-        let mut indices: Vec<usize> = (0..boxes.len()).collect();
-        indices.sort_by(|&a, &b| scores[b].partial_cmp(&scores[a]).unwrap());
-
-        let mut keep = Vec::new();
-        let mut suppressed = vec![false; boxes.len()];
-
-        for &i in &indices {
-            if suppressed[i] {
-                continue;
-            }
-
-            keep.push(i);
-            if keep.len() >= self.max_detections {
-                break;
-            }
-
-            // Suppress boxes with high IoU
-            for &j in &indices {
-                if i != j && !suppressed[j] && classes[i] == classes[j] {
-                    let iou = self.calculate_iou(&boxes[i], &boxes[j]);
-                    if iou > self.nms_threshold {
-                        suppressed[j] = true;
-                    }
-                }
-            }
-        }
+        let keep = self.compute_nms_keep_indices(&boxes, &classes, &scores);
 
         let filtered_boxes: Vec<BoundingBox> = keep.iter().map(|&i| boxes[i].clone()).collect();
         let filtered_classes: Vec<usize> = keep.iter().map(|&i| classes[i]).collect();
@@ -491,17 +459,14 @@ impl LayoutPostProcess {
         }
     }
 
-    /// Apply Non-Maximum Suppression to filter overlapping boxes.
-    fn apply_nms(
+    /// Compute indices to keep after NMS.
+    /// Returns the indices of boxes that survive non-maximum suppression.
+    fn compute_nms_keep_indices(
         &self,
-        boxes: Vec<BoundingBox>,
-        classes: Vec<usize>,
-        scores: Vec<f32>,
-    ) -> (Vec<BoundingBox>, Vec<usize>, Vec<f32>) {
-        if boxes.is_empty() {
-            return (boxes, classes, scores);
-        }
-
+        boxes: &[BoundingBox],
+        classes: &[usize],
+        scores: &[f32],
+    ) -> Vec<usize> {
         // Sort by score in descending order
         let mut indices: Vec<usize> = (0..boxes.len()).collect();
         indices.sort_by(|&a, &b| scores[b].partial_cmp(&scores[a]).unwrap());
@@ -529,6 +494,22 @@ impl LayoutPostProcess {
                 }
             }
         }
+
+        keep
+    }
+
+    /// Apply Non-Maximum Suppression to filter overlapping boxes.
+    fn apply_nms(
+        &self,
+        boxes: Vec<BoundingBox>,
+        classes: Vec<usize>,
+        scores: Vec<f32>,
+    ) -> (Vec<BoundingBox>, Vec<usize>, Vec<f32>) {
+        if boxes.is_empty() {
+            return (boxes, classes, scores);
+        }
+
+        let keep = self.compute_nms_keep_indices(&boxes, &classes, &scores);
 
         let filtered_boxes: Vec<BoundingBox> = keep.iter().map(|&i| boxes[i].clone()).collect();
         let filtered_classes: Vec<usize> = keep.iter().map(|&i| classes[i]).collect();

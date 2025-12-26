@@ -68,6 +68,10 @@ impl Projector {
                     ),
                 });
             }
+            // Invariant: h and w are evenly divisible by merge_size after the check above
+            debug_assert_eq!(h % m, 0, "h must be divisible by merge_size");
+            debug_assert_eq!(w % m, 0, "w must be divisible by merge_size");
+
             let d = feat.dim(D::Minus1).map_err(|e| {
                 candle_to_ocr_processing(
                     crate::core::errors::ProcessingStage::TensorOperation,

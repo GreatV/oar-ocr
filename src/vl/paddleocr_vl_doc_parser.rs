@@ -4,7 +4,7 @@
 //! to segment a page and determine reading order, then runs the VLM per block.
 
 use super::{PaddleOcrVl, PaddleOcrVlTask};
-use crate::core::OCRError;
+use crate::core::{OCRError, OpaqueError};
 use crate::domain::structure::{
     LayoutElement, LayoutElementType, StructureResult, TableResult, TableType,
 };
@@ -79,7 +79,7 @@ pub fn parse_document_with_layout_config(
             .map_err(|e| OCRError::Inference {
                 model_name: "layout_detection".to_string(),
                 context: "PaddleOCR-VL doc parser: layout prediction failed".to_string(),
-                source: Box::new(std::io::Error::other(e.to_string())),
+                source: Box::new(OpaqueError::from_display(e)),
             })?;
 
     let detected = layout_result

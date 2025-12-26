@@ -22,9 +22,6 @@ default = ["download-binaries"]
 visualization = ["dep:ab_glyph"]
 # PaddleOCR-VL (Vision-Language) support via Candle
 paddleocr-vl = ["dep:candle-core", "dep:candle-nn"]
-# candle-cuda = ["paddleocr-vl", "candle-core/cuda", "candle-nn/cuda"]
-# candle-metal = ["paddleocr-vl", "candle-core/metal", "candle-nn/metal"]
-# candle-mkl = ["paddleocr-vl", "candle-core/mkl", "candle-nn/mkl"]
 # ONNX Runtime execution provider features
 # When `paddleocr-vl` is also enabled, this additionally turns on Candle's CUDA backend.
 cuda = ["ort/cuda", "candle-core?/cuda", "candle-nn?/cuda"]

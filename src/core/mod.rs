@@ -44,7 +44,7 @@ pub use config::{
     TransformRegistry, TransformType,
 };
 pub use constants::*;
-pub use errors::{OCRError, OcrResult, ProcessingStage};
+pub use errors::{OCRError, OcrResult, OpaqueError, ProcessingStage};
 pub use image_reader::DefaultImageReader;
 pub use inference::{OrtInfer, OrtInfer2D, OrtInfer3D, OrtInfer4D, load_session};
 pub use traits::{
