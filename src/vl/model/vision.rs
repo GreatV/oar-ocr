@@ -3,6 +3,7 @@ use crate::core::OCRError;
 use crate::vl::config::PaddleOcrVlVisionConfig;
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::Module;
+use rayon::prelude::*;
 
 // =======================================================================
 // Vision Model Implementation
@@ -472,7 +473,7 @@ impl VisionEncoderLayer {
 #[derive(Debug, Clone)]
 struct VisionEmbeddings {
     patch_embedding: candle_nn::Conv2d,
-    packing_position_embedding: candle_nn::Embedding,
+    position_embedding: candle_nn::Embedding,
 }
 
 impl VisionEmbeddings {
@@ -485,26 +486,108 @@ impl VisionEmbeddings {
             cudnn_fwd_algo: None,
         };
         let patch_embedding = candle_nn::conv2d(
-            3,
+            cfg.num_channels,
             cfg.hidden_size,
             cfg.patch_size,
             conv_cfg,
             vb.pp("patch_embedding"),
         )
         .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "load vision patch_embedding", e))?;
-        let packing_position_embedding =
-            candle_nn::embedding(32768, cfg.hidden_size, vb.pp("packing_position_embedding"))
+        let grid = cfg.image_size / cfg.patch_size;
+        let num_positions = grid * grid;
+        let position_embedding =
+            candle_nn::embedding(num_positions, cfg.hidden_size, vb.pp("position_embedding"))
                 .map_err(|e| {
-                    candle_to_ocr_inference(
-                        "PaddleOCR-VL",
-                        "load vision packing_position_embedding",
-                        e,
-                    )
+                    candle_to_ocr_inference("PaddleOCR-VL", "load vision position_embedding", e)
                 })?;
         Ok(Self {
             patch_embedding,
-            packing_position_embedding,
+            position_embedding,
         })
+    }
+
+    fn interpolate_pos_encoding(
+        &self,
+        height: usize,
+        width: usize,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<Tensor, OCRError> {
+        if height == 0 || width == 0 {
+            return Err(OCRError::InvalidInput {
+                message: format!(
+                    "PaddleOCR-VL: vision interpolate_pos_encoding requires height/width > 0, got {height}x{width}"
+                ),
+            });
+        }
+
+        let pos_w = self.position_embedding.embeddings();
+        let (num_positions, dim) = pos_w.dims2().map_err(|e| {
+            candle_to_ocr_processing(
+                crate::core::errors::ProcessingStage::TensorOperation,
+                "PaddleOCR-VL: vision position_embedding dims2 failed",
+                e,
+            )
+        })?;
+
+        let grid = (num_positions as f64).sqrt() as usize;
+        if grid * grid != num_positions {
+            return Err(OCRError::ConfigError {
+                message: format!(
+                    "PaddleOCR-VL: vision position_embedding weight is not a square grid, got num_positions={num_positions}"
+                ),
+            });
+        }
+
+        // Match PyTorch's `interpolate(..., mode=\"bilinear\", align_corners=False)`.
+        // Python code:
+        //   patch_pos_embed = position_embedding.weight.unsqueeze(0)
+        //   patch_pos_embed = patch_pos_embed.reshape(1, grid, grid, dim).permute(0, 3, 1, 2)
+        //   patch_pos_embed = F.interpolate(..., size=(height, width), mode=\"bilinear\", align_corners=False)
+        //   patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
+        let base = pos_w
+            .to_dtype(DType::F32)
+            .map_err(|e| {
+                candle_to_ocr_processing(
+                    crate::core::errors::ProcessingStage::TensorOperation,
+                    "PaddleOCR-VL: vision position_embedding cast to f32 failed",
+                    e,
+                )
+            })?
+            .flatten_all()
+            .map_err(|e| {
+                candle_to_ocr_processing(
+                    crate::core::errors::ProcessingStage::TensorOperation,
+                    "PaddleOCR-VL: vision position_embedding flatten failed",
+                    e,
+                )
+            })?
+            .to_vec1::<f32>()
+            .map_err(|e| {
+                candle_to_ocr_processing(
+                    crate::core::errors::ProcessingStage::TensorOperation,
+                    "PaddleOCR-VL: vision position_embedding to_vec failed",
+                    e,
+                )
+            })?;
+
+        let out = interpolate_bilinear_align_corners_false(&base, grid, grid, height, width, dim);
+        Tensor::from_vec(out, (height * width, dim), device)
+            .map_err(|e| {
+                candle_to_ocr_processing(
+                    crate::core::errors::ProcessingStage::TensorOperation,
+                    "PaddleOCR-VL: vision interpolated pos embedding tensor failed",
+                    e,
+                )
+            })?
+            .to_dtype(dtype)
+            .map_err(|e| {
+                candle_to_ocr_processing(
+                    crate::core::errors::ProcessingStage::TensorOperation,
+                    "PaddleOCR-VL: vision interpolated pos embedding cast failed",
+                    e,
+                )
+            })
     }
 }
 
@@ -558,7 +641,6 @@ impl VisionModel {
         image_grid_thw: &[(usize, usize, usize)],
     ) -> Result<Vec<Tensor>, OCRError> {
         let device = pixel_values.device();
-        let mut position_ids: Vec<u32> = Vec::with_capacity(pixel_values.dims()[0]);
 
         // Compute height/width position IDs for 2D rope
         let mut height_position_ids: Vec<i64> = Vec::new();
@@ -568,21 +650,12 @@ impl VisionModel {
             let hw = (h * w) as u32;
             let numel = t * h * w;
             for idx in 0..numel as u32 {
-                position_ids.push(idx % hw);
                 // height_id = patch_idx // w, width_id = patch_idx % w
                 let patch_idx = idx % hw;
                 height_position_ids.push((patch_idx / w as u32) as i64);
                 width_position_ids.push((patch_idx % w as u32) as i64);
             }
         }
-
-        let position_ids = Tensor::new(position_ids, device).map_err(|e| {
-            candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
-                "PaddleOCR-VL: failed to create vision position_ids tensor",
-                e,
-            )
-        })?;
 
         // Build rope embeddings
         // pids = stack([height_ids, width_ids], dim=-1)  -> (num_patches, 2)
@@ -704,29 +777,52 @@ impl VisionModel {
                 )
             })?;
 
-        let pos = self
-            .embeddings
-            .packing_position_embedding
-            .forward(&position_ids)
-            .map_err(|e| {
-                candle_to_ocr_inference(
-                    "PaddleOCR-VL",
-                    "vision packing_position_embedding forward",
-                    e,
-                )
-            })?;
-
-        let mut hidden = patch
-            .broadcast_add(&pos)
-            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision add pos", e))?
-            .unsqueeze(0)
-            .map_err(|e| {
+        // Upstream adds *interpolated* 2D position embeddings (not `packing_position_embedding`)
+        // when `interpolate_pos_encoding=True`.
+        let mut segments: Vec<Tensor> = Vec::with_capacity(image_grid_thw.len());
+        let mut start = 0usize;
+        for &(t, h, w) in image_grid_thw {
+            if t != 1 {
+                return Err(OCRError::InvalidInput {
+                    message: "PaddleOCR-VL: vision temporal inputs are not supported (t != 1)"
+                        .to_string(),
+                });
+            }
+            let len = t * h * w;
+            let end = start + len;
+            let seg = patch.i((start..end, ..)).map_err(|e| {
                 candle_to_ocr_processing(
                     crate::core::errors::ProcessingStage::TensorOperation,
-                    "PaddleOCR-VL: vision add batch dim failed",
+                    "PaddleOCR-VL: vision slice patch embeddings failed",
                     e,
                 )
             })?;
+            let pos = self
+                .embeddings
+                .interpolate_pos_encoding(h, w, device, seg.dtype())?;
+            let seg = seg.broadcast_add(&pos).map_err(|e| {
+                candle_to_ocr_inference("PaddleOCR-VL", "vision add interpolated pos", e)
+            })?;
+            segments.push(seg);
+            start = end;
+        }
+
+        let refs: Vec<&Tensor> = segments.iter().collect();
+        let patch = Tensor::cat(&refs, 0).map_err(|e| {
+            candle_to_ocr_processing(
+                crate::core::errors::ProcessingStage::TensorOperation,
+                "PaddleOCR-VL: vision concat pos-added patches failed",
+                e,
+            )
+        })?;
+
+        let mut hidden = patch.unsqueeze(0).map_err(|e| {
+            candle_to_ocr_processing(
+                crate::core::errors::ProcessingStage::TensorOperation,
+                "PaddleOCR-VL: vision add batch dim failed",
+                e,
+            )
+        })?;
 
         // Pass rope embeddings to each layer
         let rope_emb = Some((&cos, &sin));
@@ -762,5 +858,91 @@ impl VisionModel {
             start = end;
         }
         Ok(out)
+    }
+}
+
+fn interpolate_bilinear_align_corners_false(
+    base: &[f32],
+    in_h: usize,
+    in_w: usize,
+    out_h: usize,
+    out_w: usize,
+    dim: usize,
+) -> Vec<f32> {
+    debug_assert_eq!(base.len(), in_h * in_w * dim);
+
+    let mut y_lut = Vec::with_capacity(out_h);
+    for oy in 0..out_h {
+        let in_y = ((oy as f32) + 0.5) * (in_h as f32) / (out_h as f32) - 0.5;
+        let in_y = in_y.clamp(0.0, (in_h - 1) as f32);
+        let y0 = in_y.floor() as usize;
+        let y1 = (y0 + 1).min(in_h - 1);
+        let wy1 = in_y - (y0 as f32);
+        let wy0 = 1.0 - wy1;
+        y_lut.push((y0, y1, wy0, wy1));
+    }
+
+    let mut x_lut = Vec::with_capacity(out_w);
+    for ox in 0..out_w {
+        let in_x = ((ox as f32) + 0.5) * (in_w as f32) / (out_w as f32) - 0.5;
+        let in_x = in_x.clamp(0.0, (in_w - 1) as f32);
+        let x0 = in_x.floor() as usize;
+        let x1 = (x0 + 1).min(in_w - 1);
+        let wx1 = in_x - (x0 as f32);
+        let wx0 = 1.0 - wx1;
+        x_lut.push((x0, x1, wx0, wx1));
+    }
+
+    let mut out = vec![0f32; out_h * out_w * dim];
+    out.par_chunks_mut(dim)
+        .enumerate()
+        .for_each(|(idx, chunk)| {
+            let oy = idx / out_w;
+            let ox = idx % out_w;
+
+            let (y0, y1, wy0, wy1) = y_lut[oy];
+            let (x0, x1, wx0, wx1) = x_lut[ox];
+            let w00 = wy0 * wx0;
+            let w01 = wy0 * wx1;
+            let w10 = wy1 * wx0;
+            let w11 = wy1 * wx1;
+
+            let base00 = (y0 * in_w + x0) * dim;
+            let base01 = (y0 * in_w + x1) * dim;
+            let base10 = (y1 * in_w + x0) * dim;
+            let base11 = (y1 * in_w + x1) * dim;
+
+            for d in 0..dim {
+                chunk[d] = base[base00 + d] * w00
+                    + base[base01 + d] * w01
+                    + base[base10 + d] * w10
+                    + base[base11 + d] * w11;
+            }
+        });
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::interpolate_bilinear_align_corners_false;
+
+    #[test]
+    fn interpolate_same_size_is_identity() {
+        // 2x2 grid, dim=1:
+        // [[0, 1],
+        //  [2, 3]]
+        let base = vec![0f32, 1f32, 2f32, 3f32];
+        let out = interpolate_bilinear_align_corners_false(&base, 2, 2, 2, 2, 1);
+        assert_eq!(out, base);
+    }
+
+    #[test]
+    fn interpolate_to_1x1_matches_pytorch_align_corners_false_center() {
+        // With align_corners=False, a 1x1 output samples the center of the input grid.
+        // For a 2x2 grid, that's the bilinear average of all 4 corners.
+        let base = vec![0f32, 1f32, 2f32, 3f32];
+        let out = interpolate_bilinear_align_corners_false(&base, 2, 2, 1, 1, 1);
+        assert_eq!(out.len(), 1);
+        assert!((out[0] - 1.5).abs() < 1e-6, "got {}", out[0]);
     }
 }

@@ -55,12 +55,15 @@ pub struct PaddleOcrVlRopeScaling {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PaddleOcrVlVisionConfig {
+    pub image_size: usize,
     pub hidden_size: usize,
     pub intermediate_size: usize,
     pub num_attention_heads: usize,
     pub num_hidden_layers: usize,
+    pub num_channels: usize,
     pub patch_size: usize,
     pub spatial_merge_size: usize,
+    pub temporal_patch_size: usize,
     pub tokens_per_second: usize,
     pub layer_norm_eps: f64,
     pub hidden_act: String,

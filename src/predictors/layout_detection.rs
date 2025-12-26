@@ -16,6 +16,11 @@ use std::path::Path;
 pub struct LayoutDetectionResult {
     /// Detected layout elements for each input image
     pub elements: Vec<Vec<crate::domain::tasks::layout_detection::LayoutElement>>,
+    /// Whether elements are already sorted by reading order (e.g., from PP-DocLayoutV2)
+    ///
+    /// When `true`, downstream consumers can skip reading order sorting algorithms
+    /// as the elements are already in the correct reading order based on model output.
+    pub is_reading_order_sorted: bool,
 }
 
 /// Layout detection predictor
@@ -37,6 +42,7 @@ impl LayoutDetectionPredictor {
         let output = self.core.predict(input)?;
         Ok(LayoutDetectionResult {
             elements: output.elements,
+            is_reading_order_sorted: output.is_reading_order_sorted,
         })
     }
 }

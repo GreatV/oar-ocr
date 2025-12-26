@@ -15,8 +15,6 @@ use crate::utils::BBoxCrop;
 use image::RgbImage;
 use std::sync::Arc;
 
-const MIN_TITLE_CROP_HEIGHT_PX: f32 = 56.0;
-
 #[derive(Debug, Clone)]
 pub struct PaddleOcrVlDocParserConfig {
     /// Adds extra padding around each detected region before cropping.
@@ -141,15 +139,23 @@ pub fn parse_document_with_layout_config(
         return Ok(StructureResult::new(input_path, index).with_layout_elements(vec![element]));
     }
 
-    let sortable: Vec<(BoundingBox, LayoutElementType)> = elements
-        .iter()
-        .map(|e| (e.bbox.clone(), e.element_type))
-        .collect();
-    let sorted_indices = sort_layout_enhanced(&sortable, page_w, page_h);
-    let mut sorted_elements: Vec<LayoutElement> = sorted_indices
-        .into_iter()
-        .filter_map(|idx| elements.get(idx).cloned())
-        .collect();
+    // Use reading order from model if available (PP-DocLayoutV2 outputs 8-dim with col/row indices)
+    // Otherwise, apply the enhanced sorting algorithm
+    let mut sorted_elements: Vec<LayoutElement> = if layout_result.is_reading_order_sorted {
+        // Elements are already in reading order from the layout model
+        elements
+    } else {
+        // Apply enhanced sorting algorithm for models without reading order info
+        let sortable: Vec<(BoundingBox, LayoutElementType)> = elements
+            .iter()
+            .map(|e| (e.bbox.clone(), e.element_type))
+            .collect();
+        let sorted_indices = sort_layout_enhanced(&sortable, page_w, page_h);
+        sorted_indices
+            .into_iter()
+            .filter_map(|idx| elements.get(idx).cloned())
+            .collect()
+    };
 
     assign_order_indices(&mut sorted_elements);
 
@@ -163,12 +169,6 @@ pub fn parse_document_with_layout_config(
             pad_bbox(&element.bbox, page_w, page_h, cfg.crop_pad_ratio)
         } else {
             element.bbox.clone()
-        };
-
-        let crop_bbox = if element.element_type.is_title() || element.element_type.is_caption() {
-            ensure_min_bbox_height(&crop_bbox, page_w, page_h, MIN_TITLE_CROP_HEIGHT_PX)
-        } else {
-            crop_bbox
         };
 
         let cropped = match BBoxCrop::crop_bounding_box(&image, &crop_bbox) {
@@ -226,40 +226,6 @@ fn pad_bbox(bbox: &BoundingBox, page_w: f32, page_h: f32, pad_ratio: f32) -> Bou
         (x2 + pad_x).min(page_w),
         (y2 + pad_y).min(page_h),
     )
-}
-
-fn ensure_min_bbox_height(
-    bbox: &BoundingBox,
-    page_w: f32,
-    page_h: f32,
-    min_height_px: f32,
-) -> BoundingBox {
-    let x1 = bbox.x_min();
-    let x2 = bbox.x_max();
-    let y1 = bbox.y_min();
-    let y2 = bbox.y_max();
-
-    let height = (y2 - y1).max(0.0);
-    if height >= min_height_px || min_height_px <= 0.0 {
-        return bbox.clone();
-    }
-
-    let extra = min_height_px - height;
-    let half = extra / 2.0;
-    let mut new_y1 = y1 - half;
-    let mut new_y2 = y2 + half;
-
-    if new_y1 < 0.0 {
-        new_y2 -= new_y1; // shift down to preserve height
-        new_y1 = 0.0;
-    }
-    if new_y2 > page_h {
-        let overflow = new_y2 - page_h;
-        new_y1 = (new_y1 - overflow).max(0.0);
-        new_y2 = page_h;
-    }
-
-    BoundingBox::from_coords(x1.max(0.0), new_y1, x2.min(page_w), new_y2)
 }
 
 fn assign_order_indices(elements: &mut [LayoutElement]) {

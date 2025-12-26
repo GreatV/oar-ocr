@@ -198,6 +198,11 @@ pub struct LayoutElement {
 pub struct LayoutDetectionOutput {
     /// Detected layout elements per image
     pub elements: Vec<Vec<LayoutElement>>,
+    /// Whether elements are already sorted by reading order (e.g., from PP-DocLayoutV2)
+    ///
+    /// When `true`, downstream consumers can skip reading order sorting algorithms
+    /// as the elements are already in the correct reading order based on model output.
+    pub is_reading_order_sorted: bool,
 }
 
 impl LayoutDetectionOutput {
@@ -205,6 +210,7 @@ impl LayoutDetectionOutput {
     pub fn empty() -> Self {
         Self {
             elements: Vec::new(),
+            is_reading_order_sorted: false,
         }
     }
 
@@ -212,7 +218,14 @@ impl LayoutDetectionOutput {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             elements: Vec::with_capacity(capacity),
+            is_reading_order_sorted: false,
         }
+    }
+
+    /// Sets the reading order sorted flag.
+    pub fn with_reading_order_sorted(mut self, sorted: bool) -> Self {
+        self.is_reading_order_sorted = sorted;
+        self
     }
 }
 
@@ -322,6 +335,7 @@ mod tests {
         };
         let output = LayoutDetectionOutput {
             elements: vec![vec![element]],
+            is_reading_order_sorted: false,
         };
         assert!(task.validate_output(&output).is_ok());
     }

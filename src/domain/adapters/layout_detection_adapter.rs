@@ -557,7 +557,10 @@ impl LayoutDetectionAdapter {
             elements.push(img_elements);
         }
 
-        LayoutDetectionOutput { elements }
+        LayoutDetectionOutput {
+            elements,
+            is_reading_order_sorted: false, // Will be set by execute() based on model output
+        }
     }
 }
 
@@ -627,8 +630,13 @@ impl ModelAdapter for LayoutDetectionAdapter {
             }
         };
 
+        // Check if predictions include reading order info (8-dim format from PP-DocLayoutV2)
+        // Shape is [batch, num_boxes, 1, N] where N=8 indicates reading order is included
+        let has_reading_order = predictions.shape().get(3).copied().unwrap_or(0) == 8;
+
         // Postprocess predictions
-        let output = self.postprocess(&predictions, img_shapes, effective_config);
+        let mut output = self.postprocess(&predictions, img_shapes, effective_config);
+        output.is_reading_order_sorted = has_reading_order;
 
         Ok(output)
     }

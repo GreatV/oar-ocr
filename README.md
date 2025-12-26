@@ -84,11 +84,20 @@ huggingface-cli download PaddlePaddle/PaddleOCR-VL --local-dir PaddleOCR-VL
 ```
 
 ```bash
-# Element-level OCR (single prompt)
-cargo run --release --features paddleocr-vl --example paddleocr_vl -- --model-dir PaddleOCR-VL --task ocr document.jpg
+# Element-level OCR
+cargo run --release --features paddleocr-vl,cuda --example paddleocr_vl -- --model-dir PaddleOCR-VL --task ocr document.jpg
+
+# Table recognition (outputs HTML)
+cargo run --release --features paddleocr-vl,cuda --example paddleocr_vl -- --model-dir PaddleOCR-VL --task table table.jpg
+
+# Formula recognition (outputs LaTeX)
+cargo run --release --features paddleocr-vl,cuda --example paddleocr_vl -- --model-dir PaddleOCR-VL --task formula formula.png
+
+# Chart recognition
+cargo run --release --features paddleocr-vl,cuda --example paddleocr_vl -- --model-dir PaddleOCR-VL --task chart chart.png
 
 # Layout-first doc parsing (PP-DocLayoutV2 -> PaddleOCR-VL)
-cargo run --release --features paddleocr-vl,cuda --example paddleocr_vl -- --model-dir PaddleOCR-VL --task ocr document.jpg
+cargo run --release --features paddleocr-vl,cuda --example paddleocr_vl -- --model-dir PaddleOCR-VL --layout-model pp-doclayoutv2.onnx document.jpg
 ```
 
 ## Acknowledgments

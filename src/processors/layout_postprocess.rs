@@ -211,32 +211,51 @@ impl LayoutPostProcess {
     }
 
     /// Process PP-DocLayout model output.
+    ///
+    /// Handles both 6-dim format (PP-DocLayout) and 8-dim format (PP-DocLayoutV2).
+    /// - 6-dim: [class_id, score, x1, y1, x2, y2]
+    /// - 8-dim: [class_id, score, x1, y1, x2, y2, col_index, row_index]
+    ///
+    /// For 8-dim format, boxes are sorted by reading order (col_index ascending, row_index ascending)
+    /// after NMS filtering.
     fn process_pp_doclayout(
         &self,
         predictions: ArrayView3<f32>,
         img_shape: &ImageScaleInfo,
     ) -> (Vec<BoundingBox>, Vec<usize>, Vec<f32>) {
-        // PP-DocLayout outputs in [num_boxes, 1, 6] format
-        // where each box is [class_id, score, x1, y1, x2, y2]
+        // PP-DocLayout outputs in [num_boxes, 1, N] format
+        // where N is 6 or 8 depending on model version
         let shape = predictions.shape();
         let num_boxes = shape[0];
+        let feature_dim = shape[2];
 
         let mut boxes = Vec::new();
         let mut classes = Vec::new();
         let mut scores = Vec::new();
+        let mut reading_orders: Vec<(f32, f32)> = Vec::new();
 
         let orig_width = img_shape.src_w;
         let orig_height = img_shape.src_h;
 
+        let has_reading_order = feature_dim == 8;
+
         // Extract predictions
         for box_idx in 0..num_boxes {
-            // predictions is [num_boxes, 1, 6], so we use 3D indexing [box_idx, 0, i]
+            // predictions is [num_boxes, 1, N], so we use 3D indexing [box_idx, 0, i]
             let class_id = predictions[[box_idx, 0, 0]] as i32;
             let score = predictions[[box_idx, 0, 1]];
             let x1 = predictions[[box_idx, 0, 2]];
             let y1 = predictions[[box_idx, 0, 3]];
             let x2 = predictions[[box_idx, 0, 4]];
             let y2 = predictions[[box_idx, 0, 5]];
+
+            // Extract reading order info if available (8-dim format)
+            // Default to (0, box_idx) for 6-dim format to maintain original order
+            let reading_order = if has_reading_order {
+                (predictions[[box_idx, 0, 6]], predictions[[box_idx, 0, 7]])
+            } else {
+                (0.0, box_idx as f32)
+            };
 
             // Filter by threshold and valid class
             if score < self.score_threshold
@@ -264,13 +283,94 @@ impl LayoutPostProcess {
             boxes.push(bbox);
             classes.push(class_id as usize);
             scores.push(score);
+            reading_orders.push(reading_order);
         }
 
-        // Apply NMS
-        let (filtered_boxes, filtered_classes, filtered_scores) =
-            self.apply_nms(boxes, classes, scores);
+        // Apply NMS with reading order preservation
+        let (filtered_boxes, filtered_classes, filtered_scores, filtered_reading_orders) =
+            self.apply_nms_with_reading_order(boxes, classes, scores, reading_orders);
 
-        (filtered_boxes, filtered_classes, filtered_scores)
+        // Sort by reading order if we have 8-dim format
+        if has_reading_order && !filtered_boxes.is_empty() {
+            let mut indices: Vec<usize> = (0..filtered_boxes.len()).collect();
+            indices.sort_by(|&i, &j| {
+                let (col_i, row_i) = filtered_reading_orders[i];
+                let (col_j, row_j) = filtered_reading_orders[j];
+                // Sort by col_index ascending, then row_index ascending
+                let col_cmp = col_i
+                    .partial_cmp(&col_j)
+                    .unwrap_or(std::cmp::Ordering::Equal);
+                if col_cmp == std::cmp::Ordering::Equal {
+                    row_i
+                        .partial_cmp(&row_j)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                } else {
+                    col_cmp
+                }
+            });
+
+            let sorted_boxes = indices.iter().map(|&i| filtered_boxes[i].clone()).collect();
+            let sorted_classes = indices.iter().map(|&i| filtered_classes[i]).collect();
+            let sorted_scores = indices.iter().map(|&i| filtered_scores[i]).collect();
+
+            (sorted_boxes, sorted_classes, sorted_scores)
+        } else {
+            (filtered_boxes, filtered_classes, filtered_scores)
+        }
+    }
+
+    /// Apply NMS with reading order preservation.
+    fn apply_nms_with_reading_order(
+        &self,
+        boxes: Vec<BoundingBox>,
+        classes: Vec<usize>,
+        scores: Vec<f32>,
+        reading_orders: Vec<(f32, f32)>,
+    ) -> (Vec<BoundingBox>, Vec<usize>, Vec<f32>, Vec<(f32, f32)>) {
+        if boxes.is_empty() {
+            return (boxes, classes, scores, reading_orders);
+        }
+
+        // Sort by score in descending order
+        let mut indices: Vec<usize> = (0..boxes.len()).collect();
+        indices.sort_by(|&a, &b| scores[b].partial_cmp(&scores[a]).unwrap());
+
+        let mut keep = Vec::new();
+        let mut suppressed = vec![false; boxes.len()];
+
+        for &i in &indices {
+            if suppressed[i] {
+                continue;
+            }
+
+            keep.push(i);
+            if keep.len() >= self.max_detections {
+                break;
+            }
+
+            // Suppress boxes with high IoU
+            for &j in &indices {
+                if i != j && !suppressed[j] && classes[i] == classes[j] {
+                    let iou = self.calculate_iou(&boxes[i], &boxes[j]);
+                    if iou > self.nms_threshold {
+                        suppressed[j] = true;
+                    }
+                }
+            }
+        }
+
+        let filtered_boxes: Vec<BoundingBox> = keep.iter().map(|&i| boxes[i].clone()).collect();
+        let filtered_classes: Vec<usize> = keep.iter().map(|&i| classes[i]).collect();
+        let filtered_scores: Vec<f32> = keep.iter().map(|&i| scores[i]).collect();
+        let filtered_reading_orders: Vec<(f32, f32)> =
+            keep.iter().map(|&i| reading_orders[i]).collect();
+
+        (
+            filtered_boxes,
+            filtered_classes,
+            filtered_scores,
+            filtered_reading_orders,
+        )
     }
 
     /// Process standard detection model output.
