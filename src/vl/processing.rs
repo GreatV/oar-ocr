@@ -479,7 +479,7 @@ fn escape_html_text(input: &str) -> String {
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"), // Use unicode escape for apostrophe
+            '\'' => out.push_str("&#39;"), // Numeric HTML entity for apostrophe
             _ => out.push(ch),
         }
     }
