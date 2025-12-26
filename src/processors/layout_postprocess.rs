@@ -11,6 +11,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 type LayoutPostprocessOutput = (Vec<Vec<BoundingBox>>, Vec<Vec<usize>>, Vec<Vec<f32>>);
+type NmsResult = (Vec<BoundingBox>, Vec<usize>, Vec<f32>, Vec<(f32, f32)>);
 
 /// Layout detection post-processor for models like PicoDet and RT-DETR.
 ///
@@ -326,7 +327,7 @@ impl LayoutPostProcess {
         classes: Vec<usize>,
         scores: Vec<f32>,
         reading_orders: Vec<(f32, f32)>,
-    ) -> (Vec<BoundingBox>, Vec<usize>, Vec<f32>, Vec<(f32, f32)>) {
+    ) -> NmsResult {
         if boxes.is_empty() {
             return (boxes, classes, scores, reading_orders);
         }
