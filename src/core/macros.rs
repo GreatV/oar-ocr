@@ -3,10 +3,6 @@
 //! This module provides utility macros to reduce code duplication across
 //! the OCR pipeline, particularly for builder patterns and metrics collection.
 
-// ============================================================================
-// Task Registration Macros
-// ============================================================================
-
 /// Central task registry macro that defines all tasks in a single location.
 ///
 /// This macro uses the "callback pattern" - it takes a callback macro name and
@@ -25,7 +21,6 @@
 ///     conversion: into_method_name,
 ///     name: "snake_case_name",
 ///     doc: "Documentation string",
-///     [boxed: true,]  // optional, for large adapters
 /// }
 /// ```
 ///
@@ -108,7 +103,6 @@ macro_rules! with_task_registry {
                 conversion: into_formula_recognition,
                 name: "formula_recognition",
                 doc: "Formula recognition - converting mathematical formulas to LaTeX",
-                boxed: true,
             },
             SealTextDetection {
                 output: $crate::domain::tasks::SealTextDetectionOutput,
@@ -153,7 +147,6 @@ macro_rules! impl_task_type_enum {
             conversion: $conversion:ident,
             name: $name:literal,
             doc: $doc:literal,
-            $(boxed: $boxed:literal,)?
         }
     ),* $(,)?) => {
         /// Represents the type of OCR task being performed.
@@ -188,7 +181,6 @@ macro_rules! impl_dyn_task_output {
             conversion: $conversion:ident,
             name: $name:literal,
             doc: $doc:literal,
-            $(boxed: $boxed:literal,)?
         }
     ),* $(,)?) => {
         /// Type-erased output from dynamic adapter execution.
@@ -258,7 +250,6 @@ macro_rules! impl_task_adapter {
             conversion: $conversion:ident,
             name: $name:literal,
             doc: $doc:literal,
-            $(boxed: $boxed:literal,)?
         }
     ),* $(,)?) => {
         /// Task-specific adapter enum with uniform Box storage.
@@ -352,10 +343,6 @@ macro_rules! impl_task_adapter {
         Ok(DynTaskOutput::$task(output))
     }};
 }
-
-// ============================================================================
-// End Task Registration Macros
-// ============================================================================
 
 /// Macro to handle optional nested config initialization in builders.
 ///
