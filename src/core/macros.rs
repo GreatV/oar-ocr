@@ -16,7 +16,7 @@
 /// TaskName {
 ///     output: OutputType,           // fully qualified: $crate::domain::tasks::*
 ///     adapter: AdapterType,         // fully qualified: $crate::domain::adapters::*
-///     input: image | text_recognition,
+///     input: image,
 ///     constructor: constructor_name,
 ///     conversion: into_method_name,
 ///     name: "snake_case_name",
