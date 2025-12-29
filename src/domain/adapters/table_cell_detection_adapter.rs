@@ -8,7 +8,7 @@ use crate::core::traits::adapter::{AdapterBuilder, AdapterInfo, ModelAdapter};
 use crate::core::traits::task::{Task, TaskType};
 use crate::core::{OCRError, Tensor4D};
 use crate::domain::tasks::{
-    TableCell, TableCellDetectionConfig, TableCellDetectionOutput, TableCellDetectionTask,
+    TableCellDetection, TableCellDetectionConfig, TableCellDetectionOutput, TableCellDetectionTask,
 };
 use crate::models::detection::{RTDetrModel, RTDetrModelBuilder, RTDetrPostprocessConfig};
 use crate::processors::{ImageScaleInfo, LayoutPostProcess};
@@ -120,7 +120,7 @@ impl TableCellDetectionAdapter {
                     .cloned()
                     .unwrap_or_else(|| "cell".to_string());
 
-                cells.push(TableCell { bbox, score, label });
+                cells.push(TableCellDetection { bbox, score, label });
 
                 if cells.len() >= config.max_cells {
                     break;

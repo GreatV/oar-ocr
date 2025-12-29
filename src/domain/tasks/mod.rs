@@ -25,14 +25,14 @@ pub use formula_recognition::{
     FormulaRecognitionConfig, FormulaRecognitionOutput, FormulaRecognitionTask,
 };
 pub use layout_detection::{
-    LayoutDetectionConfig, LayoutDetectionOutput, LayoutDetectionTask, LayoutElement,
+    LayoutDetectionConfig, LayoutDetectionElement, LayoutDetectionOutput, LayoutDetectionTask,
     MergeBboxMode, UnclipRatio,
 };
 pub use seal_text_detection::{
     SealTextDetectionConfig, SealTextDetectionOutput, SealTextDetectionTask,
 };
 pub use table_cell_detection::{
-    TableCell, TableCellDetectionConfig, TableCellDetectionOutput, TableCellDetectionTask,
+    TableCellDetection, TableCellDetectionConfig, TableCellDetectionOutput, TableCellDetectionTask,
 };
 pub use table_classification::{
     TableClassificationConfig, TableClassificationOutput, TableClassificationTask,

@@ -333,7 +333,7 @@ fn format_element_type(element_type: &str) -> String {
 #[cfg(feature = "visualization")]
 fn visualize_layout(
     img: &RgbImage,
-    elements: &[oar_ocr::domain::tasks::LayoutElement],
+    elements: &[oar_ocr::domain::tasks::LayoutDetectionElement],
     output_path: &PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use imageproc::drawing::draw_hollow_rect_mut;

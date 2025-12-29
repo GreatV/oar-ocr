@@ -17,7 +17,7 @@ use std::path::Path;
 #[derive(Debug, Clone)]
 pub struct TableCellDetectionResult {
     /// Detected table cells for each input image
-    pub cells: Vec<Vec<crate::domain::tasks::table_cell_detection::TableCell>>,
+    pub cells: Vec<Vec<crate::domain::tasks::table_cell_detection::TableCellDetection>>,
 }
 
 /// Table cell detection predictor

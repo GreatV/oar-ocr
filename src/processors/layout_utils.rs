@@ -111,9 +111,13 @@ pub fn associate_ocr_with_layout(
     }
 }
 
-/// Layout element with bounding box and label.
+/// Layout box with bounding box and label for sorting/processing purposes.
+///
+/// This is a lightweight structure used for layout processing utilities like
+/// sorting and OCR association. For final structured output, use
+/// `LayoutElement` from `domain::structure`.
 #[derive(Debug, Clone)]
-pub struct LayoutElement {
+pub struct LayoutBox {
     /// Bounding box of the layout element
     pub bbox: BoundingBox,
     /// Label/type of the layout element (e.g., "text", "title", "table", "figure")
@@ -122,8 +126,8 @@ pub struct LayoutElement {
     pub content: Option<String>,
 }
 
-impl LayoutElement {
-    /// Create a new layout element.
+impl LayoutBox {
+    /// Create a new layout box.
     pub fn new(bbox: BoundingBox, label: String) -> Self {
         Self {
             bbox,
@@ -132,7 +136,7 @@ impl LayoutElement {
         }
     }
 
-    /// Create a layout element with content.
+    /// Create a layout box with content.
     pub fn with_content(bbox: BoundingBox, label: String, content: String) -> Self {
         Self {
             bbox,
@@ -159,13 +163,13 @@ impl LayoutElement {
 ///
 /// # Arguments
 ///
-/// * `elements` - Slice of layout elements to sort
+/// * `elements` - Slice of layout boxes to sort
 /// * `image_width` - Width of the image for column detection
 ///
 /// # Returns
 ///
-/// A vector of sorted layout elements
-pub fn sort_layout_boxes(elements: &[LayoutElement], image_width: f32) -> Vec<LayoutElement> {
+/// A vector of sorted layout boxes
+pub fn sort_layout_boxes(elements: &[LayoutBox], image_width: f32) -> Vec<LayoutBox> {
     let num_boxes = elements.len();
 
     if num_boxes <= 1 {
@@ -173,7 +177,7 @@ pub fn sort_layout_boxes(elements: &[LayoutElement], image_width: f32) -> Vec<La
     }
 
     // Sort by y-coordinate first, then x-coordinate
-    let mut sorted: Vec<LayoutElement> = elements.to_vec();
+    let mut sorted: Vec<LayoutBox> = elements.to_vec();
     sorted.sort_by(|a, b| {
         let a_y = a.bbox.y_min();
         let a_x = a.bbox.x_min();
@@ -604,21 +608,21 @@ pub struct OverlapRemovalResult<T> {
 /// # Example
 ///
 /// ```ignore
-/// use oar_ocr::processors::layout_utils::{remove_overlap_blocks, LayoutElement};
+/// use oar_ocr::processors::layout_utils::{remove_overlap_blocks, LayoutBox};
 /// use oar_ocr::processors::BoundingBox;
 ///
 /// let elements = vec![
-///     LayoutElement::new(BoundingBox::from_coords(0.0, 0.0, 100.0, 100.0), "text".to_string()),
-///     LayoutElement::new(BoundingBox::from_coords(10.0, 10.0, 90.0, 90.0), "text".to_string()),
+///     LayoutBox::new(BoundingBox::from_coords(0.0, 0.0, 100.0, 100.0), "text".to_string()),
+///     LayoutBox::new(BoundingBox::from_coords(10.0, 10.0, 90.0, 90.0), "text".to_string()),
 /// ];
 ///
 /// let result = remove_overlap_blocks(&elements, 0.65);
 /// assert_eq!(result.kept.len(), 1); // Smaller overlapping box was removed
 /// ```
 pub fn remove_overlap_blocks(
-    elements: &[LayoutElement],
+    elements: &[LayoutBox],
     threshold: f32,
-) -> OverlapRemovalResult<LayoutElement> {
+) -> OverlapRemovalResult<LayoutBox> {
     let n = elements.len();
     if n <= 1 {
         return OverlapRemovalResult {
@@ -821,11 +825,11 @@ mod tests {
     #[test]
     fn test_sort_layout_boxes_single_column() {
         let elements = vec![
-            LayoutElement::new(
+            LayoutBox::new(
                 BoundingBox::from_coords(10.0, 50.0, 200.0, 70.0),
                 "text".to_string(),
             ), // bottom
-            LayoutElement::new(
+            LayoutBox::new(
                 BoundingBox::from_coords(10.0, 10.0, 200.0, 30.0),
                 "title".to_string(),
             ), // top
@@ -843,25 +847,25 @@ mod tests {
 
         let elements = vec![
             // Left column boxes (x < w/4 and x2 < 3w/5)
-            LayoutElement::new(
+            LayoutBox::new(
                 BoundingBox::from_coords(10.0, 100.0, 90.0, 120.0),
                 "left_bottom".to_string(),
             ),
-            LayoutElement::new(
+            LayoutBox::new(
                 BoundingBox::from_coords(10.0, 50.0, 90.0, 70.0),
                 "left_top".to_string(),
             ),
             // Right column boxes (x > 2w/5)
-            LayoutElement::new(
+            LayoutBox::new(
                 BoundingBox::from_coords(250.0, 100.0, 390.0, 120.0),
                 "right_bottom".to_string(),
             ),
-            LayoutElement::new(
+            LayoutBox::new(
                 BoundingBox::from_coords(250.0, 50.0, 390.0, 70.0),
                 "right_top".to_string(),
             ),
             // Full-width box (neither left nor right)
-            LayoutElement::new(
+            LayoutBox::new(
                 BoundingBox::from_coords(10.0, 10.0, 390.0, 30.0),
                 "title".to_string(),
             ),
@@ -897,14 +901,14 @@ mod tests {
 
     #[test]
     fn test_sort_layout_boxes_empty() {
-        let elements: Vec<LayoutElement> = Vec::new();
+        let elements: Vec<LayoutBox> = Vec::new();
         let sorted = sort_layout_boxes(&elements, 300.0);
         assert!(sorted.is_empty());
     }
 
     #[test]
     fn test_sort_layout_boxes_single_element() {
-        let elements = vec![LayoutElement::new(
+        let elements = vec![LayoutBox::new(
             BoundingBox::from_coords(10.0, 10.0, 100.0, 30.0),
             "text".to_string(),
         )];

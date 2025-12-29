@@ -29,7 +29,7 @@ pub use image::{
 pub use tensor::*;
 
 // Re-export transform utility functions
-pub use transform::{Point2f, get_rotate_crop_image};
+pub use transform::get_rotate_crop_image;
 
 // Re-export shared processors-style utilities
 pub use bbox_crop::BBoxCrop;

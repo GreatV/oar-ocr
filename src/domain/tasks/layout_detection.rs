@@ -182,14 +182,17 @@ impl_config_validator!(LayoutDetectionConfig {
     max_elements: min(1),
 });
 
-/// A detected layout element.
+/// A detected layout element from the layout detection model.
+///
+/// This represents the raw output from layout detection before conversion
+/// to the final `LayoutElement` in `domain::structure`.
 #[derive(Debug, Clone)]
-pub struct LayoutElement {
+pub struct LayoutDetectionElement {
     /// Bounding box of the element
     pub bbox: BoundingBox,
-    /// Type of layout element (string label)
+    /// Type of layout element (raw string label from model)
     pub element_type: String,
-    /// Confidence score
+    /// Confidence score (0.0 to 1.0)
     pub score: f32,
 }
 
@@ -197,7 +200,7 @@ pub struct LayoutElement {
 #[derive(Debug, Clone)]
 pub struct LayoutDetectionOutput {
     /// Detected layout elements per image
-    pub elements: Vec<Vec<LayoutElement>>,
+    pub elements: Vec<Vec<LayoutDetectionElement>>,
     /// Whether elements are already sorted by reading order (e.g., from PP-DocLayoutV2)
     ///
     /// When `true`, downstream consumers can skip reading order sorting algorithms
@@ -328,7 +331,7 @@ mod tests {
             Point::new(10.0, 10.0),
             Point::new(0.0, 10.0),
         ]);
-        let element = LayoutElement {
+        let element = LayoutDetectionElement {
             bbox: box1,
             element_type: "text".to_string(),
             score: 0.95,

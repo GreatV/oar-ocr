@@ -35,14 +35,17 @@ impl_config_validator!(TableCellDetectionConfig {
     max_cells: min(1),
 });
 
-/// A detected table cell.
+/// A detected table cell from the table cell detection model.
+///
+/// This represents the raw output from table cell detection before enrichment
+/// to `TableCell` in `domain::structure` with grid position and text content.
 #[derive(Debug, Clone)]
-pub struct TableCell {
+pub struct TableCellDetection {
     /// Bounding box of the detected cell.
     pub bbox: BoundingBox,
-    /// Confidence score associated with the detection.
+    /// Confidence score associated with the detection (0.0 to 1.0).
     pub score: f32,
-    /// Optional label for the cell (e.g., "cell").
+    /// Label for the cell (e.g., "cell").
     pub label: String,
 }
 
@@ -50,7 +53,7 @@ pub struct TableCell {
 #[derive(Debug, Clone)]
 pub struct TableCellDetectionOutput {
     /// Detected cells per image, preserving input order.
-    pub cells: Vec<Vec<TableCell>>,
+    pub cells: Vec<Vec<TableCellDetection>>,
 }
 
 impl TableCellDetectionOutput {
@@ -161,7 +164,7 @@ mod tests {
             Point::new(10.0, 10.0),
             Point::new(0.0, 10.0),
         ]);
-        let cell = TableCell {
+        let cell = TableCellDetection {
             bbox,
             score: 0.95,
             label: "cell".to_string(),

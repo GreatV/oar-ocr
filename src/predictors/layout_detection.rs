@@ -15,7 +15,7 @@ use std::path::Path;
 #[derive(Debug, Clone)]
 pub struct LayoutDetectionResult {
     /// Detected layout elements for each input image
-    pub elements: Vec<Vec<crate::domain::tasks::layout_detection::LayoutElement>>,
+    pub elements: Vec<Vec<crate::domain::tasks::layout_detection::LayoutDetectionElement>>,
     /// Whether elements are already sorted by reading order (e.g., from PP-DocLayoutV2)
     ///
     /// When `true`, downstream consumers can skip reading order sorting algorithms

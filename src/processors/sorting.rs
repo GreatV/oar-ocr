@@ -492,17 +492,20 @@ fn recursive_xy_cut(boxes: &[[i32; 4]], indices: &[usize], result: &mut Vec<usiz
     }
 }
 
-/// Represents a region block for hierarchical sorting.
+/// Represents a sortable region for hierarchical sorting.
+///
+/// This is a lightweight internal structure used for sorting regions.
+/// For document structure regions, use `RegionBlock` from `domain::structure`.
 #[derive(Debug, Clone)]
-pub struct RegionBlock {
+pub struct SortableRegion {
     /// Region bounding box
     pub bbox: BoundingBox,
     /// Original index of this region in the input
     pub original_index: usize,
 }
 
-impl RegionBlock {
-    /// Creates a new region block.
+impl SortableRegion {
+    /// Creates a new sortable region.
     pub fn new(bbox: BoundingBox, original_index: usize) -> Self {
         Self {
             bbox,
@@ -574,7 +577,7 @@ pub fn calculate_overlap_ratio(a: &BoundingBox, b: &BoundingBox) -> f32 {
 /// # Arguments
 ///
 /// * `elements` - Bounding boxes of layout elements
-/// * `regions` - Region blocks detected by PP-DocBlockLayout
+/// * `regions` - Sortable regions for hierarchical ordering
 /// * `threshold` - Minimum overlap ratio to assign element to region (0.0-1.0)
 ///
 /// # Returns
@@ -583,7 +586,7 @@ pub fn calculate_overlap_ratio(a: &BoundingBox, b: &BoundingBox) -> f32 {
 /// or None if the element doesn't belong to any region.
 pub fn assign_elements_to_regions(
     elements: &[BoundingBox],
-    regions: &[RegionBlock],
+    regions: &[SortableRegion],
     threshold: f32,
 ) -> Vec<Option<usize>> {
     elements
@@ -608,8 +611,8 @@ pub fn assign_elements_to_regions(
 
 /// Sorts regions in reading order (top-to-bottom, left-to-right).
 ///
-/// Uses XY-cut algorithm for consistent ordering with PP-StructureV3.
-pub fn sort_regions(regions: &[RegionBlock]) -> Vec<usize> {
+/// Uses XY-cut algorithm for consistent ordering.
+pub fn sort_regions(regions: &[SortableRegion]) -> Vec<usize> {
     if regions.is_empty() {
         return Vec::new();
     }
@@ -629,7 +632,7 @@ pub fn sort_regions(regions: &[RegionBlock]) -> Vec<usize> {
 /// # Arguments
 ///
 /// * `elements` - Bounding boxes of layout elements
-/// * `regions` - Region blocks for hierarchical grouping
+/// * `regions` - Sortable regions for hierarchical grouping
 /// * `assignments` - Region assignment for each element (from `assign_elements_to_regions`)
 ///
 /// # Returns
@@ -637,7 +640,7 @@ pub fn sort_regions(regions: &[RegionBlock]) -> Vec<usize> {
 /// Indices representing the sorted order of input elements
 pub fn sort_elements_with_regions(
     elements: &[BoundingBox],
-    regions: &[RegionBlock],
+    regions: &[SortableRegion],
     assignments: &[Option<usize>],
 ) -> Vec<usize> {
     if elements.is_empty() {
@@ -724,11 +727,11 @@ pub fn sort_with_region_hierarchy(
         return Vec::new();
     }
 
-    // Convert to RegionBlocks
-    let regions: Vec<RegionBlock> = region_bboxes
+    // Convert to SortableRegions
+    let regions: Vec<SortableRegion> = region_bboxes
         .iter()
         .enumerate()
-        .map(|(idx, bbox)| RegionBlock::new(bbox.clone(), idx))
+        .map(|(idx, bbox)| SortableRegion::new(bbox.clone(), idx))
         .collect();
 
     // Assign elements to regions

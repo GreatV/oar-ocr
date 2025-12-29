@@ -229,7 +229,7 @@ fn bbox_bounds(bbox: &oar_ocr::processors::BoundingBox) -> Option<(f32, f32, f32
 #[cfg(feature = "visualization")]
 fn visualize_cells(
     img: &RgbImage,
-    cells: &[oar_ocr::domain::tasks::TableCell],
+    cells: &[oar_ocr::domain::tasks::TableCellDetection],
     output_dir: &Path,
     image_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {

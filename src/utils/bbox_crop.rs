@@ -1,8 +1,8 @@
 //! Bounding box based image cropping utilities.
 
 use crate::core::OCRError;
-use crate::processors::BoundingBox;
-use crate::utils::transform::{Point2f, get_rotate_crop_image};
+use crate::processors::{BoundingBox, Point};
+use crate::utils::transform::get_rotate_crop_image;
 use image::{RgbImage, imageops};
 
 /// Bounding box based image cropping utilities.
@@ -166,8 +166,8 @@ impl BBoxCrop {
             )));
         }
 
-        // Convert BoundingBox points to Point2f
-        let box_points: Vec<Point2f> = bbox.points.iter().map(|p| Point2f::new(p.x, p.y)).collect();
+        // Convert BoundingBox points to Point
+        let box_points: Vec<Point> = bbox.points.iter().map(|p| Point::new(p.x, p.y)).collect();
 
         // Fast path: if the quadrilateral is axis-aligned rectangle, use simple crop
         if let [p0, p1, p2, p3] = &box_points[..] {
