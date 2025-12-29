@@ -302,8 +302,7 @@ macro_rules! common_builder_methods {
 /// // Works with any builder that has a `with_ort_config` method:
 /// // let builder = apply_ort_config!(
 /// //     DBModelBuilder::new()
-/// //         .preprocess_config(config)
-/// //         .session_pool_size(4),
+/// //         .preprocess_config(config),
 /// //     ort_config
 /// // );
 /// ```

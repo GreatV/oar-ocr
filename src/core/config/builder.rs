@@ -9,7 +9,6 @@ use std::path::PathBuf;
 ///
 /// This struct provides configuration options for building ONNX inference engines,
 /// including runtime settings and model metadata.
-/// Session pool size is managed through `OrtSessionConfig`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInferenceConfig {
     /// The path to the model file (optional).
@@ -21,7 +20,6 @@ pub struct ModelInferenceConfig {
     /// Whether to enable logging (optional).
     pub enable_logging: Option<bool>,
     /// ONNX Runtime session configuration for this model (optional).
-    /// Session pool size is configured here via `with_session_pool_size()`.
     #[serde(default)]
     pub ort_session: Option<OrtSessionConfig>,
 }
