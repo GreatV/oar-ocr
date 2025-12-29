@@ -726,6 +726,7 @@ impl OAROCR {
         mut regions: Vec<CroppedTextRegion>,
     ) -> Result<Vec<Option<crate::oarocr::TextRegion>>, OCRError> {
         use crate::core::registry::DynTaskInput;
+        use crate::core::traits::task::ImageTaskInput;
 
         let mut results: Vec<Option<crate::oarocr::TextRegion>> = vec![None; detection_count];
         if regions.is_empty() {
@@ -747,11 +748,9 @@ impl OAROCR {
                 .map(|r| r.wh_ratio)
                 .fold(base_rec_ratio, |acc, r| acc.max(r));
 
-            let rec_input = DynTaskInput::from_text_recognition(
-                crate::domain::tasks::TextRecognitionInput::new(
-                    chunk.iter().map(|r| r.image.clone()).collect(),
-                ),
-            );
+            let rec_input = DynTaskInput::from_images(ImageTaskInput::new(
+                chunk.iter().map(|r| r.image.clone()).collect(),
+            ));
 
             let rec_output = self
                 .pipeline

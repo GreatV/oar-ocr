@@ -4,10 +4,9 @@
 
 use super::builder::PredictorBuilderState;
 use crate::core::traits::adapter::AdapterBuilder;
+use crate::core::traits::task::ImageTaskInput;
 use crate::domain::adapters::TextRecognitionAdapterBuilder;
-use crate::domain::tasks::text_recognition::{
-    TextRecognitionConfig, TextRecognitionInput, TextRecognitionTask,
-};
+use crate::domain::tasks::text_recognition::{TextRecognitionConfig, TextRecognitionTask};
 use crate::predictors::TaskPredictorCore;
 use image::RgbImage;
 use std::path::{Path, PathBuf};
@@ -37,7 +36,7 @@ impl TextRecognitionPredictor {
         &self,
         images: Vec<RgbImage>,
     ) -> Result<TextRecognitionResult, Box<dyn std::error::Error>> {
-        let input = TextRecognitionInput::new(images.to_vec());
+        let input = ImageTaskInput::new(images);
         let output = self.core.predict(input)?;
         Ok(TextRecognitionResult {
             texts: output.texts,

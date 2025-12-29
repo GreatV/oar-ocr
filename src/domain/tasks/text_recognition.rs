@@ -4,10 +4,9 @@
 
 use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
-use crate::core::traits::task::{Task, TaskSchema, TaskType};
+use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
 use crate::impl_config_validator;
 use crate::utils::{ScoreValidator, validate_length_match, validate_max_value};
-use image::RgbImage;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for text recognition task.
@@ -34,20 +33,6 @@ impl_config_validator!(TextRecognitionConfig {
     score_threshold: range(0.0, 1.0),
     max_text_length: min(1),
 });
-
-/// Input for text recognition task (cropped text images).
-#[derive(Debug, Clone)]
-pub struct TextRecognitionInput {
-    /// Cropped text images to recognize
-    pub images: Vec<RgbImage>,
-}
-
-impl TextRecognitionInput {
-    /// Creates a new text recognition input from owned images.
-    pub fn new(images: Vec<RgbImage>) -> Self {
-        Self { images }
-    }
-}
 
 /// Output from text recognition task.
 #[derive(Debug, Clone)]
@@ -112,7 +97,7 @@ impl TextRecognitionTask {
 
 impl Task for TextRecognitionTask {
     type Config = TextRecognitionConfig;
-    type Input = TextRecognitionInput;
+    type Input = ImageTaskInput;
     type Output = TextRecognitionOutput;
 
     fn task_type(&self) -> TaskType {
@@ -162,6 +147,7 @@ impl Task for TextRecognitionTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::RgbImage;
 
     #[test]
     fn test_text_recognition_task_creation() {
@@ -174,11 +160,11 @@ mod tests {
         let task = TextRecognitionTask::default();
 
         // Empty images should fail
-        let empty_input = TextRecognitionInput::new(vec![]);
+        let empty_input = ImageTaskInput::new(vec![]);
         assert!(task.validate_input(&empty_input).is_err());
 
         // Valid images should pass
-        let valid_input = TextRecognitionInput::new(vec![RgbImage::new(100, 32)]);
+        let valid_input = ImageTaskInput::new(vec![RgbImage::new(100, 32)]);
         assert!(task.validate_input(&valid_input).is_ok());
     }
 
