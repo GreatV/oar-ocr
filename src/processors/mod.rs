@@ -44,7 +44,7 @@ pub use formula_preprocess::{FormulaPreprocessParams, FormulaPreprocessor, norma
 pub use geometry::*;
 pub use layout_postprocess::*;
 pub use layout_utils::{
-    LayoutElement, LayoutOCRAssociation, OverlapRemovalResult, associate_ocr_with_layout,
+    LayoutBox, LayoutOCRAssociation, OverlapRemovalResult, associate_ocr_with_layout,
     get_overlap_boxes_idx, get_overlap_removal_indices, reconcile_table_cells,
     remove_overlap_blocks, reprocess_table_cells_with_ocr, sort_layout_boxes,
 };
@@ -52,9 +52,9 @@ pub use normalization::*;
 pub use resize_detection::*;
 pub use resize_recognition::*;
 pub use sorting::{
-    RegionBlock, SortDirection, assign_elements_to_regions, calculate_iou, calculate_overlap_ratio,
-    sort_boxes_xycut, sort_by_xycut, sort_elements_with_regions, sort_poly_boxes, sort_quad_boxes,
-    sort_regions, sort_with_region_hierarchy,
+    SortDirection, SortableRegion, assign_elements_to_regions, calculate_iou,
+    calculate_overlap_ratio, sort_boxes_xycut, sort_by_xycut, sort_elements_with_regions,
+    sort_poly_boxes, sort_quad_boxes, sort_regions, sort_with_region_hierarchy,
 };
 pub use table_structure_decode::{
     CellGridInfo, TableStructureDecode, TableStructureDecodeOutput, parse_cell_grid_info,

@@ -4,35 +4,11 @@
 //! which are essential for correcting skewed text regions in images.
 
 use crate::core::OCRError;
+use crate::processors::Point;
 use image::{Rgb, RgbImage, imageops};
 use nalgebra::{Matrix3, Vector3};
 use rayon::prelude::*;
 use tracing::debug;
-
-/// A 2D point with floating-point coordinates.
-#[derive(Debug, Clone, Copy)]
-pub struct Point2f {
-    /// X coordinate of the point.
-    pub x: f32,
-    /// Y coordinate of the point.
-    pub y: f32,
-}
-
-impl Point2f {
-    /// Creates a new Point2f with the given coordinates.
-    ///
-    /// # Arguments
-    ///
-    /// * `x` - X coordinate
-    /// * `y` - Y coordinate
-    ///
-    /// # Returns
-    ///
-    /// A new Point2f instance.
-    pub fn new(x: f32, y: f32) -> Self {
-        Self { x, y }
-    }
-}
 
 /// Calculates the Euclidean distance between two points.
 ///
@@ -44,7 +20,7 @@ impl Point2f {
 /// # Returns
 ///
 /// The distance between the two points.
-fn distance(p1: &Point2f, p2: &Point2f) -> f32 {
+fn distance(p1: &Point, p2: &Point) -> f32 {
     (p1.x - p2.x).hypot(p1.y - p2.y)
 }
 
@@ -73,7 +49,7 @@ fn distance(p1: &Point2f, p2: &Point2f) -> f32 {
 /// * The perspective transformation fails
 pub fn get_rotate_crop_image(
     src_image: &RgbImage,
-    box_points: &[Point2f],
+    box_points: &[Point],
 ) -> Result<RgbImage, OCRError> {
     // Validate input
     if box_points.len() != 4 {
@@ -114,9 +90,9 @@ pub fn get_rotate_crop_image(
     let img_crop = imageops::crop_imm(src_image, left, top, crop_width, crop_height).to_image();
 
     // Adjust points relative to the cropped image
-    let points: Vec<Point2f> = box_points
+    let points: Vec<Point> = box_points
         .iter()
-        .map(|p| Point2f::new(p.x - left as f32, p.y - top as f32))
+        .map(|p| Point::new(p.x - left as f32, p.y - top as f32))
         .collect();
 
     // Reorder points to (top-left, top-right, bottom-right, bottom-left)
@@ -158,10 +134,10 @@ pub fn get_rotate_crop_image(
 
     // Define standard points for the target rectangle
     let pts_std = [
-        Point2f::new(0.0, 0.0),
-        Point2f::new(img_crop_width as f32, 0.0),
-        Point2f::new(img_crop_width as f32, img_crop_height as f32),
-        Point2f::new(0.0, img_crop_height as f32),
+        Point::new(0.0, 0.0),
+        Point::new(img_crop_width as f32, 0.0),
+        Point::new(img_crop_width as f32, img_crop_height as f32),
+        Point::new(0.0, img_crop_height as f32),
     ];
 
     // Calculate perspective transformation matrix
@@ -209,8 +185,8 @@ pub fn get_rotate_crop_image(
 /// * Either array doesn't contain exactly 4 points
 /// * The linear system cannot be solved
 fn get_perspective_transform(
-    src_points: &[Point2f],
-    dst_points: &[Point2f],
+    src_points: &[Point],
+    dst_points: &[Point],
 ) -> Result<Matrix3<f32>, OCRError> {
     // Validate input
     if src_points.len() != 4 || dst_points.len() != 4 {
@@ -511,8 +487,8 @@ mod tests {
 
     #[test]
     fn test_distance() {
-        let p1 = Point2f::new(0.0, 0.0);
-        let p2 = Point2f::new(3.0, 4.0);
+        let p1 = Point::new(0.0, 0.0);
+        let p2 = Point::new(3.0, 4.0);
         let dist = distance(&p1, &p2);
         assert_eq!(dist, 5.0);
     }
@@ -521,17 +497,17 @@ mod tests {
     fn test_get_perspective_transform() {
         // Define a simple square in source and destination
         let src_points = [
-            Point2f::new(0.0, 0.0),
-            Point2f::new(1.0, 0.0),
-            Point2f::new(1.0, 1.0),
-            Point2f::new(0.0, 1.0),
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(1.0, 1.0),
+            Point::new(0.0, 1.0),
         ];
 
         let dst_points = [
-            Point2f::new(0.0, 0.0),
-            Point2f::new(2.0, 0.0),
-            Point2f::new(2.0, 2.0),
-            Point2f::new(0.0, 2.0),
+            Point::new(0.0, 0.0),
+            Point::new(2.0, 0.0),
+            Point::new(2.0, 2.0),
+            Point::new(0.0, 2.0),
         ];
 
         let transform = get_perspective_transform(&src_points, &dst_points).unwrap();
@@ -543,13 +519,13 @@ mod tests {
     #[test]
     fn test_get_perspective_transform_invalid_input() {
         // Test with wrong number of points
-        let src_points = [Point2f::new(0.0, 0.0), Point2f::new(1.0, 0.0)];
+        let src_points = [Point::new(0.0, 0.0), Point::new(1.0, 0.0)];
 
         let dst_points = [
-            Point2f::new(0.0, 0.0),
-            Point2f::new(2.0, 0.0),
-            Point2f::new(2.0, 2.0),
-            Point2f::new(0.0, 2.0),
+            Point::new(0.0, 0.0),
+            Point::new(2.0, 0.0),
+            Point::new(2.0, 2.0),
+            Point::new(0.0, 2.0),
         ];
 
         let result = get_perspective_transform(&src_points, &dst_points);
@@ -562,7 +538,7 @@ mod tests {
         let image = RgbImage::new(4, 4);
 
         // Test with wrong number of points
-        let points = vec![Point2f::new(0.0, 0.0), Point2f::new(1.0, 0.0)];
+        let points = vec![Point::new(0.0, 0.0), Point::new(1.0, 0.0)];
 
         let result = get_rotate_crop_image(&image, &points);
         assert!(result.is_err());
@@ -584,10 +560,10 @@ mod tests {
 
         // Define a simple square region
         let points = vec![
-            Point2f::new(1.0, 1.0),
-            Point2f::new(3.0, 1.0),
-            Point2f::new(3.0, 3.0),
-            Point2f::new(1.0, 3.0),
+            Point::new(1.0, 1.0),
+            Point::new(3.0, 1.0),
+            Point::new(3.0, 3.0),
+            Point::new(1.0, 3.0),
         ];
 
         let result = get_rotate_crop_image(&image, &points);

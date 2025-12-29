@@ -9,7 +9,8 @@ use crate::core::traits::{
 };
 use crate::core::{OCRError, TaskType, Tensor4D};
 use crate::domain::tasks::{
-    LayoutDetectionConfig, LayoutDetectionOutput, LayoutDetectionTask, LayoutElement, UnclipRatio,
+    LayoutDetectionConfig, LayoutDetectionElement, LayoutDetectionOutput, LayoutDetectionTask,
+    UnclipRatio,
 };
 use crate::models::detection::{
     PPDocLayoutModel, PPDocLayoutModelBuilder, PPDocLayoutPostprocessConfig, PicoDetModel,
@@ -540,7 +541,7 @@ impl LayoutDetectionAdapter {
                 let threshold = config.get_class_threshold(&element_type);
 
                 if score >= threshold {
-                    let element = LayoutElement {
+                    let element = LayoutDetectionElement {
                         bbox: bbox.clone(),
                         element_type,
                         score,

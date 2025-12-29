@@ -12,6 +12,8 @@ pub mod tasks;
 
 pub use orientation::*;
 pub use predictions::*;
-// Note: structure module is not re-exported with * to avoid naming conflicts
-// with tasks module (LayoutElement, TableCell). Use domain::structure::* explicitly.
+// Note: structure module is not re-exported with * to keep explicit separation.
+// Tasks exports: LayoutDetectionElement, TableCellDetection (detection outputs)
+// Structure exports: LayoutElement, TableCell (enriched results)
+// Use domain::structure::* explicitly when needed.
 pub use tasks::*;
