@@ -141,7 +141,7 @@ impl TableAnalyzer {
         let table_x_offset = table_bbox.x_min().max(0.0).floor();
         let table_y_offset = table_bbox.y_min().max(0.0).floor();
 
-        let cropped_table_arc = std::sync::Arc::new(cropped_table.clone());
+        let cropped_table_arc = std::sync::Arc::new(cropped_table);
         let (table_for_recognition, table_rotation) =
             if let Some(ref orientation_adapter) = self.table_orientation_adapter {
                 match crate::oarocr::preprocess::correct_image_orientation(
