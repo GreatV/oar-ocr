@@ -293,12 +293,12 @@ impl AdapterBuilder for TableCellDetectionAdapterBuilder {
             message: "Table cell model configuration is required".to_string(),
         })?;
 
-        let (task_config, _session_pool_size, ort_config) = self
-            .config
-            .into_validated_parts()
-            .map_err(|err| OCRError::ConfigError {
-                message: err.to_string(),
-            })?;
+        let (task_config, ort_config) =
+            self.config
+                .into_validated_parts()
+                .map_err(|err| OCRError::ConfigError {
+                    message: err.to_string(),
+                })?;
 
         TableCellDetectionAdapterBuilder::build_with_config(
             model_path,

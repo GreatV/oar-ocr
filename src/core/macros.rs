@@ -243,11 +243,6 @@ macro_rules! impl_common_builder_methods {
                 self.$common_field = self.$common_field.ort_session(config);
                 self
             }
-            /// Sets the session pool size for concurrent predictions (>=1)
-            pub fn session_pool_size(mut self, size: usize) -> Self {
-                self.$common_field = self.$common_field.session_pool_size(size);
-                self
-            }
         }
     };
 }
@@ -283,12 +278,44 @@ macro_rules! common_builder_methods {
             self.$common_field = self.$common_field.ort_session(config);
             self
         }
-        /// Sets the session pool size for concurrent predictions (>=1)
-        pub fn session_pool_size(mut self, size: usize) -> Self {
-            self.$common_field = self.$common_field.session_pool_size(size);
-            self
-        }
     };
+}
+
+/// Macro to conditionally apply OrtSessionConfig to any builder that has `with_ort_config`.
+///
+/// This macro eliminates the repeated pattern:
+/// ```rust,no_run
+/// // let mut builder = SomeBuilder::new();
+/// // if let Some(ort_config) = ort_config {
+/// //     builder = builder.with_ort_config(ort_config);
+/// // }
+/// ```
+///
+/// Instead, use:
+/// ```rust,no_run
+/// // let builder = apply_ort_config!(SomeBuilder::new(), ort_config);
+/// ```
+///
+/// # Usage
+///
+/// ```rust,no_run
+/// // Works with any builder that has a `with_ort_config` method:
+/// // let builder = apply_ort_config!(
+/// //     DBModelBuilder::new()
+/// //         .preprocess_config(config),
+/// //     ort_config
+/// // );
+/// ```
+#[macro_export]
+macro_rules! apply_ort_config {
+    ($builder:expr, $ort_config:expr) => {{
+        let builder = $builder;
+        if let Some(cfg) = $ort_config {
+            builder.with_ort_config(cfg)
+        } else {
+            builder
+        }
+    }};
 }
 
 #[cfg(test)]

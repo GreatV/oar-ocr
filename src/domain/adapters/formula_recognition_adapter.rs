@@ -1,5 +1,6 @@
 //! Formula recognition adapter using formula recognition models.
 
+use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::adapter::{AdapterBuilder, AdapterInfo, ModelAdapter};
 use crate::core::traits::task::{Task, TaskType};
@@ -273,12 +274,6 @@ impl FormulaRecognitionAdapterBuilder {
         self
     }
 
-    /// Sets the session pool size.
-    pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.config = self.config.with_session_pool_size(size);
-        self
-    }
-
     /// Sets the model name override.
     pub fn model_name(mut self, name: impl Into<String>) -> Self {
         self.model_name_override = Some(name.into());
@@ -309,12 +304,12 @@ impl AdapterBuilder for FormulaRecognitionAdapterBuilder {
     type Adapter = FormulaRecognitionAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, session_pool_size, ort_config) = self
-            .config
-            .into_validated_parts()
-            .map_err(|err| OCRError::ConfigError {
-                message: err.to_string(),
-            })?;
+        let (task_config, ort_config) =
+            self.config
+                .into_validated_parts()
+                .map_err(|err| OCRError::ConfigError {
+                    message: err.to_string(),
+                })?;
 
         let model_config = self.model_config.ok_or_else(|| OCRError::InvalidInput {
             message: "Model configuration not set".to_string(),
@@ -323,25 +318,20 @@ impl AdapterBuilder for FormulaRecognitionAdapterBuilder {
         // Build the model based on type
         let model = match self.model_type {
             FormulaModelType::PPFormulaNet => {
-                let mut builder =
-                    PPFormulaNetModelBuilder::new().session_pool_size(session_pool_size);
+                let mut builder = PPFormulaNetModelBuilder::new();
                 if let Some((width, height)) = self.target_size {
                     builder = builder.target_size(width, height);
                 }
-                if let Some(ort_config) = ort_config.clone() {
-                    builder = builder.with_ort_config(ort_config);
-                }
-                FormulaModel::PPFormulaNet(builder.build(model_path)?)
+                FormulaModel::PPFormulaNet(
+                    apply_ort_config!(builder, ort_config.clone()).build(model_path)?,
+                )
             }
             FormulaModelType::UniMERNet => {
-                let mut builder = UniMERNetModelBuilder::new().session_pool_size(session_pool_size);
+                let mut builder = UniMERNetModelBuilder::new();
                 if let Some((width, height)) = self.target_size {
                     builder = builder.target_size(width, height);
                 }
-                if let Some(ort_config) = ort_config {
-                    builder = builder.with_ort_config(ort_config);
-                }
-                FormulaModel::UniMERNet(builder.build(model_path)?)
+                FormulaModel::UniMERNet(apply_ort_config!(builder, ort_config).build(model_path)?)
             }
         };
 
@@ -415,12 +405,6 @@ impl PPFormulaNetAdapterBuilder {
     /// Sets the tokenizer path.
     pub fn tokenizer_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
         self.inner = self.inner.tokenizer_path(path);
-        self
-    }
-
-    /// Sets the session pool size.
-    pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.inner = self.inner.session_pool_size(size);
         self
     }
 
@@ -511,12 +495,6 @@ impl UniMERNetFormulaAdapterBuilder {
         self
     }
 
-    /// Sets the session pool size.
-    pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.inner = self.inner.session_pool_size(size);
-        self
-    }
-
     /// Sets the model name override.
     pub fn model_name(mut self, name: impl Into<String>) -> Self {
         self.inner = self.inner.model_name(name);
@@ -599,12 +577,10 @@ mod tests {
         let builder = PPFormulaNetAdapterBuilder::new()
             .score_threshold(0.9)
             .max_length(1024)
-            .session_pool_size(4)
             .target_size(640, 640);
 
         assert_eq!(builder.inner.config.task_config().score_threshold, 0.9);
         assert_eq!(builder.inner.config.task_config().max_length, 1024);
-        assert_eq!(builder.inner.config.session_pool_size(), 4);
         assert_eq!(builder.inner.target_size, Some((640, 640)));
     }
 
@@ -640,12 +616,10 @@ mod tests {
         let builder = UniMERNetFormulaAdapterBuilder::new()
             .score_threshold(0.85)
             .max_length(768)
-            .session_pool_size(2)
             .target_size(512, 512);
 
         assert_eq!(builder.inner.config.task_config().score_threshold, 0.85);
         assert_eq!(builder.inner.config.task_config().max_length, 768);
-        assert_eq!(builder.inner.config.session_pool_size(), 2);
         assert_eq!(builder.inner.target_size, Some((512, 512)));
     }
 

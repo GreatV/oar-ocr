@@ -235,8 +235,6 @@ pub struct CRNNModelBuilder {
     preprocess_config: CRNNPreprocessConfig,
     /// Character dictionary
     character_dict: Option<Vec<String>>,
-    /// Session pool size for ONNX Runtime
-    session_pool_size: usize,
     /// ONNX Runtime session configuration
     ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
@@ -247,7 +245,6 @@ impl CRNNModelBuilder {
         Self {
             preprocess_config: CRNNPreprocessConfig::default(),
             character_dict: None,
-            session_pool_size: 1,
             ort_config: None,
         }
     }
@@ -276,12 +273,6 @@ impl CRNNModelBuilder {
         self
     }
 
-    /// Sets the session pool size.
-    pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.session_pool_size = size;
-        self
-    }
-
     /// Sets the ONNX Runtime session configuration.
     pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
         self.ort_config = Some(config);
@@ -291,16 +282,13 @@ impl CRNNModelBuilder {
     /// Builds the CRNN model.
     pub fn build(self, model_path: &Path) -> Result<CRNNModel, OCRError> {
         // Create ONNX inference engine
-        let inference = if self.session_pool_size > 1 || self.ort_config.is_some() {
-            // Use session pool for concurrent inference
+        let inference = if self.ort_config.is_some() {
             let common = crate::core::config::ModelInferenceConfig {
-                session_pool_size: Some(self.session_pool_size),
                 ort_session: self.ort_config,
                 ..Default::default()
             };
             OrtInfer::from_config(&common, model_path, None)?
         } else {
-            // Single session
             OrtInfer::new(model_path, None)?
         };
 

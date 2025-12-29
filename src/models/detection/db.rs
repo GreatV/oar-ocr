@@ -218,8 +218,6 @@ pub struct DBModelBuilder {
     preprocess_config: DBPreprocessConfig,
     /// Postprocessing configuration
     postprocess_config: DBPostprocessConfig,
-    /// Session pool size for ONNX Runtime
-    session_pool_size: usize,
     /// ONNX Runtime session configuration
     ort_config: Option<crate::core::config::OrtSessionConfig>,
 }
@@ -230,7 +228,6 @@ impl DBModelBuilder {
         Self {
             preprocess_config: DBPreprocessConfig::default(),
             postprocess_config: DBPostprocessConfig::default(),
-            session_pool_size: 1,
             ort_config: None,
         }
     }
@@ -247,12 +244,6 @@ impl DBModelBuilder {
         self
     }
 
-    /// Sets the session pool size.
-    pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.session_pool_size = size;
-        self
-    }
-
     /// Sets the ONNX Runtime session configuration.
     pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
         self.ort_config = Some(config);
@@ -262,10 +253,9 @@ impl DBModelBuilder {
     /// Builds the DB model.
     pub fn build(self, model_path: &Path) -> Result<DBModel, OCRError> {
         // Create ONNX inference engine
-        let inference = if self.session_pool_size > 1 || self.ort_config.is_some() {
+        let inference = if self.ort_config.is_some() {
             use crate::core::config::ModelInferenceConfig;
             let common_config = ModelInferenceConfig {
-                session_pool_size: Some(self.session_pool_size),
                 ort_session: self.ort_config,
                 ..Default::default()
             };

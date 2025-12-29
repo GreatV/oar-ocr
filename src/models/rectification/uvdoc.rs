@@ -202,8 +202,6 @@ impl UVDocModel {
 /// Builder for UVDoc model.
 #[derive(Debug, Default)]
 pub struct UVDocModelBuilder {
-    /// Session pool size for ONNX Runtime
-    session_pool_size: usize,
     /// Preprocessing configuration
     preprocess_config: UVDocPreprocessConfig,
     /// ONNX Runtime session configuration
@@ -214,16 +212,9 @@ impl UVDocModelBuilder {
     /// Creates a new UVDoc model builder.
     pub fn new() -> Self {
         Self {
-            session_pool_size: 1,
             preprocess_config: UVDocPreprocessConfig::default(),
             ort_config: None,
         }
-    }
-
-    /// Sets the session pool size for ONNX Runtime.
-    pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.session_pool_size = size;
-        self
     }
 
     /// Sets the preprocessing configuration.
@@ -255,15 +246,11 @@ impl UVDocModelBuilder {
     /// A configured UVDoc model instance
     pub fn build(self, model_path: &std::path::Path) -> Result<UVDocModel, OCRError> {
         // Create ONNX inference engine
-        let inference = if self.session_pool_size > 1 || self.ort_config.is_some() {
+        let inference = if self.ort_config.is_some() {
             use crate::core::config::ModelInferenceConfig;
             let common_config = ModelInferenceConfig {
-                model_path: None,
-                model_name: None,
-                batch_size: None,
-                enable_logging: None,
                 ort_session: self.ort_config,
-                session_pool_size: Some(self.session_pool_size),
+                ..Default::default()
             };
             OrtInfer::from_config(&common_config, model_path, Some("image"))?
         } else {

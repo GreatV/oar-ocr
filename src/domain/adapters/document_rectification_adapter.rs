@@ -2,6 +2,7 @@
 //!
 //! This adapter uses the UVDoc model and adapts its output to the DocumentRectification task format.
 
+use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::adapter::{AdapterBuilder, AdapterInfo, ModelAdapter};
 use crate::core::traits::task::{Task, TaskType};
@@ -94,12 +95,6 @@ impl UVDocRectifierAdapterBuilder {
         self
     }
 
-    /// Sets the session pool size.
-    pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.config = self.config.with_session_pool_size(size);
-        self
-    }
-
     /// Sets a custom model name for registry registration.
     pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
         self.model_name_override = Some(model_name.into());
@@ -124,23 +119,19 @@ impl AdapterBuilder for UVDocRectifierAdapterBuilder {
     type Adapter = UVDocRectifierAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, session_pool_size, ort_config) = self
-            .config
-            .into_validated_parts()
-            .map_err(|err| OCRError::ConfigError {
-                message: err.to_string(),
-            })?;
+        let (task_config, ort_config) =
+            self.config
+                .into_validated_parts()
+                .map_err(|err| OCRError::ConfigError {
+                    message: err.to_string(),
+                })?;
 
         // Build the UVDoc model
-        let mut model_builder = UVDocModelBuilder::new()
-            .preprocess_config(self.preprocess_config)
-            .session_pool_size(session_pool_size);
-
-        if let Some(ort_config) = ort_config {
-            model_builder = model_builder.with_ort_config(ort_config);
-        }
-
-        let model = model_builder.build(model_path)?;
+        let model = apply_ort_config!(
+            UVDocModelBuilder::new().preprocess_config(self.preprocess_config),
+            ort_config
+        )
+        .build(model_path)?;
 
         // Create adapter info
         let mut info = AdapterInfo::new(
@@ -208,12 +199,5 @@ mod tests {
         let builder = UVDocRectifierAdapterBuilder::default();
         assert_eq!(builder.adapter_type(), "uvdoc_rectifier");
         assert_eq!(builder.config.task_config().rec_image_shape, [3, 0, 0]);
-    }
-
-    #[test]
-    fn test_builder_with_session_pool() {
-        let builder = UVDocRectifierAdapterBuilder::new().session_pool_size(4);
-
-        assert_eq!(builder.adapter_type(), "uvdoc_rectifier");
     }
 }

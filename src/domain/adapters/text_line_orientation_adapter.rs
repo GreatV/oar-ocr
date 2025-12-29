@@ -2,6 +2,7 @@
 //!
 //! This adapter uses the PP-LCNet model to classify text line orientation.
 
+use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
@@ -147,12 +148,6 @@ impl TextLineOrientationAdapterBuilder {
         self
     }
 
-    /// Sets the session pool size.
-    pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.config = self.config.with_session_pool_size(size);
-        self
-    }
-
     /// Sets a custom model name for registry registration.
     pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
         self.model_name_override = Some(model_name.into());
@@ -177,12 +172,12 @@ impl AdapterBuilder for TextLineOrientationAdapterBuilder {
     type Adapter = TextLineOrientationAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, session_pool_size, ort_config) = self
-            .config
-            .into_validated_parts()
-            .map_err(|err| OCRError::ConfigError {
-                message: err.to_string(),
-            })?;
+        let (task_config, ort_config) =
+            self.config
+                .into_validated_parts()
+                .map_err(|err| OCRError::ConfigError {
+                    message: err.to_string(),
+                })?;
 
         // Build the PP-LCNet model
         let mut preprocess_config = super::preprocessing::pp_lcnet_preprocess(self.input_shape);
@@ -191,15 +186,11 @@ impl AdapterBuilder for TextLineOrientationAdapterBuilder {
         // - ImageNet mean/std in RGB order (handled by PPLCNetPreprocessConfig defaults)
         preprocess_config.resize_short = None;
 
-        let mut model_builder = PPLCNetModelBuilder::new()
-            .session_pool_size(session_pool_size)
-            .preprocess_config(preprocess_config);
-
-        if let Some(ort_config) = ort_config {
-            model_builder = model_builder.with_ort_config(ort_config);
-        }
-
-        let model = model_builder.build(model_path)?;
+        let model = apply_ort_config!(
+            PPLCNetModelBuilder::new().preprocess_config(preprocess_config),
+            ort_config
+        )
+        .build(model_path)?;
 
         // Create postprocessing configuration
         let postprocess_config = PPLCNetPostprocessConfig {
@@ -260,12 +251,9 @@ mod tests {
 
     #[test]
     fn test_builder_fluent_api() {
-        let builder = TextLineOrientationAdapterBuilder::new()
-            .input_shape((224, 224))
-            .session_pool_size(4);
+        let builder = TextLineOrientationAdapterBuilder::new().input_shape((224, 224));
 
         assert_eq!(builder.input_shape, (224, 224));
-        assert_eq!(builder.config.session_pool_size(), 4);
     }
 
     #[test]
