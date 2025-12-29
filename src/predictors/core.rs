@@ -3,6 +3,7 @@
 //! This module provides a generic predictor implementation that can be reused
 //! across all task-specific predictors, eliminating boilerplate code.
 
+use crate::core::OcrResult;
 use crate::core::traits::adapter::ModelAdapter;
 use crate::core::traits::task::Task;
 
@@ -54,7 +55,7 @@ impl<T: Task> TaskPredictorCore<T> {
     /// # Returns
     ///
     /// The task output on success, or an error if validation or execution fails.
-    pub fn predict(&self, input: T::Input) -> Result<T::Output, Box<dyn std::error::Error>> {
+    pub fn predict(&self, input: T::Input) -> OcrResult<T::Output> {
         // 1. Validate input
         self.task.validate_input(&input)?;
 
