@@ -2,6 +2,7 @@
 //!
 //! This adapter uses the CRNN model and adapts its output to the TextRecognition task format.
 
+use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
@@ -161,12 +162,6 @@ impl TextRecognitionAdapterBuilder {
         self
     }
 
-    /// Sets the session pool size.
-    pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.config = self.config.with_session_pool_size(size);
-        self
-    }
-
     /// Sets the maximum image width.
     pub fn max_img_w(mut self, max_img_w: usize) -> Self {
         self.preprocess_config.max_img_w = Some(max_img_w);
@@ -191,27 +186,21 @@ impl AdapterBuilder for TextRecognitionAdapterBuilder {
     type Adapter = TextRecognitionAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, session_pool_size, ort_config) = self
-            .config
-            .into_validated_parts()
-            .map_err(|err| OCRError::ConfigError {
-                message: err.to_string(),
-            })?;
+        let (task_config, ort_config) =
+            self.config
+                .into_validated_parts()
+                .map_err(|err| OCRError::ConfigError {
+                    message: err.to_string(),
+                })?;
 
         // Build the CRNN model
-        let mut model_builder = CRNNModelBuilder::new()
-            .preprocess_config(self.preprocess_config)
-            .session_pool_size(session_pool_size);
+        let mut model_builder = CRNNModelBuilder::new().preprocess_config(self.preprocess_config);
 
         if let Some(character_dict) = self.character_dict {
             model_builder = model_builder.character_dict(character_dict);
         }
 
-        if let Some(ort_config) = ort_config {
-            model_builder = model_builder.with_ort_config(ort_config);
-        }
-
-        let model = model_builder.build(model_path)?;
+        let model = apply_ort_config!(model_builder, ort_config).build(model_path)?;
 
         // Create adapter info
         let info = AdapterInfo::new(

@@ -183,8 +183,6 @@ impl SLANetModel {
 /// Builder for SLANet model.
 #[derive(Debug, Default)]
 pub struct SLANetModelBuilder {
-    /// Session pool size for ONNX Runtime
-    session_pool_size: usize,
     /// Input shape override (if None, will be parsed from ONNX)
     input_shape: Option<InputShape>,
     /// ONNX Runtime session configuration
@@ -195,16 +193,9 @@ impl SLANetModelBuilder {
     /// Creates a new SLANet model builder.
     pub fn new() -> Self {
         Self {
-            session_pool_size: 1,
             input_shape: None,
             ort_config: None,
         }
-    }
-
-    /// Sets the session pool size.
-    pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.session_pool_size = size;
-        self
     }
 
     /// Sets the input image size (height, width).
@@ -238,15 +229,11 @@ impl SLANetModelBuilder {
     /// 3. If ONNX has dynamic spatial dimensions, use default 512x512
     pub fn build(self, model_path: &Path) -> Result<SLANetModel, OCRError> {
         // Create ONNX inference engine
-        let inference = if self.session_pool_size > 1 || self.ort_config.is_some() {
+        let inference = if self.ort_config.is_some() {
             use crate::core::config::ModelInferenceConfig;
             let common_config = ModelInferenceConfig {
-                model_path: None,
-                model_name: None,
-                batch_size: None,
-                enable_logging: None,
                 ort_session: self.ort_config,
-                session_pool_size: Some(self.session_pool_size),
+                ..Default::default()
             };
             OrtInfer::from_config(&common_config, model_path, None)?
         } else {

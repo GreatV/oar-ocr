@@ -2,6 +2,7 @@
 //!
 //! This adapter uses the SLANet model to recognize table structure as HTML tokens with bounding boxes.
 
+use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
@@ -238,12 +239,6 @@ impl SLANetWiredAdapterBuilder {
         self
     }
 
-    /// Sets the session pool size.
-    pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.config = self.config.with_session_pool_size(size);
-        self
-    }
-
     /// Sets the dictionary path.
     pub fn dict_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.dict_path = Some(path.into());
@@ -274,26 +269,22 @@ impl AdapterBuilder for SLANetWiredAdapterBuilder {
     type Adapter = TableStructureRecognitionAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, session_pool_size, ort_config) = self
-            .config
-            .into_validated_parts()
-            .map_err(|err| OCRError::ConfigError {
-                message: err.to_string(),
-            })?;
+        let (task_config, ort_config) =
+            self.config
+                .into_validated_parts()
+                .map_err(|err| OCRError::ConfigError {
+                    message: err.to_string(),
+                })?;
 
         // Build the SLANet model - input shape will be auto-detected from ONNX if not set
-        let mut model_builder = SLANetModelBuilder::new().session_pool_size(session_pool_size);
+        let mut model_builder = SLANetModelBuilder::new();
 
         // Only set input size if explicitly provided; otherwise let ONNX auto-detect
         if let Some(input_shape) = self.input_shape {
             model_builder = model_builder.input_size(input_shape);
         }
 
-        if let Some(ort_config) = ort_config {
-            model_builder = model_builder.with_ort_config(ort_config);
-        }
-
-        let model = model_builder.build(model_path)?;
+        let model = apply_ort_config!(model_builder, ort_config).build(model_path)?;
 
         // Dictionary path is required
         let dict_path = self.dict_path.ok_or_else(|| OCRError::ConfigError {
@@ -369,12 +360,6 @@ impl SLANetWirelessAdapterBuilder {
         self
     }
 
-    /// Sets the session pool size.
-    pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.config = self.config.with_session_pool_size(size);
-        self
-    }
-
     /// Sets the dictionary path.
     pub fn dict_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.dict_path = Some(path.into());
@@ -405,26 +390,22 @@ impl AdapterBuilder for SLANetWirelessAdapterBuilder {
     type Adapter = TableStructureRecognitionAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, session_pool_size, ort_config) = self
-            .config
-            .into_validated_parts()
-            .map_err(|err| OCRError::ConfigError {
-                message: err.to_string(),
-            })?;
+        let (task_config, ort_config) =
+            self.config
+                .into_validated_parts()
+                .map_err(|err| OCRError::ConfigError {
+                    message: err.to_string(),
+                })?;
 
         // Build the SLANet model - input shape will be auto-detected from ONNX if not set
-        let mut model_builder = SLANetModelBuilder::new().session_pool_size(session_pool_size);
+        let mut model_builder = SLANetModelBuilder::new();
 
         // Only set input size if explicitly provided; otherwise let ONNX auto-detect
         if let Some(input_shape) = self.input_shape {
             model_builder = model_builder.input_size(input_shape);
         }
 
-        if let Some(ort_config) = ort_config {
-            model_builder = model_builder.with_ort_config(ort_config);
-        }
-
-        let model = model_builder.build(model_path)?;
+        let model = apply_ort_config!(model_builder, ort_config).build(model_path)?;
 
         // Dictionary path is required
         let dict_path = self.dict_path.ok_or_else(|| OCRError::ConfigError {
@@ -483,10 +464,8 @@ mod tests {
     fn test_builder_fluent_api() {
         let builder = SLANetWiredAdapterBuilder::new()
             .input_shape((640, 640))
-            .session_pool_size(4)
             .dict_path("models/table_structure_dict_ch.txt");
 
         assert_eq!(builder.input_shape, Some((640, 640)));
-        assert_eq!(builder.config.session_pool_size(), 4);
     }
 }

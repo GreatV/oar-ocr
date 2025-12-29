@@ -2,6 +2,7 @@
 //!
 //! This adapter uses the DB model configured for seal text detection (curved text).
 
+use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
@@ -105,12 +106,6 @@ impl SealTextDetectionAdapterBuilder {
         self
     }
 
-    /// Sets the session pool size.
-    pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.config = self.config.with_session_pool_size(size);
-        self
-    }
-
     /// Sets the ONNX Runtime session configuration.
     pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
         self.config = self.config.with_ort_config(config);
@@ -123,12 +118,12 @@ impl AdapterBuilder for SealTextDetectionAdapterBuilder {
     type Adapter = SealTextDetectionAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, session_pool_size, ort_config) = self
-            .config
-            .into_validated_parts()
-            .map_err(|err| OCRError::ConfigError {
-                message: err.to_string(),
-            })?;
+        let (task_config, ort_config) =
+            self.config
+                .into_validated_parts()
+                .map_err(|err| OCRError::ConfigError {
+                    message: err.to_string(),
+                })?;
 
         // Configure DB model for seal text detection
         // Use seal text preprocessing configuration (limit_side_len=736, limit_type=Min)
@@ -145,16 +140,13 @@ impl AdapterBuilder for SealTextDetectionAdapterBuilder {
         };
 
         // Build the DB model
-        let mut model_builder = DBModelBuilder::new()
-            .preprocess_config(preprocess_config)
-            .postprocess_config(postprocess_config)
-            .session_pool_size(session_pool_size);
-
-        if let Some(ort_config) = ort_config {
-            model_builder = model_builder.with_ort_config(ort_config);
-        }
-
-        let model = model_builder.build(model_path)?;
+        let model = apply_ort_config!(
+            DBModelBuilder::new()
+                .preprocess_config(preprocess_config)
+                .postprocess_config(postprocess_config),
+            ort_config
+        )
+        .build(model_path)?;
 
         // Create adapter info
         let info = AdapterInfo::new(

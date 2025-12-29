@@ -8,7 +8,8 @@ use std::path::PathBuf;
 /// Configuration for model inference and ONNX Runtime session setup.
 ///
 /// This struct provides configuration options for building ONNX inference engines,
-/// including session pool management, runtime settings, and model metadata.
+/// including runtime settings and model metadata.
+/// Session pool size is managed through `OrtSessionConfig`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInferenceConfig {
     /// The path to the model file (optional).
@@ -19,13 +20,10 @@ pub struct ModelInferenceConfig {
     pub batch_size: Option<usize>,
     /// Whether to enable logging (optional).
     pub enable_logging: Option<bool>,
-    /// ONNX Runtime session configuration for this model (optional)
+    /// ONNX Runtime session configuration for this model (optional).
+    /// Session pool size is configured here via `with_session_pool_size()`.
     #[serde(default)]
     pub ort_session: Option<OrtSessionConfig>,
-    /// Size of the pinned session pool to allow concurrent predictions (>=1)
-    /// If None, defaults to 1 (single session)
-    #[serde(default)]
-    pub session_pool_size: Option<usize>,
 }
 
 impl ModelInferenceConfig {
@@ -41,7 +39,6 @@ impl ModelInferenceConfig {
             batch_size: None,
             enable_logging: None,
             ort_session: None,
-            session_pool_size: Some(1),
         }
     }
 
@@ -62,7 +59,6 @@ impl ModelInferenceConfig {
             batch_size,
             enable_logging: Some(true),
             ort_session: None,
-            session_pool_size: Some(1),
         }
     }
 
@@ -82,7 +78,6 @@ impl ModelInferenceConfig {
             batch_size: None,
             enable_logging: Some(true),
             ort_session: None,
-            session_pool_size: Some(1),
         }
     }
 
@@ -165,20 +160,6 @@ impl ModelInferenceConfig {
         self
     }
 
-    /// Sets the session pool size used for concurrent predictions (>=1).
-    ///
-    /// # Arguments
-    ///
-    /// * `size` - The session pool size (minimum 1).
-    ///
-    /// # Returns
-    ///
-    /// The updated ModelInferenceConfig instance.
-    pub fn session_pool_size(mut self, size: usize) -> Self {
-        self.session_pool_size = Some(size);
-        self
-    }
-
     /// Validates the configuration.
     ///
     /// # Returns
@@ -216,9 +197,6 @@ impl ModelInferenceConfig {
         if other.ort_session.is_some() {
             self.ort_session = other.ort_session.clone();
         }
-        if other.session_pool_size.is_some() {
-            self.session_pool_size = other.session_pool_size;
-        }
         self
     }
 
@@ -229,15 +207,6 @@ impl ModelInferenceConfig {
     /// The batch size, or a default value if not set.
     pub fn get_batch_size(&self) -> usize {
         self.batch_size.unwrap_or(1)
-    }
-
-    /// Gets the effective session pool size.
-    ///
-    /// # Returns
-    ///
-    /// The session pool size, or a default value if not set.
-    pub fn get_session_pool_size(&self) -> usize {
-        self.session_pool_size.unwrap_or(1)
     }
 
     /// Gets the model name.
@@ -270,14 +239,6 @@ impl ConfigValidator for ModelInferenceConfig {
             self.validate_model_path(model_path)?;
         }
 
-        if let Some(pool) = self.session_pool_size
-            && pool == 0
-        {
-            return Err(ConfigError::InvalidConfig {
-                message: "session_pool_size must be >= 1".to_string(),
-            });
-        }
-
         Ok(())
     }
 
@@ -293,7 +254,6 @@ impl ConfigValidator for ModelInferenceConfig {
             batch_size: Some(32),
             enable_logging: Some(false),
             ort_session: None,
-            session_pool_size: Some(1),
         }
     }
 }
@@ -311,16 +271,17 @@ mod tests {
 
     #[test]
     fn test_common_builder_config_builder_pattern() {
+        let ort_cfg = OrtSessionConfig::default();
         let config = ModelInferenceConfig::new()
             .model_name("test_model")
             .batch_size(16)
             .enable_logging(true)
-            .session_pool_size(4);
+            .ort_session(ort_cfg);
 
         assert_eq!(config.model_name, Some("test_model".to_string()));
         assert_eq!(config.batch_size, Some(16));
         assert_eq!(config.enable_logging, Some(true));
-        assert_eq!(config.session_pool_size, Some(4));
+        assert!(config.ort_session.is_some());
     }
 
     #[test]
@@ -340,28 +301,26 @@ mod tests {
 
     #[test]
     fn test_common_builder_config_getters() {
+        let ort_cfg = OrtSessionConfig::default();
         let config = ModelInferenceConfig::new()
             .model_name("test")
             .batch_size(16)
-            .session_pool_size(2);
+            .ort_session(ort_cfg);
 
         assert_eq!(config.get_model_name(), "test");
         assert_eq!(config.get_batch_size(), 16);
-        assert_eq!(config.get_session_pool_size(), 2);
         assert!(config.get_enable_logging()); // Default is true
     }
 
     #[test]
     fn test_common_builder_config_validation() {
+        let ort_cfg = OrtSessionConfig::default();
         let valid_config = ModelInferenceConfig::new()
             .batch_size(16)
-            .session_pool_size(2);
+            .ort_session(ort_cfg);
         assert!(valid_config.validate().is_ok());
 
         let invalid_batch_config = ModelInferenceConfig::new().batch_size(0);
         assert!(invalid_batch_config.validate().is_err());
-
-        let invalid_pool_config = ModelInferenceConfig::new().session_pool_size(0);
-        assert!(invalid_pool_config.validate().is_err());
     }
 }

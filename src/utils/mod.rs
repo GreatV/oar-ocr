@@ -7,6 +7,7 @@
 pub mod bbox_crop;
 pub mod cow;
 pub mod crop;
+pub mod dict;
 pub mod image;
 pub mod tensor;
 pub mod topk;
@@ -40,3 +41,6 @@ pub use topk::{Topk, TopkResult};
 pub use validation::{
     ScoreValidator, validate_length_match, validate_max_value, validate_positive_dimensions,
 };
+
+// Re-export dictionary utilities
+pub use dict::{read_character_dict, read_dict_content, require_path};

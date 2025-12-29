@@ -26,30 +26,24 @@ impl OrtInfer {
     }
 
     /// Creates a new OrtInfer instance from ModelInferenceConfig, applying ORT session
-    /// configuration and constructing a session pool for concurrent predictions.
+    /// configuration.
     pub fn from_config(
         common: &ModelInferenceConfig,
         model_path: impl AsRef<Path>,
         input_name: Option<&str>,
     ) -> Result<Self, OCRError> {
         let path = model_path.as_ref();
-        let pool_size = common.session_pool_size.unwrap_or(1).max(1);
-        let mut sessions = Vec::with_capacity(pool_size);
-        for _ in 0..pool_size {
-            let session = session::load_session_with(
-                path,
-                |builder| {
-                    if let Some(cfg) = &common.ort_session {
-                        Self::apply_ort_config(builder, cfg)
-                    } else {
-                        // Set default log level to Error to suppress ORT logs
-                        builder.with_log_level(LogLevel::Error)
-                    }
-                },
-                Some("check device/EP configuration and model file"),
-            )?;
-            sessions.push(Mutex::new(session));
-        }
+        let session = session::load_session_with(
+            path,
+            |builder| {
+                if let Some(cfg) = &common.ort_session {
+                    Self::apply_ort_config(builder, cfg)
+                } else {
+                    builder.with_log_level(LogLevel::Error)
+                }
+            },
+            Some("check device/EP configuration and model file"),
+        )?;
 
         let model_name = common
             .model_name
@@ -57,7 +51,7 @@ impl OrtInfer {
             .unwrap_or_else(|| "unknown_model".to_string());
 
         Ok(OrtInfer {
-            sessions,
+            sessions: vec![Mutex::new(session)],
             next_idx: std::sync::atomic::AtomicUsize::new(0),
             input_name: input_name.unwrap_or("x").to_string(),
             output_name: None,

@@ -81,9 +81,9 @@ mod tests {
     use crate::core::config::ModelInferenceConfig;
 
     #[test]
-    fn test_from_config_respects_session_pool_size() {
-        let common = ModelInferenceConfig::new().session_pool_size(3);
+    fn test_from_config_with_ort_session() {
+        let common = ModelInferenceConfig::new();
         let result = OrtInfer::from_config(&common, "dummy_path.onnx", None);
-        assert!(result.is_err());
+        assert!(result.is_err()); // File doesn't exist
     }
 }
