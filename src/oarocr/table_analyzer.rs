@@ -141,10 +141,11 @@ impl TableAnalyzer {
         let table_x_offset = table_bbox.x_min().max(0.0).floor();
         let table_y_offset = table_bbox.y_min().max(0.0).floor();
 
+        let cropped_table_arc = std::sync::Arc::new(cropped_table.clone());
         let (table_for_recognition, table_rotation) =
             if let Some(ref orientation_adapter) = self.table_orientation_adapter {
                 match crate::oarocr::preprocess::correct_image_orientation(
-                    cropped_table.clone(),
+                    std::sync::Arc::clone(&cropped_table_arc),
                     orientation_adapter,
                 ) {
                     Ok((rotated, correction)) => {
@@ -167,35 +168,35 @@ impl TableAnalyzer {
                             error = %e,
                             "Table orientation detection failed; proceeding without rotation"
                         );
-                        (cropped_table.clone(), None)
+                        (std::sync::Arc::clone(&cropped_table_arc), None)
                     }
                 }
             } else {
-                (cropped_table.clone(), None)
+                (cropped_table_arc, None)
             };
 
-        let (table_type, classification_confidence) = if let Some(ref cls_adapter) =
-            self.table_classification_adapter
-        {
-            let input =
-                DynTaskInput::from_images(ImageTaskInput::new(vec![table_for_recognition.clone()]));
-            if let Ok(cls_output) = cls_adapter.execute_dyn(input)
-                && let Ok(cls_result) = cls_output.into_table_classification()
-                && let Some(classifications) = cls_result.classifications.first()
-                && let Some(top_cls) = classifications.first()
-            {
-                let table_type = match top_cls.label.to_lowercase().as_str() {
-                    "wired" | "wired_table" => TableType::Wired,
-                    "wireless" | "wireless_table" => TableType::Wireless,
-                    _ => TableType::Unknown,
-                };
-                (table_type, Some(top_cls.score))
+        let (table_type, classification_confidence) =
+            if let Some(ref cls_adapter) = self.table_classification_adapter {
+                let input = DynTaskInput::from_images(ImageTaskInput::new(vec![
+                    (*table_for_recognition).clone(),
+                ]));
+                if let Ok(cls_output) = cls_adapter.execute_dyn(input)
+                    && let Ok(cls_result) = cls_output.into_table_classification()
+                    && let Some(classifications) = cls_result.classifications.first()
+                    && let Some(top_cls) = classifications.first()
+                {
+                    let table_type = match top_cls.label.to_lowercase().as_str() {
+                        "wired" | "wired_table" => TableType::Wired,
+                        "wireless" | "wireless_table" => TableType::Wireless,
+                        _ => TableType::Unknown,
+                    };
+                    (table_type, Some(top_cls.score))
+                } else {
+                    (TableType::Unknown, None)
+                }
             } else {
                 (TableType::Unknown, None)
-            }
-        } else {
-            (TableType::Unknown, None)
-        };
+            };
 
         let use_e2e_mode = match table_type {
             TableType::Wired => self.use_e2e_wired_table_rec,
@@ -256,7 +257,7 @@ impl TableAnalyzer {
         let table_output = match structure_adapter {
             Some(adapter) => {
                 let input = DynTaskInput::from_images(ImageTaskInput::new(vec![
-                    table_for_recognition.clone(),
+                    (*table_for_recognition).clone(),
                 ]));
                 match adapter.execute_dyn(input) {
                     Ok(output) => output,
@@ -385,8 +386,9 @@ impl TableAnalyzer {
             .collect();
 
         if let Some(cell_detection_adapter) = cell_adapter {
-            let cell_input =
-                DynTaskInput::from_images(ImageTaskInput::new(vec![table_for_recognition.clone()]));
+            let cell_input = DynTaskInput::from_images(ImageTaskInput::new(vec![
+                (*table_for_recognition).clone(),
+            ]));
             if let Ok(cell_output) = cell_detection_adapter.execute_dyn(cell_input)
                 && let Ok(cell_result) = cell_output.into_table_cell_detection()
                 && let Some(detected_cells) = cell_result.cells.first()

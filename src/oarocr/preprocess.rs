@@ -2,7 +2,7 @@
 //!
 //! This service is considered "Done" when it fulfills the following contract:
 //!
-//! - **Inputs**: Single `image::RgbImage`.
+//! - **Inputs**: Single `Arc<image::RgbImage>`.
 //! - **Outputs**: `PreprocessResult` containing the (potentially rotated/rectified) image,
 //!   detected orientation angle, and optional `OrientationCorrection` for coordinate back-mapping.
 //! - **Logging**: Traces orientation corrections (angle) and rectification application.
@@ -30,7 +30,8 @@ pub(crate) struct OrientationCorrection {
 /// Result of preprocessing an image.
 #[derive(Debug)]
 pub(crate) struct PreprocessResult {
-    pub image: image::RgbImage,
+    /// The preprocessed image (potentially rotated/rectified), wrapped in Arc for zero-copy sharing.
+    pub image: Arc<image::RgbImage>,
     pub orientation_angle: Option<f32>,
     /// Bounding boxes should only be mapped back when rectification is not applied.
     pub rotation: Option<OrientationCorrection>,
@@ -55,10 +56,14 @@ impl DocumentPreprocessor {
         }
     }
 
-    pub(crate) fn preprocess(&self, image: image::RgbImage) -> Result<PreprocessResult, OCRError> {
+    pub(crate) fn preprocess(
+        &self,
+        image: Arc<image::RgbImage>,
+    ) -> Result<PreprocessResult, OCRError> {
         let (mut current_image, orientation_angle, rotation) =
             if let Some(ref orientation_adapter) = self.orientation_adapter {
-                let (rotated, rotation) = correct_image_orientation(image, orientation_adapter)?;
+                let (rotated, rotation) =
+                    correct_image_orientation(Arc::clone(&image), orientation_adapter)?;
                 (rotated, rotation.map(|r| r.angle), rotation)
             } else {
                 (image, None, None)
@@ -67,14 +72,16 @@ impl DocumentPreprocessor {
         let mut rectified_img: Option<Arc<image::RgbImage>> = None;
 
         if let Some(ref rectification_adapter) = self.rectification_adapter {
-            let input = DynTaskInput::from_images(ImageTaskInput::new(vec![current_image.clone()]));
+            // Adapter boundary: must clone to transfer ownership
+            let input =
+                DynTaskInput::from_images(ImageTaskInput::new(vec![(*current_image).clone()]));
             let output = rectification_adapter.execute_dyn(input)?;
 
             if let Ok(rect_output) = output.into_document_rectification()
                 && let Some(rectified) = rect_output.rectified_images.first()
             {
-                current_image = rectified.clone();
-                rectified_img = Some(Arc::new(current_image.clone()));
+                current_image = Arc::new(rectified.clone());
+                rectified_img = Some(Arc::clone(&current_image));
             }
         }
 
@@ -99,10 +106,11 @@ impl DocumentPreprocessor {
 /// Returns the corrected image and optional correction metadata. If the adapter
 /// fails to produce a classification, the original image is returned with `None`.
 pub(crate) fn correct_image_orientation(
-    image: image::RgbImage,
+    image: Arc<image::RgbImage>,
     orientation_adapter: &Arc<dyn DynModelAdapter>,
-) -> Result<(image::RgbImage, Option<OrientationCorrection>), OCRError> {
-    let input = DynTaskInput::from_images(ImageTaskInput::new(vec![image.clone()]));
+) -> Result<(Arc<image::RgbImage>, Option<OrientationCorrection>), OCRError> {
+    // Adapter boundary: must clone to transfer ownership
+    let input = DynTaskInput::from_images(ImageTaskInput::new(vec![(*image).clone()]));
     let output = orientation_adapter.execute_dyn(input)?;
 
     let class_id = output.into_document_orientation().ok().and_then(|o| {
@@ -127,9 +135,9 @@ pub(crate) fn correct_image_orientation(
     // For unknown class_ids, no rotation is applied but metadata is preserved
     // to allow downstream processing to handle new model outputs.
     let rotated = match class_id {
-        1 => image::imageops::rotate270(&image),
-        2 => image::imageops::rotate180(&image),
-        3 => image::imageops::rotate90(&image),
+        1 => Arc::new(image::imageops::rotate270(&*image)),
+        2 => Arc::new(image::imageops::rotate180(&*image)),
+        3 => Arc::new(image::imageops::rotate90(&*image)),
         _ => image,
     };
 
@@ -263,11 +271,11 @@ mod tests {
 
     #[test]
     fn test_correct_image_orientation_class_0_no_rotation() {
-        let image = create_test_image(100, 200);
+        let image = Arc::new(create_test_image(100, 200));
         let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockOrientationAdapter::new(0));
 
         let (rotated, correction) =
-            correct_image_orientation(image.clone(), &adapter).expect("should succeed");
+            correct_image_orientation(Arc::clone(&image), &adapter).expect("should succeed");
 
         // class_id 0 = 0° - no rotation needed
         assert_eq!(rotated.width(), 100);
@@ -281,11 +289,11 @@ mod tests {
 
     #[test]
     fn test_correct_image_orientation_class_1_rotate_90() {
-        let image = create_test_image(100, 200);
+        let image = Arc::new(create_test_image(100, 200));
         let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockOrientationAdapter::new(1));
 
         let (rotated, correction) =
-            correct_image_orientation(image.clone(), &adapter).expect("should succeed");
+            correct_image_orientation(Arc::clone(&image), &adapter).expect("should succeed");
 
         // class_id 1 = 90° - rotate270 to correct (swaps dimensions)
         assert_eq!(rotated.width(), 200);
@@ -299,11 +307,11 @@ mod tests {
 
     #[test]
     fn test_correct_image_orientation_class_2_rotate_180() {
-        let image = create_test_image(100, 200);
+        let image = Arc::new(create_test_image(100, 200));
         let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockOrientationAdapter::new(2));
 
         let (rotated, correction) =
-            correct_image_orientation(image.clone(), &adapter).expect("should succeed");
+            correct_image_orientation(Arc::clone(&image), &adapter).expect("should succeed");
 
         // class_id 2 = 180° - rotate180 to correct (dimensions unchanged)
         assert_eq!(rotated.width(), 100);
@@ -317,11 +325,11 @@ mod tests {
 
     #[test]
     fn test_correct_image_orientation_class_3_rotate_270() {
-        let image = create_test_image(100, 200);
+        let image = Arc::new(create_test_image(100, 200));
         let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockOrientationAdapter::new(3));
 
         let (rotated, correction) =
-            correct_image_orientation(image.clone(), &adapter).expect("should succeed");
+            correct_image_orientation(Arc::clone(&image), &adapter).expect("should succeed");
 
         // class_id 3 = 270° - rotate90 to correct (swaps dimensions)
         assert_eq!(rotated.width(), 200);
@@ -335,11 +343,11 @@ mod tests {
 
     #[test]
     fn test_correct_image_orientation_empty_classification_returns_original() {
-        let image = create_test_image(100, 200);
+        let image = Arc::new(create_test_image(100, 200));
         let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockEmptyOrientationAdapter);
 
         let (rotated, correction) =
-            correct_image_orientation(image.clone(), &adapter).expect("should succeed");
+            correct_image_orientation(Arc::clone(&image), &adapter).expect("should succeed");
 
         // Empty classification should return original image unchanged
         assert_eq!(rotated.width(), 100);
@@ -349,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_correct_image_orientation_adapter_failure_propagates_error() {
-        let image = create_test_image(100, 200);
+        let image = Arc::new(create_test_image(100, 200));
         let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockFailingAdapter);
 
         let result = correct_image_orientation(image, &adapter);
@@ -360,7 +368,7 @@ mod tests {
     #[test]
     fn test_orientation_correction_metadata_accuracy() {
         // Test with a non-square image to verify dimension tracking
-        let image = create_test_image(640, 480);
+        let image = Arc::new(create_test_image(640, 480));
         let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockOrientationAdapter::new(1));
 
         let (rotated, correction) =
@@ -379,7 +387,7 @@ mod tests {
     #[test]
     fn test_document_preprocessor_no_adapters() {
         let preprocessor = DocumentPreprocessor::new(None, None);
-        let image = create_test_image(100, 200);
+        let image = Arc::new(create_test_image(100, 200));
 
         let result = preprocessor.preprocess(image).expect("should succeed");
 
@@ -395,7 +403,7 @@ mod tests {
         let orientation_adapter: Arc<dyn DynModelAdapter> =
             Arc::new(MockOrientationAdapter::new(1));
         let preprocessor = DocumentPreprocessor::new(Some(orientation_adapter), None);
-        let image = create_test_image(100, 200);
+        let image = Arc::new(create_test_image(100, 200));
 
         let result = preprocessor.preprocess(image).expect("should succeed");
 
@@ -453,7 +461,7 @@ mod tests {
         // Verify that angle = class_id * 90.0
         for class_id in 0..4 {
             let expected_angle = (class_id as f32) * 90.0;
-            let image = create_test_image(100, 100);
+            let image = Arc::new(create_test_image(100, 100));
             let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockOrientationAdapter::new(class_id));
 
             let (_, correction) =
@@ -471,12 +479,12 @@ mod tests {
     #[test]
     fn test_square_image_rotation_dimensions() {
         // Square images should have same dimensions after any rotation
-        let image = create_test_image(256, 256);
+        let image = Arc::new(create_test_image(256, 256));
 
         for class_id in 0..4 {
             let adapter: Arc<dyn DynModelAdapter> = Arc::new(MockOrientationAdapter::new(class_id));
             let (rotated, _) =
-                correct_image_orientation(image.clone(), &adapter).expect("should succeed");
+                correct_image_orientation(Arc::clone(&image), &adapter).expect("should succeed");
 
             assert_eq!(rotated.width(), 256, "class_id {} width mismatch", class_id);
             assert_eq!(

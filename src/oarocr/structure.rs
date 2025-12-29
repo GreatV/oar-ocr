@@ -2270,12 +2270,13 @@ impl OARStructure {
     /// A `StructureResult` containing detected layout elements, tables, formulas, and text.
     pub fn predict_image(&self, image: image::RgbImage) -> Result<StructureResult, OCRError> {
         use crate::oarocr::preprocess::DocumentPreprocessor;
+        use std::sync::Arc;
 
         let preprocessor = DocumentPreprocessor::new(
             self.pipeline.document_orientation_adapter.clone(),
             self.pipeline.rectification_adapter.clone(),
         );
-        let preprocess = preprocessor.preprocess(image)?;
+        let preprocess = preprocessor.preprocess(Arc::new(image))?;
         let current_image = preprocess.image;
         let orientation_angle = preprocess.orientation_angle;
         let rectified_img = preprocess.rectified_img;
