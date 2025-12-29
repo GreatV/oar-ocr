@@ -476,8 +476,8 @@ impl OAROCR {
         )> = Vec::with_capacity(images.len());
 
         for image in images.into_iter() {
-            let input_img_arc = Arc::new(image.clone());
-            let preprocess = preprocessor.preprocess(image)?;
+            let input_img_arc = Arc::new(image);
+            let preprocess = preprocessor.preprocess(Arc::clone(&input_img_arc))?;
             prepared.push((input_img_arc, preprocess));
         }
 
@@ -496,9 +496,10 @@ impl OAROCR {
         while start < prepared.len() {
             let end = (start + det_batch_size).min(prepared.len());
 
+            // Adapter boundary: must clone to transfer ownership
             let batch_images: Vec<image::RgbImage> = prepared[start..end]
                 .iter()
-                .map(|(_, preprocess)| preprocess.image.clone())
+                .map(|(_, preprocess)| (*preprocess.image).clone())
                 .collect();
 
             match self.detect_sorted_text_boxes_batch(batch_images) {
@@ -640,25 +641,26 @@ impl OAROCR {
 
     fn crop_text_regions(
         &self,
-        image: &image::RgbImage,
+        image: &Arc<image::RgbImage>,
         detection_boxes: &[BoundingBox],
     ) -> Result<Vec<CroppedTextRegion>, OCRError> {
         use crate::oarocr::EdgeProcessor;
         use crate::oarocr::TextCroppingProcessor;
-        use std::sync::Arc;
 
         if detection_boxes.is_empty() {
             return Ok(Vec::new());
         }
 
         let processor = TextCroppingProcessor::new(true); // handle_rotation = true
-        let cropped = processor.process((Arc::new(image.clone()), detection_boxes.to_vec()))?;
+        // Zero-copy: share Arc instead of cloning the image
+        let cropped = processor.process((Arc::clone(image), detection_boxes.to_vec()))?;
 
         let mut regions = Vec::new();
         for (idx, crop_result) in cropped.into_iter().enumerate() {
             let Some(img) = crop_result else {
                 continue;
             };
+            // Small cropped images: clone is acceptable
             let img = (*img).clone();
             let wh_ratio = img.width() as f32 / img.height().max(1) as f32;
             regions.push(CroppedTextRegion {
