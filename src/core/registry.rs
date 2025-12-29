@@ -25,29 +25,22 @@ use crate::core::traits::{
     adapter::{AdapterInfo, ModelAdapter},
     task::{ImageTaskInput, TaskType},
 };
-use crate::domain::tasks::TextRecognitionInput;
 use std::fmt::Debug;
 
 /// Type-erased input for dynamic adapter execution.
 ///
-/// This enum wraps all possible task input types to enable dynamic dispatch.
+/// All task inputs are image-based. This enum provides a uniform wrapper
+/// for dynamic dispatch while maintaining type safety.
 #[derive(Debug, Clone)]
 pub enum DynTaskInput {
-    /// Image-based input (used by most tasks)
+    /// Image-based input (used by all tasks)
     Image(ImageTaskInput),
-    /// Text recognition input (cropped text images)
-    TextRecognition(TextRecognitionInput),
 }
 
 impl DynTaskInput {
     /// Creates a DynTaskInput from ImageTaskInput.
     pub fn from_images(input: ImageTaskInput) -> Self {
         Self::Image(input)
-    }
-
-    /// Creates a DynTaskInput from TextRecognitionInput.
-    pub fn from_text_recognition(input: TextRecognitionInput) -> Self {
-        Self::TextRecognition(input)
     }
 }
 

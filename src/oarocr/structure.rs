@@ -1189,6 +1189,7 @@ impl OARStructure {
         region_batch_size: usize,
     ) -> Result<(), OCRError> {
         use crate::core::registry::DynTaskInput;
+        use crate::core::traits::task::ImageTaskInput;
         use crate::domain::structure::LayoutElementType;
         use crate::processors::BoundingBox;
         use crate::utils::BBoxCrop;
@@ -1293,9 +1294,7 @@ impl OARStructure {
             for batch_start in (0..crops.len()).step_by(region_batch_size.max(1)) {
                 let batch_end = (batch_start + region_batch_size).min(crops.len());
                 let batch: Vec<_> = crops[batch_start..batch_end].to_vec();
-                let rec_input = DynTaskInput::from_text_recognition(
-                    crate::domain::tasks::TextRecognitionInput::new(batch),
-                );
+                let rec_input = DynTaskInput::from_images(ImageTaskInput::new(batch));
                 let rec_output = text_recognition_adapter.execute_dyn(rec_input)?;
                 if let Ok(rec_result) = rec_output.into_text_recognition() {
                     rec_texts.extend(rec_result.texts);
@@ -1371,9 +1370,7 @@ impl OARStructure {
 
             // Crop layout bbox and run recognition.
             if let Ok(crop_img) = BBoxCrop::crop_bounding_box(page_image, &elem.bbox) {
-                let rec_input = DynTaskInput::from_text_recognition(
-                    crate::domain::tasks::TextRecognitionInput::new(vec![crop_img]),
-                );
+                let rec_input = DynTaskInput::from_images(ImageTaskInput::new(vec![crop_img]));
                 let rec_output = text_recognition_adapter.execute_dyn(rec_input)?;
                 if let Ok(rec_result) = rec_output.into_text_recognition()
                     && let (Some(text), Some(score)) =
@@ -1422,6 +1419,7 @@ impl OARStructure {
         text_recognition_adapter: &Arc<dyn DynModelAdapter>,
     ) -> Result<(), OCRError> {
         use crate::core::registry::DynTaskInput;
+        use crate::core::traits::task::ImageTaskInput;
         use crate::processors::BoundingBox;
 
         // Collect all cell boxes in [x1, y1, x2, y2] format
@@ -1606,9 +1604,7 @@ impl OARStructure {
                 let crop =
                     image::imageops::crop_imm(page_image, x1u, y1u, crop_w, crop_h).to_image();
 
-                let rec_input = DynTaskInput::from_text_recognition(
-                    crate::domain::tasks::TextRecognitionInput::new(vec![crop]),
-                );
+                let rec_input = DynTaskInput::from_images(ImageTaskInput::new(vec![crop]));
                 let rec_output = text_recognition_adapter.execute_dyn(rec_input)?;
                 if let Ok(rec_result) = rec_output.into_text_recognition()
                     && let (Some(text), Some(score)) =
@@ -2186,9 +2182,7 @@ impl OARStructure {
                         rec_imgs.push(img);
                     }
 
-                    let rec_input = DynTaskInput::from_text_recognition(
-                        crate::domain::tasks::TextRecognitionInput::new(rec_imgs),
-                    );
+                    let rec_input = DynTaskInput::from_images(ImageTaskInput::new(rec_imgs));
                     if let Ok(rec_output) = text_recognition_adapter.execute_dyn(rec_input)
                         && let Ok(rec_result) = rec_output.into_text_recognition()
                     {

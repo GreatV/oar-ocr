@@ -49,7 +49,7 @@ macro_rules! with_task_registry {
             TextRecognition {
                 output: $crate::domain::tasks::TextRecognitionOutput,
                 adapter: $crate::domain::adapters::TextRecognitionAdapter,
-                input: text_recognition,
+                input: image,
                 constructor: text_recognition,
                 conversion: into_text_recognition,
                 name: "text_recognition",
@@ -347,33 +347,8 @@ macro_rules! impl_task_adapter {
     (@execute image, $adapter:ident, $input:ident, $task:ident) => {{
         let image_input = match $input {
             DynTaskInput::Image(img) => img,
-            _ => {
-                return Err(OCRError::InvalidInput {
-                    message: format!(
-                        concat!("Expected ImageTaskInput for ", stringify!($task), ", got {:?}"),
-                        std::mem::discriminant(&$input)
-                    ),
-                });
-            }
         };
         let output = $adapter.execute(image_input, None)?;
-        Ok(DynTaskOutput::$task(output))
-    }};
-
-    // Internal rule: execute for text_recognition input tasks
-    (@execute text_recognition, $adapter:ident, $input:ident, $task:ident) => {{
-        let rec_input = match $input {
-            DynTaskInput::TextRecognition(rec) => rec,
-            _ => {
-                return Err(OCRError::InvalidInput {
-                    message: format!(
-                        "Expected TextRecognitionInput for TextRecognition, got {:?}",
-                        std::mem::discriminant(&$input)
-                    ),
-                });
-            }
-        };
-        let output = $adapter.execute(rec_input, None)?;
         Ok(DynTaskOutput::$task(output))
     }};
 }
