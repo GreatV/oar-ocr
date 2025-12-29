@@ -9,51 +9,8 @@ use image::RgbImage;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 
-/// Represents the type of OCR task being performed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum TaskType {
-    /// Text detection - locating text regions in images
-    TextDetection,
-    /// Text recognition - converting text regions to strings
-    TextRecognition,
-    /// Document orientation classification
-    DocumentOrientation,
-    /// Text line orientation classification
-    TextLineOrientation,
-    /// Document rectification/unwarp
-    DocumentRectification,
-    /// Layout detection/analysis
-    LayoutDetection,
-    /// Table cell detection - locating cells within table regions
-    TableCellDetection,
-    /// Formula recognition - converting mathematical formulas to LaTeX
-    FormulaRecognition,
-    /// Seal text detection - locating text regions in seal/stamp images
-    SealTextDetection,
-    /// Table classification - classifying table images as wired or wireless
-    TableClassification,
-    /// Table structure recognition - recognizing table structure as HTML with bboxes
-    TableStructureRecognition,
-}
-
-impl TaskType {
-    /// Returns a human-readable name for the task type.
-    pub fn name(&self) -> &'static str {
-        match self {
-            TaskType::TextDetection => "text_detection",
-            TaskType::TextRecognition => "text_recognition",
-            TaskType::DocumentOrientation => "document_orientation",
-            TaskType::TextLineOrientation => "text_line_orientation",
-            TaskType::DocumentRectification => "document_rectification",
-            TaskType::LayoutDetection => "layout_detection",
-            TaskType::TableCellDetection => "table_cell_detection",
-            TaskType::FormulaRecognition => "formula_recognition",
-            TaskType::SealTextDetection => "seal_text_detection",
-            TaskType::TableClassification => "table_classification",
-            TaskType::TableStructureRecognition => "table_structure_recognition",
-        }
-    }
-}
+// Generate TaskType enum from the central task registry
+crate::with_task_registry!(crate::impl_task_type_enum);
 
 /// Schema definition for task inputs and outputs.
 ///

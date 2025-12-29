@@ -3,6 +3,385 @@
 //! This module provides utility macros to reduce code duplication across
 //! the OCR pipeline, particularly for builder patterns and metrics collection.
 
+// ============================================================================
+// Task Registration Macros
+// ============================================================================
+
+/// Central task registry macro that defines all tasks in a single location.
+///
+/// This macro uses the "callback pattern" - it takes a callback macro name and
+/// invokes it with the task registry data. Different consumers can process
+/// the same data differently.
+///
+/// # Task Entry Format
+///
+/// Each task is defined as:
+/// ```text
+/// TaskName {
+///     output: OutputType,           // fully qualified: $crate::domain::tasks::*
+///     adapter: AdapterType,         // fully qualified: $crate::domain::adapters::*
+///     input: image | text_recognition,
+///     constructor: constructor_name,
+///     conversion: into_method_name,
+///     name: "snake_case_name",
+///     doc: "Documentation string",
+///     [boxed: true,]  // optional, for large adapters
+/// }
+/// ```
+///
+/// # Benefits of Fully Qualified Paths
+///
+/// Using `$crate::` paths means consumer modules don't need to import
+/// adapter/output types - the macro expansion includes the full paths.
+#[macro_export]
+macro_rules! with_task_registry {
+    ($callback:path) => {
+        $callback! {
+            TextDetection {
+                output: $crate::domain::tasks::TextDetectionOutput,
+                adapter: $crate::domain::adapters::TextDetectionAdapter,
+                input: image,
+                constructor: text_detection,
+                conversion: into_text_detection,
+                name: "text_detection",
+                doc: "Text detection - locating text regions in images",
+            },
+            TextRecognition {
+                output: $crate::domain::tasks::TextRecognitionOutput,
+                adapter: $crate::domain::adapters::TextRecognitionAdapter,
+                input: text_recognition,
+                constructor: text_recognition,
+                conversion: into_text_recognition,
+                name: "text_recognition",
+                doc: "Text recognition - converting text regions to strings",
+            },
+            DocumentOrientation {
+                output: $crate::domain::tasks::DocumentOrientationOutput,
+                adapter: $crate::domain::adapters::DocumentOrientationAdapter,
+                input: image,
+                constructor: document_orientation,
+                conversion: into_document_orientation,
+                name: "document_orientation",
+                doc: "Document orientation classification",
+            },
+            TextLineOrientation {
+                output: $crate::domain::tasks::TextLineOrientationOutput,
+                adapter: $crate::domain::adapters::TextLineOrientationAdapter,
+                input: image,
+                constructor: text_line_orientation,
+                conversion: into_text_line_orientation,
+                name: "text_line_orientation",
+                doc: "Text line orientation classification",
+            },
+            DocumentRectification {
+                output: $crate::domain::tasks::DocumentRectificationOutput,
+                adapter: $crate::domain::adapters::UVDocRectifierAdapter,
+                input: image,
+                constructor: document_rectification,
+                conversion: into_document_rectification,
+                name: "document_rectification",
+                doc: "Document rectification/unwarp",
+            },
+            LayoutDetection {
+                output: $crate::domain::tasks::LayoutDetectionOutput,
+                adapter: $crate::domain::adapters::LayoutDetectionAdapter,
+                input: image,
+                constructor: layout_detection,
+                conversion: into_layout_detection,
+                name: "layout_detection",
+                doc: "Layout detection/analysis",
+            },
+            TableCellDetection {
+                output: $crate::domain::tasks::TableCellDetectionOutput,
+                adapter: $crate::domain::adapters::TableCellDetectionAdapter,
+                input: image,
+                constructor: table_cell_detection,
+                conversion: into_table_cell_detection,
+                name: "table_cell_detection",
+                doc: "Table cell detection - locating cells within table regions",
+            },
+            FormulaRecognition {
+                output: $crate::domain::tasks::FormulaRecognitionOutput,
+                adapter: $crate::domain::adapters::FormulaRecognitionAdapter,
+                input: image,
+                constructor: formula_recognition,
+                conversion: into_formula_recognition,
+                name: "formula_recognition",
+                doc: "Formula recognition - converting mathematical formulas to LaTeX",
+                boxed: true,
+            },
+            SealTextDetection {
+                output: $crate::domain::tasks::SealTextDetectionOutput,
+                adapter: $crate::domain::adapters::SealTextDetectionAdapter,
+                input: image,
+                constructor: seal_text_detection,
+                conversion: into_seal_text_detection,
+                name: "seal_text_detection",
+                doc: "Seal text detection - locating text regions in seal/stamp images",
+            },
+            TableClassification {
+                output: $crate::domain::tasks::TableClassificationOutput,
+                adapter: $crate::domain::adapters::TableClassificationAdapter,
+                input: image,
+                constructor: table_classification,
+                conversion: into_table_classification,
+                name: "table_classification",
+                doc: "Table classification - classifying table images as wired or wireless",
+            },
+            TableStructureRecognition {
+                output: $crate::domain::tasks::TableStructureRecognitionOutput,
+                adapter: $crate::domain::adapters::TableStructureRecognitionAdapter,
+                input: image,
+                constructor: table_structure_recognition,
+                conversion: into_table_structure_recognition,
+                name: "table_structure_recognition",
+                doc: "Table structure recognition - recognizing table structure as HTML with bboxes",
+            }
+        }
+    };
+}
+
+/// Generates the TaskType enum from the task registry.
+#[macro_export]
+macro_rules! impl_task_type_enum {
+    ($(
+        $task:ident {
+            output: $output:ty,
+            adapter: $adapter:ty,
+            input: $input_kind:ident,
+            constructor: $constructor:ident,
+            conversion: $conversion:ident,
+            name: $name:literal,
+            doc: $doc:literal,
+            $(boxed: $boxed:literal,)?
+        }
+    ),* $(,)?) => {
+        /// Represents the type of OCR task being performed.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+        pub enum TaskType {
+            $(
+                #[doc = $doc]
+                $task,
+            )*
+        }
+
+        impl TaskType {
+            /// Returns a human-readable name for the task type.
+            pub fn name(&self) -> &'static str {
+                match self {
+                    $(TaskType::$task => $name,)*
+                }
+            }
+        }
+    };
+}
+
+/// Generates the DynTaskOutput enum and its methods from the task registry.
+#[macro_export]
+macro_rules! impl_dyn_task_output {
+    ($(
+        $task:ident {
+            output: $output:ty,
+            adapter: $adapter:ty,
+            input: $input_kind:ident,
+            constructor: $constructor:ident,
+            conversion: $conversion:ident,
+            name: $name:literal,
+            doc: $doc:literal,
+            $(boxed: $boxed:literal,)?
+        }
+    ),* $(,)?) => {
+        /// Type-erased output from dynamic adapter execution.
+        ///
+        /// This enum wraps all possible task output types to enable dynamic dispatch.
+        #[derive(Debug, Clone)]
+        pub enum DynTaskOutput {
+            $(
+                #[doc = $doc]
+                $task($output),
+            )*
+        }
+
+        impl DynTaskOutput {
+            $(
+                #[doc = concat!("Extracts ", stringify!($output), " if this is a ", stringify!($task), " variant.")]
+                pub fn $conversion(self) -> Result<$output, $crate::core::OCRError> {
+                    match self {
+                        Self::$task(output) => Ok(output),
+                        _ => Err($crate::core::OCRError::InvalidInput {
+                            message: format!(
+                                concat!("Expected ", stringify!($task), " output, got {:?}"),
+                                std::mem::discriminant(&self)
+                            ),
+                        }),
+                    }
+                }
+            )*
+
+            /// Returns the underlying task type for this output.
+            pub fn task_type(&self) -> $crate::core::traits::task::TaskType {
+                match self {
+                    $(Self::$task(_) => $crate::core::traits::task::TaskType::$task,)*
+                }
+            }
+
+            /// Creates an empty `DynTaskOutput` variant for the given task type.
+            ///
+            /// This is intended for registry wiring completeness checks and test scaffolding.
+            pub fn empty_for(task_type: $crate::core::traits::task::TaskType) -> Self {
+                match task_type {
+                    $($crate::core::traits::task::TaskType::$task => {
+                        Self::$task(<$output>::empty())
+                    })*
+                }
+            }
+        }
+    };
+}
+
+/// Generates the TaskAdapter enum and its DynModelAdapter implementation.
+///
+/// All adapters are uniformly boxed to enable macro generation. The boxing overhead
+/// is negligible since:
+/// - Adapter creation happens once at build time
+/// - Adapters are long-lived
+/// - Inference time dominates any pointer overhead
+/// - Most adapter internals are already indirect (Arc, Vec, etc.)
+#[macro_export]
+macro_rules! impl_task_adapter {
+    ($(
+        $task:ident {
+            output: $output:ty,
+            adapter: $adapter:ty,
+            input: $input_kind:ident,
+            constructor: $constructor:ident,
+            conversion: $conversion:ident,
+            name: $name:literal,
+            doc: $doc:literal,
+            $(boxed: $boxed:literal,)?
+        }
+    ),* $(,)?) => {
+        /// Task-specific adapter enum with uniform Box storage.
+        ///
+        /// This enum directly holds concrete adapter types (boxed for uniform layout),
+        /// avoiding the need for runtime downcast. Each variant corresponds to a
+        /// specific task type and its adapter.
+        ///
+        /// # Benefits
+        ///
+        /// - **No runtime downcast**: Direct pattern matching on enum variants
+        /// - **Compile-time exhaustiveness**: Adding a new task type requires handling it explicitly
+        /// - **Type safety**: Each variant holds the exact adapter type for that task
+        /// - **Uniform memory layout**: All variants are pointer-sized
+        ///
+        /// # Custom Adapters
+        ///
+        /// For testing or extension, use the `Custom` variant which wraps a `Box<dyn DynModelAdapter>`.
+        #[derive(Debug)]
+        pub enum TaskAdapter {
+            $(
+                #[doc = $doc]
+                $task(Box<$adapter>),
+            )*
+            /// Custom adapter for testing or extension (wraps DynModelAdapter)
+            Custom(Box<dyn DynModelAdapter>),
+        }
+
+        impl TaskAdapter {
+            $(
+                #[doc = concat!("Creates a TaskAdapter from a ", stringify!($adapter), ".")]
+                pub fn $constructor(adapter: $adapter) -> Self {
+                    Self::$task(Box::new(adapter))
+                }
+            )*
+
+            /// Creates a TaskAdapter from a custom DynModelAdapter.
+            pub fn custom<A: DynModelAdapter + 'static>(adapter: A) -> Self {
+                Self::Custom(Box::new(adapter))
+            }
+        }
+
+        impl DynModelAdapter for TaskAdapter {
+            fn info(&self) -> AdapterInfo {
+                match self {
+                    $(Self::$task(a) => a.info(),)*
+                    Self::Custom(a) => a.info(),
+                }
+            }
+
+            fn task_type(&self) -> TaskType {
+                match self {
+                    $(Self::$task(_) => TaskType::$task,)*
+                    Self::Custom(a) => a.task_type(),
+                }
+            }
+
+            fn supports_batching(&self) -> bool {
+                match self {
+                    $(Self::$task(a) => a.supports_batching(),)*
+                    Self::Custom(a) => a.supports_batching(),
+                }
+            }
+
+            fn recommended_batch_size(&self) -> usize {
+                match self {
+                    $(Self::$task(a) => a.recommended_batch_size(),)*
+                    Self::Custom(a) => a.recommended_batch_size(),
+                }
+            }
+
+            fn execute_dyn(&self, input: DynTaskInput) -> Result<DynTaskOutput, OCRError> {
+                match self {
+                    $(
+                        Self::$task(adapter) => {
+                            $crate::impl_task_adapter!(@execute $input_kind, adapter, input, $task)
+                        }
+                    )*
+                    Self::Custom(adapter) => adapter.execute_dyn(input),
+                }
+            }
+        }
+    };
+
+    // Internal rule: execute for image input tasks
+    (@execute image, $adapter:ident, $input:ident, $task:ident) => {{
+        let image_input = match $input {
+            DynTaskInput::Image(img) => img,
+            _ => {
+                return Err(OCRError::InvalidInput {
+                    message: format!(
+                        concat!("Expected ImageTaskInput for ", stringify!($task), ", got {:?}"),
+                        std::mem::discriminant(&$input)
+                    ),
+                });
+            }
+        };
+        let output = $adapter.execute(image_input, None)?;
+        Ok(DynTaskOutput::$task(output))
+    }};
+
+    // Internal rule: execute for text_recognition input tasks
+    (@execute text_recognition, $adapter:ident, $input:ident, $task:ident) => {{
+        let rec_input = match $input {
+            DynTaskInput::TextRecognition(rec) => rec,
+            _ => {
+                return Err(OCRError::InvalidInput {
+                    message: format!(
+                        "Expected TextRecognitionInput for TextRecognition, got {:?}",
+                        std::mem::discriminant(&$input)
+                    ),
+                });
+            }
+        };
+        let output = $adapter.execute(rec_input, None)?;
+        Ok(DynTaskOutput::$task(output))
+    }};
+}
+
+// ============================================================================
+// End Task Registration Macros
+// ============================================================================
+
 /// Macro to handle optional nested config initialization in builders.
 ///
 /// This macro eliminates the repeated pattern of:
