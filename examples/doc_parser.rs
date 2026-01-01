@@ -226,7 +226,7 @@ fn process_images<B: oar_ocr::vl::RecognitionBackend>(
                 // Get markdown (OpenOCR-compatible) from the parsed result.
                 let markdown = oar_ocr::vl::utils::to_markdown_openocr(
                     &result.layout_elements,
-                    &ignore_labels,
+                    ignore_labels,
                     true,
                 );
 
