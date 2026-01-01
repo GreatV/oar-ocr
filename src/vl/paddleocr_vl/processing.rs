@@ -6,10 +6,6 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
 
-// =======================================================================
-// Image Processing
-// =======================================================================
-
 #[derive(Debug, Clone)]
 pub struct PaddleOcrVlImageInputs {
     pub pixel_values: Tensor,
@@ -198,10 +194,6 @@ fn pil_resample_to_filter_type(resample: u32) -> Option<FilterType> {
         _ => None,
     }
 }
-
-// =======================================================================
-// Text/Task Post-processing
-// =======================================================================
 
 pub fn strip_math_wrappers(input: &str) -> &str {
     let mut trimmed = input.trim();
@@ -527,8 +519,8 @@ impl UnionFind {
 
 #[cfg(test)]
 mod tests {
+    use super::PaddleOcrVlImageProcessorConfig;
     use super::*;
-    use crate::vl::config::PaddleOcrVlImageProcessorConfig;
     use image::{Rgb, RgbImage};
 
     #[test]

@@ -236,13 +236,13 @@ PaddleOCR-VL is an optional Vision-Language model (VLM) integration. Our impleme
 Enable the feature in your `Cargo.toml`:
 
 ```bash
-cargo add oar-ocr --features paddleocr-vl
+cargo add oar-ocr --features vl
 ```
 
 For GPU acceleration, also enable CUDA:
 
 ```bash
-cargo add oar-ocr --features paddleocr-vl,cuda
+cargo add oar-ocr --features vl,cuda
 ```
 
 ### Downloading the Model
@@ -276,30 +276,78 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### Layout-First Document Parsing
+### Supported Tasks
 
-For structured document parsing, combine PaddleOCR-VL with PP-DocLayoutV2 layout detection.
+| Task | Description | Output Format |
+|------|-------------|---------------|
+| `PaddleOcrVlTask::Ocr` | Text recognition | Plain text |
+| `PaddleOcrVlTask::Table` | Table structure recognition | HTML |
+| `PaddleOcrVlTask::Formula` | Mathematical formula recognition | LaTeX |
+| `PaddleOcrVlTask::Chart` | Chart understanding | Structured text |
 
-First, download the layout model (see [Pre-trained Models](./pretrained-models.md)).
+## UniRec
 
-```rust,no_run
+[UniRec](https://github.com/Topdu/OpenOCR) is a lightweight unified recognition model that handles text, formulas, and tables in a single model. It's faster and smaller than PaddleOCR-VL while maintaining good accuracy.
+
+### Downloading the Model
+
+```bash
+huggingface-cli download Topdu/UniRec-0.1B --local-dir models/unirec-0.1b
+```
+
+### Basic Usage
+
+```rust
 use oar_ocr::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let image = load_image("document.png")?;
+    let image = load_image("formula.png")?;
     let device = candle_core::Device::Cpu;
 
-    // Initialize VL model
-    let vl = PaddleOcrVl::from_dir("PaddleOCR-VL", device)?;
+    // Load UniRec model
+    let model = UniRec::from_dir("models/unirec-0.1b", device)?;
+
+    // Generate recognition result
+    let result = model.generate(image, 512)?;
+    println!("{result}");
+
+    Ok(())
+}
+```
+
+## DocParser
+
+DocParser provides a unified API for two-stage document parsing that combines layout detection with VL-based recognition. It supports both UniRec and PaddleOCR-VL as recognition backends.
+
+### Basic Usage
+
+```rust
+use oar_ocr::prelude::*;
+use oar_ocr::vl::{DocParser, DocParserConfig};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let device = candle_core::Device::Cpu;
 
     // Initialize layout detector
     let layout = LayoutDetectionPredictor::builder()
         .model_name("pp-doclayoutv2")
         .build("pp-doclayoutv2.onnx")?;
 
-    // Parse document with layout-first approach
-    let parsed = vl.parse_document(&layout, image, 256)?;
-    println!("{}", parsed.to_markdown());
+    // Option 1: Using UniRec (lighter, faster)
+    let unirec = UniRec::from_dir("models/unirec-0.1b", device.clone())?;
+    let config = DocParserConfig::default();
+    let parser = DocParser::new(unirec, layout.clone(), config);
+
+    // Option 2: Using PaddleOCR-VL (heavier, more accurate)
+    let paddleocr_vl = PaddleOcrVl::from_dir("PaddleOCR-VL", device)?;
+    let parser = DocParser::new(paddleocr_vl, layout, DocParserConfig::default());
+
+    // Parse document
+    let image = load_image("document.jpg")?;
+    let result = parser.parse(image)?;
+
+    // Output as Markdown
+    println!("{}", result.to_markdown());
 
     Ok(())
 }

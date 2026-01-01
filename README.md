@@ -75,7 +75,7 @@ cargo run --example structure -- --help
 
 See `examples/` directory for complete CLI examples.
 
-### PaddleOCR-VL (Vision-Language)
+### PaddleOCR-VL
 
 [PaddleOCR-VL](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) is a Vision-Language model for advanced document understanding. It supports element-level OCR and layout-first document parsing. Our implementation uses [Candle](https://github.com/huggingface/candle) for inference. Download the model first:
 
@@ -85,19 +85,50 @@ huggingface-cli download PaddlePaddle/PaddleOCR-VL --local-dir PaddleOCR-VL
 
 ```bash
 # Element-level OCR
-cargo run --release --features paddleocr-vl,cuda --example paddleocr_vl -- --model-dir PaddleOCR-VL --task ocr document.jpg
+cargo run --release --features vl,cuda --example paddleocr_vl -- --model-dir PaddleOCR-VL --task ocr document.jpg
 
 # Table recognition (outputs HTML)
-cargo run --release --features paddleocr-vl,cuda --example paddleocr_vl -- --model-dir PaddleOCR-VL --task table table.jpg
+cargo run --release --features vl,cuda --example paddleocr_vl -- --model-dir PaddleOCR-VL --task table table.jpg
 
 # Formula recognition (outputs LaTeX)
-cargo run --release --features paddleocr-vl,cuda --example paddleocr_vl -- --model-dir PaddleOCR-VL --task formula formula.png
+cargo run --release --features vl,cuda --example paddleocr_vl -- --model-dir PaddleOCR-VL --task formula formula.png
 
 # Chart recognition
-cargo run --release --features paddleocr-vl,cuda --example paddleocr_vl -- --model-dir PaddleOCR-VL --task chart chart.png
+cargo run --release --features vl,cuda --example paddleocr_vl -- --model-dir PaddleOCR-VL --task chart chart.png
+```
 
-# Layout-first doc parsing (PP-DocLayoutV2 -> PaddleOCR-VL)
-cargo run --release --features paddleocr-vl,cuda --example paddleocr_vl -- --model-dir PaddleOCR-VL --layout-model pp-doclayoutv2.onnx document.jpg
+### UniRec
+
+[UniRec](https://github.com/Topdu/OpenOCR) is a lightweight unified recognition model that handles text, formulas, and tables in a single model. It's faster and smaller than PaddleOCR-VL while maintaining good accuracy.
+
+```bash
+# Download UniRec model
+huggingface-cli download Topdu/UniRec-0.1B --local-dir models/unirec-0.1b
+
+# Run recognition
+cargo run --release --features vl,cuda --example unirec -- \
+    -m models/unirec-0.1b -d cuda \
+    formula.jpg text.jpg
+```
+
+### DocParser
+
+DocParser provides a unified API for two-stage document parsing (layout detection + recognition) supporting both UniRec and PaddleOCR-VL backends:
+
+```bash
+# Using UniRec
+cargo run --release --features vl,cuda --example doc_parser -- \
+    --model-name unirec \
+    --model-dir models/unirec-0.1b \
+    --layout-model pp-doclayoutv2.onnx \
+    -d cuda document.jpg
+
+# Using PaddleOCR-VL
+cargo run --release --features vl,cuda --example doc_parser -- \
+    --model-name paddleocr-vl \
+    --model-dir PaddleOCR-VL \
+    --layout-model pp-doclayoutv2.onnx \
+    -d cuda document.jpg
 ```
 
 ## Acknowledgments

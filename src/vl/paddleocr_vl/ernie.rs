@@ -1,12 +1,8 @@
-use super::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
+use super::config::PaddleOcrVlConfig;
 use crate::core::OCRError;
-use crate::vl::config::PaddleOcrVlConfig;
+use crate::vl::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::Module;
-
-// =======================================================================
-// Ernie LLM Implementation
-// =======================================================================
 
 #[derive(Debug, Default, Clone)]
 pub struct KvCache {
