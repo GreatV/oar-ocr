@@ -1,6 +1,6 @@
-use super::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
+use super::config::{PaddleOcrVlConfig, PaddleOcrVlVisionConfig};
 use crate::core::OCRError;
-use crate::vl::config::{PaddleOcrVlConfig, PaddleOcrVlVisionConfig};
+use crate::vl::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, Tensor};
 use candle_nn::Module;
 

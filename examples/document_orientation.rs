@@ -33,7 +33,7 @@ use oar_ocr::utils::load_image;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
-use utils::parse_device_config;
+use utils::device_config::parse_device_config;
 
 /// Command-line arguments for the document orientation example
 #[derive(Parser)]

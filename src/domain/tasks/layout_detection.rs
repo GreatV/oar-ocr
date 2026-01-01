@@ -111,10 +111,87 @@ impl LayoutDetectionConfig {
         class_thresholds.insert("seal".to_string(), 0.45);
 
         Self {
-            score_threshold: 0.5,
+            // Use the minimum of the per-class thresholds so the postprocessor doesn't drop
+            // candidates before the per-class filter runs.
+            score_threshold: 0.3,
             max_elements: 100,
             class_thresholds: Some(class_thresholds),
             class_merge_modes: None,
+            layout_nms: true,
+            nms_threshold: 0.5,
+            layout_unclip_ratio: Some(UnclipRatio::Separate(1.0, 1.0)),
+        }
+    }
+
+    /// Creates a config with PP-DocLayoutV2 default thresholds and merge modes.
+    ///
+    /// These defaults are aligned with OpenOCR/OpenDoc's pipeline config:
+    /// `OpenOCR/configs/rec/unirec/opendoc_pipeline.yml`.
+    ///
+    /// Notes:
+    /// - The postprocessor applies `score_threshold` before per-class thresholds, so we set it
+    ///   to the minimum per-class threshold (0.4) to avoid dropping valid candidates early.
+    /// - `class_merge_modes` is populated for all labels so merge behavior is deterministic.
+    pub fn with_pp_doclayoutv2_defaults() -> Self {
+        let mut class_thresholds = HashMap::new();
+        class_thresholds.insert("abstract".to_string(), 0.5);
+        class_thresholds.insert("algorithm".to_string(), 0.5);
+        class_thresholds.insert("aside_text".to_string(), 0.5);
+        class_thresholds.insert("chart".to_string(), 0.5);
+        class_thresholds.insert("content".to_string(), 0.5);
+        class_thresholds.insert("display_formula".to_string(), 0.4);
+        class_thresholds.insert("doc_title".to_string(), 0.4);
+        class_thresholds.insert("figure_title".to_string(), 0.5);
+        class_thresholds.insert("footer".to_string(), 0.5);
+        class_thresholds.insert("footer_image".to_string(), 0.5);
+        class_thresholds.insert("footnote".to_string(), 0.5);
+        class_thresholds.insert("formula_number".to_string(), 0.5);
+        class_thresholds.insert("header".to_string(), 0.5);
+        class_thresholds.insert("header_image".to_string(), 0.5);
+        class_thresholds.insert("image".to_string(), 0.5);
+        class_thresholds.insert("inline_formula".to_string(), 0.4);
+        class_thresholds.insert("number".to_string(), 0.5);
+        class_thresholds.insert("paragraph_title".to_string(), 0.4);
+        class_thresholds.insert("reference".to_string(), 0.5);
+        class_thresholds.insert("reference_content".to_string(), 0.5);
+        class_thresholds.insert("seal".to_string(), 0.45);
+        class_thresholds.insert("table".to_string(), 0.5);
+        class_thresholds.insert("text".to_string(), 0.4);
+        class_thresholds.insert("vertical_text".to_string(), 0.4);
+        class_thresholds.insert("vision_footnote".to_string(), 0.5);
+
+        let mut merge_modes = HashMap::new();
+        merge_modes.insert("abstract".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("algorithm".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("aside_text".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("chart".to_string(), MergeBboxMode::Large);
+        merge_modes.insert("content".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("display_formula".to_string(), MergeBboxMode::Large);
+        merge_modes.insert("doc_title".to_string(), MergeBboxMode::Large);
+        merge_modes.insert("figure_title".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("footer".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("footer_image".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("footnote".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("formula_number".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("header".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("header_image".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("image".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("inline_formula".to_string(), MergeBboxMode::Large);
+        merge_modes.insert("number".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("paragraph_title".to_string(), MergeBboxMode::Large);
+        merge_modes.insert("reference".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("reference_content".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("seal".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("table".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("text".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("vertical_text".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("vision_footnote".to_string(), MergeBboxMode::Union);
+
+        Self {
+            score_threshold: 0.4,
+            max_elements: 100,
+            class_thresholds: Some(class_thresholds),
+            class_merge_modes: Some(merge_modes),
             layout_nms: true,
             nms_threshold: 0.5,
             layout_unclip_ratio: Some(UnclipRatio::Separate(1.0, 1.0)),

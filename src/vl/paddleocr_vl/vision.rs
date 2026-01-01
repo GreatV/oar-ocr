@@ -1,13 +1,9 @@
-use super::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
+use super::config::PaddleOcrVlVisionConfig;
 use crate::core::OCRError;
-use crate::vl::config::PaddleOcrVlVisionConfig;
+use crate::vl::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::Module;
 use rayon::prelude::*;
-
-// =======================================================================
-// Vision Model Implementation
-// =======================================================================
 
 /// SigLIP-style 2D rotary embedding for vision encoder
 #[derive(Debug, Clone)]

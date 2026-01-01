@@ -711,6 +711,7 @@ pub fn apply_nms_with_merge(
     let mut result_boxes = Vec::new();
     let mut result_classes = Vec::new();
     let mut result_scores = Vec::new();
+    let mut result_order_indices = Vec::new();
     let mut processed = vec![false; boxes.len()];
 
     for &i in &indices {
@@ -732,6 +733,7 @@ pub fn apply_nms_with_merge(
 
         let mut merged_box = boxes[i].clone();
         let mut best_score = scores[i];
+        let mut order_idx = i;
 
         // Find overlapping boxes of the same class and merge them
         for &j in &indices {
@@ -741,6 +743,7 @@ pub fn apply_nms_with_merge(
                     // Merge the boxes
                     merged_box = merge_boxes(&merged_box, &boxes[j], merge_mode);
                     best_score = best_score.max(scores[j]);
+                    order_idx = order_idx.min(j);
                     processed[j] = true;
                 }
             }
@@ -749,13 +752,39 @@ pub fn apply_nms_with_merge(
         result_boxes.push(merged_box);
         result_classes.push(classes[i]);
         result_scores.push(best_score);
-
-        if result_boxes.len() >= max_detections {
-            break;
-        }
+        result_order_indices.push(order_idx);
     }
 
-    (result_boxes, result_classes, result_scores)
+    // First, apply max_detections limit based on score (NMS already processed in score order,
+    // so result_* vectors are implicitly score-ordered). This ensures we keep the highest-scoring
+    // detections rather than earliest ones.
+    let take_count = max_detections.min(result_boxes.len());
+
+    // Preserve input ordering for downstream consumers (e.g., PP-DocLayoutV2 reading-order output).
+    // We keep the score-based selection above, but sort the top-N merged results by the earliest
+    // original index in each merged group.
+    let mut merged: Vec<(usize, BoundingBox, usize, f32)> = result_order_indices
+        .into_iter()
+        .zip(result_boxes)
+        .zip(result_classes)
+        .zip(result_scores)
+        .map(|(((order, bbox), class_id), score)| (order, bbox, class_id, score))
+        .take(take_count) // Apply max_detections limit BEFORE reordering
+        .collect();
+
+    merged.sort_by(|(a, _, _, _), (b, _, _, _)| a.cmp(b));
+
+    let mut final_boxes = Vec::new();
+    let mut final_classes = Vec::new();
+    let mut final_scores = Vec::new();
+
+    for (_, bbox, class_id, score) in merged {
+        final_boxes.push(bbox);
+        final_classes.push(class_id);
+        final_scores.push(score);
+    }
+
+    (final_boxes, final_classes, final_scores)
 }
 
 /// Calculate IoU between two bounding boxes (standalone function).

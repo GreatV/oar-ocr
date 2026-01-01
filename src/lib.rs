@@ -81,6 +81,7 @@
 //!     .with_table_classification("models/table_classification.onnx")
 //!     .with_table_cell_detection("models/table_cell_detection.onnx", "wired")
 //!     .with_table_structure_recognition("models/table_structure.onnx", "wired")
+//!     .table_structure_dict_path("models/table_structure_dict.txt")
 //!     .with_formula_recognition(
 //!         "models/formula_recognition.onnx",
 //!         "models/tokenizer.json",
@@ -143,6 +144,9 @@ pub mod prelude {
     pub use crate::predictors::*;
 
     // Optional Vision-Language models
-    #[cfg(feature = "paddleocr-vl")]
-    pub use crate::vl::{PaddleOcrVl, PaddleOcrVlDocParserConfig, PaddleOcrVlTask};
+    #[cfg(feature = "vl")]
+    pub use crate::vl::{
+        DocParser, DocParserConfig, PaddleOcrVl, PaddleOcrVlTask, RecognitionBackend,
+        RecognitionTask, UniRec,
+    };
 }

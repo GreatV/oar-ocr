@@ -1,30 +1,15 @@
-//! PaddleOCR-VL (Vision-Language) integration.
-//!
-//! This module provides the preprocessing and model plumbing for PaddleOCR-VL.
-//! The full model is behind the `paddleocr-vl` feature since it depends on Candle.
+//! PaddleOCR-VL (Vision-Language) model implementation.
 
-use super::config;
-use super::model;
+use super::config::{PaddleOcrVlConfig, PaddleOcrVlImageProcessorConfig};
+use super::ernie::{Ernie4_5Model, KvCache};
 use super::processing;
-
-pub use config::{
-    PaddleOcrVlConfig, PaddleOcrVlImageProcessorConfig, PaddleOcrVlRopeScaling,
-    PaddleOcrVlVisionConfig,
-};
-pub use processing::{
-    PaddleOcrVlImageInputs, postprocess_table_output, preprocess_images, smart_resize,
-    strip_math_wrappers,
-};
-
+use super::projector::Projector;
+use super::vision::VisionModel;
 use crate::core::OCRError;
+use crate::vl::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::Module;
 use image::RgbImage;
-use model::ernie::Ernie4_5Model;
-use model::ernie::KvCache;
-use model::projector::Projector;
-use model::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
-use model::vision::VisionModel;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
