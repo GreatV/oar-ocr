@@ -199,7 +199,7 @@ fn process_images<B: oar_ocr::vl::RecognitionBackend>(
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("\n=== Processing {} images ===", images.len());
-    let ignore_labels = DocParserConfig::default().markdown_ignore_labels;
+    let ignore_labels = &parser.config().markdown_ignore_labels;
 
     for image_path in images {
         info!("\nProcessing: {}", image_path.display());

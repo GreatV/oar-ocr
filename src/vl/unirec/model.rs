@@ -204,29 +204,14 @@ impl UniRec {
                 .argmax(D::Minus1)
                 .map_err(|e| candle_to_ocr_inference("UniRec", "argmax", e))?;
 
-            // Squeeze or reshape if needed
-            let next_token = if !argmax_result.dims().is_empty()
-                && argmax_result.dims().iter().product::<usize>() == 1
-            {
-                argmax_result
-                    .squeeze(0)
-                    .map_err(|e| candle_to_ocr_inference("UniRec", "squeeze argmax", e))?
-                    .to_scalar::<u32>()
-                    .map_err(|e| candle_to_ocr_inference("UniRec", "to_scalar after squeeze", e))?
-            } else if argmax_result.dims().is_empty() {
-                argmax_result
-                    .to_scalar::<u32>()
-                    .map_err(|e| candle_to_ocr_inference("UniRec", "to_scalar", e))?
-            } else {
-                // For batched output, just take first element
-                argmax_result
-                    .flatten_all()
-                    .map_err(|e| candle_to_ocr_inference("UniRec", "flatten argmax", e))?
-                    .get(0)
-                    .map_err(|e| candle_to_ocr_inference("UniRec", "get first argmax", e))?
-                    .to_scalar::<u32>()
-                    .map_err(|e| candle_to_ocr_inference("UniRec", "to_scalar from get", e))?
-            };
+            // Extract next token - flatten_all() handles all shapes uniformly
+            let next_token = argmax_result
+                .flatten_all()
+                .map_err(|e| candle_to_ocr_inference("UniRec", "flatten argmax", e))?
+                .get(0)
+                .map_err(|e| candle_to_ocr_inference("UniRec", "get first token", e))?
+                .to_scalar::<u32>()
+                .map_err(|e| candle_to_ocr_inference("UniRec", "to_scalar", e))?;
 
             // Check for EOS
             if next_token == self.cfg.eos_token_id {

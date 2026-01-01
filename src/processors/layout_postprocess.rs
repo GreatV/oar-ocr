@@ -755,8 +755,13 @@ pub fn apply_nms_with_merge(
         result_order_indices.push(order_idx);
     }
 
+    // First, apply max_detections limit based on score (NMS already processed in score order,
+    // so result_* vectors are implicitly score-ordered). This ensures we keep the highest-scoring
+    // detections rather than earliest ones.
+    let take_count = max_detections.min(result_boxes.len());
+
     // Preserve input ordering for downstream consumers (e.g., PP-DocLayoutV2 reading-order output).
-    // We keep the score-based selection/merging above, but sort merged results by the earliest
+    // We keep the score-based selection above, but sort the top-N merged results by the earliest
     // original index in each merged group.
     let mut merged: Vec<(usize, BoundingBox, usize, f32)> = result_order_indices
         .into_iter()
@@ -764,6 +769,7 @@ pub fn apply_nms_with_merge(
         .zip(result_classes)
         .zip(result_scores)
         .map(|(((order, bbox), class_id), score)| (order, bbox, class_id, score))
+        .take(take_count) // Apply max_detections limit BEFORE reordering
         .collect();
 
     merged.sort_by(|(a, _, _, _), (b, _, _, _)| a.cmp(b));
@@ -772,7 +778,7 @@ pub fn apply_nms_with_merge(
     let mut final_classes = Vec::new();
     let mut final_scores = Vec::new();
 
-    for (_, bbox, class_id, score) in merged.into_iter().take(max_detections) {
+    for (_, bbox, class_id, score) in merged {
         final_boxes.push(bbox);
         final_classes.push(class_id);
         final_scores.push(score);

@@ -130,6 +130,11 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
         Self { backend, config }
     }
 
+    /// Returns a reference to the parser's configuration.
+    pub fn config(&self) -> &DocParserConfig {
+        &self.config
+    }
+
     /// Parse a document image using layout-first pipeline.
     pub fn parse(
         &self,

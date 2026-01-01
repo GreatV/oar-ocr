@@ -235,14 +235,18 @@ PaddleOCR-VL is an optional Vision-Language model (VLM) integration. Our impleme
 
 Enable the feature in your `Cargo.toml`:
 
-```bash
-cargo add oar-ocr --features vl
+```toml
+[dependencies]
+oar-ocr = { version = "0.5", features = ["vl"] }
+candle-core = "0.9.2-alpha.2"  # Must match oar-ocr's candle version
 ```
 
 For GPU acceleration, also enable CUDA:
 
-```bash
-cargo add oar-ocr --features vl,cuda
+```toml
+[dependencies]
+oar-ocr = { version = "0.5", features = ["vl", "cuda"] }
+candle-core = { version = "0.9.2-alpha.2", features = ["cuda"] }
 ```
 
 ### Downloading the Model
@@ -262,9 +266,10 @@ huggingface-cli download PaddlePaddle/PaddleOCR-VL --local-dir PaddleOCR-VL
 
 ```rust,no_run
 use oar_ocr::prelude::*;
+use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let image = load_image("document.png")?;
+    let image = load_image(Path::new("document.png"))?;
     let device = candle_core::Device::Cpu;
     let vl = PaddleOcrVl::from_dir("PaddleOCR-VL", device)?;
 
@@ -299,9 +304,10 @@ huggingface-cli download Topdu/UniRec-0.1B --local-dir models/unirec-0.1b
 
 ```rust
 use oar_ocr::prelude::*;
+use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let image = load_image("formula.png")?;
+    let image = load_image(Path::new("formula.png"))?;
     let device = candle_core::Device::Cpu;
 
     // Load UniRec model
@@ -324,6 +330,7 @@ DocParser provides a unified API for two-stage document parsing that combines la
 ```rust
 use oar_ocr::prelude::*;
 use oar_ocr::vl::{DocParser, DocParserConfig};
+use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = candle_core::Device::Cpu;
@@ -333,20 +340,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .model_name("pp-doclayoutv2")
         .build("pp-doclayoutv2.onnx")?;
 
+    // Load document image
+    let image = load_image(Path::new("document.jpg"))?;
+
     // Option 1: Using UniRec (lighter, faster)
     let unirec = UniRec::from_dir("models/unirec-0.1b", device.clone())?;
-    let config = DocParserConfig::default();
-    let parser = DocParser::new(unirec, layout.clone(), config);
+    let parser = DocParser::with_config(&unirec, DocParserConfig::default());
+    let result = parser.parse(&layout, image.clone())?;
+    println!("{}", result.to_markdown());
 
     // Option 2: Using PaddleOCR-VL (heavier, more accurate)
     let paddleocr_vl = PaddleOcrVl::from_dir("PaddleOCR-VL", device)?;
-    let parser = DocParser::new(paddleocr_vl, layout, DocParserConfig::default());
-
-    // Parse document
-    let image = load_image("document.jpg")?;
-    let result = parser.parse(image)?;
-
-    // Output as Markdown
+    let parser = DocParser::new(&paddleocr_vl);
+    let result = parser.parse(&layout, image)?;
     println!("{}", result.to_markdown());
 
     Ok(())
