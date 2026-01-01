@@ -69,31 +69,30 @@ impl SinusoidalPositionalEmbedding {
     }
 
     fn forward(&self, position_ids: &Tensor, device: &Device, dtype: DType) -> Result<Tensor> {
-        // Generate sinusoidal embeddings on the fly
-        let positions = position_ids.to_vec2::<u32>()?;
-        let (batch_size, seq_len) = (positions.len(), positions[0].len());
-
+        // Generate sinusoidal embeddings entirely on GPU using tensor operations
         let half_dim = self.embed_dim / 2;
         let emb_scale = -(10000f64.ln()) / (half_dim as f64);
 
-        let mut embeddings = Vec::with_capacity(batch_size * seq_len * self.embed_dim);
-        for batch in &positions {
-            for &pos in batch {
-                let pos_with_offset = pos as f64 + self.offset as f64;
-                for i in 0..half_dim {
-                    let freq = (i as f64 * emb_scale).exp();
-                    let angle = pos_with_offset * freq;
-                    embeddings.push(angle.sin() as f32);
-                }
-                for i in 0..half_dim {
-                    let freq = (i as f64 * emb_scale).exp();
-                    let angle = pos_with_offset * freq;
-                    embeddings.push(angle.cos() as f32);
-                }
-            }
-        }
+        // Create frequency tensor: exp(-i * log(10000) / half_dim) for i in [0, half_dim)
+        // Shape: [half_dim]
+        let freq_indices = Tensor::arange(0u32, half_dim as u32, device)?.to_dtype(DType::F32)?;
+        let freqs = (&freq_indices * emb_scale)?.exp()?;
 
-        Tensor::from_vec(embeddings, (batch_size, seq_len, self.embed_dim), device)?.to_dtype(dtype)
+        // Add offset to positions: [batch, seq_len]
+        let positions = position_ids
+            .to_dtype(DType::F32)?
+            .broadcast_add(&Tensor::new(self.offset as f32, device)?)?;
+
+        // Compute angles: positions [batch, seq_len, 1] * freqs [1, 1, half_dim]
+        // Result shape: [batch, seq_len, half_dim]
+        let positions_expanded = positions.unsqueeze(D::Minus1)?;
+        let freqs_expanded = freqs.reshape((1, 1, half_dim))?;
+        let angles = positions_expanded.broadcast_mul(&freqs_expanded)?;
+
+        // Compute sin and cos, then concatenate: [batch, seq_len, embed_dim]
+        let sin_emb = angles.sin()?;
+        let cos_emb = angles.cos()?;
+        Tensor::cat(&[&sin_emb, &cos_emb], D::Minus1)?.to_dtype(dtype)
     }
 }
 

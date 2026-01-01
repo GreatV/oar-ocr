@@ -636,60 +636,59 @@ fn collapse_consecutive_spaces(text: &str) -> String {
 
 fn tighten_inline_dollar_math(text: &str) -> String {
     // Trim whitespace inside *single* `$...$` blocks, while leaving `$$...$$` untouched.
-    let bytes = text.as_bytes();
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0usize;
+    // Uses character-based indexing for UTF-8 safety.
+    let mut result = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
 
-    while i < bytes.len() {
-        let Some(rel) = bytes[i..].iter().position(|&b| b == b'$') else {
-            out.push_str(&text[i..]);
-            break;
-        };
-        let start = i + rel;
-        out.push_str(&text[i..start]);
+    while i < chars.len() {
+        if chars[i] != '$' {
+            result.push(chars[i]);
+            i += 1;
+            continue;
+        }
 
-        let prev_is_dollar = start > 0 && bytes[start - 1] == b'$';
-        let next_is_dollar = start + 1 < bytes.len() && bytes[start + 1] == b'$';
+        // Check if this '$' is part of '$$' (display math)
+        let prev_is_dollar = i > 0 && chars[i - 1] == '$';
+        let next_is_dollar = i + 1 < chars.len() && chars[i + 1] == '$';
+
         if prev_is_dollar || next_is_dollar {
-            // Part of `$$` display math; keep as-is.
-            out.push('$');
-            i = start + 1;
+            result.push('$');
+            i += 1;
             continue;
         }
 
-        // Find the next single '$' to close the inline math block.
-        let mut j = start + 1;
-        let mut close = None;
-        while j < bytes.len() {
-            let Some(rel2) = bytes[j..].iter().position(|&b| b == b'$') else {
+        // Find the closing single '$'
+        let mut close_idx = None;
+        let mut j = i + 1;
+        while j < chars.len() {
+            if chars[j] == '$' {
+                let prev_d = j > 0 && chars[j - 1] == '$';
+                let next_d = j + 1 < chars.len() && chars[j + 1] == '$';
+                if prev_d || next_d {
+                    j += 1;
+                    continue;
+                }
+                close_idx = Some(j);
                 break;
-            };
-            let cand = j + rel2;
-            let prev_d = cand > 0 && bytes[cand - 1] == b'$';
-            let next_d = cand + 1 < bytes.len() && bytes[cand + 1] == b'$';
-            if prev_d || next_d {
-                j = cand + 1;
-                continue;
             }
-            close = Some(cand);
-            break;
+            j += 1;
         }
 
-        let Some(end) = close else {
+        if let Some(end_idx) = close_idx {
+            let inner: String = chars[i + 1..end_idx].iter().collect();
+            result.push('$');
+            result.push_str(inner.trim());
+            result.push('$');
+            i = end_idx + 1;
+        } else {
             // Unmatched '$' (e.g., currency); keep it.
-            out.push('$');
-            i = start + 1;
-            continue;
-        };
-
-        let inner = &text[start + 1..end];
-        out.push('$');
-        out.push_str(inner.trim());
-        out.push('$');
-        i = end + 1;
+            result.push('$');
+            i += 1;
+        }
     }
 
-    out
+    result
 }
 
 fn remove_space_before_punctuation(text: &str) -> String {
@@ -899,4 +898,51 @@ fn compute_openocr_merge_groups(elements: &[LayoutElement]) -> Vec<MergeGroup> {
         .into_iter()
         .filter(|g| g.indices.len() > 1 && g.aligns.len() + 1 == g.indices.len())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tighten_inline_dollar_math_basic() {
+        assert_eq!(tighten_inline_dollar_math("$ x $"), "$x$");
+        assert_eq!(tighten_inline_dollar_math("$  y  $"), "$y$");
+        assert_eq!(tighten_inline_dollar_math("$x$"), "$x$");
+    }
+
+    #[test]
+    fn test_tighten_inline_dollar_math_display_math_untouched() {
+        assert_eq!(tighten_inline_dollar_math("$$ x $$"), "$$ x $$");
+        assert_eq!(tighten_inline_dollar_math("$$  y  $$"), "$$  y  $$");
+    }
+
+    #[test]
+    fn test_tighten_inline_dollar_math_unmatched() {
+        assert_eq!(tighten_inline_dollar_math("$100"), "$100");
+        assert_eq!(tighten_inline_dollar_math("price is $50"), "price is $50");
+    }
+
+    #[test]
+    fn test_tighten_inline_dollar_math_utf8_safety() {
+        // Multi-byte characters inside inline math should not cause panic
+        assert_eq!(tighten_inline_dollar_math("$€$"), "$€$");
+        assert_eq!(tighten_inline_dollar_math("$ €100 $"), "$€100$");
+        assert_eq!(tighten_inline_dollar_math("$ α + β $"), "$α + β$");
+        assert_eq!(tighten_inline_dollar_math("$中文$"), "$中文$");
+        assert_eq!(tighten_inline_dollar_math("$ 数学 $"), "$数学$");
+        // Mixed content
+        assert_eq!(
+            tighten_inline_dollar_math("price $100€$ and $ α $"),
+            "price $100€$ and $α$"
+        );
+    }
+
+    #[test]
+    fn test_tighten_inline_dollar_math_mixed() {
+        assert_eq!(
+            tighten_inline_dollar_math("text $ x $ more $$ y $$ end"),
+            "text $x$ more $$ y $$ end"
+        );
+    }
 }

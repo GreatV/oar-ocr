@@ -249,8 +249,8 @@ fn process_images<B: oar_ocr::vl::RecognitionBackend>(
                             .text
                             .as_ref()
                             .map(|t| {
-                                if t.len() > 40 {
-                                    format!("{}...", &t[..40])
+                                if t.chars().count() > 40 {
+                                    format!("{}...", t.chars().take(40).collect::<String>())
                                 } else {
                                     t.clone()
                                 }
