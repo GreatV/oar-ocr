@@ -6,6 +6,7 @@
 use super::document_orientation::Classification;
 use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
+use crate::core::traits::TaskDefinition;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
 use crate::impl_config_validator;
 use crate::utils::ScoreValidator;
@@ -54,6 +55,16 @@ impl TableClassificationOutput {
         Self {
             classifications: Vec::with_capacity(capacity),
         }
+    }
+}
+
+impl TaskDefinition for TableClassificationOutput {
+    const TASK_NAME: &'static str = "table_classification";
+    const TASK_DOC: &'static str =
+        "Table classification - classifying table images as wired or wireless";
+
+    fn empty() -> Self {
+        Self::empty()
     }
 }
 

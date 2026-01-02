@@ -6,6 +6,7 @@
 use super::text_detection::Detection;
 use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
+use crate::core::traits::TaskDefinition;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
 use crate::impl_config_validator;
 use crate::utils::ScoreValidator;
@@ -66,6 +67,16 @@ impl SealTextDetectionOutput {
         Self {
             detections: Vec::with_capacity(capacity),
         }
+    }
+}
+
+impl TaskDefinition for SealTextDetectionOutput {
+    const TASK_NAME: &'static str = "seal_text_detection";
+    const TASK_DOC: &'static str =
+        "Seal text detection - locating text regions in seal/stamp images";
+
+    fn empty() -> Self {
+        Self::empty()
     }
 }
 

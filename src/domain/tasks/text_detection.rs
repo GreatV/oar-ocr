@@ -4,6 +4,7 @@
 
 use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
+use crate::core::traits::TaskDefinition;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
 use crate::impl_config_validator;
 use crate::processors::{BoundingBox, LimitType};
@@ -88,6 +89,15 @@ impl TextDetectionOutput {
         Self {
             detections: Vec::with_capacity(capacity),
         }
+    }
+}
+
+impl TaskDefinition for TextDetectionOutput {
+    const TASK_NAME: &'static str = "text_detection";
+    const TASK_DOC: &'static str = "Text detection - locating text regions in images";
+
+    fn empty() -> Self {
+        Self::empty()
     }
 }
 
