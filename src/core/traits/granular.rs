@@ -52,7 +52,6 @@
 //! assert!(result.is_ok());
 //! ```
 
-use crate::core::traits::StandardPredictor;
 use crate::core::{BatchData, OCRError};
 use image::RgbImage;
 use std::fmt::Debug;
@@ -251,87 +250,5 @@ pub trait Postprocessor: Send + Sync + Debug {
     /// String describing postprocessing operations
     fn postprocessing_info(&self) -> String {
         "Generic postprocessing".to_string()
-    }
-}
-
-/// A modular predictor that composes granular components.
-///
-/// This struct demonstrates how to build a complete predictor using the granular traits.
-/// It provides the same interface as StandardPredictor but with composable components.
-#[derive(Debug)]
-pub struct ModularPredictor<R, P, I, O> {
-    /// Image reader component
-    pub image_reader: R,
-    /// Preprocessor component
-    pub preprocessor: P,
-    /// Inference engine component
-    pub inference_engine: I,
-    /// Postprocessor component
-    pub postprocessor: O,
-}
-
-impl<R, P, I, O> ModularPredictor<R, P, I, O>
-where
-    R: ImageReader,
-    P: Preprocessor,
-    I: InferenceEngine<Input = P::Output>,
-    O: Postprocessor<InferenceOutput = I::Output, PreprocessOutput = P::Output>,
-{
-    /// Create a new modular predictor with the given components.
-    pub fn new(image_reader: R, preprocessor: P, inference_engine: I, postprocessor: O) -> Self {
-        Self {
-            image_reader,
-            preprocessor,
-            inference_engine,
-            postprocessor,
-        }
-    }
-}
-
-impl<R, P, I, O> StandardPredictor for ModularPredictor<R, P, I, O>
-where
-    R: ImageReader,
-    P: Preprocessor,
-    I: InferenceEngine<Input = P::Output>,
-    O: Postprocessor<InferenceOutput = I::Output, PreprocessOutput = P::Output, Config = P::Config>,
-{
-    type Config = P::Config;
-    type Result = O::Result;
-    type PreprocessOutput = P::Output;
-    type InferenceOutput = I::Output;
-
-    fn read_images<'a>(
-        &self,
-        paths: impl Iterator<Item = &'a str>,
-    ) -> Result<Vec<RgbImage>, OCRError> {
-        self.image_reader.read_images(paths)
-    }
-
-    fn preprocess(
-        &self,
-        images: Vec<RgbImage>,
-        config: Option<&Self::Config>,
-    ) -> Result<Self::PreprocessOutput, OCRError> {
-        self.preprocessor.preprocess(images, config)
-    }
-
-    fn infer(&self, input: &Self::PreprocessOutput) -> Result<Self::InferenceOutput, OCRError> {
-        self.inference_engine.infer(input)
-    }
-
-    fn postprocess(
-        &self,
-        output: Self::InferenceOutput,
-        preprocessed: &Self::PreprocessOutput,
-        batch_data: &BatchData,
-        raw_images: Vec<RgbImage>,
-        config: Option<&Self::Config>,
-    ) -> crate::core::OcrResult<Self::Result> {
-        self.postprocessor
-            .postprocess(output, Some(preprocessed), batch_data, raw_images, config)
-    }
-
-    fn empty_result(&self) -> crate::core::OcrResult<Self::Result> {
-        self.postprocessor.empty_result()
     }
 }

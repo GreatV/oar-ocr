@@ -6,7 +6,7 @@
 //! `granular` when you need to assemble predictors from interchangeable image
 //! readers, preprocessors, inference engines, and postprocessors.
 //!
-//! The new `task` and `adapter` modules provide a more flexible architecture
+//! The `task` and `adapter` modules provide the primary architecture
 //! for defining OCR tasks and adapting models to conform to task interfaces.
 
 pub mod adapter;
@@ -16,10 +16,7 @@ pub mod task;
 
 pub use adapter::{AdapterBuilder, AdapterInfo, AdapterTask, ModelAdapter};
 pub use granular::{
-    ImageReader as GranularImageReader, InferenceEngine, ModularPredictor, Postprocessor,
-    Preprocessor,
+    ImageReader as GranularImageReader, InferenceEngine, Postprocessor, Preprocessor,
 };
-pub use standard::{
-    BasePredictor, ImageReader, PredictorBuilder, PredictorConfig, Sampler, StandardPredictor,
-};
+pub use standard::{ImageReader, Sampler};
 pub use task::{ImageTaskInput, Task, TaskRunner, TaskSchema, TaskType};

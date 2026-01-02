@@ -48,9 +48,8 @@ pub use errors::{OCRError, OcrResult, OpaqueError, ProcessingStage};
 pub use image_reader::DefaultImageReader;
 pub use inference::{OrtInfer, OrtInfer2D, OrtInfer3D, OrtInfer4D, load_session};
 pub use traits::{
-    AdapterBuilder, AdapterInfo, AdapterTask, BasePredictor, GranularImageReader, ImageReader,
-    ImageTaskInput, InferenceEngine, ModelAdapter, ModularPredictor, Postprocessor,
-    PredictorBuilder, PredictorConfig, Preprocessor, Sampler, StandardPredictor, Task, TaskRunner,
+    AdapterBuilder, AdapterInfo, AdapterTask, GranularImageReader, ImageReader, ImageTaskInput,
+    InferenceEngine, ModelAdapter, Postprocessor, Preprocessor, Sampler, Task, TaskRunner,
     TaskSchema, TaskType,
 };
 
