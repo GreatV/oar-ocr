@@ -67,7 +67,7 @@ impl TaskDefinition for FormulaRecognitionOutput {
         "Formula recognition - converting mathematical formulas to LaTeX";
 
     fn empty() -> Self {
-        Self::empty()
+        FormulaRecognitionOutput::empty()
     }
 }
 

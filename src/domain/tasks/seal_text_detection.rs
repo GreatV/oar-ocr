@@ -76,7 +76,7 @@ impl TaskDefinition for SealTextDetectionOutput {
         "Seal text detection - locating text regions in seal/stamp images";
 
     fn empty() -> Self {
-        Self::empty()
+        SealTextDetectionOutput::empty()
     }
 }
 

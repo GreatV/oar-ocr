@@ -71,7 +71,7 @@ impl TaskDefinition for TableStructureRecognitionOutput {
         "Table structure recognition - recognizing table structure as HTML with bboxes";
 
     fn empty() -> Self {
-        Self::empty()
+        TableStructureRecognitionOutput::empty()
     }
 }
 

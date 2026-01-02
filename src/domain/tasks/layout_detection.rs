@@ -315,7 +315,7 @@ impl TaskDefinition for LayoutDetectionOutput {
     const TASK_DOC: &'static str = "Layout detection/analysis";
 
     fn empty() -> Self {
-        Self::empty()
+        LayoutDetectionOutput::empty()
     }
 }
 

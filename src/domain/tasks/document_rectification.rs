@@ -78,7 +78,7 @@ impl TaskDefinition for DocumentRectificationOutput {
     const TASK_DOC: &'static str = "Document rectification/unwarp";
 
     fn empty() -> Self {
-        Self::empty()
+        DocumentRectificationOutput::empty()
     }
 }
 

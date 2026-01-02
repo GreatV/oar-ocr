@@ -18,11 +18,12 @@
 ///     adapter: AdapterType,  // fully qualified path
 ///     constructor: constructor_name,
 ///     conversion: into_method_name,
+///     doc: "Documentation string for IDE/rustdoc",
 /// }
 /// ```
 ///
-/// The `TaskDefinition` trait provides task metadata (name, doc, empty()) so
-/// it doesn't need to be repeated in the registry.
+/// The `TaskDefinition` trait provides task metadata (name, doc, empty()) for runtime.
+/// The `doc` field in the registry is used for `#[doc]` attributes on enum variants.
 #[macro_export]
 macro_rules! with_task_registry {
     ($callback:path) => {
@@ -32,66 +33,77 @@ macro_rules! with_task_registry {
                 adapter: $crate::domain::adapters::TextDetectionAdapter,
                 constructor: text_detection,
                 conversion: into_text_detection,
+                doc: "Text detection - locating text regions in images",
             },
             TextRecognition {
                 output: $crate::domain::tasks::TextRecognitionOutput,
                 adapter: $crate::domain::adapters::TextRecognitionAdapter,
                 constructor: text_recognition,
                 conversion: into_text_recognition,
+                doc: "Text recognition - converting text regions to strings",
             },
             DocumentOrientation {
                 output: $crate::domain::tasks::DocumentOrientationOutput,
                 adapter: $crate::domain::adapters::DocumentOrientationAdapter,
                 constructor: document_orientation,
                 conversion: into_document_orientation,
+                doc: "Document orientation classification",
             },
             TextLineOrientation {
                 output: $crate::domain::tasks::TextLineOrientationOutput,
                 adapter: $crate::domain::adapters::TextLineOrientationAdapter,
                 constructor: text_line_orientation,
                 conversion: into_text_line_orientation,
+                doc: "Text line orientation classification",
             },
             DocumentRectification {
                 output: $crate::domain::tasks::DocumentRectificationOutput,
                 adapter: $crate::domain::adapters::UVDocRectifierAdapter,
                 constructor: document_rectification,
                 conversion: into_document_rectification,
+                doc: "Document rectification/unwarp",
             },
             LayoutDetection {
                 output: $crate::domain::tasks::LayoutDetectionOutput,
                 adapter: $crate::domain::adapters::LayoutDetectionAdapter,
                 constructor: layout_detection,
                 conversion: into_layout_detection,
+                doc: "Layout detection/analysis",
             },
             TableCellDetection {
                 output: $crate::domain::tasks::TableCellDetectionOutput,
                 adapter: $crate::domain::adapters::TableCellDetectionAdapter,
                 constructor: table_cell_detection,
                 conversion: into_table_cell_detection,
+                doc: "Table cell detection - locating cells within table regions",
             },
             FormulaRecognition {
                 output: $crate::domain::tasks::FormulaRecognitionOutput,
                 adapter: $crate::domain::adapters::FormulaRecognitionAdapter,
                 constructor: formula_recognition,
                 conversion: into_formula_recognition,
+                doc: "Formula recognition - converting mathematical formulas to LaTeX",
             },
             SealTextDetection {
                 output: $crate::domain::tasks::SealTextDetectionOutput,
                 adapter: $crate::domain::adapters::SealTextDetectionAdapter,
                 constructor: seal_text_detection,
                 conversion: into_seal_text_detection,
+                doc: "Seal text detection - locating text regions in seal/stamp images",
             },
             TableClassification {
                 output: $crate::domain::tasks::TableClassificationOutput,
                 adapter: $crate::domain::adapters::TableClassificationAdapter,
                 constructor: table_classification,
                 conversion: into_table_classification,
+                doc: "Table classification - classifying table images as wired or wireless",
             },
             TableStructureRecognition {
                 output: $crate::domain::tasks::TableStructureRecognitionOutput,
                 adapter: $crate::domain::adapters::TableStructureRecognitionAdapter,
                 constructor: table_structure_recognition,
                 conversion: into_table_structure_recognition,
+                doc: "Table structure recognition - recognizing table structure as HTML with bboxes",
             }
         }
     };
@@ -99,7 +111,8 @@ macro_rules! with_task_registry {
 
 /// Generates the TaskType enum from the task registry.
 ///
-/// Uses `TaskDefinition::TASK_NAME` and `TaskDefinition::TASK_DOC` for metadata.
+/// Uses `TaskDefinition::TASK_NAME` for runtime metadata.
+/// Uses `doc` field for `#[doc]` attributes on variants.
 #[macro_export]
 macro_rules! impl_task_type_enum {
     ($(
@@ -108,12 +121,16 @@ macro_rules! impl_task_type_enum {
             adapter: $adapter:ty,
             constructor: $constructor:ident,
             conversion: $conversion:ident,
+            doc: $doc:literal,
         }
     ),* $(,)?) => {
         /// Represents the type of OCR task being performed.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
         pub enum TaskType {
-            $($task,)*
+            $(
+                #[doc = $doc]
+                $task,
+            )*
         }
 
         impl TaskType {
@@ -129,7 +146,8 @@ macro_rules! impl_task_type_enum {
 
 /// Generates the DynTaskOutput enum and its methods from the task registry.
 ///
-/// Uses `TaskDefinition::empty()` and `TaskDefinition::TASK_DOC` for metadata.
+/// Uses `TaskDefinition::empty()` for runtime empty output creation.
+/// Uses `doc` field for `#[doc]` attributes on variants.
 #[macro_export]
 macro_rules! impl_dyn_task_output {
     ($(
@@ -138,6 +156,7 @@ macro_rules! impl_dyn_task_output {
             adapter: $adapter:ty,
             constructor: $constructor:ident,
             conversion: $conversion:ident,
+            doc: $doc:literal,
         }
     ),* $(,)?) => {
         /// Type-erased output from dynamic adapter execution.
@@ -145,7 +164,10 @@ macro_rules! impl_dyn_task_output {
         /// This enum wraps all possible task output types to enable dynamic dispatch.
         #[derive(Debug, Clone)]
         pub enum DynTaskOutput {
-            $($task($output),)*
+            $(
+                #[doc = $doc]
+                $task($output),
+            )*
         }
 
         impl DynTaskOutput {
@@ -193,6 +215,8 @@ macro_rules! impl_dyn_task_output {
 /// - Adapters are long-lived
 /// - Inference time dominates any pointer overhead
 /// - Most adapter internals are already indirect (Arc, Vec, etc.)
+///
+/// Uses `doc` field for `#[doc]` attributes on variants.
 #[macro_export]
 macro_rules! impl_task_adapter {
     ($(
@@ -201,6 +225,7 @@ macro_rules! impl_task_adapter {
             adapter: $adapter:ty,
             constructor: $constructor:ident,
             conversion: $conversion:ident,
+            doc: $doc:literal,
         }
     ),* $(,)?) => {
         /// Task-specific adapter enum with uniform Box storage.
@@ -221,7 +246,10 @@ macro_rules! impl_task_adapter {
         /// For testing or extension, use the `Custom` variant which wraps a `Box<dyn DynModelAdapter>`.
         #[derive(Debug)]
         pub enum TaskAdapter {
-            $($task(Box<$adapter>),)*
+            $(
+                #[doc = $doc]
+                $task(Box<$adapter>),
+            )*
             /// Custom adapter for testing or extension (wraps DynModelAdapter)
             Custom(Box<dyn DynModelAdapter>),
         }

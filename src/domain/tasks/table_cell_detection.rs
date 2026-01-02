@@ -76,7 +76,7 @@ impl TaskDefinition for TableCellDetectionOutput {
     const TASK_DOC: &'static str = "Table cell detection - locating cells within table regions";
 
     fn empty() -> Self {
-        Self::empty()
+        TableCellDetectionOutput::empty()
     }
 }
 

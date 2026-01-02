@@ -97,7 +97,7 @@ impl TaskDefinition for TextDetectionOutput {
     const TASK_DOC: &'static str = "Text detection - locating text regions in images";
 
     fn empty() -> Self {
-        Self::empty()
+        TextDetectionOutput::empty()
     }
 }
 

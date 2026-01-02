@@ -83,7 +83,7 @@ impl TaskDefinition for DocumentOrientationOutput {
     const TASK_DOC: &'static str = "Document orientation classification";
 
     fn empty() -> Self {
-        Self::empty()
+        DocumentOrientationOutput::empty()
     }
 }
 

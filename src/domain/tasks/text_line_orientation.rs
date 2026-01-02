@@ -62,7 +62,7 @@ impl TaskDefinition for TextLineOrientationOutput {
     const TASK_DOC: &'static str = "Text line orientation classification";
 
     fn empty() -> Self {
-        Self::empty()
+        TextLineOrientationOutput::empty()
     }
 }
 

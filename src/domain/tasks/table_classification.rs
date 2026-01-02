@@ -64,7 +64,7 @@ impl TaskDefinition for TableClassificationOutput {
         "Table classification - classifying table images as wired or wireless";
 
     fn empty() -> Self {
-        Self::empty()
+        TableClassificationOutput::empty()
     }
 }
 

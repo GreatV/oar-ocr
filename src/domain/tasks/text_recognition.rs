@@ -88,7 +88,7 @@ impl TaskDefinition for TextRecognitionOutput {
     const TASK_DOC: &'static str = "Text recognition - converting text regions to strings";
 
     fn empty() -> Self {
-        Self::empty()
+        TextRecognitionOutput::empty()
     }
 }
 
