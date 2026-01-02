@@ -3,7 +3,6 @@
 use super::config::{DynamicBatchConfig, PaddingStrategy, ShapeCompatibilityStrategy};
 use super::types::{CompatibleBatch, CrossImageBatch, CrossImageItem};
 use crate::core::OCRError;
-use crate::core::traits::StandardPredictor;
 use image::{ImageBuffer, Rgb, RgbImage};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -23,17 +22,6 @@ pub trait DynamicBatcher {
         items: Vec<(usize, usize, RgbImage)>, // (source_image_idx, item_idx, image)
         config: &DynamicBatchConfig,
     ) -> Result<Vec<CrossImageBatch>, OCRError>;
-
-    /// Batch predict with a predictor
-    fn batch_predict<P>(
-        &self,
-        predictor: &P,
-        images: Vec<RgbImage>,
-        config: Option<P::Config>,
-    ) -> Result<Vec<P::Result>, OCRError>
-    where
-        P: StandardPredictor,
-        P::Config: Clone;
 }
 
 /// Default implementation of dynamic batcher
@@ -600,38 +588,6 @@ impl DynamicBatcher for DefaultDynamicBatcher {
         }
 
         Ok(batches)
-    }
-
-    fn batch_predict<P>(
-        &self,
-        predictor: &P,
-        images: Vec<RgbImage>,
-        config: Option<P::Config>,
-    ) -> Result<Vec<P::Result>, OCRError>
-    where
-        P: StandardPredictor,
-        P::Config: Clone,
-    {
-        // If images vector is empty, return early
-        if images.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Use a default chunk size for batch processing
-        // This should ideally come from configuration
-        const DEFAULT_CHUNK_SIZE: usize = 8;
-        let chunk_size = DEFAULT_CHUNK_SIZE;
-
-        // Split images into chunks and process sequentially
-        // Note: Parallel processing would require Send + Sync bounds on predictor
-        let mut results = Vec::new();
-        for chunk in images.chunks(chunk_size) {
-            let chunk_images = chunk.to_vec();
-            let result = predictor.predict(chunk_images, config.clone())?;
-            results.push(result);
-        }
-
-        Ok(results)
     }
 }
 
