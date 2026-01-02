@@ -5,6 +5,7 @@
 use super::document_orientation::Classification;
 use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
+use crate::core::traits::TaskDefinition;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
 use crate::impl_config_validator;
 use crate::utils::ScoreValidator;
@@ -53,6 +54,15 @@ impl TextLineOrientationOutput {
         Self {
             classifications: Vec::with_capacity(capacity),
         }
+    }
+}
+
+impl TaskDefinition for TextLineOrientationOutput {
+    const TASK_NAME: &'static str = "text_line_orientation";
+    const TASK_DOC: &'static str = "Text line orientation classification";
+
+    fn empty() -> Self {
+        TextLineOrientationOutput::empty()
     }
 }
 

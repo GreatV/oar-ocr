@@ -8,11 +8,15 @@
 //!
 //! The `task` and `adapter` modules provide the primary architecture
 //! for defining OCR tasks and adapting models to conform to task interfaces.
+//!
+//! The `task_def` module provides the `TaskDefinition` trait for compile-time
+//! task registration, allowing each task module to define its own metadata.
 
 pub mod adapter;
 pub mod granular;
 pub mod standard;
 pub mod task;
+pub mod task_def;
 
 pub use adapter::{AdapterBuilder, AdapterInfo, AdapterTask, ModelAdapter};
 pub use granular::{
@@ -20,3 +24,4 @@ pub use granular::{
 };
 pub use standard::{ImageReader, Sampler};
 pub use task::{ImageTaskInput, Task, TaskRunner, TaskSchema, TaskType};
+pub use task_def::TaskDefinition;

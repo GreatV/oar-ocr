@@ -14,20 +14,16 @@
 /// Each task is defined as:
 /// ```text
 /// TaskName {
-///     output: OutputType,           // fully qualified: $crate::domain::tasks::*
-///     adapter: AdapterType,         // fully qualified: $crate::domain::adapters::*
-///     input: image,
+///     output: OutputType,    // fully qualified path
+///     adapter: AdapterType,  // fully qualified path
 ///     constructor: constructor_name,
 ///     conversion: into_method_name,
-///     name: "snake_case_name",
-///     doc: "Documentation string",
+///     doc: "Documentation string for IDE/rustdoc",
 /// }
 /// ```
 ///
-/// # Benefits of Fully Qualified Paths
-///
-/// Using `$crate::` paths means consumer modules don't need to import
-/// adapter/output types - the macro expansion includes the full paths.
+/// The `TaskDefinition` trait provides task metadata (name, doc, empty()) for runtime.
+/// The `doc` field in the registry is used for `#[doc]` attributes on enum variants.
 #[macro_export]
 macro_rules! with_task_registry {
     ($callback:path) => {
@@ -35,100 +31,78 @@ macro_rules! with_task_registry {
             TextDetection {
                 output: $crate::domain::tasks::TextDetectionOutput,
                 adapter: $crate::domain::adapters::TextDetectionAdapter,
-                input: image,
                 constructor: text_detection,
                 conversion: into_text_detection,
-                name: "text_detection",
                 doc: "Text detection - locating text regions in images",
             },
             TextRecognition {
                 output: $crate::domain::tasks::TextRecognitionOutput,
                 adapter: $crate::domain::adapters::TextRecognitionAdapter,
-                input: image,
                 constructor: text_recognition,
                 conversion: into_text_recognition,
-                name: "text_recognition",
                 doc: "Text recognition - converting text regions to strings",
             },
             DocumentOrientation {
                 output: $crate::domain::tasks::DocumentOrientationOutput,
                 adapter: $crate::domain::adapters::DocumentOrientationAdapter,
-                input: image,
                 constructor: document_orientation,
                 conversion: into_document_orientation,
-                name: "document_orientation",
                 doc: "Document orientation classification",
             },
             TextLineOrientation {
                 output: $crate::domain::tasks::TextLineOrientationOutput,
                 adapter: $crate::domain::adapters::TextLineOrientationAdapter,
-                input: image,
                 constructor: text_line_orientation,
                 conversion: into_text_line_orientation,
-                name: "text_line_orientation",
                 doc: "Text line orientation classification",
             },
             DocumentRectification {
                 output: $crate::domain::tasks::DocumentRectificationOutput,
                 adapter: $crate::domain::adapters::UVDocRectifierAdapter,
-                input: image,
                 constructor: document_rectification,
                 conversion: into_document_rectification,
-                name: "document_rectification",
                 doc: "Document rectification/unwarp",
             },
             LayoutDetection {
                 output: $crate::domain::tasks::LayoutDetectionOutput,
                 adapter: $crate::domain::adapters::LayoutDetectionAdapter,
-                input: image,
                 constructor: layout_detection,
                 conversion: into_layout_detection,
-                name: "layout_detection",
                 doc: "Layout detection/analysis",
             },
             TableCellDetection {
                 output: $crate::domain::tasks::TableCellDetectionOutput,
                 adapter: $crate::domain::adapters::TableCellDetectionAdapter,
-                input: image,
                 constructor: table_cell_detection,
                 conversion: into_table_cell_detection,
-                name: "table_cell_detection",
                 doc: "Table cell detection - locating cells within table regions",
             },
             FormulaRecognition {
                 output: $crate::domain::tasks::FormulaRecognitionOutput,
                 adapter: $crate::domain::adapters::FormulaRecognitionAdapter,
-                input: image,
                 constructor: formula_recognition,
                 conversion: into_formula_recognition,
-                name: "formula_recognition",
                 doc: "Formula recognition - converting mathematical formulas to LaTeX",
             },
             SealTextDetection {
                 output: $crate::domain::tasks::SealTextDetectionOutput,
                 adapter: $crate::domain::adapters::SealTextDetectionAdapter,
-                input: image,
                 constructor: seal_text_detection,
                 conversion: into_seal_text_detection,
-                name: "seal_text_detection",
                 doc: "Seal text detection - locating text regions in seal/stamp images",
             },
             TableClassification {
                 output: $crate::domain::tasks::TableClassificationOutput,
                 adapter: $crate::domain::adapters::TableClassificationAdapter,
-                input: image,
                 constructor: table_classification,
                 conversion: into_table_classification,
-                name: "table_classification",
                 doc: "Table classification - classifying table images as wired or wireless",
             },
             TableStructureRecognition {
                 output: $crate::domain::tasks::TableStructureRecognitionOutput,
                 adapter: $crate::domain::adapters::TableStructureRecognitionAdapter,
-                input: image,
                 constructor: table_structure_recognition,
                 conversion: into_table_structure_recognition,
-                name: "table_structure_recognition",
                 doc: "Table structure recognition - recognizing table structure as HTML with bboxes",
             }
         }
@@ -136,16 +110,17 @@ macro_rules! with_task_registry {
 }
 
 /// Generates the TaskType enum from the task registry.
+///
+/// Uses `TaskDefinition::TASK_NAME` for runtime metadata.
+/// Uses `doc` field for `#[doc]` attributes on variants.
 #[macro_export]
 macro_rules! impl_task_type_enum {
     ($(
         $task:ident {
             output: $output:ty,
             adapter: $adapter:ty,
-            input: $input_kind:ident,
             constructor: $constructor:ident,
             conversion: $conversion:ident,
-            name: $name:literal,
             doc: $doc:literal,
         }
     ),* $(,)?) => {
@@ -162,7 +137,7 @@ macro_rules! impl_task_type_enum {
             /// Returns a human-readable name for the task type.
             pub fn name(&self) -> &'static str {
                 match self {
-                    $(TaskType::$task => $name,)*
+                    $(TaskType::$task => <$output as $crate::core::traits::TaskDefinition>::TASK_NAME,)*
                 }
             }
         }
@@ -170,16 +145,17 @@ macro_rules! impl_task_type_enum {
 }
 
 /// Generates the DynTaskOutput enum and its methods from the task registry.
+///
+/// Uses `TaskDefinition::empty()` for runtime empty output creation.
+/// Uses `doc` field for `#[doc]` attributes on variants.
 #[macro_export]
 macro_rules! impl_dyn_task_output {
     ($(
         $task:ident {
             output: $output:ty,
             adapter: $adapter:ty,
-            input: $input_kind:ident,
             constructor: $constructor:ident,
             conversion: $conversion:ident,
-            name: $name:literal,
             doc: $doc:literal,
         }
     ),* $(,)?) => {
@@ -223,7 +199,7 @@ macro_rules! impl_dyn_task_output {
             pub fn empty_for(task_type: $crate::core::traits::task::TaskType) -> Self {
                 match task_type {
                     $($crate::core::traits::task::TaskType::$task => {
-                        Self::$task(<$output>::empty())
+                        Self::$task(<$output as $crate::core::traits::TaskDefinition>::empty())
                     })*
                 }
             }
@@ -239,16 +215,16 @@ macro_rules! impl_dyn_task_output {
 /// - Adapters are long-lived
 /// - Inference time dominates any pointer overhead
 /// - Most adapter internals are already indirect (Arc, Vec, etc.)
+///
+/// Uses `doc` field for `#[doc]` attributes on variants.
 #[macro_export]
 macro_rules! impl_task_adapter {
     ($(
         $task:ident {
             output: $output:ty,
             adapter: $adapter:ty,
-            input: $input_kind:ident,
             constructor: $constructor:ident,
             conversion: $conversion:ident,
-            name: $name:literal,
             doc: $doc:literal,
         }
     ),* $(,)?) => {
@@ -325,7 +301,11 @@ macro_rules! impl_task_adapter {
                 match self {
                     $(
                         Self::$task(adapter) => {
-                            $crate::impl_task_adapter!(@execute $input_kind, adapter, input, $task)
+                            let image_input = match input {
+                                DynTaskInput::Image(img) => img,
+                            };
+                            let output = adapter.execute(image_input, None)?;
+                            Ok(DynTaskOutput::$task(output))
                         }
                     )*
                     Self::Custom(adapter) => adapter.execute_dyn(input),
@@ -333,15 +313,6 @@ macro_rules! impl_task_adapter {
             }
         }
     };
-
-    // Internal rule: execute for image input tasks
-    (@execute image, $adapter:ident, $input:ident, $task:ident) => {{
-        let image_input = match $input {
-            DynTaskInput::Image(img) => img,
-        };
-        let output = $adapter.execute(image_input, None)?;
-        Ok(DynTaskOutput::$task(output))
-    }};
 }
 
 /// Macro to handle optional nested config initialization in builders.

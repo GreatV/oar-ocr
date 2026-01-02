@@ -4,6 +4,7 @@
 
 use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
+use crate::core::traits::TaskDefinition;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
 use crate::impl_config_validator;
 use crate::processors::BoundingBox;
@@ -306,6 +307,15 @@ impl LayoutDetectionOutput {
     pub fn with_reading_order_sorted(mut self, sorted: bool) -> Self {
         self.is_reading_order_sorted = sorted;
         self
+    }
+}
+
+impl TaskDefinition for LayoutDetectionOutput {
+    const TASK_NAME: &'static str = "layout_detection";
+    const TASK_DOC: &'static str = "Layout detection/analysis";
+
+    fn empty() -> Self {
+        LayoutDetectionOutput::empty()
     }
 }
 

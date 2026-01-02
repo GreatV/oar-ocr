@@ -5,6 +5,7 @@
 
 use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
+use crate::core::traits::TaskDefinition;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
 use crate::impl_config_validator;
 use crate::utils::{ScoreValidator, validate_length_match};
@@ -57,6 +58,16 @@ impl FormulaRecognitionOutput {
             formulas: Vec::with_capacity(capacity),
             scores: Vec::with_capacity(capacity),
         }
+    }
+}
+
+impl TaskDefinition for FormulaRecognitionOutput {
+    const TASK_NAME: &'static str = "formula_recognition";
+    const TASK_DOC: &'static str =
+        "Formula recognition - converting mathematical formulas to LaTeX";
+
+    fn empty() -> Self {
+        FormulaRecognitionOutput::empty()
     }
 }
 

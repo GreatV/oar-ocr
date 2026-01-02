@@ -5,6 +5,7 @@
 
 use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
+use crate::core::traits::TaskDefinition;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
 use crate::impl_config_validator;
 use crate::utils::{ScoreValidator, validate_max_value};
@@ -61,6 +62,16 @@ impl TableStructureRecognitionOutput {
             bboxes: Vec::with_capacity(capacity),
             structure_scores: Vec::with_capacity(capacity),
         }
+    }
+}
+
+impl TaskDefinition for TableStructureRecognitionOutput {
+    const TASK_NAME: &'static str = "table_structure_recognition";
+    const TASK_DOC: &'static str =
+        "Table structure recognition - recognizing table structure as HTML with bboxes";
+
+    fn empty() -> Self {
+        TableStructureRecognitionOutput::empty()
     }
 }
 

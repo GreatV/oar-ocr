@@ -5,6 +5,7 @@
 
 use super::validation::ensure_non_empty_images;
 use crate::core::OCRError;
+use crate::core::traits::TaskDefinition;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
 use crate::impl_config_validator;
 use crate::processors::BoundingBox;
@@ -67,6 +68,15 @@ impl TableCellDetectionOutput {
         Self {
             cells: Vec::with_capacity(capacity),
         }
+    }
+}
+
+impl TaskDefinition for TableCellDetectionOutput {
+    const TASK_NAME: &'static str = "table_cell_detection";
+    const TASK_DOC: &'static str = "Table cell detection - locating cells within table regions";
+
+    fn empty() -> Self {
+        TableCellDetectionOutput::empty()
     }
 }
 

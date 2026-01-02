@@ -5,6 +5,7 @@
 use super::validation::{ensure_images_with, ensure_non_empty_images};
 use crate::core::OCRError;
 use crate::core::config::{ConfigError, ConfigValidator};
+use crate::core::traits::TaskDefinition;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
 use image::RgbImage;
 use serde::{Deserialize, Serialize};
@@ -69,6 +70,15 @@ impl DocumentRectificationOutput {
         Self {
             rectified_images: Vec::with_capacity(capacity),
         }
+    }
+}
+
+impl TaskDefinition for DocumentRectificationOutput {
+    const TASK_NAME: &'static str = "document_rectification";
+    const TASK_DOC: &'static str = "Document rectification/unwarp";
+
+    fn empty() -> Self {
+        DocumentRectificationOutput::empty()
     }
 }
 
