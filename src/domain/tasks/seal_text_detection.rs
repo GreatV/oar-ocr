@@ -5,25 +5,29 @@
 
 use super::text_detection::Detection;
 use super::validation::ensure_non_empty_images;
+use crate::ConfigValidator;
 use crate::core::OCRError;
 use crate::core::traits::TaskDefinition;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
-use crate::impl_config_validator;
 use crate::utils::ScoreValidator;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for seal text detection models.
 ///
 /// These parameters control how text regions are extracted from seal images.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ConfigValidator)]
 pub struct SealTextDetectionConfig {
     /// Pixel-level threshold for text detection (0.2 default)
+    #[validate(range(0.0, 1.0))]
     pub score_threshold: f32,
     /// Box-level threshold for filtering detections (0.6 default)
+    #[validate(range(0.0, 1.0))]
     pub box_threshold: f32,
     /// Expansion ratio for detected regions using Vatti clipping (0.5 default)
+    #[validate(min(0.0))]
     pub unclip_ratio: f32,
     /// Maximum number of candidate detections (1000 default)
+    #[validate(min(1))]
     pub max_candidates: usize,
 }
 
@@ -37,13 +41,6 @@ impl Default for SealTextDetectionConfig {
         }
     }
 }
-
-impl_config_validator!(SealTextDetectionConfig {
-    score_threshold: range(0.0, 1.0),
-    box_threshold: range(0.0, 1.0),
-    unclip_ratio: min(0.0),
-    max_candidates: min(1),
-});
 
 /// Output from seal text detection models.
 ///

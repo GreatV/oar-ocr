@@ -3,6 +3,7 @@
 //! This module provides a high-level API for table classification (wired vs wireless tables).
 
 use super::builder::PredictorBuilderState;
+use crate::TaskPredictorBuilder;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
 use crate::domain::adapters::TableClassificationAdapterBuilder;
@@ -46,6 +47,8 @@ impl TableClassificationPredictor {
 }
 
 /// Builder for table classification predictor
+#[derive(TaskPredictorBuilder)]
+#[builder(config = TableClassificationConfig)]
 pub struct TableClassificationPredictorBuilder {
     state: PredictorBuilderState<TableClassificationConfig>,
     input_shape: (u32, u32),
@@ -104,11 +107,6 @@ impl TableClassificationPredictorBuilder {
         })
     }
 }
-
-impl_task_predictor_builder!(
-    TableClassificationPredictorBuilder,
-    TableClassificationConfig
-);
 
 impl Default for TableClassificationPredictorBuilder {
     fn default() -> Self {

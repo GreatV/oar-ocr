@@ -4,20 +4,22 @@
 //! detecting table cells using object detection models (e.g., RT-DETR).
 
 use super::validation::ensure_non_empty_images;
+use crate::ConfigValidator;
 use crate::core::OCRError;
 use crate::core::traits::TaskDefinition;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
-use crate::impl_config_validator;
 use crate::processors::BoundingBox;
 use crate::utils::{ScoreValidator, validate_max_value};
 use serde::{Deserialize, Serialize};
 
 /// Configuration for table cell detection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ConfigValidator)]
 pub struct TableCellDetectionConfig {
     /// Score threshold for detections (default: 0.3).
+    #[validate(range(0.0, 1.0))]
     pub score_threshold: f32,
     /// Maximum number of cells to keep per image (default: 300).
+    #[validate(min(1))]
     pub max_cells: usize,
 }
 
@@ -30,11 +32,6 @@ impl Default for TableCellDetectionConfig {
         }
     }
 }
-
-impl_config_validator!(TableCellDetectionConfig {
-    score_threshold: range(0.0, 1.0),
-    max_cells: min(1),
-});
 
 /// A detected table cell from the table cell detection model.
 ///

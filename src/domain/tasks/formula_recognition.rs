@@ -4,19 +4,21 @@
 //! formulas in images to LaTeX strings.
 
 use super::validation::ensure_non_empty_images;
+use crate::ConfigValidator;
 use crate::core::OCRError;
 use crate::core::traits::TaskDefinition;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
-use crate::impl_config_validator;
 use crate::utils::{ScoreValidator, validate_length_match};
 use serde::{Deserialize, Serialize};
 
 /// Configuration for formula recognition task.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ConfigValidator)]
 pub struct FormulaRecognitionConfig {
     /// Score threshold for filtering low-confidence results (default: 0.0)
+    #[validate(range(0.0, 1.0))]
     pub score_threshold: f32,
     /// Maximum formula length in tokens (default: 1536)
+    #[validate(min(1))]
     pub max_length: usize,
 }
 
@@ -28,11 +30,6 @@ impl Default for FormulaRecognitionConfig {
         }
     }
 }
-
-impl_config_validator!(FormulaRecognitionConfig {
-    score_threshold: range(0.0, 1.0),
-    max_length: min(1),
-});
 
 /// Output from formula recognition task.
 #[derive(Debug, Clone)]

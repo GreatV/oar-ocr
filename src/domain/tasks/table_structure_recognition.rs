@@ -4,19 +4,21 @@
 //! into HTML structure with bounding boxes for cells.
 
 use super::validation::ensure_non_empty_images;
+use crate::ConfigValidator;
 use crate::core::OCRError;
 use crate::core::traits::TaskDefinition;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
-use crate::impl_config_validator;
 use crate::utils::{ScoreValidator, validate_max_value};
 use serde::{Deserialize, Serialize};
 
 /// Configuration for table structure recognition task.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ConfigValidator)]
 pub struct TableStructureRecognitionConfig {
     /// Score threshold for recognition (default: 0.5)
+    #[validate(range(0.0, 1.0))]
     pub score_threshold: f32,
     /// Maximum structure sequence length (default: 500)
+    #[validate(min(1))]
     pub max_structure_length: usize,
 }
 
@@ -28,11 +30,6 @@ impl Default for TableStructureRecognitionConfig {
         }
     }
 }
-
-impl_config_validator!(TableStructureRecognitionConfig {
-    score_threshold: range(0.0, 1.0),
-    max_structure_length: min(1),
-});
 
 /// Output from table structure recognition task.
 #[derive(Debug, Clone)]

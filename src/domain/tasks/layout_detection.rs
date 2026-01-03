@@ -3,10 +3,10 @@
 //! This module provides the layout detection task that identifies document layout elements.
 
 use super::validation::ensure_non_empty_images;
+use crate::ConfigValidator;
 use crate::core::OCRError;
 use crate::core::traits::TaskDefinition;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
-use crate::impl_config_validator;
 use crate::processors::BoundingBox;
 use crate::utils::{ScoreValidator, validate_max_value};
 use serde::{Deserialize, Serialize};
@@ -43,11 +43,13 @@ impl Default for UnclipRatio {
 }
 
 /// Configuration for layout detection task.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ConfigValidator)]
 pub struct LayoutDetectionConfig {
     /// Default score threshold for detection (default: 0.5)
+    #[validate(range(0.0, 1.0))]
     pub score_threshold: f32,
     /// Maximum number of layout elements (default: 100)
+    #[validate(min(1))]
     pub max_elements: usize,
     /// Per-class score thresholds (overrides score_threshold for specific classes)
     /// PP-StructureV3 defaults:
@@ -254,11 +256,6 @@ impl LayoutDetectionConfig {
             .unwrap_or(MergeBboxMode::Large)
     }
 }
-
-impl_config_validator!(LayoutDetectionConfig {
-    score_threshold: range(0.0, 1.0),
-    max_elements: min(1),
-});
 
 /// A detected layout element from the layout detection model.
 ///

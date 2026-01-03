@@ -3,6 +3,7 @@
 //! This module provides a high-level API for text recognition from cropped text images.
 
 use super::builder::PredictorBuilderState;
+use crate::TaskPredictorBuilder;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
 use crate::domain::adapters::TextRecognitionAdapterBuilder;
@@ -46,6 +47,8 @@ impl TextRecognitionPredictor {
 }
 
 /// Builder for text recognition predictor
+#[derive(TaskPredictorBuilder)]
+#[builder(config = TextRecognitionConfig)]
 pub struct TextRecognitionPredictorBuilder {
     state: PredictorBuilderState<TextRecognitionConfig>,
     dict_path: Option<PathBuf>,
@@ -107,8 +110,6 @@ impl TextRecognitionPredictorBuilder {
         })
     }
 }
-
-impl_task_predictor_builder!(TextRecognitionPredictorBuilder, TextRecognitionConfig);
 
 impl Default for TextRecognitionPredictorBuilder {
     fn default() -> Self {

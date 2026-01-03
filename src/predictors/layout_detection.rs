@@ -3,6 +3,7 @@
 //! This module provides a high-level API for document layout detection.
 
 use super::builder::PredictorBuilderState;
+use crate::TaskPredictorBuilder;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
 use crate::domain::adapters::LayoutDetectionAdapterBuilder;
@@ -47,6 +48,8 @@ impl LayoutDetectionPredictor {
     }
 }
 
+#[derive(TaskPredictorBuilder)]
+#[builder(config = LayoutDetectionConfig)]
 pub struct LayoutDetectionPredictorBuilder {
     state: PredictorBuilderState<LayoutDetectionConfig>,
     model_name: Option<String>,
@@ -137,8 +140,6 @@ impl LayoutDetectionPredictorBuilder {
         Ok(config)
     }
 }
-
-impl_task_predictor_builder!(LayoutDetectionPredictorBuilder, LayoutDetectionConfig);
 
 impl Default for LayoutDetectionPredictorBuilder {
     fn default() -> Self {
