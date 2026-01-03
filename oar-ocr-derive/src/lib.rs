@@ -102,21 +102,27 @@ fn generate_field_validation(field: &Field) -> syn::Result<Option<proc_macro2::T
 
     let field_name_str = field_name.to_string();
 
+    let mut validations = Vec::new();
+
     for attr in &field.attrs {
         if !attr.path().is_ident("validate") {
             continue;
         }
 
         let meta = attr.parse_args::<Meta>()?;
-        return Ok(Some(generate_validation_code(
+        validations.push(generate_validation_code(
             field_name,
             &field_name_str,
             &meta,
             &field.ty,
-        )?));
+        )?);
     }
 
-    Ok(None)
+    if validations.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(quote! { #(#validations)* }))
+    }
 }
 
 fn generate_validation_code(
@@ -342,6 +348,11 @@ fn find_builder_config_type(input: &DeriveInput) -> syn::Result<Type> {
                         qself: None,
                         path: expr_path.path,
                     }));
+                } else {
+                    return Err(syn::Error::new_spanned(
+                        nv.value,
+                        "Expected a type path, e.g., #[builder(config = MyConfigType)]",
+                    ));
                 }
             }
         }
