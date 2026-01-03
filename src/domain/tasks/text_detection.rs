@@ -3,10 +3,10 @@
 //! This module provides the text detection task that locates text regions in images.
 
 use super::validation::ensure_non_empty_images;
+use crate::ConfigValidator;
 use crate::core::OCRError;
 use crate::core::traits::TaskDefinition;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
-use crate::impl_config_validator;
 use crate::processors::{BoundingBox, LimitType};
 use crate::utils::ScoreValidator;
 use serde::{Deserialize, Serialize};
@@ -30,15 +30,19 @@ impl Detection {
 /// Configuration for text detection task.
 ///
 /// Default values are aligned with PP-StructureV3.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ConfigValidator)]
 pub struct TextDetectionConfig {
     /// Score threshold for detection (default: 0.3)
+    #[validate(range(0.0, 1.0))]
     pub score_threshold: f32,
     /// Box threshold for filtering (default: 0.6)
+    #[validate(range(0.0, 1.0))]
     pub box_threshold: f32,
     /// Unclip ratio for expanding detected regions (default: 1.5)
+    #[validate(min(0.0))]
     pub unclip_ratio: f32,
     /// Maximum candidates to consider (default: 1000)
+    #[validate(min(1))]
     pub max_candidates: usize,
     /// Target side length for image resizing (optional)
     pub limit_side_len: Option<u32>,
@@ -61,13 +65,6 @@ impl Default for TextDetectionConfig {
         }
     }
 }
-
-impl_config_validator!(TextDetectionConfig {
-    score_threshold: range(0.0, 1.0),
-    box_threshold: range(0.0, 1.0),
-    unclip_ratio: min(0.0),
-    max_candidates: min(1),
-});
 
 /// Output from text detection task.
 #[derive(Debug, Clone)]

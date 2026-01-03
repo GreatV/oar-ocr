@@ -110,6 +110,9 @@ pub mod processors;
 pub mod utils;
 pub mod vl;
 
+// Re-export derive macros for convenient use
+pub use oar_ocr_derive::{ConfigValidator, TaskPredictorBuilder};
+
 /// Prelude module for convenient imports.
 ///
 ///  Bring the essentials into scope with a single use statement:

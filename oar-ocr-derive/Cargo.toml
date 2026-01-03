@@ -1,0 +1,16 @@
+[package]
+name = "oar-ocr-derive"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+authors = ["Wang Xin <xinwang614@gmail.com>"]
+description = "Procedural derive macros for oar-ocr"
+repository = "https://github.com/greatv/oar-ocr"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"

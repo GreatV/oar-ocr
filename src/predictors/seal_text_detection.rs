@@ -3,6 +3,7 @@
 //! This module provides a high-level API for seal text detection in images.
 
 use super::builder::PredictorBuilderState;
+use crate::TaskPredictorBuilder;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
 use crate::domain::adapters::SealTextDetectionAdapterBuilder;
@@ -41,6 +42,8 @@ impl SealTextDetectionPredictor {
     }
 }
 
+#[derive(TaskPredictorBuilder)]
+#[builder(config = SealTextDetectionConfig)]
 pub struct SealTextDetectionPredictorBuilder {
     state: PredictorBuilderState<SealTextDetectionConfig>,
 }
@@ -81,8 +84,6 @@ impl SealTextDetectionPredictorBuilder {
         })
     }
 }
-
-impl_task_predictor_builder!(SealTextDetectionPredictorBuilder, SealTextDetectionConfig);
 
 impl Default for SealTextDetectionPredictorBuilder {
     fn default() -> Self {

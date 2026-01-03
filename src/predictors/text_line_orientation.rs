@@ -3,6 +3,7 @@
 //! This module provides a high-level API for text line orientation classification.
 
 use super::builder::PredictorBuilderState;
+use crate::TaskPredictorBuilder;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
 use crate::domain::adapters::TextLineOrientationAdapterBuilder;
@@ -44,6 +45,8 @@ impl TextLineOrientationPredictor {
     }
 }
 
+#[derive(TaskPredictorBuilder)]
+#[builder(config = TextLineOrientationConfig)]
 pub struct TextLineOrientationPredictorBuilder {
     state: PredictorBuilderState<TextLineOrientationConfig>,
     input_shape: (u32, u32),
@@ -96,11 +99,6 @@ impl TextLineOrientationPredictorBuilder {
         })
     }
 }
-
-impl_task_predictor_builder!(
-    TextLineOrientationPredictorBuilder,
-    TextLineOrientationConfig
-);
 
 impl Default for TextLineOrientationPredictorBuilder {
     fn default() -> Self {

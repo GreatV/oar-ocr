@@ -3,6 +3,7 @@
 //! This module provides a high-level API for document orientation classification.
 
 use super::builder::PredictorBuilderState;
+use crate::TaskPredictorBuilder;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
 use crate::domain::adapters::DocumentOrientationAdapterBuilder;
@@ -45,6 +46,8 @@ impl DocumentOrientationPredictor {
 }
 
 /// Builder for document orientation predictor
+#[derive(TaskPredictorBuilder)]
+#[builder(config = DocumentOrientationConfig)]
 pub struct DocumentOrientationPredictorBuilder {
     state: PredictorBuilderState<DocumentOrientationConfig>,
     input_shape: (u32, u32),
@@ -97,11 +100,6 @@ impl DocumentOrientationPredictorBuilder {
         })
     }
 }
-
-impl_task_predictor_builder!(
-    DocumentOrientationPredictorBuilder,
-    DocumentOrientationConfig
-);
 
 impl Default for DocumentOrientationPredictorBuilder {
     fn default() -> Self {

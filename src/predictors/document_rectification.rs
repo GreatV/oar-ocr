@@ -3,6 +3,7 @@
 //! This module provides a high-level API for document rectification (dewarp).
 
 use super::builder::PredictorBuilderState;
+use crate::TaskPredictorBuilder;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
 use crate::domain::adapters::UVDocRectifierAdapterBuilder;
@@ -43,6 +44,8 @@ impl DocumentRectificationPredictor {
     }
 }
 
+#[derive(TaskPredictorBuilder)]
+#[builder(config = DocumentRectificationConfig)]
 pub struct DocumentRectificationPredictorBuilder {
     state: PredictorBuilderState<DocumentRectificationConfig>,
 }
@@ -74,11 +77,6 @@ impl DocumentRectificationPredictorBuilder {
         })
     }
 }
-
-impl_task_predictor_builder!(
-    DocumentRectificationPredictorBuilder,
-    DocumentRectificationConfig
-);
 
 impl Default for DocumentRectificationPredictorBuilder {
     fn default() -> Self {

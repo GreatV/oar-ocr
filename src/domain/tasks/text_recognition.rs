@@ -3,21 +3,23 @@
 //! This module provides the text recognition task that converts text regions to strings.
 
 use super::validation::ensure_non_empty_images;
+use crate::ConfigValidator;
 use crate::core::OCRError;
 use crate::core::traits::TaskDefinition;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
-use crate::impl_config_validator;
 use crate::utils::{ScoreValidator, validate_length_match, validate_max_value};
 use serde::{Deserialize, Serialize};
 
 /// Configuration for text recognition task.
 ///
 /// Default values are aligned with PP-StructureV3.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ConfigValidator)]
 pub struct TextRecognitionConfig {
     /// Score threshold for recognition (default: 0.0, no filtering)
+    #[validate(range(0.0, 1.0))]
     pub score_threshold: f32,
     /// Maximum text length (default: 25)
+    #[validate(min(1))]
     pub max_text_length: usize,
 }
 
@@ -29,11 +31,6 @@ impl Default for TextRecognitionConfig {
         }
     }
 }
-
-impl_config_validator!(TextRecognitionConfig {
-    score_threshold: range(0.0, 1.0),
-    max_text_length: min(1),
-});
 
 /// Output from text recognition task.
 #[derive(Debug, Clone)]

@@ -3,6 +3,7 @@
 //! This module provides a high-level API for table cell detection in images.
 
 use super::builder::PredictorBuilderState;
+use crate::TaskPredictorBuilder;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
 use crate::domain::adapters::{TableCellDetectionAdapterBuilder, TableCellModelConfig};
@@ -43,6 +44,8 @@ impl TableCellDetectionPredictor {
     }
 }
 
+#[derive(TaskPredictorBuilder)]
+#[builder(config = TableCellDetectionConfig)]
 pub struct TableCellDetectionPredictorBuilder {
     state: PredictorBuilderState<TableCellDetectionConfig>,
     model_variant: Option<TableCellModelVariant>,
@@ -157,8 +160,6 @@ impl TableCellDetectionPredictorBuilder {
         })
     }
 }
-
-impl_task_predictor_builder!(TableCellDetectionPredictorBuilder, TableCellDetectionConfig);
 
 impl Default for TableCellDetectionPredictorBuilder {
     fn default() -> Self {

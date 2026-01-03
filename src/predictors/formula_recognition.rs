@@ -3,6 +3,7 @@
 //! This module provides a high-level API for mathematical formula recognition in images.
 
 use super::builder::PredictorBuilderState;
+use crate::TaskPredictorBuilder;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
 use crate::domain::adapters::{PPFormulaNetAdapterBuilder, UniMERNetFormulaAdapterBuilder};
@@ -87,6 +88,8 @@ impl FormulaRecognitionPredictor {
 }
 
 /// Builder for formula recognition predictor
+#[derive(TaskPredictorBuilder)]
+#[builder(config = FormulaRecognitionConfig)]
 pub struct FormulaRecognitionPredictorBuilder {
     state: PredictorBuilderState<FormulaRecognitionConfig>,
     model_name: String,
@@ -212,8 +215,6 @@ impl FormulaRecognitionPredictorBuilder {
         })
     }
 }
-
-impl_task_predictor_builder!(FormulaRecognitionPredictorBuilder, FormulaRecognitionConfig);
 
 impl Default for FormulaRecognitionPredictorBuilder {
     fn default() -> Self {

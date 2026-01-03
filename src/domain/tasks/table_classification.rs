@@ -5,19 +5,21 @@
 
 use super::document_orientation::Classification;
 use super::validation::ensure_non_empty_images;
+use crate::ConfigValidator;
 use crate::core::OCRError;
 use crate::core::traits::TaskDefinition;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
-use crate::impl_config_validator;
 use crate::utils::ScoreValidator;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for table classification task.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ConfigValidator)]
 pub struct TableClassificationConfig {
     /// Score threshold for classification (default: 0.5)
+    #[validate(range(0.0, 1.0))]
     pub score_threshold: f32,
     /// Number of top predictions to return (default: 2)
+    #[validate(min(1))]
     pub topk: usize,
 }
 
@@ -29,11 +31,6 @@ impl Default for TableClassificationConfig {
         }
     }
 }
-
-impl_config_validator!(TableClassificationConfig {
-    score_threshold: range(0.0, 1.0),
-    topk: min(1),
-});
 
 /// Output from table classification task.
 #[derive(Debug, Clone)]

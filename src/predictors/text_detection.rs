@@ -3,6 +3,7 @@
 //! This module provides a high-level API for text detection in images.
 
 use super::builder::PredictorBuilderState;
+use crate::TaskPredictorBuilder;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
 use crate::domain::adapters::TextDetectionAdapterBuilder;
@@ -47,6 +48,8 @@ impl TextDetectionPredictor {
 }
 
 /// Builder for text detection predictor
+#[derive(TaskPredictorBuilder)]
+#[builder(config = TextDetectionConfig)]
 pub struct TextDetectionPredictorBuilder {
     state: PredictorBuilderState<TextDetectionConfig>,
 }
@@ -111,8 +114,6 @@ impl TextDetectionPredictorBuilder {
         })
     }
 }
-
-impl_task_predictor_builder!(TextDetectionPredictorBuilder, TextDetectionConfig);
 
 impl Default for TextDetectionPredictorBuilder {
     fn default() -> Self {

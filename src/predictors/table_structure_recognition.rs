@@ -3,6 +3,7 @@
 //! This module provides a high-level API for table structure recognition.
 
 use super::builder::PredictorBuilderState;
+use crate::TaskPredictorBuilder;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
 use crate::domain::adapters::SLANetWiredAdapterBuilder;
@@ -46,6 +47,8 @@ impl TableStructureRecognitionPredictor {
     }
 }
 
+#[derive(TaskPredictorBuilder)]
+#[builder(config = TableStructureRecognitionConfig)]
 pub struct TableStructureRecognitionPredictorBuilder {
     state: PredictorBuilderState<TableStructureRecognitionConfig>,
     dict_path: Option<PathBuf>,
@@ -116,11 +119,6 @@ impl TableStructureRecognitionPredictorBuilder {
         })
     }
 }
-
-impl_task_predictor_builder!(
-    TableStructureRecognitionPredictorBuilder,
-    TableStructureRecognitionConfig
-);
 
 impl Default for TableStructureRecognitionPredictorBuilder {
     fn default() -> Self {
