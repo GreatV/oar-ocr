@@ -188,14 +188,8 @@ fn generate_validation_code(
                         }
                     })
                 }
-                "path" => Ok(quote! {
-                    self.validate_model_path(&self.#field_name)?;
-                }),
-                "optional_path" => Ok(quote! {
-                    if let Some(ref path) = self.#field_name {
-                        self.validate_model_path(path)?;
-                    }
-                }),
+                "path" => Ok(generate_path_validation(field_name, false)),
+                "optional_path" => Ok(generate_path_validation(field_name, true)),
                 other => Err(syn::Error::new_spanned(
                     validator_name,
                     format!("Unknown validator: {}", other),
@@ -209,14 +203,8 @@ fn generate_validation_code(
             let validator_str = validator_name.to_string();
 
             match validator_str.as_str() {
-                "path" => Ok(quote! {
-                    self.validate_model_path(&self.#field_name)?;
-                }),
-                "optional_path" => Ok(quote! {
-                    if let Some(ref path) = self.#field_name {
-                        self.validate_model_path(path)?;
-                    }
-                }),
+                "path" => Ok(generate_path_validation(field_name, false)),
+                "optional_path" => Ok(generate_path_validation(field_name, true)),
                 other => Err(syn::Error::new_spanned(
                     validator_name,
                     format!("Unknown validator without arguments: {}", other),
@@ -224,6 +212,20 @@ fn generate_validation_code(
             }
         }
         _ => Err(syn::Error::new_spanned(meta, "Invalid validator format")),
+    }
+}
+
+fn generate_path_validation(field_name: &syn::Ident, optional: bool) -> proc_macro2::TokenStream {
+    if optional {
+        quote! {
+            if let Some(ref path) = self.#field_name {
+                self.validate_model_path(path)?;
+            }
+        }
+    } else {
+        quote! {
+            self.validate_model_path(&self.#field_name)?;
+        }
     }
 }
 
@@ -343,11 +345,6 @@ fn find_builder_config_type(input: &DeriveInput) -> syn::Result<Type> {
                 }
             }
         }
-
-        return Err(syn::Error::new_spanned(
-            attr,
-            "Expected #[builder(config = ConfigType)]",
-        ));
     }
 
     Err(syn::Error::new_spanned(
@@ -375,16 +372,48 @@ fn verify_state_field(input: &DeriveInput) -> syn::Result<()> {
         }
     };
 
-    let has_state_field = fields
+    let state_field = fields
         .iter()
-        .any(|f| f.ident.as_ref().is_some_and(|ident| ident == "state"));
+        .find(|f| f.ident.as_ref().is_some_and(|ident| ident == "state"));
 
-    if !has_state_field {
+    let state_field = match state_field {
+        Some(field) => field,
+        None => {
+            return Err(syn::Error::new_spanned(
+                input,
+                "Struct must have a `state` field of type PredictorBuilderState<Config>",
+            ));
+        }
+    };
+
+    // Verify the type is PredictorBuilderState<...>
+    if !is_predictor_builder_state_type(&state_field.ty) {
         return Err(syn::Error::new_spanned(
-            input,
-            "Struct must have a `state` field of type PredictorBuilderState<Config>",
+            &state_field.ty,
+            "Field `state` must be of type PredictorBuilderState<Config>",
         ));
     }
 
     Ok(())
+}
+
+fn is_predictor_builder_state_type(ty: &Type) -> bool {
+    let Type::Path(type_path) = ty else {
+        return false;
+    };
+
+    let last_segment = match type_path.path.segments.last() {
+        Some(seg) => seg,
+        None => return false,
+    };
+
+    if last_segment.ident != "PredictorBuilderState" {
+        return false;
+    }
+
+    // Verify it has exactly one generic argument
+    matches!(
+        &last_segment.arguments,
+        syn::PathArguments::AngleBracketed(args) if args.args.len() == 1
+    )
 }
