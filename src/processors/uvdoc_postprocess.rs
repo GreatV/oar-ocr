@@ -1,5 +1,7 @@
 //! Document transformation post-processing functionality.
 
+use crate::core::errors::OCRError;
+use crate::core::OcrResult;
 use std::str::FromStr;
 
 /// Post-processor for document transformation results.
@@ -250,19 +252,21 @@ impl UVDocPostProcess {
     ///
     /// # Returns
     ///
-    /// * `Result<Vec<[f32; 2]>, String>` - Transformed coordinates or error.
+    /// * `OcrResult<Vec<[f32; 2]>>` - Transformed coordinates or error.
     pub fn apply_inverse_transform(
         &self,
         coords: &[[f32; 2]],
         matrix: &[f32; 9],
-    ) -> Result<Vec<[f32; 2]>, String> {
+    ) -> OcrResult<Vec<[f32; 2]>> {
         // Calculate determinant for matrix inversion
         let det = matrix[0] * (matrix[4] * matrix[8] - matrix[5] * matrix[7])
             - matrix[1] * (matrix[3] * matrix[8] - matrix[5] * matrix[6])
             + matrix[2] * (matrix[3] * matrix[7] - matrix[4] * matrix[6]);
 
         if det.abs() < f32::EPSILON {
-            return Err("Matrix is not invertible (determinant is zero)".to_string());
+            return Err(OCRError::InvalidInput {
+                message: "Matrix is not invertible (determinant is zero)".to_string(),
+            });
         }
 
         // For simplicity, this is a basic implementation
@@ -286,16 +290,18 @@ impl UVDocPostProcess {
     ///
     /// # Returns
     ///
-    /// * `Result<Vec<image::RgbImage>, String>` - Vector of rectified images or error.
+    /// * `OcrResult<Vec<image::RgbImage>>` - Vector of rectified images or error.
     pub fn apply_batch(
         &self,
         output: &crate::core::Tensor4D,
-    ) -> Result<Vec<image::RgbImage>, String> {
+    ) -> OcrResult<Vec<image::RgbImage>> {
         use image::{Rgb, RgbImage};
 
         let shape = output.shape();
         if shape.len() != 4 {
-            return Err("Expected 4D tensor [batch, channels, height, width]".to_string());
+            return Err(OCRError::InvalidInput {
+                message: "Expected 4D tensor [batch, channels, height, width]".to_string(),
+            });
         }
 
         let batch_size = shape[0];
@@ -304,7 +310,9 @@ impl UVDocPostProcess {
         let width = shape[3];
 
         if channels != 3 {
-            return Err("Expected 3 channels (RGB)".to_string());
+            return Err(OCRError::InvalidInput {
+                message: "Expected 3 channels (RGB)".to_string(),
+            });
         }
 
         let mut images = Vec::with_capacity(batch_size);

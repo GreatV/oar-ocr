@@ -4,6 +4,8 @@
 
 use super::builder::PredictorBuilderState;
 use crate::TaskPredictorBuilder;
+use crate::core::errors::OCRError;
+use crate::core::OcrResult;
 use crate::core::traits::OrtConfigurable;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
@@ -38,7 +40,7 @@ impl TableStructureRecognitionPredictor {
     pub fn predict(
         &self,
         images: Vec<RgbImage>,
-    ) -> Result<TableStructureRecognitionResult, Box<dyn std::error::Error>> {
+    ) -> OcrResult<TableStructureRecognitionResult> {
         let input = ImageTaskInput::new(images);
         let output = self.core.predict(input)?;
         Ok(TableStructureRecognitionResult {
@@ -91,15 +93,16 @@ impl TableStructureRecognitionPredictorBuilder {
     pub fn build<P: AsRef<Path>>(
         self,
         model_path: P,
-    ) -> Result<TableStructureRecognitionPredictor, Box<dyn std::error::Error>> {
+    ) -> OcrResult<TableStructureRecognitionPredictor> {
         let Self {
             state,
             dict_path,
             input_shape,
         } = self;
         let (config, ort_config) = state.into_parts();
-        let dict_path =
-            dict_path.ok_or("Dictionary path is required for table structure recognition")?;
+        let dict_path = dict_path.ok_or_else(|| {
+            OCRError::missing_field("dict_path", "TableStructureRecognitionPredictor")
+        })?;
 
         let mut adapter_builder = SLANetWiredAdapterBuilder::new()
             .with_config(config.clone())

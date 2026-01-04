@@ -24,6 +24,8 @@
 //! // let visualization = create_ocr_visualization(&result, &config);
 //! ```
 
+use crate::core::errors::OCRError;
+use crate::core::OcrResult;
 use crate::domain::structure::{LayoutElement, LayoutElementType, StructureResult, TableResult};
 use crate::oarocr::OAROCRResult;
 use crate::processors::BoundingBox;
@@ -135,10 +137,11 @@ impl VisualizationConfig {
     /// # Returns
     ///
     /// A Result containing the VisualizationConfig if successful, or an error if the font could not be loaded.
-    pub fn with_font_path(font_path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn with_font_path(font_path: &Path) -> OcrResult<Self> {
         let font_data = std::fs::read(font_path)?;
-        let font = FontVec::try_from_vec(font_data)
-            .map_err(|_| format!("Failed to parse font file: {}", font_path.display()))?;
+        let font = FontVec::try_from_vec(font_data).map_err(|_| OCRError::InvalidInput {
+            message: format!("Failed to parse font file: {}", font_path.display()),
+        })?;
 
         Ok(Self {
             font: Some(font),
@@ -200,7 +203,7 @@ impl VisualizationConfig {
 pub fn create_ocr_visualization(
     result: &OAROCRResult,
     config: &VisualizationConfig,
-) -> Result<RgbImage, Box<dyn std::error::Error>> {
+) -> OcrResult<RgbImage> {
     let original_img = &*result.input_img;
     let (width, height) = (original_img.width(), original_img.height());
 
@@ -236,7 +239,7 @@ fn draw_detection_results(
     result: &OAROCRResult,
     config: &VisualizationConfig,
     x_offset: i32,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> OcrResult<()> {
     // Get image dimensions for bounds checking
     let img_bounds = (img.width() as i32, img.height() as i32);
 
@@ -740,7 +743,7 @@ pub fn visualize_ocr_results(
     result: &OAROCRResult,
     output_path: &Path,
     font_path: Option<&Path>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> OcrResult<()> {
     info!("Creating OCR visualization for: {}", result.input_path);
 
     let config = create_visualization_config(font_path);
@@ -850,13 +853,13 @@ impl StructureVisualizationConfig {
     }
 
     /// Creates a config with a custom font path.
-    pub fn with_font_path(font_path: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn with_font_path(font_path: impl AsRef<Path>) -> OcrResult<Self> {
         let font_data = std::fs::read(font_path.as_ref())?;
-        let font = FontVec::try_from_vec(font_data).map_err(|_| {
-            format!(
+        let font = FontVec::try_from_vec(font_data).map_err(|_| OCRError::InvalidInput {
+            message: format!(
                 "Failed to parse font file: {}",
                 font_path.as_ref().display()
-            )
+            ),
         })?;
 
         Ok(Self {
@@ -945,7 +948,7 @@ fn get_font_color(bg_color: Rgba<u8>) -> Rgba<u8> {
 pub fn create_structure_visualization(
     result: &StructureResult,
     config: &StructureVisualizationConfig,
-) -> Result<RgbaImage, Box<dyn std::error::Error>> {
+) -> OcrResult<RgbaImage> {
     // Load the base image
     let base_img = if let Some(ref rectified) = result.rectified_img {
         image::DynamicImage::ImageRgb8((**rectified).clone()).to_rgba8()
@@ -1152,7 +1155,7 @@ pub fn visualize_structure_results(
     result: &StructureResult,
     output_path: impl AsRef<Path>,
     font_path: Option<&Path>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> OcrResult<()> {
     info!(
         "Creating structure visualization for: {}",
         result.input_path

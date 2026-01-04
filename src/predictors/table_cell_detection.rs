@@ -4,6 +4,8 @@
 
 use super::builder::PredictorBuilderState;
 use crate::TaskPredictorBuilder;
+use crate::core::errors::OCRError;
+use crate::core::OcrResult;
 use crate::core::traits::OrtConfigurable;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
@@ -36,7 +38,7 @@ impl TableCellDetectionPredictor {
     pub fn predict(
         &self,
         images: Vec<RgbImage>,
-    ) -> Result<TableCellDetectionResult, Box<dyn std::error::Error>> {
+    ) -> OcrResult<TableCellDetectionResult> {
         let input = ImageTaskInput::new(images);
         let output = self.core.predict(input)?;
         Ok(TableCellDetectionResult {
@@ -131,19 +133,21 @@ impl TableCellDetectionPredictorBuilder {
     pub fn build<P: AsRef<Path>>(
         self,
         model_path: P,
-    ) -> Result<TableCellDetectionPredictor, Box<dyn std::error::Error>> {
+    ) -> OcrResult<TableCellDetectionPredictor> {
         let (config, ort_config) = self.state.into_parts();
         let path_ref = model_path.as_ref();
         let variant = self
             .model_variant
             .or_else(|| TableCellModelVariant::detect_from_path(path_ref))
             .ok_or_else(|| {
-                format!(
-                    "Unable to determine table cell model variant from '{}'. \
-                     Provide `model_variant(...)` on the builder or use a filename \
-                     containing 'wired_table_cell' or 'wireless_table_cell'.",
-                    path_ref.display()
-                )
+                OCRError::ConfigError {
+                    message: format!(
+                        "Unable to determine table cell model variant from '{}'. \
+                         Provide `model_variant(...)` on the builder or use a filename \
+                         containing 'wired_table_cell' or 'wireless_table_cell'.",
+                        path_ref.display()
+                    ),
+                }
             })?;
 
         let mut adapter_builder = TableCellDetectionAdapterBuilder::new()

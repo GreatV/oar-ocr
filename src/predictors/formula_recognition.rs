@@ -4,6 +4,8 @@
 
 use super::builder::PredictorBuilderState;
 use crate::TaskPredictorBuilder;
+use crate::core::errors::OCRError;
+use crate::core::OcrResult;
 use crate::core::traits::OrtConfigurable;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
@@ -74,7 +76,7 @@ impl FormulaRecognitionPredictor {
     pub fn predict(
         &self,
         images: Vec<RgbImage>,
-    ) -> Result<FormulaRecognitionResult, Box<dyn std::error::Error>> {
+    ) -> OcrResult<FormulaRecognitionResult> {
         // Create task input
         let input = ImageTaskInput::new(images);
 
@@ -154,7 +156,7 @@ impl FormulaRecognitionPredictorBuilder {
     pub fn build<P: AsRef<Path>>(
         self,
         model_path: P,
-    ) -> Result<FormulaRecognitionPredictor, Box<dyn std::error::Error>> {
+    ) -> OcrResult<FormulaRecognitionPredictor> {
         let Self {
             state,
             model_name,
@@ -165,8 +167,9 @@ impl FormulaRecognitionPredictorBuilder {
 
         let (config, ort_config) = state.into_parts();
 
-        let tokenizer_path =
-            tokenizer_path.ok_or("Tokenizer path is required for formula recognition")?;
+        let tokenizer_path = tokenizer_path.ok_or_else(|| {
+            OCRError::missing_field("tokenizer_path", "FormulaRecognitionPredictor")
+        })?;
 
         // Determine model kind
         let model_kind =

@@ -4,6 +4,7 @@
 
 use super::builder::PredictorBuilderState;
 use crate::TaskPredictorBuilder;
+use crate::core::OcrResult;
 use crate::core::traits::OrtConfigurable;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
@@ -36,7 +37,7 @@ impl DocumentRectificationPredictor {
     pub fn predict(
         &self,
         images: Vec<RgbImage>,
-    ) -> Result<DocumentRectificationResult, Box<dyn std::error::Error>> {
+    ) -> OcrResult<DocumentRectificationResult> {
         let input = ImageTaskInput::new(images);
         let output = self.core.predict(input)?;
         Ok(DocumentRectificationResult {
@@ -63,7 +64,7 @@ impl DocumentRectificationPredictorBuilder {
     pub fn build<P: AsRef<Path>>(
         self,
         model_path: P,
-    ) -> Result<DocumentRectificationPredictor, Box<dyn std::error::Error>> {
+    ) -> OcrResult<DocumentRectificationPredictor> {
         let (config, ort_config) = self.state.into_parts();
         let mut adapter_builder = UVDocRectifierAdapterBuilder::new().with_config(config.clone());
 

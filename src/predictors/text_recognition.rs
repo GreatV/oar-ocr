@@ -4,6 +4,8 @@
 
 use super::builder::PredictorBuilderState;
 use crate::TaskPredictorBuilder;
+use crate::core::errors::OCRError;
+use crate::core::OcrResult;
 use crate::core::traits::OrtConfigurable;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
@@ -37,7 +39,7 @@ impl TextRecognitionPredictor {
     pub fn predict(
         &self,
         images: Vec<RgbImage>,
-    ) -> Result<TextRecognitionResult, Box<dyn std::error::Error>> {
+    ) -> OcrResult<TextRecognitionResult> {
         let input = ImageTaskInput::new(images);
         let output = self.core.predict(input)?;
         Ok(TextRecognitionResult {
@@ -84,11 +86,13 @@ impl TextRecognitionPredictorBuilder {
     pub fn build<P: AsRef<Path>>(
         self,
         model_path: P,
-    ) -> Result<TextRecognitionPredictor, Box<dyn std::error::Error>> {
+    ) -> OcrResult<TextRecognitionPredictor> {
         let Self { state, dict_path } = self;
         let (config, ort_config) = state.into_parts();
 
-        let dict_path = dict_path.ok_or("Dictionary path is required for text recognition")?;
+        let dict_path = dict_path.ok_or_else(|| {
+            OCRError::missing_field("dict_path", "TextRecognitionPredictor")
+        })?;
 
         // Load character dictionary from file
         let character_dict = std::fs::read_to_string(&dict_path)?

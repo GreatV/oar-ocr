@@ -112,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(predictor) => predictor,
         Err(e) => {
             error!("Failed to build seal detection predictor: {}", e);
-            return Err(e);
+            return Err(e.into());
         }
     };
 
