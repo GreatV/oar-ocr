@@ -789,7 +789,10 @@ impl LayoutDetectionAdapterBuilder {
             }
             _ => {
                 return Err(OCRError::InvalidInput {
-                    message: format!("Unknown model type: {}", model_config.model_type),
+                    message: format!(
+                        "Unknown model type: '{}'. Supported types: picodet, rtdetr, pp-doclayout",
+                        model_config.model_type
+                    ),
                 });
             }
         };

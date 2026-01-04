@@ -4,6 +4,7 @@
 
 use super::builder::PredictorBuilderState;
 use crate::TaskPredictorBuilder;
+use crate::core::OcrResult;
 use crate::core::traits::OrtConfigurable;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
@@ -35,10 +36,7 @@ impl TableClassificationPredictor {
     }
 
     /// Predict table classifications in the given images.
-    pub fn predict(
-        &self,
-        images: Vec<RgbImage>,
-    ) -> Result<TableClassificationResult, Box<dyn std::error::Error>> {
+    pub fn predict(&self, images: Vec<RgbImage>) -> OcrResult<TableClassificationResult> {
         let input = ImageTaskInput::new(images);
         let output = self.core.predict(input)?;
         Ok(TableClassificationResult {
@@ -86,10 +84,7 @@ impl TableClassificationPredictorBuilder {
     }
 
     /// Build the table classification predictor
-    pub fn build<P: AsRef<Path>>(
-        self,
-        model_path: P,
-    ) -> Result<TableClassificationPredictor, Box<dyn std::error::Error>> {
+    pub fn build<P: AsRef<Path>>(self, model_path: P) -> OcrResult<TableClassificationPredictor> {
         let Self { state, input_shape } = self;
         let (config, ort_config) = state.into_parts();
         let mut adapter_builder = TableClassificationAdapterBuilder::new()

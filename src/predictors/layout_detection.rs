@@ -4,6 +4,8 @@
 
 use super::builder::PredictorBuilderState;
 use crate::TaskPredictorBuilder;
+use crate::core::OcrResult;
+use crate::core::errors::OCRError;
 use crate::core::traits::OrtConfigurable;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
@@ -36,10 +38,7 @@ impl LayoutDetectionPredictor {
     }
 
     /// Predict layout elements in the given images.
-    pub fn predict(
-        &self,
-        images: Vec<RgbImage>,
-    ) -> Result<LayoutDetectionResult, Box<dyn std::error::Error>> {
+    pub fn predict(&self, images: Vec<RgbImage>) -> OcrResult<LayoutDetectionResult> {
         let input = ImageTaskInput::new(images);
         let output = self.core.predict(input)?;
         Ok(LayoutDetectionResult {
@@ -84,10 +83,7 @@ impl LayoutDetectionPredictorBuilder {
         self
     }
 
-    pub fn build<P: AsRef<Path>>(
-        self,
-        model_path: P,
-    ) -> Result<LayoutDetectionPredictor, Box<dyn std::error::Error>> {
+    pub fn build<P: AsRef<Path>>(self, model_path: P) -> OcrResult<LayoutDetectionPredictor> {
         let (config, ort_config) = self.state.into_parts();
         let mut adapter_builder = LayoutDetectionAdapterBuilder::new().task_config(config.clone());
 
@@ -108,9 +104,28 @@ impl LayoutDetectionPredictorBuilder {
         })
     }
 
-    fn get_model_config(
-        model_name: &str,
-    ) -> Result<crate::domain::adapters::LayoutModelConfig, Box<dyn std::error::Error>> {
+    /// Supported layout model names
+    const SUPPORTED_MODELS: &'static [&'static str] = &[
+        "picodet_layout_1x",
+        "picodet_layout_1x_table",
+        "picodet_s_layout_3cls",
+        "picodet_l_layout_3cls",
+        "picodet_s_layout_17cls",
+        "picodet_l_layout_17cls",
+        "rtdetr_h_layout_3cls",
+        "rt_detr_h_layout_3cls",
+        "rtdetr_h_layout_17cls",
+        "rt_detr_h_layout_17cls",
+        "pp_docblocklayout",
+        "pp_doclayout_s",
+        "pp_doclayout_m",
+        "pp_doclayout_l",
+        "pp_doclayout_plus_l",
+        "pp_doclayoutv2",
+        "pp_doclayout_v2",
+    ];
+
+    fn get_model_config(model_name: &str) -> OcrResult<crate::domain::adapters::LayoutModelConfig> {
         use crate::domain::adapters::LayoutModelConfig;
 
         let normalized = model_name.to_lowercase().replace('-', "_");
@@ -134,7 +149,13 @@ impl LayoutDetectionPredictorBuilder {
             "pp_doclayout_plus_l" => LayoutModelConfig::pp_doclayout_plus_l(),
             "pp_doclayoutv2" | "pp_doclayout_v2" => LayoutModelConfig::pp_doclayoutv2(),
             _ => {
-                return Err(format!("Unknown model name: {}. Supported models: picodet_layout_1x, picodet_layout_1x_table, picodet_s_layout_3cls, picodet_l_layout_3cls, picodet_s_layout_17cls, picodet_l_layout_17cls, rtdetr_h_layout_3cls, rtdetr_h_layout_17cls, pp_docblocklayout, pp_doclayout_s, pp_doclayout_m, pp_doclayout_l, pp_doclayout_plus_l, pp_doclayoutv2", model_name).into());
+                return Err(OCRError::ConfigError {
+                    message: format!(
+                        "Unknown model name: '{}'. Supported models: {}",
+                        model_name,
+                        Self::SUPPORTED_MODELS.join(", ")
+                    ),
+                });
             }
         };
 

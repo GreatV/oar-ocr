@@ -4,6 +4,7 @@
 
 use super::builder::PredictorBuilderState;
 use crate::TaskPredictorBuilder;
+use crate::core::OcrResult;
 use crate::core::traits::OrtConfigurable;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
@@ -32,10 +33,7 @@ impl TextDetectionPredictor {
     }
 
     /// Predict text regions in the given images.
-    pub fn predict(
-        &self,
-        images: Vec<RgbImage>,
-    ) -> Result<TextDetectionResult, Box<dyn std::error::Error>> {
+    pub fn predict(&self, images: Vec<RgbImage>) -> OcrResult<TextDetectionResult> {
         // Create task input
         let input = ImageTaskInput::new(images);
 
@@ -96,10 +94,7 @@ impl TextDetectionPredictorBuilder {
     }
 
     /// Build the text detection predictor
-    pub fn build<P: AsRef<Path>>(
-        self,
-        model_path: P,
-    ) -> Result<TextDetectionPredictor, Box<dyn std::error::Error>> {
+    pub fn build<P: AsRef<Path>>(self, model_path: P) -> OcrResult<TextDetectionPredictor> {
         let (config, ort_config) = self.state.into_parts();
         let mut adapter_builder = TextDetectionAdapterBuilder::new().with_config(config.clone());
 

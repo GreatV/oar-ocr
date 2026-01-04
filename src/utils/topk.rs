@@ -1,5 +1,7 @@
 //! Top-k classification result processing.
 
+use crate::core::OcrResult;
+use crate::core::errors::OCRError;
 use std::collections::HashMap;
 
 /// Result structure for top-k classification processing.
@@ -97,7 +99,7 @@ impl Topk {
     /// # Returns
     ///
     /// * `Ok(TopkResult)` - The top-k results with indexes, scores, and optional class names.
-    /// * `Err(String)` - If k is 0 or if the input is invalid.
+    /// * `Err(OCRError)` - If k is 0 or if the input is invalid.
     ///
     /// # Examples
     ///
@@ -111,9 +113,11 @@ impl Topk {
     /// ];
     /// let result = topk.process(&predictions, 2).unwrap();
     /// ```
-    pub fn process(&self, predictions: &[Vec<f32>], k: usize) -> Result<TopkResult, String> {
+    pub fn process(&self, predictions: &[Vec<f32>], k: usize) -> OcrResult<TopkResult> {
         if k == 0 {
-            return Err("k must be greater than 0".to_string());
+            return Err(OCRError::InvalidInput {
+                message: "k must be greater than 0".to_string(),
+            });
         }
 
         if predictions.is_empty() {
@@ -134,7 +138,9 @@ impl Topk {
 
         for prediction in predictions {
             if prediction.is_empty() {
-                return Err("Empty prediction vector".to_string());
+                return Err(OCRError::InvalidInput {
+                    message: "Empty prediction vector".to_string(),
+                });
             }
 
             let effective_k = k.min(prediction.len());
@@ -264,8 +270,8 @@ impl Topk {
     /// # Returns
     ///
     /// * `Ok(TopkResult)` - The top-k results for the single prediction.
-    /// * `Err(String)` - If k is 0 or if the input is invalid.
-    pub fn process_single(&self, prediction: &[f32], k: usize) -> Result<TopkResult, String> {
+    /// * `Err(OCRError)` - If k is 0 or if the input is invalid.
+    pub fn process_single(&self, prediction: &[f32], k: usize) -> OcrResult<TopkResult> {
         self.process(&[prediction.to_vec()], k)
     }
 }

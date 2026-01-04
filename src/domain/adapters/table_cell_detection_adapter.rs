@@ -261,7 +261,7 @@ impl TableCellDetectionAdapterBuilder {
             other => {
                 return Err(OCRError::InvalidInput {
                     message: format!(
-                        "Unsupported model type '{}' for table cell detection",
+                        "Unsupported model type '{}' for table cell detection. Supported type: rtdetr",
                         other
                     ),
                 });
