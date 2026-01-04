@@ -28,6 +28,31 @@ use crate::domain::tasks::{
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Builds an optional adapter from a model path using a builder factory.
+///
+/// This helper reduces boilerplate when building adapters that only need
+/// a model path and optional ORT session configuration.
+fn build_optional_adapter<B>(
+    model_path: Option<&PathBuf>,
+    ort_config: Option<&OrtSessionConfig>,
+    create_builder: impl FnOnce() -> B,
+) -> Result<Option<B::Adapter>, OCRError>
+where
+    B: AdapterBuilder + OrtConfigurable,
+{
+    let Some(model) = model_path else {
+        return Ok(None);
+    };
+
+    let builder = create_builder();
+    let builder = match ort_config {
+        Some(config) => builder.with_ort_config(config.clone()),
+        None => builder,
+    };
+
+    Ok(Some(builder.build(model)?))
+}
+
 /// IoU threshold for removing overlapping layout elements (0.5 = 50% overlap).
 const LAYOUT_OVERLAP_IOU_THRESHOLD: f32 = 0.5;
 
@@ -623,32 +648,18 @@ impl OARStructureBuilder {
         };
 
         // Build document orientation adapter if enabled
-        let document_orientation_adapter =
-            if let Some(ref model_path) = self.document_orientation_model {
-                let mut builder = DocumentOrientationAdapterBuilder::new();
-
-                if let Some(ref ort_config) = self.ort_session_config {
-                    builder = builder.with_ort_config(ort_config.clone());
-                }
-
-                Some(builder.build(model_path)?)
-            } else {
-                None
-            };
+        let document_orientation_adapter = build_optional_adapter(
+            self.document_orientation_model.as_ref(),
+            self.ort_session_config.as_ref(),
+            DocumentOrientationAdapterBuilder::new,
+        )?;
 
         // Build document rectification adapter if enabled
-        let rectification_adapter = if let Some(ref model_path) = self.document_rectification_model
-        {
-            let mut builder = UVDocRectifierAdapterBuilder::new();
-
-            if let Some(ref ort_config) = self.ort_session_config {
-                builder = builder.with_ort_config(ort_config.clone());
-            }
-
-            Some(builder.build(model_path)?)
-        } else {
-            None
-        };
+        let rectification_adapter = build_optional_adapter(
+            self.document_rectification_model.as_ref(),
+            self.ort_session_config.as_ref(),
+            UVDocRectifierAdapterBuilder::new,
+        )?;
 
         // Build layout detection adapter (required)
         let mut layout_builder = LayoutDetectionAdapterBuilder::new();
@@ -747,17 +758,11 @@ impl OARStructureBuilder {
 
         // Build table orientation adapter if enabled (reuses document orientation model)
         // This detects rotated tables (0°, 90°, 180°, 270°) before structure recognition
-        let table_orientation_adapter = if let Some(ref model_path) = self.table_orientation_model {
-            let mut builder = DocumentOrientationAdapterBuilder::new();
-
-            if let Some(ref ort_config) = self.ort_session_config {
-                builder = builder.with_ort_config(ort_config.clone());
-            }
-
-            Some(builder.build(model_path)?)
-        } else {
-            None
-        };
+        let table_orientation_adapter = build_optional_adapter(
+            self.table_orientation_model.as_ref(),
+            self.ort_session_config.as_ref(),
+            DocumentOrientationAdapterBuilder::new,
+        )?;
 
         // Build table cell detection adapter if enabled
         let table_cell_detection_adapter = if let Some(ref model_path) =
