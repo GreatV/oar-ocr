@@ -33,10 +33,7 @@ impl TextDetectionPredictor {
     }
 
     /// Predict text regions in the given images.
-    pub fn predict(
-        &self,
-        images: Vec<RgbImage>,
-    ) -> OcrResult<TextDetectionResult> {
+    pub fn predict(&self, images: Vec<RgbImage>) -> OcrResult<TextDetectionResult> {
         // Create task input
         let input = ImageTaskInput::new(images);
 
@@ -97,10 +94,7 @@ impl TextDetectionPredictorBuilder {
     }
 
     /// Build the text detection predictor
-    pub fn build<P: AsRef<Path>>(
-        self,
-        model_path: P,
-    ) -> OcrResult<TextDetectionPredictor> {
+    pub fn build<P: AsRef<Path>>(self, model_path: P) -> OcrResult<TextDetectionPredictor> {
         let (config, ort_config) = self.state.into_parts();
         let mut adapter_builder = TextDetectionAdapterBuilder::new().with_config(config.clone());
 

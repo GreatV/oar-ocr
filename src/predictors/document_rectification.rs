@@ -34,10 +34,7 @@ impl DocumentRectificationPredictor {
     }
 
     /// Predict document rectification for the given images.
-    pub fn predict(
-        &self,
-        images: Vec<RgbImage>,
-    ) -> OcrResult<DocumentRectificationResult> {
+    pub fn predict(&self, images: Vec<RgbImage>) -> OcrResult<DocumentRectificationResult> {
         let input = ImageTaskInput::new(images);
         let output = self.core.predict(input)?;
         Ok(DocumentRectificationResult {
@@ -61,10 +58,7 @@ impl DocumentRectificationPredictorBuilder {
         }
     }
 
-    pub fn build<P: AsRef<Path>>(
-        self,
-        model_path: P,
-    ) -> OcrResult<DocumentRectificationPredictor> {
+    pub fn build<P: AsRef<Path>>(self, model_path: P) -> OcrResult<DocumentRectificationPredictor> {
         let (config, ort_config) = self.state.into_parts();
         let mut adapter_builder = UVDocRectifierAdapterBuilder::new().with_config(config.clone());
 

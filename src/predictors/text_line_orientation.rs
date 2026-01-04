@@ -35,10 +35,7 @@ impl TextLineOrientationPredictor {
     }
 
     /// Predict text line orientations in the given images.
-    pub fn predict(
-        &self,
-        images: Vec<RgbImage>,
-    ) -> OcrResult<TextLineOrientationResult> {
+    pub fn predict(&self, images: Vec<RgbImage>) -> OcrResult<TextLineOrientationResult> {
         let input = ImageTaskInput::new(images);
         let output = self.core.predict(input)?;
         Ok(TextLineOrientationResult {
@@ -80,10 +77,7 @@ impl TextLineOrientationPredictorBuilder {
         self
     }
 
-    pub fn build<P: AsRef<Path>>(
-        self,
-        model_path: P,
-    ) -> OcrResult<TextLineOrientationPredictor> {
+    pub fn build<P: AsRef<Path>>(self, model_path: P) -> OcrResult<TextLineOrientationPredictor> {
         let Self { state, input_shape } = self;
         let (config, ort_config) = state.into_parts();
         let mut adapter_builder = TextLineOrientationAdapterBuilder::new()

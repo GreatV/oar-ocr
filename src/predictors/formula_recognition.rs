@@ -4,8 +4,8 @@
 
 use super::builder::PredictorBuilderState;
 use crate::TaskPredictorBuilder;
-use crate::core::errors::OCRError;
 use crate::core::OcrResult;
+use crate::core::errors::OCRError;
 use crate::core::traits::OrtConfigurable;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
@@ -73,10 +73,7 @@ impl FormulaRecognitionPredictor {
     }
 
     /// Predict formulas in the given images.
-    pub fn predict(
-        &self,
-        images: Vec<RgbImage>,
-    ) -> OcrResult<FormulaRecognitionResult> {
+    pub fn predict(&self, images: Vec<RgbImage>) -> OcrResult<FormulaRecognitionResult> {
         // Create task input
         let input = ImageTaskInput::new(images);
 
@@ -153,10 +150,7 @@ impl FormulaRecognitionPredictorBuilder {
     }
 
     /// Build the formula recognition predictor
-    pub fn build<P: AsRef<Path>>(
-        self,
-        model_path: P,
-    ) -> OcrResult<FormulaRecognitionPredictor> {
+    pub fn build<P: AsRef<Path>>(self, model_path: P) -> OcrResult<FormulaRecognitionPredictor> {
         let Self {
             state,
             model_name,

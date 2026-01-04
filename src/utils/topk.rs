@@ -1,7 +1,7 @@
 //! Top-k classification result processing.
 
-use crate::core::errors::OCRError;
 use crate::core::OcrResult;
+use crate::core::errors::OCRError;
 use std::collections::HashMap;
 
 /// Result structure for top-k classification processing.

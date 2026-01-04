@@ -32,10 +32,7 @@ impl SealTextDetectionPredictor {
     }
 
     /// Predict seal text regions in the given images.
-    pub fn predict(
-        &self,
-        images: Vec<RgbImage>,
-    ) -> OcrResult<SealTextDetectionResult> {
+    pub fn predict(&self, images: Vec<RgbImage>) -> OcrResult<SealTextDetectionResult> {
         let input = ImageTaskInput::new(images);
         let output = self.core.predict(input)?;
         Ok(SealTextDetectionResult {
@@ -67,10 +64,7 @@ impl SealTextDetectionPredictorBuilder {
         self
     }
 
-    pub fn build<P: AsRef<Path>>(
-        self,
-        model_path: P,
-    ) -> OcrResult<SealTextDetectionPredictor> {
+    pub fn build<P: AsRef<Path>>(self, model_path: P) -> OcrResult<SealTextDetectionPredictor> {
         let (config, ort_config) = self.state.into_parts();
         let mut adapter_builder =
             SealTextDetectionAdapterBuilder::new().with_config(config.clone());

@@ -1,7 +1,7 @@
 //! Document transformation post-processing functionality.
 
-use crate::core::errors::OCRError;
 use crate::core::OcrResult;
+use crate::core::errors::OCRError;
 use std::str::FromStr;
 
 /// Post-processor for document transformation results.
@@ -291,10 +291,7 @@ impl UVDocPostProcess {
     /// # Returns
     ///
     /// * `OcrResult<Vec<image::RgbImage>>` - Vector of rectified images or error.
-    pub fn apply_batch(
-        &self,
-        output: &crate::core::Tensor4D,
-    ) -> OcrResult<Vec<image::RgbImage>> {
+    pub fn apply_batch(&self, output: &crate::core::Tensor4D) -> OcrResult<Vec<image::RgbImage>> {
         use image::{Rgb, RgbImage};
 
         let shape = output.shape();

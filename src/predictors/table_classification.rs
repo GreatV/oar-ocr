@@ -36,10 +36,7 @@ impl TableClassificationPredictor {
     }
 
     /// Predict table classifications in the given images.
-    pub fn predict(
-        &self,
-        images: Vec<RgbImage>,
-    ) -> OcrResult<TableClassificationResult> {
+    pub fn predict(&self, images: Vec<RgbImage>) -> OcrResult<TableClassificationResult> {
         let input = ImageTaskInput::new(images);
         let output = self.core.predict(input)?;
         Ok(TableClassificationResult {
@@ -87,10 +84,7 @@ impl TableClassificationPredictorBuilder {
     }
 
     /// Build the table classification predictor
-    pub fn build<P: AsRef<Path>>(
-        self,
-        model_path: P,
-    ) -> OcrResult<TableClassificationPredictor> {
+    pub fn build<P: AsRef<Path>>(self, model_path: P) -> OcrResult<TableClassificationPredictor> {
         let Self { state, input_shape } = self;
         let (config, ort_config) = state.into_parts();
         let mut adapter_builder = TableClassificationAdapterBuilder::new()

@@ -24,8 +24,8 @@
 //! // let visualization = create_ocr_visualization(&result, &config);
 //! ```
 
-use crate::core::errors::OCRError;
 use crate::core::OcrResult;
+use crate::core::errors::OCRError;
 use crate::domain::structure::{LayoutElement, LayoutElementType, StructureResult, TableResult};
 use crate::oarocr::OAROCRResult;
 use crate::processors::BoundingBox;

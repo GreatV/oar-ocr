@@ -4,8 +4,8 @@
 
 use super::builder::PredictorBuilderState;
 use crate::TaskPredictorBuilder;
-use crate::core::errors::OCRError;
 use crate::core::OcrResult;
+use crate::core::errors::OCRError;
 use crate::core::traits::OrtConfigurable;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
@@ -37,10 +37,7 @@ impl TableStructureRecognitionPredictor {
     }
 
     /// Predict table structures in the given images.
-    pub fn predict(
-        &self,
-        images: Vec<RgbImage>,
-    ) -> OcrResult<TableStructureRecognitionResult> {
+    pub fn predict(&self, images: Vec<RgbImage>) -> OcrResult<TableStructureRecognitionResult> {
         let input = ImageTaskInput::new(images);
         let output = self.core.predict(input)?;
         Ok(TableStructureRecognitionResult {

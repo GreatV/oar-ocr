@@ -4,8 +4,8 @@
 
 use super::builder::PredictorBuilderState;
 use crate::TaskPredictorBuilder;
-use crate::core::errors::OCRError;
 use crate::core::OcrResult;
+use crate::core::errors::OCRError;
 use crate::core::traits::OrtConfigurable;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
@@ -38,10 +38,7 @@ impl LayoutDetectionPredictor {
     }
 
     /// Predict layout elements in the given images.
-    pub fn predict(
-        &self,
-        images: Vec<RgbImage>,
-    ) -> OcrResult<LayoutDetectionResult> {
+    pub fn predict(&self, images: Vec<RgbImage>) -> OcrResult<LayoutDetectionResult> {
         let input = ImageTaskInput::new(images);
         let output = self.core.predict(input)?;
         Ok(LayoutDetectionResult {
@@ -86,10 +83,7 @@ impl LayoutDetectionPredictorBuilder {
         self
     }
 
-    pub fn build<P: AsRef<Path>>(
-        self,
-        model_path: P,
-    ) -> OcrResult<LayoutDetectionPredictor> {
+    pub fn build<P: AsRef<Path>>(self, model_path: P) -> OcrResult<LayoutDetectionPredictor> {
         let (config, ort_config) = self.state.into_parts();
         let mut adapter_builder = LayoutDetectionAdapterBuilder::new().task_config(config.clone());
 
@@ -110,9 +104,7 @@ impl LayoutDetectionPredictorBuilder {
         })
     }
 
-    fn get_model_config(
-        model_name: &str,
-    ) -> OcrResult<crate::domain::adapters::LayoutModelConfig> {
+    fn get_model_config(model_name: &str) -> OcrResult<crate::domain::adapters::LayoutModelConfig> {
         use crate::domain::adapters::LayoutModelConfig;
 
         let normalized = model_name.to_lowercase().replace('-', "_");
