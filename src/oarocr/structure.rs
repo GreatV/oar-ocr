@@ -4,6 +4,7 @@
 //! analysis pipelines that can detect layout elements, recognize tables, extract formulas,
 //! and optionally integrate OCR for text extraction.
 
+use super::builder_utils::build_optional_adapter;
 use crate::core::OCRError;
 use crate::core::config::OrtSessionConfig;
 use crate::core::traits::OrtConfigurable;
@@ -27,31 +28,6 @@ use crate::domain::tasks::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
-
-/// Builds an optional adapter from a model path using a builder factory.
-///
-/// This helper reduces boilerplate when building adapters that only need
-/// a model path and optional ORT session configuration.
-fn build_optional_adapter<B>(
-    model_path: Option<&PathBuf>,
-    ort_config: Option<&OrtSessionConfig>,
-    create_builder: impl FnOnce() -> B,
-) -> Result<Option<B::Adapter>, OCRError>
-where
-    B: AdapterBuilder + OrtConfigurable,
-{
-    let Some(model) = model_path else {
-        return Ok(None);
-    };
-
-    let builder = create_builder();
-    let builder = match ort_config {
-        Some(config) => builder.with_ort_config(config.clone()),
-        None => builder,
-    };
-
-    Ok(Some(builder.build(model)?))
-}
 
 /// IoU threshold for removing overlapping layout elements (0.5 = 50% overlap).
 const LAYOUT_OVERLAP_IOU_THRESHOLD: f32 = 0.5;

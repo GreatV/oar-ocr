@@ -4,6 +4,7 @@
 //! It simplifies the process of configuring text detection, recognition, and optional
 //! preprocessing components.
 
+use super::builder_utils::build_optional_adapter;
 use crate::core::config::OrtSessionConfig;
 use crate::core::constants::DEFAULT_REC_IMAGE_SHAPE;
 use crate::core::errors::OCRError;
@@ -20,28 +21,6 @@ use crate::domain::tasks::{TextDetectionConfig, TextRecognitionConfig};
 use crate::processors::BoundingBox;
 use std::path::PathBuf;
 use std::sync::Arc;
-
-/// Builds an optional adapter if model_path is Some, applying ORT config if provided.
-fn build_optional_adapter<B>(
-    model_path: Option<&PathBuf>,
-    ort_config: Option<&OrtSessionConfig>,
-    create_builder: impl FnOnce() -> B,
-) -> Result<Option<B::Adapter>, OCRError>
-where
-    B: AdapterBuilder + OrtConfigurable,
-{
-    let Some(model) = model_path else {
-        return Ok(None);
-    };
-
-    let builder = create_builder();
-    let builder = match ort_config {
-        Some(config) => builder.with_ort_config(config.clone()),
-        None => builder,
-    };
-
-    Ok(Some(builder.build(model)?))
-}
 
 /// Internal structure holding the OCR pipeline adapters.
 #[derive(Debug)]
