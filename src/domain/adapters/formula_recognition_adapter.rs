@@ -442,7 +442,7 @@ impl Default for PPFormulaNetAdapterBuilder {
 
 impl crate::core::traits::OrtConfigurable for PPFormulaNetAdapterBuilder {
     fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.inner = crate::core::traits::OrtConfigurable::with_ort_config(self.inner, config);
+        self.inner = self.inner.with_ort_config(config);
         self
     }
 }
@@ -530,7 +530,7 @@ impl Default for UniMERNetFormulaAdapterBuilder {
 
 impl crate::core::traits::OrtConfigurable for UniMERNetFormulaAdapterBuilder {
     fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.inner = crate::core::traits::OrtConfigurable::with_ort_config(self.inner, config);
+        self.inner = self.inner.with_ort_config(config);
         self
     }
 }

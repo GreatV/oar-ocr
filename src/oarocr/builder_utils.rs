@@ -38,11 +38,10 @@ where
         return Ok(None);
     };
 
-    let builder = create_builder();
-    let builder = match ort_config {
-        Some(config) => builder.with_ort_config(config.clone()),
-        None => builder,
-    };
+    let mut builder = create_builder();
+    if let Some(config) = ort_config {
+        builder = builder.with_ort_config(config.clone());
+    }
 
     Ok(Some(builder.build(model)?))
 }
