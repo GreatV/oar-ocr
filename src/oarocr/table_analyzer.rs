@@ -146,7 +146,7 @@ impl<'a> TableAnalyzer<'a> {
 
         let cropped_table_arc = std::sync::Arc::new(cropped_table);
         let (table_for_recognition, table_rotation) =
-            if let Some(orientation_adapter) = &self.table_orientation_adapter {
+            if let Some(orientation_adapter) = self.table_orientation_adapter {
                 match crate::oarocr::preprocess::correct_image_orientation(
                     std::sync::Arc::clone(&cropped_table_arc),
                     orientation_adapter,
@@ -179,7 +179,7 @@ impl<'a> TableAnalyzer<'a> {
             };
 
         let (table_type, classification_confidence) =
-            if let Some(cls_adapter) = &self.table_classification_adapter {
+            if let Some(cls_adapter) = self.table_classification_adapter {
                 let input = ImageTaskInput::new(vec![(*table_for_recognition).clone()]);
                 if let Ok(cls_result) = cls_adapter.execute(input, None)
                     && let Some(classifications) = cls_result.classifications.first()

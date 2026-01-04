@@ -99,26 +99,21 @@ impl<'a> DocumentPreprocessor<'a> {
     }
 }
 
-/// Applies the shared orientation policy to an image using the provided adapter.
+/// Applies orientation correction to an image based on the detected class ID.
 ///
-/// Returns the corrected image and optional correction metadata. If the adapter
-/// fails to produce a classification, the original image is returned with `None`.
-pub(crate) fn correct_image_orientation(
+/// This is the core rotation logic extracted for testability. The class_id corresponds to:
+/// - 0: 0° (no rotation needed)
+/// - 1: 90° (rotate 270° CCW to correct)
+/// - 2: 180° (rotate 180° to correct)
+/// - 3: 270° (rotate 90° CW to correct)
+///
+/// Returns the corrected image and correction metadata.
+fn apply_orientation_from_class_id(
     image: Arc<image::RgbImage>,
-    orientation_adapter: &DocumentOrientationAdapter,
-) -> Result<(Arc<image::RgbImage>, Option<OrientationCorrection>), OCRError> {
-    // Adapter boundary: must clone to transfer ownership
-    let input = ImageTaskInput::new(vec![(*image).clone()]);
-    let output = orientation_adapter.execute(input, None)?;
-
-    let class_id = output
-        .classifications
-        .first()
-        .and_then(|c| c.first())
-        .map(|c| c.class_id);
-
+    class_id: Option<usize>,
+) -> (Arc<image::RgbImage>, Option<OrientationCorrection>) {
     let Some(class_id) = class_id else {
-        return Ok((image, None));
+        return (image, None);
     };
 
     let angle = (class_id as f32) * 90.0;
@@ -144,7 +139,28 @@ pub(crate) fn correct_image_orientation(
         rotated_height: rotated.height(),
     };
 
-    Ok((rotated, Some(correction)))
+    (rotated, Some(correction))
+}
+
+/// Applies the shared orientation policy to an image using the provided adapter.
+///
+/// Returns the corrected image and optional correction metadata. If the adapter
+/// fails to produce a classification, the original image is returned with `None`.
+pub(crate) fn correct_image_orientation(
+    image: Arc<image::RgbImage>,
+    orientation_adapter: &DocumentOrientationAdapter,
+) -> Result<(Arc<image::RgbImage>, Option<OrientationCorrection>), OCRError> {
+    // Adapter boundary: must clone to transfer ownership
+    let input = ImageTaskInput::new(vec![(*image).clone()]);
+    let output = orientation_adapter.execute(input, None)?;
+
+    let class_id = output
+        .classifications
+        .first()
+        .and_then(|c| c.first())
+        .map(|c| c.class_id);
+
+    Ok(apply_orientation_from_class_id(image, class_id))
 }
 
 #[cfg(test)]
@@ -274,99 +290,125 @@ mod tests {
     }
 
     #[test]
-    fn test_rotation_logic_0_degrees() {
-        // class_id 0 -> 0° -> no rotation
-        let original = create_test_image(100, 200);
-        let class_id = 0u32;
+    fn test_apply_orientation_none_class_id_returns_original_image() {
+        // When no classification is available, return original image with None metadata
+        let image = Arc::new(create_test_image(100, 200));
+        let (result, correction) = apply_orientation_from_class_id(Arc::clone(&image), None);
 
-        // Simulate the rotation logic from correct_image_orientation
-        let rotated = match class_id {
-            1 => image::imageops::rotate270(&original),
-            2 => image::imageops::rotate180(&original),
-            3 => image::imageops::rotate90(&original),
-            _ => original.clone(),
-        };
-
-        // No rotation - dimensions unchanged
-        assert_eq!(rotated.width(), 100);
-        assert_eq!(rotated.height(), 200);
+        // Image should be unchanged
+        assert!(Arc::ptr_eq(&image, &result));
+        assert!(correction.is_none());
     }
 
     #[test]
-    fn test_rotation_logic_90_degrees() {
-        // class_id 1 -> 90° -> rotate270 (CCW) to correct
-        let original = create_test_image(100, 200);
-        let class_id = 1u32;
+    fn test_apply_orientation_class_id_0_no_rotation() {
+        // class_id 0 -> 0° -> no rotation needed
+        let image = Arc::new(create_test_image(100, 200));
+        let (result, correction) = apply_orientation_from_class_id(Arc::clone(&image), Some(0));
 
-        let rotated = match class_id {
-            1 => image::imageops::rotate270(&original),
-            2 => image::imageops::rotate180(&original),
-            3 => image::imageops::rotate90(&original),
-            _ => original.clone(),
-        };
+        // No rotation - dimensions unchanged, same image pointer
+        assert!(Arc::ptr_eq(&image, &result));
+        assert_eq!(result.width(), 100);
+        assert_eq!(result.height(), 200);
+
+        // Correction metadata should still be present
+        let correction = correction.expect("correction should be Some");
+        assert_eq!(correction.angle, 0.0);
+        assert_eq!(correction.rotated_width, 100);
+        assert_eq!(correction.rotated_height, 200);
+    }
+
+    #[test]
+    fn test_apply_orientation_class_id_1_rotates_270_ccw() {
+        // class_id 1 -> 90° detected -> rotate 270° CCW (rotate270) to correct
+        let image = Arc::new(create_test_image(100, 200));
+        let (result, correction) = apply_orientation_from_class_id(Arc::clone(&image), Some(1));
 
         // 90° rotation swaps dimensions
-        assert_eq!(rotated.width(), 200);
-        assert_eq!(rotated.height(), 100);
+        assert_eq!(result.width(), 200);
+        assert_eq!(result.height(), 100);
+        // Should be a new image, not the original
+        assert!(!Arc::ptr_eq(&image, &result));
+
+        let correction = correction.expect("correction should be Some");
+        assert_eq!(correction.angle, 90.0);
+        assert_eq!(correction.rotated_width, 200);
+        assert_eq!(correction.rotated_height, 100);
     }
 
     #[test]
-    fn test_rotation_logic_180_degrees() {
-        // class_id 2 -> 180° -> rotate180 to correct
-        let original = create_test_image(100, 200);
-        let class_id = 2u32;
-
-        let rotated = match class_id {
-            1 => image::imageops::rotate270(&original),
-            2 => image::imageops::rotate180(&original),
-            3 => image::imageops::rotate90(&original),
-            _ => original.clone(),
-        };
+    fn test_apply_orientation_class_id_2_rotates_180() {
+        // class_id 2 -> 180° detected -> rotate 180° to correct
+        let image = Arc::new(create_test_image(100, 200));
+        let (result, correction) = apply_orientation_from_class_id(Arc::clone(&image), Some(2));
 
         // 180° rotation keeps dimensions
-        assert_eq!(rotated.width(), 100);
-        assert_eq!(rotated.height(), 200);
+        assert_eq!(result.width(), 100);
+        assert_eq!(result.height(), 200);
+        // Should be a new image
+        assert!(!Arc::ptr_eq(&image, &result));
+
+        let correction = correction.expect("correction should be Some");
+        assert_eq!(correction.angle, 180.0);
+        assert_eq!(correction.rotated_width, 100);
+        assert_eq!(correction.rotated_height, 200);
     }
 
     #[test]
-    fn test_rotation_logic_270_degrees() {
-        // class_id 3 -> 270° -> rotate90 (CW) to correct
-        let original = create_test_image(100, 200);
-        let class_id = 3u32;
-
-        let rotated = match class_id {
-            1 => image::imageops::rotate270(&original),
-            2 => image::imageops::rotate180(&original),
-            3 => image::imageops::rotate90(&original),
-            _ => original.clone(),
-        };
+    fn test_apply_orientation_class_id_3_rotates_90_cw() {
+        // class_id 3 -> 270° detected -> rotate 90° CW (rotate90) to correct
+        let image = Arc::new(create_test_image(100, 200));
+        let (result, correction) = apply_orientation_from_class_id(Arc::clone(&image), Some(3));
 
         // 270° rotation swaps dimensions
-        assert_eq!(rotated.width(), 200);
-        assert_eq!(rotated.height(), 100);
+        assert_eq!(result.width(), 200);
+        assert_eq!(result.height(), 100);
+        assert!(!Arc::ptr_eq(&image, &result));
+
+        let correction = correction.expect("correction should be Some");
+        assert_eq!(correction.angle, 270.0);
+        assert_eq!(correction.rotated_width, 200);
+        assert_eq!(correction.rotated_height, 100);
     }
 
     #[test]
-    fn test_rotation_logic_unknown_class_id() {
-        // Unknown class_id -> no rotation
-        let original = create_test_image(100, 200);
-        let class_id = 99u32;
+    fn test_apply_orientation_unknown_class_id_preserves_metadata() {
+        // Unknown class_id (e.g., future model outputs) -> no rotation but metadata preserved
+        let image = Arc::new(create_test_image(100, 200));
+        let (result, correction) = apply_orientation_from_class_id(Arc::clone(&image), Some(99));
 
-        let rotated = match class_id {
-            1 => image::imageops::rotate270(&original),
-            2 => image::imageops::rotate180(&original),
-            3 => image::imageops::rotate90(&original),
-            _ => original.clone(),
-        };
+        // No rotation - same image
+        assert!(Arc::ptr_eq(&image, &result));
+        assert_eq!(result.width(), 100);
+        assert_eq!(result.height(), 200);
 
-        // No rotation - dimensions unchanged
-        assert_eq!(rotated.width(), 100);
-        assert_eq!(rotated.height(), 200);
+        // Correction metadata preserves the unknown angle
+        let correction = correction.expect("correction should be Some");
+        assert_eq!(correction.angle, 8910.0); // 99 * 90.0
+        assert_eq!(correction.rotated_width, 100);
+        assert_eq!(correction.rotated_height, 200);
+    }
+
+    #[test]
+    fn test_apply_orientation_square_image_all_rotations() {
+        // Square images should maintain dimensions for all rotations
+        let image = Arc::new(create_test_image(150, 150));
+
+        for class_id in 0..4 {
+            let (result, correction) =
+                apply_orientation_from_class_id(Arc::clone(&image), Some(class_id));
+
+            assert_eq!(result.width(), 150);
+            assert_eq!(result.height(), 150);
+
+            let correction = correction.expect("correction should be Some");
+            assert_eq!(correction.angle, (class_id as f32) * 90.0);
+        }
     }
 
     #[test]
     fn test_angle_calculation_from_class_id() {
-        // Verify angle = class_id * 90.0
+        // Verify angle = class_id * 90.0 for standard orientations
         assert_eq!(0_f32 * 90.0, 0.0);
         assert_eq!(1_f32 * 90.0, 90.0);
         assert_eq!(2_f32 * 90.0, 180.0);
@@ -385,5 +427,155 @@ mod tests {
 
         // Both point to the same image
         assert!(Arc::ptr_eq(&image, &shared));
+    }
+
+    #[test]
+    fn test_preprocess_result_invariant_rotation_none_when_rectified() {
+        // Invariant: When rectification is applied, rotation metadata is None
+        // because back-mapping is not supported for warped images
+        let _image = Arc::new(create_test_image(100, 200));
+        let rectified = Arc::new(create_test_image(110, 210));
+
+        let result = PreprocessResult {
+            image: Arc::clone(&rectified),
+            orientation_angle: Some(90.0), // Orientation was detected
+            rotation: None,                // But rotation metadata is cleared
+            rectified_img: Some(rectified),
+        };
+
+        // This models the behavior in DocumentPreprocessor::preprocess
+        // where rotation is set to None when rectified_img is Some
+        assert!(result.rotation.is_none());
+        assert!(result.rectified_img.is_some());
+    }
+
+    #[test]
+    fn test_preprocess_result_rotation_preserved_without_rectification() {
+        // When no rectification is applied, rotation metadata is preserved
+        let (rotated_image, correction) =
+            apply_orientation_from_class_id(Arc::new(create_test_image(100, 200)), Some(1));
+
+        let result = PreprocessResult {
+            image: rotated_image,
+            orientation_angle: Some(90.0),
+            rotation: correction,
+            rectified_img: None,
+        };
+
+        // Rotation metadata preserved for coordinate back-mapping
+        assert!(result.rotation.is_some());
+        assert!(result.rectified_img.is_none());
+        assert_eq!(result.rotation.unwrap().angle, 90.0);
+    }
+
+    /// Helper to simulate the class_id extraction logic from DocumentOrientationOutput
+    fn extract_class_id_from_classifications(
+        classifications: &[Vec<(usize, String, f32)>],
+    ) -> Option<usize> {
+        classifications
+            .first()
+            .and_then(|c| c.first())
+            .map(|(class_id, _, _)| *class_id)
+    }
+
+    #[test]
+    fn test_classification_extraction_with_valid_result() {
+        // Simulates: adapter returns [[Classification { class_id: 1, ... }]]
+        let classifications = vec![vec![(1_usize, "90".to_string(), 0.95_f32)]];
+
+        let class_id = extract_class_id_from_classifications(&classifications);
+        assert_eq!(class_id, Some(1));
+    }
+
+    #[test]
+    fn test_classification_extraction_with_multiple_topk() {
+        // Simulates: adapter returns top-k results, we take the first (highest confidence)
+        let classifications = vec![vec![
+            (2_usize, "180".to_string(), 0.85_f32),
+            (0_usize, "0".to_string(), 0.10_f32),
+            (1_usize, "90".to_string(), 0.05_f32),
+        ]];
+
+        let class_id = extract_class_id_from_classifications(&classifications);
+        assert_eq!(class_id, Some(2)); // Takes first (highest confidence)
+    }
+
+    #[test]
+    fn test_classification_extraction_with_empty_inner_vec() {
+        // Simulates: adapter returns classification but with empty inner vec
+        let classifications: Vec<Vec<(usize, String, f32)>> = vec![vec![]];
+
+        let class_id = extract_class_id_from_classifications(&classifications);
+        assert_eq!(class_id, None);
+    }
+
+    #[test]
+    fn test_classification_extraction_with_empty_outer_vec() {
+        // Simulates: adapter returns empty classifications (no images processed)
+        let classifications: Vec<Vec<(usize, String, f32)>> = vec![];
+
+        let class_id = extract_class_id_from_classifications(&classifications);
+        assert_eq!(class_id, None);
+    }
+
+    #[test]
+    fn test_classification_extraction_for_batch_input() {
+        // Simulates: batch input with multiple images, we take the first image's result
+        let classifications = vec![
+            vec![(1_usize, "90".to_string(), 0.95_f32)],
+            vec![(2_usize, "180".to_string(), 0.90_f32)],
+        ];
+
+        // correct_image_orientation only processes single images
+        let class_id = extract_class_id_from_classifications(&classifications);
+        assert_eq!(class_id, Some(1)); // First image's classification
+    }
+
+    #[test]
+    fn test_orientation_correction_flow_with_90_degree_detection() {
+        // Complete flow: 90° detected -> rotate 270° CCW to correct
+        let image = Arc::new(create_test_image(100, 200));
+
+        // Simulate what correct_image_orientation does after adapter call
+        let class_id = Some(1_usize); // 90° orientation detected
+        let (result, correction) = apply_orientation_from_class_id(Arc::clone(&image), class_id);
+
+        // Verify the complete flow result
+        assert_eq!(result.width(), 200); // Swapped
+        assert_eq!(result.height(), 100);
+
+        let correction = correction.expect("should have correction");
+        assert_eq!(correction.angle, 90.0);
+        assert_eq!(correction.rotated_width, 200);
+        assert_eq!(correction.rotated_height, 100);
+    }
+
+    #[test]
+    fn test_orientation_correction_flow_no_classification_available() {
+        // When adapter returns no classification, image is unchanged
+        let image = Arc::new(create_test_image(100, 200));
+
+        let class_id = None; // No classification available
+        let (result, correction) = apply_orientation_from_class_id(Arc::clone(&image), class_id);
+
+        // Image unchanged, no correction metadata
+        assert!(Arc::ptr_eq(&image, &result));
+        assert!(correction.is_none());
+    }
+
+    #[test]
+    fn test_preprocessor_builds_correct_result_structure() {
+        // Without adapters, preprocessor returns pass-through result
+        let preprocessor = DocumentPreprocessor::new(None, None);
+        let image = Arc::new(create_test_image(100, 200));
+
+        let result = preprocessor.preprocess(Arc::clone(&image)).unwrap();
+
+        // Verify result structure
+        assert_eq!(result.image.width(), 100);
+        assert_eq!(result.image.height(), 200);
+        assert!(result.orientation_angle.is_none());
+        assert!(result.rotation.is_none());
+        assert!(result.rectified_img.is_none());
     }
 }
