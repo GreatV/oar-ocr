@@ -104,6 +104,27 @@ impl LayoutDetectionPredictorBuilder {
         })
     }
 
+    /// Supported layout model names
+    const SUPPORTED_MODELS: &'static [&'static str] = &[
+        "picodet_layout_1x",
+        "picodet_layout_1x_table",
+        "picodet_s_layout_3cls",
+        "picodet_l_layout_3cls",
+        "picodet_s_layout_17cls",
+        "picodet_l_layout_17cls",
+        "rtdetr_h_layout_3cls",
+        "rt_detr_h_layout_3cls",
+        "rtdetr_h_layout_17cls",
+        "rt_detr_h_layout_17cls",
+        "pp_docblocklayout",
+        "pp_doclayout_s",
+        "pp_doclayout_m",
+        "pp_doclayout_l",
+        "pp_doclayout_plus_l",
+        "pp_doclayoutv2",
+        "pp_doclayout_v2",
+    ];
+
     fn get_model_config(model_name: &str) -> OcrResult<crate::domain::adapters::LayoutModelConfig> {
         use crate::domain::adapters::LayoutModelConfig;
 
@@ -130,8 +151,9 @@ impl LayoutDetectionPredictorBuilder {
             _ => {
                 return Err(OCRError::ConfigError {
                     message: format!(
-                        "Unknown model name: {}. Supported models: picodet_layout_1x, picodet_layout_1x_table, picodet_s_layout_3cls, picodet_l_layout_3cls, picodet_s_layout_17cls, picodet_l_layout_17cls, rtdetr_h_layout_3cls, rtdetr_h_layout_17cls, pp_docblocklayout, pp_doclayout_s, pp_doclayout_m, pp_doclayout_l, pp_doclayout_plus_l, pp_doclayoutv2",
-                        model_name
+                        "Unknown model name: '{}'. Supported models: {}",
+                        model_name,
+                        Self::SUPPORTED_MODELS.join(", ")
                     ),
                 });
             }
