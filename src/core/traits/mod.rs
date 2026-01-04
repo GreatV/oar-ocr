@@ -18,7 +18,7 @@ pub mod standard;
 pub mod task;
 pub mod task_def;
 
-pub use adapter::{AdapterBuilder, AdapterInfo, AdapterTask, ModelAdapter};
+pub use adapter::{AdapterBuilder, AdapterInfo, AdapterTask, ModelAdapter, OrtConfigurable};
 pub use granular::{
     ImageReader as GranularImageReader, InferenceEngine, Postprocessor, Preprocessor,
 };

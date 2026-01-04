@@ -291,12 +291,6 @@ impl FormulaRecognitionAdapterBuilder {
         self.config.task_config.max_length = length;
         self
     }
-
-    /// Sets the ONNX Runtime session configuration.
-    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.config = self.config.with_ort_config(config);
-        self
-    }
 }
 
 impl AdapterBuilder for FormulaRecognitionAdapterBuilder {
@@ -376,6 +370,13 @@ impl AdapterBuilder for FormulaRecognitionAdapterBuilder {
     }
 }
 
+impl crate::core::traits::OrtConfigurable for FormulaRecognitionAdapterBuilder {
+    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.config = self.config.with_ort_config(config);
+        self
+    }
+}
+
 /// Type alias for PP-FormulaNet adapter.
 pub type PPFormulaNetAdapter = FormulaRecognitionAdapter;
 
@@ -431,17 +432,18 @@ impl PPFormulaNetAdapterBuilder {
         self.inner = self.inner.task_config(config);
         self
     }
-
-    /// Sets the ONNX Runtime session configuration.
-    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.inner = self.inner.with_ort_config(config);
-        self
-    }
 }
 
 impl Default for PPFormulaNetAdapterBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::core::traits::OrtConfigurable for PPFormulaNetAdapterBuilder {
+    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.inner = crate::core::traits::OrtConfigurable::with_ort_config(self.inner, config);
+        self
     }
 }
 
@@ -518,17 +520,18 @@ impl UniMERNetFormulaAdapterBuilder {
         self.inner = self.inner.task_config(config);
         self
     }
-
-    /// Sets the ONNX Runtime session configuration.
-    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.inner = self.inner.with_ort_config(config);
-        self
-    }
 }
 
 impl Default for UniMERNetFormulaAdapterBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::core::traits::OrtConfigurable for UniMERNetFormulaAdapterBuilder {
+    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.inner = crate::core::traits::OrtConfigurable::with_ort_config(self.inner, config);
+        self
     }
 }
 

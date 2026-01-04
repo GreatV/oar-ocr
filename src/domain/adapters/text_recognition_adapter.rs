@@ -168,12 +168,6 @@ impl TextRecognitionAdapterBuilder {
         self
     }
 
-    /// Sets the ONNX Runtime session configuration.
-    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.config = self.config.with_ort_config(config);
-        self
-    }
-
     /// Sets whether to return character positions for word box generation.
     pub fn return_word_box(mut self, enable: bool) -> Self {
         self.return_word_box = enable;
@@ -231,5 +225,12 @@ impl AdapterBuilder for TextRecognitionAdapterBuilder {
 impl Default for TextRecognitionAdapterBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::core::traits::OrtConfigurable for TextRecognitionAdapterBuilder {
+    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.config = self.config.with_ort_config(config);
+        self
     }
 }

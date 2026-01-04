@@ -105,12 +105,6 @@ impl SealTextDetectionAdapterBuilder {
         self.config = self.config.with_task_config(config);
         self
     }
-
-    /// Sets the ONNX Runtime session configuration.
-    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.config = self.config.with_ort_config(config);
-        self
-    }
 }
 
 impl AdapterBuilder for SealTextDetectionAdapterBuilder {
@@ -176,5 +170,12 @@ impl AdapterBuilder for SealTextDetectionAdapterBuilder {
 impl Default for SealTextDetectionAdapterBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::core::traits::OrtConfigurable for SealTextDetectionAdapterBuilder {
+    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.config = self.config.with_ort_config(config);
+        self
     }
 }

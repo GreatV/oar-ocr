@@ -6,6 +6,7 @@
 
 use crate::core::OCRError;
 use crate::core::config::OrtSessionConfig;
+use crate::core::traits::OrtConfigurable;
 use crate::core::traits::adapter::{AdapterBuilder, ModelAdapter};
 use crate::domain::adapters::{
     DocumentOrientationAdapter, DocumentOrientationAdapterBuilder, FormulaRecognitionAdapter,

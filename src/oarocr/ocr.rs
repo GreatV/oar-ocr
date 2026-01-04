@@ -7,6 +7,7 @@
 use crate::core::config::OrtSessionConfig;
 use crate::core::constants::DEFAULT_REC_IMAGE_SHAPE;
 use crate::core::errors::OCRError;
+use crate::core::traits::OrtConfigurable;
 use crate::core::traits::adapter::{AdapterBuilder, ModelAdapter};
 use crate::core::traits::task::ImageTaskInput;
 use crate::domain::adapters::{
@@ -19,6 +20,28 @@ use crate::domain::tasks::{TextDetectionConfig, TextRecognitionConfig};
 use crate::processors::BoundingBox;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Builds an optional adapter if model_path is Some, applying ORT config if provided.
+fn build_optional_adapter<B>(
+    model_path: Option<&PathBuf>,
+    ort_config: Option<&OrtSessionConfig>,
+    create_builder: impl FnOnce() -> B,
+) -> Result<Option<B::Adapter>, OCRError>
+where
+    B: AdapterBuilder + OrtConfigurable,
+{
+    let Some(model) = model_path else {
+        return Ok(None);
+    };
+
+    let builder = create_builder();
+    let builder = match ort_config {
+        Some(config) => builder.with_ort_config(config.clone()),
+        None => builder,
+    };
+
+    Ok(Some(builder.build(model)?))
+}
 
 /// Internal structure holding the OCR pipeline adapters.
 #[derive(Debug)]
@@ -225,32 +248,18 @@ impl OAROCRBuilder {
         })?;
 
         // Build document rectification adapter if enabled
-        let rectification_adapter =
-            if let Some(ref rectification_model) = self.document_rectification_model {
-                let mut builder = UVDocRectifierAdapterBuilder::new();
-
-                if let Some(ref ort_config) = self.ort_session_config {
-                    builder = builder.with_ort_config(ort_config.clone());
-                }
-
-                Some(builder.build(rectification_model)?)
-            } else {
-                None
-            };
+        let rectification_adapter = build_optional_adapter(
+            self.document_rectification_model.as_ref(),
+            self.ort_session_config.as_ref(),
+            UVDocRectifierAdapterBuilder::new,
+        )?;
 
         // Build document orientation adapter if enabled
-        let document_orientation_adapter =
-            if let Some(ref orientation_model) = self.document_orientation_model {
-                let mut builder = DocumentOrientationAdapterBuilder::new();
-
-                if let Some(ref ort_config) = self.ort_session_config {
-                    builder = builder.with_ort_config(ort_config.clone());
-                }
-
-                Some(builder.build(orientation_model)?)
-            } else {
-                None
-            };
+        let document_orientation_adapter = build_optional_adapter(
+            self.document_orientation_model.as_ref(),
+            self.ort_session_config.as_ref(),
+            DocumentOrientationAdapterBuilder::new,
+        )?;
 
         // Build text detection adapter (required)
         let mut detection_builder = TextDetectionAdapterBuilder::new();
@@ -308,18 +317,11 @@ impl OAROCRBuilder {
         let text_detection_adapter = detection_builder.build(&self.text_detection_model)?;
 
         // Build text line orientation adapter if enabled
-        let text_line_orientation_adapter =
-            if let Some(ref line_orientation_model) = self.text_line_orientation_model {
-                let mut builder = TextLineOrientationAdapterBuilder::new();
-
-                if let Some(ref ort_config) = self.ort_session_config {
-                    builder = builder.with_ort_config(ort_config.clone());
-                }
-
-                Some(builder.build(line_orientation_model)?)
-            } else {
-                None
-            };
+        let text_line_orientation_adapter = build_optional_adapter(
+            self.text_line_orientation_model.as_ref(),
+            self.ort_session_config.as_ref(),
+            TextLineOrientationAdapterBuilder::new,
+        )?;
 
         // Build text recognition adapter (required)
         // Parse char_dict into Vec<String> - one character per line
