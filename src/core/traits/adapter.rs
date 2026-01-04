@@ -152,6 +152,15 @@ pub trait AdapterBuilder: Sized {
     fn adapter_type(&self) -> &str;
 }
 
+/// Trait for adapter builders that support ONNX Runtime session configuration.
+///
+/// This trait is implemented by builders that can be configured with ORT session
+/// settings like execution providers, thread count, and memory optimization.
+pub trait OrtConfigurable: Sized {
+    /// Configures the builder with ONNX Runtime session settings.
+    fn with_ort_config(self, config: crate::core::config::OrtSessionConfig) -> Self;
+}
+
 /// A wrapper that implements Task for an adapter's task type.
 ///
 /// This allows adapters to be used polymorphically through the Task trait.

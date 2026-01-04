@@ -108,12 +108,6 @@ impl TextDetectionAdapterBuilder {
         self
     }
 
-    /// Sets the ONNX Runtime session configuration.
-    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.config = self.config.with_ort_config(config);
-        self
-    }
-
     /// Sets the text type for preprocessing and postprocessing configuration.
     ///
     /// This matches the text_type parameter:
@@ -217,5 +211,12 @@ impl AdapterBuilder for TextDetectionAdapterBuilder {
 impl Default for TextDetectionAdapterBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::core::traits::OrtConfigurable for TextDetectionAdapterBuilder {
+    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.config = self.config.with_ort_config(config);
+        self
     }
 }

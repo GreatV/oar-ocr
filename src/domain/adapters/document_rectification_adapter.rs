@@ -100,17 +100,18 @@ impl UVDocRectifierAdapterBuilder {
         self.model_name_override = Some(model_name.into());
         self
     }
-
-    /// Sets the ONNX Runtime session configuration.
-    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.config = self.config.with_ort_config(config);
-        self
-    }
 }
 
 impl Default for UVDocRectifierAdapterBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::core::traits::OrtConfigurable for UVDocRectifierAdapterBuilder {
+    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.config = self.config.with_ort_config(config);
+        self
     }
 }
 
