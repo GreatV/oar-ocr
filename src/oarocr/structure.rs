@@ -6,12 +6,16 @@
 
 use crate::core::OCRError;
 use crate::core::config::OrtSessionConfig;
-use crate::core::registry::{DynModelAdapter, TaskAdapter};
-use crate::core::traits::adapter::AdapterBuilder;
+use crate::core::traits::adapter::{AdapterBuilder, ModelAdapter};
 use crate::domain::adapters::{
-    LayoutDetectionAdapterBuilder, PPFormulaNetAdapterBuilder, SLANetWiredAdapterBuilder,
-    SLANetWirelessAdapterBuilder, TableCellDetectionAdapterBuilder,
-    TableClassificationAdapterBuilder, TextDetectionAdapterBuilder, TextRecognitionAdapterBuilder,
+    DocumentOrientationAdapter, DocumentOrientationAdapterBuilder, FormulaRecognitionAdapter,
+    LayoutDetectionAdapter, LayoutDetectionAdapterBuilder, PPFormulaNetAdapterBuilder,
+    SLANetWiredAdapterBuilder, SLANetWirelessAdapterBuilder, SealTextDetectionAdapter,
+    SealTextDetectionAdapterBuilder, TableCellDetectionAdapter, TableCellDetectionAdapterBuilder,
+    TableClassificationAdapter, TableClassificationAdapterBuilder,
+    TableStructureRecognitionAdapter, TextDetectionAdapter, TextDetectionAdapterBuilder,
+    TextLineOrientationAdapter, TextLineOrientationAdapterBuilder, TextRecognitionAdapter,
+    TextRecognitionAdapterBuilder, UVDocRectifierAdapter, UVDocRectifierAdapterBuilder,
     UniMERNetFormulaAdapterBuilder,
 };
 use crate::domain::structure::{StructureResult, TableResult};
@@ -41,37 +45,37 @@ const TEXT_BOX_SPLIT_IOA_THRESHOLD: f32 = 0.3;
 #[derive(Debug)]
 struct StructurePipeline {
     // Document preprocessing (optional)
-    document_orientation_adapter: Option<Arc<dyn DynModelAdapter>>,
-    rectification_adapter: Option<Arc<dyn DynModelAdapter>>,
+    document_orientation_adapter: Option<DocumentOrientationAdapter>,
+    rectification_adapter: Option<UVDocRectifierAdapter>,
 
     // Layout analysis (required)
-    layout_detection_adapter: Arc<dyn DynModelAdapter>,
+    layout_detection_adapter: LayoutDetectionAdapter,
 
     // Region detection for hierarchical ordering (optional, PP-DocBlockLayout)
-    region_detection_adapter: Option<Arc<dyn DynModelAdapter>>,
+    region_detection_adapter: Option<LayoutDetectionAdapter>,
 
     // Table analysis (optional)
-    table_classification_adapter: Option<Arc<dyn DynModelAdapter>>,
-    table_orientation_adapter: Option<Arc<dyn DynModelAdapter>>, // Reuses doc orientation model
-    table_cell_detection_adapter: Option<Arc<dyn DynModelAdapter>>,
-    table_structure_recognition_adapter: Option<Arc<dyn DynModelAdapter>>,
+    table_classification_adapter: Option<TableClassificationAdapter>,
+    table_orientation_adapter: Option<DocumentOrientationAdapter>, // Reuses doc orientation model
+    table_cell_detection_adapter: Option<TableCellDetectionAdapter>,
+    table_structure_recognition_adapter: Option<TableStructureRecognitionAdapter>,
     // PP-StructureV3 auto-switch: separate adapters for wired/wireless tables
-    wired_table_structure_adapter: Option<Arc<dyn DynModelAdapter>>,
-    wireless_table_structure_adapter: Option<Arc<dyn DynModelAdapter>>,
-    wired_table_cell_adapter: Option<Arc<dyn DynModelAdapter>>,
-    wireless_table_cell_adapter: Option<Arc<dyn DynModelAdapter>>,
+    wired_table_structure_adapter: Option<TableStructureRecognitionAdapter>,
+    wireless_table_structure_adapter: Option<TableStructureRecognitionAdapter>,
+    wired_table_cell_adapter: Option<TableCellDetectionAdapter>,
+    wireless_table_cell_adapter: Option<TableCellDetectionAdapter>,
     // E2E mode: when true, skip cell detection and use only structure model output
     use_e2e_wired_table_rec: bool,
     use_e2e_wireless_table_rec: bool,
 
-    formula_recognition_adapter: Option<Arc<dyn DynModelAdapter>>,
+    formula_recognition_adapter: Option<FormulaRecognitionAdapter>,
 
-    seal_text_detection_adapter: Option<Arc<dyn DynModelAdapter>>,
+    seal_text_detection_adapter: Option<SealTextDetectionAdapter>,
 
     // OCR integration (optional)
-    text_detection_adapter: Option<Arc<dyn DynModelAdapter>>,
-    text_line_orientation_adapter: Option<Arc<dyn DynModelAdapter>>,
-    text_recognition_adapter: Option<Arc<dyn DynModelAdapter>>,
+    text_detection_adapter: Option<TextDetectionAdapter>,
+    text_line_orientation_adapter: Option<TextLineOrientationAdapter>,
+    text_recognition_adapter: Option<TextRecognitionAdapter>,
 
     // Batch size for region-level processing (table cells, text recognition)
     region_batch_size: Option<usize>,
@@ -618,36 +622,29 @@ impl OARStructureBuilder {
         };
 
         // Build document orientation adapter if enabled
-        let document_orientation_adapter = if let Some(ref model_path) =
-            self.document_orientation_model
-        {
-            use crate::domain::adapters::DocumentOrientationAdapterBuilder;
+        let document_orientation_adapter =
+            if let Some(ref model_path) = self.document_orientation_model {
+                let mut builder = DocumentOrientationAdapterBuilder::new();
 
-            let mut builder = DocumentOrientationAdapterBuilder::new();
+                if let Some(ref ort_config) = self.ort_session_config {
+                    builder = builder.with_ort_config(ort_config.clone());
+                }
 
-            if let Some(ref ort_config) = self.ort_session_config {
-                builder = builder.with_ort_config(ort_config.clone());
-            }
-
-            let adapter = builder.build(model_path)?;
-            Some(Arc::new(TaskAdapter::document_orientation(adapter)) as Arc<dyn DynModelAdapter>)
-        } else {
-            None
-        };
+                Some(builder.build(model_path)?)
+            } else {
+                None
+            };
 
         // Build document rectification adapter if enabled
         let rectification_adapter = if let Some(ref model_path) = self.document_rectification_model
         {
-            use crate::domain::adapters::UVDocRectifierAdapterBuilder;
-
             let mut builder = UVDocRectifierAdapterBuilder::new();
 
             if let Some(ref ort_config) = self.ort_session_config {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
-            let adapter = builder.build(model_path)?;
-            Some(Arc::new(TaskAdapter::document_rectification(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(builder.build(model_path)?)
         } else {
             None
         };
@@ -692,9 +689,7 @@ impl OARStructureBuilder {
             layout_builder = layout_builder.with_ort_config(ort_config.clone());
         }
 
-        let layout_detection_adapter = Arc::new(TaskAdapter::layout_detection(
-            layout_builder.build(&self.layout_detection_model)?,
-        )) as Arc<dyn DynModelAdapter>;
+        let layout_detection_adapter = layout_builder.build(&self.layout_detection_model)?;
 
         // Build region detection adapter if enabled (PP-DocBlockLayout)
         let region_detection_adapter = if let Some(ref model_path) = self.region_detection_model {
@@ -726,45 +721,39 @@ impl OARStructureBuilder {
                 region_builder = region_builder.with_ort_config(ort_config.clone());
             }
 
-            let adapter = region_builder.build(model_path)?;
-            Some(Arc::new(TaskAdapter::layout_detection(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(region_builder.build(model_path)?)
         } else {
             None
         };
 
         // Build table classification adapter if enabled
-        let table_classification_adapter = if let Some(ref model_path) =
-            self.table_classification_model
-        {
-            let mut builder = TableClassificationAdapterBuilder::new();
+        let table_classification_adapter =
+            if let Some(ref model_path) = self.table_classification_model {
+                let mut builder = TableClassificationAdapterBuilder::new();
 
-            if let Some(ref config) = self.table_classification_config {
-                builder = builder.with_config(config.clone());
-            }
+                if let Some(ref config) = self.table_classification_config {
+                    builder = builder.with_config(config.clone());
+                }
 
-            if let Some(ref ort_config) = self.ort_session_config {
-                builder = builder.with_ort_config(ort_config.clone());
-            }
+                if let Some(ref ort_config) = self.ort_session_config {
+                    builder = builder.with_ort_config(ort_config.clone());
+                }
 
-            let adapter = builder.build(model_path)?;
-            Some(Arc::new(TaskAdapter::table_classification(adapter)) as Arc<dyn DynModelAdapter>)
-        } else {
-            None
-        };
+                Some(builder.build(model_path)?)
+            } else {
+                None
+            };
 
         // Build table orientation adapter if enabled (reuses document orientation model)
         // This detects rotated tables (0°, 90°, 180°, 270°) before structure recognition
         let table_orientation_adapter = if let Some(ref model_path) = self.table_orientation_model {
-            use crate::domain::adapters::DocumentOrientationAdapterBuilder;
-
             let mut builder = DocumentOrientationAdapterBuilder::new();
 
             if let Some(ref ort_config) = self.ort_session_config {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
-            let adapter = builder.build(model_path)?;
-            Some(Arc::new(TaskAdapter::document_orientation(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(builder.build(model_path)?)
         } else {
             None
         };
@@ -801,8 +790,7 @@ impl OARStructureBuilder {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
-            let adapter = builder.build(model_path)?;
-            Some(Arc::new(TaskAdapter::table_cell_detection(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(builder.build(model_path)?)
         } else {
             None
         };
@@ -825,7 +813,7 @@ impl OARStructureBuilder {
                         )
                     })?;
 
-            let adapter: Arc<dyn DynModelAdapter> = match table_type {
+            let adapter: TableStructureRecognitionAdapter = match table_type {
                 "wired" => {
                     let mut builder = SLANetWiredAdapterBuilder::new().dict_path(dict_path.clone());
 
@@ -837,8 +825,7 @@ impl OARStructureBuilder {
                         builder = builder.with_ort_config(ort_config.clone());
                     }
 
-                    let adapter = builder.build(model_path)?;
-                    Arc::new(TaskAdapter::table_structure_recognition(adapter))
+                    builder.build(model_path)?
                 }
                 "wireless" => {
                     let mut builder =
@@ -852,8 +839,7 @@ impl OARStructureBuilder {
                         builder = builder.with_ort_config(ort_config.clone());
                     }
 
-                    let adapter = builder.build(model_path)?;
-                    Arc::new(TaskAdapter::table_structure_recognition(adapter))
+                    builder.build(model_path)?
                 }
                 _ => {
                     return Err(OCRError::config_error_detailed(
@@ -892,9 +878,7 @@ impl OARStructureBuilder {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
-            let adapter = builder.build(model_path)?;
-            Some(Arc::new(TaskAdapter::table_structure_recognition(adapter))
-                as Arc<dyn DynModelAdapter>)
+            Some(builder.build(model_path)?)
         } else {
             None
         };
@@ -919,9 +903,7 @@ impl OARStructureBuilder {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
-            let adapter = builder.build(model_path)?;
-            Some(Arc::new(TaskAdapter::table_structure_recognition(adapter))
-                as Arc<dyn DynModelAdapter>)
+            Some(builder.build(model_path)?)
         } else {
             None
         };
@@ -941,8 +923,7 @@ impl OARStructureBuilder {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
-            let adapter = builder.build(model_path)?;
-            Some(Arc::new(TaskAdapter::table_cell_detection(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(builder.build(model_path)?)
         } else {
             None
         };
@@ -963,8 +944,7 @@ impl OARStructureBuilder {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
-            let adapter = builder.build(model_path)?;
-            Some(Arc::new(TaskAdapter::table_cell_detection(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(builder.build(model_path)?)
         } else {
             None
         };
@@ -987,7 +967,7 @@ impl OARStructureBuilder {
                 )
             })?;
 
-            let adapter: Arc<dyn DynModelAdapter> = match model_type.to_lowercase().as_str() {
+            let adapter: FormulaRecognitionAdapter = match model_type.to_lowercase().as_str() {
                 "pp_formulanet" | "pp-formulanet" => {
                     let mut builder = PPFormulaNetAdapterBuilder::new();
 
@@ -1003,8 +983,7 @@ impl OARStructureBuilder {
                         builder = builder.with_ort_config(ort_config.clone());
                     }
 
-                    let adapter = builder.build(model_path)?;
-                    Arc::new(TaskAdapter::formula_recognition(adapter))
+                    builder.build(model_path)?
                 }
                 "unimernet" => {
                     let mut builder = UniMERNetFormulaAdapterBuilder::new();
@@ -1021,8 +1000,7 @@ impl OARStructureBuilder {
                         builder = builder.with_ort_config(ort_config.clone());
                     }
 
-                    let adapter = builder.build(model_path)?;
-                    Arc::new(TaskAdapter::formula_recognition(adapter))
+                    builder.build(model_path)?
                 }
                 _ => {
                     return Err(OCRError::config_error_detailed(
@@ -1041,22 +1019,18 @@ impl OARStructureBuilder {
         };
 
         // Build seal text detection adapter if enabled
-        let seal_text_detection_adapter = if let Some(ref model_path) =
-            self.seal_text_detection_model
-        {
-            use crate::domain::adapters::SealTextDetectionAdapterBuilder;
+        let seal_text_detection_adapter =
+            if let Some(ref model_path) = self.seal_text_detection_model {
+                let mut builder = SealTextDetectionAdapterBuilder::new();
 
-            let mut builder = SealTextDetectionAdapterBuilder::new();
+                if let Some(ref ort_config) = self.ort_session_config {
+                    builder = builder.with_ort_config(ort_config.clone());
+                }
 
-            if let Some(ref ort_config) = self.ort_session_config {
-                builder = builder.with_ort_config(ort_config.clone());
-            }
-
-            let adapter = builder.build(model_path)?;
-            Some(Arc::new(TaskAdapter::seal_text_detection(adapter)) as Arc<dyn DynModelAdapter>)
-        } else {
-            None
-        };
+                Some(builder.build(model_path)?)
+            } else {
+                None
+            };
 
         // Build text detection adapter if enabled.
         //
@@ -1083,29 +1057,24 @@ impl OARStructureBuilder {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
-            let adapter = builder.build(model_path)?;
-            Some(Arc::new(TaskAdapter::text_detection(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(builder.build(model_path)?)
         } else {
             None
         };
 
         // Build text line orientation adapter if enabled (PP-StructureV3)
-        let text_line_orientation_adapter = if let Some(ref model_path) =
-            self.text_line_orientation_model
-        {
-            use crate::domain::adapters::TextLineOrientationAdapterBuilder;
+        let text_line_orientation_adapter =
+            if let Some(ref model_path) = self.text_line_orientation_model {
+                let mut builder = TextLineOrientationAdapterBuilder::new();
 
-            let mut builder = TextLineOrientationAdapterBuilder::new();
+                if let Some(ref ort_config) = self.ort_session_config {
+                    builder = builder.with_ort_config(ort_config.clone());
+                }
 
-            if let Some(ref ort_config) = self.ort_session_config {
-                builder = builder.with_ort_config(ort_config.clone());
-            }
-
-            let adapter = builder.build(model_path)?;
-            Some(Arc::new(TaskAdapter::text_line_orientation(adapter)) as Arc<dyn DynModelAdapter>)
-        } else {
-            None
-        };
+                Some(builder.build(model_path)?)
+            } else {
+                None
+            };
 
         // Build text recognition adapter if enabled
         let text_recognition_adapter = if let Some(ref model_path) = self.text_recognition_model {
@@ -1128,8 +1097,7 @@ impl OARStructureBuilder {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
-            let adapter = builder.build(model_path)?;
-            Some(Arc::new(TaskAdapter::text_recognition(adapter)) as Arc<dyn DynModelAdapter>)
+            Some(builder.build(model_path)?)
         } else {
             None
         };
@@ -1185,10 +1153,9 @@ impl OARStructure {
         layout_elements: &[crate::domain::structure::LayoutElement],
         region_blocks: Option<&[crate::domain::structure::RegionBlock]>,
         page_image: &image::RgbImage,
-        text_recognition_adapter: &Arc<dyn DynModelAdapter>,
+        text_recognition_adapter: &TextRecognitionAdapter,
         region_batch_size: usize,
     ) -> Result<(), OCRError> {
-        use crate::core::registry::DynTaskInput;
         use crate::core::traits::task::ImageTaskInput;
         use crate::domain::structure::LayoutElementType;
         use crate::processors::BoundingBox;
@@ -1294,12 +1261,10 @@ impl OARStructure {
             for batch_start in (0..crops.len()).step_by(region_batch_size.max(1)) {
                 let batch_end = (batch_start + region_batch_size).min(crops.len());
                 let batch: Vec<_> = crops[batch_start..batch_end].to_vec();
-                let rec_input = DynTaskInput::from_images(ImageTaskInput::new(batch));
-                let rec_output = text_recognition_adapter.execute_dyn(rec_input)?;
-                if let Ok(rec_result) = rec_output.into_text_recognition() {
-                    rec_texts.extend(rec_result.texts);
-                    rec_scores.extend(rec_result.scores);
-                }
+                let rec_input = ImageTaskInput::new(batch);
+                let rec_result = text_recognition_adapter.execute(rec_input, None)?;
+                rec_texts.extend(rec_result.texts);
+                rec_scores.extend(rec_result.scores);
             }
 
             for ((crop_box, is_first), (text, score)) in crop_boxes
@@ -1370,11 +1335,10 @@ impl OARStructure {
 
             // Crop layout bbox and run recognition.
             if let Ok(crop_img) = BBoxCrop::crop_bounding_box(page_image, &elem.bbox) {
-                let rec_input = DynTaskInput::from_images(ImageTaskInput::new(vec![crop_img]));
-                let rec_output = text_recognition_adapter.execute_dyn(rec_input)?;
-                if let Ok(rec_result) = rec_output.into_text_recognition()
-                    && let (Some(text), Some(score)) =
-                        (rec_result.texts.first(), rec_result.scores.first())
+                let rec_input = ImageTaskInput::new(vec![crop_img]);
+                let rec_result = text_recognition_adapter.execute(rec_input, None)?;
+                if let (Some(text), Some(score)) =
+                    (rec_result.texts.first(), rec_result.scores.first())
                     && !text.is_empty()
                 {
                     let crop_box = elem.bbox.clone();
@@ -1416,9 +1380,8 @@ impl OARStructure {
         tables: &[TableResult],
         text_regions: &mut Vec<crate::oarocr::TextRegion>,
         page_image: &image::RgbImage,
-        text_recognition_adapter: &Arc<dyn DynModelAdapter>,
+        text_recognition_adapter: &TextRecognitionAdapter,
     ) -> Result<(), OCRError> {
-        use crate::core::registry::DynTaskInput;
         use crate::core::traits::task::ImageTaskInput;
         use crate::processors::BoundingBox;
 
@@ -1604,11 +1567,10 @@ impl OARStructure {
                 let crop =
                     image::imageops::crop_imm(page_image, x1u, y1u, crop_w, crop_h).to_image();
 
-                let rec_input = DynTaskInput::from_images(ImageTaskInput::new(vec![crop]));
-                let rec_output = text_recognition_adapter.execute_dyn(rec_input)?;
-                if let Ok(rec_result) = rec_output.into_text_recognition()
-                    && let (Some(text), Some(score)) =
-                        (rec_result.texts.first(), rec_result.scores.first())
+                let rec_input = ImageTaskInput::new(vec![crop]);
+                let rec_result = text_recognition_adapter.execute(rec_input, None)?;
+                if let (Some(text), Some(score)) =
+                    (rec_result.texts.first(), rec_result.scores.first())
                     && !text.is_empty()
                 {
                     let bbox = BoundingBox::from_coords(
@@ -1644,13 +1606,14 @@ impl OARStructure {
         ),
         OCRError,
     > {
-        use crate::core::registry::DynTaskInput;
         use crate::core::traits::task::ImageTaskInput;
         use crate::domain::structure::{LayoutElement, LayoutElementType, RegionBlock};
 
-        let input = DynTaskInput::from_images(ImageTaskInput::new(vec![page_image.clone()]));
-        let layout_output = self.pipeline.layout_detection_adapter.execute_dyn(input)?;
-        let layout_result = layout_output.into_layout_detection()?;
+        let input = ImageTaskInput::new(vec![page_image.clone()]);
+        let layout_result = self
+            .pipeline
+            .layout_detection_adapter
+            .execute(input, None)?;
 
         let mut layout_elements: Vec<LayoutElement> = Vec::new();
         if let Some(elements) = layout_result.elements.first() {
@@ -1665,10 +1628,8 @@ impl OARStructure {
 
         let mut detected_region_blocks: Option<Vec<RegionBlock>> = None;
         if let Some(ref region_adapter) = self.pipeline.region_detection_adapter {
-            let region_input =
-                DynTaskInput::from_images(ImageTaskInput::new(vec![page_image.clone()]));
-            if let Ok(region_output) = region_adapter.execute_dyn(region_input)
-                && let Ok(region_result) = region_output.into_layout_detection()
+            let region_input = ImageTaskInput::new(vec![page_image.clone()]);
+            if let Ok(region_result) = region_adapter.execute(region_input, None)
                 && let Some(region_elements) = region_result.elements.first()
                 && !region_elements.is_empty()
             {
@@ -1709,7 +1670,6 @@ impl OARStructure {
         page_image: &image::RgbImage,
         layout_elements: &[crate::domain::structure::LayoutElement],
     ) -> Result<Vec<crate::domain::structure::FormulaResult>, OCRError> {
-        use crate::core::registry::DynTaskInput;
         use crate::core::traits::task::ImageTaskInput;
         use crate::domain::structure::FormulaResult;
         use crate::utils::BBoxCrop;
@@ -1753,12 +1713,8 @@ impl OARStructure {
             return Ok(Vec::new());
         }
 
-        let input = DynTaskInput::from_images(ImageTaskInput::new(crops));
-        let formula_output = formula_adapter.execute_dyn(input)?;
-
-        let Ok(formula_result) = formula_output.into_formula_recognition() else {
-            return Ok(Vec::new());
-        };
+        let input = ImageTaskInput::new(crops);
+        let formula_result = formula_adapter.execute(input, None)?;
 
         let mut formulas = Vec::new();
         for ((bbox, formula), score) in bboxes
@@ -1792,7 +1748,6 @@ impl OARStructure {
         page_image: &image::RgbImage,
         layout_elements: &mut Vec<crate::domain::structure::LayoutElement>,
     ) -> Result<(), OCRError> {
-        use crate::core::registry::DynTaskInput;
         use crate::core::traits::task::ImageTaskInput;
         use crate::domain::structure::{LayoutElement, LayoutElementType};
         use crate::processors::Point;
@@ -1832,32 +1787,24 @@ impl OARStructure {
             return Ok(());
         }
 
-        let input = DynTaskInput::from_images(ImageTaskInput::new(seal_crops));
-        let seal_output = seal_adapter.execute_dyn(input)?;
+        let input = ImageTaskInput::new(seal_crops);
+        let seal_result = seal_adapter.execute(input, None)?;
 
-        if let Ok(seal_result) = seal_output.into_seal_text_detection() {
-            for ((dx, dy), detections) in
-                crop_offsets.iter().zip(seal_result.detections.into_iter())
-            {
-                for detection in detections {
-                    let translated_bbox = crate::processors::BoundingBox::new(
-                        detection
-                            .bbox
-                            .points
-                            .iter()
-                            .map(|p| Point::new(p.x + dx, p.y + dy))
-                            .collect(),
-                    );
+        for ((dx, dy), detections) in crop_offsets.iter().zip(seal_result.detections.into_iter()) {
+            for detection in detections {
+                let translated_bbox = crate::processors::BoundingBox::new(
+                    detection
+                        .bbox
+                        .points
+                        .iter()
+                        .map(|p| Point::new(p.x + dx, p.y + dy))
+                        .collect(),
+                );
 
-                    layout_elements.push(
-                        LayoutElement::new(
-                            translated_bbox,
-                            LayoutElementType::Seal,
-                            detection.score,
-                        )
+                layout_elements.push(
+                    LayoutElement::new(translated_bbox, LayoutElementType::Seal, detection.score)
                         .with_label("seal".to_string()),
-                    );
-                }
+                );
             }
         }
 
@@ -1959,7 +1906,6 @@ impl OARStructure {
         layout_elements: &[crate::domain::structure::LayoutElement],
         region_blocks: Option<&[crate::domain::structure::RegionBlock]>,
     ) -> Result<Vec<crate::oarocr::TextRegion>, OCRError> {
-        use crate::core::registry::DynTaskInput;
         use crate::core::traits::task::ImageTaskInput;
         use crate::oarocr::TextRegion;
         use std::sync::Arc;
@@ -1986,12 +1932,10 @@ impl OARStructure {
         }
 
         // Text detection (on masked image).
-        let input = DynTaskInput::from_images(ImageTaskInput::new(vec![ocr_image.clone()]));
-        let det_output = text_detection_adapter.execute_dyn(input)?;
+        let input = ImageTaskInput::new(vec![ocr_image.clone()]);
+        let det_result = text_detection_adapter.execute(input, None)?;
 
-        let mut detection_boxes = if let Ok(det_result) = det_output.clone().into_text_detection()
-            && let Some(detections) = det_result.detections.first()
-        {
+        let mut detection_boxes = if let Some(detections) = det_result.detections.first() {
             detections
                 .iter()
                 .map(|d| d.bbox.clone())
@@ -2155,10 +2099,8 @@ impl OARStructure {
                     if let Some(ref tlo_adapter) = self.pipeline.text_line_orientation_adapter {
                         let tlo_imgs: Vec<_> =
                             batch_items.iter().map(|(_, _, img)| img.clone()).collect();
-                        let tlo_input = DynTaskInput::from_images(ImageTaskInput::new(tlo_imgs));
-                        if let Ok(tlo_output) = tlo_adapter.execute_dyn(tlo_input)
-                            && let Ok(tlo_result) = tlo_output.into_text_line_orientation()
-                        {
+                        let tlo_input = ImageTaskInput::new(tlo_imgs);
+                        if let Ok(tlo_result) = tlo_adapter.execute(tlo_input, None) {
                             for (i, classifications) in
                                 tlo_result.classifications.iter().enumerate()
                             {
@@ -2182,10 +2124,8 @@ impl OARStructure {
                         rec_imgs.push(img);
                     }
 
-                    let rec_input = DynTaskInput::from_images(ImageTaskInput::new(rec_imgs));
-                    if let Ok(rec_output) = text_recognition_adapter.execute_dyn(rec_input)
-                        && let Ok(rec_result) = rec_output.into_text_recognition()
-                    {
+                    let rec_input = ImageTaskInput::new(rec_imgs);
+                    if let Ok(rec_result) = text_recognition_adapter.execute(rec_input, None) {
                         for ((det_idx, text), score) in det_indices
                             .into_iter()
                             .zip(rec_result.texts.into_iter())
@@ -2267,8 +2207,8 @@ impl OARStructure {
         use std::sync::Arc;
 
         let preprocessor = DocumentPreprocessor::new(
-            self.pipeline.document_orientation_adapter.clone(),
-            self.pipeline.rectification_adapter.clone(),
+            self.pipeline.document_orientation_adapter.as_ref(),
+            self.pipeline.rectification_adapter.as_ref(),
         );
         let preprocess = preprocessor.preprocess(Arc::new(image))?;
         let current_image = preprocess.image;
@@ -2311,26 +2251,26 @@ impl OARStructure {
                     table_classification_adapter: self
                         .pipeline
                         .table_classification_adapter
-                        .clone(),
-                    table_orientation_adapter: self.pipeline.table_orientation_adapter.clone(),
+                        .as_ref(),
+                    table_orientation_adapter: self.pipeline.table_orientation_adapter.as_ref(),
                     table_structure_recognition_adapter: self
                         .pipeline
                         .table_structure_recognition_adapter
-                        .clone(),
+                        .as_ref(),
                     wired_table_structure_adapter: self
                         .pipeline
                         .wired_table_structure_adapter
-                        .clone(),
+                        .as_ref(),
                     wireless_table_structure_adapter: self
                         .pipeline
                         .wireless_table_structure_adapter
-                        .clone(),
+                        .as_ref(),
                     table_cell_detection_adapter: self
                         .pipeline
                         .table_cell_detection_adapter
-                        .clone(),
-                    wired_table_cell_adapter: self.pipeline.wired_table_cell_adapter.clone(),
-                    wireless_table_cell_adapter: self.pipeline.wireless_table_cell_adapter.clone(),
+                        .as_ref(),
+                    wired_table_cell_adapter: self.pipeline.wired_table_cell_adapter.as_ref(),
+                    wireless_table_cell_adapter: self.pipeline.wireless_table_cell_adapter.as_ref(),
                     use_e2e_wired_table_rec: self.pipeline.use_e2e_wired_table_rec,
                     use_e2e_wireless_table_rec: self.pipeline.use_e2e_wireless_table_rec,
                 },

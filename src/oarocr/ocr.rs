@@ -7,11 +7,13 @@
 use crate::core::config::OrtSessionConfig;
 use crate::core::constants::DEFAULT_REC_IMAGE_SHAPE;
 use crate::core::errors::OCRError;
-use crate::core::registry::{DynModelAdapter, TaskAdapter};
-use crate::core::traits::adapter::AdapterBuilder;
+use crate::core::traits::adapter::{AdapterBuilder, ModelAdapter};
+use crate::core::traits::task::ImageTaskInput;
 use crate::domain::adapters::{
-    DocumentOrientationAdapterBuilder, TextDetectionAdapterBuilder,
-    TextLineOrientationAdapterBuilder, TextRecognitionAdapterBuilder, UVDocRectifierAdapterBuilder,
+    DocumentOrientationAdapter, DocumentOrientationAdapterBuilder, TextDetectionAdapter,
+    TextDetectionAdapterBuilder, TextLineOrientationAdapter, TextLineOrientationAdapterBuilder,
+    TextRecognitionAdapter, TextRecognitionAdapterBuilder, UVDocRectifierAdapter,
+    UVDocRectifierAdapterBuilder,
 };
 use crate::domain::tasks::{TextDetectionConfig, TextRecognitionConfig};
 use crate::processors::BoundingBox;
@@ -21,11 +23,11 @@ use std::sync::Arc;
 /// Internal structure holding the OCR pipeline adapters.
 #[derive(Debug)]
 struct OCRPipeline {
-    rectification_adapter: Option<Arc<dyn DynModelAdapter>>,
-    document_orientation_adapter: Option<Arc<dyn DynModelAdapter>>,
-    text_detection_adapter: Arc<dyn DynModelAdapter>,
-    text_line_orientation_adapter: Option<Arc<dyn DynModelAdapter>>,
-    text_recognition_adapter: Arc<dyn DynModelAdapter>,
+    rectification_adapter: Option<UVDocRectifierAdapter>,
+    document_orientation_adapter: Option<DocumentOrientationAdapter>,
+    text_detection_adapter: TextDetectionAdapter,
+    text_line_orientation_adapter: Option<TextLineOrientationAdapter>,
+    text_recognition_adapter: TextRecognitionAdapter,
 }
 
 /// Builder for constructing OCR pipelines.
@@ -223,36 +225,32 @@ impl OAROCRBuilder {
         })?;
 
         // Build document rectification adapter if enabled
-        let rectification_adapter = if let Some(ref rectification_model) =
-            self.document_rectification_model
-        {
-            let mut builder = UVDocRectifierAdapterBuilder::new();
+        let rectification_adapter =
+            if let Some(ref rectification_model) = self.document_rectification_model {
+                let mut builder = UVDocRectifierAdapterBuilder::new();
 
-            if let Some(ref ort_config) = self.ort_session_config {
-                builder = builder.with_ort_config(ort_config.clone());
-            }
+                if let Some(ref ort_config) = self.ort_session_config {
+                    builder = builder.with_ort_config(ort_config.clone());
+                }
 
-            let adapter = builder.build(rectification_model)?;
-            Some(Arc::new(TaskAdapter::document_rectification(adapter)) as Arc<dyn DynModelAdapter>)
-        } else {
-            None
-        };
+                Some(builder.build(rectification_model)?)
+            } else {
+                None
+            };
 
         // Build document orientation adapter if enabled
-        let document_orientation_adapter = if let Some(ref orientation_model) =
-            self.document_orientation_model
-        {
-            let mut builder = DocumentOrientationAdapterBuilder::new();
+        let document_orientation_adapter =
+            if let Some(ref orientation_model) = self.document_orientation_model {
+                let mut builder = DocumentOrientationAdapterBuilder::new();
 
-            if let Some(ref ort_config) = self.ort_session_config {
-                builder = builder.with_ort_config(ort_config.clone());
-            }
+                if let Some(ref ort_config) = self.ort_session_config {
+                    builder = builder.with_ort_config(ort_config.clone());
+                }
 
-            let adapter = builder.build(orientation_model)?;
-            Some(Arc::new(TaskAdapter::document_orientation(adapter)) as Arc<dyn DynModelAdapter>)
-        } else {
-            None
-        };
+                Some(builder.build(orientation_model)?)
+            } else {
+                None
+            };
 
         // Build text detection adapter (required)
         let mut detection_builder = TextDetectionAdapterBuilder::new();
@@ -307,25 +305,21 @@ impl OAROCRBuilder {
             detection_builder = detection_builder.text_type(text_type.clone());
         }
 
-        let text_detection_adapter = Arc::new(TaskAdapter::text_detection(
-            detection_builder.build(&self.text_detection_model)?,
-        )) as Arc<dyn DynModelAdapter>;
+        let text_detection_adapter = detection_builder.build(&self.text_detection_model)?;
 
         // Build text line orientation adapter if enabled
-        let text_line_orientation_adapter = if let Some(ref line_orientation_model) =
-            self.text_line_orientation_model
-        {
-            let mut builder = TextLineOrientationAdapterBuilder::new();
+        let text_line_orientation_adapter =
+            if let Some(ref line_orientation_model) = self.text_line_orientation_model {
+                let mut builder = TextLineOrientationAdapterBuilder::new();
 
-            if let Some(ref ort_config) = self.ort_session_config {
-                builder = builder.with_ort_config(ort_config.clone());
-            }
+                if let Some(ref ort_config) = self.ort_session_config {
+                    builder = builder.with_ort_config(ort_config.clone());
+                }
 
-            let adapter = builder.build(line_orientation_model)?;
-            Some(Arc::new(TaskAdapter::text_line_orientation(adapter)) as Arc<dyn DynModelAdapter>)
-        } else {
-            None
-        };
+                Some(builder.build(line_orientation_model)?)
+            } else {
+                None
+            };
 
         // Build text recognition adapter (required)
         // Parse char_dict into Vec<String> - one character per line
@@ -343,9 +337,7 @@ impl OAROCRBuilder {
             recognition_builder = recognition_builder.with_config(rec_config.clone());
         }
 
-        let text_recognition_adapter = Arc::new(TaskAdapter::text_recognition(
-            recognition_builder.build(&self.text_recognition_model)?,
-        )) as Arc<dyn DynModelAdapter>;
+        let text_recognition_adapter = recognition_builder.build(&self.text_recognition_model)?;
 
         let pipeline = OCRPipeline {
             rectification_adapter,
@@ -466,8 +458,8 @@ impl OAROCR {
         }
 
         let preprocessor = DocumentPreprocessor::new(
-            self.pipeline.document_orientation_adapter.clone(),
-            self.pipeline.rectification_adapter.clone(),
+            self.pipeline.document_orientation_adapter.as_ref(),
+            self.pipeline.rectification_adapter.as_ref(),
         );
 
         let mut prepared: Vec<(
@@ -578,16 +570,12 @@ impl OAROCR {
         &self,
         images: Vec<image::RgbImage>,
     ) -> Result<Vec<Vec<BoundingBox>>, OCRError> {
-        use crate::core::registry::DynTaskInput;
-        use crate::core::traits::task::ImageTaskInput;
-
         if images.is_empty() {
             return Ok(Vec::new());
         }
 
-        let input = DynTaskInput::from_images(ImageTaskInput::new(images));
-        let output = self.pipeline.text_detection_adapter.execute_dyn(input)?;
-        let det = output.into_text_detection()?;
+        let input = ImageTaskInput::new(images);
+        let det = self.pipeline.text_detection_adapter.execute(input, None)?;
 
         let mut results: Vec<Vec<BoundingBox>> = Vec::with_capacity(det.detections.len());
         for detections in det.detections.into_iter() {
@@ -602,12 +590,8 @@ impl OAROCR {
         &self,
         image: &image::RgbImage,
     ) -> Result<Vec<BoundingBox>, OCRError> {
-        use crate::core::registry::DynTaskInput;
-        use crate::core::traits::task::ImageTaskInput;
-
-        let input = DynTaskInput::from_images(ImageTaskInput::new(vec![image.clone()]));
-        let output = self.pipeline.text_detection_adapter.execute_dyn(input)?;
-        let det = output.into_text_detection()?;
+        let input = ImageTaskInput::new(vec![image.clone()]);
+        let det = self.pipeline.text_detection_adapter.execute(input, None)?;
 
         let boxes = det
             .detections
@@ -682,9 +666,6 @@ impl OAROCR {
         &self,
         regions: &mut [CroppedTextRegion],
     ) -> Result<(), OCRError> {
-        use crate::core::registry::DynTaskInput;
-        use crate::core::traits::task::ImageTaskInput;
-
         let Some(ref line_orientation_adapter) = self.pipeline.text_line_orientation_adapter else {
             return Ok(());
         };
@@ -694,9 +675,8 @@ impl OAROCR {
         }
 
         let input_images = regions.iter().map(|r| r.image.clone()).collect();
-        let input = DynTaskInput::from_images(ImageTaskInput::new(input_images));
-        let output = line_orientation_adapter.execute_dyn(input)?;
-        let orient = output.into_text_line_orientation()?;
+        let input = ImageTaskInput::new(input_images);
+        let orient = line_orientation_adapter.execute(input, None)?;
 
         for (idx, classifications) in orient
             .classifications
@@ -725,9 +705,6 @@ impl OAROCR {
         detection_count: usize,
         mut regions: Vec<CroppedTextRegion>,
     ) -> Result<Vec<Option<crate::oarocr::TextRegion>>, OCRError> {
-        use crate::core::registry::DynTaskInput;
-        use crate::core::traits::task::ImageTaskInput;
-
         let mut results: Vec<Option<crate::oarocr::TextRegion>> = vec![None; detection_count];
         if regions.is_empty() {
             return Ok(results);
@@ -748,15 +725,12 @@ impl OAROCR {
                 .map(|r| r.wh_ratio)
                 .fold(base_rec_ratio, |acc, r| acc.max(r));
 
-            let rec_input = DynTaskInput::from_images(ImageTaskInput::new(
-                chunk.iter().map(|r| r.image.clone()).collect(),
-            ));
+            let rec_input = ImageTaskInput::new(chunk.iter().map(|r| r.image.clone()).collect());
 
-            let rec_output = self
+            let rec = self
                 .pipeline
                 .text_recognition_adapter
-                .execute_dyn(rec_input)?;
-            let rec = rec_output.into_text_recognition()?;
+                .execute(rec_input, None)?;
 
             let n = rec.texts.len().min(chunk.len());
             for (i, region) in chunk.iter().take(n).enumerate() {

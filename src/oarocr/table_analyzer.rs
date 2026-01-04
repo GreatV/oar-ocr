@@ -12,50 +12,53 @@
 //!     - OCR results overlapping table regions are used to refine cell bounding boxes.
 
 use crate::core::OCRError;
-use crate::core::registry::{DynModelAdapter, DynTaskInput};
+use crate::core::traits::adapter::ModelAdapter;
 use crate::core::traits::task::ImageTaskInput;
+use crate::domain::adapters::{
+    DocumentOrientationAdapter, TableCellDetectionAdapter, TableClassificationAdapter,
+    TableStructureRecognitionAdapter,
+};
 use crate::domain::structure::{
     FormulaResult, LayoutElement, LayoutElementType, TableCell, TableResult, TableType,
 };
 use crate::oarocr::TextRegion;
 use crate::processors::BoundingBox;
 use crate::utils::BBoxCrop;
-use std::sync::Arc;
 
 /// Configuration for creating a TableAnalyzer.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct TableAnalyzerConfig {
-    pub table_classification_adapter: Option<Arc<dyn DynModelAdapter>>,
-    pub table_orientation_adapter: Option<Arc<dyn DynModelAdapter>>,
-    pub table_structure_recognition_adapter: Option<Arc<dyn DynModelAdapter>>,
-    pub wired_table_structure_adapter: Option<Arc<dyn DynModelAdapter>>,
-    pub wireless_table_structure_adapter: Option<Arc<dyn DynModelAdapter>>,
-    pub table_cell_detection_adapter: Option<Arc<dyn DynModelAdapter>>,
-    pub wired_table_cell_adapter: Option<Arc<dyn DynModelAdapter>>,
-    pub wireless_table_cell_adapter: Option<Arc<dyn DynModelAdapter>>,
+#[derive(Debug)]
+pub(crate) struct TableAnalyzerConfig<'a> {
+    pub table_classification_adapter: Option<&'a TableClassificationAdapter>,
+    pub table_orientation_adapter: Option<&'a DocumentOrientationAdapter>,
+    pub table_structure_recognition_adapter: Option<&'a TableStructureRecognitionAdapter>,
+    pub wired_table_structure_adapter: Option<&'a TableStructureRecognitionAdapter>,
+    pub wireless_table_structure_adapter: Option<&'a TableStructureRecognitionAdapter>,
+    pub table_cell_detection_adapter: Option<&'a TableCellDetectionAdapter>,
+    pub wired_table_cell_adapter: Option<&'a TableCellDetectionAdapter>,
+    pub wireless_table_cell_adapter: Option<&'a TableCellDetectionAdapter>,
     pub use_e2e_wired_table_rec: bool,
     pub use_e2e_wireless_table_rec: bool,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct TableAnalyzer {
-    table_classification_adapter: Option<Arc<dyn DynModelAdapter>>,
-    table_orientation_adapter: Option<Arc<dyn DynModelAdapter>>,
+#[derive(Debug)]
+pub(crate) struct TableAnalyzer<'a> {
+    table_classification_adapter: Option<&'a TableClassificationAdapter>,
+    table_orientation_adapter: Option<&'a DocumentOrientationAdapter>,
 
-    table_structure_recognition_adapter: Option<Arc<dyn DynModelAdapter>>,
-    wired_table_structure_adapter: Option<Arc<dyn DynModelAdapter>>,
-    wireless_table_structure_adapter: Option<Arc<dyn DynModelAdapter>>,
+    table_structure_recognition_adapter: Option<&'a TableStructureRecognitionAdapter>,
+    wired_table_structure_adapter: Option<&'a TableStructureRecognitionAdapter>,
+    wireless_table_structure_adapter: Option<&'a TableStructureRecognitionAdapter>,
 
-    table_cell_detection_adapter: Option<Arc<dyn DynModelAdapter>>,
-    wired_table_cell_adapter: Option<Arc<dyn DynModelAdapter>>,
-    wireless_table_cell_adapter: Option<Arc<dyn DynModelAdapter>>,
+    table_cell_detection_adapter: Option<&'a TableCellDetectionAdapter>,
+    wired_table_cell_adapter: Option<&'a TableCellDetectionAdapter>,
+    wireless_table_cell_adapter: Option<&'a TableCellDetectionAdapter>,
 
     use_e2e_wired_table_rec: bool,
     use_e2e_wireless_table_rec: bool,
 }
 
-impl TableAnalyzer {
-    pub(crate) fn new(config: TableAnalyzerConfig) -> Self {
+impl<'a> TableAnalyzer<'a> {
+    pub(crate) fn new(config: TableAnalyzerConfig<'a>) -> Self {
         Self {
             table_classification_adapter: config.table_classification_adapter,
             table_orientation_adapter: config.table_orientation_adapter,
@@ -143,7 +146,7 @@ impl TableAnalyzer {
 
         let cropped_table_arc = std::sync::Arc::new(cropped_table);
         let (table_for_recognition, table_rotation) =
-            if let Some(ref orientation_adapter) = self.table_orientation_adapter {
+            if let Some(orientation_adapter) = &self.table_orientation_adapter {
                 match crate::oarocr::preprocess::correct_image_orientation(
                     std::sync::Arc::clone(&cropped_table_arc),
                     orientation_adapter,
@@ -176,12 +179,9 @@ impl TableAnalyzer {
             };
 
         let (table_type, classification_confidence) =
-            if let Some(ref cls_adapter) = self.table_classification_adapter {
-                let input = DynTaskInput::from_images(ImageTaskInput::new(vec![
-                    (*table_for_recognition).clone(),
-                ]));
-                if let Ok(cls_output) = cls_adapter.execute_dyn(input)
-                    && let Ok(cls_result) = cls_output.into_table_classification()
+            if let Some(cls_adapter) = &self.table_classification_adapter {
+                let input = ImageTaskInput::new(vec![(*table_for_recognition).clone()]);
+                if let Ok(cls_result) = cls_adapter.execute(input, None)
                     && let Some(classifications) = cls_result.classifications.first()
                     && let Some(top_cls) = classifications.first()
                 {
@@ -204,23 +204,20 @@ impl TableAnalyzer {
             TableType::Unknown => self.use_e2e_wireless_table_rec,
         };
 
-        let structure_adapter: Option<&Arc<dyn DynModelAdapter>> = match table_type {
+        let structure_adapter: Option<&TableStructureRecognitionAdapter> = match table_type {
             TableType::Wired => self
                 .wired_table_structure_adapter
-                .as_ref()
-                .or(self.table_structure_recognition_adapter.as_ref()),
+                .or(self.table_structure_recognition_adapter),
             TableType::Wireless => self
                 .wireless_table_structure_adapter
-                .as_ref()
-                .or(self.table_structure_recognition_adapter.as_ref()),
+                .or(self.table_structure_recognition_adapter),
             TableType::Unknown => self
                 .table_structure_recognition_adapter
-                .as_ref()
-                .or(self.wireless_table_structure_adapter.as_ref())
-                .or(self.wired_table_structure_adapter.as_ref()),
+                .or(self.wireless_table_structure_adapter)
+                .or(self.wired_table_structure_adapter),
         };
 
-        let cell_adapter: Option<&Arc<dyn DynModelAdapter>> = if use_e2e_mode {
+        let cell_adapter: Option<&TableCellDetectionAdapter> = if use_e2e_mode {
             tracing::info!(
                 target: "structure",
                 table_index = idx,
@@ -238,28 +235,23 @@ impl TableAnalyzer {
             match table_type {
                 TableType::Wired => self
                     .wired_table_cell_adapter
-                    .as_ref()
-                    .or(self.table_cell_detection_adapter.as_ref())
-                    .or(self.wireless_table_cell_adapter.as_ref()),
+                    .or(self.table_cell_detection_adapter)
+                    .or(self.wireless_table_cell_adapter),
                 TableType::Wireless => self
                     .wireless_table_cell_adapter
-                    .as_ref()
-                    .or(self.table_cell_detection_adapter.as_ref())
-                    .or(self.wired_table_cell_adapter.as_ref()),
+                    .or(self.table_cell_detection_adapter)
+                    .or(self.wired_table_cell_adapter),
                 TableType::Unknown => self
                     .table_cell_detection_adapter
-                    .as_ref()
-                    .or(self.wired_table_cell_adapter.as_ref())
-                    .or(self.wireless_table_cell_adapter.as_ref()),
+                    .or(self.wired_table_cell_adapter)
+                    .or(self.wireless_table_cell_adapter),
             }
         };
 
-        let table_output = match structure_adapter {
+        let table_result = match structure_adapter {
             Some(adapter) => {
-                let input = DynTaskInput::from_images(ImageTaskInput::new(vec![
-                    (*table_for_recognition).clone(),
-                ]));
-                match adapter.execute_dyn(input) {
+                let input = ImageTaskInput::new(vec![(*table_for_recognition).clone()]);
+                match adapter.execute(input, None) {
                     Ok(output) => output,
                     Err(e) => {
                         tracing::warn!(
@@ -292,21 +284,16 @@ impl TableAnalyzer {
             }
         };
 
-        let structure_parsed = table_output.into_table_structure_recognition().ok();
-        let has_valid_structure = structure_parsed
-            .as_ref()
-            .map(|r| !r.structures.is_empty())
-            .unwrap_or(false);
+        let has_valid_structure = !table_result.structures.is_empty();
 
         if !has_valid_structure {
-            let mut table_result = TableResult::new(table_bbox.clone(), table_type);
+            let mut stub_result = TableResult::new(table_bbox.clone(), table_type);
             if let Some(conf) = classification_confidence {
-                table_result = table_result.with_classification_confidence(conf);
+                stub_result = stub_result.with_classification_confidence(conf);
             }
-            return Ok(Some(table_result));
+            return Ok(Some(stub_result));
         }
 
-        let table_result = structure_parsed.unwrap();
         let Some((structure, bboxes, structure_score)) = table_result
             .structures
             .first()
@@ -386,11 +373,8 @@ impl TableAnalyzer {
             .collect();
 
         if let Some(cell_detection_adapter) = cell_adapter {
-            let cell_input = DynTaskInput::from_images(ImageTaskInput::new(vec![
-                (*table_for_recognition).clone(),
-            ]));
-            if let Ok(cell_output) = cell_detection_adapter.execute_dyn(cell_input)
-                && let Ok(cell_result) = cell_output.into_table_cell_detection()
+            let cell_input = ImageTaskInput::new(vec![(*table_for_recognition).clone()]);
+            if let Ok(cell_result) = cell_detection_adapter.execute(cell_input, None)
                 && let Some(detected_cells) = cell_result.cells.first()
                 && !detected_cells.is_empty()
             {
@@ -504,7 +488,7 @@ impl TableAnalyzer {
         let mut final_result = TableResult::new(table_bbox.clone(), table_type)
             .with_cells(cells)
             .with_html_structure(html_structure)
-            .with_structure_tokens(structure.clone())
+            .with_structure_tokens(structure.to_vec())
             .with_structure_confidence(*structure_score);
 
         if let Some(conf) = classification_confidence {
@@ -520,11 +504,18 @@ mod tests {
     use super::*;
 
     /// Creates a minimal TableAnalyzer with no adapters for testing stub behavior.
-    fn create_stub_analyzer() -> TableAnalyzer {
+    fn create_stub_analyzer() -> TableAnalyzer<'static> {
         TableAnalyzer::new(TableAnalyzerConfig {
+            table_classification_adapter: None,
+            table_orientation_adapter: None,
+            table_structure_recognition_adapter: None,
+            wired_table_structure_adapter: None,
+            wireless_table_structure_adapter: None,
+            table_cell_detection_adapter: None,
+            wired_table_cell_adapter: None,
+            wireless_table_cell_adapter: None,
             use_e2e_wired_table_rec: true,
             use_e2e_wireless_table_rec: true,
-            ..Default::default()
         })
     }
 
