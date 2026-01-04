@@ -9,6 +9,7 @@
 //! - [`OAROCRBuilder`] - For text detection and recognition
 //! - [`OARStructureBuilder`] - For document structure analysis (layout, tables, formulas)
 
+pub(crate) mod builder_utils;
 pub mod ocr;
 pub(crate) mod preprocess;
 pub mod processors;

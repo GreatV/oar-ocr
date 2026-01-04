@@ -19,7 +19,6 @@ pub mod image_reader;
 pub mod inference;
 #[macro_use]
 pub mod macros;
-pub mod registry;
 pub mod traits;
 pub mod validation;
 
@@ -53,7 +52,6 @@ pub use traits::{
     TaskSchema, TaskType,
 };
 
-pub use registry::{DynModelAdapter, DynTaskInput, DynTaskOutput, TaskAdapter};
 pub use validation::{
     validate_batch_size, validate_division, validate_finite, validate_image_dimensions,
     validate_index_bounds, validate_non_empty, validate_non_negative,

@@ -215,12 +215,6 @@ impl TableCellDetectionAdapterBuilder {
         self
     }
 
-    /// Sets the ONNX Runtime session configuration.
-    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.config = self.config.with_ort_config(config);
-        self
-    }
-
     fn build_with_config(
         model_path: &Path,
         model_config: TableCellModelConfig,
@@ -318,6 +312,13 @@ impl AdapterBuilder for TableCellDetectionAdapterBuilder {
     }
 }
 
+impl crate::core::traits::OrtConfigurable for TableCellDetectionAdapterBuilder {
+    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.config = self.config.with_ort_config(config);
+        self
+    }
+}
+
 /// Builder for RT-DETR table cell detection adapters.
 #[derive(Debug)]
 pub struct RTDetrTableCellAdapterBuilder {
@@ -364,9 +365,10 @@ impl RTDetrTableCellAdapterBuilder {
         self.inner = self.inner.max_cells(max);
         self
     }
+}
 
-    /// Sets the ONNX Runtime session configuration.
-    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+impl crate::core::traits::OrtConfigurable for RTDetrTableCellAdapterBuilder {
+    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
         self.inner = self.inner.with_ort_config(config);
         self
     }

@@ -688,12 +688,6 @@ impl LayoutDetectionAdapterBuilder {
         self
     }
 
-    /// Sets the ONNX Runtime session configuration.
-    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.config = self.config.with_ort_config(config);
-        self
-    }
-
     /// Builds the adapter with the specified model configuration.
     fn build_with_config(
         self,
@@ -829,6 +823,13 @@ impl AdapterBuilder for LayoutDetectionAdapterBuilder {
     }
 }
 
+impl crate::core::traits::OrtConfigurable for LayoutDetectionAdapterBuilder {
+    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+        self.config = self.config.with_ort_config(config);
+        self
+    }
+}
+
 // Type aliases and builders for specific models
 
 /// PicoDet layout detection adapter.
@@ -879,9 +880,10 @@ impl PicoDetLayoutAdapterBuilder {
         self.inner = self.inner.max_elements(max);
         self
     }
+}
 
-    /// Sets the ONNX Runtime session configuration.
-    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+impl crate::core::traits::OrtConfigurable for PicoDetLayoutAdapterBuilder {
+    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
         self.inner = self.inner.with_ort_config(config);
         self
     }
@@ -953,9 +955,10 @@ impl RTDetrLayoutAdapterBuilder {
         self.inner = self.inner.max_elements(max);
         self
     }
+}
 
-    /// Sets the ONNX Runtime session configuration.
-    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+impl crate::core::traits::OrtConfigurable for RTDetrLayoutAdapterBuilder {
+    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
         self.inner = self.inner.with_ort_config(config);
         self
     }
@@ -1057,9 +1060,10 @@ impl PPDocLayoutAdapterBuilder {
         self.inner = self.inner.max_elements(max);
         self
     }
+}
 
-    /// Sets the ONNX Runtime session configuration.
-    pub fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
+impl crate::core::traits::OrtConfigurable for PPDocLayoutAdapterBuilder {
+    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
         self.inner = self.inner.with_ort_config(config);
         self
     }
