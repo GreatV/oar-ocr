@@ -35,7 +35,7 @@ impl NormalizeImage {
     /// * `mean` - Optional mean values for each channel (defaults to [0.485, 0.456, 0.406])
     /// * `std` - Optional standard deviation values for each channel (defaults to [0.229, 0.224, 0.225])
     /// * `order` - Optional tensor data layout (defaults to CHW)
-    /// * `color_model` - Optional color model describing source data (defaults to BGR)
+    /// * `color_order` - Optional color channel order (defaults to BGR)
     ///
     /// # Returns
     ///
