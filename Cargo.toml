@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "oar-ocr-derive"]
+
 [package]
 name = "oar-ocr"
 version = "0.5.1"
