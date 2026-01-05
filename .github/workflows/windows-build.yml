@@ -30,6 +30,5 @@ jobs:
       - name: Build library in release mode
         run: cargo build --release --verbose
 
-
       - name: Build all examples in release mode
         run: cargo build --examples --release --verbose
