@@ -126,8 +126,8 @@ impl OCRResize {
     ///
     /// A resized RGB image or an OCRError if input_shape is not configured.
     pub fn static_resize(&self, img: &RgbImage) -> Result<RgbImage, OCRError> {
-        let [_img_c, img_h, img_w] = self.input_shape.ok_or_else(|| OCRError::ConfigError {
-            message: "Input shape not configured for static resize".to_string(),
+        let [_img_c, img_h, img_w] = self.input_shape.ok_or_else(|| {
+            OCRError::config_error("Input shape not configured for static resize")
         })?;
 
         // Use Triangle (bilinear) to match cv2.resize INTER_LINEAR

@@ -694,12 +694,7 @@ impl LayoutDetectionAdapterBuilder {
         model_path: &Path,
         model_config: LayoutModelConfig,
     ) -> Result<LayoutDetectionAdapter, OCRError> {
-        let (task_config, ort_config) =
-            self.config
-                .into_validated_parts()
-                .map_err(|err| OCRError::ConfigError {
-                    message: err.to_string(),
-                })?;
+        let (task_config, ort_config) = self.config.into_validated_parts()?;
 
         // Create ONNX inference engine with proper input name based on model type
         let inference = if ort_config.is_some() {

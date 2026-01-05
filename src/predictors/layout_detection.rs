@@ -149,13 +149,11 @@ impl LayoutDetectionPredictorBuilder {
             "pp_doclayout_plus_l" => LayoutModelConfig::pp_doclayout_plus_l(),
             "pp_doclayoutv2" | "pp_doclayout_v2" => LayoutModelConfig::pp_doclayoutv2(),
             _ => {
-                return Err(OCRError::ConfigError {
-                    message: format!(
-                        "Unknown model name: '{}'. Supported models: {}",
-                        model_name,
-                        Self::SUPPORTED_MODELS.join(", ")
-                    ),
-                });
+                return Err(OCRError::config_error(format!(
+                    "Unknown model name: '{}'. Supported models: {}",
+                    model_name,
+                    Self::SUPPORTED_MODELS.join(", ")
+                )));
             }
         };
 

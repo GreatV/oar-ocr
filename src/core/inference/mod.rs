@@ -56,9 +56,7 @@ impl OrtInfer {
     pub fn get_session(&self, idx: usize) -> Result<std::sync::MutexGuard<'_, Session>, OCRError> {
         self.sessions[idx % self.sessions.len()]
             .lock()
-            .map_err(|_| OCRError::ConfigError {
-                message: "Failed to acquire session lock".to_string(),
-            })
+            .map_err(|_| OCRError::config_error("Failed to acquire session lock"))
     }
 
     /// Attempts to retrieve the primary input tensor shape from the first session.

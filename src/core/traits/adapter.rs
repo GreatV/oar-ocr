@@ -95,12 +95,10 @@ pub trait ModelAdapter: Send + Sync + Debug {
     fn validate_compatibility(&self, schema: &TaskSchema) -> Result<(), OCRError> {
         let adapter_schema = self.schema();
         if adapter_schema.task_type != schema.task_type {
-            return Err(OCRError::ConfigError {
-                message: format!(
-                    "Adapter task type {:?} does not match required task type {:?}",
-                    adapter_schema.task_type, schema.task_type
-                ),
-            });
+            return Err(OCRError::config_error(format!(
+                "Adapter task type {:?} does not match required task type {:?}",
+                adapter_schema.task_type, schema.task_type
+            )));
         }
         Ok(())
     }

@@ -248,12 +248,10 @@ impl VisionAttention {
         let out_proj = candle_nn::linear(cfg.hidden_size, cfg.hidden_size, vb.pp("out_proj"))
             .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "load vision out_proj", e))?;
         if !cfg.hidden_size.is_multiple_of(cfg.num_attention_heads) {
-            return Err(OCRError::ConfigError {
-                message: format!(
-                    "PaddleOCR-VL vision: hidden_size ({}) must be divisible by num_attention_heads ({})",
-                    cfg.hidden_size, cfg.num_attention_heads
-                ),
-            });
+            return Err(OCRError::config_error(format!(
+                "PaddleOCR-VL vision: hidden_size ({}) must be divisible by num_attention_heads ({})",
+                cfg.hidden_size, cfg.num_attention_heads
+            )));
         }
         let head_dim = cfg.hidden_size / cfg.num_attention_heads;
         Ok(Self {
@@ -528,13 +526,11 @@ impl VisionEmbeddings {
 
         let grid = (num_positions as f64).sqrt() as usize;
         if grid * grid != num_positions {
-            return Err(OCRError::ConfigError {
-                message: format!(
-                    "PaddleOCR-VL: vision position_embedding weight is not a square grid, \
-                     got num_positions={num_positions} (nearest square is {grid}×{grid}={})",
-                    grid * grid
-                ),
-            });
+            return Err(OCRError::config_error(format!(
+                "PaddleOCR-VL: vision position_embedding weight is not a square grid, \
+                 got num_positions={num_positions} (nearest square is {grid}×{grid}={})",
+                grid * grid
+            )));
         }
 
         // Match PyTorch's `interpolate(..., mode=\"bilinear\", align_corners=False)`.

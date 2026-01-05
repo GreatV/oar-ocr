@@ -95,30 +95,26 @@ impl NormalizeImage {
         let color_order = color_order.unwrap_or_default();
 
         if scale <= 0.0 {
-            return Err(OCRError::ConfigError {
-                message: "Scale must be greater than 0".to_string(),
-            });
+            return Err(OCRError::config_error("Scale must be greater than 0"));
         }
 
         if mean.len() != 3 {
-            return Err(OCRError::ConfigError {
-                message: "Mean must have exactly 3 elements (3-channel normalization)".to_string(),
-            });
+            return Err(OCRError::config_error(
+                "Mean must have exactly 3 elements (3-channel normalization)",
+            ));
         }
 
         if std.len() != 3 {
-            return Err(OCRError::ConfigError {
-                message: "Std must have exactly 3 elements (3-channel normalization)".to_string(),
-            });
+            return Err(OCRError::config_error(
+                "Std must have exactly 3 elements (3-channel normalization)",
+            ));
         }
 
         for (i, &s) in std.iter().enumerate() {
             if s <= 0.0 {
-                return Err(OCRError::ConfigError {
-                    message: format!(
-                        "Standard deviation at index {i} must be greater than 0, got {s}"
-                    ),
-                });
+                return Err(OCRError::config_error(format!(
+                    "Standard deviation at index {i} must be greater than 0, got {s}"
+                )));
             }
         }
 
@@ -146,25 +142,24 @@ impl NormalizeImage {
     /// * Any alpha or beta value is not finite
     pub fn validate_config(&self) -> Result<(), OCRError> {
         if self.alpha.len() != 3 || self.beta.len() != 3 {
-            return Err(OCRError::ConfigError {
-                message: "Alpha and beta must have exactly 3 elements (3-channel normalization)"
-                    .to_string(),
-            });
+            return Err(OCRError::config_error(
+                "Alpha and beta must have exactly 3 elements (3-channel normalization)",
+            ));
         }
 
         for (i, &alpha) in self.alpha.iter().enumerate() {
             if !alpha.is_finite() {
-                return Err(OCRError::ConfigError {
-                    message: format!("Alpha value at index {i} is not finite: {alpha}"),
-                });
+                return Err(OCRError::config_error(format!(
+                    "Alpha value at index {i} is not finite: {alpha}"
+                )));
             }
         }
 
         for (i, &beta) in self.beta.iter().enumerate() {
             if !beta.is_finite() {
-                return Err(OCRError::ConfigError {
-                    message: format!("Beta value at index {i} is not finite: {beta}"),
-                });
+                return Err(OCRError::config_error(format!(
+                    "Beta value at index {i} is not finite: {beta}"
+                )));
             }
         }
 
@@ -229,13 +224,11 @@ impl NormalizeImage {
         output_color_order: ColorOrder,
     ) -> Result<Self, OCRError> {
         if mean_rgb.len() != 3 || std_rgb.len() != 3 {
-            return Err(OCRError::ConfigError {
-                message: format!(
-                    "mean/std must have exactly 3 elements (got mean={}, std={})",
-                    mean_rgb.len(),
-                    std_rgb.len()
-                ),
-            });
+            return Err(OCRError::config_error(format!(
+                "mean/std must have exactly 3 elements (got mean={}, std={})",
+                mean_rgb.len(),
+                std_rgb.len()
+            )));
         }
 
         let (mean, std) = match output_color_order {

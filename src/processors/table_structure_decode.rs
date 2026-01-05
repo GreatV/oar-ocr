@@ -503,16 +503,20 @@ impl TableStructureDecode {
     /// Note: We preserve leading spaces for attribute tokens like ` colspan="2"`
     /// since they are needed to generate valid HTML like `<td colspan="2">`.
     fn load_dict(path: &Path) -> Result<Vec<String>, OCRError> {
-        let file = File::open(path).map_err(|e| OCRError::ConfigError {
-            message: format!("Failed to open dictionary file '{}': {}", path.display(), e),
+        let file = File::open(path).map_err(|e| {
+            OCRError::config_error(format!(
+                "Failed to open dictionary file '{}': {}",
+                path.display(),
+                e
+            ))
         })?;
 
         let reader = BufReader::new(file);
         let mut dict = Vec::new();
 
         for line in reader.lines() {
-            let line = line.map_err(|e| OCRError::ConfigError {
-                message: format!("Failed to read dictionary line: {}", e),
+            let line = line.map_err(|e| {
+                OCRError::config_error(format!("Failed to read dictionary line: {}", e))
             })?;
             // Only trim trailing whitespace, preserve leading spaces for attribute tokens
             // e.g., " colspan=\"2\"" needs the leading space for valid HTML generation

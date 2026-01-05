@@ -298,12 +298,7 @@ impl AdapterBuilder for FormulaRecognitionAdapterBuilder {
     type Adapter = FormulaRecognitionAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, ort_config) =
-            self.config
-                .into_validated_parts()
-                .map_err(|err| OCRError::ConfigError {
-                    message: err.to_string(),
-                })?;
+        let (task_config, ort_config) = self.config.into_validated_parts()?;
 
         let model_config = self.model_config.ok_or_else(|| OCRError::InvalidInput {
             message: "Model configuration not set".to_string(),

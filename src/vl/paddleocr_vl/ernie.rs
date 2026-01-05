@@ -18,9 +18,9 @@ pub struct RotaryEmbedding {
 impl RotaryEmbedding {
     pub fn new(head_dim: usize, rope_theta: f64, device: &Device) -> Result<Self, OCRError> {
         if !head_dim.is_multiple_of(2) {
-            return Err(OCRError::ConfigError {
-                message: format!("RotaryEmbedding: head_dim must be even, got {head_dim}"),
-            });
+            return Err(OCRError::config_error(format!(
+                "RotaryEmbedding: head_dim must be even, got {head_dim}"
+            )));
         }
         let half = head_dim / 2;
         let mut inv_freq = Vec::with_capacity(half);
@@ -133,9 +133,9 @@ impl RotaryEmbedding {
 fn select_mrope(cos_or_sin: &Tensor, mrope_section: &[usize]) -> Result<Tensor, OCRError> {
     // Input: (3, batch, seq, head_dim) -> Output: (batch, 1, seq, head_dim)
     if mrope_section.is_empty() {
-        return Err(OCRError::ConfigError {
-            message: "PaddleOCR-VL: rope_scaling.mrope_section is empty".to_string(),
-        });
+        return Err(OCRError::config_error(
+            "PaddleOCR-VL: rope_scaling.mrope_section is empty",
+        ));
     }
 
     // Validate that mrope_section sums to half of head_dim (since we double it)
@@ -143,12 +143,10 @@ fn select_mrope(cos_or_sin: &Tensor, mrope_section: &[usize]) -> Result<Tensor, 
     let head_dim = dims.get(3).copied().unwrap_or(0);
     let section_sum: usize = mrope_section.iter().sum();
     if section_sum * 2 != head_dim {
-        return Err(OCRError::ConfigError {
-            message: format!(
-                "PaddleOCR-VL: mrope_section sum ({}) * 2 != head_dim ({})",
-                section_sum, head_dim
-            ),
-        });
+        return Err(OCRError::config_error(format!(
+            "PaddleOCR-VL: mrope_section sum ({}) * 2 != head_dim ({})",
+            section_sum, head_dim
+        )));
     }
 
     // Duplicate the list like Python: mrope_section * 2
@@ -403,12 +401,10 @@ impl Ernie4_5Attention {
             .num_attention_heads
             .is_multiple_of(cfg.num_key_value_heads)
         {
-            return Err(OCRError::ConfigError {
-                message: format!(
-                    "PaddleOCR-VL: num_attention_heads ({}) must be divisible by num_key_value_heads ({})",
-                    cfg.num_attention_heads, cfg.num_key_value_heads
-                ),
-            });
+            return Err(OCRError::config_error(format!(
+                "PaddleOCR-VL: num_attention_heads ({}) must be divisible by num_key_value_heads ({})",
+                cfg.num_attention_heads, cfg.num_key_value_heads
+            )));
         }
 
         Ok(Self {

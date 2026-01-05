@@ -36,9 +36,7 @@ impl UniRec {
         // Load tokenizer with ByteLevel decoder for proper BPE decoding
         let mut tokenizer =
             Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| {
-                OCRError::ConfigError {
-                    message: format!("Failed to load UniRec tokenizer: {}", e),
-                }
+                OCRError::config_error(format!("Failed to load UniRec tokenizer: {}", e))
             })?;
         tokenizer.with_decoder(Some(ByteLevel::default()));
 

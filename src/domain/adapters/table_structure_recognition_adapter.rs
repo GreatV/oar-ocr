@@ -270,12 +270,7 @@ impl AdapterBuilder for SLANetWiredAdapterBuilder {
     type Adapter = TableStructureRecognitionAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, ort_config) =
-            self.config
-                .into_validated_parts()
-                .map_err(|err| OCRError::ConfigError {
-                    message: err.to_string(),
-                })?;
+        let (task_config, ort_config) = self.config.into_validated_parts()?;
 
         // Build the SLANet model - input shape will be auto-detected from ONNX if not set
         let mut model_builder = SLANetModelBuilder::new();
@@ -288,8 +283,8 @@ impl AdapterBuilder for SLANetWiredAdapterBuilder {
         let model = apply_ort_config!(model_builder, ort_config).build(model_path)?;
 
         // Dictionary path is required
-        let dict_path = self.dict_path.ok_or_else(|| OCRError::ConfigError {
-            message: "Dictionary path is required. Use .dict_path() to specify the path to table_structure_dict_ch.txt".to_string(),
+        let dict_path = self.dict_path.ok_or_else(|| {
+            OCRError::config_error("Dictionary path is required. Use .dict_path() to specify the path to table_structure_dict_ch.txt")
         })?;
 
         // Create decoder
@@ -392,12 +387,7 @@ impl AdapterBuilder for SLANetWirelessAdapterBuilder {
     type Adapter = TableStructureRecognitionAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, ort_config) =
-            self.config
-                .into_validated_parts()
-                .map_err(|err| OCRError::ConfigError {
-                    message: err.to_string(),
-                })?;
+        let (task_config, ort_config) = self.config.into_validated_parts()?;
 
         // Build the SLANet model - input shape will be auto-detected from ONNX if not set
         let mut model_builder = SLANetModelBuilder::new();
@@ -410,8 +400,8 @@ impl AdapterBuilder for SLANetWirelessAdapterBuilder {
         let model = apply_ort_config!(model_builder, ort_config).build(model_path)?;
 
         // Dictionary path is required
-        let dict_path = self.dict_path.ok_or_else(|| OCRError::ConfigError {
-            message: "Dictionary path is required. Use .dict_path() to specify the path to table_structure_dict_ch.txt".to_string(),
+        let dict_path = self.dict_path.ok_or_else(|| {
+            OCRError::config_error("Dictionary path is required. Use .dict_path() to specify the path to table_structure_dict_ch.txt")
         })?;
 
         // Create decoder

@@ -3,10 +3,6 @@
 use serde::{Deserialize, Serialize};
 
 /// Centralized configuration for parallel processing behavior across the OCR pipeline.
-///
-/// This struct consolidates parallel processing configuration that was previously
-/// scattered across different components, providing a unified way to tune parallelism
-/// behavior throughout the OCR pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParallelPolicy {
     /// Maximum number of threads to use for parallel processing.

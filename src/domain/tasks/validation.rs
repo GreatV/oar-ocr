@@ -1,9 +1,10 @@
 //! Shared validation helpers for task inputs.
 //!
-//! Centralizes common input validation logic to avoid duplicating checks
-//! like ensuring batches are non-empty and images have positive dimensions.
+//! This module re-exports validation functions from `core::validation` and provides
+//! backwards-compatible wrappers for existing code.
 
 use crate::core::OCRError;
+use crate::core::validation::validate_image_batch_with_message;
 use image::RgbImage;
 
 /// Ensures an image batch is non-empty and each image has positive dimensions.
@@ -19,25 +20,12 @@ pub(crate) fn ensure_non_empty_images(
 }
 
 /// Generic helper for validating non-empty RgbImage collections with custom error messaging.
+///
+/// Delegates to `crate::core::validation::validate_image_batch_with_message`.
 pub(crate) fn ensure_images_with(
     images: &[RgbImage],
     empty_batch_message: &str,
     zero_dim_message: impl Fn(usize, u32, u32) -> String,
 ) -> Result<(), OCRError> {
-    if images.is_empty() {
-        return Err(OCRError::InvalidInput {
-            message: empty_batch_message.to_string(),
-        });
-    }
-
-    for (idx, img) in images.iter().enumerate() {
-        let (width, height) = (img.width(), img.height());
-        if width == 0 || height == 0 {
-            return Err(OCRError::InvalidInput {
-                message: zero_dim_message(idx, width, height),
-            });
-        }
-    }
-
-    Ok(())
+    validate_image_batch_with_message(images, empty_batch_message, zero_dim_message)
 }

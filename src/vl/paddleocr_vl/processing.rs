@@ -106,11 +106,9 @@ pub fn preprocess_images(
         };
 
         if rh % patch != 0 || rw % patch != 0 {
-            return Err(OCRError::ConfigError {
-                message: format!(
-                    "PaddleOCR-VL preprocess produced non-divisible dims: {rh}x{rw} not divisible by patch_size={patch}"
-                ),
-            });
+            return Err(OCRError::config_error(format!(
+                "PaddleOCR-VL preprocess produced non-divisible dims: {rh}x{rw} not divisible by patch_size={patch}"
+            )));
         }
 
         let grid_h = (rh / patch) as usize;
