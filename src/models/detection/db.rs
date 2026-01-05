@@ -6,8 +6,8 @@
 use crate::core::inference::OrtInfer;
 use crate::core::{OCRError, Tensor4D, validate_positive, validate_range};
 use crate::processors::{
-    BoundingBox, BoxType, ChannelOrder, DBPostProcess, DBPostProcessConfig, DetResizeForTest,
-    ImageScaleInfo, LimitType, NormalizeImage, ScoreMode,
+    BoundingBox, BoxType, DBPostProcess, DBPostProcessConfig, DetResizeForTest, ImageScaleInfo,
+    LimitType, NormalizeImage, ScoreMode, TensorLayout,
 };
 use image::{DynamicImage, RgbImage};
 use std::path::Path;
@@ -284,8 +284,8 @@ impl DBModelBuilder {
             Some(1.0 / 255.0),               // scale
             Some(vec![0.485, 0.456, 0.406]), // mean
             Some(vec![0.229, 0.224, 0.225]), // std
-            Some(ChannelOrder::CHW),         // order
-            Some(crate::processors::ColorOrder::BGR),
+            Some(TensorLayout::CHW),         // order
+            Some(crate::processors::types::ColorOrder::BGR),
         )?;
 
         // Create postprocessor

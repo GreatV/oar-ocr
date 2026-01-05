@@ -14,7 +14,7 @@ use crate::core::validation::{
 };
 use crate::core::{OCRError, Tensor4D};
 use crate::processors::{
-    ChannelOrder, DetResizeForTest, ImageScaleInfo, LimitType, NormalizeImage,
+    DetResizeForTest, ImageScaleInfo, LimitType, NormalizeImage, TensorLayout,
 };
 use image::{DynamicImage, RgbImage};
 
@@ -163,8 +163,8 @@ impl ScaleAwareDetectorModel {
             Some(preprocess_config.scale),
             preprocess_config.mean.clone(),
             preprocess_config.std.clone(),
-            Some(ChannelOrder::CHW),
-            crate::processors::ColorOrder::BGR,
+            Some(TensorLayout::CHW),
+            crate::processors::types::ColorOrder::BGR,
         )?;
 
         Ok(Self {

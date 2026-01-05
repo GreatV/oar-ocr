@@ -62,22 +62,26 @@ pub enum LimitType {
     ResizeLong,
 }
 
-/// Specifies the order of channels in an image tensor
-#[derive(Debug, Clone)]
-pub enum ChannelOrder {
-    /// Channel, Height, Width order (common in PyTorch)
+/// Specifies the data layout of an image tensor
+#[derive(Debug, Clone, Copy)]
+pub enum TensorLayout {
+    /// Channel, Height, Width order (common in PyTorch/ONNX)
     CHW,
     /// Height, Width, Channel order (common in TensorFlow)
     HWC,
 }
 
-/// Specifies the color channel order in an image
-#[derive(Debug, Clone, Copy, Default)]
+/// Specifies the color channel ordering of an image.
+///
+/// Specifies whether the model expects RGB or BGR channel ordering.
+/// Most image libraries (PIL, image-rs) use RGB, while OpenCV and
+/// PaddlePaddle models typically expect BGR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ColorOrder {
-    /// Red, Green, Blue order (default for most image libraries like PIL, image-rs)
+    /// Red, Green, Blue order (default for most image libraries)
     #[default]
     RGB,
-    /// Blue, Green, Red order (used by OpenCV and PaddlePaddle models)
+    /// Blue, Green, Red order (used by OpenCV/PaddlePaddle models)
     BGR,
 }
 
@@ -102,8 +106,7 @@ pub enum ScoreMode {
 /// Information about image scaling during preprocessing
 ///
 /// This struct captures the original dimensions and scaling ratios applied
-/// during image resizing operations. It replaces the opaque `[f32; 4]` tuple
-/// format with self-documenting named fields.
+/// during image resizing operations.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImageScaleInfo {
     /// Original image height before resizing
@@ -125,27 +128,6 @@ impl ImageScaleInfo {
             ratio_h,
             ratio_w,
         }
-    }
-
-    /// Creates an `ImageScaleInfo` from a `[f32; 4]` array
-    ///
-    /// This is provided for backward compatibility during migration.
-    /// The array format is `[src_h, src_w, ratio_h, ratio_w]`.
-    pub fn from_array(arr: [f32; 4]) -> Self {
-        Self {
-            src_h: arr[0],
-            src_w: arr[1],
-            ratio_h: arr[2],
-            ratio_w: arr[3],
-        }
-    }
-
-    /// Converts this `ImageScaleInfo` to a `[f32; 4]` array
-    ///
-    /// This is provided for backward compatibility during migration.
-    /// The array format is `[src_h, src_w, ratio_h, ratio_w]`.
-    pub fn to_array(&self) -> [f32; 4] {
-        [self.src_h, self.src_w, self.ratio_h, self.ratio_w]
     }
 }
 

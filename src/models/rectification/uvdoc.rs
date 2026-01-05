@@ -5,7 +5,7 @@
 
 use crate::core::inference::OrtInfer;
 use crate::core::{OCRError, Tensor4D};
-use crate::processors::{ChannelOrder, NormalizeImage, UVDocPostProcess};
+use crate::processors::{NormalizeImage, TensorLayout, UVDocPostProcess};
 use image::{DynamicImage, RgbImage, imageops::FilterType};
 
 /// Configuration for UVDoc model preprocessing.
@@ -264,8 +264,8 @@ impl UVDocModelBuilder {
             Some(1.0 / 255.0),
             Some(vec![0.0, 0.0, 0.0]),
             Some(vec![1.0, 1.0, 1.0]),
-            Some(ChannelOrder::CHW),
-            Some(crate::processors::ColorOrder::BGR),
+            Some(TensorLayout::CHW),
+            Some(crate::processors::types::ColorOrder::BGR),
         )?;
 
         // Create postprocessor

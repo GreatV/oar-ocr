@@ -7,7 +7,7 @@
 use crate::core::inference::OrtInfer;
 use crate::core::{OCRError, Tensor2D, Tensor4D};
 use crate::domain::adapters::preprocessing::rgb_to_dynamic;
-use crate::processors::{ChannelOrder, NormalizeImage};
+use crate::processors::{NormalizeImage, TensorLayout};
 use crate::utils::topk::Topk;
 use image::{RgbImage, imageops::FilterType};
 
@@ -33,8 +33,8 @@ pub struct PPLCNetPreprocessConfig {
     pub normalize_mean: Vec<f32>,
     /// Standard deviation values for normalization
     pub normalize_std: Vec<f32>,
-    /// Channel ordering for the normalized tensor
-    pub channel_order: ChannelOrder,
+    /// Tensor data layout (CHW or HWC)
+    pub tensor_layout: TensorLayout,
 }
 
 impl Default for PPLCNetPreprocessConfig {
@@ -48,7 +48,7 @@ impl Default for PPLCNetPreprocessConfig {
             normalize_scale: 1.0 / 255.0,
             normalize_mean: vec![0.485, 0.456, 0.406],
             normalize_std: vec![0.229, 0.224, 0.225],
-            channel_order: ChannelOrder::CHW,
+            tensor_layout: TensorLayout::CHW,
         }
     }
 }
@@ -365,8 +365,8 @@ impl PPLCNetModelBuilder {
             Some(self.preprocess_config.normalize_scale),
             Some(mean),
             Some(std),
-            Some(self.preprocess_config.channel_order.clone()),
-            Some(crate::processors::ColorOrder::RGB),
+            Some(self.preprocess_config.tensor_layout),
+            Some(crate::processors::types::ColorOrder::RGB),
         )?;
 
         // Create top-k processor

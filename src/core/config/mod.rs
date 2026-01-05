@@ -14,7 +14,7 @@ pub mod transform;
 // Re-export commonly used types
 pub use builder::ModelInferenceConfig;
 pub use errors::{ConfigDefaults, ConfigError, ConfigValidator, ConfigValidatorExt};
-pub use model_input::{ChannelOrder, Dim, InputShape, ModelInputConfig, NormalizationConfig};
+pub use model_input::{ColorOrder, Dim, InputShape, ModelInputConfig, NormalizationConfig};
 pub use onnx::*;
 pub use parallel::ParallelPolicy;
 pub use transform::{TransformConfig, TransformRegistry, TransformType};
