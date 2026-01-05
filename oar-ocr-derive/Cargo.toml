@@ -1,11 +1,12 @@
 [package]
 name = "oar-ocr-derive"
-version = "0.5.1"
-edition = "2024"
-license = "Apache-2.0"
-authors = ["Wang Xin <xinwang614@gmail.com>"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Internal procedural derive macros for oar-ocr (implementation detail, not for direct use)"
-repository = "https://github.com/greatv/oar-ocr"
 keywords = ["oar-ocr", "internal"]
 categories = ["development-tools::procedural-macro-helpers"]
 
