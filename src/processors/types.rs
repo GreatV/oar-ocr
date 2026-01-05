@@ -63,7 +63,7 @@ pub enum LimitType {
 }
 
 /// Specifies the data layout of an image tensor
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum TensorLayout {
     /// Channel, Height, Width order (common in PyTorch/ONNX)
     CHW,

@@ -365,7 +365,7 @@ impl PPLCNetModelBuilder {
             Some(self.preprocess_config.normalize_scale),
             Some(mean),
             Some(std),
-            Some(self.preprocess_config.channel_order.clone()),
+            Some(self.preprocess_config.channel_order),
             Some(crate::processors::ColorOrder::RGB),
         )?;
 
