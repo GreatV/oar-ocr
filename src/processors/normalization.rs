@@ -20,7 +20,7 @@ pub struct NormalizeImage {
     pub alpha: Vec<f32>,
     /// Offset values for each channel (beta = -mean / std)
     pub beta: Vec<f32>,
-    /// Channel ordering (CHW or HWC)
+    /// Tensor data layout (CHW or HWC)
     pub order: TensorLayout,
     /// Color channel order (RGB or BGR)
     pub color_order: ColorOrder,
@@ -34,7 +34,7 @@ impl NormalizeImage {
     /// * `scale` - Optional scaling factor (defaults to 1.0/255.0)
     /// * `mean` - Optional mean values for each channel (defaults to [0.485, 0.456, 0.406])
     /// * `std` - Optional standard deviation values for each channel (defaults to [0.229, 0.224, 0.225])
-    /// * `order` - Optional channel ordering (defaults to CHW)
+    /// * `order` - Optional tensor data layout (defaults to CHW)
     /// * `color_model` - Optional color model describing source data (defaults to BGR)
     ///
     /// # Returns
@@ -64,7 +64,7 @@ impl NormalizeImage {
     /// * `scale` - Optional scaling factor (defaults to 1.0/255.0)
     /// * `mean` - Optional mean values for each channel (defaults to [0.485, 0.456, 0.406])
     /// * `std` - Optional standard deviation values for each channel (defaults to [0.229, 0.224, 0.225])
-    /// * `order` - Optional channel ordering (defaults to CHW)
+    /// * `order` - Optional tensor data layout (defaults to CHW)
     /// * `color_order` - Optional color channel order (defaults to RGB)
     ///
     /// # Mean/Std Semantics
