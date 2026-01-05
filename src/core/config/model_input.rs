@@ -214,13 +214,17 @@ impl std::fmt::Display for InputShape {
     }
 }
 
-/// Channel order for image input.
+/// Color channel order for image input.
+///
+/// Specifies whether the model expects RGB or BGR channel ordering.
+/// Most image libraries (PIL, image-rs) use RGB, while OpenCV and
+/// PaddlePaddle models typically expect BGR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ChannelOrder {
-    /// RGB channel order (default for most image libraries)
+pub enum ColorOrder {
+    /// Red, Green, Blue order (default for most image libraries)
     #[default]
     RGB,
-    /// BGR channel order (used by OpenCV/PaddlePaddle models)
+    /// Blue, Green, Red order (used by OpenCV/PaddlePaddle models)
     BGR,
 }
 
@@ -274,8 +278,8 @@ impl Default for NormalizationConfig {
 pub struct ModelInputConfig {
     /// Input shape specification (parsed from ONNX or configured)
     pub input_shape: InputShape,
-    /// Expected channel order
-    pub channel_order: ChannelOrder,
+    /// Expected color channel order
+    pub color_order: ColorOrder,
     /// Normalization parameters
     pub normalization: NormalizationConfig,
 }
@@ -284,12 +288,12 @@ impl ModelInputConfig {
     /// Creates a new model input configuration.
     pub fn new(
         input_shape: InputShape,
-        channel_order: ChannelOrder,
+        color_order: ColorOrder,
         normalization: NormalizationConfig,
     ) -> Self {
         Self {
             input_shape,
-            channel_order,
+            color_order,
             normalization,
         }
     }
@@ -298,7 +302,7 @@ impl ModelInputConfig {
     pub fn fixed_bgr_imagenet(height: i64, width: i64) -> Self {
         Self {
             input_shape: InputShape::dynamic_batch(3, height, width),
-            channel_order: ChannelOrder::BGR,
+            color_order: ColorOrder::BGR,
             normalization: NormalizationConfig::IMAGENET_BGR,
         }
     }
@@ -307,7 +311,7 @@ impl ModelInputConfig {
     pub fn fixed_rgb_imagenet(height: i64, width: i64) -> Self {
         Self {
             input_shape: InputShape::dynamic_batch(3, height, width),
-            channel_order: ChannelOrder::RGB,
+            color_order: ColorOrder::RGB,
             normalization: NormalizationConfig::IMAGENET_RGB,
         }
     }
@@ -336,7 +340,7 @@ pub mod presets {
             height: Dim::Fixed(512),
             width: Dim::Fixed(512),
         },
-        channel_order: ChannelOrder::BGR,
+        color_order: ColorOrder::BGR,
         normalization: NormalizationConfig::IMAGENET_BGR,
     };
 
@@ -349,7 +353,7 @@ pub mod presets {
             height: Dim::Fixed(488),
             width: Dim::Fixed(488),
         },
-        channel_order: ChannelOrder::BGR,
+        color_order: ColorOrder::BGR,
         normalization: NormalizationConfig::IMAGENET_BGR,
     };
 
@@ -362,7 +366,7 @@ pub mod presets {
             height: Dim::Fixed(488),
             width: Dim::Fixed(488),
         },
-        channel_order: ChannelOrder::BGR,
+        color_order: ColorOrder::BGR,
         normalization: NormalizationConfig::IMAGENET_BGR,
     };
 
@@ -375,7 +379,7 @@ pub mod presets {
             height: Dim::Fixed(488),
             width: Dim::Fixed(488),
         },
-        channel_order: ChannelOrder::BGR,
+        color_order: ColorOrder::BGR,
         normalization: NormalizationConfig::IMAGENET_BGR,
     };
 
@@ -388,7 +392,7 @@ pub mod presets {
             height: Dim::Fixed(224),
             width: Dim::Fixed(224),
         },
-        channel_order: ChannelOrder::BGR,
+        color_order: ColorOrder::BGR,
         normalization: NormalizationConfig::IMAGENET_BGR,
     };
 
@@ -401,7 +405,7 @@ pub mod presets {
             height: Dim::Fixed(224),
             width: Dim::Fixed(224),
         },
-        channel_order: ChannelOrder::BGR,
+        color_order: ColorOrder::BGR,
         normalization: NormalizationConfig::IMAGENET_BGR,
     };
 }

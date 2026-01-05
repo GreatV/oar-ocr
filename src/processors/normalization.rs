@@ -5,7 +5,7 @@
 //! specialized normalization for OCR recognition tasks.
 
 use crate::core::OCRError;
-use crate::processors::types::{ChannelOrder, ColorOrder};
+use crate::processors::types::{ColorOrder, TensorLayout};
 use image::DynamicImage;
 use rayon::prelude::*;
 
@@ -21,7 +21,7 @@ pub struct NormalizeImage {
     /// Offset values for each channel (beta = -mean / std)
     pub beta: Vec<f32>,
     /// Channel ordering (CHW or HWC)
-    pub order: ChannelOrder,
+    pub order: TensorLayout,
     /// Color channel order (RGB or BGR)
     pub color_order: ColorOrder,
 }
@@ -51,7 +51,7 @@ impl NormalizeImage {
         scale: Option<f32>,
         mean: Option<Vec<f32>>,
         std: Option<Vec<f32>>,
-        order: Option<ChannelOrder>,
+        order: Option<TensorLayout>,
         color_order: Option<ColorOrder>,
     ) -> Result<Self, OCRError> {
         Self::with_color_order(scale, mean, std, order, color_order)
@@ -85,13 +85,13 @@ impl NormalizeImage {
         scale: Option<f32>,
         mean: Option<Vec<f32>>,
         std: Option<Vec<f32>>,
-        order: Option<ChannelOrder>,
+        order: Option<TensorLayout>,
         color_order: Option<ColorOrder>,
     ) -> Result<Self, OCRError> {
         let scale = scale.unwrap_or(1.0 / 255.0);
         let mean = mean.unwrap_or_else(|| vec![0.485, 0.456, 0.406]);
         let std = std.unwrap_or_else(|| vec![0.229, 0.224, 0.225]);
-        let order = order.unwrap_or(ChannelOrder::CHW);
+        let order = order.unwrap_or(TensorLayout::CHW);
         let color_order = color_order.unwrap_or_default();
 
         if scale <= 0.0 {
@@ -187,7 +187,7 @@ impl NormalizeImage {
             Some(2.0 / 255.0),
             Some(vec![1.0, 1.0, 1.0]),
             Some(vec![1.0, 1.0, 1.0]),
-            Some(ChannelOrder::CHW),
+            Some(TensorLayout::CHW),
             Some(ColorOrder::BGR),
         )
     }
@@ -198,7 +198,7 @@ impl NormalizeImage {
             None,
             Some(vec![0.485, 0.456, 0.406]),
             Some(vec![0.229, 0.224, 0.225]),
-            Some(ChannelOrder::CHW),
+            Some(TensorLayout::CHW),
             Some(ColorOrder::RGB),
         )
     }
@@ -212,7 +212,7 @@ impl NormalizeImage {
             None,
             Some(vec![0.406, 0.456, 0.485]),
             Some(vec![0.225, 0.224, 0.229]),
-            Some(ChannelOrder::CHW),
+            Some(TensorLayout::CHW),
             Some(ColorOrder::BGR),
         )
     }
@@ -225,7 +225,7 @@ impl NormalizeImage {
         scale: Option<f32>,
         mean_rgb: Vec<f32>,
         std_rgb: Vec<f32>,
-        order: Option<ChannelOrder>,
+        order: Option<TensorLayout>,
         output_color_order: ColorOrder,
     ) -> Result<Self, OCRError> {
         if mean_rgb.len() != 3 || std_rgb.len() != 3 {
@@ -402,7 +402,7 @@ impl NormalizeImage {
             let batch_offset = batch_idx * img_size;
 
             match self.order {
-                ChannelOrder::CHW => {
+                TensorLayout::CHW => {
                     for (c, &src_c) in src_channels.iter().enumerate().take(channels.min(3)) {
                         for y in 0..h.min(height_img as usize) {
                             for x in 0..w.min(width as usize) {
@@ -418,7 +418,7 @@ impl NormalizeImage {
                         }
                     }
                 }
-                ChannelOrder::HWC => {
+                TensorLayout::HWC => {
                     for y in 0..h.min(height_img as usize) {
                         for x in 0..w.min(width as usize) {
                             let pixel = rgb_img.get_pixel(x as u32, y as u32);
@@ -471,7 +471,7 @@ impl NormalizeImage {
         };
 
         match self.order {
-            ChannelOrder::CHW => {
+            TensorLayout::CHW => {
                 let mut result = vec![0.0f32; (channels * height * width) as usize];
 
                 for c in 0..channels {
@@ -489,7 +489,7 @@ impl NormalizeImage {
                 }
                 result
             }
-            ChannelOrder::HWC => {
+            TensorLayout::HWC => {
                 let mut result = vec![0.0f32; (height * width * channels) as usize];
 
                 for y in 0..height {
@@ -538,7 +538,7 @@ impl NormalizeImage {
         };
 
         match self.order {
-            ChannelOrder::CHW => {
+            TensorLayout::CHW => {
                 let mut result = vec![0.0f32; (channels * height * width) as usize];
 
                 for c in 0..channels {
@@ -570,7 +570,7 @@ impl NormalizeImage {
                     )
                 })
             }
-            ChannelOrder::HWC => {
+            TensorLayout::HWC => {
                 let mut result = vec![0.0f32; (height * width * channels) as usize];
 
                 for y in 0..height {
@@ -658,7 +658,7 @@ impl NormalizeImage {
         let beta = self.beta.clone();
 
         match self.order {
-            ChannelOrder::CHW => {
+            TensorLayout::CHW => {
                 let mut result = vec![0.0f32; batch_size * (channels * height * width) as usize];
 
                 let img_size = (channels * height * width) as usize;
@@ -714,7 +714,7 @@ impl NormalizeImage {
                     )
                 })
             }
-            ChannelOrder::HWC => {
+            TensorLayout::HWC => {
                 let mut result = vec![0.0f32; batch_size * (height * width * channels) as usize];
 
                 let img_size = (height * width * channels) as usize;
@@ -789,7 +789,7 @@ mod tests {
             Some(1.0),
             Some(vec![0.0, 0.0, 0.0]),
             Some(vec![1.0, 1.0, 1.0]),
-            Some(ChannelOrder::CHW),
+            Some(TensorLayout::CHW),
             Some(ColorOrder::RGB),
         )
         .unwrap();
@@ -797,7 +797,7 @@ mod tests {
             Some(1.0),
             Some(vec![0.0, 0.0, 0.0]),
             Some(vec![1.0, 1.0, 1.0]),
-            Some(ChannelOrder::CHW),
+            Some(TensorLayout::CHW),
             Some(ColorOrder::BGR),
         )
         .unwrap();
@@ -820,7 +820,7 @@ mod tests {
             Some(1.0),
             Some(vec![1.0, 2.0, 3.0]), // RGB means
             Some(vec![2.0, 4.0, 5.0]), // RGB stds
-            Some(ChannelOrder::CHW),
+            Some(TensorLayout::CHW),
             Some(ColorOrder::RGB),
         )
         .unwrap();
@@ -828,7 +828,7 @@ mod tests {
             Some(1.0),
             Some(vec![3.0, 2.0, 1.0]), // BGR means
             Some(vec![5.0, 4.0, 2.0]), // BGR stds
-            Some(ChannelOrder::CHW),
+            Some(TensorLayout::CHW),
             Some(ColorOrder::BGR),
         )
         .unwrap();

@@ -6,7 +6,7 @@
 use crate::core::inference::OrtInfer;
 use crate::core::{OCRError, Tensor4D};
 use crate::processors::{
-    ChannelOrder, DetResizeForTest, ImageScaleInfo, LimitType, NormalizeImage,
+    DetResizeForTest, ImageScaleInfo, LimitType, NormalizeImage, TensorLayout,
 };
 use image::{DynamicImage, RgbImage};
 use ndarray::Array2;
@@ -102,7 +102,7 @@ impl RTDetrModel {
             Some(preprocess_config.scale),
             preprocess_config.mean.clone(),
             preprocess_config.std.clone(),
-            Some(ChannelOrder::CHW),
+            Some(TensorLayout::CHW),
             crate::processors::ColorOrder::BGR,
         )?;
 

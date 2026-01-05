@@ -62,24 +62,17 @@ pub enum LimitType {
     ResizeLong,
 }
 
-/// Specifies the order of channels in an image tensor
+/// Specifies the data layout of an image tensor
 #[derive(Debug, Clone)]
-pub enum ChannelOrder {
-    /// Channel, Height, Width order (common in PyTorch)
+pub enum TensorLayout {
+    /// Channel, Height, Width order (common in PyTorch/ONNX)
     CHW,
     /// Height, Width, Channel order (common in TensorFlow)
     HWC,
 }
 
-/// Specifies the color channel order in an image
-#[derive(Debug, Clone, Copy, Default)]
-pub enum ColorOrder {
-    /// Red, Green, Blue order (default for most image libraries like PIL, image-rs)
-    #[default]
-    RGB,
-    /// Blue, Green, Red order (used by OpenCV and PaddlePaddle models)
-    BGR,
-}
+// Re-export ColorOrder from core::config for backward compatibility
+pub use crate::core::config::ColorOrder;
 
 /// Specifies the type of bounding box used for text detection
 #[derive(Debug, Clone, Copy)]
