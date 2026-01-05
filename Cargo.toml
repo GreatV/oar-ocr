@@ -36,7 +36,7 @@ openvino = ["ort/openvino"]
 download-binaries = ["ort/download-binaries"]
 
 [dependencies]
-oar-ocr-derive = { path = "oar-ocr-derive" }
+oar-ocr-derive = { version = "0.5.1", path = "oar-ocr-derive" }
 image = "0.25.6"
 imageproc = "0.26.0"
 itertools = "0.14"

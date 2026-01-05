@@ -26,22 +26,42 @@ jobs:
 
       - name: Verify version consistency
         run: |
-          # Extract version from Cargo.toml
-          CARGO_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-          
           # Extract version from the Git tag (e.g., 'v1.2.3' -> '1.2.3')
           TAG_VERSION=${GITHUB_REF#refs/tags/v}
-          
-          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
-            echo "Error: Version in Cargo.toml ($CARGO_VERSION) does not match the Git tag ($TAG_VERSION)."
+
+          # Extract version from main crate Cargo.toml
+          MAIN_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "oar-ocr") | .version')
+
+          # Extract version from derive crate Cargo.toml
+          DERIVE_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "oar-ocr-derive") | .version')
+
+          echo "Tag version: $TAG_VERSION"
+          echo "oar-ocr version: $MAIN_VERSION"
+          echo "oar-ocr-derive version: $DERIVE_VERSION"
+
+          if [ "$MAIN_VERSION" != "$TAG_VERSION" ]; then
+            echo "Error: Version in oar-ocr Cargo.toml ($MAIN_VERSION) does not match the Git tag ($TAG_VERSION)."
             exit 1
           fi
-          echo "Version check passed: $CARGO_VERSION"
 
-      - name: Build in release mode
-        run: cargo build --release --verbose
+          if [ "$DERIVE_VERSION" != "$TAG_VERSION" ]; then
+            echo "Error: Version in oar-ocr-derive Cargo.toml ($DERIVE_VERSION) does not match the Git tag ($TAG_VERSION)."
+            exit 1
+          fi
 
-      - name: Publish to crates.io
+          echo "Version check passed: $TAG_VERSION"
+
+      - name: Publish oar-ocr-derive to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish
+        run: cargo publish -p oar-ocr-derive
+
+      - name: Wait for crates.io index update
+        run: |
+          echo "Waiting for crates.io to index oar-ocr-derive..."
+          sleep 30
+
+      - name: Publish oar-ocr to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p oar-ocr
