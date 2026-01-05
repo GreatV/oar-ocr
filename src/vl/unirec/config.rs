@@ -219,12 +219,14 @@ impl UniRecConfig {
     /// Load configuration from a JSON file.
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
         let path = path.as_ref();
-        let content = std::fs::read_to_string(path).map_err(|e| OCRError::ConfigError {
-            message: format!("Failed to read UniRec config from {:?}: {}", path, e),
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            OCRError::config_error(format!(
+                "Failed to read UniRec config from {:?}: {}",
+                path, e
+            ))
         })?;
-        serde_json::from_str(&content).map_err(|e| OCRError::ConfigError {
-            message: format!("Failed to parse UniRec config: {}", e),
-        })
+        serde_json::from_str(&content)
+            .map_err(|e| OCRError::config_error(format!("Failed to parse UniRec config: {}", e)))
     }
 
     /// Get the number of attention heads per key-value head.

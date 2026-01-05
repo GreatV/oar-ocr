@@ -142,12 +142,9 @@ impl UVDocModel {
         original_sizes: &[(u32, u32)],
     ) -> Result<Vec<RgbImage>, OCRError> {
         // Use UVDocPostProcess to convert tensor to images
-        let mut images =
-            self.postprocessor
-                .apply_batch(predictions)
-                .map_err(|e| OCRError::ConfigError {
-                    message: format!("Failed to postprocess rectification output: {}", e),
-                })?;
+        let mut images = self.postprocessor.apply_batch(predictions).map_err(|e| {
+            OCRError::config_error(format!("Failed to postprocess rectification output: {}", e))
+        })?;
 
         if images.len() != original_sizes.len() {
             return Err(OCRError::InvalidInput {

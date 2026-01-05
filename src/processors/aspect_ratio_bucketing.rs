@@ -131,12 +131,12 @@ impl AspectRatioBucketing {
         bucket: &AspectRatioBucket,
     ) -> Result<RgbImage, OCRError> {
         // Use cached ResizePadConfig to avoid repeated creation
-        let config =
-            self.resize_configs
-                .get(&bucket.name)
-                .ok_or_else(|| OCRError::ConfigError {
-                    message: format!("No cached resize config found for bucket: {}", bucket.name),
-                })?;
+        let config = self.resize_configs.get(&bucket.name).ok_or_else(|| {
+            OCRError::config_error(format!(
+                "No cached resize config found for bucket: {}",
+                bucket.name
+            ))
+        })?;
 
         let padded = resize_and_pad(image, config).map_err(OCRError::from)?;
 
@@ -177,12 +177,10 @@ impl AspectRatioBucketing {
                 let dims = (image.height(), image.width());
                 exact_groups.entry(dims).or_default().push((index, image));
             } else {
-                return Err(OCRError::ConfigError {
-                    message: format!(
-                        "No bucket found for aspect ratio {:.2} and fallback disabled",
-                        aspect_ratio
-                    ),
-                });
+                return Err(OCRError::config_error(format!(
+                    "No bucket found for aspect ratio {:.2} and fallback disabled",
+                    aspect_ratio
+                )));
             }
         }
 

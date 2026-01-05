@@ -4,18 +4,6 @@
 //! including various error types, helper constructors, and utilities for creating
 //! well-structured errors with appropriate context and error chaining.
 //!
-//! # Architecture
-//!
-//! The error system is organized into several modules:
-//!
-//! - [`types`] - Core error types (OCRError, ProcessingStage)
-//! - [`constructors`] - Helper methods for creating errors with context
-//!
-//! # Main Error Types
-//!
-//! - [`OCRError`] - The main error type used throughout the OCR pipeline
-//! - [`ProcessingStage`] - Enum identifying which pipeline stage an error occurred in
-//!
 //! # Usage
 //!
 //! ```rust
@@ -38,16 +26,6 @@
 //!     "[320, 320]"
 //! );
 //! ```
-//!
-//! # Error Categories
-//!
-//! The error system supports several categories of errors:
-//!
-//! - **Processing Errors** - Errors during various pipeline stages
-//! - **Inference Errors** - Model inference and prediction errors
-//! - **Configuration Errors** - Invalid configuration or validation failures
-//! - **Input Errors** - Invalid input data or parameters
-//! - **System Errors** - IO, tensor operations, and other system-level errors
 
 // Module declarations
 pub mod constructors;

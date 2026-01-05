@@ -63,16 +63,12 @@ impl PaddleOcrVl {
             PaddleOcrVlImageProcessorConfig::from_path(model_dir.join("preprocessor_config.json"))?;
 
         let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| {
-            OCRError::ConfigError {
-                message: format!("failed to load PaddleOCR-VL tokenizer.json: {e}"),
-            }
+            OCRError::config_error(format!("failed to load PaddleOCR-VL tokenizer.json: {e}"))
         })?;
 
-        let eos_token_id = tokenizer
-            .token_to_id("</s>")
-            .ok_or_else(|| OCRError::ConfigError {
-                message: "PaddleOCR-VL: tokenizer is missing </s> token".to_string(),
-            })?;
+        let eos_token_id = tokenizer.token_to_id("</s>").ok_or_else(|| {
+            OCRError::config_error("PaddleOCR-VL: tokenizer is missing </s> token")
+        })?;
         let sep_token_id = tokenizer.token_to_id("<|end_of_sentence|>");
 
         let dtype = device.bf16_default_to_f32();
@@ -412,9 +408,9 @@ fn get_rope_index(
 ) -> Result<(Tensor, i64), OCRError> {
     let spatial_merge_size = cfg.vision_config.spatial_merge_size;
     if spatial_merge_size == 0 {
-        return Err(OCRError::ConfigError {
-            message: "PaddleOCR-VL: vision_config.spatial_merge_size must be > 0".to_string(),
-        });
+        return Err(OCRError::config_error(
+            "PaddleOCR-VL: vision_config.spatial_merge_size must be > 0",
+        ));
     }
 
     let mut image_count = 0usize;

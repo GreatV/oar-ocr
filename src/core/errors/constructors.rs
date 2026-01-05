@@ -327,9 +327,9 @@ impl OCRError {
     ///
     /// An OCRError instance.
     pub fn config_error(message: impl Into<String>) -> Self {
-        Self::ConfigError {
+        Self::Config(crate::core::config::ConfigError::InvalidConfig {
             message: message.into(),
-        }
+        })
     }
 
     /// Creates an OCRError for configuration errors with context.
@@ -344,11 +344,12 @@ impl OCRError {
     ///
     /// An OCRError instance.
     pub fn config_error_with_context(field: &str, value: &str, reason: &str) -> Self {
-        Self::ConfigError {
-            message: format!(
-                "Configuration error in field '{field}' with value '{value}': {reason}"
-            ),
-        }
+        Self::Config(crate::core::config::ConfigError::InvalidFieldValue {
+            field: field.to_string(),
+            expected: reason.to_string(),
+            actual: value.to_string(),
+            suggestion: String::new(),
+        })
     }
 
     /// Creates an OCRError for validation errors.

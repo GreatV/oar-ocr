@@ -178,12 +178,7 @@ impl AdapterBuilder for DocumentOrientationAdapterBuilder {
     type Adapter = DocumentOrientationAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, ort_config) =
-            self.config
-                .into_validated_parts()
-                .map_err(|err| OCRError::ConfigError {
-                    message: err.to_string(),
-                })?;
+        let (task_config, ort_config) = self.config.into_validated_parts()?;
 
         // Build the PP-LCNet model
         let preprocess_config = super::preprocessing::pp_lcnet_preprocess(self.input_shape);

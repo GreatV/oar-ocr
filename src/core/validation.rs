@@ -243,6 +243,93 @@ pub fn validate_normalization_params(
     Ok(())
 }
 
+use image::RgbImage;
+
+/// Validates a batch of images: non-empty and each has positive dimensions.
+///
+/// This function consolidates the common pattern of validating image batches
+/// used across different OCR tasks.
+///
+/// # Arguments
+///
+/// * `images` - The batch of images to validate
+/// * `context` - Context string describing the validation (e.g., "text detection input")
+///
+/// # Returns
+///
+/// `Ok(())` if validation passes, or `Err(OCRError::InvalidInput)` if:
+/// - The batch is empty
+/// - Any image has zero width or height
+/// - Any image exceeds maximum dimensions (32768x32768)
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # use oar_ocr::core::validation::validate_image_batch;
+/// # use image::RgbImage;
+/// let images: Vec<RgbImage> = vec![RgbImage::new(100, 100)];
+/// validate_image_batch(&images, "OCR input").expect("validation failed");
+/// ```
+pub fn validate_image_batch(images: &[RgbImage], context: &str) -> Result<(), OCRError> {
+    validate_non_empty(images, &format!("{} images", context))?;
+
+    for (idx, img) in images.iter().enumerate() {
+        validate_image_dimensions(
+            img.height(),
+            img.width(),
+            &format!("{} image {}", context, idx),
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Validates a batch of images with custom error messaging.
+///
+/// This is a more flexible version of `validate_image_batch` that allows
+/// custom error messages for different failure cases.
+///
+/// # Arguments
+///
+/// * `images` - The batch of images to validate
+/// * `empty_batch_message` - Error message when batch is empty
+/// * `zero_dim_message` - Closure that generates error message for zero-dimension images
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # use oar_ocr::core::validation::validate_image_batch_with_message;
+/// # use image::RgbImage;
+/// let images: Vec<RgbImage> = vec![RgbImage::new(100, 100)];
+/// validate_image_batch_with_message(
+///     &images,
+///     "Detection requires at least one image",
+///     |idx, w, h| format!("Image {idx} has invalid size {w}x{h}"),
+/// ).expect("validation failed");
+/// ```
+pub fn validate_image_batch_with_message(
+    images: &[RgbImage],
+    empty_batch_message: &str,
+    zero_dim_message: impl Fn(usize, u32, u32) -> String,
+) -> Result<(), OCRError> {
+    if images.is_empty() {
+        return Err(OCRError::InvalidInput {
+            message: empty_batch_message.to_string(),
+        });
+    }
+
+    for (idx, img) in images.iter().enumerate() {
+        let (width, height) = (img.width(), img.height());
+        if width == 0 || height == 0 {
+            return Err(OCRError::InvalidInput {
+                message: zero_dim_message(idx, width, height),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

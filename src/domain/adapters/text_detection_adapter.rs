@@ -124,12 +124,7 @@ impl AdapterBuilder for TextDetectionAdapterBuilder {
     type Adapter = TextDetectionAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, ort_config) =
-            self.config
-                .into_validated_parts()
-                .map_err(|err| OCRError::ConfigError {
-                    message: err.to_string(),
-                })?;
+        let (task_config, ort_config) = self.config.into_validated_parts()?;
 
         // Determine if this is seal text (uses different preprocessing and box type)
         let is_seal_text = self

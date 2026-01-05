@@ -163,12 +163,13 @@ pub enum OCRError {
         message: String,
     },
 
-    /// Error indicating a configuration problem.
-    #[error("configuration: {message}")]
-    ConfigError {
-        /// A message describing the configuration error.
-        message: String,
-    },
+    /// Error indicating a configuration problem (transparent wrapper).
+    ///
+    /// This variant preserves the full `ConfigError` structure, allowing
+    /// callers to inspect specific error variants like `InvalidBatchSize`,
+    /// `ModelPathNotFound`, etc.
+    #[error(transparent)]
+    Config(#[from] crate::core::config::ConfigError),
 
     /// Error indicating a buffer is too small.
     #[error("buffer too small: expected at least {expected} bytes, got {actual} bytes")]
@@ -233,15 +234,6 @@ impl From<image::ImageError> for OCRError {
     }
 }
 
-impl From<crate::core::config::ConfigError> for OCRError {
-    /// Converts a ConfigError to OCRError::ConfigError.
-    fn from(error: crate::core::config::ConfigError) -> Self {
-        Self::ConfigError {
-            message: error.to_string(),
-        }
-    }
-}
-
 impl From<ImageProcessError> for OCRError {
     /// Converts an ImageProcessError to OCRError::Processing.
     fn from(error: ImageProcessError) -> Self {
@@ -273,12 +265,12 @@ impl OCRError {
     ///     "task graph validation",
     ///     "task 'recognition' depends on 'detection' which does not exist"
     /// );
-    /// assert!(matches!(err, OCRError::ConfigError { .. }));
+    /// assert!(matches!(err, OCRError::Config(_)));
     /// ```
     pub fn config_error_detailed(context: impl Into<String>, details: impl Into<String>) -> Self {
-        Self::ConfigError {
+        Self::Config(crate::core::config::ConfigError::InvalidConfig {
             message: format!("{}: {}", context.into(), details.into()),
-        }
+        })
     }
 
     /// Creates a configuration error with a suggestion for recovery.
@@ -302,21 +294,21 @@ impl OCRError {
     ///     "model file not found at 'models/detection.onnx'",
     ///     "ensure the model has been downloaded and the path is correct"
     /// );
-    /// assert!(matches!(err, OCRError::ConfigError { .. }));
+    /// assert!(matches!(err, OCRError::Config(_)));
     /// ```
     pub fn config_error_with_suggestion(
         context: impl Into<String>,
         details: impl Into<String>,
         suggestion: impl Into<String>,
     ) -> Self {
-        Self::ConfigError {
+        Self::Config(crate::core::config::ConfigError::InvalidConfig {
             message: format!(
                 "{}: {}; suggestion: {}",
                 context.into(),
                 details.into(),
                 suggestion.into()
             ),
-        }
+        })
     }
 
     /// Creates a configuration error for missing required fields.
@@ -330,13 +322,10 @@ impl OCRError {
     ///
     /// A new ConfigError for missing fields
     pub fn missing_field(field: impl Into<String>, context: impl Into<String>) -> Self {
-        Self::ConfigError {
-            message: format!(
-                "missing required field '{}' in {}",
-                field.into(),
-                context.into()
-            ),
-        }
+        Self::Config(crate::core::config::ConfigError::MissingRequiredField {
+            field: field.into(),
+            suggestion: format!("; required in {}", context.into()),
+        })
     }
 
     /// Creates a configuration error for invalid field values.
@@ -355,14 +344,12 @@ impl OCRError {
         expected: impl Into<String>,
         actual: impl Into<String>,
     ) -> Self {
-        Self::ConfigError {
-            message: format!(
-                "invalid value for field '{}': expected {}, got {}",
-                field.into(),
-                expected.into(),
-                actual.into()
-            ),
-        }
+        Self::Config(crate::core::config::ConfigError::InvalidFieldValue {
+            field: field.into(),
+            expected: expected.into(),
+            actual: actual.into(),
+            suggestion: String::new(),
+        })
     }
 
     /// Creates a configuration error for type mismatches in task graphs.
@@ -381,14 +368,14 @@ impl OCRError {
         expected: impl Into<String>,
         actual: impl Into<String>,
     ) -> Self {
-        Self::ConfigError {
+        Self::Config(crate::core::config::ConfigError::TypeMismatch {
             message: format!(
-                "type mismatch in task '{}': expected {}, got {}",
+                "in task '{}': expected {}, got {}",
                 task_id.into(),
                 expected.into(),
                 actual.into()
             ),
-        }
+        })
     }
 
     /// Creates a configuration error for dependency issues.
@@ -407,14 +394,14 @@ impl OCRError {
         dependency: impl Into<String>,
         issue: impl Into<String>,
     ) -> Self {
-        Self::ConfigError {
+        Self::Config(crate::core::config::ConfigError::DependencyError {
             message: format!(
-                "dependency error: task '{}' depends on '{}' which {}",
+                "task '{}' depends on '{}' which {}",
                 dependent.into(),
                 dependency.into(),
                 issue.into()
             ),
-        }
+        })
     }
 
     /// Wraps an error that occurred while executing a model adapter.

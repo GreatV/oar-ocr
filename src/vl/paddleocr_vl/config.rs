@@ -23,26 +23,25 @@ pub struct PaddleOcrVlImageProcessorConfig {
 impl PaddleOcrVlImageProcessorConfig {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
         let contents = std::fs::read_to_string(path)?;
-        serde_json::from_str(&contents).map_err(|e| OCRError::ConfigError {
-            message: format!("failed to parse PaddleOCR-VL preprocessor_config.json: {e}"),
+        serde_json::from_str(&contents).map_err(|e| {
+            OCRError::config_error(format!(
+                "failed to parse PaddleOCR-VL preprocessor_config.json: {e}"
+            ))
         })
     }
 
     pub fn validate(&self) -> Result<(), OCRError> {
         if self.image_mean.len() != 3 || self.image_std.len() != 3 {
-            return Err(OCRError::ConfigError {
-                message: format!(
-                    "PaddleOCR-VL image_mean/std must have length 3, got mean={} std={}",
-                    self.image_mean.len(),
-                    self.image_std.len()
-                ),
-            });
+            return Err(OCRError::config_error(format!(
+                "PaddleOCR-VL image_mean/std must have length 3, got mean={} std={}",
+                self.image_mean.len(),
+                self.image_std.len()
+            )));
         }
         if self.patch_size == 0 || self.merge_size == 0 || self.temporal_patch_size == 0 {
-            return Err(OCRError::ConfigError {
-                message: "PaddleOCR-VL patch_size/merge_size/temporal_patch_size must be > 0"
-                    .to_string(),
-            });
+            return Err(OCRError::config_error(
+                "PaddleOCR-VL patch_size/merge_size/temporal_patch_size must be > 0",
+            ));
         }
         Ok(())
     }
@@ -93,8 +92,8 @@ pub struct PaddleOcrVlConfig {
 impl PaddleOcrVlConfig {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
         let contents = std::fs::read_to_string(path)?;
-        serde_json::from_str(&contents).map_err(|e| OCRError::ConfigError {
-            message: format!("failed to parse PaddleOCR-VL config.json: {e}"),
+        serde_json::from_str(&contents).map_err(|e| {
+            OCRError::config_error(format!("failed to parse PaddleOCR-VL config.json: {e}"))
         })
     }
 }

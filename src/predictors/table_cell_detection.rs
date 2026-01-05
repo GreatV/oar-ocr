@@ -133,13 +133,13 @@ impl TableCellDetectionPredictorBuilder {
         let variant = self
             .model_variant
             .or_else(|| TableCellModelVariant::detect_from_path(path_ref))
-            .ok_or_else(|| OCRError::ConfigError {
-                message: format!(
+            .ok_or_else(|| {
+                OCRError::config_error(format!(
                     "Unable to determine table cell model variant from '{}'. \
                          Provide `model_variant(...)` on the builder or use a filename \
                          containing 'wired_table_cell' or 'wireless_table_cell'.",
                     path_ref.display()
-                ),
+                ))
             })?;
 
         let mut adapter_builder = TableCellDetectionAdapterBuilder::new()

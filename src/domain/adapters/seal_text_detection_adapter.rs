@@ -112,12 +112,7 @@ impl AdapterBuilder for SealTextDetectionAdapterBuilder {
     type Adapter = SealTextDetectionAdapter;
 
     fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, ort_config) =
-            self.config
-                .into_validated_parts()
-                .map_err(|err| OCRError::ConfigError {
-                    message: err.to_string(),
-                })?;
+        let (task_config, ort_config) = self.config.into_validated_parts()?;
 
         // Configure DB model for seal text detection
         // Use seal text preprocessing configuration (limit_side_len=736, limit_type=Min)

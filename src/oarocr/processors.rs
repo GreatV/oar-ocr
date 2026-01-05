@@ -206,9 +206,7 @@ where
 
     fn process(&self, input: Self::Input) -> Result<Self::Output, OCRError> {
         if self.processors.is_empty() {
-            return Err(OCRError::ConfigError {
-                message: "Empty processor chain".to_string(),
-            });
+            return Err(OCRError::config_error("Empty processor chain"));
         }
 
         // Apply all processors in sequence, threading the output of each as input to the next
@@ -414,6 +412,8 @@ mod tests {
 
     #[test]
     fn test_chain_processor_empty_chain() {
+        use crate::core::config::ConfigError;
+
         let processors: Vec<Box<dyn EdgeProcessor<Input = i32, Output = i32>>> = vec![];
 
         let chain = ChainProcessor::new(processors);
@@ -421,10 +421,10 @@ mod tests {
 
         // Should return an error for empty chain
         assert!(result.is_err());
-        if let Err(OCRError::ConfigError { message }) = result {
+        if let Err(OCRError::Config(ConfigError::InvalidConfig { message })) = result {
             assert_eq!(message, "Empty processor chain");
         } else {
-            panic!("Expected ConfigError");
+            panic!("Expected Config(InvalidConfig)");
         }
     }
 

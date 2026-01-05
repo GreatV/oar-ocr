@@ -371,12 +371,7 @@ impl ConfigValidator for DefaultValidator {
 /// This trait extends ConfigValidator to provide convenient methods for wrapping
 /// validation errors into OCRError types, reducing duplication across the codebase.
 pub trait ConfigValidatorExt: ConfigValidator {
-    /// Validates configuration and wraps any errors into OCRError::ConfigError.
-    ///
-    /// This method provides a convenient way to validate configuration and
-    /// automatically wrap any validation errors into the appropriate OCRError type.
-    /// This eliminates the repeated `config.validate().map_err(|e| OCRError::ConfigError { message: e.to_string() })`
-    /// pattern found throughout the codebase.
+    /// Validates configuration and wraps any errors into OCRError::Config.
     ///
     /// # Returns
     ///
@@ -385,10 +380,7 @@ pub trait ConfigValidatorExt: ConfigValidator {
     where
         Self: Sized,
     {
-        self.validate()
-            .map_err(|e| super::super::errors::OCRError::ConfigError {
-                message: e.to_string(),
-            })?;
+        self.validate()?; // ConfigError automatically converts to OCRError::Config
         Ok(self)
     }
 
