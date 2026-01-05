@@ -26,8 +26,6 @@ jobs:
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Build library in debug mode
-        run: cargo build --verbose
 
       - name: Build library in release mode
         run: cargo build --release --verbose
