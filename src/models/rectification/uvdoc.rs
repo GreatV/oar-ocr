@@ -265,7 +265,7 @@ impl UVDocModelBuilder {
             Some(vec![0.0, 0.0, 0.0]),
             Some(vec![1.0, 1.0, 1.0]),
             Some(TensorLayout::CHW),
-            Some(crate::processors::ColorOrder::BGR),
+            Some(crate::processors::types::ColorOrder::BGR),
         )?;
 
         // Create postprocessor

@@ -366,7 +366,7 @@ impl PPLCNetModelBuilder {
             Some(mean),
             Some(std),
             Some(self.preprocess_config.tensor_layout),
-            Some(crate::processors::ColorOrder::RGB),
+            Some(crate::processors::types::ColorOrder::RGB),
         )?;
 
         // Create top-k processor

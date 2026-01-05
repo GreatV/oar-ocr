@@ -15,6 +15,8 @@
 //! - `[1, 3, -1, -1]` - Fixed batch/channels, dynamic spatial dimensions
 //! - `[-1, -1, -1, -1]` - Fully dynamic
 
+pub use crate::processors::types::ColorOrder;
+
 /// Represents a dimension that can be fixed or dynamic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dim {
@@ -212,20 +214,6 @@ impl std::fmt::Display for InputShape {
             self.batch, self.channels, self.height, self.width
         )
     }
-}
-
-/// Color channel order for image input.
-///
-/// Specifies whether the model expects RGB or BGR channel ordering.
-/// Most image libraries (PIL, image-rs) use RGB, while OpenCV and
-/// PaddlePaddle models typically expect BGR.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ColorOrder {
-    /// Red, Green, Blue order (default for most image libraries)
-    #[default]
-    RGB,
-    /// Blue, Green, Red order (used by OpenCV/PaddlePaddle models)
-    BGR,
 }
 
 /// Normalization parameters for image preprocessing.

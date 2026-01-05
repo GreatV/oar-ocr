@@ -103,7 +103,7 @@ impl RTDetrModel {
             preprocess_config.mean.clone(),
             preprocess_config.std.clone(),
             Some(TensorLayout::CHW),
-            crate::processors::ColorOrder::BGR,
+            crate::processors::types::ColorOrder::BGR,
         )?;
 
         Ok(Self {

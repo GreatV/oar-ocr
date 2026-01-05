@@ -49,11 +49,9 @@
 //! - **Input Errors** - Invalid input data or parameters
 //! - **System Errors** - IO, tensor operations, and other system-level errors
 
-// Module declarations
-pub mod constructors;
-pub mod types;
+mod constructors;
+mod types;
 
-// Re-export all public types and functions for backward compatibility
 pub use types::{ImageProcessError, OCRError, OpaqueError, ProcessingStage};
 
 /// Convenient result alias for OCR operations.

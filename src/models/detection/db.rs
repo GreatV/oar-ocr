@@ -285,7 +285,7 @@ impl DBModelBuilder {
             Some(vec![0.485, 0.456, 0.406]), // mean
             Some(vec![0.229, 0.224, 0.225]), // std
             Some(TensorLayout::CHW),         // order
-            Some(crate::processors::ColorOrder::BGR),
+            Some(crate::processors::types::ColorOrder::BGR),
         )?;
 
         // Create postprocessor
