@@ -324,7 +324,7 @@ impl OCRError {
     pub fn missing_field(field: impl Into<String>, context: impl Into<String>) -> Self {
         Self::Config(crate::core::config::ConfigError::MissingRequiredField {
             field: field.into(),
-            suggestion: format!("; required in {}", context.into()),
+            suggestion: format!(" in {}", context.into()),
         })
     }
 
