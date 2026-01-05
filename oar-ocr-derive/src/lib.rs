@@ -341,19 +341,19 @@ fn find_builder_config_type(input: &DeriveInput) -> syn::Result<Type> {
 
         let meta = attr.parse_args::<Meta>()?;
 
-        if let Meta::NameValue(nv) = meta {
-            if nv.path.is_ident("config") {
-                if let Expr::Path(expr_path) = nv.value {
-                    return Ok(Type::Path(syn::TypePath {
-                        qself: None,
-                        path: expr_path.path,
-                    }));
-                } else {
-                    return Err(syn::Error::new_spanned(
-                        nv.value,
-                        "Expected a type path, e.g., #[builder(config = MyConfigType)]",
-                    ));
-                }
+        if let Meta::NameValue(nv) = meta
+            && nv.path.is_ident("config")
+        {
+            if let Expr::Path(expr_path) = nv.value {
+                return Ok(Type::Path(syn::TypePath {
+                    qself: None,
+                    path: expr_path.path,
+                }));
+            } else {
+                return Err(syn::Error::new_spanned(
+                    nv.value,
+                    "Expected a type path, e.g., #[builder(config = MyConfigType)]",
+                ));
             }
         }
     }

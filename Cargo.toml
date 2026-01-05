@@ -1,12 +1,24 @@
-[package]
-name = "oar-ocr"
+[workspace]
+members = [".", "oar-ocr-derive"]
+resolver = "2"
+
+[workspace.package]
 version = "0.5.1"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["Wang Xin <xinwang614@gmail.com>"]
-description = "A comprehensive OCR library built in Rust with ONNX Runtime for efficient inference"
 repository = "https://github.com/greatv/oar-ocr"
 homepage = "https://github.com/greatv/oar-ocr"
+
+[package]
+name = "oar-ocr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "A comprehensive OCR library built in Rust with ONNX Runtime for efficient inference"
 readme = "README.md"
 keywords = [
     "ocr",
