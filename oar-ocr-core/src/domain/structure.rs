@@ -3,7 +3,7 @@
 //! This module defines the result types for document structure analysis,
 //! including layout detection, table recognition, and formula recognition.
 
-use crate::oarocr::TextRegion;
+use super::text_region::TextRegion;
 use crate::processors::BoundingBox;
 use image::RgbImage;
 use once_cell::sync::Lazy;

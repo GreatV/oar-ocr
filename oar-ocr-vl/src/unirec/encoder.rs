@@ -7,8 +7,8 @@ use candle_core::{Module, Result, Tensor};
 use candle_nn::{Conv2d, Conv2dConfig, Dropout, LayerNorm, Linear, VarBuilder};
 
 use super::config::UniRecConfig;
-use crate::core::OCRError;
-use crate::vl::utils::candle_to_ocr_inference;
+use crate::utils::candle_to_ocr_inference;
+use oar_ocr_core::core::OCRError;
 
 /// Drop path (stochastic depth) for regularization.
 #[derive(Debug, Clone)]

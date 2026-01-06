@@ -6,7 +6,7 @@
 //! # Usage
 //!
 //! ```bash
-//! cargo run --features vl --example unirec -- [OPTIONS] <IMAGES>...
+//! cargo run -p oar-ocr-vl --example unirec -- [OPTIONS] <IMAGES>...
 //! ```
 //!
 //! # Arguments
@@ -21,33 +21,27 @@
 //!
 //! ```bash
 //! # Run on CPU
-//! cargo run --features vl --example unirec -- \
+//! cargo run -p oar-ocr-vl --example unirec -- \
 //!     -m models/unirec-0.1b \
 //!     formula.jpg text.jpg
 //!
 //! # Run on CUDA GPU
-//! cargo run --features vl,cuda --example unirec -- \
+//! cargo run -p oar-ocr-vl --features cuda --example unirec -- \
 //!     -m models/unirec-0.1b -d cuda \
 //!     formula.jpg text.jpg
 //! ```
 
-#[cfg(feature = "vl")]
 mod utils;
 
 use clap::Parser;
 use std::path::PathBuf;
-
-#[cfg(feature = "vl")]
 use std::time::Instant;
-#[cfg(feature = "vl")]
+
 use tracing::{error, info};
 
-#[cfg(feature = "vl")]
-use oar_ocr::utils::load_image;
-#[cfg(feature = "vl")]
-use oar_ocr::vl::UniRec;
-#[cfg(feature = "vl")]
-use utils::candle_device::parse_candle_device;
+use oar_ocr_core::utils::load_image;
+use oar_ocr_vl::UniRec;
+use oar_ocr_vl::utils::parse_device;
 
 /// Command-line arguments for the UniRec example
 #[derive(Parser)]
@@ -77,14 +71,6 @@ struct Args {
     verbose: bool,
 }
 
-#[cfg(not(feature = "vl"))]
-fn main() {
-    eprintln!("This example requires the 'vl' feature.");
-    eprintln!("Run with: cargo run --features vl --example unirec -- ...");
-    std::process::exit(1);
-}
-
-#[cfg(feature = "vl")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing for logging
     utils::init_tracing();
@@ -138,7 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Determine device
-    let device = parse_candle_device(&args.device)?;
+    let device = parse_device(&args.device)?;
     info!("Using device: {:?}", device);
 
     // Load the UniRec model

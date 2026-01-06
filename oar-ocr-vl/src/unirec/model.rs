@@ -11,8 +11,8 @@ use tokenizers::decoders::byte_level::ByteLevel;
 use super::config::UniRecConfig;
 use super::decoder::{KvCache, M2M100Decoder, create_causal_mask};
 use super::encoder::FocalSVTR;
-use crate::core::OCRError;
-use crate::vl::utils::candle_to_ocr_inference;
+use crate::utils::candle_to_ocr_inference;
+use oar_ocr_core::core::OCRError;
 
 /// UniRec model for unified text, formula, and table recognition.
 pub struct UniRec {

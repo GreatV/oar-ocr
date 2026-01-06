@@ -28,6 +28,7 @@ use oar_ocr::prelude::*;
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize the OCR pipeline
     let ocr = OAROCRBuilder::new(
         "pp-ocrv5_mobile_det.onnx",
         "pp-ocrv5_mobile_rec.onnx",
@@ -35,12 +36,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .build()?;
 
+    // Load an image
     let image = load_image(Path::new("document.jpg"))?;
+    
+    // Run prediction
     let results = ocr.predict(vec![image])?;
 
+    // Process results
     for text_region in &results[0].text_regions {
         if let Some((text, confidence)) = text_region.text_with_confidence() {
-            println!("{} ({:.2})", text, confidence);
+            println!("Text: {} ({:.2})", text, confidence);
         }
     }
 
@@ -51,15 +56,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Document Structure Analysis
 
 ```rust
-use oar_ocr::oarocr::OARStructureBuilder;
+use oar_ocr::prelude::*;
+use std::path::Path;
 
-let structure = OARStructureBuilder::new("pp-doclayout_plus-l.onnx")
-    .with_table_classification("pp-lcnet_x1_0_table_cls.onnx")
-    .with_table_structure_recognition("slanet_plus.onnx", "wireless")
-    .table_structure_dict_path("table_structure_dict_ch.txt")
-    .with_ocr("pp-ocrv5_mobile_det.onnx", "pp-ocrv5_mobile_rec.onnx", "ppocrv5_dict.txt")
-    .build()?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize structure analysis pipeline
+    let structure = OARStructureBuilder::new("pp-doclayout_plus-l.onnx")
+        .with_table_classification("pp-lcnet_x1_0_table_cls.onnx")
+        .with_table_structure_recognition("slanet_plus.onnx", "wireless")
+        .table_structure_dict_path("table_structure_dict_ch.txt")
+        .with_ocr(
+            "pp-ocrv5_mobile_det.onnx", 
+            "pp-ocrv5_mobile_rec.onnx", 
+            "ppocrv5_dict.txt"
+        )
+        .build()?;
+        
+    // Analyze document
+    let result = structure.predict("document.jpg")?;
+    
+    // Output Markdown
+    println!("{}", result.to_markdown());
+    
+    Ok(())
+}
 ```
+
+## Vision-Language Models (VLM)
+
+For advanced document understanding using Vision-Language Models (like PaddleOCR-VL and UniRec), check out the [`oar-ocr-vl`](oar-ocr-vl/README.md) crate.
 
 ## Documentation
 
@@ -68,67 +93,20 @@ let structure = OARStructureBuilder::new("pp-doclayout_plus-l.onnx")
 
 ## Examples
 
+The `examples/` directory contains complete examples for various tasks:
+
 ```bash
+# General OCR
 cargo run --example ocr -- --help
+
+# Document Structure Analysis
 cargo run --example structure -- --help
-```
 
-See `examples/` directory for complete CLI examples.
+# Layout Detection
+cargo run --example layout_detection -- --help
 
-### PaddleOCR-VL
-
-[PaddleOCR-VL](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) is a Vision-Language model for advanced document understanding. It supports element-level OCR and layout-first document parsing. Our implementation uses [Candle](https://github.com/huggingface/candle) for inference. Download the model first:
-
-```bash
-huggingface-cli download PaddlePaddle/PaddleOCR-VL --local-dir PaddleOCR-VL
-```
-
-```bash
-# Element-level OCR
-cargo run --release --features vl,cuda --example paddleocr_vl -- --model-dir PaddleOCR-VL --task ocr document.jpg
-
-# Table recognition (outputs HTML)
-cargo run --release --features vl,cuda --example paddleocr_vl -- --model-dir PaddleOCR-VL --task table table.jpg
-
-# Formula recognition (outputs LaTeX)
-cargo run --release --features vl,cuda --example paddleocr_vl -- --model-dir PaddleOCR-VL --task formula formula.png
-
-# Chart recognition
-cargo run --release --features vl,cuda --example paddleocr_vl -- --model-dir PaddleOCR-VL --task chart chart.png
-```
-
-### UniRec
-
-[UniRec](https://github.com/Topdu/OpenOCR) is a lightweight unified recognition model that handles text, formulas, and tables in a single model. It's faster and smaller than PaddleOCR-VL while maintaining good accuracy.
-
-```bash
-# Download UniRec model
-huggingface-cli download Topdu/UniRec-0.1B --local-dir models/unirec-0.1b
-
-# Run recognition
-cargo run --release --features vl,cuda --example unirec -- \
-    -m models/unirec-0.1b -d cuda \
-    formula.jpg text.jpg
-```
-
-### DocParser
-
-DocParser provides a unified API for two-stage document parsing (layout detection + recognition) supporting both UniRec and PaddleOCR-VL backends:
-
-```bash
-# Using UniRec
-cargo run --release --features vl,cuda --example doc_parser -- \
-    --model-name unirec \
-    --model-dir models/unirec-0.1b \
-    --layout-model pp-doclayoutv2.onnx \
-    -d cuda document.jpg
-
-# Using PaddleOCR-VL
-cargo run --release --features vl,cuda --example doc_parser -- \
-    --model-name paddleocr-vl \
-    --model-dir PaddleOCR-VL \
-    --layout-model pp-doclayoutv2.onnx \
-    -d cuda document.jpg
+# Table Structure Recognition
+cargo run --example table_structure_recognition -- --help
 ```
 
 ## Acknowledgments
@@ -138,5 +116,7 @@ This project builds upon the excellent work of several open-source projects:
 - **[ort](https://github.com/pykeio/ort)**: Rust bindings for ONNX Runtime by pykeio. This crate provides the Rust interface to ONNX Runtime that powers the efficient inference engine in this OCR library.
 
 - **[PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)**: Baidu's awesome multilingual OCR toolkits based on PaddlePaddle. This project utilizes PaddleOCR's pre-trained models, which provide excellent accuracy and performance for text detection and recognition across multiple languages.
+
+- **[OpenOCR](https://github.com/Topdu/OpenOCR)**: An open-source toolkit for general OCR research and applications by the FVL Laboratory at Fudan University. We use the UniRec model for unified text, formula, and table recognition.
 
 - **[Candle](https://github.com/huggingface/candle)**: A minimalist ML framework for Rust by Hugging Face. We use Candle to implement Vision-Language model inference.

@@ -1,4 +1,4 @@
-use crate::core::OCRError;
+use oar_ocr_core::core::OCRError;
 use serde::Deserialize;
 use std::path::Path;
 

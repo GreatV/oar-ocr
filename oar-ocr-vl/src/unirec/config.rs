@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use crate::core::OCRError;
+use oar_ocr_core::core::OCRError;
 
 /// UniRec model configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]

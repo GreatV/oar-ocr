@@ -5,11 +5,11 @@ use super::ernie::{Ernie4_5Model, KvCache};
 use super::processing;
 use super::projector::Projector;
 use super::vision::VisionModel;
-use crate::core::OCRError;
-use crate::vl::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
+use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::Module;
 use image::RgbImage;
+use oar_ocr_core::core::OCRError;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
@@ -146,14 +146,14 @@ impl PaddleOcrVl {
 
         let input_ids_t = Tensor::new(input_ids.clone(), &self.device).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: create input_ids tensor failed",
                 e,
             )
         })?;
         let input_ids_t = input_ids_t.reshape((1usize, prompt_len)).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: reshape input_ids tensor failed",
                 e,
             )
@@ -186,7 +186,7 @@ impl PaddleOcrVl {
 
         let token_embeds = inputs_embeds.squeeze(0).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: squeeze token embeddings failed",
                 e,
             )
@@ -198,7 +198,7 @@ impl PaddleOcrVl {
             if cursor < pos {
                 parts.push(token_embeds.i((cursor..pos, ..)).map_err(|e| {
                     candle_to_ocr_processing(
-                        crate::core::errors::ProcessingStage::TensorOperation,
+                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                         "PaddleOCR-VL: slice token embeddings failed",
                         e,
                     )
@@ -206,14 +206,14 @@ impl PaddleOcrVl {
             }
             let img_row = image_embeds.i((img_idx, ..)).map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: slice image embeddings failed",
                     e,
                 )
             })?;
             let img_row = img_row.unsqueeze(0).map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: unsqueeze image embedding failed",
                     e,
                 )
@@ -224,7 +224,7 @@ impl PaddleOcrVl {
         if cursor < prompt_len {
             parts.push(token_embeds.i((cursor..prompt_len, ..)).map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: slice tail token embeddings failed",
                     e,
                 )
@@ -234,7 +234,7 @@ impl PaddleOcrVl {
 
         let inputs_embeds = Tensor::cat(&refs, 0).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: concat embeddings failed",
                 e,
             )
@@ -242,7 +242,7 @@ impl PaddleOcrVl {
 
         let inputs_embeds = inputs_embeds.unsqueeze(0).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: unsqueeze batch for embeddings failed",
                 e,
             )
@@ -268,14 +268,14 @@ impl PaddleOcrVl {
 
         let last = hidden.i((0, prompt_len - 1, ..)).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: select last hidden state failed",
                 e,
             )
         })?;
         let last = last.unsqueeze(0).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: unsqueeze last hidden state failed",
                 e,
             )
@@ -309,14 +309,14 @@ impl PaddleOcrVl {
 
             let token_t = Tensor::new(&[next_token], &self.device).map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: create next_token tensor failed",
                     e,
                 )
             })?;
             let token_t = token_t.reshape((1usize, 1usize)).map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: reshape next_token tensor failed",
                     e,
                 )
@@ -328,14 +328,14 @@ impl PaddleOcrVl {
             let pos_ids =
                 Tensor::new(&[next_pos, next_pos, next_pos], &self.device).map_err(|e| {
                     candle_to_ocr_processing(
-                        crate::core::errors::ProcessingStage::TensorOperation,
+                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                         "PaddleOCR-VL: create pos tensor failed",
                         e,
                     )
                 })?;
             let pos_ids = pos_ids.reshape((3usize, 1usize, 1usize)).map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: reshape pos tensor failed",
                     e,
                 )
@@ -346,7 +346,7 @@ impl PaddleOcrVl {
                 .forward(&token_embed, &pos_ids, Some(&mut kv_cache), None)?;
             let hs = hs.squeeze(0).map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: squeeze hs batch failed",
                     e,
                 )
@@ -389,14 +389,14 @@ fn causal_mask(seq_len: usize, device: &Device, dtype: DType) -> Result<Tensor, 
     let tensor =
         Tensor::from_vec(data, (1usize, 1usize, seq_len, seq_len), device).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: build causal mask failed",
                 e,
             )
         })?;
     let data = tensor.to_dtype(dtype).map_err(|e| {
         candle_to_ocr_processing(
-            crate::core::errors::ProcessingStage::TensorOperation,
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "PaddleOCR-VL: cast causal mask failed",
             e,
         )
@@ -510,7 +510,7 @@ fn get_rope_index(
     let position_ids = Tensor::from_vec(pos_ids, (3usize, 1usize, input_ids.len()), device)
         .map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: build position_ids tensor failed",
                 e,
             )

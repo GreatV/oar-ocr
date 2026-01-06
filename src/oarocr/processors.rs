@@ -3,11 +3,11 @@
 //! This module provides processors that transform data between task nodes in the graph.
 //! For example, cropping and perspective transformation between detection and recognition.
 
-use crate::core::OCRError;
-use crate::processors::BoundingBox;
-use crate::utils::BBoxCrop;
 use image::{Rgb, RgbImage};
 use imageproc::geometric_transformations::{Interpolation, rotate_about_center};
+use oar_ocr_core::core::OCRError;
+use oar_ocr_core::processors::BoundingBox;
+use oar_ocr_core::utils::BBoxCrop;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::sync::Arc;

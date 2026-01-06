@@ -11,10 +11,10 @@
 //!     - Output image is always in RGB format.
 //!     - Corrected images are rotated to upright (0°) orientation.
 
-use crate::core::OCRError;
-use crate::core::traits::adapter::ModelAdapter;
-use crate::core::traits::task::ImageTaskInput;
-use crate::domain::adapters::{DocumentOrientationAdapter, UVDocRectifierAdapter};
+use oar_ocr_core::core::OCRError;
+use oar_ocr_core::core::traits::adapter::ModelAdapter;
+use oar_ocr_core::core::traits::task::ImageTaskInput;
+use oar_ocr_core::domain::adapters::{DocumentOrientationAdapter, UVDocRectifierAdapter};
 use std::sync::Arc;
 
 /// Orientation correction metadata for a single image.

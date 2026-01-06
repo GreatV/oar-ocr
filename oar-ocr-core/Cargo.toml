@@ -1,0 +1,54 @@
+[package]
+name = "oar-ocr-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Core types and predictors for oar-ocr"
+readme = "README.md"
+keywords = [
+    "ocr",
+    "onnx",
+    "computer-vision",
+    "text-recognition",
+    "machine-learning",
+]
+categories = ["computer-vision", "science"]
+
+[features]
+default = ["download-binaries"]
+# ONNX Runtime execution provider features
+cuda = ["ort/cuda"]
+tensorrt = ["ort/tensorrt"]
+directml = ["ort/directml"]
+coreml = ["ort/coreml"]
+webgpu = ["ort/webgpu"]
+openvino = ["ort/openvino"]
+# Auto-download ONNX Runtime binaries during build (enabled by default).
+download-binaries = ["ort/download-binaries"]
+
+[dependencies]
+oar-ocr-derive = { version = "0.5.1", path = "../oar-ocr-derive" }
+image = "0.25.6"
+imageproc = "0.26.0"
+itertools = "0.14"
+once_cell = "1.19"
+regex = "1.11.1"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+toml = "0.9"
+ort = { version = "2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "tracing", "copy-dylibs"] }
+ndarray = "0.16"
+nalgebra = "0.34"
+rayon = "1.8"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokenizers = { version = "0.22", default-features = false, features = ["progressbar", "onig"] }
+clipper2 = "0.5.3"
+html-escape = "0.2"
+
+[dev-dependencies]
+tempfile = "3.19"

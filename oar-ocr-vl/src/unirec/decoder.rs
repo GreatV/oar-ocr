@@ -7,8 +7,8 @@ use candle_core::{D, DType, Device, Result, Tensor};
 use candle_nn::{Dropout, Embedding, LayerNorm, Linear, Module, VarBuilder};
 
 use super::config::UniRecConfig;
-use crate::core::OCRError;
-use crate::vl::utils::candle_to_ocr_inference;
+use crate::utils::candle_to_ocr_inference;
+use oar_ocr_core::core::OCRError;
 
 /// KV cache for decoder attention layers.
 #[derive(Debug, Default, Clone)]

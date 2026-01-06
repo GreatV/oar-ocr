@@ -5,20 +5,20 @@
 //! preprocessing components.
 
 use super::builder_utils::build_optional_adapter;
-use crate::core::config::OrtSessionConfig;
-use crate::core::constants::DEFAULT_REC_IMAGE_SHAPE;
-use crate::core::errors::OCRError;
-use crate::core::traits::OrtConfigurable;
-use crate::core::traits::adapter::{AdapterBuilder, ModelAdapter};
-use crate::core::traits::task::ImageTaskInput;
-use crate::domain::adapters::{
+use oar_ocr_core::core::config::OrtSessionConfig;
+use oar_ocr_core::core::constants::DEFAULT_REC_IMAGE_SHAPE;
+use oar_ocr_core::core::errors::OCRError;
+use oar_ocr_core::core::traits::OrtConfigurable;
+use oar_ocr_core::core::traits::adapter::{AdapterBuilder, ModelAdapter};
+use oar_ocr_core::core::traits::task::ImageTaskInput;
+use oar_ocr_core::domain::adapters::{
     DocumentOrientationAdapter, DocumentOrientationAdapterBuilder, TextDetectionAdapter,
     TextDetectionAdapterBuilder, TextLineOrientationAdapter, TextLineOrientationAdapterBuilder,
     TextRecognitionAdapter, TextRecognitionAdapterBuilder, UVDocRectifierAdapter,
     UVDocRectifierAdapterBuilder,
 };
-use crate::domain::tasks::{TextDetectionConfig, TextRecognitionConfig};
-use crate::processors::BoundingBox;
+use oar_ocr_core::domain::tasks::{TextDetectionConfig, TextRecognitionConfig};
+use oar_ocr_core::processors::BoundingBox;
 use std::path::PathBuf;
 use std::sync::Arc;
 

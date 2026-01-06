@@ -1,12 +1,7 @@
-//! Common utilities for examples.
-
-pub mod device_config;
+//! Common utilities for oar-ocr-vl examples.
 
 /// Initializes the tracing subscriber for logging in examples.
 pub fn init_tracing() {
-    // Reference utility functions to prevent dead_code warnings when building with --all-features
-    let _ = device_config::parse_device_config;
-
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()

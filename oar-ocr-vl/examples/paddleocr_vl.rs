@@ -6,7 +6,7 @@
 //! # Usage
 //!
 //! ```bash
-//! cargo run --features vl --example paddleocr_vl -- [OPTIONS] <IMAGES>...
+//! cargo run -p oar-ocr-vl --example paddleocr_vl -- [OPTIONS] <IMAGES>...
 //! ```
 //!
 //! # Arguments
@@ -21,43 +21,37 @@
 //!
 //! ```bash
 //! # OCR (text recognition)
-//! cargo run --features vl --example paddleocr_vl -- \
+//! cargo run -p oar-ocr-vl --example paddleocr_vl -- \
 //!     -m PaddleOCR-VL --task ocr document.jpg
 //!
 //! # Table recognition
-//! cargo run --features vl --example paddleocr_vl -- \
+//! cargo run -p oar-ocr-vl --example paddleocr_vl -- \
 //!     -m PaddleOCR-VL --task table table.jpg
 //!
 //! # Formula recognition
-//! cargo run --features vl --example paddleocr_vl -- \
+//! cargo run -p oar-ocr-vl --example paddleocr_vl -- \
 //!     -m PaddleOCR-VL --task formula formula.jpg
 //!
 //! # Chart recognition
-//! cargo run --features vl --example paddleocr_vl -- \
+//! cargo run -p oar-ocr-vl --example paddleocr_vl -- \
 //!     -m PaddleOCR-VL --task chart chart.jpg
 //!
 //! # Run on CUDA GPU
-//! cargo run --features vl,cuda --example paddleocr_vl -- \
+//! cargo run -p oar-ocr-vl --features cuda --example paddleocr_vl -- \
 //!     -m PaddleOCR-VL -d cuda --task ocr document.jpg
 //! ```
 
-#[cfg(feature = "vl")]
 mod utils;
 
 use clap::Parser;
 use std::path::PathBuf;
-
-#[cfg(feature = "vl")]
 use std::time::Instant;
-#[cfg(feature = "vl")]
+
 use tracing::{error, info};
 
-#[cfg(feature = "vl")]
-use oar_ocr::utils::load_image;
-#[cfg(feature = "vl")]
-use oar_ocr::vl::{PaddleOcrVl, PaddleOcrVlTask};
-#[cfg(feature = "vl")]
-use utils::candle_device::parse_candle_device;
+use oar_ocr_core::utils::load_image;
+use oar_ocr_vl::utils::parse_device;
+use oar_ocr_vl::{PaddleOcrVl, PaddleOcrVlTask};
 
 /// Command-line arguments for the PaddleOCR-VL example
 #[derive(Parser)]
@@ -85,14 +79,6 @@ struct Args {
     max_tokens: usize,
 }
 
-#[cfg(not(feature = "vl"))]
-fn main() {
-    eprintln!("This example requires the 'vl' feature.");
-    eprintln!("Run with: cargo run --features vl --example paddleocr_vl -- ...");
-    std::process::exit(1);
-}
-
-#[cfg(feature = "vl")]
 fn parse_task(task_str: &str) -> Result<PaddleOcrVlTask, Box<dyn std::error::Error>> {
     match task_str.to_lowercase().as_str() {
         "ocr" => Ok(PaddleOcrVlTask::Ocr),
@@ -107,7 +93,6 @@ fn parse_task(task_str: &str) -> Result<PaddleOcrVlTask, Box<dyn std::error::Err
     }
 }
 
-#[cfg(feature = "vl")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     utils::init_tracing();
 
@@ -145,7 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Determine device
-    let device = parse_candle_device(&args.device)?;
+    let device = parse_device(&args.device)?;
     info!("Using device: {:?}", device);
 
     // Load model

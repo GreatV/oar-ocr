@@ -1,7 +1,7 @@
 use super::config::PaddleOcrVlImageProcessorConfig;
-use crate::core::OCRError;
 use candle_core::{DType, Device, Tensor};
 use image::{RgbImage, imageops::FilterType};
+use oar_ocr_core::core::OCRError;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
@@ -151,7 +151,7 @@ pub fn preprocess_images(
             device,
         )
         .map_err(|e| OCRError::Processing {
-            kind: crate::core::errors::ProcessingStage::TensorOperation,
+            kind: oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             context: "PaddleOCR-VL: failed to create pixel_values tensor".to_string(),
             source: Box::new(e),
         })?;
@@ -161,7 +161,7 @@ pub fn preprocess_images(
     }
 
     let pixel_values = Tensor::cat(&all_patches, 0).map_err(|e| OCRError::Processing {
-        kind: crate::core::errors::ProcessingStage::TensorOperation,
+        kind: oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
         context: "PaddleOCR-VL: failed to concatenate pixel_values tensors".to_string(),
         source: Box::new(e),
     })?;
@@ -170,7 +170,7 @@ pub fn preprocess_images(
     let pixel_values = pixel_values
         .to_dtype(dtype)
         .map_err(|e| OCRError::Processing {
-            kind: crate::core::errors::ProcessingStage::TensorOperation,
+            kind: oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             context: "PaddleOCR-VL: failed to convert pixel_values to target dtype".to_string(),
             source: Box::new(e),
         })?;

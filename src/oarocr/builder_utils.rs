@@ -1,9 +1,9 @@
 //! Shared utilities for builder patterns in oarocr module.
 
-use crate::core::OCRError;
-use crate::core::config::OrtSessionConfig;
-use crate::core::traits::OrtConfigurable;
-use crate::core::traits::adapter::AdapterBuilder;
+use oar_ocr_core::core::OCRError;
+use oar_ocr_core::core::config::OrtSessionConfig;
+use oar_ocr_core::core::traits::OrtConfigurable;
+use oar_ocr_core::core::traits::adapter::AdapterBuilder;
 use std::path::PathBuf;
 
 /// Builds an optional adapter from a model path using a builder factory.

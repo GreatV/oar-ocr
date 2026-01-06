@@ -229,24 +229,24 @@ let ort_config = OrtSessionConfig::new()
 
 ## PaddleOCR-VL (Vision-Language)
 
-PaddleOCR-VL is an optional Vision-Language model (VLM) integration. Our implementation uses [Candle](https://github.com/huggingface/candle) for inference.
+[PaddleOCR-VL](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) is an ultra-compact (0.9B parameters) Vision-Language Model for document parsing, released by Baidu's PaddlePaddle team. It supports **109 languages** and excels in recognizing complex elements including text, tables, formulas, and 11 chart types. The model achieves SOTA performance in both page-level document parsing and element-level recognition while maintaining minimal resource consumption.
+
+This functionality is available in the separate `oar-ocr-vl` crate, using [Candle](https://github.com/huggingface/candle) for native Rust inference.
 
 ### Installation
 
-Enable the feature in your `Cargo.toml`:
+Add the VL crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oar-ocr = { version = "0.5", features = ["vl"] }
-candle-core = "0.9.2-alpha.2"  # Must match oar-ocr's candle version
+oar-ocr-vl = "0.5"
 ```
 
-For GPU acceleration, also enable CUDA:
+For GPU acceleration, enable CUDA:
 
 ```toml
 [dependencies]
-oar-ocr = { version = "0.5", features = ["vl", "cuda"] }
-candle-core = { version = "0.9.2-alpha.2", features = ["cuda"] }
+oar-ocr-vl = { version = "0.5", features = ["cuda"] }
 ```
 
 ### Downloading the Model
@@ -265,12 +265,14 @@ huggingface-cli download PaddlePaddle/PaddleOCR-VL --local-dir PaddleOCR-VL
 ### Basic Usage
 
 ```rust,no_run
-use oar_ocr::prelude::*;
+use oar_ocr_core::utils::load_image;
+use oar_ocr_vl::{PaddleOcrVl, PaddleOcrVlTask};
+use oar_ocr_vl::utils::parse_device;
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = load_image(Path::new("document.png"))?;
-    let device = candle_core::Device::Cpu;
+    let device = parse_device("cpu")?;  // or "cuda", "cuda:0"
     let vl = PaddleOcrVl::from_dir("PaddleOCR-VL", device)?;
 
     // Element-level OCR
@@ -279,6 +281,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+```
+
+### Running the Example
+
+```bash
+# Run on CPU
+cargo run -p oar-ocr-vl --example paddleocr_vl -- \
+    -m PaddleOCR-VL --task ocr document.jpg
+
+# Run on CUDA GPU
+cargo run -p oar-ocr-vl --features cuda --example paddleocr_vl -- \
+    -m PaddleOCR-VL -d cuda --task ocr document.jpg
 ```
 
 ### Supported Tasks
@@ -292,7 +306,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## UniRec
 
-[UniRec](https://github.com/Topdu/OpenOCR) is a lightweight unified recognition model that handles text, formulas, and tables in a single model. It's faster and smaller than PaddleOCR-VL while maintaining good accuracy.
+[UniRec](https://github.com/Topdu/OpenOCR) is a unified recognition model with only **0.1B parameters**, developed by the FVL Laboratory at Fudan University as part of the OpenOCR project. It is designed for high-accuracy and efficient recognition of plain text (words, lines, paragraphs), mathematical formulas (single-line, multi-line), and mixed content in both Chinese and English. Despite its small size, it achieves performance comparable to or better than much larger vision-language models. It's also available in the `oar-ocr-vl` crate.
 
 ### Downloading the Model
 
@@ -303,12 +317,14 @@ huggingface-cli download Topdu/UniRec-0.1B --local-dir models/unirec-0.1b
 ### Basic Usage
 
 ```rust
-use oar_ocr::prelude::*;
+use oar_ocr_core::utils::load_image;
+use oar_ocr_vl::UniRec;
+use oar_ocr_vl::utils::parse_device;
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = load_image(Path::new("formula.png"))?;
-    let device = candle_core::Device::Cpu;
+    let device = parse_device("cpu")?;  // or "cuda", "cuda:0"
 
     // Load UniRec model
     let model = UniRec::from_dir("models/unirec-0.1b", device)?;
@@ -321,6 +337,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Running the Example
+
+```bash
+# Run on CPU
+cargo run -p oar-ocr-vl --example unirec -- \
+    -m models/unirec-0.1b formula.jpg
+
+# Run on CUDA GPU
+cargo run -p oar-ocr-vl --features cuda --example unirec -- \
+    -m models/unirec-0.1b -d cuda formula.jpg
+```
+
 ## DocParser
 
 DocParser provides a unified API for two-stage document parsing that combines layout detection with VL-based recognition. It supports both UniRec and PaddleOCR-VL as recognition backends.
@@ -328,12 +356,14 @@ DocParser provides a unified API for two-stage document parsing that combines la
 ### Basic Usage
 
 ```rust
-use oar_ocr::prelude::*;
-use oar_ocr::vl::{DocParser, DocParserConfig};
+use oar_ocr_core::utils::load_image;
+use oar_ocr_core::predictors::LayoutDetectionPredictor;
+use oar_ocr_vl::{DocParser, DocParserConfig, UniRec, PaddleOcrVl};
+use oar_ocr_vl::utils::parse_device;
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let device = candle_core::Device::Cpu;
+    let device = parse_device("cpu")?;
 
     // Initialize layout detector
     let layout = LayoutDetectionPredictor::builder()
@@ -357,6 +387,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+```
+
+### Running the Example
+
+```bash
+# Using UniRec (default, lighter)
+cargo run -p oar-ocr-vl --example doc_parser -- \
+    --model-name unirec \
+    --model-dir models/unirec-0.1b \
+    --layout-model models/pp-doclayoutv2.onnx \
+    document.jpg
+
+# Using PaddleOCR-VL (heavier, more accurate)
+cargo run -p oar-ocr-vl --example doc_parser -- \
+    --model-name paddleocr-vl \
+    --model-dir PaddleOCR-VL \
+    --layout-model models/pp-doclayoutv2.onnx \
+    document.jpg
 ```
 
 ## Configuration Options

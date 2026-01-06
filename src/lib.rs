@@ -99,16 +99,32 @@
 //! # }
 //! ```
 
-// Core modules
-pub mod core;
-pub mod domain;
-pub mod models;
+// Re-export core modules from oar-ocr-core
+pub mod core {
+    pub use oar_ocr_core::core::*;
+}
 
-pub mod oarocr;
-pub mod predictors;
-pub mod processors;
+pub mod domain {
+    pub use oar_ocr_core::domain::*;
+}
+
+pub mod models {
+    pub use oar_ocr_core::models::*;
+}
+
+pub mod processors {
+    pub use oar_ocr_core::processors::*;
+}
+
+pub mod predictors {
+    pub use oar_ocr_core::predictors::*;
+}
+
+// Utils module with re-exports from core and OCR-specific visualization
 pub mod utils;
-pub mod vl;
+
+// High-level OCR API (remains in main crate)
+pub mod oarocr;
 
 // Re-export derive macros for convenient use
 pub use oar_ocr_derive::{ConfigValidator, TaskPredictorBuilder};
@@ -138,18 +154,11 @@ pub mod prelude {
     };
 
     // Error Handling
-    pub use crate::core::{OCRError, OcrResult};
+    pub use oar_ocr_core::core::{OCRError, OcrResult};
 
     // Image Utilities
-    pub use crate::utils::{load_image, load_images};
+    pub use oar_ocr_core::utils::{load_image, load_images};
 
     // Predictors (high-level API)
-    pub use crate::predictors::*;
-
-    // Optional Vision-Language models
-    #[cfg(feature = "vl")]
-    pub use crate::vl::{
-        DocParser, DocParserConfig, PaddleOcrVl, PaddleOcrVlTask, RecognitionBackend,
-        RecognitionTask, UniRec,
-    };
+    pub use oar_ocr_core::predictors::*;
 }
