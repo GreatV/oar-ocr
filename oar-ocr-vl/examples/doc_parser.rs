@@ -7,41 +7,33 @@
 //!
 //! ```bash
 //! # Using UniRec model (default, lighter)
-//! cargo run --features vl --example doc_parser -- \
+//! cargo run -p oar-ocr-vl --example doc_parser -- \
 //!     --model-name unirec \
 //!     --model-dir models/unirec-0.1b \
 //!     --layout-model models/pp-doclayoutv2.onnx \
 //!     document.jpg
 //!
 //! # Using PaddleOCR-VL model (heavier, more accurate)
-//! cargo run --features vl --example doc_parser -- \
+//! cargo run -p oar-ocr-vl --example doc_parser -- \
 //!     --model-name paddleocr-vl \
 //!     --model-dir PaddleOCR-VL \
 //!     --layout-model models/pp-doclayoutv2.onnx \
 //!     document.jpg
 //! ```
 
-#[cfg(feature = "vl")]
 mod utils;
 
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
-
-#[cfg(feature = "vl")]
 use std::time::Instant;
-#[cfg(feature = "vl")]
+
 use tracing::{error, info};
 
-#[cfg(feature = "vl")]
-use oar_ocr::domain::LayoutDetectionConfig;
-#[cfg(feature = "vl")]
-use oar_ocr::predictors::LayoutDetectionPredictor;
-#[cfg(feature = "vl")]
-use oar_ocr::utils::load_image;
-#[cfg(feature = "vl")]
-use oar_ocr::vl::{DocParser, DocParserConfig};
-#[cfg(feature = "vl")]
-use utils::candle_device::parse_candle_device;
+use oar_ocr_core::domain::LayoutDetectionConfig;
+use oar_ocr_core::predictors::LayoutDetectionPredictor;
+use oar_ocr_core::utils::load_image;
+use oar_ocr_vl::utils::parse_device;
+use oar_ocr_vl::{DocParser, DocParserConfig};
 
 /// Recognition model type
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -95,16 +87,8 @@ struct Args {
     verbose: bool,
 }
 
-#[cfg(not(feature = "vl"))]
-fn main() {
-    eprintln!("This example requires the 'vl' feature.");
-    eprintln!("Run with: cargo run --features vl --example doc_parser -- ...");
-    std::process::exit(1);
-}
-
-#[cfg(feature = "vl")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use oar_ocr::vl::{PaddleOcrVl, UniRec};
+    use oar_ocr_vl::{PaddleOcrVl, UniRec};
 
     utils::init_tracing();
     let args = Args::parse();
@@ -135,7 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(dir)?;
     }
 
-    let device = parse_candle_device(&args.device)?;
+    let device = parse_device(&args.device)?;
     info!("Device: {:?}", device);
 
     // Load layout model
@@ -191,8 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(feature = "vl")]
-fn process_images<B: oar_ocr::vl::RecognitionBackend>(
+fn process_images<B: oar_ocr_vl::RecognitionBackend>(
     parser: &DocParser<B>,
     layout_predictor: &LayoutDetectionPredictor,
     images: &[PathBuf],
@@ -224,7 +207,7 @@ fn process_images<B: oar_ocr::vl::RecognitionBackend>(
                 info!("  Elements: {}", result.layout_elements.len());
 
                 // Get markdown (OpenOCR-compatible) from the parsed result.
-                let markdown = oar_ocr::vl::utils::to_markdown_openocr(
+                let markdown = oar_ocr_vl::utils::to_markdown_openocr(
                     &result.layout_elements,
                     ignore_labels,
                     true,

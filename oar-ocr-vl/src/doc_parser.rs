@@ -14,16 +14,16 @@ use super::utils::{
     DetectedBox, calculate_overlap_ratio, calculate_projection_overlap_ratio, convert_otsl_to_html,
     crop_margin, filter_overlap_boxes, truncate_repetitive_content,
 };
-use crate::core::{OCRError, OpaqueError};
-use crate::domain::structure::{
-    LayoutElement, LayoutElementType, StructureResult, TableResult, TableType,
-};
-use crate::predictors::LayoutDetectionPredictor;
-use crate::processors::BoundingBox;
-use crate::processors::layout_sorting::sort_layout_enhanced;
-use crate::utils::BBoxCrop;
 use image::RgbImage;
 use image::{Rgb, imageops};
+use oar_ocr_core::core::{OCRError, OpaqueError};
+use oar_ocr_core::domain::structure::{
+    LayoutElement, LayoutElementType, StructureResult, TableResult, TableType,
+};
+use oar_ocr_core::predictors::LayoutDetectionPredictor;
+use oar_ocr_core::processors::BoundingBox;
+use oar_ocr_core::processors::layout_sorting::sort_layout_enhanced;
+use oar_ocr_core::utils::BBoxCrop;
 use std::sync::Arc;
 
 /// Recognition task for a layout element.
@@ -425,10 +425,8 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
     }
 }
 
-#[cfg(feature = "vl")]
 use super::unirec::UniRec;
 
-#[cfg(feature = "vl")]
 impl RecognitionBackend for UniRec {
     fn recognize(
         &self,
@@ -453,10 +451,8 @@ impl RecognitionBackend for UniRec {
     }
 }
 
-#[cfg(feature = "vl")]
 use super::paddleocr_vl::{PaddleOcrVl, PaddleOcrVlTask};
 
-#[cfg(feature = "vl")]
 impl RecognitionBackend for PaddleOcrVl {
     fn recognize(
         &self,
@@ -608,11 +604,9 @@ fn format_text(text: &str) -> String {
     result.trim().to_string()
 }
 
-#[cfg(feature = "vl")]
 /// Document parser using UniRec backend.
 pub type UniRecDocParser<'a> = DocParser<'a, UniRec>;
 
-#[cfg(feature = "vl")]
 /// Document parser using PaddleOCR-VL backend.
 pub type PaddleOcrVlDocParser<'a> = DocParser<'a, PaddleOcrVl>;
 

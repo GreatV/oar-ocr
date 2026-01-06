@@ -1,8 +1,8 @@
 use super::config::{PaddleOcrVlConfig, PaddleOcrVlVisionConfig};
-use crate::core::OCRError;
-use crate::vl::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
+use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, Tensor};
 use candle_nn::Module;
+use oar_ocr_core::core::OCRError;
 
 #[derive(Debug, Clone)]
 pub struct Projector {
@@ -71,7 +71,7 @@ impl Projector {
 
             let d = feat.dim(D::Minus1).map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: projector dim failed",
                     e,
                 )
@@ -83,7 +83,7 @@ impl Projector {
                 .reshape((t, h, w, d))
                 .map_err(|e| {
                     candle_to_ocr_processing(
-                        crate::core::errors::ProcessingStage::TensorOperation,
+                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                         "PaddleOCR-VL: projector reshape thwd failed",
                         e,
                     )
@@ -91,7 +91,7 @@ impl Projector {
                 .reshape((t, hb, m, wb, m, d))
                 .map_err(|e| {
                     candle_to_ocr_processing(
-                        crate::core::errors::ProcessingStage::TensorOperation,
+                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                         "PaddleOCR-VL: projector reshape blocks failed",
                         e,
                     )
@@ -99,7 +99,7 @@ impl Projector {
                 .permute((0, 1, 3, 2, 4, 5))
                 .map_err(|e| {
                     candle_to_ocr_processing(
-                        crate::core::errors::ProcessingStage::TensorOperation,
+                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                         "PaddleOCR-VL: projector permute failed",
                         e,
                     )
@@ -107,7 +107,7 @@ impl Projector {
                 .reshape((t * hb * wb, m * m * d))
                 .map_err(|e| {
                     candle_to_ocr_processing(
-                        crate::core::errors::ProcessingStage::TensorOperation,
+                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                         "PaddleOCR-VL: projector merge reshape failed",
                         e,
                     )
@@ -129,7 +129,7 @@ impl Projector {
         let refs: Vec<&Tensor> = projected.iter().collect();
         Tensor::cat(&refs, 0).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: projector concat failed",
                 e,
             )

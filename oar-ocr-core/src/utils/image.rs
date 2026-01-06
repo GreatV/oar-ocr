@@ -85,8 +85,8 @@ pub fn load_image_from_memory(bytes: &[u8]) -> Result<RgbImage, OCRError> {
 ///
 /// This function will return an `OCRError::ImageLoad` error if the image cannot
 /// be loaded from the specified path, or if there is an error during conversion.
-pub fn load_image(path: &Path) -> Result<RgbImage, OCRError> {
-    let img = open_image_any_format(path).map_err(OCRError::ImageLoad)?;
+pub fn load_image<P: AsRef<Path>>(path: P) -> Result<RgbImage, OCRError> {
+    let img = open_image_any_format(path.as_ref()).map_err(OCRError::ImageLoad)?;
     Ok(dynamic_to_rgb(img))
 }
 

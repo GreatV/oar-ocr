@@ -29,23 +29,41 @@ jobs:
           # Extract version from the Git tag (e.g., 'v1.2.3' -> '1.2.3')
           TAG_VERSION=${GITHUB_REF#refs/tags/v}
 
-          # Extract version from main crate Cargo.toml
-          MAIN_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "oar-ocr") | .version')
-
-          # Extract version from derive crate Cargo.toml
+          # Extract versions from all crates
           DERIVE_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "oar-ocr-derive") | .version')
+          CORE_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "oar-ocr-core") | .version')
+          MAIN_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "oar-ocr") | .version')
+          VL_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "oar-ocr-vl") | .version')
 
           echo "Tag version: $TAG_VERSION"
-          echo "oar-ocr version: $MAIN_VERSION"
           echo "oar-ocr-derive version: $DERIVE_VERSION"
+          echo "oar-ocr-core version: $CORE_VERSION"
+          echo "oar-ocr version: $MAIN_VERSION"
+          echo "oar-ocr-vl version: $VL_VERSION"
 
-          if [ "$MAIN_VERSION" != "$TAG_VERSION" ]; then
-            echo "Error: Version in oar-ocr Cargo.toml ($MAIN_VERSION) does not match the Git tag ($TAG_VERSION)."
-            exit 1
-          fi
+          FAILED=0
 
           if [ "$DERIVE_VERSION" != "$TAG_VERSION" ]; then
-            echo "Error: Version in oar-ocr-derive Cargo.toml ($DERIVE_VERSION) does not match the Git tag ($TAG_VERSION)."
+            echo "Error: oar-ocr-derive version ($DERIVE_VERSION) does not match Git tag ($TAG_VERSION)."
+            FAILED=1
+          fi
+
+          if [ "$CORE_VERSION" != "$TAG_VERSION" ]; then
+            echo "Error: oar-ocr-core version ($CORE_VERSION) does not match Git tag ($TAG_VERSION)."
+            FAILED=1
+          fi
+
+          if [ "$MAIN_VERSION" != "$TAG_VERSION" ]; then
+            echo "Error: oar-ocr version ($MAIN_VERSION) does not match Git tag ($TAG_VERSION)."
+            FAILED=1
+          fi
+
+          if [ "$VL_VERSION" != "$TAG_VERSION" ]; then
+            echo "Error: oar-ocr-vl version ($VL_VERSION) does not match Git tag ($TAG_VERSION)."
+            FAILED=1
+          fi
+
+          if [ "$FAILED" -eq 1 ]; then
             exit 1
           fi
 
@@ -61,7 +79,27 @@ jobs:
           echo "Waiting for crates.io to index oar-ocr-derive..."
           sleep 30
 
+      - name: Publish oar-ocr-core to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p oar-ocr-core
+
+      - name: Wait for crates.io index update
+        run: |
+          echo "Waiting for crates.io to index oar-ocr-core..."
+          sleep 30
+
       - name: Publish oar-ocr to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p oar-ocr
+
+      - name: Wait for crates.io index update
+        run: |
+          echo "Waiting for crates.io to index oar-ocr..."
+          sleep 30
+
+      - name: Publish oar-ocr-vl to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p oar-ocr-vl

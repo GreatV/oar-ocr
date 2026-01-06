@@ -1,8 +1,8 @@
 use super::config::PaddleOcrVlConfig;
-use crate::core::OCRError;
-use crate::vl::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
+use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::Module;
+use oar_ocr_core::core::OCRError;
 
 #[derive(Debug, Default, Clone)]
 pub struct KvCache {
@@ -30,7 +30,7 @@ impl RotaryEmbedding {
         }
         let inv_freq = Tensor::from_vec(inv_freq, (half,), device).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "RotaryEmbedding: failed to create inv_freq tensor",
                 e,
             )
@@ -46,14 +46,14 @@ impl RotaryEmbedding {
         // position_ids: (3, batch, seq)
         let position_ids = position_ids.to_dtype(DType::F32).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "RotaryEmbedding: position_ids cast to f32 failed",
                 e,
             )
         })?;
         let inv_len = self.inv_freq.dims1().map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "RotaryEmbedding: inv_freq dims1 failed",
                 e,
             )
@@ -63,7 +63,7 @@ impl RotaryEmbedding {
             .reshape((1usize, 1usize, 1usize, inv_len))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "RotaryEmbedding: inv_freq reshape failed",
                     e,
                 )
@@ -72,7 +72,7 @@ impl RotaryEmbedding {
             .unsqueeze(3)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "RotaryEmbedding: position_ids unsqueeze failed",
                     e,
                 )
@@ -80,14 +80,14 @@ impl RotaryEmbedding {
             .broadcast_mul(&inv)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "RotaryEmbedding: rotary freqs multiply failed",
                     e,
                 )
             })?;
         let emb = Tensor::cat(&[&freqs, &freqs], candle_core::D::Minus1).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "RotaryEmbedding: rotary emb cat failed",
                 e,
             )
@@ -96,7 +96,7 @@ impl RotaryEmbedding {
             .cos()
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "RotaryEmbedding: rotary cos failed",
                     e,
                 )
@@ -104,7 +104,7 @@ impl RotaryEmbedding {
             .to_dtype(dtype)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "RotaryEmbedding: rotary cos cast failed",
                     e,
                 )
@@ -113,7 +113,7 @@ impl RotaryEmbedding {
             .sin()
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "RotaryEmbedding: rotary sin failed",
                     e,
                 )
@@ -121,7 +121,7 @@ impl RotaryEmbedding {
             .to_dtype(dtype)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "RotaryEmbedding: rotary sin cast failed",
                     e,
                 )
@@ -164,7 +164,7 @@ fn select_mrope(cos_or_sin: &Tensor, mrope_section: &[usize]) -> Result<Tensor, 
         let next = offset + sec;
         let seg = cos_or_sin.i((.., .., .., offset..next)).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 format!(
                     "PaddleOCR-VL: mrope slice failed at chunk {} (offset {}..{})",
                     i, offset, next
@@ -174,7 +174,7 @@ fn select_mrope(cos_or_sin: &Tensor, mrope_section: &[usize]) -> Result<Tensor, 
         })?;
         let picked = seg.i((i % 3, .., .., ..)).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 format!(
                     "PaddleOCR-VL: mrope pick failed at chunk {} (dim {})",
                     i,
@@ -189,14 +189,14 @@ fn select_mrope(cos_or_sin: &Tensor, mrope_section: &[usize]) -> Result<Tensor, 
     let refs: Vec<&Tensor> = chunks.iter().collect();
     let cat = Tensor::cat(&refs, D::Minus1).map_err(|e| {
         candle_to_ocr_processing(
-            crate::core::errors::ProcessingStage::TensorOperation,
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "PaddleOCR-VL: mrope cat failed",
             e,
         )
     })?;
     cat.unsqueeze(1).map_err(|e| {
         candle_to_ocr_processing(
-            crate::core::errors::ProcessingStage::TensorOperation,
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "PaddleOCR-VL: mrope unsqueeze failed",
             e,
         )
@@ -214,7 +214,7 @@ fn apply_multimodal_rotary_pos_emb(
     let sin = select_mrope(sin, mrope_section)?;
     let q_mul = q.broadcast_mul(&cos).map_err(|e| {
         candle_to_ocr_processing(
-            crate::core::errors::ProcessingStage::TensorOperation,
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "PaddleOCR-VL: mrope q*cos failed",
             e,
         )
@@ -222,14 +222,14 @@ fn apply_multimodal_rotary_pos_emb(
     let q_half = rotate_half(q)?;
     let q_half_mul = q_half.broadcast_mul(&sin).map_err(|e| {
         candle_to_ocr_processing(
-            crate::core::errors::ProcessingStage::TensorOperation,
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "PaddleOCR-VL: mrope rotate_half(q)*sin failed",
             e,
         )
     })?;
     let q_rot = (&q_mul + &q_half_mul).map_err(|e| {
         candle_to_ocr_processing(
-            crate::core::errors::ProcessingStage::TensorOperation,
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "PaddleOCR-VL: mrope apply on q failed",
             e,
         )
@@ -237,7 +237,7 @@ fn apply_multimodal_rotary_pos_emb(
 
     let k_mul = k.broadcast_mul(&cos).map_err(|e| {
         candle_to_ocr_processing(
-            crate::core::errors::ProcessingStage::TensorOperation,
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "PaddleOCR-VL: mrope k*cos failed",
             e,
         )
@@ -245,14 +245,14 @@ fn apply_multimodal_rotary_pos_emb(
     let k_half = rotate_half(k)?;
     let k_half_mul = k_half.broadcast_mul(&sin).map_err(|e| {
         candle_to_ocr_processing(
-            crate::core::errors::ProcessingStage::TensorOperation,
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "PaddleOCR-VL: mrope rotate_half(k)*sin failed",
             e,
         )
     })?;
     let k_rot = (&k_mul + &k_half_mul).map_err(|e| {
         candle_to_ocr_processing(
-            crate::core::errors::ProcessingStage::TensorOperation,
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "PaddleOCR-VL: mrope apply on k failed",
             e,
         )
@@ -266,7 +266,7 @@ fn repeat_kv(hidden_states: &Tensor, n_rep: usize) -> Result<Tensor, OCRError> {
     }
     let (b, kv_heads, slen, head_dim) = hidden_states.dims4().map_err(|e| {
         candle_to_ocr_processing(
-            crate::core::errors::ProcessingStage::TensorOperation,
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "PaddleOCR-VL: repeat_kv dims failed",
             e,
         )
@@ -275,7 +275,7 @@ fn repeat_kv(hidden_states: &Tensor, n_rep: usize) -> Result<Tensor, OCRError> {
         .unsqueeze(2)
         .map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: repeat_kv unsqueeze failed",
                 e,
             )
@@ -283,7 +283,7 @@ fn repeat_kv(hidden_states: &Tensor, n_rep: usize) -> Result<Tensor, OCRError> {
         .expand((b, kv_heads, n_rep, slen, head_dim))
         .map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: repeat_kv expand failed",
                 e,
             )
@@ -291,7 +291,7 @@ fn repeat_kv(hidden_states: &Tensor, n_rep: usize) -> Result<Tensor, OCRError> {
         .reshape((b, kv_heads * n_rep, slen, head_dim))
         .map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: repeat_kv reshape failed",
                 e,
             )

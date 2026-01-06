@@ -1,8 +1,8 @@
 use super::config::PaddleOcrVlVisionConfig;
-use crate::core::OCRError;
-use crate::vl::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
+use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::Module;
+use oar_ocr_core::core::OCRError;
 use rayon::prelude::*;
 
 /// SigLIP-style 2D rotary embedding for vision encoder
@@ -20,7 +20,7 @@ impl SigLIPRotaryEmbedding {
         }
         let inv_freq = Tensor::from_vec(inv_freq, (dim / 2,), device).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: failed to create vision inv_freq tensor",
                 e,
             )
@@ -33,7 +33,7 @@ impl SigLIPRotaryEmbedding {
         let seq: Vec<f32> = (0..seqlen).map(|i| i as f32).collect();
         let seq = Tensor::from_vec(seq, (seqlen,), device).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision rope seq tensor failed",
                 e,
             )
@@ -41,7 +41,7 @@ impl SigLIPRotaryEmbedding {
         // outer product: (seqlen, dim/2)
         let inv_freq = self.inv_freq.to_dtype(DType::F32).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision inv_freq cast failed",
                 e,
             )
@@ -51,21 +51,21 @@ impl SigLIPRotaryEmbedding {
             .unsqueeze(1)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: vision seq unsqueeze failed",
                     e,
                 )
             })?
             .broadcast_mul(&inv_freq.unsqueeze(0).map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: vision inv_freq unsqueeze failed",
                     e,
                 )
             })?)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: vision rope outer product failed",
                     e,
                 )
@@ -91,14 +91,14 @@ fn apply_rotary_pos_emb_vision(
 
     let q = q.to_dtype(DType::F32).map_err(|e| {
         candle_to_ocr_processing(
-            crate::core::errors::ProcessingStage::TensorOperation,
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "PaddleOCR-VL: vision rope q cast failed",
             e,
         )
     })?;
     let k = k.to_dtype(DType::F32).map_err(|e| {
         candle_to_ocr_processing(
-            crate::core::errors::ProcessingStage::TensorOperation,
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "PaddleOCR-VL: vision rope k cast failed",
             e,
         )
@@ -109,7 +109,7 @@ fn apply_rotary_pos_emb_vision(
         .unsqueeze(0)
         .map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision cos unsqueeze0 failed",
                 e,
             )
@@ -117,7 +117,7 @@ fn apply_rotary_pos_emb_vision(
         .unsqueeze(2)
         .map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision cos unsqueeze2 failed",
                 e,
             )
@@ -125,7 +125,7 @@ fn apply_rotary_pos_emb_vision(
         .to_dtype(DType::F32)
         .map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision cos cast failed",
                 e,
             )
@@ -135,7 +135,7 @@ fn apply_rotary_pos_emb_vision(
         .unsqueeze(0)
         .map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision sin unsqueeze0 failed",
                 e,
             )
@@ -143,7 +143,7 @@ fn apply_rotary_pos_emb_vision(
         .unsqueeze(2)
         .map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision sin unsqueeze2 failed",
                 e,
             )
@@ -151,7 +151,7 @@ fn apply_rotary_pos_emb_vision(
         .to_dtype(DType::F32)
         .map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision sin cast failed",
                 e,
             )
@@ -163,21 +163,21 @@ fn apply_rotary_pos_emb_vision(
         .broadcast_mul(&cos)
         .map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision q*cos failed",
                 e,
             )
         })?
         .broadcast_add(&q_rot.broadcast_mul(&sin).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision rotate_half(q)*sin failed",
                 e,
             )
         })?)
         .map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision q rope add failed",
                 e,
             )
@@ -188,21 +188,21 @@ fn apply_rotary_pos_emb_vision(
         .broadcast_mul(&cos)
         .map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision k*cos failed",
                 e,
             )
         })?
         .broadcast_add(&k_rot.broadcast_mul(&sin).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision rotate_half(k)*sin failed",
                 e,
             )
         })?)
         .map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision k rope add failed",
                 e,
             )
@@ -210,14 +210,14 @@ fn apply_rotary_pos_emb_vision(
 
     let q_embed = q_embed.to_dtype(orig_dtype).map_err(|e| {
         candle_to_ocr_processing(
-            crate::core::errors::ProcessingStage::TensorOperation,
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "PaddleOCR-VL: vision q_embed cast back failed",
             e,
         )
     })?;
     let k_embed = k_embed.to_dtype(orig_dtype).map_err(|e| {
         candle_to_ocr_processing(
-            crate::core::errors::ProcessingStage::TensorOperation,
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "PaddleOCR-VL: vision k_embed cast back failed",
             e,
         )
@@ -520,7 +520,7 @@ impl VisionEmbeddings {
         let pos_w = self.position_embedding.embeddings();
         let (num_positions, dim) = pos_w.dims2().map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision position_embedding dims2 failed",
                 e,
             )
@@ -547,7 +547,7 @@ impl VisionEmbeddings {
             .to_dtype(DType::F32)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: vision position_embedding cast to f32 failed",
                     e,
                 )
@@ -555,7 +555,7 @@ impl VisionEmbeddings {
             .flatten_all()
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: vision position_embedding flatten failed",
                     e,
                 )
@@ -563,7 +563,7 @@ impl VisionEmbeddings {
             .to_vec1::<f32>()
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: vision position_embedding to_vec failed",
                     e,
                 )
@@ -573,7 +573,7 @@ impl VisionEmbeddings {
         Tensor::from_vec(out, (height * width, dim), device)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: vision interpolated pos embedding tensor failed",
                     e,
                 )
@@ -581,7 +581,7 @@ impl VisionEmbeddings {
             .to_dtype(dtype)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: vision interpolated pos embedding cast failed",
                     e,
                 )
@@ -670,7 +670,7 @@ impl VisionModel {
         let h_ids = Tensor::new(height_position_ids.clone(), device)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: vision height_ids tensor failed",
                     e,
                 )
@@ -678,7 +678,7 @@ impl VisionModel {
             .to_dtype(DType::U32)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: vision height_ids cast failed",
                     e,
                 )
@@ -687,7 +687,7 @@ impl VisionModel {
         let w_ids = Tensor::new(width_position_ids, device)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: vision width_ids tensor failed",
                     e,
                 )
@@ -695,7 +695,7 @@ impl VisionModel {
             .to_dtype(DType::U32)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: vision width_ids cast failed",
                     e,
                 )
@@ -704,14 +704,14 @@ impl VisionModel {
         // freqs_h = freqs[height_ids], freqs_w = freqs[width_ids]
         let freqs_h = freqs.index_select(&h_ids, 0).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision freqs_h gather failed",
                 e,
             )
         })?;
         let freqs_w = freqs.index_select(&w_ids, 0).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision freqs_w gather failed",
                 e,
             )
@@ -720,7 +720,7 @@ impl VisionModel {
         // Concatenate to get (num_patches, head_dim/2) then repeat to get (num_patches, head_dim)
         let rope_emb = Tensor::cat(&[&freqs_h, &freqs_w], 1).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision rope_emb cat failed",
                 e,
             )
@@ -728,7 +728,7 @@ impl VisionModel {
         // Repeat to double the dimension for full head_dim
         let rope_emb = Tensor::cat(&[&rope_emb, &rope_emb], 1).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision rope_emb repeat failed",
                 e,
             )
@@ -736,14 +736,14 @@ impl VisionModel {
 
         let cos = rope_emb.cos().map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision rope cos failed",
                 e,
             )
         })?;
         let sin = rope_emb.sin().map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision rope sin failed",
                 e,
             )
@@ -761,7 +761,7 @@ impl VisionModel {
             .flatten_from(2)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: vision patch flatten failed",
                     e,
                 )
@@ -769,7 +769,7 @@ impl VisionModel {
             .squeeze(2)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: vision patch squeeze failed",
                     e,
                 )
@@ -790,7 +790,7 @@ impl VisionModel {
             let end = start + len;
             let seg = patch.i((start..end, ..)).map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: vision slice patch embeddings failed",
                     e,
                 )
@@ -808,7 +808,7 @@ impl VisionModel {
         let refs: Vec<&Tensor> = segments.iter().collect();
         let patch = Tensor::cat(&refs, 0).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision concat pos-added patches failed",
                 e,
             )
@@ -816,7 +816,7 @@ impl VisionModel {
 
         let mut hidden = patch.unsqueeze(0).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision add batch dim failed",
                 e,
             )
@@ -834,7 +834,7 @@ impl VisionModel {
 
         let hidden = hidden.squeeze(0).map_err(|e| {
             candle_to_ocr_processing(
-                crate::core::errors::ProcessingStage::TensorOperation,
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: vision squeeze batch failed",
                 e,
             )
@@ -847,7 +847,7 @@ impl VisionModel {
             let end = start + len;
             let slice = hidden.i((start..end, ..)).map_err(|e| {
                 candle_to_ocr_processing(
-                    crate::core::errors::ProcessingStage::TensorOperation,
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
                     "PaddleOCR-VL: vision slice failed",
                     e,
                 )

@@ -11,19 +11,19 @@
 //!     - Table results include both logical grid info (row/col) and visual bounding boxes.
 //!     - OCR results overlapping table regions are used to refine cell bounding boxes.
 
-use crate::core::OCRError;
-use crate::core::traits::adapter::ModelAdapter;
-use crate::core::traits::task::ImageTaskInput;
-use crate::domain::adapters::{
+use crate::oarocr::TextRegion;
+use oar_ocr_core::core::OCRError;
+use oar_ocr_core::core::traits::adapter::ModelAdapter;
+use oar_ocr_core::core::traits::task::ImageTaskInput;
+use oar_ocr_core::domain::adapters::{
     DocumentOrientationAdapter, TableCellDetectionAdapter, TableClassificationAdapter,
     TableStructureRecognitionAdapter,
 };
-use crate::domain::structure::{
+use oar_ocr_core::domain::structure::{
     FormulaResult, LayoutElement, LayoutElementType, TableCell, TableResult, TableType,
 };
-use crate::oarocr::TextRegion;
-use crate::processors::BoundingBox;
-use crate::utils::BBoxCrop;
+use oar_ocr_core::processors::BoundingBox;
+use oar_ocr_core::utils::BBoxCrop;
 
 /// Configuration for creating a TableAnalyzer.
 #[derive(Debug)]

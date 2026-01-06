@@ -5,11 +5,11 @@
 //! and optionally integrate OCR for text extraction.
 
 use super::builder_utils::build_optional_adapter;
-use crate::core::OCRError;
-use crate::core::config::OrtSessionConfig;
-use crate::core::traits::OrtConfigurable;
-use crate::core::traits::adapter::{AdapterBuilder, ModelAdapter};
-use crate::domain::adapters::{
+use oar_ocr_core::core::OCRError;
+use oar_ocr_core::core::config::OrtSessionConfig;
+use oar_ocr_core::core::traits::OrtConfigurable;
+use oar_ocr_core::core::traits::adapter::{AdapterBuilder, ModelAdapter};
+use oar_ocr_core::domain::adapters::{
     DocumentOrientationAdapter, DocumentOrientationAdapterBuilder, FormulaRecognitionAdapter,
     LayoutDetectionAdapter, LayoutDetectionAdapterBuilder, PPFormulaNetAdapterBuilder,
     SLANetWiredAdapterBuilder, SLANetWirelessAdapterBuilder, SealTextDetectionAdapter,
@@ -20,8 +20,8 @@ use crate::domain::adapters::{
     TextRecognitionAdapterBuilder, UVDocRectifierAdapter, UVDocRectifierAdapterBuilder,
     UniMERNetFormulaAdapterBuilder,
 };
-use crate::domain::structure::{StructureResult, TableResult};
-use crate::domain::tasks::{
+use oar_ocr_core::domain::structure::{StructureResult, TableResult};
+use oar_ocr_core::domain::tasks::{
     FormulaRecognitionConfig, LayoutDetectionConfig, TableCellDetectionConfig,
     TableClassificationConfig, TableStructureRecognitionConfig, TextDetectionConfig,
     TextRecognitionConfig,
@@ -642,7 +642,7 @@ impl OARStructureBuilder {
 
         // Use explicit model name or default
         let layout_model_config = if let Some(name) = &self.layout_model_name {
-            use crate::domain::adapters::LayoutModelConfig;
+            use oar_ocr_core::domain::adapters::LayoutModelConfig;
             match name.as_str() {
                 "picodet_layout_1x" => LayoutModelConfig::picodet_layout_1x(),
                 "picodet_layout_1x_table" => LayoutModelConfig::picodet_layout_1x_table(),
@@ -681,7 +681,7 @@ impl OARStructureBuilder {
 
         // Build region detection adapter if enabled (PP-DocBlockLayout)
         let region_detection_adapter = if let Some(ref model_path) = self.region_detection_model {
-            use crate::domain::adapters::LayoutModelConfig;
+            use oar_ocr_core::domain::adapters::LayoutModelConfig;
             let mut region_builder = LayoutDetectionAdapterBuilder::new();
 
             // Use model name to select configuration, default to PP-DocBlockLayout
@@ -746,7 +746,7 @@ impl OARStructureBuilder {
         {
             let cell_type = self.table_cell_detection_type.as_deref().unwrap_or("wired");
 
-            use crate::domain::adapters::table_cell_detection_adapter::TableCellModelConfig;
+            use oar_ocr_core::domain::adapters::table_cell_detection_adapter::TableCellModelConfig;
 
             let model_config = match cell_type {
                 "wired" => TableCellModelConfig::rtdetr_l_wired_table_cell_det(),
@@ -892,7 +892,7 @@ impl OARStructureBuilder {
 
         // Build wired/wireless table cell detection adapters for auto-switch
         let wired_table_cell_adapter = if let Some(ref model_path) = self.wired_table_cell_model {
-            use crate::domain::adapters::table_cell_detection_adapter::TableCellModelConfig;
+            use oar_ocr_core::domain::adapters::table_cell_detection_adapter::TableCellModelConfig;
 
             let model_config = TableCellModelConfig::rtdetr_l_wired_table_cell_det();
             let mut builder = TableCellDetectionAdapterBuilder::new().model_config(model_config);
@@ -913,7 +913,7 @@ impl OARStructureBuilder {
         let wireless_table_cell_adapter = if let Some(ref model_path) =
             self.wireless_table_cell_model
         {
-            use crate::domain::adapters::table_cell_detection_adapter::TableCellModelConfig;
+            use oar_ocr_core::domain::adapters::table_cell_detection_adapter::TableCellModelConfig;
 
             let model_config = TableCellModelConfig::rtdetr_l_wireless_table_cell_det();
             let mut builder = TableCellDetectionAdapterBuilder::new().model_config(model_config);
@@ -1138,10 +1138,10 @@ impl OARStructure {
         text_recognition_adapter: &TextRecognitionAdapter,
         region_batch_size: usize,
     ) -> Result<(), OCRError> {
-        use crate::core::traits::task::ImageTaskInput;
-        use crate::domain::structure::LayoutElementType;
-        use crate::processors::BoundingBox;
-        use crate::utils::BBoxCrop;
+        use oar_ocr_core::core::traits::task::ImageTaskInput;
+        use oar_ocr_core::domain::structure::LayoutElementType;
+        use oar_ocr_core::processors::BoundingBox;
+        use oar_ocr_core::utils::BBoxCrop;
 
         if text_regions.is_empty() || layout_elements.is_empty() {
             return Ok(());
@@ -1364,8 +1364,8 @@ impl OARStructure {
         page_image: &image::RgbImage,
         text_recognition_adapter: &TextRecognitionAdapter,
     ) -> Result<(), OCRError> {
-        use crate::core::traits::task::ImageTaskInput;
-        use crate::processors::BoundingBox;
+        use oar_ocr_core::core::traits::task::ImageTaskInput;
+        use oar_ocr_core::processors::BoundingBox;
 
         // Collect all cell boxes in [x1, y1, x2, y2] format
         let mut cell_boxes: Vec<[f32; 4]> = Vec::new();
@@ -1588,8 +1588,8 @@ impl OARStructure {
         ),
         OCRError,
     > {
-        use crate::core::traits::task::ImageTaskInput;
-        use crate::domain::structure::{LayoutElement, LayoutElementType, RegionBlock};
+        use oar_ocr_core::core::traits::task::ImageTaskInput;
+        use oar_ocr_core::domain::structure::{LayoutElement, LayoutElementType, RegionBlock};
 
         let input = ImageTaskInput::new(vec![page_image.clone()]);
         let layout_result = self
@@ -1652,9 +1652,9 @@ impl OARStructure {
         page_image: &image::RgbImage,
         layout_elements: &[crate::domain::structure::LayoutElement],
     ) -> Result<Vec<crate::domain::structure::FormulaResult>, OCRError> {
-        use crate::core::traits::task::ImageTaskInput;
-        use crate::domain::structure::FormulaResult;
-        use crate::utils::BBoxCrop;
+        use oar_ocr_core::core::traits::task::ImageTaskInput;
+        use oar_ocr_core::domain::structure::FormulaResult;
+        use oar_ocr_core::utils::BBoxCrop;
 
         let Some(ref formula_adapter) = self.pipeline.formula_recognition_adapter else {
             return Ok(Vec::new());
@@ -1730,10 +1730,10 @@ impl OARStructure {
         page_image: &image::RgbImage,
         layout_elements: &mut Vec<crate::domain::structure::LayoutElement>,
     ) -> Result<(), OCRError> {
-        use crate::core::traits::task::ImageTaskInput;
-        use crate::domain::structure::{LayoutElement, LayoutElementType};
-        use crate::processors::Point;
-        use crate::utils::BBoxCrop;
+        use oar_ocr_core::core::traits::task::ImageTaskInput;
+        use oar_ocr_core::domain::structure::{LayoutElement, LayoutElementType};
+        use oar_ocr_core::processors::Point;
+        use oar_ocr_core::utils::BBoxCrop;
 
         let Some(ref seal_adapter) = self.pipeline.seal_text_detection_adapter else {
             return Ok(());
@@ -1798,7 +1798,7 @@ impl OARStructure {
         page_width: f32,
         page_height: f32,
     ) {
-        use crate::processors::layout_sorting::sort_layout_enhanced;
+        use oar_ocr_core::processors::layout_sorting::sort_layout_enhanced;
 
         if layout_elements.is_empty() {
             return;
@@ -1888,8 +1888,8 @@ impl OARStructure {
         layout_elements: &[crate::domain::structure::LayoutElement],
         region_blocks: Option<&[crate::domain::structure::RegionBlock]>,
     ) -> Result<Vec<crate::oarocr::TextRegion>, OCRError> {
-        use crate::core::traits::task::ImageTaskInput;
         use crate::oarocr::TextRegion;
+        use oar_ocr_core::core::traits::task::ImageTaskInput;
         use std::sync::Arc;
 
         let Some(ref text_detection_adapter) = self.pipeline.text_detection_adapter else {

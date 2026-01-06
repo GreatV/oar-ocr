@@ -1,19 +1,93 @@
 //! Utility functions for VL models and document parsing.
 //!
 //! This module provides:
+//! - Device configuration for Candle-based models
 //! - Candle tensor utilities for model inference
 //! - Markdown conversion for parsed documents
 //! - OTSL to HTML table conversion
 //! - Image processing helpers
 
-use crate::core::OCRError;
-use crate::domain::structure::{LayoutElement, LayoutElementType};
-use crate::processors::BoundingBox;
-use candle_core::{IndexOp, Tensor};
+use candle_core::{Device, IndexOp, Tensor};
 use image::{GrayImage, RgbImage};
+use oar_ocr_core::core::OCRError;
+use oar_ocr_core::domain::structure::{LayoutElement, LayoutElementType};
+use oar_ocr_core::processors::BoundingBox;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashSet;
+
+/// Parses a device string and creates a Candle [`Device`].
+///
+/// # Supported formats
+///
+/// - `"cpu"` → CPU device
+/// - `"cuda"` or `"gpu"` → CUDA device 0
+/// - `"cuda:N"` → CUDA device N (e.g., `"cuda:1"`)
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The device string is invalid
+/// - CUDA is requested but the `cuda` feature is not enabled
+/// - CUDA device creation fails
+///
+/// # Examples
+///
+/// ```no_run
+/// use oar_ocr_vl::utils::parse_device;
+///
+/// let cpu = parse_device("cpu").unwrap();
+/// let cuda = parse_device("cuda").unwrap();
+/// let cuda1 = parse_device("cuda:1").unwrap();
+/// ```
+#[cfg(not(feature = "cuda"))]
+fn cuda_not_enabled() -> OCRError {
+    OCRError::ConfigError {
+        message: "CUDA support not enabled. Compile with --features cuda".to_string(),
+    }
+}
+
+pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
+    let device_str = device_str.to_lowercase();
+    match device_str.as_str() {
+        "cpu" => Ok(Device::Cpu),
+        "cuda" | "gpu" => {
+            #[cfg(feature = "cuda")]
+            {
+                Device::new_cuda(0).map_err(|e| OCRError::ConfigError {
+                    message: format!("Failed to create CUDA device: {}", e),
+                })
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                Err(cuda_not_enabled())
+            }
+        }
+        s if s.starts_with("cuda:") => {
+            #[cfg(feature = "cuda")]
+            {
+                let ordinal: usize = s.strip_prefix("cuda:").unwrap().parse().map_err(|_| {
+                    OCRError::ConfigError {
+                        message: format!("Invalid CUDA device ordinal in '{}'", s),
+                    }
+                })?;
+                Device::new_cuda(ordinal).map_err(|e| OCRError::ConfigError {
+                    message: format!("Failed to create CUDA device {}: {}", ordinal, e),
+                })
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                Err(cuda_not_enabled())
+            }
+        }
+        _ => Err(OCRError::ConfigError {
+            message: format!(
+                "Unknown device: '{}'. Use 'cpu', 'cuda', or 'cuda:N'",
+                device_str
+            ),
+        }),
+    }
+}
 
 /// Convert Candle error to OCRError for inference operations.
 pub fn candle_to_ocr_inference(
@@ -30,7 +104,7 @@ pub fn candle_to_ocr_inference(
 
 /// Convert Candle error to OCRError for processing operations.
 pub fn candle_to_ocr_processing(
-    kind: crate::core::errors::ProcessingStage,
+    kind: oar_ocr_core::core::errors::ProcessingStage,
     context: impl Into<String>,
     err: candle_core::Error,
 ) -> OCRError {
@@ -45,7 +119,7 @@ pub fn candle_to_ocr_processing(
 pub fn rotate_half(x: &Tensor) -> Result<Tensor, OCRError> {
     let d = x.dim(candle_core::D::Minus1).map_err(|e| {
         candle_to_ocr_processing(
-            crate::core::errors::ProcessingStage::TensorOperation,
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "rotate_half dim failed",
             e,
         )
@@ -53,28 +127,28 @@ pub fn rotate_half(x: &Tensor) -> Result<Tensor, OCRError> {
     let half = d / 2;
     let x1 = x.i((.., .., .., 0..half)).map_err(|e| {
         candle_to_ocr_processing(
-            crate::core::errors::ProcessingStage::TensorOperation,
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "rotate_half slice x1 failed",
             e,
         )
     })?;
     let x2 = x.i((.., .., .., half..d)).map_err(|e| {
         candle_to_ocr_processing(
-            crate::core::errors::ProcessingStage::TensorOperation,
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "rotate_half slice x2 failed",
             e,
         )
     })?;
     let nx2 = x2.neg().map_err(|e| {
         candle_to_ocr_processing(
-            crate::core::errors::ProcessingStage::TensorOperation,
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "rotate_half neg failed",
             e,
         )
     })?;
     Tensor::cat(&[&nx2, &x1], candle_core::D::Minus1).map_err(|e| {
         candle_to_ocr_processing(
-            crate::core::errors::ProcessingStage::TensorOperation,
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "rotate_half cat failed",
             e,
         )

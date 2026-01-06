@@ -11,11 +11,11 @@
 //! 3. **Reading order**: Elements are assigned `order_index` based on spatial sorting
 //! 4. **Orphan handling**: Unmatched OCR regions create new text elements
 
-use crate::domain::structure::{
+use crate::oarocr::TextRegion;
+use oar_ocr_core::domain::structure::{
     FormulaResult, LayoutElement, LayoutElementType, StructureResult, TableResult,
 };
-use crate::oarocr::TextRegion;
-use crate::processors::BoundingBox;
+use oar_ocr_core::processors::BoundingBox;
 use std::cmp::Ordering;
 
 /// Labels that should be excluded from OCR text matching.
@@ -736,7 +736,7 @@ fn needs_space_after(c: char) -> bool {
 mod tests {
     use super::*;
     use crate::oarocr::TextRegion;
-    use crate::processors::BoundingBox;
+    use oar_ocr_core::processors::BoundingBox;
 
     #[test]
     fn test_is_overlapping_threshold() {

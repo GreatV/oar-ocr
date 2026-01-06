@@ -1,50 +1,50 @@
-//! Visualization utilities for OCR and document structure analysis results.
+//! Visualization utilities for OCR and document structure results.
 //!
 //! This module provides functions for creating visual representations of:
-//! - OCR results with bounding boxes and detected text
+//! - OCR results with detected text regions and recognized text
 //! - Document structure analysis results with layout elements, tables, and formulas
 //!
-//! # Features
+//! # OCR Visualization
 //!
-//! - Visualization of complete OCR results with original and processed images side-by-side
-//! - Visualization of text detection results with bounding boxes
-//! - Document structure visualization with type-specific colors (PP-StructureV3 style)
-//! - Table cell boundaries and formula bounding boxes
+//! - Side-by-side visualization with original image and annotated results
+//! - Bounding boxes around detected text regions and word boxes
+//! - Text rendering with configurable fonts
+//! - Horizontal and vertical text layout support
+//!
+//! # Structure Visualization
+//!
+//! - Layout element bounding boxes with type-specific colors
 //! - Labels with confidence scores and reading order indices
-//! - Configurable fonts, colors, and styling
-//! - Support for both horizontal and vertical text layouts
-//!
-//! # Examples
-//!
-//! ```rust
-//! use oar_ocr::utils::visualization::{create_ocr_visualization, VisualizationConfig};
-//! // Assuming you have an OAROCRResult
-//! // let result = oar_ocr_result;
-//! // let config = VisualizationConfig::with_system_font();
-//! // let visualization = create_ocr_visualization(&result, &config);
-//! ```
+//! - Table cell boundaries and formula bounding boxes
 
-use crate::core::OcrResult;
-use crate::core::errors::OCRError;
-use crate::domain::structure::{LayoutElement, LayoutElementType, StructureResult, TableResult};
-use crate::oarocr::OAROCRResult;
-use crate::processors::BoundingBox;
-
-use ab_glyph::FontVec;
+use crate::oarocr::{OAROCRResult, TextRegion};
 use image::{Rgb, RgbImage, Rgba, RgbaImage, imageops};
 use imageproc::drawing::{draw_filled_rect_mut, draw_hollow_rect_mut, draw_text_mut};
 use imageproc::rect::Rect;
+use oar_ocr_core::core::OcrResult;
+use oar_ocr_core::core::errors::OCRError;
+use oar_ocr_core::domain::structure::{
+    LayoutElement, LayoutElementType, StructureResult, TableResult,
+};
+use oar_ocr_core::processors::BoundingBox;
+
+use ab_glyph::FontVec;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-const BBOX_COLOR: Rgb<u8> = Rgb([0, 255, 0]);
-const WORD_BBOX_COLOR: Rgb<u8> = Rgb([255, 165, 0]); // Orange color for word boxes
+/// Background color for the OCR visualization (light gray).
+const BACKGROUND_COLOR: Rgb<u8> = Rgb([238, 238, 238]);
 
-const TEXT_COLOR: Rgb<u8> = Rgb([0, 0, 0]);
+/// Bounding box color for OCR (red).
+const BBOX_COLOR: Rgb<u8> = Rgb([255, 0, 0]);
 
-const BACKGROUND_COLOR: Rgb<u8> = Rgb([255, 255, 255]);
+/// Word bounding box color (blue).
+const WORD_BBOX_COLOR: Rgb<u8> = Rgb([0, 0, 255]);
 
-/// Color palette following standard colormap (RGB format).
+/// Text color for rendered text (dark gray).
+const TEXT_COLOR: Rgb<u8> = Rgb([50, 50, 50]);
+
+/// Color palette for structure visualization (RGB format).
 /// These colors are designed to be visually distinct for different element types.
 const COLOR_PALETTE: [[u8; 3]; 20] = [
     [255, 0, 0],   // 0: Red
@@ -220,27 +220,12 @@ pub fn create_ocr_visualization(
 }
 
 /// Draws detection results (bounding boxes and text) onto an image.
-///
-/// This function iterates through all detected text boxes and draws both the bounding boxes
-/// and the recognized text on the image according to the provided configuration.
-///
-/// # Arguments
-///
-/// * `img` - The image to draw on
-/// * `result` - The OCR results containing text boxes and recognized text
-/// * `config` - Visualization configuration controlling how elements are drawn
-/// * `x_offset` - Horizontal offset for positioning (used when drawing on the right side of a split view)
-///
-/// # Returns
-///
-/// A Result indicating success or failure of the drawing operations.
 fn draw_detection_results(
     img: &mut RgbImage,
     result: &OAROCRResult,
     config: &VisualizationConfig,
     x_offset: i32,
 ) -> OcrResult<()> {
-    // Get image dimensions for bounds checking
     let img_bounds = (img.width() as i32, img.height() as i32);
 
     for region in result.text_regions.iter() {
@@ -257,7 +242,6 @@ fn draw_detection_results(
             if let Some(text) = &region.text {
                 let chars: Vec<char> = text.chars().collect();
                 for (i, word_bbox) in word_boxes.iter().enumerate() {
-                    // Draw word bounding box
                     draw_bounding_box(
                         img,
                         word_bbox,
@@ -267,7 +251,6 @@ fn draw_detection_results(
                         WORD_BBOX_COLOR,
                     );
 
-                    // Draw individual character if available
                     if let Some(char_to_draw) = chars.get(i) {
                         draw_text_for_single_char(
                             img,
@@ -281,7 +264,6 @@ fn draw_detection_results(
                 }
             }
         } else {
-            // Only draw text for the whole region if word boxes are not present
             draw_text_for_region(img, region, config, x_offset, img_bounds);
         }
     }
@@ -290,18 +272,6 @@ fn draw_detection_results(
 }
 
 /// Draws a bounding box on an image with the specified configuration.
-///
-/// This function converts a BoundingBox to a Rect and draws it on the image
-/// with the specified thickness. It also performs bounds checking to ensure
-/// the box is within the image boundaries.
-///
-/// # Arguments
-///
-/// * `img` - The image to draw on
-/// * `bbox` - The bounding box to draw
-/// * `config` - Visualization configuration controlling line thickness
-/// * `x_offset` - Horizontal offset for positioning
-/// * `img_bounds` - Image dimensions as (width, height) for bounds checking
 fn draw_bounding_box(
     img: &mut RgbImage,
     bbox: &BoundingBox,
@@ -310,7 +280,6 @@ fn draw_bounding_box(
     img_bounds: (i32, i32),
     color: Rgb<u8>,
 ) {
-    // Convert the bounding box to a rectangle for easier drawing
     let Some(rect) = bbox_to_rect(bbox, x_offset) else {
         return;
     };
@@ -333,18 +302,6 @@ fn draw_bounding_box(
 }
 
 /// Draws recognized text for a single character within its bounding box on an image.
-///
-/// This function draws a single character from a word box.
-/// It attempts to center the character within its small bounding box.
-///
-/// # Arguments
-///
-/// * `img` - The image to draw on
-/// * `bbox` - The bounding box for the single character
-/// * `char_str` - The character string to draw
-/// * `config` - Visualization configuration including font settings
-/// * `x_offset` - Horizontal offset for positioning
-/// * `img_bounds` - Image dimensions as (width, height) for bounds checking
 fn draw_text_for_single_char(
     img: &mut RgbImage,
     bbox: &BoundingBox,
@@ -360,22 +317,16 @@ fn draw_text_for_single_char(
 
     let (img_width, img_height) = img_bounds;
 
-    // Calculate dynamic font scale based on box dimensions
     let box_height = bbox_rect.height() as f32;
     let box_width = bbox_rect.width() as f32;
 
-    // Start with a scale based on height (e.g., 80% of box height)
-    // This matches the logic in calculate_horizontal_text_layout (0.7 there)
-    // We use 0.8 here to fill the box a bit more for single characters
     let mut font_scale = (box_height * 0.8).max(8.0);
 
-    // Ensure the character fits within the box width
-    if let Some(text_width) = measure_text_width(char_str, font, font_scale) {
-        // If wider than 90% of box width, scale down
-        if text_width > box_width * 0.9 {
-            let scale_factor = (box_width * 0.9) / text_width;
-            font_scale *= scale_factor;
-        }
+    if let Some(text_width) = measure_text_width(char_str, font, font_scale)
+        && text_width > box_width * 0.9
+    {
+        let scale_factor = (box_width * 0.9) / text_width;
+        font_scale *= scale_factor;
     }
 
     let text_width_px = measure_text_width(char_str, font, font_scale)
@@ -383,12 +334,7 @@ fn draw_text_for_single_char(
         .round() as i32;
     let text_height_px = font_scale.round() as i32;
 
-    // Calculate position to center the character in its bbox
-    // Note: draw_text_mut draws from top-left of the glyph bounding box
     let text_x = bbox_rect.left() + (bbox_rect.width() as i32 - text_width_px) / 2;
-
-    // Vertical centering:
-    // bbox_rect.top() + half box height - half text height
     let text_y = bbox_rect.top() + (bbox_rect.height() as i32 - text_height_px) / 2;
 
     if text_x >= 0
@@ -401,26 +347,13 @@ fn draw_text_for_single_char(
 }
 
 /// Draws recognized text within a text region on an image.
-///
-/// This function draws the recognized text from a TextRegion on the image.
-/// It handles both horizontal and vertical text layouts based on the
-/// bounding box dimensions.
-///
-/// # Arguments
-///
-/// * `img` - The image to draw on
-/// * `region` - The text region containing the text and bounding box
-/// * `config` - Visualization configuration including font settings
-/// * `x_offset` - Horizontal offset for positioning
-/// * `img_bounds` - Image dimensions as (width, height) for bounds checking
 fn draw_text_for_region(
     img: &mut RgbImage,
-    region: &crate::prelude::TextRegion,
+    region: &TextRegion,
     config: &VisualizationConfig,
     x_offset: i32,
     img_bounds: (i32, i32),
 ) {
-    // Check if the text is available (not filtered out)
     let Some(text) = &region.text else {
         return;
     };
@@ -461,39 +394,12 @@ fn draw_text_for_region(
 }
 
 /// Checks if a rectangle is within the bounds of an image.
-///
-/// This function verifies that all sides of a rectangle are within the specified
-/// image dimensions, ensuring that drawing operations won't go outside the image boundaries.
-///
-/// # Arguments
-///
-/// * `rect` - The rectangle to check
-/// * `img_width` - The width of the image
-/// * `img_height` - The height of the image
-///
-/// # Returns
-///
-/// `true` if the rectangle is completely within the image bounds, `false` otherwise.
 fn is_rect_in_bounds(rect: &Rect, img_width: i32, img_height: i32) -> bool {
     rect.left() >= 0 && rect.top() >= 0 && rect.right() < img_width && rect.bottom() < img_height
 }
 
 /// Converts a BoundingBox to a Rect for easier drawing operations.
-///
-/// This function calculates the bounding rectangle of a polygon by finding
-/// the minimum and maximum x and y coordinates of all points in the bounding box.
-///
-/// # Arguments
-///
-/// * `bbox` - The bounding box to convert
-/// * `x_offset` - Horizontal offset to apply to the resulting rectangle
-///
-/// # Returns
-///
-/// An Option containing the calculated Rect, or None if the bounding box is empty
-/// or has invalid dimensions.
 fn bbox_to_rect(bbox: &BoundingBox, x_offset: i32) -> Option<Rect> {
-    // Return None for empty bounding boxes
     if bbox.points.is_empty() {
         return None;
     }
@@ -523,45 +429,25 @@ fn bbox_to_rect(bbox: &BoundingBox, x_offset: i32) -> Option<Rect> {
     (width > 0 && height > 0).then(|| Rect::at(left, top).of_size(width, height))
 }
 
-/// Calculates the appropriate text layout (horizontal or vertical) based on the bounding box dimensions.
-///
-/// This function determines whether text should be laid out horizontally or vertically
-/// based on the aspect ratio of the bounding box. If the height is more than 1.2 times
-/// the width, vertical layout is used; otherwise, horizontal layout is used.
-///
-/// # Arguments
-///
-/// * `bbox` - The bounding box for the text
-/// * `x_offset` - The x-axis offset for positioning
-/// * `text` - The text to be laid out
-/// * `font` - The font to be used for text measurement
-///
-/// # Returns
-///
-/// An Option containing the calculated TextLayout, or None if layout could not be determined.
+/// Calculates the appropriate text layout based on the bounding box dimensions.
 fn calculate_text_layout(
     bbox: &BoundingBox,
     x_offset: i32,
     text: &str,
     font: &FontVec,
 ) -> Option<TextLayout> {
-    // Return None if bbox or text is empty
     if bbox.points.is_empty() || text.is_empty() {
         return None;
     }
 
-    // Convert bbox to rect for easier manipulation
     let bbox_rect = bbox_to_rect(bbox, x_offset)?;
     let bbox_width = bbox_rect.width() as f32;
     let bbox_height = bbox_rect.height() as f32;
 
-    // Return None if bbox dimensions are invalid
     if bbox_width <= 0.0 || bbox_height <= 0.0 {
         return None;
     }
 
-    // Choose layout based on aspect ratio
-    // If height is more than 1.2 times the width, use vertical layout
     if bbox_height > bbox_width * 1.2 {
         calculate_vertical_text_layout(text, font, &bbox_rect)
     } else {
@@ -569,27 +455,12 @@ fn calculate_text_layout(
     }
 }
 
-/// Calculates horizontal text layout parameters for a given bounding box.
-///
-/// This function determines the appropriate font size and position for horizontally
-/// laid out text within a bounding box, taking into account available space and
-/// text length.
-///
-/// # Arguments
-///
-/// * `text` - The text to be laid out
-/// * `font` - The font to be used for text measurement
-/// * `bbox_rect` - The bounding rectangle for the text
-///
-/// # Returns
-///
-/// An Option containing the calculated TextLayout, or None if layout could not be determined.
+/// Calculates horizontal text layout parameters.
 fn calculate_horizontal_text_layout(
     text: &str,
     font: &FontVec,
     bbox_rect: &Rect,
 ) -> Option<TextLayout> {
-    // Define padding and minimum font size
     const PADDING: f32 = 4.0;
     const MIN_FONT_SIZE: f32 = 8.0;
 
@@ -617,27 +488,12 @@ fn calculate_horizontal_text_layout(
     })
 }
 
-/// Calculates vertical text layout parameters for a given bounding box.
-///
-/// This function determines the appropriate font size, line height, and position for vertically
-/// laid out text within a bounding box. Each character is positioned on a separate line.
-/// The font is used to measure character widths for proper scaling.
-///
-/// # Arguments
-///
-/// * `text` - The text to be laid out vertically
-/// * `font` - The font to be used for measuring character dimensions
-/// * `bbox_rect` - The bounding rectangle for the text
-///
-/// # Returns
-///
-/// An Option containing the calculated TextLayout, or None if layout could not be determined.
+/// Calculates vertical text layout parameters.
 fn calculate_vertical_text_layout(
     text: &str,
     font: &FontVec,
     bbox_rect: &Rect,
 ) -> Option<TextLayout> {
-    // Define padding and minimum font size
     const PADDING: f32 = 4.0;
     const MIN_FONT_SIZE: f32 = 8.0;
 
@@ -647,16 +503,13 @@ fn calculate_vertical_text_layout(
     let mut font_scale = (available_width * 0.8).max(MIN_FONT_SIZE);
     let mut line_height = font_scale * 1.1;
 
-    // Check if characters fit within the available width at the current scale
     let display_chars: Vec<char> = text.chars().collect();
     if !display_chars.is_empty() {
-        // Find the widest character to ensure all characters fit
         let max_char_width = display_chars
             .iter()
             .filter_map(|&ch| measure_text_width(&ch.to_string(), font, font_scale))
             .fold(0.0, f32::max);
 
-        // Scale down if the widest character doesn't fit
         if max_char_width > available_width {
             let scale_factor = available_width / max_char_width;
             font_scale = (font_scale * scale_factor).max(MIN_FONT_SIZE);
@@ -698,19 +551,6 @@ fn calculate_vertical_text_layout(
 }
 
 /// Measures the width of text when rendered with a specific font and scale.
-///
-/// This function calculates the total width of a text string by summing the advance
-/// widths of each character when rendered with the specified font and scale.
-///
-/// # Arguments
-///
-/// * `text` - The text to measure
-/// * `font` - The font to use for measurement
-/// * `scale` - The scale at which the font will be rendered
-///
-/// # Returns
-///
-/// An Option containing the calculated width, or None if measurement failed.
 fn measure_text_width(text: &str, font: &FontVec, scale: f32) -> Option<f32> {
     use ab_glyph::{Font, ScaleFont};
 
@@ -755,24 +595,10 @@ pub fn visualize_ocr_results(
 }
 
 /// Creates a VisualizationConfig with appropriate font settings.
-///
-/// This function attempts to create a VisualizationConfig with a custom font if specified,
-/// falling back to system fonts or default settings if the custom font cannot be loaded.
-///
-/// # Arguments
-///
-/// * `font_path` - Optional path to a custom font file
-///
-/// # Returns
-///
-/// A VisualizationConfig with the appropriate font settings.
 fn create_visualization_config(font_path: Option<&Path>) -> VisualizationConfig {
     match font_path {
-        // If a custom font path is provided
         Some(path) => VisualizationConfig::with_font_path(path)
-            // Log success if custom font is loaded
             .inspect(|_| info!("Using custom font: {}", path.display()))
-            // Log error and fall back if custom font fails to load
             .inspect_err(|e| {
                 debug!(
                     "Failed to load custom font {}: {}. Falling back to system font.",
@@ -780,12 +606,10 @@ fn create_visualization_config(font_path: Option<&Path>) -> VisualizationConfig 
                     e
                 )
             })
-            // Use system font as fallback if custom font fails
             .unwrap_or_else(|_| {
                 info!("Falling back to system font");
                 VisualizationConfig::with_system_font()
             }),
-        // If no custom font is specified, use system font
         None => {
             info!("No custom font specified, using system font");
             VisualizationConfig::with_system_font()
