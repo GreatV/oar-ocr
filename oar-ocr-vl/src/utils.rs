@@ -40,6 +40,13 @@ use std::collections::HashSet;
 /// let cuda = parse_device("cuda").unwrap();
 /// let cuda1 = parse_device("cuda:1").unwrap();
 /// ```
+#[cfg(not(feature = "cuda"))]
+fn cuda_not_enabled() -> OCRError {
+    OCRError::ConfigError {
+        message: "CUDA support not enabled. Compile with --features cuda".to_string(),
+    }
+}
+
 pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
     let device_str = device_str.to_lowercase();
     match device_str.as_str() {
@@ -53,9 +60,7 @@ pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
             }
             #[cfg(not(feature = "cuda"))]
             {
-                Err(OCRError::ConfigError {
-                    message: "CUDA support not enabled. Compile with --features cuda".to_string(),
-                })
+                Err(cuda_not_enabled())
             }
         }
         s if s.starts_with("cuda:") => {
@@ -72,9 +77,7 @@ pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
             }
             #[cfg(not(feature = "cuda"))]
             {
-                Err(OCRError::ConfigError {
-                    message: "CUDA support not enabled. Compile with --features cuda".to_string(),
-                })
+                Err(cuda_not_enabled())
             }
         }
         _ => Err(OCRError::ConfigError {
