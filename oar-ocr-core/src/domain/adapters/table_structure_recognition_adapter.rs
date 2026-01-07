@@ -6,7 +6,7 @@ use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterInfo, ModelAdapter},
-    task::{Task, TaskType},
+    task::Task,
 };
 use crate::domain::tasks::{TableStructureRecognitionConfig, TableStructureRecognitionTask};
 use crate::impl_adapter_builder;
@@ -208,7 +208,7 @@ impl_adapter_builder! {
     builder_name: SLANetWiredAdapterBuilder,
     adapter_name: TableStructureRecognitionAdapter,
     config_type: TableStructureRecognitionConfig,
-    adapter_type: "TableStructureRecognitionWired",
+    adapter_type: "table_structure_recognition_wired",
     adapter_desc: "Recognizes table structure for wired tables as HTML tokens",
     task_type: TableStructureRecognition,
 
@@ -266,13 +266,8 @@ impl_adapter_builder! {
         // Create decoder
         let decoder = TableStructureDecode::from_dict_path(&dict_path)?;
 
-        // Create adapter info
-        let mut info = AdapterInfo::new(
-            "table_structure_recognition_wired",
-            "1.0.0",
-            TaskType::TableStructureRecognition,
-            "Table structure recognition (wired tables) using SLANeXt model",
-        );
+        // Create adapter info using the helper
+        let mut info = SLANetWiredAdapterBuilder::base_adapter_info();
         if let Some(model_name) = builder.model_name_override {
             info.model_name = model_name;
         }
@@ -290,7 +285,7 @@ impl_adapter_builder! {
     builder_name: SLANetWirelessAdapterBuilder,
     adapter_name: TableStructureRecognitionAdapter,
     config_type: TableStructureRecognitionConfig,
-    adapter_type: "TableStructureRecognitionWireless",
+    adapter_type: "table_structure_recognition_wireless",
     adapter_desc: "Recognizes table structure for wireless tables as HTML tokens",
     task_type: TableStructureRecognition,
 
@@ -348,13 +343,8 @@ impl_adapter_builder! {
         // Create decoder
         let decoder = TableStructureDecode::from_dict_path(&dict_path)?;
 
-        // Create adapter info
-        let mut info = AdapterInfo::new(
-            "table_structure_recognition_wireless",
-            "1.0.0",
-            TaskType::TableStructureRecognition,
-            "Table structure recognition (wireless tables) using SLANet_plus model",
-        );
+        // Create adapter info using the helper
+        let mut info = SLANetWirelessAdapterBuilder::base_adapter_info();
         if let Some(model_name) = builder.model_name_override {
             info.model_name = model_name;
         }
@@ -376,13 +366,16 @@ mod tests {
     #[test]
     fn test_wired_builder_creation() {
         let builder = SLANetWiredAdapterBuilder::new();
-        assert_eq!(builder.adapter_type(), "TableStructureRecognitionWired");
+        assert_eq!(builder.adapter_type(), "table_structure_recognition_wired");
     }
 
     #[test]
     fn test_wireless_builder_creation() {
         let builder = SLANetWirelessAdapterBuilder::new();
-        assert_eq!(builder.adapter_type(), "TableStructureRecognitionWireless");
+        assert_eq!(
+            builder.adapter_type(),
+            "table_structure_recognition_wireless"
+        );
     }
 
     #[test]

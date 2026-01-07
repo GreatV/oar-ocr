@@ -6,7 +6,7 @@ use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterInfo, ModelAdapter},
-    task::{Task, TaskType},
+    task::Task,
 };
 use crate::domain::tasks::{
     Detection, SealTextDetectionConfig, SealTextDetectionOutput, SealTextDetectionTask,
@@ -102,7 +102,7 @@ impl_adapter_builder! {
     builder_name: SealTextDetectionAdapterBuilder,
     adapter_name: SealTextDetectionAdapter,
     config_type: SealTextDetectionConfig,
-    adapter_type: "SealTextDetection",
+    adapter_type: "seal_text_detection",
     adapter_desc: "Detects curved seal text with polygon bounding boxes",
     task_type: SealTextDetection,
 
@@ -139,13 +139,8 @@ impl_adapter_builder! {
         )
         .build(model_path)?;
 
-        // Create adapter info
-        let info = AdapterInfo::new(
-            "seal_text_detection",
-            "1.0.0",
-            TaskType::SealTextDetection,
-            "Seal text detection using DB model with polygon output",
-        );
+        // Create adapter info using the helper
+        let info = SealTextDetectionAdapterBuilder::base_adapter_info();
 
         Ok(SealTextDetectionAdapter::new(
             model,

@@ -67,8 +67,5 @@ pub use formula_recognition_adapter::{
     UniMERNetAdapterBuilder, UniMERNetFormulaAdapter,
 };
 
-// Re-export UniMERNetAdapterBuilder as UniMERNetFormulaAdapterBuilder for backward compatibility
-pub use formula_recognition_adapter::UniMERNetFormulaAdapterBuilder;
-
 // Re-export rectification adapters
 pub use document_rectification_adapter::{UVDocRectifierAdapter, UVDocRectifierAdapterBuilder};

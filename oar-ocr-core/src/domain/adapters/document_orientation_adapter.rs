@@ -6,7 +6,7 @@ use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterInfo, ModelAdapter},
-    task::{Task, TaskType},
+    task::Task,
 };
 use crate::domain::tasks::{
     Classification, DocumentOrientationConfig, DocumentOrientationOutput, DocumentOrientationTask,
@@ -132,7 +132,7 @@ impl_adapter_builder! {
     builder_name: DocumentOrientationAdapterBuilder,
     adapter_name: DocumentOrientationAdapter,
     config_type: DocumentOrientationConfig,
-    adapter_type: "DocumentOrientation",
+    adapter_type: "document_orientation",
     adapter_desc: "Classifies document image orientation (0°, 90°, 180°, 270°)",
     task_type: DocumentOrientation,
 
@@ -175,13 +175,8 @@ impl_adapter_builder! {
             topk: 1, // Will be overridden by task config
         };
 
-        // Create adapter info
-        let mut info = AdapterInfo::new(
-            "document_orientation",
-            "1.0.0",
-            TaskType::DocumentOrientation,
-            "Document orientation classification using PP-LCNet model",
-        );
+        // Create adapter info using the helper
+        let mut info = DocumentOrientationAdapterBuilder::base_adapter_info();
         if let Some(model_name) = builder.model_name_override {
             info.model_name = model_name;
         }
@@ -203,7 +198,7 @@ mod tests {
     #[test]
     fn test_builder_creation() {
         let builder = DocumentOrientationAdapterBuilder::new();
-        assert_eq!(builder.adapter_type(), "DocumentOrientation");
+        assert_eq!(builder.adapter_type(), "document_orientation");
     }
 
     #[test]
@@ -228,7 +223,7 @@ mod tests {
     #[test]
     fn test_default_builder() {
         let builder = DocumentOrientationAdapterBuilder::default();
-        assert_eq!(builder.adapter_type(), "DocumentOrientation");
+        assert_eq!(builder.adapter_type(), "document_orientation");
         assert_eq!(
             builder.input_shape,
             DocumentOrientationAdapter::DEFAULT_INPUT_SHAPE

@@ -5,7 +5,7 @@
 use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::adapter::{AdapterInfo, ModelAdapter};
-use crate::core::traits::task::{Task, TaskType};
+use crate::core::traits::task::Task;
 use crate::domain::tasks::document_rectification::{
     DocumentRectificationConfig, DocumentRectificationOutput, DocumentRectificationTask,
 };
@@ -76,6 +76,13 @@ impl_adapter_builder! {
     },
 
     methods: {
+        /// Sets the task configuration.
+        pub fn with_config(mut self, config: DocumentRectificationConfig) -> Self {
+            self.preprocess_config.rec_image_shape = config.rec_image_shape;
+            self.config = self.config.with_task_config(config);
+            self
+        }
+
         /// Sets a custom model name for registry registration.
         pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
             self.model_name_override = Some(model_name.into());
@@ -107,13 +114,8 @@ impl_adapter_builder! {
         )
         .build(model_path)?;
 
-        // Create adapter info
-        let mut info = AdapterInfo::new(
-            "uvdoc_rectifier",
-            "1.0.0",
-            TaskType::DocumentRectification,
-            "UVDoc document rectifier for correcting image distortions",
-        );
+        // Create adapter info using the helper
+        let mut info = UVDocRectifierAdapterBuilder::base_adapter_info();
         if let Some(model_name) = builder.model_name_override {
             info.model_name = model_name;
         }

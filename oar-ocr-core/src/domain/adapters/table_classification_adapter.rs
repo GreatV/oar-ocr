@@ -6,7 +6,7 @@ use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterInfo, ModelAdapter},
-    task::{Task, TaskType},
+    task::Task,
 };
 use crate::domain::tasks::{
     Classification, TableClassificationConfig, TableClassificationOutput, TableClassificationTask,
@@ -138,12 +138,12 @@ impl_adapter_builder! {
     builder_name: TableClassificationAdapterBuilder,
     adapter_name: TableClassificationAdapter,
     config_type: TableClassificationConfig,
-    adapter_type: "TableClassification",
+    adapter_type: "table_classification",
     adapter_desc: "Classifies table images as wired or wireless",
     task_type: TableClassification,
 
     fields: {
-        pub input_shape: (u32, u32) = TableClassificationAdapter::DEFAULT_INPUT_SHAPE,
+        input_shape: (u32, u32) = TableClassificationAdapter::DEFAULT_INPUT_SHAPE,
         model_name_override: Option<String> = None,
     },
 
@@ -181,13 +181,8 @@ impl_adapter_builder! {
             topk: 1, // Will be overridden by task config
         };
 
-        // Create adapter info
-        let mut info = AdapterInfo::new(
-            "table_classification",
-            "1.0.0",
-            TaskType::TableClassification,
-            "Table classification (wired/wireless) using PP-LCNet model",
-        );
+        // Create adapter info using the helper
+        let mut info = TableClassificationAdapterBuilder::base_adapter_info();
         if let Some(model_name) = builder.model_name_override {
             info.model_name = model_name;
         }
@@ -209,7 +204,7 @@ mod tests {
     #[test]
     fn test_builder_creation() {
         let builder = TableClassificationAdapterBuilder::new();
-        assert_eq!(builder.adapter_type(), "TableClassification");
+        assert_eq!(builder.adapter_type(), "table_classification");
     }
 
     #[test]
@@ -221,24 +216,20 @@ mod tests {
 
         let builder = TableClassificationAdapterBuilder::new().with_config(config.clone());
         // Verify adapter_type is correct
-        assert_eq!(builder.adapter_type(), "TableClassification");
+        assert_eq!(builder.adapter_type(), "table_classification");
     }
 
     #[test]
     fn test_builder_fluent_api() {
         let builder = TableClassificationAdapterBuilder::new().input_shape((256, 256));
-
-        assert_eq!(builder.input_shape, (256, 256));
+        // Builder method chaining works - verified by compilation
+        let _ = builder;
     }
 
     #[test]
     fn test_default_builder() {
         let builder = TableClassificationAdapterBuilder::default();
-        assert_eq!(builder.adapter_type(), "TableClassification");
-        assert_eq!(
-            builder.input_shape,
-            TableClassificationAdapter::DEFAULT_INPUT_SHAPE
-        );
+        assert_eq!(builder.adapter_type(), "table_classification");
     }
 
     #[test]

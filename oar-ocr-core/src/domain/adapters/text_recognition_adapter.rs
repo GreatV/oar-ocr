@@ -120,7 +120,7 @@ impl_adapter_builder! {
     builder_name: TextRecognitionAdapterBuilder,
     adapter_name: TextRecognitionAdapter,
     config_type: TextRecognitionConfig,
-    adapter_type: "TextRecognition",
+    adapter_type: "text_recognition",
     adapter_desc: "Recognizes text content from image regions",
     task_type: TextRecognition,
 
@@ -178,13 +178,8 @@ impl_adapter_builder! {
 
         let model = apply_ort_config!(model_builder, ort_config).build(model_path)?;
 
-        // Create adapter info
-        let info = crate::core::traits::adapter::AdapterInfo::new(
-            "TextRecognition",
-            "1.0.0",
-            crate::core::traits::task::TaskType::TextRecognition,
-            "Text recognition using CRNN model",
-        );
+        // Create adapter info using the helper
+        let info = TextRecognitionAdapterBuilder::base_adapter_info();
 
         Ok(TextRecognitionAdapter {
             model,

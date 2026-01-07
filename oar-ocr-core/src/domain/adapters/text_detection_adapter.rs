@@ -91,7 +91,7 @@ impl_adapter_builder! {
     builder_name: TextDetectionAdapterBuilder,
     adapter_name: TextDetectionAdapter,
     config_type: TextDetectionConfig,
-    adapter_type: "TextDetection",
+    adapter_type: "text_detection",
     adapter_desc: "Detects text regions in images with bounding boxes",
     task_type: TextDetection,
 
@@ -170,13 +170,8 @@ impl_adapter_builder! {
         )
         .build(model_path)?;
 
-        // Create adapter info
-        let info = crate::core::traits::adapter::AdapterInfo::new(
-            "TextDetection",
-            "1.0.0",
-            crate::core::traits::task::TaskType::TextDetection,
-            "Text detection using DB model",
-        );
+        // Create adapter info using the helper
+        let info = TextDetectionAdapterBuilder::base_adapter_info();
 
         Ok(TextDetectionAdapter {
             model,

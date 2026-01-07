@@ -183,7 +183,7 @@ impl_adapter_builder! {
     builder_name: TableCellDetectionAdapterBuilder,
     adapter_name: TableCellDetectionAdapter,
     config_type: TableCellDetectionConfig,
-    adapter_type: "TableCellDetection",
+    adapter_type: "table_cell_detection",
     adapter_desc: "Detects table cell boundaries in table images",
     task_type: TableCellDetection,
 
@@ -254,7 +254,6 @@ impl TableCellDetectionAdapterBuilder {
 
         let info = AdapterInfo::new(
             format!("TableCellDetection_{}", model_config.model_name),
-            "1.0.0",
             TaskType::TableCellDetection,
             format!(
                 "Table cell detection adapter for {} with {} classes",

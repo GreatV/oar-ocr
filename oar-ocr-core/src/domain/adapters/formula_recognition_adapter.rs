@@ -3,7 +3,7 @@
 use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::adapter::{AdapterInfo, ModelAdapter};
-use crate::core::traits::task::{Task, TaskType};
+use crate::core::traits::task::Task;
 use crate::domain::tasks::{
     FormulaRecognitionConfig, FormulaRecognitionOutput, FormulaRecognitionTask,
 };
@@ -18,7 +18,7 @@ use tokenizers::Tokenizer;
 
 /// Formula model enum to support different model types.
 #[derive(Debug)]
-pub enum FormulaModel {
+pub(crate) enum FormulaModel {
     PPFormulaNet(PPFormulaNetModel),
     UniMERNet(UniMERNetModel),
 }
@@ -78,7 +78,7 @@ pub struct FormulaRecognitionAdapter {
 
 impl FormulaRecognitionAdapter {
     /// Creates a new formula recognition adapter.
-    pub fn new(
+    pub(crate) fn new(
         model: FormulaModel,
         tokenizer: Tokenizer,
         model_config: FormulaModelConfig,
@@ -261,7 +261,7 @@ impl_adapter_builder! {
     builder_name: PPFormulaNetAdapterBuilder,
     adapter_name: FormulaRecognitionAdapter,
     config_type: FormulaRecognitionConfig,
-    adapter_type: "FormulaRecognitionPPFormulaNet",
+    adapter_type: "formula_recognition_pp_formulanet",
     adapter_desc: "Recognizes mathematical formulas from images and converts to LaTeX",
     task_type: FormulaRecognition,
 
@@ -336,12 +336,8 @@ impl_adapter_builder! {
 
         let model_config = FormulaModelConfig::pp_formulanet();
 
-        let mut info = AdapterInfo::new(
-            "formula_recognition_pp_formulanet",
-            "1.0.0",
-            TaskType::FormulaRecognition,
-            "Formula recognition using PP-FormulaNet model",
-        );
+        // Create adapter info using the helper
+        let mut info = PPFormulaNetAdapterBuilder::base_adapter_info();
         if let Some(model_name) = builder.model_name_override {
             info.model_name = model_name;
         }
@@ -360,7 +356,7 @@ impl_adapter_builder! {
     builder_name: UniMERNetAdapterBuilder,
     adapter_name: FormulaRecognitionAdapter,
     config_type: FormulaRecognitionConfig,
-    adapter_type: "FormulaRecognitionUniMERNet",
+    adapter_type: "formula_recognition_unimernet",
     adapter_desc: "Recognizes mathematical formulas from images and converts to LaTeX",
     task_type: FormulaRecognition,
 
@@ -435,12 +431,8 @@ impl_adapter_builder! {
 
         let model_config = FormulaModelConfig::unimernet();
 
-        let mut info = AdapterInfo::new(
-            "formula_recognition_unimernet",
-            "1.0.0",
-            TaskType::FormulaRecognition,
-            "Formula recognition using UniMERNet model",
-        );
+        // Create adapter info using the helper
+        let mut info = UniMERNetAdapterBuilder::base_adapter_info();
         if let Some(model_name) = builder.model_name_override {
             info.model_name = model_name;
         }
@@ -461,10 +453,6 @@ pub type PPFormulaNetAdapter = FormulaRecognitionAdapter;
 /// Type alias for UniMERNet adapter.
 pub type UniMERNetFormulaAdapter = FormulaRecognitionAdapter;
 
-/// Type alias for backward compatibility.
-/// UniMERNetFormulaAdapterBuilder is now UniMERNetAdapterBuilder.
-pub type UniMERNetFormulaAdapterBuilder = UniMERNetAdapterBuilder;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,7 +461,7 @@ mod tests {
     #[test]
     fn test_pp_formulanet_builder_creation() {
         let builder = PPFormulaNetAdapterBuilder::new();
-        assert_eq!(builder.adapter_type(), "FormulaRecognitionPPFormulaNet");
+        assert_eq!(builder.adapter_type(), "formula_recognition_pp_formulanet");
     }
 
     #[test]
@@ -503,7 +491,7 @@ mod tests {
     #[test]
     fn test_pp_formulanet_default_builder() {
         let builder = PPFormulaNetAdapterBuilder::default();
-        assert_eq!(builder.adapter_type(), "FormulaRecognitionPPFormulaNet");
+        assert_eq!(builder.adapter_type(), "formula_recognition_pp_formulanet");
         // Default config values
         assert_eq!(builder.config.task_config().score_threshold, 0.0);
         assert_eq!(builder.config.task_config().max_length, 1536);
@@ -512,7 +500,7 @@ mod tests {
     #[test]
     fn test_unimernet_builder_creation() {
         let builder = UniMERNetAdapterBuilder::new();
-        assert_eq!(builder.adapter_type(), "FormulaRecognitionUniMERNet");
+        assert_eq!(builder.adapter_type(), "formula_recognition_unimernet");
     }
 
     #[test]
@@ -542,7 +530,7 @@ mod tests {
     #[test]
     fn test_unimernet_default_builder() {
         let builder = UniMERNetAdapterBuilder::default();
-        assert_eq!(builder.adapter_type(), "FormulaRecognitionUniMERNet");
+        assert_eq!(builder.adapter_type(), "formula_recognition_unimernet");
         // Default config values
         assert_eq!(builder.config.task_config().score_threshold, 0.0);
         assert_eq!(builder.config.task_config().max_length, 1536);
@@ -567,7 +555,7 @@ mod tests {
     #[test]
     fn test_unimernet_formula_adapter_builder_alias() {
         // Test that the type alias works for backward compatibility
-        let builder: UniMERNetFormulaAdapterBuilder = UniMERNetAdapterBuilder::new();
-        assert_eq!(builder.adapter_type(), "FormulaRecognitionUniMERNet");
+        let builder = UniMERNetAdapterBuilder::new();
+        assert_eq!(builder.adapter_type(), "formula_recognition_unimernet");
     }
 }

@@ -6,7 +6,7 @@ use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::{
     adapter::{AdapterInfo, ModelAdapter},
-    task::{Task, TaskType},
+    task::Task,
 };
 use crate::domain::tasks::{
     Classification, TextLineOrientationConfig, TextLineOrientationOutput, TextLineOrientationTask,
@@ -127,7 +127,7 @@ impl_adapter_builder! {
     builder_name: TextLineOrientationAdapterBuilder,
     adapter_name: TextLineOrientationAdapter,
     config_type: TextLineOrientationConfig,
-    adapter_type: "TextLineOrientation",
+    adapter_type: "text_line_orientation",
     adapter_desc: "Classifies text line orientation (0° or 180°)",
     task_type: TextLineOrientation,
 
@@ -174,13 +174,8 @@ impl_adapter_builder! {
             topk: 1, // Will be overridden by task config
         };
 
-        // Create adapter info
-        let mut info = AdapterInfo::new(
-            "text_line_orientation",
-            "1.0.0",
-            TaskType::TextLineOrientation,
-            "Text line orientation classification using PP-LCNet model",
-        );
+        // Create adapter info using the helper
+        let mut info = TextLineOrientationAdapterBuilder::base_adapter_info();
         if let Some(model_name) = builder.model_name_override {
             info.model_name = model_name;
         }
@@ -202,7 +197,7 @@ mod tests {
     #[test]
     fn test_builder_creation() {
         let builder = TextLineOrientationAdapterBuilder::new();
-        assert_eq!(builder.adapter_type(), "TextLineOrientation");
+        assert_eq!(builder.adapter_type(), "text_line_orientation");
     }
 
     #[test]
@@ -227,7 +222,7 @@ mod tests {
     #[test]
     fn test_default_builder() {
         let builder = TextLineOrientationAdapterBuilder::default();
-        assert_eq!(builder.adapter_type(), "TextLineOrientation");
+        assert_eq!(builder.adapter_type(), "text_line_orientation");
         assert_eq!(
             builder.input_shape,
             TextLineOrientationAdapter::DEFAULT_INPUT_SHAPE

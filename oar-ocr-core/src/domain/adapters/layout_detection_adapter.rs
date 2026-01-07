@@ -738,7 +738,6 @@ impl LayoutDetectionAdapterBuilder {
         // Create adapter info
         let info = AdapterInfo::new(
             format!("LayoutDetection_{}", model_config.model_name),
-            "1.0.0",
             TaskType::LayoutDetection,
             format!(
                 "Layout detection adapter for {} with {} classes",

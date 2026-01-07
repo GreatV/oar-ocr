@@ -497,6 +497,8 @@ macro_rules! impl_adapter_builder {
         build: $build_closure:expr,
     ) => {
         /// Builder for [$Adapter].
+        ///
+        #[doc = $adapter_desc]
         #[derive(Debug)]
         pub struct $Builder {
             /// Common configuration shared across all adapters
@@ -517,6 +519,18 @@ macro_rules! impl_adapter_builder {
             pub fn with_config(mut self, config: $Config) -> Self {
                 self.config = self.config.with_task_config(config);
                 self
+            }
+
+            /// Creates the base [`AdapterInfo`] for this adapter.
+            ///
+            /// This helper method constructs an [`AdapterInfo`] using the adapter's
+            /// type, task type, and description from the macro.
+            pub fn base_adapter_info() -> $crate::core::traits::adapter::AdapterInfo {
+                $crate::core::traits::adapter::AdapterInfo::new(
+                    $adapter_type_str,
+                    $crate::core::traits::task::TaskType::$TaskType,
+                    $adapter_desc,
+                )
             }
 
             // Custom methods provided by the user
@@ -677,6 +691,8 @@ macro_rules! impl_adapter_builder {
         build: $build_closure:expr,
     ) => {
         /// Builder for [$Adapter].
+        ///
+        #[doc = $adapter_desc]
         #[derive(Debug)]
         pub struct $Builder {
             /// Common configuration shared across all adapters
@@ -691,6 +707,18 @@ macro_rules! impl_adapter_builder {
                     config: $crate::domain::adapters::builder_config::AdapterBuilderConfig::default(),
                     $($field_name : $field_default),*
                 }
+            }
+
+            /// Creates the base [`AdapterInfo`] for this adapter.
+            ///
+            /// This helper method constructs an [`AdapterInfo`] using the adapter's
+            /// type, task type, and description from the macro.
+            pub fn base_adapter_info() -> $crate::core::traits::adapter::AdapterInfo {
+                $crate::core::traits::adapter::AdapterInfo::new(
+                    $adapter_type_str,
+                    $crate::core::traits::task::TaskType::$TaskType,
+                    $adapter_desc,
+                )
             }
 
             // Custom methods provided by the user
@@ -756,6 +784,8 @@ macro_rules! impl_adapter_builder {
         build: $build_closure:expr,
     ) => {
         /// Builder for [$Adapter].
+        ///
+        #[doc = $adapter_desc]
         #[derive(Debug)]
         pub struct $Builder {
             /// Common configuration shared across all adapters
@@ -770,6 +800,18 @@ macro_rules! impl_adapter_builder {
                     config: $crate::domain::adapters::builder_config::AdapterBuilderConfig::default(),
                     $($field_name : $field_default),*
                 }
+            }
+
+            /// Creates the base [`AdapterInfo`] for this adapter.
+            ///
+            /// This helper method constructs an [`AdapterInfo`] using the adapter's
+            /// type, task type, and description from the macro.
+            pub fn base_adapter_info() -> $crate::core::traits::adapter::AdapterInfo {
+                $crate::core::traits::adapter::AdapterInfo::new(
+                    $adapter_type_str,
+                    $crate::core::traits::task::TaskType::$TaskType,
+                    $adapter_desc,
+                )
             }
 
             // Custom methods provided by the user
