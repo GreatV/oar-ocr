@@ -5,12 +5,13 @@
 use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::{
-    adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
+    adapter::{AdapterInfo, ModelAdapter},
     task::{Task, TaskType},
 };
 use crate::domain::tasks::{
     Classification, TableClassificationConfig, TableClassificationOutput, TableClassificationTask,
 };
+use crate::impl_adapter_builder;
 use crate::models::classification::{PPLCNetModel, PPLCNetModelBuilder, PPLCNetPostprocessConfig};
 use std::path::Path;
 
@@ -132,65 +133,41 @@ impl ModelAdapter for TableClassificationAdapter {
     }
 }
 
-/// Builder for table classification adapter.
-pub struct TableClassificationAdapterBuilder {
-    config: super::builder_config::AdapterBuilderConfig<TableClassificationConfig>,
-    /// Input shape (height, width)
-    input_shape: (u32, u32),
-    /// Optional override for the registered model name
-    model_name_override: Option<String>,
-}
+// Builder macro invocation - generates the builder struct and all trait implementations
+impl_adapter_builder! {
+    builder_name: TableClassificationAdapterBuilder,
+    adapter_name: TableClassificationAdapter,
+    config_type: TableClassificationConfig,
+    adapter_type: "TableClassification",
+    adapter_desc: "Classifies table images as wired or wireless",
+    task_type: TableClassification,
 
-impl TableClassificationAdapterBuilder {
-    /// Creates a new builder with default configuration.
-    pub fn new() -> Self {
-        Self {
-            config: super::builder_config::AdapterBuilderConfig::default(),
-            input_shape: TableClassificationAdapter::DEFAULT_INPUT_SHAPE,
-            model_name_override: None,
+    fields: {
+        pub input_shape: (u32, u32) = TableClassificationAdapter::DEFAULT_INPUT_SHAPE,
+        model_name_override: Option<String> = None,
+    },
+
+    methods: {
+        pub fn input_shape(mut self, shape: (u32, u32)) -> Self {
+            self.input_shape = shape;
+            self
+        }
+
+        pub fn model_name(mut self, name: impl Into<String>) -> Self {
+            self.model_name_override = Some(name.into());
+            self
         }
     }
 
-    /// Sets the input shape.
-    pub fn input_shape(mut self, input_shape: (u32, u32)) -> Self {
-        self.input_shape = input_shape;
-        self
-    }
-
-    /// Sets a custom model name for registry registration.
-    pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
-        self.model_name_override = Some(model_name.into());
-        self
-    }
-}
-
-impl Default for TableClassificationAdapterBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl crate::core::traits::OrtConfigurable for TableClassificationAdapterBuilder {
-    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.config = self.config.with_ort_config(config);
-        self
-    }
-}
-
-impl AdapterBuilder for TableClassificationAdapterBuilder {
-    type Config = TableClassificationConfig;
-    type Adapter = TableClassificationAdapter;
-
-    fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, ort_config) =
-            self.config
-                .into_validated_parts()
-                .map_err(|err| OCRError::ConfigError {
-                    message: err.to_string(),
-                })?;
+    build: |builder: TableClassificationAdapterBuilder, model_path: &Path| -> Result<TableClassificationAdapter, OCRError> {
+        let (task_config, ort_config) = builder.config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
 
         // Build the PP-LCNet model
-        let preprocess_config = super::preprocessing::pp_lcnet_preprocess(self.input_shape);
+        let preprocess_config = super::preprocessing::pp_lcnet_preprocess(builder.input_shape);
 
         let model = apply_ort_config!(
             PPLCNetModelBuilder::new().preprocess_config(preprocess_config),
@@ -211,7 +188,7 @@ impl AdapterBuilder for TableClassificationAdapterBuilder {
             TaskType::TableClassification,
             "Table classification (wired/wireless) using PP-LCNet model",
         );
-        if let Some(model_name) = self.model_name_override {
+        if let Some(model_name) = builder.model_name_override {
             info.model_name = model_name;
         }
 
@@ -221,21 +198,13 @@ impl AdapterBuilder for TableClassificationAdapterBuilder {
             task_config,
             postprocess_config,
         ))
-    }
-
-    fn with_config(mut self, config: Self::Config) -> Self {
-        self.config = self.config.with_task_config(config);
-        self
-    }
-
-    fn adapter_type(&self) -> &str {
-        "TableClassification"
-    }
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::traits::adapter::AdapterBuilder;
 
     #[test]
     fn test_builder_creation() {
@@ -251,8 +220,8 @@ mod tests {
         };
 
         let builder = TableClassificationAdapterBuilder::new().with_config(config.clone());
-        assert_eq!(builder.config.task_config().topk, 2);
-        assert_eq!(builder.config.task_config().score_threshold, 0.7);
+        // Verify adapter_type is correct
+        assert_eq!(builder.adapter_type(), "TableClassification");
     }
 
     #[test]

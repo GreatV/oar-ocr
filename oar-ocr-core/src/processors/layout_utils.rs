@@ -608,8 +608,8 @@ pub struct OverlapRemovalResult<T> {
 /// # Example
 ///
 /// ```ignore
-/// use oar_ocr::processors::layout_utils::{remove_overlap_blocks, LayoutBox};
-/// use oar_ocr::processors::BoundingBox;
+/// use oar_ocr_core::processors::layout_utils::{remove_overlap_blocks, LayoutBox};
+/// use oar_ocr_core::processors::BoundingBox;
 ///
 /// let elements = vec![
 ///     LayoutBox::new(BoundingBox::from_coords(0.0, 0.0, 100.0, 100.0), "text".to_string()),

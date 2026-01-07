@@ -268,7 +268,7 @@ impl OCRError {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use oar_ocr::core::errors::OCRError;
+    /// # use oar_ocr_core::core::errors::OCRError;
     /// let err = OCRError::config_error_detailed(
     ///     "task graph validation",
     ///     "task 'recognition' depends on 'detection' which does not exist"
@@ -296,7 +296,7 @@ impl OCRError {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use oar_ocr::core::errors::OCRError;
+    /// # use oar_ocr_core::core::errors::OCRError;
     /// let err = OCRError::config_error_with_suggestion(
     ///     "model loading",
     ///     "model file not found at 'models/detection.onnx'",

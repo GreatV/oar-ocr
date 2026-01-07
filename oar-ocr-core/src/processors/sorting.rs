@@ -149,7 +149,7 @@ pub enum SortDirection {
 /// # Example
 ///
 /// ```
-/// use oar_ocr::processors::{BoundingBox, SortDirection, sort_by_xycut};
+/// use oar_ocr_core::processors::{BoundingBox, SortDirection, sort_by_xycut};
 ///
 /// let boxes = vec![
 ///     BoundingBox::from_coords(10.0, 10.0, 50.0, 30.0),

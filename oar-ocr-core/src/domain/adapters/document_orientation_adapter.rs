@@ -5,14 +5,14 @@
 use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::{
-    adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
+    adapter::{AdapterInfo, ModelAdapter},
     task::{Task, TaskType},
 };
 use crate::domain::tasks::{
     Classification, DocumentOrientationConfig, DocumentOrientationOutput, DocumentOrientationTask,
 };
+use crate::impl_adapter_builder;
 use crate::models::classification::{PPLCNetModel, PPLCNetModelBuilder, PPLCNetPostprocessConfig};
-use std::path::Path;
 
 /// Document orientation classification adapter that uses the PP-LCNet model.
 #[derive(Debug)]
@@ -128,65 +128,40 @@ impl ModelAdapter for DocumentOrientationAdapter {
     }
 }
 
-/// Builder for document orientation adapter.
-pub struct DocumentOrientationAdapterBuilder {
-    config: super::builder_config::AdapterBuilderConfig<DocumentOrientationConfig>,
-    /// Input shape (height, width)
-    input_shape: (u32, u32),
-    /// Optional override for the registered model name
-    model_name_override: Option<String>,
-}
+impl_adapter_builder! {
+    builder_name: DocumentOrientationAdapterBuilder,
+    adapter_name: DocumentOrientationAdapter,
+    config_type: DocumentOrientationConfig,
+    adapter_type: "DocumentOrientation",
+    adapter_desc: "Classifies document image orientation (0°, 90°, 180°, 270°)",
+    task_type: DocumentOrientation,
 
-impl DocumentOrientationAdapterBuilder {
-    /// Creates a new builder with default configuration.
-    pub fn new() -> Self {
-        Self {
-            config: super::builder_config::AdapterBuilderConfig::default(),
-            input_shape: DocumentOrientationAdapter::DEFAULT_INPUT_SHAPE,
-            model_name_override: None,
+    fields: {
+        input_shape: (u32, u32) = DocumentOrientationAdapter::DEFAULT_INPUT_SHAPE,
+        model_name_override: Option<String> = None,
+    },
+
+    methods: {
+        pub fn input_shape(mut self, input_shape: (u32, u32)) -> Self {
+            self.input_shape = input_shape;
+            self
+        }
+
+        pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
+            self.model_name_override = Some(model_name.into());
+            self
         }
     }
 
-    /// Sets the input shape.
-    pub fn input_shape(mut self, input_shape: (u32, u32)) -> Self {
-        self.input_shape = input_shape;
-        self
-    }
-
-    /// Sets a custom model name for registry registration.
-    pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
-        self.model_name_override = Some(model_name.into());
-        self
-    }
-}
-
-impl Default for DocumentOrientationAdapterBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl crate::core::traits::OrtConfigurable for DocumentOrientationAdapterBuilder {
-    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.config = self.config.with_ort_config(config);
-        self
-    }
-}
-
-impl AdapterBuilder for DocumentOrientationAdapterBuilder {
-    type Config = DocumentOrientationConfig;
-    type Adapter = DocumentOrientationAdapter;
-
-    fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, ort_config) =
-            self.config
-                .into_validated_parts()
-                .map_err(|err| OCRError::ConfigError {
-                    message: err.to_string(),
-                })?;
+    build: |builder: DocumentOrientationAdapterBuilder, model_path: &std::path::Path| -> Result<DocumentOrientationAdapter, OCRError> {
+        let (task_config, ort_config) = builder.config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
 
         // Build the PP-LCNet model
-        let preprocess_config = super::preprocessing::pp_lcnet_preprocess(self.input_shape);
+        let preprocess_config = super::preprocessing::pp_lcnet_preprocess(builder.input_shape);
 
         let model = apply_ort_config!(
             PPLCNetModelBuilder::new().preprocess_config(preprocess_config),
@@ -207,7 +182,7 @@ impl AdapterBuilder for DocumentOrientationAdapterBuilder {
             TaskType::DocumentOrientation,
             "Document orientation classification using PP-LCNet model",
         );
-        if let Some(model_name) = self.model_name_override {
+        if let Some(model_name) = builder.model_name_override {
             info.model_name = model_name;
         }
 
@@ -217,21 +192,13 @@ impl AdapterBuilder for DocumentOrientationAdapterBuilder {
             task_config,
             postprocess_config,
         ))
-    }
-
-    fn with_config(mut self, config: Self::Config) -> Self {
-        self.config = self.config.with_task_config(config);
-        self
-    }
-
-    fn adapter_type(&self) -> &str {
-        "DocumentOrientation"
-    }
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::traits::adapter::AdapterBuilder;
 
     #[test]
     fn test_builder_creation() {

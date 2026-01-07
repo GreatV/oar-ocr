@@ -5,12 +5,12 @@
 use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::{
-    adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
-    task::{Task, TaskType},
+    adapter::{AdapterInfo, ModelAdapter},
+    task::Task,
 };
 use crate::domain::tasks::{TextRecognitionConfig, TextRecognitionOutput, TextRecognitionTask};
+use crate::impl_adapter_builder;
 use crate::models::recognition::crnn::{CRNNModel, CRNNModelBuilder, CRNNPreprocessConfig};
-use std::path::Path;
 
 /// Text recognition adapter that uses the CRNN model.
 #[derive(Debug)]
@@ -116,91 +116,73 @@ impl ModelAdapter for TextRecognitionAdapter {
     }
 }
 
-/// Builder for text recognition adapter.
-pub struct TextRecognitionAdapterBuilder {
-    config: super::builder_config::AdapterBuilderConfig<TextRecognitionConfig>,
-    /// Model preprocessing configuration
-    preprocess_config: CRNNPreprocessConfig,
-    /// Character dictionary
-    character_dict: Option<Vec<String>>,
-    /// Whether to return character positions for word box generation
-    return_word_box: bool,
-}
+impl_adapter_builder! {
+    builder_name: TextRecognitionAdapterBuilder,
+    adapter_name: TextRecognitionAdapter,
+    config_type: TextRecognitionConfig,
+    adapter_type: "TextRecognition",
+    adapter_desc: "Recognizes text content from image regions",
+    task_type: TextRecognition,
 
-impl TextRecognitionAdapterBuilder {
-    /// Creates a new text recognition adapter builder.
-    pub fn new() -> Self {
-        Self {
-            config: super::builder_config::AdapterBuilderConfig::default(),
-            preprocess_config: CRNNPreprocessConfig::default(),
-            character_dict: None,
-            return_word_box: false,
+    fields: {
+        preprocess_config: CRNNPreprocessConfig = CRNNPreprocessConfig::default(),
+        character_dict: Option<Vec<String>> = None,
+        return_word_box: bool = false,
+    },
+
+    methods: {
+        /// Sets the model input shape.
+        pub fn model_input_shape(mut self, shape: [usize; 3]) -> Self {
+            self.preprocess_config.model_input_shape = shape;
+            self
+        }
+
+        /// Sets the character dictionary.
+        pub fn character_dict(mut self, character_dict: Vec<String>) -> Self {
+            self.character_dict = Some(character_dict);
+            self
+        }
+
+        /// Sets the score threshold.
+        pub fn score_thresh(mut self, score_thresh: f32) -> Self {
+            self.config.task_config.score_threshold = score_thresh;
+            self
+        }
+
+        /// Sets the maximum image width.
+        pub fn max_img_w(mut self, max_img_w: usize) -> Self {
+            self.preprocess_config.max_img_w = Some(max_img_w);
+            self
+        }
+
+        /// Sets whether to return character positions for word box generation.
+        pub fn return_word_box(mut self, enable: bool) -> Self {
+            self.return_word_box = enable;
+            self
         }
     }
 
-    /// Sets the task configuration.
-    pub fn with_config(mut self, config: TextRecognitionConfig) -> Self {
-        self.config = self.config.with_task_config(config);
-        self
-    }
-
-    /// Sets the model input shape.
-    pub fn model_input_shape(mut self, shape: [usize; 3]) -> Self {
-        self.preprocess_config.model_input_shape = shape;
-        self
-    }
-
-    /// Sets the character dictionary.
-    pub fn character_dict(mut self, character_dict: Vec<String>) -> Self {
-        self.character_dict = Some(character_dict);
-        self
-    }
-
-    /// Sets the score threshold.
-    pub fn score_thresh(mut self, score_thresh: f32) -> Self {
-        self.config.task_config.score_threshold = score_thresh;
-        self
-    }
-
-    /// Sets the maximum image width.
-    pub fn max_img_w(mut self, max_img_w: usize) -> Self {
-        self.preprocess_config.max_img_w = Some(max_img_w);
-        self
-    }
-
-    /// Sets whether to return character positions for word box generation.
-    pub fn return_word_box(mut self, enable: bool) -> Self {
-        self.return_word_box = enable;
-        self
-    }
-}
-
-impl AdapterBuilder for TextRecognitionAdapterBuilder {
-    type Config = TextRecognitionConfig;
-    type Adapter = TextRecognitionAdapter;
-
-    fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, ort_config) =
-            self.config
-                .into_validated_parts()
-                .map_err(|err| OCRError::ConfigError {
-                    message: err.to_string(),
-                })?;
+    build: |builder: TextRecognitionAdapterBuilder, model_path: &std::path::Path| -> Result<TextRecognitionAdapter, OCRError> {
+        let (task_config, ort_config) = builder.config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
 
         // Build the CRNN model
-        let mut model_builder = CRNNModelBuilder::new().preprocess_config(self.preprocess_config);
+        let mut model_builder = CRNNModelBuilder::new().preprocess_config(builder.preprocess_config);
 
-        if let Some(character_dict) = self.character_dict {
+        if let Some(character_dict) = builder.character_dict {
             model_builder = model_builder.character_dict(character_dict);
         }
 
         let model = apply_ort_config!(model_builder, ort_config).build(model_path)?;
 
         // Create adapter info
-        let info = AdapterInfo::new(
+        let info = crate::core::traits::adapter::AdapterInfo::new(
             "TextRecognition",
             "1.0.0",
-            TaskType::TextRecognition,
+            crate::core::traits::task::TaskType::TextRecognition,
             "Text recognition using CRNN model",
         );
 
@@ -208,29 +190,7 @@ impl AdapterBuilder for TextRecognitionAdapterBuilder {
             model,
             info,
             config: task_config,
-            return_word_box: self.return_word_box,
+            return_word_box: builder.return_word_box,
         })
-    }
-
-    fn with_config(mut self, config: Self::Config) -> Self {
-        self.config = self.config.with_task_config(config);
-        self
-    }
-
-    fn adapter_type(&self) -> &str {
-        "TextRecognition"
-    }
-}
-
-impl Default for TextRecognitionAdapterBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl crate::core::traits::OrtConfigurable for TextRecognitionAdapterBuilder {
-    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.config = self.config.with_ort_config(config);
-        self
-    }
+    },
 }

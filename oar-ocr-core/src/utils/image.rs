@@ -638,7 +638,7 @@ pub fn ocr_resize_and_pad(
 /// # Example
 ///
 /// ```rust,no_run
-/// use oar_ocr::utils::resize_images_batch;
+/// use oar_ocr_core::utils::resize_images_batch;
 /// use image::RgbImage;
 ///
 /// let images = vec![RgbImage::new(100, 100), RgbImage::new(200, 150)];
@@ -714,7 +714,7 @@ pub fn resize_images_batch_to_dynamic(
 /// # Example
 ///
 /// ```rust,no_run
-/// use oar_ocr::utils::mask_region;
+/// use oar_ocr_core::utils::mask_region;
 /// use image::RgbImage;
 ///
 /// let mut image = RgbImage::new(100, 100);
@@ -767,8 +767,8 @@ pub fn mask_region(
 /// # Example
 ///
 /// ```rust,no_run
-/// use oar_ocr::utils::mask_regions;
-/// use oar_ocr::processors::BoundingBox;
+/// use oar_ocr_core::utils::mask_regions;
+/// use oar_ocr_core::processors::BoundingBox;
 /// use image::RgbImage;
 ///
 /// let mut image = RgbImage::new(100, 100);

@@ -5,14 +5,14 @@
 use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::{
-    adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
+    adapter::{AdapterInfo, ModelAdapter},
     task::{Task, TaskType},
 };
 use crate::domain::tasks::{
     Classification, TextLineOrientationConfig, TextLineOrientationOutput, TextLineOrientationTask,
 };
+use crate::impl_adapter_builder;
 use crate::models::classification::{PPLCNetModel, PPLCNetModelBuilder, PPLCNetPostprocessConfig};
-use std::path::Path;
 
 /// Text line orientation classification adapter that uses the PP-LCNet model.
 #[derive(Debug)]
@@ -123,65 +123,40 @@ impl ModelAdapter for TextLineOrientationAdapter {
     }
 }
 
-/// Builder for text line orientation adapter.
-pub struct TextLineOrientationAdapterBuilder {
-    config: super::builder_config::AdapterBuilderConfig<TextLineOrientationConfig>,
-    /// Input shape (height, width)
-    input_shape: (u32, u32),
-    /// Optional override for the registered model name
-    model_name_override: Option<String>,
-}
+impl_adapter_builder! {
+    builder_name: TextLineOrientationAdapterBuilder,
+    adapter_name: TextLineOrientationAdapter,
+    config_type: TextLineOrientationConfig,
+    adapter_type: "TextLineOrientation",
+    adapter_desc: "Classifies text line orientation (0° or 180°)",
+    task_type: TextLineOrientation,
 
-impl TextLineOrientationAdapterBuilder {
-    /// Creates a new builder with default configuration.
-    pub fn new() -> Self {
-        Self {
-            config: super::builder_config::AdapterBuilderConfig::default(),
-            input_shape: TextLineOrientationAdapter::DEFAULT_INPUT_SHAPE,
-            model_name_override: None,
+    fields: {
+        input_shape: (u32, u32) = TextLineOrientationAdapter::DEFAULT_INPUT_SHAPE,
+        model_name_override: Option<String> = None,
+    },
+
+    methods: {
+        pub fn input_shape(mut self, input_shape: (u32, u32)) -> Self {
+            self.input_shape = input_shape;
+            self
+        }
+
+        pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
+            self.model_name_override = Some(model_name.into());
+            self
         }
     }
 
-    /// Sets the input shape.
-    pub fn input_shape(mut self, input_shape: (u32, u32)) -> Self {
-        self.input_shape = input_shape;
-        self
-    }
-
-    /// Sets a custom model name for registry registration.
-    pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
-        self.model_name_override = Some(model_name.into());
-        self
-    }
-}
-
-impl Default for TextLineOrientationAdapterBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl crate::core::traits::OrtConfigurable for TextLineOrientationAdapterBuilder {
-    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.config = self.config.with_ort_config(config);
-        self
-    }
-}
-
-impl AdapterBuilder for TextLineOrientationAdapterBuilder {
-    type Config = TextLineOrientationConfig;
-    type Adapter = TextLineOrientationAdapter;
-
-    fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, ort_config) =
-            self.config
-                .into_validated_parts()
-                .map_err(|err| OCRError::ConfigError {
-                    message: err.to_string(),
-                })?;
+    build: |builder: TextLineOrientationAdapterBuilder, model_path: &std::path::Path| -> Result<TextLineOrientationAdapter, OCRError> {
+        let (task_config, ort_config) = builder.config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
 
         // Build the PP-LCNet model
-        let mut preprocess_config = super::preprocessing::pp_lcnet_preprocess(self.input_shape);
+        let mut preprocess_config = super::preprocessing::pp_lcnet_preprocess(builder.input_shape);
         // Align with standard model configuration:
         // - Direct resize to 80x160 (no resize_short + crop)
         // - ImageNet mean/std in RGB order (handled by PPLCNetPreprocessConfig defaults)
@@ -206,7 +181,7 @@ impl AdapterBuilder for TextLineOrientationAdapterBuilder {
             TaskType::TextLineOrientation,
             "Text line orientation classification using PP-LCNet model",
         );
-        if let Some(model_name) = self.model_name_override {
+        if let Some(model_name) = builder.model_name_override {
             info.model_name = model_name;
         }
 
@@ -216,21 +191,13 @@ impl AdapterBuilder for TextLineOrientationAdapterBuilder {
             task_config,
             postprocess_config,
         ))
-    }
-
-    fn with_config(mut self, config: Self::Config) -> Self {
-        self.config = self.config.with_task_config(config);
-        self
-    }
-
-    fn adapter_type(&self) -> &str {
-        "TextLineOrientation"
-    }
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::traits::adapter::AdapterBuilder;
 
     #[test]
     fn test_builder_creation() {

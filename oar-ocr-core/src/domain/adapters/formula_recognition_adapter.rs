@@ -2,14 +2,15 @@
 
 use crate::apply_ort_config;
 use crate::core::OCRError;
-use crate::core::traits::adapter::{AdapterBuilder, AdapterInfo, ModelAdapter};
+use crate::core::traits::adapter::{AdapterInfo, ModelAdapter};
 use crate::core::traits::task::{Task, TaskType};
 use crate::domain::tasks::{
     FormulaRecognitionConfig, FormulaRecognitionOutput, FormulaRecognitionTask,
 };
+use crate::impl_adapter_builder;
 use crate::models::recognition::{
-    PPFormulaNetModel, PPFormulaNetModelBuilder, PPFormulaNetPostprocessConfig, UniMERNetModel,
-    UniMERNetModelBuilder, UniMERNetPostprocessConfig,
+    PPFormulaNetModel, PPFormulaNetModelBuilder, UniMERNetModel, UniMERNetModelBuilder,
+    pp_formulanet::PPFormulaNetPostprocessConfig, unimernet::UniMERNetPostprocessConfig,
 };
 use crate::processors::normalize_latex;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ use tokenizers::Tokenizer;
 
 /// Formula model enum to support different model types.
 #[derive(Debug)]
-enum FormulaModel {
+pub enum FormulaModel {
     PPFormulaNet(PPFormulaNetModel),
     UniMERNet(UniMERNetModel),
 }
@@ -65,37 +66,6 @@ impl FormulaModel {
     }
 }
 
-/// Formula model configuration.
-#[derive(Debug, Clone)]
-pub struct FormulaModelConfig {
-    pub model_name: String,
-    pub description: String,
-    pub sos_token_id: i64,
-    pub eos_token_id: i64,
-}
-
-impl FormulaModelConfig {
-    /// PP-FormulaNet configuration.
-    pub fn pp_formulanet() -> Self {
-        Self {
-            model_name: "PP-FormulaNet".to_string(),
-            description: "PP-FormulaNet formula recognition model".to_string(),
-            sos_token_id: 0,
-            eos_token_id: 2,
-        }
-    }
-
-    /// UniMERNet configuration.
-    pub fn unimernet() -> Self {
-        Self {
-            model_name: "UniMERNet".to_string(),
-            description: "UniMERNet formula recognition model".to_string(),
-            sos_token_id: 0,
-            eos_token_id: 2,
-        }
-    }
-}
-
 /// Formula recognition adapter.
 #[derive(Debug)]
 pub struct FormulaRecognitionAdapter {
@@ -104,6 +74,37 @@ pub struct FormulaRecognitionAdapter {
     model_config: FormulaModelConfig,
     info: AdapterInfo,
     config: FormulaRecognitionConfig,
+}
+
+impl FormulaRecognitionAdapter {
+    /// Creates a new formula recognition adapter.
+    pub fn new(
+        model: FormulaModel,
+        tokenizer: Tokenizer,
+        model_config: FormulaModelConfig,
+        info: AdapterInfo,
+        config: FormulaRecognitionConfig,
+    ) -> Self {
+        Self {
+            model,
+            tokenizer,
+            model_config,
+            info,
+            config,
+        }
+    }
+
+    /// PP-FormulaNet SOS token ID.
+    pub const PPFORMULANET_SOS_TOKEN_ID: i64 = 0;
+
+    /// PP-FormulaNet EOS token ID.
+    pub const PPFORMULANET_EOS_TOKEN_ID: i64 = 2;
+
+    /// UniMERNet SOS token ID.
+    pub const UNIMERNET_SOS_TOKEN_ID: i64 = 0;
+
+    /// UniMERNet EOS token ID.
+    pub const UNIMERNET_EOS_TOKEN_ID: i64 = 2;
 }
 
 impl ModelAdapter for FormulaRecognitionAdapter {
@@ -225,342 +226,254 @@ impl ModelAdapter for FormulaRecognitionAdapter {
     }
 }
 
-/// Model type for formula recognition.
-#[derive(Debug, Clone, Copy)]
-enum FormulaModelType {
-    PPFormulaNet,
-    UniMERNet,
+/// Formula model configuration.
+#[derive(Debug, Clone)]
+pub struct FormulaModelConfig {
+    pub model_name: String,
+    pub description: String,
+    pub sos_token_id: i64,
+    pub eos_token_id: i64,
 }
 
-/// Builder for formula recognition adapter.
-#[derive(Debug)]
-pub struct FormulaRecognitionAdapterBuilder {
-    config: super::builder_config::AdapterBuilderConfig<FormulaRecognitionConfig>,
-    model_config: Option<FormulaModelConfig>,
-    model_type: FormulaModelType,
-    tokenizer_path: Option<PathBuf>,
-    model_name_override: Option<String>,
-    target_size: Option<(u32, u32)>,
-}
-
-impl FormulaRecognitionAdapterBuilder {
-    /// Creates a new builder with the specified model configuration and type.
-    fn new_with_config(model_config: FormulaModelConfig, model_type: FormulaModelType) -> Self {
+impl FormulaModelConfig {
+    /// PP-FormulaNet configuration.
+    pub fn pp_formulanet() -> Self {
         Self {
-            config: super::builder_config::AdapterBuilderConfig::default(),
-            model_config: Some(model_config),
-            model_type,
-            tokenizer_path: None,
-            model_name_override: None,
-            target_size: None,
+            model_name: "PP-FormulaNet".to_string(),
+            description: "PP-FormulaNet formula recognition model".to_string(),
+            sos_token_id: FormulaRecognitionAdapter::PPFORMULANET_SOS_TOKEN_ID,
+            eos_token_id: FormulaRecognitionAdapter::PPFORMULANET_EOS_TOKEN_ID,
         }
     }
 
-    /// Sets the task configuration.
-    pub fn task_config(mut self, config: FormulaRecognitionConfig) -> Self {
-        self.config = self.config.with_task_config(config);
-        self
-    }
-
-    /// Sets the target size.
-    pub fn target_size(mut self, width: u32, height: u32) -> Self {
-        self.target_size = Some((width, height));
-        self
-    }
-
-    /// Sets the tokenizer path.
-    pub fn tokenizer_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
-        self.tokenizer_path = Some(path.into());
-        self
-    }
-
-    /// Sets the model name override.
-    pub fn model_name(mut self, name: impl Into<String>) -> Self {
-        self.model_name_override = Some(name.into());
-        self
-    }
-
-    /// Sets the score threshold.
-    pub fn score_threshold(mut self, threshold: f32) -> Self {
-        self.config.task_config.score_threshold = threshold;
-        self
-    }
-
-    /// Sets the maximum sequence length.
-    pub fn max_length(mut self, length: usize) -> Self {
-        self.config.task_config.max_length = length;
-        self
+    /// UniMERNet configuration.
+    pub fn unimernet() -> Self {
+        Self {
+            model_name: "UniMERNet".to_string(),
+            description: "UniMERNet formula recognition model".to_string(),
+            sos_token_id: FormulaRecognitionAdapter::UNIMERNET_SOS_TOKEN_ID,
+            eos_token_id: FormulaRecognitionAdapter::UNIMERNET_EOS_TOKEN_ID,
+        }
     }
 }
 
-impl AdapterBuilder for FormulaRecognitionAdapterBuilder {
-    type Config = FormulaRecognitionConfig;
-    type Adapter = FormulaRecognitionAdapter;
+impl_adapter_builder! {
+    builder_name: PPFormulaNetAdapterBuilder,
+    adapter_name: FormulaRecognitionAdapter,
+    config_type: FormulaRecognitionConfig,
+    adapter_type: "FormulaRecognitionPPFormulaNet",
+    adapter_desc: "Recognizes mathematical formulas from images and converts to LaTeX",
+    task_type: FormulaRecognition,
 
-    fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, ort_config) =
-            self.config
-                .into_validated_parts()
-                .map_err(|err| OCRError::ConfigError {
-                    message: err.to_string(),
-                })?;
+    fields: {
+        tokenizer_path: Option<PathBuf> = None,
+        target_size: Option<(u32, u32)> = None,
+        model_name_override: Option<String> = None,
+    },
 
-        let model_config = self.model_config.ok_or_else(|| OCRError::InvalidInput {
-            message: "Model configuration not set".to_string(),
-        })?;
+    methods: {
+        /// Sets the target size for image preprocessing.
+        pub fn target_size(mut self, width: u32, height: u32) -> Self {
+            self.target_size = Some((width, height));
+            self
+        }
 
-        // Build the model based on type
-        let model = match self.model_type {
-            FormulaModelType::PPFormulaNet => {
-                let mut builder = PPFormulaNetModelBuilder::new();
-                if let Some((width, height)) = self.target_size {
-                    builder = builder.target_size(width, height);
-                }
-                FormulaModel::PPFormulaNet(
-                    apply_ort_config!(builder, ort_config.clone()).build(model_path)?,
-                )
-            }
-            FormulaModelType::UniMERNet => {
-                let mut builder = UniMERNetModelBuilder::new();
-                if let Some((width, height)) = self.target_size {
-                    builder = builder.target_size(width, height);
-                }
-                FormulaModel::UniMERNet(apply_ort_config!(builder, ort_config).build(model_path)?)
-            }
-        };
+        /// Sets the tokenizer path.
+        pub fn tokenizer_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
+            self.tokenizer_path = Some(path.into());
+            self
+        }
 
-        // Load tokenizer - tokenizer path is required
-        let tokenizer_path = self.tokenizer_path.ok_or_else(|| OCRError::InvalidInput {
-            message: "Tokenizer path is required. Please provide it via --tokenizer-path or tokenizer_path() builder method.".to_string(),
-        })?;
+        /// Sets a custom model name for registry registration.
+        pub fn model_name(mut self, name: impl Into<String>) -> Self {
+            self.model_name_override = Some(name.into());
+            self
+        }
 
-        let tokenizer =
-            Tokenizer::from_file(&tokenizer_path).map_err(|err| OCRError::InvalidInput {
-                message: format!(
-                    "Failed to load tokenizer from {:?}: {}",
-                    tokenizer_path, err
-                ),
+        /// Sets the maximum sequence length.
+        pub fn max_length(mut self, length: usize) -> Self {
+            self.config.task_config.max_length = length;
+            self
+        }
+
+        /// Sets the task configuration (alias for with_config).
+        pub fn task_config(mut self, config: FormulaRecognitionConfig) -> Self {
+            self.config = self.config.with_task_config(config);
+            self
+        }
+
+        /// Sets the score threshold for filtering low-confidence results.
+        pub fn score_threshold(mut self, threshold: f32) -> Self {
+            self.config.task_config.score_threshold = threshold;
+            self
+        }
+    }
+
+    build: |builder: PPFormulaNetAdapterBuilder, model_path: &Path| -> Result<FormulaRecognitionAdapter, OCRError> {
+        let (task_config, ort_config) = builder.config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
             })?;
 
-        // Create adapter info
-        let info = AdapterInfo::new(
-            self.model_name_override
-                .unwrap_or_else(|| model_config.model_name.clone()),
-            "1.0.0",
-            TaskType::FormulaRecognition,
-            &model_config.description,
+        // Build PP-FormulaNet model
+        let mut model_builder = PPFormulaNetModelBuilder::new();
+        if let Some((width, height)) = builder.target_size {
+            model_builder = model_builder.target_size(width, height);
+        }
+        let model = FormulaModel::PPFormulaNet(
+            apply_ort_config!(model_builder, ort_config).build(model_path)?
         );
 
-        Ok(FormulaRecognitionAdapter {
+        // Tokenizer path is required
+        let tokenizer_path = builder.tokenizer_path.ok_or_else(|| OCRError::InvalidInput {
+            message: "Tokenizer path is required. Use .tokenizer_path() to specify the path.".to_string(),
+        })?;
+
+        let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|err| OCRError::InvalidInput {
+            message: format!("Failed to load tokenizer from {:?}: {}", tokenizer_path, err),
+        })?;
+
+        let model_config = FormulaModelConfig::pp_formulanet();
+
+        let mut info = AdapterInfo::new(
+            "formula_recognition_pp_formulanet",
+            "1.0.0",
+            TaskType::FormulaRecognition,
+            "Formula recognition using PP-FormulaNet model",
+        );
+        if let Some(model_name) = builder.model_name_override {
+            info.model_name = model_name;
+        }
+
+        Ok(FormulaRecognitionAdapter::new(
             model,
             tokenizer,
             model_config,
             info,
-            config: task_config,
-        })
-    }
-
-    fn with_config(mut self, config: Self::Config) -> Self {
-        self.config = self.config.with_task_config(config);
-        self
-    }
-
-    fn adapter_type(&self) -> &str {
-        "FormulaRecognition"
-    }
+            task_config,
+        ))
+    },
 }
 
-impl crate::core::traits::OrtConfigurable for FormulaRecognitionAdapterBuilder {
-    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.config = self.config.with_ort_config(config);
-        self
+impl_adapter_builder! {
+    builder_name: UniMERNetAdapterBuilder,
+    adapter_name: FormulaRecognitionAdapter,
+    config_type: FormulaRecognitionConfig,
+    adapter_type: "FormulaRecognitionUniMERNet",
+    adapter_desc: "Recognizes mathematical formulas from images and converts to LaTeX",
+    task_type: FormulaRecognition,
+
+    fields: {
+        tokenizer_path: Option<PathBuf> = None,
+        target_size: Option<(u32, u32)> = None,
+        model_name_override: Option<String> = None,
+    },
+
+    methods: {
+        /// Sets the target size for image preprocessing.
+        pub fn target_size(mut self, width: u32, height: u32) -> Self {
+            self.target_size = Some((width, height));
+            self
+        }
+
+        /// Sets the tokenizer path.
+        pub fn tokenizer_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
+            self.tokenizer_path = Some(path.into());
+            self
+        }
+
+        /// Sets a custom model name for registry registration.
+        pub fn model_name(mut self, name: impl Into<String>) -> Self {
+            self.model_name_override = Some(name.into());
+            self
+        }
+
+        /// Sets the maximum sequence length.
+        pub fn max_length(mut self, length: usize) -> Self {
+            self.config.task_config.max_length = length;
+            self
+        }
+
+        /// Sets the task configuration (alias for with_config).
+        pub fn task_config(mut self, config: FormulaRecognitionConfig) -> Self {
+            self.config = self.config.with_task_config(config);
+            self
+        }
+
+        /// Sets the score threshold for filtering low-confidence results.
+        pub fn score_threshold(mut self, threshold: f32) -> Self {
+            self.config.task_config.score_threshold = threshold;
+            self
+        }
     }
+
+    build: |builder: UniMERNetAdapterBuilder, model_path: &Path| -> Result<FormulaRecognitionAdapter, OCRError> {
+        let (task_config, ort_config) = builder.config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
+
+        // Build UniMERNet model
+        let mut model_builder = UniMERNetModelBuilder::new();
+        if let Some((width, height)) = builder.target_size {
+            model_builder = model_builder.target_size(width, height);
+        }
+        let model = FormulaModel::UniMERNet(
+            apply_ort_config!(model_builder, ort_config).build(model_path)?
+        );
+
+        // Tokenizer path is required
+        let tokenizer_path = builder.tokenizer_path.ok_or_else(|| OCRError::InvalidInput {
+            message: "Tokenizer path is required. Use .tokenizer_path() to specify the path.".to_string(),
+        })?;
+
+        let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|err| OCRError::InvalidInput {
+            message: format!("Failed to load tokenizer from {:?}: {}", tokenizer_path, err),
+        })?;
+
+        let model_config = FormulaModelConfig::unimernet();
+
+        let mut info = AdapterInfo::new(
+            "formula_recognition_unimernet",
+            "1.0.0",
+            TaskType::FormulaRecognition,
+            "Formula recognition using UniMERNet model",
+        );
+        if let Some(model_name) = builder.model_name_override {
+            info.model_name = model_name;
+        }
+
+        Ok(FormulaRecognitionAdapter::new(
+            model,
+            tokenizer,
+            model_config,
+            info,
+            task_config,
+        ))
+    },
 }
 
 /// Type alias for PP-FormulaNet adapter.
 pub type PPFormulaNetAdapter = FormulaRecognitionAdapter;
 
-/// Builder for PP-FormulaNet adapter.
-#[derive(Debug)]
-pub struct PPFormulaNetAdapterBuilder {
-    inner: FormulaRecognitionAdapterBuilder,
-}
-
-impl PPFormulaNetAdapterBuilder {
-    /// Creates a new PP-FormulaNet adapter builder.
-    pub fn new() -> Self {
-        Self {
-            inner: FormulaRecognitionAdapterBuilder::new_with_config(
-                FormulaModelConfig::pp_formulanet(),
-                FormulaModelType::PPFormulaNet,
-            ),
-        }
-    }
-
-    /// Sets the target size.
-    pub fn target_size(mut self, width: u32, height: u32) -> Self {
-        self.inner = self.inner.target_size(width, height);
-        self
-    }
-
-    /// Sets the tokenizer path.
-    pub fn tokenizer_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
-        self.inner = self.inner.tokenizer_path(path);
-        self
-    }
-
-    /// Sets the model name override.
-    pub fn model_name(mut self, name: impl Into<String>) -> Self {
-        self.inner = self.inner.model_name(name);
-        self
-    }
-
-    /// Sets the score threshold.
-    pub fn score_threshold(mut self, threshold: f32) -> Self {
-        self.inner = self.inner.score_threshold(threshold);
-        self
-    }
-
-    /// Sets the maximum sequence length.
-    pub fn max_length(mut self, length: usize) -> Self {
-        self.inner = self.inner.max_length(length);
-        self
-    }
-
-    /// Sets the task configuration.
-    pub fn task_config(mut self, config: FormulaRecognitionConfig) -> Self {
-        self.inner = self.inner.task_config(config);
-        self
-    }
-}
-
-impl Default for PPFormulaNetAdapterBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl crate::core::traits::OrtConfigurable for PPFormulaNetAdapterBuilder {
-    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.inner = self.inner.with_ort_config(config);
-        self
-    }
-}
-
-impl AdapterBuilder for PPFormulaNetAdapterBuilder {
-    type Config = FormulaRecognitionConfig;
-    type Adapter = PPFormulaNetAdapter;
-
-    fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        self.inner.build(model_path)
-    }
-
-    fn with_config(mut self, config: Self::Config) -> Self {
-        self.inner = self.inner.with_config(config);
-        self
-    }
-
-    fn adapter_type(&self) -> &str {
-        "PPFormulaNet"
-    }
-}
-
 /// Type alias for UniMERNet adapter.
 pub type UniMERNetFormulaAdapter = FormulaRecognitionAdapter;
 
-/// Builder for UniMERNet adapter.
-#[derive(Debug)]
-pub struct UniMERNetFormulaAdapterBuilder {
-    inner: FormulaRecognitionAdapterBuilder,
-}
-
-impl UniMERNetFormulaAdapterBuilder {
-    /// Creates a new UniMERNet adapter builder.
-    pub fn new() -> Self {
-        Self {
-            inner: FormulaRecognitionAdapterBuilder::new_with_config(
-                FormulaModelConfig::unimernet(),
-                FormulaModelType::UniMERNet,
-            ),
-        }
-    }
-
-    /// Sets the target size.
-    pub fn target_size(mut self, width: u32, height: u32) -> Self {
-        self.inner = self.inner.target_size(width, height);
-        self
-    }
-
-    /// Sets the tokenizer path.
-    pub fn tokenizer_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
-        self.inner = self.inner.tokenizer_path(path);
-        self
-    }
-
-    /// Sets the model name override.
-    pub fn model_name(mut self, name: impl Into<String>) -> Self {
-        self.inner = self.inner.model_name(name);
-        self
-    }
-
-    /// Sets the score threshold.
-    pub fn score_threshold(mut self, threshold: f32) -> Self {
-        self.inner = self.inner.score_threshold(threshold);
-        self
-    }
-
-    /// Sets the maximum sequence length.
-    pub fn max_length(mut self, length: usize) -> Self {
-        self.inner = self.inner.max_length(length);
-        self
-    }
-
-    /// Sets the task configuration.
-    pub fn task_config(mut self, config: FormulaRecognitionConfig) -> Self {
-        self.inner = self.inner.task_config(config);
-        self
-    }
-}
-
-impl Default for UniMERNetFormulaAdapterBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl crate::core::traits::OrtConfigurable for UniMERNetFormulaAdapterBuilder {
-    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.inner = self.inner.with_ort_config(config);
-        self
-    }
-}
-
-impl AdapterBuilder for UniMERNetFormulaAdapterBuilder {
-    type Config = FormulaRecognitionConfig;
-    type Adapter = UniMERNetFormulaAdapter;
-
-    fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        self.inner.build(model_path)
-    }
-
-    fn with_config(mut self, config: Self::Config) -> Self {
-        self.inner = self.inner.with_config(config);
-        self
-    }
-
-    fn adapter_type(&self) -> &str {
-        "UniMERNet"
-    }
-}
+/// Type alias for backward compatibility.
+/// UniMERNetFormulaAdapterBuilder is now UniMERNetAdapterBuilder.
+pub type UniMERNetFormulaAdapterBuilder = UniMERNetAdapterBuilder;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::traits::adapter::AdapterBuilder;
 
     #[test]
     fn test_pp_formulanet_builder_creation() {
         let builder = PPFormulaNetAdapterBuilder::new();
-        assert_eq!(builder.adapter_type(), "PPFormulaNet");
+        assert_eq!(builder.adapter_type(), "FormulaRecognitionPPFormulaNet");
     }
 
     #[test]
@@ -570,9 +483,9 @@ mod tests {
             max_length: 512,
         };
 
-        let builder = PPFormulaNetAdapterBuilder::new().with_config(config.clone());
-        assert_eq!(builder.inner.config.task_config().score_threshold, 0.8);
-        assert_eq!(builder.inner.config.task_config().max_length, 512);
+        let builder = PPFormulaNetAdapterBuilder::new().with_config(config);
+        assert_eq!(builder.config.task_config().score_threshold, 0.8);
+        assert_eq!(builder.config.task_config().max_length, 512);
     }
 
     #[test]
@@ -582,24 +495,24 @@ mod tests {
             .max_length(1024)
             .target_size(640, 640);
 
-        assert_eq!(builder.inner.config.task_config().score_threshold, 0.9);
-        assert_eq!(builder.inner.config.task_config().max_length, 1024);
-        assert_eq!(builder.inner.target_size, Some((640, 640)));
+        assert_eq!(builder.config.task_config().score_threshold, 0.9);
+        assert_eq!(builder.config.task_config().max_length, 1024);
+        assert_eq!(builder.target_size, Some((640, 640)));
     }
 
     #[test]
     fn test_pp_formulanet_default_builder() {
         let builder = PPFormulaNetAdapterBuilder::default();
-        assert_eq!(builder.adapter_type(), "PPFormulaNet");
+        assert_eq!(builder.adapter_type(), "FormulaRecognitionPPFormulaNet");
         // Default config values
-        assert_eq!(builder.inner.config.task_config().score_threshold, 0.0);
-        assert_eq!(builder.inner.config.task_config().max_length, 1536);
+        assert_eq!(builder.config.task_config().score_threshold, 0.0);
+        assert_eq!(builder.config.task_config().max_length, 1536);
     }
 
     #[test]
     fn test_unimernet_builder_creation() {
-        let builder = UniMERNetFormulaAdapterBuilder::new();
-        assert_eq!(builder.adapter_type(), "UniMERNet");
+        let builder = UniMERNetAdapterBuilder::new();
+        assert_eq!(builder.adapter_type(), "FormulaRecognitionUniMERNet");
     }
 
     #[test]
@@ -609,30 +522,30 @@ mod tests {
             max_length: 2048,
         };
 
-        let builder = UniMERNetFormulaAdapterBuilder::new().with_config(config.clone());
-        assert_eq!(builder.inner.config.task_config().score_threshold, 0.7);
-        assert_eq!(builder.inner.config.task_config().max_length, 2048);
+        let builder = UniMERNetAdapterBuilder::new().with_config(config);
+        assert_eq!(builder.config.task_config().score_threshold, 0.7);
+        assert_eq!(builder.config.task_config().max_length, 2048);
     }
 
     #[test]
     fn test_unimernet_builder_fluent_api() {
-        let builder = UniMERNetFormulaAdapterBuilder::new()
+        let builder = UniMERNetAdapterBuilder::new()
             .score_threshold(0.85)
             .max_length(768)
             .target_size(512, 512);
 
-        assert_eq!(builder.inner.config.task_config().score_threshold, 0.85);
-        assert_eq!(builder.inner.config.task_config().max_length, 768);
-        assert_eq!(builder.inner.target_size, Some((512, 512)));
+        assert_eq!(builder.config.task_config().score_threshold, 0.85);
+        assert_eq!(builder.config.task_config().max_length, 768);
+        assert_eq!(builder.target_size, Some((512, 512)));
     }
 
     #[test]
     fn test_unimernet_default_builder() {
-        let builder = UniMERNetFormulaAdapterBuilder::default();
-        assert_eq!(builder.adapter_type(), "UniMERNet");
+        let builder = UniMERNetAdapterBuilder::default();
+        assert_eq!(builder.adapter_type(), "FormulaRecognitionUniMERNet");
         // Default config values
-        assert_eq!(builder.inner.config.task_config().score_threshold, 0.0);
-        assert_eq!(builder.inner.config.task_config().max_length, 1536);
+        assert_eq!(builder.config.task_config().score_threshold, 0.0);
+        assert_eq!(builder.config.task_config().max_length, 1536);
     }
 
     #[test]
@@ -649,5 +562,12 @@ mod tests {
         assert_eq!(config.model_name, "UniMERNet");
         assert_eq!(config.sos_token_id, 0);
         assert_eq!(config.eos_token_id, 2);
+    }
+
+    #[test]
+    fn test_unimernet_formula_adapter_builder_alias() {
+        // Test that the type alias works for backward compatibility
+        let builder: UniMERNetFormulaAdapterBuilder = UniMERNetAdapterBuilder::new();
+        assert_eq!(builder.adapter_type(), "FormulaRecognitionUniMERNet");
     }
 }

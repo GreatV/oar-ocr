@@ -114,7 +114,7 @@ impl TransformRegistry {
     /// # Examples
     ///
     /// ```rust
-    /// use oar_ocr::core::config::transform::TransformRegistry;
+    /// use oar_ocr_core::core::config::transform::TransformRegistry;
     ///
     /// let registry = TransformRegistry::new();
     /// assert_eq!(registry.len(), 0);
@@ -135,7 +135,7 @@ impl TransformRegistry {
     /// # Examples
     ///
     /// ```rust
-    /// use oar_ocr::core::config::transform::{TransformRegistry, TransformType, TransformConfig};
+    /// use oar_ocr_core::core::config::transform::{TransformRegistry, TransformType, TransformConfig};
     ///
     /// let mut registry = TransformRegistry::new();
     /// registry.add(TransformType::ResizeImage, TransformConfig::ResizeImage {

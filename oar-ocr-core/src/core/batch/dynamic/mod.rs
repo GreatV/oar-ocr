@@ -15,7 +15,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use oar_ocr::core::{DynamicBatchConfig, DefaultDynamicBatcher, DynamicBatcher};
+//! use oar_ocr_core::core::{DynamicBatchConfig, DefaultDynamicBatcher, DynamicBatcher};
 //! use image::RgbImage;
 //!
 //! let config = DynamicBatchConfig::default();

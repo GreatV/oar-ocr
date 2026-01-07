@@ -19,7 +19,7 @@
 //! # Usage
 //!
 //! ```rust
-//! use oar_ocr::core::errors::{OCRError, ProcessingStage};
+//! use oar_ocr_core::core::errors::{OCRError, ProcessingStage};
 //!
 //! // Create a processing error with context
 //! let error = OCRError::tensor_operation(

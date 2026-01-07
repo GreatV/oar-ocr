@@ -15,7 +15,7 @@ use std::fmt::Debug;
 /// # Example
 ///
 /// ```rust,ignore
-/// use oar_ocr::core::traits::TaskDefinition;
+/// use oar_ocr_core::core::traits::TaskDefinition;
 ///
 /// #[derive(Debug, Clone)]
 /// pub struct MyTaskOutput {

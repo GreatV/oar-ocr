@@ -1019,8 +1019,8 @@ impl PPDocLayoutAdapterBuilder {
     ///
     /// ```no_run
     /// use std::path::Path;
-    /// use oar_ocr::core::traits::adapter::AdapterBuilder;
-    /// use oar_ocr::domain::adapters::PPDocLayoutAdapterBuilder;
+    /// use oar_ocr_core::core::traits::adapter::AdapterBuilder;
+    /// use oar_ocr_core::domain::adapters::PPDocLayoutAdapterBuilder;
     ///
     /// let _adapter = PPDocLayoutAdapterBuilder::new("pp-doclayout-s")
     ///     .build(Path::new("model.onnx"))

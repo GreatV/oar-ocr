@@ -50,7 +50,7 @@ impl ArcCow<RgbImage> for RgbImage {
 /// ```
 /// use std::sync::Arc;
 /// use image::RgbImage;
-/// use oar_ocr::utils::cow::clone_if_shared;
+/// use oar_ocr_core::utils::cow::clone_if_shared;
 ///
 /// let image = Arc::new(RgbImage::new(100, 100));
 /// let cloned = Arc::clone(&image); // Two references now
@@ -86,7 +86,7 @@ pub fn clone_if_shared(image: Arc<RgbImage>) -> Arc<RgbImage> {
 /// ```
 /// use std::sync::Arc;
 /// use image::{RgbImage, Rgb};
-/// use oar_ocr::utils::cow::modify_cow;
+/// use oar_ocr_core::utils::cow::modify_cow;
 ///
 /// let image = Arc::new(RgbImage::new(100, 100));
 ///

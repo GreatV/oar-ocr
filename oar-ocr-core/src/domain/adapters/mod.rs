@@ -63,10 +63,12 @@ pub use text_line_orientation_adapter::{
 
 // Re-export formula recognition adapters
 pub use formula_recognition_adapter::{
-    FormulaModelConfig, FormulaRecognitionAdapter, FormulaRecognitionAdapterBuilder,
-    PPFormulaNetAdapter, PPFormulaNetAdapterBuilder, UniMERNetFormulaAdapter,
-    UniMERNetFormulaAdapterBuilder,
+    FormulaModelConfig, FormulaRecognitionAdapter, PPFormulaNetAdapter, PPFormulaNetAdapterBuilder,
+    UniMERNetAdapterBuilder, UniMERNetFormulaAdapter,
 };
+
+// Re-export UniMERNetAdapterBuilder as UniMERNetFormulaAdapterBuilder for backward compatibility
+pub use formula_recognition_adapter::UniMERNetFormulaAdapterBuilder;
 
 // Re-export rectification adapters
 pub use document_rectification_adapter::{UVDocRectifierAdapter, UVDocRectifierAdapterBuilder};
