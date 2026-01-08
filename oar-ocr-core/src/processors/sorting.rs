@@ -323,11 +323,9 @@ fn recursive_yx_cut(boxes: &[[i32; 4]], indices: &[usize], result: &mut Vec<usiz
     let y_projection = projection_by_bboxes(&y_sorted_boxes, 1);
     let y_intervals = split_projection_profile(&y_projection, 0, 1);
 
-    if y_intervals.is_none() {
+    let Some((y_starts, y_ends)) = y_intervals else {
         return;
-    }
-
-    let (y_starts, y_ends) = y_intervals.unwrap();
+    };
 
     // Process each segment defined by Y-axis projection
     for (y_start, y_end) in y_starts.iter().zip(y_ends.iter()) {
@@ -357,11 +355,9 @@ fn recursive_yx_cut(boxes: &[[i32; 4]], indices: &[usize], result: &mut Vec<usiz
         let x_projection = projection_by_bboxes(&x_sorted_boxes, 0);
         let x_intervals = split_projection_profile(&x_projection, 0, min_gap);
 
-        if x_intervals.is_none() {
+        let Some((x_starts, x_ends)) = x_intervals else {
             continue;
-        }
-
-        let (x_starts, x_ends) = x_intervals.unwrap();
+        };
 
         // If X-axis cannot be further segmented, add current indices to results
         if x_starts.len() == 1 {
@@ -419,11 +415,9 @@ fn recursive_xy_cut(boxes: &[[i32; 4]], indices: &[usize], result: &mut Vec<usiz
     let x_projection = projection_by_bboxes(&x_sorted_boxes, 0);
     let x_intervals = split_projection_profile(&x_projection, 0, 1);
 
-    if x_intervals.is_none() {
+    let Some((x_starts, x_ends)) = x_intervals else {
         return;
-    }
-
-    let (x_starts, x_ends) = x_intervals.unwrap();
+    };
 
     // Process each segment defined by X-axis projection
     for (x_start, x_end) in x_starts.iter().zip(x_ends.iter()) {
@@ -453,11 +447,9 @@ fn recursive_xy_cut(boxes: &[[i32; 4]], indices: &[usize], result: &mut Vec<usiz
         let y_projection = projection_by_bboxes(&y_sorted_boxes, 1);
         let y_intervals = split_projection_profile(&y_projection, 0, min_gap);
 
-        if y_intervals.is_none() {
+        let Some((y_starts, y_ends)) = y_intervals else {
             continue;
-        }
-
-        let (y_starts, y_ends) = y_intervals.unwrap();
+        };
 
         // If Y-axis cannot be further segmented, add current indices to results
         if y_starts.len() == 1 {

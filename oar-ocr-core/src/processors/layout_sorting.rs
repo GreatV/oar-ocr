@@ -152,8 +152,18 @@ pub fn sort_layout_enhanced(
     }
 
     // 3. Sort Headers and Footers (simple top-to-bottom)
-    header_blocks.sort_by(|a, b| a.bbox.y_min().partial_cmp(&b.bbox.y_min()).unwrap());
-    footer_blocks.sort_by(|a, b| a.bbox.y_min().partial_cmp(&b.bbox.y_min()).unwrap());
+    header_blocks.sort_by(|a, b| {
+        a.bbox
+            .y_min()
+            .partial_cmp(&b.bbox.y_min())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    footer_blocks.sort_by(|a, b| {
+        a.bbox
+            .y_min()
+            .partial_cmp(&b.bbox.y_min())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // 4. Sort Main Blocks using Enhanced Logic
     let sorted_main = sort_main_blocks(main_blocks, page_width, page_height);
@@ -204,20 +214,35 @@ fn sort_main_blocks(
     // 3. VisionTitle/ParagraphTitle (Weakly attached, depend on anchors)
 
     // 1. DocTitle
-    doc_title_blocks.sort_by(|a, b| a.bbox.y_min().partial_cmp(&b.bbox.y_min()).unwrap());
+    doc_title_blocks.sort_by(|a, b| {
+        a.bbox
+            .y_min()
+            .partial_cmp(&b.bbox.y_min())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     for block in doc_title_blocks {
         weighted_distance_insert(block, &mut sorted_blocks, SortDirection::Horizontal);
     }
 
     // 2. Vision (Tables, Images)
     // Sort by position to stabilize insertion
-    vision_blocks.sort_by(|a, b| a.bbox.y_min().partial_cmp(&b.bbox.y_min()).unwrap());
+    vision_blocks.sort_by(|a, b| {
+        a.bbox
+            .y_min()
+            .partial_cmp(&b.bbox.y_min())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     for block in vision_blocks {
         weighted_distance_insert(block, &mut sorted_blocks, SortDirection::Horizontal);
     }
 
     // 3. Other Unsorted (Titles, CrossLayout, etc.)
-    other_unsorted_blocks.sort_by(|a, b| a.bbox.y_min().partial_cmp(&b.bbox.y_min()).unwrap());
+    other_unsorted_blocks.sort_by(|a, b| {
+        a.bbox
+            .y_min()
+            .partial_cmp(&b.bbox.y_min())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     for block in other_unsorted_blocks {
         weighted_distance_insert(block, &mut sorted_blocks, SortDirection::Horizontal);
     }

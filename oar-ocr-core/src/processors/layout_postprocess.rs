@@ -469,7 +469,11 @@ impl LayoutPostProcess {
     ) -> Vec<usize> {
         // Sort by score in descending order
         let mut indices: Vec<usize> = (0..boxes.len()).collect();
-        indices.sort_by(|&a, &b| scores[b].partial_cmp(&scores[a]).unwrap());
+        indices.sort_by(|&a, &b| {
+            scores[b]
+                .partial_cmp(&scores[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let mut keep = Vec::new();
         let mut suppressed = vec![false; boxes.len()];
@@ -706,7 +710,11 @@ pub fn apply_nms_with_merge(
 
     // Sort by score in descending order
     let mut indices: Vec<usize> = (0..boxes.len()).collect();
-    indices.sort_by(|&a, &b| scores[b].partial_cmp(&scores[a]).unwrap());
+    indices.sort_by(|&a, &b| {
+        scores[b]
+            .partial_cmp(&scores[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut result_boxes = Vec::new();
     let mut result_classes = Vec::new();
