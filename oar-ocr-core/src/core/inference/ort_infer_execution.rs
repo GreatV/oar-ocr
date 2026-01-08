@@ -112,16 +112,15 @@ impl OrtInfer {
             message: "Input tensor is not contiguous in memory".to_string(),
         })?;
 
-        let input_tensor =
-            TensorRef::from_array_view((input_dims.clone(), input_data)).map_err(|e| {
-                OCRError::model_inference_error_builder(&self.model_name, "tensor_conversion")
-                    .input_shape(&input_shape)
-                    .context(format!(
-                        "Failed to convert input tensor with shape {:?}",
-                        input_shape
-                    ))
-                    .build(e)
-            })?;
+        let input_tensor = TensorRef::from_array_view((input_dims, input_data)).map_err(|e| {
+            OCRError::model_inference_error_builder(&self.model_name, "tensor_conversion")
+                .input_shape(&input_shape)
+                .context(format!(
+                    "Failed to convert input tensor with shape {:?}",
+                    input_shape
+                ))
+                .build(e)
+        })?;
 
         let inputs = ort::inputs![self.input_name.as_str() => input_tensor];
         let context = format!(
