@@ -239,14 +239,14 @@ Add the VL crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oar-ocr-vl = "0.5"
+oar-ocr-vl = "0.6"
 ```
 
 For GPU acceleration, enable CUDA:
 
 ```toml
 [dependencies]
-oar-ocr-vl = { version = "0.5", features = ["cuda"] }
+oar-ocr-vl = { version = "0.6", features = ["cuda"] }
 ```
 
 ### Downloading the Model
@@ -286,13 +286,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Running the Example
 
 ```bash
-# Run on CPU
-cargo run -p oar-ocr-vl --example paddleocr_vl -- \
-    -m PaddleOCR-VL --task ocr document.jpg
-
-# Run on CUDA GPU
 cargo run -p oar-ocr-vl --features cuda --example paddleocr_vl -- \
-    -m PaddleOCR-VL -d cuda --task ocr document.jpg
+    -m PaddleOCR-VL --device cuda --task ocr document.jpg
 ```
 
 ### Supported Tasks
@@ -340,14 +335,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Running the Example
 
 ```bash
-# Run on CPU
-cargo run -p oar-ocr-vl --example unirec -- \
-    -m models/unirec-0.1b formula.jpg
-
-# Run on CUDA GPU
 cargo run -p oar-ocr-vl --features cuda --example unirec -- \
-    -m models/unirec-0.1b -d cuda formula.jpg
+    -m models/unirec-0.1b --device cuda formula.jpg
 ```
+
+## HunyuanOCR
+
+[HunyuanOCR](https://huggingface.co/tencent/HunyuanOCR) is a 1B parameter OCR expert VLM powered by Hunyuan's multimodal architecture. It's available in the `oar-ocr-vl` crate and supports prompt-driven image-to-text OCR.
+
+Note: inputs are automatically resized to satisfy the model's image/token limits (e.g., max side length 2048).
+
+### Downloading the Model
+
+```bash
+git lfs install
+git clone https://huggingface.co/tencent/HunyuanOCR
+
+# Or using huggingface-cli
+huggingface-cli download tencent/HunyuanOCR --local-dir HunyuanOCR
+```
+
+### Basic Usage
+
+```rust,no_run
+use oar_ocr_core::utils::load_image;
+use oar_ocr_vl::HunyuanOcr;
+use oar_ocr_vl::utils::parse_device;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let image = load_image("document.jpg")?;
+    let device = parse_device("cpu")?; // or "cuda", "cuda:0"
+
+    let model = HunyuanOcr::from_dir("HunyuanOCR", device)?;
+
+    let prompt = "Detect and recognize text in the image, and output the text coordinates in a formatted manner.";
+    let text = model.generate(image, prompt, 1024)?;
+    println!("{text}");
+
+    Ok(())
+}
+```
+
+### Running the Example
+
+```bash
+cargo run -p oar-ocr-vl --features cuda --example hunyuanocr -- \
+    --model-dir HunyuanOCR \
+    --device cuda \
+    --prompt "Detect and recognize text in the image, and output the text coordinates in a formatted manner." \
+    document.jpg
+```
+
+### Application-oriented Prompts
+
+Prompts from the upstream HunyuanOCR README:
+
+| Task | English | Chinese |
+|------|---------|---------|
+| **Spotting** | Detect and recognize text in the image, and output the text coordinates in a formatted manner. | 检测并识别图片中的文字，将文本坐标格式化输出。 |
+| **Parsing** | • Identify the formula in the image and represent it using LaTeX format.<br><br>• Parse the table in the image into HTML.<br><br>• Parse the chart in the image; use Mermaid format for flowcharts and Markdown for other charts.<br><br>• Extract all information from the main body of the document image and represent it in markdown format, ignoring headers and footers. Tables should be expressed in HTML format, formulas in the document should be represented using LaTeX format, and the parsing should be organized according to the reading order. | • 识别图片中的公式，用 LaTeX 格式表示。<br><br>• 把图中的表格解析为 HTML。<br><br>• 解析图中的图表，对于流程图使用 Mermaid 格式表示，其他图表使用 Markdown 格式表示。<br><br>• 提取文档图片中正文的所有信息用 markdown 格式表示，其中页眉、页脚部分忽略，表格用 html 格式表达，文档中公式用 latex 格式表示，按照阅读顺序组织进行解析。 |
+| **Information Extraction** | • Output the value of Key.<br><br>• Extract the content of the fields: ['key1','key2', ...] from the image and return it in JSON format.<br><br>• Extract the subtitles from the image. | • 输出 Key 的值。<br><br>• 提取图片中的: ['key1','key2', ...] 的字段内容，并按照 JSON 格式返回。<br><br>• 提取图片中的字幕。 |
+| **Translation** | First extract the text, then translate the text content into English. If it is a document, ignore the header and footer. Formulas should be represented in LaTeX format, and tables should be represented in HTML format. | 先提取文字，再将文字内容翻译为英文。若是文档，则其中页眉、页脚忽略。公式用latex格式表示，表格用html格式表示。 |
 
 ## DocParser
 
@@ -393,17 +441,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```bash
 # Using UniRec (default, lighter)
-cargo run -p oar-ocr-vl --example doc_parser -- \
+cargo run -p oar-ocr-vl --features cuda --example doc_parser -- \
     --model-name unirec \
     --model-dir models/unirec-0.1b \
     --layout-model models/pp-doclayoutv2.onnx \
+    --device cuda \
     document.jpg
 
 # Using PaddleOCR-VL (heavier, more accurate)
-cargo run -p oar-ocr-vl --example doc_parser -- \
+cargo run -p oar-ocr-vl --features cuda --example doc_parser -- \
     --model-name paddleocr-vl \
     --model-dir PaddleOCR-VL \
     --layout-model models/pp-doclayoutv2.onnx \
+    --device cuda \
     document.jpg
 ```
 

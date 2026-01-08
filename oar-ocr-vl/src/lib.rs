@@ -27,6 +27,7 @@
 //! ```
 
 pub mod doc_parser;
+pub mod hunyuanocr;
 pub mod paddleocr_vl;
 pub mod unirec;
 pub mod utils;
@@ -37,5 +38,7 @@ pub use paddleocr_vl::{
 };
 
 pub use unirec::UniRec;
+
+pub use hunyuanocr::HunyuanOcr;
 
 pub use doc_parser::{DocParser, DocParserConfig, RecognitionBackend, RecognitionTask};

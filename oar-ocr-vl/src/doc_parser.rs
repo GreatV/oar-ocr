@@ -451,6 +451,7 @@ impl RecognitionBackend for UniRec {
     }
 }
 
+use super::hunyuanocr::HunyuanOcr;
 use super::paddleocr_vl::{PaddleOcrVl, PaddleOcrVlTask};
 
 impl RecognitionBackend for PaddleOcrVl {
@@ -484,6 +485,44 @@ impl RecognitionBackend for PaddleOcrVl {
 
     fn needs_repetition_truncation(&self) -> bool {
         false // Handled inside `recognize()` (must run before per-task postprocess)
+    }
+}
+
+impl RecognitionBackend for HunyuanOcr {
+    fn recognize(
+        &self,
+        image: RgbImage,
+        task: RecognitionTask,
+        max_tokens: usize,
+    ) -> Result<String, OCRError> {
+        let prompt = match task {
+            RecognitionTask::Ocr => {
+                "Detect and recognize text in the image, and output the text coordinates in a formatted manner."
+            }
+            RecognitionTask::Table => "Parse the table in the image into HTML.",
+            RecognitionTask::Formula => {
+                "Identify the formula in the image and represent it using LaTeX format."
+            }
+            RecognitionTask::Chart => {
+                "Parse the chart in the image; use Mermaid format for flowcharts and Markdown for other charts."
+            }
+        };
+        let out = self.generate(image, prompt, max_tokens)?;
+        Ok(truncate_repetitive_content(&out, 10, 10, 10)
+            .trim()
+            .to_string())
+    }
+
+    fn needs_table_postprocess(&self) -> bool {
+        false
+    }
+
+    fn needs_formula_preprocess(&self) -> bool {
+        false
+    }
+
+    fn needs_repetition_truncation(&self) -> bool {
+        false // handled inside `recognize()`
     }
 }
 
