@@ -130,10 +130,9 @@ impl UVDocRectifierAdapterBuilder {
     /// * `shape` - Input shape as [channels, height, width]
     pub fn input_shape(mut self, shape: [usize; 3]) -> Self {
         self.preprocess_config.rec_image_shape = shape;
-        // Also update the config to match the test expectation
-        let task_config = DocumentRectificationConfig {
-            rec_image_shape: shape,
-        };
+        // Clone existing config to preserve other fields, then update
+        let mut task_config = self.config.task_config().clone();
+        task_config.rec_image_shape = shape;
         self.config = self.config.with_task_config(task_config);
         self
     }
