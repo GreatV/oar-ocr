@@ -86,7 +86,7 @@ impl OrtInfer {
                     cudnn_conv_use_max_workspace,
                 } => {
                     use ort::execution_providers::{
-                        ArenaExtendStrategy, cuda::CuDNNConvAlgorithmSearch,
+                        ArenaExtendStrategy, cuda::ConvAlgorithmSearch,
                     };
                     let mut cuda_provider =
                         ort::execution_providers::CUDAExecutionProvider::default();
@@ -107,9 +107,9 @@ impl OrtInfer {
                     }
                     if let Some(search) = cudnn_conv_algo_search {
                         let search = match search.to_lowercase().as_str() {
-                            "heuristic" => CuDNNConvAlgorithmSearch::Heuristic,
-                            "default" => CuDNNConvAlgorithmSearch::Default,
-                            _ => CuDNNConvAlgorithmSearch::Exhaustive,
+                            "heuristic" => ConvAlgorithmSearch::Heuristic,
+                            "default" => ConvAlgorithmSearch::Default,
+                            _ => ConvAlgorithmSearch::Exhaustive,
                         };
                         cuda_provider = cuda_provider.with_conv_algorithm_search(search);
                     }
@@ -155,12 +155,12 @@ impl OrtInfer {
                     ane_only,
                     subgraphs,
                 } => {
-                    use ort::execution_providers::coreml::CoreMLComputeUnits;
+                    use ort::execution_providers::coreml::ComputeUnits;
                     let mut coreml_provider =
                         ort::execution_providers::CoreMLExecutionProvider::default();
                     if let Some(true) = ane_only {
-                        coreml_provider = coreml_provider
-                            .with_compute_units(CoreMLComputeUnits::CPUAndNeuralEngine);
+                        coreml_provider =
+                            coreml_provider.with_compute_units(ComputeUnits::CPUAndNeuralEngine);
                     }
                     if let Some(sub) = subgraphs {
                         coreml_provider = coreml_provider.with_subgraphs(*sub);

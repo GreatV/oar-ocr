@@ -208,22 +208,9 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_with_config() {
-        let config = TableClassificationConfig {
-            score_threshold: 0.7,
-            topk: 2,
-        };
-
-        let builder = TableClassificationAdapterBuilder::new().with_config(config.clone());
-        // Verify adapter_type is correct
-        assert_eq!(builder.adapter_type(), "table_classification");
-    }
-
-    #[test]
     fn test_builder_fluent_api() {
         let builder = TableClassificationAdapterBuilder::new().input_shape((256, 256));
-        // Builder method chaining works - verified by compilation
-        let _ = builder;
+        assert_eq!(builder.input_shape, (256, 256));
     }
 
     #[test]

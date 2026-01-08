@@ -222,7 +222,7 @@ impl_adapter_builder! {
                 message: err.to_string(),
             })?;
 
-        Self::build_with_config(model_path, model_config, task_config, ort_config)
+        TableCellDetectionAdapterBuilder::build_with_config(model_path, model_config, task_config, ort_config)
     },
 }
 

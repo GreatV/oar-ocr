@@ -67,8 +67,8 @@ impl OrtInfer {
     pub fn primary_input_shape(&self) -> Option<Vec<i64>> {
         let session_mutex = self.sessions.first()?;
         let session_guard = session_mutex.lock().ok()?;
-        let input = session_guard.inputs.first()?;
-        match &input.input_type {
+        let input = session_guard.inputs().first()?;
+        match input.dtype() {
             ValueType::Tensor { shape, .. } => Some(shape.iter().copied().collect()),
             _ => None,
         }
