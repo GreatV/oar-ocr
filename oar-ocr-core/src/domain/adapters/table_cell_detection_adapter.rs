@@ -10,6 +10,7 @@ use crate::core::{OCRError, Tensor4D};
 use crate::domain::tasks::{
     TableCellDetection, TableCellDetectionConfig, TableCellDetectionOutput, TableCellDetectionTask,
 };
+use crate::impl_adapter_builder;
 use crate::models::detection::{RTDetrModel, RTDetrModelBuilder, RTDetrPostprocessConfig};
 use crate::processors::{ImageScaleInfo, LayoutPostProcess};
 use std::collections::HashMap;
@@ -178,43 +179,54 @@ impl ModelAdapter for TableCellDetectionAdapter {
     }
 }
 
-/// Builder for table cell detection adapters.
-#[derive(Debug, Default)]
-pub struct TableCellDetectionAdapterBuilder {
-    config: super::builder_config::AdapterBuilderConfig<TableCellDetectionConfig>,
-    model_config: Option<TableCellModelConfig>,
+impl_adapter_builder! {
+    builder_name: TableCellDetectionAdapterBuilder,
+    adapter_name: TableCellDetectionAdapter,
+    config_type: TableCellDetectionConfig,
+    adapter_type: "table_cell_detection",
+    adapter_desc: "Detects table cell boundaries in table images",
+    task_type: TableCellDetection,
+
+    fields: {
+        model_config: Option<TableCellModelConfig> = None,
+    },
+
+    methods: {
+        /// Sets the model configuration.
+        pub fn model_config(mut self, config: TableCellModelConfig) -> Self {
+            self.model_config = Some(config);
+            self
+        }
+
+        /// Sets the score threshold.
+        pub fn score_threshold(mut self, threshold: f32) -> Self {
+            self.config.task_config.score_threshold = threshold;
+            self
+        }
+
+        /// Sets the maximum number of cells per image.
+        pub fn max_cells(mut self, max: usize) -> Self {
+            self.config.task_config.max_cells = max;
+            self
+        }
+    }
+
+    build: |builder: TableCellDetectionAdapterBuilder, model_path: &Path| -> Result<TableCellDetectionAdapter, OCRError> {
+        let model_config = builder.model_config.ok_or_else(|| OCRError::InvalidInput {
+            message: "Table cell model configuration is required".to_string(),
+        })?;
+
+        let (task_config, ort_config) = builder.config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
+
+        TableCellDetectionAdapterBuilder::build_with_config(model_path, model_config, task_config, ort_config)
+    },
 }
 
 impl TableCellDetectionAdapterBuilder {
-    /// Creates a new builder.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Sets the model configuration.
-    pub fn model_config(mut self, config: TableCellModelConfig) -> Self {
-        self.model_config = Some(config);
-        self
-    }
-
-    /// Sets the task configuration.
-    pub fn task_config(mut self, config: TableCellDetectionConfig) -> Self {
-        self.config = self.config.with_task_config(config);
-        self
-    }
-
-    /// Sets the score threshold.
-    pub fn score_threshold(mut self, threshold: f32) -> Self {
-        self.config.task_config.score_threshold = threshold;
-        self
-    }
-
-    /// Sets the maximum number of cells per image.
-    pub fn max_cells(mut self, max: usize) -> Self {
-        self.config.task_config.max_cells = max;
-        self
-    }
-
     fn build_with_config(
         model_path: &Path,
         model_config: TableCellModelConfig,
@@ -242,7 +254,6 @@ impl TableCellDetectionAdapterBuilder {
 
         let info = AdapterInfo::new(
             format!("TableCellDetection_{}", model_config.model_name),
-            "1.0.0",
             TaskType::TableCellDetection,
             format!(
                 "Table cell detection adapter for {} with {} classes",
@@ -278,47 +289,6 @@ impl TableCellDetectionAdapterBuilder {
     }
 }
 
-impl AdapterBuilder for TableCellDetectionAdapterBuilder {
-    type Config = TableCellDetectionConfig;
-    type Adapter = TableCellDetectionAdapter;
-
-    fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let model_config = self.model_config.ok_or_else(|| OCRError::InvalidInput {
-            message: "Table cell model configuration is required".to_string(),
-        })?;
-
-        let (task_config, ort_config) =
-            self.config
-                .into_validated_parts()
-                .map_err(|err| OCRError::ConfigError {
-                    message: err.to_string(),
-                })?;
-
-        TableCellDetectionAdapterBuilder::build_with_config(
-            model_path,
-            model_config,
-            task_config,
-            ort_config,
-        )
-    }
-
-    fn with_config(mut self, config: Self::Config) -> Self {
-        self.config = self.config.with_task_config(config);
-        self
-    }
-
-    fn adapter_type(&self) -> &str {
-        "TableCellDetection"
-    }
-}
-
-impl crate::core::traits::OrtConfigurable for TableCellDetectionAdapterBuilder {
-    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.config = self.config.with_ort_config(config);
-        self
-    }
-}
-
 /// Builder for RT-DETR table cell detection adapters.
 #[derive(Debug)]
 pub struct RTDetrTableCellAdapterBuilder {
@@ -346,12 +316,6 @@ impl RTDetrTableCellAdapterBuilder {
             inner: TableCellDetectionAdapterBuilder::new()
                 .model_config(TableCellModelConfig::rtdetr_l_wireless_table_cell_det()),
         }
-    }
-
-    /// Sets the task configuration.
-    pub fn task_config(mut self, config: TableCellDetectionConfig) -> Self {
-        self.inner = self.inner.task_config(config);
-        self
     }
 
     /// Sets the score threshold.

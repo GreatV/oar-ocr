@@ -9,7 +9,7 @@ use crate::core::errors::OCRError;
 use crate::core::traits::OrtConfigurable;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
-use crate::domain::adapters::{PPFormulaNetAdapterBuilder, UniMERNetFormulaAdapterBuilder};
+use crate::domain::adapters::{PPFormulaNetAdapterBuilder, UniMERNetAdapterBuilder};
 use crate::domain::tasks::formula_recognition::{FormulaRecognitionConfig, FormulaRecognitionTask};
 use crate::predictors::TaskPredictorCore;
 use image::RgbImage;
@@ -171,7 +171,7 @@ impl FormulaRecognitionPredictorBuilder {
 
         let adapter = match model_kind {
             FormulaModelKind::UniMERNet => {
-                let mut builder = UniMERNetFormulaAdapterBuilder::new()
+                let mut builder = UniMERNetAdapterBuilder::new()
                     .with_config(config.clone())
                     .model_name(&model_name)
                     .tokenizer_path(tokenizer_path);

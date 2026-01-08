@@ -63,9 +63,8 @@ pub use text_line_orientation_adapter::{
 
 // Re-export formula recognition adapters
 pub use formula_recognition_adapter::{
-    FormulaModelConfig, FormulaRecognitionAdapter, FormulaRecognitionAdapterBuilder,
-    PPFormulaNetAdapter, PPFormulaNetAdapterBuilder, UniMERNetFormulaAdapter,
-    UniMERNetFormulaAdapterBuilder,
+    FormulaModelConfig, FormulaRecognitionAdapter, PPFormulaNetAdapter, PPFormulaNetAdapterBuilder,
+    UniMERNetAdapterBuilder, UniMERNetFormulaAdapter,
 };
 
 // Re-export rectification adapters

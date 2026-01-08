@@ -5,15 +5,15 @@
 use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::{
-    adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
-    task::{Task, TaskType},
+    adapter::{AdapterInfo, ModelAdapter},
+    task::Task,
 };
 use crate::domain::tasks::{
     Detection, SealTextDetectionConfig, SealTextDetectionOutput, SealTextDetectionTask,
 };
+use crate::impl_adapter_builder;
 use crate::models::detection::db::{DBModel, DBModelBuilder, DBPostprocessConfig};
 use crate::processors::{BoxType, ScoreMode};
-use std::path::Path;
 
 /// Seal text detection adapter that uses the DB model.
 #[derive(Debug)]
@@ -24,6 +24,17 @@ pub struct SealTextDetectionAdapter {
     info: AdapterInfo,
     /// Task configuration
     config: SealTextDetectionConfig,
+}
+
+impl SealTextDetectionAdapter {
+    /// Creates a new seal text detection adapter.
+    pub fn new(model: DBModel, info: AdapterInfo, config: SealTextDetectionConfig) -> Self {
+        Self {
+            model,
+            info,
+            config,
+        }
+    }
 }
 
 impl ModelAdapter for SealTextDetectionAdapter {
@@ -87,37 +98,23 @@ impl ModelAdapter for SealTextDetectionAdapter {
     }
 }
 
-/// Builder for seal text detection adapter.
-pub struct SealTextDetectionAdapterBuilder {
-    config: super::builder_config::AdapterBuilderConfig<SealTextDetectionConfig>,
-}
+impl_adapter_builder! {
+    builder_name: SealTextDetectionAdapterBuilder,
+    adapter_name: SealTextDetectionAdapter,
+    config_type: SealTextDetectionConfig,
+    adapter_type: "seal_text_detection",
+    adapter_desc: "Detects curved seal text with polygon bounding boxes",
+    task_type: SealTextDetection,
 
-impl SealTextDetectionAdapterBuilder {
-    /// Creates a new seal text detection adapter builder.
-    pub fn new() -> Self {
-        Self {
-            config: super::builder_config::AdapterBuilderConfig::default(),
-        }
-    }
+    fields: {},
+    methods: {}
 
-    /// Sets the task configuration.
-    pub fn with_config(mut self, config: SealTextDetectionConfig) -> Self {
-        self.config = self.config.with_task_config(config);
-        self
-    }
-}
-
-impl AdapterBuilder for SealTextDetectionAdapterBuilder {
-    type Config = SealTextDetectionConfig;
-    type Adapter = SealTextDetectionAdapter;
-
-    fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, ort_config) =
-            self.config
-                .into_validated_parts()
-                .map_err(|err| OCRError::ConfigError {
-                    message: err.to_string(),
-                })?;
+    build: |builder: SealTextDetectionAdapterBuilder, model_path: &std::path::Path| -> Result<SealTextDetectionAdapter, OCRError> {
+        let (task_config, ort_config) = builder.config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
 
         // Configure DB model for seal text detection
         // Use seal text preprocessing configuration (limit_side_len=736, limit_type=Min)
@@ -142,40 +139,13 @@ impl AdapterBuilder for SealTextDetectionAdapterBuilder {
         )
         .build(model_path)?;
 
-        // Create adapter info
-        let info = AdapterInfo::new(
-            "SealTextDetection",
-            "1.0.0",
-            TaskType::SealTextDetection,
-            "Seal text detection using DB model with polygon output",
-        );
+        // Create adapter info using the helper
+        let info = SealTextDetectionAdapterBuilder::base_adapter_info();
 
-        Ok(SealTextDetectionAdapter {
+        Ok(SealTextDetectionAdapter::new(
             model,
             info,
-            config: task_config,
-        })
-    }
-
-    fn with_config(mut self, config: Self::Config) -> Self {
-        self.config = self.config.with_task_config(config);
-        self
-    }
-
-    fn adapter_type(&self) -> &str {
-        "SealTextDetection"
-    }
-}
-
-impl Default for SealTextDetectionAdapterBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl crate::core::traits::OrtConfigurable for SealTextDetectionAdapterBuilder {
-    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.config = self.config.with_ort_config(config);
-        self
-    }
+            task_config,
+        ))
+    },
 }

@@ -33,8 +33,8 @@ impl Crop {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use oar_ocr::utils::crop::Crop;
-    /// use oar_ocr::processors::types::CropMode;
+    /// use oar_ocr_core::utils::crop::Crop;
+    /// use oar_ocr_core::processors::types::CropMode;
     ///
     /// let crop = Crop::new([224, 224], CropMode::Center).unwrap();
     /// ```
@@ -79,8 +79,8 @@ impl Crop {
     ///
     /// ```rust,no_run
     /// use image::RgbImage;
-    /// use oar_ocr::utils::crop::Crop;
-    /// use oar_ocr::processors::types::CropMode;
+    /// use oar_ocr_core::utils::crop::Crop;
+    /// use oar_ocr_core::processors::types::CropMode;
     ///
     /// let crop = Crop::new([100, 100], CropMode::Center).unwrap();
     /// let img = RgbImage::new(200, 200);

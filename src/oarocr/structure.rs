@@ -18,7 +18,7 @@ use oar_ocr_core::domain::adapters::{
     TableStructureRecognitionAdapter, TextDetectionAdapter, TextDetectionAdapterBuilder,
     TextLineOrientationAdapter, TextLineOrientationAdapterBuilder, TextRecognitionAdapter,
     TextRecognitionAdapterBuilder, UVDocRectifierAdapter, UVDocRectifierAdapterBuilder,
-    UniMERNetFormulaAdapterBuilder,
+    UniMERNetAdapterBuilder,
 };
 use oar_ocr_core::domain::structure::{StructureResult, TableResult};
 use oar_ocr_core::domain::tasks::{
@@ -968,7 +968,7 @@ impl OARStructureBuilder {
                     builder.build(model_path)?
                 }
                 "unimernet" => {
-                    let mut builder = UniMERNetFormulaAdapterBuilder::new();
+                    let mut builder = UniMERNetAdapterBuilder::new();
 
                     builder = builder.tokenizer_path(tokenizer_path);
 

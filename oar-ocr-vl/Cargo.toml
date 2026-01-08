@@ -23,7 +23,7 @@ default = []
 cuda = ["candle-core/cuda", "candle-nn/cuda"]
 
 [dependencies]
-oar-ocr-core = { version = "0.5.1", path = "../oar-ocr-core" }
+oar-ocr-core.workspace = true
 image = "0.25.6"
 candle-core = "0.9.2-alpha.2"
 candle-nn = "0.9.2-alpha.2"

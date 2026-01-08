@@ -5,10 +5,11 @@
 use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::{
-    adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
-    task::{Task, TaskType},
+    adapter::{AdapterInfo, ModelAdapter},
+    task::Task,
 };
 use crate::domain::tasks::{TableStructureRecognitionConfig, TableStructureRecognitionTask};
+use crate::impl_adapter_builder;
 use crate::models::recognition::{SLANetModel, SLANetModelBuilder};
 use crate::processors::TableStructureDecode;
 use std::path::Path;
@@ -203,106 +204,71 @@ impl ModelAdapter for TableStructureRecognitionAdapter {
     }
 }
 
-/// Builder for table structure recognition adapter (wired tables).
-///
-/// Uses SLANeXt_wired model which requires 512×512 input size (per PP-StructureV3 configuration).
-/// If no input shape is specified, it will be auto-detected from the ONNX model.
-pub struct SLANetWiredAdapterBuilder {
-    config: super::builder_config::AdapterBuilderConfig<TableStructureRecognitionConfig>,
-    /// Input shape (height, width) - if None, will be auto-detected from ONNX
-    input_shape: Option<(u32, u32)>,
-    /// Dictionary path
-    dict_path: Option<std::path::PathBuf>,
-    /// Optional override for the registered model name
-    model_name_override: Option<String>,
-}
+impl_adapter_builder! {
+    builder_name: SLANetWiredAdapterBuilder,
+    adapter_name: TableStructureRecognitionAdapter,
+    config_type: TableStructureRecognitionConfig,
+    adapter_type: "table_structure_recognition_wired",
+    adapter_desc: "Recognizes table structure for wired tables as HTML tokens",
+    task_type: TableStructureRecognition,
 
-impl SLANetWiredAdapterBuilder {
-    /// Creates a new builder with default configuration.
-    ///
-    /// Input shape will be auto-detected from the ONNX model if not explicitly set.
-    pub fn new() -> Self {
-        Self {
-            config: super::builder_config::AdapterBuilderConfig::default(),
-            input_shape: Some((512, 512)), // SLANeXt_wired is trained/evaluated at 512
-            dict_path: None,
-            model_name_override: None,
+    fields: {
+        input_shape: Option<(u32, u32)> = Some((512, 512)),
+        dict_path: Option<std::path::PathBuf> = None,
+        model_name_override: Option<String> = None,
+    },
+
+    methods: {
+        /// Sets the input shape explicitly.
+        ///
+        /// If not set, the input shape will be auto-detected from the ONNX model.
+        /// For SLANeXt_wired, the expected shape is 512×512.
+        pub fn input_shape(mut self, input_shape: (u32, u32)) -> Self {
+            self.input_shape = Some(input_shape);
+            self
+        }
+
+        /// Sets the dictionary path.
+        pub fn dict_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+            self.dict_path = Some(path.into());
+            self
+        }
+
+        /// Sets a custom model name for registry registration.
+        pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
+            self.model_name_override = Some(model_name.into());
+            self
         }
     }
 
-    /// Sets the input shape explicitly.
-    ///
-    /// If not set, the input shape will be auto-detected from the ONNX model.
-    /// For SLANeXt_wired, the expected shape is 512×512.
-    pub fn input_shape(mut self, input_shape: (u32, u32)) -> Self {
-        self.input_shape = Some(input_shape);
-        self
-    }
-
-    /// Sets the dictionary path.
-    pub fn dict_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
-        self.dict_path = Some(path.into());
-        self
-    }
-
-    /// Sets a custom model name for registry registration.
-    pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
-        self.model_name_override = Some(model_name.into());
-        self
-    }
-}
-
-impl Default for SLANetWiredAdapterBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl crate::core::traits::OrtConfigurable for SLANetWiredAdapterBuilder {
-    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.config = self.config.with_ort_config(config);
-        self
-    }
-}
-
-impl AdapterBuilder for SLANetWiredAdapterBuilder {
-    type Config = TableStructureRecognitionConfig;
-    type Adapter = TableStructureRecognitionAdapter;
-
-    fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, ort_config) =
-            self.config
-                .into_validated_parts()
-                .map_err(|err| OCRError::ConfigError {
-                    message: err.to_string(),
-                })?;
+    build: |builder: SLANetWiredAdapterBuilder, model_path: &Path| -> Result<TableStructureRecognitionAdapter, OCRError> {
+        let (task_config, ort_config) = builder.config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
 
         // Build the SLANet model - input shape will be auto-detected from ONNX if not set
         let mut model_builder = SLANetModelBuilder::new();
 
         // Only set input size if explicitly provided; otherwise let ONNX auto-detect
-        if let Some(input_shape) = self.input_shape {
+        if let Some(input_shape) = builder.input_shape {
             model_builder = model_builder.input_size(input_shape);
         }
 
         let model = apply_ort_config!(model_builder, ort_config).build(model_path)?;
 
         // Dictionary path is required
-        let dict_path = self.dict_path.ok_or_else(|| OCRError::ConfigError {
+        let dict_path = builder.dict_path.ok_or_else(|| OCRError::ConfigError {
             message: "Dictionary path is required. Use .dict_path() to specify the path to table_structure_dict_ch.txt".to_string(),
         })?;
 
         // Create decoder
         let decoder = TableStructureDecode::from_dict_path(&dict_path)?;
 
-        // Create adapter info
-        let mut info = AdapterInfo::new(
-            "table_structure_recognition_wired",
-            "1.0.0",
-            TaskType::TableStructureRecognition,
-            "Table structure recognition (wired tables) using SLANeXt model",
-        );
-        if let Some(model_name) = self.model_name_override {
+        // Create adapter info using the helper
+        let mut info = SLANetWiredAdapterBuilder::base_adapter_info();
+        if let Some(model_name) = builder.model_name_override {
             info.model_name = model_name;
         }
 
@@ -312,119 +278,74 @@ impl AdapterBuilder for SLANetWiredAdapterBuilder {
             info,
             task_config,
         ))
-    }
-
-    fn with_config(mut self, config: Self::Config) -> Self {
-        self.config = self.config.with_task_config(config);
-        self
-    }
-
-    fn adapter_type(&self) -> &str {
-        "TableStructureRecognitionWired"
-    }
+    },
 }
 
-/// Builder for table structure recognition adapter (wireless tables).
-///
-/// Uses SLANet_plus model which requires 488×488 input size (per PP-StructureV3 configuration).
-/// If no input shape is specified, it will be auto-detected from the ONNX model.
-pub struct SLANetWirelessAdapterBuilder {
-    config: super::builder_config::AdapterBuilderConfig<TableStructureRecognitionConfig>,
-    /// Input shape (height, width) - if None, will be auto-detected from ONNX
-    input_shape: Option<(u32, u32)>,
-    /// Dictionary path
-    dict_path: Option<std::path::PathBuf>,
-    /// Optional override for the registered model name
-    model_name_override: Option<String>,
-}
+impl_adapter_builder! {
+    builder_name: SLANetWirelessAdapterBuilder,
+    adapter_name: TableStructureRecognitionAdapter,
+    config_type: TableStructureRecognitionConfig,
+    adapter_type: "table_structure_recognition_wireless",
+    adapter_desc: "Recognizes table structure for wireless tables as HTML tokens",
+    task_type: TableStructureRecognition,
 
-impl SLANetWirelessAdapterBuilder {
-    /// Creates a new builder with default configuration.
-    ///
-    /// Input shape will be auto-detected from the ONNX model.
-    /// For SLANet/SLANet_plus with dynamic input, this enables no-padding preprocessing.
-    pub fn new() -> Self {
-        Self {
-            config: super::builder_config::AdapterBuilderConfig::default(),
-            input_shape: Some((488, 488)), // SLANet_plus requires 488x488 with padding
-            dict_path: None,
-            model_name_override: None,
+    fields: {
+        input_shape: Option<(u32, u32)> = Some((488, 488)),
+        dict_path: Option<std::path::PathBuf> = None,
+        model_name_override: Option<String> = None,
+    },
+
+    methods: {
+        /// Sets the input shape explicitly.
+        ///
+        /// If not set, the input shape will be auto-detected from the ONNX model.
+        /// For SLANet_plus, the expected shape is 488×488.
+        pub fn input_shape(mut self, input_shape: (u32, u32)) -> Self {
+            self.input_shape = Some(input_shape);
+            self
+        }
+
+        /// Sets the dictionary path.
+        pub fn dict_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+            self.dict_path = Some(path.into());
+            self
+        }
+
+        /// Sets a custom model name for registry registration.
+        pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
+            self.model_name_override = Some(model_name.into());
+            self
         }
     }
 
-    /// Sets the input shape explicitly.
-    ///
-    /// If not set, the input shape will be auto-detected from the ONNX model.
-    /// For SLANet_plus, the expected shape is 488×488.
-    pub fn input_shape(mut self, input_shape: (u32, u32)) -> Self {
-        self.input_shape = Some(input_shape);
-        self
-    }
-
-    /// Sets the dictionary path.
-    pub fn dict_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
-        self.dict_path = Some(path.into());
-        self
-    }
-
-    /// Sets a custom model name for registry registration.
-    pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
-        self.model_name_override = Some(model_name.into());
-        self
-    }
-}
-
-impl Default for SLANetWirelessAdapterBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl crate::core::traits::OrtConfigurable for SLANetWirelessAdapterBuilder {
-    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.config = self.config.with_ort_config(config);
-        self
-    }
-}
-
-impl AdapterBuilder for SLANetWirelessAdapterBuilder {
-    type Config = TableStructureRecognitionConfig;
-    type Adapter = TableStructureRecognitionAdapter;
-
-    fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, ort_config) =
-            self.config
-                .into_validated_parts()
-                .map_err(|err| OCRError::ConfigError {
-                    message: err.to_string(),
-                })?;
+    build: |builder: SLANetWirelessAdapterBuilder, model_path: &Path| -> Result<TableStructureRecognitionAdapter, OCRError> {
+        let (task_config, ort_config) = builder.config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
 
         // Build the SLANet model - input shape will be auto-detected from ONNX if not set
         let mut model_builder = SLANetModelBuilder::new();
 
         // Only set input size if explicitly provided; otherwise let ONNX auto-detect
-        if let Some(input_shape) = self.input_shape {
+        if let Some(input_shape) = builder.input_shape {
             model_builder = model_builder.input_size(input_shape);
         }
 
         let model = apply_ort_config!(model_builder, ort_config).build(model_path)?;
 
         // Dictionary path is required
-        let dict_path = self.dict_path.ok_or_else(|| OCRError::ConfigError {
+        let dict_path = builder.dict_path.ok_or_else(|| OCRError::ConfigError {
             message: "Dictionary path is required. Use .dict_path() to specify the path to table_structure_dict_ch.txt".to_string(),
         })?;
 
         // Create decoder
         let decoder = TableStructureDecode::from_dict_path(&dict_path)?;
 
-        // Create adapter info
-        let mut info = AdapterInfo::new(
-            "table_structure_recognition_wireless",
-            "1.0.0",
-            TaskType::TableStructureRecognition,
-            "Table structure recognition (wireless tables) using SLANet_plus model",
-        );
-        if let Some(model_name) = self.model_name_override {
+        // Create adapter info using the helper
+        let mut info = SLANetWirelessAdapterBuilder::base_adapter_info();
+        if let Some(model_name) = builder.model_name_override {
             info.model_name = model_name;
         }
 
@@ -434,32 +355,27 @@ impl AdapterBuilder for SLANetWirelessAdapterBuilder {
             info,
             task_config,
         ))
-    }
-
-    fn with_config(mut self, config: Self::Config) -> Self {
-        self.config = self.config.with_task_config(config);
-        self
-    }
-
-    fn adapter_type(&self) -> &str {
-        "TableStructureRecognitionWireless"
-    }
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::traits::adapter::AdapterBuilder;
 
     #[test]
     fn test_wired_builder_creation() {
         let builder = SLANetWiredAdapterBuilder::new();
-        assert_eq!(builder.adapter_type(), "TableStructureRecognitionWired");
+        assert_eq!(builder.adapter_type(), "table_structure_recognition_wired");
     }
 
     #[test]
     fn test_wireless_builder_creation() {
         let builder = SLANetWirelessAdapterBuilder::new();
-        assert_eq!(builder.adapter_type(), "TableStructureRecognitionWireless");
+        assert_eq!(
+            builder.adapter_type(),
+            "table_structure_recognition_wireless"
+        );
     }
 
     #[test]

@@ -15,7 +15,7 @@
 //!
 //! After:
 //! ```rust,ignore
-//! use oar_ocr::ConfigValidator;
+//! use oar_ocr_core::ConfigValidator;
 //!
 //! #[derive(ConfigValidator)]
 //! pub struct MyConfig {

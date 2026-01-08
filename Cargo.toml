@@ -3,12 +3,16 @@ members = [".", "oar-ocr-derive", "oar-ocr-core", "oar-ocr-vl"]
 resolver = "2"
 
 [workspace.package]
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["Wang Xin <xinwang614@gmail.com>"]
 repository = "https://github.com/greatv/oar-ocr"
 homepage = "https://github.com/greatv/oar-ocr"
+
+[workspace.dependencies]
+oar-ocr-core = { version = "0.5.2", path = "oar-ocr-core" }
+oar-ocr-derive = { version = "0.5.2", path = "oar-ocr-derive" }
 
 [package]
 name = "oar-ocr"
@@ -46,9 +50,9 @@ download-binaries = ["oar-ocr-core/download-binaries"]
 
 [dependencies]
 # Core library with all types and predictors
-oar-ocr-core = { version = "0.5.1", path = "oar-ocr-core" }
+oar-ocr-core.workspace = true
 # Derive macros
-oar-ocr-derive = { version = "0.5.1", path = "oar-ocr-derive" }
+oar-ocr-derive.workspace = true
 
 # Direct dependencies for oarocr module
 image = "0.25.6"

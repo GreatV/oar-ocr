@@ -12,7 +12,7 @@
 //! Creates standardized errors for individual item failures within batch processing:
 //!
 //! ```rust
-//! use oar_ocr::core::OCRError;
+//! use oar_ocr_core::core::OCRError;
 //!
 //! // Error for a specific item in a named batch
 //! let error = OCRError::batch_item_error(
@@ -41,7 +41,7 @@
 //! Creates formatted error messages for logging without wrapping in OCRError:
 //!
 //! ```rust
-//! use oar_ocr::core::OCRError;
+//! use oar_ocr_core::core::OCRError;
 //!
 //! let underlying_error = std::io::Error::new(std::io::ErrorKind::Other, "network timeout");
 //! let affected_indices = vec![1, 3, 5];

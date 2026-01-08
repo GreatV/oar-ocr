@@ -23,7 +23,7 @@
 //! # Examples
 //!
 //! ```rust,no_run
-//! use oar_ocr::core::traits::granular::Preprocessor;
+//! use oar_ocr_core::core::traits::granular::Preprocessor;
 //! use image::RgbImage;
 //!
 //! // Example of how you would implement and use a custom preprocessor
@@ -36,7 +36,7 @@
 //! # impl Preprocessor for MyPreprocessor {
 //! #     type Config = MyConfig;
 //! #     type Output = Vec<RgbImage>;
-//! #     fn preprocess(&self, images: Vec<RgbImage>, config: Option<&Self::Config>) -> Result<Self::Output, oar_ocr::core::OCRError> {
+//! #     fn preprocess(&self, images: Vec<RgbImage>, config: Option<&Self::Config>) -> Result<Self::Output, oar_ocr_core::core::OCRError> {
 //! #         Ok(images)
 //! #     }
 //! #     fn preprocessing_info(&self) -> String { "MyPreprocessor".to_string() }

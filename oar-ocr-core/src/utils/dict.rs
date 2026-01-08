@@ -26,11 +26,11 @@ use std::path::Path;
 /// # Example
 ///
 /// ```rust,no_run
-/// use oar_ocr::utils::read_character_dict;
+/// use oar_ocr_core::utils::read_character_dict;
 /// use std::path::Path;
 ///
 /// let dict = read_character_dict(Path::new("path/to/dict.txt"))?;
-/// # Ok::<(), oar_ocr::core::OCRError>(())
+/// # Ok::<(), oar_ocr_core::core::OCRError>(())
 /// ```
 pub fn read_character_dict(path: &Path) -> Result<Vec<String>, OCRError> {
     let content = std::fs::read_to_string(path).map_err(|e| OCRError::InvalidInput {
@@ -86,12 +86,12 @@ pub fn read_dict_content(path: &Path) -> Result<String, OCRError> {
 /// # Example
 ///
 /// ```rust,no_run
-/// use oar_ocr::utils::require_path;
+/// use oar_ocr_core::utils::require_path;
 /// use std::path::PathBuf;
 ///
 /// let path: Option<PathBuf> = Some(PathBuf::from("/path/to/dict.txt"));
 /// let validated = require_path(path, "text_recognition", "character dictionary path")?;
-/// # Ok::<(), oar_ocr::core::OCRError>(())
+/// # Ok::<(), oar_ocr_core::core::OCRError>(())
 /// ```
 pub fn require_path<P: AsRef<Path> + Clone>(
     path: Option<P>,

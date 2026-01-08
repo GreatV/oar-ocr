@@ -422,6 +422,428 @@ macro_rules! common_builder_methods {
     };
 }
 
+/// Internal helper macro that generates the common parts of adapter builders.
+///
+/// This macro generates:
+/// - Builder struct definition
+/// - `new()` constructor
+/// - `base_adapter_info()` method
+/// - Custom methods
+/// - `Default` trait implementation
+/// - `OrtConfigurable` trait implementation
+///
+/// It does NOT generate:
+/// - `with_config()` inherent method (added separately for non-override variants)
+/// - `AdapterBuilder` trait implementation (varies based on overrides)
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __impl_adapter_builder_common {
+    (
+        builder_name: $Builder:ident,
+        adapter_name: $Adapter:ident,
+        config_type: $Config:ty,
+        adapter_type: $adapter_type_str:literal,
+        adapter_desc: $adapter_desc:literal,
+        task_type: $TaskType:ident,
+
+        fields: {
+            $($field_vis:vis $field_name:ident : $field_ty:ty = $field_default:expr),*
+            $(,)?
+        },
+
+        methods: {
+            $($method:item)*
+        }
+    ) => {
+        /// Builder for [$Adapter].
+        ///
+        #[doc = $adapter_desc]
+        #[derive(Debug)]
+        pub struct $Builder {
+            /// Common configuration shared across all adapters
+            config: $crate::domain::adapters::builder_config::AdapterBuilderConfig<$Config>,
+            $($field_vis $field_name : $field_ty),*
+        }
+
+        impl $Builder {
+            /// Creates a new builder with default configuration.
+            pub fn new() -> Self {
+                Self {
+                    config: $crate::domain::adapters::builder_config::AdapterBuilderConfig::default(),
+                    $($field_name : $field_default),*
+                }
+            }
+
+            /// Creates the base [`AdapterInfo`] for this adapter.
+            ///
+            /// This helper method constructs an [`AdapterInfo`] using the adapter's
+            /// type, task type, and description from the macro.
+            pub fn base_adapter_info() -> $crate::core::traits::adapter::AdapterInfo {
+                $crate::core::traits::adapter::AdapterInfo::new(
+                    $adapter_type_str,
+                    $crate::core::traits::task::TaskType::$TaskType,
+                    $adapter_desc,
+                )
+            }
+
+            // Custom methods provided by the user
+            $($method)*
+        }
+
+        impl Default for $Builder {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+
+        impl $crate::core::traits::OrtConfigurable for $Builder {
+            fn with_ort_config(mut self, config: $crate::core::config::OrtSessionConfig) -> Self {
+                self.config = self.config.with_ort_config(config);
+                self
+            }
+        }
+    };
+}
+
+/// Macro to implement common adapter builder boilerplate.
+///
+/// This macro generates the repetitive parts of adapter builders including the `build()` method.
+/// Uses a callback pattern to work around Rust macro hygiene limitations.
+///
+/// Generates:
+/// - Builder struct with `config` field plus custom fields
+/// - `new()` constructor
+/// - `with_config()` convenience method
+/// - `Default` trait implementation
+/// - `OrtConfigurable` trait implementation
+/// - `AdapterBuilder` trait implementation (with callback-based `build()`)
+///
+/// # Syntax
+///
+/// ```rust,ignore
+/// impl_adapter_builder! {
+///     // Required: Type information
+///     builder_name: MyAdapterBuilder,
+///     adapter_name: MyAdapter,
+///     config_type: MyConfig,
+///     adapter_type: "MyAdapter",
+///     adapter_desc: "Description",
+///     task_type: MyTaskType,
+///
+///     // Optional: Custom fields
+///     fields: {
+///         pub custom_field: Option<String> = None,
+///     },
+///
+///     // Optional: Custom methods
+///     methods: {
+///         pub fn custom_method(mut self, value: String) -> Self {
+///             self.custom_field = Some(value);
+///             self
+///         }
+///     }
+///
+///     // Required: Build closure (use |builder, model_path| { ... })
+///     build: |builder, model_path| {
+///         let (task_config, ort_config) = builder.config.into_validated_parts()?;
+///         let model = apply_ort_config!(
+///             SomeModelBuilder::new(),
+///             ort_config
+///         ).build(model_path)?;
+///         Ok(MyAdapter::new(model, task_config))
+///     }
+/// }
+/// ```
+#[macro_export]
+macro_rules! impl_adapter_builder {
+    // Full variant with fields and methods (no overrides)
+    (
+        builder_name: $Builder:ident,
+        adapter_name: $Adapter:ident,
+        config_type: $Config:ty,
+        adapter_type: $adapter_type_str:literal,
+        adapter_desc: $adapter_desc:literal,
+        task_type: $TaskType:ident,
+
+        fields: {
+            $($field_vis:vis $field_name:ident : $field_ty:ty = $field_default:expr),*
+            $(,)?
+        },
+
+        methods: {
+            $($method:item)*
+        }
+
+        build: $build_closure:expr,
+    ) => {
+        // Generate common parts (struct, new, base_adapter_info, Default, OrtConfigurable)
+        $crate::__impl_adapter_builder_common! {
+            builder_name: $Builder,
+            adapter_name: $Adapter,
+            config_type: $Config,
+            adapter_type: $adapter_type_str,
+            adapter_desc: $adapter_desc,
+            task_type: $TaskType,
+
+            fields: {
+                $($field_vis $field_name : $field_ty = $field_default),*
+            },
+
+            methods: {
+                /// Sets the task configuration.
+                pub fn with_config(mut self, config: $Config) -> Self {
+                    self.config = self.config.with_task_config(config);
+                    self
+                }
+
+                $($method)*
+            }
+        }
+
+        // Generate AdapterBuilder impl with standard methods
+        impl $crate::core::traits::adapter::AdapterBuilder for $Builder {
+            type Config = $Config;
+            type Adapter = $Adapter;
+
+            fn build(self, model_path: &std::path::Path) -> Result<Self::Adapter, $crate::core::OCRError> {
+                let build_fn: fn(Self, &std::path::Path) -> Result<$Adapter, $crate::core::OCRError> = $build_closure;
+                build_fn(self, model_path)
+            }
+
+            fn with_config(mut self, config: Self::Config) -> Self {
+                self.config = self.config.with_task_config(config);
+                self
+            }
+
+            fn adapter_type(&self) -> &str {
+                $adapter_type_str
+            }
+        }
+    };
+
+    // Variant without custom fields
+    (
+        builder_name: $Builder:ident,
+        adapter_name: $Adapter:ident,
+        config_type: $Config:ty,
+        adapter_type: $adapter_type_str:literal,
+        adapter_desc: $adapter_desc:literal,
+        task_type: $TaskType:ident,
+
+        methods: {
+            $($method:item)*
+        }
+
+        build: $build_closure:expr,
+    ) => {
+        impl_adapter_builder! {
+            builder_name: $Builder,
+            adapter_name: $Adapter,
+            config_type: $Config,
+            adapter_type: $adapter_type_str,
+            adapter_desc: $adapter_desc,
+            task_type: $TaskType,
+
+            fields: {},
+
+            methods: {
+                $($method)*
+            }
+
+            build: $build_closure,
+        }
+    };
+
+    // Variant without custom methods
+    (
+        builder_name: $Builder:ident,
+        adapter_name: $Adapter:ident,
+        config_type: $Config:ty,
+        adapter_type: $adapter_type_str:literal,
+        adapter_desc: $adapter_desc:literal,
+        task_type: $TaskType:ident,
+
+        fields: {
+            $($field_vis:vis $field_name:ident : $field_ty:ty = $field_default:expr),*
+            $(,)?
+        }
+
+        build: $build_closure:expr,
+    ) => {
+        impl_adapter_builder! {
+            builder_name: $Builder,
+            adapter_name: $Adapter,
+            config_type: $Config,
+            adapter_type: $adapter_type_str,
+            adapter_desc: $adapter_desc,
+            task_type: $TaskType,
+
+            fields: {
+                $($field_vis $field_name : $field_ty = $field_default),*
+            },
+
+            methods: {}
+
+            build: $build_closure,
+        }
+    };
+
+    // Minimal variant (no custom fields, no custom methods)
+    (
+        builder_name: $Builder:ident,
+        adapter_name: $Adapter:ident,
+        config_type: $Config:ty,
+        adapter_type: $adapter_type_str:literal,
+        adapter_desc: $adapter_desc:literal,
+        task_type: $TaskType:ident
+
+        build: $build_closure:expr,
+    ) => {
+        impl_adapter_builder! {
+            builder_name: $Builder,
+            adapter_name: $Adapter,
+            config_type: $Config,
+            adapter_type: $adapter_type_str,
+            adapter_desc: $adapter_desc,
+            task_type: $TaskType,
+
+            fields: {},
+
+            methods: {}
+
+            build: $build_closure,
+        }
+    };
+
+    // Variant with trait method overrides (for with_config, adapter_type)
+    (
+        builder_name: $Builder:ident,
+        adapter_name: $Adapter:ident,
+        config_type: $Config:ty,
+        adapter_type: $adapter_type_str:literal,
+        adapter_desc: $adapter_desc:literal,
+        task_type: $TaskType:ident,
+
+        fields: {
+            $($field_vis:vis $field_name:ident : $field_ty:ty = $field_default:expr),*
+            $(,)?
+        },
+
+        methods: {
+            $($method:item)*
+        }
+
+        overrides: {
+            with_config: $with_config_closure:expr,
+            adapter_type: $adapter_type_closure:expr,
+        }
+
+        build: $build_closure:expr,
+    ) => {
+        // Generate common parts (struct, new, base_adapter_info, Default, OrtConfigurable)
+        $crate::__impl_adapter_builder_common! {
+            builder_name: $Builder,
+            adapter_name: $Adapter,
+            config_type: $Config,
+            adapter_type: $adapter_type_str,
+            adapter_desc: $adapter_desc,
+            task_type: $TaskType,
+
+            fields: {
+                $($field_vis $field_name : $field_ty = $field_default),*
+            },
+
+            methods: {
+                $($method)*
+            }
+        }
+
+        // Generate AdapterBuilder impl with overridden methods
+        impl $crate::core::traits::adapter::AdapterBuilder for $Builder {
+            type Config = $Config;
+            type Adapter = $Adapter;
+
+            fn build(self, model_path: &std::path::Path) -> Result<Self::Adapter, $crate::core::OCRError> {
+                let build_fn: fn(Self, &std::path::Path) -> Result<$Adapter, $crate::core::OCRError> = $build_closure;
+                build_fn(self, model_path)
+            }
+
+            fn with_config(self, config: Self::Config) -> Self {
+                let with_config_fn: fn(Self, Self::Config) -> Self = $with_config_closure;
+                with_config_fn(self, config)
+            }
+
+            fn adapter_type(&self) -> &str {
+                let adapter_type_fn: fn(&Self) -> &str = $adapter_type_closure;
+                adapter_type_fn(self)
+            }
+        }
+    };
+
+    // Variant with only with_config override
+    (
+        builder_name: $Builder:ident,
+        adapter_name: $Adapter:ident,
+        config_type: $Config:ty,
+        adapter_type: $adapter_type_str:literal,
+        adapter_desc: $adapter_desc:literal,
+        task_type: $TaskType:ident,
+
+        fields: {
+            $($field_vis:vis $field_name:ident : $field_ty:ty = $field_default:expr),*
+            $(,)?
+        },
+
+        methods: {
+            $($method:item)*
+        }
+
+        overrides: {
+            with_config: $with_config_closure:expr,
+        }
+
+        build: $build_closure:expr,
+    ) => {
+        // Generate common parts (struct, new, base_adapter_info, Default, OrtConfigurable)
+        $crate::__impl_adapter_builder_common! {
+            builder_name: $Builder,
+            adapter_name: $Adapter,
+            config_type: $Config,
+            adapter_type: $adapter_type_str,
+            adapter_desc: $adapter_desc,
+            task_type: $TaskType,
+
+            fields: {
+                $($field_vis $field_name : $field_ty = $field_default),*
+            },
+
+            methods: {
+                $($method)*
+            }
+        }
+
+        // Generate AdapterBuilder impl with with_config override
+        impl $crate::core::traits::adapter::AdapterBuilder for $Builder {
+            type Config = $Config;
+            type Adapter = $Adapter;
+
+            fn build(self, model_path: &std::path::Path) -> Result<Self::Adapter, $crate::core::OCRError> {
+                let build_fn: fn(Self, &std::path::Path) -> Result<$Adapter, $crate::core::OCRError> = $build_closure;
+                build_fn(self, model_path)
+            }
+
+            fn with_config(self, config: Self::Config) -> Self {
+                let with_config_fn: fn(Self, Self::Config) -> Self = $with_config_closure;
+                with_config_fn(self, config)
+            }
+
+            fn adapter_type(&self) -> &str {
+                $adapter_type_str
+            }
+        }
+    };
+}
+
 /// Macro to conditionally apply OrtSessionConfig to any builder that has `with_ort_config`.
 ///
 /// This macro eliminates the repeated pattern:

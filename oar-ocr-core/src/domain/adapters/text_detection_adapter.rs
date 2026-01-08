@@ -5,15 +5,15 @@
 use crate::apply_ort_config;
 use crate::core::OCRError;
 use crate::core::traits::{
-    adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
-    task::{Task, TaskType},
+    adapter::{AdapterInfo, ModelAdapter},
+    task::Task,
 };
 use crate::domain::tasks::{
     Detection, TextDetectionConfig, TextDetectionOutput, TextDetectionTask,
 };
+use crate::impl_adapter_builder;
 use crate::models::detection::db::{DBModel, DBModelBuilder, DBPostprocessConfig};
 use crate::processors::{BoxType, ScoreMode};
-use std::path::Path;
 
 /// Text detection adapter that uses the DB model.
 #[derive(Debug)]
@@ -87,52 +87,39 @@ impl ModelAdapter for TextDetectionAdapter {
     }
 }
 
-/// Builder for text detection adapter.
-pub struct TextDetectionAdapterBuilder {
-    config: super::builder_config::AdapterBuilderConfig<TextDetectionConfig>,
-    text_type: Option<String>,
-}
+impl_adapter_builder! {
+    builder_name: TextDetectionAdapterBuilder,
+    adapter_name: TextDetectionAdapter,
+    config_type: TextDetectionConfig,
+    adapter_type: "text_detection",
+    adapter_desc: "Detects text regions in images with bounding boxes",
+    task_type: TextDetection,
 
-impl TextDetectionAdapterBuilder {
-    /// Creates a new text detection adapter builder.
-    pub fn new() -> Self {
-        Self {
-            config: super::builder_config::AdapterBuilderConfig::default(),
-            text_type: None,
+    fields: {
+        text_type: Option<String> = None,
+    },
+
+    methods: {
+        /// Sets the text type for preprocessing and postprocessing configuration.
+        ///
+        /// This matches the text_type parameter:
+        /// - "seal": Uses seal-specific preprocessing (limit_side_len=736, limit_type=Min) and polygon boxes
+        /// - Other values or None: Uses general text configuration (limit_side_len=960, limit_type=Max) and quad boxes
+        pub fn text_type(mut self, text_type: impl Into<String>) -> Self {
+            self.text_type = Some(text_type.into());
+            self
         }
     }
 
-    /// Sets the task configuration.
-    pub fn with_config(mut self, config: TextDetectionConfig) -> Self {
-        self.config = self.config.with_task_config(config);
-        self
-    }
-
-    /// Sets the text type for preprocessing and postprocessing configuration.
-    ///
-    /// This matches the text_type parameter:
-    /// - "seal": Uses seal-specific preprocessing (limit_side_len=736, limit_type=Min) and polygon boxes
-    /// - Other values or None: Uses general text configuration (limit_side_len=960, limit_type=Max) and quad boxes
-    pub fn text_type(mut self, text_type: impl Into<String>) -> Self {
-        self.text_type = Some(text_type.into());
-        self
-    }
-}
-
-impl AdapterBuilder for TextDetectionAdapterBuilder {
-    type Config = TextDetectionConfig;
-    type Adapter = TextDetectionAdapter;
-
-    fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        let (task_config, ort_config) =
-            self.config
-                .into_validated_parts()
-                .map_err(|err| OCRError::ConfigError {
-                    message: err.to_string(),
-                })?;
+    build: |builder: TextDetectionAdapterBuilder, model_path: &std::path::Path| -> Result<TextDetectionAdapter, OCRError> {
+        let (task_config, ort_config) = builder.config
+            .into_validated_parts()
+            .map_err(|err| OCRError::ConfigError {
+                message: err.to_string(),
+            })?;
 
         // Determine if this is seal text (uses different preprocessing and box type)
-        let is_seal_text = self
+        let is_seal_text = builder
             .text_type
             .as_ref()
             .map(|t| t.to_lowercase() == "seal")
@@ -143,7 +130,7 @@ impl AdapterBuilder for TextDetectionAdapterBuilder {
         // - General text: limit_side_len=960, limit_type=Max
         // - Seal text: limit_side_len=736, limit_type=Min
         let mut preprocess_config =
-            super::preprocessing::db_preprocess_for_text_type(self.text_type.as_deref());
+            super::preprocessing::db_preprocess_for_text_type(builder.text_type.as_deref());
 
         // Override with config values if present
         if let Some(limit) = task_config.limit_side_len {
@@ -183,40 +170,13 @@ impl AdapterBuilder for TextDetectionAdapterBuilder {
         )
         .build(model_path)?;
 
-        // Create adapter info
-        let info = AdapterInfo::new(
-            "TextDetection",
-            "1.0.0",
-            TaskType::TextDetection,
-            "Text detection using DB model",
-        );
+        // Create adapter info using the helper
+        let info = TextDetectionAdapterBuilder::base_adapter_info();
 
         Ok(TextDetectionAdapter {
             model,
             info,
             config: task_config,
         })
-    }
-
-    fn with_config(mut self, config: Self::Config) -> Self {
-        self.config = self.config.with_task_config(config);
-        self
-    }
-
-    fn adapter_type(&self) -> &str {
-        "TextDetection"
-    }
-}
-
-impl Default for TextDetectionAdapterBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl crate::core::traits::OrtConfigurable for TextDetectionAdapterBuilder {
-    fn with_ort_config(mut self, config: crate::core::config::OrtSessionConfig) -> Self {
-        self.config = self.config.with_ort_config(config);
-        self
-    }
+    },
 }

@@ -27,7 +27,7 @@ type TableDecodeResult = Result<TableDecodeArtifacts, OCRError>;
 /// # Example
 ///
 /// ```
-/// use oar_ocr::processors::wrap_table_html;
+/// use oar_ocr_core::processors::wrap_table_html;
 ///
 /// let tokens = vec!["<tr>".to_string(), "<td></td>".to_string(), "</tr>".to_string()];
 /// let html = wrap_table_html(&tokens);
@@ -50,7 +50,7 @@ pub fn wrap_table_html(tokens: &[String]) -> String {
 ///
 /// # Example
 /// ```
-/// use oar_ocr::processors::wrap_table_html_with_content;
+/// use oar_ocr_core::processors::wrap_table_html_with_content;
 ///
 /// let tokens = vec![
 ///     "<tr>".to_string(),

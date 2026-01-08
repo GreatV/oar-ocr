@@ -14,8 +14,6 @@ use std::path::Path;
 pub struct AdapterInfo {
     /// Name of the model (e.g., "DB", "CRNN", "RT-DETR")
     pub model_name: String,
-    /// Version of the model implementation
-    pub version: String,
     /// Task type this adapter supports
     pub task_type: TaskType,
     /// Description of the model
@@ -26,13 +24,11 @@ impl AdapterInfo {
     /// Creates a new adapter info.
     pub fn new(
         model_name: impl Into<String>,
-        version: impl Into<String>,
         task_type: TaskType,
         description: impl Into<String>,
     ) -> Self {
         Self {
             model_name: model_name.into(),
-            version: version.into(),
             task_type,
             description: description.into(),
         }
@@ -189,13 +185,11 @@ mod tests {
     fn test_adapter_info_creation() {
         let info = AdapterInfo::new(
             "DB",
-            "1.0.0",
             TaskType::TextDetection,
             "Differentiable Binarization text detector",
         );
 
         assert_eq!(info.model_name, "DB");
-        assert_eq!(info.version, "1.0.0");
         assert_eq!(info.task_type, TaskType::TextDetection);
     }
 

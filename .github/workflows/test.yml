@@ -38,4 +38,4 @@ jobs:
           cargo clippy --all-targets -p oar-ocr-vl -- -D warnings
 
       - name: Run tests in debug mode
-        run: cargo test --verbose
+        run: cargo test --verbose --all
