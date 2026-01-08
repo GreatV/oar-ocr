@@ -187,7 +187,10 @@ impl DBPostProcess {
             return BoundingBox::new(Vec::new());
         }
 
-        let path = offset_paths.into_iter().next().unwrap();
+        // Safe: we just verified len() == 1
+        let Some(path) = offset_paths.into_iter().next() else {
+            return BoundingBox::new(Vec::new());
+        };
 
         let mut points: Vec<Point> = path
             .iter()
@@ -196,9 +199,11 @@ impl DBPostProcess {
 
         // Remove duplicate closing point if present
         if points.len() > 1 {
-            let first = points.first().unwrap();
-            let last = points.last().unwrap();
-            if (first.x - last.x).abs() < f32::EPSILON && (first.y - last.y).abs() < f32::EPSILON {
+            // Safe: we just verified len() > 1
+            if let (Some(first), Some(last)) = (points.first(), points.last())
+                && (first.x - last.x).abs() < f32::EPSILON
+                && (first.y - last.y).abs() < f32::EPSILON
+            {
                 points.pop();
             }
         }

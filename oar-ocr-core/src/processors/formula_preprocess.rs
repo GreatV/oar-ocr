@@ -7,6 +7,24 @@ use crate::core::{OCRError, Tensor4D};
 use image::imageops::{FilterType, overlay, resize};
 use image::{DynamicImage, RgbImage};
 use ndarray::{Array2, Array3, Array4};
+use once_cell::sync::Lazy;
+use regex::Regex;
+
+// Static regex patterns for LaTeX normalization
+static CHINESE_TEXT_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\\text\s*\{([^{}]*[\u{4e00}-\u{9fff}]+[^{}]*)\}")
+        .expect("Failed to compile Chinese text regex pattern")
+});
+
+static TEXT_COMMAND_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(\\(operatorname|mathrm|text|mathbf)\s?\*?\s*\{.*?\})")
+        .expect("Failed to compile text command regex pattern")
+});
+
+static LETTER_TO_NONLETTER_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"([a-zA-Z])\s+([^a-zA-Z])")
+        .expect("Failed to compile letter to nonletter regex pattern")
+});
 
 /// Configuration parameters for formula preprocessing pipeline.
 #[derive(Debug, Clone, Copy)]
@@ -267,23 +285,18 @@ impl FormulaPreprocessor {
 /// # Returns
 /// Normalized LaTeX string suitable for rendering
 pub fn normalize_latex(latex: &str) -> String {
-    use regex::Regex;
-
     let mut result = latex.to_string();
 
     // Step 1: Remove Chinese text wrapping (from UniMERNetDecode.remove_chinese_text_wrapping)
-    let chinese_text_pattern =
-        Regex::new(r"\\text\s*\{([^{}]*[\u{4e00}-\u{9fff}]+[^{}]*)\}").unwrap();
-    result = chinese_text_pattern.replace_all(&result, "$1").to_string();
+    result = CHINESE_TEXT_PATTERN.replace_all(&result, "$1").to_string();
     result = result.replace('"', "");
 
     // Step 2: Implement LaTeXOCRDecode.post_process logic
     // First, handle special LaTeX commands by removing spaces inside them
-    let text_reg = Regex::new(r"(\\(operatorname|mathrm|text|mathbf)\s?\*?\s*\{.*?\})").unwrap();
 
     // Extract all matches and remove spaces from them
     let mut names = Vec::new();
-    for mat in text_reg.find_iter(&result) {
+    for mat in TEXT_COMMAND_PATTERN.find_iter(&result) {
         let text = mat.as_str();
         // Remove spaces after the command name inside braces
         let cleaned = text.replace(" ", "");
@@ -293,7 +306,7 @@ pub fn normalize_latex(latex: &str) -> String {
     // Replace each match with its space-removed version
     if !names.is_empty() {
         let mut names_iter = names.into_iter();
-        result = text_reg
+        result = TEXT_COMMAND_PATTERN
             .replace_all(&result, |_: &regex::Captures| {
                 names_iter.next().unwrap_or_default()
             })
@@ -308,7 +321,6 @@ pub fn normalize_latex(latex: &str) -> String {
     let mut prev_result = String::new();
     let max_iterations = 10;
     let mut iterations = 0;
-    let letter_to_nonletter = Regex::new(r"([a-zA-Z])\s+([^a-zA-Z])").unwrap();
 
     while prev_result != result && iterations < max_iterations {
         prev_result = result.clone();
@@ -365,7 +377,9 @@ pub fn normalize_latex(latex: &str) -> String {
 
         // Python pattern 3: r"(%s)\s+?(%s)" % (letter, noletter)
         // Remove spaces between letter and non-letter
-        result = letter_to_nonletter.replace_all(&result, "$1$2").to_string();
+        result = LETTER_TO_NONLETTER_PATTERN
+            .replace_all(&result, "$1$2")
+            .to_string();
 
         iterations += 1;
     }
