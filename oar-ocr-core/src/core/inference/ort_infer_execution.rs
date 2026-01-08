@@ -520,7 +520,10 @@ impl OrtInfer {
             .map_err(|_| OCRError::InvalidInput {
                 message: "Failed to acquire session lock to check inputs".to_string(),
             })?;
-        Ok(session.inputs().iter().any(|input| input.name() == "im_shape"))
+        Ok(session
+            .inputs()
+            .iter()
+            .any(|input| input.name() == "im_shape"))
     }
 
     /// Runs inference with multiple inputs for layout detection models.
