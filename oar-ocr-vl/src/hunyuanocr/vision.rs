@@ -388,6 +388,7 @@ impl VisionEncoderLayer {
 
 #[derive(Debug, Clone)]
 struct VisionPerceive {
+    hidden_size: usize,
     before_rms: candle_nn::RmsNorm,
     proj_0: Conv2d,
     proj_2: Conv2d,
@@ -453,6 +454,7 @@ impl VisionPerceive {
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "load perceive image_newline", e))?;
 
         Ok(Self {
+            hidden_size: cfg.hidden_size,
             before_rms,
             proj_0,
             proj_2,
@@ -478,9 +480,12 @@ impl VisionPerceive {
                 e,
             )
         })?;
-        if d != 1152 {
+        if d != self.hidden_size {
             return Err(OCRError::InvalidInput {
-                message: format!("HunyuanOCR: unexpected vit hidden dim {d}, expected 1152"),
+                message: format!(
+                    "HunyuanOCR: unexpected vit hidden dim {d}, expected {}",
+                    self.hidden_size
+                ),
             });
         }
 

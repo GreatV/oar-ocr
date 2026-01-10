@@ -119,16 +119,8 @@ fn clamp_to_max_image_size(
         w = factor_f;
     }
 
-    let mut h = h as u32;
-    let mut w = w as u32;
-
-    // Defensive: rounding and clamping should already ensure this, but keep it safe.
-    while h > max_image_size && h > factor {
-        h -= factor;
-    }
-    while w > max_image_size && w > factor {
-        w -= factor;
-    }
+    let h = h as u32;
+    let w = w as u32;
 
     Ok((h, w))
 }

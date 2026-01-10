@@ -67,15 +67,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let existing_images: Vec<PathBuf> = args
         .images
-        .iter()
+        .into_iter()
         .filter(|path| {
-            let exists = path.exists();
-            if !exists {
+            if path.exists() {
+                true
+            } else {
                 error!("Image file not found: {}", path.display());
+                false
             }
-            exists
         })
-        .cloned()
         .collect();
     if existing_images.is_empty() {
         return Err("No valid image files found".into());
