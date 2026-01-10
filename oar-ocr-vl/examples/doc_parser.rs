@@ -43,6 +43,9 @@ enum ModelName {
     /// PaddleOCR-VL: Large VLM with task prompts
     #[value(name = "paddleocr-vl")]
     PaddleOcrVl,
+    /// HunyuanOCR: OCR expert VLM (HunYuanVL)
+    #[value(name = "hunyuanocr")]
+    HunyuanOcr,
 }
 
 /// Command-line arguments
@@ -88,7 +91,7 @@ struct Args {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use oar_ocr_vl::{PaddleOcrVl, UniRec};
+    use oar_ocr_vl::{HunyuanOcr, PaddleOcrVl, UniRec};
 
     utils::init_tracing();
     let args = Args::parse();
@@ -169,6 +172,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             let parser = DocParser::with_config(&vl, config);
+            process_images(&parser, &layout_predictor, &existing_images, &args)?;
+        }
+        ModelName::HunyuanOcr => {
+            info!("Loading HunyuanOCR model...");
+            let load_start = Instant::now();
+            let model = HunyuanOcr::from_dir(&args.model_dir, device)?;
+            info!(
+                "HunyuanOCR loaded in {:.2}ms",
+                load_start.elapsed().as_secs_f64() * 1000.0
+            );
+
+            let parser = DocParser::with_config(&model, config);
             process_images(&parser, &layout_predictor, &existing_images, &args)?;
         }
     }

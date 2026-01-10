@@ -14,6 +14,10 @@ This crate provides PaddleOCR-VL and UniRec implementations using [Candle](https
 
 [UniRec](https://github.com/Topdu/OpenOCR) is a unified recognition model with only **0.1B parameters**, developed by the FVL Laboratory at Fudan University. It is designed for high-accuracy and efficient recognition of plain text, mathematical formulas, and mixed content in both Chinese and English.
 
+### HunyuanOCR
+
+[HunyuanOCR](https://huggingface.co/tencent/HunyuanOCR) is a 1B parameter OCR expert VLM powered by Hunyuan's multimodal architecture. This crate provides native Rust inference for the `model_type=hunyuan_vl` checkpoint.
+
 ### DocParser
 
 Two-stage document parsing API that combines layout detection (ONNX) with VL-based recognition, supporting both UniRec and PaddleOCR-VL backends.
@@ -109,10 +113,11 @@ The `oar-ocr-vl` crate includes several examples demonstrating its capabilities.
 This example combines layout detection (ONNX) with a VLM for recognition.
 
 ```bash
-cargo run --release --example doc_parser -- \
+cargo run --release --features cuda --example doc_parser -- \
     --model-name unirec \
     --model-dir models/unirec-0.1b \
     --layout-model models/pp-doclayoutv2.onnx \
+    --device cuda \
     document.jpg
 ```
 
@@ -121,8 +126,9 @@ cargo run --release --example doc_parser -- \
 Run the UniRec model directly on an image.
 
 ```bash
-cargo run --release --example unirec -- \
+cargo run --release --features cuda --example unirec -- \
     --model-dir models/unirec-0.1b \
+    --device cuda \
     formula.png
 ```
 
@@ -132,14 +138,26 @@ Run the PaddleOCR-VL model directly on an image with a specific task prompt.
 
 ```bash
 # OCR task
-cargo run --release --example paddleocr_vl -- \
+cargo run --release --features cuda --example paddleocr_vl -- \
     --model-dir PaddleOCR-VL \
+    --device cuda \
     --task ocr \
     document.jpg
 
 # Table task
-cargo run --release --example paddleocr_vl -- \
+cargo run --release --features cuda --example paddleocr_vl -- \
     --model-dir PaddleOCR-VL \
+    --device cuda \
     --task table \
     table.jpg
+```
+
+### HunyuanOCR (Direct Inference)
+
+```bash
+cargo run --release --features cuda --example hunyuanocr -- \
+    --model-dir ~/repos/HunyuanOCR \
+    --device cuda \
+    --prompt "Detect and recognize text in the image, and output the text coordinates in a formatted manner." \
+    document.jpg
 ```
