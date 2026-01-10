@@ -179,7 +179,7 @@ struct VisionAttention {
 
 impl VisionAttention {
     fn load(cfg: &HunyuanOcrVisionConfig, vb: candle_nn::VarBuilder) -> Result<Self, OCRError> {
-        if cfg.hidden_size % cfg.num_attention_heads != 0 {
+        if !cfg.hidden_size.is_multiple_of(cfg.num_attention_heads) {
             return Err(OCRError::ConfigError {
                 message: format!(
                     "HunyuanOCR: vit hidden_size {} not divisible by num_attention_heads {}",
@@ -808,7 +808,9 @@ impl HunyuanVisionModel {
             )
         })?;
 
-        if h % self.cfg.spatial_merge_size != 0 || w % self.cfg.spatial_merge_size != 0 {
+        if !h.is_multiple_of(self.cfg.spatial_merge_size)
+            || !w.is_multiple_of(self.cfg.spatial_merge_size)
+        {
             return Err(OCRError::InvalidInput {
                 message: format!(
                     "HunyuanOCR: vit grid {h}x{w} not divisible by spatial_merge_size={}",

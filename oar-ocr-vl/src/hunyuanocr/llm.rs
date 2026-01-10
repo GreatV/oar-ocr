@@ -54,7 +54,7 @@ impl RotaryEmbedding {
         if dims.len() != 3 || dims[0] != self.num_dims {
             return Err(OCRError::InvalidInput {
                 message: format!(
-                    "RotaryEmbedding: expected position_ids shape ({} ,B,S), got {:?}",
+                    "RotaryEmbedding: expected position_ids shape ({}, B, S), got {:?}",
                     self.num_dims, dims
                 ),
             });
@@ -171,7 +171,7 @@ fn select_xdrope(cos_or_sin: &Tensor, xdrope_section: &[usize]) -> Result<Tensor
         });
     }
 
-    let num_dims = dims.get(0).copied().unwrap_or(0);
+    let num_dims = dims.first().copied().unwrap_or(0);
     if num_dims == 0 {
         return Err(OCRError::InvalidInput {
             message: "HunyuanOCR: empty rope dims".to_string(),
@@ -325,101 +325,6 @@ fn repeat_kv(hidden_states: &Tensor, n_rep: usize) -> Result<Tensor, OCRError> {
         })
 }
 
-fn rms_norm_last_dim(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor, OCRError> {
-    let orig_dtype = x.dtype();
-    let x_f = x.to_dtype(DType::F32).map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "HunyuanOCR: qk_norm cast to f32 failed",
-            e,
-        )
-    })?;
-
-    let var = x_f
-        .sqr()
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "HunyuanOCR: qk_norm sqr failed",
-                e,
-            )
-        })?
-        .mean_keepdim(3)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "HunyuanOCR: qk_norm mean_keepdim failed",
-                e,
-            )
-        })?;
-
-    let denom = (var + eps)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "HunyuanOCR: qk_norm add eps failed",
-                e,
-            )
-        })?
-        .sqrt()
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "HunyuanOCR: qk_norm sqrt failed",
-                e,
-            )
-        })?;
-
-    let x_norm = x_f.broadcast_div(&denom).map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "HunyuanOCR: qk_norm div failed",
-            e,
-        )
-    })?;
-
-    let head_dim = weight.dims1().map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "HunyuanOCR: qk_norm weight dims1 failed",
-            e,
-        )
-    })?;
-    let w = weight
-        .to_dtype(DType::F32)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "HunyuanOCR: qk_norm weight cast failed",
-                e,
-            )
-        })?
-        .reshape((1usize, 1usize, 1usize, head_dim))
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "HunyuanOCR: qk_norm weight reshape failed",
-                e,
-            )
-        })?;
-
-    let out = x_norm.broadcast_mul(&w).map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "HunyuanOCR: qk_norm mul weight failed",
-            e,
-        )
-    })?;
-
-    out.to_dtype(orig_dtype).map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "HunyuanOCR: qk_norm cast back failed",
-            e,
-        )
-    })
-}
-
 #[derive(Debug, Clone)]
 struct HunyuanMlp {
     gate_proj: candle_nn::Linear,
@@ -470,15 +375,14 @@ struct HunyuanAttention {
     k_proj: candle_nn::Linear,
     v_proj: candle_nn::Linear,
     o_proj: candle_nn::Linear,
-    query_layernorm: Tensor,
-    key_layernorm: Tensor,
+    query_layernorm: Option<candle_nn::RmsNorm>,
+    key_layernorm: Option<candle_nn::RmsNorm>,
     num_heads: usize,
     num_kv_heads: usize,
     num_kv_groups: usize,
     head_dim: usize,
     scaling: f64,
     xdrope_section: Vec<usize>,
-    qk_norm_eps: f64,
 }
 
 impl HunyuanAttention {
@@ -520,29 +424,31 @@ impl HunyuanAttention {
         )
         .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "load o_proj", e))?;
 
-        let q_ln = vb
-            .pp("query_layernorm")
-            .get(cfg.head_dim, "weight")
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "load query_layernorm", e))?;
-        let k_ln = vb
-            .pp("key_layernorm")
-            .get(cfg.head_dim, "weight")
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "load key_layernorm", e))?;
+        let (query_layernorm, key_layernorm) = if cfg.use_qk_norm {
+            let q_ln =
+                candle_nn::rms_norm(cfg.head_dim, cfg.rms_norm_eps, vb.pp("query_layernorm"))
+                    .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "load query_layernorm", e))?;
+            let k_ln =
+                candle_nn::rms_norm(cfg.head_dim, cfg.rms_norm_eps, vb.pp("key_layernorm"))
+                    .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "load key_layernorm", e))?;
+            (Some(q_ln), Some(k_ln))
+        } else {
+            (None, None)
+        };
 
         Ok(Self {
             q_proj,
             k_proj,
             v_proj,
             o_proj,
-            query_layernorm: q_ln,
-            key_layernorm: k_ln,
+            query_layernorm,
+            key_layernorm,
             num_heads: cfg.num_attention_heads,
             num_kv_heads: cfg.num_key_value_heads,
             num_kv_groups: cfg.num_attention_heads / cfg.num_key_value_heads,
             head_dim: cfg.head_dim,
             scaling: (cfg.head_dim as f64).powf(-0.5),
             xdrope_section: cfg.rope_scaling.xdrope_section.clone(),
-            qk_norm_eps: cfg.rms_norm_eps,
         })
     }
 
@@ -585,8 +491,18 @@ impl HunyuanAttention {
             .transpose(1, 2)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn v transpose", e))?;
 
-        let q = rms_norm_last_dim(&q, &self.query_layernorm, self.qk_norm_eps)?;
-        let k = rms_norm_last_dim(&k, &self.key_layernorm, self.qk_norm_eps)?;
+        let q = match &self.query_layernorm {
+            Some(ln) => ln
+                .forward(&q)
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn query_layernorm", e))?,
+            None => q,
+        };
+        let k = match &self.key_layernorm {
+            Some(ln) => ln
+                .forward(&k)
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn key_layernorm", e))?,
+            None => k,
+        };
 
         let (q, k) = apply_xdrope_rotary_pos_emb(&q, &k, cos, sin, &self.xdrope_section)?;
 

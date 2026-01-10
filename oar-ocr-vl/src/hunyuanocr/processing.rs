@@ -32,13 +32,13 @@ pub fn smart_resize_token_limited(
     max_pixels: u32,
     max_tokens: usize,
 ) -> Result<(u32, u32), OCRError> {
-    let (mut rh, mut rw) =
-        crate::paddleocr_vl::smart_resize(height, width, factor, min_pixels, max_pixels)?;
     if factor == 0 {
         return Err(OCRError::InvalidInput {
             message: "HunyuanOCR smart_resize_token_limited: factor must be > 0".to_string(),
         });
     }
+    let (mut rh, mut rw) =
+        crate::paddleocr_vl::smart_resize(height, width, factor, min_pixels, max_pixels)?;
 
     // Token count in HunYuanVL is based on merged grid with an extra newline token per row:
     // tokens = Hm * (Wm + 1)
@@ -198,7 +198,7 @@ pub fn preprocess_image(
     let mean = &cfg.image_mean;
     let std = &cfg.image_std;
 
-    let mut data = Vec::with_capacity(1 * 3 * (rh as usize) * (rw as usize));
+    let mut data = Vec::with_capacity(3 * (rh as usize) * (rw as usize));
     for c in 0..3usize {
         for y in 0..rh {
             for x in 0..rw {

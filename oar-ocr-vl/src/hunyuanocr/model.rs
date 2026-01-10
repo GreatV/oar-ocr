@@ -48,6 +48,8 @@ impl HunyuanOcr {
         let dtype = device.bf16_default_to_f32();
 
         let weight_files = resolve_safetensors_shards(model_dir)?;
+        // SAFETY: from_mmaped_safetensors is unsafe because it memory-maps weight files
+        // directly. The caller must ensure the safetensors files are valid and not corrupted.
         let vb = unsafe {
             candle_nn::VarBuilder::from_mmaped_safetensors(&weight_files, dtype, &device)
                 .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "load safetensors shards", e))?
@@ -77,8 +79,97 @@ impl HunyuanOcr {
     ) -> Result<String, OCRError> {
         let instruction = instruction.as_ref();
 
+        let (input_ids, image_inputs, inputs_embeds) =
+            self.prepare_inputs_embeds(&image, instruction)?;
+
+        let (mut kv_cache, mut logits) = self.run_prefill(&inputs_embeds, &input_ids, &image_inputs)?;
+
+        let mut generated: Vec<u32> = Vec::new();
+        let mut next_pos = input_ids.len() as i64;
+
+        for _ in 0..max_new_tokens {
+            let next_token = logits
+                .argmax(D::Minus1)
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "argmax", e))?
+                .to_scalar::<u32>()
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "argmax to_scalar", e))?;
+
+            if self.stop_token_ids.contains(&next_token) {
+                break;
+            }
+            generated.push(next_token);
+
+            let token_t = Tensor::new(&[next_token], &self.device).map_err(|e| {
+                candle_to_ocr_processing(
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    "HunyuanOCR: create next_token tensor failed",
+                    e,
+                )
+            })?;
+            let token_t = token_t.reshape((1usize, 1usize)).map_err(|e| {
+                candle_to_ocr_processing(
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    "HunyuanOCR: reshape next_token tensor failed",
+                    e,
+                )
+            })?;
+            let token_embed = self.llm.embed(&token_t)?;
+
+            // For text-only generation, use the same 1D position index for all 4 RoPE dimensions.
+            let pos_ids = Tensor::new(&[next_pos, next_pos, next_pos, next_pos], &self.device)
+                .map_err(|e| {
+                    candle_to_ocr_processing(
+                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                        "HunyuanOCR: create pos tensor failed",
+                        e,
+                    )
+                })?;
+            let pos_ids = pos_ids.reshape((4usize, 1usize, 1usize)).map_err(|e| {
+                candle_to_ocr_processing(
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    "HunyuanOCR: reshape pos tensor failed",
+                    e,
+                )
+            })?;
+
+            let hs = self
+                .llm
+                .forward(&token_embed, &pos_ids, Some(&mut kv_cache), None)?;
+            let hs = hs.squeeze(0).map_err(|e| {
+                candle_to_ocr_processing(
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    "HunyuanOCR: squeeze hs batch failed",
+                    e,
+                )
+            })?;
+            let hs = hs.squeeze(0).map_err(|e| {
+                candle_to_ocr_processing(
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    "HunyuanOCR: squeeze hs seq failed",
+                    e,
+                )
+            })?;
+            logits = self.logits_from_hidden(&hs)?;
+            next_pos += 1;
+        }
+
+        let decoded =
+            self.tokenizer
+                .decode(&generated, true)
+                .map_err(|e| OCRError::InvalidInput {
+                    message: format!("HunyuanOCR: tokenizer decode failed: {e}"),
+                })?;
+        Ok(decoded.trim().to_string())
+    }
+
+    /// Prepare input embeddings from image and instruction.
+    fn prepare_inputs_embeds(
+        &self,
+        image: &RgbImage,
+        instruction: &str,
+    ) -> Result<(Vec<u32>, HunyuanOcrImageInputs, Tensor), OCRError> {
         let image_inputs = preprocess_image(
-            &image,
+            image,
             &self.image_cfg,
             &self.cfg.vision_config,
             &self.device,
@@ -203,13 +294,23 @@ impl HunyuanOcr {
             )
         })?;
 
-        let position_ids = build_position_ids(&input_ids, &self.cfg, &image_inputs)?;
+        Ok((input_ids, image_inputs, inputs_embeds))
+    }
+
+    /// Run the prefill step: build attention components and populate KV cache.
+    fn run_prefill(
+        &self,
+        inputs_embeds: &Tensor,
+        input_ids: &[u32],
+        image_inputs: &HunyuanOcrImageInputs,
+    ) -> Result<(Vec<KvCache>, Tensor), OCRError> {
+        let position_ids = build_position_ids(input_ids, &self.cfg, image_inputs)?;
         let prefill_causal_mask =
             causal_mask(input_ids.len(), &self.device, inputs_embeds.dtype())?;
 
         let mut kv_cache = vec![KvCache::default(); self.cfg.num_hidden_layers];
         let hidden = self.llm.forward(
-            &inputs_embeds,
+            inputs_embeds,
             &position_ids,
             Some(&mut kv_cache),
             Some(&prefill_causal_mask),
@@ -222,84 +323,9 @@ impl HunyuanOcr {
                 e,
             )
         })?;
-        let mut logits = self.logits_from_hidden(&last)?;
+        let logits = self.logits_from_hidden(&last)?;
 
-        let mut generated: Vec<u32> = Vec::new();
-        let mut next_pos = input_ids.len() as i64;
-
-        for _ in 0..max_new_tokens {
-            let next_token = logits
-                .argmax(D::Minus1)
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "argmax", e))?
-                .to_scalar::<u32>()
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "argmax to_scalar", e))?;
-
-            if self.stop_token_ids.contains(&next_token) {
-                break;
-            }
-            generated.push(next_token);
-
-            let token_t = Tensor::new(&[next_token], &self.device).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "HunyuanOCR: create next_token tensor failed",
-                    e,
-                )
-            })?;
-            let token_t = token_t.reshape((1usize, 1usize)).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "HunyuanOCR: reshape next_token tensor failed",
-                    e,
-                )
-            })?;
-            let token_embed = self.llm.embed(&token_t)?;
-
-            // For text-only generation, use the same 1D position index for all 4 RoPE dimensions.
-            let pos_ids = Tensor::new(&[next_pos, next_pos, next_pos, next_pos], &self.device)
-                .map_err(|e| {
-                    candle_to_ocr_processing(
-                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                        "HunyuanOCR: create pos tensor failed",
-                        e,
-                    )
-                })?;
-            let pos_ids = pos_ids.reshape((4usize, 1usize, 1usize)).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "HunyuanOCR: reshape pos tensor failed",
-                    e,
-                )
-            })?;
-
-            let hs = self
-                .llm
-                .forward(&token_embed, &pos_ids, Some(&mut kv_cache), None)?;
-            let hs = hs.squeeze(0).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "HunyuanOCR: squeeze hs batch failed",
-                    e,
-                )
-            })?;
-            let hs = hs.squeeze(0).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "HunyuanOCR: squeeze hs seq failed",
-                    e,
-                )
-            })?;
-            logits = self.logits_from_hidden(&hs)?;
-            next_pos += 1;
-        }
-
-        let decoded =
-            self.tokenizer
-                .decode(&generated, true)
-                .map_err(|e| OCRError::InvalidInput {
-                    message: format!("HunyuanOCR: tokenizer decode failed: {e}"),
-                })?;
-        Ok(decoded.trim().to_string())
+        Ok((kv_cache, logits))
     }
 
     fn logits_from_hidden(&self, hidden: &Tensor) -> Result<Tensor, OCRError> {
