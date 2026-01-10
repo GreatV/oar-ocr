@@ -82,7 +82,8 @@ impl HunyuanOcr {
         let (input_ids, image_inputs, inputs_embeds) =
             self.prepare_inputs_embeds(&image, instruction)?;
 
-        let (mut kv_cache, mut logits) = self.run_prefill(&inputs_embeds, &input_ids, &image_inputs)?;
+        let (mut kv_cache, mut logits) =
+            self.run_prefill(&inputs_embeds, &input_ids, &image_inputs)?;
 
         let mut generated: Vec<u32> = Vec::new();
         let mut next_pos = input_ids.len() as i64;

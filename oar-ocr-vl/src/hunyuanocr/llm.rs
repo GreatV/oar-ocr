@@ -427,10 +427,11 @@ impl HunyuanAttention {
         let (query_layernorm, key_layernorm) = if cfg.use_qk_norm {
             let q_ln =
                 candle_nn::rms_norm(cfg.head_dim, cfg.rms_norm_eps, vb.pp("query_layernorm"))
-                    .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "load query_layernorm", e))?;
-            let k_ln =
-                candle_nn::rms_norm(cfg.head_dim, cfg.rms_norm_eps, vb.pp("key_layernorm"))
-                    .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "load key_layernorm", e))?;
+                    .map_err(|e| {
+                        candle_to_ocr_inference("HunyuanOCR", "load query_layernorm", e)
+                    })?;
+            let k_ln = candle_nn::rms_norm(cfg.head_dim, cfg.rms_norm_eps, vb.pp("key_layernorm"))
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "load key_layernorm", e))?;
             (Some(q_ln), Some(k_ln))
         } else {
             (None, None)
