@@ -286,7 +286,7 @@ mod tests {
         assert!(rh <= vision_cfg.max_image_size);
         assert!(rw <= vision_cfg.max_image_size);
 
-        let factor = (cfg.patch_size * cfg.merge_size) as usize;
+        let factor = cfg.patch_size * cfg.merge_size;
         assert_eq!(rh % factor, 0);
         assert_eq!(rw % factor, 0);
         assert_eq!(out.grid_thw_merged, (1, rh / factor, rw / factor));
