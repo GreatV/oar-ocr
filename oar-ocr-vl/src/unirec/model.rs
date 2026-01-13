@@ -3,6 +3,7 @@
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::{Linear, Module};
 use image::RgbImage;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use std::path::Path;
 use tokenizers::Tokenizer;
@@ -13,6 +14,12 @@ use super::decoder::{KvCache, M2M100Decoder, create_causal_mask};
 use super::encoder::FocalSVTR;
 use crate::utils::candle_to_ocr_inference;
 use oar_ocr_core::core::OCRError;
+
+// Static regexes for postprocessing (compiled once)
+static UNDERSCORE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"_{4,}").expect("static underscore regex"));
+static DOTS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\.{4,}").expect("static dots regex"));
+static SPACES_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[ ]{2,}").expect("static spaces regex"));
 
 /// UniRec model for unified text, formula, and table recognition.
 pub struct UniRec {
@@ -283,15 +290,12 @@ fn postprocess_unirec_output(text: &str) -> String {
         .replace("</s>", "")
         .replace('\u{FFFF}', "");
 
-    // Match OpenOCR's extra cleanup rules.
-    let underscore_re = Regex::new(r"_{4,}").expect("static underscore regex must compile");
-    let dots_re = Regex::new(r"\.{4,}").expect("static dots regex must compile");
-    let result = underscore_re.replace_all(&result, "___");
-    let result = dots_re.replace_all(&result, "...");
+    // Match OpenOCR's extra cleanup rules (using static regexes for efficiency).
+    let result = UNDERSCORE_RE.replace_all(&result, "___");
+    let result = DOTS_RE.replace_all(&result, "...");
 
     // Collapse repeated spaces introduced during token cleanup.
-    let spaces_re = Regex::new(r"[ ]{2,}").expect("static spaces regex must compile");
-    let result = spaces_re.replace_all(&result, " ");
+    let result = SPACES_RE.replace_all(&result, " ");
 
     // Trim leading/trailing whitespace
     result.trim().to_string()

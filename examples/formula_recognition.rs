@@ -281,9 +281,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or("unknown.jpg");
                 let output_path = output_dir.join(output_filename);
 
-                // Truncate formula for display if too long (use chars to avoid UTF-8 panic)
-                let display_formula = if formula.chars().count() > 50 {
-                    format!("{}...", formula.chars().take(50).collect::<String>())
+                // Truncate formula for display if too long (use char_indices for efficiency)
+                let display_formula = if let Some((idx, _)) = formula.char_indices().nth(50) {
+                    format!("{}...", &formula[..idx])
                 } else {
                     formula.clone()
                 };
