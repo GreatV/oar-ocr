@@ -230,7 +230,10 @@ mod tests {
         let result = BBoxCrop::crop_bounding_box(&img, &bbox);
         assert!(result.is_ok());
 
-        let cropped = result.unwrap();
+        let cropped = match result {
+            Ok(cropped) => cropped,
+            Err(err) => panic!("expected crop to succeed: {err}"),
+        };
         assert_eq!(cropped.width(), 40); // 50 - 10
         assert_eq!(cropped.height(), 30); // 40 - 10
     }
@@ -276,7 +279,10 @@ mod tests {
         let result = BBoxCrop::crop_bounding_box(&img, &bbox);
         assert!(result.is_ok());
 
-        let cropped = result.unwrap();
+        let cropped = match result {
+            Ok(cropped) => cropped,
+            Err(err) => panic!("expected crop to succeed: {err}"),
+        };
         // Should clamp negative coordinates to 0
         assert_eq!(cropped.width(), 30); // 30 - 0 (clamped from -10)
         assert_eq!(cropped.height(), 25); // 25 - 0 (clamped from -5)
@@ -297,7 +303,10 @@ mod tests {
         let result = BBoxCrop::crop_bounding_box(&img, &bbox);
         assert!(result.is_ok());
 
-        let cropped = result.unwrap();
+        let cropped = match result {
+            Ok(cropped) => cropped,
+            Err(err) => panic!("expected crop to succeed: {err}"),
+        };
         // Should clamp to image boundaries
         assert_eq!(cropped.width(), 20); // 100 - 80
         assert_eq!(cropped.height(), 20); // 100 - 80
@@ -319,7 +328,10 @@ mod tests {
         let result = BBoxCrop::crop_bounding_box(&img, &bbox);
         assert!(result.is_ok());
 
-        let cropped = result.unwrap();
+        let cropped = match result {
+            Ok(cropped) => cropped,
+            Err(err) => panic!("expected crop to succeed: {err}"),
+        };
         // Should use bounding rectangle of the polygon
         assert_eq!(cropped.width(), 70); // 80 - 10
         assert_eq!(cropped.height(), 60); // 70 - 10
@@ -340,7 +352,10 @@ mod tests {
         let result = BBoxCrop::crop_rotated_bounding_box(&img, &bbox);
         assert!(result.is_ok());
 
-        let cropped = result.unwrap();
+        let cropped = match result {
+            Ok(cropped) => cropped,
+            Err(err) => panic!("expected crop to succeed: {err}"),
+        };
         assert!(cropped.width() > 0);
         assert!(cropped.height() > 0);
     }
@@ -375,7 +390,10 @@ mod tests {
                 Point { x: 10.0, y: 50.0 },
             ],
         };
-        let cropped_fast = BBoxCrop::crop_rotated_bounding_box(&img, &bbox).unwrap();
+        let cropped_fast = match BBoxCrop::crop_rotated_bounding_box(&img, &bbox) {
+            Ok(cropped_fast) => cropped_fast,
+            Err(err) => panic!("expected rotated crop to succeed: {err}"),
+        };
         // Expected via simple crop
         let expected = imageops::crop_imm(&img, 10, 20, 50, 30).to_image();
         assert_eq!(cropped_fast.dimensions(), expected.dimensions());

@@ -36,7 +36,11 @@ impl Crop {
     /// use oar_ocr_core::utils::crop::Crop;
     /// use oar_ocr_core::processors::types::CropMode;
     ///
-    /// let crop = Crop::new([224, 224], CropMode::Center).unwrap();
+    /// # fn main() -> Result<(), oar_ocr_core::core::errors::ImageProcessError> {
+    /// let crop = Crop::new([224, 224], CropMode::Center)?;
+    /// # let _ = crop;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new(crop_size: [u32; 2], crop_mode: CropMode) -> Result<Self, ImageProcessError> {
         image::check_image_size(&crop_size)?;
@@ -82,10 +86,13 @@ impl Crop {
     /// use oar_ocr_core::utils::crop::Crop;
     /// use oar_ocr_core::processors::types::CropMode;
     ///
-    /// let crop = Crop::new([100, 100], CropMode::Center).unwrap();
+    /// # fn main() -> Result<(), oar_ocr_core::core::errors::ImageProcessError> {
+    /// let crop = Crop::new([100, 100], CropMode::Center)?;
     /// let img = RgbImage::new(200, 200);
-    /// let cropped = crop.process(&img).unwrap();
+    /// let cropped = crop.process(&img)?;
     /// assert_eq!(cropped.dimensions(), (100, 100));
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn process(&self, img: &RgbImage) -> Result<RgbImage, ImageProcessError> {
         let (img_width, img_height) = img.dimensions();
@@ -248,69 +255,77 @@ mod tests {
     }
 
     #[test]
-    fn test_crop_center() {
-        let crop = Crop::new([100, 100], CropMode::Center).unwrap();
+    fn test_crop_center() -> Result<(), ImageProcessError> {
+        let crop = Crop::new([100, 100], CropMode::Center)?;
         let img = create_test_image(200, 200);
-        let cropped = crop.process(&img).unwrap();
+        let cropped = crop.process(&img)?;
         assert_eq!(cropped.dimensions(), (100, 100));
+        Ok(())
     }
 
     #[test]
-    fn test_crop_top_left() {
-        let crop = Crop::new([100, 100], CropMode::TopLeft).unwrap();
+    fn test_crop_top_left() -> Result<(), ImageProcessError> {
+        let crop = Crop::new([100, 100], CropMode::TopLeft)?;
         let img = create_test_image(200, 200);
-        let cropped = crop.process(&img).unwrap();
+        let cropped = crop.process(&img)?;
         assert_eq!(cropped.dimensions(), (100, 100));
+        Ok(())
     }
 
     #[test]
-    fn test_crop_custom() {
-        let crop = Crop::new([100, 100], CropMode::Custom { x: 50, y: 50 }).unwrap();
+    fn test_crop_custom() -> Result<(), ImageProcessError> {
+        let crop = Crop::new([100, 100], CropMode::Custom { x: 50, y: 50 })?;
         let img = create_test_image(200, 200);
-        let cropped = crop.process(&img).unwrap();
+        let cropped = crop.process(&img)?;
         assert_eq!(cropped.dimensions(), (100, 100));
 
         // Test out of bounds custom position
-        let crop_oob = Crop::new([100, 100], CropMode::Custom { x: 150, y: 150 }).unwrap();
+        let crop_oob = Crop::new([100, 100], CropMode::Custom { x: 150, y: 150 })?;
         assert!(crop_oob.process(&img).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_crop_size_too_large() {
-        let crop = Crop::new([300, 300], CropMode::Center).unwrap();
+    fn test_crop_size_too_large() -> Result<(), ImageProcessError> {
+        let crop = Crop::new([300, 300], CropMode::Center)?;
         let img = create_test_image(200, 200);
         assert!(crop.process(&img).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_crop_same_size() {
-        let crop = Crop::new([200, 200], CropMode::Center).unwrap();
+    fn test_crop_same_size() -> Result<(), ImageProcessError> {
+        let crop = Crop::new([200, 200], CropMode::Center)?;
         let img = create_test_image(200, 200);
-        let cropped = crop.process(&img).unwrap();
+        let cropped = crop.process(&img)?;
         assert_eq!(cropped.dimensions(), (200, 200));
+        Ok(())
     }
 
     #[test]
-    fn test_can_crop() {
-        let crop = Crop::new([100, 100], CropMode::Center).unwrap();
+    fn test_can_crop() -> Result<(), ImageProcessError> {
+        let crop = Crop::new([100, 100], CropMode::Center)?;
         assert!(crop.can_crop(200, 200));
         assert!(crop.can_crop(100, 100));
         assert!(!crop.can_crop(50, 50));
+        Ok(())
     }
 
     #[test]
-    fn test_aspect_ratio() {
-        let crop = Crop::new([200, 100], CropMode::Center).unwrap();
+    fn test_aspect_ratio() -> Result<(), ImageProcessError> {
+        let crop = Crop::new([200, 100], CropMode::Center)?;
         assert_eq!(crop.aspect_ratio(), 2.0);
+        Ok(())
     }
 
     #[test]
-    fn test_process_batch() {
-        let crop = Crop::new([100, 100], CropMode::Center).unwrap();
+    fn test_process_batch() -> Result<(), ImageProcessError> {
+        let crop = Crop::new([100, 100], CropMode::Center)?;
         let images = vec![create_test_image(200, 200), create_test_image(300, 300)];
-        let cropped = crop.process_batch(&images).unwrap();
+        let cropped = crop.process_batch(&images)?;
         assert_eq!(cropped.len(), 2);
         assert_eq!(cropped[0].dimensions(), (100, 100));
         assert_eq!(cropped[1].dimensions(), (100, 100));
+        Ok(())
     }
 }

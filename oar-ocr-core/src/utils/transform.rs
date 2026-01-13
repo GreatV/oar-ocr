@@ -494,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_perspective_transform() {
+    fn test_get_perspective_transform() -> Result<(), OCRError> {
         // Define a simple square in source and destination
         let src_points = [
             Point::new(0.0, 0.0),
@@ -510,10 +510,11 @@ mod tests {
             Point::new(0.0, 2.0),
         ];
 
-        let transform = get_perspective_transform(&src_points, &dst_points).unwrap();
+        let transform = get_perspective_transform(&src_points, &dst_points)?;
 
         // Check that the transformation matrix is valid (all elements are finite)
         assert!(transform.iter().all(|&x| x.is_finite()));
+        Ok(())
     }
 
     #[test]
@@ -545,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_rotate_crop_image_success() {
+    fn test_get_rotate_crop_image_success() -> Result<(), OCRError> {
         // Create a simple 4x4 image with distinct colors
         let mut image = RgbImage::new(4, 4);
         for y in 0..4 {
@@ -566,13 +567,11 @@ mod tests {
             Point::new(1.0, 3.0),
         ];
 
-        let result = get_rotate_crop_image(&image, &points);
-        assert!(result.is_ok());
-
-        let cropped_image = result.unwrap();
+        let cropped_image = get_rotate_crop_image(&image, &points)?;
         // Check that we got an image back
         assert!(cropped_image.width() > 0);
         assert!(cropped_image.height() > 0);
+        Ok(())
     }
 
     #[test]

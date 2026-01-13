@@ -1,7 +1,7 @@
 //! Text Detection Example
 //!
 //! This example demonstrates how to use the text detection predictor to detect text regions in images.
-//! It loads a text detection model, processes input images, and visualizes the detected text regions.
+//! It loads a text detection model, processes input images, and optionally visualizes the detected text regions.
 //!
 //! # Usage
 //!
@@ -12,14 +12,15 @@
 //! # Arguments
 //!
 //! * `-m, --model-path` - Path to the text detection model file
-//! * `-o, --output-dir` - Directory to save visualization results
+//! * `-o, --output-dir` - Directory to save output results (visualizations, etc.)
+//! * `--vis` - Enable visualization output
 //! * `-d, --device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
 //! * `<IMAGES>...` - Paths to input images to process
 //!
 //! # Example
 //!
 //! ```bash
-//! cargo run --example text_detection -- -m model.onnx -o output/ -d cpu image1.jpg image2.jpg
+//! cargo run --example text_detection -- -m model.onnx -o output/ --vis -d cpu image1.jpg image2.jpg
 //! ```
 
 mod utils;
@@ -31,9 +32,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
 use utils::device_config::parse_device_config;
-
-#[cfg(feature = "visualization")]
-use image::RgbImage;
+use utils::visualization::{Detection, DetectionVisConfig, save_rgb_image, visualize_detections};
 
 /// Command-line arguments for the text detection example
 #[derive(Parser)]
@@ -48,9 +47,13 @@ struct Args {
     #[arg(required = true)]
     images: Vec<PathBuf>,
 
-    /// Directory to save visualization results
+    /// Directory to save output results (visualizations, etc.)
     #[arg(short, long)]
     output_dir: Option<PathBuf>,
+
+    /// Enable visualization output
+    #[arg(long)]
+    vis: bool,
 
     /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
     #[arg(short, long, default_value = "cpu")]
@@ -207,13 +210,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Save visualization if output directory is provided
-    #[cfg(feature = "visualization")]
-    if let Some(output_dir) = args.output_dir {
+    // Save visualization if --vis is enabled and output directory is provided
+    if args.vis {
+        let output_dir = args
+            .output_dir
+            .as_ref()
+            .ok_or("--output-dir is required when --vis is enabled")?;
+
         // Create output directory if it doesn't exist
-        std::fs::create_dir_all(&output_dir)?;
+        std::fs::create_dir_all(output_dir)?;
 
         info!("\nSaving visualizations to: {}", output_dir.display());
+
+        let vis_config = DetectionVisConfig::default();
 
         for (image_path, rgb_img, detections) in existing_images
             .iter()
@@ -222,9 +231,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|((path, img), detections)| (path, img, detections))
         {
             if !detections.is_empty() {
-                // Extract boxes and scores from detections
-                let boxes: Vec<_> = detections.iter().map(|d| d.bbox.clone()).collect();
-                let scores: Vec<_> = detections.iter().map(|d| d.score).collect();
+                // Build detection list for visualization
+                let vis_detections: Vec<Detection> = detections
+                    .iter()
+                    .map(|d| Detection::new(&d.bbox, d.score))
+                    .collect();
+
                 // Use the original filename for output
                 let output_filename = image_path
                     .file_name()
@@ -232,8 +244,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or("unknown.jpg");
                 let output_path = output_dir.join(output_filename);
 
-                let visualized = visualize_detections(rgb_img, &boxes, &scores);
-                visualized.save(&output_path)?;
+                let visualized = visualize_detections(rgb_img, &vis_detections, &vis_config);
+                save_rgb_image(&visualized, &output_path)
+                    .map_err(|e| format!("Failed to save visualization: {}", e))?;
                 info!("  Saved: {}", output_path.display());
             } else {
                 warn!(
@@ -244,135 +257,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
-}
-
-/// Visualizes detected text regions by drawing bounding boxes on the image
-#[cfg(feature = "visualization")]
-fn visualize_detections(
-    img: &RgbImage,
-    boxes: &[oar_ocr::processors::BoundingBox],
-    scores: &[f32],
-) -> RgbImage {
-    use image::Rgb;
-    use imageproc::drawing::{draw_filled_circle_mut, draw_hollow_rect_mut, draw_text_mut};
-    use imageproc::rect::Rect;
-
-    let mut output = img.clone();
-    let box_color = Rgb([0u8, 255u8, 0u8]); // Green
-    let text_color = Rgb([255u8, 0u8, 0u8]); // Red for text labels
-    let img_bounds = (output.width() as i32, output.height() as i32);
-
-    // Try to load a font for text rendering
-    let font = load_font();
-
-    for (idx, (bbox, score)) in boxes.iter().zip(scores.iter()).enumerate() {
-        // Convert polygon to rectangle
-        if let Some(rect) = bbox_to_rect(bbox) {
-            // Draw thick rectangle (thickness = 2)
-            for t in 0..2 {
-                let thick_rect = Rect::at(rect.0 - t, rect.1 - t)
-                    .of_size(rect.2 + (2 * t) as u32, rect.3 + (2 * t) as u32);
-
-                if is_rect_in_bounds(&thick_rect, img_bounds) {
-                    draw_hollow_rect_mut(&mut output, thick_rect, box_color);
-                }
-            }
-
-            // Draw corner points
-            for point in &bbox.points {
-                let x = point.x as i32;
-                let y = point.y as i32;
-                if is_point_in_bounds(x, y, img_bounds) {
-                    draw_filled_circle_mut(&mut output, (x, y), 3, box_color);
-                }
-            }
-
-            // Draw label with index and confidence score
-            if let Some(ref font) = font {
-                let label = format!("#{} {:.1}%", idx + 1, score * 100.0);
-                let label_x = rect.0.max(0);
-                let label_y = (rect.1 - 20).max(0);
-
-                if is_point_in_bounds(label_x, label_y, img_bounds) {
-                    draw_text_mut(
-                        &mut output,
-                        text_color,
-                        label_x,
-                        label_y,
-                        20.0,
-                        font,
-                        &label,
-                    );
-                }
-            }
-        }
-    }
-
-    output
-}
-
-#[cfg(feature = "visualization")]
-fn load_font() -> Option<ab_glyph::FontVec> {
-    use ab_glyph::FontVec;
-
-    // Try common font paths
-    let font_paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/System/Library/Fonts/Arial.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
-    ];
-
-    for path in &font_paths {
-        if let Ok(font_data) = std::fs::read(path)
-            && let Ok(font) = FontVec::try_from_vec(font_data)
-        {
-            return Some(font);
-        }
-    }
-
-    None
-}
-
-#[cfg(feature = "visualization")]
-fn bbox_to_rect(bbox: &oar_ocr::processors::BoundingBox) -> Option<(i32, i32, u32, u32)> {
-    if bbox.points.is_empty() {
-        return None;
-    }
-
-    let (min_x, max_x, min_y, max_y) = bbox.points.iter().fold(
-        (
-            f32::INFINITY,
-            f32::NEG_INFINITY,
-            f32::INFINITY,
-            f32::NEG_INFINITY,
-        ),
-        |(min_x, max_x, min_y, max_y), p| {
-            (
-                min_x.min(p.x),
-                max_x.max(p.x),
-                min_y.min(p.y),
-                max_y.max(p.y),
-            )
-        },
-    );
-
-    let x = min_x as i32;
-    let y = min_y as i32;
-    let width = (max_x - min_x).max(0.0).round() as u32;
-    let height = (max_y - min_y).max(0.0).round() as u32;
-
-    (width > 0 && height > 0).then_some((x, y, width, height))
-}
-
-#[cfg(feature = "visualization")]
-fn is_rect_in_bounds(rect: &imageproc::rect::Rect, img_bounds: (i32, i32)) -> bool {
-    let (img_width, img_height) = img_bounds;
-    rect.left() >= 0 && rect.top() >= 0 && rect.right() < img_width && rect.bottom() < img_height
-}
-
-#[cfg(feature = "visualization")]
-fn is_point_in_bounds(x: i32, y: i32, img_bounds: (i32, i32)) -> bool {
-    let (img_width, img_height) = img_bounds;
-    x >= 0 && y >= 0 && x < img_width && y < img_height
 }

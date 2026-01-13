@@ -1021,9 +1021,11 @@ impl PPDocLayoutAdapterBuilder {
     /// use oar_ocr_core::core::traits::adapter::AdapterBuilder;
     /// use oar_ocr_core::domain::adapters::PPDocLayoutAdapterBuilder;
     ///
+    /// # fn main() -> Result<(), oar_ocr_core::core::OCRError> {
     /// let _adapter = PPDocLayoutAdapterBuilder::new("pp-doclayout-s")
-    ///     .build(Path::new("model.onnx"))
-    ///     .expect("Failed to create adapter");
+    ///     .build(Path::new("model.onnx"))?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new(model_name: impl AsRef<str>) -> Self {
         let name = model_name.as_ref();

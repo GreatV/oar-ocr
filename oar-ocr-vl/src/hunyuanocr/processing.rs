@@ -241,17 +241,18 @@ mod tests {
     use image::RgbImage;
 
     #[test]
-    fn test_clamp_to_max_image_size_keeps_factor_divisible() {
+    fn test_clamp_to_max_image_size_keeps_factor_divisible() -> Result<(), OCRError> {
         let factor = 32;
-        let (h, w) = clamp_to_max_image_size(3008, 512, factor, 2048).unwrap();
+        let (h, w) = clamp_to_max_image_size(3008, 512, factor, 2048)?;
         assert!(h <= 2048);
         assert!(w <= 2048);
         assert_eq!(h % factor, 0);
         assert_eq!(w % factor, 0);
+        Ok(())
     }
 
     #[test]
-    fn test_preprocess_image_clamps_to_max_image_size() {
+    fn test_preprocess_image_clamps_to_max_image_size() -> Result<(), Box<dyn std::error::Error>> {
         let cfg = HunyuanOcrImageProcessorConfig {
             min_pixels: 0,
             max_pixels: 100_000_000,
@@ -281,8 +282,8 @@ mod tests {
         };
 
         let img = RgbImage::new(512, 3000);
-        let out = preprocess_image(&img, &cfg, &vision_cfg, &Device::Cpu, DType::F32).unwrap();
-        let (_b, _c, rh, rw) = out.pixel_values.dims4().unwrap();
+        let out = preprocess_image(&img, &cfg, &vision_cfg, &Device::Cpu, DType::F32)?;
+        let (_b, _c, rh, rw) = out.pixel_values.dims4()?;
         assert!(rh <= vision_cfg.max_image_size);
         assert!(rw <= vision_cfg.max_image_size);
 
@@ -290,5 +291,6 @@ mod tests {
         assert_eq!(rh % factor, 0);
         assert_eq!(rw % factor, 0);
         assert_eq!(out.grid_thw_merged, (1, rh / factor, rw / factor));
+        Ok(())
     }
 }

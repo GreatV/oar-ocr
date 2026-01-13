@@ -274,24 +274,25 @@ mod tests {
     }
 
     #[test]
-    fn test_edge_processor_config_serialization() {
+    fn test_edge_processor_config_serialization() -> Result<(), Box<dyn std::error::Error>> {
         let config = EdgeProcessorConfig::TextCropping {
             handle_rotation: true,
         };
 
-        let json = serde_json::to_string(&config).unwrap();
+        let json = serde_json::to_string(&config)?;
         assert!(json.contains("TextCropping"));
 
-        let deserialized: EdgeProcessorConfig = serde_json::from_str(&json).unwrap();
+        let deserialized: EdgeProcessorConfig = serde_json::from_str(&json)?;
         if let EdgeProcessorConfig::TextCropping { handle_rotation } = deserialized {
             assert!(handle_rotation);
         } else {
             panic!("Wrong variant");
         }
+        Ok(())
     }
 
     #[test]
-    fn test_image_rotation_processor_rotates_images() {
+    fn test_image_rotation_processor_rotates_images() -> Result<(), OCRError> {
         let processor = ImageRotationProcessor::new(true);
 
         // Create a simple test image (10x10 white image)
@@ -301,50 +302,59 @@ mod tests {
         let images = vec![Some(img.clone())];
         let angles = vec![Some(45.0)]; // 45 degree rotation
 
-        let result = processor.process((images, angles)).unwrap();
+        let result = processor.process((images, angles))?;
 
         // Should have one rotated image
         assert_eq!(result.len(), 1);
         assert!(result[0].is_some());
 
         // The rotated image should have different dimensions due to rotation
-        let rotated = result[0].as_ref().unwrap();
+        let Some(rotated) = result[0].as_ref() else {
+            panic!("expected rotated image to be Some");
+        };
         // After rotation, the image will be larger to accommodate the rotated content
         assert!(rotated.width() >= 10 || rotated.height() >= 10);
+        Ok(())
     }
 
     #[test]
-    fn test_image_rotation_processor_skips_small_angles() {
+    fn test_image_rotation_processor_skips_small_angles() -> Result<(), OCRError> {
         let processor = ImageRotationProcessor::new(true);
 
         let img = Arc::new(RgbImage::from_pixel(10, 10, Rgb([255u8, 255u8, 255u8])));
         let images = vec![Some(img.clone())];
         let angles = vec![Some(0.05)]; // Very small angle, should be skipped
 
-        let result = processor.process((images, angles)).unwrap();
+        let result = processor.process((images, angles))?;
 
         // Should return the original image unchanged
         assert_eq!(result.len(), 1);
         assert!(result[0].is_some());
-        let output = result[0].as_ref().unwrap();
+        let Some(output) = result[0].as_ref() else {
+            panic!("expected output image to be Some");
+        };
         assert_eq!(output.dimensions(), img.dimensions());
+        Ok(())
     }
 
     #[test]
-    fn test_image_rotation_processor_disabled() {
+    fn test_image_rotation_processor_disabled() -> Result<(), OCRError> {
         let processor = ImageRotationProcessor::new(false); // auto_rotate disabled
 
         let img = Arc::new(RgbImage::from_pixel(10, 10, Rgb([255u8, 255u8, 255u8])));
         let images = vec![Some(img.clone())];
         let angles = vec![Some(45.0)];
 
-        let result = processor.process((images, angles)).unwrap();
+        let result = processor.process((images, angles))?;
 
         // Should return the original image unchanged
         assert_eq!(result.len(), 1);
         assert!(result[0].is_some());
-        let output = result[0].as_ref().unwrap();
+        let Some(output) = result[0].as_ref() else {
+            panic!("expected output image to be Some");
+        };
         assert_eq!(output.dimensions(), img.dimensions());
+        Ok(())
     }
 
     // Test processor that adds a value to an integer
@@ -386,19 +396,20 @@ mod tests {
     }
 
     #[test]
-    fn test_chain_processor_single_processor() {
+    fn test_chain_processor_single_processor() -> Result<(), OCRError> {
         let processors: Vec<Box<dyn EdgeProcessor<Input = i32, Output = i32>>> =
             vec![Box::new(AddProcessor { value: 5 })];
 
         let chain = ChainProcessor::new(processors);
-        let result = chain.process(10).unwrap();
+        let result = chain.process(10)?;
 
         // 10 + 5 = 15
         assert_eq!(result, 15);
+        Ok(())
     }
 
     #[test]
-    fn test_chain_processor_multiple_processors() {
+    fn test_chain_processor_multiple_processors() -> Result<(), OCRError> {
         let processors: Vec<Box<dyn EdgeProcessor<Input = i32, Output = i32>>> = vec![
             Box::new(AddProcessor { value: 5 }),      // 10 + 5 = 15
             Box::new(MultiplyProcessor { value: 2 }), // 15 * 2 = 30
@@ -406,10 +417,11 @@ mod tests {
         ];
 
         let chain = ChainProcessor::new(processors);
-        let result = chain.process(10).unwrap();
+        let result = chain.process(10)?;
 
         // (10 + 5) * 2 + 10 = 40
         assert_eq!(result, 40);
+        Ok(())
     }
 
     #[test]
@@ -438,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn test_chain_processor_order_matters() {
+    fn test_chain_processor_order_matters() -> Result<(), OCRError> {
         // Test that processors are applied in order
         let processors1: Vec<Box<dyn EdgeProcessor<Input = i32, Output = i32>>> = vec![
             Box::new(AddProcessor { value: 5 }),      // 10 + 5 = 15
@@ -453,8 +465,8 @@ mod tests {
         let chain1 = ChainProcessor::new(processors1);
         let chain2 = ChainProcessor::new(processors2);
 
-        let result1 = chain1.process(10).unwrap();
-        let result2 = chain2.process(10).unwrap();
+        let result1 = chain1.process(10)?;
+        let result2 = chain2.process(10)?;
 
         // (10 + 5) * 2 = 30
         assert_eq!(result1, 30);
@@ -462,5 +474,6 @@ mod tests {
         assert_eq!(result2, 25);
         // Results should be different
         assert_ne!(result1, result2);
+        Ok(())
     }
 }

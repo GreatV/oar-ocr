@@ -14,14 +14,13 @@ use crate::core::OCRError;
 /// # Examples
 ///
 /// ```rust,no_run
-/// # use oar_ocr_core::utils::validation::ScoreValidator;
-/// # use oar_ocr_core::core::OCRError;
-/// # fn example() -> Result<(), OCRError> {
+/// use oar_ocr_core::utils::validation::ScoreValidator;
+/// use oar_ocr_core::core::OCRError;
+/// # fn main() -> Result<(), OCRError> {
 /// let validator = ScoreValidator::new_unit_range("confidence");
 /// validator.validate_scores(&[0.5, 0.8, 0.95], "Detection")?;
-/// #     Ok(())
+/// # Ok(())
 /// # }
-/// # example().unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct ScoreValidator {

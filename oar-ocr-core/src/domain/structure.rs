@@ -39,7 +39,7 @@ static TITLE_NUMBERING_REGEX: Lazy<Regex> = Lazy::new(|| {
         $
     ",
     )
-    .expect("Invalid title numbering regex")
+    .unwrap_or_else(|e| panic!("Invalid title numbering regex: {e}"))
 });
 
 /// Format a paragraph title with automatic level detection based on numbering.

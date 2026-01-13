@@ -1,8 +1,8 @@
 //! Table Cell Detection Example
 //!
 //! This example runs the table cell detection models (wired / wireless) exported
-//! from table detection models and prints the detected cell bounding boxes. When the
-//! `visualization` feature is enabled it will also produce an annotated image.
+//! from table detection models and prints the detected cell bounding boxes.
+//! It will also produce an annotated image when visualization is enabled.
 //!
 //! # Usage
 //!
@@ -13,7 +13,8 @@
 //! # Arguments
 //!
 //! * `-m, --model-path` - Path to the table cell detection model (.onnx)
-//! * `-o, --output-dir` - Output directory for visualizations
+//! * `-o, --output-dir` - Output directory for results
+//! * `--vis` - Enable visualization output
 //! * `--model-type` - Explicit model type override (e.g., 'rt-detr-l_wired_table_cell_det')
 //! * `--score-threshold` - Score threshold for detections (default: 0.3)
 //! * `--max-cells` - Maximum number of cells per image (default: 300)
@@ -23,19 +24,14 @@
 mod utils;
 
 use clap::Parser;
+use image::Rgb;
 use oar_ocr::predictors::{TableCellDetectionPredictor, TableCellModelVariant};
 use oar_ocr::utils::load_image;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
 use utils::device_config::parse_device_config;
-
-#[cfg(feature = "visualization")]
-use image::RgbImage;
-#[cfg(feature = "visualization")]
-use std::fs;
-#[cfg(feature = "visualization")]
-use std::path::Path;
+use utils::visualization::{Detection, DetectionVisConfig, save_rgb_image, visualize_detections};
 
 /// Command line arguments.
 #[derive(Parser)]
@@ -50,13 +46,13 @@ struct Args {
     #[arg(required = true)]
     images: Vec<PathBuf>,
 
-    /// Output directory for visualizations (enabled with the `visualization` feature)
-    #[cfg_attr(
-        not(feature = "visualization"),
-        doc = " (requires `visualization` feature)"
-    )]
+    /// Output directory for results
     #[arg(short, long)]
     output_dir: Option<PathBuf>,
+
+    /// Enable visualization output
+    #[arg(long)]
+    vis: bool,
 
     /// Explicit model type override (e.g., `rt-detr-l_wired_table_cell_det`)
     #[arg(long)]
@@ -120,46 +116,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let predictor = predictor_builder.build(&args.model_path)?;
 
-    #[cfg(feature = "visualization")]
-    if let Some(ref output_dir) = args.output_dir {
-        fs::create_dir_all(output_dir)?;
+    // Load all images into memory
+    let mut images = Vec::new();
+    let existing_images: Vec<PathBuf> = args
+        .images
+        .iter()
+        .filter(|path| {
+            let exists = path.exists();
+            if !exists {
+                error!("Image file not found: {}", path.display());
+            }
+            exists
+        })
+        .cloned()
+        .collect();
+
+    if existing_images.is_empty() {
+        error!("No valid image files found");
+        return Err("No valid image files found".into());
     }
 
-    for (idx, image_path) in args.images.iter().enumerate() {
-        info!(
-            "Processing image {}/{}: {:?}",
-            idx + 1,
-            args.images.len(),
-            image_path
-        );
-
-        let img = match load_image(image_path) {
-            Ok(img) => img,
+    for image_path in &existing_images {
+        match load_image(image_path) {
+            Ok(img) => {
+                info!(
+                    "Loaded image: {} ({}x{})",
+                    image_path.display(),
+                    img.width(),
+                    img.height()
+                );
+                images.push(img);
+            }
             Err(e) => {
                 error!("Failed to load image {:?}: {}", image_path, e);
                 continue;
             }
-        };
+        }
+    }
 
-        info!("Image size: {}x{}", img.width(), img.height());
+    if images.is_empty() {
+        error!("No images could be loaded for processing");
+        return Err("No images could be loaded".into());
+    }
 
-        #[cfg(feature = "visualization")]
-        let img_for_vis = img.clone();
+    // Run detection
+    info!("Running table cell detection...");
+    let start = Instant::now();
+    let output = predictor.predict(images.clone())?;
+    let elapsed = start.elapsed();
 
-        let start = Instant::now();
-        let output = match predictor.predict(vec![img]) {
-            Ok(output) => output,
-            Err(e) => {
-                error!("Table cell detection failed for {:?}: {}", image_path, e);
-                continue;
-            }
-        };
-        let elapsed = start.elapsed();
+    info!("Detection completed in {:.2?}", elapsed);
 
-        info!("Detection completed in {:.2?}", elapsed);
+    // Display results for each image
+    for (idx, (image_path, cells)) in existing_images.iter().zip(output.cells.iter()).enumerate() {
+        info!("\n=== Results for image {} ===", idx + 1);
+        info!("Image: {}", image_path.display());
+        info!("Detected {} table cells", cells.len());
 
-        if let Some(cells) = output.cells.first() {
-            info!("Detected {} table cells", cells.len());
+        if cells.is_empty() {
+            warn!("No cells detected in this image");
+        } else {
             for (cell_idx, cell) in cells.iter().enumerate() {
                 if let Some((min_x, min_y, max_x, max_y)) = bbox_bounds(&cell.bbox) {
                     info!(
@@ -173,16 +189,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             }
+        }
+    }
 
-            #[cfg(feature = "visualization")]
-            if let Some(ref output_dir) = args.output_dir
-                && let Err(e) =
-                    visualize_cells(&img_for_vis, cells, output_dir.as_path(), image_path)
-            {
-                error!("Failed to save visualization: {}", e);
+    // Save visualization if --vis is enabled
+    if args.vis {
+        let output_dir = args
+            .output_dir
+            .as_ref()
+            .ok_or("--output-dir is required when --vis is enabled")?;
+
+        // Create output directory if it doesn't exist
+        std::fs::create_dir_all(output_dir)?;
+
+        info!("\nSaving visualizations to: {}", output_dir.display());
+
+        // Use cyan color for table cells
+        let vis_config = DetectionVisConfig::default()
+            .with_box_color(Rgb([0, 200, 255]))
+            .with_label_color(Rgb([0, 200, 255]));
+
+        for (image_path, rgb_img, cells) in existing_images
+            .iter()
+            .zip(images.iter())
+            .zip(output.cells.iter())
+            .map(|((path, img), cells)| (path, img, cells))
+        {
+            if !cells.is_empty() {
+                // Build detection list for visualization with labels
+                let vis_detections: Vec<Detection> = cells
+                    .iter()
+                    .map(|c| Detection::new(&c.bbox, c.score).with_label(&c.label))
+                    .collect();
+
+                // Use the original filename for output
+                let output_filename = image_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("result.png");
+                let output_path = output_dir.join(output_filename);
+
+                let visualized = visualize_detections(rgb_img, &vis_detections, &vis_config);
+                save_rgb_image(&visualized, &output_path)
+                    .map_err(|e| format!("Failed to save visualization: {}", e))?;
+                info!("  Saved: {}", output_path.display());
+            } else {
+                warn!(
+                    "  Skipping visualization for {} (no cells detected)",
+                    image_path.display()
+                );
             }
-        } else {
-            warn!("No cells detected for {:?}", image_path);
         }
     }
 
@@ -224,84 +280,4 @@ fn bbox_bounds(bbox: &oar_ocr::processors::BoundingBox) -> Option<(f32, f32, f32
         .fold(f32::NEG_INFINITY, f32::max);
 
     Some((min_x, min_y, max_x, max_y))
-}
-
-#[cfg(feature = "visualization")]
-fn visualize_cells(
-    img: &RgbImage,
-    cells: &[oar_ocr::domain::tasks::TableCellDetection],
-    output_dir: &Path,
-    image_path: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use imageproc::drawing::{draw_hollow_rect_mut, draw_text_mut};
-    use imageproc::rect::Rect;
-
-    let mut canvas = image::DynamicImage::ImageRgb8(img.clone()).to_rgba8();
-    let color = image::Rgba([0, 200, 255, 255]);
-
-    let font = load_font();
-
-    for (idx, cell) in cells.iter().enumerate() {
-        if let Some((min_x, min_y, max_x, max_y)) = bbox_bounds(&cell.bbox) {
-            let rect = Rect::at(min_x.max(0.0) as i32, min_y.max(0.0) as i32).of_size(
-                (max_x - min_x).max(1.0) as u32,
-                (max_y - min_y).max(1.0) as u32,
-            );
-            draw_hollow_rect_mut(&mut canvas, rect, color);
-
-            if let Some(ref font) = font {
-                let label = format!("{} #{}, {:.1}%", cell.label, idx, cell.score * 100.0);
-                let text_x = min_x.max(0.0) as i32;
-                let text_y = (min_y - 18.0).max(0.0) as i32;
-                draw_text_mut(&mut canvas, color, text_x, text_y, 18.0, font, &label);
-            }
-        }
-    }
-
-    // Use the original filename for output
-    let output_filename = image_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("result.png");
-    let output_path = output_dir.join(output_filename);
-
-    // Convert RGBA to RGB if saving as JPEG (JPEG doesn't support alpha channel)
-    let extension = output_path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    if extension == "jpg" || extension == "jpeg" {
-        let rgb_canvas = image::DynamicImage::ImageRgba8(canvas).to_rgb8();
-        rgb_canvas
-            .save(&output_path)
-            .map_err(|e| format!("Failed to save visualization to {:?}: {}", output_path, e).into())
-    } else {
-        canvas
-            .save(&output_path)
-            .map_err(|e| format!("Failed to save visualization to {:?}: {}", output_path, e).into())
-    }
-}
-
-#[cfg(feature = "visualization")]
-fn load_font() -> Option<ab_glyph::FontVec> {
-    use ab_glyph::FontVec;
-
-    let font_paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/System/Library/Fonts/Arial.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
-    ];
-
-    for path in &font_paths {
-        if let Ok(font_data) = std::fs::read(path)
-            && let Ok(font) = FontVec::try_from_vec(font_data)
-        {
-            return Some(font);
-        }
-    }
-
-    None
 }

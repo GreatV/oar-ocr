@@ -801,20 +801,21 @@ mod tests {
     }
 
     #[test]
-    fn test_argmax() {
+    fn test_argmax() -> Result<(), OCRError> {
         use ndarray::Array3;
 
         let dict_path = Path::new("models/table_structure_dict.txt");
         if !dict_path.exists() {
-            return; // Skip if dict not available
+            return Ok(()); // Skip if dict not available
         }
 
-        let decoder = TableStructureDecode::from_dict_path(dict_path).unwrap();
+        let decoder = TableStructureDecode::from_dict_path(dict_path)?;
 
         // Create simple logits tensor
         let logits = Array3::zeros((1, 5, 50));
         let (idx, _prob) = decoder.argmax_at(&logits, 0, 0);
         assert_eq!(idx, 0); // Should be first token (all zeros)
+        Ok(())
     }
 
     #[test]
@@ -986,7 +987,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_bbox_longest_side_scaling_matches_standard() {
+    fn test_extract_bbox_longest_side_scaling_matches_standard() -> Result<(), OCRError> {
         let decoder = TableStructureDecode {
             character_dict: Vec::new(),
             ignored_tokens: Vec::new(),
@@ -1009,9 +1010,7 @@ mod tests {
         let pad_w = target_size - (orig_w * scale); // Padding on the right
         let shape_info = [[orig_h, orig_w, scale, pad_h, pad_w, target_size]];
 
-        let bbox = decoder
-            .extract_bbox(&bbox_preds, 0, 0, &shape_info)
-            .expect("bbox decode");
+        let bbox = decoder.extract_bbox(&bbox_preds, 0, 0, &shape_info)?;
 
         // TableLabelDecode _get_bbox_scales for SLANeXt/SLANet_plus:
         // ratio = target_size / max(orig_w, orig_h) => denorm factor = max dim.
@@ -1036,5 +1035,6 @@ mod tests {
                 exp
             );
         }
+        Ok(())
     }
 }

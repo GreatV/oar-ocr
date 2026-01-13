@@ -378,9 +378,9 @@ struct Args {
     #[arg(long = "to-html", default_value_t = false)]
     to_html: bool,
 
-    /// Save visualization image with labeled bounding boxes
-    #[arg(long = "visualize", default_value_t = true)]
-    visualize: bool,
+    /// Enable visualization output with labeled bounding boxes
+    #[arg(long)]
+    vis: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -550,12 +550,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     builder = builder.use_e2e_wireless_table_rec(args.use_e2e_wireless_table_rec);
 
     if let Some(path) = args.formula_model {
+        let Some(tokenizer) = args.formula_tokenizer else {
+            return Err("Formula recognition requires --formula-tokenizer".into());
+        };
+        let Some(model_type) = args.formula_type else {
+            return Err("Formula recognition requires --formula-type".into());
+        };
+
         builder = builder
-            .with_formula_recognition(
-                path,
-                args.formula_tokenizer.as_ref().expect("validated above"),
-                args.formula_type.as_ref().expect("validated above"),
-            )
+            .with_formula_recognition(path, tokenizer, model_type)
             .formula_recognition_config(formula_config);
     }
 
@@ -567,15 +570,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder = builder.with_text_line_orientation(path);
     }
 
-    if args.text_det_model.is_some()
-        && args.text_rec_model.is_some()
-        && args.text_dict_path.is_some()
-    {
+    if let (Some(text_det_model), Some(text_rec_model), Some(text_dict_path)) = (
+        &args.text_det_model,
+        &args.text_rec_model,
+        &args.text_dict_path,
+    ) {
         builder = builder
             .with_ocr(
-                args.text_det_model.as_ref().unwrap(),
-                args.text_rec_model.as_ref().unwrap(),
-                args.text_dict_path.as_ref().unwrap(),
+                text_det_model.clone(),
+                text_rec_model.clone(),
+                text_dict_path.clone(),
             )
             .text_detection_model_name(&args.text_det_model_name)
             .text_recognition_model_name(&args.text_rec_model_name)
@@ -621,9 +625,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        // Save visualization if requested
-        #[cfg(feature = "visualization")]
-        if args.visualize {
+        // Save visualization if --vis is enabled
+        if args.vis {
             let stem = image_path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -635,7 +638,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let vis_path = args.output_dir.join(format!("{}.{}", stem, ext));
 
             if let Err(err) =
-                oar_ocr::utils::visualization::visualize_structure_results(&result, &vis_path, None)
+                utils::visualization::visualize_structure_results(&result, &vis_path, None)
             {
                 error!("Failed to save visualization: {}", err);
             } else {

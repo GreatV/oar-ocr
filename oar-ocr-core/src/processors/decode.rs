@@ -18,8 +18,10 @@ pub type PositionedDecodeResult = (
     Vec<usize>,
 );
 
-static ALPHANUMERIC_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"[a-zA-Z0-9 :*./%+-]").expect("Failed to compile regex pattern"));
+static ALPHANUMERIC_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"[a-zA-Z0-9 :*./%+-]")
+        .unwrap_or_else(|e| panic!("Failed to compile regex pattern: {e}"))
+});
 
 /// A base decoder for text recognition that handles character mapping and basic decoding operations.
 ///

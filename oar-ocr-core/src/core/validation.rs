@@ -304,8 +304,14 @@ mod tests {
 
     #[test]
     fn test_validate_batch_size() {
-        assert_eq!(validate_batch_size(&[2, 3, 224, 224], "test").unwrap(), 2);
-        assert_eq!(validate_batch_size(&[1, 3, 224, 224], "test").unwrap(), 1);
+        match validate_batch_size(&[2, 3, 224, 224], "test") {
+            Ok(batch_size) => assert_eq!(batch_size, 2),
+            Err(err) => panic!("expected validate_batch_size to succeed: {err}"),
+        }
+        match validate_batch_size(&[1, 3, 224, 224], "test") {
+            Ok(batch_size) => assert_eq!(batch_size, 1),
+            Err(err) => panic!("expected validate_batch_size to succeed: {err}"),
+        }
         assert!(validate_batch_size(&[0, 3, 224, 224], "test").is_err());
         assert!(validate_batch_size(&[1, 3, 224], "test").is_err());
     }

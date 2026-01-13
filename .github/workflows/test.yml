@@ -31,10 +31,9 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy linter
-        # Use `cargo clippy --all-targets --all-features -- -D warnings` for full features
         # Run clippy on all workspace members with warnings-as-errors
         run: |
-          cargo clippy --all-targets --features visualization -- -D warnings
+          cargo clippy --all-targets --all -- -D warnings
           cargo clippy --all-targets -p oar-ocr-vl -- -D warnings
 
       - name: Run tests in debug mode

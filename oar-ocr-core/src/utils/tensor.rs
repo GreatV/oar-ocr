@@ -105,9 +105,13 @@ pub fn vec_to_tensor2d(data: &[Vec<f32>]) -> Result<Tensor2D, OCRError> {
 /// ```
 /// use oar_ocr_core::utils::tensor::{tensor2d_to_vec, vec_to_tensor2d};
 /// // Create a tensor first
+/// # fn main() -> Result<(), oar_ocr_core::core::OCRError> {
 /// let data = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
-/// let tensor = vec_to_tensor2d(&data).unwrap();
+/// let tensor = vec_to_tensor2d(&data)?;
 /// let vec_data = tensor2d_to_vec(&tensor);
+/// # let _ = vec_data;
+/// # Ok(())
+/// # }
 /// ```
 pub fn tensor2d_to_vec(tensor: &Tensor2D) -> Vec<Vec<f32>> {
     tensor.outer_iter().map(|row| row.to_vec()).collect()
@@ -226,9 +230,13 @@ pub fn vec_to_tensor3d(data: &[Vec<Vec<f32>>]) -> Result<Tensor3D, OCRError> {
 /// ```
 /// use oar_ocr_core::utils::tensor::{tensor3d_to_vec, vec_to_tensor3d};
 /// // Create a tensor first
+/// # fn main() -> Result<(), oar_ocr_core::core::OCRError> {
 /// let data = vec![vec![vec![1.0, 2.0], vec![3.0, 4.0]]];
-/// let tensor = vec_to_tensor3d(&data).unwrap();
+/// let tensor = vec_to_tensor3d(&data)?;
 /// let vec_data = tensor3d_to_vec(&tensor);
+/// # let _ = vec_data;
+/// # Ok(())
+/// # }
 /// ```
 pub fn tensor3d_to_vec(tensor: &Tensor3D) -> Vec<Vec<Vec<f32>>> {
     tensor
@@ -357,9 +365,13 @@ pub fn vec_to_tensor4d(data: &[Vec<Vec<Vec<f32>>>]) -> Result<Tensor4D, OCRError
 /// ```
 /// use oar_ocr_core::utils::tensor::{tensor4d_to_vec, vec_to_tensor4d};
 /// // Create a tensor first
+/// # fn main() -> Result<(), oar_ocr_core::core::OCRError> {
 /// let data = vec![vec![vec![vec![1.0, 2.0], vec![3.0, 4.0]]]];
-/// let tensor = vec_to_tensor4d(&data).unwrap();
+/// let tensor = vec_to_tensor4d(&data)?;
 /// let vec_data = tensor4d_to_vec(&tensor);
+/// # let _ = vec_data;
+/// # Ok(())
+/// # }
 /// ```
 pub fn tensor4d_to_vec(tensor: &Tensor4D) -> Vec<Vec<Vec<Vec<f32>>>> {
     tensor
@@ -424,10 +436,14 @@ pub fn vec_to_tensor1d(data: Vec<f32>, shape: &[usize]) -> Result<Tensor1D, OCRE
 /// ```
 /// use oar_ocr_core::utils::tensor::{tensor1d_to_vec, vec_to_tensor1d};
 /// // Create a tensor first
+/// # fn main() -> Result<(), oar_ocr_core::core::OCRError> {
 /// let data = vec![1.0, 2.0, 3.0, 4.0];
 /// let shape = &[4];
-/// let tensor = vec_to_tensor1d(data, shape).unwrap();
+/// let tensor = vec_to_tensor1d(data, shape)?;
 /// let vec_data = tensor1d_to_vec(&tensor);
+/// # let _ = vec_data;
+/// # Ok(())
+/// # }
 /// ```
 pub fn tensor1d_to_vec(tensor: &Tensor1D) -> Vec<f32> {
     tensor.as_slice().unwrap_or(&[]).to_vec()
@@ -450,9 +466,13 @@ pub fn tensor1d_to_vec(tensor: &Tensor1D) -> Vec<f32> {
 /// ```
 /// use oar_ocr_core::utils::tensor::{tensor4d_slice, vec_to_tensor4d};
 /// // Create a tensor first
+/// # fn main() -> Result<(), oar_ocr_core::core::OCRError> {
 /// let data = vec![vec![vec![vec![1.0, 2.0], vec![3.0, 4.0]]]];
-/// let tensor = vec_to_tensor4d(&data).unwrap();
-/// let slice = tensor4d_slice(&tensor, 0);
+/// let tensor = vec_to_tensor4d(&data)?;
+/// let slice = tensor4d_slice(&tensor, 0)?;
+/// # let _ = slice;
+/// # Ok(())
+/// # }
 /// ```
 pub fn tensor4d_slice(tensor: &Tensor4D, index: usize) -> Result<Tensor3D, OCRError> {
     if index >= tensor.shape()[0] {
@@ -484,9 +504,13 @@ pub fn tensor4d_slice(tensor: &Tensor4D, index: usize) -> Result<Tensor3D, OCREr
 /// ```
 /// use oar_ocr_core::utils::tensor::{tensor3d_slice, vec_to_tensor3d};
 /// // Create a tensor first
+/// # fn main() -> Result<(), oar_ocr_core::core::OCRError> {
 /// let data = vec![vec![vec![1.0, 2.0], vec![3.0, 4.0]]];
-/// let tensor = vec_to_tensor3d(&data).unwrap();
-/// let slice = tensor3d_slice(&tensor, 0);
+/// let tensor = vec_to_tensor3d(&data)?;
+/// let slice = tensor3d_slice(&tensor, 0)?;
+/// # let _ = slice;
+/// # Ok(())
+/// # }
 /// ```
 pub fn tensor3d_slice(tensor: &Tensor3D, index: usize) -> Result<Tensor2D, OCRError> {
     if index >= tensor.shape()[0] {
@@ -517,12 +541,16 @@ pub fn tensor3d_slice(tensor: &Tensor3D, index: usize) -> Result<Tensor2D, OCREr
 /// ```
 /// use oar_ocr_core::utils::tensor::{stack_tensor3d, vec_to_tensor3d};
 /// // Create tensors first
+/// # fn main() -> Result<(), oar_ocr_core::core::OCRError> {
 /// let data1 = vec![vec![vec![1.0, 2.0], vec![3.0, 4.0]]];
 /// let data2 = vec![vec![vec![5.0, 6.0], vec![7.0, 8.0]]];
-/// let tensor1 = vec_to_tensor3d(&data1).unwrap();
-/// let tensor2 = vec_to_tensor3d(&data2).unwrap();
+/// let tensor1 = vec_to_tensor3d(&data1)?;
+/// let tensor2 = vec_to_tensor3d(&data2)?;
 /// let tensors = vec![tensor1, tensor2];
-/// let stacked_tensor = stack_tensor3d(&tensors);
+/// let stacked_tensor = stack_tensor3d(&tensors)?;
+/// # let _ = stacked_tensor;
+/// # Ok(())
+/// # }
 /// ```
 pub fn stack_tensor3d(tensors: &[Tensor3D]) -> Result<Tensor4D, OCRError> {
     if tensors.is_empty() {
@@ -616,12 +644,16 @@ pub fn stack_tensor3d(tensors: &[Tensor3D]) -> Result<Tensor4D, OCRError> {
 /// ```
 /// use oar_ocr_core::utils::tensor::{stack_tensor2d, vec_to_tensor2d};
 /// // Create tensors first
+/// # fn main() -> Result<(), oar_ocr_core::core::OCRError> {
 /// let data1 = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
 /// let data2 = vec![vec![5.0, 6.0], vec![7.0, 8.0]];
-/// let tensor1 = vec_to_tensor2d(&data1).unwrap();
-/// let tensor2 = vec_to_tensor2d(&data2).unwrap();
+/// let tensor1 = vec_to_tensor2d(&data1)?;
+/// let tensor2 = vec_to_tensor2d(&data2)?;
 /// let tensors = vec![tensor1, tensor2];
-/// let stacked_tensor = stack_tensor2d(&tensors);
+/// let stacked_tensor = stack_tensor2d(&tensors)?;
+/// # let _ = stacked_tensor;
+/// # Ok(())
+/// # }
 /// ```
 pub fn stack_tensor2d(tensors: &[Tensor2D]) -> Result<Tensor3D, OCRError> {
     if tensors.is_empty() {

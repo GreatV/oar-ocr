@@ -958,15 +958,10 @@ mod tests {
         let builder = TestBuilder::new().nested_field(42);
 
         assert!(builder.get_config().nested_config.is_some());
-        assert_eq!(
-            builder
-                .get_config()
-                .nested_config
-                .as_ref()
-                .unwrap()
-                .nested_field,
-            Some(42)
-        );
+        let Some(nested) = builder.get_config().nested_config.as_ref() else {
+            panic!("expected nested_config to be Some");
+        };
+        assert_eq!(nested.nested_field, Some(42));
     }
 
     #[test]
@@ -986,10 +981,10 @@ mod tests {
         let config = builder.get_config();
         assert_eq!(config.simple_field, Some("test".to_string()));
         assert!(config.nested_config.is_some());
-        assert_eq!(
-            config.nested_config.as_ref().unwrap().nested_field,
-            Some(123)
-        );
+        let Some(nested) = config.nested_config.as_ref() else {
+            panic!("expected nested_config to be Some");
+        };
+        assert_eq!(nested.nested_field, Some(123));
         assert!(config.enable_field.is_some());
     }
 }

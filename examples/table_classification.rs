@@ -13,7 +13,8 @@
 //! # Arguments
 //!
 //! * `-m, --model-path` - Path to the table classification model file
-//! * `-o, --output-dir` - Directory to save visualization results (optional)
+//! * `-o, --output-dir` - Directory to save output results
+//! * `--vis` - Enable visualization output
 //! * `--device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
 //! * `<IMAGES>...` - Paths to input table images to process
 //!
@@ -22,6 +23,7 @@
 //! ```bash
 //! cargo run --example table_classification -- \
 //!     -m models/pp-lcnet_x1_0_table_cls.onnx \
+//!     -o output/ --vis \
 //!     images/table_recognition.jpg
 //! ```
 
@@ -34,6 +36,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
 use utils::device_config::parse_device_config;
+use utils::visualization::{ClassificationVisConfig, save_rgb_image, visualize_classification};
 
 /// Command-line arguments for the table classification example
 #[derive(Parser)]
@@ -48,9 +51,13 @@ struct Args {
     #[arg(required = true)]
     images: Vec<PathBuf>,
 
-    /// Directory to save visualization results
+    /// Directory to save output results
     #[arg(short, long)]
     output_dir: Option<PathBuf>,
+
+    /// Enable visualization output
+    #[arg(long)]
+    vis: bool,
 
     /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
     #[arg(long, default_value = "cpu")]
@@ -212,13 +219,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Save visualization if output directory is provided
-    #[cfg(feature = "visualization")]
-    if let Some(output_dir) = args.output_dir {
+    // Save visualization if --vis is enabled
+    if args.vis {
+        let output_dir = args
+            .output_dir
+            .as_ref()
+            .ok_or("--output-dir is required when --vis is enabled")?;
+
         // Create output directory if it doesn't exist
-        std::fs::create_dir_all(&output_dir)?;
+        std::fs::create_dir_all(output_dir)?;
 
         info!("\nSaving visualizations to: {}", output_dir.display());
+
+        let vis_config = ClassificationVisConfig::default();
 
         for (image_path, rgb_img, classifications) in existing_images
             .iter()
@@ -227,9 +240,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|((path, img), classifications)| (path, img, classifications))
         {
             if !classifications.is_empty() {
-                // Extract labels and scores from classifications
-                let labels: Vec<_> = classifications.iter().map(|c| c.label.clone()).collect();
-                let scores: Vec<_> = classifications.iter().map(|c| c.score).collect();
+                // Get top prediction
+                let top = &classifications[0];
+
                 // Use the original filename for output
                 let output_filename = image_path
                     .file_name()
@@ -237,12 +250,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or("unknown.jpg");
                 let output_path = output_dir.join(output_filename);
 
-                // Get top prediction
-                let table_type = &labels[0];
-                let confidence = scores[0];
-
-                let visualized = visualize_table_classification(rgb_img, table_type, confidence);
-                visualized.save(&output_path)?;
+                let visualized = visualize_classification(
+                    rgb_img,
+                    &top.label,
+                    top.score,
+                    "Table Type",
+                    &vis_config,
+                );
+                save_rgb_image(&visualized, &output_path)
+                    .map_err(|e| format!("Failed to save visualization: {}", e))?;
                 info!("  Saved: {}", output_path.display());
             } else {
                 warn!(
@@ -254,105 +270,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-}
-
-/// Visualizes table classification by drawing the predicted type and confidence on the image
-/// The classification result is displayed in an additional space above the original image
-#[cfg(feature = "visualization")]
-fn visualize_table_classification(
-    img: &image::RgbImage,
-    table_type: &str,
-    confidence: f32,
-) -> image::RgbImage {
-    use image::{Rgb, RgbImage};
-    use imageproc::drawing::{draw_filled_rect_mut, draw_text_mut};
-    use imageproc::rect::Rect;
-
-    let original_width = img.width();
-    let original_height = img.height();
-
-    // Create additional space above the image for classification result
-    let header_height = 60;
-    let total_height = header_height + original_height;
-
-    // Create new image with extra space on top
-    let mut output = RgbImage::new(original_width, total_height);
-
-    // Fill header area with background color
-    let bg_color = Rgb([240u8, 240u8, 240u8]); // Light gray background
-
-    for y in 0..header_height {
-        for x in 0..original_width {
-            output.put_pixel(x, y, bg_color);
-        }
-    }
-
-    // Copy original image to the bottom part
-    for y in 0..original_height {
-        for x in 0..original_width {
-            output.put_pixel(x, y + header_height, *img.get_pixel(x, y));
-        }
-    }
-
-    let text_color = table_classification_color(table_type);
-
-    // Try to load a font for text rendering
-    let font = load_font();
-
-    if let Some(ref font) = font {
-        // Draw the table type label
-        let label = format!(
-            "Table Type: {} (Confidence: {:.1}%)",
-            table_type,
-            confidence * 100.0
-        );
-
-        // Center the text horizontally
-        let text_x = 10;
-        let text_y = 20;
-
-        // Draw text
-        draw_text_mut(&mut output, text_color, text_x, text_y, 24.0, font, &label);
-    } else {
-        // Fallback: draw a simple colored rectangle to indicate classification
-        let indicator_color = table_classification_color(table_type);
-
-        let indicator_rect = Rect::at(10, 15).of_size(30, 30);
-        draw_filled_rect_mut(&mut output, indicator_rect, indicator_color);
-    }
-
-    output
-}
-
-#[cfg(feature = "visualization")]
-fn table_classification_color(table_type: &str) -> image::Rgb<u8> {
-    use image::Rgb;
-
-    match table_type {
-        "Wired" => Rgb([0u8, 128u8, 0u8]), // Green
-        _ => Rgb([220u8, 20u8, 60u8]),     // Red for non-wired classifications
-    }
-}
-
-#[cfg(feature = "visualization")]
-fn load_font() -> Option<ab_glyph::FontVec> {
-    use ab_glyph::FontVec;
-
-    // Try common font paths
-    let font_paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/System/Library/Fonts/Arial.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
-    ];
-
-    for path in &font_paths {
-        if let Ok(font_data) = std::fs::read(path)
-            && let Ok(font) = FontVec::try_from_vec(font_data)
-        {
-            return Some(font);
-        }
-    }
-
-    None
 }

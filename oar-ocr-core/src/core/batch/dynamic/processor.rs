@@ -7,6 +7,15 @@ use image::{ImageBuffer, Rgb, RgbImage};
 use std::collections::HashMap;
 use std::time::Instant;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum CompatibilityKey {
+    Exact(u32, u32),
+    AspectRatioBucket(i64),
+    AspectRatioRatio(u32, u32),
+    MaxDimensionBucket(u32),
+    CustomTarget(Option<(u32, u32)>),
+}
+
 /// Enhanced trait for dynamic batching functionality
 pub trait DynamicBatcher {
     /// Group images by compatible shapes for batching
@@ -52,6 +61,80 @@ impl DefaultDynamicBatcher {
     fn calculate_aspect_ratio(image: &RgbImage) -> f32 {
         let (width, height) = image.dimensions();
         width as f32 / height as f32
+    }
+
+    fn gcd_u32(mut a: u32, mut b: u32) -> u32 {
+        while b != 0 {
+            let remainder = a % b;
+            a = b;
+            b = remainder;
+        }
+        a
+    }
+
+    fn reduced_ratio(width: u32, height: u32) -> (u32, u32) {
+        match (width, height) {
+            (0, 0) => (0, 0),
+            (0, _) => (0, 1),
+            (_, 0) => (1, 0),
+            (w, h) => {
+                let gcd = Self::gcd_u32(w, h);
+                (w / gcd, h / gcd)
+            }
+        }
+    }
+
+    fn aspect_ratio_bucket_id(image: &RgbImage, tolerance: f32) -> i64 {
+        debug_assert!(tolerance.is_finite() && tolerance > 0.0);
+
+        let (width, height) = image.dimensions();
+        if height == 0 {
+            return i64::MAX;
+        }
+
+        let ratio = width as f64 / height as f64;
+        let scaled = ratio / tolerance as f64;
+
+        if !scaled.is_finite() {
+            return if scaled.is_sign_positive() {
+                i64::MAX
+            } else {
+                i64::MIN
+            };
+        }
+
+        scaled.floor().clamp(i64::MIN as f64, i64::MAX as f64) as i64
+    }
+
+    fn compatibility_key(
+        image: &RgbImage,
+        strategy: &ShapeCompatibilityStrategy,
+    ) -> CompatibilityKey {
+        match strategy {
+            ShapeCompatibilityStrategy::Exact => {
+                let (width, height) = image.dimensions();
+                CompatibilityKey::Exact(width, height)
+            }
+            ShapeCompatibilityStrategy::AspectRatio { tolerance } => {
+                if tolerance.is_finite() && *tolerance > 0.0 {
+                    CompatibilityKey::AspectRatioBucket(Self::aspect_ratio_bucket_id(
+                        image, *tolerance,
+                    ))
+                } else {
+                    let (width, height) = image.dimensions();
+                    let (ratio_w, ratio_h) = Self::reduced_ratio(width, height);
+                    CompatibilityKey::AspectRatioRatio(ratio_w, ratio_h)
+                }
+            }
+            ShapeCompatibilityStrategy::MaxDimension { bucket_size } => {
+                let (width, height) = image.dimensions();
+                let max_dimension = width.max(height);
+                CompatibilityKey::MaxDimensionBucket(max_dimension / bucket_size)
+            }
+            ShapeCompatibilityStrategy::Custom { targets, tolerance } => {
+                CompatibilityKey::CustomTarget(Self::find_best_target(image, targets, *tolerance))
+            }
+        }
     }
 
     /// Check if two images are compatible based on strategy
@@ -103,19 +186,24 @@ impl DefaultDynamicBatcher {
     }
 
     /// Calculate target dimensions for a batch
-    fn calculate_target_dimensions(
-        images: &[RgbImage],
+    fn calculate_target_dimensions<'a>(
+        images: impl IntoIterator<Item = &'a RgbImage>,
         strategy: &ShapeCompatibilityStrategy,
     ) -> (u32, u32) {
         match strategy {
             ShapeCompatibilityStrategy::Exact => {
                 // All images should have the same dimensions
-                images.first().map(|img| img.dimensions()).unwrap_or((0, 0))
+                images
+                    .into_iter()
+                    .next()
+                    .map(|img| img.dimensions())
+                    .unwrap_or((0, 0))
             }
             _ => {
                 // Calculate the maximum dimensions
-                let max_width = images.iter().map(|img| img.width()).max().unwrap_or(0);
-                let max_height = images.iter().map(|img| img.height()).max().unwrap_or(0);
+                let (max_width, max_height) = images.into_iter().fold((0, 0), |acc, img| {
+                    (acc.0.max(img.width()), acc.1.max(img.height()))
+                });
                 (max_width, max_height)
             }
         }
@@ -428,34 +516,43 @@ impl DynamicBatcher for DefaultDynamicBatcher {
         let mut batch_counter = 0;
 
         // Group images by compatibility
-        let mut compatibility_groups: HashMap<String, Vec<(usize, RgbImage)>> = HashMap::new();
+        let mut compatibility_groups: HashMap<CompatibilityKey, Vec<(usize, RgbImage)>> =
+            HashMap::new();
 
         for (index, image) in images {
-            let mut target_group_key = None;
-
-            // Try to find a compatible group
-            for (group_key, group_images) in compatibility_groups.iter() {
-                if let Some((_, first_image)) = group_images.first()
-                    && Self::are_images_compatible(&image, first_image, &config.shape_compatibility)
+            let group_key = match &config.shape_compatibility {
+                ShapeCompatibilityStrategy::AspectRatio { tolerance }
+                    if tolerance.is_finite() && *tolerance > 0.0 =>
                 {
-                    target_group_key = Some(group_key.clone());
-                    break;
-                }
-            }
+                    let bucket = Self::aspect_ratio_bucket_id(&image, *tolerance);
+                    let candidate_buckets =
+                        [bucket, bucket.saturating_sub(1), bucket.saturating_add(1)];
 
-            // Add to the compatible group or create a new one
-            if let Some(group_key) = target_group_key {
-                if let Some(group) = compatibility_groups.get_mut(&group_key) {
-                    group.push((index, image));
-                } else {
-                    // This should not happen, but handle it defensively
-                    let group_key = format!("group_{}", compatibility_groups.len());
-                    compatibility_groups.insert(group_key, vec![(index, image)]);
+                    let mut selected_key = None;
+                    for candidate_bucket in candidate_buckets {
+                        let candidate_key = CompatibilityKey::AspectRatioBucket(candidate_bucket);
+                        if let Some(group_images) = compatibility_groups.get(&candidate_key)
+                            && let Some((_, first_image)) = group_images.first()
+                            && Self::are_images_compatible(
+                                &image,
+                                first_image,
+                                &config.shape_compatibility,
+                            )
+                        {
+                            selected_key = Some(candidate_key);
+                            break;
+                        }
+                    }
+
+                    selected_key.unwrap_or(CompatibilityKey::AspectRatioBucket(bucket))
                 }
-            } else {
-                let group_key = format!("group_{}", compatibility_groups.len());
-                compatibility_groups.insert(group_key, vec![(index, image)]);
-            }
+                _ => Self::compatibility_key(&image, &config.shape_compatibility),
+            };
+
+            compatibility_groups
+                .entry(group_key)
+                .or_default()
+                .push((index, image));
         }
 
         // Convert groups to batches
@@ -473,20 +570,31 @@ impl DynamicBatcher for DefaultDynamicBatcher {
             } else {
                 // Split large groups into appropriately sized batches
                 let max_batch_size = config.max_detection_batch_size;
-                let images_vec: Vec<RgbImage> =
-                    group_images.iter().map(|(_, img)| img.clone()).collect();
-                let target_dims =
-                    Self::calculate_target_dimensions(&images_vec, &config.shape_compatibility);
+                let target_dims = Self::calculate_target_dimensions(
+                    group_images.iter().map(|(_, img)| img),
+                    &config.shape_compatibility,
+                );
 
-                for chunk in group_images.chunks(max_batch_size) {
+                let mut group_iter = group_images.into_iter();
+                loop {
                     let batch_id = Self::generate_batch_id(target_dims, batch_counter);
                     let mut batch = CompatibleBatch::new(batch_id, target_dims);
 
-                    for (index, image) in chunk {
+                    for _ in 0..max_batch_size {
+                        let Some((index, image)) = group_iter.next() else {
+                            break;
+                        };
                         // Pad image to target dimensions if needed
-                        let padded_image =
-                            Self::pad_image(image, target_dims, &config.padding_strategy)?;
-                        batch.add_image(padded_image, *index);
+                        let padded_image = if image.dimensions() == target_dims {
+                            image
+                        } else {
+                            Self::pad_image(&image, target_dims, &config.padding_strategy)?
+                        };
+                        batch.add_image(padded_image, index);
+                    }
+
+                    if batch.is_empty() {
+                        break;
                     }
 
                     batches.push(batch);
@@ -507,45 +615,45 @@ impl DynamicBatcher for DefaultDynamicBatcher {
         let mut batches = Vec::new();
         let mut batch_counter = 0;
 
-        // Convert to CrossImageItem
-        let cross_items: Vec<CrossImageItem> = items
-            .into_iter()
-            .map(|(source_idx, item_idx, image)| CrossImageItem::new(source_idx, item_idx, image))
-            .collect();
-
         // Group by compatibility
-        let mut compatibility_groups: HashMap<String, Vec<CrossImageItem>> = HashMap::new();
+        let mut compatibility_groups: HashMap<CompatibilityKey, Vec<CrossImageItem>> =
+            HashMap::new();
 
-        for item in cross_items {
-            let mut target_group_key = None;
-
-            // Try to find a compatible group
-            for (group_key, group_items) in compatibility_groups.iter() {
-                if let Some(first_item) = group_items.first()
-                    && Self::are_images_compatible(
-                        &item.image,
-                        &first_item.image,
-                        &config.shape_compatibility,
-                    )
+        for (source_idx, item_idx, image) in items {
+            let item = CrossImageItem::new(source_idx, item_idx, image);
+            let group_key = match &config.shape_compatibility {
+                ShapeCompatibilityStrategy::AspectRatio { tolerance }
+                    if tolerance.is_finite() && *tolerance > 0.0 =>
                 {
-                    target_group_key = Some(group_key.clone());
-                    break;
-                }
-            }
+                    let bucket = Self::aspect_ratio_bucket_id(&item.image, *tolerance);
+                    let candidate_buckets =
+                        [bucket, bucket.saturating_sub(1), bucket.saturating_add(1)];
 
-            // Add to the compatible group or create a new one
-            if let Some(group_key) = target_group_key {
-                if let Some(group) = compatibility_groups.get_mut(&group_key) {
-                    group.push(item);
-                } else {
-                    // This should not happen, but handle it defensively
-                    let group_key = format!("cross_group_{}", compatibility_groups.len());
-                    compatibility_groups.insert(group_key, vec![item]);
+                    let mut selected_key = None;
+                    for candidate_bucket in candidate_buckets {
+                        let candidate_key = CompatibilityKey::AspectRatioBucket(candidate_bucket);
+                        if let Some(group_items) = compatibility_groups.get(&candidate_key)
+                            && let Some(first_item) = group_items.first()
+                            && Self::are_images_compatible(
+                                &item.image,
+                                &first_item.image,
+                                &config.shape_compatibility,
+                            )
+                        {
+                            selected_key = Some(candidate_key);
+                            break;
+                        }
+                    }
+
+                    selected_key.unwrap_or(CompatibilityKey::AspectRatioBucket(bucket))
                 }
-            } else {
-                let group_key = format!("cross_group_{}", compatibility_groups.len());
-                compatibility_groups.insert(group_key, vec![item]);
-            }
+                _ => Self::compatibility_key(&item.image, &config.shape_compatibility),
+            };
+
+            compatibility_groups
+                .entry(group_key)
+                .or_default()
+                .push(item);
         }
 
         // Convert groups to batches
@@ -563,22 +671,41 @@ impl DynamicBatcher for DefaultDynamicBatcher {
             } else {
                 // Split large groups into appropriately sized batches
                 let max_batch_size = config.max_recognition_batch_size;
-                let images_vec: Vec<RgbImage> =
-                    group_items.iter().map(|item| item.image.clone()).collect();
-                let target_dims =
-                    Self::calculate_target_dimensions(&images_vec, &config.shape_compatibility);
+                let target_dims = Self::calculate_target_dimensions(
+                    group_items.iter().map(|item| &item.image),
+                    &config.shape_compatibility,
+                );
 
-                for chunk in group_items.chunks(max_batch_size) {
+                let mut group_iter = group_items.into_iter();
+                loop {
                     let batch_id = Self::generate_batch_id(target_dims, batch_counter);
                     let mut batch = CrossImageBatch::new(batch_id, target_dims);
 
-                    for item in chunk {
+                    for _ in 0..max_batch_size {
+                        let Some(item) = group_iter.next() else {
+                            break;
+                        };
+                        let CrossImageItem {
+                            source_image_index,
+                            item_index,
+                            image,
+                            metadata,
+                        } = item;
+
                         // Pad image to target dimensions if needed
-                        let padded_image =
-                            Self::pad_image(&item.image, target_dims, &config.padding_strategy)?;
-                        let mut padded_item = item.clone();
-                        padded_item.image = padded_image;
+                        let padded_image = if image.dimensions() == target_dims {
+                            image
+                        } else {
+                            Self::pad_image(&image, target_dims, &config.padding_strategy)?
+                        };
+                        let mut padded_item =
+                            CrossImageItem::new(source_image_index, item_index, padded_image);
+                        padded_item.metadata = metadata;
                         batch.add_item(padded_item);
+                    }
+
+                    if batch.items.is_empty() {
+                        break;
                     }
 
                     batches.push(batch);
@@ -641,10 +768,10 @@ mod tests {
     }
 
     #[test]
-    fn test_pad_image_zero_strategy() {
+    fn test_pad_image_zero_strategy() -> Result<(), OCRError> {
         let image = create_test_image(10, 10, "solid_red");
         let strategy = PaddingStrategy::Zero;
-        let result = DefaultDynamicBatcher::pad_image(&image, (20, 20), &strategy).unwrap();
+        let result = DefaultDynamicBatcher::pad_image(&image, (20, 20), &strategy)?;
 
         assert_eq!(result.dimensions(), (20, 20));
 
@@ -654,15 +781,16 @@ mod tests {
 
         // Check that the original image is centered
         assert_eq!(*result.get_pixel(10, 10), Rgb([255, 0, 0])); // Center of original
+        Ok(())
     }
 
     #[test]
-    fn test_pad_image_center_strategy() {
+    fn test_pad_image_center_strategy() -> Result<(), OCRError> {
         let image = create_test_image(10, 10, "solid_red");
         let strategy = PaddingStrategy::Center {
             fill_color: [0, 255, 0],
         }; // Green padding
-        let result = DefaultDynamicBatcher::pad_image(&image, (20, 20), &strategy).unwrap();
+        let result = DefaultDynamicBatcher::pad_image(&image, (20, 20), &strategy)?;
 
         assert_eq!(result.dimensions(), (20, 20));
 
@@ -672,13 +800,14 @@ mod tests {
 
         // Check that the original image is centered
         assert_eq!(*result.get_pixel(10, 10), Rgb([255, 0, 0])); // Center of original
+        Ok(())
     }
 
     #[test]
-    fn test_pad_image_edge_strategy() {
+    fn test_pad_image_edge_strategy() -> Result<(), OCRError> {
         let image = create_test_image(6, 6, "border");
         let strategy = PaddingStrategy::Edge;
-        let result = DefaultDynamicBatcher::pad_image(&image, (12, 12), &strategy).unwrap();
+        let result = DefaultDynamicBatcher::pad_image(&image, (12, 12), &strategy)?;
 
         assert_eq!(result.dimensions(), (12, 12));
 
@@ -697,13 +826,14 @@ mod tests {
 
         // Check that the original image content is preserved
         assert_eq!(*result.get_pixel(6, 6), Rgb([128, 128, 128])); // Center of original
+        Ok(())
     }
 
     #[test]
-    fn test_pad_image_smart_strategy() {
+    fn test_pad_image_smart_strategy() -> Result<(), OCRError> {
         let image = create_test_image(10, 10, "border");
         let strategy = PaddingStrategy::Smart;
-        let result = DefaultDynamicBatcher::pad_image(&image, (20, 20), &strategy).unwrap();
+        let result = DefaultDynamicBatcher::pad_image(&image, (20, 20), &strategy)?;
 
         assert_eq!(result.dimensions(), (20, 20));
 
@@ -715,17 +845,19 @@ mod tests {
         // Check that the original image is centered and preserved
         // The original image is 10x10, centered in 20x20, so it starts at (5,5)
         assert_eq!(*result.get_pixel(10, 10), Rgb([128, 128, 128])); // Center of original (5+5, 5+5)
+        Ok(())
     }
 
     #[test]
-    fn test_pad_image_no_padding_needed() {
+    fn test_pad_image_no_padding_needed() -> Result<(), OCRError> {
         let image = create_test_image(10, 10, "solid_red");
         let strategy = PaddingStrategy::Zero;
-        let result = DefaultDynamicBatcher::pad_image(&image, (10, 10), &strategy).unwrap();
+        let result = DefaultDynamicBatcher::pad_image(&image, (10, 10), &strategy)?;
 
         // Should return a clone of the original image
         assert_eq!(result.dimensions(), (10, 10));
         assert_eq!(*result.get_pixel(5, 5), Rgb([255, 0, 0]));
+        Ok(())
     }
 
     #[test]

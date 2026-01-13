@@ -702,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stub_analyzer_returns_none_when_no_tables() {
+    fn test_stub_analyzer_returns_none_when_no_tables() -> Result<(), OCRError> {
         let analyzer = create_stub_analyzer();
         let page_image = create_test_image(800, 600);
 
@@ -711,11 +711,11 @@ mod tests {
         let formulas: Vec<FormulaResult> = vec![];
         let text_regions: Vec<TextRegion> = vec![];
 
-        let result = analyzer
-            .analyze_tables(&page_image, &layout_elements, &formulas, &text_regions)
-            .expect("analyze_tables should not error");
+        let result =
+            analyzer.analyze_tables(&page_image, &layout_elements, &formulas, &text_regions)?;
 
         assert!(result.is_empty());
+        Ok(())
     }
 
     #[test]
@@ -965,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn test_analyze_tables_with_table_element_no_adapters() {
+    fn test_analyze_tables_with_table_element_no_adapters() -> Result<(), OCRError> {
         // When a table element exists but no structure adapter is available,
         // the analyzer should return a stub TableResult.
         let analyzer = create_stub_analyzer();
@@ -981,9 +981,8 @@ mod tests {
         let formulas: Vec<FormulaResult> = vec![];
         let text_regions: Vec<TextRegion> = vec![];
 
-        let result = analyzer
-            .analyze_tables(&page_image, &layout_elements, &formulas, &text_regions)
-            .expect("analyze_tables should not error");
+        let result =
+            analyzer.analyze_tables(&page_image, &layout_elements, &formulas, &text_regions)?;
 
         // Should produce one stub result
         assert_eq!(result.len(), 1);
@@ -1001,10 +1000,11 @@ mod tests {
 
         // Classification confidence should be None (no classifier)
         assert!(table.classification_confidence.is_none());
+        Ok(())
     }
 
     #[test]
-    fn test_analyze_tables_skips_non_table_elements() {
+    fn test_analyze_tables_skips_non_table_elements() -> Result<(), OCRError> {
         let analyzer = create_stub_analyzer();
         let page_image = create_test_image(800, 600);
 
@@ -1023,16 +1023,16 @@ mod tests {
         let formulas: Vec<FormulaResult> = vec![];
         let text_regions: Vec<TextRegion> = vec![];
 
-        let result = analyzer
-            .analyze_tables(&page_image, &layout_elements, &formulas, &text_regions)
-            .expect("analyze_tables should not error");
+        let result =
+            analyzer.analyze_tables(&page_image, &layout_elements, &formulas, &text_regions)?;
 
         // No tables should be returned since there are no Table elements
         assert!(result.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn test_analyze_tables_multiple_tables() {
+    fn test_analyze_tables_multiple_tables() -> Result<(), OCRError> {
         let analyzer = create_stub_analyzer();
         let page_image = create_test_image(1000, 800);
 
@@ -1056,9 +1056,8 @@ mod tests {
         let formulas: Vec<FormulaResult> = vec![];
         let text_regions: Vec<TextRegion> = vec![];
 
-        let result = analyzer
-            .analyze_tables(&page_image, &layout_elements, &formulas, &text_regions)
-            .expect("analyze_tables should not error");
+        let result =
+            analyzer.analyze_tables(&page_image, &layout_elements, &formulas, &text_regions)?;
 
         // Should produce three stub results
         assert_eq!(result.len(), 3);
@@ -1071,10 +1070,11 @@ mod tests {
         assert!(bboxes.contains(&(50.0, 50.0)));
         assert!(bboxes.contains(&(50.0, 250.0)));
         assert!(bboxes.contains(&(400.0, 50.0)));
+        Ok(())
     }
 
     #[test]
-    fn test_analyze_tables_handles_edge_crop_region() {
+    fn test_analyze_tables_handles_edge_crop_region() -> Result<(), OCRError> {
         let analyzer = create_stub_analyzer();
         // Small image where table bbox extends beyond bounds
         let page_image = create_test_image(100, 100);
@@ -1090,12 +1090,12 @@ mod tests {
         let formulas: Vec<FormulaResult> = vec![];
         let text_regions: Vec<TextRegion> = vec![];
 
-        let result = analyzer
-            .analyze_tables(&page_image, &layout_elements, &formulas, &text_regions)
-            .expect("analyze_tables should not error");
+        let result =
+            analyzer.analyze_tables(&page_image, &layout_elements, &formulas, &text_regions)?;
 
         // BBoxCrop clamps to image bounds and produces a 1x1 crop
         // which is still valid, resulting in a stub table result
         assert_eq!(result.len(), 1);
+        Ok(())
     }
 }

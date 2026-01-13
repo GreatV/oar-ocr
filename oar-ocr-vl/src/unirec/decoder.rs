@@ -106,15 +106,13 @@ struct M2M100Attention {
     num_heads: usize,
     head_dim: usize,
     scale: f64,
-    #[allow(dead_code)]
-    is_cross_attention: bool,
 }
 
 impl M2M100Attention {
     fn load(
         embed_dim: usize,
         num_heads: usize,
-        is_cross_attention: bool,
+        _is_cross_attention: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
         let head_dim = embed_dim / num_heads;
@@ -131,7 +129,6 @@ impl M2M100Attention {
             num_heads,
             head_dim,
             scale: (head_dim as f64).powf(-0.5),
-            is_cross_attention,
         })
     }
 

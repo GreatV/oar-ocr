@@ -887,7 +887,9 @@ mod tests {
         let result = split_projection_profile(&profile, 0, 1);
 
         assert!(result.is_some());
-        let (starts, ends) = result.unwrap();
+        let Some((starts, ends)) = result else {
+            panic!("expected split_projection_profile to return Some");
+        };
         assert_eq!(starts.len(), 2);
         assert_eq!(ends.len(), 2);
     }

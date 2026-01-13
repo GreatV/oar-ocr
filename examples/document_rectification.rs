@@ -14,6 +14,7 @@
 //!
 //! * `-m, --model-path` - Path to the document rectification model file
 //! * `-o, --output-dir` - Directory to save rectified images (required)
+//! * `--vis` - Enable visualization output (saves side-by-side comparison images)
 //! * `--device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
 //! * `<IMAGES>...` - Paths to input document images to rectify
 //!
@@ -22,7 +23,7 @@
 //! ```bash
 //! cargo run --example document_rectification -- \
 //!     -m models/uvdoc_rectifier.onnx \
-//!     -o output/ \
+//!     -o output/ --vis \
 //!     distorted_doc1.jpg distorted_doc2.jpg
 //! ```
 
@@ -35,6 +36,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info};
 use utils::device_config::parse_device_config;
+use utils::visualization::{load_system_font, save_rgb_image};
 
 /// Command-line arguments for the document rectification example
 #[derive(Parser)]
@@ -53,6 +55,10 @@ struct Args {
     #[arg(short, long)]
     output_dir: PathBuf,
 
+    /// Enable visualization output (saves side-by-side comparison images)
+    #[arg(long)]
+    vis: bool,
+
     /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
     #[arg(long, default_value = "cpu")]
     device: String,
@@ -68,10 +74,6 @@ struct Args {
     /// Enable verbose output
     #[arg(short, long)]
     verbose: bool,
-
-    /// Save side-by-side comparison images
-    #[arg(long)]
-    save_comparison: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -221,11 +223,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Save rectified image
         let rectified_path = args.output_dir.join(output_filename);
-        rectified_img.save(&rectified_path)?;
+        save_rgb_image(rectified_img, &rectified_path)
+            .map_err(|e| format!("Failed to save rectified image: {}", e))?;
         info!("  Saved rectified: {}", rectified_path.display());
 
-        // Save comparison image if requested
-        if args.save_comparison {
+        // Save comparison image if --vis is enabled
+        if args.vis {
             let input_filename = image_path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -233,7 +236,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let comparison_filename = format!("{}_comparison.jpg", input_filename);
             let comparison_path = args.output_dir.join(&comparison_filename);
             let comparison_img = create_comparison_image(original_img, rectified_img);
-            comparison_img.save(&comparison_path)?;
+            save_rgb_image(&comparison_img, &comparison_path)
+                .map_err(|e| format!("Failed to save comparison image: {}", e))?;
             info!("  Saved comparison: {}", comparison_path.display());
         }
     }
@@ -249,6 +253,7 @@ fn create_comparison_image(
     rectified: &image::RgbImage,
 ) -> image::RgbImage {
     use image::{Rgb, RgbImage};
+    use imageproc::drawing::draw_text_mut;
 
     // Calculate dimensions for side-by-side layout
     let max_height = original.height().max(rectified.height());
@@ -273,51 +278,24 @@ fn create_comparison_image(
         }
     }
 
-    // Add labels if visualization feature is enabled
-    #[cfg(feature = "visualization")]
-    {
-        use imageproc::drawing::draw_text_mut;
+    // Add labels
+    if let Some(font) = load_system_font() {
         let text_color = Rgb([0u8, 0u8, 0u8]); // Black text
 
-        if let Some(font) = load_font() {
-            // Label for original image
-            draw_text_mut(&mut output, text_color, 10, 10, 24.0, &font, "Original");
+        // Label for original image
+        draw_text_mut(&mut output, text_color, 10, 10, 24.0, &font, "Original");
 
-            // Label for rectified image
-            draw_text_mut(
-                &mut output,
-                text_color,
-                (x_offset + 10) as i32,
-                10,
-                24.0,
-                &font,
-                "Rectified",
-            );
-        }
+        // Label for rectified image
+        draw_text_mut(
+            &mut output,
+            text_color,
+            (x_offset + 10) as i32,
+            10,
+            24.0,
+            &font,
+            "Rectified",
+        );
     }
 
     output
-}
-
-#[cfg(feature = "visualization")]
-fn load_font() -> Option<ab_glyph::FontVec> {
-    use ab_glyph::FontVec;
-
-    // Try common font paths
-    let font_paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/System/Library/Fonts/Arial.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
-    ];
-
-    for path in &font_paths {
-        if let Ok(font_data) = std::fs::read(path)
-            && let Ok(font) = FontVec::try_from_vec(font_data)
-        {
-            return Some(font);
-        }
-    }
-
-    None
 }

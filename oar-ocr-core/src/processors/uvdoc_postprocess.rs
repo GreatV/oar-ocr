@@ -427,11 +427,12 @@ mod tests {
     }
 
     #[test]
-    fn test_from_str() {
-        let postprocessor: UVDocPostProcess = "2.5".parse().unwrap();
+    fn test_from_str() -> Result<(), std::num::ParseFloatError> {
+        let postprocessor: UVDocPostProcess = "2.5".parse()?;
         assert_eq!(postprocessor.scale(), 2.5);
 
         assert!("invalid".parse::<UVDocPostProcess>().is_err());
+        Ok(())
     }
 
     #[test]
