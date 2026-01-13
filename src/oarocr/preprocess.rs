@@ -255,13 +255,11 @@ mod tests {
     }
 
     #[test]
-    fn test_document_preprocessor_no_adapters() {
+    fn test_document_preprocessor_no_adapters() -> Result<(), OCRError> {
         let preprocessor = DocumentPreprocessor::new(None, None);
         let image = Arc::new(create_test_image(100, 200));
 
-        let result = preprocessor
-            .preprocess(Arc::clone(&image))
-            .expect("preprocess should succeed");
+        let result = preprocessor.preprocess(Arc::clone(&image))?;
 
         // Without adapters, the image should be unchanged
         assert_eq!(result.image.width(), 100);
@@ -269,24 +267,22 @@ mod tests {
         assert!(result.orientation_angle.is_none());
         assert!(result.rotation.is_none());
         assert!(result.rectified_img.is_none());
+        Ok(())
     }
 
     #[test]
-    fn test_document_preprocessor_clone() {
+    fn test_document_preprocessor_clone() -> Result<(), OCRError> {
         let preprocessor = DocumentPreprocessor::<'static>::new(None, None);
         let cloned = preprocessor.clone();
 
         // Both should work identically
         let image = Arc::new(create_test_image(50, 50));
-        let r1 = preprocessor
-            .preprocess(Arc::clone(&image))
-            .expect("preprocess should succeed");
-        let r2 = cloned
-            .preprocess(Arc::clone(&image))
-            .expect("preprocess should succeed");
+        let r1 = preprocessor.preprocess(Arc::clone(&image))?;
+        let r2 = cloned.preprocess(Arc::clone(&image))?;
 
         assert_eq!(r1.image.width(), r2.image.width());
         assert_eq!(r1.image.height(), r2.image.height());
+        Ok(())
     }
 
     #[test]
@@ -312,7 +308,9 @@ mod tests {
         assert_eq!(result.height(), 200);
 
         // Correction metadata should still be present
-        let correction = correction.expect("correction should be Some");
+        let Some(correction) = correction else {
+            panic!("correction should be Some");
+        };
         assert_eq!(correction.angle, 0.0);
         assert_eq!(correction.rotated_width, 100);
         assert_eq!(correction.rotated_height, 200);
@@ -330,7 +328,9 @@ mod tests {
         // Should be a new image, not the original
         assert!(!Arc::ptr_eq(&image, &result));
 
-        let correction = correction.expect("correction should be Some");
+        let Some(correction) = correction else {
+            panic!("correction should be Some");
+        };
         assert_eq!(correction.angle, 90.0);
         assert_eq!(correction.rotated_width, 200);
         assert_eq!(correction.rotated_height, 100);
@@ -348,7 +348,9 @@ mod tests {
         // Should be a new image
         assert!(!Arc::ptr_eq(&image, &result));
 
-        let correction = correction.expect("correction should be Some");
+        let Some(correction) = correction else {
+            panic!("correction should be Some");
+        };
         assert_eq!(correction.angle, 180.0);
         assert_eq!(correction.rotated_width, 100);
         assert_eq!(correction.rotated_height, 200);
@@ -365,7 +367,9 @@ mod tests {
         assert_eq!(result.height(), 100);
         assert!(!Arc::ptr_eq(&image, &result));
 
-        let correction = correction.expect("correction should be Some");
+        let Some(correction) = correction else {
+            panic!("correction should be Some");
+        };
         assert_eq!(correction.angle, 270.0);
         assert_eq!(correction.rotated_width, 200);
         assert_eq!(correction.rotated_height, 100);
@@ -383,7 +387,9 @@ mod tests {
         assert_eq!(result.height(), 200);
 
         // Correction metadata preserves the unknown angle
-        let correction = correction.expect("correction should be Some");
+        let Some(correction) = correction else {
+            panic!("correction should be Some");
+        };
         assert_eq!(correction.angle, 8910.0); // 99 * 90.0
         assert_eq!(correction.rotated_width, 100);
         assert_eq!(correction.rotated_height, 200);
@@ -401,7 +407,9 @@ mod tests {
             assert_eq!(result.width(), 150);
             assert_eq!(result.height(), 150);
 
-            let correction = correction.expect("correction should be Some");
+            let Some(correction) = correction else {
+                panic!("correction should be Some");
+            };
             assert_eq!(correction.angle, (class_id as f32) * 90.0);
         }
     }
@@ -465,7 +473,10 @@ mod tests {
         // Rotation metadata preserved for coordinate back-mapping
         assert!(result.rotation.is_some());
         assert!(result.rectified_img.is_none());
-        assert_eq!(result.rotation.unwrap().angle, 90.0);
+        let Some(rotation) = result.rotation.as_ref() else {
+            panic!("expected rotation metadata to be Some");
+        };
+        assert_eq!(rotation.angle, 90.0);
     }
 
     /// Helper to simulate the class_id extraction logic from DocumentOrientationOutput
@@ -544,7 +555,9 @@ mod tests {
         assert_eq!(result.width(), 200); // Swapped
         assert_eq!(result.height(), 100);
 
-        let correction = correction.expect("should have correction");
+        let Some(correction) = correction else {
+            panic!("expected correction metadata to be Some");
+        };
         assert_eq!(correction.angle, 90.0);
         assert_eq!(correction.rotated_width, 200);
         assert_eq!(correction.rotated_height, 100);
@@ -564,12 +577,12 @@ mod tests {
     }
 
     #[test]
-    fn test_preprocessor_builds_correct_result_structure() {
+    fn test_preprocessor_builds_correct_result_structure() -> Result<(), OCRError> {
         // Without adapters, preprocessor returns pass-through result
         let preprocessor = DocumentPreprocessor::new(None, None);
         let image = Arc::new(create_test_image(100, 200));
 
-        let result = preprocessor.preprocess(Arc::clone(&image)).unwrap();
+        let result = preprocessor.preprocess(Arc::clone(&image))?;
 
         // Verify result structure
         assert_eq!(result.image.width(), 100);
@@ -577,5 +590,6 @@ mod tests {
         assert!(result.orientation_angle.is_none());
         assert!(result.rotation.is_none());
         assert!(result.rectified_img.is_none());
+        Ok(())
     }
 }

@@ -12,7 +12,8 @@
 //! # Arguments
 //!
 //! * `-m, --model-path` - Path to the seal detection model file
-//! * `-o, --output-dir` - Directory to save visualization results
+//! * `-o, --output-dir` - Directory to save output results
+//! * `--vis` - Enable visualization output
 //! * `--server-model-path` - Path to the server model for higher accuracy
 //! * `--score-threshold` - Pixel-level threshold for text detection
 //! * `--box-threshold` - Box-level threshold for filtering detections
@@ -27,13 +28,9 @@ use oar_ocr::predictors::SealTextDetectionPredictor;
 use oar_ocr::utils::load_image;
 use std::path::PathBuf;
 use std::time::Instant;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use utils::device_config::parse_device_config;
-
-#[cfg(feature = "visualization")]
-use image::RgbImage;
-#[cfg(feature = "visualization")]
-use std::fs;
+use utils::visualization::{Detection, DetectionVisConfig, save_rgb_image, visualize_detections};
 
 /// Command-line arguments for seal text detection example.
 #[derive(Parser, Debug)]
@@ -48,9 +45,13 @@ struct Args {
     #[arg(required = true)]
     images: Vec<PathBuf>,
 
-    /// Directory to save visualization results (if visualization feature is enabled)
+    /// Directory to save output results
     #[arg(short, long)]
     output_dir: Option<PathBuf>,
+
+    /// Enable visualization output
+    #[arg(long)]
+    vis: bool,
 
     /// Path to the server model for higher accuracy (overrides model_path if provided)
     #[arg(long)]
@@ -122,51 +123,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("  Box threshold: {}", args.box_threshold);
     info!("  Unclip ratio: {}", args.unclip_ratio);
 
-    // Create output directory if specified
-    #[cfg(feature = "visualization")]
-    if let Some(output_dir) = args.output_dir.as_ref().filter(|dir| !dir.exists()) {
-        fs::create_dir_all(output_dir)?;
-        info!("Created output directory: {:?}", output_dir);
+    // Load all images into memory
+    let mut images = Vec::new();
+    let existing_images: Vec<PathBuf> = args
+        .images
+        .iter()
+        .filter(|path| {
+            let exists = path.exists();
+            if !exists {
+                error!("Image file not found: {}", path.display());
+            }
+            exists
+        })
+        .cloned()
+        .collect();
+
+    if existing_images.is_empty() {
+        error!("No valid image files found");
+        return Err("No valid image files found".into());
     }
 
-    // Process each image
-    for image_path in &args.images {
-        info!("Processing: {:?}", image_path);
-
-        // Load input image
-        let image = match load_image(image_path) {
-            Ok(img) => img,
+    for image_path in &existing_images {
+        match load_image(image_path) {
+            Ok(img) => {
+                info!(
+                    "Loaded image: {} ({}x{})",
+                    image_path.display(),
+                    img.width(),
+                    img.height()
+                );
+                images.push(img);
+            }
             Err(e) => {
                 error!("Failed to load image {:?}: {}", image_path, e);
                 continue;
             }
-        };
+        }
+    }
 
-        let (width, height) = (image.width(), image.height());
-        info!("  Image dimensions: {}x{}", width, height);
+    if images.is_empty() {
+        error!("No images could be loaded for processing");
+        return Err("No images could be loaded".into());
+    }
 
-        #[cfg(feature = "visualization")]
-        let image_for_vis = image.clone();
+    // Run detection
+    info!("Running seal text detection...");
+    let start = Instant::now();
+    let output = match predictor.predict(images.clone()) {
+        Ok(output) => output,
+        Err(e) => {
+            error!("Detection failed: {}", e);
+            return Err(e.into());
+        }
+    };
+    let duration = start.elapsed();
 
-        // Run detection
-        let start = Instant::now();
-        let output = match predictor.predict(vec![image]) {
-            Ok(output) => output,
-            Err(e) => {
-                error!("  Detection failed: {}", e);
-                continue;
-            }
-        };
-        let duration = start.elapsed();
+    info!(
+        "Detection completed in {:.2}ms",
+        duration.as_secs_f64() * 1000.0
+    );
 
-        // Display results
-        if let Some(detections) = output.detections.first() {
-            info!(
-                "  Detected {} seal text regions in {:?}",
-                detections.len(),
-                duration
-            );
+    // Display results for each image
+    for (idx, (image_path, detections)) in existing_images
+        .iter()
+        .zip(output.detections.iter())
+        .enumerate()
+    {
+        info!("\n=== Results for image {} ===", idx + 1);
+        info!("Image: {}", image_path.display());
+        info!("Detected {} seal text regions", detections.len());
 
+        if detections.is_empty() {
+            warn!("No text regions found in this image");
+        } else {
             for (i, detection) in detections.iter().enumerate() {
                 let bbox = &detection.bbox;
                 let score = detection.score;
@@ -184,7 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
 
                 info!(
-                    "    Box #{}: [{:.0}, {:.0}, {:.0}, {:.0}] confidence {:.2}%",
+                    "  Box #{}: [{:.0}, {:.0}, {:.0}, {:.0}] confidence {:.2}%",
                     i + 1,
                     min_x,
                     min_y,
@@ -196,15 +225,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Display polygon points for curved text regions
                 if bbox.points.len() > 4 {
                     info!(
-                        "      Polygon with {} points (curved text)",
+                        "    Polygon with {} points (curved text)",
                         bbox.points.len()
                     );
                 }
             }
+        }
+    }
 
-            // Save visualization if output directory is specified
-            #[cfg(feature = "visualization")]
-            if let Some(ref output_dir) = args.output_dir {
+    // Save visualization if --vis is enabled
+    if args.vis {
+        let output_dir = args
+            .output_dir
+            .as_ref()
+            .ok_or("--output-dir is required when --vis is enabled")?;
+
+        // Create output directory if it doesn't exist
+        std::fs::create_dir_all(output_dir)?;
+
+        info!("\nSaving visualizations to: {}", output_dir.display());
+
+        // Use polygon mode for seal text detection (curved text)
+        let vis_config = DetectionVisConfig::default().with_polygon(true);
+
+        for (image_path, rgb_img, detections) in existing_images
+            .iter()
+            .zip(images.iter())
+            .zip(output.detections.iter())
+            .map(|((path, img), detections)| (path, img, detections))
+        {
+            if !detections.is_empty() {
+                // Build detection list for visualization
+                let vis_detections: Vec<Detection> = detections
+                    .iter()
+                    .map(|d| Detection::new(&d.bbox, d.score))
+                    .collect();
+
                 // Use the original filename for output
                 let output_filename = image_path
                     .file_name()
@@ -212,161 +268,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or("unknown.png");
                 let output_path = output_dir.join(output_filename);
 
-                // Extract boxes and scores from detections
-                let boxes: Vec<_> = detections.iter().map(|d| d.bbox.clone()).collect();
-                let scores: Vec<_> = detections.iter().map(|d| d.score).collect();
-
-                // Draw bounding boxes on the image
-                let vis_image = visualize_detections(&image_for_vis, &boxes, &scores);
-
-                if let Err(e) = vis_image.save(&output_path) {
-                    error!("    Failed to save visualization: {}", e);
-                } else {
-                    info!("    Saved visualization to: {:?}", output_path);
-                }
+                let visualized = visualize_detections(rgb_img, &vis_detections, &vis_config);
+                save_rgb_image(&visualized, &output_path)
+                    .map_err(|e| format!("Failed to save visualization: {}", e))?;
+                info!("  Saved: {}", output_path.display());
+            } else {
+                warn!(
+                    "  Skipping visualization for {} (no detections)",
+                    image_path.display()
+                );
             }
-        } else {
-            info!("  No text regions detected");
         }
     }
 
     Ok(())
-}
-
-/// Visualizes detection results by drawing polygons on the image.
-///
-/// For seal text detection, this function draws the actual polygon shapes
-/// that follow curved text paths, rather than simple bounding boxes.
-///
-/// - Red lines: The polygon outline connecting all detection points
-/// - Green dots: Vertex markers shown for complex polygons (>8 points)
-/// - White text: Confidence scores displayed at polygon centers
-#[cfg(feature = "visualization")]
-fn visualize_detections(
-    img: &RgbImage,
-    boxes: &[oar_ocr::processors::BoundingBox],
-    scores: &[f32],
-) -> RgbImage {
-    use image::Rgb;
-    use imageproc::drawing::{draw_filled_circle_mut, draw_line_segment_mut, draw_text_mut};
-
-    let mut output = img.clone();
-
-    // Define colors for visualization
-    let seal_color = Rgb([255, 0, 0]); // Red for seal text
-    let vertex_color = Rgb([0, 255, 0]); // Green for vertices
-    let text_color = Rgb([255, 255, 255]); // White for score text
-    let font = load_font();
-    let font_scale = 12.0;
-
-    let img_bounds = (img.width() as i32, img.height() as i32);
-
-    for (bbox, &score) in boxes.iter().zip(scores.iter()) {
-        // Draw polygon by connecting adjacent points
-        if !bbox.points.is_empty() {
-            // Draw lines connecting all adjacent points
-            for i in 0..bbox.points.len() {
-                let p1 = &bbox.points[i];
-                let p2 = &bbox.points[(i + 1) % bbox.points.len()]; // Connect last to first
-
-                let x1 = p1.x;
-                let y1 = p1.y;
-                let x2 = p2.x;
-                let y2 = p2.y;
-
-                // Draw line segment
-                draw_line_segment_mut(&mut output, (x1, y1), (x2, y2), seal_color);
-
-                // Draw thicker lines for better visibility
-                draw_line_segment_mut(&mut output, (x1 + 1.0, y1), (x2 + 1.0, y2), seal_color);
-                draw_line_segment_mut(&mut output, (x1, y1 + 1.0), (x2, y2 + 1.0), seal_color);
-            }
-
-            // For polygons with many points (curved text), optionally draw vertices
-            if bbox.points.len() > 8 {
-                // Draw small circles at vertices for curved regions
-                for (i, point) in bbox.points.iter().enumerate() {
-                    // Draw every Nth vertex to avoid cluttering
-                    if i % 3 == 0 {
-                        let x = point.x as i32;
-                        let y = point.y as i32;
-                        if is_point_in_bounds(x, y, img_bounds) {
-                            draw_filled_circle_mut(&mut output, (x, y), 2, vertex_color);
-                        }
-                    }
-                }
-            }
-
-            // Find a good position for the score text (center of polygon)
-            let (center_x, center_y) = bbox
-                .points
-                .iter()
-                .fold((0.0, 0.0), |(sx, sy), p| (sx + p.x, sy + p.y));
-            let center_x = (center_x / bbox.points.len() as f32) as i32;
-            let center_y = (center_y / bbox.points.len() as f32) as i32;
-
-            // Draw score text at polygon center
-            if let Some(ref font) = font {
-                let score_text = format!("{:.1}%", score * 100.0);
-                if is_point_in_bounds(center_x, center_y - 10, img_bounds) {
-                    // Draw text background for better visibility
-                    for dx in -1..=1 {
-                        for dy in -1..=1 {
-                            draw_text_mut(
-                                &mut output,
-                                Rgb([0, 0, 0]), // Black background
-                                center_x + dx,
-                                center_y - 10 + dy,
-                                font_scale,
-                                font,
-                                &score_text,
-                            );
-                        }
-                    }
-                    draw_text_mut(
-                        &mut output,
-                        text_color,
-                        center_x,
-                        center_y - 10,
-                        font_scale,
-                        font,
-                        &score_text,
-                    );
-                }
-            }
-        }
-    }
-
-    output
-}
-
-/// Loads a font for visualization.
-#[cfg(feature = "visualization")]
-fn load_font() -> Option<ab_glyph::FontVec> {
-    use ab_glyph::FontVec;
-
-    // Try common font paths
-    let font_paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/System/Library/Fonts/Arial.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
-    ];
-
-    for path in &font_paths {
-        if let Ok(font_data) = std::fs::read(path)
-            && let Ok(font) = FontVec::try_from_vec(font_data)
-        {
-            return Some(font);
-        }
-    }
-
-    None
-}
-
-/// Checks if a point is within image bounds.
-#[cfg(feature = "visualization")]
-fn is_point_in_bounds(x: i32, y: i32, img_bounds: (i32, i32)) -> bool {
-    let (img_width, img_height) = img_bounds;
-    x >= 0 && y >= 0 && x < img_width && y < img_height
 }

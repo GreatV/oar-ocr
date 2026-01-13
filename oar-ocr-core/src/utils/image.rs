@@ -717,9 +717,12 @@ pub fn resize_images_batch_to_dynamic(
 /// use oar_ocr_core::utils::mask_region;
 /// use image::RgbImage;
 ///
+/// # fn main() -> Result<(), oar_ocr_core::core::errors::ImageProcessError> {
 /// let mut image = RgbImage::new(100, 100);
 /// // Mask a formula region from (10, 10) to (50, 30) with white
-/// mask_region(&mut image, 10, 10, 50, 30, [255, 255, 255]).unwrap();
+/// mask_region(&mut image, 10, 10, 50, 30, [255, 255, 255])?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn mask_region(
     image: &mut RgbImage,
@@ -810,25 +813,28 @@ mod tests {
     }
 
     #[test]
-    fn slice_rgb_image_region() {
+    fn slice_rgb_image_region() -> Result<(), ImageProcessError> {
         let img = RgbImage::from_pixel(10, 10, Rgb([255, 0, 0]));
-        let cropped = slice_image(&img, (2, 2, 6, 6)).unwrap();
+        let cropped = slice_image(&img, (2, 2, 6, 6))?;
         assert_eq!(cropped.dimensions(), (4, 4));
         assert!(slice_image(&img, (6, 6, 2, 2)).is_err());
+        Ok(())
     }
 
     #[test]
-    fn slice_gray_image_region() {
+    fn slice_gray_image_region() -> Result<(), ImageProcessError> {
         let img = GrayImage::from_pixel(10, 10, image::Luma([128]));
-        let cropped = slice_gray_image(&img, (1, 1, 5, 5)).unwrap();
+        let cropped = slice_gray_image(&img, (1, 1, 5, 5))?;
         assert_eq!(cropped.dimensions(), (4, 4));
+        Ok(())
     }
 
     #[test]
-    fn center_crop_coordinates() {
-        let coords = calculate_center_crop_coords(100, 60, 40, 20).unwrap();
+    fn center_crop_coordinates() -> Result<(), ImageProcessError> {
+        let coords = calculate_center_crop_coords(100, 60, 40, 20)?;
         assert_eq!(coords, (30, 20));
         assert!(calculate_center_crop_coords(20, 20, 40, 10).is_err());
+        Ok(())
     }
 
     #[test]
@@ -838,20 +844,21 @@ mod tests {
     }
 
     #[test]
-    fn pad_image_to_target() {
+    fn pad_image_to_target() -> Result<(), ImageProcessError> {
         let img = RgbImage::from_pixel(20, 20, Rgb([10, 20, 30]));
-        let padded = pad_image(&img, 40, 40, [0, 0, 0]).unwrap();
+        let padded = pad_image(&img, 40, 40, [0, 0, 0])?;
         assert_eq!(padded.dimensions(), (40, 40));
         assert!(pad_image(&img, 10, 10, [0, 0, 0]).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_resize_and_pad_with_custom_padding() {
+    fn test_resize_and_pad_with_custom_padding() -> Result<(), ImageProcessError> {
         let image = create_test_image(50, 100, [255, 0, 0]); // 1:2 aspect ratio (tall)
         let config = ResizePadConfig::new((80, 80))
             .with_padding_strategy(PaddingStrategy::SolidColor([0, 255, 0])); // Green padding
 
-        let result = resize_and_pad(&image, &config).unwrap();
+        let result = resize_and_pad(&image, &config)?;
 
         assert_eq!(result.dimensions(), (80, 80));
 
@@ -862,15 +869,16 @@ mod tests {
 
         let left_padding = result.get_pixel(10, 40); // Left padding area
         assert_eq!(*left_padding, Rgb([0, 255, 0])); // Should be green (custom padding)
+        Ok(())
     }
 
     #[test]
-    fn test_resize_and_pad_left_align() {
+    fn test_resize_and_pad_left_align() -> Result<(), ImageProcessError> {
         let image = create_test_image(50, 100, [0, 0, 255]); // 1:2 aspect ratio (tall)
         let config = ResizePadConfig::new((80, 80))
             .with_padding_strategy(PaddingStrategy::LeftAlign([255, 255, 0])); // Yellow padding, left-aligned
 
-        let result = resize_and_pad(&image, &config).unwrap();
+        let result = resize_and_pad(&image, &config)?;
 
         assert_eq!(result.dimensions(), (80, 80));
 
@@ -880,6 +888,7 @@ mod tests {
 
         let right_padding = result.get_pixel(60, 40); // Right padding area
         assert_eq!(*right_padding, Rgb([255, 255, 0])); // Should be yellow (padding)
+        Ok(())
     }
 
     #[test]
@@ -953,11 +962,11 @@ mod tests {
     }
 
     #[test]
-    fn test_ocr_resize_and_pad_with_max_width_constraint() {
+    fn test_ocr_resize_and_pad_with_max_width_constraint() -> Result<(), ImageProcessError> {
         let image = create_test_image(400, 100, [200, 100, 50]); // 4:1 aspect ratio
         let config = OCRResizePadConfig::new(32, 100); // Height 32, max width 100
 
-        let (result, actual_width) = ocr_resize_and_pad(&image, &config, None).unwrap();
+        let (result, actual_width) = ocr_resize_and_pad(&image, &config, None)?;
 
         assert_eq!(result.height(), 32);
         assert_eq!(actual_width, 100); // Should be constrained to max width
@@ -966,20 +975,21 @@ mod tests {
         // Check that the image is left-aligned
         let left_pixel = result.get_pixel(0, 16); // Left edge, middle height
         assert_eq!(*left_pixel, Rgb([200, 100, 50])); // Should be original color
+        Ok(())
     }
 
     #[test]
-    fn test_ocr_resize_and_pad_with_target_ratio() {
+    fn test_ocr_resize_and_pad_with_target_ratio() -> Result<(), ImageProcessError> {
         let image = create_test_image(100, 50, [255, 128, 64]); // 2:1 aspect ratio
         let config = OCRResizePadConfig::new(32, 200); // Height 32, max width 200
         let target_ratio = 3.0; // Force 3:1 ratio
 
-        let (result, actual_width) =
-            ocr_resize_and_pad(&image, &config, Some(target_ratio)).unwrap();
+        let (result, actual_width) = ocr_resize_and_pad(&image, &config, Some(target_ratio))?;
 
         assert_eq!(result.height(), 32);
         assert_eq!(actual_width, 96); // 32 * 3.0 = 96
         assert_eq!(result.width(), 96);
+        Ok(())
     }
 
     #[test]

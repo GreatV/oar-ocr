@@ -36,9 +36,13 @@ use std::collections::HashSet;
 /// ```no_run
 /// use oar_ocr_vl::utils::parse_device;
 ///
-/// let cpu = parse_device("cpu").unwrap();
-/// let cuda = parse_device("cuda").unwrap();
-/// let cuda1 = parse_device("cuda:1").unwrap();
+/// # fn main() -> Result<(), oar_ocr_core::core::OCRError> {
+/// let cpu = parse_device("cpu")?;
+/// let cuda = parse_device("cuda")?;
+/// let cuda1 = parse_device("cuda:1")?;
+/// # let _ = (cpu, cuda, cuda1);
+/// # Ok(())
+/// # }
 /// ```
 #[cfg(not(feature = "cuda"))]
 fn cuda_not_enabled() -> OCRError {
@@ -66,10 +70,13 @@ pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
         s if s.starts_with("cuda:") => {
             #[cfg(feature = "cuda")]
             {
-                let ordinal: usize = s.strip_prefix("cuda:").unwrap().parse().map_err(|_| {
-                    OCRError::ConfigError {
-                        message: format!("Invalid CUDA device ordinal in '{}'", s),
-                    }
+                let ordinal_str = s
+                    .strip_prefix("cuda:")
+                    .ok_or_else(|| OCRError::ConfigError {
+                        message: format!("Invalid CUDA device string '{}'", s),
+                    })?;
+                let ordinal: usize = ordinal_str.parse().map_err(|_| OCRError::ConfigError {
+                    message: format!("Invalid CUDA device ordinal in '{}'", s),
                 })?;
                 Device::new_cuda(ordinal).map_err(|e| OCRError::ConfigError {
                     message: format!("Failed to create CUDA device {}: {}", ordinal, e),
@@ -201,14 +208,28 @@ pub fn to_markdown(elements: &[LayoutElement], ignore_labels: &[String]) -> Stri
 
 // Matches PaddleX `compile_title_pattern()` in:
 // paddlex/inference/pipelines/layout_parsing/result_v2.py
-static OPENOCR_TITLE_RE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+static OPENOCR_TITLE_RE_PATTERN: Lazy<Result<Regex, regex::Error>> = Lazy::new(|| {
     // Note: Rust's `regex` is stricter about escapes inside character classes than Python `re`.
     // Keep the pattern semantically identical while avoiding unnecessary escapes.
     Regex::new(
         r"^\s*((?:[1-9][0-9]*(?:\.[1-9][0-9]*)*[.、]?|[(（](?:[1-9][0-9]*|[一二三四五六七八九十百千万亿零壹贰叁肆伍陆柒捌玖拾]+)[)）]|[一二三四五六七八九十百千万亿零壹贰叁肆伍陆柒捌玖拾]+[、.]?|(?:I|II|III|IV|V|VI|VII|VIII|IX|X)\.?))(\s*)(.*)$",
     )
-    .expect("OPENOCR_TITLE_RE_PATTERN must compile")
 });
+
+static TAG_NEWLINES_RE: Lazy<Result<Regex, regex::Error>> = Lazy::new(|| Regex::new(r">\s*\n+\s*"));
+static TABLE_TAG_RE: Lazy<Result<Regex, regex::Error>> =
+    Lazy::new(|| Regex::new(r"</?(table|tr|th|td|thead|tbody|tfoot)[^>]*>"));
+static UNDERSCORE_RE: Lazy<Result<Regex, regex::Error>> = Lazy::new(|| Regex::new(r"_{4,}"));
+static DOTS_RE: Lazy<Result<Regex, regex::Error>> = Lazy::new(|| Regex::new(r"\.{4,}"));
+static LATEX_BRACKETS_RE: Lazy<Result<Regex, regex::Error>> = Lazy::new(|| {
+    Regex::new(
+        r"\\(big|Big|bigg|Bigg|bigl|bigr|Bigl|Bigr|biggr|biggl|Biggl|Biggr)\{(\\?[{}\[\]\(\)\|])\}",
+    )
+});
+static OTSL_TOKEN_RE: Lazy<Result<Regex, regex::Error>> =
+    Lazy::new(|| Regex::new(r"(<nl>|<fcel>|<ecel>|<lcel>|<ucel>|<xcel>)"));
+static OTSL_CELL_RE: Lazy<Result<Regex, regex::Error>> =
+    Lazy::new(|| Regex::new(r"<fcel>|<ecel>|<lcel>|<ucel>|<xcel>"));
 
 fn openocr_format_title(text: &str) -> String {
     fn should_treat_prefix_as_numbering(prefix: &str, suffix_ws: &str) -> bool {
@@ -237,7 +258,9 @@ fn openocr_format_title(text: &str) -> String {
     }
 
     let mut title = text.to_string();
-    if let Some(caps) = OPENOCR_TITLE_RE_PATTERN.captures(&title) {
+    if let Ok(re) = OPENOCR_TITLE_RE_PATTERN.as_ref()
+        && let Some(caps) = re.captures(&title)
+    {
         let numbering_raw = caps.get(1).map(|m| m.as_str()).unwrap_or("");
         let suffix_ws = caps.get(2).map(|m| m.as_str()).unwrap_or("");
         let numbering = numbering_raw.trim();
@@ -273,8 +296,9 @@ fn openocr_format_table_center_func(html: &str) -> String {
     table_content = table_content.replace("<th>", "<th style='text-align: center;'>");
     table_content = table_content.replace("<td>", "<td style='text-align: center;'>");
     // PaddleX outputs compact single-line table HTML in markdown (no tag-newlines).
-    let re = Regex::new(r">\s*\n+\s*").unwrap_or_else(|_| Regex::new(r">").unwrap());
-    table_content = re.replace_all(&table_content, ">").to_string();
+    if let Ok(re) = TAG_NEWLINES_RE.as_ref() {
+        table_content = re.replace_all(&table_content, ">").to_string();
+    }
     table_content
 }
 
@@ -430,8 +454,9 @@ fn format_table(text: &str) -> String {
     result = clean_special_tokens(&result);
     result = result.replace("\\(", "$").replace("\\)", "$");
     result = result.replace("\\[", "$$").replace("\\]", "$$");
-    let re = Regex::new(r">\s*\n+\s*").unwrap_or_else(|_| Regex::new(r">").unwrap());
-    result = re.replace_all(&result, ">").to_string();
+    if let Ok(re) = TAG_NEWLINES_RE.as_ref() {
+        result = re.replace_all(&result, ">").to_string();
+    }
     result
 }
 
@@ -500,9 +525,9 @@ fn format_text(text: &str) -> String {
         result = result.replace("\\[", " $$ ").replace("\\]", " $$ ");
     }
     result = result.replace("$\\bullet$", "•");
-    if result.contains("<table>") {
-        let re = Regex::new(r"</?(table|tr|th|td|thead|tbody|tfoot)[^>]*>")
-            .unwrap_or_else(|_| Regex::new(r"<table>").unwrap());
+    if result.contains("<table>")
+        && let Ok(re) = TABLE_TAG_RE.as_ref()
+    {
         result = re.replace_all(&result, "").to_string();
     }
     process_text(&result)
@@ -517,10 +542,12 @@ fn clean_special_tokens(text: &str) -> String {
 
 fn process_text(text: &str) -> String {
     let mut result = text.to_string();
-    let underscore_re = Regex::new(r"_{4,}").unwrap_or_else(|_| Regex::new(r"_").unwrap());
-    result = underscore_re.replace_all(&result, "___").to_string();
-    let dots_re = Regex::new(r"\.{4,}").unwrap_or_else(|_| Regex::new(r"\.").unwrap());
-    result = dots_re.replace_all(&result, "...").to_string();
+    if let Ok(underscore_re) = UNDERSCORE_RE.as_ref() {
+        result = underscore_re.replace_all(&result, "___").to_string();
+    }
+    if let Ok(dots_re) = DOTS_RE.as_ref() {
+        result = dots_re.replace_all(&result, "...").to_string();
+    }
     result.trim().to_string()
 }
 
@@ -536,10 +563,9 @@ fn remove_newlines_in_heading(text: &str) -> String {
 }
 
 fn fix_latex_brackets(text: &str) -> String {
-    let pattern = Regex::new(
-        r"\\(big|Big|bigg|Bigg|bigl|bigr|Bigl|Bigr|biggr|biggl|Biggl|Biggr)\{(\\?[{}\[\]\(\)\|])\}",
-    )
-    .unwrap_or_else(|_| Regex::new(r"\\big").unwrap());
+    let Ok(pattern) = LATEX_BRACKETS_RE.as_ref() else {
+        return text.to_string();
+    };
     pattern.replace_all(text, r"\$1$2").to_string()
 }
 
@@ -856,7 +882,15 @@ fn is_otsl_tag(s: &str) -> bool {
 }
 
 fn otsl_extract_tokens_and_text(s: &str) -> (Vec<String>, Vec<String>) {
-    let pattern = Regex::new(r"(<nl>|<fcel>|<ecel>|<lcel>|<ucel>|<xcel>)").unwrap();
+    let Ok(pattern) = OTSL_TOKEN_RE.as_ref() else {
+        let trimmed = s.trim();
+        let text_parts = if trimmed.is_empty() {
+            Vec::new()
+        } else {
+            vec![trimmed.to_string()]
+        };
+        return (Vec::new(), text_parts);
+    };
     let tokens: Vec<String> = pattern
         .find_iter(s)
         .map(|m| m.as_str().to_string())
@@ -1101,7 +1135,9 @@ fn otsl_pad_to_square(otsl_str: &str) -> String {
     let lines: Vec<&str> = otsl_str.split(OTSL_NL).filter(|l| !l.is_empty()).collect();
     let mut row_data: Vec<(Vec<&str>, usize, usize)> = Vec::new();
 
-    let cell_pattern = Regex::new(r"<fcel>|<ecel>|<lcel>|<ucel>|<xcel>").unwrap();
+    let Ok(cell_pattern) = OTSL_CELL_RE.as_ref() else {
+        return format!("{}{}", otsl_str, OTSL_NL);
+    };
 
     for line in &lines {
         let raw_cells: Vec<&str> = cell_pattern.find_iter(line).map(|m| m.as_str()).collect();

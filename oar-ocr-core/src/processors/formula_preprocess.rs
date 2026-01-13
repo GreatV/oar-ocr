@@ -13,17 +13,17 @@ use regex::Regex;
 // Static regex patterns for LaTeX normalization
 static CHINESE_TEXT_PATTERN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"\\text\s*\{([^{}]*[\u{4e00}-\u{9fff}]+[^{}]*)\}")
-        .expect("Failed to compile Chinese text regex pattern")
+        .unwrap_or_else(|e| panic!("Failed to compile Chinese text regex pattern: {e}"))
 });
 
 static TEXT_COMMAND_PATTERN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(\\(operatorname|mathrm|text|mathbf)\s?\*?\s*\{.*?\})")
-        .expect("Failed to compile text command regex pattern")
+        .unwrap_or_else(|e| panic!("Failed to compile text command regex pattern: {e}"))
 });
 
 static LETTER_TO_NONLETTER_PATTERN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"([a-zA-Z])\s+([^a-zA-Z])")
-        .expect("Failed to compile letter to nonletter regex pattern")
+        .unwrap_or_else(|e| panic!("Failed to compile letter to nonletter regex pattern: {e}"))
 });
 
 /// Configuration parameters for formula preprocessing pipeline.

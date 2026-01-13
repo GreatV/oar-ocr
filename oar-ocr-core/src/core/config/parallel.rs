@@ -65,8 +65,11 @@ impl ParallelPolicy {
     /// # Example
     ///
     /// ```ignore
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let policy = ParallelPolicy::new().with_max_threads(Some(4));
-    /// policy.install_global_thread_pool().expect("Failed to configure thread pool");
+    /// policy.install_global_thread_pool()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn install_global_thread_pool(&self) -> Result<bool, rayon::ThreadPoolBuildError> {
         if let Some(num_threads) = self.max_threads {

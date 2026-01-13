@@ -1,36 +1,478 @@
-//! Visualization utilities for OCR and document structure results.
+//! Visualization utilities for OCR examples.
 //!
-//! This module provides functions for creating visual representations of:
-//! - OCR results with detected text regions and recognized text
-//! - Document structure analysis results with layout elements, tables, and formulas
-//!
-//! # OCR Visualization
-//!
-//! - Side-by-side visualization with original image and annotated results
-//! - Bounding boxes around detected text regions and word boxes
-//! - Text rendering with configurable fonts
-//! - Horizontal and vertical text layout support
-//!
-//! # Structure Visualization
-//!
-//! - Layout element bounding boxes with type-specific colors
-//! - Labels with confidence scores and reading order indices
-//! - Table cell boundaries and formula bounding boxes
+//! This module provides unified visualization functions for all examples:
+//! - Detection visualization (bounding boxes with labels)
+//! - Classification visualization (header with result)
+//! - Layout visualization (colored boxes by element type)
+//! - OCR visualization (text regions with recognized text)
+//! - Structure visualization (layout elements, tables, formulas)
 
-use crate::oarocr::{OAROCRResult, TextRegion};
+use ab_glyph::FontVec;
 use image::{Rgb, RgbImage, Rgba, RgbaImage, imageops};
-use imageproc::drawing::{draw_filled_rect_mut, draw_hollow_rect_mut, draw_text_mut};
+use imageproc::drawing::{
+    draw_filled_circle_mut, draw_filled_rect_mut, draw_hollow_rect_mut, draw_line_segment_mut,
+    draw_text_mut,
+};
 use imageproc::rect::Rect;
+use oar_ocr::oarocr::{OAROCRResult, TextRegion};
 use oar_ocr_core::core::OcrResult;
 use oar_ocr_core::core::errors::OCRError;
 use oar_ocr_core::domain::structure::{
     LayoutElement, LayoutElementType, StructureResult, TableResult,
 };
 use oar_ocr_core::processors::BoundingBox;
-
-use ab_glyph::FontVec;
 use std::path::Path;
 use tracing::{debug, info, warn};
+
+/// Load a system font for text rendering.
+pub fn load_system_font() -> Option<FontVec> {
+    let font_paths = [
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/System/Library/Fonts/Arial.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+    ];
+
+    for path in &font_paths {
+        if let Ok(font_data) = std::fs::read(path)
+            && let Ok(font) = FontVec::try_from_vec(font_data)
+        {
+            debug!("Loaded font from {}", path);
+            return Some(font);
+        }
+    }
+
+    debug!("No system font found");
+    None
+}
+
+/// Save an image to a file, handling JPEG alpha channel conversion.
+pub fn save_image(img: &RgbaImage, output_path: &Path) -> Result<(), String> {
+    let ext = output_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+
+    if ext == "jpg" || ext == "jpeg" {
+        image::DynamicImage::ImageRgba8(img.clone())
+            .to_rgb8()
+            .save(output_path)
+            .map_err(|e| format!("Failed to save image: {}", e))
+    } else {
+        img.save(output_path)
+            .map_err(|e| format!("Failed to save image: {}", e))
+    }
+}
+
+/// Save an RGB image to a file.
+pub fn save_rgb_image(img: &RgbImage, output_path: &Path) -> Result<(), String> {
+    img.save(output_path)
+        .map_err(|e| format!("Failed to save image: {}", e))
+}
+
+/// Configuration for detection visualization.
+pub struct DetectionVisConfig {
+    /// Box color
+    pub box_color: Rgb<u8>,
+    /// Label color
+    pub label_color: Rgb<u8>,
+    /// Font size for labels
+    pub font_size: f32,
+    /// Line thickness
+    pub thickness: i32,
+    /// Whether to draw corner points
+    pub draw_corners: bool,
+    /// Whether to draw polygon lines (for curved text)
+    pub draw_polygon: bool,
+}
+
+impl Default for DetectionVisConfig {
+    fn default() -> Self {
+        Self {
+            box_color: Rgb([0, 255, 0]),   // Green
+            label_color: Rgb([255, 0, 0]), // Red
+            font_size: 20.0,
+            thickness: 2,
+            draw_corners: true,
+            draw_polygon: false,
+        }
+    }
+}
+
+impl DetectionVisConfig {
+    pub fn with_box_color(mut self, color: Rgb<u8>) -> Self {
+        self.box_color = color;
+        self
+    }
+
+    pub fn with_label_color(mut self, color: Rgb<u8>) -> Self {
+        self.label_color = color;
+        self
+    }
+
+    pub fn with_polygon(mut self, draw_polygon: bool) -> Self {
+        self.draw_polygon = draw_polygon;
+        self
+    }
+}
+
+/// A detection result with bounding box, score, and optional label.
+pub struct Detection<'a> {
+    pub bbox: &'a BoundingBox,
+    pub score: f32,
+    pub label: Option<&'a str>,
+}
+
+impl<'a> Detection<'a> {
+    pub fn new(bbox: &'a BoundingBox, score: f32) -> Self {
+        Self {
+            bbox,
+            score,
+            label: None,
+        }
+    }
+
+    pub fn with_label(mut self, label: &'a str) -> Self {
+        self.label = Some(label);
+        self
+    }
+}
+
+/// Visualize detection results on an image.
+pub fn visualize_detections(
+    img: &RgbImage,
+    detections: &[Detection],
+    config: &DetectionVisConfig,
+) -> RgbImage {
+    let mut output = img.clone();
+    let font = load_system_font();
+    let img_bounds = (output.width() as i32, output.height() as i32);
+
+    for (idx, det) in detections.iter().enumerate() {
+        let bbox = det.bbox;
+        if bbox.points.is_empty() {
+            continue;
+        }
+
+        if config.draw_polygon && bbox.points.len() > 4 {
+            // Draw polygon lines for curved text
+            draw_polygon_lines(&mut output, bbox, config.box_color, config.thickness);
+        } else {
+            // Draw bounding rectangle
+            if let Some((x, y, w, h)) = bbox_to_rect_coords(bbox) {
+                draw_thick_rect(
+                    &mut output,
+                    x,
+                    y,
+                    w,
+                    h,
+                    config.box_color,
+                    config.thickness,
+                    img_bounds,
+                );
+            }
+        }
+
+        // Draw corner points
+        if config.draw_corners {
+            for point in &bbox.points {
+                let x = point.x as i32;
+                let y = point.y as i32;
+                if is_point_in_bounds(x, y, img_bounds) {
+                    draw_filled_circle_mut(&mut output, (x, y), 3, config.box_color);
+                }
+            }
+        }
+
+        // Draw label
+        if let Some(ref font) = font {
+            let label = if let Some(lbl) = det.label {
+                format!("{} #{} {:.1}%", lbl, idx + 1, det.score * 100.0)
+            } else {
+                format!("#{} {:.1}%", idx + 1, det.score * 100.0)
+            };
+
+            let (label_x, label_y) = get_label_position(bbox, img_bounds);
+            draw_text_mut(
+                &mut output,
+                config.label_color,
+                label_x,
+                label_y,
+                config.font_size,
+                font,
+                &label,
+            );
+        }
+    }
+
+    output
+}
+
+fn draw_polygon_lines(img: &mut RgbImage, bbox: &BoundingBox, color: Rgb<u8>, thickness: i32) {
+    for i in 0..bbox.points.len() {
+        let p1 = &bbox.points[i];
+        let p2 = &bbox.points[(i + 1) % bbox.points.len()];
+
+        // Draw with thickness
+        for t in 0..thickness {
+            let offset = t as f32;
+            draw_line_segment_mut(img, (p1.x + offset, p1.y), (p2.x + offset, p2.y), color);
+            draw_line_segment_mut(img, (p1.x, p1.y + offset), (p2.x, p2.y + offset), color);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_thick_rect(
+    img: &mut RgbImage,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    color: Rgb<u8>,
+    thickness: i32,
+    bounds: (i32, i32),
+) {
+    for t in 0..thickness {
+        let rect = Rect::at(x - t, y - t).of_size(w + (2 * t) as u32, h + (2 * t) as u32);
+        if is_rect_in_bounds(&rect, bounds.0, bounds.1) {
+            draw_hollow_rect_mut(img, rect, color);
+        }
+    }
+}
+
+fn get_label_position(bbox: &BoundingBox, bounds: (i32, i32)) -> (i32, i32) {
+    let min_x = bbox
+        .points
+        .iter()
+        .map(|p| p.x as i32)
+        .min()
+        .unwrap_or(0)
+        .max(0);
+    let min_y = bbox.points.iter().map(|p| p.y as i32).min().unwrap_or(0);
+    let label_y = (min_y - 22).max(0);
+    (min_x.min(bounds.0 - 100), label_y.min(bounds.1 - 20))
+}
+
+/// Configuration for classification visualization.
+pub struct ClassificationVisConfig {
+    /// Header height
+    pub header_height: u32,
+    /// Background color
+    pub bg_color: Rgb<u8>,
+    /// Text color
+    pub text_color: Rgb<u8>,
+    /// Font size
+    pub font_size: f32,
+}
+
+impl Default for ClassificationVisConfig {
+    fn default() -> Self {
+        Self {
+            header_height: 60,
+            bg_color: Rgb([240, 240, 240]),
+            text_color: Rgb([0, 0, 0]),
+            font_size: 24.0,
+        }
+    }
+}
+
+/// Visualize classification result with a header above the image.
+pub fn visualize_classification(
+    img: &RgbImage,
+    label: &str,
+    confidence: f32,
+    prefix: &str,
+    config: &ClassificationVisConfig,
+) -> RgbImage {
+    let (width, height) = (img.width(), img.height());
+    let total_height = config.header_height + height;
+    let mut output = RgbImage::new(width, total_height);
+
+    // Fill header with background color
+    for y in 0..config.header_height {
+        for x in 0..width {
+            output.put_pixel(x, y, config.bg_color);
+        }
+    }
+
+    // Copy original image below header
+    for y in 0..height {
+        for x in 0..width {
+            output.put_pixel(x, y + config.header_height, *img.get_pixel(x, y));
+        }
+    }
+
+    // Draw label text
+    if let Some(ref font) = load_system_font() {
+        let text = format!(
+            "{}: {} (Confidence: {:.1}%)",
+            prefix,
+            label,
+            confidence * 100.0
+        );
+        draw_text_mut(
+            &mut output,
+            config.text_color,
+            10,
+            18,
+            config.font_size,
+            font,
+            &text,
+        );
+    }
+
+    output
+}
+
+/// Color palette for layout element types.
+const LAYOUT_COLORS: [Rgba<u8>; 10] = [
+    Rgba([255, 0, 0, 255]),     // 0: Red - Text
+    Rgba([0, 200, 0, 255]),     // 1: Green - Title
+    Rgba([0, 0, 255, 255]),     // 2: Blue - List
+    Rgba([255, 200, 0, 255]),   // 3: Yellow - Table
+    Rgba([255, 0, 255, 255]),   // 4: Magenta - Figure
+    Rgba([0, 255, 255, 255]),   // 5: Cyan - Formula
+    Rgba([255, 128, 0, 255]),   // 6: Orange - Header
+    Rgba([128, 0, 255, 255]),   // 7: Purple - Footer
+    Rgba([0, 128, 128, 255]),   // 8: Teal - Chart
+    Rgba([128, 128, 128, 255]), // 9: Gray - Other
+];
+
+/// Get color for a layout element type.
+pub fn get_layout_color(element_type: &str) -> Rgba<u8> {
+    match element_type.to_lowercase().as_str() {
+        "text" | "content" | "paragraph" => LAYOUT_COLORS[0],
+        "title" | "paragraph_title" | "doc_title" => LAYOUT_COLORS[1],
+        "list" => LAYOUT_COLORS[2],
+        "table" => LAYOUT_COLORS[3],
+        "figure" | "image" => LAYOUT_COLORS[4],
+        "formula" => LAYOUT_COLORS[5],
+        "header" | "header_image" => LAYOUT_COLORS[6],
+        "footer" | "footer_image" | "footnote" => LAYOUT_COLORS[7],
+        "chart" => LAYOUT_COLORS[8],
+        _ => LAYOUT_COLORS[9],
+    }
+}
+
+/// A layout element with bounding box, type, and score.
+pub struct LayoutItem<'a> {
+    pub bbox: &'a BoundingBox,
+    pub element_type: &'a str,
+    pub score: f32,
+}
+
+/// Visualize layout detection results.
+pub fn visualize_layout(
+    img: &RgbImage,
+    elements: &[LayoutItem],
+    thickness: i32,
+    show_labels: bool,
+) -> RgbaImage {
+    let mut output = image::DynamicImage::ImageRgb8(img.clone()).to_rgba8();
+    let font = load_system_font();
+    let img_bounds = (output.width() as i32, output.height() as i32);
+
+    for (idx, elem) in elements.iter().enumerate() {
+        let color = get_layout_color(elem.element_type);
+
+        if let Some((x, y, w, h)) = bbox_to_rect_coords(elem.bbox) {
+            // Draw rectangle with thickness
+            for t in 0..thickness {
+                let rect = Rect::at(x - t, y - t).of_size(w + (2 * t) as u32, h + (2 * t) as u32);
+                if is_rect_in_bounds(&rect, img_bounds.0, img_bounds.1) {
+                    draw_hollow_rect_mut(&mut output, rect, color);
+                }
+            }
+
+            // Draw label
+            if show_labels && let Some(ref font) = font {
+                let label = format!(
+                    "[{}] {} {:.0}%",
+                    idx + 1,
+                    elem.element_type,
+                    elem.score * 100.0
+                );
+                let label_y = (y - 18).max(0);
+
+                // Draw label background
+                let label_width = (label.len() * 8) as u32;
+                let bg_rect = Rect::at(x, label_y).of_size(label_width.min(w), 18);
+                if is_rect_in_bounds(&bg_rect, img_bounds.0, img_bounds.1) {
+                    draw_filled_rect_mut(&mut output, bg_rect, color);
+                }
+
+                // Draw text (dark color for readability)
+                let text_color = get_contrasting_text_color(color);
+                draw_text_mut(
+                    &mut output,
+                    text_color,
+                    x + 2,
+                    label_y + 1,
+                    14.0,
+                    font,
+                    &label,
+                );
+            }
+        }
+    }
+
+    output
+}
+
+fn get_contrasting_text_color(bg: Rgba<u8>) -> Rgba<u8> {
+    let luminance = 0.299 * bg[0] as f32 + 0.587 * bg[1] as f32 + 0.114 * bg[2] as f32;
+    if luminance > 128.0 {
+        Rgba([20, 20, 20, 255])
+    } else {
+        Rgba([255, 255, 255, 255])
+    }
+}
+
+fn bbox_to_rect_coords(bbox: &BoundingBox) -> Option<(i32, i32, u32, u32)> {
+    if bbox.points.is_empty() {
+        return None;
+    }
+
+    let min_x = bbox
+        .points
+        .iter()
+        .map(|p| p.x)
+        .fold(f32::INFINITY, f32::min);
+    let max_x = bbox
+        .points
+        .iter()
+        .map(|p| p.x)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_y = bbox
+        .points
+        .iter()
+        .map(|p| p.y)
+        .fold(f32::INFINITY, f32::min);
+    let max_y = bbox
+        .points
+        .iter()
+        .map(|p| p.y)
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    let x = min_x.max(0.0) as i32;
+    let y = min_y.max(0.0) as i32;
+    let w = (max_x - min_x).max(1.0) as u32;
+    let h = (max_y - min_y).max(1.0) as u32;
+
+    Some((x, y, w, h))
+}
+
+fn is_point_in_bounds(x: i32, y: i32, bounds: (i32, i32)) -> bool {
+    x >= 0 && y >= 0 && x < bounds.0 && y < bounds.1
+}
+
+fn is_rect_in_bounds(rect: &Rect, img_width: i32, img_height: i32) -> bool {
+    rect.left() >= 0 && rect.top() >= 0 && rect.right() < img_width && rect.bottom() < img_height
+}
 
 /// Background color for the OCR visualization (light gray).
 const BACKGROUND_COLOR: Rgb<u8> = Rgb([238, 238, 238]);
@@ -45,7 +487,6 @@ const WORD_BBOX_COLOR: Rgb<u8> = Rgb([0, 0, 255]);
 const TEXT_COLOR: Rgb<u8> = Rgb([50, 50, 50]);
 
 /// Color palette for structure visualization (RGB format).
-/// These colors are designed to be visually distinct for different element types.
 const COLOR_PALETTE: [[u8; 3]; 20] = [
     [255, 0, 0],   // 0: Red
     [204, 255, 0], // 1: Yellow-Green
@@ -79,19 +520,12 @@ const FONT_COLOR_LIGHT: Rgba<u8> = Rgba([255, 255, 255, 255]);
 const TABLE_CELL_COLOR: Rgba<u8> = Rgba([255, 0, 0, 255]);
 
 /// Represents the layout of text for visualization purposes.
-///
-/// Text can be laid out either horizontally or vertically depending on the aspect ratio
-/// of the bounding box. Vertical layout is used when the height of the bounding box is
-/// more than 1.2 times its width.
 enum TextLayout {
-    /// Horizontal text layout with position, scale, and text content
     Horizontal {
         pos: (i32, i32),
         scale: f32,
         text: String,
     },
-
-    /// Vertical text layout with start position, scale, line height, and individual characters
     Vertical {
         start_pos: (i32, i32),
         scale: f32,
@@ -101,42 +535,21 @@ enum TextLayout {
 }
 
 /// Configuration for OCR visualization.
-///
-/// This struct holds settings that control how OCR results are visualized,
-/// including font settings and bounding box styling. You can customize these
-/// settings to change the appearance of the visualization output.
 pub struct VisualizationConfig {
-    /// The font to use for text rendering. If None, text rendering is skipped.
     pub font: Option<FontVec>,
-
-    /// The scale factor for the font. Defaults to 16.0.
-    pub font_scale: f32,
-
-    /// The thickness of bounding box lines. Defaults to 2.
     pub bbox_thickness: i32,
 }
 
 impl Default for VisualizationConfig {
-    /// Creates a default VisualizationConfig with no font, font scale of 16.0, and bbox thickness of 2.
     fn default() -> Self {
         Self {
             font: None,
-            font_scale: 16.0,
             bbox_thickness: 2,
         }
     }
 }
 
 impl VisualizationConfig {
-    /// Creates a VisualizationConfig with a font loaded from the specified path.
-    ///
-    /// # Arguments
-    ///
-    /// * `font_path` - Path to the font file to load
-    ///
-    /// # Returns
-    ///
-    /// A Result containing the VisualizationConfig if successful, or an error if the font could not be loaded.
     pub fn with_font_path(font_path: &Path) -> OcrResult<Self> {
         let font_data = std::fs::read(font_path)?;
         let font = FontVec::try_from_vec(font_data).map_err(|_| OCRError::InvalidInput {
@@ -145,61 +558,19 @@ impl VisualizationConfig {
 
         Ok(Self {
             font: Some(font),
-            font_scale: 16.0,
             bbox_thickness: 2,
         })
     }
 
-    /// Creates a VisualizationConfig with a system font.
-    ///
-    /// This function attempts to load a system font from common locations.
-    /// If no system font is found, it falls back to the default configuration.
-    ///
-    /// # Returns
-    ///
-    /// A VisualizationConfig with a system font if found, otherwise with default settings.
     pub fn with_system_font() -> Self {
-        // Try a mix of common Latin and Chinese fonts
-        let font_paths = [
-            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", // Good Chinese coverage on many Linux distros
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/System/Library/Fonts/Arial.ttf",
-            "C:\\Windows\\Fonts\\arial.ttf",
-        ];
-
-        for path in &font_paths {
-            if let Ok(font_data) = std::fs::read(path)
-                && let Ok(font) = FontVec::try_from_vec(font_data)
-            {
-                info!("Loaded system font: {}", path);
-                return Self {
-                    font: Some(font),
-                    font_scale: 16.0,
-                    bbox_thickness: 2,
-                };
-            }
+        Self {
+            font: load_system_font(),
+            bbox_thickness: 2,
         }
-
-        debug!("No system font found, text rendering will be skipped");
-        Self::default()
     }
 }
 
-/// Creates an OCR visualization image by combining the original image with detected text and bounding boxes.
-///
-/// This function generates a visualization that shows the original image on the left and the processed
-/// image with text detection results on the right. The right side includes:
-/// - Bounding boxes around detected text regions
-/// - Recognized text overlaid on the image
-///
-/// # Arguments
-///
-/// * `result` - The OAROCRResult containing the OCR results to visualize
-/// * `config` - The VisualizationConfig controlling how the visualization is rendered
-///
-/// # Returns
-///
-/// A Result containing the RgbImage with the visualization if successful, or an error if visualization failed.
+/// Creates an OCR visualization image.
 pub fn create_ocr_visualization(
     result: &OAROCRResult,
     config: &VisualizationConfig,
@@ -208,7 +579,6 @@ pub fn create_ocr_visualization(
     let (width, height) = (original_img.width(), original_img.height());
 
     let mut vis_img = RgbImage::new(width * 2, height);
-
     imageops::overlay(&mut vis_img, original_img, 0, 0);
 
     let fill_rect = Rect::at(width as i32, 0).of_size(width, height);
@@ -219,7 +589,6 @@ pub fn create_ocr_visualization(
     Ok(vis_img)
 }
 
-/// Draws detection results (bounding boxes and text) onto an image.
 fn draw_detection_results(
     img: &mut RgbImage,
     result: &OAROCRResult,
@@ -229,7 +598,7 @@ fn draw_detection_results(
     let img_bounds = (img.width() as i32, img.height() as i32);
 
     for region in result.text_regions.iter() {
-        draw_bounding_box(
+        draw_ocr_bounding_box(
             img,
             &region.bounding_box,
             config,
@@ -242,7 +611,7 @@ fn draw_detection_results(
             if let Some(text) = &region.text {
                 let chars: Vec<char> = text.chars().collect();
                 for (i, word_bbox) in word_boxes.iter().enumerate() {
-                    draw_bounding_box(
+                    draw_ocr_bounding_box(
                         img,
                         word_bbox,
                         config,
@@ -271,8 +640,7 @@ fn draw_detection_results(
     Ok(())
 }
 
-/// Draws a bounding box on an image with the specified configuration.
-fn draw_bounding_box(
+fn draw_ocr_bounding_box(
     img: &mut RgbImage,
     bbox: &BoundingBox,
     config: &VisualizationConfig,
@@ -301,7 +669,6 @@ fn draw_bounding_box(
     }
 }
 
-/// Draws recognized text for a single character within its bounding box on an image.
 fn draw_text_for_single_char(
     img: &mut RgbImage,
     bbox: &BoundingBox,
@@ -346,7 +713,6 @@ fn draw_text_for_single_char(
     }
 }
 
-/// Draws recognized text within a text region on an image.
 fn draw_text_for_region(
     img: &mut RgbImage,
     region: &TextRegion,
@@ -393,12 +759,6 @@ fn draw_text_for_region(
     }
 }
 
-/// Checks if a rectangle is within the bounds of an image.
-fn is_rect_in_bounds(rect: &Rect, img_width: i32, img_height: i32) -> bool {
-    rect.left() >= 0 && rect.top() >= 0 && rect.right() < img_width && rect.bottom() < img_height
-}
-
-/// Converts a BoundingBox to a Rect for easier drawing operations.
 fn bbox_to_rect(bbox: &BoundingBox, x_offset: i32) -> Option<Rect> {
     if bbox.points.is_empty() {
         return None;
@@ -429,7 +789,6 @@ fn bbox_to_rect(bbox: &BoundingBox, x_offset: i32) -> Option<Rect> {
     (width > 0 && height > 0).then(|| Rect::at(left, top).of_size(width, height))
 }
 
-/// Calculates the appropriate text layout based on the bounding box dimensions.
 fn calculate_text_layout(
     bbox: &BoundingBox,
     x_offset: i32,
@@ -455,7 +814,6 @@ fn calculate_text_layout(
     }
 }
 
-/// Calculates horizontal text layout parameters.
 fn calculate_horizontal_text_layout(
     text: &str,
     font: &FontVec,
@@ -488,7 +846,6 @@ fn calculate_horizontal_text_layout(
     })
 }
 
-/// Calculates vertical text layout parameters.
 fn calculate_vertical_text_layout(
     text: &str,
     font: &FontVec,
@@ -550,7 +907,6 @@ fn calculate_vertical_text_layout(
     })
 }
 
-/// Measures the width of text when rendered with a specific font and scale.
 fn measure_text_width(text: &str, font: &FontVec, scale: f32) -> Option<f32> {
     use ab_glyph::{Font, ScaleFont};
 
@@ -565,73 +921,14 @@ fn measure_text_width(text: &str, font: &FontVec, scale: f32) -> Option<f32> {
     Some(width)
 }
 
-/// Creates an OCR visualization and saves it to a file.
-///
-/// This function generates an OCR visualization image and saves it to the specified output path.
-/// It can optionally use a custom font for text rendering.
-///
-/// # Arguments
-///
-/// * `result` - The OAROCRResult containing the OCR results to visualize
-/// * `output_path` - The path where the visualization image will be saved
-/// * `font_path` - Optional path to a custom font file for text rendering
-///
-/// # Returns
-///
-/// A Result indicating success or failure of the visualization process.
-pub fn visualize_ocr_results(
-    result: &OAROCRResult,
-    output_path: &Path,
-    font_path: Option<&Path>,
-) -> OcrResult<()> {
-    info!("Creating OCR visualization for: {}", result.input_path);
-
-    let config = create_visualization_config(font_path);
-    let vis_img = create_ocr_visualization(result, &config)?;
-    vis_img.save(output_path)?;
-
-    info!("Visualization saved to: {}", output_path.display());
-    Ok(())
-}
-
-/// Creates a VisualizationConfig with appropriate font settings.
-fn create_visualization_config(font_path: Option<&Path>) -> VisualizationConfig {
-    match font_path {
-        Some(path) => VisualizationConfig::with_font_path(path)
-            .inspect(|_| info!("Using custom font: {}", path.display()))
-            .inspect_err(|e| {
-                debug!(
-                    "Failed to load custom font {}: {}. Falling back to system font.",
-                    path.display(),
-                    e
-                )
-            })
-            .unwrap_or_else(|_| {
-                info!("Falling back to system font");
-                VisualizationConfig::with_system_font()
-            }),
-        None => {
-            info!("No custom font specified, using system font");
-            VisualizationConfig::with_system_font()
-        }
-    }
-}
-
 /// Configuration for document structure visualization.
 pub struct StructureVisualizationConfig {
-    /// Font for rendering labels.
     pub font: Option<FontVec>,
-    /// Font size for labels.
     pub font_size: f32,
-    /// Bounding box line thickness.
     pub line_thickness: i32,
-    /// Whether to show element labels.
     pub show_labels: bool,
-    /// Whether to show confidence scores.
     pub show_scores: bool,
-    /// Whether to show reading order indices.
     pub show_order: bool,
-    /// Whether to show table cells.
     pub show_table_cells: bool,
 }
 
@@ -650,33 +947,13 @@ impl Default for StructureVisualizationConfig {
 }
 
 impl StructureVisualizationConfig {
-    /// Creates a config with a system font loaded.
     pub fn with_system_font() -> Self {
-        let font_paths = [
-            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/System/Library/Fonts/Arial.ttf",
-            "C:\\Windows\\Fonts\\arial.ttf",
-        ];
-
-        for path in &font_paths {
-            if let Ok(font_data) = std::fs::read(path)
-                && let Ok(font) = FontVec::try_from_vec(font_data)
-            {
-                info!("Structure visualization: Loaded font from {}", path);
-                return Self {
-                    font: Some(font),
-                    ..Default::default()
-                };
-            }
+        Self {
+            font: load_system_font(),
+            ..Default::default()
         }
-
-        debug!("No system font found for structure visualization, labels will be skipped");
-        Self::default()
     }
 
-    /// Creates a config with a custom font path.
     pub fn with_font_path(font_path: impl AsRef<Path>) -> OcrResult<Self> {
         let font_data = std::fs::read(font_path.as_ref())?;
         let font = FontVec::try_from_vec(font_data).map_err(|_| OCRError::InvalidInput {
@@ -694,64 +971,43 @@ impl StructureVisualizationConfig {
 }
 
 /// Gets the color for a layout element type.
-///
-/// Colors are assigned based on semantic categories to maintain consistency
-/// and visual distinction between different types of elements.
 pub fn get_element_color(element_type: &LayoutElementType) -> Rgba<u8> {
     let idx = match element_type {
-        // Document structure - warm colors
-        LayoutElementType::DocTitle => 0,       // Red
-        LayoutElementType::ParagraphTitle => 5, // Orange
-        LayoutElementType::Text => 3,           // Blue
-        LayoutElementType::Content => 17,       // Sky Blue
-        LayoutElementType::Abstract => 8,       // Deep Blue
-
-        // Visual elements - green spectrum
-        LayoutElementType::Image => 6, // Lime
-        LayoutElementType::Table => 2, // Green
-        LayoutElementType::Chart => 7, // Cyan-Green
-
-        // Formulas - purple spectrum
-        LayoutElementType::Formula => 18,       // Purple
-        LayoutElementType::FormulaNumber => 13, // Violet
-
-        // Captions - yellow spectrum
-        LayoutElementType::FigureTitle => 10, // Orange-Yellow
-        LayoutElementType::TableTitle => 15,  // Yellow
-        LayoutElementType::ChartTitle => 1,   // Yellow-Green
-        LayoutElementType::FigureTableChartTitle => 10, // Orange-Yellow
-
-        // Page structure - gray spectrum (using muted colors)
-        LayoutElementType::Header => 17,      // Sky Blue
-        LayoutElementType::HeaderImage => 17, // Sky Blue
-        LayoutElementType::Footer => 12,      // Cyan
-        LayoutElementType::FooterImage => 12, // Cyan
-        LayoutElementType::Footnote => 12,    // Cyan
-
-        // Special elements
-        LayoutElementType::Seal => 14,            // Hot Pink
-        LayoutElementType::Number => 9,           // Pink
-        LayoutElementType::Reference => 4,        // Magenta
-        LayoutElementType::ReferenceContent => 4, // Magenta
-        LayoutElementType::Algorithm => 13,       // Violet
-        LayoutElementType::AsideText => 11,       // Bright Green
-        LayoutElementType::List => 16,            // Spring Green
-
-        // Region blocks
-        LayoutElementType::Region => 19, // Crimson
-
-        // Fallback
-        LayoutElementType::Other => 19, // Crimson
+        LayoutElementType::DocTitle => 0,
+        LayoutElementType::ParagraphTitle => 5,
+        LayoutElementType::Text => 3,
+        LayoutElementType::Content => 17,
+        LayoutElementType::Abstract => 8,
+        LayoutElementType::Image => 6,
+        LayoutElementType::Table => 2,
+        LayoutElementType::Chart => 7,
+        LayoutElementType::Formula => 18,
+        LayoutElementType::FormulaNumber => 13,
+        LayoutElementType::FigureTitle => 10,
+        LayoutElementType::TableTitle => 15,
+        LayoutElementType::ChartTitle => 1,
+        LayoutElementType::FigureTableChartTitle => 10,
+        LayoutElementType::Header => 17,
+        LayoutElementType::HeaderImage => 17,
+        LayoutElementType::Footer => 12,
+        LayoutElementType::FooterImage => 12,
+        LayoutElementType::Footnote => 12,
+        LayoutElementType::Seal => 14,
+        LayoutElementType::Number => 9,
+        LayoutElementType::Reference => 4,
+        LayoutElementType::ReferenceContent => 4,
+        LayoutElementType::Algorithm => 13,
+        LayoutElementType::AsideText => 11,
+        LayoutElementType::List => 16,
+        LayoutElementType::Region => 19,
+        LayoutElementType::Other => 19,
     };
 
     let [r, g, b] = COLOR_PALETTE[idx % COLOR_PALETTE.len()];
     Rgba([r, g, b, 255])
 }
 
-/// Gets the appropriate font color based on the background color.
-/// Returns light font color for dark backgrounds and vice versa.
 fn get_font_color(bg_color: Rgba<u8>) -> Rgba<u8> {
-    // Calculate relative luminance using sRGB coefficients
     let luminance =
         0.299 * bg_color[0] as f32 + 0.587 * bg_color[1] as f32 + 0.114 * bg_color[2] as f32;
 
@@ -763,17 +1019,10 @@ fn get_font_color(bg_color: Rgba<u8>) -> Rgba<u8> {
 }
 
 /// Creates a visualization image from a StructureResult.
-///
-/// This function generates a visualization that shows:
-/// - Layout element bounding boxes with type-specific colors
-/// - Labels with confidence scores
-/// - Table cell boundaries
-/// - Reading order indices
 pub fn create_structure_visualization(
     result: &StructureResult,
     config: &StructureVisualizationConfig,
 ) -> OcrResult<RgbaImage> {
-    // Load the base image
     let base_img = if let Some(ref rectified) = result.rectified_img {
         image::DynamicImage::ImageRgb8((**rectified).clone()).to_rgba8()
     } else {
@@ -782,24 +1031,20 @@ pub fn create_structure_visualization(
 
     let mut img = base_img;
 
-    // Draw layout elements
     for element in &result.layout_elements {
         draw_layout_element(&mut img, element, config);
     }
 
-    // Draw table cells if enabled
     if config.show_table_cells {
         for table in &result.tables {
             draw_table_cells(&mut img, table, config);
         }
     }
 
-    // Draw formula bounding boxes
     for formula in &result.formulas {
         let color = get_element_color(&LayoutElementType::Formula);
         draw_structure_bbox(&mut img, &formula.bbox, color, config.line_thickness);
 
-        // Draw label if font is available
         if config.show_labels
             && let Some(ref font) = config.font
         {
@@ -822,7 +1067,6 @@ pub fn create_structure_visualization(
     Ok(img)
 }
 
-/// Draws a layout element on the image.
 fn draw_layout_element(
     img: &mut RgbaImage,
     element: &LayoutElement,
@@ -830,10 +1074,8 @@ fn draw_layout_element(
 ) {
     let color = get_element_color(&element.element_type);
 
-    // Draw bounding box
     draw_structure_bbox(img, &element.bbox, color, config.line_thickness);
 
-    // Draw label if enabled and font is available
     if config.show_labels
         && let Some(ref font) = config.font
     {
@@ -842,7 +1084,6 @@ fn draw_layout_element(
     }
 }
 
-/// Builds the label string for an element.
 fn build_element_label(element: &LayoutElement, config: &StructureVisualizationConfig) -> String {
     let type_name = element
         .label
@@ -851,17 +1092,14 @@ fn build_element_label(element: &LayoutElement, config: &StructureVisualizationC
 
     let mut label = String::new();
 
-    // Add reading order index if available and enabled
     if config.show_order
         && let Some(order) = element.order_index
     {
         label.push_str(&format!("[{}] ", order));
     }
 
-    // Add type name
     label.push_str(type_name);
 
-    // Add confidence score if enabled
     if config.show_scores {
         label.push_str(&format!(" {:.0}%", element.confidence * 100.0));
     }
@@ -869,7 +1107,6 @@ fn build_element_label(element: &LayoutElement, config: &StructureVisualizationC
     label
 }
 
-/// Draws table cells on the image.
 fn draw_table_cells(
     img: &mut RgbaImage,
     table: &TableResult,
@@ -880,7 +1117,6 @@ fn draw_table_cells(
     }
 }
 
-/// Draws a bounding box on an RGBA image.
 fn draw_structure_bbox(img: &mut RgbaImage, bbox: &BoundingBox, color: Rgba<u8>, thickness: i32) {
     if bbox.points.is_empty() {
         return;
@@ -898,7 +1134,6 @@ fn draw_structure_bbox(img: &mut RgbaImage, bbox: &BoundingBox, color: Rgba<u8>,
     let width = (max_x - min_x) as u32;
     let height = (max_y - min_y) as u32;
 
-    // Draw multiple rectangles for thickness effect
     for t in 0..thickness {
         let left = (min_x - t).max(0);
         let top = (min_y - t).max(0);
@@ -912,7 +1147,6 @@ fn draw_structure_bbox(img: &mut RgbaImage, bbox: &BoundingBox, color: Rgba<u8>,
     }
 }
 
-/// Draws a label near the bounding box.
 fn draw_structure_label(
     img: &mut RgbaImage,
     bbox: &BoundingBox,
@@ -928,24 +1162,20 @@ fn draw_structure_label(
     let min_x = bbox.x_min() as i32;
     let min_y = bbox.y_min() as i32;
 
-    // Calculate text dimensions
     let text_width =
         measure_text_width(label, font, font_size).unwrap_or(label.len() as f32 * font_size * 0.6);
     let text_height = font_size;
 
-    // Padding around text
     let padding = 2;
     let rect_width = (text_width as i32 + padding * 2).min(img.width() as i32 - min_x);
     let rect_height = (text_height as i32 + padding * 2).max(1);
 
-    // Position label above the box if possible, otherwise below
     let (rect_x, rect_y) = if min_y > rect_height {
         (min_x, min_y - rect_height)
     } else {
         (min_x, min_y)
     };
 
-    // Ensure we're within bounds
     let rect_x = rect_x.max(0);
     let rect_y = rect_y.max(0);
 
@@ -960,11 +1190,9 @@ fn draw_structure_label(
         return;
     }
 
-    // Draw background rectangle
     let label_rect = Rect::at(rect_x, rect_y).of_size(rect_width, rect_height);
     draw_filled_rect_mut(img, label_rect, bg_color);
 
-    // Draw text
     let font_color = get_font_color(bg_color);
     let text_x = rect_x + padding;
     let text_y = rect_y + padding;
@@ -977,7 +1205,7 @@ fn draw_structure_label(
 /// Creates a structure visualization and saves it to a file.
 pub fn visualize_structure_results(
     result: &StructureResult,
-    output_path: impl AsRef<Path>,
+    output_path: &Path,
     font_path: Option<&Path>,
 ) -> OcrResult<()> {
     info!(
@@ -994,10 +1222,8 @@ pub fn visualize_structure_results(
     };
 
     let vis_img = create_structure_visualization(result, &config)?;
-    let out_path = output_path.as_ref();
 
-    // JPEG doesn't support alpha; convert to RGB to avoid encoder errors
-    let ext = out_path
+    let ext = output_path
         .extension()
         .and_then(|s| s.to_str())
         .map(|s| s.to_lowercase())
@@ -1006,14 +1232,14 @@ pub fn visualize_structure_results(
     if ext == "jpg" || ext == "jpeg" {
         image::DynamicImage::ImageRgba8(vis_img)
             .to_rgb8()
-            .save(out_path)?;
+            .save(output_path)?;
     } else {
-        vis_img.save(out_path)?;
+        vis_img.save(output_path)?;
     }
 
     info!(
         "Structure visualization saved to: {}",
-        output_path.as_ref().display()
+        output_path.display()
     );
     Ok(())
 }

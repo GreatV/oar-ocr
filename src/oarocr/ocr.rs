@@ -43,6 +43,7 @@ struct OCRPipeline {
 /// ```no_run
 /// use oar_ocr::oarocr::OAROCRBuilder;
 ///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let ocr = OAROCRBuilder::new(
 ///     "path/to/text_detection.onnx",
 ///     "path/to/text_recognition.onnx",
@@ -52,8 +53,10 @@ struct OCRPipeline {
 /// .with_text_line_orientation_classification("path/to/line_orientation.onnx")
 /// .image_batch_size(4)
 /// .region_batch_size(32)
-/// .build()
-/// .expect("Failed to build OCR pipeline");
+/// .build()?;
+/// # let _ = ocr;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug)]
 pub struct OAROCRBuilder {
@@ -983,21 +986,18 @@ mod tests {
             .with_text_line_orientation_classification("models/line_orient.onnx")
             .with_document_image_rectification("models/rectify.onnx");
 
-        assert!(builder.document_orientation_model.is_some());
-        assert_eq!(
-            builder.document_orientation_model.unwrap(),
-            PathBuf::from("models/doc_orient.onnx")
-        );
-        assert!(builder.text_line_orientation_model.is_some());
-        assert_eq!(
-            builder.text_line_orientation_model.unwrap(),
-            PathBuf::from("models/line_orient.onnx")
-        );
-        assert!(builder.document_rectification_model.is_some());
-        assert_eq!(
-            builder.document_rectification_model.unwrap(),
-            PathBuf::from("models/rectify.onnx")
-        );
+        let Some(path) = builder.document_orientation_model.as_ref() else {
+            panic!("expected document_orientation_model to be Some");
+        };
+        assert_eq!(path, &PathBuf::from("models/doc_orient.onnx"));
+        let Some(path) = builder.text_line_orientation_model.as_ref() else {
+            panic!("expected text_line_orientation_model to be Some");
+        };
+        assert_eq!(path, &PathBuf::from("models/line_orient.onnx"));
+        let Some(path) = builder.document_rectification_model.as_ref() else {
+            panic!("expected document_rectification_model to be Some");
+        };
+        assert_eq!(path, &PathBuf::from("models/rectify.onnx"));
     }
 
     #[test]

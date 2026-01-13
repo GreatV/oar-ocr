@@ -184,69 +184,119 @@ impl PaddleOcrVl {
             });
         }
 
-        let token_embeds = inputs_embeds.squeeze(0).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "PaddleOCR-VL: squeeze token embeddings failed",
-                e,
-            )
-        })?;
+        // Fast path: image tokens are typically a contiguous block in the prompt, so we can
+        // reconstruct embeddings with at most 3 slices instead of O(k) pieces.
+        let inputs_embeds = if let Some(&first_pos) = image_token_positions.first() {
+            let contiguous = image_token_positions
+                .iter()
+                .enumerate()
+                .all(|(i, &pos)| pos == first_pos + i);
 
-        let mut parts: Vec<Tensor> = Vec::with_capacity(image_token_positions.len() * 2 + 1);
-        let mut cursor = 0usize;
-        for (img_idx, &pos) in image_token_positions.iter().enumerate() {
-            if cursor < pos {
-                parts.push(token_embeds.i((cursor..pos, ..)).map_err(|e| {
+            if contiguous {
+                let image_token_count = image_token_positions.len();
+                let image_end_exclusive = first_pos + image_token_count;
+
+                let mut parts: Vec<Tensor> = Vec::with_capacity(3);
+                if first_pos > 0 {
+                    parts.push(inputs_embeds.narrow(1, 0, first_pos).map_err(|e| {
+                        candle_to_ocr_processing(
+                            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                            "PaddleOCR-VL: narrow prefix token embeddings failed",
+                            e,
+                        )
+                    })?);
+                }
+
+                let image_embeds = image_embeds.unsqueeze(0).map_err(|e| {
                     candle_to_ocr_processing(
                         oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                        "PaddleOCR-VL: slice token embeddings failed",
+                        "PaddleOCR-VL: unsqueeze batch for image embeddings failed",
                         e,
                     )
-                })?);
+                })?;
+                parts.push(image_embeds);
+
+                if image_end_exclusive < prompt_len {
+                    parts.push(
+                        inputs_embeds
+                            .narrow(1, image_end_exclusive, prompt_len - image_end_exclusive)
+                            .map_err(|e| {
+                                candle_to_ocr_processing(
+                                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                                    "PaddleOCR-VL: narrow suffix token embeddings failed",
+                                    e,
+                                )
+                            })?,
+                    );
+                }
+
+                let refs: Vec<&Tensor> = parts.iter().collect();
+                Tensor::cat(&refs, 1).map_err(|e| {
+                    candle_to_ocr_processing(
+                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                        "PaddleOCR-VL: concat embeddings failed",
+                        e,
+                    )
+                })?
+            } else {
+                // Fallback path: handle non-contiguous image tokens by interleaving slices.
+                let mut parts: Vec<Tensor> =
+                    Vec::with_capacity(image_token_positions.len() * 2 + 1);
+                let mut cursor = 0usize;
+                for (img_idx, &pos) in image_token_positions.iter().enumerate() {
+                    if cursor < pos {
+                        parts.push(inputs_embeds.narrow(1, cursor, pos - cursor).map_err(|e| {
+                            candle_to_ocr_processing(
+                                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                                "PaddleOCR-VL: narrow token embeddings failed",
+                                e,
+                            )
+                        })?);
+                    }
+
+                    let img_row = image_embeds.narrow(0, img_idx, 1).map_err(|e| {
+                        candle_to_ocr_processing(
+                            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                            "PaddleOCR-VL: narrow image embeddings failed",
+                            e,
+                        )
+                    })?;
+                    let img_row = img_row.unsqueeze(0).map_err(|e| {
+                        candle_to_ocr_processing(
+                            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                            "PaddleOCR-VL: unsqueeze batch for image token embedding failed",
+                            e,
+                        )
+                    })?;
+                    parts.push(img_row);
+                    cursor = pos + 1;
+                }
+                if cursor < prompt_len {
+                    parts.push(
+                        inputs_embeds
+                            .narrow(1, cursor, prompt_len - cursor)
+                            .map_err(|e| {
+                                candle_to_ocr_processing(
+                                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                                    "PaddleOCR-VL: narrow tail token embeddings failed",
+                                    e,
+                                )
+                            })?,
+                    );
+                }
+                let refs: Vec<&Tensor> = parts.iter().collect();
+
+                Tensor::cat(&refs, 1).map_err(|e| {
+                    candle_to_ocr_processing(
+                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                        "PaddleOCR-VL: concat embeddings failed",
+                        e,
+                    )
+                })?
             }
-            let img_row = image_embeds.i((img_idx, ..)).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "PaddleOCR-VL: slice image embeddings failed",
-                    e,
-                )
-            })?;
-            let img_row = img_row.unsqueeze(0).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "PaddleOCR-VL: unsqueeze image embedding failed",
-                    e,
-                )
-            })?;
-            parts.push(img_row);
-            cursor = pos + 1;
-        }
-        if cursor < prompt_len {
-            parts.push(token_embeds.i((cursor..prompt_len, ..)).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "PaddleOCR-VL: slice tail token embeddings failed",
-                    e,
-                )
-            })?);
-        }
-        let refs: Vec<&Tensor> = parts.iter().collect();
-
-        let inputs_embeds = Tensor::cat(&refs, 0).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "PaddleOCR-VL: concat embeddings failed",
-                e,
-            )
-        })?;
-
-        let inputs_embeds = inputs_embeds.unsqueeze(0).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "PaddleOCR-VL: unsqueeze batch for embeddings failed",
-                e,
-            )
-        })?;
+        } else {
+            inputs_embeds
+        };
 
         let (position_ids, rope_deltas) = get_rope_index(
             &self.cfg,

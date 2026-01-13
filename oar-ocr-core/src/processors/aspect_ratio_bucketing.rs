@@ -234,30 +234,68 @@ mod tests {
         let bucketing = AspectRatioBucketing::default();
 
         // Test different aspect ratios
-        assert_eq!(bucketing.find_bucket(0.5).unwrap().name, "tall");
-        assert_eq!(bucketing.find_bucket(1.0).unwrap().name, "square");
-        assert_eq!(bucketing.find_bucket(2.0).unwrap().name, "normal");
-        assert_eq!(bucketing.find_bucket(3.0).unwrap().name, "wide");
-        assert_eq!(bucketing.find_bucket(5.0).unwrap().name, "ultra_wide");
+        assert_eq!(
+            bucketing
+                .find_bucket(0.5)
+                .map(|bucket| bucket.name.as_str()),
+            Some("tall")
+        );
+        assert_eq!(
+            bucketing
+                .find_bucket(1.0)
+                .map(|bucket| bucket.name.as_str()),
+            Some("square")
+        );
+        assert_eq!(
+            bucketing
+                .find_bucket(2.0)
+                .map(|bucket| bucket.name.as_str()),
+            Some("normal")
+        );
+        assert_eq!(
+            bucketing
+                .find_bucket(3.0)
+                .map(|bucket| bucket.name.as_str()),
+            Some("wide")
+        );
+        assert_eq!(
+            bucketing
+                .find_bucket(5.0)
+                .map(|bucket| bucket.name.as_str()),
+            Some("ultra_wide")
+        );
 
         // Test very large aspect ratios (should still go to ultra_wide)
-        assert_eq!(bucketing.find_bucket(100.0).unwrap().name, "ultra_wide");
-        assert_eq!(bucketing.find_bucket(5000.0).unwrap().name, "ultra_wide");
+        assert_eq!(
+            bucketing
+                .find_bucket(100.0)
+                .map(|bucket| bucket.name.as_str()),
+            Some("ultra_wide")
+        );
+        assert_eq!(
+            bucketing
+                .find_bucket(5000.0)
+                .map(|bucket| bucket.name.as_str()),
+            Some("ultra_wide")
+        );
     }
 
     #[test]
-    fn test_resize_and_pad() {
+    fn test_resize_and_pad() -> Result<(), OCRError> {
         let bucketing = AspectRatioBucketing::default();
         let image = create_test_image(100, 50); // 2:1 aspect ratio
-        let bucket = bucketing.find_bucket(2.0).unwrap();
+        let Some(bucket) = bucketing.find_bucket(2.0) else {
+            panic!("expected bucket for aspect ratio 2.0");
+        };
 
-        let result = bucketing.resize_and_pad_to_bucket(&image, bucket).unwrap();
+        let result = bucketing.resize_and_pad_to_bucket(&image, bucket)?;
         let (width, height) = result.dimensions();
         assert_eq!((height, width), bucket.target_dims);
+        Ok(())
     }
 
     #[test]
-    fn test_group_images_by_buckets() {
+    fn test_group_images_by_buckets() -> Result<(), OCRError> {
         let bucketing = AspectRatioBucketing::default();
 
         // Create images with different aspect ratios
@@ -269,7 +307,7 @@ mod tests {
             (4, create_test_image(300, 60)),  // 5:1 ratio -> ultra_wide bucket
         ];
 
-        let groups = bucketing.group_images_by_buckets(images).unwrap();
+        let groups = bucketing.group_images_by_buckets(images)?;
 
         // Should have 4 different bucket groups
         assert!(groups.len() >= 4);
@@ -281,16 +319,17 @@ mod tests {
         assert!(groups.contains_key("ultra_wide"));
 
         // Normal bucket should have 2 images
-        assert_eq!(groups.get("normal").unwrap().len(), 2);
+        assert_eq!(groups.get("normal").map(|v| v.len()), Some(2));
 
         // Other buckets should have 1 image each
-        assert_eq!(groups.get("tall").unwrap().len(), 1);
-        assert_eq!(groups.get("square").unwrap().len(), 1);
-        assert_eq!(groups.get("ultra_wide").unwrap().len(), 1);
+        assert_eq!(groups.get("tall").map(|v| v.len()), Some(1));
+        assert_eq!(groups.get("square").map(|v| v.len()), Some(1));
+        assert_eq!(groups.get("ultra_wide").map(|v| v.len()), Some(1));
+        Ok(())
     }
 
     #[test]
-    fn test_bucket_efficiency_comparison() {
+    fn test_bucket_efficiency_comparison() -> Result<(), OCRError> {
         let bucketing = AspectRatioBucketing::default();
 
         // Create many images with slightly different dimensions but similar aspect ratios
@@ -303,7 +342,7 @@ mod tests {
         }
 
         // With aspect ratio bucketing, these should mostly go into one or two buckets
-        let bucket_groups = bucketing.group_images_by_buckets(images.clone()).unwrap();
+        let bucket_groups = bucketing.group_images_by_buckets(images.clone())?;
 
         // With exact dimension grouping, each image would be in its own group
         let mut exact_groups = HashMap::new();
@@ -319,22 +358,22 @@ mod tests {
         assert!(bucket_groups.len() < exact_groups.len());
 
         // Most images should be in the same bucket
-        let largest_bucket_size = bucket_groups.values().map(|v| v.len()).max().unwrap();
+        let largest_bucket_size = bucket_groups.values().map(|v| v.len()).max().unwrap_or(0);
         assert!(largest_bucket_size > 10); // Most images should be grouped together
 
         // Exact grouping should have mostly single-image groups
         let exact_single_groups = exact_groups.values().filter(|v| v.len() == 1).count();
         assert!(exact_single_groups > 15); // Most groups should have only one image
+        Ok(())
     }
 
     #[test]
-    fn test_json_serialization_roundtrip() {
+    fn test_json_serialization_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let config = AspectRatioBucketingConfig::default();
 
         // Test that JSON serialization and deserialization work correctly
-        let json_str = serde_json::to_string(&config).expect("Should serialize to JSON");
-        let deserialized: AspectRatioBucketingConfig =
-            serde_json::from_str(&json_str).expect("Should deserialize from JSON");
+        let json_str = serde_json::to_string(&config)?;
+        let deserialized: AspectRatioBucketingConfig = serde_json::from_str(&json_str)?;
 
         // Verify that the deserialized config matches the original
         assert_eq!(config.buckets.len(), deserialized.buckets.len());
@@ -351,6 +390,7 @@ mod tests {
             .find_bucket(5000.0)
             .map(|bucket| bucket.name.as_str());
         assert_eq!(bucket_name, Some("ultra_wide"));
+        Ok(())
     }
 
     #[test]

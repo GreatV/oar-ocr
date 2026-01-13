@@ -106,12 +106,16 @@ impl Topk {
     /// ```rust,no_run
     /// use oar_ocr_core::utils::topk::Topk;
     ///
+    /// # fn main() -> Result<(), oar_ocr_core::core::OCRError> {
     /// let topk = Topk::without_class_names();
     /// let predictions = vec![
     ///     vec![0.1, 0.8, 0.1],  // Prediction 1: class 1 has highest score
     ///     vec![0.7, 0.2, 0.1],  // Prediction 2: class 0 has highest score
     /// ];
-    /// let result = topk.process(&predictions, 2).unwrap();
+    /// let result = topk.process(&predictions, 2)?;
+    /// # let _ = result;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn process(&self, predictions: &[Vec<f32>], k: usize) -> OcrResult<TopkResult> {
         if k == 0 {
@@ -288,19 +292,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_topk_without_class_names() {
+    fn test_topk_without_class_names() -> Result<(), OCRError> {
         let topk = Topk::without_class_names();
         let predictions = vec![vec![0.1, 0.8, 0.1], vec![0.7, 0.2, 0.1]];
 
-        let result = topk.process(&predictions, 2).unwrap();
+        let result = topk.process(&predictions, 2)?;
         assert_eq!(result.indexes.len(), 2);
         assert_eq!(result.indexes[0], vec![1, 0]); // Class 1 (0.8), Class 0 (0.1)
         assert_eq!(result.indexes[1], vec![0, 1]); // Class 0 (0.7), Class 1 (0.2)
         assert!(result.class_names.is_none());
+        Ok(())
     }
 
     #[test]
-    fn test_topk_with_class_names() {
+    fn test_topk_with_class_names() -> Result<(), OCRError> {
         let mut class_map = HashMap::new();
         class_map.insert(0, "cat".to_string());
         class_map.insert(1, "dog".to_string());
@@ -309,9 +314,13 @@ mod tests {
         let topk = Topk::new(Some(class_map));
         let predictions = vec![vec![0.1, 0.8, 0.1]];
 
-        let result = topk.process(&predictions, 2).unwrap();
+        let result = topk.process(&predictions, 2)?;
         assert_eq!(result.indexes[0], vec![1, 0]);
-        assert_eq!(result.class_names.as_ref().unwrap()[0], vec!["dog", "cat"]);
+        let Some(class_names) = result.class_names.as_ref() else {
+            panic!("expected class_names to be present");
+        };
+        assert_eq!(class_names[0], vec!["dog", "cat"]);
+        Ok(())
     }
 
     #[test]
@@ -325,12 +334,13 @@ mod tests {
     }
 
     #[test]
-    fn test_topk_k_larger_than_classes() {
+    fn test_topk_k_larger_than_classes() -> Result<(), OCRError> {
         let topk = Topk::without_class_names();
         let predictions = vec![vec![0.1, 0.8]]; // Only 2 classes
 
-        let result = topk.process(&predictions, 5).unwrap(); // Ask for 5
+        let result = topk.process(&predictions, 5)?; // Ask for 5
         assert_eq!(result.indexes[0].len(), 2); // Should only get 2
+        Ok(())
     }
 
     #[test]
@@ -342,22 +352,24 @@ mod tests {
     }
 
     #[test]
-    fn test_topk_empty_predictions() {
+    fn test_topk_empty_predictions() -> Result<(), OCRError> {
         let topk = Topk::without_class_names();
         let predictions = vec![];
 
-        let result = topk.process(&predictions, 2).unwrap();
+        let result = topk.process(&predictions, 2)?;
         assert!(result.indexes.is_empty());
         assert!(result.scores.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn test_process_single() {
+    fn test_process_single() -> Result<(), OCRError> {
         let topk = Topk::without_class_names();
         let prediction = vec![0.1, 0.8, 0.1];
 
-        let result = topk.process_single(&prediction, 2).unwrap();
+        let result = topk.process_single(&prediction, 2)?;
         assert_eq!(result.indexes.len(), 1);
         assert_eq!(result.indexes[0], vec![1, 0]);
+        Ok(())
     }
 }

@@ -113,23 +113,25 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn test_read_character_dict() {
-        let mut file = NamedTempFile::new().unwrap();
-        writeln!(file, "a").unwrap();
-        writeln!(file, "b").unwrap();
-        writeln!(file, "c").unwrap();
+    fn test_read_character_dict() -> Result<(), Box<dyn std::error::Error>> {
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "a")?;
+        writeln!(file, "b")?;
+        writeln!(file, "c")?;
 
-        let dict = read_character_dict(file.path()).unwrap();
+        let dict = read_character_dict(file.path())?;
         assert_eq!(dict, vec!["a", "b", "c"]);
+        Ok(())
     }
 
     #[test]
-    fn test_read_dict_content() {
-        let mut file = NamedTempFile::new().unwrap();
-        write!(file, "hello\nworld").unwrap();
+    fn test_read_dict_content() -> Result<(), Box<dyn std::error::Error>> {
+        let mut file = NamedTempFile::new()?;
+        write!(file, "hello\nworld")?;
 
-        let content = read_dict_content(file.path()).unwrap();
+        let content = read_dict_content(file.path())?;
         assert_eq!(content, "hello\nworld");
+        Ok(())
     }
 
     #[test]

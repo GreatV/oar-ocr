@@ -467,9 +467,10 @@ impl ToBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::OCRError;
 
     #[test]
-    fn test_to_batch_apply_contiguous() {
+    fn test_to_batch_apply_contiguous() -> Result<(), OCRError> {
         let to_batch = ToBatch::new();
 
         // Create test images with same dimensions
@@ -478,7 +479,7 @@ mod tests {
         let imgs = vec![img1, img2];
         let shapes = vec![(1, 2, 2), (1, 2, 2)]; // Same shapes
 
-        let result = to_batch.apply(&imgs, &shapes).unwrap();
+        let result = to_batch.apply(&imgs, &shapes)?;
 
         // Expected: batch_size=2, channels=1, height=2, width=2
         // Total size: 2 * 1 * 2 * 2 = 8
@@ -495,10 +496,11 @@ mod tests {
         assert_eq!(result[5], 6.0);
         assert_eq!(result[6], 7.0);
         assert_eq!(result[7], 8.0);
+        Ok(())
     }
 
     #[test]
-    fn test_to_batch_apply_mixed_dimensions() {
+    fn test_to_batch_apply_mixed_dimensions() -> Result<(), OCRError> {
         let to_batch = ToBatch::new();
 
         // Create test images with different dimensions
@@ -507,7 +509,7 @@ mod tests {
         let imgs = vec![img1, img2];
         let shapes = vec![(1, 1, 2), (1, 2, 2)]; // Different shapes
 
-        let result = to_batch.apply(&imgs, &shapes).unwrap();
+        let result = to_batch.apply(&imgs, &shapes)?;
 
         // Expected: batch_size=2, channels=1, max_height=2, max_width=2
         // Total size: 2 * 1 * 2 * 2 = 8
@@ -522,5 +524,6 @@ mod tests {
         assert!(result.contains(&4.0));
         assert!(result.contains(&5.0));
         assert!(result.contains(&6.0));
+        Ok(())
     }
 }

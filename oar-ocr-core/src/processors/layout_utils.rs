@@ -882,16 +882,18 @@ mod tests {
 
         assert_eq!(sorted[0].label, "title");
         // Left column should come before right column
-        let left_top_idx = sorted.iter().position(|e| e.label == "left_top").unwrap();
-        let left_bottom_idx = sorted
-            .iter()
-            .position(|e| e.label == "left_bottom")
-            .unwrap();
-        let right_top_idx = sorted.iter().position(|e| e.label == "right_top").unwrap();
-        let right_bottom_idx = sorted
-            .iter()
-            .position(|e| e.label == "right_bottom")
-            .unwrap();
+        let Some(left_top_idx) = sorted.iter().position(|e| e.label == "left_top") else {
+            panic!("missing expected left_top element");
+        };
+        let Some(left_bottom_idx) = sorted.iter().position(|e| e.label == "left_bottom") else {
+            panic!("missing expected left_bottom element");
+        };
+        let Some(right_top_idx) = sorted.iter().position(|e| e.label == "right_top") else {
+            panic!("missing expected right_top element");
+        };
+        let Some(right_bottom_idx) = sorted.iter().position(|e| e.label == "right_bottom") else {
+            panic!("missing expected right_bottom element");
+        };
 
         // Within left column, top should come before bottom
         assert!(left_top_idx < left_bottom_idx);

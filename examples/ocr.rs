@@ -25,7 +25,8 @@
 //! * Detection config: `--det-score-thresh`, `--det-box-thresh`, `--det-unclip`, `--det-max-candidates`
 //! * Recognition config: `--rec-score-thresh`, `--rec-max-text-length`
 //! * Batch sizes: `--image-batch-size` (detection sessions), `--region-batch-size` (recognition)
-//! * `-o, --output-dir` - Directory to save visualizations (requires `visualization` feature)
+//! * `-o, --output-dir` - Directory to save output results
+//! * `--vis` - Enable visualization output
 //! * `--vis-font-path` - Optional font for visualization (set for non-Latin languages like Chinese)
 //! * `<IMAGES>...` - One or more document images to process
 //!
@@ -50,9 +51,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
 use utils::device_config::parse_device_config;
-
-#[cfg(feature = "visualization")]
-use oar_ocr::utils::visualization::{VisualizationConfig, create_ocr_visualization};
+use utils::visualization::{VisualizationConfig, create_ocr_visualization};
 
 /// Command-line arguments for the OCR pipeline example
 #[derive(Parser)]
@@ -139,13 +138,15 @@ struct Args {
     #[arg(long)]
     region_batch_size: Option<usize>,
 
-    /// Directory to save visualization images (requires `visualization` feature)
-    #[cfg(feature = "visualization")]
+    /// Directory to save output results (visualizations, etc.)
     #[arg(short = 'o', long = "output-dir")]
     output_dir: Option<PathBuf>,
 
+    /// Enable visualization output
+    #[arg(long)]
+    vis: bool,
+
     /// Custom font path for visualization (useful for Chinese or other non-Latin text)
-    #[cfg(feature = "visualization")]
     #[arg(long = "vis-font-path")]
     vis_font_path: Option<PathBuf>,
 }
@@ -331,10 +332,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Save visualizations when enabled
-    #[cfg(feature = "visualization")]
-    if let Some(output_dir) = args.output_dir {
-        std::fs::create_dir_all(&output_dir)?;
+    // Save visualizations if --vis is enabled
+    if args.vis {
+        let output_dir = args
+            .output_dir
+            .as_ref()
+            .ok_or("--output-dir is required when --vis is enabled")?;
+
+        std::fs::create_dir_all(output_dir)?;
         let vis_config = if let Some(font_path) = args.vis_font_path {
             VisualizationConfig::with_font_path(&font_path).unwrap_or_else(|err| {
                 warn!(
@@ -348,6 +353,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             VisualizationConfig::with_system_font()
         };
 
+        info!("\nSaving visualizations to: {}", output_dir.display());
+
         for (path, result) in existing_images.iter().zip(results.iter()) {
             let vis_img = create_ocr_visualization(result, &vis_config)?;
             let filename = path
@@ -357,7 +364,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|| "visualization.jpg".to_string());
             let output_path = output_dir.join(filename);
             vis_img.save(&output_path)?;
-            info!("Saved visualization to {}", output_path.display());
+            info!("  Saved: {}", output_path.display());
         }
     }
 

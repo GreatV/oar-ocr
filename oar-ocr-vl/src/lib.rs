@@ -23,7 +23,11 @@
 //! ```no_run
 //! use oar_ocr_vl::utils::parse_device;
 //!
-//! let device = parse_device("cuda:0").unwrap();
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let device = parse_device("cuda:0")?;
+//! # let _ = device;
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod doc_parser;

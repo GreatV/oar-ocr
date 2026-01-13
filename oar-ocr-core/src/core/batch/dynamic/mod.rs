@@ -18,11 +18,15 @@
 //! use oar_ocr_core::core::{DynamicBatchConfig, DefaultDynamicBatcher, DynamicBatcher};
 //! use image::RgbImage;
 //!
+//! # fn main() -> Result<(), oar_ocr_core::core::OCRError> {
 //! let config = DynamicBatchConfig::default();
 //! let batcher = DefaultDynamicBatcher::new();
 //! let images = vec![(0, RgbImage::new(100, 100)), (1, RgbImage::new(100, 100))];
 //!
-//! let batches = batcher.group_images_by_compatibility(images, &config).unwrap();
+//! let batches = batcher.group_images_by_compatibility(images, &config)?;
+//! # let _ = batches;
+//! # Ok(())
+//! # }
 //! ```
 
 mod config;

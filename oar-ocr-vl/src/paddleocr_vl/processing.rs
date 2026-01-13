@@ -238,7 +238,7 @@ fn looks_like_table_tokens(input: &str) -> bool {
 fn try_convert_table_tokens_to_html(input: &str) -> Option<String> {
     static TOKEN_RE: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"(<fcel>|<lcel>|<ucel>|<xcel>|<ecel>|<nl>)")
-            .expect("table token regex must compile")
+            .unwrap_or_else(|e| panic!("table token regex must compile: {e}"))
     });
 
     let first = TOKEN_RE.find(input)?;
@@ -524,14 +524,15 @@ mod tests {
     use image::{Rgb, RgbImage};
 
     #[test]
-    fn test_smart_resize_factor_divisibility() {
-        let (h, w) = smart_resize(100, 200, 28, 147_384, 2_822_400).unwrap();
+    fn test_smart_resize_factor_divisibility() -> Result<(), OCRError> {
+        let (h, w) = smart_resize(100, 200, 28, 147_384, 2_822_400)?;
         assert_eq!(h % 28, 0);
         assert_eq!(w % 28, 0);
+        Ok(())
     }
 
     #[test]
-    fn test_preprocess_outputs_expected_shapes() {
+    fn test_preprocess_outputs_expected_shapes() -> Result<(), OCRError> {
         let cfg = PaddleOcrVlImageProcessorConfig {
             do_resize: true,
             do_rescale: true,
@@ -554,7 +555,7 @@ mod tests {
         }
 
         let device = Device::Cpu;
-        let out = preprocess_images(&[img], &cfg, &device, DType::F32).unwrap();
+        let out = preprocess_images(&[img], &cfg, &device, DType::F32)?;
         assert_eq!(out.image_grid_thw.len(), 1);
         let (t, h, w) = out.image_grid_thw[0];
         assert_eq!(t, 1);
@@ -565,5 +566,6 @@ mod tests {
         assert_eq!(shape[1], 3);
         assert_eq!(shape[2], 14);
         assert_eq!(shape[3], 14);
+        Ok(())
     }
 }

@@ -14,7 +14,8 @@
 //!
 //! * `-m, --model-path` - Path to the text recognition model file
 //! * `-d, --dict-path` - Path to the character dictionary file
-//! * `-o, --output-dir` - Directory to save visualization results (optional)
+//! * `-o, --output-dir` - Directory to save output results
+//! * `--vis` - Enable visualization output
 //! * `--device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
 //! * `<IMAGES>...` - Paths to input text images to process
 //!
@@ -24,6 +25,7 @@
 //! cargo run --example text_recognition -- \
 //!     -m models/ppocrv4_mobile_rec.onnx \
 //!     -d models/ppocr_keys_v1.txt \
+//!     -o output/ --vis \
 //!     text1.jpg text2.jpg
 //! ```
 
@@ -36,9 +38,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
 use utils::device_config::parse_device_config;
-
-#[cfg(feature = "visualization")]
-use image::RgbImage;
+use utils::visualization::{ClassificationVisConfig, save_rgb_image, visualize_classification};
 
 /// Command-line arguments for the text recognition example
 #[derive(Parser)]
@@ -57,9 +57,13 @@ struct Args {
     #[arg(required = true)]
     images: Vec<PathBuf>,
 
-    /// Directory to save visualization results
+    /// Directory to save output results
     #[arg(short, long)]
     output_dir: Option<PathBuf>,
+
+    /// Enable visualization output
+    #[arg(long)]
+    vis: bool,
 
     /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
     #[arg(long, default_value = "cpu")]
@@ -216,13 +220,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Save visualization if output directory is provided
-    #[cfg(feature = "visualization")]
-    if let Some(output_dir) = args.output_dir {
+    // Save visualization if --vis is enabled
+    if args.vis {
+        let output_dir = args
+            .output_dir
+            .as_ref()
+            .ok_or("--output-dir is required when --vis is enabled")?;
+
         // Create output directory if it doesn't exist
-        std::fs::create_dir_all(&output_dir)?;
+        std::fs::create_dir_all(output_dir)?;
 
         info!("\nSaving visualizations to: {}", output_dir.display());
+
+        let vis_config = ClassificationVisConfig::default();
 
         for (image_path, rgb_img, text, score) in existing_images
             .iter()
@@ -239,8 +249,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or("unknown.jpg");
                 let output_path = output_dir.join(output_filename);
 
-                let visualized = visualize_recognition(rgb_img, text, *score);
-                visualized.save(&output_path)?;
+                let visualized =
+                    visualize_classification(rgb_img, text, *score, "Text", &vis_config);
+                save_rgb_image(&visualized, &output_path)
+                    .map_err(|e| format!("Failed to save visualization: {}", e))?;
                 info!("  Saved: {}", output_path.display());
             } else {
                 warn!(
@@ -252,51 +264,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-}
-
-/// Visualizes recognized text by drawing it on the image
-#[cfg(feature = "visualization")]
-fn visualize_recognition(img: &RgbImage, text: &str, score: f32) -> RgbImage {
-    use image::Rgb;
-    use imageproc::drawing::draw_text_mut;
-
-    let mut output = img.clone();
-    let text_color = Rgb([255u8, 0u8, 0u8]); // Red for text
-
-    // Try to load a font for text rendering
-    let font = load_font();
-
-    if let Some(ref font) = font {
-        // Draw the recognized text at the top
-        let label = format!("{} ({:.1}%)", text, score * 100.0);
-        let text_x = 10;
-        let text_y = 10;
-
-        draw_text_mut(&mut output, text_color, text_x, text_y, 20.0, font, &label);
-    }
-
-    output
-}
-
-#[cfg(feature = "visualization")]
-fn load_font() -> Option<ab_glyph::FontVec> {
-    use ab_glyph::FontVec;
-
-    // Try common font paths
-    let font_paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/System/Library/Fonts/Arial.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
-    ];
-
-    for path in &font_paths {
-        if let Ok(font_data) = std::fs::read(path)
-            && let Ok(font) = FontVec::try_from_vec(font_data)
-        {
-            return Some(font);
-        }
-    }
-
-    None
 }

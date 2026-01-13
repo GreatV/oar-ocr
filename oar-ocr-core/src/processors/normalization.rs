@@ -781,7 +781,7 @@ mod tests {
     use image::{Rgb, RgbImage};
 
     #[test]
-    fn test_normalize_image_color_order_rgb_vs_bgr_chw() {
+    fn test_normalize_image_color_order_rgb_vs_bgr_chw() -> Result<(), OCRError> {
         let mut img = RgbImage::new(1, 1);
         img.put_pixel(0, 0, Rgb([10, 20, 30])); // R, G, B
 
@@ -791,16 +791,14 @@ mod tests {
             Some(vec![1.0, 1.0, 1.0]),
             Some(TensorLayout::CHW),
             Some(ColorOrder::RGB),
-        )
-        .unwrap();
+        )?;
         let bgr = NormalizeImage::with_color_order(
             Some(1.0),
             Some(vec![0.0, 0.0, 0.0]),
             Some(vec![1.0, 1.0, 1.0]),
             Some(TensorLayout::CHW),
             Some(ColorOrder::BGR),
-        )
-        .unwrap();
+        )?;
 
         let rgb_out = rgb.apply(vec![DynamicImage::ImageRgb8(img.clone())]);
         let bgr_out = bgr.apply(vec![DynamicImage::ImageRgb8(img)]);
@@ -809,10 +807,11 @@ mod tests {
         assert_eq!(bgr_out.len(), 1);
         assert_eq!(rgb_out[0], vec![10.0, 20.0, 30.0]);
         assert_eq!(bgr_out[0], vec![30.0, 20.0, 10.0]);
+        Ok(())
     }
 
     #[test]
-    fn test_normalize_image_mean_std_applied_in_output_channel_order() {
+    fn test_normalize_image_mean_std_applied_in_output_channel_order() -> Result<(), OCRError> {
         let mut img = RgbImage::new(1, 1);
         img.put_pixel(0, 0, Rgb([11, 22, 33])); // R, G, B
 
@@ -822,21 +821,20 @@ mod tests {
             Some(vec![2.0, 4.0, 5.0]), // RGB stds
             Some(TensorLayout::CHW),
             Some(ColorOrder::RGB),
-        )
-        .unwrap();
+        )?;
         let bgr = NormalizeImage::with_color_order(
             Some(1.0),
             Some(vec![3.0, 2.0, 1.0]), // BGR means
             Some(vec![5.0, 4.0, 2.0]), // BGR stds
             Some(TensorLayout::CHW),
             Some(ColorOrder::BGR),
-        )
-        .unwrap();
+        )?;
 
         let rgb_out = rgb.apply(vec![DynamicImage::ImageRgb8(img.clone())]);
         let bgr_out = bgr.apply(vec![DynamicImage::ImageRgb8(img)]);
 
         assert_eq!(rgb_out[0], vec![5.0, 5.0, 6.0]); // (R-1)/2, (G-2)/4, (B-3)/5
         assert_eq!(bgr_out[0], vec![6.0, 5.0, 5.0]); // (B-3)/5, (G-2)/4, (R-1)/2
+        Ok(())
     }
 }

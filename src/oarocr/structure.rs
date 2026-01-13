@@ -101,6 +101,7 @@ struct StructurePipeline {
 /// ```no_run
 /// use oar_ocr::oarocr::structure::OARStructureBuilder;
 ///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let structure = OARStructureBuilder::new("models/layout.onnx")
 ///     .with_table_classification("models/table_cls.onnx")
 ///     .with_table_cell_detection("models/table_cell.onnx", "wired")
@@ -110,8 +111,10 @@ struct StructurePipeline {
 ///         "models/tokenizer.json",
 ///         "pp_formulanet"
 ///     )
-///     .build()
-///     .expect("Failed to build structure analyzer");
+///     .build()?;
+/// # let _ = structure;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct OARStructureBuilder {

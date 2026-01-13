@@ -187,8 +187,9 @@ impl DBPostProcess {
             return BoundingBox::new(Vec::new());
         }
 
-        // Safe: we just verified len() == 1
-        let path = offset_paths.into_iter().next().unwrap();
+        let Some(path) = offset_paths.into_iter().next() else {
+            return BoundingBox::new(Vec::new());
+        };
 
         let mut points: Vec<Point> = path
             .iter()

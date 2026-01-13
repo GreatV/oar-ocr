@@ -138,8 +138,6 @@ impl Module for Mlp {
 /// Focal Modulation block for multi-scale context aggregation.
 #[derive(Debug)]
 struct FocalModulation {
-    #[allow(dead_code)]
-    dim: usize,
     focal_level: usize,
     f_proj: Linear,
     h_conv: Conv2d,
@@ -184,7 +182,6 @@ impl FocalModulation {
         }
 
         Ok(Self {
-            dim,
             focal_level,
             f_proj,
             h_conv,
@@ -450,8 +447,6 @@ pub struct FocalSVTR {
     patch_embed_1: ConvBNLayer,
     pos_drop: Dropout,
     layers: Vec<BasicLayer>,
-    #[allow(dead_code)]
-    num_features: usize,
     vision_fc: Linear,
 }
 
@@ -553,7 +548,6 @@ impl FocalSVTR {
             patch_embed_1,
             pos_drop,
             layers,
-            num_features,
             vision_fc,
         })
     }

@@ -2,7 +2,7 @@
 //!
 //! This example demonstrates how to use the OCR pipeline to classify text line orientation.
 //! It loads a text line orientation model, processes input text images (typically cropped text regions),
-//! and predicts whether the text is upright (0°) or upside-down (180°) with confidence scores.
+//! and predicts whether the text is upright (0) or upside-down (180) with confidence scores.
 //!
 //! # Usage
 //!
@@ -13,7 +13,8 @@
 //! # Arguments
 //!
 //! * `-m, --model-path` - Path to the text line orientation model file
-//! * `-o, --output-dir` - Directory to save visualization results (optional)
+//! * `-o, --output-dir` - Directory to save output results
+//! * `--vis` - Enable visualization output
 //! * `--device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
 //! * `<IMAGES>...` - Paths to input text line images to process
 //!
@@ -22,6 +23,7 @@
 //! ```bash
 //! cargo run --example text_line_orientation -- \
 //!     -m models/pplcnet_x1_0_textline_ori.onnx \
+//!     -o output/ --vis \
 //!     text_line1.jpg text_line2.jpg
 //! ```
 
@@ -34,6 +36,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
 use utils::device_config::parse_device_config;
+use utils::visualization::{ClassificationVisConfig, save_rgb_image, visualize_classification};
 
 /// Command-line arguments for the text line orientation example
 #[derive(Parser)]
@@ -48,9 +51,13 @@ struct Args {
     #[arg(required = true)]
     images: Vec<PathBuf>,
 
-    /// Directory to save visualization results
+    /// Directory to save output results
     #[arg(short, long)]
     output_dir: Option<PathBuf>,
+
+    /// Enable visualization output
+    #[arg(long)]
+    vis: bool,
 
     /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
     #[arg(long, default_value = "cpu")]
@@ -200,26 +207,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Show top prediction prominently
             let top = &classifications[0];
 
-            info!("  Detected orientation: {}°", top.label);
+            info!("  Detected orientation: {}", top.label);
             info!("  Confidence: {:.2}%", top.score * 100.0);
 
             // Show all predictions if verbose
             if args.verbose && classifications.len() > 1 {
                 info!("  All predictions:");
                 for (rank, c) in classifications.iter().enumerate() {
-                    info!("    [{}] {}° - {:.2}%", rank + 1, c.label, c.score * 100.0);
+                    info!("    [{}] {} - {:.2}%", rank + 1, c.label, c.score * 100.0);
                 }
             }
         }
     }
 
-    // Save visualization if output directory is provided
-    #[cfg(feature = "visualization")]
-    if let Some(output_dir) = args.output_dir {
+    // Save visualization if --vis is enabled
+    if args.vis {
+        let output_dir = args
+            .output_dir
+            .as_ref()
+            .ok_or("--output-dir is required when --vis is enabled")?;
+
         // Create output directory if it doesn't exist
-        std::fs::create_dir_all(&output_dir)?;
+        std::fs::create_dir_all(output_dir)?;
 
         info!("\nSaving visualizations to: {}", output_dir.display());
+
+        let vis_config = ClassificationVisConfig::default();
 
         for (image_path, rgb_img, classifications) in existing_images
             .iter()
@@ -228,9 +241,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|((path, img), classifications)| (path, img, classifications))
         {
             if !classifications.is_empty() {
-                // Extract labels and scores from classifications
-                let labels: Vec<_> = classifications.iter().map(|c| c.label.clone()).collect();
-                let scores: Vec<_> = classifications.iter().map(|c| c.score).collect();
+                // Get top prediction
+                let top = &classifications[0];
+                let label = top.label.to_string();
+
                 // Use the original filename for output
                 let output_filename = image_path
                     .file_name()
@@ -238,8 +252,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or("unknown.jpg");
                 let output_path = output_dir.join(output_filename);
 
-                let visualized = visualize_text_line_orientation(rgb_img, &labels, &scores);
-                visualized.save(&output_path)?;
+                let visualized = visualize_classification(
+                    rgb_img,
+                    &label,
+                    top.score,
+                    "Text Line Orientation",
+                    &vis_config,
+                );
+                save_rgb_image(&visualized, &output_path)
+                    .map_err(|e| format!("Failed to save visualization: {}", e))?;
                 info!("  Saved: {}", output_path.display());
             } else {
                 warn!(
@@ -251,97 +272,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-}
-
-/// Visualizes text line orientation by drawing the predicted angle and confidence on the image
-/// The orientation result is displayed in an additional space above the original image
-#[cfg(feature = "visualization")]
-fn visualize_text_line_orientation(
-    img: &image::RgbImage,
-    labels: &[String],
-    _scores: &[f32],
-) -> image::RgbImage {
-    use image::{Rgb, RgbImage};
-    use imageproc::drawing::draw_text_mut;
-
-    let orientation_label = labels.first().map(|label| label.as_str()).unwrap_or("0");
-
-    let original_width = img.width();
-    let original_height = img.height();
-
-    // Scale header height and font size based on image dimensions
-    // Use the smaller dimension as reference for scaling
-    let reference_size = original_width.min(original_height) as f32;
-    let scale_factor = (reference_size / 300.0).clamp(0.3, 2.0); // Clamp between 0.3x and 2x
-
-    let header_height = (40.0 * scale_factor).round() as u32;
-    let font_size = (16.0 * scale_factor).clamp(10.0, 48.0); // Clamp font size between 10 and 48
-    let text_x = (8.0 * scale_factor).round() as i32;
-    let text_y = ((header_height as f32 - font_size) / 2.0).round() as i32; // Center vertically
-
-    let total_height = header_height + original_height;
-
-    // Create new image with extra space on top
-    let mut output = RgbImage::new(original_width, total_height);
-
-    // Fill header area with background color
-    let bg_color = Rgb([240u8, 240u8, 240u8]); // Light gray background
-    let text_color = Rgb([0u8, 0u8, 0u8]); // Black text
-
-    for y in 0..header_height {
-        for x in 0..original_width {
-            output.put_pixel(x, y, bg_color);
-        }
-    }
-
-    // Copy original image to the bottom part
-    for y in 0..original_height {
-        for x in 0..original_width {
-            output.put_pixel(x, y + header_height, *img.get_pixel(x, y));
-        }
-    }
-
-    // Try to load a font for text rendering
-    let font = load_font();
-
-    if let Some(ref font) = font {
-        // Draw only the orientation value
-        let label = format!("{}°", orientation_label);
-
-        // Draw text
-        draw_text_mut(
-            &mut output,
-            text_color,
-            text_x,
-            text_y,
-            font_size,
-            font,
-            &label,
-        );
-    }
-
-    output
-}
-
-#[cfg(feature = "visualization")]
-fn load_font() -> Option<ab_glyph::FontVec> {
-    use ab_glyph::FontVec;
-
-    // Try common font paths
-    let font_paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/System/Library/Fonts/Arial.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
-    ];
-
-    for path in &font_paths {
-        if let Ok(font_data) = std::fs::read(path)
-            && let Ok(font) = FontVec::try_from_vec(font_data)
-        {
-            return Some(font);
-        }
-    }
-
-    None
 }
