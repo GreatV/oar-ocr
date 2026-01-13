@@ -284,22 +284,13 @@ fn postprocess_unirec_output(text: &str) -> String {
         .replace('\u{FFFF}', "");
 
     // Match OpenOCR's extra cleanup rules.
-    let underscore_re = Regex::new(r"_{4,}").unwrap_or_else(|_| {
-        Regex::new(r"_")
-            .unwrap_or_else(|e| panic!("UniRec: fallback underscore regex must compile: {e}"))
-    });
-    let dots_re = Regex::new(r"\.{4,}").unwrap_or_else(|_| {
-        Regex::new(r"\.")
-            .unwrap_or_else(|e| panic!("UniRec: fallback dots regex must compile: {e}"))
-    });
+    let underscore_re = Regex::new(r"_{4,}").expect("static underscore regex must compile");
+    let dots_re = Regex::new(r"\.{4,}").expect("static dots regex must compile");
     let result = underscore_re.replace_all(&result, "___");
     let result = dots_re.replace_all(&result, "...");
 
     // Collapse repeated spaces introduced during token cleanup.
-    let spaces_re = Regex::new(r"[ ]{2,}").unwrap_or_else(|_| {
-        Regex::new(r" ")
-            .unwrap_or_else(|e| panic!("UniRec: fallback spaces regex must compile: {e}"))
-    });
+    let spaces_re = Regex::new(r"[ ]{2,}").expect("static spaces regex must compile");
     let result = spaces_re.replace_all(&result, " ");
 
     // Trim leading/trailing whitespace

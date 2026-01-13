@@ -549,16 +549,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     builder = builder.use_e2e_wired_table_rec(args.use_e2e_wired_table_rec);
     builder = builder.use_e2e_wireless_table_rec(args.use_e2e_wireless_table_rec);
 
-    if let Some(path) = &args.formula_model {
-        let Some(tokenizer) = args.formula_tokenizer.as_ref() else {
+    if let Some(path) = args.formula_model {
+        let Some(tokenizer) = args.formula_tokenizer else {
             return Err("Formula recognition requires --formula-tokenizer".into());
         };
-        let Some(model_type) = args.formula_type.as_deref() else {
+        let Some(model_type) = args.formula_type else {
             return Err("Formula recognition requires --formula-type".into());
         };
 
         builder = builder
-            .with_formula_recognition(path.clone(), tokenizer.clone(), model_type)
+            .with_formula_recognition(path, tokenizer, model_type)
             .formula_recognition_config(formula_config);
     }
 
