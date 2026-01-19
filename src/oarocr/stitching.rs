@@ -15,7 +15,9 @@ use crate::oarocr::TextRegion;
 use oar_ocr_core::domain::structure::{
     FormulaResult, LayoutElement, LayoutElementType, StructureResult, TableResult,
 };
-use oar_ocr_core::processors::BoundingBox;
+use oar_ocr_core::processors::{
+    BoundingBox, SplitConfig as OcrSplitConfig, create_expanded_ocr_for_table,
+};
 use std::cmp::Ordering;
 
 /// Labels that should be excluded from OCR text matching.
@@ -35,6 +37,10 @@ pub struct StitchConfig {
     pub cell_merge_min_iou: f32,
     pub formula_to_cell_min_iou: f32,
     pub same_line_y_tolerance: f32,
+    /// Whether to enable cross-cell OCR box splitting.
+    /// When enabled, OCR boxes that span multiple table cells will be split
+    /// at cell boundaries and their text distributed proportionally.
+    pub enable_cross_cell_split: bool,
 }
 
 impl Default for StitchConfig {
@@ -46,6 +52,7 @@ impl Default for StitchConfig {
             cell_merge_min_iou: 0.3,
             formula_to_cell_min_iou: 0.01,
             same_line_y_tolerance: 10.0,
+            enable_cross_cell_split: true,
         }
     }
 }
@@ -316,12 +323,40 @@ impl ResultStitcher {
                 .map(|(idx, _)| idx)
                 .collect();
 
+            // 1.5. Cross-cell OCR splitting (new step)
+            // Detect OCR boxes that span multiple cells and split them at cell boundaries.
+            // This improves accuracy for complex tables with rowspan/colspan.
+            let (split_regions, split_ocr_indices, split_cell_assignments) =
+                if cfg.enable_cross_cell_split {
+                    Self::split_cross_cell_ocr_boxes(text_regions, &relevant_indices, &table.cells)
+                } else {
+                    (
+                        Vec::new(),
+                        std::collections::HashSet::new(),
+                        std::collections::HashMap::new(),
+                    )
+                };
+
             // 2. Match OCR boxes to Cells (global OCR fallback for cells without per-cell OCR)
             // Map: cell_index -> List of ocr_index
             let mut cell_to_ocr: std::collections::HashMap<usize, Vec<usize>> =
                 std::collections::HashMap::new();
 
+            // First, add pre-assigned split regions to cell_to_ocr
+            for (cell_idx, ocr_indices) in &split_cell_assignments {
+                for &ocr_idx in ocr_indices {
+                    cell_to_ocr.entry(*cell_idx).or_default().push(ocr_idx);
+                }
+            }
+
+            // Mark split original indices as used and process non-split regions
             for &ocr_idx in &relevant_indices {
+                // Skip indices that were split
+                if split_ocr_indices.contains(&ocr_idx) {
+                    used_indices.insert(ocr_idx);
+                    continue;
+                }
+
                 let region = &text_regions[ocr_idx];
 
                 // Compute cost for each cell: (1 - IoU, L1_Distance)
@@ -349,9 +384,12 @@ impl ResultStitcher {
 
                 // Assign to best cell if found
                 if let Some(cell_idx) = best_cell_idx {
-                    // Check for OCR spanning multiple cells could happen here (IoU > 0.5 logic)
-                    // For now, we implement the primary matching logic requested.
-                    cell_to_ocr.entry(cell_idx).or_default().push(ocr_idx);
+                    // Use a large index offset for original (non-split) regions
+                    // to distinguish them from split regions
+                    cell_to_ocr
+                        .entry(cell_idx)
+                        .or_default()
+                        .push(ocr_idx + 1_000_000);
                     used_indices.insert(ocr_idx);
                 }
             }
@@ -374,10 +412,19 @@ impl ResultStitcher {
                     let mut cell_text_regions: Vec<(&TextRegion, &str)> = ocr_indices
                         .iter()
                         .filter_map(|&idx| {
-                            text_regions[idx]
-                                .text
-                                .as_deref()
-                                .map(|t| (&text_regions[idx], t))
+                            if idx >= 1_000_000 {
+                                // Original (non-split) region
+                                let actual_idx = idx - 1_000_000;
+                                text_regions[actual_idx]
+                                    .text
+                                    .as_deref()
+                                    .map(|t| (&text_regions[actual_idx], t))
+                            } else {
+                                // Split region
+                                split_regions
+                                    .get(idx)
+                                    .and_then(|r| r.text.as_deref().map(|t| (r, t)))
+                            }
                         })
                         .collect();
 
@@ -410,6 +457,82 @@ impl ResultStitcher {
 
             tracing::debug!("Table {}: matching complete.", table_idx);
         }
+    }
+
+    /// Detects and splits OCR boxes that span multiple table cells.
+    ///
+    /// Returns:
+    /// - Vec<TextRegion>: New text regions created from split OCR boxes
+    /// - HashSet<usize>: Indices of original regions that were split
+    /// - HashMap<usize, Vec<usize>>: Mapping from cell_idx -> indices in the new split_regions vec
+    fn split_cross_cell_ocr_boxes(
+        text_regions: &[TextRegion],
+        relevant_indices: &[usize],
+        cells: &[oar_ocr_core::domain::structure::TableCell],
+    ) -> (
+        Vec<TextRegion>,
+        std::collections::HashSet<usize>,
+        std::collections::HashMap<usize, Vec<usize>>,
+    ) {
+        let mut split_regions: Vec<TextRegion> = Vec::new();
+        let mut split_ocr_indices: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+        let mut cell_assignments: std::collections::HashMap<usize, Vec<usize>> =
+            std::collections::HashMap::new();
+
+        // Build a subset of text regions for the table
+        let table_regions: Vec<TextRegion> = relevant_indices
+            .iter()
+            .map(|&idx| text_regions[idx].clone())
+            .collect();
+
+        if table_regions.is_empty() || cells.is_empty() {
+            return (split_regions, split_ocr_indices, cell_assignments);
+        }
+
+        // Use the cross-cell splitting utility
+        let split_config = OcrSplitConfig::default();
+        let (expanded, processed_local_indices) =
+            create_expanded_ocr_for_table(&table_regions, cells, Some(&split_config));
+
+        // Map local indices back to original indices
+        for local_idx in processed_local_indices {
+            if local_idx < relevant_indices.len() {
+                split_ocr_indices.insert(relevant_indices[local_idx]);
+            }
+        }
+
+        // Add expanded regions and track cell assignments
+        for region in expanded {
+            let region_idx = split_regions.len();
+
+            // Find the best matching cell for this expanded region
+            let mut best_cell_idx = 0usize;
+            let mut best_iou = 0.0f32;
+
+            for (cell_idx, cell) in cells.iter().enumerate() {
+                let iou = region.bounding_box.iou(&cell.bbox);
+                if iou > best_iou {
+                    best_iou = iou;
+                    best_cell_idx = cell_idx;
+                }
+            }
+
+            cell_assignments
+                .entry(best_cell_idx)
+                .or_default()
+                .push(region_idx);
+
+            split_regions.push(region);
+        }
+
+        tracing::debug!(
+            "Cross-cell OCR splitting: {} original regions processed, {} new regions created",
+            split_ocr_indices.len(),
+            split_regions.len()
+        );
+
+        (split_regions, split_ocr_indices, cell_assignments)
     }
 
     /// Attaches recognized formulas to the best-matching table cells.
@@ -644,35 +767,47 @@ impl ResultStitcher {
                 // Check if this is a new line (Y-difference > tolerance)
                 if (current_y - py).abs() > cfg.same_line_y_tolerance {
                     // New visual line detected.
-                    // Decide whether to insert '\n' (hard break) or ' ' (soft break/wrap).
-                    let mut add_newline = false;
+                    // Check for hyphenation: if previous text ends with '-' and current starts with lowercase,
+                    // this is likely a word break that should be joined without the hyphen.
+                    let prev_ends_hyphen = result.ends_with('-');
+                    let current_starts_lower =
+                        text.chars().next().is_some_and(|c| c.is_lowercase());
 
-                    if let Some(container) = container_bbox
-                        && let Some(last_region) = prev_region
-                    {
-                        let container_width = container.x_max() - container.x_min();
-                        // If the previous line ended far from the right edge, it's likely a paragraph break.
-                        // Heuristic: gap > 30% of container width
-                        // Note: We use container.x_max because we assume LTR text.
-                        let right_gap = container.x_max() - last_region.bounding_box.x_max();
-                        if right_gap > container_width * 0.3 {
-                            add_newline = true;
-                        }
-                    }
-                    // If no container info, we default to NO newline (soft wrap) to avoid discontinuity,
-                    // unless specific patterns dictate otherwise (future work).
-
-                    if add_newline {
-                        if !result.ends_with('\n') {
-                            result.push('\n');
-                        }
+                    if prev_ends_hyphen && current_starts_lower {
+                        // Remove the trailing hyphen and join directly (dehyphenation)
+                        result.pop();
+                        // Don't add any separator - words should be joined
                     } else {
-                        // Soft wrap - treat as space if needed (English) or join (CJK)
-                        if let Some(last_char) = result.chars().last()
-                            && last_char != '\n'
-                            && needs_space_after(last_char)
+                        // Decide whether to insert '\n' (hard break) or ' ' (soft break/wrap).
+                        let mut add_newline = false;
+
+                        if let Some(container) = container_bbox
+                            && let Some(last_region) = prev_region
                         {
-                            result.push(' ');
+                            let container_width = container.x_max() - container.x_min();
+                            // If the previous line ended far from the right edge, it's likely a paragraph break.
+                            // Heuristic: gap > 30% of container width
+                            // Note: We use container.x_max because we assume LTR text.
+                            let right_gap = container.x_max() - last_region.bounding_box.x_max();
+                            if right_gap > container_width * 0.3 {
+                                add_newline = true;
+                            }
+                        }
+                        // If no container info, we default to NO newline (soft wrap) to avoid discontinuity,
+                        // unless specific patterns dictate otherwise (future work).
+
+                        if add_newline {
+                            if !result.ends_with('\n') {
+                                result.push('\n');
+                            }
+                        } else {
+                            // Soft wrap - treat as space if needed (English) or join (CJK)
+                            if let Some(last_char) = result.chars().last()
+                                && last_char != '\n'
+                                && needs_space_after(last_char)
+                            {
+                                result.push(' ');
+                            }
                         }
                     }
                 } else {

@@ -16,6 +16,70 @@ use crate::processors::normalize_latex;
 use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
 
+/// Special token IDs extracted from a tokenizer.
+#[derive(Debug, Clone)]
+pub struct SpecialTokenIds {
+    /// Start-of-sequence (BOS) token ID
+    pub sos_token_id: i64,
+    /// End-of-sequence (EOS) token ID
+    pub eos_token_id: i64,
+}
+
+impl Default for SpecialTokenIds {
+    fn default() -> Self {
+        Self {
+            sos_token_id: 0,
+            eos_token_id: 2,
+        }
+    }
+}
+
+/// Extracts special token IDs from a tokenizer.
+///
+/// This function attempts to find the BOS and EOS token IDs by checking common
+/// token representations used by different tokenizer implementations.
+///
+/// # Token search order
+/// - BOS tokens: `<s>`, `[BOS]`, `<bos>`, `[CLS]`
+/// - EOS tokens: `</s>`, `[EOS]`, `<eos>`, `[SEP]`
+///
+/// If tokens are not found, falls back to default values (BOS=0, EOS=2).
+pub fn extract_special_token_ids(tokenizer: &Tokenizer) -> SpecialTokenIds {
+    // Common BOS token representations
+    let bos_candidates = ["<s>", "[BOS]", "<bos>", "[CLS]"];
+    // Common EOS token representations
+    let eos_candidates = ["</s>", "[EOS]", "<eos>", "[SEP]"];
+
+    let sos_token_id = bos_candidates
+        .iter()
+        .find_map(|&token| tokenizer.token_to_id(token))
+        .map(|id| id as i64)
+        .unwrap_or_else(|| {
+            tracing::debug!("BOS token not found in tokenizer vocabulary, using default value 0");
+            0
+        });
+
+    let eos_token_id = eos_candidates
+        .iter()
+        .find_map(|&token| tokenizer.token_to_id(token))
+        .map(|id| id as i64)
+        .unwrap_or_else(|| {
+            tracing::debug!("EOS token not found in tokenizer vocabulary, using default value 2");
+            2
+        });
+
+    tracing::debug!(
+        "Extracted special token IDs: sos_token_id={}, eos_token_id={}",
+        sos_token_id,
+        eos_token_id
+    );
+
+    SpecialTokenIds {
+        sos_token_id,
+        eos_token_id,
+    }
+}
+
 /// Formula model enum to support different model types.
 #[derive(Debug)]
 pub(crate) enum FormulaModel {
@@ -93,18 +157,6 @@ impl FormulaRecognitionAdapter {
             config,
         }
     }
-
-    /// PP-FormulaNet SOS token ID.
-    pub const PPFORMULANET_SOS_TOKEN_ID: i64 = 0;
-
-    /// PP-FormulaNet EOS token ID.
-    pub const PPFORMULANET_EOS_TOKEN_ID: i64 = 2;
-
-    /// UniMERNet SOS token ID.
-    pub const UNIMERNET_SOS_TOKEN_ID: i64 = 0;
-
-    /// UniMERNet EOS token ID.
-    pub const UNIMERNET_EOS_TOKEN_ID: i64 = 2;
 }
 
 impl ModelAdapter for FormulaRecognitionAdapter {
@@ -236,23 +288,23 @@ pub struct FormulaModelConfig {
 }
 
 impl FormulaModelConfig {
-    /// PP-FormulaNet configuration.
-    pub fn pp_formulanet() -> Self {
+    /// PP-FormulaNet configuration with dynamically extracted token IDs.
+    pub fn pp_formulanet_with_tokens(token_ids: SpecialTokenIds) -> Self {
         Self {
             model_name: "PP-FormulaNet".to_string(),
             description: "PP-FormulaNet formula recognition model".to_string(),
-            sos_token_id: FormulaRecognitionAdapter::PPFORMULANET_SOS_TOKEN_ID,
-            eos_token_id: FormulaRecognitionAdapter::PPFORMULANET_EOS_TOKEN_ID,
+            sos_token_id: token_ids.sos_token_id,
+            eos_token_id: token_ids.eos_token_id,
         }
     }
 
-    /// UniMERNet configuration.
-    pub fn unimernet() -> Self {
+    /// UniMERNet configuration with dynamically extracted token IDs.
+    pub fn unimernet_with_tokens(token_ids: SpecialTokenIds) -> Self {
         Self {
             model_name: "UniMERNet".to_string(),
             description: "UniMERNet formula recognition model".to_string(),
-            sos_token_id: FormulaRecognitionAdapter::UNIMERNET_SOS_TOKEN_ID,
-            eos_token_id: FormulaRecognitionAdapter::UNIMERNET_EOS_TOKEN_ID,
+            sos_token_id: token_ids.sos_token_id,
+            eos_token_id: token_ids.eos_token_id,
         }
     }
 }
@@ -334,7 +386,9 @@ impl_adapter_builder! {
             message: format!("Failed to load tokenizer from {:?}: {}", tokenizer_path, err),
         })?;
 
-        let model_config = FormulaModelConfig::pp_formulanet();
+        // Extract special token IDs dynamically from tokenizer
+        let special_tokens = extract_special_token_ids(&tokenizer);
+        let model_config = FormulaModelConfig::pp_formulanet_with_tokens(special_tokens);
 
         // Create adapter info using the helper
         let mut info = PPFormulaNetAdapterBuilder::base_adapter_info();
@@ -429,7 +483,9 @@ impl_adapter_builder! {
             message: format!("Failed to load tokenizer from {:?}: {}", tokenizer_path, err),
         })?;
 
-        let model_config = FormulaModelConfig::unimernet();
+        // Extract special token IDs dynamically from tokenizer
+        let special_tokens = extract_special_token_ids(&tokenizer);
+        let model_config = FormulaModelConfig::unimernet_with_tokens(special_tokens);
 
         // Create adapter info using the helper
         let mut info = UniMERNetAdapterBuilder::base_adapter_info();
@@ -538,18 +594,33 @@ mod tests {
 
     #[test]
     fn test_formula_model_config_pp_formulanet() {
-        let config = FormulaModelConfig::pp_formulanet();
+        let token_ids = SpecialTokenIds {
+            sos_token_id: 1,
+            eos_token_id: 2,
+        };
+        let config = FormulaModelConfig::pp_formulanet_with_tokens(token_ids);
         assert_eq!(config.model_name, "PP-FormulaNet");
-        assert_eq!(config.sos_token_id, 0);
+        assert_eq!(config.sos_token_id, 1);
         assert_eq!(config.eos_token_id, 2);
     }
 
     #[test]
     fn test_formula_model_config_unimernet() {
-        let config = FormulaModelConfig::unimernet();
+        let token_ids = SpecialTokenIds {
+            sos_token_id: 0,
+            eos_token_id: 3,
+        };
+        let config = FormulaModelConfig::unimernet_with_tokens(token_ids);
         assert_eq!(config.model_name, "UniMERNet");
         assert_eq!(config.sos_token_id, 0);
-        assert_eq!(config.eos_token_id, 2);
+        assert_eq!(config.eos_token_id, 3);
+    }
+
+    #[test]
+    fn test_special_token_ids_default() {
+        let default_ids = SpecialTokenIds::default();
+        assert_eq!(default_ids.sos_token_id, 0);
+        assert_eq!(default_ids.eos_token_id, 2);
     }
 
     #[test]

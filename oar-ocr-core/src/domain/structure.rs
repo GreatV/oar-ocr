@@ -44,18 +44,20 @@ static TITLE_NUMBERING_REGEX: Lazy<Regex> = Lazy::new(|| {
 
 /// Format a paragraph title with automatic level detection based on numbering.
 ///
-/// Following standard title formatting logic:
+/// Following PaddleX's title formatting logic:
 /// - Extracts numbering prefix (1.2.3, etc.)
-/// - Determines heading level from number of dots (1.2.3 -> level 3)
-/// - Returns (level, formatted_title) where level is 1-based
+/// - Determines heading level from number of dots
+/// - Returns (level, formatted_title) where level starts from 2 (## for paragraph titles)
 ///
-/// # Examples
+/// PaddleX logic: `level = dots + 1`, then uses `#{'#' * level}` which means:
+/// - "1 Introduction" (0 dots) -> level=1 -> `## 1 Introduction`
+/// - "2.1 Method" (1 dot) -> level=2 -> `### 2.1 Method`
+/// - "2.1.1 Details" (2 dots) -> level=3 -> `#### 2.1.1 Details`
 ///
-/// - "1 Introduction" -> (1, "1 Introduction")
-/// - "1.2 Methods" -> (2, "1.2 Methods")
-/// - "1.2.3 Details" -> (3, "1.2.3 Details")
-/// - "一、绪论" -> (1, "一、绪论")
-/// - "Just text" -> (2, "Just text") (default level 2 for no numbering)
+/// To align with PaddleX, we return level+1 to account for the extra `#`:
+/// - "1 Introduction" -> (2, "1 Introduction") -> `## 1 Introduction`
+/// - "2.1 Method" -> (3, "2.1 Method") -> `### 2.1 Method`
+/// - "2.1.1 Details" -> (4, "2.1.1 Details") -> `#### 2.1.1 Details`
 fn format_title_with_level(title: &str) -> (usize, String) {
     // Clean up line breaks
     let cleaned = title.replace("-\n", "").replace('\n', " ");
@@ -64,13 +66,10 @@ fn format_title_with_level(title: &str) -> (usize, String) {
         let numbering = captures.get(1).map(|m| m.as_str().trim()).unwrap_or("");
         let title_content = captures.get(3).map(|m| m.as_str()).unwrap_or("");
 
-        // Determine level from dots in numbering
-        // 1 -> level 1, 1.2 -> level 2, 1.2.3 -> level 3
-        let level = if numbering.contains('.') {
-            numbering.matches('.').count() + 1
-        } else {
-            1
-        };
+        // Determine level from dots in numbering (PaddleX: dots + 1, then +1 for base ##)
+        // 1 -> 2 (##), 1.2 -> 3 (###), 1.2.3 -> 4 (####)
+        let dot_count = numbering.matches('.').count();
+        let level = dot_count + 2; // +1 for PaddleX logic, +1 for base ## level
 
         // Reconstruct title: numbering + space + content
         let formatted = if title_content.is_empty() {
@@ -83,8 +82,8 @@ fn format_title_with_level(title: &str) -> (usize, String) {
             )
         };
 
-        // Clamp level to reasonable range (1-6 for markdown)
-        let level = level.clamp(1, 6);
+        // Clamp level to reasonable range (2-6 for markdown, since # is for doc_title)
+        let level = level.clamp(2, 6);
 
         (level, formatted)
     } else {
@@ -114,6 +113,36 @@ pub struct RegionBlock {
     pub order_index: Option<u32>,
     /// Indices of layout elements that belong to this region
     pub element_indices: Vec<usize>,
+}
+
+/// Page continuation flags for multi-page document processing.
+///
+/// These flags indicate whether the page starts or ends in the middle of
+/// a semantic paragraph, which is crucial for properly concatenating
+/// markdown output from multiple pages.
+///
+/// - `paragraph_start`: `false` means this page continues a paragraph from previous page
+/// - `paragraph_end`: `false` means this page's content continues to next page
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PageContinuationFlags {
+    /// Whether the first element on this page is a paragraph continuation
+    pub paragraph_start: bool,
+    /// Whether the last element on this page continues to the next page
+    pub paragraph_end: bool,
+}
+
+impl PageContinuationFlags {
+    pub fn new(paragraph_start: bool, paragraph_end: bool) -> Self {
+        Self {
+            paragraph_start,
+            paragraph_end,
+        }
+    }
+
+    /// Returns the tuple format (is_start, is_end) for compatibility
+    pub fn as_tuple(&self) -> (bool, bool) {
+        (self.paragraph_start, self.paragraph_end)
+    }
 }
 
 /// Result of document structure analysis.
@@ -162,6 +191,10 @@ pub struct StructureResult {
     /// Use this image for visualization when rectification was applied.
     #[serde(skip)]
     pub rectified_img: Option<Arc<RgbImage>>,
+    /// Page continuation flags for multi-page document processing.
+    /// This indicates whether this page continues a paragraph from the previous page
+    /// or continues to the next page, which is crucial for proper markdown concatenation.
+    pub page_continuation_flags: Option<PageContinuationFlags>,
 }
 
 impl StructureResult {
@@ -177,6 +210,7 @@ impl StructureResult {
             orientation_angle: None,
             region_blocks: None,
             rectified_img: None,
+            page_continuation_flags: None,
         }
     }
 
@@ -213,6 +247,12 @@ impl StructureResult {
         self
     }
 
+    /// Sets page continuation flags for multi-page document processing.
+    pub fn with_page_continuation_flags(mut self, flags: PageContinuationFlags) -> Self {
+        self.page_continuation_flags = Some(flags);
+        self
+    }
+
     /// Converts the result to a Markdown string.
     ///
     /// Follows PP-StructureV3's formatting rules:
@@ -234,7 +274,9 @@ impl StructureResult {
             .collect();
 
         let mut md = String::new();
-        for element in &self.layout_elements {
+        let elements = &self.layout_elements;
+
+        for (idx, element) in elements.iter().enumerate() {
             // PP-StructureV3 markdown ignores auxiliary labels.
             if matches!(
                 element.element_type,
@@ -269,14 +311,16 @@ impl StructureResult {
                 LayoutElementType::DocTitle => {
                     md.push_str("\n# ");
                     if let Some(text) = &element.text {
-                        md.push_str(&text.replace("-\n", "").replace('\n', " "));
+                        let cleaned = clean_ocr_text(text);
+                        md.push_str(&cleaned);
                     }
                     md.push_str("\n\n");
                 }
                 // Paragraph/section title - auto-detect numbering for level
                 LayoutElementType::ParagraphTitle => {
                     if let Some(text) = &element.text {
-                        let (level, formatted_title) = format_title_with_level(text);
+                        let cleaned = clean_ocr_text(text);
+                        let (level, formatted_title) = format_title_with_level(&cleaned);
                         md.push('\n');
                         for _ in 0..level {
                             md.push('#');
@@ -288,17 +332,21 @@ impl StructureResult {
                         md.push_str("\n## \n\n");
                     }
                 }
-                // Table - preserve HTML structure with border
+                // Table - preserve HTML structure with border and center alignment
+                // Following PaddleX's format with <div style="text-align: center;"> wrapper
                 LayoutElementType::Table => {
                     if let Some(table) =
                         self.tables.iter().find(|t| t.bbox.iou(&element.bbox) > 0.5)
                     {
                         if let Some(html) = &table.html_structure {
-                            // Add border to table for better visibility
-                            let table_with_border = html.replace("<table>", "<table border=\"1\">");
-                            md.push('\n');
+                            // Simplify table HTML (remove html/body wrappers) and add border
+                            let simplified = simplify_table_html(html);
+                            let table_with_border =
+                                simplified.replacen("<table>", "<table border=\"1\">", 1);
+                            // Wrap with center-aligned div for better markdown rendering
+                            md.push_str("\n<div style=\"text-align: center;\">");
                             md.push_str(&table_with_border);
-                            md.push_str("\n\n");
+                            md.push_str("</div>\n\n");
                         } else {
                             md.push_str("\n[Table]\n\n");
                         }
@@ -306,25 +354,362 @@ impl StructureResult {
                         md.push_str("\n[Table]\n\n");
                     }
                 }
-                // Formula - wrap with $$
+                // Formula - detect inline vs display formula based on context
                 LayoutElementType::Formula | LayoutElementType::FormulaNumber => {
-                    md.push_str("\n$$");
-                    if let Some(latex) = &element.text {
-                        md.push_str(latex);
+                    // Check if this formula is on the same line as adjacent text elements
+                    // to determine if it's an inline formula or display formula
+                    let is_inline = {
+                        // Look for previous non-formula text element on the same line
+                        let has_prev_text = (0..idx).rev().any(|i| {
+                            let prev = &elements[i];
+                            !prev.element_type.is_formula()
+                                && (prev.element_type == LayoutElementType::Text
+                                    || prev.element_type == LayoutElementType::ReferenceContent)
+                                && is_same_line(&element.bbox, &prev.bbox)
+                        });
+
+                        // Look for next non-formula text element on the same line
+                        let has_next_text = ((idx + 1)..elements.len()).any(|i| {
+                            let next = &elements[i];
+                            !next.element_type.is_formula()
+                                && (next.element_type == LayoutElementType::Text
+                                    || next.element_type == LayoutElementType::ReferenceContent)
+                                && is_same_line(&element.bbox, &next.bbox)
+                        });
+
+                        has_prev_text || has_next_text
+                    };
+
+                    if is_inline {
+                        // Inline formula: use $...$
+                        md.push('$');
+                        if let Some(latex) = &element.text {
+                            md.push_str(latex);
+                        }
+                        md.push_str("$ ");
+                    } else {
+                        // Display formula: use $$...$$
+                        md.push_str("\n$$");
+                        if let Some(latex) = &element.text {
+                            md.push_str(latex);
+                        }
+                        md.push_str("$$\n\n");
                     }
-                    md.push_str("$$\n\n");
                 }
-                // Image/Chart - figure format
+                // Image/Chart - figure format with center alignment
                 LayoutElementType::Image | LayoutElementType::Chart => {
-                    md.push_str("\n![Figure]");
-                    if let Some(caption) = &element.text {
-                        md.push('(');
-                        md.push_str(caption);
-                        md.push(')');
+                    // Use HTML img tag with center alignment for better rendering
+                    md.push_str("\n<div style=\"text-align: center;\"><img src=\"");
+                    // Generate a placeholder image name based on element bbox
+                    let img_name = format!(
+                        "imgs/img_in_{}_box_{:.0}_{:.0}_{:.0}_{:.0}.jpg",
+                        if element.element_type == LayoutElementType::Chart {
+                            "chart"
+                        } else {
+                            "image"
+                        },
+                        element.bbox.x_min(),
+                        element.bbox.y_min(),
+                        element.bbox.x_max(),
+                        element.bbox.y_max()
+                    );
+                    md.push_str(&img_name);
+                    md.push_str("\" alt=\"Image\" width=\"");
+                    // Calculate width percentage based on element size
+                    let width_pct =
+                        ((element.bbox.x_max() - element.bbox.x_min()) / 12.0).clamp(20.0, 100.0);
+                    md.push_str(&format!("{:.0}%", width_pct));
+                    md.push_str("\" /></div>\n\n");
+                }
+                // Seal - show as image with text
+                LayoutElementType::Seal => {
+                    md.push_str("\n![Seal]");
+                    if let Some(text) = &element.text {
+                        md.push_str("\n> ");
+                        md.push_str(text);
                     }
                     md.push_str("\n\n");
                 }
-                // Seal - show as image with text
+                // Captions - with center alignment following PaddleX
+                _ if element.element_type.is_caption() => {
+                    if let Some(text) = &element.text {
+                        md.push_str("\n<div style=\"text-align: center;\">");
+                        md.push_str(text);
+                        md.push_str(" </div>\n\n");
+                    }
+                }
+                // Abstract - following PaddleX format with proper text handling
+                LayoutElementType::Abstract => {
+                    if let Some(text) = &element.text {
+                        // Check for "Abstract" or "摘要" heading
+                        let lower = text.to_lowercase();
+                        if lower.contains("abstract") || lower.contains("摘要") {
+                            md.push_str("\n## **Abstract**\n\n");
+                        }
+                        let formatted = format_text_block(text);
+                        md.push_str(&formatted);
+                        md.push_str("\n\n");
+                    }
+                }
+                // Reference - following PaddleX's format_reference_block
+                LayoutElementType::Reference => {
+                    if let Some(text) = &element.text {
+                        let formatted = format_reference_block(text);
+                        md.push('\n');
+                        md.push_str(&formatted);
+                        md.push_str("\n\n");
+                    }
+                }
+                // Content (table of contents) - following PaddleX's soft breaks
+                LayoutElementType::Content => {
+                    if let Some(text) = &element.text {
+                        let formatted = format_content_block(text);
+                        md.push('\n');
+                        md.push_str(&formatted);
+                        md.push_str("\n\n");
+                    }
+                }
+                // Footnote - following PaddleX's vision_footnote handling
+                LayoutElementType::Footnote => {
+                    if let Some(text) = &element.text {
+                        let formatted = format_vision_footnote_block(text);
+                        md.push('\n');
+                        md.push_str(&formatted);
+                        md.push_str("\n\n");
+                    }
+                }
+                // List
+                LayoutElementType::List => {
+                    if let Some(text) = &element.text {
+                        let cleaned = format_text_block(text);
+                        // Split by newlines and format as list items
+                        for line in cleaned.lines() {
+                            let line = line.trim();
+                            if !line.is_empty() {
+                                md.push_str("- ");
+                                md.push_str(line);
+                                md.push('\n');
+                            }
+                        }
+                        md.push('\n');
+                    }
+                }
+                // Header/Footer - smaller text (typically excluded from markdown)
+                _ if element.element_type.is_header() || element.element_type.is_footer() => {
+                    // Skip headers and footers in markdown output
+                    // They typically contain page numbers and repeating info
+                    continue;
+                }
+                // Default text elements - following PaddleX's text handling
+                _ => {
+                    if let Some(text) = &element.text {
+                        let formatted = format_text_block(text);
+                        md.push_str(&formatted);
+                        md.push_str("\n\n");
+                    }
+                }
+            }
+        }
+        md.trim().to_string()
+    }
+
+    /// Converts the result to a markdown string and saves extracted images.
+    ///
+    /// This method extracts image/chart regions from the source image and saves them
+    /// to the specified output directory, then references them in the markdown output.
+    ///
+    /// # Arguments
+    ///
+    /// * `output_dir` - Directory to save extracted images (an `imgs` subdirectory will be created)
+    ///
+    /// # Returns
+    ///
+    /// A markdown string with relative paths to the saved images
+    pub fn to_markdown_with_images(&self, output_dir: impl AsRef<Path>) -> std::io::Result<String> {
+        let output_dir = output_dir.as_ref();
+        let imgs_dir = output_dir.join("imgs");
+
+        // Create imgs directory if it doesn't exist
+        if !imgs_dir.exists() {
+            std::fs::create_dir_all(&imgs_dir)?;
+        }
+
+        // Collect table bboxes for overlap filtering
+        let table_bboxes: Vec<&BoundingBox> = self
+            .layout_elements
+            .iter()
+            .filter(|e| e.element_type == LayoutElementType::Table)
+            .map(|e| &e.bbox)
+            .collect();
+
+        let mut md = String::new();
+        let mut img_counter = 0usize;
+        let elements = &self.layout_elements;
+
+        for (idx, element) in elements.iter().enumerate() {
+            // PP-StructureV3 markdown ignores auxiliary labels.
+            if matches!(
+                element.element_type,
+                LayoutElementType::Number
+                    | LayoutElementType::Footnote
+                    | LayoutElementType::Header
+                    | LayoutElementType::HeaderImage
+                    | LayoutElementType::Footer
+                    | LayoutElementType::FooterImage
+                    | LayoutElementType::AsideText
+            ) {
+                continue;
+            }
+
+            // Filter out low-confidence text elements that overlap with tables
+            if element.element_type == LayoutElementType::Text {
+                let overlaps_table = table_bboxes
+                    .iter()
+                    .any(|table_bbox| element.bbox.ioa(table_bbox) > 0.3);
+                if overlaps_table && element.confidence < 0.7 {
+                    continue;
+                }
+            }
+
+            match element.element_type {
+                // Document title
+                LayoutElementType::DocTitle => {
+                    md.push_str("\n# ");
+                    if let Some(text) = &element.text {
+                        let cleaned = clean_ocr_text(text);
+                        md.push_str(&cleaned);
+                    }
+                    md.push_str("\n\n");
+                }
+                // Paragraph/section title
+                LayoutElementType::ParagraphTitle => {
+                    if let Some(text) = &element.text {
+                        let cleaned = clean_ocr_text(text);
+                        let (level, formatted_title) = format_title_with_level(&cleaned);
+                        md.push('\n');
+                        for _ in 0..level {
+                            md.push('#');
+                        }
+                        md.push(' ');
+                        md.push_str(&formatted_title);
+                        md.push_str("\n\n");
+                    } else {
+                        md.push_str("\n## \n\n");
+                    }
+                }
+                // Table
+                LayoutElementType::Table => {
+                    if let Some(table) =
+                        self.tables.iter().find(|t| t.bbox.iou(&element.bbox) > 0.5)
+                    {
+                        if let Some(html) = &table.html_structure {
+                            let simplified = simplify_table_html(html);
+                            let table_with_border =
+                                simplified.replacen("<table>", "<table border=\"1\">", 1);
+                            md.push_str("\n<div style=\"text-align: center;\">");
+                            md.push_str(&table_with_border);
+                            md.push_str("</div>\n\n");
+                        } else {
+                            md.push_str("\n[Table]\n\n");
+                        }
+                    } else {
+                        md.push_str("\n[Table]\n\n");
+                    }
+                }
+                // Formula - detect inline vs display formula based on context
+                LayoutElementType::Formula | LayoutElementType::FormulaNumber => {
+                    // Check if this formula is on the same line as adjacent text elements
+                    let is_inline = {
+                        let has_prev_text = (0..idx).rev().any(|i| {
+                            let prev = &elements[i];
+                            !prev.element_type.is_formula()
+                                && (prev.element_type == LayoutElementType::Text
+                                    || prev.element_type == LayoutElementType::ReferenceContent)
+                                && is_same_line(&element.bbox, &prev.bbox)
+                        });
+
+                        let has_next_text = ((idx + 1)..elements.len()).any(|i| {
+                            let next = &elements[i];
+                            !next.element_type.is_formula()
+                                && (next.element_type == LayoutElementType::Text
+                                    || next.element_type == LayoutElementType::ReferenceContent)
+                                && is_same_line(&element.bbox, &next.bbox)
+                        });
+
+                        has_prev_text || has_next_text
+                    };
+
+                    if is_inline {
+                        md.push('$');
+                        if let Some(latex) = &element.text {
+                            md.push_str(latex);
+                        }
+                        md.push_str("$ ");
+                    } else {
+                        md.push_str("\n$$");
+                        if let Some(latex) = &element.text {
+                            md.push_str(latex);
+                        }
+                        md.push_str("$$\n\n");
+                    }
+                }
+                // Image/Chart - extract and save image region
+                LayoutElementType::Image | LayoutElementType::Chart => {
+                    let type_name = if element.element_type == LayoutElementType::Chart {
+                        "chart"
+                    } else {
+                        "image"
+                    };
+
+                    // Generate image filename
+                    let img_name = format!(
+                        "img_in_{}_box_{:.0}_{:.0}_{:.0}_{:.0}.jpg",
+                        type_name,
+                        element.bbox.x_min(),
+                        element.bbox.y_min(),
+                        element.bbox.x_max(),
+                        element.bbox.y_max()
+                    );
+                    let img_path = imgs_dir.join(&img_name);
+                    let relative_path = format!("imgs/{}", img_name);
+
+                    // Extract and save image region if we have the source image
+                    if let Some(ref img) = self.rectified_img {
+                        let x = element.bbox.x_min().max(0.0) as u32;
+                        let y = element.bbox.y_min().max(0.0) as u32;
+                        let width = ((element.bbox.x_max() - element.bbox.x_min()) as u32)
+                            .min(img.width().saturating_sub(x));
+                        let height = ((element.bbox.y_max() - element.bbox.y_min()) as u32)
+                            .min(img.height().saturating_sub(y));
+
+                        if width > 0 && height > 0 {
+                            let cropped =
+                                image::imageops::crop_imm(img.as_ref(), x, y, width, height)
+                                    .to_image();
+                            // Save as JPEG
+                            if let Err(e) = cropped.save(&img_path) {
+                                tracing::warn!(
+                                    "Failed to save image {}: {}",
+                                    img_path.display(),
+                                    e
+                                );
+                            }
+                        }
+                    }
+
+                    // Calculate width percentage
+                    let width_pct =
+                        ((element.bbox.x_max() - element.bbox.x_min()) / 12.0).clamp(20.0, 100.0);
+
+                    md.push_str("\n<div style=\"text-align: center;\"><img src=\"");
+                    md.push_str(&relative_path);
+                    md.push_str("\" alt=\"Image\" width=\"");
+                    md.push_str(&format!("{:.0}%", width_pct));
+                    md.push_str("\" /></div>\n\n");
+
+                    img_counter += 1;
+                }
+                // Seal
                 LayoutElementType::Seal => {
                     md.push_str("\n![Seal]");
                     if let Some(text) = &element.text {
@@ -336,59 +721,139 @@ impl StructureResult {
                 // Captions
                 _ if element.element_type.is_caption() => {
                     if let Some(text) = &element.text {
-                        md.push('*');
+                        md.push_str("\n<div style=\"text-align: center;\">");
                         md.push_str(text);
-                        md.push_str("*\n\n");
+                        md.push_str(" </div>\n\n");
                     }
                 }
                 // Abstract
                 LayoutElementType::Abstract => {
-                    md.push_str("\n**Abstract**\n\n");
                     if let Some(text) = &element.text {
-                        md.push_str(text);
+                        let lower = text.to_lowercase();
+                        if lower.contains("abstract") || lower.contains("摘要") {
+                            md.push_str("\n## **Abstract**\n\n");
+                        }
+                        let formatted = format_text_block(text);
+                        md.push_str(&formatted);
                         md.push_str("\n\n");
                     }
                 }
                 // Reference
                 LayoutElementType::Reference => {
-                    md.push_str("\n**References**\n\n");
                     if let Some(text) = &element.text {
-                        md.push_str(text);
+                        let formatted = format_reference_block(text);
+                        md.push('\n');
+                        md.push_str(&formatted);
+                        md.push_str("\n\n");
+                    }
+                }
+                // Content
+                LayoutElementType::Content => {
+                    if let Some(text) = &element.text {
+                        let formatted = format_content_block(text);
+                        md.push('\n');
+                        md.push_str(&formatted);
+                        md.push_str("\n\n");
+                    }
+                }
+                // Footnote
+                LayoutElementType::Footnote => {
+                    if let Some(text) = &element.text {
+                        let formatted = format_vision_footnote_block(text);
+                        md.push('\n');
+                        md.push_str(&formatted);
                         md.push_str("\n\n");
                     }
                 }
                 // List
                 LayoutElementType::List => {
                     if let Some(text) = &element.text {
-                        // Split by newlines and format as list items
-                        for line in text.lines() {
-                            md.push_str("- ");
-                            md.push_str(line);
-                            md.push('\n');
+                        let cleaned = format_text_block(text);
+                        for line in cleaned.lines() {
+                            let line = line.trim();
+                            if !line.is_empty() {
+                                md.push_str("- ");
+                                md.push_str(line);
+                                md.push('\n');
+                            }
                         }
                         md.push('\n');
                     }
                 }
-                // Header/Footer - smaller text
+                // Header/Footer - skip
                 _ if element.element_type.is_header() || element.element_type.is_footer() => {
-                    if let Some(text) = &element.text {
-                        md.push_str("<small>");
-                        md.push_str(text);
-                        md.push_str("</small>\n\n");
-                    }
+                    continue;
                 }
-                // Default text elements
+                // Default text
                 _ => {
                     if let Some(text) = &element.text {
-                        // Convert double newlines to paragraph breaks
-                        let formatted = text.replace("\n\n", "\n").replace('\n', "\n\n");
+                        let formatted = format_text_block(text);
                         md.push_str(&formatted);
                         md.push_str("\n\n");
                     }
                 }
             }
         }
-        md.trim().to_string()
+
+        tracing::debug!("Extracted {} images to {:?}", img_counter, imgs_dir);
+        Ok(md.trim().to_string())
+    }
+
+    /// Calculates the page continuation flags for this result.
+    ///
+    /// This follows PaddleX's `get_seg_flag` logic to determine whether
+    /// the page starts/ends in the middle of a semantic paragraph.
+    ///
+    /// Returns (paragraph_start, paragraph_end) where:
+    /// - `paragraph_start`: false means page continues from previous
+    /// - `paragraph_end`: false means content continues to next page
+    pub fn calculate_continuation_flags(&self) -> PageContinuationFlags {
+        let elements = &self.layout_elements;
+
+        if elements.is_empty() {
+            return PageContinuationFlags::new(true, true);
+        }
+
+        // Estimate page width from rectified image or element bboxes
+        let page_width = self
+            .rectified_img
+            .as_ref()
+            .map(|img| img.width() as f32)
+            .or_else(|| {
+                elements
+                    .iter()
+                    .map(|e| e.bbox.x_max())
+                    .fold(None, |acc, x| Some(acc.map_or(x, |max: f32| max.max(x))))
+            });
+
+        // Filter to only text elements for continuation analysis
+        let text_elements: Vec<_> = elements
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.element_type,
+                    LayoutElementType::Text
+                        | LayoutElementType::DocTitle
+                        | LayoutElementType::ParagraphTitle
+                        | LayoutElementType::Abstract
+                        | LayoutElementType::Reference
+                )
+            })
+            .collect();
+
+        if text_elements.is_empty() {
+            return PageContinuationFlags::new(true, true);
+        }
+
+        // Calculate paragraph start flag
+        let first = &text_elements[0];
+        let paragraph_start = !is_text_continuation_start(first, page_width);
+
+        // Calculate paragraph end flag
+        let last = &text_elements[text_elements.len() - 1];
+        let paragraph_end = !is_text_continuation_end(last, page_width);
+
+        PageContinuationFlags::new(paragraph_start, paragraph_end)
     }
 
     /// Converts the result to an HTML string.
@@ -417,16 +882,18 @@ impl StructureResult {
                     }
                     html.push_str("</h2>\n");
                 }
-                // Table - embed HTML structure
+                // Table - embed HTML structure with simplified markup
                 LayoutElementType::Table => {
                     if let Some(table) =
                         self.tables.iter().find(|t| t.bbox.iou(&element.bbox) > 0.5)
                     {
                         if let Some(table_html) = &table.html_structure {
-                            // Add border styling
-                            let styled = table_html.replace(
+                            // Simplify table HTML (remove html/body wrappers) and add border styling
+                            let simplified = simplify_table_html(table_html);
+                            let styled = simplified.replacen(
                                 "<table>",
                                 "<table border=\"1\" style=\"border-collapse: collapse;\">",
+                                1,
                             );
                             html.push_str(&styled);
                             html.push('\n');
@@ -568,10 +1035,27 @@ impl StructureResult {
         }
 
         let input_path = Path::new(self.input_path.as_ref());
-        let stem = input_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("result");
+        // Extract file stem, handling PDF page suffix (e.g., "file.pdf#3" -> "file_003")
+        let stem = if let Some(path_str) = input_path.to_str() {
+            if let Some(hash_idx) = path_str.rfind('#') {
+                // This is a PDF page reference like "file.pdf#3"
+                let base = &path_str[..hash_idx];
+                let page_num = &path_str[hash_idx + 1..];
+                let base_stem = Path::new(base)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("result");
+                format!("{}_{}", base_stem, page_num)
+            } else {
+                input_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("result")
+                    .to_string()
+            }
+        } else {
+            "result".to_string()
+        };
 
         // Save JSON
         if to_json {
@@ -580,16 +1064,767 @@ impl StructureResult {
             serde_json::to_writer_pretty(json_file, self)?;
         }
 
-        // Save Markdown
+        // Save Markdown (with extracted images)
         if to_markdown {
             let md_path = output_dir.join(format!("{}.md", stem));
-            std::fs::write(md_path, self.to_markdown())?;
+            let md_content = self.to_markdown_with_images(output_dir)?;
+            std::fs::write(md_path, md_content)?;
         }
 
         // Save HTML
         if to_html {
             let html_path = output_dir.join(format!("{}.html", stem));
             std::fs::write(html_path, self.to_html())?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Checks if a text element appears to be a continuation from a previous element.
+///
+/// Following PaddleX's logic: if the text starts near the left edge of the page
+/// (within 10 pixels), it's likely the start of a new paragraph rather than a continuation.
+fn is_text_continuation_start(element: &LayoutElement, page_width: Option<f32>) -> bool {
+    // Get the left coordinate (x_min)
+    let left = element.bbox.x_min();
+
+    // Use dynamic threshold based on page width, or default
+    let threshold = page_width.map_or(50.0, |w| w * 0.05); // 5% of page width
+    left > threshold
+}
+
+/// Checks if a text element appears to continue to a next element.
+///
+/// Following PaddleX's logic: if the text ends near the right edge of the page
+/// (within margin of the expected content width), it's likely continuing.
+fn is_text_continuation_end(element: &LayoutElement, page_width: Option<f32>) -> bool {
+    let right = element.bbox.x_max();
+
+    // If we have page width info, check if element extends close to the right edge
+    if let Some(width) = page_width {
+        // If text ends within 10% of right margin, it's likely continuing to next page
+        let right_margin = width * 0.1;
+        return right > (width - right_margin);
+    }
+
+    // Conservative default: assume paragraphs end
+    false
+}
+
+/// Concatenates markdown content from multiple pages into a single document.
+///
+/// This follows PaddleX's `concatenate_markdown_pages` logic to intelligently
+/// merge pages while preserving paragraph continuity.
+///
+/// # Arguments
+///
+/// * `results` - Slice of structure results from multiple pages (in order)
+///
+/// # Returns
+///
+/// A single markdown string with all pages properly concatenated
+pub fn concatenate_markdown_pages(results: &[StructureResult]) -> String {
+    if results.is_empty() {
+        return String::new();
+    }
+
+    if results.len() == 1 {
+        return results[0].to_markdown();
+    }
+
+    let mut markdown = String::new();
+    let mut prev_page_end_flag = true; // First page is treated as starting fresh
+
+    for result in results.iter() {
+        let flags = result
+            .page_continuation_flags
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| result.calculate_continuation_flags());
+
+        let page_markdown = result.to_markdown();
+
+        // Skip empty pages
+        if page_markdown.trim().is_empty() {
+            prev_page_end_flag = flags.paragraph_end;
+            continue;
+        }
+
+        let page_first_continues = !flags.paragraph_start;
+        let _page_last_continues = !flags.paragraph_end;
+
+        // Determine how to join this page
+        if page_first_continues && !prev_page_end_flag {
+            // Both pages are in the middle of the same paragraph
+            // Check for Chinese characters to decide spacing
+            let last_char = markdown.chars().last();
+            let first_char = page_markdown.chars().next();
+
+            let last_is_chinese = last_char.is_some_and(is_chinese_char);
+            let first_is_chinese = first_char.is_some_and(is_chinese_char);
+
+            if !last_is_chinese && !first_is_chinese {
+                // Non-Chinese text: add space
+                markdown.push(' ');
+                markdown.push_str(page_markdown.trim_start());
+            } else {
+                // Chinese or mixed: direct concatenation
+                markdown.push_str(page_markdown.trim_start());
+            }
+        } else {
+            // New paragraph or section
+            if !markdown.is_empty() {
+                markdown.push_str("\n\n");
+            }
+            markdown.push_str(&page_markdown);
+        }
+
+        prev_page_end_flag = flags.paragraph_end;
+    }
+
+    markdown.trim().to_string()
+}
+
+/// Concatenates markdown content from multiple pages with image extraction.
+///
+/// This follows PaddleX's `concatenate_markdown_pages` logic to intelligently
+/// merge pages while preserving paragraph continuity, and also extracts images
+/// from image/chart regions.
+///
+/// # Arguments
+///
+/// * `results` - Slice of structure results from multiple pages (in order)
+/// * `output_dir` - Directory to save extracted images
+///
+/// # Returns
+///
+/// A single markdown string with all pages properly concatenated and images extracted
+pub fn concatenate_markdown_pages_with_images(
+    results: &[StructureResult],
+    output_dir: impl AsRef<Path>,
+) -> std::io::Result<String> {
+    let output_dir = output_dir.as_ref();
+
+    if results.is_empty() {
+        return Ok(String::new());
+    }
+
+    if results.len() == 1 {
+        return results[0].to_markdown_with_images(output_dir);
+    }
+
+    let mut markdown = String::new();
+    let mut prev_page_end_flag = true;
+
+    for result in results.iter() {
+        let flags = result
+            .page_continuation_flags
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| result.calculate_continuation_flags());
+
+        let page_markdown = result.to_markdown_with_images(output_dir)?;
+
+        if page_markdown.trim().is_empty() {
+            prev_page_end_flag = flags.paragraph_end;
+            continue;
+        }
+
+        let page_first_continues = !flags.paragraph_start;
+
+        if page_first_continues && !prev_page_end_flag {
+            let last_char = markdown.chars().last();
+            let first_char = page_markdown.chars().next();
+
+            let last_is_chinese = last_char.is_some_and(is_chinese_char);
+            let first_is_chinese = first_char.is_some_and(is_chinese_char);
+
+            if !last_is_chinese && !first_is_chinese {
+                markdown.push(' ');
+                markdown.push_str(page_markdown.trim_start());
+            } else {
+                markdown.push_str(page_markdown.trim_start());
+            }
+        } else {
+            if !markdown.is_empty() {
+                markdown.push_str("\n\n");
+            }
+            markdown.push_str(&page_markdown);
+        }
+
+        prev_page_end_flag = flags.paragraph_end;
+    }
+
+    Ok(markdown.trim().to_string())
+}
+
+/// Cleans OCR text content by removing common artifacts.
+///
+/// This function removes PDF line-break hyphens and fixes spacing issues
+/// in OCR text content. It should only be applied to raw OCR text, not to
+/// formatted markdown or HTML.
+///
+/// Following PaddleX's approach:
+/// 1. Remove hyphenation artifacts: `-\n` -> `` (join words)
+/// 2. Convert newlines to spaces: `\n` -> ` `
+fn clean_ocr_text(text: &str) -> String {
+    // First remove hyphenation (word breaks), then convert newlines to spaces
+    text.replace("-\n", "").replace('\n', " ")
+}
+
+/// Formats text blocks following PaddleX's text handling:
+/// 1. First remove hyphenation: `-\n` -> `` (join broken words)
+/// 2. Then: `.replace("\n\n", "\n").replace("\n", "\n\n")`
+///
+/// This converts OCR line breaks into proper paragraph breaks.
+fn format_text_block(text: &str) -> String {
+    // First, remove hyphenation artifacts (word breaks at line ends)
+    let dehyphenated = text.replace("-\n", "");
+    // Collapse double newlines to single (undo paragraph breaks)
+    let step1 = dehyphenated.replace("\n\n", "\n");
+    // Then, convert single newlines to paragraph breaks
+    step1.replace('\n', "\n\n")
+}
+
+/// Formats content blocks (table of contents) following PaddleX:
+/// `.replace("-\n", "  \n").replace("\n", "  \n")`
+///
+/// This uses markdown's soft line break (two spaces at end of line).
+fn format_content_block(text: &str) -> String {
+    // Handle PDF hyphen line breaks first
+    let step1 = text.replace("-\n", "  \n");
+    // Convert newlines to soft breaks
+    step1.replace('\n', "  \n")
+}
+
+/// Formats reference blocks, following PaddleX's `format_first_line_func`:
+/// - First remove hyphenation: `-\n` -> ``
+/// - Detects "References" or "参考文献" keyword
+/// - Adds markdown heading if found
+fn format_reference_block(text: &str) -> String {
+    // First remove hyphenation
+    let dehyphenated = text.replace("-\n", "");
+    let lines: Vec<&str> = dehyphenated.lines().collect();
+
+    // Check first non-empty line for reference keywords
+    let mut result = String::new();
+    let mut added_heading = false;
+
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Check if this is a reference heading line
+        if !added_heading && (trimmed.contains("References") || trimmed.contains("参考文献")) {
+            result.push_str("## **References**\n\n");
+            added_heading = true;
+            // Skip the heading line itself, continue with content
+            continue;
+        }
+
+        // Add remaining lines
+        if i > 0 || result.is_empty() {
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(trimmed);
+        }
+    }
+
+    if result.is_empty() {
+        dehyphenated
+    } else {
+        result
+    }
+}
+
+/// Formats vision footnote blocks following PaddleX:
+/// 1. First remove hyphenation: `-\n` -> ``
+/// 2. Then: `.replace("\n\n", "\n").replace("\n", "\n\n")`
+fn format_vision_footnote_block(text: &str) -> String {
+    let dehyphenated = text.replace("-\n", "");
+    let step1 = dehyphenated.replace("\n\n", "\n");
+    step1.replace('\n', "\n\n")
+}
+
+/// Checks if a character is a Chinese character.
+///
+/// Used to determine spacing rules when concatenating pages.
+fn is_chinese_char(c: char) -> bool {
+    match c {
+        '\u{4E00}'..='\u{9FFF}' | // CJK Unified Ideographs
+        '\u{3400}'..='\u{4DBF}' | // CJK Unified Ideographs Extension A
+        '\u{20000}'..='\u{2A6DF}' | // CJK Unified Ideographs Extension B
+        '\u{2A700}'..='\u{2B73F}' | // CJK Unified Ideographs Extension C
+        '\u{2B740}'..='\u{2B81F}' | // CJK Unified Ideographs Extension D
+        '\u{2B820}'..='\u{2CEAF}' | // CJK Unified Ideographs Extension E
+        '\u{2CEB0}'..='\u{2EBEF}' => // CJK Unified Ideographs Extension F
+            true,
+        _ => false,
+    }
+}
+
+/// Checks if a character is a lowercase letter.
+fn is_lowercase(c: char) -> bool {
+    c.is_ascii_lowercase()
+}
+
+/// Checks if a character is an uppercase letter.
+fn is_uppercase(c: char) -> bool {
+    c.is_ascii_uppercase()
+}
+
+/// Checks if a character is a digit.
+fn is_digit(c: char) -> bool {
+    c.is_ascii_digit()
+}
+
+/// Removes PDF hyphenation artifacts from text.
+///
+/// PDFs often break words at line ends with hyphens like "frame-work",
+/// "com-pared", etc. This function detects and removes these hyphens
+/// when they appear to be line-break hyphens rather than intentional hyphens.
+///
+/// Rules:
+/// 1. Hyphen followed by lowercase letter is likely a hyphenation artifact
+/// 2. Hyphen followed by space and lowercase letter is also artifact
+/// 3. Hyphen followed by newline and lowercase letter is artifact
+/// 4. Preserve intentional hyphens (compound words, hyphenated phrases)
+/// 5. Preserve hyphens in URLs and technical patterns
+fn dehyphenate(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    // Helper to check if we're in a URL-like pattern
+    let is_url_context = |pos: usize| -> bool {
+        // Look back for "http", "https", "www", "://"
+        let lookback: String = chars[pos.saturating_sub(10)..pos].iter().collect();
+        lookback.contains("http")
+            || lookback.contains("www")
+            || lookback.contains("://")
+            || lookback.contains(".com")
+            || lookback.contains(".org")
+    };
+
+    while i < len {
+        if chars[i] == '-' {
+            // Skip dehyphenation for URL contexts
+            if is_url_context(i) {
+                result.push('-');
+                i += 1;
+                continue;
+            }
+
+            // Check if this is a hyphenation artifact
+            let is_artifact = if i + 1 < len {
+                let next = chars[i + 1];
+                if next == '\n' {
+                    // Hyphen followed by newline - check what's after the newline
+                    if i + 2 < len {
+                        let after_newline = chars[i + 2];
+                        is_lowercase(after_newline)
+                    } else {
+                        false
+                    }
+                } else if is_lowercase(next) {
+                    // Hyphen followed directly by lowercase letter (e.g., "com-puted")
+                    // But check if preceded by lowercase to avoid removing intentional hyphens
+                    // like in "RT-DETR" or "one-to-many"
+                    i > 0 && is_lowercase(chars[i - 1])
+                } else if next.is_whitespace() && i + 2 < len {
+                    let after_space = chars[i + 2];
+                    // Hyphen + space + lowercase letter (e.g., "com- puted")
+                    is_lowercase(after_space) && i > 0 && is_lowercase(chars[i - 1])
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if is_artifact {
+                // Skip the hyphen
+                // Also skip following newline/space if present
+                if i + 1 < len {
+                    let next = chars[i + 1];
+                    if next == '\n' || next.is_whitespace() {
+                        i += 1;
+                    }
+                }
+            } else {
+                result.push('-');
+            }
+        } else {
+            result.push(chars[i]);
+        }
+        i += 1;
+    }
+
+    result
+}
+
+/// Fixes missing spaces between merged words.
+///
+/// OCR and PDF extraction can result in merged words like
+/// "enhancetheencoder'sfeaturerepresentation" or "48.1%AP".
+/// This function detects and fixes common patterns.
+fn fix_merged_words(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let current = chars[i];
+
+        if i > 0 {
+            let prev = chars[i - 1];
+
+            // Detect missing space between lowercase and lowercase (after apostrophe or consonant)
+            // e.g., "encoder'sfeature" -> "encoder's feature"
+            if is_lowercase(prev) && is_lowercase(current) {
+                // Only add space if previous was apostrophe or word boundary context
+                // This is a heuristic - in practice you'd want more sophisticated NLP
+                if i > 1 && chars[i - 2] == '\'' {
+                    result.push(' ');
+                }
+                // Also detect lowercase followed by uppercase
+                // e.g., "RT-DETRis" -> "RT-DETR is"
+            } else if is_lowercase(prev) && is_uppercase(current) {
+                // Check if the uppercase starts a new word (not an acronym)
+                // If next char is lowercase, it's likely a new word
+                if i + 1 < chars.len() && is_lowercase(chars[i + 1]) {
+                    result.push(' ');
+                }
+            }
+            // Detect digit/percent followed by letter, or letter-digit-letter pattern
+            // e.g., "48.1%AP" -> "48.1% AP"
+            // e.g., "RT-DETRv3" shouldn't be split, but "model 100instances" -> "model 100 instances"
+            else if ((is_digit(prev) || prev == '%') && is_uppercase(current))
+                || (is_letter(prev)
+                    && is_digit(current)
+                    && i + 1 < chars.len()
+                    && is_letter(chars[i + 1]))
+            {
+                result.push(' ');
+            }
+        }
+
+        result.push(current);
+        i += 1;
+    }
+
+    result
+}
+
+/// Checks if a character is a letter.
+fn is_letter(c: char) -> bool {
+    is_lowercase(c) || is_uppercase(c)
+}
+
+/// Simplifies table HTML by removing wrapper tags, following PaddleX's `simplify_table_func`.
+///
+/// This removes `<html>`, `</html>`, `<body>`, and `</body>` tags from table HTML
+/// to produce cleaner markdown output.
+fn simplify_table_html(html: &str) -> String {
+    html.replace("<html>", "")
+        .replace("</html>", "")
+        .replace("<body>", "")
+        .replace("</body>", "")
+}
+
+/// Post-processes text content to fix common OCR/PDF artifacts.
+///
+/// This applies multiple cleanup steps:
+/// 1. Dehyphenation - removes line-break hyphens
+/// 2. Word merging fixes - adds missing spaces
+/// 3. Spacing normalization - fixes multiple spaces
+pub fn postprocess_text(text: &str) -> String {
+    let text = dehyphenate(text);
+    let text = fix_merged_words(&text);
+
+    // Normalize whitespace (collapse multiple spaces, fix spacing after punctuation)
+    let mut result = String::new();
+    let mut in_space = false;
+
+    for c in text.chars() {
+        if c.is_whitespace() {
+            if !in_space && !result.is_empty() {
+                result.push(' ');
+                in_space = true;
+            }
+        } else {
+            // Fix missing space after period (when followed by letter)
+            if c == '.' && !result.is_empty() {
+                let last = result.chars().last().unwrap();
+                if is_letter(last) || is_digit(last) {
+                    result.push('.');
+                    in_space = true;
+                    continue;
+                }
+            }
+            // Fix spacing after punctuation
+            if in_space && matches!(c, '.' | ',' | '!' | '?' | ';' | ':' | ')' | ']' | '}') {
+                result.pop(); // Remove the space before punctuation
+                result.push(c);
+                continue;
+            }
+            result.push(c);
+            in_space = false;
+        }
+    }
+
+    result
+}
+
+/// Removes duplicate section headers from concatenated markdown.
+///
+/// When concatenating pages, section headers like "**Abstract**" or
+/// "**References**" may appear multiple times. This function deduplicates
+/// them while preserving the first occurrence.
+fn deduplicate_sections(markdown: &str) -> String {
+    let mut result = String::new();
+    let mut seen_sections: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+
+        // Check for common section header patterns
+        let is_section_header = trimmed.starts_with("**")
+            && trimmed.ends_with("**")
+            && trimmed.len() > 4
+            && !trimmed.contains(' ');
+
+        let section_name = if is_section_header {
+            trimmed[2..trimmed.len() - 2].to_string()
+        } else {
+            String::new()
+        };
+
+        if is_section_header {
+            if seen_sections.contains(&section_name) {
+                // Skip duplicate section header
+                continue;
+            }
+            seen_sections.insert(section_name);
+        }
+
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(line);
+    }
+
+    result
+}
+
+/// Checks if two bounding boxes are on the same line (have significant vertical overlap).
+///
+/// Two boxes are considered on the same line if their vertical overlap is greater than
+/// 50% of the smaller box's height.
+fn is_same_line(bbox1: &BoundingBox, bbox2: &BoundingBox) -> bool {
+    let y1_min = bbox1.y_min();
+    let y1_max = bbox1.y_max();
+    let y2_min = bbox2.y_min();
+    let y2_max = bbox2.y_max();
+
+    // Calculate vertical overlap
+    let overlap_start = y1_min.max(y2_min);
+    let overlap_end = y1_max.min(y2_max);
+    let overlap = (overlap_end - overlap_start).max(0.0);
+
+    // Calculate minimum height
+    let height1 = y1_max - y1_min;
+    let height2 = y2_max - y2_min;
+    let min_height = height1.min(height2);
+
+    // Consider same line if overlap > 50% of min height
+    min_height > 0.0 && overlap / min_height > 0.5
+}
+
+/// Filters empty formula blocks from markdown.
+///
+/// Formula blocks with no LaTeX content like `$$\n$$` are removed.
+fn filter_empty_formulas(markdown: &str) -> String {
+    let mut result = String::new();
+    let lines: Vec<&str> = markdown.lines().collect();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let line = lines[i];
+
+        // Check for empty formula block pattern
+        if line.trim() == "$$" {
+            // Check if next line is also $$ (empty formula)
+            if i + 1 < lines.len() && lines[i + 1].trim() == "$$" {
+                // Skip both lines
+                i += 2;
+                // Also skip the blank line after
+                if i < lines.len() && lines[i].trim().is_empty() {
+                    i += 1;
+                }
+                continue;
+            }
+            // Check if the next non-empty line contains actual content
+            let mut j = i + 1;
+            let has_content = if j < lines.len() {
+                let mut found = false;
+                while j < lines.len() {
+                    if lines[j].trim() == "$$" {
+                        break;
+                    }
+                    if !lines[j].trim().is_empty() {
+                        found = true;
+                        break;
+                    }
+                    j += 1;
+                }
+                found
+            } else {
+                false
+            };
+
+            if !has_content {
+                // Skip to closing $$
+                while i < lines.len() && lines[i].trim() != "$$" {
+                    i += 1;
+                }
+                if i < lines.len() {
+                    i += 1; // Skip closing $$
+                }
+                continue;
+            }
+        }
+
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(line);
+        i += 1;
+    }
+
+    result
+}
+
+/// Applies all post-processing steps to concatenated markdown.
+///
+/// This is the main entry point for cleaning up concatenated markdown output.
+pub fn postprocess_markdown(markdown: &str) -> String {
+    let markdown = filter_empty_formulas(markdown);
+    let markdown = deduplicate_sections(&markdown);
+
+    // Apply text post-processing line by line for text content
+    let mut result = String::new();
+    let mut in_code_block = false;
+    let mut in_formula = false;
+
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+
+        // Detect code blocks
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+
+        // Detect formula blocks
+        if trimmed == "$$" {
+            in_formula = !in_formula;
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+
+        // Skip processing inside code/formula blocks
+        if in_code_block || in_formula {
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+
+        // Process text content (skip headers, lists, etc.)
+        if trimmed.starts_with('#')
+            || trimmed.starts_with('*')
+            || trimmed.starts_with('>')
+            || trimmed.starts_with('|')
+            || trimmed.starts_with('-')
+            || trimmed.starts_with('+')
+        {
+            result.push_str(line);
+        } else {
+            result.push_str(&postprocess_text(line));
+        }
+        result.push('\n');
+    }
+
+    result
+}
+
+/// Extension trait for convenient multi-page processing.
+pub trait StructureResultExt {
+    /// Converts multiple results to a single concatenated markdown.
+    fn to_concatenated_markdown(results: &[Self]) -> String
+    where
+        Self: Sized;
+
+    /// Saves multiple results with concatenated markdown.
+    fn save_multi_page_results(
+        results: &[Self],
+        output_dir: impl AsRef<std::path::Path>,
+        base_name: &str,
+        to_json: bool,
+        to_markdown: bool,
+        to_html: bool,
+    ) -> std::io::Result<()>
+    where
+        Self: Sized;
+}
+
+impl StructureResultExt for StructureResult {
+    fn to_concatenated_markdown(results: &[Self]) -> String {
+        concatenate_markdown_pages(results)
+    }
+
+    fn save_multi_page_results(
+        results: &[Self],
+        output_dir: impl AsRef<std::path::Path>,
+        base_name: &str,
+        to_json: bool,
+        to_markdown: bool,
+        to_html: bool,
+    ) -> std::io::Result<()>
+    where
+        Self: Sized,
+    {
+        let output_dir = output_dir.as_ref();
+        if !output_dir.exists() {
+            std::fs::create_dir_all(output_dir)?;
+        }
+
+        // Save individual page results
+        for (idx, result) in results.iter().enumerate() {
+            let page_dir = output_dir.join(format!("page_{:03}", idx));
+            std::fs::create_dir_all(&page_dir)?;
+            result.save_results(&page_dir, to_json, to_markdown, to_html)?;
+        }
+
+        // Save concatenated markdown
+        if to_markdown {
+            let concat_md_path = output_dir.join(format!("{}.md", base_name));
+            std::fs::write(concat_md_path, Self::to_concatenated_markdown(results))?;
+        }
+
+        // Save concatenated JSON (array of results)
+        if to_json {
+            let concat_json_path = output_dir.join(format!("{}.json", base_name));
+            let json_file = std::fs::File::create(concat_json_path)?;
+            serde_json::to_writer_pretty(json_file, &results)?;
         }
 
         Ok(())

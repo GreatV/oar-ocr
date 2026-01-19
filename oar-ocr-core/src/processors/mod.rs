@@ -31,6 +31,7 @@ mod normalization;
 pub mod resize_detection;
 pub mod resize_recognition;
 mod sorting;
+pub mod table_ocr_split;
 pub mod table_structure_decode;
 pub mod types;
 pub mod unimernet_preprocess;
@@ -55,6 +56,10 @@ pub use sorting::{
     SortDirection, SortableRegion, assign_elements_to_regions, calculate_iou,
     calculate_overlap_ratio, sort_boxes_xycut, sort_by_xycut, sort_elements_with_regions,
     sort_poly_boxes, sort_quad_boxes, sort_regions, sort_with_region_hierarchy,
+};
+pub use table_ocr_split::{
+    CrossCellDetection, SplitConfig, SplitOcrResult, SplitSegment, create_expanded_ocr_for_table,
+    detect_cross_cell_ocr_boxes, split_ocr_box_at_cell_boundaries, split_text_by_ratio,
 };
 pub use table_structure_decode::{
     CellGridInfo, TableStructureDecode, TableStructureDecodeOutput, parse_cell_grid_info,

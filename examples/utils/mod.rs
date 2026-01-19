@@ -1,6 +1,7 @@
 //! Common utilities for examples.
 
 pub mod device_config;
+pub mod pdf;
 #[allow(dead_code)]
 pub mod visualization;
 

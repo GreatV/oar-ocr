@@ -141,16 +141,18 @@
 mod utils;
 
 use clap::Parser;
-use oar_ocr::domain::structure::TableType;
+use image::RgbImage;
+use oar_ocr::domain::structure::{TableType, concatenate_markdown_pages_with_images};
 use oar_ocr::domain::tasks::{
     FormulaRecognitionConfig, LayoutDetectionConfig, TextDetectionConfig, TextRecognitionConfig,
 };
 use oar_ocr::oarocr::OARStructureBuilder;
 use oar_ocr::processors::LimitType;
-use oar_ocr::utils::load_image;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tracing::{error, info, warn};
 use utils::device_config::parse_device_config;
+use utils::pdf::{PdfDocument, is_pdf_file};
 
 /// Command-line arguments for the structure analysis example
 #[derive(Parser)]
@@ -419,22 +421,89 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.textline_orientation_model.as_ref(),
     )?;
 
-    // Filter input images that exist
-    let existing_images: Vec<PathBuf> = args
-        .images
-        .iter()
-        .filter(|path| {
-            let exists = path.exists();
-            if !exists {
-                error!("Image not found: {}", path.display());
-            }
-            exists
-        })
-        .cloned()
-        .collect();
+    /// Unified input source for processing
+    enum InputSource {
+        ImageFile(PathBuf),
+        PdfPage {
+            pdf_path: PathBuf,
+            page_number: usize,
+            image: Arc<RgbImage>,
+        },
+    }
 
-    if existing_images.is_empty() {
-        return Err("No valid images provided".into());
+    impl InputSource {
+        fn path(&self) -> String {
+            match self {
+                Self::ImageFile(p) => p.to_string_lossy().to_string(),
+                Self::PdfPage {
+                    pdf_path,
+                    page_number,
+                    ..
+                } => {
+                    format!("{}#{}", pdf_path.to_string_lossy(), page_number)
+                }
+            }
+        }
+
+        fn into_image(self) -> Result<RgbImage, Box<dyn std::error::Error>> {
+            match self {
+                Self::ImageFile(p) => oar_ocr::utils::load_image(&p).map_err(|e| e.into()),
+                Self::PdfPage { image, .. } => {
+                    let arc_img: Arc<RgbImage> = image;
+                    Ok((*arc_img).clone())
+                }
+            }
+        }
+    }
+
+    // Process input files, expanding PDF pages
+    let mut input_sources: Vec<InputSource> = Vec::new();
+
+    for input_path in &args.images {
+        if !input_path.exists() {
+            error!("Input not found: {}", input_path.display());
+            continue;
+        }
+
+        if is_pdf_file(input_path) {
+            info!("Processing PDF file: {}", input_path.display());
+
+            let pdf_doc = match PdfDocument::open(input_path) {
+                Ok(doc) => doc,
+                Err(e) => {
+                    error!("Failed to open PDF {}: {}", input_path.display(), e);
+                    continue;
+                }
+            };
+
+            let page_count = pdf_doc.page_count();
+            info!("PDF has {} page(s)", page_count);
+
+            for page_num in 1..=page_count {
+                match pdf_doc.render_page(page_num) {
+                    Ok(rendered) => {
+                        info!(
+                            "  Page {} rendered: {}x{}",
+                            page_num, rendered.width, rendered.height
+                        );
+                        input_sources.push(InputSource::PdfPage {
+                            pdf_path: input_path.clone(),
+                            page_number: page_num,
+                            image: Arc::new(rendered.image),
+                        });
+                    }
+                    Err(e) => {
+                        error!("  Failed to render page {}: {}", page_num, e);
+                    }
+                }
+            }
+        } else {
+            input_sources.push(InputSource::ImageFile(input_path.clone()));
+        }
+    }
+
+    if input_sources.is_empty() {
+        return Err("No valid inputs provided".into());
     }
 
     // Validate table recognition: structure models require dictionary
@@ -589,15 +658,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let analyzer = builder.build()?;
 
-    // Process each image individually
-    for (idx, image_path) in existing_images.iter().enumerate() {
-        info!("\nProcessing image {}: {}", idx + 1, image_path.display());
+    // Collect all results for potential concatenation
+    let mut all_results: Vec<oar_ocr::domain::structure::StructureResult> = Vec::new();
 
-        // Load image using the utility function
-        let image = match load_image(image_path) {
+    // Process each input source
+    for (idx, source) in std::mem::take(&mut input_sources).into_iter().enumerate() {
+        let source_path = source.path();
+        let source_stem = {
+            match &source {
+                InputSource::ImageFile(p) => p
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("result")
+                    .to_string(),
+                InputSource::PdfPage {
+                    pdf_path,
+                    page_number,
+                    ..
+                } => {
+                    format!(
+                        "{}_page_{:03}",
+                        pdf_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("pdf"),
+                        page_number
+                    )
+                }
+            }
+        };
+        info!("\nProcessing input {}: {}", idx + 1, source_path);
+
+        let image = match source.into_image() {
             Ok(img) => img,
             Err(err) => {
-                error!("Failed to load {}: {}", image_path.display(), err);
+                error!("Failed to load image: {}", err);
                 continue;
             }
         };
@@ -605,37 +700,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut result = match analyzer.predict_image(image) {
             Ok(res) => res,
             Err(err) => {
-                error!("Failed to analyze {}: {}", image_path.display(), err);
+                error!("Failed to analyze {}: {}", source_path, err);
                 continue;
             }
         };
-        result.input_path = std::sync::Arc::from(image_path.to_string_lossy().as_ref());
+        result.input_path = std::sync::Arc::from(source_path.clone());
 
-        // Save results to output directory
+        // Always collect results for potential concatenation
+        all_results.push(result.clone());
+
+        // Save individual page results (JSON only, markdown will be concatenated)
         if let Err(err) = result.save_results(
             &args.output_dir,
             args.to_json,
-            args.to_markdown,
+            false, // Never save individual markdown files
             args.to_html,
         ) {
-            error!(
-                "Failed to save results for {}: {}",
-                image_path.display(),
-                err
-            );
+            error!("Failed to save results for {}: {}", source_path, err);
         }
 
         // Save visualization if --vis is enabled
         if args.vis {
-            let stem = image_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("result");
-            let ext = image_path
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("png");
-            let vis_path = args.output_dir.join(format!("{}.{}", stem, ext));
+            let vis_path = args.output_dir.join(format!("{}.png", source_stem));
 
             if let Err(err) =
                 utils::visualization::visualize_structure_results(&result, &vis_path, None)
@@ -753,6 +839,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         } else {
             info!("  OCR regions: not enabled");
+        }
+    }
+
+    // Always concatenate and save merged results
+    if !all_results.is_empty() {
+        // Detect if processing a multi-page PDF
+        let is_multi_page_pdf = input_sources.len() > 1
+            && input_sources
+                .iter()
+                .any(|s| matches!(s, InputSource::PdfPage { .. }));
+
+        if is_multi_page_pdf {
+            info!("\nConcatenating {} pages", all_results.len());
+        }
+
+        // Determine base name for output - use original filename (stem) without extension
+        let base_name = if input_sources.len() == 1 {
+            match &input_sources[0] {
+                InputSource::ImageFile(p) => p
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("output")
+                    .to_string(),
+                InputSource::PdfPage { pdf_path, .. } => pdf_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("output")
+                    .to_string(),
+            }
+        } else {
+            // Empty input sources - use default name
+            "output".to_string()
+        };
+
+        // Save concatenated markdown with extracted images
+        if args.to_markdown {
+            match concatenate_markdown_pages_with_images(&all_results, &args.output_dir) {
+                Ok(concat_md) => {
+                    let md_path = args.output_dir.join(format!("{}.md", base_name));
+                    if let Err(err) = std::fs::write(&md_path, concat_md) {
+                        error!("Failed to save markdown: {}", err);
+                    } else {
+                        info!("Markdown saved to: {}", md_path.display());
+                    }
+                }
+                Err(err) => {
+                    error!("Failed to generate markdown with images: {}", err);
+                }
+            }
+        }
+
+        // Save concatenated JSON
+        if args.to_json {
+            let json_path = args.output_dir.join(format!("{}.json", base_name));
+            let json_file = match std::fs::File::create(&json_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    error!("Failed to create JSON file: {}", e);
+                    return Ok(());
+                }
+            };
+            if let Err(e) = serde_json::to_writer_pretty(json_file, &all_results) {
+                error!("Failed to save JSON: {}", e);
+            } else {
+                info!("JSON saved to: {}", json_path.display());
+            }
+        }
+
+        if is_multi_page_pdf {
+            info!("=== Multi-page PDF processing complete ===");
         }
     }
 
