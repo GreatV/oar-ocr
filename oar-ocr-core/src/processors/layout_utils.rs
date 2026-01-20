@@ -454,7 +454,7 @@ pub fn combine_rectangles_kmeans(rectangles: &[BoundingBox], target_n: usize) ->
         .collect();
 
     // Initialize cluster centers using K-Means++ algorithm
-    let centers = kmeans_plusplus_init(&points, target_n);
+    let centers = kmeans_maxdist_init(&points, target_n);
     let mut centers = centers;
     let mut labels: Vec<usize> = vec![0; num_rects];
 
@@ -540,11 +540,12 @@ pub fn combine_rectangles_kmeans(rectangles: &[BoundingBox], target_n: usize) ->
     }
 }
 
-/// K-Means++ initialization for better cluster center selection.
+/// Deterministic K-Means initialization using max-distance selection.
 ///
-/// This algorithm selects initial centers with probability proportional to the
-/// squared distance from the nearest existing center, which leads to better
-/// clustering results than random initialization.
+/// This is a simplified variant of K-Means++ that deterministically selects
+/// the point with maximum distance from existing centers, rather than using
+/// probabilistic selection. This avoids random number generation while still
+/// providing good initial cluster spread.
 ///
 /// # Arguments
 ///
@@ -554,7 +555,7 @@ pub fn combine_rectangles_kmeans(rectangles: &[BoundingBox], target_n: usize) ->
 /// # Returns
 ///
 /// Vector of k initial cluster centers.
-fn kmeans_plusplus_init(points: &[(f32, f32)], k: usize) -> Vec<(f32, f32)> {
+fn kmeans_maxdist_init(points: &[(f32, f32)], k: usize) -> Vec<(f32, f32)> {
     if points.is_empty() || k == 0 {
         return Vec::new();
     }
@@ -607,9 +608,8 @@ fn kmeans_plusplus_init(points: &[(f32, f32)], k: usize) -> Vec<(f32, f32)> {
             continue;
         }
 
-        // Select next center with probability proportional to squared distance
-        // Use deterministic selection: pick the point with maximum distance
-        // This is a simplified version that avoids random number generation
+        // Select next center deterministically: pick the point with maximum distance
+        // This is simpler than probabilistic K-Means++ but still provides good spread
         let mut max_dist = 0.0f32;
         let mut max_idx = 0;
 

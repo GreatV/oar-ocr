@@ -6,7 +6,33 @@
 
 use oar_ocr::domain::structure::{LayoutElementType, StructureResult};
 use oar_ocr::processors::BoundingBox;
+use regex::Regex;
 use std::path::Path;
+use std::sync::LazyLock;
+
+/// Title numbering pattern for detecting section numbers like 1, 1.2, 1.2.3, (1), 一、etc.
+static TITLE_NUMBERING_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?x)
+        ^\s*
+        (
+            [1-9][0-9]*(?:\.[1-9][0-9]*)*[\.、]?
+            |
+            [(（][1-9][0-9]*(?:\.[1-9][0-9]*)*[)）]
+            |
+            [一二三四五六七八九十百千万亿零壹贰叁肆伍陆柒捌玖拾][、.]?
+            |
+            [(（][一二三四五六七八九十百千万亿零壹贰叁肆伍陆柒捌玖拾]+[)）]
+            |
+            (?:I|II|III|IV|V|VI|VII|VIII|IX|X)(?:\.|\b)
+        )
+        (\s+)
+        (.*)
+        $
+    ",
+    )
+    .expect("Invalid TITLE_NUMBERING_REGEX pattern")
+});
 
 /// Exports markdown with extracted images saved to disk.
 ///
@@ -366,10 +392,6 @@ pub fn export_concatenated_markdown_with_images(
     Ok(markdown.trim().to_string())
 }
 
-// ============================================================================
-// Helper functions (replicated from lib crate)
-// ============================================================================
-
 /// Cleans OCR text content by removing common artifacts.
 fn clean_ocr_text(text: &str) -> String {
     text.replace("-\n", "").replace('\n', " ")
@@ -471,32 +493,9 @@ fn is_chinese_char(c: char) -> bool {
 
 /// Title numbering pattern for detecting section numbers.
 fn is_numbered_title(title: &str) -> (bool, usize, String) {
-    use regex::Regex;
-
-    let numbering_regex = Regex::new(
-        r"(?x)
-        ^\s*
-        (
-            [1-9][0-9]*(?:\.[1-9][0-9]*)*[\.、]?
-            |
-            [(（][1-9][0-9]*(?:\.[1-9][0-9]*)*[)）]
-            |
-            [一二三四五六七八九十百千万亿零壹贰叁肆伍陆柒捌玖拾][、.]?
-            |
-            [(（][一二三四五六七八九十百千万亿零壹贰叁肆伍陆柒捌玖拾]+[)）]
-            |
-            (?:I|II|III|IV|V|VI|VII|VIII|IX|X)(?:\.|\b)
-        )
-        (\s+)
-        (.*)
-        $
-    ",
-    )
-    .unwrap();
-
     let cleaned = title.replace("-\n", "").replace('\n', " ");
 
-    if let Some(captures) = numbering_regex.captures(&cleaned) {
+    if let Some(captures) = TITLE_NUMBERING_REGEX.captures(&cleaned) {
         let numbering = captures.get(1).map(|m| m.as_str().trim()).unwrap_or("");
         let title_content = captures.get(3).map(|m| m.as_str()).unwrap_or("");
 

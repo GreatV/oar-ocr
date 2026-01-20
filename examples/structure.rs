@@ -385,6 +385,41 @@ struct Args {
     vis: bool,
 }
 
+/// Unified input source for processing
+enum InputSource {
+    ImageFile(PathBuf),
+    PdfPage {
+        pdf_path: PathBuf,
+        page_number: usize,
+        image: Arc<RgbImage>,
+    },
+}
+
+impl InputSource {
+    fn path(&self) -> String {
+        match self {
+            Self::ImageFile(p) => p.to_string_lossy().to_string(),
+            Self::PdfPage {
+                pdf_path,
+                page_number,
+                ..
+            } => {
+                format!("{}#{}", pdf_path.to_string_lossy(), page_number)
+            }
+        }
+    }
+
+    fn into_image(self) -> Result<RgbImage, Box<dyn std::error::Error>> {
+        match self {
+            Self::ImageFile(p) => oar_ocr::utils::load_image(&p).map_err(|e| e.into()),
+            Self::PdfPage { image, .. } => {
+                // Try to unwrap the Arc to avoid cloning if we have the only reference
+                Ok(Arc::try_unwrap(image).unwrap_or_else(|arc| (*arc).clone()))
+            }
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     utils::init_tracing();
     let args = Args::parse();
@@ -420,41 +455,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "text line orientation model",
         args.textline_orientation_model.as_ref(),
     )?;
-
-    /// Unified input source for processing
-    enum InputSource {
-        ImageFile(PathBuf),
-        PdfPage {
-            pdf_path: PathBuf,
-            page_number: usize,
-            image: Arc<RgbImage>,
-        },
-    }
-
-    impl InputSource {
-        fn path(&self) -> String {
-            match self {
-                Self::ImageFile(p) => p.to_string_lossy().to_string(),
-                Self::PdfPage {
-                    pdf_path,
-                    page_number,
-                    ..
-                } => {
-                    format!("{}#{}", pdf_path.to_string_lossy(), page_number)
-                }
-            }
-        }
-
-        fn into_image(self) -> Result<RgbImage, Box<dyn std::error::Error>> {
-            match self {
-                Self::ImageFile(p) => oar_ocr::utils::load_image(&p).map_err(|e| e.into()),
-                Self::PdfPage { image, .. } => {
-                    // Try to unwrap the Arc to avoid cloning if we have the only reference
-                    Ok(Arc::try_unwrap(image).unwrap_or_else(|arc| (*arc).clone()))
-                }
-            }
-        }
-    }
 
     // Process input files, expanding PDF pages
     let mut input_sources: Vec<InputSource> = Vec::new();
@@ -888,8 +888,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let json_file = match std::fs::File::create(&json_path) {
                 Ok(f) => f,
                 Err(e) => {
-                    error!("Failed to create JSON file: {}", e);
-                    return Ok(());
+                    return Err(format!("Failed to create JSON file: {}", e).into());
                 }
             };
             if let Err(e) = serde_json::to_writer_pretty(json_file, &all_results) {
