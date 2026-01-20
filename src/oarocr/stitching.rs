@@ -20,6 +20,16 @@ use oar_ocr_core::processors::{
 };
 use std::cmp::Ordering;
 
+/// Source of an OCR region reference, distinguishing between regions that were
+/// split across cell boundaries and original regions.
+#[derive(Clone, Copy, Debug)]
+enum OcrSource {
+    /// Index into the split_regions vector (created by cross-cell splitting)
+    Split(usize),
+    /// Index into the original text_regions slice
+    Original(usize),
+}
+
 /// Labels that should be excluded from OCR text matching.
 /// These regions have their own specialized content (LaTeX, HTML, etc.)
 const EXCLUDED_FROM_OCR_LABELS: [LayoutElementType; 4] = [
@@ -338,14 +348,17 @@ impl ResultStitcher {
                 };
 
             // 2. Match OCR boxes to Cells (global OCR fallback for cells without per-cell OCR)
-            // Map: cell_index -> List of ocr_index
-            let mut cell_to_ocr: std::collections::HashMap<usize, Vec<usize>> =
+            // Map: cell_index -> List of OCR sources (split or original regions)
+            let mut cell_to_ocr: std::collections::HashMap<usize, Vec<OcrSource>> =
                 std::collections::HashMap::new();
 
             // First, add pre-assigned split regions to cell_to_ocr
             for (cell_idx, ocr_indices) in &split_cell_assignments {
                 for &ocr_idx in ocr_indices {
-                    cell_to_ocr.entry(*cell_idx).or_default().push(ocr_idx);
+                    cell_to_ocr
+                        .entry(*cell_idx)
+                        .or_default()
+                        .push(OcrSource::Split(ocr_idx));
                 }
             }
 
@@ -384,12 +397,10 @@ impl ResultStitcher {
 
                 // Assign to best cell if found
                 if let Some(cell_idx) = best_cell_idx {
-                    // Use a large index offset for original (non-split) regions
-                    // to distinguish them from split regions
                     cell_to_ocr
                         .entry(cell_idx)
                         .or_default()
-                        .push(ocr_idx + 1_000_000);
+                        .push(OcrSource::Original(ocr_idx));
                     used_indices.insert(ocr_idx);
                 }
             }
@@ -408,23 +419,16 @@ impl ResultStitcher {
                     continue;
                 }
 
-                if let Some(ocr_indices) = cell_to_ocr.get(&cell_idx) {
-                    let mut cell_text_regions: Vec<(&TextRegion, &str)> = ocr_indices
+                if let Some(ocr_sources) = cell_to_ocr.get(&cell_idx) {
+                    let mut cell_text_regions: Vec<(&TextRegion, &str)> = ocr_sources
                         .iter()
-                        .filter_map(|&idx| {
-                            if idx >= 1_000_000 {
-                                // Original (non-split) region
-                                let actual_idx = idx - 1_000_000;
-                                text_regions[actual_idx]
-                                    .text
-                                    .as_deref()
-                                    .map(|t| (&text_regions[actual_idx], t))
-                            } else {
-                                // Split region
-                                split_regions
-                                    .get(idx)
-                                    .and_then(|r| r.text.as_deref().map(|t| (r, t)))
-                            }
+                        .filter_map(|&source| match source {
+                            OcrSource::Split(idx) => split_regions
+                                .get(idx)
+                                .and_then(|r| r.text.as_deref().map(|t| (r, t))),
+                            OcrSource::Original(idx) => text_regions
+                                .get(idx)
+                                .and_then(|r| r.text.as_deref().map(|t| (r, t))),
                         })
                         .collect();
 

@@ -3,6 +3,9 @@
 #![allow(dead_code)]
 
 use std::path::Path;
+use std::sync::Arc;
+
+use hayro::Pdf;
 
 /// Error type for PDF processing.
 #[derive(Debug)]
@@ -43,7 +46,7 @@ pub struct RenderedPage {
 ///
 /// This uses the pure Rust `hayro` library for PDF rendering.
 pub struct PdfDocument {
-    data: Vec<u8>,
+    pdf: Pdf,
     page_count: usize,
 }
 
@@ -56,21 +59,12 @@ impl PdfDocument {
         }
 
         let data = std::fs::read(path)?;
-
-        // Parse PDF to get page count
-        let page_count = Self::count_pages(&data)?;
-
-        Ok(Self { data, page_count })
-    }
-
-    fn count_pages(data: &[u8]) -> Result<usize, PdfError> {
-        use hayro::Pdf;
-
-        let pdf_data = std::sync::Arc::new(data.to_vec());
+        let pdf_data = Arc::new(data);
         let pdf = Pdf::new(pdf_data)
             .map_err(|e| PdfError::Hayro(format!("Failed to parse PDF: {:?}", e)))?;
+        let page_count = pdf.pages().len();
 
-        Ok(pdf.pages().len())
+        Ok(Self { pdf, page_count })
     }
 
     /// Returns the number of pages in the PDF.
@@ -82,18 +76,15 @@ impl PdfDocument {
     ///
     /// This uses pure Rust rendering via the `hayro` library.
     pub fn render_page(&self, page_num: usize) -> Result<RenderedPage, PdfError> {
-        use hayro::{Pdf, RenderSettings};
+        use hayro::RenderSettings;
 
         if page_num < 1 || page_num > self.page_count {
             return Err(PdfError::PageNotFound(page_num));
         }
 
-        let pdf_data = std::sync::Arc::new(self.data.clone());
-        let pdf = Pdf::new(pdf_data)
-            .map_err(|e| PdfError::Hayro(format!("Failed to load PDF: {:?}", e)))?;
-
         let page_index = page_num - 1;
-        let page = pdf
+        let page = self
+            .pdf
             .pages()
             .get(page_index)
             .ok_or_else(|| PdfError::Hayro(format!("Failed to get page {}", page_num)))?;
@@ -161,18 +152,15 @@ impl PdfDocument {
         max_width: u32,
         max_height: u32,
     ) -> Result<RenderedPage, PdfError> {
-        use hayro::{Pdf, RenderSettings};
+        use hayro::RenderSettings;
 
         if page_num < 1 || page_num > self.page_count {
             return Err(PdfError::PageNotFound(page_num));
         }
 
-        let pdf_data = std::sync::Arc::new(self.data.clone());
-        let pdf = Pdf::new(pdf_data)
-            .map_err(|e| PdfError::Hayro(format!("Failed to load PDF: {:?}", e)))?;
-
         let page_index = page_num - 1;
-        let page = pdf
+        let page = self
+            .pdf
             .pages()
             .get(page_index)
             .ok_or_else(|| PdfError::Hayro(format!("Failed to get page {}", page_num)))?;

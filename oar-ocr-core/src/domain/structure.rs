@@ -513,292 +513,6 @@ impl StructureResult {
         md.trim().to_string()
     }
 
-    /// Converts the result to a markdown string and saves extracted images.
-    ///
-    /// This method extracts image/chart regions from the source image and saves them
-    /// to the specified output directory, then references them in the markdown output.
-    ///
-    /// # Arguments
-    ///
-    /// * `output_dir` - Directory to save extracted images (an `imgs` subdirectory will be created)
-    ///
-    /// # Returns
-    ///
-    /// A markdown string with relative paths to the saved images
-    pub fn to_markdown_with_images(&self, output_dir: impl AsRef<Path>) -> std::io::Result<String> {
-        let output_dir = output_dir.as_ref();
-        let imgs_dir = output_dir.join("imgs");
-
-        // Create imgs directory if it doesn't exist
-        if !imgs_dir.exists() {
-            std::fs::create_dir_all(&imgs_dir)?;
-        }
-
-        // Collect table bboxes for overlap filtering
-        let table_bboxes: Vec<&BoundingBox> = self
-            .layout_elements
-            .iter()
-            .filter(|e| e.element_type == LayoutElementType::Table)
-            .map(|e| &e.bbox)
-            .collect();
-
-        let mut md = String::new();
-        let mut img_counter = 0usize;
-        let elements = &self.layout_elements;
-
-        for (idx, element) in elements.iter().enumerate() {
-            // PP-StructureV3 markdown ignores auxiliary labels.
-            if matches!(
-                element.element_type,
-                LayoutElementType::Number
-                    | LayoutElementType::Footnote
-                    | LayoutElementType::Header
-                    | LayoutElementType::HeaderImage
-                    | LayoutElementType::Footer
-                    | LayoutElementType::FooterImage
-                    | LayoutElementType::AsideText
-            ) {
-                continue;
-            }
-
-            // Filter out low-confidence text elements that overlap with tables
-            if element.element_type == LayoutElementType::Text {
-                let overlaps_table = table_bboxes
-                    .iter()
-                    .any(|table_bbox| element.bbox.ioa(table_bbox) > 0.3);
-                if overlaps_table && element.confidence < 0.7 {
-                    continue;
-                }
-            }
-
-            match element.element_type {
-                // Document title
-                LayoutElementType::DocTitle => {
-                    md.push_str("\n# ");
-                    if let Some(text) = &element.text {
-                        let cleaned = clean_ocr_text(text);
-                        md.push_str(&cleaned);
-                    }
-                    md.push_str("\n\n");
-                }
-                // Paragraph/section title
-                LayoutElementType::ParagraphTitle => {
-                    if let Some(text) = &element.text {
-                        let cleaned = clean_ocr_text(text);
-                        let (level, formatted_title) = format_title_with_level(&cleaned);
-                        md.push('\n');
-                        for _ in 0..level {
-                            md.push('#');
-                        }
-                        md.push(' ');
-                        md.push_str(&formatted_title);
-                        md.push_str("\n\n");
-                    } else {
-                        md.push_str("\n## \n\n");
-                    }
-                }
-                // Table
-                LayoutElementType::Table => {
-                    if let Some(table) =
-                        self.tables.iter().find(|t| t.bbox.iou(&element.bbox) > 0.5)
-                    {
-                        if let Some(html) = &table.html_structure {
-                            let simplified = simplify_table_html(html);
-                            let table_with_border =
-                                simplified.replacen("<table>", "<table border=\"1\">", 1);
-                            md.push_str("\n<div style=\"text-align: center;\">");
-                            md.push_str(&table_with_border);
-                            md.push_str("</div>\n\n");
-                        } else {
-                            md.push_str("\n[Table]\n\n");
-                        }
-                    } else {
-                        md.push_str("\n[Table]\n\n");
-                    }
-                }
-                // Formula - detect inline vs display formula based on context
-                LayoutElementType::Formula | LayoutElementType::FormulaNumber => {
-                    // Check if this formula is on the same line as adjacent text elements
-                    let is_inline = {
-                        let has_prev_text = (0..idx).rev().any(|i| {
-                            let prev = &elements[i];
-                            !prev.element_type.is_formula()
-                                && (prev.element_type == LayoutElementType::Text
-                                    || prev.element_type == LayoutElementType::ReferenceContent)
-                                && is_same_line(&element.bbox, &prev.bbox)
-                        });
-
-                        let has_next_text = ((idx + 1)..elements.len()).any(|i| {
-                            let next = &elements[i];
-                            !next.element_type.is_formula()
-                                && (next.element_type == LayoutElementType::Text
-                                    || next.element_type == LayoutElementType::ReferenceContent)
-                                && is_same_line(&element.bbox, &next.bbox)
-                        });
-
-                        has_prev_text || has_next_text
-                    };
-
-                    if is_inline {
-                        md.push('$');
-                        if let Some(latex) = &element.text {
-                            md.push_str(latex);
-                        }
-                        md.push_str("$ ");
-                    } else {
-                        md.push_str("\n$$");
-                        if let Some(latex) = &element.text {
-                            md.push_str(latex);
-                        }
-                        md.push_str("$$\n\n");
-                    }
-                }
-                // Image/Chart - extract and save image region
-                LayoutElementType::Image | LayoutElementType::Chart => {
-                    let type_name = if element.element_type == LayoutElementType::Chart {
-                        "chart"
-                    } else {
-                        "image"
-                    };
-
-                    // Generate image filename
-                    let img_name = format!(
-                        "img_in_{}_box_{:.0}_{:.0}_{:.0}_{:.0}.jpg",
-                        type_name,
-                        element.bbox.x_min(),
-                        element.bbox.y_min(),
-                        element.bbox.x_max(),
-                        element.bbox.y_max()
-                    );
-                    let img_path = imgs_dir.join(&img_name);
-                    let relative_path = format!("imgs/{}", img_name);
-
-                    // Extract and save image region if we have the source image
-                    if let Some(ref img) = self.rectified_img {
-                        let x = element.bbox.x_min().max(0.0) as u32;
-                        let y = element.bbox.y_min().max(0.0) as u32;
-                        let width = ((element.bbox.x_max() - element.bbox.x_min()) as u32)
-                            .min(img.width().saturating_sub(x));
-                        let height = ((element.bbox.y_max() - element.bbox.y_min()) as u32)
-                            .min(img.height().saturating_sub(y));
-
-                        if width > 0 && height > 0 {
-                            let cropped =
-                                image::imageops::crop_imm(img.as_ref(), x, y, width, height)
-                                    .to_image();
-                            // Save as JPEG
-                            if let Err(e) = cropped.save(&img_path) {
-                                tracing::warn!(
-                                    "Failed to save image {}: {}",
-                                    img_path.display(),
-                                    e
-                                );
-                            }
-                        }
-                    }
-
-                    // Calculate width percentage
-                    let width_pct =
-                        ((element.bbox.x_max() - element.bbox.x_min()) / 12.0).clamp(20.0, 100.0);
-
-                    md.push_str("\n<div style=\"text-align: center;\"><img src=\"");
-                    md.push_str(&relative_path);
-                    md.push_str("\" alt=\"Image\" width=\"");
-                    md.push_str(&format!("{:.0}%", width_pct));
-                    md.push_str("\" /></div>\n\n");
-
-                    img_counter += 1;
-                }
-                // Seal
-                LayoutElementType::Seal => {
-                    md.push_str("\n![Seal]");
-                    if let Some(text) = &element.text {
-                        md.push_str("\n> ");
-                        md.push_str(text);
-                    }
-                    md.push_str("\n\n");
-                }
-                // Captions
-                _ if element.element_type.is_caption() => {
-                    if let Some(text) = &element.text {
-                        md.push_str("\n<div style=\"text-align: center;\">");
-                        md.push_str(text);
-                        md.push_str(" </div>\n\n");
-                    }
-                }
-                // Abstract
-                LayoutElementType::Abstract => {
-                    if let Some(text) = &element.text {
-                        let lower = text.to_lowercase();
-                        if lower.contains("abstract") || lower.contains("摘要") {
-                            md.push_str("\n## **Abstract**\n\n");
-                        }
-                        let formatted = format_text_block(text);
-                        md.push_str(&formatted);
-                        md.push_str("\n\n");
-                    }
-                }
-                // Reference
-                LayoutElementType::Reference => {
-                    if let Some(text) = &element.text {
-                        let formatted = format_reference_block(text);
-                        md.push('\n');
-                        md.push_str(&formatted);
-                        md.push_str("\n\n");
-                    }
-                }
-                // Content
-                LayoutElementType::Content => {
-                    if let Some(text) = &element.text {
-                        let formatted = format_content_block(text);
-                        md.push('\n');
-                        md.push_str(&formatted);
-                        md.push_str("\n\n");
-                    }
-                }
-                // Footnote
-                LayoutElementType::Footnote => {
-                    if let Some(text) = &element.text {
-                        let formatted = format_vision_footnote_block(text);
-                        md.push('\n');
-                        md.push_str(&formatted);
-                        md.push_str("\n\n");
-                    }
-                }
-                // List
-                LayoutElementType::List => {
-                    if let Some(text) = &element.text {
-                        let cleaned = format_text_block(text);
-                        for line in cleaned.lines() {
-                            let line = line.trim();
-                            if !line.is_empty() {
-                                md.push_str("- ");
-                                md.push_str(line);
-                                md.push('\n');
-                            }
-                        }
-                        md.push('\n');
-                    }
-                }
-                // Header/Footer - skip
-                _ if element.element_type.is_header() || element.element_type.is_footer() => {
-                    continue;
-                }
-                // Default text
-                _ => {
-                    if let Some(text) = &element.text {
-                        let formatted = format_text_block(text);
-                        md.push_str(&formatted);
-                        md.push_str("\n\n");
-                    }
-                }
-            }
-        }
-
-        tracing::debug!("Extracted {} images to {:?}", img_counter, imgs_dir);
-        Ok(md.trim().to_string())
-    }
-
     /// Calculates the page continuation flags for this result.
     ///
     /// This follows PaddleX's `get_seg_flag` logic to determine whether
@@ -1016,17 +730,22 @@ impl StructureResult {
     ///
     /// This generates:
     /// - `*_res.json`: The full structured result
-    /// - `*_res.md`: A Markdown representation
     /// - `*_res.html`: An HTML representation
+    ///
+    /// Note: Markdown export with image extraction should use the example utilities
+    /// (`examples/utils/markdown.rs`) instead, as that requires I/O operations
+    /// that belong in the application layer. Use `StructureResult::to_markdown()`
+    /// for pure markdown generation without side effects.
     ///
     /// # Arguments
     ///
-    /// * `to_html` - If true, save an HTML representation.
+    /// * `output_dir` - Directory to save the output files
+    /// * `to_json` - If true, save a JSON representation
+    /// * `to_html` - If true, save an HTML representation
     pub fn save_results(
         &self,
         output_dir: impl AsRef<Path>,
         to_json: bool,
-        to_markdown: bool,
         to_html: bool,
     ) -> std::io::Result<()> {
         let output_dir = output_dir.as_ref();
@@ -1062,13 +781,6 @@ impl StructureResult {
             let json_path = output_dir.join(format!("{}.json", stem));
             let json_file = std::fs::File::create(json_path)?;
             serde_json::to_writer_pretty(json_file, self)?;
-        }
-
-        // Save Markdown (with extracted images)
-        if to_markdown {
-            let md_path = output_dir.join(format!("{}.md", stem));
-            let md_content = self.to_markdown_with_images(output_dir)?;
-            std::fs::write(md_path, md_content)?;
         }
 
         // Save HTML
@@ -1184,79 +896,6 @@ pub fn concatenate_markdown_pages(results: &[StructureResult]) -> String {
     }
 
     markdown.trim().to_string()
-}
-
-/// Concatenates markdown content from multiple pages with image extraction.
-///
-/// This follows PaddleX's `concatenate_markdown_pages` logic to intelligently
-/// merge pages while preserving paragraph continuity, and also extracts images
-/// from image/chart regions.
-///
-/// # Arguments
-///
-/// * `results` - Slice of structure results from multiple pages (in order)
-/// * `output_dir` - Directory to save extracted images
-///
-/// # Returns
-///
-/// A single markdown string with all pages properly concatenated and images extracted
-pub fn concatenate_markdown_pages_with_images(
-    results: &[StructureResult],
-    output_dir: impl AsRef<Path>,
-) -> std::io::Result<String> {
-    let output_dir = output_dir.as_ref();
-
-    if results.is_empty() {
-        return Ok(String::new());
-    }
-
-    if results.len() == 1 {
-        return results[0].to_markdown_with_images(output_dir);
-    }
-
-    let mut markdown = String::new();
-    let mut prev_page_end_flag = true;
-
-    for result in results.iter() {
-        let flags = result
-            .page_continuation_flags
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| result.calculate_continuation_flags());
-
-        let page_markdown = result.to_markdown_with_images(output_dir)?;
-
-        if page_markdown.trim().is_empty() {
-            prev_page_end_flag = flags.paragraph_end;
-            continue;
-        }
-
-        let page_first_continues = !flags.paragraph_start;
-
-        if page_first_continues && !prev_page_end_flag {
-            let last_char = markdown.chars().last();
-            let first_char = page_markdown.chars().next();
-
-            let last_is_chinese = last_char.is_some_and(is_chinese_char);
-            let first_is_chinese = first_char.is_some_and(is_chinese_char);
-
-            if !last_is_chinese && !first_is_chinese {
-                markdown.push(' ');
-                markdown.push_str(page_markdown.trim_start());
-            } else {
-                markdown.push_str(page_markdown.trim_start());
-            }
-        } else {
-            if !markdown.is_empty() {
-                markdown.push_str("\n\n");
-            }
-            markdown.push_str(&page_markdown);
-        }
-
-        prev_page_end_flag = flags.paragraph_end;
-    }
-
-    Ok(markdown.trim().to_string())
 }
 
 /// Cleans OCR text content by removing common artifacts.
@@ -1811,7 +1450,7 @@ impl StructureResultExt for StructureResult {
         for (idx, result) in results.iter().enumerate() {
             let page_dir = output_dir.join(format!("page_{:03}", idx));
             std::fs::create_dir_all(&page_dir)?;
-            result.save_results(&page_dir, to_json, to_markdown, to_html)?;
+            result.save_results(&page_dir, to_json, to_html)?;
         }
 
         // Save concatenated markdown

@@ -142,7 +142,7 @@ mod utils;
 
 use clap::Parser;
 use image::RgbImage;
-use oar_ocr::domain::structure::{TableType, concatenate_markdown_pages_with_images};
+use oar_ocr::domain::structure::TableType;
 use oar_ocr::domain::tasks::{
     FormulaRecognitionConfig, LayoutDetectionConfig, TextDetectionConfig, TextRecognitionConfig,
 };
@@ -710,12 +710,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         all_results.push(result.clone());
 
         // Save individual page results (JSON only, markdown will be concatenated)
-        if let Err(err) = result.save_results(
-            &args.output_dir,
-            args.to_json,
-            false, // Never save individual markdown files
-            args.to_html,
-        ) {
+        if let Err(err) = result.save_results(&args.output_dir, args.to_json, args.to_html) {
             error!("Failed to save results for {}: {}", source_path, err);
         }
 
@@ -844,38 +839,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Always concatenate and save merged results
     if !all_results.is_empty() {
-        // Detect if processing a multi-page PDF
-        let is_multi_page_pdf = input_sources.len() > 1
-            && input_sources
-                .iter()
-                .any(|s| matches!(s, InputSource::PdfPage { .. }));
+        // Detect if processing a multi-page PDF (PDF pages have '#' in their input_path)
+        let is_multi_page_pdf =
+            all_results.len() > 1 && all_results.iter().any(|r| r.input_path.contains('#'));
 
         if is_multi_page_pdf {
             info!("\nConcatenating {} pages", all_results.len());
         }
 
         // Determine base name for output - use original filename (stem) without extension
-        let base_name = if input_sources.len() == 1 {
-            match &input_sources[0] {
-                InputSource::ImageFile(p) => p
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("output")
-                    .to_string(),
-                InputSource::PdfPage { pdf_path, .. } => pdf_path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("output")
-                    .to_string(),
-            }
-        } else {
-            // Empty input sources - use default name
-            "output".to_string()
+        let base_name = {
+            let path_str: &str = &all_results[0].input_path;
+            // PDF pages have format "path/to/file.pdf#page_N", strip the page suffix
+            let path = if let Some(hash_idx) = path_str.rfind('#') {
+                std::path::Path::new(&path_str[..hash_idx])
+            } else {
+                std::path::Path::new(path_str)
+            };
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("output")
+                .to_string()
         };
 
         // Save concatenated markdown with extracted images
         if args.to_markdown {
-            match concatenate_markdown_pages_with_images(&all_results, &args.output_dir) {
+            match utils::markdown::export_concatenated_markdown_with_images(
+                &all_results,
+                &args.output_dir,
+            ) {
                 Ok(concat_md) => {
                     let md_path = args.output_dir.join(format!("{}.md", base_name));
                     if let Err(err) = std::fs::write(&md_path, concat_md) {
