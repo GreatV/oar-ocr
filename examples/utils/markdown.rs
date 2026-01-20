@@ -4,7 +4,7 @@
 //! The library crate provides pure transformations (e.g., `StructureResult::to_markdown()`),
 //! while these examples utilities handle the file system operations.
 
-use oar_ocr::domain::structure::{LayoutElementType, PageContinuationFlags, StructureResult};
+use oar_ocr::domain::structure::{LayoutElementType, StructureResult};
 use oar_ocr::processors::BoundingBox;
 use std::path::Path;
 
@@ -329,7 +329,7 @@ pub fn export_concatenated_markdown_with_images(
             .page_continuation_flags
             .as_ref()
             .cloned()
-            .unwrap_or_else(|| calculate_continuation_flags(result));
+            .unwrap_or_else(|| result.calculate_continuation_flags());
 
         let page_markdown = export_markdown_with_images(result, output_dir)?;
 
@@ -527,30 +527,4 @@ fn format_title_with_level(title: &str) -> (usize, String) {
     } else {
         (2, title.replace("-\n", "").replace('\n', " "))
     }
-}
-
-/// Calculates page continuation flags for a result.
-fn calculate_continuation_flags(result: &StructureResult) -> PageContinuationFlags {
-    let page_width = result.rectified_img.as_ref().map(|img| img.width() as f32);
-
-    let mut paragraph_start = true;
-    let mut paragraph_end = true;
-
-    if let Some(first_element) = result.layout_elements.first() {
-        // Check if first element starts near left edge (new paragraph)
-        let left = first_element.bbox.x_min();
-        let threshold = page_width.map_or(50.0, |w| w * 0.05);
-        paragraph_start = left > threshold;
-    }
-
-    if let Some(last_element) = result.layout_elements.last() {
-        // Check if last element extends near right edge (continuing)
-        let right = last_element.bbox.x_max();
-        if let Some(width) = page_width {
-            let right_margin = width * 0.1;
-            paragraph_end = right <= (width - right_margin);
-        }
-    }
-
-    PageContinuationFlags::new(paragraph_start, paragraph_end)
 }

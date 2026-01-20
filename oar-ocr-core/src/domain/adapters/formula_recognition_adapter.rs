@@ -55,7 +55,7 @@ pub fn extract_special_token_ids(tokenizer: &Tokenizer) -> SpecialTokenIds {
         .find_map(|&token| tokenizer.token_to_id(token))
         .map(|id| id as i64)
         .unwrap_or_else(|| {
-            tracing::debug!("BOS token not found in tokenizer vocabulary, using default value 0");
+            tracing::warn!("BOS token not found in tokenizer vocabulary, using default value 0. This may cause incorrect results with some tokenizers.");
             0
         });
 
@@ -64,7 +64,7 @@ pub fn extract_special_token_ids(tokenizer: &Tokenizer) -> SpecialTokenIds {
         .find_map(|&token| tokenizer.token_to_id(token))
         .map(|id| id as i64)
         .unwrap_or_else(|| {
-            tracing::debug!("EOS token not found in tokenizer vocabulary, using default value 2");
+            tracing::warn!("EOS token not found in tokenizer vocabulary, using default value 2. This may cause incorrect results with some tokenizers.");
             2
         });
 

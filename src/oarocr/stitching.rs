@@ -511,21 +511,24 @@ impl ResultStitcher {
             let region_idx = split_regions.len();
 
             // Find the best matching cell for this expanded region
-            let mut best_cell_idx = 0usize;
+            let mut best_cell_idx = None;
             let mut best_iou = 0.0f32;
 
             for (cell_idx, cell) in cells.iter().enumerate() {
                 let iou = region.bounding_box.iou(&cell.bbox);
                 if iou > best_iou {
                     best_iou = iou;
-                    best_cell_idx = cell_idx;
+                    best_cell_idx = Some(cell_idx);
                 }
             }
 
-            cell_assignments
-                .entry(best_cell_idx)
-                .or_default()
-                .push(region_idx);
+            // Only assign to a cell if there's actual overlap
+            if let Some(cell_idx) = best_cell_idx {
+                cell_assignments
+                    .entry(cell_idx)
+                    .or_default()
+                    .push(region_idx);
+            }
 
             split_regions.push(region);
         }

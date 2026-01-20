@@ -561,11 +561,11 @@ impl StructureResult {
 
         // Calculate paragraph start flag
         let first = &text_elements[0];
-        let paragraph_start = !is_text_continuation_start(first, page_width);
+        let paragraph_start = is_new_paragraph_start(first, page_width);
 
         // Calculate paragraph end flag
         let last = &text_elements[text_elements.len() - 1];
-        let paragraph_end = !is_text_continuation_end(last, page_width);
+        let paragraph_end = is_paragraph_complete(last, page_width);
 
         PageContinuationFlags::new(paragraph_start, paragraph_end)
     }
@@ -793,35 +793,31 @@ impl StructureResult {
     }
 }
 
-/// Checks if a text element appears to be a continuation from a previous element.
+/// Checks if a text element appears to start a new paragraph.
 ///
 /// Following PaddleX's logic: if the text starts near the left edge of the page
-/// (within 10 pixels), it's likely the start of a new paragraph rather than a continuation.
-fn is_text_continuation_start(element: &LayoutElement, page_width: Option<f32>) -> bool {
-    // Get the left coordinate (x_min)
+/// (within 5% of page width), it's likely the start of a new paragraph.
+fn is_new_paragraph_start(element: &LayoutElement, page_width: Option<f32>) -> bool {
     let left = element.bbox.x_min();
-
-    // Use dynamic threshold based on page width, or default
     let threshold = page_width.map_or(50.0, |w| w * 0.05); // 5% of page width
-    left > threshold
+    left <= threshold
 }
 
-/// Checks if a text element appears to continue to a next element.
+/// Checks if a text element appears to complete its paragraph on this page.
 ///
-/// Following PaddleX's logic: if the text ends near the right edge of the page
-/// (within margin of the expected content width), it's likely continuing.
-fn is_text_continuation_end(element: &LayoutElement, page_width: Option<f32>) -> bool {
+/// Following PaddleX's logic: if the text ends before the right edge of the page
+/// (not within 10% of right margin), the paragraph likely ends here.
+fn is_paragraph_complete(element: &LayoutElement, page_width: Option<f32>) -> bool {
     let right = element.bbox.x_max();
 
-    // If we have page width info, check if element extends close to the right edge
+    // If we have page width info, check if element ends before the right edge
     if let Some(width) = page_width {
-        // If text ends within 10% of right margin, it's likely continuing to next page
         let right_margin = width * 0.1;
-        return right > (width - right_margin);
+        return right <= (width - right_margin);
     }
 
     // Conservative default: assume paragraphs end
-    false
+    true
 }
 
 /// Concatenates markdown content from multiple pages into a single document.
@@ -1041,13 +1037,11 @@ fn dehyphenate(text: &str) -> String {
 
     // Helper to check if we're in a URL-like pattern
     let is_url_context = |pos: usize| -> bool {
-        // Look back for "http", "https", "www", "://"
-        let lookback: String = chars[pos.saturating_sub(10)..pos].iter().collect();
-        lookback.contains("http")
-            || lookback.contains("www")
-            || lookback.contains("://")
-            || lookback.contains(".com")
-            || lookback.contains(".org")
+        // Look at a window around the hyphen for URL patterns
+        let start = pos.saturating_sub(10);
+        let end = (pos + 5).min(len);
+        let window: String = chars[start..end].iter().collect();
+        window.contains("http") || window.contains("www") || window.contains("://")
     };
 
     while i < len {
@@ -1233,10 +1227,8 @@ fn deduplicate_sections(markdown: &str) -> String {
         let trimmed = line.trim();
 
         // Check for common section header patterns
-        let is_section_header = trimmed.starts_with("**")
-            && trimmed.ends_with("**")
-            && trimmed.len() > 4
-            && !trimmed.contains(' ');
+        let is_section_header =
+            trimmed.starts_with("**") && trimmed.ends_with("**") && trimmed.len() > 4;
 
         let section_name = if is_section_header {
             trimmed[2..trimmed.len() - 2].to_string()

@@ -449,8 +449,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match self {
                 Self::ImageFile(p) => oar_ocr::utils::load_image(&p).map_err(|e| e.into()),
                 Self::PdfPage { image, .. } => {
-                    let arc_img: Arc<RgbImage> = image;
-                    Ok((*arc_img).clone())
+                    // Try to unwrap the Arc to avoid cloning if we have the only reference
+                    Ok(Arc::try_unwrap(image).unwrap_or_else(|arc| (*arc).clone()))
                 }
             }
         }
@@ -480,7 +480,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!("PDF has {} page(s)", page_count);
 
             for page_num in 1..=page_count {
-                match pdf_doc.render_page(page_num) {
+                match pdf_doc.render_page(page_num, None) {
                     Ok(rendered) => {
                         info!(
                             "  Page {} rendered: {}x{}",
