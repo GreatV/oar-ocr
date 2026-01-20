@@ -2,6 +2,9 @@
 
 pub mod device_config;
 #[allow(dead_code)]
+pub mod markdown;
+pub mod pdf;
+#[allow(dead_code)]
 pub mod visualization;
 
 /// Initializes the tracing subscriber for logging in examples.

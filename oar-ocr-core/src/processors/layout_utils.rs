@@ -432,6 +432,8 @@ pub fn reprocess_table_cells_with_ocr(
 
 /// Combines rectangles into at most `target_n` rectangles using KMeans-style clustering
 /// on box centers.
+///
+/// Uses K-Means++ initialization for better cluster center selection.
 pub fn combine_rectangles_kmeans(rectangles: &[BoundingBox], target_n: usize) -> Vec<BoundingBox> {
     let num_rects = rectangles.len();
     if num_rects == 0 || target_n == 0 {
@@ -451,8 +453,9 @@ pub fn combine_rectangles_kmeans(rectangles: &[BoundingBox], target_n: usize) ->
         })
         .collect();
 
-    // Initialize cluster centers using the first target_n points
-    let mut centers: Vec<(f32, f32)> = points.iter().take(target_n).cloned().collect();
+    // Initialize cluster centers using K-Means++ algorithm
+    let centers = kmeans_maxdist_init(&points, target_n);
+    let mut centers = centers;
     let mut labels: Vec<usize> = vec![0; num_rects];
 
     let max_iters = 10;
@@ -535,6 +538,92 @@ pub fn combine_rectangles_kmeans(rectangles: &[BoundingBox], target_n: usize) ->
     } else {
         combined
     }
+}
+
+/// Deterministic K-Means initialization using max-distance selection.
+///
+/// This is a simplified variant of K-Means++ that deterministically selects
+/// the point with maximum distance from existing centers, rather than using
+/// probabilistic selection. This avoids random number generation while still
+/// providing good initial cluster spread.
+///
+/// # Arguments
+///
+/// * `points` - Slice of (x, y) points to cluster.
+/// * `k` - Number of clusters.
+///
+/// # Returns
+///
+/// Vector of k initial cluster centers.
+fn kmeans_maxdist_init(points: &[(f32, f32)], k: usize) -> Vec<(f32, f32)> {
+    if points.is_empty() || k == 0 {
+        return Vec::new();
+    }
+
+    if k >= points.len() {
+        return points.to_vec();
+    }
+
+    let mut centers: Vec<(f32, f32)> = Vec::with_capacity(k);
+
+    // Use a simple deterministic selection based on point index for reproducibility
+    // Select the first center as the point with median x-coordinate
+    let mut sorted_by_x: Vec<usize> = (0..points.len()).collect();
+    sorted_by_x.sort_by(|&a, &b| {
+        points[a]
+            .0
+            .partial_cmp(&points[b].0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let first_idx = sorted_by_x[sorted_by_x.len() / 2];
+    centers.push(points[first_idx]);
+
+    // Select remaining centers using K-Means++ selection
+    for _ in 1..k {
+        // Compute squared distances to nearest center for each point
+        let mut distances: Vec<f32> = Vec::with_capacity(points.len());
+        let mut total_dist = 0.0f32;
+
+        for &(px, py) in points {
+            let min_dist_sq = centers
+                .iter()
+                .map(|&(cx, cy)| {
+                    let dx = px - cx;
+                    let dy = py - cy;
+                    dx * dx + dy * dy
+                })
+                .fold(f32::MAX, f32::min);
+
+            distances.push(min_dist_sq);
+            total_dist += min_dist_sq;
+        }
+
+        if total_dist <= 0.0 {
+            // All points are at existing centers, pick any remaining point
+            if let Some(&point) = points.iter().find(|p| !centers.contains(p)) {
+                centers.push(point);
+            } else {
+                break;
+            }
+            continue;
+        }
+
+        // Select next center deterministically: pick the point with maximum distance
+        // This is simpler than probabilistic K-Means++ but still provides good spread
+        let mut max_dist = 0.0f32;
+        let mut max_idx = 0;
+
+        for (i, &dist) in distances.iter().enumerate() {
+            if dist > max_dist {
+                max_dist = dist;
+                max_idx = i;
+            }
+        }
+
+        centers.push(points[max_idx]);
+    }
+
+    centers
 }
 
 /// Calculates Intersection over Union (IoU) between two bounding boxes.

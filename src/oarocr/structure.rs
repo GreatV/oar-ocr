@@ -2362,6 +2362,9 @@ impl OARStructure {
         }
 
         // Construct and return result
+        // Ensure rectified_img is always set for markdown image extraction
+        // If no rectification was applied, use current_image
+        let final_image = rectified_img.unwrap_or_else(|| Arc::new((*current_image).clone()));
         let mut result = StructureResult {
             input_path: Arc::from("memory"),
             index: 0,
@@ -2375,7 +2378,8 @@ impl OARStructure {
             },
             orientation_angle,
             region_blocks: detected_region_blocks,
-            rectified_img,
+            rectified_img: Some(final_image),
+            page_continuation_flags: None,
         };
 
         // Stitch text results into layout elements and tables
