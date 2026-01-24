@@ -217,52 +217,8 @@ impl PixtralRotaryEmbedding {
             freqs.dims()
         );
 
-        // Debug: print all position IDs for small tensors
-        if let Ok(pos_vec) = position_ids.to_vec1::<u32>() {
-            if pos_vec.len() <= 50 {
-                debug!(
-                    "PixtralRotaryEmbedding: ALL position_ids ({} total): {:?}",
-                    pos_vec.len(),
-                    pos_vec
-                );
-            } else {
-                debug!(
-                    "PixtralRotaryEmbedding: first 10 position_ids: {:?}",
-                    &pos_vec[..10.min(pos_vec.len())]
-                );
-            }
-        }
-
         let cos = freqs.cos()?.to_dtype(dtype)?;
         let sin = freqs.sin()?.to_dtype(dtype)?;
-
-        // Debug: print cos/sin values at key positions (convert to f32 first for BF16/F16)
-        let cos_f32 = cos.to_dtype(DType::F32);
-        let sin_f32 = sin.to_dtype(DType::F32);
-        if let Ok(cos_vec) = cos_f32.and_then(|c| c.to_vec2::<f32>()) {
-            debug!(
-                "PixtralRotaryEmbedding: cos[0, :8]: {:?}",
-                &cos_vec[0][..8.min(cos_vec[0].len())]
-            );
-            if cos_vec.len() > 10 {
-                debug!(
-                    "PixtralRotaryEmbedding: cos[10, :8]: {:?}",
-                    &cos_vec[10][..8.min(cos_vec[10].len())]
-                );
-            }
-        }
-        if let Ok(sin_vec) = sin_f32.and_then(|s| s.to_vec2::<f32>()) {
-            debug!(
-                "PixtralRotaryEmbedding: sin[0, :8]: {:?}",
-                &sin_vec[0][..8.min(sin_vec[0].len())]
-            );
-            if sin_vec.len() > 10 {
-                debug!(
-                    "PixtralRotaryEmbedding: sin[10, :8]: {:?}",
-                    &sin_vec[10][..8.min(sin_vec[10].len())]
-                );
-            }
-        }
 
         Ok((cos, sin))
     }

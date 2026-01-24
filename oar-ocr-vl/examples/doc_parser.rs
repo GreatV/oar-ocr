@@ -118,7 +118,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let needs_layout = !matches!(args.model_name, ModelName::LightOnOcr);
     if needs_layout {
         let layout_model = args.layout_model.as_ref().ok_or_else(|| {
-            error!("Layout model is required for this model");
+            error!(
+                "Layout model is required for {:?} (not needed for LightOnOcr)",
+                args.model_name
+            );
             "Layout model not provided"
         })?;
         if !layout_model.exists() {

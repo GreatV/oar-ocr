@@ -99,6 +99,12 @@ impl LightOnOcrImageProcessorConfig {
                 ),
             });
         }
+        if self.image_std.contains(&0.0) {
+            return Err(OCRError::ConfigError {
+                message: "LightOnOCR image_std values must be non-zero (used as divisor)"
+                    .to_string(),
+            });
+        }
         if self.patch_size == 0 {
             return Err(OCRError::ConfigError {
                 message: "LightOnOCR patch_size must be > 0".to_string(),

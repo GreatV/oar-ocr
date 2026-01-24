@@ -78,7 +78,7 @@ pub fn preprocess_image(
         });
     }
 
-    let mut data = Vec::with_capacity(grid_h * grid_w * 3 * cfg.patch_size * cfg.patch_size);
+    let mut data = Vec::with_capacity(3 * target_h as usize * target_w as usize);
     let mean = &cfg.image_mean;
     let std = &cfg.image_std;
 

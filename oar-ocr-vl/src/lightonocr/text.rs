@@ -105,7 +105,7 @@ struct Attention {
     rotary_emb: Arc<RotaryEmbedding>,
     n_kv_groups: usize,
     softmax_scale: f64,
-    kv_cache: Arc<Mutex<KvCache>>,
+    kv_cache: Mutex<KvCache>,
 }
 
 impl Attention {
@@ -156,7 +156,7 @@ impl Attention {
             rotary_emb,
             n_kv_groups: cfg.num_attention_heads / cfg.num_key_value_heads,
             softmax_scale: 1.0 / (cfg.head_dim as f64).sqrt(),
-            kv_cache: Arc::new(Mutex::new(KvCache::new(2, cfg.max_position_embeddings))),
+            kv_cache: Mutex::new(KvCache::new(2, cfg.max_position_embeddings)),
         })
     }
 
@@ -193,7 +193,7 @@ impl Attention {
         let (k, v) = self
             .kv_cache
             .lock()
-            .expect("kv cache mutex poisoned")
+            .map_err(|_| candle_core::Error::Msg("kv cache mutex poisoned".into()))?
             .append(&k, &v)?;
 
         let k = repeat_kv(k, self.n_kv_groups)?.contiguous()?;
@@ -337,14 +337,10 @@ impl LightOnOcrTextModel {
         let (_, seq_len, _) = xs.dims3()?;
 
         for layer in &self.layers {
-            xs = layer.forward(
-                &xs,
-                attention_mask
-                    .as_ref()
-                    .map(|m| m.to_device(xs.device()).unwrap())
-                    .as_ref(),
-                seqlen_offsets,
-            )?;
+            let mask = attention_mask
+                .map(|m| m.to_device(xs.device()))
+                .transpose()?;
+            xs = layer.forward(&xs, mask.as_ref(), seqlen_offsets)?;
         }
 
         xs = xs.apply(&self.norm)?;

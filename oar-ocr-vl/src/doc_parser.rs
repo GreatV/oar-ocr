@@ -147,19 +147,11 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
     }
 
     /// Parse a document image without layout detection (single full-image OCR).
+    ///
+    /// Use this for end-to-end models (e.g. LightOnOCR) that handle layout internally.
+    /// For models requiring separate layout detection, use [`parse`](Self::parse) instead.
     pub fn parse_without_layout(&self, image: RgbImage) -> Result<StructureResult, OCRError> {
-        self.parse_without_layout_with_path("<memory>", 0, image)
-    }
-
-    /// Parse a document image without layout detection, including source path info.
-    pub fn parse_without_layout_with_path(
-        &self,
-        input_path: impl Into<Arc<str>>,
-        index: usize,
-        image: RgbImage,
-    ) -> Result<StructureResult, OCRError> {
-        let input_path: Arc<str> = input_path.into();
-        self.recognize_full_image(input_path, index, image)
+        self.recognize_full_image("<memory>".into(), 0, image)
     }
 
     /// Parse a document image with source path information.

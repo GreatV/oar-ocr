@@ -91,6 +91,8 @@ impl LightOnOcr {
         }
 
         let dtype = device.bf16_default_to_f32();
+        // SAFETY: The mmap'd file must not be modified or deleted while in use.
+        // This is upheld because model files are read-only assets loaded at initialization.
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
                 &[model_dir.join("model.safetensors")],
@@ -127,6 +129,10 @@ impl LightOnOcr {
         })
     }
 
+    /// Generate OCR output for an image with an optional instruction.
+    ///
+    /// An empty instruction performs plain text extraction. For structured output,
+    /// pass a task-specific prompt (e.g. "Parse the table in the image into HTML.").
     pub fn generate(
         &self,
         image: RgbImage,
@@ -417,7 +423,9 @@ impl VisionProjection {
         let trim_h = merged_h * self.merge_size;
         let trim_w = merged_w * self.merge_size;
 
-        // Match Python spatial_merge exactly:
+        // Match Mistral3PatchMerger.forward from HuggingFace transformers
+        // (models/mistral3/modular_mistral3.py), which uses F.unfold(kernel=merge, stride=merge).
+        // Here we implement the equivalent via reshape + permute.
         // 1. (b, seq, hidden) -> (b, h, w, hidden)
         let xs = xs.reshape((b, grid_h, grid_w, hidden))?;
         let xs = xs.narrow(1, 0, trim_h)?;
@@ -435,8 +443,8 @@ impl VisionProjection {
         ))?;
 
         // 3. permute to (b, h', w', hidden, merge_h, merge_w)
-        //    This matches Python unfold order where hidden varies slowest in the flattened output
-        //    Python unfold gives (h', w', hidden, merge_h, merge_w), and view flattens last 3 dims
+        //    unfold order: hidden varies slowest in the flattened output
+        //    i.e. unfold gives (h', w', hidden, merge_h, merge_w), view flattens last 3 dims
         let xs = xs.permute((0, 1, 3, 5, 2, 4))?;
 
         // 4. flatten to (b, h'*w', hidden*merge*merge)
@@ -560,13 +568,20 @@ fn build_causal_mask(
     dtype: DType,
     device: &Device,
 ) -> Result<Tensor, OCRError> {
+    // Use dtype-specific min for numerical stability (matches vision.rs)
+    let d_min: f32 = match dtype {
+        DType::F32 => f32::MIN,
+        DType::F16 => -65504.0,
+        DType::BF16 => -3.39e+38,
+        _ => f32::MIN,
+    };
     let mut mask = Vec::with_capacity(tgt_len * (tgt_len + offset));
     for i in 0..tgt_len {
         for j in 0..(tgt_len + offset) {
             if j <= i + offset {
                 mask.push(0f32);
             } else {
-                mask.push(f32::NEG_INFINITY);
+                mask.push(d_min);
             }
         }
     }
@@ -593,4 +608,111 @@ fn build_causal_mask(
                 e,
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_image_spans_single_span() {
+        let input_ids = [1, 2, 99, 99, 99, 3, 4];
+        let spans = find_image_spans(&input_ids, 99);
+        assert_eq!(spans, vec![(2, 5)]);
+    }
+
+    #[test]
+    fn test_find_image_spans_multiple_spans() {
+        let input_ids = [99, 99, 1, 2, 99, 99, 99, 3];
+        let spans = find_image_spans(&input_ids, 99);
+        assert_eq!(spans, vec![(0, 2), (4, 7)]);
+    }
+
+    #[test]
+    fn test_find_image_spans_trailing() {
+        let input_ids = [1, 2, 99, 99];
+        let spans = find_image_spans(&input_ids, 99);
+        assert_eq!(spans, vec![(2, 4)]);
+    }
+
+    #[test]
+    fn test_find_image_spans_none() {
+        let input_ids = [1, 2, 3, 4];
+        let spans = find_image_spans(&input_ids, 99);
+        assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn test_find_image_spans_all() {
+        let input_ids = [99, 99, 99];
+        let spans = find_image_spans(&input_ids, 99);
+        assert_eq!(spans, vec![(0, 3)]);
+    }
+
+    #[test]
+    fn test_find_image_spans_single_token_spans() {
+        let input_ids = [99, 1, 99, 2, 99];
+        let spans = find_image_spans(&input_ids, 99);
+        assert_eq!(spans, vec![(0, 1), (2, 3), (4, 5)]);
+    }
+
+    #[test]
+    fn test_image_token_repeat_basic() {
+        let result = image_token_repeat(4, 6, 2).unwrap();
+        // merged_h=2, merged_w=3 -> 6 tokens
+        assert_eq!(result, "<|image_pad|>".repeat(6));
+    }
+
+    #[test]
+    fn test_image_token_repeat_merge_size_1() {
+        let result = image_token_repeat(3, 4, 1).unwrap();
+        assert_eq!(result, "<|image_pad|>".repeat(12));
+    }
+
+    #[test]
+    fn test_image_token_repeat_zero_merge_size() {
+        let result = image_token_repeat(4, 4, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_image_token_repeat_empty_grid() {
+        // grid_h=1, merge_size=2 -> merged_h=0
+        let result = image_token_repeat(1, 4, 2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_prompt_with_instruction() {
+        let tokens = "<|image_pad|>".repeat(4);
+        let prompt = build_prompt("Describe this image.", tokens.clone());
+        let expected = format!(
+            "<|im_start|>system<|im_end|>\n<|im_start|>user\n{}\nDescribe this image.<|im_end|>\n<|im_start|>assistant\n",
+            tokens
+        );
+        assert_eq!(prompt, expected);
+    }
+
+    #[test]
+    fn test_build_prompt_empty_instruction() {
+        let tokens = "<|image_pad|>".repeat(2);
+        let prompt = build_prompt("", tokens.clone());
+        let expected = format!(
+            "<|im_start|>system<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+            tokens
+        );
+        assert_eq!(prompt, expected);
+    }
+
+    #[test]
+    fn test_build_prompt_whitespace_instruction() {
+        let tokens = "<|image_pad|>".to_string();
+        let prompt = build_prompt("   \n  ", tokens.clone());
+        // Whitespace-only instruction is treated as empty
+        let expected = format!(
+            "<|im_start|>system<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+            tokens
+        );
+        assert_eq!(prompt, expected);
+    }
 }
