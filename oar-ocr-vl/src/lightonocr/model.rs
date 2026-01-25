@@ -571,8 +571,8 @@ fn build_causal_mask(
     // Use dtype-specific min for numerical stability (matches vision.rs)
     let d_min: f32 = match dtype {
         DType::F32 => f32::MIN,
-        DType::F16 => -65504.0,              // half::f16::MIN
-        DType::BF16 => -3.3895313e+38,       // half::bf16::MIN
+        DType::F16 => -65504.0,        // half::f16::MIN
+        DType::BF16 => -3.3895313e+38, // half::bf16::MIN
         _ => f32::MIN,
     };
     let mut mask = Vec::with_capacity(tgt_len * (tgt_len + offset));
