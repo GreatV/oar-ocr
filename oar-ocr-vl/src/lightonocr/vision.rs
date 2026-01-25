@@ -459,10 +459,10 @@ fn generate_block_attention_mask(
     // Use dtype.min for numerical stability (matches HuggingFace)
     // BF16/F16 min is ~-3.39e+38, which is more stable than NEG_INFINITY
     let d_min: f32 = match dtype {
-        DType::F32 => -3.4028235e+38, // f32::MIN
-        DType::F16 => -65504.0,       // f16::MIN
-        DType::BF16 => -3.39e+38,     // bf16::MIN (approximate)
-        _ => -3.4028235e+38,
+        DType::F32 => f32::MIN,
+        DType::F16 => -65504.0,              // half::f16::MIN
+        DType::BF16 => -3.3895313e+38,       // half::bf16::MIN
+        _ => f32::MIN,
     };
 
     // Start with all d_min (no attention)

@@ -116,19 +116,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Model directory not found".into());
     }
     let needs_layout = !matches!(args.model_name, ModelName::LightOnOcr);
-    if needs_layout {
-        let layout_model = args.layout_model.as_ref().ok_or_else(|| {
+    let layout_model_path = if needs_layout {
+        let path = args.layout_model.as_ref().ok_or_else(|| {
             error!(
                 "Layout model is required for {:?} (not needed for LightOnOcr)",
                 args.model_name
             );
             "Layout model not provided"
         })?;
-        if !layout_model.exists() {
-            error!("Layout model not found: {}", layout_model.display());
+        if !path.exists() {
+            error!("Layout model not found: {}", path.display());
             return Err("Layout model not found".into());
         }
-    }
+        Some(path)
+    } else {
+        None
+    };
 
     // Filter valid images
     let existing_images: Vec<PathBuf> =
@@ -146,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = parse_device(&args.device)?;
     info!("Device: {:?}", device);
 
-    let layout_predictor = if needs_layout {
+    let layout_predictor = if let Some(layout_path) = layout_model_path {
         info!("Loading layout model...");
         let normalized_layout_name = args.layout_model_name.to_lowercase().replace('-', "_");
         let layout_config = match normalized_layout_name.as_str() {
@@ -161,8 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(config) = layout_config {
             layout_builder = layout_builder.with_config(config);
         }
-        let layout_model = args.layout_model.as_ref().expect("layout model checked");
-        Some(layout_builder.build(layout_model)?)
+        Some(layout_builder.build(layout_path)?)
     } else {
         None
     };
