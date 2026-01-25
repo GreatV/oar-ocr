@@ -770,12 +770,20 @@ pub fn crop_margin(img: &RgbImage) -> RgbImage {
 }
 
 fn find_shortest_repeating_substring(s: &str) -> Option<String> {
-    let n = s.len();
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
     for i in 1..=n / 2 {
         if n.is_multiple_of(i) {
-            let substring = &s[..i];
-            if substring.repeat(n / i) == s {
-                return Some(substring.to_string());
+            let unit = &chars[..i];
+            let mut matches = true;
+            for start in (0..n).step_by(i) {
+                if chars[start..start + i] != *unit {
+                    matches = false;
+                    break;
+                }
+            }
+            if matches {
+                return Some(unit.iter().collect());
             }
         }
     }
@@ -787,21 +795,33 @@ fn find_repeating_suffix(
     min_len: usize,
     min_repeats: usize,
 ) -> Option<(String, String, usize)> {
-    for i in (min_len..=s.len() / min_repeats).rev() {
-        if s.len() < i * min_repeats {
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    for i in (min_len..=n / min_repeats).rev() {
+        let total = i * min_repeats;
+        if n < total {
             continue;
         }
-        let unit = &s[s.len() - i..];
-        let pattern = unit.repeat(min_repeats);
-        if s.ends_with(&pattern) {
-            let mut count = 0;
-            let mut temp_s = s;
-            while temp_s.ends_with(unit) {
-                temp_s = &temp_s[..temp_s.len() - i];
-                count += 1;
+        let unit = &chars[n - i..n];
+        let mut matches = true;
+        let start = n - total;
+        for offset in 0..min_repeats {
+            let chunk_start = start + offset * i;
+            if chars[chunk_start..chunk_start + i] != *unit {
+                matches = false;
+                break;
             }
-            let start_index = s.len() - (count * i);
-            return Some((s[..start_index].to_string(), unit.to_string(), count));
+        }
+        if matches {
+            let mut count = 0;
+            let mut end = n;
+            while end >= i && chars[end - i..end] == *unit {
+                count += 1;
+                end -= i;
+            }
+            let prefix: String = chars[..end].iter().collect();
+            let unit_str: String = unit.iter().collect();
+            return Some((prefix, unit_str, count));
         }
     }
     None
@@ -818,20 +838,21 @@ pub fn truncate_repetitive_content(
     if stripped.is_empty() {
         return content.to_string();
     }
+    let stripped_chars = stripped.chars().count();
 
     if !stripped.contains('\n')
-        && stripped.len() > 100
+        && stripped_chars > 100
         && let Some((prefix, unit, count)) = find_repeating_suffix(stripped, 8, 5)
-        && unit.len() * count > stripped.len() / 2
+        && unit.chars().count() * count > stripped_chars / 2
     {
         return prefix;
     }
 
     if !stripped.contains('\n')
-        && stripped.len() > min_len
+        && stripped_chars > min_len
         && let Some(unit) = find_shortest_repeating_substring(stripped)
     {
-        let count = stripped.len() / unit.len();
+        let count = stripped_chars / unit.chars().count();
         if count >= char_threshold {
             return unit;
         }
@@ -1295,6 +1316,10 @@ mod tests {
         assert_eq!(
             find_shortest_repeating_substring("abcabcabc"),
             Some("abc".to_string())
+        );
+        assert_eq!(
+            find_shortest_repeating_substring("綠洲綠洲綠洲"),
+            Some("綠洲".to_string())
         );
         assert_eq!(find_shortest_repeating_substring("hello"), None);
     }

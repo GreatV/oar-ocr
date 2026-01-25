@@ -2,7 +2,7 @@
 
 Vision-Language models for document understanding in Rust.
 
-This crate provides PaddleOCR-VL and UniRec implementations using [Candle](https://github.com/huggingface/candle) for native Rust inference.
+This crate provides PaddleOCR-VL, UniRec, HunyuanOCR, and LightOnOCR implementations using [Candle](https://github.com/huggingface/candle) for native Rust inference.
 
 ## Supported Models
 
@@ -18,9 +18,13 @@ This crate provides PaddleOCR-VL and UniRec implementations using [Candle](https
 
 [HunyuanOCR](https://huggingface.co/tencent/HunyuanOCR) is a 1B parameter OCR expert VLM powered by Hunyuan's multimodal architecture. This crate provides native Rust inference for the `model_type=hunyuan_vl` checkpoint.
 
+### LightOnOCR
+
+[LightOnOCR-2](https://huggingface.co/lightonai/LightOnOCR-2-1B) is an efficient end-to-end OCR VLM for extracting clean text from document images without an external pipeline.
+
 ### DocParser
 
-Two-stage document parsing API that combines layout detection (ONNX) with VL-based recognition, supporting both UniRec and PaddleOCR-VL backends.
+Two-stage document parsing API that combines layout detection (ONNX) with VL-based recognition, supporting UniRec, PaddleOCR-VL, HunyuanOCR, and LightOnOCR backends.
 
 ## Installation
 

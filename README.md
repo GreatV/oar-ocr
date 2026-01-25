@@ -1,11 +1,11 @@
-# OAR (ONNXRuntime And Rust) OCR
+# OAR-OCR
 
 ![Crates.io Version](https://img.shields.io/crates/v/oar-ocr)
 ![Crates.io Downloads (recent)](https://img.shields.io/crates/dr/oar-ocr)
 [![dependency status](https://deps.rs/repo/github/GreatV/oar-ocr/status.svg)](https://deps.rs/repo/github/GreatV/oar-ocr)
 ![GitHub License](https://img.shields.io/github/license/GreatV/oar-ocr)
 
-A comprehensive OCR and document understanding library built in Rust with ONNX Runtime.
+An Optical Character Recognition (OCR) and Document Layout Analysis library written in Rust.
 
 ## Quick Start
 

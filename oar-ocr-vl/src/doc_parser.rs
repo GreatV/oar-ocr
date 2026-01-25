@@ -9,6 +9,8 @@
 //! Supported backends:
 //! - `UniRec` - Lightweight unified recognition
 //! - `PaddleOcrVl` - Larger VLM with task-specific prompts
+//! - `HunyuanOcr` - OCR expert VLM (HunYuanVL)
+//! - `LightOnOcr` - End-to-end OCR VLM
 
 use super::utils::{
     DetectedBox, calculate_overlap_ratio, calculate_projection_overlap_ratio, convert_otsl_to_html,
@@ -144,6 +146,14 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
         self.parse_with_path(layout_predictor, "<memory>", 0, image)
     }
 
+    /// Parse a document image without layout detection (single full-image OCR).
+    ///
+    /// Use this for end-to-end models (e.g. LightOnOCR) that handle layout internally.
+    /// For models requiring separate layout detection, use [`parse`](Self::parse) instead.
+    pub fn parse_without_layout(&self, image: RgbImage) -> Result<StructureResult, OCRError> {
+        self.recognize_full_image("<memory>".into(), 0, image)
+    }
+
     /// Parse a document image with source path information.
     pub fn parse_with_path(
         &self,
@@ -185,19 +195,7 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
 
         // If no layout elements detected, run OCR on the whole image
         if detected.is_empty() {
-            let text = self.backend.recognize(
-                image.clone(),
-                RecognitionTask::Ocr,
-                self.config.max_tokens,
-            )?;
-            let element = LayoutElement::new(
-                BoundingBox::from_coords(0.0, 0.0, page_w, page_h),
-                LayoutElementType::Text,
-                1.0,
-            )
-            .with_label("text")
-            .with_text(text.trim());
-            return Ok(StructureResult::new(input_path, index).with_layout_elements(vec![element]));
+            return self.recognize_full_image(input_path, index, image);
         }
 
         // Step 2: Filter and prepare elements
@@ -218,19 +216,7 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
         }
 
         if elements.is_empty() {
-            let text = self.backend.recognize(
-                image.clone(),
-                RecognitionTask::Ocr,
-                self.config.max_tokens,
-            )?;
-            let element = LayoutElement::new(
-                BoundingBox::from_coords(0.0, 0.0, page_w, page_h),
-                LayoutElementType::Text,
-                1.0,
-            )
-            .with_label("text")
-            .with_text(text.trim());
-            return Ok(StructureResult::new(input_path, index).with_layout_elements(vec![element]));
+            return self.recognize_full_image(input_path, index, image);
         }
 
         // Step 3: Sort by reading order
@@ -423,6 +409,26 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
             true,
         ))
     }
+
+    fn recognize_full_image(
+        &self,
+        input_path: Arc<str>,
+        index: usize,
+        image: RgbImage,
+    ) -> Result<StructureResult, OCRError> {
+        let (page_w, page_h) = (image.width() as f32, image.height() as f32);
+        let text = self
+            .backend
+            .recognize(image, RecognitionTask::Ocr, self.config.max_tokens)?;
+        let element = LayoutElement::new(
+            BoundingBox::from_coords(0.0, 0.0, page_w, page_h),
+            LayoutElementType::Text,
+            1.0,
+        )
+        .with_label("text")
+        .with_text(text.trim());
+        Ok(StructureResult::new(input_path, index).with_layout_elements(vec![element]))
+    }
 }
 
 use super::unirec::UniRec;
@@ -452,6 +458,7 @@ impl RecognitionBackend for UniRec {
 }
 
 use super::hunyuanocr::HunyuanOcr;
+use super::lightonocr::LightOnOcr;
 use super::paddleocr_vl::{PaddleOcrVl, PaddleOcrVlTask};
 
 impl RecognitionBackend for PaddleOcrVl {
@@ -499,6 +506,42 @@ impl RecognitionBackend for HunyuanOcr {
             RecognitionTask::Ocr => {
                 "Detect and recognize text in the image, and output the text coordinates in a formatted manner."
             }
+            RecognitionTask::Table => "Parse the table in the image into HTML.",
+            RecognitionTask::Formula => {
+                "Identify the formula in the image and represent it using LaTeX format."
+            }
+            RecognitionTask::Chart => {
+                "Parse the chart in the image; use Mermaid format for flowcharts and Markdown for other charts."
+            }
+        };
+        let out = self.generate(image, prompt, max_tokens)?;
+        Ok(truncate_repetitive_content(&out, 10, 10, 10)
+            .trim()
+            .to_string())
+    }
+
+    fn needs_table_postprocess(&self) -> bool {
+        false
+    }
+
+    fn needs_formula_preprocess(&self) -> bool {
+        false
+    }
+
+    fn needs_repetition_truncation(&self) -> bool {
+        false // handled inside `recognize()`
+    }
+}
+
+impl RecognitionBackend for LightOnOcr {
+    fn recognize(
+        &self,
+        image: RgbImage,
+        task: RecognitionTask,
+        max_tokens: usize,
+    ) -> Result<String, OCRError> {
+        let prompt = match task {
+            RecognitionTask::Ocr => "",
             RecognitionTask::Table => "Parse the table in the image into HTML.",
             RecognitionTask::Formula => {
                 "Identify the formula in the image and represent it using LaTeX format."
