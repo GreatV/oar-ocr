@@ -4,7 +4,6 @@
 //! for managing OCR pipeline configurations.
 
 pub mod builder;
-pub mod derive;
 pub mod errors;
 pub mod model_input;
 pub mod onnx;

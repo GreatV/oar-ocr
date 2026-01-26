@@ -33,16 +33,16 @@ impl Detection {
 #[derive(Debug, Clone, Serialize, Deserialize, ConfigValidator)]
 pub struct TextDetectionConfig {
     /// Score threshold for detection (default: 0.3)
-    #[validate(range(0.0, 1.0))]
+    #[validate(range(min = 0.0, max = 1.0))]
     pub score_threshold: f32,
     /// Box threshold for filtering (default: 0.6)
-    #[validate(range(0.0, 1.0))]
+    #[validate(range(min = 0.0, max = 1.0))]
     pub box_threshold: f32,
     /// Unclip ratio for expanding detected regions (default: 1.5)
-    #[validate(min(0.0))]
+    #[validate(min = 0.0)]
     pub unclip_ratio: f32,
     /// Maximum candidates to consider (default: 1000)
-    #[validate(min(1))]
+    #[validate(min = 1)]
     pub max_candidates: usize,
     /// Target side length for image resizing (optional)
     pub limit_side_len: Option<u32>,

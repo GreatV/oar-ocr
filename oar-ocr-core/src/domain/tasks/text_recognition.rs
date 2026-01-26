@@ -16,10 +16,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, ConfigValidator)]
 pub struct TextRecognitionConfig {
     /// Score threshold for recognition (default: 0.0, no filtering)
-    #[validate(range(0.0, 1.0))]
+    #[validate(range(min = 0.0, max = 1.0))]
     pub score_threshold: f32,
     /// Maximum text length (default: 25)
-    #[validate(min(1))]
+    #[validate(min = 1)]
     pub max_text_length: usize,
 }
 

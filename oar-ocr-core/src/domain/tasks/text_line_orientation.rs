@@ -15,10 +15,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, ConfigValidator)]
 pub struct TextLineOrientationConfig {
     /// Score threshold for classification (default: 0.5)
-    #[validate(range(0.0, 1.0))]
+    #[validate(range(min = 0.0, max = 1.0))]
     pub score_threshold: f32,
     /// Number of top predictions to return (default: 2)
-    #[validate(min(1))]
+    #[validate(min = 1)]
     pub topk: usize,
 }
 

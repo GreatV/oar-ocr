@@ -16,10 +16,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, ConfigValidator)]
 pub struct TableCellDetectionConfig {
     /// Score threshold for detections (default: 0.3).
-    #[validate(range(0.0, 1.0))]
+    #[validate(range(min = 0.0, max = 1.0))]
     pub score_threshold: f32,
     /// Maximum number of cells to keep per image (default: 300).
-    #[validate(min(1))]
+    #[validate(min = 1)]
     pub max_cells: usize,
 }
 

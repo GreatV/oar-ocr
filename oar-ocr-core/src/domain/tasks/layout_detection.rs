@@ -46,10 +46,10 @@ impl Default for UnclipRatio {
 #[derive(Debug, Clone, Serialize, Deserialize, ConfigValidator)]
 pub struct LayoutDetectionConfig {
     /// Default score threshold for detection (default: 0.5)
-    #[validate(range(0.0, 1.0))]
+    #[validate(range(min = 0.0, max = 1.0))]
     pub score_threshold: f32,
     /// Maximum number of layout elements (default: 100)
-    #[validate(min(1))]
+    #[validate(min = 1)]
     pub max_elements: usize,
     /// Per-class score thresholds (overrides score_threshold for specific classes)
     /// PP-StructureV3 defaults:
