@@ -7,10 +7,6 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{DeriveInput, Expr, Type, parse_macro_input};
 
-// ============================================================================
-// ConfigValidator types
-// ============================================================================
-
 /// Parsed arguments for range validators: `range(min, max)` or `optional_range(min, max)`
 #[derive(Debug, FromMeta)]
 struct RangeArgs {
@@ -65,10 +61,6 @@ struct ConfigValidatorInput {
     data: ast::Data<(), ValidatedField>,
 }
 
-// ============================================================================
-// TaskPredictorBuilder types
-// ============================================================================
-
 /// Builder attribute: `#[builder(config = ConfigType)]`
 #[derive(Debug, FromMeta)]
 struct BuilderAttr {
@@ -91,10 +83,6 @@ struct TaskPredictorBuilderInput {
     #[darling(flatten)]
     builder: BuilderAttr,
 }
-
-// ============================================================================
-// ConfigValidator implementation
-// ============================================================================
 
 /// Derive macro for implementing ConfigValidator trait.
 ///
@@ -263,10 +251,6 @@ fn generate_field_validation(field: &ValidatedField) -> Option<proc_macro2::Toke
         Some(quote! { #(#validations)* })
     }
 }
-
-// ============================================================================
-// TaskPredictorBuilder implementation
-// ============================================================================
 
 /// Derive macro for implementing TaskPredictorBuilder trait.
 ///
