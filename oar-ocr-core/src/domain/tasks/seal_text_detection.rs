@@ -18,16 +18,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, ConfigValidator)]
 pub struct SealTextDetectionConfig {
     /// Pixel-level threshold for text detection (0.2 default)
-    #[validate(range(0.0, 1.0))]
+    #[validate(range(min = 0.0, max = 1.0))]
     pub score_threshold: f32,
     /// Box-level threshold for filtering detections (0.6 default)
-    #[validate(range(0.0, 1.0))]
+    #[validate(range(min = 0.0, max = 1.0))]
     pub box_threshold: f32,
     /// Expansion ratio for detected regions using Vatti clipping (0.5 default)
-    #[validate(min(0.0))]
+    #[validate(min = 0.0)]
     pub unclip_ratio: f32,
     /// Maximum number of candidate detections (1000 default)
-    #[validate(min(1))]
+    #[validate(min = 1)]
     pub max_candidates: usize,
 }
 

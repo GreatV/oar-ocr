@@ -22,7 +22,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "A comprehensive OCR library built in Rust with ONNX Runtime for efficient inference"
+description = "An Optical Character Recognition (OCR) and Document Layout Analysis library written in Rust."
 readme = "README.md"
 keywords = [
     "ocr",
