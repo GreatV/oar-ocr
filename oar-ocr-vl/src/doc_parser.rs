@@ -485,7 +485,9 @@ impl RecognitionBackend for PaddleOcrVl {
         // PaddleOCR-VL's reference pipeline truncates repetitive tails on the *raw* model output,
         // before per-task postprocessing (e.g., table-token conversion).
         let results = self.generate_with_raw(&[image], &[vl_task], max_tokens);
-        let (raw, _) = results.into_iter().next().unwrap()?;
+        let (raw, _) = results.into_iter().next().ok_or(OCRError::InvalidInput {
+            message: "PaddleOCR-VL: no result returned".to_string(),
+        })??;
         let raw = truncate_repetitive_content(&raw, 10, 10, 10);
         Ok(vl_task.postprocess(raw))
     }
