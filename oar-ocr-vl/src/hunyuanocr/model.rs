@@ -1,9 +1,10 @@
 //! HunyuanOCR model wrapper (HunYuanVLForConditionalGeneration).
 
 use super::config::{HunyuanOcrConfig, HunyuanOcrImageProcessorConfig};
-use super::llm::{HunyuanLlm, KvCache};
+use super::llm::HunyuanLlm;
 use super::processing::{HunyuanOcrImageInputs, preprocess_image};
 use super::vision::HunyuanVisionModel;
+use crate::attention::{combine_masks, create_causal_mask, create_left_padding_mask};
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use image::RgbImage;
@@ -70,263 +71,301 @@ impl HunyuanOcr {
         })
     }
 
-    /// Generate OCR output for an image with a custom instruction.
+    /// Generate OCR output for one or more images with custom instructions.
+    ///
+    /// Supports true GPU batching when multiple images are provided.
+    ///
+    /// # Arguments
+    /// * `images` - Input images
+    /// * `instructions` - Instruction for each image (must match images length)
+    /// * `max_new_tokens` - Maximum tokens to generate per image
+    ///
+    /// # Returns
+    /// Vector of results, one per input image.
     pub fn generate(
         &self,
-        image: RgbImage,
-        instruction: impl AsRef<str>,
+        images: &[RgbImage],
+        instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Result<String, OCRError> {
-        let instruction = instruction.as_ref();
+    ) -> Vec<Result<String, OCRError>> {
+        if images.is_empty() {
+            return Vec::new();
+        }
+        if images.len() != instructions.len() {
+            return vec![Err(OCRError::InvalidInput {
+                message: format!(
+                    "HunyuanOCR: images count ({}) != instructions count ({})",
+                    images.len(),
+                    instructions.len()
+                ),
+            })];
+        }
 
-        let (input_ids, image_inputs, inputs_embeds) =
-            self.prepare_inputs_embeds(&image, instruction)?;
+        match self.generate_internal(images, instructions, max_new_tokens) {
+            Ok(results) => results.into_iter().map(Ok).collect(),
+            Err(e) => {
+                let msg = format!("generation failed: {e}");
+                (0..images.len())
+                    .map(|_| {
+                        Err(OCRError::InvalidInput {
+                            message: msg.clone(),
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
 
-        let (mut kv_cache, mut logits) =
-            self.run_prefill(&inputs_embeds, &input_ids, &image_inputs)?;
+    /// Internal generation implementation supporting batched inference.
+    fn generate_internal(
+        &self,
+        images: &[RgbImage],
+        instructions: &[impl AsRef<str>],
+        max_new_tokens: usize,
+    ) -> Result<Vec<String>, OCRError> {
+        let batch_size = images.len();
 
-        let mut generated: Vec<u32> = Vec::new();
-        let mut next_pos = input_ids.len() as i64;
+        // 1. Preprocess all images and build prompts
+        let mut all_input_ids: Vec<Vec<u32>> = Vec::with_capacity(batch_size);
+        let mut all_image_inputs: Vec<HunyuanOcrImageInputs> = Vec::with_capacity(batch_size);
+
+        for (image, instruction) in images.iter().zip(instructions.iter()) {
+            let instruction = instruction.as_ref();
+            let image_inputs = preprocess_image(
+                image,
+                &self.image_cfg,
+                &self.cfg.vision_config,
+                &self.device,
+                self.dtype,
+            )?;
+
+            let prompt = build_prompt(instruction);
+            let enc = self
+                .tokenizer
+                .encode(prompt, false)
+                .map_err(|e| OCRError::InvalidInput {
+                    message: format!("HunyuanOCR: tokenizer encode failed: {e}"),
+                })?;
+
+            let mut input_ids = enc.get_ids().to_vec();
+            expand_image_tokens_in_place(&mut input_ids, &self.cfg, &image_inputs)?;
+
+            all_input_ids.push(input_ids);
+            all_image_inputs.push(image_inputs);
+        }
+
+        // 2. Compute vision features and build embeddings for each sample
+        let seq_lens: Vec<usize> = all_input_ids.iter().map(|ids| ids.len()).collect();
+        let max_seq_len = *seq_lens.iter().max().unwrap();
+
+        let mut batch_embeds: Vec<Tensor> = Vec::with_capacity(batch_size);
+        let mut batch_position_ids: Vec<Tensor> = Vec::with_capacity(batch_size);
+
+        for (input_ids, image_inputs) in all_input_ids.iter().zip(all_image_inputs.iter()) {
+            let seq_len = input_ids.len();
+            let pad_len = max_seq_len - seq_len;
+
+            // Embed tokens
+            let input_ids_t = Tensor::new(input_ids.clone(), &self.device)
+                .and_then(|t| t.reshape((1, seq_len)))
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "create input_ids", e))?;
+            let token_embeds = self.llm.embed(&input_ids_t)?;
+
+            // Get vision features
+            let (image_embeds, merged_hw) = self.vision.forward(&image_inputs.pixel_values)?;
+            if merged_hw
+                != (
+                    image_inputs.grid_thw_merged.1,
+                    image_inputs.grid_thw_merged.2,
+                )
+            {
+                return Err(OCRError::InvalidInput {
+                    message: format!(
+                        "HunyuanOCR: merged grid mismatch: vision={:?} preprocessor={:?}",
+                        merged_hw, image_inputs.grid_thw_merged
+                    ),
+                });
+            }
+
+            // Fuse image embeddings
+            let (start_pos, end_pos) = find_image_span(input_ids, &self.cfg)?;
+            let region_len = end_pos - start_pos + 1;
+            let (img_len, _) = image_embeds
+                .dims2()
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "image_embeds dims2", e))?;
+            if region_len != img_len {
+                return Err(OCRError::InvalidInput {
+                    message: format!(
+                        "HunyuanOCR: image span length mismatch: tokens={region_len} embeds={img_len}"
+                    ),
+                });
+            }
+
+            let token_embeds = token_embeds.squeeze(0).map_err(|e| {
+                candle_to_ocr_inference("HunyuanOCR", "squeeze token embeddings", e)
+            })?;
+
+            let mut parts: Vec<Tensor> = Vec::with_capacity(3);
+            if start_pos > 0 {
+                parts.push(token_embeds.i((0..start_pos, ..)).map_err(|e| {
+                    candle_to_ocr_inference("HunyuanOCR", "slice prefix embeddings", e)
+                })?);
+            }
+            parts.push(image_embeds);
+            if end_pos + 1 < input_ids.len() {
+                parts.push(
+                    token_embeds
+                        .i((end_pos + 1..input_ids.len(), ..))
+                        .map_err(|e| {
+                            candle_to_ocr_inference("HunyuanOCR", "slice suffix embeddings", e)
+                        })?,
+                );
+            }
+            let refs: Vec<&Tensor> = parts.iter().collect();
+            let mut inputs_embeds = Tensor::cat(&refs, 0)
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "cat embeds", e))?
+                .unsqueeze(0)
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "unsqueeze embeds", e))?;
+
+            // Left-pad if needed
+            if pad_len > 0 {
+                let hidden_size = inputs_embeds
+                    .dim(2)
+                    .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "get hidden_size", e))?;
+                let pad = Tensor::zeros(
+                    (1, pad_len, hidden_size),
+                    inputs_embeds.dtype(),
+                    &self.device,
+                )
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "create pad", e))?;
+                inputs_embeds = Tensor::cat(&[&pad, &inputs_embeds], 1)
+                    .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "cat pad", e))?;
+            }
+            batch_embeds.push(inputs_embeds);
+
+            // Build position IDs
+            let pos_ids = build_position_ids(input_ids, &self.cfg, image_inputs)?;
+            // Left-pad position IDs
+            let pos_ids = if pad_len > 0 {
+                let pad_pos = Tensor::zeros((4, 1, pad_len), DType::I64, &self.device)
+                    .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "create pad pos", e))?;
+                Tensor::cat(&[&pad_pos, &pos_ids], 2)
+                    .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "cat pad pos", e))?
+            } else {
+                pos_ids
+            };
+            batch_position_ids.push(pos_ids);
+        }
+
+        // 3. Stack batched tensors
+        let batch_refs: Vec<&Tensor> = batch_embeds.iter().collect();
+        let inputs_embeds = Tensor::cat(&batch_refs, 0)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "stack embeds", e))?;
+
+        let pos_refs: Vec<&Tensor> = batch_position_ids.iter().collect();
+        let position_ids = Tensor::cat(&pos_refs, 1)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "stack pos", e))?;
+
+        // 4. Create attention mask
+        let causal = create_causal_mask(max_seq_len, max_seq_len, self.dtype, &self.device)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "create causal", e))?;
+        let padding = create_left_padding_mask(&seq_lens, max_seq_len, self.dtype, &self.device)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "create padding", e))?;
+        let mask = combine_masks(&causal, &padding)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "combine masks", e))?;
+
+        // 5. Prefill
+        self.llm.clear_kv_cache();
+        let hidden = self
+            .llm
+            .forward(&inputs_embeds, &position_ids, Some(&mask))?;
+
+        // 6. Get initial logits per sample
+        let mut logits_list: Vec<Tensor> = Vec::with_capacity(batch_size);
+        for i in 0..batch_size {
+            let last = hidden
+                .i((i, max_seq_len - 1, ..))
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "get last hidden", e))?;
+            let logits = self.logits_from_hidden(&last)?;
+            logits_list.push(logits);
+        }
+
+        // 7. Autoregressive decode
+        let mut generated: Vec<Vec<u32>> = vec![Vec::new(); batch_size];
+        let mut finished: Vec<bool> = vec![false; batch_size];
+        let mut positions: Vec<i64> = seq_lens.iter().map(|&len| len as i64).collect();
 
         for _ in 0..max_new_tokens {
-            let next_token = logits
-                .argmax(D::Minus1)
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "argmax", e))?
-                .to_scalar::<u32>()
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "argmax to_scalar", e))?;
-
-            if self.stop_token_ids.contains(&next_token) {
+            if finished.iter().all(|&f| f) {
                 break;
             }
-            generated.push(next_token);
 
-            let token_t = Tensor::new(&[next_token], &self.device).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "HunyuanOCR: create next_token tensor failed",
-                    e,
-                )
-            })?;
-            let token_t = token_t.reshape((1usize, 1usize)).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "HunyuanOCR: reshape next_token tensor failed",
-                    e,
-                )
-            })?;
-            let token_embed = self.llm.embed(&token_t)?;
+            let mut next_tokens: Vec<u32> = Vec::with_capacity(batch_size);
+            for (i, logits) in logits_list.iter().enumerate() {
+                if finished[i] {
+                    next_tokens.push(0); // Padding token for finished samples
+                } else {
+                    let tok = logits
+                        .argmax(D::Minus1)
+                        .and_then(|t| t.to_scalar::<u32>())
+                        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "argmax", e))?;
 
-            // For text-only generation, use the same 1D position index for all 4 RoPE dimensions.
-            let pos_ids = Tensor::new(&[next_pos, next_pos, next_pos, next_pos], &self.device)
-                .map_err(|e| {
-                    candle_to_ocr_processing(
-                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                        "HunyuanOCR: create pos tensor failed",
-                        e,
-                    )
-                })?;
-            let pos_ids = pos_ids.reshape((4usize, 1usize, 1usize)).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "HunyuanOCR: reshape pos tensor failed",
-                    e,
-                )
-            })?;
+                    if self.stop_token_ids.contains(&tok) {
+                        finished[i] = true;
+                    } else {
+                        generated[i].push(tok);
+                    }
+                    next_tokens.push(tok);
+                }
+            }
 
-            let hs = self
-                .llm
-                .forward(&token_embed, &pos_ids, Some(&mut kv_cache), None)?;
-            let hs = hs.squeeze(0).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "HunyuanOCR: squeeze hs batch failed",
-                    e,
-                )
-            })?;
-            let hs = hs.squeeze(0).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "HunyuanOCR: squeeze hs seq failed",
-                    e,
-                )
-            })?;
-            logits = self.logits_from_hidden(&hs)?;
-            next_pos += 1;
+            if finished.iter().all(|&f| f) {
+                break;
+            }
+
+            // Batch forward for next tokens
+            let tokens = Tensor::new(next_tokens, &self.device)
+                .and_then(|t| t.reshape((batch_size, 1)))
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "create tokens", e))?;
+            let embeds = self.llm.embed(&tokens)?;
+
+            // Build 4-axis position IDs for decode step
+            let pos_data: Vec<i64> = positions.iter().flat_map(|&p| [p, p, p, p]).collect();
+            let pos = Tensor::new(pos_data, &self.device)
+                .and_then(|t| t.reshape((4, batch_size, 1)))
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "create pos", e))?;
+
+            let hs = self.llm.forward(&embeds, &pos, None)?;
+
+            logits_list.clear();
+            for i in 0..batch_size {
+                let h = hs
+                    .i((i, 0, ..))
+                    .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "get hs", e))?;
+                let logits = self.logits_from_hidden(&h)?;
+                logits_list.push(logits);
+            }
+
+            for (i, p) in positions.iter_mut().enumerate() {
+                if !finished[i] {
+                    *p += 1;
+                }
+            }
         }
 
-        let decoded =
-            self.tokenizer
-                .decode(&generated, true)
-                .map_err(|e| OCRError::InvalidInput {
-                    message: format!("HunyuanOCR: tokenizer decode failed: {e}"),
-                })?;
-        Ok(decoded.trim().to_string())
-    }
-
-    /// Prepare input embeddings from image and instruction.
-    fn prepare_inputs_embeds(
-        &self,
-        image: &RgbImage,
-        instruction: &str,
-    ) -> Result<(Vec<u32>, HunyuanOcrImageInputs, Tensor), OCRError> {
-        let image_inputs = preprocess_image(
-            image,
-            &self.image_cfg,
-            &self.cfg.vision_config,
-            &self.device,
-            self.dtype,
-        )?;
-
-        let prompt = build_prompt(instruction);
-        let enc = self
-            .tokenizer
-            .encode(prompt, false)
-            .map_err(|e| OCRError::InvalidInput {
-                message: format!("HunyuanOCR: tokenizer encode failed: {e}"),
-            })?;
-
-        let mut input_ids = enc.get_ids().to_vec();
-        expand_image_tokens_in_place(&mut input_ids, &self.cfg, &image_inputs)?;
-
-        let input_ids_t = Tensor::new(input_ids.clone(), &self.device).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "HunyuanOCR: create input_ids tensor failed",
-                e,
-            )
-        })?;
-        let input_ids_t = input_ids_t
-            .reshape((1usize, input_ids.len()))
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "HunyuanOCR: reshape input_ids tensor failed",
-                    e,
-                )
-            })?;
-
-        let token_embeds = self.llm.embed(&input_ids_t)?;
-
-        let (image_embeds, merged_hw) = self.vision.forward(&image_inputs.pixel_values)?;
-        if merged_hw
-            != (
-                image_inputs.grid_thw_merged.1,
-                image_inputs.grid_thw_merged.2,
-            )
-        {
-            return Err(OCRError::InvalidInput {
-                message: format!(
-                    "HunyuanOCR: merged grid mismatch: vision={:?} preprocessor={:?}",
-                    merged_hw, image_inputs.grid_thw_merged
-                ),
-            });
+        // 8. Decode results
+        let mut results = Vec::with_capacity(batch_size);
+        for tokens in generated {
+            let decoded =
+                self.tokenizer
+                    .decode(&tokens, true)
+                    .map_err(|e| OCRError::InvalidInput {
+                        message: format!("HunyuanOCR: tokenizer decode failed: {e}"),
+                    })?;
+            results.push(decoded.trim().to_string());
         }
 
-        let (start_pos, end_pos) = find_image_span(&input_ids, &self.cfg)?;
-        let region_len = end_pos - start_pos + 1;
-        let (img_len, img_dim) = image_embeds.dims2().map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "HunyuanOCR: image_embeds dims2 failed",
-                e,
-            )
-        })?;
-        if img_dim != self.cfg.hidden_size {
-            return Err(OCRError::InvalidInput {
-                message: format!(
-                    "HunyuanOCR: image_embeds hidden dim mismatch: got {img_dim}, expected {}",
-                    self.cfg.hidden_size
-                ),
-            });
-        }
-        if region_len != img_len {
-            return Err(OCRError::InvalidInput {
-                message: format!(
-                    "HunyuanOCR: image span length mismatch: tokens={region_len} embeds={img_len}"
-                ),
-            });
-        }
-
-        let token_embeds = token_embeds.squeeze(0).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "HunyuanOCR: squeeze token embeddings failed",
-                e,
-            )
-        })?;
-
-        let mut parts: Vec<Tensor> = Vec::with_capacity(3);
-        if start_pos > 0 {
-            parts.push(token_embeds.i((0..start_pos, ..)).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "HunyuanOCR: slice prefix token embeddings failed",
-                    e,
-                )
-            })?);
-        }
-        parts.push(image_embeds);
-        if end_pos + 1 < input_ids.len() {
-            parts.push(
-                token_embeds
-                    .i((end_pos + 1..input_ids.len(), ..))
-                    .map_err(|e| {
-                        candle_to_ocr_processing(
-                            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                            "HunyuanOCR: slice suffix token embeddings failed",
-                            e,
-                        )
-                    })?,
-            );
-        }
-        let refs: Vec<&Tensor> = parts.iter().collect();
-        let inputs_embeds = Tensor::cat(&refs, 0).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "HunyuanOCR: concat input embeddings failed",
-                e,
-            )
-        })?;
-        let inputs_embeds = inputs_embeds.unsqueeze(0).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "HunyuanOCR: add batch dim to embeddings failed",
-                e,
-            )
-        })?;
-
-        Ok((input_ids, image_inputs, inputs_embeds))
-    }
-
-    /// Run the prefill step: build attention components and populate KV cache.
-    fn run_prefill(
-        &self,
-        inputs_embeds: &Tensor,
-        input_ids: &[u32],
-        image_inputs: &HunyuanOcrImageInputs,
-    ) -> Result<(Vec<KvCache>, Tensor), OCRError> {
-        let position_ids = build_position_ids(input_ids, &self.cfg, image_inputs)?;
-        let prefill_causal_mask =
-            causal_mask(input_ids.len(), &self.device, inputs_embeds.dtype())?;
-
-        let mut kv_cache = vec![KvCache::default(); self.cfg.num_hidden_layers];
-        let hidden = self.llm.forward(
-            inputs_embeds,
-            &position_ids,
-            Some(&mut kv_cache),
-            Some(&prefill_causal_mask),
-        )?;
-
-        let last = hidden.i((0, input_ids.len() - 1, ..)).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "HunyuanOCR: select last hidden state failed",
-                e,
-            )
-        })?;
-        let logits = self.logits_from_hidden(&last)?;
-
-        Ok((kv_cache, logits))
+        Ok(results)
     }
 
     fn logits_from_hidden(&self, hidden: &Tensor) -> Result<Tensor, OCRError> {
@@ -504,34 +543,6 @@ fn build_position_ids(
         candle_to_ocr_processing(
             oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "HunyuanOCR: build position_ids tensor failed",
-            e,
-        )
-    })
-}
-
-fn causal_mask(seq_len: usize, device: &Device, dtype: DType) -> Result<Tensor, OCRError> {
-    let mut data = Vec::with_capacity(seq_len * seq_len);
-    for i in 0..seq_len {
-        for j in 0..seq_len {
-            if j <= i {
-                data.push(0f32);
-            } else {
-                data.push(f32::NEG_INFINITY);
-            }
-        }
-    }
-    let tensor =
-        Tensor::from_vec(data, (1usize, 1usize, seq_len, seq_len), device).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "HunyuanOCR: build causal mask failed",
-                e,
-            )
-        })?;
-    tensor.to_dtype(dtype).map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "HunyuanOCR: cast causal mask failed",
             e,
         )
     })

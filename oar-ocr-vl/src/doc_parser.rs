@@ -14,7 +14,7 @@
 
 use super::utils::{
     DetectedBox, calculate_overlap_ratio, calculate_projection_overlap_ratio, convert_otsl_to_html,
-    crop_margin, filter_overlap_boxes, truncate_repetitive_content,
+    crop_margin, filter_overlap_boxes, text, truncate_repetitive_content,
 };
 use image::RgbImage;
 use image::{Rgb, imageops};
@@ -363,9 +363,9 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
                     generated.trim().to_string()
                 }
             } else if task == RecognitionTask::Formula {
-                format_formula(&generated)
+                text::format_formula(&generated)
             } else {
-                format_text(&generated)
+                text::format_text(&generated)
             };
 
             if element.element_type == LayoutElementType::Table {
@@ -441,7 +441,14 @@ impl RecognitionBackend for UniRec {
         max_tokens: usize,
     ) -> Result<String, OCRError> {
         // UniRec doesn't use task-specific prompts; it's a unified model
-        self.generate(image, max_tokens)
+        self.generate(&[image], max_tokens)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| {
+                Err(OCRError::InvalidInput {
+                    message: "UniRec: no result returned".to_string(),
+                })
+            })
     }
 
     fn needs_table_postprocess(&self) -> bool {
@@ -477,7 +484,8 @@ impl RecognitionBackend for PaddleOcrVl {
 
         // PaddleOCR-VL's reference pipeline truncates repetitive tails on the *raw* model output,
         // before per-task postprocessing (e.g., table-token conversion).
-        let (raw, _) = self.generate_with_raw(image, vl_task, max_tokens)?;
+        let results = self.generate_with_raw(&[image], &[vl_task], max_tokens);
+        let (raw, _) = results.into_iter().next().unwrap()?;
         let raw = truncate_repetitive_content(&raw, 10, 10, 10);
         Ok(vl_task.postprocess(raw))
     }
@@ -514,7 +522,15 @@ impl RecognitionBackend for HunyuanOcr {
                 "Parse the chart in the image; use Mermaid format for flowcharts and Markdown for other charts."
             }
         };
-        let out = self.generate(image, prompt, max_tokens)?;
+        let out = self
+            .generate(&[image], &[prompt], max_tokens)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| {
+                Err(OCRError::InvalidInput {
+                    message: "HunyuanOCR: no result returned".to_string(),
+                })
+            })?;
         Ok(truncate_repetitive_content(&out, 10, 10, 10)
             .trim()
             .to_string())
@@ -550,7 +566,15 @@ impl RecognitionBackend for LightOnOcr {
                 "Parse the chart in the image; use Mermaid format for flowcharts and Markdown for other charts."
             }
         };
-        let out = self.generate(image, prompt, max_tokens)?;
+        let out = self
+            .generate(&[image], &[prompt], max_tokens)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| {
+                Err(OCRError::InvalidInput {
+                    message: "LightOnOCR: no result returned".to_string(),
+                })
+            })?;
         Ok(truncate_repetitive_content(&out, 10, 10, 10)
             .trim()
             .to_string())
@@ -648,140 +672,11 @@ fn should_have_order_index(element_type: LayoutElementType) -> bool {
     )
 }
 
-/// Format formula text with LaTeX delimiters.
-fn format_formula(text: &str) -> String {
-    let mut result = text.to_string();
-    // Clean special tokens
-    result = result.replace("<|sn|>", "");
-    result = result.replace("<|unk|>", "");
-    result = result.replace('\u{FFFF}', "");
-    // Remove existing delimiters
-    result = result.replace("\\[", "");
-    result = result.replace("\\]", "");
-    result = result.replace("\\(", "");
-    result = result.replace("\\)", "");
-    result = result.trim().trim_matches('$').to_string();
-    // Wrap in display math delimiters
-    format!("$${}$$", result.trim())
-}
-
-/// Format regular text output.
-fn format_text(text: &str) -> String {
-    let mut result = text.to_string();
-    // Clean special tokens
-    result = result.replace("<|sn|>", " ");
-    result = result.replace("<|unk|>", "");
-    result = result.replace('\u{FFFF}', "");
-    // Convert inline LaTeX delimiters
-    if result.contains("\\(") && result.contains("\\)") {
-        result = result.replace("\\(", " $ ").replace("\\)", " $ ");
-    }
-    if result.contains("\\[") && result.contains("\\]") {
-        result = result.replace("\\[", " $$ ").replace("\\]", " $$ ");
-    }
-    // Normalize inline math spacing to match OpenOCR/PaddleX markdown output.
-    result = tighten_inline_dollar_math(&result);
-    result = collapse_consecutive_spaces(&result);
-    result = remove_space_before_punctuation(&result);
-    result.trim().to_string()
-}
-
 /// Document parser using UniRec backend.
 pub type UniRecDocParser<'a> = DocParser<'a, UniRec>;
 
 /// Document parser using PaddleOCR-VL backend.
 pub type PaddleOcrVlDocParser<'a> = DocParser<'a, PaddleOcrVl>;
-
-fn collapse_consecutive_spaces(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut prev_space = false;
-    for ch in text.chars() {
-        if ch == ' ' {
-            if prev_space {
-                continue;
-            }
-            prev_space = true;
-            out.push(' ');
-        } else {
-            prev_space = false;
-            out.push(ch);
-        }
-    }
-    out
-}
-
-fn tighten_inline_dollar_math(text: &str) -> String {
-    // Trim whitespace inside *single* `$...$` blocks, while leaving `$$...$$` untouched.
-    // Uses character-based indexing for UTF-8 safety.
-    let mut result = String::with_capacity(text.len());
-    let chars: Vec<char> = text.chars().collect();
-    let mut i = 0;
-
-    while i < chars.len() {
-        if chars[i] != '$' {
-            result.push(chars[i]);
-            i += 1;
-            continue;
-        }
-
-        // Check if this '$' is part of '$$' (display math)
-        let prev_is_dollar = i > 0 && chars[i - 1] == '$';
-        let next_is_dollar = i + 1 < chars.len() && chars[i + 1] == '$';
-
-        if prev_is_dollar || next_is_dollar {
-            result.push('$');
-            i += 1;
-            continue;
-        }
-
-        // Find the closing single '$'
-        let mut close_idx = None;
-        let mut j = i + 1;
-        while j < chars.len() {
-            if chars[j] == '$' {
-                let prev_d = j > 0 && chars[j - 1] == '$';
-                let next_d = j + 1 < chars.len() && chars[j + 1] == '$';
-                if prev_d || next_d {
-                    j += 1;
-                    continue;
-                }
-                close_idx = Some(j);
-                break;
-            }
-            j += 1;
-        }
-
-        if let Some(end_idx) = close_idx {
-            let inner: String = chars[i + 1..end_idx].iter().collect();
-            result.push('$');
-            result.push_str(inner.trim());
-            result.push('$');
-            i = end_idx + 1;
-        } else {
-            // Unmatched '$' (e.g., currency); keep it.
-            result.push('$');
-            i += 1;
-        }
-    }
-
-    result
-}
-
-fn remove_space_before_punctuation(text: &str) -> String {
-    // Remove a single ASCII space when it appears right before punctuation.
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == ' '
-            && let Some(&next) = chars.peek()
-            && matches!(next, ',' | '.' | ';' | ':' | '!' | '?' | ')')
-        {
-            continue;
-        }
-        out.push(ch);
-    }
-    out
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MergeAlign {
@@ -974,51 +869,4 @@ fn compute_openocr_merge_groups(elements: &[LayoutElement]) -> Vec<MergeGroup> {
         .into_iter()
         .filter(|g| g.indices.len() > 1 && g.aligns.len() + 1 == g.indices.len())
         .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_tighten_inline_dollar_math_basic() {
-        assert_eq!(tighten_inline_dollar_math("$ x $"), "$x$");
-        assert_eq!(tighten_inline_dollar_math("$  y  $"), "$y$");
-        assert_eq!(tighten_inline_dollar_math("$x$"), "$x$");
-    }
-
-    #[test]
-    fn test_tighten_inline_dollar_math_display_math_untouched() {
-        assert_eq!(tighten_inline_dollar_math("$$ x $$"), "$$ x $$");
-        assert_eq!(tighten_inline_dollar_math("$$  y  $$"), "$$  y  $$");
-    }
-
-    #[test]
-    fn test_tighten_inline_dollar_math_unmatched() {
-        assert_eq!(tighten_inline_dollar_math("$100"), "$100");
-        assert_eq!(tighten_inline_dollar_math("price is $50"), "price is $50");
-    }
-
-    #[test]
-    fn test_tighten_inline_dollar_math_utf8_safety() {
-        // Multi-byte characters inside inline math should not cause panic
-        assert_eq!(tighten_inline_dollar_math("$€$"), "$€$");
-        assert_eq!(tighten_inline_dollar_math("$ €100 $"), "$€100$");
-        assert_eq!(tighten_inline_dollar_math("$ α + β $"), "$α + β$");
-        assert_eq!(tighten_inline_dollar_math("$中文$"), "$中文$");
-        assert_eq!(tighten_inline_dollar_math("$ 数学 $"), "$数学$");
-        // Mixed content
-        assert_eq!(
-            tighten_inline_dollar_math("price $100€$ and $ α $"),
-            "price $100€$ and $α$"
-        );
-    }
-
-    #[test]
-    fn test_tighten_inline_dollar_math_mixed() {
-        assert_eq!(
-            tighten_inline_dollar_math("text $ x $ more $$ y $$ end"),
-            "text $x$ more $$ y $$ end"
-        );
-    }
 }

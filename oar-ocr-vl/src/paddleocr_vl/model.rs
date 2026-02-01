@@ -1,10 +1,11 @@
 //! PaddleOCR-VL (Vision-Language) model implementation.
 
 use super::config::{PaddleOcrVlConfig, PaddleOcrVlImageProcessorConfig};
-use super::ernie::{Ernie4_5Model, KvCache};
+use super::ernie::Ernie4_5Model;
 use super::processing;
 use super::projector::Projector;
 use super::vision::VisionModel;
+use crate::attention::{combine_masks, create_causal_mask, create_left_padding_mask};
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::Module;
@@ -53,6 +54,8 @@ pub struct PaddleOcrVl {
     projector: Projector,
     eos_token_id: u32,
     sep_token_id: Option<u32>,
+    /// Cached tokenized image placeholder (single token)
+    image_placeholder_token_id: u32,
 }
 
 impl PaddleOcrVl {
@@ -74,6 +77,14 @@ impl PaddleOcrVl {
                 message: "PaddleOCR-VL: tokenizer is missing </s> token".to_string(),
             })?;
         let sep_token_id = tokenizer.token_to_id("<|end_of_sentence|>");
+
+        // Pre-tokenize image placeholder to avoid repeated string allocation
+        let image_placeholder_token_id = tokenizer
+            .token_to_id("<|IMAGE_PLACEHOLDER|>")
+            .ok_or_else(|| OCRError::ConfigError {
+                message: "PaddleOCR-VL: tokenizer is missing <|IMAGE_PLACEHOLDER|> token"
+                    .to_string(),
+            })?;
 
         let dtype = device.bf16_default_to_f32();
         let vb = unsafe {
@@ -104,354 +115,341 @@ impl PaddleOcrVl {
             projector,
             eos_token_id,
             sep_token_id,
+            image_placeholder_token_id,
         })
     }
 
+    /// Generate OCR output for one or more images.
+    ///
+    /// Supports true GPU batching when multiple images are provided.
+    ///
+    /// # Arguments
+    /// * `images` - Input images
+    /// * `tasks` - Task for each image (must match images length)
+    /// * `max_new_tokens` - Maximum tokens to generate per image
+    ///
+    /// # Returns
+    /// Vector of results, one per input image.
     pub fn generate(
         &self,
-        image: RgbImage,
-        task: PaddleOcrVlTask,
+        images: &[RgbImage],
+        tasks: &[PaddleOcrVlTask],
         max_new_tokens: usize,
-    ) -> Result<String, OCRError> {
-        self.generate_with_raw(image, task, max_new_tokens)
-            .map(|(_, processed)| processed)
+    ) -> Vec<Result<String, OCRError>> {
+        self.generate_with_raw(images, tasks, max_new_tokens)
+            .into_iter()
+            .map(|r| r.map(|(_, processed)| processed))
+            .collect()
     }
 
+    /// Generate with both raw and postprocessed output.
     pub fn generate_with_raw(
         &self,
-        image: RgbImage,
-        task: PaddleOcrVlTask,
+        images: &[RgbImage],
+        tasks: &[PaddleOcrVlTask],
         max_new_tokens: usize,
-    ) -> Result<(String, String), OCRError> {
+    ) -> Vec<Result<(String, String), OCRError>> {
+        if images.is_empty() {
+            return Vec::new();
+        }
+        if images.len() != tasks.len() {
+            return vec![Err(OCRError::InvalidInput {
+                message: format!(
+                    "PaddleOCR-VL: images count ({}) != tasks count ({})",
+                    images.len(),
+                    tasks.len()
+                ),
+            })];
+        }
+
+        match self.generate_internal(images, tasks, max_new_tokens) {
+            Ok(results) => results.into_iter().map(Ok).collect(),
+            Err(e) => {
+                let msg = format!("generation failed: {e}");
+                (0..images.len())
+                    .map(|_| {
+                        Err(OCRError::InvalidInput {
+                            message: msg.clone(),
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Internal generation implementation supporting batched inference.
+    fn generate_internal(
+        &self,
+        images: &[RgbImage],
+        tasks: &[PaddleOcrVlTask],
+        max_new_tokens: usize,
+    ) -> Result<Vec<(String, String)>, OCRError> {
+        let batch_size = images.len();
+
+        // 1. Preprocess all images
         let image_inputs =
-            processing::preprocess_images(&[image], &self.image_cfg, &self.device, self.dtype)?;
-        let (t, h, w) = image_inputs.image_grid_thw[0];
-        let image_token_repeat =
-            (t * h * w) / (self.image_cfg.merge_size * self.image_cfg.merge_size);
-        let image_tokens = "<|IMAGE_PLACEHOLDER|>".repeat(image_token_repeat);
-        // Note: The chat template includes <|begin_of_sentence|> at the start
-        let prompt = format!(
-            "<|begin_of_sentence|>User: <|IMAGE_START|>{image_tokens}<|IMAGE_END|>{}\nAssistant: ",
-            task.prompt()
-        );
+            processing::preprocess_images(images, &self.image_cfg, &self.device, self.dtype)?;
 
-        let enc = self
-            .tokenizer
-            .encode(prompt, false)
-            .map_err(|e| OCRError::InvalidInput {
-                message: format!("PaddleOCR-VL: tokenizer encode failed: {e}"),
+        // 2. Build prompts for each sample
+        let mut all_input_ids: Vec<Vec<u32>> = Vec::with_capacity(batch_size);
+        let mut all_image_token_counts: Vec<usize> = Vec::with_capacity(batch_size);
+
+        for (i, task) in tasks.iter().enumerate() {
+            let (t, h, w) = image_inputs.image_grid_thw[i];
+            let image_token_count =
+                (t * h * w) / (self.image_cfg.merge_size * self.image_cfg.merge_size);
+            all_image_token_counts.push(image_token_count);
+
+            let prefix = "<|begin_of_sentence|>User: <|IMAGE_START|>";
+            let suffix = format!("<|IMAGE_END|>{}\nAssistant: ", task.prompt());
+
+            let prefix_enc =
+                self.tokenizer
+                    .encode(prefix, false)
+                    .map_err(|e| OCRError::InvalidInput {
+                        message: format!("tokenizer encode failed: {e}"),
+                    })?;
+            let suffix_enc = self.tokenizer.encode(suffix.as_str(), false).map_err(|e| {
+                OCRError::InvalidInput {
+                    message: format!("tokenizer encode failed: {e}"),
+                }
             })?;
-        let input_ids = enc.get_ids().to_vec();
-        let prompt_len = input_ids.len();
 
-        let input_ids_t = Tensor::new(input_ids.clone(), &self.device).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "PaddleOCR-VL: create input_ids tensor failed",
-                e,
-            )
-        })?;
-        let input_ids_t = input_ids_t.reshape((1usize, prompt_len)).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "PaddleOCR-VL: reshape input_ids tensor failed",
-                e,
-            )
-        })?;
+            let mut input_ids =
+                Vec::with_capacity(prefix_enc.len() + image_token_count + suffix_enc.len());
+            input_ids.extend_from_slice(prefix_enc.get_ids());
+            input_ids.extend(std::iter::repeat_n(
+                self.image_placeholder_token_id,
+                image_token_count,
+            ));
+            input_ids.extend_from_slice(suffix_enc.get_ids());
+            all_input_ids.push(input_ids);
+        }
 
-        let inputs_embeds = self.llm.embed(&input_ids_t)?;
-
+        // 3. Compute vision features
         let vision_feats = self
             .vision
             .forward(&image_inputs.pixel_values, &image_inputs.image_grid_thw)?;
-
-        let image_embeds = self
+        let image_embeds_all = self
             .projector
             .forward(&vision_feats, &image_inputs.image_grid_thw)?;
 
-        let image_token_positions: Vec<usize> = input_ids
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &id)| (id == self.cfg.image_token_id).then_some(i))
-            .collect();
-        if image_token_positions.len() != image_embeds.dims()[0] {
-            return Err(OCRError::InvalidInput {
-                message: format!(
-                    "PaddleOCR-VL: image token count ({}) != image embeds ({})",
-                    image_token_positions.len(),
-                    image_embeds.dims()[0]
-                ),
-            });
-        }
+        // 4. Build embeddings per sample
+        let seq_lens: Vec<usize> = all_input_ids.iter().map(|ids| ids.len()).collect();
+        let max_seq_len = *seq_lens.iter().max().unwrap();
 
-        // Fast path: image tokens are typically a contiguous block in the prompt, so we can
-        // reconstruct embeddings with at most 3 slices instead of O(k) pieces.
-        let inputs_embeds = if let Some(&first_pos) = image_token_positions.first() {
-            let contiguous = image_token_positions
+        let mut batch_embeds: Vec<Tensor> = Vec::with_capacity(batch_size);
+        let mut rope_deltas: Vec<i64> = Vec::with_capacity(batch_size);
+        let mut batch_position_ids: Vec<Tensor> = Vec::with_capacity(batch_size);
+        let mut embed_offset = 0usize;
+
+        for (i, input_ids) in all_input_ids.iter().enumerate() {
+            let seq_len = input_ids.len();
+            let pad_len = max_seq_len - seq_len;
+            let image_token_count = all_image_token_counts[i];
+
+            // Get image embeddings for this sample
+            let image_embeds = image_embeds_all
+                .narrow(0, embed_offset, image_token_count)
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "narrow image embeds", e))?;
+            embed_offset += image_token_count;
+
+            // Embed tokens
+            let input_ids_t = Tensor::new(input_ids.clone(), &self.device)
+                .and_then(|t| t.reshape((1, seq_len)))
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create input_ids", e))?;
+            let mut inputs_embeds = self.llm.embed(&input_ids_t)?;
+
+            // Fuse image embeddings
+            let first_img_pos = input_ids
                 .iter()
-                .enumerate()
-                .all(|(i, &pos)| pos == first_pos + i);
-
-            if contiguous {
-                let image_token_count = image_token_positions.len();
-                let image_end_exclusive = first_pos + image_token_count;
-
+                .position(|&id| id == self.cfg.image_token_id);
+            if let Some(first_pos) = first_img_pos {
+                let image_end = first_pos + image_token_count;
                 let mut parts: Vec<Tensor> = Vec::with_capacity(3);
+
                 if first_pos > 0 {
                     parts.push(inputs_embeds.narrow(1, 0, first_pos).map_err(|e| {
-                        candle_to_ocr_processing(
-                            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                            "PaddleOCR-VL: narrow prefix token embeddings failed",
-                            e,
-                        )
+                        candle_to_ocr_inference("PaddleOCR-VL", "narrow prefix", e)
                     })?);
                 }
-
-                let image_embeds = image_embeds.unsqueeze(0).map_err(|e| {
-                    candle_to_ocr_processing(
-                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                        "PaddleOCR-VL: unsqueeze batch for image embeddings failed",
-                        e,
-                    )
-                })?;
-                parts.push(image_embeds);
-
-                if image_end_exclusive < prompt_len {
+                parts.push(
+                    image_embeds
+                        .unsqueeze(0)
+                        .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "unsqueeze img", e))?,
+                );
+                if image_end < seq_len {
                     parts.push(
                         inputs_embeds
-                            .narrow(1, image_end_exclusive, prompt_len - image_end_exclusive)
+                            .narrow(1, image_end, seq_len - image_end)
                             .map_err(|e| {
-                                candle_to_ocr_processing(
-                                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                                    "PaddleOCR-VL: narrow suffix token embeddings failed",
-                                    e,
-                                )
+                                candle_to_ocr_inference("PaddleOCR-VL", "narrow suffix", e)
                             })?,
                     );
                 }
 
                 let refs: Vec<&Tensor> = parts.iter().collect();
-                Tensor::cat(&refs, 1).map_err(|e| {
-                    candle_to_ocr_processing(
-                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                        "PaddleOCR-VL: concat embeddings failed",
-                        e,
-                    )
-                })?
+                inputs_embeds = Tensor::cat(&refs, 1)
+                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "cat embeds", e))?;
+            }
+
+            // Left-pad if needed
+            if pad_len > 0 {
+                let pad = Tensor::zeros(
+                    (1, pad_len, self.cfg.hidden_size),
+                    inputs_embeds.dtype(),
+                    &self.device,
+                )
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create pad", e))?;
+                inputs_embeds = Tensor::cat(&[&pad, &inputs_embeds], 1)
+                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "cat pad", e))?;
+            }
+            batch_embeds.push(inputs_embeds);
+
+            // Position IDs
+            let (pos_ids, delta) = get_rope_index(
+                &self.cfg,
+                input_ids,
+                &[image_inputs.image_grid_thw[i]],
+                &self.device,
+            )?;
+            rope_deltas.push(delta);
+
+            let pos_ids = if pad_len > 0 {
+                let pad_pos = Tensor::zeros((3, 1, pad_len), DType::I64, &self.device)
+                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create pad pos", e))?;
+                Tensor::cat(&[&pad_pos, &pos_ids], 2)
+                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "cat pad pos", e))?
             } else {
-                // Fallback path: handle non-contiguous image tokens by interleaving slices.
-                let mut parts: Vec<Tensor> =
-                    Vec::with_capacity(image_token_positions.len() * 2 + 1);
-                let mut cursor = 0usize;
-                for (img_idx, &pos) in image_token_positions.iter().enumerate() {
-                    if cursor < pos {
-                        parts.push(inputs_embeds.narrow(1, cursor, pos - cursor).map_err(|e| {
-                            candle_to_ocr_processing(
-                                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                                "PaddleOCR-VL: narrow token embeddings failed",
-                                e,
-                            )
-                        })?);
-                    }
+                pos_ids
+            };
+            batch_position_ids.push(pos_ids);
+        }
 
-                    let img_row = image_embeds.narrow(0, img_idx, 1).map_err(|e| {
-                        candle_to_ocr_processing(
-                            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                            "PaddleOCR-VL: narrow image embeddings failed",
-                            e,
-                        )
-                    })?;
-                    let img_row = img_row.unsqueeze(0).map_err(|e| {
-                        candle_to_ocr_processing(
-                            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                            "PaddleOCR-VL: unsqueeze batch for image token embedding failed",
-                            e,
-                        )
-                    })?;
-                    parts.push(img_row);
-                    cursor = pos + 1;
-                }
-                if cursor < prompt_len {
-                    parts.push(
-                        inputs_embeds
-                            .narrow(1, cursor, prompt_len - cursor)
-                            .map_err(|e| {
-                                candle_to_ocr_processing(
-                                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                                    "PaddleOCR-VL: narrow tail token embeddings failed",
-                                    e,
-                                )
-                            })?,
-                    );
-                }
-                let refs: Vec<&Tensor> = parts.iter().collect();
+        // 5. Stack batched tensors
+        let batch_refs: Vec<&Tensor> = batch_embeds.iter().collect();
+        let inputs_embeds = Tensor::cat(&batch_refs, 0)
+            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "stack embeds", e))?;
 
-                Tensor::cat(&refs, 1).map_err(|e| {
-                    candle_to_ocr_processing(
-                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                        "PaddleOCR-VL: concat embeddings failed",
-                        e,
-                    )
-                })?
-            }
-        } else {
-            inputs_embeds
-        };
+        let pos_refs: Vec<&Tensor> = batch_position_ids.iter().collect();
+        let position_ids = Tensor::cat(&pos_refs, 1)
+            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "stack pos", e))?;
 
-        let (position_ids, rope_deltas) = get_rope_index(
-            &self.cfg,
-            &input_ids,
-            &image_inputs.image_grid_thw,
-            &self.device,
-        )?;
+        // 6. Create attention mask
+        let causal = create_causal_mask(max_seq_len, max_seq_len, self.dtype, &self.device)
+            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create causal", e))?;
+        let padding = create_left_padding_mask(&seq_lens, max_seq_len, self.dtype, &self.device)
+            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create padding", e))?;
+        let mask = combine_masks(&causal, &padding)
+            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "combine masks", e))?;
 
-        let prefill_causal_mask = causal_mask(prompt_len, &self.device, inputs_embeds.dtype())?;
+        // 7. Prefill
+        self.llm.clear_kv_cache();
+        let hidden = self
+            .llm
+            .forward(&inputs_embeds, &position_ids, Some(&mask))?;
 
-        let mut kv_cache = vec![KvCache::default(); self.cfg.num_hidden_layers];
-
-        let hidden = self.llm.forward(
-            &inputs_embeds,
-            &position_ids,
-            Some(&mut kv_cache),
-            Some(&prefill_causal_mask),
-        )?;
-
-        let last = hidden.i((0, prompt_len - 1, ..)).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "PaddleOCR-VL: select last hidden state failed",
-                e,
-            )
-        })?;
-        let last = last.unsqueeze(0).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "PaddleOCR-VL: unsqueeze last hidden state failed",
-                e,
-            )
-        })?;
-        let logits = self
-            .lm_head
-            .forward(&last)
-            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "lm_head forward", e))?;
-        let mut logits = logits
-            .squeeze(0)
-            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "lm_head squeeze", e))?;
-
-        let mut generated: Vec<u32> = Vec::new();
-        let mut next_pos = (prompt_len as i64) + rope_deltas;
-        for _ in 0..max_new_tokens {
-            let next_token = logits
-                .argmax(D::Minus1)
-                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "argmax", e))?;
-            let next_token = next_token
-                .to_scalar::<u32>()
-                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "argmax to_scalar", e))?;
-
-            if next_token == self.eos_token_id {
-                break;
-            }
-            if self.sep_token_id.is_some_and(|id| id == next_token) {
-                break;
-            }
-
-            generated.push(next_token);
-
-            let token_t = Tensor::new(&[next_token], &self.device).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "PaddleOCR-VL: create next_token tensor failed",
-                    e,
-                )
-            })?;
-            let token_t = token_t.reshape((1usize, 1usize)).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "PaddleOCR-VL: reshape next_token tensor failed",
-                    e,
-                )
-            })?;
-            let token_embed = self.llm.embed(&token_t)?;
-
-            // For text-only tokens during generation, all three RoPE dimensions
-            // (temporal, height, width) share the same position index.
-            let pos_ids =
-                Tensor::new(&[next_pos, next_pos, next_pos], &self.device).map_err(|e| {
-                    candle_to_ocr_processing(
-                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                        "PaddleOCR-VL: create pos tensor failed",
-                        e,
-                    )
-                })?;
-            let pos_ids = pos_ids.reshape((3usize, 1usize, 1usize)).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "PaddleOCR-VL: reshape pos tensor failed",
-                    e,
-                )
-            })?;
-
-            let hs = self
-                .llm
-                .forward(&token_embed, &pos_ids, Some(&mut kv_cache), None)?;
-            let hs = hs.squeeze(0).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "PaddleOCR-VL: squeeze hs batch failed",
-                    e,
-                )
-            })?;
-            // hs is now [1, hidden_size], keep it 2D for lm_head
-            let hs_logits = self
+        // 8. Get initial logits
+        let mut logits_list: Vec<Tensor> = Vec::with_capacity(batch_size);
+        for i in 0..batch_size {
+            let last = hidden
+                .i((i, max_seq_len - 1, ..))
+                .and_then(|t| t.unsqueeze(0))
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "get last hidden", e))?;
+            let logits = self
                 .lm_head
-                .forward(&hs)
-                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "lm_head forward step", e))?;
-            logits = hs_logits
-                .squeeze(0)
-                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "lm_head squeeze step", e))?;
-
-            next_pos += 1;
+                .forward(&last)
+                .and_then(|t| t.squeeze(0))
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "lm_head", e))?;
+            logits_list.push(logits);
         }
 
-        let decoded =
-            self.tokenizer
-                .decode(&generated, true)
-                .map_err(|e| OCRError::InvalidInput {
-                    message: format!("PaddleOCR-VL: tokenizer decode failed: {e}"),
-                })?;
-        let processed = task.postprocess(decoded.clone());
-        Ok((decoded, processed))
-    }
-}
+        // 9. Autoregressive decode
+        let mut generated: Vec<Vec<u32>> = vec![Vec::new(); batch_size];
+        let mut finished: Vec<bool> = vec![false; batch_size];
+        let mut positions: Vec<i64> = seq_lens
+            .iter()
+            .zip(&rope_deltas)
+            .map(|(&len, &d)| (len as i64) + d)
+            .collect();
 
-fn causal_mask(seq_len: usize, device: &Device, dtype: DType) -> Result<Tensor, OCRError> {
-    let mut data = Vec::with_capacity(seq_len * seq_len);
-    for i in 0..seq_len {
-        for j in 0..seq_len {
-            if j <= i {
-                data.push(0f32);
-            } else {
-                // Use NEG_INFINITY for masked positions - converts correctly to BF16/F16
-                data.push(f32::NEG_INFINITY);
+        for _ in 0..max_new_tokens {
+            if finished.iter().all(|&f| f) {
+                break;
+            }
+
+            let mut next_tokens: Vec<u32> = Vec::with_capacity(batch_size);
+            for (i, logits) in logits_list.iter().enumerate() {
+                if finished[i] {
+                    next_tokens.push(0);
+                } else {
+                    let tok = logits
+                        .argmax(D::Minus1)
+                        .and_then(|t| t.to_scalar::<u32>())
+                        .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "argmax", e))?;
+
+                    if tok == self.eos_token_id || self.sep_token_id.is_some_and(|id| id == tok) {
+                        finished[i] = true;
+                    } else {
+                        generated[i].push(tok);
+                    }
+                    next_tokens.push(tok);
+                }
+            }
+
+            if finished.iter().all(|&f| f) {
+                break;
+            }
+
+            // Batch forward
+            let tokens = Tensor::new(next_tokens, &self.device)
+                .and_then(|t| t.reshape((batch_size, 1)))
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create tokens", e))?;
+            let embeds = self.llm.embed(&tokens)?;
+
+            let pos_data: Vec<i64> = positions.iter().flat_map(|&p| [p, p, p]).collect();
+            let pos = Tensor::new(pos_data, &self.device)
+                .and_then(|t| t.reshape((3, batch_size, 1)))
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create pos", e))?;
+
+            let hs = self.llm.forward(&embeds, &pos, None)?;
+
+            logits_list.clear();
+            for i in 0..batch_size {
+                let h = hs
+                    .i((i, 0, ..))
+                    .and_then(|t| t.unsqueeze(0))
+                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "get hs", e))?;
+                let logits = self
+                    .lm_head
+                    .forward(&h)
+                    .and_then(|t| t.squeeze(0))
+                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "lm_head step", e))?;
+                logits_list.push(logits);
+            }
+
+            for (i, p) in positions.iter_mut().enumerate() {
+                if !finished[i] {
+                    *p += 1;
+                }
             }
         }
+
+        // 10. Decode results
+        let mut results = Vec::with_capacity(batch_size);
+        for (i, tokens) in generated.into_iter().enumerate() {
+            let decoded =
+                self.tokenizer
+                    .decode(&tokens, true)
+                    .map_err(|e| OCRError::InvalidInput {
+                        message: format!("decode failed: {e}"),
+                    })?;
+            let processed = tasks[i].postprocess(decoded.clone());
+            results.push((decoded, processed));
+        }
+
+        Ok(results)
     }
-    let tensor =
-        Tensor::from_vec(data, (1usize, 1usize, seq_len, seq_len), device).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "PaddleOCR-VL: build causal mask failed",
-                e,
-            )
-        })?;
-    let data = tensor.to_dtype(dtype).map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "PaddleOCR-VL: cast causal mask failed",
-            e,
-        )
-    })?;
-    Ok(data)
 }
 
 fn get_rope_index(

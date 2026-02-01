@@ -169,7 +169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Run inference
         let infer_start = Instant::now();
-        match model.generate(rgb_img, args.max_tokens) {
+        match model.generate(&[rgb_img], args.max_tokens).pop().unwrap() {
             Ok(result) => {
                 let infer_duration = infer_start.elapsed();
                 info!(

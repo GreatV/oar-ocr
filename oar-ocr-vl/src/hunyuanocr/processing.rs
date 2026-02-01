@@ -1,5 +1,8 @@
 use super::config::{HunyuanOcrImageProcessorConfig, HunyuanOcrVisionConfig};
-use crate::utils::candle_to_ocr_processing;
+use crate::utils::{
+    candle_to_ocr_processing,
+    image::{clamp_to_max_image_size, image_to_chw, pil_resample_to_filter_type, smart_resize},
+};
 use candle_core::{DType, Device, Tensor};
 use image::{RgbImage, imageops::FilterType};
 use oar_ocr_core::core::OCRError;
@@ -8,20 +11,6 @@ use oar_ocr_core::core::OCRError;
 pub struct HunyuanOcrImageInputs {
     pub pixel_values: Tensor,
     pub grid_thw_merged: (usize, usize, usize),
-}
-
-fn pil_resample_to_filter_type(resample: u32) -> Option<FilterType> {
-    // Match PIL / transformers `PILImageResampling` integer values:
-    // 0=NEAREST, 1=LANCZOS, 2=BILINEAR, 3=BICUBIC, 4=BOX, 5=HAMMING.
-    match resample {
-        0 => Some(FilterType::Nearest),
-        1 => Some(FilterType::Lanczos3),
-        2 => Some(FilterType::Triangle),
-        3 => Some(FilterType::CatmullRom),
-        4 => Some(FilterType::Triangle),
-        5 => Some(FilterType::CatmullRom),
-        _ => None,
-    }
 }
 
 pub fn smart_resize_token_limited(
@@ -37,8 +26,7 @@ pub fn smart_resize_token_limited(
             message: "HunyuanOCR smart_resize_token_limited: factor must be > 0".to_string(),
         });
     }
-    let (mut rh, mut rw) =
-        crate::paddleocr_vl::smart_resize(height, width, factor, min_pixels, max_pixels)?;
+    let (mut rh, mut rw) = smart_resize(height, width, factor, min_pixels, max_pixels)?;
 
     // Token count in HunYuanVL is based on merged grid with an extra newline token per row:
     // tokens = Hm * (Wm + 1)
@@ -71,58 +59,6 @@ pub fn smart_resize_token_limited(
     }
 
     Ok((rh, rw))
-}
-
-fn clamp_to_max_image_size(
-    height: u32,
-    width: u32,
-    factor: u32,
-    max_image_size: usize,
-) -> Result<(u32, u32), OCRError> {
-    if factor == 0 {
-        return Err(OCRError::InvalidInput {
-            message: "HunyuanOCR clamp_to_max_image_size: factor must be > 0".to_string(),
-        });
-    }
-    let max_image_size = u32::try_from(max_image_size).map_err(|_| OCRError::ConfigError {
-        message: format!("HunyuanOCR max_image_size too large: {max_image_size}"),
-    })?;
-    if max_image_size == 0 {
-        return Err(OCRError::ConfigError {
-            message: "HunyuanOCR max_image_size must be > 0".to_string(),
-        });
-    }
-    if max_image_size < factor {
-        return Err(OCRError::ConfigError {
-            message: format!(
-                "HunyuanOCR max_image_size {max_image_size} must be >= factor={factor}"
-            ),
-        });
-    }
-
-    let max_dim = height.max(width);
-    if max_dim <= max_image_size {
-        return Ok((height, width));
-    }
-
-    let scale = max_image_size as f64 / max_dim as f64;
-    let factor_f = factor as f64;
-
-    let mut h = (((height as f64) * scale) / factor_f).floor() * factor_f;
-    let mut w = (((width as f64) * scale) / factor_f).floor() * factor_f;
-
-    // Ensure non-zero dims and factor divisibility.
-    if h < factor_f {
-        h = factor_f;
-    }
-    if w < factor_f {
-        w = factor_f;
-    }
-
-    let h = h as u32;
-    let w = w as u32;
-
-    Ok((h, w))
 }
 
 pub fn preprocess_image(
@@ -187,20 +123,7 @@ pub fn preprocess_image(
     let wm = (rw / factor) as usize;
     let grid_thw_merged = (t, hm, wm);
 
-    let mean = &cfg.image_mean;
-    let std = &cfg.image_std;
-
-    let mut data = Vec::with_capacity(3 * (rh as usize) * (rw as usize));
-    for c in 0..3usize {
-        for y in 0..rh {
-            for x in 0..rw {
-                let p = resized.get_pixel(x, y);
-                let v = p.0[c] as f32 / 255.0;
-                let v = (v - mean[c]) / std[c];
-                data.push(v);
-            }
-        }
-    }
+    let data = image_to_chw(&resized, &cfg.image_mean, &cfg.image_std, Some(1.0 / 255.0));
 
     let pixel_values = Tensor::from_vec(data, (1usize, 3usize, rh as usize, rw as usize), device)
         .map_err(|e| {
@@ -239,17 +162,6 @@ pub fn preprocess_image(
 mod tests {
     use super::*;
     use image::RgbImage;
-
-    #[test]
-    fn test_clamp_to_max_image_size_keeps_factor_divisible() -> Result<(), OCRError> {
-        let factor = 32;
-        let (h, w) = clamp_to_max_image_size(3008, 512, factor, 2048)?;
-        assert!(h <= 2048);
-        assert!(w <= 2048);
-        assert_eq!(h % factor, 0);
-        assert_eq!(w % factor, 0);
-        Ok(())
-    }
 
     #[test]
     fn test_preprocess_image_clamps_to_max_image_size() -> Result<(), Box<dyn std::error::Error>> {

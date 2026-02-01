@@ -7,8 +7,12 @@
 //! - OTSL to HTML table conversion
 //! - Image processing helpers
 
+pub mod image;
+pub mod table;
+pub mod text;
+
+use ::image::{GrayImage, RgbImage};
 use candle_core::{Device, IndexOp, Tensor};
-use image::{GrayImage, RgbImage};
 use oar_ocr_core::core::OCRError;
 use oar_ocr_core::domain::structure::{LayoutElement, LayoutElementType};
 use oar_ocr_core::processors::BoundingBox;
@@ -185,14 +189,14 @@ pub fn to_markdown(elements: &[LayoutElement], ignore_labels: &[String]) -> Stri
         let content = match element.element_type {
             LayoutElementType::DocTitle => format_heading(text, 1),
             LayoutElementType::ParagraphTitle => format_heading(text, 2),
-            LayoutElementType::Table => format_table(text),
-            LayoutElementType::Formula => format_formula(text),
+            LayoutElementType::Table => text::format_table(text),
+            LayoutElementType::Formula => text::format_formula(text),
             LayoutElementType::Image | LayoutElementType::Chart | LayoutElementType::Seal => {
                 format_figure(text, i)
             }
             LayoutElementType::List => format_list(text),
             LayoutElementType::Algorithm => format_code(text),
-            _ => format_text(text),
+            _ => text::format_text(text),
         };
 
         if !content.is_empty() {
@@ -215,21 +219,6 @@ static OPENOCR_TITLE_RE_PATTERN: Lazy<Result<Regex, regex::Error>> = Lazy::new(|
         r"^\s*((?:[1-9][0-9]*(?:\.[1-9][0-9]*)*[.、]?|[(（](?:[1-9][0-9]*|[一二三四五六七八九十百千万亿零壹贰叁肆伍陆柒捌玖拾]+)[)）]|[一二三四五六七八九十百千万亿零壹贰叁肆伍陆柒捌玖拾]+[、.]?|(?:I|II|III|IV|V|VI|VII|VIII|IX|X)\.?))(\s*)(.*)$",
     )
 });
-
-static TAG_NEWLINES_RE: Lazy<Result<Regex, regex::Error>> = Lazy::new(|| Regex::new(r">\s*\n+\s*"));
-static TABLE_TAG_RE: Lazy<Result<Regex, regex::Error>> =
-    Lazy::new(|| Regex::new(r"</?(table|tr|th|td|thead|tbody|tfoot)[^>]*>"));
-static UNDERSCORE_RE: Lazy<Result<Regex, regex::Error>> = Lazy::new(|| Regex::new(r"_{4,}"));
-static DOTS_RE: Lazy<Result<Regex, regex::Error>> = Lazy::new(|| Regex::new(r"\.{4,}"));
-static LATEX_BRACKETS_RE: Lazy<Result<Regex, regex::Error>> = Lazy::new(|| {
-    Regex::new(
-        r"\\(big|Big|bigg|Bigg|bigl|bigr|Bigl|Bigr|biggr|biggl|Biggl|Biggr)\{(\\?[{}\[\]\(\)\|])\}",
-    )
-});
-static OTSL_TOKEN_RE: Lazy<Result<Regex, regex::Error>> =
-    Lazy::new(|| Regex::new(r"(<nl>|<fcel>|<ecel>|<lcel>|<ucel>|<xcel>)"));
-static OTSL_CELL_RE: Lazy<Result<Regex, regex::Error>> =
-    Lazy::new(|| Regex::new(r"<fcel>|<ecel>|<lcel>|<ucel>|<xcel>"));
 
 fn openocr_format_title(text: &str) -> String {
     fn should_treat_prefix_as_numbering(prefix: &str, suffix_ws: &str) -> bool {
@@ -296,9 +285,9 @@ fn openocr_format_table_center_func(html: &str) -> String {
     table_content = table_content.replace("<th>", "<th style='text-align: center;'>");
     table_content = table_content.replace("<td>", "<td style='text-align: center;'>");
     // PaddleX outputs compact single-line table HTML in markdown (no tag-newlines).
-    if let Ok(re) = TAG_NEWLINES_RE.as_ref() {
-        table_content = re.replace_all(&table_content, ">").to_string();
-    }
+    table_content = text::TAG_NEWLINES_RE
+        .replace_all(&table_content, ">")
+        .to_string();
     table_content
 }
 
@@ -442,36 +431,8 @@ pub fn to_markdown_openocr(
 fn format_heading(text: &str, level: usize) -> String {
     let prefix = "#".repeat(level.min(6));
     let cleaned = remove_newlines_in_heading(text);
-    let processed = process_text(cleaned.trim());
+    let processed = text::process_text(cleaned.trim());
     format!("{} {}", prefix, processed)
-}
-
-fn format_table(text: &str) -> String {
-    let mut result = text.to_string();
-    result = result.replace("<tdcolspan=", "<td colspan=");
-    result = result.replace("<tdrowspan=", "<td rowspan=");
-    result = result.replace("\"colspan=", "\" colspan=");
-    result = clean_special_tokens(&result);
-    result = result.replace("\\(", "$").replace("\\)", "$");
-    result = result.replace("\\[", "$$").replace("\\]", "$$");
-    if let Ok(re) = TAG_NEWLINES_RE.as_ref() {
-        result = re.replace_all(&result, ">").to_string();
-    }
-    result
-}
-
-fn format_formula(text: &str) -> String {
-    let mut result = text.to_string();
-    result = clean_special_tokens(&result);
-    result = result.replace(r"\upmu", r"\mu");
-    result = result.replace("\\]", "");
-    result = result.replace("\\[", "");
-    result = result.replace("\\)", "");
-    result = result.replace("\\(", "");
-    result = result.trim().trim_matches('$').trim().to_string();
-    result = result.replace('\n', "\\\\\n");
-    result = fix_latex_brackets(&result);
-    format!("$${}$$", result)
 }
 
 fn format_figure(text: &str, index: usize) -> String {
@@ -516,41 +477,6 @@ fn format_code(text: &str) -> String {
     format!("```\n{}\n```", text.trim())
 }
 
-fn format_text(text: &str) -> String {
-    let mut result = clean_special_tokens(text);
-    if result.contains("\\(") && result.contains("\\)") {
-        result = result.replace("\\(", " $ ").replace("\\)", " $ ");
-    }
-    if result.contains("\\[") && result.contains("\\]") {
-        result = result.replace("\\[", " $$ ").replace("\\]", " $$ ");
-    }
-    result = result.replace("$\\bullet$", "•");
-    if result.contains("<table>")
-        && let Ok(re) = TABLE_TAG_RE.as_ref()
-    {
-        result = re.replace_all(&result, "").to_string();
-    }
-    process_text(&result)
-}
-
-fn clean_special_tokens(text: &str) -> String {
-    text.replace("-<|sn|>", "")
-        .replace("<|sn|>", " ")
-        .replace("<|unk|>", "")
-        .replace('\u{FFFF}', "")
-}
-
-fn process_text(text: &str) -> String {
-    let mut result = text.to_string();
-    if let Ok(underscore_re) = UNDERSCORE_RE.as_ref() {
-        result = underscore_re.replace_all(&result, "___").to_string();
-    }
-    if let Ok(dots_re) = DOTS_RE.as_ref() {
-        result = dots_re.replace_all(&result, "...").to_string();
-    }
-    result.trim().to_string()
-}
-
 fn remove_newlines_in_heading(text: &str) -> String {
     fn is_chinese(c: char) -> bool {
         ('\u{4e00}'..='\u{9fff}').contains(&c)
@@ -562,42 +488,8 @@ fn remove_newlines_in_heading(text: &str) -> String {
     }
 }
 
-fn fix_latex_brackets(text: &str) -> String {
-    let Ok(pattern) = LATEX_BRACKETS_RE.as_ref() else {
-        return text.to_string();
-    };
-    pattern.replace_all(text, r"\$1$2").to_string()
-}
-
-/// Truncate repeated tail patterns.
-pub fn truncate_repeated_tail(text: &str, threshold: usize, keep: usize) -> String {
-    if text.is_empty() {
-        return text.to_string();
-    }
-    let max_pattern_len = (text.len() / threshold).min(100);
-    for pattern_len in 1..=max_pattern_len {
-        if text.len() < pattern_len {
-            break;
-        }
-        let pattern = &text[text.len() - pattern_len..];
-        let mut count = 0;
-        let mut pos = text.len();
-        while pos >= pattern_len {
-            if &text[pos - pattern_len..pos] == pattern {
-                count += 1;
-                pos -= pattern_len;
-            } else {
-                break;
-            }
-        }
-        if count > threshold {
-            let non_repeat_part = &text[..pos];
-            let kept_repeats = pattern.repeat(keep);
-            return format!("{}{}", non_repeat_part, kept_repeats);
-        }
-    }
-    text.to_string()
-}
+pub use self::table::convert_otsl_to_html;
+pub use self::text::truncate_repetitive_content;
 
 /// Calculate the area of a bounding box.
 #[inline]
@@ -722,7 +614,7 @@ pub fn filter_overlap_boxes(boxes: Vec<DetectedBox>, overlap_threshold: f32) -> 
 
 /// Crop white margins from a formula image.
 pub fn crop_margin(img: &RgbImage) -> RgbImage {
-    let gray: GrayImage = image::imageops::grayscale(img);
+    let gray: GrayImage = ::image::imageops::grayscale(img);
     let (min_val, max_val) = gray.pixels().fold((255u8, 0u8), |(min, max), p| {
         (min.min(p.0[0]), max.max(p.0[0]))
     });
@@ -732,32 +624,35 @@ pub fn crop_margin(img: &RgbImage) -> RgbImage {
     }
 
     let threshold = 200u8;
-    let mut non_white_coords: Vec<(u32, u32)> = Vec::new();
+    let mut x_min = img.width();
+    let mut y_min = img.height();
+    let mut x_max = 0;
+    let mut y_max = 0;
+    let mut found = false;
 
     for (x, y, pixel) in gray.enumerate_pixels() {
         let normalized = ((pixel.0[0] as f32 - min_val as f32) / (max_val as f32 - min_val as f32)
             * 255.0) as u8;
         if normalized < threshold {
-            non_white_coords.push((x, y));
+            if x < x_min {
+                x_min = x;
+            }
+            if x > x_max {
+                x_max = x;
+            }
+            if y < y_min {
+                y_min = y;
+            }
+            if y > y_max {
+                y_max = y;
+            }
+            found = true;
         }
     }
 
-    if non_white_coords.is_empty() {
+    if !found {
         return img.clone();
     }
-
-    let x_min = non_white_coords.iter().map(|(x, _)| *x).min().unwrap_or(0);
-    let y_min = non_white_coords.iter().map(|(_, y)| *y).min().unwrap_or(0);
-    let x_max = non_white_coords
-        .iter()
-        .map(|(x, _)| *x)
-        .max()
-        .unwrap_or(img.width());
-    let y_max = non_white_coords
-        .iter()
-        .map(|(_, y)| *y)
-        .max()
-        .unwrap_or(img.height());
 
     let width = (x_max - x_min + 1).min(img.width() - x_min);
     let height = (y_max - y_min + 1).min(img.height() - y_min);
@@ -766,505 +661,7 @@ pub fn crop_margin(img: &RgbImage) -> RgbImage {
         return img.clone();
     }
 
-    image::imageops::crop_imm(img, x_min, y_min, width, height).to_image()
-}
-
-fn find_shortest_repeating_substring(s: &str) -> Option<String> {
-    let chars: Vec<char> = s.chars().collect();
-    let n = chars.len();
-    for i in 1..=n / 2 {
-        if n.is_multiple_of(i) {
-            let unit = &chars[..i];
-            let mut matches = true;
-            for start in (0..n).step_by(i) {
-                if chars[start..start + i] != *unit {
-                    matches = false;
-                    break;
-                }
-            }
-            if matches {
-                return Some(unit.iter().collect());
-            }
-        }
-    }
-    None
-}
-
-fn find_repeating_suffix(
-    s: &str,
-    min_len: usize,
-    min_repeats: usize,
-) -> Option<(String, String, usize)> {
-    let chars: Vec<char> = s.chars().collect();
-    let n = chars.len();
-    for i in (min_len..=n / min_repeats).rev() {
-        let total = i * min_repeats;
-        if n < total {
-            continue;
-        }
-        let unit = &chars[n - i..n];
-        let mut matches = true;
-        let start = n - total;
-        for offset in 0..min_repeats {
-            let chunk_start = start + offset * i;
-            if chars[chunk_start..chunk_start + i] != *unit {
-                matches = false;
-                break;
-            }
-        }
-        if matches {
-            let mut count = 0;
-            let mut end = n;
-            while end >= i && chars[end - i..end] == *unit {
-                count += 1;
-                end -= i;
-            }
-            let prefix: String = chars[..end].iter().collect();
-            let unit_str: String = unit.iter().collect();
-            return Some((prefix, unit_str, count));
-        }
-    }
-    None
-}
-
-/// Detect and truncate repetitive content.
-pub fn truncate_repetitive_content(
-    content: &str,
-    line_threshold: usize,
-    char_threshold: usize,
-    min_len: usize,
-) -> String {
-    let stripped = content.trim();
-    if stripped.is_empty() {
-        return content.to_string();
-    }
-    let stripped_chars = stripped.chars().count();
-
-    if !stripped.contains('\n')
-        && stripped_chars > 100
-        && let Some((prefix, unit, count)) = find_repeating_suffix(stripped, 8, 5)
-        && unit.chars().count() * count > stripped_chars / 2
-    {
-        return prefix;
-    }
-
-    if !stripped.contains('\n')
-        && stripped_chars > min_len
-        && let Some(unit) = find_shortest_repeating_substring(stripped)
-    {
-        let count = stripped_chars / unit.chars().count();
-        if count >= char_threshold {
-            return unit;
-        }
-    }
-
-    let lines: Vec<&str> = content
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .collect();
-
-    if lines.is_empty() {
-        return content.to_string();
-    }
-
-    let total_lines = lines.len();
-    if total_lines < line_threshold {
-        return content.to_string();
-    }
-
-    let mut counts = std::collections::HashMap::new();
-    for line in &lines {
-        *counts.entry(*line).or_insert(0usize) += 1;
-    }
-
-    if let Some((most_common, count)) = counts.into_iter().max_by_key(|(_, c)| *c)
-        && count >= line_threshold
-        && (count as f32 / total_lines as f32) >= 0.8
-    {
-        return most_common.to_string();
-    }
-
-    content.to_string()
-}
-
-const OTSL_NL: &str = "<nl>";
-const OTSL_FCEL: &str = "<fcel>";
-const OTSL_ECEL: &str = "<ecel>";
-const OTSL_LCEL: &str = "<lcel>";
-const OTSL_UCEL: &str = "<ucel>";
-const OTSL_XCEL: &str = "<xcel>";
-
-fn is_otsl_tag(s: &str) -> bool {
-    matches!(
-        s,
-        "<nl>" | "<fcel>" | "<ecel>" | "<lcel>" | "<ucel>" | "<xcel>"
-    )
-}
-
-fn otsl_extract_tokens_and_text(s: &str) -> (Vec<String>, Vec<String>) {
-    let Ok(pattern) = OTSL_TOKEN_RE.as_ref() else {
-        let trimmed = s.trim();
-        let text_parts = if trimmed.is_empty() {
-            Vec::new()
-        } else {
-            vec![trimmed.to_string()]
-        };
-        return (Vec::new(), text_parts);
-    };
-    let tokens: Vec<String> = pattern
-        .find_iter(s)
-        .map(|m| m.as_str().to_string())
-        .collect();
-    let text_parts: Vec<String> = pattern
-        .split(s)
-        .map(|p| p.to_string())
-        .filter(|p| !p.trim().is_empty())
-        .collect();
-    (tokens, text_parts)
-}
-
-#[derive(Debug, Clone)]
-struct TableCell {
-    row_span: usize,
-    col_span: usize,
-    start_row: usize,
-    end_row: usize,
-    start_col: usize,
-    end_col: usize,
-    text: String,
-}
-
-impl Default for TableCell {
-    fn default() -> Self {
-        Self {
-            row_span: 1,
-            col_span: 1,
-            start_row: 0,
-            end_row: 1,
-            start_col: 0,
-            end_col: 1,
-            text: String::new(),
-        }
-    }
-}
-
-fn otsl_parse_texts(texts: &[String], tokens: &[String]) -> (Vec<TableCell>, Vec<Vec<String>>) {
-    let mut split_row_tokens: Vec<Vec<String>> = Vec::new();
-    let mut current_row: Vec<String> = Vec::new();
-
-    for token in tokens {
-        if token == OTSL_NL {
-            if !current_row.is_empty() {
-                split_row_tokens.push(current_row);
-                current_row = Vec::new();
-            }
-        } else {
-            current_row.push(token.clone());
-        }
-    }
-    if !current_row.is_empty() {
-        split_row_tokens.push(current_row);
-    }
-
-    if split_row_tokens.is_empty() {
-        return (Vec::new(), split_row_tokens);
-    }
-
-    let max_cols = split_row_tokens.iter().map(|r| r.len()).max().unwrap_or(0);
-    for row in &mut split_row_tokens {
-        while row.len() < max_cols {
-            row.push(OTSL_ECEL.to_string());
-        }
-    }
-
-    let mut table_cells: Vec<TableCell> = Vec::new();
-    let mut text_idx = 0usize;
-
-    let mut combined_texts: Vec<String> = Vec::new();
-    for row in &split_row_tokens {
-        for token in row {
-            combined_texts.push(token.clone());
-            if text_idx < texts.len() && &texts[text_idx] == token {
-                text_idx += 1;
-                if text_idx < texts.len() && !is_otsl_tag(&texts[text_idx]) {
-                    combined_texts.push(texts[text_idx].clone());
-                    text_idx += 1;
-                }
-            }
-        }
-        combined_texts.push(OTSL_NL.to_string());
-        if text_idx < texts.len() && texts[text_idx] == OTSL_NL {
-            text_idx += 1;
-        }
-    }
-
-    let count_right = |tokens: &[Vec<String>], c: usize, r: usize, which: &[&str]| -> usize {
-        let mut span = 0;
-        let mut c_iter = c;
-        while c_iter < tokens[r].len() && which.contains(&tokens[r][c_iter].as_str()) {
-            span += 1;
-            c_iter += 1;
-        }
-        span
-    };
-
-    let count_down = |tokens: &[Vec<String>], c: usize, r: usize, which: &[&str]| -> usize {
-        let mut span = 0;
-        let mut r_iter = r;
-        while r_iter < tokens.len()
-            && c < tokens[r_iter].len()
-            && which.contains(&tokens[r_iter][c].as_str())
-        {
-            span += 1;
-            r_iter += 1;
-        }
-        span
-    };
-
-    let mut r_idx = 0usize;
-    let mut c_idx = 0usize;
-    let mut i = 0;
-    while i < combined_texts.len() {
-        let text = &combined_texts[i];
-
-        if text == OTSL_FCEL || text == OTSL_ECEL {
-            let mut row_span = 1usize;
-            let mut col_span = 1usize;
-            let mut cell_text = String::new();
-            let mut right_offset = 1;
-
-            if text != OTSL_ECEL
-                && i + 1 < combined_texts.len()
-                && !is_otsl_tag(&combined_texts[i + 1])
-            {
-                cell_text = combined_texts[i + 1].clone();
-                right_offset = 2;
-            }
-
-            let next_right_cell = if i + right_offset < combined_texts.len() {
-                &combined_texts[i + right_offset]
-            } else {
-                ""
-            };
-
-            let next_bottom_cell = if r_idx + 1 < split_row_tokens.len()
-                && c_idx < split_row_tokens[r_idx + 1].len()
-            {
-                &split_row_tokens[r_idx + 1][c_idx]
-            } else {
-                ""
-            };
-
-            if next_right_cell == OTSL_LCEL || next_right_cell == OTSL_XCEL {
-                col_span +=
-                    count_right(&split_row_tokens, c_idx + 1, r_idx, &[OTSL_LCEL, OTSL_XCEL]);
-            }
-
-            if next_bottom_cell == OTSL_UCEL || next_bottom_cell == OTSL_XCEL {
-                row_span +=
-                    count_down(&split_row_tokens, c_idx, r_idx + 1, &[OTSL_UCEL, OTSL_XCEL]);
-            }
-
-            table_cells.push(TableCell {
-                row_span,
-                col_span,
-                start_row: r_idx,
-                end_row: r_idx + row_span,
-                start_col: c_idx,
-                end_col: c_idx + col_span,
-                text: cell_text.trim().to_string(),
-            });
-        }
-
-        if text == OTSL_FCEL
-            || text == OTSL_ECEL
-            || text == OTSL_LCEL
-            || text == OTSL_UCEL
-            || text == OTSL_XCEL
-        {
-            c_idx += 1;
-        }
-
-        if text == OTSL_NL {
-            r_idx += 1;
-            c_idx = 0;
-        }
-
-        i += 1;
-    }
-
-    (table_cells, split_row_tokens)
-}
-
-fn export_to_html(cells: &[TableCell], num_rows: usize, num_cols: usize) -> String {
-    if cells.is_empty() {
-        return String::new();
-    }
-
-    let mut grid: Vec<Vec<Option<&TableCell>>> = vec![vec![None; num_cols]; num_rows];
-    for cell in cells {
-        for row in grid
-            .iter_mut()
-            .take(cell.end_row.min(num_rows))
-            .skip(cell.start_row)
-        {
-            for col in row
-                .iter_mut()
-                .take(cell.end_col.min(num_cols))
-                .skip(cell.start_col)
-            {
-                *col = Some(cell);
-            }
-        }
-    }
-
-    let mut body = String::new();
-    for (i, row) in grid.iter().enumerate().take(num_rows) {
-        body.push_str("<tr>");
-        for (j, col) in row.iter().enumerate().take(num_cols) {
-            if let Some(cell) = col {
-                if cell.start_row != i || cell.start_col != j {
-                    continue;
-                }
-
-                let content = html_escape::encode_text(&cell.text);
-                let mut opening_tag = String::from("td");
-
-                if cell.row_span > 1 {
-                    opening_tag.push_str(&format!(" rowspan=\"{}\"", cell.row_span));
-                }
-                if cell.col_span > 1 {
-                    opening_tag.push_str(&format!(" colspan=\"{}\"", cell.col_span));
-                }
-
-                body.push_str(&format!("<{}>{}</td>", opening_tag, content));
-            }
-        }
-        body.push_str("</tr>");
-    }
-
-    format!("<table>{}</table>", body)
-}
-
-fn otsl_pad_to_square(otsl_str: &str) -> String {
-    let otsl_str = otsl_str.trim();
-    if !otsl_str.contains(OTSL_NL) {
-        return format!("{}{}", otsl_str, OTSL_NL);
-    }
-
-    let lines: Vec<&str> = otsl_str.split(OTSL_NL).filter(|l| !l.is_empty()).collect();
-    let mut row_data: Vec<(Vec<&str>, usize, usize)> = Vec::new();
-
-    let Ok(cell_pattern) = OTSL_CELL_RE.as_ref() else {
-        return format!("{}{}", otsl_str, OTSL_NL);
-    };
-
-    for line in &lines {
-        let raw_cells: Vec<&str> = cell_pattern.find_iter(line).map(|m| m.as_str()).collect();
-        if raw_cells.is_empty() {
-            continue;
-        }
-
-        let total_len = raw_cells.len();
-        let mut min_len = 0;
-        for (i, cell) in raw_cells.iter().enumerate() {
-            if *cell == OTSL_FCEL {
-                min_len = i + 1;
-            }
-        }
-        row_data.push((raw_cells, total_len, min_len));
-    }
-
-    if row_data.is_empty() {
-        return OTSL_NL.to_string();
-    }
-
-    let global_min_width = row_data.iter().map(|(_, _, m)| *m).max().unwrap_or(0);
-    let max_total_len = row_data.iter().map(|(_, t, _)| *t).max().unwrap_or(0);
-
-    let search_start = global_min_width;
-    let search_end = global_min_width.max(max_total_len);
-
-    let mut min_total_cost = usize::MAX;
-    let mut optimal_width = search_end;
-
-    for width in search_start..=search_end {
-        let current_cost: usize = row_data
-            .iter()
-            .map(|(_, total, _)| (*total as isize - width as isize).unsigned_abs())
-            .sum();
-        if current_cost < min_total_cost {
-            min_total_cost = current_cost;
-            optimal_width = width;
-        }
-    }
-
-    let mut repaired_lines: Vec<String> = Vec::new();
-    for (cells, _, _) in &row_data {
-        let current_len = cells.len();
-        let new_cells: Vec<&str> = if current_len > optimal_width {
-            cells[..optimal_width].to_vec()
-        } else {
-            let mut padded = cells.clone();
-            while padded.len() < optimal_width {
-                padded.push(OTSL_ECEL);
-            }
-            padded
-        };
-        repaired_lines.push(new_cells.join(""));
-    }
-
-    format!("{}{}", repaired_lines.join(OTSL_NL), OTSL_NL)
-}
-
-/// Convert OTSL table format to HTML.
-pub fn convert_otsl_to_html(otsl_content: &str) -> String {
-    if otsl_content.contains("<table") {
-        return clean_html_table(otsl_content);
-    }
-
-    if !otsl_content.contains("<fcel>") && !otsl_content.contains("<ecel>") {
-        return simple_otsl_conversion(otsl_content);
-    }
-
-    let padded = otsl_pad_to_square(otsl_content);
-    let (tokens, mixed_texts) = otsl_extract_tokens_and_text(&padded);
-    let (table_cells, split_row_tokens) = otsl_parse_texts(&mixed_texts, &tokens);
-
-    let num_rows = split_row_tokens.len();
-    let num_cols = split_row_tokens.iter().map(|r| r.len()).max().unwrap_or(0);
-
-    export_to_html(&table_cells, num_rows, num_cols)
-}
-
-fn simple_otsl_conversion(text: &str) -> String {
-    let mut html = String::from("<table>");
-    for line in text.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        html.push_str("<tr>");
-        for cell in line.split('\t') {
-            html.push_str("<td>");
-            html.push_str(cell.trim());
-            html.push_str("</td>");
-        }
-        html.push_str("</tr>");
-    }
-    html.push_str("</table>");
-    html
-}
-
-fn clean_html_table(text: &str) -> String {
-    let mut result = text.to_string();
-    result = result.replace("<tdcolspan=", "<td colspan=");
-    result = result.replace("<tdrowspan=", "<td rowspan=");
-    result = result.replace("\"colspan=", "\" colspan=");
-    result = result.replace("<|sn|>", "");
-    result = result.replace("<|unk|>", "");
-    result = result.replace('\u{FFFF}', "");
-    result
+    ::image::imageops::crop_imm(img, x_min, y_min, width, height).to_image()
 }
 
 #[cfg(test)]
@@ -1273,67 +670,6 @@ mod tests {
 
     #[test]
     fn test_format_heading() {
-        assert_eq!(format_heading("Title", 1), "# Title");
-        assert_eq!(format_heading("Section", 2), "## Section");
-    }
-
-    #[test]
-    fn test_format_formula() {
-        assert_eq!(format_formula("x + y = z"), "$$x + y = z$$");
-        assert_eq!(format_formula("\\[x^2\\]"), "$$x^2$$");
-    }
-
-    #[test]
-    fn test_clean_special_tokens() {
-        assert_eq!(clean_special_tokens("hello<|sn|>world"), "hello world");
-        assert_eq!(clean_special_tokens("test<|unk|>"), "test");
-    }
-
-    #[test]
-    fn test_truncate_repeated_tail() {
-        let text = "hello".to_string() + &"!".repeat(50);
-        let result = truncate_repeated_tail(&text, 20, 1);
-        assert_eq!(result, "hello!");
-    }
-
-    #[test]
-    fn test_calculate_overlap_ratio() {
-        let bbox1 = BoundingBox::from_coords(0.0, 0.0, 10.0, 10.0);
-        let bbox2 = BoundingBox::from_coords(5.0, 5.0, 15.0, 15.0);
-        let ratio = calculate_overlap_ratio(&bbox1, &bbox2, "union");
-        assert!(ratio > 0.0 && ratio < 1.0);
-    }
-
-    #[test]
-    fn test_truncate_repetitive_content() {
-        let text = "hello\nhello\nhello\nhello\nhello\nhello\nhello\nhello\nhello\nhello\nhello";
-        let result = truncate_repetitive_content(text, 10, 10, 10);
-        assert_eq!(result, "hello");
-    }
-
-    #[test]
-    fn test_find_shortest_repeating() {
-        assert_eq!(
-            find_shortest_repeating_substring("abcabcabc"),
-            Some("abc".to_string())
-        );
-        assert_eq!(
-            find_shortest_repeating_substring("綠洲綠洲綠洲"),
-            Some("綠洲".to_string())
-        );
-        assert_eq!(find_shortest_repeating_substring("hello"), None);
-    }
-
-    #[test]
-    fn test_simple_otsl_conversion() {
-        let input = "a\tb\tc\nd\te\tf";
-        let html = simple_otsl_conversion(input);
-        assert!(html.contains("<table>"));
-        assert!(html.contains("<td>a</td>"));
-    }
-
-    #[test]
-    fn test_openocr_format_title_numbering_heuristics() {
         // Avoid false-positive roman numerals (e.g., "Impact" should not become "I mpact").
         assert_eq!(
             openocr_format_title("Impact of Class Labels"),

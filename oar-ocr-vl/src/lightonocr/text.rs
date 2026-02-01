@@ -1,67 +1,14 @@
-use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
+use std::sync::Arc;
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor};
+use candle_core::{IndexOp, Result, Tensor};
 use candle_nn::{
     Activation, Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, kv_cache::KvCache,
     linear_b, rms_norm,
 };
-use candle_transformers::utils::repeat_kv;
 
 use super::config::LightOnOcrTextConfig;
-
-#[derive(Debug, Clone)]
-pub struct RotaryEmbedding {
-    cos: Tensor,
-    sin: Tensor,
-}
-
-impl RotaryEmbedding {
-    pub fn new(
-        base: f32,
-        head_dim: usize,
-        max_position_embeddings: usize,
-        device: &Device,
-        dtype: DType,
-    ) -> Result<Self> {
-        let inv_freq: Vec<_> = (0..head_dim)
-            .step_by(2)
-            .map(|i| 1f32 / base.powf(i as f32 / head_dim as f32))
-            .collect();
-        let inv_freq_len = inv_freq.len();
-        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), device)?;
-        let t = Tensor::arange(0u32, max_position_embeddings as u32, device)?
-            .to_dtype(DType::F32)?
-            .reshape((max_position_embeddings, 1))?;
-        let freqs = t.matmul(&inv_freq)?;
-        let sin = freqs.sin()?.to_dtype(dtype)?;
-        let cos = freqs.cos()?.to_dtype(dtype)?;
-
-        Ok(Self { cos, sin })
-    }
-
-    pub fn forward(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        seqlen_offsets: &[usize],
-    ) -> Result<(Tensor, Tensor)> {
-        let (_b_sz, _qh, seq_len, _n_embd) = q.dims4()?;
-
-        let mut q_embeds = Vec::new();
-        let mut k_embeds = Vec::new();
-        for (i, offset) in seqlen_offsets.iter().enumerate() {
-            let cos = self.cos.narrow(0, *offset, seq_len)?;
-            let sin = self.sin.narrow(0, *offset, seq_len)?;
-            let q_embed =
-                candle_nn::rotary_emb::rope(&q.i(i)?.unsqueeze(0)?.contiguous()?, &cos, &sin)?;
-            let k_embed =
-                candle_nn::rotary_emb::rope(&k.i(i)?.unsqueeze(0)?.contiguous()?, &cos, &sin)?;
-            q_embeds.push(q_embed);
-            k_embeds.push(k_embed);
-        }
-        Ok((Tensor::cat(&q_embeds, 0)?, Tensor::cat(&k_embeds, 0)?))
-    }
-}
+use crate::attention::{RotaryEmbedding, repeat_kv, scaled_dot_product_attention};
 
 struct Mlp {
     gate_proj: Linear,
@@ -105,7 +52,7 @@ struct Attention {
     rotary_emb: Arc<RotaryEmbedding>,
     n_kv_groups: usize,
     softmax_scale: f64,
-    kv_cache: Mutex<KvCache>,
+    kv_cache: RefCell<KvCache>,
 }
 
 impl Attention {
@@ -143,6 +90,12 @@ impl Attention {
         )?;
         let q_norm = rms_norm(cfg.head_dim, cfg.rms_norm_eps, vb.pp("q_norm"))?;
         let k_norm = rms_norm(cfg.head_dim, cfg.rms_norm_eps, vb.pp("k_norm"))?;
+
+        // Create KvCache with dim=2 for seq_len dimension
+        // Cap initial capacity to avoid excessive memory allocation
+        let kv_cache_capacity = cfg.max_position_embeddings.min(8192);
+        let kv_cache = KvCache::new(2, kv_cache_capacity);
+
         Ok(Self {
             q_proj,
             k_proj,
@@ -156,7 +109,7 @@ impl Attention {
             rotary_emb,
             n_kv_groups: cfg.num_attention_heads / cfg.num_key_value_heads,
             softmax_scale: 1.0 / (cfg.head_dim as f64).sqrt(),
-            kv_cache: Mutex::new(KvCache::new(2, cfg.max_position_embeddings)),
+            kv_cache: RefCell::new(kv_cache),
         })
     }
 
@@ -184,41 +137,34 @@ impl Attention {
         q = q.apply(&self.q_norm)?;
         k = k.apply(&self.k_norm)?;
 
-        (q, k) = self.rotary_emb.forward(&q, &k, seqlen_offsets)?;
+        (q, k) = self.rotary_emb.apply_rotary_emb(&q, &k, seqlen_offsets)?;
 
         let q = q.contiguous()?;
         let k = k.contiguous()?;
         let v = v.contiguous()?;
 
-        let (k, v) = self
-            .kv_cache
-            .lock()
-            .map_err(|_| candle_core::Error::Msg("kv cache mutex poisoned".into()))?
-            .append(&k, &v)?;
+        let (k, v) = self.kv_cache.borrow_mut().append(&k, &v)?;
 
-        let k = repeat_kv(k, self.n_kv_groups)?.contiguous()?;
-        let v = repeat_kv(v, self.n_kv_groups)?.contiguous()?;
+        let k = repeat_kv(&k, self.n_kv_groups)?.contiguous()?;
+        let v = repeat_kv(&v, self.n_kv_groups)?.contiguous()?;
 
-        let attn_weights = (q.matmul(&k.transpose(2, 3)?)? * self.softmax_scale)?;
-        let attn_weights = match attention_mask {
-            None => attn_weights,
-            Some(mask) => attn_weights.broadcast_add(mask)?,
-        };
-        // Compute softmax in float32 for numerical stability, then cast back
-        let input_dtype = attn_weights.dtype();
-        let attn_weights = attn_weights.to_dtype(candle_core::DType::F32)?;
-        let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
-        let attn_weights = attn_weights.to_dtype(input_dtype)?;
-        let attn_output = attn_weights.matmul(&v)?;
+        // Use unified attention implementation
+        let is_causal = attention_mask.is_none();
+        let attn_output = scaled_dot_product_attention(
+            &q,
+            &k,
+            &v,
+            attention_mask,
+            self.softmax_scale,
+            is_causal,
+        )?;
         let attn_output = attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?;
 
         self.o_proj.forward(&attn_output)
     }
 
     fn clear_kv_cache(&self) {
-        if let Ok(mut cache) = self.kv_cache.lock() {
-            cache.reset();
-        }
+        self.kv_cache.borrow_mut().reset();
     }
 }
 
@@ -281,19 +227,25 @@ pub struct LightOnOcrTextModel {
     norm: RmsNorm,
     layers: Vec<DecoderLayer>,
     lm_head: Linear,
-    pub dtype: DType,
-    pub num_attn_heads: usize,
 }
 
 impl LightOnOcrTextModel {
+    /// Maximum positions to precompute for RoPE embeddings.
+    /// Capped to avoid excessive memory usage when config specifies very large values.
+    const MAX_PRECOMPUTED_POSITIONS: usize = 8192;
+
     pub fn new(cfg: &LightOnOcrTextConfig, vb: VarBuilder) -> Result<Self> {
         let vb_m = vb.pp("model").pp("language_model");
         let embed_tokens = embedding(cfg.vocab_size, cfg.hidden_size, vb_m.pp("embed_tokens"))?;
 
-        let rotary_emb = Arc::new(RotaryEmbedding::new(
+        // Cap precomputed RoPE size to avoid memory waste from large max_position_embeddings
+        let rope_max_pos = cfg
+            .max_position_embeddings
+            .min(Self::MAX_PRECOMPUTED_POSITIONS);
+        let rotary_emb = Arc::new(RotaryEmbedding::new_precomputed(
             cfg.rope_theta as f32,
             cfg.head_dim,
-            cfg.max_position_embeddings,
+            rope_max_pos,
             vb.device(),
             vb_m.dtype(),
         )?);
@@ -319,8 +271,6 @@ impl LightOnOcrTextModel {
             norm,
             layers,
             lm_head,
-            dtype: vb.dtype(),
-            num_attn_heads: cfg.num_attention_heads,
         })
     }
 
