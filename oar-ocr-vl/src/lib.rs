@@ -13,6 +13,7 @@
 //! - `lightonocr` - LightOnOCR end-to-end OCR VLM
 //! - `doc_parser` - Unified document parsing with pluggable recognition backends
 //! - `utils` - Utility functions (device parsing, candle helpers, markdown, OTSL conversion)
+//! - `attention` - Unified attention implementation shared by all models
 //!
 //! ## Features
 //!
@@ -32,12 +33,16 @@
 //! # }
 //! ```
 
+// Core model modules
 pub mod doc_parser;
 pub mod hunyuanocr;
 pub mod lightonocr;
 pub mod paddleocr_vl;
 pub mod unirec;
 pub mod utils;
+
+// Shared attention implementation
+pub mod attention;
 
 // Re-exports for convenience
 pub use paddleocr_vl::{

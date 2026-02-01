@@ -107,15 +107,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let infer_start = Instant::now();
-        match model.generate(rgb_img, &args.prompt, args.max_tokens) {
-            Ok(result) => {
+        match model
+            .generate(&[rgb_img], &[args.prompt.as_str()], args.max_tokens)
+            .pop()
+        {
+            Some(Ok(result)) => {
                 info!(
                     "  Inference time: {:.2}ms",
                     infer_start.elapsed().as_secs_f64() * 1000.0
                 );
                 println!("{}", result);
             }
-            Err(e) => error!("  Inference failed: {}", e),
+            Some(Err(e)) => error!("  Inference failed: {}", e),
+            None => error!("  No result returned from model"),
         }
     }
 

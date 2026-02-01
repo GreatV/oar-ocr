@@ -1,5 +1,8 @@
 use super::config::LightOnOcrImageProcessorConfig;
-use crate::utils::candle_to_ocr_processing;
+use crate::utils::{
+    candle_to_ocr_processing,
+    image::{image_to_chw, pil_resample_to_filter_type, round_up_to_multiple},
+};
 use candle_core::{DType, Device, Tensor};
 use image::{RgbImage, imageops::FilterType};
 use oar_ocr_core::core::OCRError;
@@ -78,25 +81,24 @@ pub fn preprocess_image(
         });
     }
 
-    let mut data = Vec::with_capacity(3 * target_h as usize * target_w as usize);
-    let mean = &cfg.image_mean;
-    let std = &cfg.image_std;
+    let scale = if cfg.do_rescale {
+        Some(cfg.rescale_factor)
+    } else {
+        None
+    };
 
-    for c in 0..3usize {
-        for y in 0..target_h {
-            for x in 0..target_w {
-                let p = resized.get_pixel(x, y);
-                let mut v = p.0[c] as f32;
-                if cfg.do_rescale {
-                    v *= cfg.rescale_factor;
-                }
-                if cfg.do_normalize {
-                    v = (v - mean[c]) / std[c];
-                }
-                data.push(v);
-            }
-        }
-    }
+    let mean: &[f32] = if cfg.do_normalize {
+        &cfg.image_mean
+    } else {
+        &[0.0, 0.0, 0.0]
+    };
+    let std: &[f32] = if cfg.do_normalize {
+        &cfg.image_std
+    } else {
+        &[1.0, 1.0, 1.0]
+    };
+
+    let data = image_to_chw(&resized, mean, std, scale);
 
     let pixel_values = Tensor::from_vec(
         data,
@@ -124,25 +126,4 @@ pub fn preprocess_image(
         grid_h,
         grid_w,
     })
-}
-
-fn round_up_to_multiple(value: u32, multiple: u32) -> u32 {
-    if multiple == 0 {
-        return value;
-    }
-    value.div_ceil(multiple) * multiple
-}
-
-fn pil_resample_to_filter_type(resample: u32) -> Option<FilterType> {
-    // Match PIL / transformers `PILImageResampling` integer values:
-    // 0=NEAREST, 1=LANCZOS, 2=BILINEAR, 3=BICUBIC, 4=BOX, 5=HAMMING.
-    match resample {
-        0 => Some(FilterType::Nearest),
-        1 => Some(FilterType::Lanczos3),
-        2 => Some(FilterType::Triangle),
-        3 => Some(FilterType::CatmullRom),
-        4 => Some(FilterType::Triangle),
-        5 => Some(FilterType::CatmullRom),
-        _ => None,
-    }
 }

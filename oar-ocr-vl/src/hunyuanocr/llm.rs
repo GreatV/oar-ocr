@@ -1,233 +1,12 @@
 use super::config::HunyuanOcrConfig;
+use crate::attention::{
+    RotaryEmbedding, repeat_kv, scaled_dot_product_attention, select_rope_sections,
+};
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
-use candle_core::{D, DType, Device, IndexOp, Tensor};
-use candle_nn::Module;
+use candle_core::Tensor;
+use candle_nn::{Module, kv_cache::KvCache};
 use oar_ocr_core::core::OCRError;
-
-#[derive(Debug, Default, Clone)]
-pub struct KvCache {
-    pub key: Option<Tensor>,
-    pub value: Option<Tensor>,
-}
-
-#[derive(Debug, Clone)]
-pub struct RotaryEmbedding {
-    inv_freq: Tensor,
-    num_dims: usize,
-}
-
-impl RotaryEmbedding {
-    pub fn new(
-        head_dim: usize,
-        rope_theta: f64,
-        num_dims: usize,
-        device: &Device,
-    ) -> Result<Self, OCRError> {
-        if !head_dim.is_multiple_of(2) {
-            return Err(OCRError::ConfigError {
-                message: format!("RotaryEmbedding: head_dim must be even, got {head_dim}"),
-            });
-        }
-        let half = head_dim / 2;
-        let mut inv_freq = Vec::with_capacity(half);
-        for i in (0..head_dim).step_by(2) {
-            let v = 1f64 / rope_theta.powf(i as f64 / head_dim as f64);
-            inv_freq.push(v as f32);
-        }
-        let inv_freq = Tensor::from_vec(inv_freq, (half,), device).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "RotaryEmbedding: failed to create inv_freq tensor",
-                e,
-            )
-        })?;
-        Ok(Self { inv_freq, num_dims })
-    }
-
-    pub fn forward(
-        &self,
-        position_ids: &Tensor,
-        dtype: DType,
-    ) -> Result<(Tensor, Tensor), OCRError> {
-        // position_ids: (num_dims, batch, seq)
-        let dims = position_ids.dims();
-        if dims.len() != 3 || dims[0] != self.num_dims {
-            return Err(OCRError::InvalidInput {
-                message: format!(
-                    "RotaryEmbedding: expected position_ids shape ({}, B, S), got {:?}",
-                    self.num_dims, dims
-                ),
-            });
-        }
-
-        let position_ids = position_ids.to_dtype(DType::F32).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "RotaryEmbedding: position_ids cast to f32 failed",
-                e,
-            )
-        })?;
-
-        let inv_len = self.inv_freq.dims1().map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "RotaryEmbedding: inv_freq dims1 failed",
-                e,
-            )
-        })?;
-        let inv = self
-            .inv_freq
-            .reshape((1usize, 1usize, 1usize, inv_len))
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "RotaryEmbedding: inv_freq reshape failed",
-                    e,
-                )
-            })?;
-
-        let freqs = position_ids
-            .unsqueeze(3)
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "RotaryEmbedding: position_ids unsqueeze failed",
-                    e,
-                )
-            })?
-            .broadcast_mul(&inv)
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "RotaryEmbedding: rotary freqs multiply failed",
-                    e,
-                )
-            })?;
-
-        let emb = Tensor::cat(&[&freqs, &freqs], D::Minus1).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "RotaryEmbedding: rotary emb cat failed",
-                e,
-            )
-        })?;
-
-        let cos = emb
-            .cos()
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "RotaryEmbedding: rotary cos failed",
-                    e,
-                )
-            })?
-            .to_dtype(dtype)
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "RotaryEmbedding: rotary cos cast failed",
-                    e,
-                )
-            })?;
-
-        let sin = emb
-            .sin()
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "RotaryEmbedding: rotary sin failed",
-                    e,
-                )
-            })?
-            .to_dtype(dtype)
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "RotaryEmbedding: rotary sin cast failed",
-                    e,
-                )
-            })?;
-        Ok((cos, sin))
-    }
-}
-
-fn select_xdrope(cos_or_sin: &Tensor, xdrope_section: &[usize]) -> Result<Tensor, OCRError> {
-    // Input: (num_dims, batch, seq, head_dim) -> Output: (batch, 1, seq, head_dim)
-    if xdrope_section.is_empty() {
-        return Err(OCRError::ConfigError {
-            message: "HunyuanOCR: rope_scaling.xdrope_section is empty".to_string(),
-        });
-    }
-
-    let dims = cos_or_sin.dims();
-    let head_dim = dims.get(3).copied().unwrap_or(0);
-    let section_sum: usize = xdrope_section.iter().sum();
-    if section_sum * 2 != head_dim {
-        return Err(OCRError::ConfigError {
-            message: format!(
-                "HunyuanOCR: xdrope_section sum ({}) * 2 != head_dim ({})",
-                section_sum, head_dim
-            ),
-        });
-    }
-
-    let num_dims = dims.first().copied().unwrap_or(0);
-    if num_dims == 0 {
-        return Err(OCRError::InvalidInput {
-            message: "HunyuanOCR: empty rope dims".to_string(),
-        });
-    }
-
-    let doubled_sections: Vec<usize> = xdrope_section
-        .iter()
-        .chain(xdrope_section.iter())
-        .copied()
-        .collect();
-
-    let mut offset = 0usize;
-    let mut chunks: Vec<Tensor> = Vec::with_capacity(doubled_sections.len());
-    for (i, &sec) in doubled_sections.iter().enumerate() {
-        let next = offset + sec;
-        let seg = cos_or_sin.i((.., .., .., offset..next)).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                format!(
-                    "HunyuanOCR: xdrope slice failed at chunk {} (offset {}..{})",
-                    i, offset, next
-                ),
-                e,
-            )
-        })?;
-        let picked = seg.i((i % num_dims, .., .., ..)).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                format!(
-                    "HunyuanOCR: xdrope pick failed at chunk {} (dim {})",
-                    i,
-                    i % num_dims
-                ),
-                e,
-            )
-        })?;
-        chunks.push(picked);
-        offset = next;
-    }
-    let refs: Vec<&Tensor> = chunks.iter().collect();
-    let cat = Tensor::cat(&refs, D::Minus1).map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "HunyuanOCR: xdrope cat failed",
-            e,
-        )
-    })?;
-    cat.unsqueeze(1).map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "HunyuanOCR: xdrope unsqueeze failed",
-            e,
-        )
-    })
-}
+use std::cell::RefCell;
 
 fn apply_xdrope_rotary_pos_emb(
     q: &Tensor,
@@ -236,8 +15,9 @@ fn apply_xdrope_rotary_pos_emb(
     sin: &Tensor,
     xdrope_section: &[usize],
 ) -> Result<(Tensor, Tensor), OCRError> {
-    let cos = select_xdrope(cos, xdrope_section)?;
-    let sin = select_xdrope(sin, xdrope_section)?;
+    // XDRoPE uses 4 position dimensions
+    let cos = select_rope_sections(cos, xdrope_section, 4)?;
+    let sin = select_rope_sections(sin, xdrope_section, 4)?;
 
     let q_mul = q.broadcast_mul(&cos).map_err(|e| {
         candle_to_ocr_processing(
@@ -287,44 +67,6 @@ fn apply_xdrope_rotary_pos_emb(
     Ok((q_rot, k_rot))
 }
 
-fn repeat_kv(hidden_states: &Tensor, n_rep: usize) -> Result<Tensor, OCRError> {
-    if n_rep == 1 {
-        return Ok(hidden_states.clone());
-    }
-    let (b, kv_heads, slen, head_dim) = hidden_states.dims4().map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "HunyuanOCR: repeat_kv dims failed",
-            e,
-        )
-    })?;
-    hidden_states
-        .unsqueeze(2)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "HunyuanOCR: repeat_kv unsqueeze failed",
-                e,
-            )
-        })?
-        .expand((b, kv_heads, n_rep, slen, head_dim))
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "HunyuanOCR: repeat_kv expand failed",
-                e,
-            )
-        })?
-        .reshape((b, kv_heads * n_rep, slen, head_dim))
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "HunyuanOCR: repeat_kv reshape failed",
-                e,
-            )
-        })
-}
-
 #[derive(Debug, Clone)]
 struct HunyuanMlp {
     gate_proj: candle_nn::Linear,
@@ -369,7 +111,7 @@ impl HunyuanMlp {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct HunyuanAttention {
     q_proj: candle_nn::Linear,
     k_proj: candle_nn::Linear,
@@ -383,6 +125,7 @@ struct HunyuanAttention {
     head_dim: usize,
     scaling: f64,
     xdrope_section: Vec<usize>,
+    kv_cache: RefCell<KvCache>,
 }
 
 impl HunyuanAttention {
@@ -437,6 +180,13 @@ impl HunyuanAttention {
             (None, None)
         };
 
+        // Create KvCache with dim=2 for seq_len dimension
+        // Pre-allocate enough space to avoid O(N) reallocation during generation
+        // Conservative estimate: vision tokens + max_generation_tokens
+        // Typical: ~1000-2000 vision tokens + 4096 generation tokens = ~6000-8000 total
+        // Use 16384 to handle worst case without reallocation
+        let kv_cache = KvCache::new(2, 16384);
+
         Ok(Self {
             q_proj,
             k_proj,
@@ -450,6 +200,7 @@ impl HunyuanAttention {
             head_dim: cfg.head_dim,
             scaling: (cfg.head_dim as f64).powf(-0.5),
             xdrope_section: cfg.rope_scaling.xdrope_section.clone(),
+            kv_cache: RefCell::new(kv_cache),
         })
     }
 
@@ -458,7 +209,6 @@ impl HunyuanAttention {
         hidden_states: &Tensor,
         cos: &Tensor,
         sin: &Tensor,
-        cache: Option<&mut KvCache>,
         causal_mask: Option<&Tensor>,
     ) -> Result<Tensor, OCRError> {
         let (b, seq_len, _) = hidden_states
@@ -507,33 +257,27 @@ impl HunyuanAttention {
 
         let (q, k) = apply_xdrope_rotary_pos_emb(&q, &k, cos, sin, &self.xdrope_section)?;
 
-        let (k_all, v_all) = match cache {
-            None => (k, v),
-            Some(cache) => {
-                let (k_all, v_all) = match (&cache.key, &cache.value) {
-                    (Some(k_prev), Some(v_prev)) => {
-                        let k_all = Tensor::cat(&[k_prev, &k], 2).map_err(|e| {
-                            candle_to_ocr_inference("HunyuanOCR", "attn cat k cache", e)
-                        })?;
-                        let v_all = Tensor::cat(&[v_prev, &v], 2).map_err(|e| {
-                            candle_to_ocr_inference("HunyuanOCR", "attn cat v cache", e)
-                        })?;
-                        (k_all, v_all)
-                    }
-                    _ => (k.clone(), v.clone()),
-                };
-                cache.key = Some(k_all.clone());
-                cache.value = Some(v_all.clone());
-                (k_all, v_all)
-            }
-        };
-
-        let key_states = repeat_kv(&k_all, self.num_kv_groups)?;
-        let value_states = repeat_kv(&v_all, self.num_kv_groups)?;
-
         let q = q
             .contiguous()
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn q contiguous", e))?;
+        let k = k
+            .contiguous()
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn k contiguous", e))?;
+        let v = v
+            .contiguous()
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn v contiguous", e))?;
+
+        let (k_all, v_all) = self
+            .kv_cache
+            .borrow_mut()
+            .append(&k, &v)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "append kv_cache", e))?;
+
+        let key_states = repeat_kv(&k_all, self.num_kv_groups)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "repeat_kv key", e))?;
+        let value_states = repeat_kv(&v_all, self.num_kv_groups)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "repeat_kv value", e))?;
+
         let key_states = key_states
             .contiguous()
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn key_states contiguous", e))?;
@@ -541,41 +285,18 @@ impl HunyuanAttention {
             candle_to_ocr_inference("HunyuanOCR", "attn value_states contiguous", e)
         })?;
 
-        let attn_weights = q
-            .matmul(
-                &key_states
-                    .transpose(2, 3)
-                    .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn k transpose23", e))?
-                    .contiguous()
-                    .map_err(|e| {
-                        candle_to_ocr_inference("HunyuanOCR", "attn k t23 contiguous", e)
-                    })?,
-            )
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn qk matmul", e))?
-            .affine(self.scaling, 0.0)
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn scaling", e))?;
-
-        let attn_weights = match causal_mask {
-            None => attn_weights,
-            Some(mask) => attn_weights
-                .broadcast_add(mask)
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn add causal mask", e))?,
-        };
-
-        let attn_weights = candle_nn::ops::softmax_last_dim(
-            &attn_weights
-                .to_dtype(DType::F32)
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn weights cast f32", e))?,
+        // Use unified attention implementation
+        let attn_output = scaled_dot_product_attention(
+            &q,
+            &key_states,
+            &value_states,
+            causal_mask,
+            self.scaling,
+            false, // not causal - mask is explicit
         )
-        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn softmax", e))?
-        .to_dtype(value_states.dtype())
-        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn weights cast back", e))?
-        .contiguous()
-        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn weights contiguous", e))?;
+        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "scaled_dot_product_attention", e))?;
 
-        let attn_output = attn_weights
-            .matmul(&value_states)
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn av matmul", e))?
+        let attn_output = attn_output
             .transpose(1, 2)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn out transpose", e))?
             .reshape((b, seq_len, self.num_heads * self.head_dim))
@@ -585,9 +306,13 @@ impl HunyuanAttention {
             .forward(&attn_output)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn o_proj", e))
     }
+
+    fn clear_kv_cache(&self) {
+        self.kv_cache.borrow_mut().reset();
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct HunyuanDecoderLayer {
     self_attn: HunyuanAttention,
     mlp: HunyuanMlp,
@@ -621,7 +346,6 @@ impl HunyuanDecoderLayer {
         hidden_states: &Tensor,
         cos: &Tensor,
         sin: &Tensor,
-        cache: Option<&mut KvCache>,
         causal_mask: Option<&Tensor>,
     ) -> Result<Tensor, OCRError> {
         let residual = hidden_states;
@@ -631,7 +355,7 @@ impl HunyuanDecoderLayer {
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "llm input_layernorm", e))?;
         let attn_out = self
             .self_attn
-            .forward(&hidden_states, cos, sin, cache, causal_mask)?;
+            .forward(&hidden_states, cos, sin, causal_mask)?;
         let hidden_states = (residual + &attn_out)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "llm attn residual add", e))?;
 
@@ -646,9 +370,13 @@ impl HunyuanDecoderLayer {
         (&residual + &mlp_out)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "llm mlp residual add", e))
     }
+
+    fn clear_kv_cache(&self) {
+        self.self_attn.clear_kv_cache();
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct HunyuanLlm {
     embed_tokens: candle_nn::Embedding,
     layers: Vec<HunyuanDecoderLayer>,
@@ -671,7 +399,7 @@ impl HunyuanLlm {
         let norm = candle_nn::rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("norm"))
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "load final norm", e))?;
 
-        let rotary = RotaryEmbedding::new(cfg.head_dim, cfg.rope_theta, 4, vb.device())?;
+        let rotary = RotaryEmbedding::new_multi_axis(cfg.head_dim, cfg.rope_theta, 4, vb.device())?;
 
         Ok(Self {
             embed_tokens,
@@ -695,21 +423,26 @@ impl HunyuanLlm {
         &self,
         inputs_embeds: &Tensor,
         position_ids: &Tensor,
-        kv_cache: Option<&mut [KvCache]>,
         causal_mask: Option<&Tensor>,
     ) -> Result<Tensor, OCRError> {
-        let (cos, sin) = self.rotary.forward(position_ids, inputs_embeds.dtype())?;
+        let (cos, sin) = self
+            .rotary
+            .forward_multi_axis(position_ids, inputs_embeds.dtype())?;
 
         let mut hidden_states = inputs_embeds.clone();
-        let mut kv_cache = kv_cache;
-        for (idx, layer) in self.layers.iter().enumerate() {
-            let cache = kv_cache.as_deref_mut().and_then(|c| c.get_mut(idx));
-            hidden_states = layer.forward(&hidden_states, &cos, &sin, cache, causal_mask)?;
+        for layer in &self.layers {
+            hidden_states = layer.forward(&hidden_states, &cos, &sin, causal_mask)?;
         }
         let hidden_states = self
             .norm
             .forward(&hidden_states)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "llm final norm", e))?;
         Ok(hidden_states)
+    }
+
+    pub fn clear_kv_cache(&self) {
+        for layer in &self.layers {
+            layer.clear_kv_cache();
+        }
     }
 }

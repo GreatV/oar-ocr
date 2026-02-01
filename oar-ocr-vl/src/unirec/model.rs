@@ -10,9 +10,9 @@ use tokenizers::Tokenizer;
 use tokenizers::decoders::byte_level::ByteLevel;
 
 use super::config::UniRecConfig;
-use super::decoder::{KvCache, M2M100Decoder, create_causal_mask};
+use super::decoder::M2M100Decoder;
 use super::encoder::FocalSVTR;
-use crate::utils::candle_to_ocr_inference;
+use crate::utils::{candle_to_ocr_inference, image::image_to_chw};
 use oar_ocr_core::core::OCRError;
 
 // Static regexes for postprocessing (compiled once)
@@ -83,8 +83,8 @@ impl UniRec {
         })
     }
 
-    /// Preprocess an image for the model.
-    fn preprocess_image(&self, image: &RgbImage) -> Result<Tensor, OCRError> {
+    /// Compute target dimensions for an image preserving aspect ratio.
+    fn compute_target_size(&self, image: &RgbImage) -> (usize, usize) {
         let (max_w, max_h) = (self.cfg.input_width, self.cfg.input_height);
         let (orig_w, orig_h) = (image.width() as usize, image.height() as usize);
 
@@ -110,94 +110,163 @@ impl UniRec {
         let target_h = ((new_h / 64) * 64).max(64);
         let target_w = ((new_w / 64) * 64).max(64);
 
-        // Resize image.
-        //
-        // OpenOCR uses torchvision/PIL BICUBIC interpolation for `NaSizeResize`.
-        // `image::imageops::FilterType::CatmullRom` is the closest equivalent.
+        (target_w, target_h)
+    }
+
+    /// Preprocess an image with specific target dimensions (for batching).
+    fn preprocess_image_with_size(
+        &self,
+        image: &RgbImage,
+        target_w: usize,
+        target_h: usize,
+    ) -> Result<Tensor, OCRError> {
+        // First resize to natural dimensions preserving aspect ratio
+        let (natural_w, natural_h) = self.compute_target_size(image);
+
         let resized = image::imageops::resize(
             image,
-            target_w as u32,
-            target_h as u32,
+            natural_w as u32,
+            natural_h as u32,
             image::imageops::FilterType::CatmullRom,
         );
 
-        // Convert to tensor with normalization: (pixel / 255 - 0.5) / 0.5
-        let mut data = Vec::with_capacity(3 * target_h * target_w);
+        // Convert to tensor with normalization and padding to target size
+        let chw_data = image_to_chw(
+            &resized,
+            &[0.5, 0.5, 0.5],
+            &[0.5, 0.5, 0.5],
+            Some(1.0 / 255.0),
+        );
 
-        // CHW format
+        let mut data = vec![0f32; 3 * target_h * target_w];
+        let natural_area = natural_h * natural_w;
+        let target_area = target_h * target_w;
+
+        // Copy into padded buffer respecting stride
         for c in 0..3 {
-            for y in 0..target_h {
-                for x in 0..target_w {
-                    let pixel = resized.get_pixel(x as u32, y as u32);
-                    let val = pixel[c] as f32 / 255.0;
-                    let normalized = (val - 0.5) / 0.5;
-                    data.push(normalized);
-                }
+            let src_channel_offset = c * natural_area;
+            let dst_channel_offset = c * target_area;
+            for y in 0..natural_h {
+                let src_row_start = src_channel_offset + y * natural_w;
+                let dst_row_start = dst_channel_offset + y * target_w;
+                data[dst_row_start..dst_row_start + natural_w]
+                    .copy_from_slice(&chw_data[src_row_start..src_row_start + natural_w]);
             }
         }
 
         Tensor::from_vec(data, (1, 3, target_h, target_w), &self.device)
-            .map_err(|e| candle_to_ocr_inference("UniRec", "create image tensor", e))?
+            .map_err(|e| candle_to_ocr_inference("UniRec", "create padded image tensor", e))?
             .to_dtype(self.dtype)
-            .map_err(|e| candle_to_ocr_inference("UniRec", "cast image tensor dtype", e))
+            .map_err(|e| candle_to_ocr_inference("UniRec", "cast padded image dtype", e))
     }
 
-    /// Generate text from an image using greedy decoding.
-    pub fn generate(&self, image: RgbImage, max_new_tokens: usize) -> Result<String, OCRError> {
-        // Preprocess image
-        let pixel_values = self.preprocess_image(&image)?;
+    /// Generate text from one or more images using greedy decoding.
+    ///
+    /// Supports true GPU batching when multiple images are provided.
+    ///
+    /// # Arguments
+    /// * `images` - Input images
+    /// * `max_new_tokens` - Maximum tokens to generate per image
+    ///
+    /// # Returns
+    /// Vector of results, one per input image.
+    pub fn generate(
+        &self,
+        images: &[RgbImage],
+        max_new_tokens: usize,
+    ) -> Vec<Result<String, OCRError>> {
+        if images.is_empty() {
+            return Vec::new();
+        }
 
-        // Encode image
+        match self.generate_internal(images, max_new_tokens) {
+            Ok(results) => results.into_iter().map(Ok).collect(),
+            Err(e) => {
+                let msg = format!("generation failed: {e}");
+                (0..images.len())
+                    .map(|_| {
+                        Err(OCRError::InvalidInput {
+                            message: msg.clone(),
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Internal generation implementation supporting batched inference.
+    fn generate_internal(
+        &self,
+        images: &[RgbImage],
+        max_new_tokens: usize,
+    ) -> Result<Vec<String>, OCRError> {
+        let batch_size = images.len();
+
+        // 1. Compute max dimensions across all images
+        let mut max_w = 0usize;
+        let mut max_h = 0usize;
+        for image in images {
+            let (w, h) = self.compute_target_size(image);
+            max_w = max_w.max(w);
+            max_h = max_h.max(h);
+        }
+
+        // 2. Preprocess all images with padding to max size
+        let mut pixel_tensors: Vec<Tensor> = Vec::with_capacity(batch_size);
+        for image in images {
+            let tensor = self.preprocess_image_with_size(image, max_w, max_h)?;
+            pixel_tensors.push(tensor);
+        }
+
+        // 3. Stack into batch tensor
+        let refs: Vec<&Tensor> = pixel_tensors.iter().collect();
+        let pixel_values = Tensor::cat(&refs, 0)
+            .map_err(|e| candle_to_ocr_inference("UniRec", "stack pixel values", e))?;
+
+        // 4. Encode all images
         let encoder_hidden_states = self.encoder.forward(&pixel_values)?;
 
-        // Initialize KV cache
-        let mut kv_cache: Vec<KvCache> = (0..self.cfg.decoder_layers)
-            .map(|_| KvCache::default())
-            .collect();
+        // 5. Clear KV cache before generation
+        self.decoder.clear_kv_cache();
 
-        // Start with BOS token
-        let mut generated_tokens: Vec<u32> = vec![self.cfg.bos_token_id];
+        // 6. Initialize generation state
+        let mut generated_tokens: Vec<Vec<u32>> = vec![vec![self.cfg.bos_token_id]; batch_size];
+        let mut finished: Vec<bool> = vec![false; batch_size];
         let mut position_offset = 0usize;
 
         for _ in 0..max_new_tokens {
-            let current_len = generated_tokens.len();
+            if finished.iter().all(|&f| f) {
+                break;
+            }
 
-            // Create input tensor (only last token for cached inference)
+            // Create input tensor
             let input_ids = if position_offset == 0 {
-                // First step - use all tokens
-                Tensor::new(&generated_tokens[..], &self.device)
+                // First step - use BOS token for all
+                Tensor::new(vec![self.cfg.bos_token_id; batch_size], &self.device)
                     .map_err(|e| candle_to_ocr_inference("UniRec", "create input_ids", e))?
-                    .unsqueeze(0)
-                    .map_err(|e| candle_to_ocr_inference("UniRec", "unsqueeze input_ids", e))?
+                    .reshape((batch_size, 1))
+                    .map_err(|e| candle_to_ocr_inference("UniRec", "reshape input_ids", e))?
             } else {
-                // Subsequent steps - only use last token
-                let last_token =
-                    generated_tokens
-                        .last()
-                        .copied()
-                        .ok_or_else(|| OCRError::InvalidInput {
-                            message: "UniRec: generated_tokens is empty".to_string(),
-                        })?;
-                Tensor::new(&[last_token], &self.device)
-                    .map_err(|e| candle_to_ocr_inference("UniRec", "create input_id", e))?
-                    .unsqueeze(0)
-                    .map_err(|e| candle_to_ocr_inference("UniRec", "unsqueeze input_id", e))?
+                // Subsequent steps - use last token for each sample
+                let last_tokens: Vec<u32> = generated_tokens
+                    .iter()
+                    .map(|tokens| *tokens.last().unwrap_or(&self.cfg.bos_token_id))
+                    .collect();
+                Tensor::new(last_tokens, &self.device)
+                    .map_err(|e| candle_to_ocr_inference("UniRec", "create input_ids", e))?
+                    .reshape((batch_size, 1))
+                    .map_err(|e| candle_to_ocr_inference("UniRec", "reshape input_ids", e))?
             };
 
-            // Create causal mask (only for first step with multiple tokens)
-            let self_attn_mask = if position_offset == 0 && current_len > 1 {
-                Some(create_causal_mask(current_len, &self.device, self.dtype)?)
-            } else {
-                None
-            };
+            // No causal mask needed for single token decode
+            let self_attn_mask = None;
 
             // Decoder forward
             let hidden_states = self.decoder.forward(
                 &input_ids,
                 &encoder_hidden_states,
                 position_offset,
-                self_attn_mask.as_ref(),
-                Some(&mut kv_cache),
+                self_attn_mask,
             )?;
 
             // Get logits for last position
@@ -213,53 +282,49 @@ impl UniRec {
                 .forward(&last_hidden)
                 .map_err(|e| candle_to_ocr_inference("UniRec", "lm_head forward", e))?;
 
-            // Greedy decoding - select argmax
-            let argmax_result = logits
+            // Greedy decoding for each sample
+            let next_tokens = logits
                 .argmax(D::Minus1)
-                .map_err(|e| candle_to_ocr_inference("UniRec", "argmax", e))?;
+                .map_err(|e| candle_to_ocr_inference("UniRec", "argmax", e))?
+                .to_vec1::<u32>()
+                .map_err(|e| candle_to_ocr_inference("UniRec", "to_vec1", e))?;
 
-            // Extract next token - flatten_all() handles all shapes uniformly
-            let next_token = argmax_result
-                .flatten_all()
-                .map_err(|e| candle_to_ocr_inference("UniRec", "flatten argmax", e))?
-                .get(0)
-                .map_err(|e| candle_to_ocr_inference("UniRec", "get first token", e))?
-                .to_scalar::<u32>()
-                .map_err(|e| candle_to_ocr_inference("UniRec", "to_scalar", e))?;
-
-            // Check for EOS
-            if next_token == self.cfg.eos_token_id {
-                break;
+            for (i, &token) in next_tokens.iter().enumerate() {
+                if finished[i] {
+                    continue;
+                }
+                if token == self.cfg.eos_token_id {
+                    finished[i] = true;
+                } else {
+                    generated_tokens[i].push(token);
+                }
             }
-
-            generated_tokens.push(next_token);
 
             // Update position offset
-            if position_offset == 0 {
-                position_offset = current_len;
-            } else {
-                position_offset += 1;
-            }
+            position_offset += 1;
         }
 
-        // Decode tokens (skip BOS token)
-        let tokens_to_decode: Vec<u32> = if generated_tokens.len() > 1 {
-            generated_tokens[1..].to_vec()
-        } else {
-            vec![]
-        };
+        // 7. Decode tokens for each sample
+        let mut results = Vec::with_capacity(batch_size);
+        for tokens in generated_tokens {
+            // Skip BOS token
+            let tokens_to_decode: Vec<u32> = if tokens.len() > 1 {
+                tokens[1..].to_vec()
+            } else {
+                vec![]
+            };
 
-        // Decode with skip_special_tokens=false to preserve LaTeX tokens
-        // The tokenizer treats many LaTeX commands as "special" tokens
-        let raw_output = self
-            .tokenizer
-            .decode(&tokens_to_decode, false)
-            .map_err(|e| OCRError::InvalidInput {
-                message: format!("UniRec: tokenizer decode failed: {}", e),
-            })?;
+            let raw_output = self
+                .tokenizer
+                .decode(&tokens_to_decode, false)
+                .map_err(|e| OCRError::InvalidInput {
+                    message: format!("UniRec: tokenizer decode failed: {}", e),
+                })?;
 
-        // Postprocess: clean up special tokens and GPT-style markers
-        Ok(postprocess_unirec_output(&raw_output))
+            results.push(postprocess_unirec_output(&raw_output));
+        }
+
+        Ok(results)
     }
 
     /// Get model configuration.
