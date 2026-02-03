@@ -36,7 +36,7 @@
 //! # Using GLM-OCR model
 //! cargo run -p oar-ocr-vl --example doc_parser -- \
 //!     --model-name glmocr \
-//!     --model-dir ~/repos/zai-org/GLM-OCR \
+//!     --model-dir /path/to/GLM-OCR \
 //!     --layout-model models/pp-doclayoutv3.onnx \
 //!     document.jpg
 //! ```
