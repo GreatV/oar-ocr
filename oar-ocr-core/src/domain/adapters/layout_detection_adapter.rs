@@ -22,13 +22,20 @@ use ndarray::Axis;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Result type for layout detection box filtering and merging operations.
-type LayoutBoxResult = (
-    Vec<crate::processors::BoundingBox>,
-    Vec<usize>,
-    Vec<f32>,
-    Vec<(f32, f32)>,
-);
+/// Result data for layout detection box filtering and merging operations.
+///
+/// This struct holds the filtered/merged bounding boxes along with their
+/// associated metadata (class IDs, confidence scores, and reading order pairs).
+struct LayoutBoxData {
+    /// Filtered bounding boxes
+    boxes: Vec<crate::processors::BoundingBox>,
+    /// Class IDs corresponding to each box
+    classes: Vec<usize>,
+    /// Confidence scores for each detection
+    scores: Vec<f32>,
+    /// Reading order pairs (column, row) for PP-DocLayout models
+    order_pairs: Vec<(f32, f32)>,
+}
 
 /// Configuration for layout detection models.
 #[derive(Debug, Clone)]
@@ -746,11 +753,11 @@ impl LayoutDetectionAdapter {
                     orig_height,
                     image_id,
                 );
-                if let Some((new_boxes, new_classes, new_scores, new_orders)) = filtered {
-                    boxes = new_boxes;
-                    classes = new_classes;
-                    scores = new_scores;
-                    order_pairs = new_orders;
+                if let Some(filtered) = filtered {
+                    boxes = filtered.boxes;
+                    classes = filtered.classes;
+                    scores = filtered.scores;
+                    order_pairs = filtered.order_pairs;
                 }
             }
 
@@ -758,31 +765,31 @@ impl LayoutDetectionAdapter {
                 && !merge_modes.is_empty()
                 && !boxes.is_empty()
             {
-                let (new_boxes, new_classes, new_scores, new_orders) =
-                    Self::apply_paddlex_merge_modes(
-                        &boxes,
-                        &classes,
-                        &scores,
-                        &order_pairs,
-                        merge_modes,
-                        formula_class_id,
-                    );
-                boxes = new_boxes;
-                classes = new_classes;
-                scores = new_scores;
-                order_pairs = new_orders;
+                let merged = Self::apply_paddlex_merge_modes(
+                    &boxes,
+                    &classes,
+                    &scores,
+                    &order_pairs,
+                    merge_modes,
+                    formula_class_id,
+                );
+                boxes = merged.boxes;
+                classes = merged.classes;
+                scores = merged.scores;
+                order_pairs = merged.order_pairs;
             }
 
             if order_mode != PpDocLayoutOrderMode::None && !boxes.is_empty() {
                 let mut indices: Vec<usize> = (0..boxes.len()).collect();
                 match order_mode {
                     PpDocLayoutOrderMode::V2 => {
+                        // Sort by column ascending, then row ascending (top to bottom)
                         indices.sort_by(|&i, &j| {
                             let (col_i, row_i) = order_pairs[i];
                             let (col_j, row_j) = order_pairs[j];
                             col_i
                                 .total_cmp(&col_j)
-                                .then_with(|| row_j.total_cmp(&row_i))
+                                .then_with(|| row_i.total_cmp(&row_j))
                         });
                     }
                     PpDocLayoutOrderMode::V3 => {
@@ -964,7 +971,7 @@ impl LayoutDetectionAdapter {
         orig_width: f32,
         orig_height: f32,
         image_class_id: usize,
-    ) -> Option<LayoutBoxResult> {
+    ) -> Option<LayoutBoxData> {
         let area_thres = if orig_width > orig_height { 0.82 } else { 0.93 };
         let img_area = orig_width * orig_height;
 
@@ -989,12 +996,12 @@ impl LayoutDetectionAdapter {
             return None;
         }
 
-        Some((
-            Self::select_by_indices(boxes, &keep_indices),
-            Self::select_by_indices(classes, &keep_indices),
-            Self::select_by_indices(scores, &keep_indices),
-            Self::select_by_indices(order_pairs, &keep_indices),
-        ))
+        Some(LayoutBoxData {
+            boxes: Self::select_by_indices(boxes, &keep_indices),
+            classes: Self::select_by_indices(classes, &keep_indices),
+            scores: Self::select_by_indices(scores, &keep_indices),
+            order_pairs: Self::select_by_indices(order_pairs, &keep_indices),
+        })
     }
 
     fn apply_paddlex_merge_modes(
@@ -1004,7 +1011,7 @@ impl LayoutDetectionAdapter {
         order_pairs: &[(f32, f32)],
         merge_modes: &HashMap<usize, MergeBboxMode>,
         formula_class_id: Option<usize>,
-    ) -> LayoutBoxResult {
+    ) -> LayoutBoxData {
         let mut keep_mask = vec![true; boxes.len()];
 
         for (class_id, mode) in merge_modes {
@@ -1034,12 +1041,12 @@ impl LayoutDetectionAdapter {
             }
         }
 
-        (
-            Self::select_by_mask(boxes, &keep_mask),
-            Self::select_by_mask(classes, &keep_mask),
-            Self::select_by_mask(scores, &keep_mask),
-            Self::select_by_mask(order_pairs, &keep_mask),
-        )
+        LayoutBoxData {
+            boxes: Self::select_by_mask(boxes, &keep_mask),
+            classes: Self::select_by_mask(classes, &keep_mask),
+            scores: Self::select_by_mask(scores, &keep_mask),
+            order_pairs: Self::select_by_mask(order_pairs, &keep_mask),
+        }
     }
 
     fn check_containment(
