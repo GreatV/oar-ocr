@@ -2,33 +2,27 @@
 
 Vision-Language models for document understanding in Rust.
 
-This crate provides PaddleOCR-VL, UniRec, HunyuanOCR, and LightOnOCR implementations using [Candle](https://github.com/huggingface/candle) for native Rust inference.
+This crate provides native Rust inference for document VLMs using [Candle](https://github.com/huggingface/candle), along with a two-stage document parsing pipeline.
 
 ## Supported Models
 
-### PaddleOCR-VL
+| Model | Parameters | Description |
+|-------|------------|-------------|
+| [PaddleOCR-VL](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) | 0.9B | SOTA document parsing VLM supporting 109 languages, text, tables, formulas, and 11 chart types |
+| [PaddleOCR-VL-1.5](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5) | 0.9B | Next-gen PaddleOCR-VL with 94.5% on OmniDocBench v1.5, adds text spotting and seal recognition |
+| [UniRec](https://huggingface.co/topdu/unirec-0.1b) | 0.1B | Ultra-lightweight unified recognition for text, formulas, and tables (Chinese/English) |
+| [HunyuanOCR](https://huggingface.co/tencent/HunyuanOCR) | 1B | End-to-end OCR VLM for multilingual document parsing, text spotting, and information extraction |
+| [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) | 0.9B | #1 on OmniDocBench v1.5 (94.62), optimized for real-world scenarios with MTP loss and RL training |
+| [LightOnOCR-2](https://huggingface.co/lightonai/LightOnOCR-2-1B) | 1B | SOTA on OlmOCR-Bench, 9x smaller than competitors, processes 5.7 pages/s on H100 |
 
-[PaddleOCR-VL](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) is an ultra-compact (0.9B parameters) Vision-Language Model for document parsing, released by Baidu's PaddlePaddle team. It supports **109 languages** and excels in recognizing complex elements including text, tables, formulas, and 11 chart types.
+## Document Parsing Pipeline
 
-### PaddleOCR-VL-1.5
+**DocParser** is a two-stage document parsing API that combines:
 
-[PaddleOCR-VL-1.5](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5) is the next-generation 0.9B PaddleOCR-VL model with improved accuracy and support for **text spotting** and **seal recognition**. It is a drop-in replacement for PaddleOCR-VL when using `PaddleOcrVl::from_dir`, and adds `PaddleOcrVlTask::Spotting` and `PaddleOcrVlTask::Seal`.
+1. **Layout detection** (ONNX models like PP-DocLayoutV3) to identify document regions
+2. **VL-based recognition** (any supported model above) to extract content from each region
 
-### UniRec
-
-[UniRec](https://github.com/Topdu/OpenOCR) is a unified recognition model with only **0.1B parameters**, developed by the FVL Laboratory at Fudan University. It is designed for high-accuracy and efficient recognition of plain text, mathematical formulas, and mixed content in both Chinese and English.
-
-### HunyuanOCR
-
-[HunyuanOCR](https://huggingface.co/tencent/HunyuanOCR) is a 1B parameter OCR expert VLM powered by Hunyuan's multimodal architecture. This crate provides native Rust inference for the `model_type=hunyuan_vl` checkpoint.
-
-### LightOnOCR
-
-[LightOnOCR-2](https://huggingface.co/lightonai/LightOnOCR-2-1B) is an efficient end-to-end OCR VLM for extracting clean text from document images without an external pipeline.
-
-### DocParser
-
-Two-stage document parsing API that combines layout detection (ONNX) with VL-based recognition, supporting UniRec, PaddleOCR-VL, HunyuanOCR, and LightOnOCR backends.
+This approach provides structured output with reading order preservation.
 
 ## Installation
 
@@ -160,28 +154,28 @@ Run the PaddleOCR-VL model directly on an image with a specific task prompt.
 ```bash
 # OCR task
 cargo run --release --features cuda --example paddleocr_vl -- \
-    --model-dir PaddleOCR-VL \
+    --model-dir models/PaddleOCR-VL \
     --device cuda \
     --task ocr \
     document.jpg
 
 # Table task
 cargo run --release --features cuda --example paddleocr_vl -- \
-    --model-dir PaddleOCR-VL \
+    --model-dir models/PaddleOCR-VL \
     --device cuda \
     --task table \
     table.jpg
 
 # Text spotting (PaddleOCR-VL-1.5)
 cargo run --release --features cuda --example paddleocr_vl -- \
-    --model-dir PaddleOCR-VL-1.5 \
+    --model-dir models/PaddleOCR-VL-1.5 \
     --device cuda \
     --task spotting \
     spotting.jpg
 
 # Seal recognition (PaddleOCR-VL-1.5)
 cargo run --release --features cuda --example paddleocr_vl -- \
-    --model-dir PaddleOCR-VL-1.5 \
+    --model-dir models/PaddleOCR-VL-1.5 \
     --device cuda \
     --task seal \
     seal.jpg
@@ -191,8 +185,18 @@ cargo run --release --features cuda --example paddleocr_vl -- \
 
 ```bash
 cargo run --release --features cuda --example hunyuanocr -- \
-    --model-dir ~/repos/HunyuanOCR \
+    --model-dir models/HunyuanOCR \
     --device cuda \
     --prompt "Detect and recognize text in the image, and output the text coordinates in a formatted manner." \
+    document.jpg
+```
+
+### GLM-OCR (Direct Inference)
+
+```bash
+cargo run --release --features cuda --example glmocr -- \
+    --model-dir models/GLM-OCR \
+    --device cuda \
+    --prompt "Text Recognition:" \
     document.jpg
 ```

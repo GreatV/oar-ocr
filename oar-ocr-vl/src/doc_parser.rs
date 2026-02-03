@@ -10,6 +10,7 @@
 //! - `UniRec` - Lightweight unified recognition
 //! - `PaddleOcrVl` - Larger VLM with task-specific prompts
 //! - `HunyuanOcr` - OCR expert VLM (HunYuanVL)
+//! - `GlmOcr` - GLM-OCR OCR expert VLM
 //! - `LightOnOcr` - End-to-end OCR VLM
 
 use super::utils::{
@@ -464,6 +465,7 @@ impl RecognitionBackend for UniRec {
     }
 }
 
+use super::glmocr::GlmOcr;
 use super::hunyuanocr::HunyuanOcr;
 use super::lightonocr::LightOnOcr;
 use super::paddleocr_vl::{PaddleOcrVl, PaddleOcrVlTask};
@@ -531,6 +533,46 @@ impl RecognitionBackend for HunyuanOcr {
             .unwrap_or_else(|| {
                 Err(OCRError::InvalidInput {
                     message: "HunyuanOCR: no result returned".to_string(),
+                })
+            })?;
+        Ok(truncate_repetitive_content(&out, 10, 10, 10)
+            .trim()
+            .to_string())
+    }
+
+    fn needs_table_postprocess(&self) -> bool {
+        false
+    }
+
+    fn needs_formula_preprocess(&self) -> bool {
+        false
+    }
+
+    fn needs_repetition_truncation(&self) -> bool {
+        false // handled inside `recognize()`
+    }
+}
+
+impl RecognitionBackend for GlmOcr {
+    fn recognize(
+        &self,
+        image: RgbImage,
+        task: RecognitionTask,
+        max_tokens: usize,
+    ) -> Result<String, OCRError> {
+        let prompt = match task {
+            RecognitionTask::Ocr => "Text Recognition:",
+            RecognitionTask::Table => "Table Recognition:",
+            RecognitionTask::Formula => "Formula Recognition:",
+            RecognitionTask::Chart => "Text Recognition:",
+        };
+        let out = self
+            .generate(&[image], &[prompt], max_tokens)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| {
+                Err(OCRError::InvalidInput {
+                    message: "GLM-OCR: no result returned".to_string(),
                 })
             })?;
         Ok(truncate_repetitive_content(&out, 10, 10, 10)
