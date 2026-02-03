@@ -695,10 +695,10 @@ impl LayoutDetectionAdapter {
                     continue;
                 }
 
-                let threshold = match class_thresholds.as_ref() {
-                    Some(map) => map.get(&(class_id as usize)).copied().unwrap_or(0.5),
-                    None => config.score_threshold.max(0.0),
-                };
+                let threshold = class_thresholds
+                    .as_ref()
+                    .and_then(|map| map.get(&(class_id as usize)).copied())
+                    .unwrap_or(config.score_threshold.max(0.0));
 
                 if score < threshold {
                     continue;

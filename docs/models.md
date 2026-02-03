@@ -116,7 +116,8 @@ Models for document structure analysis with `OARStructureBuilder`:
 | PP-DocLayout-M | [`pp-doclayout-m.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-doclayout-m.onnx) | 22.4MB | Medium variant |
 | PP-DocLayout-L | [`pp-doclayout-l.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-doclayout-l.onnx) | 123.4MB | Large variant |
 | PP-DocLayout_plus-L | [`pp-doclayout_plus-l.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-doclayout_plus-l.onnx) | 123.7MB | Enhanced large variant |
-| PP-DocLayoutV2 | [`pp-doclayoutv2.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-doclayoutv2.onnx) | 204.0MB | Latest version |
+| PP-DocLayoutV2 | [`pp-doclayoutv2.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-doclayoutv2.onnx) | 204.0MB | V2 with reading order (col, row) |
+| PP-DocLayoutV3 | [`pp-doclayoutv3.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.6.0/pp-doclayoutv3.onnx) | 124.0MB | V3 with single order key |
 | PP-DocBlockLayout | [`pp-docblocklayout.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-docblocklayout.onnx) | 123.4MB | Hierarchical ordering |
 | RT-DETR-H 17cls | [`rt-detr-h_layout_17cls.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/rt-detr-h_layout_17cls.onnx) | 469.2MB | High accuracy 17-class |
 | RT-DETR-H 3cls | [`rt-detr-h_layout_3cls.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/rt-detr-h_layout_3cls.onnx) | 469.2MB | High accuracy 3-class |
