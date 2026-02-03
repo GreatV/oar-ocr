@@ -13,9 +13,11 @@ use crate::core::validation::{
     validate_same_length,
 };
 use crate::core::{OCRError, Tensor4D};
+use crate::processors::types::ColorOrder;
 use crate::processors::{
     DetResizeForTest, ImageScaleInfo, LimitType, NormalizeImage, TensorLayout,
 };
+use image::imageops::FilterType;
 use image::{DynamicImage, RgbImage};
 
 /// Specifies which auxiliary inputs the model requires for inference.
@@ -42,6 +44,10 @@ pub struct ScaleAwareDetectorPreprocessConfig {
     pub mean: Vec<f32>,
     /// Normalization std values (RGB)
     pub std: Vec<f32>,
+    /// Interpolation filter for resizing
+    pub resize_filter: FilterType,
+    /// Expected output color order for the model
+    pub color_order: ColorOrder,
 }
 
 impl ScaleAwareDetectorPreprocessConfig {
@@ -54,6 +60,8 @@ impl ScaleAwareDetectorPreprocessConfig {
             scale: 1.0 / 255.0,
             mean: vec![0.485, 0.456, 0.406],
             std: vec![0.229, 0.224, 0.225],
+            resize_filter: FilterType::Lanczos3,
+            color_order: ColorOrder::BGR,
         }
     }
 
@@ -66,6 +74,8 @@ impl ScaleAwareDetectorPreprocessConfig {
             scale: 1.0 / 255.0,
             mean: vec![0.0, 0.0, 0.0],
             std: vec![1.0, 1.0, 1.0],
+            resize_filter: FilterType::CatmullRom,
+            color_order: ColorOrder::RGB,
         }
     }
 
@@ -155,16 +165,16 @@ impl ScaleAwareDetectorModel {
             Some(LimitType::Max),
             None,
             None,
-        );
+        )
+        .with_filter(preprocess_config.resize_filter);
 
-        // Create normalizer.
-        // Paddle models expect BGR input; reorder ImageNet stats and swap channels.
+        // Create normalizer using the configured output color order.
         let normalizer = NormalizeImage::with_color_order_from_rgb_stats(
             Some(preprocess_config.scale),
             preprocess_config.mean.clone(),
             preprocess_config.std.clone(),
             Some(TensorLayout::CHW),
-            crate::processors::types::ColorOrder::BGR,
+            preprocess_config.color_order,
         )?;
 
         Ok(Self {

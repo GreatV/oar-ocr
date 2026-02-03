@@ -123,6 +123,8 @@ impl LayoutDetectionPredictorBuilder {
         "pp_doclayout_plus_l",
         "pp_doclayoutv2",
         "pp_doclayout_v2",
+        "pp_doclayoutv3",
+        "pp_doclayout_v3",
     ];
 
     fn get_model_config(model_name: &str) -> OcrResult<crate::domain::adapters::LayoutModelConfig> {
@@ -148,6 +150,7 @@ impl LayoutDetectionPredictorBuilder {
             "pp_doclayout_l" => LayoutModelConfig::pp_doclayout_l(),
             "pp_doclayout_plus_l" => LayoutModelConfig::pp_doclayout_plus_l(),
             "pp_doclayoutv2" | "pp_doclayout_v2" => LayoutModelConfig::pp_doclayoutv2(),
+            "pp_doclayoutv3" | "pp_doclayout_v3" => LayoutModelConfig::pp_doclayoutv3(),
             _ => {
                 return Err(OCRError::ConfigError {
                     message: format!(

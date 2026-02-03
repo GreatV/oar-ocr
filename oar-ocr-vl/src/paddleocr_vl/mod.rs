@@ -5,6 +5,8 @@
 //! - Table recognition (outputs HTML)
 //! - Formula recognition (outputs LaTeX)
 //! - Chart recognition
+//! - Text spotting
+//! - Seal recognition
 
 mod config;
 mod ernie;

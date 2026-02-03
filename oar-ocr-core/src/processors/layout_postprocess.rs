@@ -213,8 +213,9 @@ impl LayoutPostProcess {
 
     /// Process PP-DocLayout model output.
     ///
-    /// Handles both 6-dim format (PP-DocLayout) and 8-dim format (PP-DocLayoutV2).
+    /// Handles 6-dim format (PP-DocLayout), 7-dim format (PP-DocLayoutV3), and 8-dim format (PP-DocLayoutV2).
     /// - 6-dim: [class_id, score, x1, y1, x2, y2]
+    /// - 7-dim: [class_id, score, x1, y1, x2, y2, extra]
     /// - 8-dim: [class_id, score, x1, y1, x2, y2, col_index, row_index]
     ///
     /// For 8-dim format, boxes are sorted by reading order (col_index ascending, row_index ascending)

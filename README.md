@@ -84,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Vision-Language Models (VLM)
 
-For advanced document understanding using Vision-Language Models (like PaddleOCR-VL and UniRec), check out the [`oar-ocr-vl`](oar-ocr-vl/README.md) crate.
+For advanced document understanding using Vision-Language Models (like PaddleOCR-VL, **PaddleOCR-VL-1.5**, and UniRec), check out the [`oar-ocr-vl`](oar-ocr-vl/README.md) crate.
 
 ## Documentation
 

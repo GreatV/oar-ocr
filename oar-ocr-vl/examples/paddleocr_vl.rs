@@ -12,7 +12,7 @@
 //! # Arguments
 //!
 //! * `-m, --model-dir` - Path to the PaddleOCR-VL model directory
-//! * `-t, --task` - Recognition task: ocr, table, formula, chart (default: ocr)
+//! * `-t, --task` - Recognition task: ocr, table, formula, chart, spotting, seal (default: ocr)
 //! * `-d, --device` - Device to run on: cpu, cuda, or cuda:N (default: cpu)
 //! * `--max-tokens` - Maximum number of tokens to generate (default: 512)
 //! * `<IMAGES>...` - Paths to input images to process
@@ -35,6 +35,14 @@
 //! # Chart recognition
 //! cargo run -p oar-ocr-vl --example paddleocr_vl -- \
 //!     -m PaddleOCR-VL --task chart chart.jpg
+//!
+//! # Text spotting (PaddleOCR-VL-1.5)
+//! cargo run -p oar-ocr-vl --example paddleocr_vl -- \
+//!     -m PaddleOCR-VL-1.5 --task spotting spotting.jpg
+//!
+//! # Seal recognition (PaddleOCR-VL-1.5)
+//! cargo run -p oar-ocr-vl --example paddleocr_vl -- \
+//!     -m PaddleOCR-VL-1.5 --task seal seal.jpg
 //!
 //! # Run on CUDA GPU
 //! cargo run -p oar-ocr-vl --features cuda --example paddleocr_vl -- \
@@ -66,7 +74,7 @@ struct Args {
     #[arg(required = true)]
     images: Vec<PathBuf>,
 
-    /// Recognition task: ocr, table, formula, chart
+    /// Recognition task: ocr, table, formula, chart, spotting, seal
     #[arg(short, long, default_value = "ocr")]
     task: String,
 
@@ -85,8 +93,10 @@ fn parse_task(task_str: &str) -> Result<PaddleOcrVlTask, Box<dyn std::error::Err
         "table" => Ok(PaddleOcrVlTask::Table),
         "formula" => Ok(PaddleOcrVlTask::Formula),
         "chart" => Ok(PaddleOcrVlTask::Chart),
+        "spotting" => Ok(PaddleOcrVlTask::Spotting),
+        "seal" => Ok(PaddleOcrVlTask::Seal),
         _ => Err(format!(
-            "Unknown task: {}. Use 'ocr', 'table', 'formula', or 'chart'",
+            "Unknown task: {}. Use 'ocr', 'table', 'formula', 'chart', 'spotting', or 'seal'",
             task_str
         )
         .into()),

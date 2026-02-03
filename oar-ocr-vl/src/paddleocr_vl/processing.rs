@@ -28,6 +28,16 @@ pub fn preprocess_images(
     device: &Device,
     dtype: DType,
 ) -> Result<PaddleOcrVlImageInputs, OCRError> {
+    preprocess_images_with_max_pixels(images, cfg, device, dtype, cfg.max_pixels)
+}
+
+pub(crate) fn preprocess_images_with_max_pixels(
+    images: &[RgbImage],
+    cfg: &PaddleOcrVlImageProcessorConfig,
+    device: &Device,
+    dtype: DType,
+    max_pixels: u32,
+) -> Result<PaddleOcrVlImageInputs, OCRError> {
     cfg.validate()?;
     if images.is_empty() {
         return Err(OCRError::InvalidInput {
@@ -48,7 +58,7 @@ pub fn preprocess_images(
     for img in images {
         let (h, w) = (img.height(), img.width());
         let (rh, rw) = if cfg.do_resize {
-            smart_resize(h, w, factor, cfg.min_pixels, cfg.max_pixels)?
+            smart_resize(h, w, factor, cfg.min_pixels, max_pixels)?
         } else {
             (h, w)
         };

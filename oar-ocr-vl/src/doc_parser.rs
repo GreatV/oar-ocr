@@ -1,7 +1,7 @@
 //! Unified document parser using layout-first approach.
 //!
 //! This module provides a generic document parsing pipeline that:
-//! 1. Detects layout elements with PP-DocLayoutV2
+//! 1. Detects layout elements with PP-DocLayout (v2/v3)
 //! 2. Filters and sorts elements by reading order
 //! 3. Crops regions and recognizes each with a pluggable backend
 //! 4. Returns structured document results
@@ -182,7 +182,7 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
             .unwrap_or_default();
 
         // OpenOCR applies an additional overlap filter (overlap_ratio > 0.7, mode=small)
-        // after PP-DocLayoutV2 to remove redundant boxes.
+        // after PP-DocLayout (v2/v3) to remove redundant boxes.
         let detected: Vec<DetectedBox> = detected
             .into_iter()
             .map(|e| DetectedBox {

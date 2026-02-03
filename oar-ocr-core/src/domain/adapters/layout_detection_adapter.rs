@@ -10,7 +10,7 @@ use crate::core::traits::{
 use crate::core::{OCRError, TaskType, Tensor4D};
 use crate::domain::tasks::{
     LayoutDetectionConfig, LayoutDetectionElement, LayoutDetectionOutput, LayoutDetectionTask,
-    UnclipRatio,
+    MergeBboxMode, UnclipRatio,
 };
 use crate::models::detection::{
     PPDocLayoutModel, PPDocLayoutModelBuilder, PPDocLayoutPostprocessConfig, PicoDetModel,
@@ -18,8 +18,17 @@ use crate::models::detection::{
     RTDetrPostprocessConfig,
 };
 use crate::processors::{ImageScaleInfo, LayoutPostProcess, apply_nms_with_merge, unclip_boxes};
+use ndarray::Axis;
 use std::collections::HashMap;
 use std::path::Path;
+
+/// Result type for layout detection box filtering and merging operations.
+type LayoutBoxResult = (
+    Vec<crate::processors::BoundingBox>,
+    Vec<usize>,
+    Vec<f32>,
+    Vec<(f32, f32)>,
+);
 
 /// Configuration for layout detection models.
 #[derive(Debug, Clone)]
@@ -401,6 +410,44 @@ impl LayoutModelConfig {
             input_size: Some((800, 800)),
         }
     }
+
+    /// Create configuration for PP-DocLayoutV3 model (25 classes).
+    pub fn pp_doclayoutv3() -> Self {
+        let mut class_labels = HashMap::new();
+        class_labels.insert(0, "abstract".to_string());
+        class_labels.insert(1, "algorithm".to_string());
+        class_labels.insert(2, "aside_text".to_string());
+        class_labels.insert(3, "chart".to_string());
+        class_labels.insert(4, "content".to_string());
+        class_labels.insert(5, "display_formula".to_string());
+        class_labels.insert(6, "doc_title".to_string());
+        class_labels.insert(7, "figure_title".to_string());
+        class_labels.insert(8, "footer".to_string());
+        class_labels.insert(9, "footer_image".to_string());
+        class_labels.insert(10, "footnote".to_string());
+        class_labels.insert(11, "formula_number".to_string());
+        class_labels.insert(12, "header".to_string());
+        class_labels.insert(13, "header_image".to_string());
+        class_labels.insert(14, "image".to_string());
+        class_labels.insert(15, "inline_formula".to_string());
+        class_labels.insert(16, "number".to_string());
+        class_labels.insert(17, "paragraph_title".to_string());
+        class_labels.insert(18, "reference".to_string());
+        class_labels.insert(19, "reference_content".to_string());
+        class_labels.insert(20, "seal".to_string());
+        class_labels.insert(21, "table".to_string());
+        class_labels.insert(22, "text".to_string());
+        class_labels.insert(23, "vertical_text".to_string());
+        class_labels.insert(24, "vision_footnote".to_string());
+
+        Self {
+            model_name: "pp-doclayoutv3".to_string(),
+            num_classes: 25,
+            class_labels,
+            model_type: "pp-doclayout".to_string(),
+            input_size: Some((800, 800)),
+        }
+    }
 }
 
 /// Enum for different layout detection model types.
@@ -409,6 +456,13 @@ enum LayoutModel {
     PicoDet(PicoDetModel),
     RTDetr(RTDetrModel),
     PPDocLayout(PPDocLayoutModel),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PpDocLayoutOrderMode {
+    None,
+    V2,
+    V3,
 }
 
 /// Generic layout detection adapter.
@@ -483,6 +537,10 @@ impl LayoutDetectionAdapter {
         img_shapes: Vec<ImageScaleInfo>,
         config: &LayoutDetectionConfig,
     ) -> LayoutDetectionOutput {
+        if self.model_config.model_type == "pp-doclayout" {
+            return self.postprocess_pp_doclayout(predictions, img_shapes, config);
+        }
+
         let (boxes, class_ids, scores) = self.postprocessor.apply(predictions, img_shapes);
 
         let mut elements = Vec::with_capacity(boxes.len());
@@ -562,6 +620,505 @@ impl LayoutDetectionAdapter {
             elements,
             is_reading_order_sorted: false, // Will be set by execute() based on model output
         }
+    }
+
+    fn postprocess_pp_doclayout(
+        &self,
+        predictions: &Tensor4D,
+        img_shapes: Vec<ImageScaleInfo>,
+        config: &LayoutDetectionConfig,
+    ) -> LayoutDetectionOutput {
+        let feature_dim = predictions.shape().get(3).copied().unwrap_or(0);
+        let order_mode = match feature_dim {
+            8 => PpDocLayoutOrderMode::V2,
+            7 => PpDocLayoutOrderMode::V3,
+            _ => PpDocLayoutOrderMode::None,
+        };
+
+        let class_thresholds = config.class_thresholds.as_ref().map(|thresholds| {
+            let mut by_class = HashMap::new();
+            for (class_id, label) in &self.model_config.class_labels {
+                if let Some(threshold) = thresholds.get(label) {
+                    by_class.insert(*class_id, *threshold);
+                }
+            }
+            by_class
+        });
+
+        let class_merge_modes = config.class_merge_modes.as_ref().map(|merge_modes| {
+            let mut by_class = HashMap::new();
+            for (class_id, label) in &self.model_config.class_labels {
+                if let Some(mode) = merge_modes.get(label) {
+                    by_class.insert(*class_id, *mode);
+                }
+            }
+            by_class
+        });
+
+        let image_class_id = self
+            .model_config
+            .class_labels
+            .iter()
+            .find_map(|(id, label)| (label == "image").then_some(*id));
+        let formula_class_id = self
+            .model_config
+            .class_labels
+            .iter()
+            .find_map(|(id, label)| (label == "formula").then_some(*id));
+
+        let mut elements = Vec::with_capacity(predictions.shape()[0]);
+
+        for (img_idx, img_shape) in img_shapes.iter().enumerate() {
+            let pred = predictions.index_axis(Axis(0), img_idx);
+            let num_boxes = pred.shape()[0];
+
+            let orig_width = img_shape.src_w;
+            let orig_height = img_shape.src_h;
+
+            let mut boxes = Vec::new();
+            let mut classes = Vec::new();
+            let mut scores = Vec::new();
+            let mut order_pairs: Vec<(f32, f32)> = Vec::new();
+
+            for box_idx in 0..num_boxes {
+                let class_id = pred[[box_idx, 0, 0]] as i32;
+                let score = pred[[box_idx, 0, 1]];
+
+                if class_id < 0 || (class_id as usize) >= self.model_config.num_classes {
+                    continue;
+                }
+
+                let threshold = match class_thresholds.as_ref() {
+                    Some(map) => map.get(&(class_id as usize)).copied().unwrap_or(0.5),
+                    None => config.score_threshold.max(0.0),
+                };
+
+                if score < threshold {
+                    continue;
+                }
+
+                let x1 = pred[[box_idx, 0, 2]];
+                let y1 = pred[[box_idx, 0, 3]];
+                let x2 = pred[[box_idx, 0, 4]];
+                let y2 = pred[[box_idx, 0, 5]];
+
+                let (sx1, sy1, sx2, sy2) =
+                    Self::convert_bbox_coords(x1, y1, x2, y2, orig_width, orig_height);
+
+                if !Self::is_valid_box(sx1, sy1, sx2, sy2) {
+                    continue;
+                }
+
+                let bbox = crate::processors::BoundingBox::from_coords(sx1, sy1, sx2, sy2);
+                boxes.push(bbox);
+                classes.push(class_id as usize);
+                scores.push(score);
+
+                let order_pair = match order_mode {
+                    PpDocLayoutOrderMode::V2 => (pred[[box_idx, 0, 6]], pred[[box_idx, 0, 7]]),
+                    PpDocLayoutOrderMode::V3 => (pred[[box_idx, 0, 6]], 0.0),
+                    PpDocLayoutOrderMode::None => (0.0, 0.0),
+                };
+                order_pairs.push(order_pair);
+            }
+
+            if !boxes.is_empty() {
+                Self::round_boxes(&mut boxes);
+            }
+
+            if config.layout_nms && !boxes.is_empty() {
+                let keep = Self::paddlex_layout_nms(&boxes, &classes, &scores);
+                boxes = Self::select_by_indices(&boxes, &keep);
+                classes = Self::select_by_indices(&classes, &keep);
+                scores = Self::select_by_indices(&scores, &keep);
+                order_pairs = Self::select_by_indices(&order_pairs, &keep);
+            }
+
+            if let Some(image_id) = image_class_id
+                && boxes.len() > 1
+            {
+                let filtered = Self::filter_large_image_boxes(
+                    &boxes,
+                    &classes,
+                    &scores,
+                    &order_pairs,
+                    orig_width,
+                    orig_height,
+                    image_id,
+                );
+                if let Some((new_boxes, new_classes, new_scores, new_orders)) = filtered {
+                    boxes = new_boxes;
+                    classes = new_classes;
+                    scores = new_scores;
+                    order_pairs = new_orders;
+                }
+            }
+
+            if let Some(ref merge_modes) = class_merge_modes
+                && !merge_modes.is_empty()
+                && !boxes.is_empty()
+            {
+                let (new_boxes, new_classes, new_scores, new_orders) =
+                    Self::apply_paddlex_merge_modes(
+                        &boxes,
+                        &classes,
+                        &scores,
+                        &order_pairs,
+                        merge_modes,
+                        formula_class_id,
+                    );
+                boxes = new_boxes;
+                classes = new_classes;
+                scores = new_scores;
+                order_pairs = new_orders;
+            }
+
+            if order_mode != PpDocLayoutOrderMode::None && !boxes.is_empty() {
+                let mut indices: Vec<usize> = (0..boxes.len()).collect();
+                match order_mode {
+                    PpDocLayoutOrderMode::V2 => {
+                        indices.sort_by(|&i, &j| {
+                            let (col_i, row_i) = order_pairs[i];
+                            let (col_j, row_j) = order_pairs[j];
+                            col_i
+                                .total_cmp(&col_j)
+                                .then_with(|| row_j.total_cmp(&row_i))
+                        });
+                    }
+                    PpDocLayoutOrderMode::V3 => {
+                        indices.sort_by(|&i, &j| order_pairs[i].0.total_cmp(&order_pairs[j].0));
+                    }
+                    PpDocLayoutOrderMode::None => {}
+                }
+
+                boxes = Self::select_by_indices(&boxes, &indices);
+                classes = Self::select_by_indices(&classes, &indices);
+                scores = Self::select_by_indices(&scores, &indices);
+                order_pairs = Self::select_by_indices(&order_pairs, &indices);
+            }
+
+            if let Some(ref unclip_ratio) = config.layout_unclip_ratio {
+                let (width_ratio, height_ratio, per_class_ratios) = match unclip_ratio {
+                    UnclipRatio::Uniform(r) => (*r, *r, None),
+                    UnclipRatio::Separate(w, h) => (*w, *h, None),
+                    UnclipRatio::PerClass(ratios) => (1.0, 1.0, Some(ratios)),
+                };
+                boxes = unclip_boxes(
+                    &boxes,
+                    &classes,
+                    width_ratio,
+                    height_ratio,
+                    per_class_ratios,
+                );
+            }
+
+            let mut img_elements = Vec::new();
+            for ((bbox, &class_id), &score) in boxes.iter().zip(classes.iter()).zip(scores.iter()) {
+                let element_type = self
+                    .model_config
+                    .class_labels
+                    .get(&class_id)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                img_elements.push(LayoutDetectionElement {
+                    bbox: bbox.clone(),
+                    element_type,
+                    score,
+                });
+
+                if img_elements.len() >= config.max_elements {
+                    break;
+                }
+            }
+
+            elements.push(img_elements);
+        }
+
+        LayoutDetectionOutput {
+            elements,
+            is_reading_order_sorted: false,
+        }
+    }
+
+    fn convert_bbox_coords(
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        orig_width: f32,
+        orig_height: f32,
+    ) -> (f32, f32, f32, f32) {
+        let normalized = x2 <= 1.05
+            && y2 <= 1.05
+            && x1 >= -0.05
+            && y1 >= -0.05
+            && orig_width > 0.0
+            && orig_height > 0.0;
+
+        if normalized {
+            (
+                x1.clamp(0.0, 1.0) * orig_width,
+                y1.clamp(0.0, 1.0) * orig_height,
+                x2.clamp(0.0, 1.0) * orig_width,
+                y2.clamp(0.0, 1.0) * orig_height,
+            )
+        } else {
+            (
+                x1.clamp(0.0, orig_width),
+                y1.clamp(0.0, orig_height),
+                x2.clamp(0.0, orig_width),
+                y2.clamp(0.0, orig_height),
+            )
+        }
+    }
+
+    fn is_valid_box(x1: f32, y1: f32, x2: f32, y2: f32) -> bool {
+        x2 > x1 && y2 > y1 && x1.is_finite() && y1.is_finite() && x2.is_finite() && y2.is_finite()
+    }
+
+    fn round_boxes(boxes: &mut [crate::processors::BoundingBox]) {
+        fn round_half_even(value: f32) -> f32 {
+            let base = value.floor();
+            let frac = value - base;
+            if frac < 0.5 {
+                base
+            } else if frac > 0.5 {
+                base + 1.0
+            } else if (base as i64) % 2 == 0 {
+                base
+            } else {
+                base + 1.0
+            }
+        }
+
+        for bbox in boxes.iter_mut() {
+            *bbox = crate::processors::BoundingBox::from_coords(
+                round_half_even(bbox.x_min()),
+                round_half_even(bbox.y_min()),
+                round_half_even(bbox.x_max()),
+                round_half_even(bbox.y_max()),
+            );
+        }
+    }
+
+    fn paddlex_layout_nms(
+        boxes: &[crate::processors::BoundingBox],
+        classes: &[usize],
+        scores: &[f32],
+    ) -> Vec<usize> {
+        let mut indices: Vec<usize> = (0..boxes.len()).collect();
+        indices.sort_by(|&a, &b| {
+            scores[b]
+                .partial_cmp(&scores[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut selected = Vec::new();
+        while !indices.is_empty() {
+            let current = indices[0];
+            let current_class = classes[current];
+            let current_box = &boxes[current];
+            selected.push(current);
+
+            let mut filtered = Vec::new();
+            for &idx in indices.iter().skip(1) {
+                let threshold = if classes[idx] == current_class {
+                    0.6
+                } else {
+                    0.98
+                };
+                let iou = Self::paddlex_iou(current_box, &boxes[idx]);
+                if iou < threshold {
+                    filtered.push(idx);
+                }
+            }
+            indices = filtered;
+        }
+        selected
+    }
+
+    fn paddlex_iou(
+        box1: &crate::processors::BoundingBox,
+        box2: &crate::processors::BoundingBox,
+    ) -> f32 {
+        let (x1, y1, x2, y2) = (box1.x_min(), box1.y_min(), box1.x_max(), box1.y_max());
+        let (x1p, y1p, x2p, y2p) = (box2.x_min(), box2.y_min(), box2.x_max(), box2.y_max());
+
+        let inter_w = (x2.min(x2p) - x1.max(x1p) + 1.0).max(0.0);
+        let inter_h = (y2.min(y2p) - y1.max(y1p) + 1.0).max(0.0);
+        let inter_area = inter_w * inter_h;
+
+        let area1 = (x2 - x1 + 1.0) * (y2 - y1 + 1.0);
+        let area2 = (x2p - x1p + 1.0) * (y2p - y1p + 1.0);
+        let union = area1 + area2 - inter_area;
+
+        if union > 0.0 { inter_area / union } else { 0.0 }
+    }
+
+    fn filter_large_image_boxes(
+        boxes: &[crate::processors::BoundingBox],
+        classes: &[usize],
+        scores: &[f32],
+        order_pairs: &[(f32, f32)],
+        orig_width: f32,
+        orig_height: f32,
+        image_class_id: usize,
+    ) -> Option<LayoutBoxResult> {
+        let area_thres = if orig_width > orig_height { 0.82 } else { 0.93 };
+        let img_area = orig_width * orig_height;
+
+        let mut keep_indices = Vec::new();
+        for (idx, bbox) in boxes.iter().enumerate() {
+            if classes[idx] != image_class_id {
+                keep_indices.push(idx);
+                continue;
+            }
+
+            let xmin = bbox.x_min().max(0.0);
+            let ymin = bbox.y_min().max(0.0);
+            let xmax = bbox.x_max().min(orig_width);
+            let ymax = bbox.y_max().min(orig_height);
+            let area = (xmax - xmin) * (ymax - ymin);
+            if area <= area_thres * img_area {
+                keep_indices.push(idx);
+            }
+        }
+
+        if keep_indices.is_empty() {
+            return None;
+        }
+
+        Some((
+            Self::select_by_indices(boxes, &keep_indices),
+            Self::select_by_indices(classes, &keep_indices),
+            Self::select_by_indices(scores, &keep_indices),
+            Self::select_by_indices(order_pairs, &keep_indices),
+        ))
+    }
+
+    fn apply_paddlex_merge_modes(
+        boxes: &[crate::processors::BoundingBox],
+        classes: &[usize],
+        scores: &[f32],
+        order_pairs: &[(f32, f32)],
+        merge_modes: &HashMap<usize, MergeBboxMode>,
+        formula_class_id: Option<usize>,
+    ) -> LayoutBoxResult {
+        let mut keep_mask = vec![true; boxes.len()];
+
+        for (class_id, mode) in merge_modes {
+            if matches!(mode, MergeBboxMode::Union) {
+                continue;
+            }
+
+            let (contains_other, contained_by_other) =
+                Self::check_containment(boxes, classes, formula_class_id, *class_id, *mode);
+
+            match mode {
+                MergeBboxMode::Large => {
+                    for (idx, flag) in contained_by_other.iter().enumerate() {
+                        if *flag == 1 {
+                            keep_mask[idx] = false;
+                        }
+                    }
+                }
+                MergeBboxMode::Small => {
+                    for idx in 0..keep_mask.len() {
+                        if !(contains_other[idx] == 0 || contained_by_other[idx] == 1) {
+                            keep_mask[idx] = false;
+                        }
+                    }
+                }
+                MergeBboxMode::Union => {}
+            }
+        }
+
+        (
+            Self::select_by_mask(boxes, &keep_mask),
+            Self::select_by_mask(classes, &keep_mask),
+            Self::select_by_mask(scores, &keep_mask),
+            Self::select_by_mask(order_pairs, &keep_mask),
+        )
+    }
+
+    fn check_containment(
+        boxes: &[crate::processors::BoundingBox],
+        classes: &[usize],
+        formula_class_id: Option<usize>,
+        target_class_id: usize,
+        mode: MergeBboxMode,
+    ) -> (Vec<i32>, Vec<i32>) {
+        let n = boxes.len();
+        let mut contains_other = vec![0; n];
+        let mut contained_by_other = vec![0; n];
+
+        for i in 0..n {
+            for j in 0..n {
+                if i == j {
+                    continue;
+                }
+                if let Some(formula_id) = formula_class_id
+                    && classes[i] == formula_id
+                    && classes[j] != formula_id
+                {
+                    continue;
+                }
+
+                match mode {
+                    MergeBboxMode::Large if classes[j] == target_class_id => {
+                        if Self::is_contained(&boxes[i], &boxes[j]) {
+                            contained_by_other[i] = 1;
+                            contains_other[j] = 1;
+                        }
+                    }
+                    MergeBboxMode::Small if classes[i] == target_class_id => {
+                        if Self::is_contained(&boxes[i], &boxes[j]) {
+                            contained_by_other[i] = 1;
+                            contains_other[j] = 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        (contains_other, contained_by_other)
+    }
+
+    fn is_contained(
+        inner: &crate::processors::BoundingBox,
+        outer: &crate::processors::BoundingBox,
+    ) -> bool {
+        let (x1, y1, x2, y2) = (inner.x_min(), inner.y_min(), inner.x_max(), inner.y_max());
+        let (x1p, y1p, x2p, y2p) = (outer.x_min(), outer.y_min(), outer.x_max(), outer.y_max());
+
+        let box_area = (x2 - x1) * (y2 - y1);
+        if box_area <= 0.0 {
+            return false;
+        }
+
+        let xi1 = x1.max(x1p);
+        let yi1 = y1.max(y1p);
+        let xi2 = x2.min(x2p);
+        let yi2 = y2.min(y2p);
+        let inter_w = (xi2 - xi1).max(0.0);
+        let inter_h = (yi2 - yi1).max(0.0);
+        let inter_area = inter_w * inter_h;
+        let iou = inter_area / box_area;
+        iou >= 0.9
+    }
+
+    fn select_by_indices<T: Clone>(items: &[T], indices: &[usize]) -> Vec<T> {
+        indices.iter().map(|&idx| items[idx].clone()).collect()
+    }
+
+    fn select_by_mask<T: Clone>(items: &[T], mask: &[bool]) -> Vec<T> {
+        items
+            .iter()
+            .zip(mask.iter())
+            .filter_map(|(item, keep)| keep.then_some(item.clone()))
+            .collect()
     }
 }
 
@@ -1012,6 +1569,7 @@ impl PPDocLayoutAdapterBuilder {
     ///   - `"pp-doclayout-l"` or `"pp_doclayout_l"` - Large model (640x640, default)
     ///   - `"pp-doclayout_plus-l"` or `"pp_doclayout_plus_l"` - Plus-Large model (800x800)
     ///   - `"pp-doclayoutv2"` or `"pp_doclayoutv2"` - PP-DocLayoutV2 model (800x800)
+    ///   - `"pp-doclayoutv3"` or `"pp_doclayoutv3"` - PP-DocLayoutV3 model (800x800)
     ///   - `"pp-docblocklayout"` or `"pp_docblocklayout"` - Block layout model (640x640)
     ///
     /// # Example
@@ -1035,6 +1593,7 @@ impl PPDocLayoutAdapterBuilder {
             "PP-DocLayout-L" => LayoutModelConfig::pp_doclayout_l(),
             "PP-DocLayout_plus-L" => LayoutModelConfig::pp_doclayout_plus_l(),
             "PP-DocLayoutV2" | "PP-DocLayout-V2" => LayoutModelConfig::pp_doclayoutv2(),
+            "PP-DocLayoutV3" | "PP-DocLayout-V3" => LayoutModelConfig::pp_doclayoutv3(),
             "PP-DocBlockLayout" => LayoutModelConfig::pp_docblocklayout(),
             _ => {
                 // Default to pp-doclayout-l for unknown variants
