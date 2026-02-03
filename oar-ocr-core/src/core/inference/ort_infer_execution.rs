@@ -672,8 +672,9 @@ impl OrtInfer {
                                         )
                                     })
                             }
-                            // 7-dim format: [class_id, score, x1, y1, x2, y2, extra]
-                            // Extra field is ignored by postprocessor.
+                            // 7-dim format: [class_id, score, x1, y1, x2, y2, order_key]
+                            // The 7th field (order_key) is used for reading order in V3 mode.
+                            // See PpDocLayoutOrderMode::V3 in layout_detection_adapter.rs.
                             7 => {
                                 ndarray::Array::from_shape_vec((1, num_boxes, 1, 7), output_data.to_vec())
                                     .map_err(|e| {

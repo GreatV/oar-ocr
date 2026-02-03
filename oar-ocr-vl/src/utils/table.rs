@@ -187,19 +187,29 @@ fn otsl_pad_to_sqr_v2(otsl_str: &str) -> String {
     output
 }
 
+/// Split an OTSL line into segments, where each segment starts with a token
+/// and includes any text up to the next token.
+/// Any leading text before the first token is prepended to the first segment.
 fn split_otsl_segments(line: &str) -> Vec<&str> {
     let matches: Vec<regex::Match<'_>> = OTSL_TOKEN_RE.find_iter(line).collect();
     if matches.is_empty() {
         return Vec::new();
     }
     let mut segments = Vec::with_capacity(matches.len());
+    let first_token_start = matches[0].start();
     for (idx, mat) in matches.iter().enumerate() {
-        let start = mat.start();
+        // For the first segment, include any leading text before the first token
+        let start = if idx == 0 { 0 } else { mat.start() };
         let end = matches
             .get(idx + 1)
             .map(|next| next.start())
             .unwrap_or_else(|| line.len());
-        segments.push(&line[start..end]);
+        // Skip empty leading prefix (when first token is at position 0)
+        if idx == 0 && first_token_start == 0 {
+            segments.push(&line[mat.start()..end]);
+        } else {
+            segments.push(&line[start..end]);
+        }
     }
     segments
 }

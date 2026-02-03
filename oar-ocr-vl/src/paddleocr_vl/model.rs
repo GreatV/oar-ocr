@@ -92,11 +92,13 @@ impl PaddleOcrVl {
             })?;
         let sep_token_id = tokenizer.token_to_id("<|end_of_sentence|>");
 
-        let assistant_prefix = match std::fs::read_to_string(model_dir.join("chat_template.jinja"))
+        let assistant_prefix = if std::fs::read_to_string(model_dir.join("chat_template.jinja"))
+            .map(|t| t.contains("Assistant:\\n"))
+            .unwrap_or(false)
         {
-            Ok(template) if template.contains("Assistant:\\n") => "Assistant:\n".to_string(),
-            Ok(template) if template.contains("Assistant: ") => "Assistant: ".to_string(),
-            _ => "Assistant: ".to_string(),
+            "Assistant:\n".to_string()
+        } else {
+            "Assistant: ".to_string()
         };
 
         // Pre-tokenize image placeholder to avoid repeated string allocation

@@ -1195,9 +1195,12 @@ impl ModelAdapter for LayoutDetectionAdapter {
             }
         };
 
-        // Check if predictions include reading order info (8-dim format from PP-DocLayoutV2)
-        // Shape is [batch, num_boxes, 1, N] where N=8 indicates reading order is included
-        let has_reading_order = predictions.shape().get(3).copied().unwrap_or(0) == 8;
+        // Check if predictions include reading order info
+        // Shape is [batch, num_boxes, 1, N] where:
+        // - N=8: PP-DocLayoutV2 format with (col, row) order indices
+        // - N=7: PP-DocLayoutV3 format with single order_key index
+        let feature_dim = predictions.shape().get(3).copied().unwrap_or(0);
+        let has_reading_order = feature_dim == 7 || feature_dim == 8;
 
         // Postprocess predictions
         let mut output = self.postprocess(&predictions, img_shapes, effective_config);
