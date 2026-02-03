@@ -647,7 +647,7 @@ impl OrtInfer {
 
                 // Validate and convert output
                 // Some models output 2D [num_boxes, N] format instead of 4D
-                // N can be 6 (PP-DocLayout) or 8 (PP-DocLayoutV2 with reading order: col_index, row_index)
+                // N can be 6 (PP-DocLayout), 7 (PP-DocLayoutV3), or 8 (PP-DocLayoutV2 with reading order: col_index, row_index)
                 // We pass through raw data and let the postprocessor handle format-specific logic
                 match output_shape.len() {
                     2 => {
@@ -666,6 +666,24 @@ impl OrtInfer {
                                             &[output_data.len()],
                                             &format!(
                                                 "Failed to reshape 8-dim output to 4D for model '{}'",
+                                                self.model_name
+                                            ),
+                                            e,
+                                        )
+                                    })
+                            }
+                            // 7-dim format: [class_id, score, x1, y1, x2, y2, order_key]
+                            // The 7th field (order_key) is used for reading order in V3 mode.
+                            // See PpDocLayoutOrderMode::V3 in layout_detection_adapter.rs.
+                            7 => {
+                                ndarray::Array::from_shape_vec((1, num_boxes, 1, 7), output_data.to_vec())
+                                    .map_err(|e| {
+                                        OCRError::tensor_operation_error(
+                                            "output_reshape",
+                                            &[1, num_boxes, 1, 7],
+                                            &[output_data.len()],
+                                            &format!(
+                                                "Failed to reshape 7-dim output to 4D for model '{}'",
                                                 self.model_name
                                             ),
                                             e,
@@ -691,7 +709,7 @@ impl OrtInfer {
                             }
                             _ => Err(OCRError::InvalidInput {
                                 message: format!(
-                                    "Expected box dimension 6 or 8, got {} with shape {:?}",
+                                    "Expected box dimension 6, 7, or 8, got {} with shape {:?}",
                                     box_dim, output_shape
                                 ),
                             }),

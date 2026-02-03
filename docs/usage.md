@@ -233,6 +233,8 @@ let ort_config = OrtSessionConfig::new()
 
 This functionality is available in the separate `oar-ocr-vl` crate, using [Candle](https://github.com/huggingface/candle) for native Rust inference.
 
+PaddleOCR-VL-1.5 is also supported as a drop-in replacement via `PaddleOcrVl::from_dir`, and adds **text spotting** and **seal recognition** tasks.
+
 ### Installation
 
 Add the VL crate to your `Cargo.toml`:
@@ -258,8 +260,12 @@ Download the PaddleOCR-VL model from Hugging Face:
 git lfs install
 git clone https://huggingface.co/PaddlePaddle/PaddleOCR-VL
 
-# Or using huggingface-cli
-huggingface-cli download PaddlePaddle/PaddleOCR-VL --local-dir PaddleOCR-VL
+# PaddleOCR-VL-1.5
+git clone https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5
+
+# Or using hf
+hf download PaddlePaddle/PaddleOCR-VL --local-dir PaddleOCR-VL
+hf download PaddlePaddle/PaddleOCR-VL-1.5 --local-dir PaddleOCR-VL-1.5
 ```
 
 ### Basic Usage
@@ -283,11 +289,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+PaddleOCR-VL-1.5 uses the same API:
+
+```rust,no_run
+use oar_ocr_core::utils::load_image;
+use oar_ocr_vl::{PaddleOcrVl, PaddleOcrVlTask};
+use oar_ocr_vl::utils::parse_device;
+use std::path::Path;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let image = load_image(Path::new("seal.png"))?;
+    let device = parse_device("cpu")?;
+    let vl = PaddleOcrVl::from_dir("PaddleOCR-VL-1.5", device)?;
+
+    let result = vl.generate(image, PaddleOcrVlTask::Seal, 256)?;
+    println!("{result}");
+
+    Ok(())
+}
+```
+
 ### Running the Example
 
 ```bash
 cargo run -p oar-ocr-vl --features cuda --example paddleocr_vl -- \
     -m PaddleOCR-VL --device cuda --task ocr document.jpg
+
+cargo run -p oar-ocr-vl --features cuda --example paddleocr_vl -- \
+    -m PaddleOCR-VL-1.5 --device cuda --task spotting spotting.jpg
 ```
 
 ### Supported Tasks
@@ -298,6 +327,8 @@ cargo run -p oar-ocr-vl --features cuda --example paddleocr_vl -- \
 | `PaddleOcrVlTask::Table` | Table structure recognition | HTML |
 | `PaddleOcrVlTask::Formula` | Mathematical formula recognition | LaTeX |
 | `PaddleOcrVlTask::Chart` | Chart understanding | Structured text |
+| `PaddleOcrVlTask::Spotting` | Text spotting (localization + recognition) | Structured text |
+| `PaddleOcrVlTask::Seal` | Seal recognition | Plain text |
 
 ## UniRec
 
@@ -306,7 +337,7 @@ cargo run -p oar-ocr-vl --features cuda --example paddleocr_vl -- \
 ### Downloading the Model
 
 ```bash
-huggingface-cli download Topdu/UniRec-0.1B --local-dir models/unirec-0.1b
+hf download Topdu/UniRec-0.1B --local-dir models/unirec-0.1b
 ```
 
 ### Basic Usage
@@ -351,8 +382,8 @@ Note: inputs are automatically resized to satisfy the model's image/token limits
 git lfs install
 git clone https://huggingface.co/tencent/HunyuanOCR
 
-# Or using huggingface-cli
-huggingface-cli download tencent/HunyuanOCR --local-dir HunyuanOCR
+# Or using hf
+hf download tencent/HunyuanOCR --local-dir HunyuanOCR
 ```
 
 ### Basic Usage
@@ -399,7 +430,7 @@ Prompts from the upstream HunyuanOCR README:
 
 ## DocParser
 
-DocParser provides a unified API for two-stage document parsing that combines layout detection with VL-based recognition. It supports both UniRec and PaddleOCR-VL as recognition backends.
+DocParser provides a unified API for two-stage document parsing that combines layout detection with VL-based recognition. It supports UniRec and PaddleOCR-VL (including PaddleOCR-VL-1.5) as recognition backends.
 
 ### Basic Usage
 
@@ -415,8 +446,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize layout detector
     let layout = LayoutDetectionPredictor::builder()
-        .model_name("pp-doclayoutv2")
-        .build("pp-doclayoutv2.onnx")?;
+        .model_name("pp-doclayoutv3")
+        .build("pp-doclayoutv3.onnx")?;
 
     // Load document image
     let image = load_image(Path::new("document.jpg"))?;
@@ -430,6 +461,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Option 2: Using PaddleOCR-VL (heavier, more accurate)
     let paddleocr_vl = PaddleOcrVl::from_dir("PaddleOCR-VL", device)?;
     let parser = DocParser::new(&paddleocr_vl);
+    let result = parser.parse(&layout, image.clone())?;
+    println!("{}", result.to_markdown());
+
+    // Option 3: Using PaddleOCR-VL-1.5 (next-gen, more accurate)
+    let paddleocr_vl_15 = PaddleOcrVl::from_dir("PaddleOCR-VL-1.5", device)?;
+    let parser = DocParser::new(&paddleocr_vl_15);
     let result = parser.parse(&layout, image)?;
     println!("{}", result.to_markdown());
 
@@ -444,7 +481,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 cargo run -p oar-ocr-vl --features cuda --example doc_parser -- \
     --model-name unirec \
     --model-dir models/unirec-0.1b \
-    --layout-model models/pp-doclayoutv2.onnx \
+    --layout-model models/pp-doclayoutv3.onnx \
     --device cuda \
     document.jpg
 
@@ -452,7 +489,15 @@ cargo run -p oar-ocr-vl --features cuda --example doc_parser -- \
 cargo run -p oar-ocr-vl --features cuda --example doc_parser -- \
     --model-name paddleocr-vl \
     --model-dir PaddleOCR-VL \
-    --layout-model models/pp-doclayoutv2.onnx \
+    --layout-model models/pp-doclayoutv3.onnx \
+    --device cuda \
+    document.jpg
+
+# Using PaddleOCR-VL-1.5 (next-gen, more accurate)
+cargo run -p oar-ocr-vl --features cuda --example doc_parser -- \
+    --model-name paddleocr-vl-1.5 \
+    --model-dir PaddleOCR-VL-1.5 \
+    --layout-model models/pp-doclayoutv3.onnx \
     --device cuda \
     document.jpg
 ```

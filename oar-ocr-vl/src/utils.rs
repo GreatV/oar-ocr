@@ -216,45 +216,19 @@ static OPENOCR_TITLE_RE_PATTERN: Lazy<Result<Regex, regex::Error>> = Lazy::new(|
     // Note: Rust's `regex` is stricter about escapes inside character classes than Python `re`.
     // Keep the pattern semantically identical while avoiding unnecessary escapes.
     Regex::new(
-        r"^\s*((?:[1-9][0-9]*(?:\.[1-9][0-9]*)*[.、]?|[(（](?:[1-9][0-9]*|[一二三四五六七八九十百千万亿零壹贰叁肆伍陆柒捌玖拾]+)[)）]|[一二三四五六七八九十百千万亿零壹贰叁肆伍陆柒捌玖拾]+[、.]?|(?:I|II|III|IV|V|VI|VII|VIII|IX|X)\.?))(\s*)(.*)$",
+        r"^\s*((?:[1-9][0-9]*(?:\.[1-9][0-9]*)*[.、]?|[(（](?:[1-9][0-9]*|[一二三四五六七八九十百千万亿零壹贰叁肆伍陆柒捌玖拾]+)[)）]|[一二三四五六七八九十百千万亿零壹贰叁肆伍陆柒捌玖拾]+[、.]?|(?:I|II|III|IV|V|VI|VII|VIII|IX|X)(?:\.|\s)))(\s*)(.*)$",
     )
 });
 
 fn openocr_format_title(text: &str) -> String {
-    fn should_treat_prefix_as_numbering(prefix: &str, suffix_ws: &str) -> bool {
-        if !suffix_ws.is_empty() {
-            return true;
-        }
-
-        if prefix.starts_with('(') || prefix.starts_with('（') {
-            return true;
-        }
-
-        if prefix.ends_with('.')
-            || prefix.ends_with('、')
-            || prefix.ends_with(')')
-            || prefix.ends_with('）')
-        {
-            return true;
-        }
-
-        // Numeric headings like `1.2Title` should still be treated as numbering even without space.
-        if prefix.contains('.') || prefix.contains('、') {
-            return true;
-        }
-
-        false
-    }
-
     let mut title = text.to_string();
     if let Ok(re) = OPENOCR_TITLE_RE_PATTERN.as_ref()
         && let Some(caps) = re.captures(&title)
     {
         let numbering_raw = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-        let suffix_ws = caps.get(2).map(|m| m.as_str()).unwrap_or("");
         let numbering = numbering_raw.trim();
         let title_content = caps.get(3).map(|m| m.as_str()).unwrap_or("").trim_start();
-        if !numbering.is_empty() && should_treat_prefix_as_numbering(numbering, suffix_ws) {
+        if !numbering.is_empty() {
             title = format!("{numbering} {title_content}");
         }
     }
@@ -280,14 +254,16 @@ fn openocr_format_table_center_func(html: &str) -> String {
     let mut table_content = html.to_string();
     table_content = table_content.replace(
         "<table>",
-        "<table border=1 style='margin: auto; width: max-content;'>",
+        "<table border=1 style='margin: auto; word-wrap: break-word;'>",
     );
-    table_content = table_content.replace("<th>", "<th style='text-align: center;'>");
-    table_content = table_content.replace("<td>", "<td style='text-align: center;'>");
-    // PaddleX outputs compact single-line table HTML in markdown (no tag-newlines).
-    table_content = text::TAG_NEWLINES_RE
-        .replace_all(&table_content, ">")
-        .to_string();
+    table_content = table_content.replace(
+        "<th>",
+        "<th style='text-align: center; word-wrap: break-word;'>",
+    );
+    table_content = table_content.replace(
+        "<td>",
+        "<td style='text-align: center; word-wrap: break-word;'>",
+    );
     table_content
 }
 
@@ -321,7 +297,7 @@ fn openocr_format_first_line(
 
 /// Convert layout elements to OpenOCR (PaddleX) markdown format.
 ///
-/// This matches `PaddleOCRVLResult._to_markdown(pretty=...)` when labels come from PP-DocLayoutV2.
+/// This matches `PaddleOCRVLResult._to_markdown(pretty=...)` when labels come from PP-DocLayoutV2/V3.
 pub fn to_markdown_openocr(
     elements: &[LayoutElement],
     ignore_labels: &[String],
@@ -378,12 +354,7 @@ pub fn to_markdown_openocr(
             // Tables
             "table" => {
                 if pretty {
-                    // PaddleX table blocks typically include extra trailing blank lines (`\n\n\n`)
-                    // in the markdown output (see OpenOCR `infer_doc.py` + PaddleX markdown export).
-                    let compact = openocr_format_table_center_func(content)
-                        .trim_end_matches('\n')
-                        .to_string();
-                    format!("\n{}\n\n\n", compact)
+                    format!("\n{}", openocr_format_table_center_func(content))
                 } else {
                     // `simplify_table_func("\n" + block.content)`
                     format!("\n{}", content)

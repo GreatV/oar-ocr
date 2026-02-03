@@ -7,7 +7,7 @@
 //!
 //! ## Module Structure
 //!
-//! - `paddleocr_vl` - PaddleOCR-VL for OCR, table, formula, chart recognition
+//! - `paddleocr_vl` - PaddleOCR-VL for OCR, table, formula, chart, spotting, and seal recognition
 //! - `unirec` - UniRec unified text/formula/table recognition
 //! - `hunyuanocr` - HunyuanOCR OCR expert VLM
 //! - `lightonocr` - LightOnOCR end-to-end OCR VLM

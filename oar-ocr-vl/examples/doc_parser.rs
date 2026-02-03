@@ -10,14 +10,21 @@
 //! cargo run -p oar-ocr-vl --example doc_parser -- \
 //!     --model-name unirec \
 //!     --model-dir models/unirec-0.1b \
-//!     --layout-model models/pp-doclayoutv2.onnx \
+//!     --layout-model models/pp-doclayoutv3.onnx \
 //!     document.jpg
 //!
 //! # Using PaddleOCR-VL model (heavier, more accurate)
 //! cargo run -p oar-ocr-vl --example doc_parser -- \
 //!     --model-name paddleocr-vl \
 //!     --model-dir PaddleOCR-VL \
-//!     --layout-model models/pp-doclayoutv2.onnx \
+//!     --layout-model models/pp-doclayoutv3.onnx \
+//!     document.jpg
+//!
+//! # Using PaddleOCR-VL-1.5 model (next-gen, more accurate)
+//! cargo run -p oar-ocr-vl --example doc_parser -- \
+//!     --model-name paddleocr-vl-1.5 \
+//!     --model-dir PaddleOCR-VL-1.5 \
+//!     --layout-model models/pp-doclayoutv3.onnx \
 //!     document.jpg
 //!
 //! # Using LightOnOCR model (end-to-end OCR)
@@ -49,6 +56,9 @@ enum ModelName {
     /// PaddleOCR-VL: Large VLM with task prompts
     #[value(name = "paddleocr-vl")]
     PaddleOcrVl,
+    /// PaddleOCR-VL-1.5: Next-gen VLM with spotting and seal recognition
+    #[value(name = "paddleocr-vl-1.5")]
+    PaddleOcrVl15,
     /// HunyuanOCR: OCR expert VLM (HunYuanVL)
     #[value(name = "hunyuanocr")]
     HunyuanOcr,
@@ -61,7 +71,7 @@ enum ModelName {
 #[derive(Parser)]
 #[command(name = "doc_parser")]
 #[command(
-    about = "Unified Document Parser - supports UniRec, PaddleOCR-VL, HunyuanOCR, and LightOnOCR models"
+    about = "Unified Document Parser - supports UniRec, PaddleOCR-VL, PaddleOCR-VL-1.5, HunyuanOCR, and LightOnOCR models"
 )]
 struct Args {
     /// Recognition model to use
@@ -72,7 +82,7 @@ struct Args {
     #[arg(short, long)]
     model_dir: PathBuf,
 
-    /// Path to the PP-DocLayoutV2 ONNX model file (required unless using lightonocr)
+    /// Path to the PP-DocLayout ONNX model file (v2/v3, required unless using lightonocr)
     #[arg(short, long)]
     layout_model: Option<PathBuf>,
 
@@ -81,7 +91,7 @@ struct Args {
     images: Vec<PathBuf>,
 
     /// Layout model name for label mapping
-    #[arg(long, default_value = "pp-doclayoutv2")]
+    #[arg(long, default_value = "pp-doclayoutv3")]
     layout_model_name: String,
 
     /// Device to run on: cpu, cuda, or cuda:N
@@ -156,6 +166,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "pp_doclayoutv2" | "pp_doclayout_v2" => {
                 Some(LayoutDetectionConfig::with_pp_doclayoutv2_defaults())
             }
+            "pp_doclayoutv3" | "pp_doclayout_v3" => {
+                Some(LayoutDetectionConfig::with_pp_doclayoutv3_defaults())
+            }
+            "pp_structurev3" | "pp_structure_v3" => {
+                Some(LayoutDetectionConfig::with_pp_structurev3_defaults())
+            }
             _ => None,
         };
 
@@ -189,7 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let parser = DocParser::with_config(&unirec, config);
             process_images(&parser, layout_predictor.as_ref(), &existing_images, &args)?;
         }
-        ModelName::PaddleOcrVl => {
+        ModelName::PaddleOcrVl | ModelName::PaddleOcrVl15 => {
             info!("Loading PaddleOCR-VL model...");
             let load_start = Instant::now();
             let vl = PaddleOcrVl::from_dir(&args.model_dir, device)?;

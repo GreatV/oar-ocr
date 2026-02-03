@@ -36,6 +36,8 @@ pub struct DetResizeForTest {
     pub limit_type: Option<LimitType>,
     /// The maximum allowed side length
     pub max_side_limit: u32,
+    /// Interpolation filter used for resizing
+    pub filter: image::imageops::FilterType,
 }
 
 impl DetResizeForTest {
@@ -92,7 +94,14 @@ impl DetResizeForTest {
             limit_side_len: limit_side_len.or(Some(DEFAULT_LIMIT_SIDE_LEN)),
             limit_type: limit_type.or(Some(LimitType::Min)),
             max_side_limit: max_side_limit.unwrap_or(DEFAULT_MAX_SIDE_LIMIT),
+            filter: image::imageops::FilterType::Lanczos3,
         }
+    }
+
+    /// Overrides the interpolation filter used for resizing.
+    pub fn with_filter(mut self, filter: image::imageops::FilterType) -> Self {
+        self.filter = filter;
+        self
     }
 
     /// Applies resizing to a batch of images
@@ -298,8 +307,7 @@ impl DetResizeForTest {
             return (img, [1.0, 1.0]);
         }
 
-        let resized_img =
-            img.resize_exact(resize_w, resize_h, image::imageops::FilterType::Lanczos3);
+        let resized_img = img.resize_exact(resize_w, resize_h, self.filter);
         let ratio_h = resize_h as f32 / h as f32;
         let ratio_w = resize_w as f32 / w as f32;
 
@@ -347,8 +355,7 @@ impl DetResizeForTest {
 
         let ratio_h = resize_h as f32 / ori_h as f32;
         let ratio_w = resize_w as f32 / ori_w as f32;
-        let resized_img =
-            img.resize_exact(resize_w, resize_h, image::imageops::FilterType::Lanczos3);
+        let resized_img = img.resize_exact(resize_w, resize_h, self.filter);
 
         (resized_img, [ratio_h, ratio_w])
     }
@@ -392,8 +399,7 @@ impl DetResizeForTest {
             return (img, [1.0, 1.0]);
         }
 
-        let resized_img =
-            img.resize_exact(resize_w, resize_h, image::imageops::FilterType::Lanczos3);
+        let resized_img = img.resize_exact(resize_w, resize_h, self.filter);
         let ratio_h = resize_h as f32 / h as f32;
         let ratio_w = resize_w as f32 / w as f32;
 
@@ -428,8 +434,7 @@ impl DetResizeForTest {
 
         let ratio_h = resize_h as f32 / ori_h as f32;
         let ratio_w = resize_w as f32 / ori_w as f32;
-        let resized_img =
-            img.resize_exact(resize_w, resize_h, image::imageops::FilterType::Lanczos3);
+        let resized_img = img.resize_exact(resize_w, resize_h, self.filter);
 
         (resized_img, [ratio_h, ratio_w])
     }

@@ -32,8 +32,10 @@
 mod utils;
 
 use clap::Parser;
+use oar_ocr::domain::tasks::layout_detection::LayoutDetectionConfig;
 use oar_ocr::predictors::LayoutDetectionPredictor;
 use oar_ocr::utils::load_image;
+use serde_json::json;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
@@ -70,13 +72,17 @@ struct Args {
     #[arg(long)]
     model_name: Option<String>,
 
-    /// Score threshold for layout elements (0.0 to 1.0)
-    #[arg(long, default_value_t = 0.5)]
-    score_threshold: f32,
+    /// Score threshold for layout elements (overrides model defaults)
+    #[arg(long)]
+    score_threshold: Option<f32>,
 
     /// Maximum number of layout elements to detect
     #[arg(long, default_value_t = 100)]
     max_elements: usize,
+
+    /// Dump layout elements as JSON to stdout
+    #[arg(long)]
+    dump_json: bool,
 
     /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
     #[arg(long, default_value = "cpu")]
@@ -164,9 +170,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Build the layout detection predictor
+    let mut base_config = match model_type.as_str() {
+        "pp_doclayoutv2" => LayoutDetectionConfig::with_pp_doclayoutv2_defaults(),
+        "pp_doclayoutv3" => LayoutDetectionConfig::with_pp_doclayoutv3_defaults(),
+        _ => LayoutDetectionConfig::default(),
+    };
+    base_config.max_elements = args.max_elements;
+    if let Some(threshold) = args.score_threshold {
+        base_config.score_threshold = threshold;
+    }
+
     let mut predictor_builder = LayoutDetectionPredictor::builder()
-        .model_name(model_type)
-        .score_threshold(args.score_threshold);
+        .with_config(base_config)
+        .model_name(model_type);
 
     if let Some(ort_cfg) = ort_config {
         predictor_builder = predictor_builder.with_ort_config(ort_cfg);
@@ -265,6 +281,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         idx, type_name, min_x, min_y, max_x, max_y, element.score
                     );
                 }
+            }
+
+            if args.dump_json {
+                let elements_json: Vec<_> = elements
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, element)| {
+                        let bbox = &element.bbox;
+                        json!({
+                            "order": idx + 1,
+                            "label": element.element_type.as_str(),
+                            "score": element.score,
+                            "bbox": [
+                                bbox.x_min().round() as i32,
+                                bbox.y_min().round() as i32,
+                                bbox.x_max().round() as i32,
+                                bbox.y_max().round() as i32
+                            ]
+                        })
+                    })
+                    .collect();
+                let payload = json!({
+                    "image": image_path,
+                    "width": width,
+                    "height": height,
+                    "elements": elements_json
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
             }
 
             // Visualization

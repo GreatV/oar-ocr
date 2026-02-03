@@ -10,6 +10,10 @@ This crate provides PaddleOCR-VL, UniRec, HunyuanOCR, and LightOnOCR implementat
 
 [PaddleOCR-VL](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) is an ultra-compact (0.9B parameters) Vision-Language Model for document parsing, released by Baidu's PaddlePaddle team. It supports **109 languages** and excels in recognizing complex elements including text, tables, formulas, and 11 chart types.
 
+### PaddleOCR-VL-1.5
+
+[PaddleOCR-VL-1.5](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5) is the next-generation 0.9B PaddleOCR-VL model with improved accuracy and support for **text spotting** and **seal recognition**. It is a drop-in replacement for PaddleOCR-VL when using `PaddleOcrVl::from_dir`, and adds `PaddleOcrVlTask::Spotting` and `PaddleOcrVlTask::Seal`.
+
 ### UniRec
 
 [UniRec](https://github.com/Topdu/OpenOCR) is a unified recognition model with only **0.1B parameters**, developed by the FVL Laboratory at Fudan University. It is designed for high-accuracy and efficient recognition of plain text, mathematical formulas, and mixed content in both Chinese and English.
@@ -61,6 +65,19 @@ let result = model.generate(image, PaddleOcrVlTask::Ocr, 256)?;
 println!("Result: {}", result);
 ```
 
+PaddleOCR-VL-1.5 is loaded the same way, with additional tasks:
+
+```rust
+use oar_ocr_core::utils::load_image;
+use oar_ocr_vl::{PaddleOcrVl, PaddleOcrVlTask};
+
+let image = load_image("seal.png")?;
+let device = candle_core::Device::Cpu;
+let model = PaddleOcrVl::from_dir("PaddleOCR-VL-1.5", device)?;
+let result = model.generate(image, PaddleOcrVlTask::Seal, 256)?;
+println!("Result: {}", result);
+```
+
 ### UniRec
 
 UniRec is a unified model that handles text, mathematical formulas, and table structures in a single pass without needing task-specific prompts.
@@ -93,8 +110,8 @@ let device = candle_core::Device::Cpu;
 
 // 1. Setup Layout Detector
 let layout_predictor = LayoutDetectionPredictor::builder()
-    .model_name("pp-doclayoutv2")
-    .build("pp-doclayoutv2.onnx")?;
+    .model_name("pp-doclayoutv3")
+    .build("pp-doclayoutv3.onnx")?;
 
 // 2. Setup Recognition Backend (UniRec or PaddleOCR-VL)
 let unirec = UniRec::from_dir("models/unirec-0.1b", device)?;
@@ -120,7 +137,7 @@ This example combines layout detection (ONNX) with a VLM for recognition.
 cargo run --release --features cuda --example doc_parser -- \
     --model-name unirec \
     --model-dir models/unirec-0.1b \
-    --layout-model models/pp-doclayoutv2.onnx \
+    --layout-model models/pp-doclayoutv3.onnx \
     --device cuda \
     document.jpg
 ```
@@ -154,6 +171,20 @@ cargo run --release --features cuda --example paddleocr_vl -- \
     --device cuda \
     --task table \
     table.jpg
+
+# Text spotting (PaddleOCR-VL-1.5)
+cargo run --release --features cuda --example paddleocr_vl -- \
+    --model-dir PaddleOCR-VL-1.5 \
+    --device cuda \
+    --task spotting \
+    spotting.jpg
+
+# Seal recognition (PaddleOCR-VL-1.5)
+cargo run --release --features cuda --example paddleocr_vl -- \
+    --model-dir PaddleOCR-VL-1.5 \
+    --device cuda \
+    --task seal \
+    seal.jpg
 ```
 
 ### HunyuanOCR (Direct Inference)

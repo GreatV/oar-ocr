@@ -6,10 +6,11 @@ use super::processing;
 use super::projector::Projector;
 use super::vision::VisionModel;
 use crate::attention::{combine_masks, create_causal_mask, create_left_padding_mask};
+use crate::utils::image::pil_resample_to_filter_type;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::Module;
-use image::RgbImage;
+use image::{RgbImage, imageops::FilterType};
 use oar_ocr_core::core::OCRError;
 use std::path::Path;
 use tokenizers::Tokenizer;
@@ -20,6 +21,8 @@ pub enum PaddleOcrVlTask {
     Table,
     Chart,
     Formula,
+    Spotting,
+    Seal,
 }
 
 impl PaddleOcrVlTask {
@@ -29,6 +32,8 @@ impl PaddleOcrVlTask {
             Self::Table => "Table Recognition:",
             Self::Chart => "Chart Recognition:",
             Self::Formula => "Formula Recognition:",
+            Self::Spotting => "Spotting:",
+            Self::Seal => "Seal Recognition:",
         }
     }
 
@@ -37,10 +42,17 @@ impl PaddleOcrVlTask {
         match self {
             Self::Formula => processing::strip_math_wrappers(trimmed).to_string(),
             Self::Table => processing::postprocess_table_output(trimmed),
-            Self::Ocr | Self::Chart => trimmed.to_string(),
+            Self::Ocr | Self::Chart | Self::Spotting | Self::Seal => trimmed.to_string(),
         }
     }
+
+    fn needs_spotting_preprocess(self) -> bool {
+        matches!(self, Self::Spotting)
+    }
 }
+
+const SPOTTING_UPSCALE_THRESHOLD: u32 = 1500;
+const SPOTTING_MAX_LONG_SIDE: u32 = 2048;
 
 pub struct PaddleOcrVl {
     device: Device,
@@ -56,6 +68,8 @@ pub struct PaddleOcrVl {
     sep_token_id: Option<u32>,
     /// Cached tokenized image placeholder (single token)
     image_placeholder_token_id: u32,
+    /// Assistant prefix derived from chat template (e.g., "Assistant: " vs "Assistant:\n")
+    assistant_prefix: String,
 }
 
 impl PaddleOcrVl {
@@ -77,6 +91,15 @@ impl PaddleOcrVl {
                 message: "PaddleOCR-VL: tokenizer is missing </s> token".to_string(),
             })?;
         let sep_token_id = tokenizer.token_to_id("<|end_of_sentence|>");
+
+        let assistant_prefix = if std::fs::read_to_string(model_dir.join("chat_template.jinja"))
+            .map(|t| t.contains("Assistant:\\n"))
+            .unwrap_or(false)
+        {
+            "Assistant:\n".to_string()
+        } else {
+            "Assistant: ".to_string()
+        };
 
         // Pre-tokenize image placeholder to avoid repeated string allocation
         let image_placeholder_token_id = tokenizer
@@ -116,6 +139,7 @@ impl PaddleOcrVl {
             eos_token_id,
             sep_token_id,
             image_placeholder_token_id,
+            assistant_prefix,
         })
     }
 
@@ -187,8 +211,51 @@ impl PaddleOcrVl {
         let batch_size = images.len();
 
         // 1. Preprocess all images
-        let image_inputs =
-            processing::preprocess_images(images, &self.image_cfg, &self.device, self.dtype)?;
+        let needs_spotting = tasks.iter().any(|t| t.needs_spotting_preprocess());
+        let resized_images;
+        let images_for_preprocess = if needs_spotting {
+            let resize_filter = self
+                .image_cfg
+                .resample
+                .and_then(pil_resample_to_filter_type)
+                .unwrap_or(FilterType::CatmullRom);
+            let mut processed = Vec::with_capacity(images.len());
+            for (img, task) in images.iter().zip(tasks.iter()) {
+                if task.needs_spotting_preprocess()
+                    && img.width() < SPOTTING_UPSCALE_THRESHOLD
+                    && img.height() < SPOTTING_UPSCALE_THRESHOLD
+                {
+                    processed.push(image::imageops::resize(
+                        img,
+                        img.width().saturating_mul(2),
+                        img.height().saturating_mul(2),
+                        resize_filter,
+                    ));
+                } else {
+                    processed.push(img.clone());
+                }
+            }
+            resized_images = Some(processed);
+            resized_images.as_ref().unwrap().as_slice()
+        } else {
+            images
+        };
+        let max_pixels = if needs_spotting {
+            let factor = (self.image_cfg.patch_size * self.image_cfg.merge_size) as u32;
+            let spotting_max_pixels = SPOTTING_MAX_LONG_SIDE
+                .saturating_mul(factor)
+                .saturating_mul(factor);
+            self.image_cfg.max_pixels.max(spotting_max_pixels)
+        } else {
+            self.image_cfg.max_pixels
+        };
+        let image_inputs = processing::preprocess_images_with_max_pixels(
+            images_for_preprocess,
+            &self.image_cfg,
+            &self.device,
+            self.dtype,
+            max_pixels,
+        )?;
 
         // 2. Build prompts for each sample
         let mut all_input_ids: Vec<Vec<u32>> = Vec::with_capacity(batch_size);
@@ -201,7 +268,7 @@ impl PaddleOcrVl {
             all_image_token_counts.push(image_token_count);
 
             let prefix = "<|begin_of_sentence|>User: <|IMAGE_START|>";
-            let suffix = format!("<|IMAGE_END|>{}\nAssistant: ", task.prompt());
+            let suffix = format!("<|IMAGE_END|>{}\n{}", task.prompt(), self.assistant_prefix);
 
             let prefix_enc =
                 self.tokenizer

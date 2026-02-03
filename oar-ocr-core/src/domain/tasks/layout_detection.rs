@@ -201,6 +201,49 @@ impl LayoutDetectionConfig {
         }
     }
 
+    /// Creates a config with PP-DocLayoutV3 defaults (0.3 threshold + PP-DocLayout merge modes).
+    ///
+    /// PP-DocLayoutV3 keeps the same label set as PP-DocLayoutV2 but uses a lower
+    /// global threshold in the reference pipeline.
+    pub fn with_pp_doclayoutv3_defaults() -> Self {
+        let mut merge_modes = HashMap::new();
+        merge_modes.insert("abstract".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("algorithm".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("aside_text".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("chart".to_string(), MergeBboxMode::Large);
+        merge_modes.insert("content".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("display_formula".to_string(), MergeBboxMode::Large);
+        merge_modes.insert("doc_title".to_string(), MergeBboxMode::Large);
+        merge_modes.insert("figure_title".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("footer".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("footer_image".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("footnote".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("formula_number".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("header".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("header_image".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("image".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("inline_formula".to_string(), MergeBboxMode::Large);
+        merge_modes.insert("number".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("paragraph_title".to_string(), MergeBboxMode::Large);
+        merge_modes.insert("reference".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("reference_content".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("seal".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("table".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("text".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("vertical_text".to_string(), MergeBboxMode::Union);
+        merge_modes.insert("vision_footnote".to_string(), MergeBboxMode::Union);
+
+        Self {
+            score_threshold: 0.3,
+            max_elements: 100,
+            class_thresholds: None,
+            class_merge_modes: Some(merge_modes),
+            layout_nms: true,
+            nms_threshold: 0.5,
+            layout_unclip_ratio: Some(UnclipRatio::Separate(1.0, 1.0)),
+        }
+    }
+
     /// Creates a config with PP-StructureV3 default thresholds, merge modes, and unclip ratio.
     ///
     /// Merge modes follow standard configuration:
