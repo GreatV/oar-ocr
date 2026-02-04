@@ -32,6 +32,13 @@
 //!     --model-name lightonocr \
 //!     --model-dir LightOnOCR-2-1B \
 //!     document.jpg
+//!
+//! # Using GLM-OCR model
+//! cargo run -p oar-ocr-vl --example doc_parser -- \
+//!     --model-name glmocr \
+//!     --model-dir /path/to/GLM-OCR \
+//!     --layout-model models/pp-doclayoutv3.onnx \
+//!     document.jpg
 //! ```
 
 mod utils;
@@ -62,6 +69,9 @@ enum ModelName {
     /// HunyuanOCR: OCR expert VLM (HunYuanVL)
     #[value(name = "hunyuanocr")]
     HunyuanOcr,
+    /// GLM-OCR: OCR expert VLM (GLM-V)
+    #[value(name = "glmocr")]
+    GlmOcr,
     /// LightOnOCR: End-to-end OCR VLM
     #[value(name = "lightonocr")]
     LightOnOcr,
@@ -71,7 +81,7 @@ enum ModelName {
 #[derive(Parser)]
 #[command(name = "doc_parser")]
 #[command(
-    about = "Unified Document Parser - supports UniRec, PaddleOCR-VL, PaddleOCR-VL-1.5, HunyuanOCR, and LightOnOCR models"
+    about = "Unified Document Parser - supports UniRec, PaddleOCR-VL, PaddleOCR-VL-1.5, HunyuanOCR, GLM-OCR, and LightOnOCR models"
 )]
 struct Args {
     /// Recognition model to use
@@ -112,7 +122,7 @@ struct Args {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use oar_ocr_vl::{HunyuanOcr, LightOnOcr, PaddleOcrVl, UniRec};
+    use oar_ocr_vl::{GlmOcr, HunyuanOcr, LightOnOcr, PaddleOcrVl, UniRec};
 
     utils::init_tracing();
     let args = Args::parse();
@@ -223,6 +233,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let model = HunyuanOcr::from_dir(&args.model_dir, device)?;
             info!(
                 "HunyuanOCR loaded in {:.2}ms",
+                load_start.elapsed().as_secs_f64() * 1000.0
+            );
+
+            let parser = DocParser::with_config(&model, config);
+            process_images(&parser, layout_predictor.as_ref(), &existing_images, &args)?;
+        }
+        ModelName::GlmOcr => {
+            info!("Loading GLM-OCR model...");
+            let load_start = Instant::now();
+            let model = GlmOcr::from_dir(&args.model_dir, device)?;
+            info!(
+                "GLM-OCR loaded in {:.2}ms",
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
 

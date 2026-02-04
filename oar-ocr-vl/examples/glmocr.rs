@@ -1,19 +1,19 @@
-//! HunyuanOCR Recognition Example (Candle-based)
+//! GLM-OCR Recognition Example (Candle-based)
 //!
-//! This example demonstrates how to run `tencent/HunyuanOCR` (HunYuanVL) in Rust.
+//! This example demonstrates how to run `zai-org/GLM-OCR` in Rust.
 //!
 //! # Usage
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --example hunyuanocr -- [OPTIONS] <IMAGES>...
+//! cargo run -p oar-ocr-vl --example glmocr -- [OPTIONS] <IMAGES>...
 //! ```
 //!
 //! # Examples
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --example hunyuanocr -- \\
-//!     --model-dir /path/to/HunyuanOCR \\
-//!     --prompt "Detect and recognize text in the image, and output the text coordinates in a formatted manner." \\
+//! cargo run -p oar-ocr-vl --example glmocr -- \
+//!     --model-dir /path/to/GLM-OCR \
+//!     --prompt "Text Recognition:" \
 //!     document.jpg
 //! ```
 
@@ -25,14 +25,14 @@ use std::time::Instant;
 use tracing::{error, info};
 
 use oar_ocr_core::utils::load_image;
-use oar_ocr_vl::HunyuanOcr;
+use oar_ocr_vl::GlmOcr;
 use oar_ocr_vl::utils::parse_device;
 
 #[derive(Parser)]
-#[command(name = "hunyuanocr")]
-#[command(about = "HunyuanOCR Recognition Example - image-to-text using Candle")]
+#[command(name = "glmocr")]
+#[command(about = "GLM-OCR Recognition Example - image-to-text using Candle")]
 struct Args {
-    /// Path to the HunyuanOCR model directory
+    /// Path to the GLM-OCR model directory
     #[arg(short, long)]
     model_dir: PathBuf,
 
@@ -48,11 +48,8 @@ struct Args {
     #[arg(long, default_value = "4096")]
     max_tokens: usize,
 
-    /// Instruction prompt (default: text spotting)
-    #[arg(
-        long,
-        default_value = "Detect and recognize text in the image, and output the text coordinates in a formatted manner."
-    )]
+    /// Instruction prompt (default: Text Recognition)
+    #[arg(long, default_value = "Text Recognition:")]
     prompt: String,
 }
 
@@ -84,12 +81,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = parse_device(&args.device)?;
     info!("Using device: {:?}", device);
 
-    info!(
-        "Loading HunyuanOCR model from: {}",
-        args.model_dir.display()
-    );
+    info!("Loading GLM-OCR model from: {}", args.model_dir.display());
     let load_start = Instant::now();
-    let model = HunyuanOcr::from_dir(&args.model_dir, device)?;
+    let model = GlmOcr::from_dir(&args.model_dir, device)?;
     info!(
         "Model loaded in {:.2}ms",
         load_start.elapsed().as_secs_f64() * 1000.0
@@ -109,7 +103,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let infer_start = Instant::now();
         match model
             .generate(&[rgb_img], &[args.prompt.as_str()], args.max_tokens)
-            .pop()
+            .into_iter()
+            .next()
         {
             Some(Ok(result)) => {
                 info!(
