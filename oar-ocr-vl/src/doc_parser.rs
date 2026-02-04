@@ -12,6 +12,7 @@
 //! - `HunyuanOcr` - OCR expert VLM (HunYuanVL)
 //! - `GlmOcr` - GLM-OCR OCR expert VLM
 //! - `LightOnOcr` - End-to-end OCR VLM
+//! - `MinerU` - MinerU2.5 document parsing VLM (Qwen2-VL backbone)
 
 use super::utils::{
     DetectedBox, calculate_overlap_ratio, calculate_projection_overlap_ratio, convert_otsl_to_html,
@@ -468,6 +469,7 @@ impl RecognitionBackend for UniRec {
 use super::glmocr::GlmOcr;
 use super::hunyuanocr::HunyuanOcr;
 use super::lightonocr::LightOnOcr;
+use super::mineru::MinerU;
 use super::paddleocr_vl::{PaddleOcrVl, PaddleOcrVlTask};
 
 impl RecognitionBackend for PaddleOcrVl {
@@ -635,6 +637,85 @@ impl RecognitionBackend for LightOnOcr {
     fn needs_repetition_truncation(&self) -> bool {
         false // handled inside `recognize()`
     }
+}
+
+impl RecognitionBackend for MinerU {
+    fn recognize(
+        &self,
+        image: RgbImage,
+        task: RecognitionTask,
+        max_tokens: usize,
+    ) -> Result<String, OCRError> {
+        let prompt = match task {
+            RecognitionTask::Ocr => "\nText Recognition:",
+            RecognitionTask::Table => "\nTable Recognition:",
+            RecognitionTask::Formula => "\nFormula Recognition:",
+            RecognitionTask::Chart => "\nDocument Parsing:",
+        };
+        // MinerU requires images with minimum edge >= 28 (factor constraint)
+        // Preprocess small or extremely aspect-ratioed images
+        let processed = resize_for_mineru(&image, 28, 50.0);
+        let out = self
+            .generate(&[processed], &[prompt], max_tokens)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| {
+                Err(OCRError::InvalidInput {
+                    message: "MinerU2.5: no result returned".to_string(),
+                })
+            })?;
+        Ok(truncate_repetitive_content(&out, 10, 10, 10)
+            .trim()
+            .to_string())
+    }
+
+    fn needs_table_postprocess(&self) -> bool {
+        true
+    }
+
+    fn needs_formula_preprocess(&self) -> bool {
+        false
+    }
+
+    fn needs_repetition_truncation(&self) -> bool {
+        false // handled inside `recognize()`
+    }
+}
+
+/// Resize/pad image for MinerU to meet minimum edge and aspect ratio constraints.
+///
+/// MinerU requires images with minimum edge >= factor (28 by default).
+/// Also pads images with extreme aspect ratios to avoid degenerate inputs.
+fn resize_for_mineru(image: &RgbImage, min_edge: u32, max_aspect_ratio: f32) -> RgbImage {
+    let (mut w, mut h) = image.dimensions();
+    let mut out = image.clone();
+
+    // Handle extreme aspect ratios by padding
+    let ratio = (w.max(h) as f32) / (w.min(h).max(1) as f32);
+    if ratio > max_aspect_ratio {
+        let (new_w, new_h) = if w > h {
+            (w, (w as f32 / max_aspect_ratio).ceil() as u32)
+        } else {
+            ((h as f32 / max_aspect_ratio).ceil() as u32, h)
+        };
+        let mut canvas = RgbImage::from_pixel(new_w, new_h, Rgb([255, 255, 255]));
+        let x = ((new_w - w) / 2) as i64;
+        let y = ((new_h - h) / 2) as i64;
+        imageops::overlay(&mut canvas, &out, x, y);
+        out = canvas;
+        (w, h) = out.dimensions();
+    }
+
+    // Scale up if minimum edge is too small
+    let min_dim = w.min(h);
+    if min_dim < min_edge {
+        let scale = min_edge as f32 / min_dim as f32;
+        let new_w = (w as f32 * scale).ceil() as u32;
+        let new_h = (h as f32 * scale).ceil() as u32;
+        out = imageops::resize(&out, new_w, new_h, imageops::FilterType::CatmullRom);
+    }
+
+    out
 }
 
 fn is_auxiliary_element(element_type: LayoutElementType) -> bool {

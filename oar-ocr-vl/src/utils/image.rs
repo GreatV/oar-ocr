@@ -122,19 +122,9 @@ pub fn smart_resize(
         });
     }
 
-    let mut height = height as f64;
-    let mut width = width as f64;
+    let height = height as f64;
+    let width = width as f64;
     let factor_f = factor as f64;
-
-    // Ensure dimensions are at least factor_f
-    if height < factor_f {
-        width = ((width * factor_f) / height).round();
-        height = factor_f;
-    }
-    if width < factor_f {
-        height = ((height * factor_f) / width).round();
-        width = factor_f;
-    }
 
     let max_dim = height.max(width);
     let min_dim = height.min(width);
@@ -155,15 +145,19 @@ pub fn smart_resize(
         let beta = ((height * width) / max_pixels as f64).sqrt();
         h_bar = ((height / beta) / factor_f).floor() * factor_f;
         w_bar = ((width / beta) / factor_f).floor() * factor_f;
+        if h_bar < factor_f {
+            h_bar = factor_f;
+        }
+        if w_bar < factor_f {
+            w_bar = factor_f;
+        }
     } else if area < min_pixels as f64 {
         let beta = (min_pixels as f64 / (height * width)).sqrt();
         h_bar = ((height * beta) / factor_f).ceil() * factor_f;
         w_bar = ((width * beta) / factor_f).ceil() * factor_f;
     }
 
-    let h_out = h_bar.max(factor_f) as u32;
-    let w_out = w_bar.max(factor_f) as u32;
-    Ok((h_out, w_out))
+    Ok((h_bar as u32, w_bar as u32))
 }
 
 /// Clamp dimensions to a maximum image size while maintaining aspect ratio and factor divisibility.
