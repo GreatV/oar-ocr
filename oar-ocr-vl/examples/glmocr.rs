@@ -103,7 +103,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let infer_start = Instant::now();
         match model
             .generate(&[rgb_img], &[args.prompt.as_str()], args.max_tokens)
-            .pop()
+            .into_iter()
+            .next()
         {
             Some(Ok(result)) => {
                 info!(

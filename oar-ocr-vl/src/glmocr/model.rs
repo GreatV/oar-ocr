@@ -170,16 +170,16 @@ impl GlmOcr {
                 });
             }
 
-            let (inputs_embeds, rope_delta) = self.prepare_inputs(&input_ids, &image_inputs)?;
-
             let seq_len = input_ids.len();
-            let position_ids = build_position_ids(
+            let inputs_embeds = self.prepare_inputs(&input_ids, &image_inputs)?;
+            let (position_ids, max_pos) = build_position_ids(
                 &input_ids,
                 image_inputs.grid_thw,
                 self.cfg.vision_config.spatial_merge_size,
                 self.image_token_id,
                 &self.device,
             )?;
+            let rope_delta = max_pos + 1 - seq_len as i64;
 
             self.text.clear_kv_cache();
             let hidden = self.text.forward(&inputs_embeds, &position_ids, None)?;
@@ -263,7 +263,7 @@ impl GlmOcr {
         &self,
         input_ids: &[u32],
         image_inputs: &GlmOcrImageInputs,
-    ) -> Result<(Tensor, i64), OCRError> {
+    ) -> Result<Tensor, OCRError> {
         let seq_len = input_ids.len();
         let token_ids =
             Tensor::from_vec(input_ids.to_vec(), (1, seq_len), &self.device).map_err(|e| {
@@ -388,15 +388,7 @@ impl GlmOcr {
             )
         })?;
 
-        let max_pos = compute_max_pos(
-            input_ids,
-            image_inputs.grid_thw,
-            self.cfg.vision_config.spatial_merge_size,
-            self.image_token_id,
-        )?;
-        let rope_delta = max_pos + 1 - seq_len as i64;
-
-        Ok((embeds, rope_delta))
+        Ok(embeds)
     }
 
     fn logits_from_hidden(&self, hidden: &Tensor) -> Result<Tensor, OCRError> {
@@ -444,13 +436,16 @@ fn expand_image_tokens(prompt: &str, num_image_tokens: usize) -> Result<String, 
     Ok(expanded.replace(placeholder, "<|image|>"))
 }
 
+/// Build position IDs tensor and compute max position value.
+///
+/// Returns `(position_ids, max_pos)` where `max_pos` is used to compute rope_delta.
 fn build_position_ids(
     input_ids: &[u32],
     grid_thw: (usize, usize, usize),
     merge_size: usize,
     image_token_id: u32,
     device: &Device,
-) -> Result<Tensor, OCRError> {
+) -> Result<(Tensor, i64), OCRError> {
     let (mut pos_t, mut pos_h, mut pos_w) = (Vec::new(), Vec::new(), Vec::new());
     let mut max_pos: i64 = -1;
 
@@ -542,65 +537,5 @@ fn build_position_ids(
             e,
         )
     })?;
-    Ok(position_ids)
-}
-
-fn compute_max_pos(
-    input_ids: &[u32],
-    grid_thw: (usize, usize, usize),
-    merge_size: usize,
-    image_token_id: u32,
-) -> Result<i64, OCRError> {
-    let mut max_pos: i64 = -1;
-    let mut current = input_ids.first().copied().unwrap_or(image_token_id) == image_token_id;
-    let mut start = 0usize;
-    let mut groups = Vec::new();
-    for (i, &id) in input_ids.iter().enumerate() {
-        let is_image = id == image_token_id;
-        if i == 0 {
-            current = is_image;
-            continue;
-        }
-        if is_image != current {
-            groups.push((current, start, i));
-            start = i;
-            current = is_image;
-        }
-    }
-    groups.push((current, start, input_ids.len()));
-
-    let (grid_t, grid_h, grid_w) = grid_thw;
-    let llm_grid_h = grid_h / merge_size;
-    let llm_grid_w = grid_w / merge_size;
-    let llm_grid_t = grid_t;
-    let mut seen_image = false;
-
-    let expected_image_tokens = llm_grid_t * llm_grid_h * llm_grid_w;
-    for (is_image, s, e) in groups {
-        let st_idx = max_pos + 1;
-        if is_image {
-            if seen_image {
-                return Err(OCRError::InvalidInput {
-                    message: "GLM-OCR: multiple image groups in prompt are not supported"
-                        .to_string(),
-                });
-            }
-            seen_image = true;
-            let group_len = e - s;
-            if group_len != expected_image_tokens {
-                return Err(OCRError::InvalidInput {
-                    message: format!(
-                        "GLM-OCR: image token count ({group_len}) != expected ({expected_image_tokens})"
-                    ),
-                });
-            }
-            let group_max = (llm_grid_t.max(llm_grid_h).max(llm_grid_w) as i64) - 1 + st_idx;
-            max_pos = group_max;
-        } else {
-            let len = e - s;
-            max_pos = st_idx + len as i64 - 1;
-        }
-    }
-
-    Ok(max_pos)
+    Ok((position_ids, max_pos))
 }
