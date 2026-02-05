@@ -21,17 +21,17 @@
 mod utils;
 
 use clap::Parser;
-use image::{Rgb, RgbImage, imageops};
+use image::{RgbImage, imageops};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::Serialize;
-use std::borrow::Cow;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info};
 
 use oar_ocr_core::utils::load_image;
 use oar_ocr_vl::MinerU;
+use oar_ocr_vl::utils::image::resize_for_mineru;
 use oar_ocr_vl::utils::parse_device;
 use oar_ocr_vl::utils::{convert_otsl_to_html, truncate_repetitive_content};
 
@@ -231,16 +231,14 @@ fn parse_layout_output(output: &str) -> Vec<ContentBlock> {
         let Some(caps) = LAYOUT_REGEX.captures(line) else {
             continue;
         };
-        let Some(x1) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) else {
-            continue;
-        };
-        let Some(y1) = caps.get(2).and_then(|m| m.as_str().parse::<i32>().ok()) else {
-            continue;
-        };
-        let Some(x2) = caps.get(3).and_then(|m| m.as_str().parse::<i32>().ok()) else {
-            continue;
-        };
-        let Some(y2) = caps.get(4).and_then(|m| m.as_str().parse::<i32>().ok()) else {
+        let Some((x1, y1, x2, y2)) = (|| {
+            Some((
+                caps.get(1)?.as_str().parse().ok()?,
+                caps.get(2)?.as_str().parse().ok()?,
+                caps.get(3)?.as_str().parse().ok()?,
+                caps.get(4)?.as_str().parse().ok()?,
+            ))
+        })() else {
             continue;
         };
         let ref_type = caps
@@ -368,45 +366,13 @@ fn prepare_for_extract(
                 _ => crop,
             };
         }
-        crop = resize_by_need(&crop, min_image_edge, max_image_edge_ratio);
+        crop = resize_for_mineru(&crop, min_image_edge, max_image_edge_ratio);
         block_images.push(crop);
         prompts.push(prompt_for_block(&block.block_type).to_string());
         indices.push(idx);
     }
 
     (block_images, prompts, indices)
-}
-
-fn resize_by_need(image: &RgbImage, min_image_edge: u32, max_image_edge_ratio: f32) -> RgbImage {
-    let (mut w, mut h) = image.dimensions();
-    let mut out = Cow::Borrowed(image);
-    let ratio = (w.max(h) as f32) / (w.min(h) as f32);
-    if ratio > max_image_edge_ratio {
-        let (new_w, new_h) = if w > h {
-            (w, (w as f32 / max_image_edge_ratio).ceil() as u32)
-        } else {
-            ((h as f32 / max_image_edge_ratio).ceil() as u32, h)
-        };
-        let mut canvas = RgbImage::from_pixel(new_w, new_h, Rgb([255, 255, 255]));
-        let x = ((new_w - w) / 2) as i64;
-        let y = ((new_h - h) / 2) as i64;
-        imageops::overlay(&mut canvas, &*out, x, y);
-        out = Cow::Owned(canvas);
-    }
-    (w, h) = out.dimensions();
-    let min_edge = w.min(h);
-    if min_edge < min_image_edge {
-        let scale = min_image_edge as f32 / min_edge as f32;
-        let new_w = (w as f32 * scale).ceil() as u32;
-        let new_h = (h as f32 * scale).ceil() as u32;
-        out = Cow::Owned(imageops::resize(
-            &*out,
-            new_w,
-            new_h,
-            imageops::FilterType::CatmullRom,
-        ));
-    }
-    out.into_owned()
 }
 
 fn prompt_for_block(block_type: &str) -> &'static str {

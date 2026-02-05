@@ -238,6 +238,52 @@ pub fn clamp_to_max_image_size(
     Ok((h, w))
 }
 
+/// Resize an image for MinerU2.5 inference.
+///
+/// Handles two cases:
+/// 1. If the aspect ratio exceeds `max_aspect_ratio`, the image is padded with
+///    white to bring it within bounds.
+/// 2. If the minimum edge is below `min_edge`, the image is scaled up.
+pub fn resize_for_mineru(image: &RgbImage, min_edge: u32, max_aspect_ratio: f32) -> RgbImage {
+    use image::{Rgb, imageops};
+    use std::borrow::Cow;
+
+    let (mut w, mut h) = image.dimensions();
+    let mut out = Cow::Borrowed(image);
+
+    // Handle extreme aspect ratios by padding
+    let ratio = (w.max(h) as f32) / (w.min(h).max(1) as f32);
+    if ratio > max_aspect_ratio {
+        let (new_w, new_h) = if w > h {
+            (w, (w as f32 / max_aspect_ratio).ceil() as u32)
+        } else {
+            ((h as f32 / max_aspect_ratio).ceil() as u32, h)
+        };
+        let mut canvas = RgbImage::from_pixel(new_w, new_h, Rgb([255, 255, 255]));
+        let x = ((new_w - w) / 2) as i64;
+        let y = ((new_h - h) / 2) as i64;
+        imageops::overlay(&mut canvas, &*out, x, y);
+        out = Cow::Owned(canvas);
+        (w, h) = out.dimensions();
+    }
+
+    // Scale up if minimum edge is too small
+    let min_dim = w.min(h);
+    if min_dim < min_edge {
+        let scale = min_edge as f32 / min_dim as f32;
+        let new_w = (w as f32 * scale).ceil() as u32;
+        let new_h = (h as f32 * scale).ceil() as u32;
+        out = Cow::Owned(imageops::resize(
+            &*out,
+            new_w,
+            new_h,
+            imageops::FilterType::CatmullRom,
+        ));
+    }
+
+    out.into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
