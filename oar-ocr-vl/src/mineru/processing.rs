@@ -94,6 +94,11 @@ pub fn preprocess_images(
         }
 
         let frame = image_to_chw(&resized, mean, std, rescale_factor);
+        // For static document images, repeat the same frame to match the expected
+        // temporal_patch_size dimension. This is correct behavior for image-only
+        // models - the temporal dimension exists in the architecture but since
+        // there's only one "frame" (the document image), it's repeated to match
+        // the tensor shape expected by the vision encoder.
         let frames: Vec<&[f32]> =
             std::iter::repeat_n(frame.as_slice(), cfg.temporal_patch_size).collect();
 

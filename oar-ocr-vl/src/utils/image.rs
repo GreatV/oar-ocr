@@ -151,10 +151,35 @@ pub fn smart_resize(
         if w_bar < factor_f {
             w_bar = factor_f;
         }
+        // After scaling down, ensure we don't violate min_pixels due to quantization
+        if (h_bar * w_bar) < min_pixels as f64 {
+            return Err(OCRError::InvalidInput {
+                message: format!(
+                    "smart_resize: cannot satisfy both min_pixels={} and max_pixels={} constraints after quantization",
+                    min_pixels, max_pixels
+                ),
+            });
+        }
     } else if area < min_pixels as f64 {
         let beta = (min_pixels as f64 / (height * width)).sqrt();
         h_bar = ((height * beta) / factor_f).ceil() * factor_f;
         w_bar = ((width * beta) / factor_f).ceil() * factor_f;
+        // Ensure minimum dimensions are at least factor_f
+        if h_bar < factor_f {
+            h_bar = factor_f;
+        }
+        if w_bar < factor_f {
+            w_bar = factor_f;
+        }
+        // After scaling up, ensure we don't violate max_pixels due to quantization
+        if (h_bar * w_bar) > max_pixels as f64 {
+            return Err(OCRError::InvalidInput {
+                message: format!(
+                    "smart_resize: cannot satisfy both min_pixels={} and max_pixels={} constraints after quantization",
+                    min_pixels, max_pixels
+                ),
+            });
+        }
     }
 
     Ok((h_bar as u32, w_bar as u32))

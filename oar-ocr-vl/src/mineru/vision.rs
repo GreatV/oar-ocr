@@ -5,6 +5,11 @@ use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{LayerNorm, LayerNormConfig, Linear, Module, VarBuilder, layer_norm, linear};
 use oar_ocr_core::core::OCRError;
 
+/// Sequence length threshold above which chunked attention is used to reduce peak memory.
+const CHUNKED_ATTN_SEQ_THRESHOLD: usize = 1024;
+/// Chunk size for chunked attention when processing large images.
+const CHUNKED_ATTN_CHUNK_SIZE: usize = 256;
+
 fn quick_gelu(xs: &Tensor) -> Result<Tensor, OCRError> {
     let scaled = (xs * 1.702).map_err(|e| {
         candle_to_ocr_processing(
@@ -450,9 +455,9 @@ impl VisionAttention {
         let seq_len = q
             .dim(2)
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "vision q dim", e))?;
-        let attn = if seq_len > 1024 {
+        let attn = if seq_len > CHUNKED_ATTN_SEQ_THRESHOLD {
             // Chunked attention to reduce peak memory for large images.
-            let chunk_size = 256usize;
+            let chunk_size = CHUNKED_ATTN_CHUNK_SIZE;
             let mut chunks: Vec<Tensor> = Vec::new();
             let mut start = 0usize;
             while start < seq_len {
@@ -662,6 +667,14 @@ impl MinerUVisionModel {
         }
         let merger = PatchMerger::load(cfg, vb.clone())?;
         let head_dim = cfg.embed_dim / cfg.num_heads;
+        if !head_dim.is_multiple_of(2) {
+            return Err(OCRError::ConfigError {
+                message: format!(
+                    "MinerU2.5: head_dim {} must be even for rotary embeddings",
+                    head_dim
+                ),
+            });
+        }
         let rotary_pos_emb = VisionRotaryEmbedding::new(head_dim / 2, 10000.0, vb.device())?;
         Ok(Self {
             patch_embed,

@@ -22,8 +22,10 @@ mod utils;
 
 use clap::Parser;
 use image::{Rgb, RgbImage, imageops};
+use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::Serialize;
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info};
@@ -40,6 +42,8 @@ const DEFAULT_PROMPT: &str = "\nText Recognition:";
 const LAYOUT_IMAGE_SIZE: u32 = 1036;
 
 const LAYOUT_RE: &str = r"^<\|box_start\|>(\d+)\s+(\d+)\s+(\d+)\s+(\d+)<\|box_end\|><\|ref_start\|>(\w+?)<\|ref_end\|>(.*)$";
+
+static LAYOUT_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(LAYOUT_RE).expect("layout regex"));
 
 #[derive(Debug, Clone, Serialize)]
 struct ContentBlock {
@@ -222,27 +226,22 @@ fn two_step_extract(
 }
 
 fn parse_layout_output(output: &str) -> Vec<ContentBlock> {
-    let re = Regex::new(LAYOUT_RE).expect("layout regex");
     let mut blocks = Vec::new();
     for line in output.lines() {
-        let Some(caps) = re.captures(line) else {
+        let Some(caps) = LAYOUT_REGEX.captures(line) else {
             continue;
         };
-        let x1 = match caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-            Some(v) => v,
-            None => continue,
+        let Some(x1) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) else {
+            continue;
         };
-        let y1 = match caps.get(2).and_then(|m| m.as_str().parse::<i32>().ok()) {
-            Some(v) => v,
-            None => continue,
+        let Some(y1) = caps.get(2).and_then(|m| m.as_str().parse::<i32>().ok()) else {
+            continue;
         };
-        let x2 = match caps.get(3).and_then(|m| m.as_str().parse::<i32>().ok()) {
-            Some(v) => v,
-            None => continue,
+        let Some(x2) = caps.get(3).and_then(|m| m.as_str().parse::<i32>().ok()) else {
+            continue;
         };
-        let y2 = match caps.get(4).and_then(|m| m.as_str().parse::<i32>().ok()) {
-            Some(v) => v,
-            None => continue,
+        let Some(y2) = caps.get(4).and_then(|m| m.as_str().parse::<i32>().ok()) else {
+            continue;
         };
         let ref_type = caps
             .get(5)
@@ -380,7 +379,7 @@ fn prepare_for_extract(
 
 fn resize_by_need(image: &RgbImage, min_image_edge: u32, max_image_edge_ratio: f32) -> RgbImage {
     let (mut w, mut h) = image.dimensions();
-    let mut out = image.clone();
+    let mut out = Cow::Borrowed(image);
     let ratio = (w.max(h) as f32) / (w.min(h) as f32);
     if ratio > max_image_edge_ratio {
         let (new_w, new_h) = if w > h {
@@ -391,8 +390,8 @@ fn resize_by_need(image: &RgbImage, min_image_edge: u32, max_image_edge_ratio: f
         let mut canvas = RgbImage::from_pixel(new_w, new_h, Rgb([255, 255, 255]));
         let x = ((new_w - w) / 2) as i64;
         let y = ((new_h - h) / 2) as i64;
-        imageops::overlay(&mut canvas, &out, x, y);
-        out = canvas;
+        imageops::overlay(&mut canvas, &*out, x, y);
+        out = Cow::Owned(canvas);
     }
     (w, h) = out.dimensions();
     let min_edge = w.min(h);
@@ -400,9 +399,14 @@ fn resize_by_need(image: &RgbImage, min_image_edge: u32, max_image_edge_ratio: f
         let scale = min_image_edge as f32 / min_edge as f32;
         let new_w = (w as f32 * scale).ceil() as u32;
         let new_h = (h as f32 * scale).ceil() as u32;
-        out = imageops::resize(&out, new_w, new_h, imageops::FilterType::CatmullRom);
+        out = Cow::Owned(imageops::resize(
+            &*out,
+            new_w,
+            new_h,
+            imageops::FilterType::CatmullRom,
+        ));
     }
-    out
+    out.into_owned()
 }
 
 fn prompt_for_block(block_type: &str) -> &'static str {

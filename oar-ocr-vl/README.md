@@ -217,21 +217,11 @@ cargo run --release --features cuda --example glmocr -- \
 
 ### MinerU2.5 (Direct Inference)
 
-```bash
-cargo run --release --features cuda --example mineru -- \
-    --model-dir /path/to/MinerU2.5-2509-1.2B \
-    --device cuda:0 \
-    --mode two-step \
-    document.jpg
-```
-
-Single-prompt mode:
+Two-step document extraction (layout detection + content extraction):
 
 ```bash
 cargo run --release --features cuda --example mineru -- \
     --model-dir /path/to/MinerU2.5-2509-1.2B \
     --device cuda:0 \
-    --mode single \
-    --prompt $'\nDocument Parsing:' \
     document.jpg
 ```

@@ -203,6 +203,23 @@ impl MinerU {
         })
     }
 
+    /// Generate text for a batch of images and instructions.
+    ///
+    /// # Arguments
+    /// * `images` - Input images to process
+    /// * `instructions` - Text instructions/prompts for each image
+    /// * `max_new_tokens` - Maximum number of new tokens to generate
+    ///
+    /// # Returns
+    /// Vector of results, one for each input image-instruction pair
+    ///
+    /// # Limitations
+    /// * Batched inference with different sequence lengths has known issues due to
+    ///   variable left-padding causing incorrect attention mask computation during
+    ///   incremental generation. For reliable results, process samples one at a time
+    ///   when sequences have significantly different lengths.
+    /// * The current implementation works correctly when all sequences in the batch
+    ///   have similar lengths (minimal padding differences).
     pub fn generate(
         &self,
         images: &[RgbImage],
@@ -761,18 +778,12 @@ fn sample_from_probs(probs: &[f32]) -> Option<usize> {
 }
 
 fn apply_no_repeat_ngram(logits: &mut [f32], history: &[u32], ngram_size: usize) {
-    if ngram_size <= 1 || history.len() + 1 < ngram_size {
+    if ngram_size <= 1 || history.len() < ngram_size {
         return;
     }
     let prefix_len = ngram_size - 1;
-    if history.len() < prefix_len {
-        return;
-    }
     let prefix_start = history.len() - prefix_len;
     let prefix = &history[prefix_start..];
-    if history.len() < ngram_size {
-        return;
-    }
     let mut banned = HashSet::new();
     for i in 0..=history.len() - ngram_size {
         if history[i..i + prefix_len] == *prefix {
@@ -849,7 +860,7 @@ fn get_rope_index(
     let mut st = 0usize;
     let mut current_max: i64 = -1;
 
-    for (image_index, _) in (0..image_count).enumerate() {
+    for (image_index, &(t, h, w)) in image_grid_thw.iter().enumerate().take(image_count) {
         let ed = input_ids[st..]
             .iter()
             .position(|&id| id == image_token_id)
@@ -868,7 +879,6 @@ fn get_rope_index(
             current_max = current_max.max(p);
         }
 
-        let (t, h, w) = image_grid_thw[image_index];
         let llm_t = t as i64;
         let llm_h = (h / spatial_merge_size) as i64;
         let llm_w = (w / spatial_merge_size) as i64;
