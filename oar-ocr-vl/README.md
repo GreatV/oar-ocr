@@ -14,6 +14,7 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 | [HunyuanOCR](https://huggingface.co/tencent/HunyuanOCR) | 1B | End-to-end OCR VLM for multilingual document parsing, text spotting, and information extraction |
 | [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) | 0.9B | #1 on OmniDocBench v1.5 (94.62), optimized for real-world scenarios with MTP loss and RL training |
 | [LightOnOCR-2](https://huggingface.co/lightonai/LightOnOCR-2-1B) | 1B | SOTA on OlmOCR-Bench, 9x smaller than competitors, processes 5.7 pages/s on H100 |
+| [MinerU2.5](https://huggingface.co/opendatalab/MinerU2.5-2509-1.2B) | 1.2B | Decoupled document parsing VLM with strong text, formula, and table recognition |
 
 ## Document Parsing Pipeline
 
@@ -119,6 +120,19 @@ let result = parser.parse(&layout_predictor, image)?;
 println!("{}", result.to_markdown());
 ```
 
+### MinerU2.5
+
+```rust
+use oar_ocr_core::utils::load_image;
+use oar_ocr_vl::MinerU;
+
+let image = load_image("document.png")?;
+let device = candle_core::Device::Cpu;
+let model = MinerU::from_dir("/path/to/MinerU2.5-2509-1.2B", device)?;
+let result = model.generate(&[image], &["\nDocument Parsing:"], 4096);
+println!("Result: {}", result[0].as_ref()?);
+```
+
 ## Running Examples
 
 The `oar-ocr-vl` crate includes several examples demonstrating its capabilities.
@@ -198,5 +212,16 @@ cargo run --release --features cuda --example glmocr -- \
     --model-dir models/GLM-OCR \
     --device cuda \
     --prompt "Text Recognition:" \
+    document.jpg
+```
+
+### MinerU2.5 (Direct Inference)
+
+Two-step document extraction (layout detection + content extraction):
+
+```bash
+cargo run --release --features cuda --example mineru -- \
+    --model-dir /path/to/MinerU2.5-2509-1.2B \
+    --device cuda:0 \
     document.jpg
 ```

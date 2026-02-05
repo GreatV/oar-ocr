@@ -12,10 +12,11 @@
 //! - `HunyuanOcr` - OCR expert VLM (HunYuanVL)
 //! - `GlmOcr` - GLM-OCR OCR expert VLM
 //! - `LightOnOcr` - End-to-end OCR VLM
+//! - `MinerU` - MinerU2.5 document parsing VLM (Qwen2-VL backbone)
 
 use super::utils::{
     DetectedBox, calculate_overlap_ratio, calculate_projection_overlap_ratio, convert_otsl_to_html,
-    crop_margin, filter_overlap_boxes, text, truncate_repetitive_content,
+    crop_margin, filter_overlap_boxes, image::resize_for_mineru, text, truncate_repetitive_content,
 };
 use image::RgbImage;
 use image::{Rgb, imageops};
@@ -468,6 +469,7 @@ impl RecognitionBackend for UniRec {
 use super::glmocr::GlmOcr;
 use super::hunyuanocr::HunyuanOcr;
 use super::lightonocr::LightOnOcr;
+use super::mineru::MinerU;
 use super::paddleocr_vl::{PaddleOcrVl, PaddleOcrVlTask};
 
 impl RecognitionBackend for PaddleOcrVl {
@@ -626,6 +628,49 @@ impl RecognitionBackend for LightOnOcr {
 
     fn needs_table_postprocess(&self) -> bool {
         false
+    }
+
+    fn needs_formula_preprocess(&self) -> bool {
+        false
+    }
+
+    fn needs_repetition_truncation(&self) -> bool {
+        false // handled inside `recognize()`
+    }
+}
+
+impl RecognitionBackend for MinerU {
+    fn recognize(
+        &self,
+        image: RgbImage,
+        task: RecognitionTask,
+        max_tokens: usize,
+    ) -> Result<String, OCRError> {
+        let prompt = match task {
+            RecognitionTask::Ocr => "\nText Recognition:",
+            RecognitionTask::Table => "\nTable Recognition:",
+            RecognitionTask::Formula => "\nFormula Recognition:",
+            RecognitionTask::Chart => "\nDocument Parsing:",
+        };
+        // MinerU requires images with minimum edge >= 28 (factor constraint)
+        // Preprocess small or extremely aspect-ratioed images
+        let processed = resize_for_mineru(&image, 28, 50.0);
+        let out = self
+            .generate(&[processed], &[prompt], max_tokens)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| {
+                Err(OCRError::InvalidInput {
+                    message: "MinerU2.5: no result returned".to_string(),
+                })
+            })?;
+        Ok(truncate_repetitive_content(&out, 10, 10, 10)
+            .trim()
+            .to_string())
+    }
+
+    fn needs_table_postprocess(&self) -> bool {
+        true
     }
 
     fn needs_formula_preprocess(&self) -> bool {

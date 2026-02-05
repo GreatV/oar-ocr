@@ -39,6 +39,13 @@
 //!     --model-dir /path/to/GLM-OCR \
 //!     --layout-model models/pp-doclayoutv3.onnx \
 //!     document.jpg
+//!
+//! # Using MinerU2.5 model
+//! cargo run -p oar-ocr-vl --example doc_parser -- \
+//!     --model-name mineru \
+//!     --model-dir /path/to/MinerU2.5-2509-1.2B \
+//!     --layout-model models/pp-doclayoutv3.onnx \
+//!     document.jpg
 //! ```
 
 mod utils;
@@ -75,13 +82,16 @@ enum ModelName {
     /// LightOnOCR: End-to-end OCR VLM
     #[value(name = "lightonocr")]
     LightOnOcr,
+    /// MinerU2.5: Qwen2-VL document parsing model
+    #[value(name = "mineru")]
+    MinerU,
 }
 
 /// Command-line arguments
 #[derive(Parser)]
 #[command(name = "doc_parser")]
 #[command(
-    about = "Unified Document Parser - supports UniRec, PaddleOCR-VL, PaddleOCR-VL-1.5, HunyuanOCR, GLM-OCR, and LightOnOCR models"
+    about = "Unified Document Parser - supports UniRec, PaddleOCR-VL, PaddleOCR-VL-1.5, HunyuanOCR, GLM-OCR, LightOnOCR, and MinerU2.5 models"
 )]
 struct Args {
     /// Recognition model to use
@@ -122,7 +132,7 @@ struct Args {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use oar_ocr_vl::{GlmOcr, HunyuanOcr, LightOnOcr, PaddleOcrVl, UniRec};
+    use oar_ocr_vl::{GlmOcr, HunyuanOcr, LightOnOcr, MinerU, PaddleOcrVl, UniRec};
 
     utils::init_tracing();
     let args = Args::parse();
@@ -257,6 +267,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let model = LightOnOcr::from_dir(&args.model_dir, device)?;
             info!(
                 "LightOnOCR loaded in {:.2}ms",
+                load_start.elapsed().as_secs_f64() * 1000.0
+            );
+
+            let parser = DocParser::with_config(&model, config);
+            process_images(&parser, layout_predictor.as_ref(), &existing_images, &args)?;
+        }
+        ModelName::MinerU => {
+            info!("Loading MinerU2.5 model...");
+            let load_start = Instant::now();
+            let model = MinerU::from_dir(&args.model_dir, device)?;
+            info!(
+                "MinerU2.5 loaded in {:.2}ms",
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
 

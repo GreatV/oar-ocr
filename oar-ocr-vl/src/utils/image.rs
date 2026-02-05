@@ -122,19 +122,9 @@ pub fn smart_resize(
         });
     }
 
-    let mut height = height as f64;
-    let mut width = width as f64;
+    let height = height as f64;
+    let width = width as f64;
     let factor_f = factor as f64;
-
-    // Ensure dimensions are at least factor_f
-    if height < factor_f {
-        width = ((width * factor_f) / height).round();
-        height = factor_f;
-    }
-    if width < factor_f {
-        height = ((height * factor_f) / width).round();
-        width = factor_f;
-    }
 
     let max_dim = height.max(width);
     let min_dim = height.min(width);
@@ -155,15 +145,44 @@ pub fn smart_resize(
         let beta = ((height * width) / max_pixels as f64).sqrt();
         h_bar = ((height / beta) / factor_f).floor() * factor_f;
         w_bar = ((width / beta) / factor_f).floor() * factor_f;
+        if h_bar < factor_f {
+            h_bar = factor_f;
+        }
+        if w_bar < factor_f {
+            w_bar = factor_f;
+        }
+        // After scaling down, ensure we don't violate min_pixels due to quantization
+        if (h_bar * w_bar) < min_pixels as f64 {
+            return Err(OCRError::InvalidInput {
+                message: format!(
+                    "smart_resize: cannot satisfy both min_pixels={} and max_pixels={} constraints after quantization",
+                    min_pixels, max_pixels
+                ),
+            });
+        }
     } else if area < min_pixels as f64 {
         let beta = (min_pixels as f64 / (height * width)).sqrt();
         h_bar = ((height * beta) / factor_f).ceil() * factor_f;
         w_bar = ((width * beta) / factor_f).ceil() * factor_f;
+        // Ensure minimum dimensions are at least factor_f
+        if h_bar < factor_f {
+            h_bar = factor_f;
+        }
+        if w_bar < factor_f {
+            w_bar = factor_f;
+        }
+        // After scaling up, ensure we don't violate max_pixels due to quantization
+        if (h_bar * w_bar) > max_pixels as f64 {
+            return Err(OCRError::InvalidInput {
+                message: format!(
+                    "smart_resize: cannot satisfy both min_pixels={} and max_pixels={} constraints after quantization",
+                    min_pixels, max_pixels
+                ),
+            });
+        }
     }
 
-    let h_out = h_bar.max(factor_f) as u32;
-    let w_out = w_bar.max(factor_f) as u32;
-    Ok((h_out, w_out))
+    Ok((h_bar as u32, w_bar as u32))
 }
 
 /// Clamp dimensions to a maximum image size while maintaining aspect ratio and factor divisibility.
@@ -217,6 +236,52 @@ pub fn clamp_to_max_image_size(
     let w = w as u32;
 
     Ok((h, w))
+}
+
+/// Resize an image for MinerU2.5 inference.
+///
+/// Handles two cases:
+/// 1. If the aspect ratio exceeds `max_aspect_ratio`, the image is padded with
+///    white to bring it within bounds.
+/// 2. If the minimum edge is below `min_edge`, the image is scaled up.
+pub fn resize_for_mineru(image: &RgbImage, min_edge: u32, max_aspect_ratio: f32) -> RgbImage {
+    use image::{Rgb, imageops};
+    use std::borrow::Cow;
+
+    let (mut w, mut h) = image.dimensions();
+    let mut out = Cow::Borrowed(image);
+
+    // Handle extreme aspect ratios by padding
+    let ratio = (w.max(h) as f32) / (w.min(h).max(1) as f32);
+    if ratio > max_aspect_ratio {
+        let (new_w, new_h) = if w > h {
+            (w, (w as f32 / max_aspect_ratio).ceil() as u32)
+        } else {
+            ((h as f32 / max_aspect_ratio).ceil() as u32, h)
+        };
+        let mut canvas = RgbImage::from_pixel(new_w, new_h, Rgb([255, 255, 255]));
+        let x = ((new_w - w) / 2) as i64;
+        let y = ((new_h - h) / 2) as i64;
+        imageops::overlay(&mut canvas, &*out, x, y);
+        out = Cow::Owned(canvas);
+        (w, h) = out.dimensions();
+    }
+
+    // Scale up if minimum edge is too small
+    let min_dim = w.min(h);
+    if min_dim < min_edge {
+        let scale = min_edge as f32 / min_dim as f32;
+        let new_w = (w as f32 * scale).ceil() as u32;
+        let new_h = (h as f32 * scale).ceil() as u32;
+        out = Cow::Owned(imageops::resize(
+            &*out,
+            new_w,
+            new_h,
+            imageops::FilterType::CatmullRom,
+        ));
+    }
+
+    out.into_owned()
 }
 
 #[cfg(test)]
