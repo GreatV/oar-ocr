@@ -114,7 +114,7 @@ struct Args {
     #[arg(long, default_value = "pp-doclayoutv3")]
     layout_model_name: String,
 
-    /// Device to run on: cpu, cuda, or cuda:N
+    /// Device to run on: cpu, cuda, cuda:N, or metal
     #[arg(short, long, default_value = "cpu")]
     device: String,
 

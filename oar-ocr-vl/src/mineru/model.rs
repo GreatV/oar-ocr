@@ -567,31 +567,44 @@ fn create_generation_mask(
 ) -> Result<Tensor, candle_core::Error> {
     let batch_size = pad_lens.len();
 
+    // For Metal, create mask on CPU first then transfer to device
+    let compute_device = match device {
+        Device::Metal(_) => &Device::Cpu,
+        _ => device,
+    };
+
     // pad_lens as tensor: (batch, 1, 1, 1)
     let pad_lens_tensor = Tensor::from_vec(
         pad_lens.iter().map(|&x| x as u32).collect::<Vec<_>>(),
         (batch_size, 1, 1, 1),
-        device,
+        compute_device,
     )?
     .to_dtype(dtype)?;
 
     // Position indices: (1, 1, 1, kv_len)
-    let pos_tensor = Tensor::arange(0u32, kv_len as u32, device)?
+    let pos_tensor = Tensor::arange(0u32, kv_len as u32, compute_device)?
         .reshape((1, 1, 1, kv_len))?
         .to_dtype(dtype)?;
 
     // Mask condition: pos < pad_len -> masked (large negative value)
     let mask_cond = pos_tensor.broadcast_lt(&pad_lens_tensor)?;
 
-    let zero = Tensor::new(0f32, device)?
+    let zero = Tensor::new(0f32, compute_device)?
         .to_dtype(dtype)?
         .broadcast_as(mask_cond.shape())?;
     // Use large negative value instead of -inf to avoid potential numerical issues
-    let mask_value = Tensor::new(-1e9_f32, device)?
+    let mask_value = Tensor::new(-1e9_f32, compute_device)?
         .to_dtype(dtype)?
         .broadcast_as(mask_cond.shape())?;
 
-    mask_cond.where_cond(&mask_value, &zero)
+    let mask = mask_cond.where_cond(&mask_value, &zero)?;
+
+    // Transfer to target device if needed
+    if matches!(device, Device::Metal(_)) {
+        mask.to_device(device)
+    } else {
+        Ok(mask)
+    }
 }
 
 fn build_prompt(instruction: &str) -> String {

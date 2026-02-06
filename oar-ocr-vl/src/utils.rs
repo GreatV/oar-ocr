@@ -27,13 +27,15 @@ use std::collections::HashSet;
 /// - `"cpu"` → CPU device
 /// - `"cuda"` or `"gpu"` → CUDA device 0
 /// - `"cuda:N"` → CUDA device N (e.g., `"cuda:1"`)
+/// - `"metal"` → Metal device (Apple GPU)
 ///
 /// # Errors
 ///
 /// Returns an error if:
 /// - The device string is invalid
 /// - CUDA is requested but the `cuda` feature is not enabled
-/// - CUDA device creation fails
+/// - Metal is requested but the `metal` feature is not enabled
+/// - Device creation fails
 ///
 /// # Examples
 ///
@@ -44,7 +46,8 @@ use std::collections::HashSet;
 /// let cpu = parse_device("cpu")?;
 /// let cuda = parse_device("cuda")?;
 /// let cuda1 = parse_device("cuda:1")?;
-/// # let _ = (cpu, cuda, cuda1);
+/// let metal = parse_device("metal")?;
+/// # let _ = (cpu, cuda, cuda1, metal);
 /// # Ok(())
 /// # }
 /// ```
@@ -52,6 +55,13 @@ use std::collections::HashSet;
 fn cuda_not_enabled() -> OCRError {
     OCRError::ConfigError {
         message: "CUDA support not enabled. Compile with --features cuda".to_string(),
+    }
+}
+
+#[cfg(not(feature = "metal"))]
+fn metal_not_enabled() -> OCRError {
+    OCRError::ConfigError {
+        message: "Metal support not enabled. Compile with --features metal".to_string(),
     }
 }
 
@@ -69,6 +79,18 @@ pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
             #[cfg(not(feature = "cuda"))]
             {
                 Err(cuda_not_enabled())
+            }
+        }
+        "metal" => {
+            #[cfg(feature = "metal")]
+            {
+                Device::new_metal(0).map_err(|e| OCRError::ConfigError {
+                    message: format!("Failed to create Metal device: {}", e),
+                })
+            }
+            #[cfg(not(feature = "metal"))]
+            {
+                Err(metal_not_enabled())
             }
         }
         s if s.starts_with("cuda:") => {
@@ -93,7 +115,7 @@ pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
         }
         _ => Err(OCRError::ConfigError {
             message: format!(
-                "Unknown device: '{}'. Use 'cpu', 'cuda', or 'cuda:N'",
+                "Unknown device: '{}'. Use 'cpu', 'cuda', 'cuda:N', or 'metal'",
                 device_str
             ),
         }),

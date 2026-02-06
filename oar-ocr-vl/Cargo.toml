@@ -21,6 +21,8 @@ categories = ["computer-vision", "science"]
 default = []
 # When enabled, turns on Candle's CUDA backend for GPU acceleration.
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+# When enabled, turns on Candle's Metal backend for GPU acceleration on Apple devices.
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 
 [dependencies]
 oar-ocr-core.workspace = true

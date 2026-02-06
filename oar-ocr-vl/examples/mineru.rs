@@ -66,7 +66,7 @@ struct Args {
     #[arg(required = true)]
     images: Vec<PathBuf>,
 
-    /// Device to run on: cpu, cuda, or cuda:N (default: cpu)
+    /// Device to run on: cpu, cuda, cuda:N, or metal (default: cpu)
     #[arg(short, long, default_value = "cpu")]
     device: String,
 
