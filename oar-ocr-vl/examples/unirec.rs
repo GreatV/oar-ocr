@@ -12,7 +12,7 @@
 //! # Arguments
 //!
 //! * `-m, --model-dir` - Path to the UniRec model directory (containing model.safetensors, config.json, tokenizer.json)
-//! * `-d, --device` - Device to run on: cpu, cuda, or cuda:N (default: cpu)
+//! * `-d, --device` - Device to run on: cpu, cuda, cuda:N, or metal (default: cpu)
 //! * `--max-tokens` - Maximum number of tokens to generate (default: 512)
 //! * `-v, --verbose` - Enable verbose output
 //! * `<IMAGES>...` - Paths to input images to process
@@ -58,7 +58,7 @@ struct Args {
     #[arg(required = true)]
     images: Vec<PathBuf>,
 
-    /// Device to run on: cpu, cuda, or cuda:N (default: cpu)
+    /// Device to run on: cpu, cuda, cuda:N, or metal (default: cpu)
     #[arg(short, long, default_value = "cpu")]
     device: String,
 

@@ -1,4 +1,5 @@
 use super::config::GlmOcrVisionConfig;
+use crate::attention::on_compute_device;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::{
@@ -102,30 +103,9 @@ impl GlmOcrVisionRotaryEmbedding {
     }
 
     fn forward(&self, seqlen: usize) -> Result<Tensor, OCRError> {
-        let seq = Tensor::arange(0u32, seqlen as u32, self.inv_freq.device())
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "GLM-OCR: create vision pos ids",
-                    e,
-                )
-            })?
-            .to_dtype(self.inv_freq.dtype())
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "GLM-OCR: cast vision pos ids",
-                    e,
-                )
-            })?
-            .reshape((seqlen, 1))
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "GLM-OCR: vision pos reshape",
-                    e,
-                )
-            })?;
+        let device = self.inv_freq.device();
+        let dtype = self.inv_freq.dtype();
+
         let inv_len = self.inv_freq.dims1().map_err(|e| {
             candle_to_ocr_processing(
                 oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
@@ -133,17 +113,24 @@ impl GlmOcrVisionRotaryEmbedding {
                 e,
             )
         })?;
-        let inv = self.inv_freq.reshape((1, inv_len)).map_err(|e| {
+
+        // Use on_compute_device to handle Metal's lack of support for arange
+        on_compute_device(device, |compute_device| {
+            let seq = Tensor::arange(0u32, seqlen as u32, compute_device)?
+                .to_dtype(dtype)?
+                .reshape((seqlen, 1))?;
+
+            let inv = self
+                .inv_freq
+                .to_device(compute_device)?
+                .reshape((1, inv_len))?;
+
+            seq.matmul(&inv)
+        })
+        .map_err(|e| {
             candle_to_ocr_processing(
                 oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "GLM-OCR: vision inv_freq reshape",
-                e,
-            )
-        })?;
-        seq.matmul(&inv).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "GLM-OCR: vision freqs matmul",
+                "GLM-OCR: vision rope forward failed",
                 e,
             )
         })
@@ -720,106 +707,40 @@ impl GlmOcrVisionModel {
     fn rot_pos_emb(&self, grid_thw: (usize, usize, usize)) -> Result<Tensor, OCRError> {
         let (_t, h, w) = grid_thw;
         let merge = self.cfg.spatial_merge_size;
+        let device = self.patch_embed.weight.device();
 
-        let hpos = Tensor::arange(0u32, h as u32, self.patch_embed.weight.device())
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "GLM-OCR: vision hpos arange",
-                    e,
-                )
-            })?
-            .reshape((h, 1))
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "GLM-OCR: vision hpos reshape",
-                    e,
-                )
-            })?
-            .broadcast_as((h, w))
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "GLM-OCR: vision hpos broadcast",
-                    e,
-                )
-            })?;
-        let hpos = hpos
-            .reshape((h / merge, merge, w / merge, merge))
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "GLM-OCR: vision hpos reshape merge",
-                    e,
-                )
-            })?
-            .permute((0, 2, 1, 3))
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "GLM-OCR: vision hpos permute",
-                    e,
-                )
-            })?
-            .flatten(0, 3)
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "GLM-OCR: vision hpos flatten",
-                    e,
-                )
-            })?;
+        // Use on_compute_device to handle Metal's lack of support for arange and broadcast_as
+        let hpos = on_compute_device(device, |compute_device| {
+            let hpos = Tensor::arange(0u32, h as u32, compute_device)?
+                .reshape((h, 1))?
+                .broadcast_as((h, w))?;
+            hpos.reshape((h / merge, merge, w / merge, merge))?
+                .permute((0, 2, 1, 3))?
+                .flatten(0, 3)
+        })
+        .map_err(|e| {
+            candle_to_ocr_processing(
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                "GLM-OCR: vision hpos computation failed",
+                e,
+            )
+        })?;
 
-        let wpos = Tensor::arange(0u32, w as u32, self.patch_embed.weight.device())
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "GLM-OCR: vision wpos arange",
-                    e,
-                )
-            })?
-            .reshape((1, w))
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "GLM-OCR: vision wpos reshape",
-                    e,
-                )
-            })?
-            .broadcast_as((h, w))
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "GLM-OCR: vision wpos broadcast",
-                    e,
-                )
-            })?;
-        let wpos = wpos
-            .reshape((h / merge, merge, w / merge, merge))
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "GLM-OCR: vision wpos reshape merge",
-                    e,
-                )
-            })?
-            .permute((0, 2, 1, 3))
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "GLM-OCR: vision wpos permute",
-                    e,
-                )
-            })?
-            .flatten(0, 3)
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "GLM-OCR: vision wpos flatten",
-                    e,
-                )
-            })?;
+        let wpos = on_compute_device(device, |compute_device| {
+            let wpos = Tensor::arange(0u32, w as u32, compute_device)?
+                .reshape((1, w))?
+                .broadcast_as((h, w))?;
+            wpos.reshape((h / merge, merge, w / merge, merge))?
+                .permute((0, 2, 1, 3))?
+                .flatten(0, 3)
+        })
+        .map_err(|e| {
+            candle_to_ocr_processing(
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                "GLM-OCR: vision wpos computation failed",
+                e,
+            )
+        })?;
 
         let pos_ids = Tensor::stack(&[&hpos, &wpos], D::Minus1).map_err(|e| {
             candle_to_ocr_processing(

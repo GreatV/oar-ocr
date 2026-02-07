@@ -8,7 +8,7 @@ use candle_nn::{Embedding, LayerNorm, Linear, Module, VarBuilder, kv_cache::KvCa
 use std::cell::RefCell;
 
 use super::config::UniRecConfig;
-use crate::attention::scaled_dot_product_attention;
+use crate::attention::{on_compute_device, scaled_dot_product_attention};
 use crate::utils::candle_to_ocr_inference;
 use oar_ocr_core::core::OCRError;
 
@@ -62,30 +62,36 @@ impl SinusoidalPositionalEmbedding {
     }
 
     fn forward(&self, position_ids: &Tensor, device: &Device, dtype: DType) -> Result<Tensor> {
-        // Generate sinusoidal embeddings entirely on GPU using tensor operations
         let half_dim = self.embed_dim / 2;
         let emb_scale = -(10000f64.ln()) / (half_dim as f64);
 
-        // Create frequency tensor: exp(-i * log(10000) / half_dim) for i in [0, half_dim)
-        // Shape: [half_dim]
-        let freq_indices = Tensor::arange(0u32, half_dim as u32, device)?.to_dtype(DType::F32)?;
-        let freqs = (&freq_indices * emb_scale)?.exp()?;
+        // Use on_compute_device to handle Metal's lack of support for arange and broadcast_*
+        on_compute_device(device, |compute_device| {
+            // Create frequency tensor: exp(-i * log(10000) / half_dim) for i in [0, half_dim)
+            // Shape: [half_dim]
+            let freq_indices =
+                Tensor::arange(0u32, half_dim as u32, compute_device)?.to_dtype(DType::F32)?;
+            let freqs = (&freq_indices * emb_scale)?.exp()?;
 
-        // Add offset to positions: [batch, seq_len]
-        let positions = position_ids
-            .to_dtype(DType::F32)?
-            .broadcast_add(&Tensor::new(self.offset as f32, device)?)?;
+            // Transfer position_ids to compute device if needed
+            let position_ids = position_ids.to_device(compute_device)?;
 
-        // Compute angles: positions [batch, seq_len, 1] * freqs [1, 1, half_dim]
-        // Result shape: [batch, seq_len, half_dim]
-        let positions_expanded = positions.unsqueeze(D::Minus1)?;
-        let freqs_expanded = freqs.reshape((1, 1, half_dim))?;
-        let angles = positions_expanded.broadcast_mul(&freqs_expanded)?;
+            // Add offset to positions: [batch, seq_len]
+            let positions = position_ids
+                .to_dtype(DType::F32)?
+                .broadcast_add(&Tensor::new(self.offset as f32, compute_device)?)?;
 
-        // Compute sin and cos, then concatenate: [batch, seq_len, embed_dim]
-        let sin_emb = angles.sin()?;
-        let cos_emb = angles.cos()?;
-        Tensor::cat(&[&sin_emb, &cos_emb], D::Minus1)?.to_dtype(dtype)
+            // Compute angles: positions [batch, seq_len, 1] * freqs [1, 1, half_dim]
+            // Result shape: [batch, seq_len, half_dim]
+            let positions_expanded = positions.unsqueeze(D::Minus1)?;
+            let freqs_expanded = freqs.reshape((1, 1, half_dim))?;
+            let angles = positions_expanded.broadcast_mul(&freqs_expanded)?;
+
+            // Compute sin and cos, then concatenate: [batch, seq_len, embed_dim]
+            let sin_emb = angles.sin()?;
+            let cos_emb = angles.cos()?;
+            Tensor::cat(&[&sin_emb, &cos_emb], D::Minus1)?.to_dtype(dtype)
+        })
     }
 }
 

@@ -4,6 +4,7 @@
 //! `modeling_pixtral.py` more closely than the Candle version, particularly
 //! in the RoPE (Rotary Position Embedding) computation.
 
+use crate::attention::on_compute_device;
 use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::{
     Conv2d, Conv2dConfig, Linear, RmsNorm, VarBuilder, conv2d_no_bias, linear_b, rms_norm,
@@ -53,23 +54,25 @@ fn position_ids_in_meshgrid(
     max_width: usize,
     device: &Device,
 ) -> Result<Tensor> {
-    let h = Tensor::arange(0u32, num_patches_h as u32, device)?;
-    let w = Tensor::arange(0u32, num_patches_w as u32, device)?;
+    on_compute_device(device, |compute_device| {
+        let h = Tensor::arange(0u32, num_patches_h as u32, compute_device)?;
+        let w = Tensor::arange(0u32, num_patches_w as u32, compute_device)?;
 
-    // meshgrid with indexing="ij"
-    let h_grid = h
-        .unsqueeze(1)?
-        .broadcast_as((num_patches_h, num_patches_w))?;
-    let w_grid = w
-        .unsqueeze(0)?
-        .broadcast_as((num_patches_h, num_patches_w))?;
+        // meshgrid with indexing="ij"
+        let h_grid = h
+            .unsqueeze(1)?
+            .broadcast_as((num_patches_h, num_patches_w))?;
+        let w_grid = w
+            .unsqueeze(0)?
+            .broadcast_as((num_patches_h, num_patches_w))?;
 
-    // ids = h_grid * max_width + w_grid
-    let ids = (h_grid.to_dtype(DType::U32)? * (max_width as f64))?
-        .add(&w_grid.to_dtype(DType::U32)?)?
-        .flatten_all()?;
+        // ids = h_grid * max_width + w_grid
+        let ids = (h_grid.to_dtype(DType::U32)? * (max_width as f64))?
+            .add(&w_grid.to_dtype(DType::U32)?)?
+            .flatten_all()?;
 
-    Ok(ids)
+        Ok(ids)
+    })
 }
 
 /// Pixtral Rotary Embedding.
@@ -121,54 +124,59 @@ impl PixtralRotaryEmbedding {
             &freqs_w[..4.min(freqs_w.len())]
         );
 
-        let freqs_h = Tensor::new(freqs_h, device)?;
-        let freqs_w = Tensor::new(freqs_w, device)?;
+        // Use on_compute_device to handle Metal's lack of support for arange and broadcast_as
+        let inv_freq = on_compute_device(device, |compute_device| {
+            let freqs_h = Tensor::new(freqs_h.clone(), compute_device)?;
+            let freqs_w = Tensor::new(freqs_w.clone(), compute_device)?;
 
-        // Position indices
-        let h = Tensor::arange(0u32, max_patches_per_side as u32, device)?.to_dtype(DType::F32)?;
-        let w = Tensor::arange(0u32, max_patches_per_side as u32, device)?.to_dtype(DType::F32)?;
+            // Position indices
+            let h = Tensor::arange(0u32, max_patches_per_side as u32, compute_device)?
+                .to_dtype(DType::F32)?;
+            let w = Tensor::arange(0u32, max_patches_per_side as u32, compute_device)?
+                .to_dtype(DType::F32)?;
 
-        // Compute outer products: (max_patches, dim/4)
-        let freqs_h = h.unsqueeze(1)?.matmul(&freqs_h.unsqueeze(0)?)?;
-        let freqs_w = w.unsqueeze(1)?.matmul(&freqs_w.unsqueeze(0)?)?;
+            // Compute outer products: (max_patches, dim/4)
+            let freqs_h = h.unsqueeze(1)?.matmul(&freqs_h.unsqueeze(0)?)?;
+            let freqs_w = w.unsqueeze(1)?.matmul(&freqs_w.unsqueeze(0)?)?;
 
-        debug!(
-            "PixtralRotaryEmbedding: freqs_h outer shape {:?}, freqs_w outer shape {:?}",
-            freqs_h.dims(),
-            freqs_w.dims()
-        );
+            debug!(
+                "PixtralRotaryEmbedding: freqs_h outer shape {:?}, freqs_w outer shape {:?}",
+                freqs_h.dims(),
+                freqs_w.dims()
+            );
 
-        // Build the full inv_freq tensor:
-        // freqs_h: (max_patches, 1, dim/4) repeated along width
-        // freqs_w: (1, max_patches, dim/4) repeated along height
-        // concat along last dim -> (max_patches, max_patches, dim/2)
-        // reshape -> (max_patches^2, dim/2)
-        let freqs_h = freqs_h
-            .unsqueeze(1)?
-            .broadcast_as((max_patches_per_side, max_patches_per_side, freqs_h.dim(1)?))?
-            .contiguous()?;
-        let freqs_w = freqs_w
-            .unsqueeze(0)?
-            .broadcast_as((max_patches_per_side, max_patches_per_side, freqs_w.dim(1)?))?
-            .contiguous()?;
+            // Build the full inv_freq tensor:
+            // freqs_h: (max_patches, 1, dim/4) repeated along width
+            // freqs_w: (1, max_patches, dim/4) repeated along height
+            // concat along last dim -> (max_patches, max_patches, dim/2)
+            // reshape -> (max_patches^2, dim/2)
+            let freqs_h = freqs_h
+                .unsqueeze(1)?
+                .broadcast_as((max_patches_per_side, max_patches_per_side, freqs_h.dim(1)?))?
+                .contiguous()?;
+            let freqs_w = freqs_w
+                .unsqueeze(0)?
+                .broadcast_as((max_patches_per_side, max_patches_per_side, freqs_w.dim(1)?))?
+                .contiguous()?;
 
-        debug!(
-            "PixtralRotaryEmbedding: broadcast freqs_h {:?}, freqs_w {:?}",
-            freqs_h.dims(),
-            freqs_w.dims()
-        );
+            debug!(
+                "PixtralRotaryEmbedding: broadcast freqs_h {:?}, freqs_w {:?}",
+                freqs_h.dims(),
+                freqs_w.dims()
+            );
 
-        let inv_freq = Tensor::cat(&[freqs_h, freqs_w], D::Minus1)?
-            .reshape((max_patches_per_side * max_patches_per_side, dim / 2))?;
+            let inv_freq = Tensor::cat(&[freqs_h, freqs_w], D::Minus1)?
+                .reshape((max_patches_per_side * max_patches_per_side, dim / 2))?;
 
-        debug!(
-            "PixtralRotaryEmbedding: inv_freq after concat and reshape {:?}",
-            inv_freq.dims()
-        );
+            debug!(
+                "PixtralRotaryEmbedding: inv_freq after concat and reshape {:?}",
+                inv_freq.dims()
+            );
 
-        // CRITICAL: Duplicate inv_freq to full dimension (dim/2 -> dim)
-        // This matches: inv_freq = torch.cat((inv_freq, inv_freq), dim=-1)
-        let inv_freq = Tensor::cat(&[&inv_freq, &inv_freq], D::Minus1)?;
+            // CRITICAL: Duplicate inv_freq to full dimension (dim/2 -> dim)
+            // This matches: inv_freq = torch.cat((inv_freq, inv_freq), dim=-1)
+            Tensor::cat(&[&inv_freq, &inv_freq], D::Minus1)
+        })?;
 
         debug!(
             "PixtralRotaryEmbedding: final inv_freq shape {:?}",

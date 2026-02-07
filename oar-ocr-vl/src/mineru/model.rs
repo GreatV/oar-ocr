@@ -2,7 +2,9 @@ use super::config::{MinerUConfig, MinerUImageProcessorConfig};
 use super::processing::preprocess_images;
 use super::text::MinerUTextModel;
 use super::vision::MinerUVisionModel;
-use crate::attention::{combine_masks, create_causal_mask, create_left_padding_mask};
+use crate::attention::{
+    combine_masks, create_causal_mask, create_left_padding_mask, on_compute_device,
+};
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
@@ -567,31 +569,33 @@ fn create_generation_mask(
 ) -> Result<Tensor, candle_core::Error> {
     let batch_size = pad_lens.len();
 
-    // pad_lens as tensor: (batch, 1, 1, 1)
-    let pad_lens_tensor = Tensor::from_vec(
-        pad_lens.iter().map(|&x| x as u32).collect::<Vec<_>>(),
-        (batch_size, 1, 1, 1),
-        device,
-    )?
-    .to_dtype(dtype)?;
-
-    // Position indices: (1, 1, 1, kv_len)
-    let pos_tensor = Tensor::arange(0u32, kv_len as u32, device)?
-        .reshape((1, 1, 1, kv_len))?
+    on_compute_device(device, |compute_device| {
+        // pad_lens as tensor: (batch, 1, 1, 1)
+        let pad_lens_tensor = Tensor::from_vec(
+            pad_lens.iter().map(|&x| x as u32).collect::<Vec<_>>(),
+            (batch_size, 1, 1, 1),
+            compute_device,
+        )?
         .to_dtype(dtype)?;
 
-    // Mask condition: pos < pad_len -> masked (large negative value)
-    let mask_cond = pos_tensor.broadcast_lt(&pad_lens_tensor)?;
+        // Position indices: (1, 1, 1, kv_len)
+        let pos_tensor = Tensor::arange(0u32, kv_len as u32, compute_device)?
+            .reshape((1, 1, 1, kv_len))?
+            .to_dtype(dtype)?;
 
-    let zero = Tensor::new(0f32, device)?
-        .to_dtype(dtype)?
-        .broadcast_as(mask_cond.shape())?;
-    // Use large negative value instead of -inf to avoid potential numerical issues
-    let mask_value = Tensor::new(-1e9_f32, device)?
-        .to_dtype(dtype)?
-        .broadcast_as(mask_cond.shape())?;
+        // Mask condition: pos < pad_len -> masked (large negative value)
+        let mask_cond = pos_tensor.broadcast_lt(&pad_lens_tensor)?;
 
-    mask_cond.where_cond(&mask_value, &zero)
+        let zero = Tensor::new(0f32, compute_device)?
+            .to_dtype(dtype)?
+            .broadcast_as(mask_cond.shape())?;
+        // Use large negative value instead of -inf to avoid potential numerical issues
+        let mask_value = Tensor::new(-1e9_f32, compute_device)?
+            .to_dtype(dtype)?
+            .broadcast_as(mask_cond.shape())?;
+
+        mask_cond.where_cond(&mask_value, &zero)
+    })
 }
 
 fn build_prompt(instruction: &str) -> String {
