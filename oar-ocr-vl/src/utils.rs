@@ -43,13 +43,22 @@ use std::collections::HashSet;
 /// ```no_run
 /// use oar_ocr_vl::utils::parse_device;
 ///
+/// # #[allow(unused_variables)]
 /// # fn main() -> Result<(), oar_ocr_core::core::OCRError> {
+/// // CPU is always available
 /// let cpu = parse_device("cpu")?;
+///
+/// // CUDA examples (only when cuda feature is enabled)
+/// # #[cfg(feature = "cuda")]
 /// let cuda = parse_device("cuda")?;
+/// # #[cfg(feature = "cuda")]
 /// let cuda1 = parse_device("cuda:1")?;
+///
+/// // Metal examples (only when metal feature is enabled)
+/// # #[cfg(feature = "metal")]
 /// let metal = parse_device("metal")?;
+/// # #[cfg(feature = "metal")]
 /// let metal1 = parse_device("metal:1")?;
-/// # let _ = (cpu, cuda, cuda1, metal, metal1);
 /// # Ok(())
 /// # }
 /// ```
