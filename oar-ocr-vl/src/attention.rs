@@ -51,7 +51,7 @@ pub(crate) fn on_compute_device<F>(device: &Device, f: F) -> Result<Tensor>
 where
     F: FnOnce(&Device) -> Result<Tensor>,
 {
-    if let Device::Metal(_) = device {
+    if device.is_metal() {
         // Operations unsupported on Metal are run on the CPU...
         let cpu_device = Device::Cpu;
         let tensor_on_cpu = f(&cpu_device)?;
