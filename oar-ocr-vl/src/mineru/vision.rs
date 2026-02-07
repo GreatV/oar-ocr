@@ -1,5 +1,5 @@
 use super::config::MinerUVisionConfig;
-use crate::attention::scaled_dot_product_attention;
+use crate::attention::{on_compute_device, scaled_dot_product_attention};
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{LayerNorm, LayerNormConfig, Linear, Module, VarBuilder, layer_norm, linear};
@@ -263,51 +263,22 @@ impl VisionRotaryEmbedding {
     }
 
     fn forward(&self, seqlen: usize, device: &Device) -> Result<Tensor, OCRError> {
-        let seq = Tensor::arange(0u32, seqlen as u32, device)
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "MinerU2.5: vision rope seq tensor failed",
-                    e,
-                )
-            })?
-            .to_dtype(DType::F32)
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "MinerU2.5: vision rope seq cast failed",
-                    e,
-                )
-            })?;
-        let inv = self.inv_freq.to_dtype(DType::F32).map_err(|e| {
+        // Use on_compute_device to handle Metal's lack of support for arange
+        on_compute_device(device, |compute_device| {
+            let seq = Tensor::arange(0u32, seqlen as u32, compute_device)?.to_dtype(DType::F32)?;
+            let inv = self
+                .inv_freq
+                .to_device(compute_device)?
+                .to_dtype(DType::F32)?;
+            seq.unsqueeze(1)?.matmul(&inv.unsqueeze(0)?)
+        })
+        .map_err(|e| {
             candle_to_ocr_processing(
                 oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "MinerU2.5: vision inv_freq cast failed",
+                "MinerU2.5: vision rope forward failed",
                 e,
             )
-        })?;
-        seq.unsqueeze(1)
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "MinerU2.5: vision seq unsqueeze failed",
-                    e,
-                )
-            })?
-            .matmul(&inv.unsqueeze(0).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "MinerU2.5: vision inv_freq unsqueeze failed",
-                    e,
-                )
-            })?)
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "MinerU2.5: vision rope outer product failed",
-                    e,
-                )
-            })
+        })
     }
 
     fn dim(&self) -> usize {

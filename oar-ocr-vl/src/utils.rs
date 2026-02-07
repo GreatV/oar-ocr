@@ -67,6 +67,27 @@ fn metal_not_enabled() -> OCRError {
     }
 }
 
+/// Helper function to parse a device string with an ordinal (e.g., "cuda:1", "metal:0").
+#[cfg(any(feature = "cuda", feature = "metal"))]
+fn parse_device_with_ordinal(
+    s: &str,
+    prefix: &str,
+    device_name: &str,
+    creator: impl Fn(usize) -> candle_core::Result<Device>,
+) -> Result<Device, OCRError> {
+    let ordinal_str = s
+        .strip_prefix(prefix)
+        .ok_or_else(|| OCRError::ConfigError {
+            message: format!("Invalid {} device string '{}'", device_name, s),
+        })?;
+    let ordinal: usize = ordinal_str.parse().map_err(|_| OCRError::ConfigError {
+        message: format!("Invalid {} device ordinal in '{}'", device_name, s),
+    })?;
+    creator(ordinal).map_err(|e| OCRError::ConfigError {
+        message: format!("Failed to create {} device {}: {}", device_name, ordinal, e),
+    })
+}
+
 pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
     let device_str = device_str.to_lowercase();
     match device_str.as_str() {
@@ -98,17 +119,7 @@ pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
         s if s.starts_with("cuda:") => {
             #[cfg(feature = "cuda")]
             {
-                let ordinal_str = s
-                    .strip_prefix("cuda:")
-                    .ok_or_else(|| OCRError::ConfigError {
-                        message: format!("Invalid CUDA device string '{}'", s),
-                    })?;
-                let ordinal: usize = ordinal_str.parse().map_err(|_| OCRError::ConfigError {
-                    message: format!("Invalid CUDA device ordinal in '{}'", s),
-                })?;
-                Device::new_cuda(ordinal).map_err(|e| OCRError::ConfigError {
-                    message: format!("Failed to create CUDA device {}: {}", ordinal, e),
-                })
+                parse_device_with_ordinal(s, "cuda:", "CUDA", Device::new_cuda)
             }
             #[cfg(not(feature = "cuda"))]
             {
@@ -118,17 +129,7 @@ pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
         s if s.starts_with("metal:") => {
             #[cfg(feature = "metal")]
             {
-                let ordinal_str =
-                    s.strip_prefix("metal:")
-                        .ok_or_else(|| OCRError::ConfigError {
-                            message: format!("Invalid Metal device string '{}'", s),
-                        })?;
-                let ordinal: usize = ordinal_str.parse().map_err(|_| OCRError::ConfigError {
-                    message: format!("Invalid Metal device ordinal in '{}'", s),
-                })?;
-                Device::new_metal(ordinal).map_err(|e| OCRError::ConfigError {
-                    message: format!("Failed to create Metal device {}: {}", ordinal, e),
-                })
+                parse_device_with_ordinal(s, "metal:", "Metal", Device::new_metal)
             }
             #[cfg(not(feature = "metal"))]
             {

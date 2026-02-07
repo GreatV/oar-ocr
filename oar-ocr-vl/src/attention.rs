@@ -51,17 +51,15 @@ pub(crate) fn on_compute_device<F>(device: &Device, f: F) -> Result<Tensor>
 where
     F: FnOnce(&Device) -> Result<Tensor>,
 {
-    let compute_device = match device {
-        Device::Metal(_) => &Device::Cpu,
-        _ => device,
-    };
-
-    let tensor = f(compute_device)?;
-
-    if matches!(device, Device::Metal(_)) {
-        tensor.to_device(device)
+    if let Device::Metal(_) = device {
+        // Operations unsupported on Metal are run on the CPU...
+        let cpu_device = Device::Cpu;
+        let tensor_on_cpu = f(&cpu_device)?;
+        // ...and the result is moved back to the Metal device.
+        tensor_on_cpu.to_device(device)
     } else {
-        Ok(tensor)
+        // For other devices, run directly.
+        f(device)
     }
 }
 
@@ -348,11 +346,16 @@ impl RotaryEmbedding {
             .map(|i| 1f32 / base.powf(i as f32 / head_dim as f32))
             .collect();
         let inv_freq_len = inv_freq.len();
-        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), device)?;
-        let t = Tensor::arange(0u32, max_position_embeddings as u32, device)?
-            .to_dtype(DType::F32)?
-            .reshape((max_position_embeddings, 1))?;
-        let freqs = t.matmul(&inv_freq)?;
+
+        // Use on_compute_device to handle Metal's lack of support for arange
+        let freqs = on_compute_device(device, |compute_device| {
+            let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), compute_device)?;
+            let t = Tensor::arange(0u32, max_position_embeddings as u32, compute_device)?
+                .to_dtype(DType::F32)?
+                .reshape((max_position_embeddings, 1))?;
+            t.matmul(&inv_freq)
+        })?;
+
         let sin = freqs.sin()?.to_dtype(dtype)?;
         let cos = freqs.cos()?.to_dtype(dtype)?;
 
