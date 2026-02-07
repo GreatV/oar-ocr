@@ -27,7 +27,8 @@ use std::collections::HashSet;
 /// - `"cpu"` → CPU device
 /// - `"cuda"` or `"gpu"` → CUDA device 0
 /// - `"cuda:N"` → CUDA device N (e.g., `"cuda:1"`)
-/// - `"metal"` → Metal device (Apple GPU)
+/// - `"metal"` → Metal device 0 (Apple GPU)
+/// - `"metal:N"` → Metal device N (e.g., `"metal:1"` for Mac Pro with multiple GPUs)
 ///
 /// # Errors
 ///
@@ -47,7 +48,8 @@ use std::collections::HashSet;
 /// let cuda = parse_device("cuda")?;
 /// let cuda1 = parse_device("cuda:1")?;
 /// let metal = parse_device("metal")?;
-/// # let _ = (cpu, cuda, cuda1, metal);
+/// let metal1 = parse_device("metal:1")?;
+/// # let _ = (cpu, cuda, cuda1, metal, metal1);
 /// # Ok(())
 /// # }
 /// ```
@@ -113,9 +115,29 @@ pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
                 Err(cuda_not_enabled())
             }
         }
+        s if s.starts_with("metal:") => {
+            #[cfg(feature = "metal")]
+            {
+                let ordinal_str =
+                    s.strip_prefix("metal:")
+                        .ok_or_else(|| OCRError::ConfigError {
+                            message: format!("Invalid Metal device string '{}'", s),
+                        })?;
+                let ordinal: usize = ordinal_str.parse().map_err(|_| OCRError::ConfigError {
+                    message: format!("Invalid Metal device ordinal in '{}'", s),
+                })?;
+                Device::new_metal(ordinal).map_err(|e| OCRError::ConfigError {
+                    message: format!("Failed to create Metal device {}: {}", ordinal, e),
+                })
+            }
+            #[cfg(not(feature = "metal"))]
+            {
+                Err(metal_not_enabled())
+            }
+        }
         _ => Err(OCRError::ConfigError {
             message: format!(
-                "Unknown device: '{}'. Use 'cpu', 'cuda', 'cuda:N', or 'metal'",
+                "Unknown device: '{}'. Use 'cpu', 'cuda', 'cuda:N', 'metal', or 'metal:N'",
                 device_str
             ),
         }),
@@ -660,6 +682,58 @@ pub fn crop_margin(img: &RgbImage) -> RgbImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_device_cpu() {
+        let device = parse_device("cpu").unwrap();
+        assert!(matches!(device, Device::Cpu));
+    }
+
+    #[test]
+    fn test_parse_device_invalid() {
+        let result = parse_device("invalid");
+        assert!(result.is_err());
+        if let Err(OCRError::ConfigError { message }) = result {
+            assert!(message.contains("Unknown device"));
+        }
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_parse_device_metal_with_ordinal() {
+        // Test parsing "metal:0" - should always work on Apple devices
+        let result = parse_device("metal:0");
+        assert!(result.is_ok(), "metal:0 should succeed on Apple devices");
+
+        // Note: metal:1 and higher ordinals may panic in Candle on single-GPU systems,
+        // so we don't test them here. The parsing logic itself works correctly.
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_parse_device_metal_invalid_ordinal() {
+        let result = parse_device("metal:abc");
+        assert!(result.is_err());
+        if let Err(OCRError::ConfigError { message }) = result {
+            assert!(message.contains("Invalid Metal device ordinal"));
+        }
+    }
+
+    #[cfg(not(feature = "metal"))]
+    #[test]
+    fn test_parse_device_metal_not_enabled() {
+        let result = parse_device("metal");
+        assert!(result.is_err());
+        if let Err(OCRError::ConfigError { message }) = result {
+            assert!(message.contains("Metal support not enabled"));
+        }
+
+        let result = parse_device("metal:0");
+        assert!(result.is_err());
+        if let Err(OCRError::ConfigError { message }) = result {
+            assert!(message.contains("Metal support not enabled"));
+        }
+    }
 
     #[test]
     fn test_format_heading() {

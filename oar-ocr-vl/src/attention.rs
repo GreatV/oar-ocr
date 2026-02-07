@@ -35,6 +35,36 @@ use crate::utils::candle_to_ocr_processing;
 use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use oar_ocr_core::core::errors::OCRError;
 
+/// Helper function to handle Metal device computation.
+///
+/// Metal backend doesn't support certain operations (arange, broadcast_*, etc.).
+/// This helper executes operations on CPU for Metal devices, then transfers the
+/// result back to Metal.
+///
+/// # Arguments
+/// * `device` - Target device
+/// * `f` - Closure that creates the tensor on the compute device
+///
+/// # Returns
+/// Tensor on the target device
+pub(crate) fn on_compute_device<F>(device: &Device, f: F) -> Result<Tensor>
+where
+    F: FnOnce(&Device) -> Result<Tensor>,
+{
+    let compute_device = match device {
+        Device::Metal(_) => &Device::Cpu,
+        _ => device,
+    };
+
+    let tensor = f(compute_device)?;
+
+    if matches!(device, Device::Metal(_)) {
+        tensor.to_device(device)
+    } else {
+        Ok(tensor)
+    }
+}
+
 /// Scaled dot-product attention.
 ///
 /// Computes attention as: softmax(Q @ K^T / scale) @ V
@@ -105,43 +135,31 @@ pub fn create_causal_mask(
     dtype: DType,
     device: &Device,
 ) -> Result<Tensor> {
-    // For Metal, create mask on CPU first then transfer to device
-    // This works around limited support for certain ops on Metal
-    let compute_device = match device {
-        Device::Metal(_) => &Device::Cpu,
-        _ => device,
-    };
+    on_compute_device(device, |compute_device| {
+        let row_idx = Tensor::arange(0u32, seq_len as u32, compute_device)?
+            .reshape((seq_len, 1))?
+            .to_dtype(dtype)?;
+        let col_idx = Tensor::arange(0u32, kv_len as u32, compute_device)?
+            .reshape((1, kv_len))?
+            .to_dtype(dtype)?;
 
-    let row_idx = Tensor::arange(0u32, seq_len as u32, compute_device)?
-        .reshape((seq_len, 1))?
-        .to_dtype(dtype)?;
-    let col_idx = Tensor::arange(0u32, kv_len as u32, compute_device)?
-        .reshape((1, kv_len))?
-        .to_dtype(dtype)?;
+        let offset = (kv_len.saturating_sub(seq_len)) as f64;
+        // Condition: col <= row + offset
+        // col - offset <= row
+        let diff = col_idx.broadcast_sub(&Tensor::new(offset, compute_device)?.to_dtype(dtype)?)?;
+        let mask_cond = diff.broadcast_le(&row_idx)?;
 
-    let offset = (kv_len.saturating_sub(seq_len)) as f64;
-    // Condition: col <= row + offset
-    // col - offset <= row
-    let diff = col_idx.broadcast_sub(&Tensor::new(offset, compute_device)?.to_dtype(dtype)?)?;
-    let mask_cond = diff.broadcast_le(&row_idx)?;
+        let zero = Tensor::new(0f32, compute_device)?
+            .to_dtype(dtype)?
+            .broadcast_as(mask_cond.shape())?;
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, compute_device)?
+            .to_dtype(dtype)?
+            .broadcast_as(mask_cond.shape())?;
 
-    let zero = Tensor::new(0f32, compute_device)?
-        .to_dtype(dtype)?
-        .broadcast_as(mask_cond.shape())?;
-    let neg_inf = Tensor::new(f32::NEG_INFINITY, compute_device)?
-        .to_dtype(dtype)?
-        .broadcast_as(mask_cond.shape())?;
-
-    let mask = mask_cond
-        .where_cond(&zero, &neg_inf)?
-        .reshape((1, 1, seq_len, kv_len))?;
-
-    // Transfer to target device if needed
-    if matches!(device, Device::Metal(_)) {
-        mask.to_device(device)
-    } else {
-        Ok(mask)
-    }
+        mask_cond
+            .where_cond(&zero, &neg_inf)?
+            .reshape((1, 1, seq_len, kv_len))
+    })
 }
 
 /// Create a padding mask from sequence lengths.
@@ -162,43 +180,32 @@ pub fn create_padding_mask(
 ) -> Result<Tensor> {
     let batch_size = seq_lens.len();
 
-    // For Metal, create mask on CPU first then transfer to device
-    let compute_device = match device {
-        Device::Metal(_) => &Device::Cpu,
-        _ => device,
-    };
-
-    // (B, 1, 1, 1)
-    let lens_tensor = Tensor::from_vec(
-        seq_lens.iter().map(|&x| x as u32).collect::<Vec<_>>(),
-        (batch_size, 1, 1, 1),
-        compute_device,
-    )?
-    .to_dtype(dtype)?;
-
-    // (1, 1, 1, max_len)
-    let pos_tensor = Tensor::arange(0u32, max_len as u32, compute_device)?
-        .reshape((1, 1, 1, max_len))?
+    on_compute_device(device, |compute_device| {
+        // (B, 1, 1, 1)
+        let lens_tensor = Tensor::from_vec(
+            seq_lens.iter().map(|&x| x as u32).collect::<Vec<_>>(),
+            (batch_size, 1, 1, 1),
+            compute_device,
+        )?
         .to_dtype(dtype)?;
 
-    // Mask: pos < len -> 0, else -inf
-    let mask_cond = pos_tensor.broadcast_lt(&lens_tensor)?;
+        // (1, 1, 1, max_len)
+        let pos_tensor = Tensor::arange(0u32, max_len as u32, compute_device)?
+            .reshape((1, 1, 1, max_len))?
+            .to_dtype(dtype)?;
 
-    let zero = Tensor::new(0f32, compute_device)?
-        .to_dtype(dtype)?
-        .broadcast_as(mask_cond.shape())?;
-    let neg_inf = Tensor::new(f32::NEG_INFINITY, compute_device)?
-        .to_dtype(dtype)?
-        .broadcast_as(mask_cond.shape())?;
+        // Mask: pos < len -> 0, else -inf
+        let mask_cond = pos_tensor.broadcast_lt(&lens_tensor)?;
 
-    let mask = mask_cond.where_cond(&zero, &neg_inf)?;
+        let zero = Tensor::new(0f32, compute_device)?
+            .to_dtype(dtype)?
+            .broadcast_as(mask_cond.shape())?;
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, compute_device)?
+            .to_dtype(dtype)?
+            .broadcast_as(mask_cond.shape())?;
 
-    // Transfer to target device if needed
-    if matches!(device, Device::Metal(_)) {
-        mask.to_device(device)
-    } else {
-        Ok(mask)
-    }
+        mask_cond.where_cond(&zero, &neg_inf)
+    })
 }
 
 /// Combine causal and padding masks.
@@ -244,48 +251,37 @@ pub fn create_left_padding_mask(
 ) -> Result<Tensor> {
     let batch_size = seq_lens.len();
 
-    // For Metal, create mask on CPU first then transfer to device
-    let compute_device = match device {
-        Device::Metal(_) => &Device::Cpu,
-        _ => device,
-    };
-
-    // pad_len = max_len - len
-    // lens: (B, 1, 1, 1)
-    let lens_tensor = Tensor::from_vec(
-        seq_lens.iter().map(|&x| x as u32).collect::<Vec<_>>(),
-        (batch_size, 1, 1, 1),
-        compute_device,
-    )?
-    .to_dtype(dtype)?;
-
-    let max_len_t = Tensor::new(max_len as u32, compute_device)?.to_dtype(dtype)?;
-    let pad_len = max_len_t.broadcast_sub(&lens_tensor)?; // (B, 1, 1, 1)
-
-    // pos: (1, 1, 1, max_len)
-    let pos_tensor = Tensor::arange(0u32, max_len as u32, compute_device)?
-        .reshape((1, 1, 1, max_len))?
+    on_compute_device(device, |compute_device| {
+        // pad_len = max_len - len
+        // lens: (B, 1, 1, 1)
+        let lens_tensor = Tensor::from_vec(
+            seq_lens.iter().map(|&x| x as u32).collect::<Vec<_>>(),
+            (batch_size, 1, 1, 1),
+            compute_device,
+        )?
         .to_dtype(dtype)?;
 
-    // Mask: pos < pad_len -> -inf, else 0
-    let mask_cond = pos_tensor.broadcast_lt(&pad_len)?;
+        let max_len_t = Tensor::new(max_len as u32, compute_device)?.to_dtype(dtype)?;
+        let pad_len = max_len_t.broadcast_sub(&lens_tensor)?; // (B, 1, 1, 1)
 
-    let zero = Tensor::new(0f32, compute_device)?
-        .to_dtype(dtype)?
-        .broadcast_as(mask_cond.shape())?;
-    let neg_inf = Tensor::new(f32::NEG_INFINITY, compute_device)?
-        .to_dtype(dtype)?
-        .broadcast_as(mask_cond.shape())?;
+        // pos: (1, 1, 1, max_len)
+        let pos_tensor = Tensor::arange(0u32, max_len as u32, compute_device)?
+            .reshape((1, 1, 1, max_len))?
+            .to_dtype(dtype)?;
 
-    // if pos < pad_len (padded region), return -inf
-    let mask = mask_cond.where_cond(&neg_inf, &zero)?;
+        // Mask: pos < pad_len -> -inf, else 0
+        let mask_cond = pos_tensor.broadcast_lt(&pad_len)?;
 
-    // Transfer to target device if needed
-    if matches!(device, Device::Metal(_)) {
-        mask.to_device(device)
-    } else {
-        Ok(mask)
-    }
+        let zero = Tensor::new(0f32, compute_device)?
+            .to_dtype(dtype)?
+            .broadcast_as(mask_cond.shape())?;
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, compute_device)?
+            .to_dtype(dtype)?
+            .broadcast_as(mask_cond.shape())?;
+
+        // if pos < pad_len (padded region), return -inf
+        mask_cond.where_cond(&neg_inf, &zero)
+    })
 }
 
 fn rotate_half(x: &Tensor) -> Result<Tensor> {
