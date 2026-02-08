@@ -15,9 +15,9 @@
 //! The model automatically parses input shape from the ONNX file. For models with
 //! dynamic spatial dimensions, a default size must be provided.
 
+use crate::core::OCRError;
 use crate::core::config::InputShape;
-use crate::core::inference::OrtInfer;
-use crate::core::{OCRError, Tensor3D, Tensor4D};
+use crate::core::inference::{OrtInfer, TensorInput};
 use crate::processors::NormalizeImage;
 use image::{DynamicImage, RgbImage};
 use std::path::Path;
@@ -26,9 +26,9 @@ use std::path::Path;
 #[derive(Debug, Clone)]
 pub struct SLANetModelOutput {
     /// Structure token logits [batch, seq_len, vocab_size]
-    pub structure_logits: Tensor3D,
+    pub structure_logits: ndarray::Array3<f32>,
     /// Bounding box predictions [batch, seq_len, 8] (4 corner points × 2 coords)
-    pub bbox_preds: Tensor3D,
+    pub bbox_preds: ndarray::Array3<f32>,
     /// Image shape information for bbox denormalization (h, w, ratio_h, ratio_w, pad_h, pad_w)
     pub shape_info: Vec<[f32; 6]>,
 }
@@ -68,7 +68,10 @@ impl SLANetModel {
     /// This difference is required because the ONNX-exported SLANet_plus model
     /// produces incorrect (truncated) output when given padded square input,
     /// while SLANeXt models require fixed 512×512 input.
-    pub fn preprocess(&self, images: Vec<RgbImage>) -> Result<(Tensor4D, Vec<[f32; 6]>), OCRError> {
+    pub fn preprocess(
+        &self,
+        images: Vec<RgbImage>,
+    ) -> Result<(ndarray::Array4<f32>, Vec<[f32; 6]>), OCRError> {
         let mut shape_info_list = Vec::with_capacity(images.len());
         let mut processed_images = Vec::with_capacity(images.len());
 
@@ -145,9 +148,16 @@ impl SLANetModel {
     /// Runs inference on the preprocessed tensor.
     ///
     /// Returns dual outputs: structure logits and bbox predictions.
-    pub fn infer(&self, batch_tensor: &Tensor4D) -> Result<(Tensor3D, Tensor3D), OCRError> {
-        self.inference
-            .infer_dual_3d(batch_tensor)
+    pub fn infer(
+        &self,
+        batch_tensor: &ndarray::Array4<f32>,
+    ) -> Result<(ndarray::Array3<f32>, ndarray::Array3<f32>), OCRError> {
+        let input_name = self.inference.input_name();
+        let inputs = vec![(input_name, TensorInput::Array4(batch_tensor))];
+
+        let outputs = self
+            .inference
+            .infer(&inputs)
             .map_err(|e| OCRError::Inference {
                 model_name: "SLANet".to_string(),
                 context: format!(
@@ -155,7 +165,37 @@ impl SLANetModel {
                     batch_tensor.shape()
                 ),
                 source: Box::new(e),
-            })
+            })?;
+
+        if outputs.len() < 2 {
+            return Err(OCRError::InvalidInput {
+                message: format!("SLANet: expected at least 2 outputs, got {}", outputs.len()),
+            });
+        }
+
+        let structure =
+            outputs[0]
+                .1
+                .clone()
+                .try_into_array3_f32()
+                .map_err(|e| OCRError::Inference {
+                    model_name: "SLANet".to_string(),
+                    context: "failed to convert first output (structure) to 3D array".to_string(),
+                    source: Box::new(e),
+                })?;
+
+        let bboxes =
+            outputs[1]
+                .1
+                .clone()
+                .try_into_array3_f32()
+                .map_err(|e| OCRError::Inference {
+                    model_name: "SLANet".to_string(),
+                    context: "failed to convert second output (bboxes) to 3D array".to_string(),
+                    source: Box::new(e),
+                })?;
+
+        Ok((structure, bboxes))
     }
 
     /// Runs the complete forward pass: preprocess -> infer.

@@ -6,7 +6,7 @@
 //! - Reusable preprocessing pipelines for common patterns
 //! - Utility functions for image format conversions
 
-use crate::core::{OCRError, Tensor4D};
+use crate::core::OCRError;
 use crate::models::classification::PPLCNetPreprocessConfig;
 use crate::models::detection::db::DBPreprocessConfig;
 use crate::processors::{ImageScaleInfo, LimitType, NormalizeImage};
@@ -140,7 +140,7 @@ pub fn resize_and_normalize<R>(
     images: Vec<RgbImage>,
     resizer: &R,
     normalizer: &NormalizeImage,
-) -> Result<Tensor4D, OCRError>
+) -> Result<ndarray::Array4<f32>, OCRError>
 where
     R: ResizeOperation,
 {
@@ -179,7 +179,7 @@ pub fn detection_resize_and_normalize<R>(
     images: Vec<RgbImage>,
     resizer: &R,
     normalizer: &NormalizeImage,
-) -> Result<(Tensor4D, Vec<ImageScaleInfo>), OCRError>
+) -> Result<(ndarray::Array4<f32>, Vec<ImageScaleInfo>), OCRError>
 where
     R: DetectionResizeOperation,
 {
@@ -269,7 +269,7 @@ impl PreprocessPipelineBuilder {
     }
 
     /// Normalizes images to a tensor.
-    pub fn normalize(self, normalizer: &NormalizeImage) -> Result<Tensor4D, OCRError> {
+    pub fn normalize(self, normalizer: &NormalizeImage) -> Result<ndarray::Array4<f32>, OCRError> {
         let dynamic_images = if let Some(images) = self.images {
             rgb_to_dynamic(images)
         } else if let Some(images) = self.dynamic_images {
@@ -284,7 +284,7 @@ impl PreprocessPipelineBuilder {
     }
 
     /// Builds the final tensor (alias for normalize for consistency).
-    pub fn build(self, normalizer: &NormalizeImage) -> Result<Tensor4D, OCRError> {
+    pub fn build(self, normalizer: &NormalizeImage) -> Result<ndarray::Array4<f32>, OCRError> {
         self.normalize(normalizer)
     }
 }

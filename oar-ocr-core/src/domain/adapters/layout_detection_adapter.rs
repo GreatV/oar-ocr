@@ -7,7 +7,7 @@ use crate::core::traits::{
     adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
     task::Task,
 };
-use crate::core::{OCRError, TaskType, Tensor4D};
+use crate::core::{OCRError, TaskType};
 use crate::domain::tasks::{
     LayoutDetectionConfig, LayoutDetectionElement, LayoutDetectionOutput, LayoutDetectionTask,
     MergeBboxMode, UnclipRatio,
@@ -540,7 +540,7 @@ impl LayoutDetectionAdapter {
     /// Postprocesses model predictions to layout elements.
     fn postprocess(
         &self,
-        predictions: &Tensor4D,
+        predictions: &ndarray::Array4<f32>,
         img_shapes: Vec<ImageScaleInfo>,
         config: &LayoutDetectionConfig,
     ) -> LayoutDetectionOutput {
@@ -631,7 +631,7 @@ impl LayoutDetectionAdapter {
 
     fn postprocess_pp_doclayout(
         &self,
-        predictions: &Tensor4D,
+        predictions: &ndarray::Array4<f32>,
         img_shapes: Vec<ImageScaleInfo>,
         config: &LayoutDetectionConfig,
     ) -> LayoutDetectionOutput {

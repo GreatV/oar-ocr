@@ -1,17 +1,14 @@
 //! Structures and helpers for ONNX Runtime inference.
 //!
-//! This module centralizes the low level inference engine along with thin wrappers
-//! that adapt it to the `InferenceEngine` trait used across the pipeline.
+//! This module provides a unified inference interface that is backend-agnostic
+//! and does not make assumptions about input/output semantics.
 
-use crate::core::{
-    batch::{Tensor2D, Tensor3D, Tensor4D},
-    errors::OCRError,
-};
+use crate::core::errors::OCRError;
 use ort::{session::Session, value::ValueType};
 use std::sync::Mutex;
 
 pub mod session;
-pub mod wrappers;
+mod tensor_output;
 
 // OrtInfer implementation modules
 #[path = "ort_infer_builders.rs"]
@@ -21,8 +18,9 @@ mod ort_infer_config;
 #[path = "ort_infer_execution.rs"]
 mod ort_infer_execution;
 
+pub use ort_infer_execution::TensorInput;
 pub use session::load_session;
-pub use wrappers::{OrtInfer2D, OrtInfer3D, OrtInfer4D};
+pub use tensor_output::TensorOutput;
 
 /// Core ONNX Runtime inference engine with support for pooling and configurable sessions.
 pub struct OrtInfer {
