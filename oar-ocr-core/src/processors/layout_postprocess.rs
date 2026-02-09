@@ -3,7 +3,6 @@
 //! This module implements post-processing for layout detection models including
 //! PicoDet, RT-DETR, and PP-DocLayout series models.
 
-use crate::core::Tensor4D;
 use crate::domain::tasks::MergeBboxMode;
 use crate::processors::{BoundingBox, ImageScaleInfo, Point};
 use ndarray::{ArrayView3, Axis};
@@ -59,7 +58,7 @@ impl LayoutPostProcess {
     /// Tuple of (bounding_boxes, class_ids, scores) for each image in batch
     pub fn apply(
         &self,
-        predictions: &Tensor4D,
+        predictions: &ndarray::Array4<f32>,
         img_shapes: Vec<ImageScaleInfo>,
     ) -> LayoutPostprocessOutput {
         let batch_size = predictions.shape()[0];

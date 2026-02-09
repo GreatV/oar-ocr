@@ -13,7 +13,6 @@ mod db_mask;
 #[path = "db_score.rs"]
 mod db_score;
 
-use crate::core::Tensor4D;
 use crate::processors::geometry::BoundingBox;
 use crate::processors::types::{BoxType, ImageScaleInfo, ScoreMode};
 use ndarray::Axis;
@@ -99,7 +98,7 @@ impl DBPostProcess {
     /// Tuple of (bounding_boxes, scores) for each image in batch
     pub fn apply(
         &self,
-        preds: &Tensor4D,
+        preds: &ndarray::Array4<f32>,
         img_shapes: Vec<ImageScaleInfo>,
         config: Option<&DBPostProcessConfig>,
     ) -> (Vec<Vec<BoundingBox>>, Vec<Vec<f32>>) {

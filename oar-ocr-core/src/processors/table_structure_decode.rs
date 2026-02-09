@@ -3,7 +3,7 @@
 //! This module provides postprocessing for table structure recognition models.
 //! It decodes structure token logits and extracts bounding boxes for table cells.
 
-use crate::core::{OCRError, Tensor3D};
+use crate::core::OCRError;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -539,8 +539,8 @@ impl TableStructureDecode {
     /// Decoded structure tokens, bounding boxes, and confidence scores
     pub fn decode(
         &self,
-        structure_logits: &Tensor3D,
-        bbox_preds: &Tensor3D,
+        structure_logits: &ndarray::Array3<f32>,
+        bbox_preds: &ndarray::Array3<f32>,
         shape_info: &[[f32; 6]],
     ) -> Result<TableStructureDecodeOutput, OCRError> {
         let batch_size = structure_logits.shape()[0];
@@ -568,8 +568,8 @@ impl TableStructureDecode {
     /// Decodes a single image from the batch.
     fn decode_single(
         &self,
-        structure_logits: &Tensor3D,
-        bbox_preds: &Tensor3D,
+        structure_logits: &ndarray::Array3<f32>,
+        bbox_preds: &ndarray::Array3<f32>,
         batch_idx: usize,
         shape_info: &[[f32; 6]],
     ) -> TableDecodeResult {
@@ -661,7 +661,12 @@ impl TableStructureDecode {
     }
 
     /// Finds argmax at specific position in structure logits.
-    fn argmax_at(&self, logits: &Tensor3D, batch_idx: usize, seq_idx: usize) -> (usize, f32) {
+    fn argmax_at(
+        &self,
+        logits: &ndarray::Array3<f32>,
+        batch_idx: usize,
+        seq_idx: usize,
+    ) -> (usize, f32) {
         let vocab_size = logits.shape()[2];
         let mut max_idx = 0;
         let mut max_val = f32::NEG_INFINITY;
@@ -687,7 +692,7 @@ impl TableStructureDecode {
     /// use the same `scale` (the longest side of the original image).
     fn extract_bbox(
         &self,
-        bbox_preds: &Tensor3D,
+        bbox_preds: &ndarray::Array3<f32>,
         batch_idx: usize,
         seq_idx: usize,
         shape_info: &[[f32; 6]],

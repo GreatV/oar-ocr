@@ -88,17 +88,14 @@ pub(crate) enum FormulaModel {
 }
 
 impl FormulaModel {
-    fn preprocess(&self, images: Vec<image::RgbImage>) -> Result<crate::core::Tensor4D, OCRError> {
+    fn preprocess(&self, images: Vec<image::RgbImage>) -> Result<ndarray::Array4<f32>, OCRError> {
         match self {
             FormulaModel::PPFormulaNet(model) => model.preprocess(images),
             FormulaModel::UniMERNet(model) => model.preprocess(images),
         }
     }
 
-    fn infer(
-        &self,
-        batch_tensor: &crate::core::Tensor4D,
-    ) -> Result<ndarray::Array2<i64>, OCRError> {
+    fn infer(&self, batch_tensor: &ndarray::Array4<f32>) -> Result<ndarray::Array2<i64>, OCRError> {
         match self {
             FormulaModel::PPFormulaNet(model) => model.infer(batch_tensor),
             FormulaModel::UniMERNet(model) => model.infer(batch_tensor),

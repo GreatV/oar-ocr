@@ -249,7 +249,7 @@ impl BaseRecLabelDecode {
     /// A tuple containing:
     /// * A vector of decoded text strings
     /// * A vector of confidence scores for each text string
-    pub fn apply(&self, pred: &crate::core::Tensor3D) -> (Vec<String>, Vec<f32>) {
+    pub fn apply(&self, pred: &ndarray::Array3<f32>) -> (Vec<String>, Vec<f32>) {
         if pred.is_empty() {
             return (Vec::new(), Vec::new());
         }
@@ -433,7 +433,7 @@ impl CTCLabelDecode {
     /// * A vector of character positions (normalized 0.0-1.0) for each text string
     /// * A vector of column indices for each character in each text string
     /// * A vector of sequence lengths (total columns) for each text string
-    pub fn apply_with_positions(&self, pred: &crate::core::Tensor3D) -> PositionedDecodeResult {
+    pub fn apply_with_positions(&self, pred: &ndarray::Array3<f32>) -> PositionedDecodeResult {
         if pred.is_empty() {
             return (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         }
@@ -553,7 +553,7 @@ impl CTCLabelDecode {
     /// A tuple containing:
     /// * A vector of decoded text strings
     /// * A vector of confidence scores for each text string
-    pub fn apply(&self, pred: &crate::core::Tensor3D) -> (Vec<String>, Vec<f32>) {
+    pub fn apply(&self, pred: &ndarray::Array3<f32>) -> (Vec<String>, Vec<f32>) {
         if pred.is_empty() {
             return (Vec::new(), Vec::new());
         }

@@ -519,7 +519,7 @@ impl NormalizeImage {
     /// # Returns
     ///
     /// A Result containing the normalized image as a 4D tensor or an OCRError.
-    pub fn normalize_to(&self, img: DynamicImage) -> Result<crate::core::Tensor4D, OCRError> {
+    pub fn normalize_to(&self, img: DynamicImage) -> Result<ndarray::Array4<f32>, OCRError> {
         let rgb_img = img.to_rgb8();
         let (width, height) = rgb_img.dimensions();
         let channels = 3;
@@ -622,7 +622,7 @@ impl NormalizeImage {
     pub fn normalize_batch_to(
         &self,
         imgs: Vec<DynamicImage>,
-    ) -> Result<crate::core::Tensor4D, OCRError> {
+    ) -> Result<ndarray::Array4<f32>, OCRError> {
         if imgs.is_empty() {
             return Ok(ndarray::Array4::zeros((0, 0, 0, 0)));
         }

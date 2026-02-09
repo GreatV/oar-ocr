@@ -7,12 +7,12 @@
 //! are thin wrappers around this core implementation, eliminating code duplication
 //! while maintaining clean, model-specific APIs.
 
-use crate::core::inference::OrtInfer;
+use crate::core::OCRError;
+use crate::core::inference::{OrtInfer, TensorInput};
 use crate::core::validation::{
     validate_division, validate_image_dimensions, validate_non_empty, validate_positive,
     validate_same_length,
 };
-use crate::core::{OCRError, Tensor4D};
 use crate::processors::types::ColorOrder;
 use crate::processors::{
     DetResizeForTest, ImageScaleInfo, LimitType, NormalizeImage, TensorLayout,
@@ -122,11 +122,15 @@ pub struct ScaleAwareDetectorPostprocessConfig {
 pub struct ScaleAwareDetectorModelOutput {
     /// Detection predictions tensor [batch_size, num_detections, 6]
     /// Each detection: [x1, y1, x2, y2, score, class_id]
-    pub predictions: Tensor4D,
+    pub predictions: ndarray::Array4<f32>,
 }
 
-type ScaleAwareDetectorPreprocessArtifacts =
-    (Tensor4D, Vec<ImageScaleInfo>, Vec<[f32; 2]>, Vec<[f32; 2]>);
+type ScaleAwareDetectorPreprocessArtifacts = (
+    ndarray::Array4<f32>,
+    Vec<ImageScaleInfo>,
+    Vec<[f32; 2]>,
+    Vec<[f32; 2]>,
+);
 type ScaleAwareDetectorPreprocessResult = Result<ScaleAwareDetectorPreprocessArtifacts, OCRError>;
 
 /// Generic scale-aware object detection model.
@@ -234,10 +238,10 @@ impl ScaleAwareDetectorModel {
     /// - ScaleFactorAndImageShape: Passes both scale_factor and im_shape
     pub fn infer(
         &self,
-        batch_tensor: &Tensor4D,
+        batch_tensor: &ndarray::Array4<f32>,
         orig_shapes: &[[f32; 2]],
         resized_shapes: &[[f32; 2]],
-    ) -> Result<Tensor4D, OCRError> {
+    ) -> Result<ndarray::Array4<f32>, OCRError> {
         let batch_size = batch_tensor.shape()[0];
 
         // Validate batch size
@@ -299,8 +303,11 @@ impl ScaleAwareDetectorModel {
         match self.inference_mode {
             ScaleAwareDetectorInferenceMode::ScaleFactorOnly => {
                 // PicoDet-style: only scale_factor
-                self.inference
-                    .infer_4d_layout(batch_tensor, Some(scale_factor), None)
+                let inputs = vec![
+                    ("image", TensorInput::Array4(batch_tensor)),
+                    ("scale_factor", TensorInput::Array2(&scale_factor)),
+                ];
+                self.run_inference_with_inputs(&inputs)
             }
             ScaleAwareDetectorInferenceMode::ScaleFactorAndImageShape => {
                 // PP-DocLayout-style: both scale_factor and image_shape
@@ -315,9 +322,86 @@ impl ScaleAwareDetectorModel {
                     message: format!("Failed to create image_shape array: {}", e),
                 })?;
 
-                self.inference
-                    .infer_4d_layout(batch_tensor, Some(scale_factor), Some(image_shape))
+                let inputs = vec![
+                    ("image", TensorInput::Array4(batch_tensor)),
+                    ("scale_factor", TensorInput::Array2(&scale_factor)),
+                    ("im_shape", TensorInput::Array2(&image_shape)),
+                ];
+                self.run_inference_with_inputs(&inputs)
             }
+        }
+    }
+
+    /// Helper method to run inference with the given inputs and handle output processing.
+    fn run_inference_with_inputs(
+        &self,
+        inputs: &[(&str, TensorInput)],
+    ) -> Result<ndarray::Array4<f32>, OCRError> {
+        let outputs = self
+            .inference
+            .infer(inputs)
+            .map_err(|e| OCRError::Inference {
+                model_name: "Scale-Aware Detector".to_string(),
+                context: "failed to run inference".to_string(),
+                source: Box::new(e),
+            })?;
+
+        // Extract output - use first available output
+        let output = outputs.first().ok_or_else(|| OCRError::InvalidInput {
+            message: "No output tensors available from model".to_string(),
+        })?;
+
+        let output_shape = output.1.shape();
+
+        // Handle both 2D and 4D output formats
+        match output_shape.len() {
+            2 => {
+                // 2D format: [num_boxes, N] where N can be 6, 7, or 8
+                let num_boxes = output_shape[0] as usize;
+                let box_dim = output_shape[1] as usize;
+
+                if ![6, 7, 8].contains(&box_dim) {
+                    return Err(OCRError::InvalidInput {
+                        message: format!(
+                            "Expected box dimension 6, 7, or 8, got {} with shape {:?}",
+                            box_dim, output_shape
+                        ),
+                    });
+                }
+
+                // Convert to 4D format [1, num_boxes, 1, N]
+                let output_array =
+                    output
+                        .1
+                        .clone()
+                        .try_into_array_f32()
+                        .map_err(|e| OCRError::InvalidInput {
+                            message: format!("Failed to extract output tensor: {}", e),
+                        })?;
+                let (data, _offset) = output_array.into_raw_vec_and_offset();
+                ndarray::Array::from_shape_vec((1, num_boxes, 1, box_dim), data).map_err(|e| {
+                    OCRError::InvalidInput {
+                        message: format!("Failed to reshape 2D output to 4D: {}", e),
+                    }
+                })
+            }
+            4 => {
+                // Standard 4D output format
+                output
+                    .1
+                    .clone()
+                    .try_into_array4_f32()
+                    .map_err(|e| OCRError::InvalidInput {
+                        message: format!("Failed to convert to 4D array: {}", e),
+                    })
+            }
+            _ => Err(OCRError::InvalidInput {
+                message: format!(
+                    "Layout inference: expected 2D or 4D output tensor, got {}D with shape {:?}",
+                    output_shape.len(),
+                    output_shape
+                ),
+            }),
         }
     }
 
@@ -326,7 +410,7 @@ impl ScaleAwareDetectorModel {
     /// Returns raw predictions for adapter layer to process.
     pub fn postprocess(
         &self,
-        predictions: Tensor4D,
+        predictions: ndarray::Array4<f32>,
         _config: &ScaleAwareDetectorPostprocessConfig,
     ) -> Result<ScaleAwareDetectorModelOutput, OCRError> {
         Ok(ScaleAwareDetectorModelOutput { predictions })
