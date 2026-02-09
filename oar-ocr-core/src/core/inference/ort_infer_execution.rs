@@ -198,10 +198,15 @@ impl OrtInfer {
                     shape: shape.iter().copied().collect(),
                     data: data.to_vec(),
                 }
+            } else if let Ok((shape, data)) = value.try_extract_tensor::<i32>() {
+                TensorOutput::I64 {
+                    shape: shape.iter().copied().collect(),
+                    data: data.iter().map(|&v| v as i64).collect(),
+                }
             } else {
                 return Err(OCRError::InvalidInput {
                     message: format!(
-                        "Model '{}': Unsupported output type for tensor '{}'. Only f32 and i64 are supported.",
+                        "Model '{}': Unsupported output type for tensor '{}'. Only f32, i64, and i32 are supported.",
                         self.model_name, name
                     ),
                 });

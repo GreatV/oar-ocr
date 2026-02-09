@@ -56,9 +56,17 @@ impl PPDocLayoutModelBuilder {
     }
 
     /// Builds the PP-DocLayout model.
+    ///
+    /// Auto-detects the inference mode based on the model's declared inputs:
+    /// uses `ScaleFactorAndImageShape` if the model accepts `im_shape`, otherwise
+    /// falls back to `ScaleFactorOnly`.
     pub fn build(self, inference: OrtInfer) -> Result<PPDocLayoutModel, OCRError> {
-        self.inner
-            .inference_mode(ScaleAwareDetectorInferenceMode::ScaleFactorAndImageShape)
-            .build(inference)
+        let input_names = inference.input_names_from_model();
+        let mode = if input_names.iter().any(|n| n == "im_shape") {
+            ScaleAwareDetectorInferenceMode::ScaleFactorAndImageShape
+        } else {
+            ScaleAwareDetectorInferenceMode::ScaleFactorOnly
+        };
+        self.inner.inference_mode(mode).build(inference)
     }
 }

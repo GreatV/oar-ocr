@@ -59,6 +59,21 @@ impl OrtInfer {
             })
     }
 
+    /// Returns the declared input names from the model.
+    pub fn input_names_from_model(&self) -> Vec<String> {
+        let Some(session_mutex) = self.sessions.first() else {
+            return Vec::new();
+        };
+        let Ok(session_guard) = session_mutex.lock() else {
+            return Vec::new();
+        };
+        session_guard
+            .inputs()
+            .iter()
+            .map(|i| i.name().to_string())
+            .collect()
+    }
+
     /// Attempts to retrieve the primary input tensor shape from the first session.
     ///
     /// Returns a vector of dimensions if available. Dynamic dimensions (e.g., -1) are returned as-is.

@@ -8,6 +8,8 @@ use crate::core::inference::{OrtInfer, TensorInput};
 use crate::processors::{NormalizeImage, TensorLayout, UVDocPostProcess};
 use image::{DynamicImage, RgbImage, imageops::FilterType};
 
+type PreprocessResult = Result<(ndarray::Array4<f32>, Vec<(u32, u32)>), OCRError>;
+
 /// Configuration for UVDoc model preprocessing.
 #[derive(Debug, Clone)]
 pub struct UVDocPreprocessConfig {
@@ -70,10 +72,7 @@ impl UVDocModel {
     /// # Returns
     ///
     /// A tuple of (batch_tensor, original_sizes)
-    pub fn preprocess(
-        &self,
-        images: Vec<RgbImage>,
-    ) -> Result<(ndarray::Array4<f32>, Vec<(u32, u32)>), OCRError> {
+    pub fn preprocess(&self, images: Vec<RgbImage>) -> PreprocessResult {
         let mut original_sizes = Vec::with_capacity(images.len());
         let mut processed_images = Vec::with_capacity(images.len());
 
