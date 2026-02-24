@@ -27,7 +27,6 @@ pub struct OrtInfer {
     pub(self) sessions: Vec<Mutex<Session>>,
     pub(self) next_idx: std::sync::atomic::AtomicUsize,
     pub(self) input_name: String,
-    pub(self) output_name: Option<String>,
     pub(self) model_path: std::path::PathBuf,
     pub(self) model_name: String,
 }
@@ -37,7 +36,6 @@ impl std::fmt::Debug for OrtInfer {
         f.debug_struct("OrtInfer")
             .field("sessions", &self.sessions.len())
             .field("input_name", &self.input_name)
-            .field("output_name", &self.output_name)
             .field("model_path", &self.model_path)
             .field("model_name", &self.model_name)
             .finish()

@@ -23,6 +23,8 @@
 //!   - `--wired-cell-model` / `--wireless-cell-model` - Table cell detection models
 //!   - `--wired-cell-model-name` / `--wireless-cell-model-name` - Model names
 //!   - `--table-structure-dict` - Table structure dictionary
+//!   - `--use-wired-table-cells-trans-to-html` / `--use-wireless-table-cells-trans-to-html`
+//!     - PaddleX-compatible table-cells-to-HTML fallback
 //! * Formula recognition:
 //!   - `--formula-model` / `--formula-tokenizer` / `--formula-type` (pp_formulanet or unimernet)
 //! * OCR integration:
@@ -255,6 +257,14 @@ struct Args {
     /// Use --use-e2e-wireless-table-rec=false to disable E2E mode and enable cell detection
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     use_e2e_wireless_table_rec: bool,
+
+    /// Convert wired table cell detections directly into HTML structure (PaddleX-compatible)
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    use_wired_table_cells_trans_to_html: bool,
+
+    /// Convert wireless table cell detections directly into HTML structure (PaddleX-compatible)
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    use_wireless_table_cells_trans_to_html: bool,
 
     /// Formula recognition model
     #[arg(long = "formula-model")]
@@ -617,6 +627,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // E2E mode settings (defaults: wired=false, wireless=true)
     builder = builder.use_e2e_wired_table_rec(args.use_e2e_wired_table_rec);
     builder = builder.use_e2e_wireless_table_rec(args.use_e2e_wireless_table_rec);
+    builder = builder.use_wired_table_cells_trans_to_html(args.use_wired_table_cells_trans_to_html);
+    builder =
+        builder.use_wireless_table_cells_trans_to_html(args.use_wireless_table_cells_trans_to_html);
 
     if let Some(path) = args.formula_model {
         let Some(tokenizer) = args.formula_tokenizer else {

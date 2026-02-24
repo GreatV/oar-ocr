@@ -48,8 +48,7 @@ pub use image_reader::DefaultImageReader;
 pub use inference::{OrtInfer, TensorInput, TensorOutput, load_session};
 pub use traits::{
     AdapterBuilder, AdapterInfo, AdapterTask, GranularImageReader, ImageReader, ImageTaskInput,
-    InferenceEngine, ModelAdapter, Postprocessor, Preprocessor, Sampler, Task, TaskRunner,
-    TaskSchema, TaskType,
+    ModelAdapter, Postprocessor, Preprocessor, Sampler, Task, TaskRunner, TaskSchema, TaskType,
 };
 
 pub use validation::{

@@ -1,8 +1,10 @@
-use crate::processors::geometry::{BoundingBox, Point};
+use crate::processors::geometry::{BoundingBox, MinAreaRect, Point};
 use crate::processors::types::ScoreMode;
 use clipper2::{EndType, JoinType, Path as ClipperPath};
 use image::GrayImage;
-use imageproc::contours::find_contours;
+use imageproc::contours::{Contour, find_contours};
+use std::cmp::Ordering;
+use std::f32::consts::PI;
 
 use super::DBPostProcess;
 
@@ -43,22 +45,24 @@ impl DBPostProcess {
                 continue;
             }
 
-            let unclipped_points = if approx.points.len() > 2 {
-                let unclipped = self.unclip(&approx, unclip_ratio);
-                if unclipped.points.is_empty() {
-                    continue;
-                }
-                unclipped.points
+            let unclipped = if approx.points.len() > 2 {
+                self.unclip(&approx, unclip_ratio)
             } else {
                 continue;
             };
-
-            let min_rect = BoundingBox::new(unclipped_points.clone()).get_min_area_rect();
-            if min_rect.min_side() < self.min_size + 2.0 {
+            if unclipped.points.is_empty() {
                 continue;
             }
 
-            let scaled_points: Vec<Point> = unclipped_points
+            let Some((_, sside)) = self.get_mini_boxes_from_points(&unclipped.points) else {
+                continue;
+            };
+            if sside < self.min_size + 2.0 {
+                continue;
+            }
+
+            let scaled_points: Vec<Point> = unclipped
+                .points
                 .iter()
                 .map(|point| {
                     let x = (point.x * width_scale)
@@ -97,15 +101,17 @@ impl DBPostProcess {
         let mut scores = Vec::new();
 
         for contour in contours.into_iter().take(self.max_candidates) {
-            let bbox = BoundingBox::from_contour(&contour);
-            let min_rect = bbox.get_min_area_rect();
-
-            if min_rect.min_side() < self.min_size {
+            let Some((mini_box_points, min_side)) = self.get_mini_boxes_from_contour(&contour)
+            else {
+                continue;
+            };
+            if min_side < self.min_size {
                 continue;
             }
+            let mini_box = BoundingBox::new(mini_box_points);
 
             let score = match self.score_mode {
-                ScoreMode::Fast => self.box_score_fast(pred, &bbox),
+                ScoreMode::Fast => self.box_score_fast(pred, &mini_box),
                 ScoreMode::Slow => self.box_score_slow(pred, &contour),
             };
 
@@ -113,14 +119,19 @@ impl DBPostProcess {
                 continue;
             }
 
-            let unclipped = self.unclip(&bbox, unclip_ratio);
-            let final_rect = unclipped.get_min_area_rect();
-
-            if final_rect.min_side() < self.min_size + 2.0 {
+            let unclipped = self.unclip(&mini_box, unclip_ratio);
+            if unclipped.points.is_empty() {
                 continue;
             }
 
-            let box_points = final_rect.get_box_points();
+            let Some((box_points, sside)) = self.get_mini_boxes_from_points(&unclipped.points)
+            else {
+                continue;
+            };
+            if sside < self.min_size + 2.0 {
+                continue;
+            }
+
             let scaled_points: Vec<Point> = box_points
                 .iter()
                 .map(|point| {
@@ -139,6 +150,133 @@ impl DBPostProcess {
         }
 
         (boxes, scores)
+    }
+
+    /// PaddleX `get_mini_boxes(contour)` equivalent.
+    fn get_mini_boxes_from_contour(&self, contour: &Contour<u32>) -> Option<(Vec<Point>, f32)> {
+        let points = contour
+            .points
+            .iter()
+            .map(|p| Point::new(p.x as f32, p.y as f32))
+            .collect::<Vec<_>>();
+        let simplified = Self::simplify_chain_points(&points);
+        if simplified.len() >= 3 {
+            self.get_mini_boxes_from_points(&simplified)
+        } else {
+            self.get_mini_boxes_from_points(&points)
+        }
+    }
+
+    /// PaddleX `get_mini_boxes` equivalent from polygon points.
+    fn get_mini_boxes_from_points(&self, points: &[Point]) -> Option<(Vec<Point>, f32)> {
+        if points.len() < 3 {
+            return None;
+        }
+
+        let min_rect = BoundingBox::new(points.to_vec()).get_min_area_rect();
+        let min_side = min_rect.min_side();
+        if !min_side.is_finite() || min_side <= 0.0 {
+            return None;
+        }
+
+        let raw_points = Self::box_points_without_reorder(&min_rect);
+        if raw_points.len() != 4 {
+            return None;
+        }
+
+        Some((Self::paddlex_order_mini_box_points(raw_points), min_side))
+    }
+
+    fn box_points_without_reorder(rect: &MinAreaRect) -> Vec<Point> {
+        let cos_a = (rect.angle * PI / 180.0).cos();
+        let sin_a = (rect.angle * PI / 180.0).sin();
+        let w_2 = rect.width / 2.0;
+        let h_2 = rect.height / 2.0;
+        let corners = [(-w_2, -h_2), (w_2, -h_2), (w_2, h_2), (-w_2, h_2)];
+
+        corners
+            .iter()
+            .map(|(x, y)| {
+                let rotated_x = x * cos_a - y * sin_a + rect.center.x;
+                let rotated_y = x * sin_a + y * cos_a + rect.center.y;
+                Point::new(rotated_x, rotated_y)
+            })
+            .collect()
+    }
+
+    /// Compress contour chain points similarly to OpenCV CHAIN_APPROX_SIMPLE.
+    ///
+    /// This keeps turning points and removes interior points on straight segments.
+    fn simplify_chain_points(points: &[Point]) -> Vec<Point> {
+        if points.len() <= 2 {
+            return points.to_vec();
+        }
+
+        let mut simplified = Vec::with_capacity(points.len());
+        let n = points.len();
+
+        for i in 0..n {
+            let prev = points[(i + n - 1) % n];
+            let curr = points[i];
+            let next = points[(i + 1) % n];
+
+            let dir_prev = (
+                Self::sign_step(curr.x - prev.x),
+                Self::sign_step(curr.y - prev.y),
+            );
+            let dir_next = (
+                Self::sign_step(next.x - curr.x),
+                Self::sign_step(next.y - curr.y),
+            );
+
+            if dir_prev != dir_next {
+                simplified.push(curr);
+            }
+        }
+
+        if simplified.len() < 3 {
+            points.to_vec()
+        } else {
+            simplified
+        }
+    }
+
+    fn sign_step(v: f32) -> i8 {
+        if v > 0.0 {
+            1
+        } else if v < 0.0 {
+            -1
+        } else {
+            0
+        }
+    }
+
+    /// PaddleX `get_mini_boxes` point ordering:
+    /// sort by x, then select [top-left, top-right, bottom-right, bottom-left].
+    fn paddlex_order_mini_box_points(mut points: Vec<Point>) -> Vec<Point> {
+        if points.len() != 4 {
+            return points;
+        }
+
+        points.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(Ordering::Equal));
+
+        let (index_1, index_4) = if points[1].y > points[0].y {
+            (0usize, 1usize)
+        } else {
+            (1usize, 0usize)
+        };
+        let (index_2, index_3) = if points[3].y > points[2].y {
+            (2usize, 3usize)
+        } else {
+            (3usize, 2usize)
+        };
+
+        vec![
+            points[index_1],
+            points[index_2],
+            points[index_3],
+            points[index_4],
+        ]
     }
 
     fn unclip(&self, bbox: &BoundingBox, unclip_ratio: f32) -> BoundingBox {
@@ -211,5 +349,60 @@ impl DBPostProcess {
         }
 
         BoundingBox::new(points)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_paddlex_order_mini_box_points() {
+        let input = vec![
+            Point::new(20.0, 20.0),
+            Point::new(10.0, 10.0),
+            Point::new(20.0, 10.0),
+            Point::new(10.0, 20.0),
+        ];
+
+        let ordered = DBPostProcess::paddlex_order_mini_box_points(input);
+        assert_eq!(ordered.len(), 4);
+        assert!((ordered[0].x - 10.0).abs() < 1e-6 && (ordered[0].y - 10.0).abs() < 1e-6);
+        assert!((ordered[1].x - 20.0).abs() < 1e-6 && (ordered[1].y - 10.0).abs() < 1e-6);
+        assert!((ordered[2].x - 20.0).abs() < 1e-6 && (ordered[2].y - 20.0).abs() < 1e-6);
+        assert!((ordered[3].x - 10.0).abs() < 1e-6 && (ordered[3].y - 20.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_get_mini_boxes_from_points_returns_min_side() {
+        let post = DBPostProcess::new(None, None, None, None, None, None, None);
+        let points = vec![
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 5.0),
+            Point::new(0.0, 5.0),
+        ];
+
+        let (_, min_side) = post
+            .get_mini_boxes_from_points(&points)
+            .expect("expected mini box");
+        assert!((min_side - 5.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_simplify_chain_points_removes_straight_segment_points() {
+        let points = vec![
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(2.0, 0.0),
+            Point::new(2.0, 1.0),
+            Point::new(2.0, 2.0),
+            Point::new(1.0, 2.0),
+            Point::new(0.0, 2.0),
+            Point::new(0.0, 1.0),
+        ];
+
+        let simplified = DBPostProcess::simplify_chain_points(&points);
+        assert_eq!(simplified.len(), 4);
     }
 }

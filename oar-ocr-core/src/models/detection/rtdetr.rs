@@ -181,10 +181,10 @@ impl RTDetrModel {
                 source: Box::new(e),
             })?;
 
-        // Find primary output (named "output0" or first output)
+        // Find primary output (RT-DETR uses "fetch_name_0", fall back to first output)
         let output = outputs
             .iter()
-            .find(|(name, _)| name == "output0")
+            .find(|(name, _)| name == "fetch_name_0")
             .or_else(|| outputs.first())
             .ok_or_else(|| OCRError::InvalidInput {
                 message: "RT-DETR: no outputs found from model".to_string(),

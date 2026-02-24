@@ -95,9 +95,7 @@ impl TableCellModelVariant {
 
     /// Parses from a user-provided model type string.
     pub fn from_model_type(model_type: &str) -> Option<Self> {
-        let normalized = model_type.to_ascii_lowercase();
-        let canonical = normalized.replace('-', "_");
-        match canonical.as_str() {
+        match model_type {
             "rt-detr-l_wired_table_cell_det" => Some(TableCellModelVariant::RTDetrLWired),
             "rt-detr-l_wireless_table_cell_det" => Some(TableCellModelVariant::RTDetrLWireless),
             _ => None,
@@ -161,5 +159,28 @@ impl TableCellDetectionPredictorBuilder {
 impl Default for TableCellDetectionPredictorBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TableCellModelVariant;
+
+    #[test]
+    fn test_from_model_type_accepts_dash_form() {
+        let parsed = TableCellModelVariant::from_model_type("rt-detr-l_wired_table_cell_det");
+        assert_eq!(parsed, Some(TableCellModelVariant::RTDetrLWired));
+    }
+
+    #[test]
+    fn test_from_model_type_rejects_underscore_form() {
+        let parsed = TableCellModelVariant::from_model_type("rt_detr_l_wireless_table_cell_det");
+        assert_eq!(parsed, None);
+    }
+
+    #[test]
+    fn test_from_model_type_rejects_whitespace_suffix() {
+        let parsed = TableCellModelVariant::from_model_type("rt-detr-l_wired_table_cell_det ");
+        assert_eq!(parsed, None);
     }
 }

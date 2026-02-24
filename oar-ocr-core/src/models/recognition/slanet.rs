@@ -20,6 +20,7 @@ use crate::core::config::InputShape;
 use crate::core::inference::{OrtInfer, TensorInput};
 use crate::processors::NormalizeImage;
 use image::{DynamicImage, RgbImage};
+use ndarray::s;
 use std::path::Path;
 
 /// Output from SLANet model containing structure predictions and bounding boxes.
@@ -61,19 +62,20 @@ impl SLANetModel {
 
     /// Preprocesses images for table structure recognition.
     ///
-    /// Preprocessing strategy depends on model type:
-    /// - **SLANeXt (fixed 512×512)**: ResizeByLong + Padding to square
-    /// - **SLANet/SLANet_plus (dynamic)**: ResizeByLong only, no padding
+    /// Preprocessing follows PaddleX TablePredictor order:
+    /// - ResizeByLong
+    /// - Normalize
+    /// - PaddingTableImage (for fixed-shape models)
     ///
-    /// This difference is required because the ONNX-exported SLANet_plus model
-    /// produces incorrect (truncated) output when given padded square input,
-    /// while SLANeXt models require fixed 512×512 input.
+    /// Important: padding happens **after normalization** and uses zero fill in normalized
+    /// tensor space. This matches PaddleX behavior and avoids introducing large negative
+    /// values from normalizing black pixels in padded regions.
     pub fn preprocess(
         &self,
         images: Vec<RgbImage>,
     ) -> Result<(ndarray::Array4<f32>, Vec<[f32; 6]>), OCRError> {
         let mut shape_info_list = Vec::with_capacity(images.len());
-        let mut processed_images = Vec::with_capacity(images.len());
+        let mut processed_tensors = Vec::with_capacity(images.len());
 
         // Determine preprocessing strategy based on input shape
         let needs_padding = self.input_shape.has_fixed_spatial();
@@ -111,24 +113,24 @@ impl SLANetModel {
                 image::imageops::FilterType::Triangle,
             );
 
-            // Padding strategy differs by model type
-            let (final_img, pad_h, pad_w) = if needs_padding {
-                // SLANeXt: Pad to target_size × target_size (square)
-                let target_size_u32 = target_size as u32;
-                let mut padded_img = image::RgbImage::new(target_size_u32, target_size_u32);
+            // Normalize resized image first, then optionally pad in normalized space.
+            let normalized = self
+                .normalizer
+                .normalize_to(DynamicImage::ImageRgb8(resized.clone()))?;
 
-                for y in 0..resized_h.min(target_size_u32) {
-                    for x in 0..resized_w.min(target_size_u32) {
-                        padded_img.put_pixel(x, y, *resized.get_pixel(x, y));
-                    }
-                }
+            let (tensor, pad_h, pad_w) = if needs_padding {
+                let target_size_u32 = target_size as usize;
+                let mut padded =
+                    ndarray::Array4::<f32>::zeros((1, 3, target_size_u32, target_size_u32));
+                padded
+                    .slice_mut(s![0, .., 0..(resized_h as usize), 0..(resized_w as usize)])
+                    .assign(&normalized.slice(s![0, .., .., ..]));
 
                 let pad_h = target_size - (resized_h as f32);
                 let pad_w = target_size - (resized_w as f32);
-                (padded_img, pad_h, pad_w)
+                (padded, pad_h, pad_w)
             } else {
-                // SLANet/SLANet_plus: No padding, use resized dimensions directly
-                (resized, 0.0, 0.0)
+                (normalized, 0.0, 0.0)
             };
 
             // Store shape information for bbox denormalization
@@ -136,11 +138,33 @@ impl SLANetModel {
             // For non-padded case, target_size represents max_len used for ResizeByLong
             shape_info_list.push([orig_h, orig_w, scale, pad_h, pad_w, target_size]);
 
-            processed_images.push(DynamicImage::ImageRgb8(final_img));
+            processed_tensors.push(tensor);
         }
 
-        // Normalize and convert to tensor (using BGR-ordered mean/std)
-        let batch_tensor = self.normalizer.normalize_batch_to(processed_images)?;
+        // Concatenate per-image tensors into a batch tensor.
+        let batch_tensor = if processed_tensors.is_empty() {
+            ndarray::Array4::<f32>::zeros((0, 0, 0, 0))
+        } else {
+            let first_shape = processed_tensors[0].shape().to_vec();
+            let (channels, height, width) = (first_shape[1], first_shape[2], first_shape[3]);
+            if !processed_tensors.iter().all(|t| {
+                t.shape()[1] == channels && t.shape()[2] == height && t.shape()[3] == width
+            }) {
+                return Err(OCRError::InvalidInput {
+                    message: "SLANet preprocess produced tensors with inconsistent shapes"
+                        .to_string(),
+                });
+            }
+
+            let mut batch =
+                ndarray::Array4::<f32>::zeros((processed_tensors.len(), channels, height, width));
+            for (i, tensor) in processed_tensors.iter().enumerate() {
+                batch
+                    .slice_mut(s![i, .., .., ..])
+                    .assign(&tensor.slice(s![0, .., .., ..]));
+            }
+            batch
+        };
 
         Ok((batch_tensor, shape_info_list))
     }
