@@ -10,7 +10,7 @@ use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
 use image::RgbImage;
 use oar_ocr_core::core::OCRError;
-use rand::distributions::WeightedIndex;
+use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
 use serde::Deserialize;
 use std::cmp::Ordering;
@@ -777,7 +777,7 @@ fn softmax(logits: &[f32]) -> Vec<f32> {
 
 fn sample_from_probs(probs: &[f32]) -> Option<usize> {
     let dist = WeightedIndex::new(probs).ok()?;
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
     Some(dist.sample(&mut rng))
 }
 

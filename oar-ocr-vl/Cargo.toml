@@ -38,7 +38,7 @@ tokenizers = { version = "0.22", default-features = false, features = ["progress
 tracing = "0.1"
 rayon = "1.8"
 html-escape = "0.2"
-rand = "0.8"
+rand = "0.10"
 
 [dev-dependencies]
 clap = { version = "4.5.42", features = ["derive"] }
