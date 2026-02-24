@@ -3,15 +3,20 @@
 //! This module provides a pure implementation of the RT-DETR model for layout detection.
 //! The model is independent of any specific task and can be reused in different contexts.
 
-use crate::core::inference::OrtInfer;
-use crate::core::{OCRError, Tensor4D};
+use crate::core::OCRError;
+use crate::core::inference::{OrtInfer, TensorInput};
 use crate::processors::{
     DetResizeForTest, ImageScaleInfo, LimitType, NormalizeImage, TensorLayout,
 };
 use image::{DynamicImage, RgbImage};
 use ndarray::Array2;
 
-type RTDetrPreprocessArtifacts = (Tensor4D, Vec<ImageScaleInfo>, Vec<[f32; 2]>, Vec<[f32; 2]>);
+type RTDetrPreprocessArtifacts = (
+    ndarray::Array4<f32>,
+    Vec<ImageScaleInfo>,
+    Vec<[f32; 2]>,
+    Vec<[f32; 2]>,
+);
 type RTDetrPreprocessResult = Result<RTDetrPreprocessArtifacts, OCRError>;
 
 /// Preprocessing configuration for RT-DETR model.
@@ -57,7 +62,7 @@ pub struct RTDetrPostprocessConfig {
 pub struct RTDetrModelOutput {
     /// Detection predictions tensor [batch_size, num_detections, 6]
     /// Each detection: [x1, y1, x2, y2, score, class_id]
-    pub predictions: Tensor4D,
+    pub predictions: ndarray::Array4<f32>,
 }
 
 /// RT-DETR layout detection model.
@@ -157,12 +162,76 @@ impl RTDetrModel {
     /// RT-DETR requires both `scale_factor` and `im_shape` inputs.
     pub fn infer(
         &self,
-        batch_tensor: &Tensor4D,
-        scale_factor: Array2<f32>,
-        im_shape: Array2<f32>,
-    ) -> Result<Tensor4D, OCRError> {
-        self.inference
-            .infer_4d_layout(batch_tensor, Some(scale_factor), Some(im_shape))
+        batch_tensor: &ndarray::Array4<f32>,
+        scale_factor: &Array2<f32>,
+        im_shape: &Array2<f32>,
+    ) -> Result<ndarray::Array4<f32>, OCRError> {
+        let inputs = vec![
+            ("image", TensorInput::Array4(batch_tensor)),
+            ("scale_factor", TensorInput::Array2(scale_factor)),
+            ("im_shape", TensorInput::Array2(im_shape)),
+        ];
+
+        let outputs = self
+            .inference
+            .infer(&inputs)
+            .map_err(|e| OCRError::Inference {
+                model_name: "RT-DETR".to_string(),
+                context: "failed to run inference".to_string(),
+                source: Box::new(e),
+            })?;
+
+        // Find primary output (RT-DETR uses "fetch_name_0", fall back to first output)
+        let output = outputs
+            .iter()
+            .find(|(name, _)| name == "fetch_name_0")
+            .or_else(|| outputs.first())
+            .ok_or_else(|| OCRError::InvalidInput {
+                message: "RT-DETR: no outputs found from model".to_string(),
+            })?;
+
+        let output_shape = output.1.shape();
+
+        // RT-DETR can output either 2D or 4D format
+        match output_shape.len() {
+            2 => {
+                // 2D format: [num_boxes, N] where N >= 6
+                // Convert to 4D format [1, num_boxes, 1, N]
+                let output_array =
+                    output
+                        .1
+                        .clone()
+                        .try_into_array_f32()
+                        .map_err(|e| OCRError::InvalidInput {
+                            message: format!("Failed to extract output tensor: {}", e),
+                        })?;
+                let num_boxes = output_shape[0] as usize;
+                let box_dim = output_shape[1] as usize;
+                let (data, _offset) = output_array.into_raw_vec_and_offset();
+                ndarray::Array::from_shape_vec((1, num_boxes, 1, box_dim), data).map_err(|e| {
+                    OCRError::InvalidInput {
+                        message: format!("Failed to reshape 2D output to 4D: {}", e),
+                    }
+                })
+            }
+            4 => {
+                // Standard 4D output format
+                output
+                    .1
+                    .clone()
+                    .try_into_array4_f32()
+                    .map_err(|e| OCRError::InvalidInput {
+                        message: format!("Failed to convert to 4D array: {}", e),
+                    })
+            }
+            _ => Err(OCRError::InvalidInput {
+                message: format!(
+                    "RT-DETR inference: expected 2D or 4D output, got {}D with shape {:?}",
+                    output_shape.len(),
+                    output_shape
+                ),
+            }),
+        }
     }
 
     /// Postprocesses model predictions.
@@ -171,7 +240,7 @@ impl RTDetrModel {
     /// The adapter layer will handle converting these to task-specific outputs.
     pub fn postprocess(
         &self,
-        predictions: Tensor4D,
+        predictions: ndarray::Array4<f32>,
         _config: &RTDetrPostprocessConfig,
     ) -> Result<RTDetrModelOutput, OCRError> {
         Ok(RTDetrModelOutput { predictions })
@@ -209,7 +278,7 @@ impl RTDetrModel {
             }
         })?;
 
-        let predictions = self.infer(&batch_tensor, scale_factor, im_shape)?;
+        let predictions = self.infer(&batch_tensor, &scale_factor, &im_shape)?;
         let output = self.postprocess(predictions, config)?;
         Ok((output, img_shapes))
     }

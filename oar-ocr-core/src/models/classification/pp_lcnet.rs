@@ -4,8 +4,8 @@
 //! PP-LCNet is a lightweight classification network that can be used for various classification
 //! tasks such as document orientation and text line orientation.
 
-use crate::core::inference::OrtInfer;
-use crate::core::{OCRError, Tensor2D, Tensor4D};
+use crate::core::OCRError;
+use crate::core::inference::{OrtInfer, TensorInput};
 use crate::domain::adapters::preprocessing::rgb_to_dynamic;
 use crate::processors::{NormalizeImage, TensorLayout};
 use crate::utils::topk::Topk;
@@ -130,7 +130,7 @@ impl PPLCNetModel {
     /// # Returns
     ///
     /// Preprocessed batch tensor
-    pub fn preprocess(&self, images: Vec<RgbImage>) -> Result<Tensor4D, OCRError> {
+    pub fn preprocess(&self, images: Vec<RgbImage>) -> Result<ndarray::Array4<f32>, OCRError> {
         let (crop_h, crop_w) = self.input_shape;
 
         let resized_rgb: Vec<RgbImage> = if let Some(resize_short) = self.resize_short {
@@ -198,15 +198,38 @@ impl PPLCNetModel {
     /// # Returns
     ///
     /// Model predictions as a 2D tensor (batch_size x num_classes)
-    pub fn infer(&self, batch_tensor: &Tensor4D) -> Result<Tensor2D, OCRError> {
-        self.inference
-            .infer_2d(batch_tensor)
+    pub fn infer(
+        &self,
+        batch_tensor: &ndarray::Array4<f32>,
+    ) -> Result<ndarray::Array2<f32>, OCRError> {
+        let input_name = self.inference.input_name();
+        let inputs = vec![(input_name, TensorInput::Array4(batch_tensor))];
+
+        let outputs = self
+            .inference
+            .infer(&inputs)
             .map_err(|e| OCRError::Inference {
                 model_name: "PP-LCNet".to_string(),
                 context: format!(
                     "failed to run inference on batch with shape {:?}",
                     batch_tensor.shape()
                 ),
+                source: Box::new(e),
+            })?;
+
+        let output = outputs
+            .into_iter()
+            .next()
+            .ok_or_else(|| OCRError::InvalidInput {
+                message: "PP-LCNet: no output returned from inference".to_string(),
+            })?;
+
+        output
+            .1
+            .try_into_array2_f32()
+            .map_err(|e| OCRError::Inference {
+                model_name: "PP-LCNet".to_string(),
+                context: "failed to convert output to 2D array".to_string(),
                 source: Box::new(e),
             })
     }
@@ -223,7 +246,7 @@ impl PPLCNetModel {
     /// PPLCNetModelOutput containing class IDs, scores, and optional label names
     pub fn postprocess(
         &self,
-        predictions: &Tensor2D,
+        predictions: &ndarray::Array2<f32>,
         config: &PPLCNetPostprocessConfig,
     ) -> Result<PPLCNetModelOutput, OCRError> {
         let predictions_vec: Vec<Vec<f32>> =

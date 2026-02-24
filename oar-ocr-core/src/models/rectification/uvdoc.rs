@@ -3,10 +3,12 @@
 //! This module provides a pure implementation of the UVDoc model for document rectification.
 //! The model takes distorted document images and outputs rectified (flattened) versions.
 
-use crate::core::inference::OrtInfer;
-use crate::core::{OCRError, Tensor4D};
+use crate::core::OCRError;
+use crate::core::inference::{OrtInfer, TensorInput};
 use crate::processors::{NormalizeImage, TensorLayout, UVDocPostProcess};
 use image::{DynamicImage, RgbImage, imageops::FilterType};
+
+type PreprocessResult = Result<(ndarray::Array4<f32>, Vec<(u32, u32)>), OCRError>;
 
 /// Configuration for UVDoc model preprocessing.
 #[derive(Debug, Clone)]
@@ -70,10 +72,7 @@ impl UVDocModel {
     /// # Returns
     ///
     /// A tuple of (batch_tensor, original_sizes)
-    pub fn preprocess(
-        &self,
-        images: Vec<RgbImage>,
-    ) -> Result<(Tensor4D, Vec<(u32, u32)>), OCRError> {
+    pub fn preprocess(&self, images: Vec<RgbImage>) -> PreprocessResult {
         let mut original_sizes = Vec::with_capacity(images.len());
         let mut processed_images = Vec::with_capacity(images.len());
 
@@ -113,15 +112,38 @@ impl UVDocModel {
     /// # Returns
     ///
     /// Model predictions as a 4D tensor
-    pub fn infer(&self, batch_tensor: &Tensor4D) -> Result<Tensor4D, OCRError> {
-        self.inference
-            .infer_4d(batch_tensor)
+    pub fn infer(
+        &self,
+        batch_tensor: &ndarray::Array4<f32>,
+    ) -> Result<ndarray::Array4<f32>, OCRError> {
+        let input_name = self.inference.input_name();
+        let inputs = vec![(input_name, TensorInput::Array4(batch_tensor))];
+
+        let outputs = self
+            .inference
+            .infer(&inputs)
             .map_err(|e| OCRError::Inference {
                 model_name: "UVDoc".to_string(),
                 context: format!(
                     "failed to run inference on batch with shape {:?}",
                     batch_tensor.shape()
                 ),
+                source: Box::new(e),
+            })?;
+
+        let output = outputs
+            .into_iter()
+            .next()
+            .ok_or_else(|| OCRError::InvalidInput {
+                message: "UVDoc: no output returned from inference".to_string(),
+            })?;
+
+        output
+            .1
+            .try_into_array4_f32()
+            .map_err(|e| OCRError::Inference {
+                model_name: "UVDoc".to_string(),
+                context: "failed to convert output to 4D array".to_string(),
                 source: Box::new(e),
             })
     }
@@ -138,7 +160,7 @@ impl UVDocModel {
     /// Rectified images resized to original dimensions
     pub fn postprocess(
         &self,
-        predictions: &Tensor4D,
+        predictions: &ndarray::Array4<f32>,
         original_sizes: &[(u32, u32)],
     ) -> Result<Vec<RgbImage>, OCRError> {
         // Use UVDocPostProcess to convert tensor to images

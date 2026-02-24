@@ -3,8 +3,8 @@
 //! This module provides a pure implementation of the DB text detection model.
 //! The model handles preprocessing, inference, and postprocessing independently of tasks.
 
-use crate::core::inference::OrtInfer;
-use crate::core::{OCRError, Tensor4D, validate_positive, validate_range};
+use crate::core::inference::{OrtInfer, TensorInput};
+use crate::core::{OCRError, validate_positive, validate_range};
 use crate::processors::{
     BoundingBox, BoxType, DBPostProcess, DBPostProcessConfig, DetResizeForTest, ImageScaleInfo,
     LimitType, NormalizeImage, ScoreMode, TensorLayout,
@@ -123,7 +123,7 @@ impl DBModel {
     pub fn preprocess(
         &self,
         images: Vec<RgbImage>,
-    ) -> Result<(Tensor4D, Vec<ImageScaleInfo>), OCRError> {
+    ) -> Result<(ndarray::Array4<f32>, Vec<ImageScaleInfo>), OCRError> {
         // Convert to DynamicImage
         let dynamic_images: Vec<DynamicImage> =
             images.into_iter().map(DynamicImage::ImageRgb8).collect();
@@ -163,9 +163,16 @@ impl DBModel {
     }
 
     /// Runs inference on the preprocessed batch.
-    pub fn infer(&self, batch_tensor: &Tensor4D) -> Result<Tensor4D, OCRError> {
-        self.inference
-            .infer_4d(batch_tensor)
+    pub fn infer(
+        &self,
+        batch_tensor: &ndarray::Array4<f32>,
+    ) -> Result<ndarray::Array4<f32>, OCRError> {
+        let input_name = self.inference.input_name();
+        let inputs = vec![(input_name, TensorInput::Array4(batch_tensor))];
+
+        let outputs = self
+            .inference
+            .infer(&inputs)
             .map_err(|e| OCRError::Inference {
                 model_name: "DB".to_string(),
                 context: format!(
@@ -173,13 +180,29 @@ impl DBModel {
                     batch_tensor.shape()
                 ),
                 source: Box::new(e),
+            })?;
+
+        let output = outputs
+            .into_iter()
+            .next()
+            .ok_or_else(|| OCRError::InvalidInput {
+                message: "DB: no output returned from inference".to_string(),
+            })?;
+
+        output
+            .1
+            .try_into_array4_f32()
+            .map_err(|e| OCRError::Inference {
+                model_name: "DB".to_string(),
+                context: "failed to convert output to 4D array".to_string(),
+                source: Box::new(e),
             })
     }
 
     /// Postprocesses model predictions to bounding boxes.
     pub fn postprocess(
         &self,
-        predictions: &Tensor4D,
+        predictions: &ndarray::Array4<f32>,
         img_shapes: Vec<ImageScaleInfo>,
         score_threshold: f32,
         box_threshold: f32,

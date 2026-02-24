@@ -51,10 +51,12 @@ impl DBPostProcess {
             .into_option()
             .unwrap_or((0.0, 0.0));
 
-        let min_x = min_x.max(0.0).min(width as f32 - 1.0);
-        let max_x = max_x.max(0.0).min(width as f32 - 1.0);
-        let min_y = min_y.max(0.0).min(height as f32 - 1.0);
-        let max_y = max_y.max(0.0).min(height as f32 - 1.0);
+        // Match PaddleX / OpenCV semantics:
+        // xmin,ymin use floor; xmax,ymax use ceil before inclusive slicing.
+        let min_x = min_x.floor().max(0.0).min(width as f32 - 1.0);
+        let max_x = max_x.ceil().max(0.0).min(width as f32 - 1.0);
+        let min_y = min_y.floor().max(0.0).min(height as f32 - 1.0);
+        let max_y = max_y.ceil().max(0.0).min(height as f32 - 1.0);
 
         let start_y = min_y as usize;
         let end_y = max_y as usize + 1;

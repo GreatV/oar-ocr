@@ -3,7 +3,7 @@
 //! This module provides reusable preprocessing pipelines for formula recognition,
 //! including image normalization, margin cropping, and tensor formatting.
 
-use crate::core::{OCRError, Tensor4D};
+use crate::core::OCRError;
 use image::imageops::{FilterType, overlay, resize};
 use image::{DynamicImage, RgbImage};
 use ndarray::{Array2, Array3, Array4};
@@ -66,7 +66,7 @@ impl FormulaPreprocessor {
     ///
     /// # Returns
     /// A 4D tensor of shape [batch, channels, height, width] ready for model inference
-    pub fn preprocess_batch(&self, images: &[RgbImage]) -> Result<Tensor4D, OCRError> {
+    pub fn preprocess_batch(&self, images: &[RgbImage]) -> Result<ndarray::Array4<f32>, OCRError> {
         let mut normalized = Vec::with_capacity(images.len());
 
         for image in images {
@@ -244,7 +244,7 @@ impl FormulaPreprocessor {
     ///
     /// Creates a tensor with dimensions padded to multiples of the configured value,
     /// which is required by some models for efficient computation.
-    fn format_to_tensor(&self, images: Vec<Array3<f32>>) -> Result<Tensor4D, OCRError> {
+    fn format_to_tensor(&self, images: Vec<Array3<f32>>) -> Result<ndarray::Array4<f32>, OCRError> {
         let (target_width, target_height) = self.params.target_size;
         let batch_size = images.len();
 

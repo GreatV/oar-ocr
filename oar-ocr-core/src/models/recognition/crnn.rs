@@ -3,8 +3,8 @@
 //! This module provides a pure implementation of the CRNN text recognition model.
 //! The model handles preprocessing, inference, and postprocessing independently of tasks.
 
-use crate::core::inference::OrtInfer;
-use crate::core::{OCRError, Tensor3D, Tensor4D};
+use crate::core::OCRError;
+use crate::core::inference::{OrtInfer, TensorInput};
 use crate::processors::{CTCLabelDecode, OCRResize};
 use image::RgbImage;
 use std::path::Path;
@@ -58,7 +58,7 @@ impl CRNNModel {
     /// # Returns
     ///
     /// A 4D tensor ready for inference
-    pub fn preprocess(&self, images: Vec<RgbImage>) -> Result<Tensor4D, OCRError> {
+    pub fn preprocess(&self, images: Vec<RgbImage>) -> Result<ndarray::Array4<f32>, OCRError> {
         if images.is_empty() {
             return Ok(ndarray::Array4::zeros((0, 0, 0, 0)));
         }
@@ -126,15 +126,38 @@ impl CRNNModel {
     /// # Returns
     ///
     /// A 3D tensor containing CTC predictions
-    pub fn infer(&self, batch_tensor: &Tensor4D) -> Result<Tensor3D, OCRError> {
-        self.inference
-            .infer_3d(batch_tensor)
+    pub fn infer(
+        &self,
+        batch_tensor: &ndarray::Array4<f32>,
+    ) -> Result<ndarray::Array3<f32>, OCRError> {
+        let input_name = self.inference.input_name();
+        let inputs = vec![(input_name, TensorInput::Array4(batch_tensor))];
+
+        let outputs = self
+            .inference
+            .infer(&inputs)
             .map_err(|e| OCRError::Inference {
                 model_name: "CRNN".to_string(),
                 context: format!(
                     "failed to run inference on batch with shape {:?}",
                     batch_tensor.shape()
                 ),
+                source: Box::new(e),
+            })?;
+
+        let output = outputs
+            .into_iter()
+            .next()
+            .ok_or_else(|| OCRError::InvalidInput {
+                message: "CRNN: no output returned from inference".to_string(),
+            })?;
+
+        output
+            .1
+            .try_into_array3_f32()
+            .map_err(|e| OCRError::Inference {
+                model_name: "CRNN".to_string(),
+                context: "failed to convert output to 3D array".to_string(),
                 source: Box::new(e),
             })
     }
@@ -149,7 +172,11 @@ impl CRNNModel {
     /// # Returns
     ///
     /// Model output containing recognized texts, scores, and optionally character positions
-    pub fn postprocess(&self, predictions: &Tensor3D, return_positions: bool) -> CRNNModelOutput {
+    pub fn postprocess(
+        &self,
+        predictions: &ndarray::Array3<f32>,
+        return_positions: bool,
+    ) -> CRNNModelOutput {
         if return_positions {
             // Decode CTC predictions with character positions and column indices
             let (texts, scores, char_positions, char_col_indices, sequence_lengths) =

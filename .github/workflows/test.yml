@@ -11,8 +11,16 @@ env:
 
 jobs:
   test:
-    name: Run Tests, Lints, and Format Checks
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            clippy-features: ""
+          - os: macos-latest
+            clippy-features: "--features metal"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -34,7 +42,7 @@ jobs:
         # Run clippy on all workspace members with warnings-as-errors
         run: |
           cargo clippy --all-targets --all -- -D warnings
-          cargo clippy --all-targets -p oar-ocr-vl -- -D warnings
+          cargo clippy --all-targets -p oar-ocr-vl ${{ matrix.clippy-features }} -- -D warnings
 
       - name: Run tests in debug mode
         run: cargo test --verbose --all

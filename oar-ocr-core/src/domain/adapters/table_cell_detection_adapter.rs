@@ -3,10 +3,10 @@
 //! This adapter wraps RT-DETR models that detect table cells (wired / wireless
 //! cell structures) and adapts their outputs to the [`TableCellDetectionTask`].
 
+use crate::core::OCRError;
 use crate::core::inference::OrtInfer;
 use crate::core::traits::adapter::{AdapterBuilder, AdapterInfo, ModelAdapter};
 use crate::core::traits::task::{Task, TaskType};
-use crate::core::{OCRError, Tensor4D};
 use crate::domain::tasks::{
     TableCellDetection, TableCellDetectionConfig, TableCellDetectionOutput, TableCellDetectionTask,
 };
@@ -94,7 +94,7 @@ impl TableCellDetectionAdapter {
 
     fn postprocess(
         &self,
-        predictions: &Tensor4D,
+        predictions: &ndarray::Array4<f32>,
         img_shapes: Vec<ImageScaleInfo>,
         config: &TableCellDetectionConfig,
     ) -> TableCellDetectionOutput {

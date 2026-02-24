@@ -7,7 +7,7 @@ use crate::core::traits::{
     adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
     task::Task,
 };
-use crate::core::{OCRError, TaskType, Tensor4D};
+use crate::core::{OCRError, TaskType};
 use crate::domain::tasks::{
     LayoutDetectionConfig, LayoutDetectionElement, LayoutDetectionOutput, LayoutDetectionTask,
     MergeBboxMode, UnclipRatio,
@@ -540,7 +540,7 @@ impl LayoutDetectionAdapter {
     /// Postprocesses model predictions to layout elements.
     fn postprocess(
         &self,
-        predictions: &Tensor4D,
+        predictions: &ndarray::Array4<f32>,
         img_shapes: Vec<ImageScaleInfo>,
         config: &LayoutDetectionConfig,
     ) -> LayoutDetectionOutput {
@@ -631,7 +631,7 @@ impl LayoutDetectionAdapter {
 
     fn postprocess_pp_doclayout(
         &self,
-        predictions: &Tensor4D,
+        predictions: &ndarray::Array4<f32>,
         img_shapes: Vec<ImageScaleInfo>,
         config: &LayoutDetectionConfig,
     ) -> LayoutDetectionOutput {
@@ -729,10 +729,8 @@ impl LayoutDetectionAdapter {
                 order_pairs.push(order_pair);
             }
 
-            if !boxes.is_empty() {
-                Self::round_boxes(&mut boxes);
-            }
-
+            // Keep floating-point coords here to match PaddleX: crops are truncated later.
+            // Rounding at this stage introduces ~1px shifts that can destabilize table structure.
             if config.layout_nms && !boxes.is_empty() {
                 let keep = Self::paddlex_layout_nms(&boxes, &classes, &scores);
                 boxes = Self::select_by_indices(&boxes, &keep);
@@ -882,31 +880,6 @@ impl LayoutDetectionAdapter {
 
     fn is_valid_box(x1: f32, y1: f32, x2: f32, y2: f32) -> bool {
         x2 > x1 && y2 > y1 && x1.is_finite() && y1.is_finite() && x2.is_finite() && y2.is_finite()
-    }
-
-    fn round_boxes(boxes: &mut [crate::processors::BoundingBox]) {
-        fn round_half_even(value: f32) -> f32 {
-            let base = value.floor();
-            let frac = value - base;
-            if frac < 0.5 {
-                base
-            } else if frac > 0.5 {
-                base + 1.0
-            } else if (base as i64) % 2 == 0 {
-                base
-            } else {
-                base + 1.0
-            }
-        }
-
-        for bbox in boxes.iter_mut() {
-            *bbox = crate::processors::BoundingBox::from_coords(
-                round_half_even(bbox.x_min()),
-                round_half_even(bbox.y_min()),
-                round_half_even(bbox.x_max()),
-                round_half_even(bbox.y_max()),
-            );
-        }
     }
 
     fn paddlex_layout_nms(

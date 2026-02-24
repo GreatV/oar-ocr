@@ -6,18 +6,17 @@
 //! The design focuses on practical composability and clean separation of concerns:
 //! - **ImageReader**: Handles I/O operations (loading images from files/memory)
 //! - **Preprocessor**: Handles image preprocessing (resize, normalize, tensor conversion)
-//! - **InferenceEngine**: Handles model inference (ONNX, TensorRT, etc.)
 //! - **Postprocessor**: Handles result processing (decoding, formatting, filtering)
 //!
 //! # Architecture
 //!
 //! ```text
-//! ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌──────────────┐
-//! │ImageReader  │───▶│Preprocessor │───▶│InferenceEng │───▶│Postprocessor │
-//! │             │    │             │    │             │    │              │
-//! │• read_images│    │• preprocess │    │• infer      │    │• postprocess │
-//! │• validate   │    │• validate   │    │• engine_info│    │• empty_result│
-//! └─────────────┘    └─────────────┘    └─────────────┘    └──────────────┘
+//! ┌─────────────┐    ┌─────────────┐    ┌──────────────┐
+//! │ImageReader  │───▶│Preprocessor │───▶│Postprocessor │
+//! │             │    │             │    │              │
+//! │• read_images│    │• preprocess │    │• postprocess │
+//! │• validate   │    │• validate   │    │• empty_result│
+//! └─────────────┘    └─────────────┘    └──────────────┘
 //! ```
 //!
 //! # Examples
@@ -149,50 +148,6 @@ pub trait Preprocessor: Send + Sync + Debug {
                 message: "No images provided for preprocessing".to_string(),
             });
         }
-        Ok(())
-    }
-}
-
-/// Trait for inference engine operations.
-///
-/// This trait handles running the actual model inference, whether through
-/// ONNX Runtime, TensorRT, PyTorch, or other backends.
-pub trait InferenceEngine: Send + Sync + Debug {
-    /// Input type for inference (typically a tensor)
-    type Input: Send + Sync + Debug;
-
-    /// Output type from inference (typically a tensor)
-    type Output: Send + Sync + Debug;
-
-    /// Perform inference on preprocessed input.
-    ///
-    /// # Arguments
-    ///
-    /// * `input` - Preprocessed input ready for inference
-    ///
-    /// # Returns
-    ///
-    /// Raw inference output or an error
-    fn infer(&self, input: &Self::Input) -> Result<Self::Output, OCRError>;
-
-    /// Get information about the inference engine.
-    ///
-    /// # Returns
-    ///
-    /// String describing the inference engine (model type, backend, etc.)
-    fn engine_info(&self) -> String;
-
-    /// Validate that the input is suitable for inference.
-    ///
-    /// # Arguments
-    ///
-    /// * `input` - Input to validate
-    ///
-    /// # Returns
-    ///
-    /// Result indicating success or validation error
-    fn validate_inference_input(&self, _input: &Self::Input) -> Result<(), OCRError> {
-        // Default implementation - basic validation
         Ok(())
     }
 }

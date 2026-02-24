@@ -9,7 +9,7 @@ use crate::core::errors::OCRError;
 use crate::core::traits::OrtConfigurable;
 use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
-use crate::domain::adapters::SLANetWiredAdapterBuilder;
+use crate::domain::adapters::{SLANetWiredAdapterBuilder, SLANetWirelessAdapterBuilder};
 use crate::domain::tasks::table_structure_recognition::{
     TableStructureRecognitionConfig, TableStructureRecognitionTask,
 };
@@ -24,6 +24,34 @@ pub struct TableStructureRecognitionResult {
     pub structures: Vec<Vec<String>>,
     /// Bounding boxes for table cells as 8-point coordinates (one per image)
     pub bboxes: Vec<Vec<Vec<f32>>>,
+}
+
+/// Supported table structure model families.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TableStructureModelFamily {
+    Wired,
+    Wireless,
+}
+
+impl TableStructureModelFamily {
+    fn from_model_name(model_name: &str) -> Option<Self> {
+        match model_name {
+            "SLANet" | "SLANeXt_wired" | "SLANeXt_wireless" => Some(Self::Wired),
+            "SLANet_plus" => Some(Self::Wireless),
+            _ => None,
+        }
+    }
+
+    fn detect_from_path(path: &Path) -> Option<Self> {
+        let stem = path.file_stem()?.to_str()?.to_ascii_lowercase();
+        if stem.contains("slanet_plus") {
+            Some(Self::Wireless)
+        } else if stem.contains("wired") || stem.contains("slanet") || stem.contains("slanext") {
+            Some(Self::Wired)
+        } else {
+            None
+        }
+    }
 }
 
 /// Table structure recognition predictor
@@ -52,6 +80,7 @@ impl TableStructureRecognitionPredictor {
 pub struct TableStructureRecognitionPredictorBuilder {
     state: PredictorBuilderState<TableStructureRecognitionConfig>,
     dict_path: Option<PathBuf>,
+    model_name: Option<String>,
     /// Custom input shape (height, width). If None, uses adapter default.
     input_shape: Option<(u32, u32)>,
 }
@@ -64,6 +93,7 @@ impl TableStructureRecognitionPredictorBuilder {
                 max_structure_length: 500,
             }),
             dict_path: None,
+            model_name: None,
             input_shape: None,
         }
     }
@@ -75,6 +105,18 @@ impl TableStructureRecognitionPredictorBuilder {
 
     pub fn dict_path<P: AsRef<Path>>(mut self, path: P) -> Self {
         self.dict_path = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    /// Sets the table structure model preset name.
+    ///
+    /// Supported names:
+    /// - `SLANeXt_wired`
+    /// - `SLANeXt_wireless`
+    /// - `SLANet`
+    /// - `SLANet_plus`
+    pub fn model_name(mut self, name: impl Into<String>) -> Self {
+        self.model_name = Some(name.into());
         self
     }
 
@@ -94,35 +136,122 @@ impl TableStructureRecognitionPredictorBuilder {
         let Self {
             state,
             dict_path,
+            model_name,
             input_shape,
         } = self;
         let (config, ort_config) = state.into_parts();
         let dict_path = dict_path.ok_or_else(|| {
             OCRError::missing_field("dict_path", "TableStructureRecognitionPredictor")
         })?;
+        let model_path = model_path.as_ref();
 
-        let mut adapter_builder = SLANetWiredAdapterBuilder::new()
-            .with_config(config.clone())
-            .dict_path(dict_path);
+        let model_family = if let Some(name) = model_name.as_deref() {
+            TableStructureModelFamily::from_model_name(name).ok_or_else(|| {
+                OCRError::ConfigError {
+                    message: format!(
+                        "Unknown model name '{}'. Supported names: {}",
+                        name,
+                        Self::SUPPORTED_MODEL_NAMES.join(", ")
+                    ),
+                }
+            })?
+        } else {
+            TableStructureModelFamily::detect_from_path(model_path)
+                .unwrap_or(TableStructureModelFamily::Wired)
+        };
 
-        if let Some((h, w)) = input_shape {
-            adapter_builder = adapter_builder.input_shape((h, w));
-        }
+        let adapter = match model_family {
+            TableStructureModelFamily::Wired => {
+                let mut adapter_builder = SLANetWiredAdapterBuilder::new()
+                    .with_config(config.clone())
+                    .dict_path(dict_path.clone());
 
-        if let Some(ort_cfg) = ort_config {
-            adapter_builder = adapter_builder.with_ort_config(ort_cfg);
-        }
+                if let Some(name) = model_name.as_deref() {
+                    adapter_builder = adapter_builder.model_name(name);
+                }
 
-        let adapter = Box::new(adapter_builder.build(model_path.as_ref())?);
+                if let Some((h, w)) = input_shape {
+                    adapter_builder = adapter_builder.input_shape((h, w));
+                }
+
+                if let Some(ort_cfg) = ort_config.clone() {
+                    adapter_builder = adapter_builder.with_ort_config(ort_cfg);
+                }
+
+                Box::new(adapter_builder.build(model_path)?)
+            }
+            TableStructureModelFamily::Wireless => {
+                let mut adapter_builder = SLANetWirelessAdapterBuilder::new()
+                    .with_config(config.clone())
+                    .dict_path(dict_path);
+
+                if let Some(name) = model_name.as_deref() {
+                    adapter_builder = adapter_builder.model_name(name);
+                }
+
+                if let Some((h, w)) = input_shape {
+                    adapter_builder = adapter_builder.input_shape((h, w));
+                }
+
+                if let Some(ort_cfg) = ort_config {
+                    adapter_builder = adapter_builder.with_ort_config(ort_cfg);
+                }
+
+                Box::new(adapter_builder.build(model_path)?)
+            }
+        };
         let task = TableStructureRecognitionTask::new(config.clone());
         Ok(TableStructureRecognitionPredictor {
             core: TaskPredictorCore::new(adapter, task, config),
         })
     }
+
+    /// Supported table structure model names.
+    const SUPPORTED_MODEL_NAMES: &'static [&'static str] =
+        &["SLANeXt_wired", "SLANeXt_wireless", "SLANet", "SLANet_plus"];
 }
 
 impl Default for TableStructureRecognitionPredictorBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TableStructureModelFamily;
+    use std::path::Path;
+
+    #[test]
+    fn test_model_family_from_model_name() {
+        assert_eq!(
+            TableStructureModelFamily::from_model_name("SLANeXt_wired"),
+            Some(TableStructureModelFamily::Wired)
+        );
+        assert_eq!(
+            TableStructureModelFamily::from_model_name("SLANeXt_wireless"),
+            Some(TableStructureModelFamily::Wired)
+        );
+        assert_eq!(
+            TableStructureModelFamily::from_model_name("SLANet_plus"),
+            Some(TableStructureModelFamily::Wireless)
+        );
+        assert_eq!(TableStructureModelFamily::from_model_name("unknown"), None);
+    }
+
+    #[test]
+    fn test_model_family_detect_from_path() {
+        assert_eq!(
+            TableStructureModelFamily::detect_from_path(Path::new("models/slanet_plus.onnx")),
+            Some(TableStructureModelFamily::Wireless)
+        );
+        assert_eq!(
+            TableStructureModelFamily::detect_from_path(Path::new("models/slanext_wired.onnx")),
+            Some(TableStructureModelFamily::Wired)
+        );
+        assert_eq!(
+            TableStructureModelFamily::detect_from_path(Path::new("models/custom.onnx")),
+            None
+        );
     }
 }

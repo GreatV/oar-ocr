@@ -24,6 +24,10 @@ use oar_ocr_core::domain::structure::{
 };
 use oar_ocr_core::processors::BoundingBox;
 use oar_ocr_core::utils::BBoxCrop;
+use std::collections::HashMap;
+
+/// HTML structure tokens paired with the row-major cell ordering implied by those tokens.
+type HtmlStructureResult = (Vec<String>, Vec<(usize, crate::processors::CellGridInfo)>);
 
 /// Configuration for creating a TableAnalyzer.
 #[derive(Debug)]
@@ -38,6 +42,8 @@ pub(crate) struct TableAnalyzerConfig<'a> {
     pub wireless_table_cell_adapter: Option<&'a TableCellDetectionAdapter>,
     pub use_e2e_wired_table_rec: bool,
     pub use_e2e_wireless_table_rec: bool,
+    pub use_wired_table_cells_trans_to_html: bool,
+    pub use_wireless_table_cells_trans_to_html: bool,
 }
 
 #[derive(Debug)]
@@ -55,6 +61,180 @@ pub(crate) struct TableAnalyzer<'a> {
 
     use_e2e_wired_table_rec: bool,
     use_e2e_wireless_table_rec: bool,
+    use_wired_table_cells_trans_to_html: bool,
+    use_wireless_table_cells_trans_to_html: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CellLayoutEntry {
+    source_idx: usize,
+    row_start: usize,
+    col_start: usize,
+    row_span: usize,
+    col_span: usize,
+}
+
+/// Clusters close coordinates and returns averaged positions.
+fn cluster_positions(mut positions: Vec<f32>, tolerance: f32) -> Vec<f32> {
+    if positions.is_empty() {
+        return Vec::new();
+    }
+    positions.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    positions.dedup_by(|a, b| (*a - *b).abs() < 0.1);
+
+    let mut clustered = Vec::new();
+    let mut current_cluster = vec![positions[0]];
+
+    for &pos in positions.iter().skip(1) {
+        if (pos - *current_cluster.last().unwrap_or(&pos)).abs() <= tolerance {
+            current_cluster.push(pos);
+        } else {
+            let mean = current_cluster.iter().sum::<f32>() / (current_cluster.len() as f32);
+            clustered.push(mean);
+            current_cluster.clear();
+            current_cluster.push(pos);
+        }
+    }
+
+    if !current_cluster.is_empty() {
+        let mean = current_cluster.iter().sum::<f32>() / (current_cluster.len() as f32);
+        clustered.push(mean);
+    }
+
+    clustered
+}
+
+fn nearest_index(positions: &[f32], value: f32) -> usize {
+    positions
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            let da = (*a - value).abs();
+            let db = (*b - value).abs();
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(idx, _)| idx)
+        .unwrap_or(0)
+}
+
+/// Converts detected table cell boxes to PaddleX-like HTML structure tokens and
+/// returns the row-major cell ordering implied by those tokens.
+fn table_cells_to_html_structure(
+    cell_bboxes: &[BoundingBox],
+    tolerance: f32,
+) -> Option<HtmlStructureResult> {
+    if cell_bboxes.is_empty() {
+        return None;
+    }
+
+    let mut x_coords = Vec::with_capacity(cell_bboxes.len() * 2);
+    let mut y_coords = Vec::with_capacity(cell_bboxes.len() * 2);
+    for bbox in cell_bboxes {
+        x_coords.push(bbox.x_min());
+        x_coords.push(bbox.x_max());
+        y_coords.push(bbox.y_min());
+        y_coords.push(bbox.y_max());
+    }
+
+    let x_positions = cluster_positions(x_coords, tolerance);
+    let y_positions = cluster_positions(y_coords, tolerance);
+
+    if x_positions.len() < 2 || y_positions.len() < 2 {
+        return None;
+    }
+
+    let num_rows = y_positions.len() - 1;
+    let num_cols = x_positions.len() - 1;
+    if num_rows == 0 || num_cols == 0 {
+        return None;
+    }
+
+    let mut entries = Vec::with_capacity(cell_bboxes.len());
+    let mut cell_map: HashMap<(usize, usize), usize> = HashMap::new();
+
+    for (source_idx, bbox) in cell_bboxes.iter().enumerate() {
+        let x1_idx = nearest_index(&x_positions, bbox.x_min());
+        let x2_idx = nearest_index(&x_positions, bbox.x_max());
+        let y1_idx = nearest_index(&y_positions, bbox.y_min());
+        let y2_idx = nearest_index(&y_positions, bbox.y_max());
+
+        let col_start = x1_idx.min(x2_idx).min(num_cols.saturating_sub(1));
+        let col_end = x1_idx.max(x2_idx).min(num_cols);
+        let row_start = y1_idx.min(y2_idx).min(num_rows.saturating_sub(1));
+        let row_end = y1_idx.max(y2_idx).min(num_rows);
+
+        let row_span = row_end.saturating_sub(row_start).max(1);
+        let col_span = col_end.saturating_sub(col_start).max(1);
+
+        let entry_idx = entries.len();
+        entries.push(CellLayoutEntry {
+            source_idx,
+            row_start,
+            col_start,
+            row_span,
+            col_span,
+        });
+
+        let row_stop = (row_start + row_span).min(num_rows);
+        let col_stop = (col_start + col_span).min(num_cols);
+        for r in row_start..row_stop {
+            for c in col_start..col_stop {
+                cell_map.entry((r, c)).or_insert(entry_idx);
+            }
+        }
+    }
+
+    let mut structure_tokens = Vec::new();
+    let mut cell_order = Vec::new();
+    structure_tokens.push("<table>".to_string());
+    structure_tokens.push("<tbody>".to_string());
+
+    for r in 0..num_rows {
+        structure_tokens.push("<tr>".to_string());
+        let mut c = 0usize;
+        while c < num_cols {
+            if let Some(&entry_idx) = cell_map.get(&(r, c)) {
+                let entry = entries[entry_idx];
+                if entry.row_start == r && entry.col_start == c {
+                    let token = if entry.row_span > 1 || entry.col_span > 1 {
+                        let mut attrs = String::new();
+                        if entry.row_span > 1 {
+                            attrs.push_str(&format!(" rowspan=\"{}\"", entry.row_span));
+                        }
+                        if entry.col_span > 1 {
+                            attrs.push_str(&format!(" colspan=\"{}\"", entry.col_span));
+                        }
+                        format!("<td{}></td>", attrs)
+                    } else {
+                        "<td></td>".to_string()
+                    };
+                    structure_tokens.push(token);
+                    cell_order.push((
+                        entry.source_idx,
+                        crate::processors::CellGridInfo {
+                            row: entry.row_start,
+                            col: entry.col_start,
+                            row_span: entry.row_span,
+                            col_span: entry.col_span,
+                        },
+                    ));
+                }
+                c += entry.col_span.max(1);
+            } else {
+                c += 1;
+            }
+        }
+        structure_tokens.push("</tr>".to_string());
+    }
+
+    structure_tokens.push("</tbody>".to_string());
+    structure_tokens.push("</table>".to_string());
+
+    if cell_order.is_empty() {
+        None
+    } else {
+        Some((structure_tokens, cell_order))
+    }
 }
 
 impl<'a> TableAnalyzer<'a> {
@@ -70,6 +250,8 @@ impl<'a> TableAnalyzer<'a> {
             wireless_table_cell_adapter: config.wireless_table_cell_adapter,
             use_e2e_wired_table_rec: config.use_e2e_wired_table_rec,
             use_e2e_wireless_table_rec: config.use_e2e_wireless_table_rec,
+            use_wired_table_cells_trans_to_html: config.use_wired_table_cells_trans_to_html,
+            use_wireless_table_cells_trans_to_html: config.use_wireless_table_cells_trans_to_html,
         }
     }
 
@@ -140,9 +322,10 @@ impl<'a> TableAnalyzer<'a> {
             }
         };
 
-        // Use floor() to align with BBoxCrop which truncates coordinates to u32.
-        let table_x_offset = table_bbox.x_min().max(0.0).floor();
-        let table_y_offset = table_bbox.y_min().max(0.0).floor();
+        // PaddleX uses the original float table box as `crop_start_point` when mapping
+        // cell boxes back, even though crop slicing itself truncates to integer pixels.
+        let table_x_offset = table_bbox.x_min().max(0.0);
+        let table_y_offset = table_bbox.y_min().max(0.0);
 
         let cropped_table_arc = std::sync::Arc::new(cropped_table);
         let (table_for_recognition, table_rotation) =
@@ -204,6 +387,12 @@ impl<'a> TableAnalyzer<'a> {
             TableType::Unknown => self.use_e2e_wireless_table_rec,
         };
 
+        let use_cells_trans_to_html = match table_type {
+            TableType::Wired => self.use_wired_table_cells_trans_to_html,
+            TableType::Wireless => self.use_wireless_table_cells_trans_to_html,
+            TableType::Unknown => false,
+        };
+
         let structure_adapter: Option<&TableStructureRecognitionAdapter> = match table_type {
             TableType::Wired => self
                 .wired_table_structure_adapter
@@ -248,248 +437,327 @@ impl<'a> TableAnalyzer<'a> {
             }
         };
 
-        let table_result = match structure_adapter {
+        let mut structure_tokens_opt: Option<Vec<String>> = None;
+        let mut structure_score_opt: Option<f32> = None;
+        let mut structure_bboxes: Vec<Vec<f32>> = Vec::new();
+
+        match structure_adapter {
             Some(adapter) => {
                 let input = ImageTaskInput::new(vec![(*table_for_recognition).clone()]);
                 match adapter.execute(input, None) {
-                    Ok(output) => output,
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "structure",
-                            table_index = idx,
-                            table_type = ?table_type,
-                            error = %e,
-                            "Structure adapter failed; adding stub result"
-                        );
-                        let mut table_result = TableResult::new(table_bbox.clone(), table_type);
-                        if let Some(conf) = classification_confidence {
-                            table_result = table_result.with_classification_confidence(conf);
+                    Ok(table_result) => {
+                        if let Some((structure, bboxes, structure_score)) = table_result
+                            .structures
+                            .first()
+                            .zip(table_result.bboxes.first())
+                            .zip(table_result.structure_scores.first())
+                            .map(|((s, b), sc)| (s, b, sc))
+                        {
+                            structure_tokens_opt = Some(structure.clone());
+                            structure_bboxes = bboxes.clone();
+                            structure_score_opt = Some(*structure_score);
+                        } else {
+                            tracing::warn!(
+                                target: "structure",
+                                table_index = idx,
+                                table_type = ?table_type,
+                                structures = table_result.structures.len(),
+                                bboxes = table_result.bboxes.len(),
+                                scores = table_result.structure_scores.len(),
+                                "Structure recognition returned no usable structure payload"
+                            );
                         }
-                        return Ok(Some(table_result));
+                    }
+                    Err(e) => {
+                        if use_cells_trans_to_html && !use_e2e_mode {
+                            tracing::warn!(
+                                target: "structure",
+                                table_index = idx,
+                                table_type = ?table_type,
+                                error = %e,
+                                "Structure adapter failed; falling back to cells->html mode"
+                            );
+                        } else {
+                            tracing::warn!(
+                                target: "structure",
+                                table_index = idx,
+                                table_type = ?table_type,
+                                error = %e,
+                                "Structure adapter failed; adding stub result"
+                            );
+                            let mut table_result = TableResult::new(table_bbox.clone(), table_type);
+                            if let Some(conf) = classification_confidence {
+                                table_result = table_result.with_classification_confidence(conf);
+                            }
+                            return Ok(Some(table_result));
+                        }
                     }
                 }
             }
             None => {
-                tracing::warn!(
+                if !use_cells_trans_to_html || use_e2e_mode {
+                    tracing::warn!(
+                        target: "structure",
+                        table_index = idx,
+                        table_type = ?table_type,
+                        "No structure adapter available; adding stub result"
+                    );
+                    let mut table_result = TableResult::new(table_bbox.clone(), table_type);
+                    if let Some(conf) = classification_confidence {
+                        table_result = table_result.with_classification_confidence(conf);
+                    }
+                    return Ok(Some(table_result));
+                }
+                tracing::info!(
                     target: "structure",
                     table_index = idx,
                     table_type = ?table_type,
-                    "No structure adapter available; adding stub result"
+                    "No structure adapter available; using cells->html mode"
                 );
-                let mut table_result = TableResult::new(table_bbox.clone(), table_type);
-                if let Some(conf) = classification_confidence {
-                    table_result = table_result.with_classification_confidence(conf);
-                }
-                return Ok(Some(table_result));
             }
-        };
-
-        let has_valid_structure = !table_result.structures.is_empty();
-
-        if !has_valid_structure {
-            let mut stub_result = TableResult::new(table_bbox.clone(), table_type);
-            if let Some(conf) = classification_confidence {
-                stub_result = stub_result.with_classification_confidence(conf);
-            }
-            return Ok(Some(stub_result));
         }
 
-        let Some((structure, bboxes, structure_score)) = table_result
-            .structures
-            .first()
-            .zip(table_result.bboxes.first())
-            .zip(table_result.structure_scores.first())
-            .map(|((s, b), sc)| (s, b, sc))
-        else {
-            tracing::warn!(
-                "Table {}: Structure recognition returned mismatched data (structures: {}, bboxes: {}, scores: {}). Adding stub result.",
-                idx,
-                table_result.structures.len(),
-                table_result.bboxes.len(),
-                table_result.structure_scores.len()
-            );
-            let mut stub_result = TableResult::new(table_bbox.clone(), table_type);
-            if let Some(conf) = classification_confidence {
-                stub_result = stub_result.with_classification_confidence(conf);
-            }
-            return Ok(Some(stub_result));
-        };
-
-        let grid_info = crate::processors::parse_cell_grid_info(structure);
-
-        let mut cells: Vec<TableCell> = bboxes
-            .iter()
-            .enumerate()
-            .map(|(cell_idx, bbox_coords)| {
-                let mut bbox_crop = if bbox_coords.len() >= 8 {
-                    let xs = [
-                        bbox_coords[0],
-                        bbox_coords[2],
-                        bbox_coords[4],
-                        bbox_coords[6],
-                    ];
-                    let ys = [
-                        bbox_coords[1],
-                        bbox_coords[3],
-                        bbox_coords[5],
-                        bbox_coords[7],
-                    ];
-                    let x_min = xs.iter().fold(f32::INFINITY, |acc, &x| acc.min(x));
-                    let y_min = ys.iter().fold(f32::INFINITY, |acc, &y| acc.min(y));
-                    let x_max = xs.iter().fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
-                    let y_max = ys.iter().fold(f32::NEG_INFINITY, |acc, &y| acc.max(y));
-                    BoundingBox::from_coords(x_min, y_min, x_max, y_max)
-                } else if bbox_coords.len() >= 4 {
-                    BoundingBox::from_coords(
-                        bbox_coords[0],
-                        bbox_coords[1],
-                        bbox_coords[2],
-                        bbox_coords[3],
-                    )
-                } else {
-                    BoundingBox::from_coords(0.0, 0.0, 0.0, 0.0)
-                };
-
-                if let Some(rot) = table_rotation
-                    && rot.angle.abs() > 1.0
-                {
-                    bbox_crop = bbox_crop.rotate_back_to_original(
-                        rot.angle,
-                        rot.rotated_width,
-                        rot.rotated_height,
-                    );
-                }
-
-                let bbox = bbox_crop.translate(table_x_offset, table_y_offset);
-
-                let mut cell = TableCell::new(bbox, 1.0);
-                if let Some(info) = grid_info.get(cell_idx) {
-                    cell = cell
-                        .with_position(info.row, info.col)
-                        .with_span(info.row_span, info.col_span);
-                }
-                cell
-            })
-            .collect();
-
-        if let Some(cell_detection_adapter) = cell_adapter {
-            let cell_input = ImageTaskInput::new(vec![(*table_for_recognition).clone()]);
-            if let Ok(cell_result) = cell_detection_adapter.execute(cell_input, None)
-                && let Some(detected_cells) = cell_result.cells.first()
-                && !detected_cells.is_empty()
-            {
-                let structure_bboxes_crop: Vec<_> = cells
+        let mut cells: Vec<TableCell> =
+            if let Some(structure_tokens) = structure_tokens_opt.as_ref() {
+                let grid_info = crate::processors::parse_cell_grid_info(structure_tokens);
+                structure_bboxes
                     .iter()
-                    .map(|c| {
-                        BoundingBox::from_coords(
-                            c.bbox.x_min() - table_x_offset,
-                            c.bbox.y_min() - table_y_offset,
-                            c.bbox.x_max() - table_x_offset,
-                            c.bbox.y_max() - table_y_offset,
-                        )
-                    })
-                    .collect();
+                    .enumerate()
+                    .map(|(cell_idx, bbox_coords)| {
+                        let mut bbox_crop = if bbox_coords.len() >= 8 {
+                            let xs = [
+                                bbox_coords[0],
+                                bbox_coords[2],
+                                bbox_coords[4],
+                                bbox_coords[6],
+                            ];
+                            let ys = [
+                                bbox_coords[1],
+                                bbox_coords[3],
+                                bbox_coords[5],
+                                bbox_coords[7],
+                            ];
+                            let x_min = xs.iter().fold(f32::INFINITY, |acc, &x| acc.min(x));
+                            let y_min = ys.iter().fold(f32::INFINITY, |acc, &y| acc.min(y));
+                            let x_max = xs.iter().fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
+                            let y_max = ys.iter().fold(f32::NEG_INFINITY, |acc, &y| acc.max(y));
+                            BoundingBox::from_coords(x_min, y_min, x_max, y_max)
+                        } else if bbox_coords.len() >= 4 {
+                            BoundingBox::from_coords(
+                                bbox_coords[0],
+                                bbox_coords[1],
+                                bbox_coords[2],
+                                bbox_coords[3],
+                            )
+                        } else {
+                            BoundingBox::from_coords(0.0, 0.0, 0.0, 0.0)
+                        };
 
-                let detected_bboxes: Vec<_> = detected_cells
-                    .iter()
-                    .map(|c| {
-                        let mut bbox = c.bbox.clone();
                         if let Some(rot) = table_rotation
                             && rot.angle.abs() > 1.0
                         {
-                            bbox = bbox.rotate_back_to_original(
+                            bbox_crop = bbox_crop.rotate_back_to_original(
                                 rot.angle,
                                 rot.rotated_width,
                                 rot.rotated_height,
                             );
                         }
-                        bbox
-                    })
-                    .collect();
-                let detected_scores: Vec<f32> = detected_cells.iter().map(|c| c.score).collect();
 
-                let mut ocr_boxes_crop: Vec<BoundingBox> = Vec::new();
-                for region in text_regions {
-                    let b = &region.bounding_box;
-                    if b.x_min() >= table_bbox.x_min()
-                        && b.y_min() >= table_bbox.y_min()
-                        && b.x_max() <= table_bbox.x_max()
-                        && b.y_max() <= table_bbox.y_max()
-                    {
-                        ocr_boxes_crop.push(BoundingBox::from_coords(
-                            b.x_min() - table_x_offset,
-                            b.y_min() - table_y_offset,
-                            b.x_max() - table_x_offset,
-                            b.y_max() - table_y_offset,
-                        ));
-                    }
-                }
-                for formula in formulas {
-                    let b = &formula.bbox;
-                    if b.x_min() >= table_bbox.x_min()
-                        && b.y_min() >= table_bbox.y_min()
-                        && b.x_max() <= table_bbox.x_max()
-                        && b.y_max() <= table_bbox.y_max()
-                    {
-                        ocr_boxes_crop.push(BoundingBox::from_coords(
-                            b.x_min() - table_x_offset,
-                            b.y_min() - table_y_offset,
-                            b.x_max() - table_x_offset,
-                            b.y_max() - table_y_offset,
-                        ));
-                    }
-                }
-                for elem in layout_elements {
-                    if matches!(
-                        elem.element_type,
-                        LayoutElementType::Image | LayoutElementType::Chart
-                    ) {
-                        let b = &elem.bbox;
-                        if b.x_min() >= table_bbox.x_min()
-                            && b.y_min() >= table_bbox.y_min()
-                            && b.x_max() <= table_bbox.x_max()
-                            && b.y_max() <= table_bbox.y_max()
-                        {
-                            ocr_boxes_crop.push(BoundingBox::from_coords(
-                                b.x_min() - table_x_offset,
-                                b.y_min() - table_y_offset,
-                                b.x_max() - table_x_offset,
-                                b.y_max() - table_y_offset,
-                            ));
+                        let bbox = bbox_crop.translate(table_x_offset, table_y_offset);
+                        let mut cell = TableCell::new(bbox, 1.0);
+                        if let Some(info) = grid_info.get(cell_idx) {
+                            cell = cell
+                                .with_position(info.row, info.col)
+                                .with_span(info.row_span, info.col_span);
                         }
+                        cell
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+        let mut detected_bboxes_crop: Vec<BoundingBox> = Vec::new();
+        let mut detected_scores: Vec<f32> = Vec::new();
+        if let Some(cell_detection_adapter) = cell_adapter {
+            let cell_input = ImageTaskInput::new(vec![(*table_for_recognition).clone()]);
+            if let Ok(cell_result) = cell_detection_adapter.execute(cell_input, None)
+                && let Some(detected_cells) = cell_result.cells.first()
+            {
+                for detected_cell in detected_cells {
+                    let mut bbox = detected_cell.bbox.clone();
+                    if let Some(rot) = table_rotation
+                        && rot.angle.abs() > 1.0
+                    {
+                        bbox = bbox.rotate_back_to_original(
+                            rot.angle,
+                            rot.rotated_width,
+                            rot.rotated_height,
+                        );
                     }
-                }
-
-                let expected_n = structure_bboxes_crop.len();
-                let processed_detected_crop = crate::processors::reprocess_table_cells_with_ocr(
-                    &detected_bboxes,
-                    &detected_scores,
-                    &ocr_boxes_crop,
-                    expected_n,
-                );
-
-                let reconciled_bboxes = crate::processors::reconcile_table_cells(
-                    &structure_bboxes_crop,
-                    &processed_detected_crop,
-                );
-
-                for (cell, new_bbox_crop) in cells.iter_mut().zip(reconciled_bboxes.into_iter()) {
-                    cell.bbox = BoundingBox::from_coords(
-                        new_bbox_crop.x_min() + table_x_offset,
-                        new_bbox_crop.y_min() + table_y_offset,
-                        new_bbox_crop.x_max() + table_x_offset,
-                        new_bbox_crop.y_max() + table_y_offset,
-                    );
+                    detected_bboxes_crop.push(bbox);
+                    detected_scores.push(detected_cell.score);
                 }
             }
         }
 
-        let html_structure = crate::processors::wrap_table_html(structure);
+        if use_cells_trans_to_html && !use_e2e_mode && !detected_bboxes_crop.is_empty() {
+            cells = detected_bboxes_crop
+                .iter()
+                .zip(detected_scores.iter())
+                .map(|(bbox_crop, score)| {
+                    let bbox = bbox_crop.translate(table_x_offset, table_y_offset);
+                    TableCell::new(bbox, *score)
+                })
+                .collect();
+        } else if !detected_bboxes_crop.is_empty() && !cells.is_empty() {
+            let structure_bboxes_crop: Vec<_> = cells
+                .iter()
+                .map(|c| {
+                    BoundingBox::from_coords(
+                        c.bbox.x_min() - table_x_offset,
+                        c.bbox.y_min() - table_y_offset,
+                        c.bbox.x_max() - table_x_offset,
+                        c.bbox.y_max() - table_y_offset,
+                    )
+                })
+                .collect();
+
+            let mut ocr_boxes_crop: Vec<BoundingBox> = Vec::new();
+            for region in text_regions {
+                let b = &region.bounding_box;
+                if b.x_min() >= table_bbox.x_min()
+                    && b.y_min() >= table_bbox.y_min()
+                    && b.x_max() <= table_bbox.x_max()
+                    && b.y_max() <= table_bbox.y_max()
+                {
+                    ocr_boxes_crop.push(BoundingBox::from_coords(
+                        b.x_min() - table_x_offset,
+                        b.y_min() - table_y_offset,
+                        b.x_max() - table_x_offset,
+                        b.y_max() - table_y_offset,
+                    ));
+                }
+            }
+            for formula in formulas {
+                let b = &formula.bbox;
+                if b.x_min() >= table_bbox.x_min()
+                    && b.y_min() >= table_bbox.y_min()
+                    && b.x_max() <= table_bbox.x_max()
+                    && b.y_max() <= table_bbox.y_max()
+                {
+                    ocr_boxes_crop.push(BoundingBox::from_coords(
+                        b.x_min() - table_x_offset,
+                        b.y_min() - table_y_offset,
+                        b.x_max() - table_x_offset,
+                        b.y_max() - table_y_offset,
+                    ));
+                }
+            }
+            for elem in layout_elements {
+                if matches!(
+                    elem.element_type,
+                    LayoutElementType::Image | LayoutElementType::Chart
+                ) {
+                    let b = &elem.bbox;
+                    if b.x_min() >= table_bbox.x_min()
+                        && b.y_min() >= table_bbox.y_min()
+                        && b.x_max() <= table_bbox.x_max()
+                        && b.y_max() <= table_bbox.y_max()
+                    {
+                        ocr_boxes_crop.push(BoundingBox::from_coords(
+                            b.x_min() - table_x_offset,
+                            b.y_min() - table_y_offset,
+                            b.x_max() - table_x_offset,
+                            b.y_max() - table_y_offset,
+                        ));
+                    }
+                }
+            }
+
+            let expected_n = structure_bboxes_crop.len();
+            let processed_detected_crop = crate::processors::reprocess_table_cells_with_ocr(
+                &detected_bboxes_crop,
+                &detected_scores,
+                &ocr_boxes_crop,
+                expected_n,
+            );
+
+            let reconciled_bboxes = crate::processors::reconcile_table_cells(
+                &structure_bboxes_crop,
+                &processed_detected_crop,
+            );
+
+            for (cell, new_bbox_crop) in cells.iter_mut().zip(reconciled_bboxes.into_iter()) {
+                cell.bbox = BoundingBox::from_coords(
+                    new_bbox_crop.x_min() + table_x_offset,
+                    new_bbox_crop.y_min() + table_y_offset,
+                    new_bbox_crop.x_max() + table_x_offset,
+                    new_bbox_crop.y_max() + table_y_offset,
+                );
+            }
+        }
+
+        if cells.is_empty() {
+            let mut stub_result = TableResult::new(table_bbox.clone(), table_type);
+            if let Some(conf) = classification_confidence {
+                stub_result = stub_result.with_classification_confidence(conf);
+            }
+            return Ok(Some(stub_result));
+        }
+
+        if use_cells_trans_to_html {
+            let cell_bboxes_crop: Vec<_> = cells
+                .iter()
+                .map(|c| {
+                    BoundingBox::from_coords(
+                        c.bbox.x_min() - table_x_offset,
+                        c.bbox.y_min() - table_y_offset,
+                        c.bbox.x_max() - table_x_offset,
+                        c.bbox.y_max() - table_y_offset,
+                    )
+                })
+                .collect();
+
+            if let Some((generated_tokens, cell_order)) =
+                table_cells_to_html_structure(&cell_bboxes_crop, 5.0)
+            {
+                let mut reordered_cells = Vec::with_capacity(cell_order.len());
+                for (source_idx, grid_info) in cell_order {
+                    if let Some(cell) = cells.get(source_idx).cloned() {
+                        reordered_cells.push(
+                            cell.with_position(grid_info.row, grid_info.col)
+                                .with_span(grid_info.row_span, grid_info.col_span),
+                        );
+                    }
+                }
+                if !reordered_cells.is_empty() {
+                    cells = reordered_cells;
+                    structure_tokens_opt = Some(generated_tokens);
+                    if structure_score_opt.is_none() {
+                        structure_score_opt = Some(1.0);
+                    }
+                }
+            }
+        }
+
+        let Some(structure_tokens) = structure_tokens_opt else {
+            let mut stub_result = TableResult::new(table_bbox.clone(), table_type);
+            if let Some(conf) = classification_confidence {
+                stub_result = stub_result.with_classification_confidence(conf);
+            }
+            return Ok(Some(stub_result));
+        };
+
+        let html_structure = crate::processors::wrap_table_html(&structure_tokens);
         let mut final_result = TableResult::new(table_bbox.clone(), table_type)
             .with_cells(cells)
             .with_html_structure(html_structure)
-            .with_structure_tokens(structure.to_vec())
-            .with_structure_confidence(*structure_score);
+            .with_structure_tokens(structure_tokens);
+
+        if let Some(score) = structure_score_opt {
+            final_result = final_result.with_structure_confidence(score);
+        }
 
         if let Some(conf) = classification_confidence {
             final_result = final_result.with_classification_confidence(conf);
@@ -516,6 +784,8 @@ mod tests {
             wireless_table_cell_adapter: None,
             use_e2e_wired_table_rec: true,
             use_e2e_wireless_table_rec: true,
+            use_wired_table_cells_trans_to_html: false,
+            use_wireless_table_cells_trans_to_html: false,
         })
     }
 
@@ -525,37 +795,77 @@ mod tests {
     }
 
     #[test]
-    fn test_table_offset_floor_alignment() {
-        // Verify that offset calculation uses floor() to align with BBoxCrop
-        // which truncates f32 coordinates to u32.
+    fn test_table_cells_to_html_structure_row_major_order() {
+        let boxes = vec![
+            BoundingBox::from_coords(0.0, 0.0, 50.0, 20.0),
+            BoundingBox::from_coords(50.0, 0.0, 100.0, 20.0),
+            BoundingBox::from_coords(0.0, 20.0, 50.0, 40.0),
+            BoundingBox::from_coords(50.0, 20.0, 100.0, 40.0),
+        ];
+
+        let (tokens, order) =
+            table_cells_to_html_structure(&boxes, 5.0).expect("expected html conversion");
+
+        assert_eq!(order.len(), 4);
+        assert_eq!(tokens.first().map(String::as_str), Some("<table>"));
+        assert_eq!(tokens.last().map(String::as_str), Some("</table>"));
+        assert_eq!(
+            tokens.iter().filter(|t| t.as_str() == "<td></td>").count(),
+            4
+        );
+
+        let grid_positions: Vec<(usize, usize)> =
+            order.iter().map(|(_, g)| (g.row, g.col)).collect();
+        assert_eq!(grid_positions, vec![(0, 0), (0, 1), (1, 0), (1, 1)]);
+    }
+
+    #[test]
+    fn test_table_cells_to_html_structure_with_rowspan() {
+        let boxes = vec![
+            BoundingBox::from_coords(0.0, 0.0, 50.0, 40.0), // rowspan=2
+            BoundingBox::from_coords(50.0, 0.0, 100.0, 20.0), // row 0 col 1
+            BoundingBox::from_coords(50.0, 20.0, 100.0, 40.0), // row 1 col 1
+        ];
+
+        let (tokens, order) =
+            table_cells_to_html_structure(&boxes, 5.0).expect("expected html conversion");
+
+        assert_eq!(order.len(), 3);
+        assert!(tokens.iter().any(|t| t.contains("rowspan=\"2\"")));
+    }
+
+    #[test]
+    fn test_table_offset_preserves_fraction() {
+        // PaddleX keeps the original fractional crop start point when translating
+        // table-relative boxes back to page coordinates.
 
         // Case 1: Positive fractional coordinates
         let bbox = BoundingBox::from_coords(10.7, 20.3, 100.0, 200.0);
-        let x_offset = bbox.x_min().max(0.0).floor();
-        let y_offset = bbox.y_min().max(0.0).floor();
-        assert_eq!(x_offset, 10.0);
-        assert_eq!(y_offset, 20.0);
+        let x_offset = bbox.x_min().max(0.0);
+        let y_offset = bbox.y_min().max(0.0);
+        assert_eq!(x_offset, 10.7);
+        assert_eq!(y_offset, 20.3);
 
         // Case 2: Integer coordinates (no change)
         let bbox = BoundingBox::from_coords(15.0, 25.0, 100.0, 200.0);
-        let x_offset = bbox.x_min().max(0.0).floor();
-        let y_offset = bbox.y_min().max(0.0).floor();
+        let x_offset = bbox.x_min().max(0.0);
+        let y_offset = bbox.y_min().max(0.0);
         assert_eq!(x_offset, 15.0);
         assert_eq!(y_offset, 25.0);
 
         // Case 3: Negative coordinates clamped to 0
         let bbox = BoundingBox::from_coords(-5.5, -10.2, 100.0, 200.0);
-        let x_offset = bbox.x_min().max(0.0).floor();
-        let y_offset = bbox.y_min().max(0.0).floor();
+        let x_offset = bbox.x_min().max(0.0);
+        let y_offset = bbox.y_min().max(0.0);
         assert_eq!(x_offset, 0.0);
         assert_eq!(y_offset, 0.0);
 
         // Case 4: High precision fractional coordinates
         let bbox = BoundingBox::from_coords(99.999, 199.001, 300.0, 400.0);
-        let x_offset = bbox.x_min().max(0.0).floor();
-        let y_offset = bbox.y_min().max(0.0).floor();
-        assert_eq!(x_offset, 99.0);
-        assert_eq!(y_offset, 199.0);
+        let x_offset = bbox.x_min().max(0.0);
+        let y_offset = bbox.y_min().max(0.0);
+        assert_eq!(x_offset, 99.999);
+        assert_eq!(y_offset, 199.001);
     }
 
     #[test]

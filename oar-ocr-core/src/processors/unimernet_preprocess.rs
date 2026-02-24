@@ -3,7 +3,7 @@
 //! This module implements the specific preprocessing logic for UniMERNet model,
 //! which differs significantly from PP-FormulaNet's preprocessing.
 
-use crate::core::{OCRError, Tensor4D};
+use crate::core::OCRError;
 use image::{ImageBuffer, Luma, Rgb, RgbImage, imageops};
 use ndarray::{Array4, s};
 
@@ -202,7 +202,7 @@ impl UniMERNetPreprocessor {
     }
 
     /// Convert image to tensor and normalize
-    fn image_to_tensor(&self, img: &RgbImage) -> Tensor4D {
+    fn image_to_tensor(&self, img: &RgbImage) -> ndarray::Array4<f32> {
         let (width, height) = img.dimensions();
 
         // Ensure dimensions are multiples of padding_multiple
@@ -249,7 +249,7 @@ impl UniMERNetPreprocessor {
     }
 
     /// Process a batch of images
-    pub fn preprocess_batch(&self, images: &[RgbImage]) -> Result<Tensor4D, OCRError> {
+    pub fn preprocess_batch(&self, images: &[RgbImage]) -> Result<ndarray::Array4<f32>, OCRError> {
         if images.is_empty() {
             return Err(OCRError::InvalidInput {
                 message: "Empty image batch".to_string(),

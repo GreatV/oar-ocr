@@ -19,7 +19,6 @@ impl OrtInfer {
             sessions: vec![Mutex::new(session)],
             next_idx: std::sync::atomic::AtomicUsize::new(0),
             input_name: input_name.unwrap_or("x").to_string(),
-            output_name: None,
             model_path: path.to_path_buf(),
             model_name,
         })
@@ -54,31 +53,6 @@ impl OrtInfer {
             sessions: vec![Mutex::new(session)],
             next_idx: std::sync::atomic::AtomicUsize::new(0),
             input_name: input_name.unwrap_or("x").to_string(),
-            output_name: None,
-            model_path: path.to_path_buf(),
-            model_name,
-        })
-    }
-
-    /// Creates a new OrtInfer instance with a specified output tensor name.
-    pub fn with_output_name(
-        model_path: impl AsRef<Path>,
-        input_name: Option<&str>,
-        output_name: Option<&str>,
-    ) -> Result<Self, OCRError> {
-        let path = model_path.as_ref();
-        let session = session::load_session_with(
-            path,
-            |builder| builder.with_log_level(LogLevel::Error),
-            Some("verify model path and compatibility"),
-        )?;
-        let model_name = "unknown_model".to_string();
-
-        Ok(OrtInfer {
-            sessions: vec![Mutex::new(session)],
-            next_idx: std::sync::atomic::AtomicUsize::new(0),
-            input_name: input_name.unwrap_or("x").to_string(),
-            output_name: output_name.map(|s| s.to_string()),
             model_path: path.to_path_buf(),
             model_name,
         })

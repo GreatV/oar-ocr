@@ -3,8 +3,8 @@
 //! This module provides a pure implementation of the UniMERNet formula recognition model.
 //! The model is independent of any specific task and can be reused in different contexts.
 
-use crate::core::inference::OrtInfer;
-use crate::core::{OCRError, Tensor4D};
+use crate::core::OCRError;
+use crate::core::inference::{OrtInfer, TensorInput};
 use crate::processors::{UniMERNetPreprocessParams, UniMERNetPreprocessor};
 use image::RgbImage;
 use ndarray::{ArrayBase, Axis, Data, Ix2};
@@ -103,22 +103,45 @@ impl UniMERNetModel {
     /// Preprocesses images for formula recognition.
     ///
     /// Returns a batch tensor ready for inference.
-    pub fn preprocess(&self, images: Vec<RgbImage>) -> Result<Tensor4D, OCRError> {
+    pub fn preprocess(&self, images: Vec<RgbImage>) -> Result<ndarray::Array4<f32>, OCRError> {
         self.preprocessor.preprocess_batch(&images)
     }
 
     /// Runs inference on the preprocessed batch tensor.
     ///
     /// Returns raw token IDs [batch_size, max_length].
-    pub fn infer(&self, batch_tensor: &Tensor4D) -> Result<ndarray::Array2<i64>, OCRError> {
-        self.inference
-            .infer_2d_i64(batch_tensor)
+    pub fn infer(
+        &self,
+        batch_tensor: &ndarray::Array4<f32>,
+    ) -> Result<ndarray::Array2<i64>, OCRError> {
+        let input_name = self.inference.input_name();
+        let inputs = vec![(input_name, TensorInput::Array4(batch_tensor))];
+
+        let outputs = self
+            .inference
+            .infer(&inputs)
             .map_err(|e| OCRError::Inference {
                 model_name: "UniMERNet".to_string(),
                 context: format!(
                     "failed to run inference on batch with shape {:?}",
                     batch_tensor.shape()
                 ),
+                source: Box::new(e),
+            })?;
+
+        let output = outputs
+            .into_iter()
+            .next()
+            .ok_or_else(|| OCRError::InvalidInput {
+                message: "UniMERNet: no output returned from inference".to_string(),
+            })?;
+
+        output
+            .1
+            .try_into_array2_i64()
+            .map_err(|e| OCRError::Inference {
+                model_name: "UniMERNet".to_string(),
+                context: "failed to convert output to 2D i64 array".to_string(),
                 source: Box::new(e),
             })
     }

@@ -37,7 +37,7 @@ pub use batch::dynamic::{
     DefaultDynamicBatcher, DynamicBatchConfig, DynamicBatchResult, DynamicBatcher, PaddingStrategy,
     ShapeCompatibilityStrategy,
 };
-pub use batch::{BatchData, BatchSampler, Tensor1D, Tensor2D, Tensor3D, Tensor4D, ToBatch};
+pub use batch::{BatchData, BatchSampler, ToBatch};
 pub use config::{
     ConfigError, ConfigValidator, ConfigValidatorExt, ModelInferenceConfig, TransformConfig,
     TransformRegistry, TransformType,
@@ -45,11 +45,10 @@ pub use config::{
 pub use constants::*;
 pub use errors::{OCRError, OcrResult, OpaqueError, ProcessingStage};
 pub use image_reader::DefaultImageReader;
-pub use inference::{OrtInfer, OrtInfer2D, OrtInfer3D, OrtInfer4D, load_session};
+pub use inference::{OrtInfer, TensorInput, TensorOutput, load_session};
 pub use traits::{
     AdapterBuilder, AdapterInfo, AdapterTask, GranularImageReader, ImageReader, ImageTaskInput,
-    InferenceEngine, ModelAdapter, Postprocessor, Preprocessor, Sampler, Task, TaskRunner,
-    TaskSchema, TaskType,
+    ModelAdapter, Postprocessor, Preprocessor, Sampler, Task, TaskRunner, TaskSchema, TaskType,
 };
 
 pub use validation::{

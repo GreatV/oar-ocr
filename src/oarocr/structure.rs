@@ -69,6 +69,9 @@ struct StructurePipeline {
     // E2E mode: when true, skip cell detection and use only structure model output
     use_e2e_wired_table_rec: bool,
     use_e2e_wireless_table_rec: bool,
+    // PaddleX compatibility: build table HTML from cell detection boxes
+    use_wired_table_cells_trans_to_html: bool,
+    use_wireless_table_cells_trans_to_html: bool,
 
     formula_recognition_adapter: Option<FormulaRecognitionAdapter>,
 
@@ -146,6 +149,10 @@ pub struct OARStructureBuilder {
     // Defaults: wired=false, wireless=true
     use_e2e_wired_table_rec: bool,
     use_e2e_wireless_table_rec: bool,
+    // PaddleX compatibility: build table HTML from cell detection boxes
+    // Defaults: wired=false, wireless=false
+    use_wired_table_cells_trans_to_html: bool,
+    use_wireless_table_cells_trans_to_html: bool,
 
     // Optional formula recognition
     formula_recognition_model: Option<PathBuf>,
@@ -212,6 +219,8 @@ impl OARStructureBuilder {
             // Defaults: wired=false (use cell detection), wireless=true (E2E mode)
             use_e2e_wired_table_rec: false,
             use_e2e_wireless_table_rec: true,
+            use_wired_table_cells_trans_to_html: false,
+            use_wireless_table_cells_trans_to_html: false,
             formula_recognition_model: None,
             formula_recognition_type: None,
             formula_tokenizer_path: None,
@@ -435,6 +444,24 @@ impl OARStructureBuilder {
     /// Default: `true` (E2E mode for wireless tables)
     pub fn use_e2e_wireless_table_rec(mut self, enabled: bool) -> Self {
         self.use_e2e_wireless_table_rec = enabled;
+        self
+    }
+
+    /// Enables PaddleX-compatible conversion of wired cell detections to HTML structure tokens.
+    ///
+    /// When enabled, wired tables can derive structure tokens directly from detected cell boxes,
+    /// which is useful for parity testing with PaddleX `use_wired_table_cells_trans_to_html`.
+    pub fn use_wired_table_cells_trans_to_html(mut self, enabled: bool) -> Self {
+        self.use_wired_table_cells_trans_to_html = enabled;
+        self
+    }
+
+    /// Enables PaddleX-compatible conversion of wireless cell detections to HTML structure tokens.
+    ///
+    /// When enabled, wireless tables can derive structure tokens directly from detected cell boxes,
+    /// which is useful for parity testing with PaddleX `use_wireless_table_cells_trans_to_html`.
+    pub fn use_wireless_table_cells_trans_to_html(mut self, enabled: bool) -> Self {
+        self.use_wireless_table_cells_trans_to_html = enabled;
         self
     }
 
@@ -1102,6 +1129,8 @@ impl OARStructureBuilder {
             wireless_table_cell_adapter,
             use_e2e_wired_table_rec: self.use_e2e_wired_table_rec,
             use_e2e_wireless_table_rec: self.use_e2e_wireless_table_rec,
+            use_wired_table_cells_trans_to_html: self.use_wired_table_cells_trans_to_html,
+            use_wireless_table_cells_trans_to_html: self.use_wireless_table_cells_trans_to_html,
             formula_recognition_adapter,
             seal_text_detection_adapter,
             text_detection_adapter,
@@ -2033,6 +2062,11 @@ impl OARStructure {
             }
         }
 
+        // PaddleX sorts OCR detection boxes in reading order before cropping/recognition.
+        if !detection_boxes.is_empty() {
+            detection_boxes = oar_ocr_core::processors::sort_quad_boxes(&detection_boxes);
+        }
+
         // Debug: boxes actually used for recognition cropping (after cross-layout splitting).
         if tracing::enabled!(tracing::Level::DEBUG) && !detection_boxes.is_empty() {
             let pre_rec_rects: Vec<[f32; 4]> = detection_boxes
@@ -2063,10 +2097,27 @@ impl OARStructure {
             }
 
             if !cropped_images.is_empty() {
-                let mut items: Vec<(usize, f32, image::RgbImage)> = cropped_images
+                // PaddleX applies textline orientation in detection order first.
+                if let Some(ref tlo_adapter) = self.pipeline.text_line_orientation_adapter {
+                    let tlo_input = ImageTaskInput::new(cropped_images.clone());
+                    if let Ok(tlo_result) = tlo_adapter.execute(tlo_input, None) {
+                        for (i, classifications) in tlo_result.classifications.iter().enumerate() {
+                            if i >= cropped_images.len() {
+                                break;
+                            }
+                            if let Some(top_cls) = classifications.first()
+                                && top_cls.class_id == 1
+                            {
+                                cropped_images[i] = image::imageops::rotate180(&cropped_images[i]);
+                            }
+                        }
+                    }
+                }
+
+                let mut items: Vec<(usize, f32, image::RgbImage)> = valid_indices
                     .into_iter()
-                    .zip(valid_indices)
-                    .map(|(img, det_idx)| {
+                    .zip(cropped_images)
+                    .map(|(det_idx, img)| {
                         let wh_ratio = img.width() as f32 / img.height().max(1) as f32;
                         (det_idx, wh_ratio, img)
                     })
@@ -2075,32 +2126,13 @@ impl OARStructure {
                 items.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
                 let batch_size = self.pipeline.region_batch_size.unwrap_or(8).max(1);
+                let mut recognized_by_det_idx: Vec<Option<(String, f32)>> =
+                    vec![None; detection_boxes.len()];
 
                 while !items.is_empty() {
                     let take_n = batch_size.min(items.len());
-                    let mut batch_items: Vec<(usize, f32, image::RgbImage)> =
+                    let batch_items: Vec<(usize, f32, image::RgbImage)> =
                         items.drain(0..take_n).collect();
-
-                    if let Some(ref tlo_adapter) = self.pipeline.text_line_orientation_adapter {
-                        let tlo_imgs: Vec<_> =
-                            batch_items.iter().map(|(_, _, img)| img.clone()).collect();
-                        let tlo_input = ImageTaskInput::new(tlo_imgs);
-                        if let Ok(tlo_result) = tlo_adapter.execute(tlo_input, None) {
-                            for (i, classifications) in
-                                tlo_result.classifications.iter().enumerate()
-                            {
-                                if i >= batch_items.len() {
-                                    break;
-                                }
-                                if let Some(top_cls) = classifications.first()
-                                    && top_cls.class_id == 1
-                                {
-                                    batch_items[i].2 =
-                                        image::imageops::rotate180(&batch_items[i].2);
-                                }
-                            }
-                        }
-                    }
 
                     let mut det_indices: Vec<usize> = Vec::with_capacity(batch_items.len());
                     let mut rec_imgs: Vec<image::RgbImage> = Vec::with_capacity(batch_items.len());
@@ -2119,19 +2151,28 @@ impl OARStructure {
                             if text.is_empty() {
                                 continue;
                             }
-
-                            let bbox = detection_boxes[det_idx].clone();
-                            text_regions.push(TextRegion {
-                                bounding_box: bbox.clone(),
-                                dt_poly: Some(bbox.clone()),
-                                rec_poly: Some(bbox),
-                                text: Some(Arc::from(text)),
-                                confidence: Some(score),
-                                orientation_angle: None,
-                                word_boxes: None,
-                            });
+                            if let Some(slot) = recognized_by_det_idx.get_mut(det_idx) {
+                                *slot = Some((text, score));
+                            }
                         }
                     }
+                }
+
+                // Emit OCR regions in original detection order, matching PaddleX.
+                for (det_idx, rec) in recognized_by_det_idx.into_iter().enumerate() {
+                    let Some((text, score)) = rec else {
+                        continue;
+                    };
+                    let bbox = detection_boxes[det_idx].clone();
+                    text_regions.push(TextRegion {
+                        bounding_box: bbox.clone(),
+                        dt_poly: Some(bbox.clone()),
+                        rec_poly: Some(bbox),
+                        text: Some(Arc::from(text)),
+                        confidence: Some(score),
+                        orientation_angle: None,
+                        word_boxes: None,
+                    });
                 }
             }
         }
@@ -2258,6 +2299,12 @@ impl OARStructure {
                     wireless_table_cell_adapter: self.pipeline.wireless_table_cell_adapter.as_ref(),
                     use_e2e_wired_table_rec: self.pipeline.use_e2e_wired_table_rec,
                     use_e2e_wireless_table_rec: self.pipeline.use_e2e_wireless_table_rec,
+                    use_wired_table_cells_trans_to_html: self
+                        .pipeline
+                        .use_wired_table_cells_trans_to_html,
+                    use_wireless_table_cells_trans_to_html: self
+                        .pipeline
+                        .use_wireless_table_cells_trans_to_html,
                 },
             );
             tables.extend(analyzer.analyze_tables(
@@ -2275,7 +2322,10 @@ impl OARStructure {
         // - For each OCR box that overlaps >= k table cells, split at cell boundaries
         // - Re-run recognition on each split crop
         // - Replace the original OCR box with the split boxes + texts
-        if !tables.is_empty()
+        let has_detection_backed_table_cells = tables
+            .iter()
+            .any(|table| table.cells.iter().any(|cell| cell.confidence < 0.999));
+        if has_detection_backed_table_cells
             && !text_regions.is_empty()
             && let Some(ref text_rec_adapter) = self.pipeline.text_recognition_adapter
         {

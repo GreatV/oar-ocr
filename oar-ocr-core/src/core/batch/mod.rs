@@ -9,18 +9,6 @@ pub mod dynamic;
 use crate::core::traits::Sampler;
 use std::sync::Arc;
 
-/// A 2-dimensional tensor represented as a 2D array of f32 values.
-pub type Tensor2D = ndarray::Array2<f32>;
-
-/// A 3-dimensional tensor represented as a 3D array of f32 values.
-pub type Tensor3D = ndarray::Array3<f32>;
-
-/// A 4-dimensional tensor represented as a 4D array of f32 values.
-pub type Tensor4D = ndarray::Array4<f32>;
-
-/// A 1-dimensional tensor represented as a dynamic-dimensional array of f32 values.
-pub type Tensor1D = ndarray::ArrayD<f32>;
-
 /// Data structure for holding batched input data.
 ///
 /// This struct contains the instances, input paths, and indexes for a batch of data.

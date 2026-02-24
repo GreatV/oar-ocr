@@ -24,9 +24,6 @@ pub use image::{
     slice_image, validate_crop_bounds,
 };
 
-// Re-export tensor utility functions
-pub use tensor::*;
-
 // Re-export transform utility functions
 pub use transform::get_rotate_crop_image;
 
