@@ -171,7 +171,7 @@ impl SLANetModel {
 
     /// Runs inference on the preprocessed tensor.
     ///
-    /// Returns dual outputs: structure logits and bbox predictions.
+    /// Returns dual outputs matching ONNX model order: (bbox predictions, structure logits).
     pub fn infer(
         &self,
         batch_tensor: &ndarray::Array4<f32>,
@@ -197,29 +197,30 @@ impl SLANetModel {
             });
         }
 
-        let structure =
+        let bbox_preds =
             outputs[0]
                 .1
                 .clone()
                 .try_into_array3_f32()
                 .map_err(|e| OCRError::Inference {
                     model_name: "SLANet".to_string(),
-                    context: "failed to convert first output (structure) to 3D array".to_string(),
+                    context: "failed to convert first output (bbox_preds) to 3D array".to_string(),
                     source: Box::new(e),
                 })?;
 
-        let bboxes =
+        let structure_logits =
             outputs[1]
                 .1
                 .clone()
                 .try_into_array3_f32()
                 .map_err(|e| OCRError::Inference {
                     model_name: "SLANet".to_string(),
-                    context: "failed to convert second output (bboxes) to 3D array".to_string(),
+                    context: "failed to convert second output (structure_logits) to 3D array"
+                        .to_string(),
                     source: Box::new(e),
                 })?;
 
-        Ok((structure, bboxes))
+        Ok((bbox_preds, structure_logits))
     }
 
     /// Runs the complete forward pass: preprocess -> infer.
