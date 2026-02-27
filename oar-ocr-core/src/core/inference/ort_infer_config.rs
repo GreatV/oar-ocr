@@ -2,7 +2,7 @@ use super::*;
 use crate::core::config::{
     OrtExecutionProvider, OrtGraphOptimizationLevel as OG, OrtSessionConfig,
 };
-use ort::execution_providers::ExecutionProviderDispatch;
+use ort::ep::ExecutionProviderDispatch;
 use ort::logging::LogLevel;
 use ort::session::builder::{GraphOptimizationLevel as GOL, SessionBuilder};
 
@@ -124,9 +124,15 @@ impl OrtInfer {
                     max_workspace_size,
                     min_subgraph_size,
                     fp16_enable,
+                    timing_cache,
+                    timing_cache_path,
+                    force_timing_cache,
+                    engine_cache,
+                    engine_cache_path,
+                    dump_ep_context_model,
+                    ep_context_file_path,
                 } => {
-                    let mut trt_provider =
-                        ort::execution_providers::TensorRTExecutionProvider::default();
+                    let mut trt_provider = ort::ep::TensorRTExecutionProvider::default();
                     if let Some(id) = device_id {
                         trt_provider = trt_provider.with_device_id(*id);
                     }
@@ -138,6 +144,28 @@ impl OrtInfer {
                     }
                     if let Some(fp16) = fp16_enable {
                         trt_provider = trt_provider.with_fp16(*fp16);
+                    }
+                    if let Some(timing_cache) = timing_cache {
+                        trt_provider = trt_provider.with_timing_cache(*timing_cache);
+                    }
+                    if let Some(path) = timing_cache_path {
+                        trt_provider = trt_provider.with_timing_cache_path(path);
+                    }
+                    if let Some(force_timing_cache) = force_timing_cache {
+                        trt_provider = trt_provider.with_force_timing_cache(*force_timing_cache);
+                    }
+                    if let Some(engine_cache) = engine_cache {
+                        trt_provider = trt_provider.with_engine_cache(*engine_cache);
+                    }
+                    if let Some(path) = engine_cache_path {
+                        trt_provider = trt_provider.with_engine_cache_path(path);
+                    }
+                    if let Some(dump_ep_context_model) = dump_ep_context_model {
+                        trt_provider =
+                            trt_provider.with_dump_ep_context_model(*dump_ep_context_model);
+                    }
+                    if let Some(path) = ep_context_file_path {
+                        trt_provider = trt_provider.with_ep_context_file_path(path);
                     }
                     providers.push(trt_provider.build());
                 }
