@@ -132,8 +132,7 @@ impl OrtInfer {
                     dump_ep_context_model,
                     ep_context_file_path,
                 } => {
-                    let mut trt_provider =
-                        ort::ep::TensorRTExecutionProvider::default();
+                    let mut trt_provider = ort::ep::TensorRTExecutionProvider::default();
                     if let Some(id) = device_id {
                         trt_provider = trt_provider.with_device_id(*id);
                     }
@@ -162,7 +161,8 @@ impl OrtInfer {
                         trt_provider = trt_provider.with_engine_cache_path(path);
                     }
                     if let Some(dump_ep_context_model) = dump_ep_context_model {
-                        trt_provider = trt_provider.with_dump_ep_context_model(*dump_ep_context_model);
+                        trt_provider =
+                            trt_provider.with_dump_ep_context_model(*dump_ep_context_model);
                     }
                     if let Some(path) = ep_context_file_path {
                         trt_provider = trt_provider.with_ep_context_file_path(path);
