@@ -231,13 +231,13 @@ impl BoundingBox {
             let angle_a = (a.y - start_point.y).atan2(a.x - start_point.x);
             let angle_b = (b.y - start_point.y).atan2(b.x - start_point.x);
 
-            match angle_a.partial_cmp(&angle_b).unwrap() {
+            match angle_a.total_cmp(&angle_b) {
                 std::cmp::Ordering::Equal => {
                     let dist_a = (a.x - start_point.x).powi(2)
                         + (a.y - start_point.y).powi(2);
                     let dist_b = (b.x - start_point.x).powi(2)
                         + (b.y - start_point.y).powi(2);
-                    dist_a.partial_cmp(&dist_b).unwrap()
+                    dist_a.total_cmp(&dist_b)
                 }
                 ord => ord,
             }
