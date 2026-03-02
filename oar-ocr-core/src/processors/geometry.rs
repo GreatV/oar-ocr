@@ -228,23 +228,21 @@ impl BoundingBox {
 
         // Sort points by polar angle with respect to the start point
         points[1..].sort_by(|a, b| {
-            let cross = Self::cross_product(&start_point, a, b);
-            if cross == 0.0 {
-                // If points are collinear, sort by distance from start point
-                let dist_a = (a.x - start_point.x).powi(2) + (a.y - start_point.y).powi(2);
-                let dist_b = (b.x - start_point.x).powi(2) + (b.y - start_point.y).powi(2);
-                dist_a
-                    .partial_cmp(&dist_b)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            } else if cross > 0.0 {
-                // Counter-clockwise turn
-                std::cmp::Ordering::Less
-            } else {
-                // Clockwise turn
-                std::cmp::Ordering::Greater
+            let angle_a = (a.y - start_point.y).atan2(a.x - start_point.x);
+            let angle_b = (b.y - start_point.y).atan2(b.x - start_point.x);
+
+            match angle_a.partial_cmp(&angle_b).unwrap() {
+                std::cmp::Ordering::Equal => {
+                    let dist_a = (a.x - start_point.x).powi(2)
+                        + (a.y - start_point.y).powi(2);
+                    let dist_b = (b.x - start_point.x).powi(2)
+                        + (b.y - start_point.y).powi(2);
+                    dist_a.partial_cmp(&dist_b).unwrap()
+                }
+                ord => ord,
             }
         });
-
+        
         // Build the convex hull using a stack
         let mut hull = Vec::new();
         for point in points {
