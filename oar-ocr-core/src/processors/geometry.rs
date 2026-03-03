@@ -233,16 +233,14 @@ impl BoundingBox {
 
             match angle_a.total_cmp(&angle_b) {
                 std::cmp::Ordering::Equal => {
-                    let dist_a = (a.x - start_point.x).powi(2)
-                        + (a.y - start_point.y).powi(2);
-                    let dist_b = (b.x - start_point.x).powi(2)
-                        + (b.y - start_point.y).powi(2);
+                    let dist_a = (a.x - start_point.x).powi(2) + (a.y - start_point.y).powi(2);
+                    let dist_b = (b.x - start_point.x).powi(2) + (b.y - start_point.y).powi(2);
                     dist_a.total_cmp(&dist_b)
                 }
                 ord => ord,
             }
         });
-        
+
         // Build the convex hull using a stack
         let mut hull = Vec::new();
         for point in points {
