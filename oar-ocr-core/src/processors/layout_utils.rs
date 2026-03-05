@@ -280,16 +280,30 @@ pub fn reconcile_table_cells(
 
     // Assign each detected cell to the best matching structure cell
     for (det_idx, det_box) in det_boxes.iter().enumerate() {
-        let mut best_iou = 0.001f32; // Minimal threshold
+        let mut best_ioa = 0.001f32; // Minimal threshold
         let mut best_struct_idx: Option<usize> = None;
 
+        let det_area = (det_box.x_max() - det_box.x_min()) * (det_box.y_max() - det_box.y_min());
+
         for (struct_idx, struct_box) in structure_cells.iter().enumerate() {
-            // Use IoU for assignment
-            // Note: We could also use intersection over detection area to handle
-            // cases where detection is much smaller than structure cell
-            let iou = calculate_iou(det_box, struct_box);
-            if iou > best_iou {
-                best_iou = iou;
+            // Use Intersection over Area (IoA) of detection for assignment.
+            // This properly handles cases where the structure cell has rowspan/colspan
+            // and is significantly larger than the detected text bounding box.
+            let inter_x1 = det_box.x_min().max(struct_box.x_min());
+            let inter_y1 = det_box.y_min().max(struct_box.y_min());
+            let inter_x2 = det_box.x_max().min(struct_box.x_max());
+            let inter_y2 = det_box.y_max().min(struct_box.y_max());
+
+            let inter_area = (inter_x2 - inter_x1).max(0.0) * (inter_y2 - inter_y1).max(0.0);
+
+            let ioa = if det_area > 0.0 {
+                inter_area / det_area
+            } else {
+                0.0
+            };
+
+            if ioa > best_ioa {
+                best_ioa = ioa;
                 best_struct_idx = Some(struct_idx);
             }
         }
@@ -624,27 +638,6 @@ fn kmeans_maxdist_init(points: &[(f32, f32)], k: usize) -> Vec<(f32, f32)> {
     }
 
     centers
-}
-
-/// Calculates Intersection over Union (IoU) between two bounding boxes.
-fn calculate_iou(a: &BoundingBox, b: &BoundingBox) -> f32 {
-    let inter_x1 = a.x_min().max(b.x_min());
-    let inter_y1 = a.y_min().max(b.y_min());
-    let inter_x2 = a.x_max().min(b.x_max());
-    let inter_y2 = a.y_max().min(b.y_max());
-
-    let inter_area = (inter_x2 - inter_x1).max(0.0) * (inter_y2 - inter_y1).max(0.0);
-
-    let area_a = (a.x_max() - a.x_min()) * (a.y_max() - a.y_min());
-    let area_b = (b.x_max() - b.x_min()) * (b.y_max() - b.y_min());
-
-    let union_area = area_a + area_b - inter_area;
-
-    if union_area <= 0.0 {
-        0.0
-    } else {
-        inter_area / union_area
-    }
 }
 
 /// Calculates Intersection over Area (IoA) - intersection / smaller box area.

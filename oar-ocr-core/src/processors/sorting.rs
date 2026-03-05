@@ -216,7 +216,7 @@ pub fn sort_boxes_xycut(boxes: &[BoundingBox], direction: SortDirection) -> Vec<
 /// # Returns
 ///
 /// A 1D vector representing the projection histogram
-fn projection_by_bboxes(boxes: &[[i32; 4]], axis: usize) -> Vec<i32> {
+pub(crate) fn projection_by_bboxes(boxes: &[[i32; 4]], axis: usize) -> Vec<i32> {
     assert!(axis <= 1, "axis must be 0 or 1");
 
     if boxes.is_empty() {
@@ -264,7 +264,7 @@ fn projection_by_bboxes(boxes: &[[i32; 4]], axis: usize) -> Vec<i32> {
 /// # Returns
 ///
 /// Optional tuple of (segment_starts, segment_ends)
-fn split_projection_profile(
+pub(crate) fn split_projection_profile(
     arr_values: &[i32],
     min_value: i32,
     min_gap: i32,
@@ -522,6 +522,7 @@ impl SortableRegion {
 }
 
 /// Calculates the IoU (Intersection over Union) between two bounding boxes.
+#[allow(dead_code)]
 pub fn calculate_iou(a: &BoundingBox, b: &BoundingBox) -> f32 {
     let x1 = a.x_min().max(b.x_min());
     let y1 = a.y_min().max(b.y_min());

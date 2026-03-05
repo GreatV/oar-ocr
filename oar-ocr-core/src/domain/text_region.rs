@@ -37,12 +37,18 @@ pub struct TextRegion {
     /// Only populated when word-level detection is enabled.
     /// Each box corresponds to a word or character in the recognized text.
     pub word_boxes: Option<Vec<BoundingBox>>,
+    /// Label indicating the type of this text region.
+    /// Used to distinguish between normal text and special content like formulas.
+    /// Common values: "formula", "text", "seal", etc.
+    /// PaddleX: corresponds to `rec_labels` in OCR results.
+    #[serde(default)]
+    pub label: Option<Arc<str>>,
 }
 
 impl TextRegion {
     /// Creates a new TextRegion with the given bounding box.
     ///
-    /// The text, confidence, orientation_angle, and word_boxes are initially set to None.
+    /// The text, confidence, orientation_angle, word_boxes, and label are initially set to None.
     pub fn new(bounding_box: BoundingBox) -> Self {
         Self {
             bounding_box,
@@ -52,6 +58,7 @@ impl TextRegion {
             confidence: None,
             orientation_angle: None,
             word_boxes: None,
+            label: None,
         }
     }
 
@@ -69,6 +76,7 @@ impl TextRegion {
             confidence,
             orientation_angle: None,
             word_boxes: None,
+            label: None,
         }
     }
 
@@ -87,6 +95,7 @@ impl TextRegion {
             confidence,
             orientation_angle,
             word_boxes: None,
+            label: None,
         }
     }
 
@@ -116,5 +125,21 @@ impl TextRegion {
             (Some(text), Some(confidence)) => Some((text, confidence)),
             _ => None,
         }
+    }
+
+    /// Returns true if this text region has a label.
+    pub fn has_label(&self) -> bool {
+        self.label.is_some()
+    }
+
+    /// Returns true if this text region is labeled as a formula.
+    pub fn is_formula(&self) -> bool {
+        self.label.as_deref() == Some("formula")
+    }
+
+    /// Sets the label for this text region.
+    pub fn with_label(mut self, label: Option<&str>) -> Self {
+        self.label = label.map(|s| s.into());
+        self
     }
 }

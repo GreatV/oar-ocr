@@ -189,6 +189,7 @@ impl OAROCRBuilder {
     ///
     /// This matches the text_type parameter:
     /// - "seal": Uses polygon-based sorting/cropping for seal text (circular/curved)
+    /// - "table": Uses table-friendly detection defaults (box_threshold=0.4)
     /// - Other values or None: Uses quad-based sorting (default)
     ///
     /// # Arguments
@@ -253,11 +254,26 @@ impl OAROCRBuilder {
         // Align text detection defaults with OCR pipeline.
         // Defaults depend on text_type:
         // - general: limit_side_len=960, limit_type="max", thresh=0.3, box_thresh=0.6, unclip_ratio=2.0
+        // - table: limit_side_len=960, limit_type="max", thresh=0.3, box_thresh=0.4, unclip_ratio=2.0
         // - seal: limit_side_len=736, limit_type="min", thresh=0.2, box_thresh=0.6, unclip_ratio=0.5
         let mut effective_det_cfg = self.text_detection_config.clone().unwrap_or_default();
         let has_explicit_det_cfg = self.text_detection_config.is_some();
         if !has_explicit_det_cfg {
             match self.text_type.as_deref().unwrap_or("general") {
+                "table" => {
+                    effective_det_cfg.score_threshold = 0.3;
+                    effective_det_cfg.box_threshold = 0.4;
+                    effective_det_cfg.unclip_ratio = 2.0;
+                    if effective_det_cfg.limit_side_len.is_none() {
+                        effective_det_cfg.limit_side_len = Some(960);
+                    }
+                    if effective_det_cfg.limit_type.is_none() {
+                        effective_det_cfg.limit_type = Some(crate::processors::LimitType::Max);
+                    }
+                    if effective_det_cfg.max_side_len.is_none() {
+                        effective_det_cfg.max_side_len = Some(4000);
+                    }
+                }
                 "seal" => {
                     effective_det_cfg.score_threshold = 0.2;
                     effective_det_cfg.box_threshold = 0.6;
@@ -762,6 +778,7 @@ impl OAROCR {
                         confidence: Some(score),
                         orientation_angle: region.line_orientation_angle,
                         word_boxes,
+                        label: None,
                     });
                 }
             }

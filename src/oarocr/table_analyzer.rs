@@ -406,36 +406,49 @@ impl<'a> TableAnalyzer<'a> {
                 .or(self.wired_table_structure_adapter),
         };
 
-        let cell_adapter: Option<&TableCellDetectionAdapter> = if use_e2e_mode {
-            tracing::info!(
-                target: "structure",
-                table_index = idx,
-                table_type = ?table_type,
-                "Using E2E mode: skipping cell detection"
-            );
-            None
-        } else {
-            tracing::info!(
-                target: "structure",
-                table_index = idx,
-                table_type = ?table_type,
-                "Using cell detection mode (E2E disabled)"
-            );
-            match table_type {
-                TableType::Wired => self
-                    .wired_table_cell_adapter
-                    .or(self.table_cell_detection_adapter)
-                    .or(self.wireless_table_cell_adapter),
-                TableType::Wireless => self
-                    .wireless_table_cell_adapter
-                    .or(self.table_cell_detection_adapter)
-                    .or(self.wired_table_cell_adapter),
-                TableType::Unknown => self
-                    .table_cell_detection_adapter
-                    .or(self.wired_table_cell_adapter)
-                    .or(self.wireless_table_cell_adapter),
-            }
-        };
+        // Use cell detection when either:
+        // 1. E2E mode is disabled, OR
+        // 2. use_cells_trans_to_html is enabled (user wants detected cells instead of E2E cells)
+        let cell_adapter: Option<&TableCellDetectionAdapter> =
+            if !use_e2e_mode || use_cells_trans_to_html {
+                if use_cells_trans_to_html {
+                    tracing::info!(
+                        target: "structure",
+                        table_index = idx,
+                        table_type = ?table_type,
+                        "Using cell detection (cells_trans_to_html enabled)"
+                    );
+                } else {
+                    tracing::info!(
+                        target: "structure",
+                        table_index = idx,
+                        table_type = ?table_type,
+                        "Using cell detection mode (E2E disabled)"
+                    );
+                }
+                match table_type {
+                    TableType::Wired => self
+                        .wired_table_cell_adapter
+                        .or(self.table_cell_detection_adapter)
+                        .or(self.wireless_table_cell_adapter),
+                    TableType::Wireless => self
+                        .wireless_table_cell_adapter
+                        .or(self.table_cell_detection_adapter)
+                        .or(self.wired_table_cell_adapter),
+                    TableType::Unknown => self
+                        .table_cell_detection_adapter
+                        .or(self.wired_table_cell_adapter)
+                        .or(self.wireless_table_cell_adapter),
+                }
+            } else {
+                tracing::info!(
+                    target: "structure",
+                    table_index = idx,
+                    table_type = ?table_type,
+                    "Using E2E mode: skipping cell detection"
+                );
+                None
+            };
 
         let mut structure_tokens_opt: Option<Vec<String>> = None;
         let mut structure_score_opt: Option<f32> = None;
@@ -601,6 +614,7 @@ impl<'a> TableAnalyzer<'a> {
             }
         }
 
+        // Use detected cells when in cells_trans_to_html mode (non-E2E)
         if use_cells_trans_to_html && !use_e2e_mode && !detected_bboxes_crop.is_empty() {
             cells = detected_bboxes_crop
                 .iter()
@@ -610,7 +624,64 @@ impl<'a> TableAnalyzer<'a> {
                     TableCell::new(bbox, *score)
                 })
                 .collect();
-        } else if !detected_bboxes_crop.is_empty() && !cells.is_empty() {
+            // Clear structure tokens so that the code below regenerates them
+            // from the detected cell positions with proper grid info.
+            structure_tokens_opt = None;
+        }
+
+        // Approach C: In non-E2E mode with cell detection results, store detected
+        // bboxes in page coordinates for the stitcher's row-aware IoA-based matcher.
+        // The structure cells (in `cells`) retain grid metadata (row, col, span);
+        // detected bboxes travel separately for better OCR matching geometry.
+        let detected_page_bboxes: Option<Vec<BoundingBox>> =
+            if !use_e2e_mode && !use_cells_trans_to_html && !detected_bboxes_crop.is_empty() {
+                Some(
+                    detected_bboxes_crop
+                        .iter()
+                        .map(|bbox_crop| bbox_crop.translate(table_x_offset, table_y_offset))
+                        .collect(),
+                )
+            } else {
+                None
+            };
+
+        // If we have cells but no structure tokens, generate structure from cell positions.
+        // This ensures cells are ordered correctly to match the generated tokens.
+        if !cells.is_empty() && structure_tokens_opt.is_none() {
+            let cell_bboxes_crop: Vec<_> = cells
+                .iter()
+                .map(|c| {
+                    BoundingBox::from_coords(
+                        c.bbox.x_min() - table_x_offset,
+                        c.bbox.y_min() - table_y_offset,
+                        c.bbox.x_max() - table_x_offset,
+                        c.bbox.y_max() - table_y_offset,
+                    )
+                })
+                .collect();
+
+            if let Some((generated_tokens, cell_order)) =
+                table_cells_to_html_structure(&cell_bboxes_crop, 5.0)
+            {
+                let mut reordered_cells = Vec::with_capacity(cell_order.len());
+                for (source_idx, grid_info) in cell_order {
+                    if let Some(source_cell) = cells.get(source_idx) {
+                        let mut cell = source_cell.clone();
+                        cell = cell
+                            .with_position(grid_info.row, grid_info.col)
+                            .with_span(grid_info.row_span, grid_info.col_span);
+                        reordered_cells.push(cell);
+                    }
+                }
+                if !reordered_cells.is_empty() {
+                    cells = reordered_cells;
+                    structure_tokens_opt = Some(generated_tokens);
+                }
+            }
+        }
+
+        // Fallback: if we have detected cells but no cells yet, try to generate from detected boxes
+        if !detected_bboxes_crop.is_empty() && cells.is_empty() {
             let structure_bboxes_crop: Vec<_> = cells
                 .iter()
                 .map(|c| {
@@ -753,7 +824,8 @@ impl<'a> TableAnalyzer<'a> {
         let mut final_result = TableResult::new(table_bbox.clone(), table_type)
             .with_cells(cells)
             .with_html_structure(html_structure)
-            .with_structure_tokens(structure_tokens);
+            .with_structure_tokens(structure_tokens)
+            .with_e2e(use_e2e_mode);
 
         if let Some(score) = structure_score_opt {
             final_result = final_result.with_structure_confidence(score);
@@ -761,6 +833,10 @@ impl<'a> TableAnalyzer<'a> {
 
         if let Some(conf) = classification_confidence {
             final_result = final_result.with_classification_confidence(conf);
+        }
+
+        if let Some(detected_bboxes) = detected_page_bboxes {
+            final_result = final_result.with_detected_cell_bboxes(detected_bboxes);
         }
 
         Ok(Some(final_result))
@@ -881,12 +957,12 @@ mod tests {
         // Transform back to original
         let original = cell_bbox.rotate_back_to_original(90.0, rotated_width, rotated_height);
 
-        // For 90° rotation: (x, y) -> (rotated_height - 1 - y, x)
+        // For 90° rotation: (x, y) -> (rotated_height - y, x)
         // Original points: (10, 20), (30, 20), (30, 40), (10, 40)
-        // Expected: (179, 10), (179, 30), (159, 30), (159, 10)
-        assert!((original.x_min() - 159.0).abs() < 0.01);
+        // Expected corners in original space: (160, 10), (180, 10), (180, 30), (160, 30)
+        assert!((original.x_min() - 160.0).abs() < 0.01);
         assert!((original.y_min() - 10.0).abs() < 0.01);
-        assert!((original.x_max() - 179.0).abs() < 0.01);
+        assert!((original.x_max() - 180.0).abs() < 0.01);
         assert!((original.y_max() - 30.0).abs() < 0.01);
     }
 
@@ -896,14 +972,15 @@ mod tests {
         let rotated_height = 200;
 
         let cell_bbox = BoundingBox::from_coords(10.0, 20.0, 30.0, 40.0);
-        let original = cell_bbox.rotate_back_to_original(180.0, rotated_width, rotated_height);
+        let original =
+            cell_bbox.rotate_back_to_original(180.0, rotated_width, rotated_height as u32);
 
-        // For 180° rotation: (x, y) -> (rotated_width - 1 - x, rotated_height - 1 - y)
-        // Expected corners: (69, 159), (89, 159), (89, 179), (69, 179)
-        assert!((original.x_min() - 69.0).abs() < 0.01);
-        assert!((original.y_min() - 159.0).abs() < 0.01);
-        assert!((original.x_max() - 89.0).abs() < 0.01);
-        assert!((original.y_max() - 179.0).abs() < 0.01);
+        // For 180° rotation: (x, y) -> (rotated_width - x, rotated_height - y)
+        // Expected corners in original: (70, 160), (90, 160), (90, 180), (70, 180)
+        assert!((original.x_min() - 70.0).abs() < 0.01);
+        assert!((original.y_min() - 160.0).abs() < 0.01);
+        assert!((original.x_max() - 90.0).abs() < 0.01);
+        assert!((original.y_max() - 180.0).abs() < 0.01);
     }
 
     #[test]
@@ -914,12 +991,12 @@ mod tests {
         let cell_bbox = BoundingBox::from_coords(10.0, 20.0, 30.0, 40.0);
         let original = cell_bbox.rotate_back_to_original(270.0, rotated_width, rotated_height);
 
-        // For 270° rotation: (x, y) -> (y, rotated_width - 1 - x)
-        // Expected corners: (20, 69), (40, 69), (40, 89), (20, 89)
+        // For 270° rotation: (x, y) -> (y, rotated_width - x)
+        // Expected corners: (20, 70), (40, 70), (40, 90), (20, 90)
         assert!((original.x_min() - 20.0).abs() < 0.01);
-        assert!((original.y_min() - 69.0).abs() < 0.01);
+        assert!((original.y_min() - 70.0).abs() < 0.01);
         assert!((original.x_max() - 40.0).abs() < 0.01);
-        assert!((original.y_max() - 89.0).abs() < 0.01);
+        assert!((original.y_max() - 90.0).abs() < 0.01);
     }
 
     #[test]
