@@ -65,6 +65,20 @@ pub enum OrtExecutionProvider {
         min_subgraph_size: Option<usize>,
         /// FP16 enable flag
         fp16_enable: Option<bool>,
+        /// Enable use of timing cache to speed up builds
+        timing_cache: Option<bool>,
+        /// Set path for storing timing cache
+        timing_cache_path: Option<String>,
+        /// Force use of timing cache regardless of GPU match
+        force_timing_cache: Option<bool>,
+        /// Enable caching of TensorRT engines
+        engine_cache: Option<bool>,
+        /// Set path to store cached TensorRT engines
+        engine_cache_path: Option<String>,
+        /// Dump ep context model
+        dump_ep_context_model: Option<bool>,
+        /// The path of an embedded engine model
+        ep_context_file_path: Option<String>,
     },
     /// CoreML execution provider (macOS/iOS only)
     CoreML {
