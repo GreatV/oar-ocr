@@ -10,7 +10,7 @@ impl OrtInfer {
         let path = model_path.as_ref();
         let session = session::load_session_with(
             path,
-            |builder| builder.with_log_level(LogLevel::Error),
+            |builder| Ok(builder.with_log_level(LogLevel::Error)?),
             Some("verify model path and compatibility with selected execution providers"),
         )?;
         let model_name = "unknown_model".to_string();
@@ -38,7 +38,7 @@ impl OrtInfer {
                 if let Some(cfg) = &common.ort_session {
                     Self::apply_ort_config(builder, cfg)
                 } else {
-                    builder.with_log_level(LogLevel::Error)
+                    Ok(builder.with_log_level(LogLevel::Error)?)
                 }
             },
             Some("check device/EP configuration and model file"),

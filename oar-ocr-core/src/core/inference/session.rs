@@ -11,7 +11,7 @@ const SESSION_CREATION_FAILURE: &str = "failed to create ONNX session";
 pub fn load_session(model_path: impl AsRef<Path>) -> Result<Session, OCRError> {
     load_session_with(
         model_path,
-        |builder| builder.with_log_level(LogLevel::Error),
+        |builder| Ok(builder.with_log_level(LogLevel::Error)?),
         Some("verify model file exists and is readable"),
     )
 }
@@ -27,7 +27,7 @@ where
 {
     let path = model_path.as_ref();
     let builder = Session::builder()?;
-    let builder = configure_builder(builder)?;
+    let mut builder = configure_builder(builder)?;
     let session = builder.commit_from_file(path).map_err(|e| {
         OCRError::model_load_error(path, SESSION_CREATION_FAILURE, suggestion, Some(e))
     })?;

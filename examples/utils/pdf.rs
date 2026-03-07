@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use hayro::Pdf;
+use hayro::hayro_syntax::Pdf;
 
 /// Error type for PDF processing.
 #[derive(Debug)]
@@ -118,15 +118,17 @@ impl PdfDocument {
             None => 2.0, // Default scale factor for better quality
         };
 
-        // Create render settings
+        // Create render settings (hayro 0.5 defaults bg_color to TRANSPARENT;
+        // we need WHITE so the RGBA→RGB conversion produces a white background)
         let settings = RenderSettings {
             x_scale: scale,
             y_scale: scale,
+            bg_color: hayro::vello_cpu::color::palette::css::WHITE,
             ..Default::default()
         };
 
         // Render the page using hayro's render function
-        let interpreter_settings = hayro::InterpreterSettings::default();
+        let interpreter_settings = hayro::hayro_interpret::InterpreterSettings::default();
         let pixmap = hayro::render(page, &interpreter_settings, &settings);
 
         // Convert pixmap to RGB image
