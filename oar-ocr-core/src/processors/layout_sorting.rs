@@ -305,6 +305,13 @@ fn direction_aware_xycut_sort(blocks: &mut [SortableBlock]) -> Vec<SortableBlock
 /// Cross-layout detection (port of PaddleX `get_layout_structure`).
 ///
 /// Marks blocks that span multiple columns as `CrossLayout`.
+///
+/// The naive algorithm is O(n³). We reduce it to O(n² + k²) per outer block
+/// (where k = |h_neighbors| ≪ n for typical sparse layouts) by precomputing
+/// horizontal-projection overlaps once and building per-block neighbor lists.
+/// Both the 2D bbox overlap and the projection-overlap conditions require
+/// horizontal overlap with `block_idx`, so any block outside its h_neighbors
+/// can never trigger a cross-layout classification and is safely skipped.
 fn detect_cross_layout(blocks: &mut [SortableBlock], _page_width: f32) {
     if blocks.len() < 2 {
         return;
@@ -331,8 +338,6 @@ fn detect_cross_layout(blocks: &mut [SortableBlock], _page_width: f32) {
 
     let n = blocks.len();
 
-    // We need to work with indices to avoid borrow checker issues
-    // Collect block data we need for comparisons
     let block_data: Vec<(BoundingBox, OrderLabel, f32, f32)> = blocks
         .iter()
         .map(|b| {
@@ -347,6 +352,29 @@ fn detect_cross_layout(blocks: &mut [SortableBlock], _page_width: f32) {
 
     let text_line_heights: Vec<f32> = blocks.iter().map(|b| b.text_line_height).collect();
 
+    // Precompute the full horizontal-projection overlap matrix (O(n²)) so that
+    // inner loops can do a single table lookup instead of recomputing the ratio.
+    let h_proj: Vec<Vec<f32>> = (0..n)
+        .map(|i| {
+            (0..n)
+                .map(|j| {
+                    calculate_projection_overlap_ratio(
+                        &block_data[i].0,
+                        &block_data[j].0,
+                        SortDirection::Horizontal,
+                    )
+                })
+                .collect()
+        })
+        .collect();
+
+    // For each block, the set of other blocks that horizontally overlap with it.
+    // Both inner loops only act on blocks in this set, so we iterate only over
+    // neighbors rather than 0..n.
+    let h_neighbors: Vec<Vec<usize>> = (0..n)
+        .map(|i| (0..n).filter(|&j| j != i && h_proj[i][j] > 0.0).collect())
+        .collect();
+
     for block_idx in 0..n {
         if mask_labels.contains(&block_data[block_idx].1) {
             continue;
@@ -354,11 +382,13 @@ fn detect_cross_layout(blocks: &mut [SortableBlock], _page_width: f32) {
 
         let mut mark_block_cross = false;
 
-        for ref_idx in 0..n {
-            if block_idx == ref_idx || mask_labels.contains(&block_data[ref_idx].1) {
+        // Iterate only over blocks that horizontally overlap with block_idx.
+        // Any block without horizontal overlap has bbox_overlap == 0 and
+        // match_proj == 0, so it cannot affect the cross-layout decision.
+        for &ref_idx in &h_neighbors[block_idx] {
+            if mask_labels.contains(&block_data[ref_idx].1) {
                 continue;
             }
-            // Skip already-marked blocks
             if blocks[ref_idx].order_label == OrderLabel::CrossLayout {
                 continue;
             }
@@ -380,84 +410,71 @@ fn detect_cross_layout(blocks: &mut [SortableBlock], _page_width: f32) {
                 }
             }
 
-            // Check projection overlap in primary direction (horizontal)
-            let match_proj = calculate_projection_overlap_ratio(
-                &block_data[block_idx].0,
-                &block_data[ref_idx].0,
-                SortDirection::Horizontal,
-            );
+            // h_proj[block_idx][ref_idx] > 0 is guaranteed by h_neighbors, so
+            // the match_proj > 0 guard from the original is always satisfied here.
 
-            if match_proj > 0.0 {
-                for second_ref_idx in 0..n {
-                    if second_ref_idx == block_idx
-                        || second_ref_idx == ref_idx
-                        || mask_labels.contains(&block_data[second_ref_idx].1)
-                    {
+            // Iterate over the same neighbor set for second_ref: every triggering
+            // condition (bbox_overlap2 > 0.1 or second_match_proj > 0) requires
+            // horizontal overlap with block_idx, which is exactly h_neighbors.
+            for &second_ref_idx in &h_neighbors[block_idx] {
+                if second_ref_idx == ref_idx || mask_labels.contains(&block_data[second_ref_idx].1)
+                {
+                    continue;
+                }
+                if blocks[second_ref_idx].order_label == OrderLabel::CrossLayout {
+                    continue;
+                }
+
+                let bbox_overlap2 = calculate_overlap_ratio(
+                    &block_data[block_idx].0,
+                    &block_data[second_ref_idx].0,
+                );
+
+                if bbox_overlap2 > 0.1 {
+                    if block_data[second_ref_idx].1 == OrderLabel::Vision {
+                        blocks[second_ref_idx].order_label = OrderLabel::CrossLayout;
                         continue;
                     }
-                    if blocks[second_ref_idx].order_label == OrderLabel::CrossLayout {
-                        continue;
-                    }
-
-                    let bbox_overlap2 = calculate_overlap_ratio(
-                        &block_data[block_idx].0,
-                        &block_data[second_ref_idx].0,
-                    );
-
-                    if bbox_overlap2 > 0.1 {
-                        if block_data[second_ref_idx].1 == OrderLabel::Vision {
-                            blocks[second_ref_idx].order_label = OrderLabel::CrossLayout;
-                            continue;
-                        }
-                        if block_data[block_idx].1 == OrderLabel::Vision
-                            || block_data[block_idx].2 < block_data[second_ref_idx].2
-                        {
-                            mark_block_cross = true;
-                            break;
-                        }
-                    }
-
-                    let second_match_proj = calculate_projection_overlap_ratio(
-                        &block_data[block_idx].0,
-                        &block_data[second_ref_idx].0,
-                        SortDirection::Horizontal,
-                    );
-                    let ref_match_proj = calculate_projection_overlap_ratio(
-                        &block_data[ref_idx].0,
-                        &block_data[second_ref_idx].0,
-                        SortDirection::Horizontal,
-                    );
-                    let secondary_ref_match = calculate_projection_overlap_ratio(
-                        &block_data[ref_idx].0,
-                        &block_data[second_ref_idx].0,
-                        SortDirection::Vertical,
-                    );
-
-                    if second_match_proj > 0.0 && ref_match_proj == 0.0 && secondary_ref_match > 0.0
+                    if block_data[block_idx].1 == OrderLabel::Vision
+                        || block_data[block_idx].2 < block_data[second_ref_idx].2
                     {
-                        if block_data[block_idx].1 == OrderLabel::Vision {
-                            mark_block_cross = true;
-                            break;
-                        }
-                        // Both ref blocks are normal text with sufficient width
-                        if block_data[ref_idx].1 == OrderLabel::NormalText
-                            && block_data[second_ref_idx].1 == OrderLabel::NormalText
-                            && block_data[ref_idx].3
-                                > text_line_heights[ref_idx]
-                                    * CROSS_LAYOUT_REF_TEXT_BLOCK_WORDS_NUM_THRESHOLD
-                            && block_data[second_ref_idx].3
-                                > text_line_heights[second_ref_idx]
-                                    * CROSS_LAYOUT_REF_TEXT_BLOCK_WORDS_NUM_THRESHOLD
-                        {
-                            mark_block_cross = true;
-                            break;
-                        }
+                        mark_block_cross = true;
+                        break;
                     }
                 }
 
-                if mark_block_cross {
-                    break;
+                // second_match_proj > 0 is guaranteed (second_ref_idx ∈ h_neighbors[block_idx]).
+                // Use precomputed table for ref_match_proj to avoid re-computing.
+                let ref_match_proj = h_proj[ref_idx][second_ref_idx];
+                let secondary_ref_match = calculate_projection_overlap_ratio(
+                    &block_data[ref_idx].0,
+                    &block_data[second_ref_idx].0,
+                    SortDirection::Vertical,
+                );
+
+                if ref_match_proj == 0.0 && secondary_ref_match > 0.0 {
+                    if block_data[block_idx].1 == OrderLabel::Vision {
+                        mark_block_cross = true;
+                        break;
+                    }
+                    // Both ref blocks are normal text with sufficient width
+                    if block_data[ref_idx].1 == OrderLabel::NormalText
+                        && block_data[second_ref_idx].1 == OrderLabel::NormalText
+                        && block_data[ref_idx].3
+                            > text_line_heights[ref_idx]
+                                * CROSS_LAYOUT_REF_TEXT_BLOCK_WORDS_NUM_THRESHOLD
+                        && block_data[second_ref_idx].3
+                            > text_line_heights[second_ref_idx]
+                                * CROSS_LAYOUT_REF_TEXT_BLOCK_WORDS_NUM_THRESHOLD
+                    {
+                        mark_block_cross = true;
+                        break;
+                    }
                 }
+            }
+
+            if mark_block_cross {
+                break;
             }
         }
 

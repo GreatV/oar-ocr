@@ -393,6 +393,12 @@ impl<'a> TableAnalyzer<'a> {
             TableType::Unknown => false,
         };
 
+        // When use_cells_trans_to_html is set it overrides E2E mode: detected
+        // cells are used in place of SLANet structure tokens.  Anything that
+        // conditions on "are we actually in E2E mode?" should use this flag
+        // rather than use_e2e_mode directly.
+        let effective_use_e2e = use_e2e_mode && !use_cells_trans_to_html;
+
         let structure_adapter: Option<&TableStructureRecognitionAdapter> = match table_type {
             TableType::Wired => self
                 .wired_table_structure_adapter
@@ -482,7 +488,7 @@ impl<'a> TableAnalyzer<'a> {
                         }
                     }
                     Err(e) => {
-                        if use_cells_trans_to_html && !use_e2e_mode {
+                        if use_cells_trans_to_html {
                             tracing::warn!(
                                 target: "structure",
                                 table_index = idx,
@@ -508,7 +514,7 @@ impl<'a> TableAnalyzer<'a> {
                 }
             }
             None => {
-                if !use_cells_trans_to_html || use_e2e_mode {
+                if !use_cells_trans_to_html || effective_use_e2e {
                     tracing::warn!(
                         target: "structure",
                         table_index = idx,
@@ -614,8 +620,8 @@ impl<'a> TableAnalyzer<'a> {
             }
         }
 
-        // Use detected cells when in cells_trans_to_html mode (non-E2E)
-        if use_cells_trans_to_html && !use_e2e_mode && !detected_bboxes_crop.is_empty() {
+        // Use detected cells when in cells_trans_to_html mode (overrides E2E).
+        if use_cells_trans_to_html && !detected_bboxes_crop.is_empty() {
             cells = detected_bboxes_crop
                 .iter()
                 .zip(detected_scores.iter())

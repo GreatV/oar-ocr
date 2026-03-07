@@ -965,18 +965,28 @@ impl ResultStitcher {
         }
 
         // --- Sort cells into rows ---
-        // When detected bboxes are available, sort them (better spatial accuracy)
-        // for the IoA matching loop.
-        let (match_sorted_indices, match_row_flags) = if let Some(det_bboxes) = cell_bboxes_override
-        {
-            let temp_cells: Vec<TableCell> = det_bboxes
-                .iter()
-                .map(|b| TableCell::new(b.clone(), 0.5))
-                .collect();
-            Self::sort_table_cells_boxes(&temp_cells, row_y_tolerance)
-        } else {
-            Self::sort_table_cells_boxes(cells, row_y_tolerance)
-        };
+        // When detected bboxes are available we sort them (better spatial accuracy)
+        // to pick the IoA bbox for OCR matching.  We also independently sort the
+        // structure cells so that the td→cell text-assignment step uses a valid
+        // index into `cells[]`.  Without this separation the det-bbox sort indices
+        // are silently reused as structure-cell indices, misassigning OCR to wrong
+        // cells whenever the two orderings differ.
+        let (match_sorted_indices, cell_sorted_indices, match_row_flags) =
+            if let Some(det_bboxes) = cell_bboxes_override {
+                let temp_cells: Vec<TableCell> = det_bboxes
+                    .iter()
+                    .map(|b| TableCell::new(b.clone(), 0.5))
+                    .collect();
+                let (det_sorted, row_flags) =
+                    Self::sort_table_cells_boxes(&temp_cells, row_y_tolerance);
+                // Sort structure cells independently so their indices stay valid.
+                let (cell_sorted, _) = Self::sort_table_cells_boxes(cells, row_y_tolerance);
+                (det_sorted, cell_sorted, row_flags)
+            } else {
+                let (sorted, row_flags) = Self::sort_table_cells_boxes(cells, row_y_tolerance);
+                // When there is no override the two index lists are identical.
+                (sorted.clone(), sorted, row_flags)
+            };
 
         if match_sorted_indices.is_empty() || match_row_flags.is_empty() {
             return None;
@@ -1061,13 +1071,15 @@ impl ResultStitcher {
 
             // Map td position to the original cell index via sorted ordering.
             // match_aligned[matched_row_idx] + td_index gives the position in the
-            // sorted cell list, and match_sorted_indices maps that back to cells[].
+            // sorted cell list.  Use cell_sorted_indices (indices into cells[])
+            // rather than match_sorted_indices (which may be indices into det_bboxes
+            // when cell_bboxes_override is active).
             let mapped_cell_idx = match_aligned
                 .get(matched_row_idx)
                 .copied()
                 .and_then(|row_start| {
                     let sorted_pos = row_start + td_index;
-                    match_sorted_indices.get(sorted_pos).copied()
+                    cell_sorted_indices.get(sorted_pos).copied()
                 })
                 .filter(|&idx| idx < cells.len());
 
