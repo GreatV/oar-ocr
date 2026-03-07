@@ -1719,8 +1719,10 @@ pub fn postprocess_markdown(markdown: &str) -> String {
             if contains_dollar && is_plain_text {
                 result.push_str(&line.replace('$', "\\$"));
             } else if contains_dollar {
-                // Remove redundant dollar signs inside the block
-                result.push_str(&line.replace('$', ""));
+                // Escape bare dollar signs inside the math block to avoid
+                // "Can't use function '$' in math mode" KaTeX errors while
+                // preserving literal dollars (e.g. \text{$10}).
+                result.push_str(&line.replace('$', "\\$"));
             } else {
                 result.push_str(line);
             }

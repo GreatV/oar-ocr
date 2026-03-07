@@ -522,7 +522,6 @@ impl SortableRegion {
 }
 
 /// Calculates the IoU (Intersection over Union) between two bounding boxes.
-#[allow(dead_code)]
 pub fn calculate_iou(a: &BoundingBox, b: &BoundingBox) -> f32 {
     let x1 = a.x_min().max(b.x_min());
     let y1 = a.y_min().max(b.y_min());
