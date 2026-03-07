@@ -26,7 +26,7 @@ use oar_ocr_core::domain::structure::{
 };
 use oar_ocr_core::predictors::LayoutDetectionPredictor;
 use oar_ocr_core::processors::BoundingBox;
-use oar_ocr_core::processors::layout_sorting::sort_layout_enhanced;
+use oar_ocr_core::processors::layout_sorting::{SortableElement, sort_layout_enhanced};
 use oar_ocr_core::utils::BBoxCrop;
 use std::sync::Arc;
 
@@ -225,9 +225,13 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
         let mut sorted_elements: Vec<LayoutElement> = if layout_result.is_reading_order_sorted {
             elements
         } else {
-            let sortable: Vec<(BoundingBox, LayoutElementType)> = elements
+            let sortable: Vec<SortableElement> = elements
                 .iter()
-                .map(|e| (e.bbox.clone(), e.element_type))
+                .map(|e| SortableElement {
+                    bbox: e.bbox.clone(),
+                    element_type: e.element_type,
+                    num_lines: e.num_lines,
+                })
                 .collect();
             let sorted_indices = sort_layout_enhanced(&sortable, page_w, page_h);
             sorted_indices

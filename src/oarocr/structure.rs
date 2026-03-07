@@ -1049,6 +1049,7 @@ impl OARStructureBuilder {
         // PP-StructureV3 overall OCR uses DB preprocess with:
         // - limit_side_len=736
         // - limit_type="min"
+        // - max_side_limit=4000
         // We fill these defaults here (only for the structure pipeline) unless the caller
         // explicitly overrides them via `text_detection_config`.
         let text_detection_adapter = if let Some(ref model_path) = self.text_detection_model {
@@ -1057,11 +1058,28 @@ impl OARStructureBuilder {
             // Note: image_batch_size batching not yet implemented for structure analysis
 
             let mut effective_cfg = self.text_detection_config.clone().unwrap_or_default();
+
+            // Table-heavy documents are sensitive to detection fragmentation.
+            // Match PaddleX's lower table-scene threshold when users don't override config.
+            let has_table_pipeline = self.table_classification_model.is_some()
+                || self.table_structure_recognition_model.is_some()
+                || self.wired_table_structure_model.is_some()
+                || self.wireless_table_structure_model.is_some()
+                || self.table_cell_detection_model.is_some()
+                || self.wired_table_cell_model.is_some()
+                || self.wireless_table_cell_model.is_some();
+            if self.text_detection_config.is_none() && has_table_pipeline {
+                effective_cfg.box_threshold = 0.4;
+            }
+
             if effective_cfg.limit_side_len.is_none() {
                 effective_cfg.limit_side_len = Some(736);
             }
             if effective_cfg.limit_type.is_none() {
                 effective_cfg.limit_type = Some(crate::processors::LimitType::Min);
+            }
+            if effective_cfg.max_side_len.is_none() {
+                effective_cfg.max_side_len = Some(4000);
             }
             builder = builder.with_config(effective_cfg);
 
@@ -1303,6 +1321,7 @@ impl OARStructure {
                         confidence: Some(score),
                         orientation_angle: None,
                         word_boxes: None,
+                        label: None,
                     });
                 }
             }
@@ -1364,6 +1383,7 @@ impl OARStructure {
                         confidence: Some(*score),
                         orientation_angle: None,
                         word_boxes: None,
+                        label: None,
                     });
                 }
             }
@@ -1601,6 +1621,7 @@ impl OARStructure {
                         confidence: Some(*score),
                         orientation_angle: None,
                         word_boxes: None,
+                        label: None,
                     });
                 }
             }
@@ -1830,7 +1851,7 @@ impl OARStructure {
         page_width: f32,
         page_height: f32,
     ) {
-        use oar_ocr_core::processors::layout_sorting::sort_layout_enhanced;
+        use oar_ocr_core::processors::layout_sorting::{SortableElement, sort_layout_enhanced};
 
         if layout_elements.is_empty() {
             return;
@@ -1838,7 +1859,11 @@ impl OARStructure {
 
         let sortable_elements: Vec<_> = layout_elements
             .iter()
-            .map(|e| (e.bbox.clone(), e.element_type))
+            .map(|e| SortableElement {
+                bbox: e.bbox.clone(),
+                element_type: e.element_type,
+                num_lines: e.num_lines,
+            })
             .collect();
 
         let sorted_indices = sort_layout_enhanced(&sortable_elements, page_width, page_height);
@@ -2172,6 +2197,7 @@ impl OARStructure {
                         confidence: Some(score),
                         orientation_angle: None,
                         word_boxes: None,
+                        label: None,
                     });
                 }
             }
@@ -2322,9 +2348,7 @@ impl OARStructure {
         // - For each OCR box that overlaps >= k table cells, split at cell boundaries
         // - Re-run recognition on each split crop
         // - Replace the original OCR box with the split boxes + texts
-        let has_detection_backed_table_cells = tables
-            .iter()
-            .any(|table| table.cells.iter().any(|cell| cell.confidence < 0.999));
+        let has_detection_backed_table_cells = tables.iter().any(|table| !table.is_e2e);
         if has_detection_backed_table_cells
             && !text_regions.is_empty()
             && let Some(ref text_rec_adapter) = self.pipeline.text_recognition_adapter
@@ -2408,6 +2432,23 @@ impl OARStructure {
                             .bbox
                             .rotate_back_to_original(angle, rotated_width, rotated_height);
                 }
+            }
+        }
+
+        // PaddleX: convert_formula_res_to_ocr_format — inject formula results into
+        // the overall OCR pool so they participate in normal block matching and table
+        // cell matching. The raw LaTeX text is used here (no $...$ wrapping);
+        // wrapping is handled by to_markdown() for formula elements, by
+        // stitch_tables() for table cells, and by sort_and_join_texts for inline formulas.
+        for formula in &formulas {
+            let w = formula.bbox.x_max() - formula.bbox.x_min();
+            let h = formula.bbox.y_max() - formula.bbox.y_min();
+            if w > 1.0 && h > 1.0 {
+                let mut region = crate::oarocr::TextRegion::new(formula.bbox.clone());
+                region.text = Some(formula.latex.clone().into());
+                region.confidence = Some(1.0);
+                region.label = Some("formula".into()); // Mark as formula for inline wrapping
+                text_regions.push(region);
             }
         }
 

@@ -9,6 +9,7 @@ use image::RgbImage;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -58,20 +59,25 @@ static TITLE_NUMBERING_REGEX: Lazy<Regex> = Lazy::new(|| {
 /// - "1 Introduction" -> (2, "1 Introduction") -> `## 1 Introduction`
 /// - "2.1 Method" -> (3, "2.1 Method") -> `### 2.1 Method`
 /// - "2.1.1 Details" -> (4, "2.1.1 Details") -> `#### 2.1.1 Details`
-fn format_title_with_level(title: &str) -> (usize, String) {
-    // Clean up line breaks
-    let cleaned = title.replace("-\n", "").replace('\n', " ");
+fn semantic_title_level_and_format(cleaned: &str) -> Option<(usize, String)> {
+    let trimmed = cleaned.trim();
 
-    if let Some(captures) = TITLE_NUMBERING_REGEX.captures(&cleaned) {
+    // Common unnumbered top-level section headers.
+    let keyword = trimmed.trim_end_matches(':').to_ascii_uppercase();
+    if matches!(
+        keyword.as_str(),
+        "ABSTRACT" | "INTRODUCTION" | "REFERENCES" | "REFERENCE"
+    ) {
+        return Some((1, trimmed.to_string()));
+    }
+
+    if let Some(captures) = TITLE_NUMBERING_REGEX.captures(cleaned) {
         let numbering = captures.get(1).map(|m| m.as_str().trim()).unwrap_or("");
         let title_content = captures.get(3).map(|m| m.as_str()).unwrap_or("");
 
-        // Determine level from dots in numbering (PaddleX: dots + 1, then +1 for base ##)
-        // 1 -> 2 (##), 1.2 -> 3 (###), 1.2.3 -> 4 (####)
         let dot_count = numbering.matches('.').count();
-        let level = dot_count + 2; // +1 for PaddleX logic, +1 for base ## level
+        let level = (dot_count + 2).clamp(2, 6);
 
-        // Reconstruct title: numbering + space + content
         let formatted = if title_content.is_empty() {
             numbering.trim_end_matches('.').to_string()
         } else {
@@ -81,15 +87,213 @@ fn format_title_with_level(title: &str) -> (usize, String) {
                 title_content.trim_start()
             )
         };
-
-        // Clamp level to reasonable range (2-6 for markdown, since # is for doc_title)
-        let level = level.clamp(2, 6);
-
-        (level, formatted)
-    } else {
-        // No numbering detected, default to level 2 (## heading)
-        (2, cleaned)
+        return Some((level, formatted));
     }
+
+    None
+}
+
+fn semantic_title_level(text: &str) -> Option<usize> {
+    let cleaned = text.replace("-\n", "").replace('\n', " ");
+    semantic_title_level_and_format(&cleaned).map(|(level, _)| level)
+}
+
+fn format_title_with_level(title: &str, clustered_level: Option<usize>) -> (usize, String) {
+    // Clean up line breaks
+    let cleaned = title.replace("-\n", "").replace('\n', " ");
+    if let Some((level, formatted)) = semantic_title_level_and_format(&cleaned) {
+        return (level, formatted);
+    }
+
+    // No semantic signal: use voting hint from relative/font-size signals.
+    let level = clustered_level.unwrap_or(2).clamp(2, 6);
+    (level, cleaned)
+}
+
+/// Estimate per-title heading levels using three-signal voting:
+/// 1) semantic numbering/keyword level
+/// 2) relative indentation order
+/// 3) font-size k-means (k<=4)
+///
+fn infer_paragraph_title_levels(elements: &[LayoutElement]) -> HashMap<usize, usize> {
+    let title_indices: Vec<usize> = elements
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.element_type == LayoutElementType::ParagraphTitle)
+        .map(|(idx, _)| idx)
+        .collect();
+    if title_indices.is_empty() {
+        return HashMap::new();
+    }
+
+    let height_samples: Vec<(usize, f32)> = title_indices
+        .iter()
+        .filter_map(|&idx| {
+            let e = &elements[idx];
+            let height = (e.bbox.y_max() - e.bbox.y_min()).max(1.0);
+            let line_h = height / e.num_lines.unwrap_or(1).max(1) as f32;
+            let v = line_h.max(1.0);
+            if v.is_finite() { Some((idx, v)) } else { None }
+        })
+        .collect();
+
+    let indent_samples: Vec<(usize, f32)> = title_indices
+        .iter()
+        .filter_map(|&idx| {
+            let x = elements[idx].bbox.x_min();
+            if x.is_finite() { Some((idx, x)) } else { None }
+        })
+        .collect();
+    let semantic_levels: HashMap<usize, usize> = title_indices
+        .iter()
+        .filter_map(|&idx| {
+            elements[idx]
+                .text
+                .as_deref()
+                .and_then(semantic_title_level)
+                .map(|level| (idx, level))
+        })
+        .collect();
+
+    let font_levels = infer_levels_by_kmeans_feature(&height_samples, true);
+    // Smaller x_min (less indent) -> higher-level heading.
+    let relative_levels = infer_levels_by_kmeans_feature(&indent_samples, false);
+
+    let mut voted = HashMap::new();
+    for idx in title_indices {
+        let semantic_level = semantic_levels.get(&idx).copied();
+        let font_level = font_levels.get(&idx).copied();
+        let relative_level = relative_levels.get(&idx).copied();
+
+        let mut score = [0u8; 7];
+        if let Some(level) = semantic_level {
+            score[level.clamp(1, 6)] += 2;
+        }
+        if let Some(level) = font_level {
+            score[level.clamp(1, 6)] += 1;
+        }
+        if let Some(level) = relative_level {
+            score[level.clamp(1, 6)] += 1;
+        }
+
+        let mut best_level = semantic_level.unwrap_or(2);
+        let mut best_score = 0u8;
+        for (level, &s) in score.iter().enumerate().skip(1) {
+            if s > best_score {
+                best_score = s;
+                best_level = level;
+            } else if s == best_score && s > 0 {
+                let is_semantic = semantic_level == Some(level);
+                let best_is_semantic = semantic_level == Some(best_level);
+                if (is_semantic && !best_is_semantic)
+                    || (is_semantic == best_is_semantic && level < best_level)
+                {
+                    best_level = level;
+                }
+            }
+        }
+
+        if best_score == 0 {
+            best_level = semantic_level
+                .or(font_level)
+                .or(relative_level)
+                .unwrap_or(2);
+        }
+
+        voted.insert(idx, best_level.clamp(1, 6));
+    }
+
+    voted
+}
+
+/// Cluster one scalar feature into heading levels with 1D k-means.
+///
+/// `descending=true` means larger feature -> higher-level heading (smaller markdown depth).
+/// `descending=false` means smaller feature -> higher-level heading.
+fn infer_levels_by_kmeans_feature(
+    samples: &[(usize, f32)],
+    descending: bool,
+) -> HashMap<usize, usize> {
+    let clean_samples: Vec<(usize, f32)> = samples
+        .iter()
+        .copied()
+        .filter(|(_, v)| v.is_finite())
+        .collect();
+    if clean_samples.len() < 2 {
+        return HashMap::new();
+    }
+
+    let mut values: Vec<f32> = clean_samples.iter().map(|(_, v)| *v).collect();
+    values.sort_by(|a, b| a.total_cmp(b));
+    let unique_count = values
+        .windows(2)
+        .filter(|w| (w[1] - w[0]).abs() > 1e-3)
+        .count()
+        + 1;
+    let k = unique_count.clamp(1, 4).min(clean_samples.len());
+    if k <= 1 {
+        return HashMap::new();
+    }
+
+    let mut centroids = (0..k)
+        .map(|i| {
+            let pos = ((i as f32 + 0.5) / k as f32 * values.len() as f32).floor() as usize;
+            values[pos.min(values.len() - 1)]
+        })
+        .collect::<Vec<_>>();
+
+    for _ in 0..16 {
+        let mut sums = vec![0.0f32; k];
+        let mut counts = vec![0usize; k];
+        for (_, value) in &clean_samples {
+            let mut best_idx = 0usize;
+            let mut best_dist = f32::INFINITY;
+            for (idx, c) in centroids.iter().enumerate() {
+                let dist = (value - c).abs();
+                if dist < best_dist {
+                    best_dist = dist;
+                    best_idx = idx;
+                }
+            }
+            sums[best_idx] += *value;
+            counts[best_idx] += 1;
+        }
+        for idx in 0..k {
+            if counts[idx] > 0 {
+                centroids[idx] = sums[idx] / counts[idx] as f32;
+            }
+        }
+    }
+
+    let mut centroid_order: Vec<(usize, f32)> = centroids.iter().copied().enumerate().collect();
+    if descending {
+        centroid_order.sort_by(|a, b| b.1.total_cmp(&a.1));
+    } else {
+        centroid_order.sort_by(|a, b| a.1.total_cmp(&b.1));
+    }
+    let rank_by_cluster: HashMap<usize, usize> = centroid_order
+        .into_iter()
+        .enumerate()
+        .map(|(rank, (cluster_idx, _))| (cluster_idx, rank))
+        .collect();
+
+    let mut result = HashMap::new();
+    for (element_idx, value) in &clean_samples {
+        let mut best_idx = 0usize;
+        let mut best_dist = f32::INFINITY;
+        for (idx, c) in centroids.iter().enumerate() {
+            let dist = (value - c).abs();
+            if dist < best_dist {
+                best_dist = dist;
+                best_idx = idx;
+            }
+        }
+        let rank = rank_by_cluster.get(&best_idx).copied().unwrap_or(0);
+        let level = (rank + 2).clamp(2, 6);
+        result.insert(*element_idx, level);
+    }
+
+    result
 }
 
 /// A detected document region block (from PP-DocBlockLayout).
@@ -273,8 +477,25 @@ impl StructureResult {
             .map(|e| &e.bbox)
             .collect();
 
+        // Compute original image width for image scaling (PaddleX: original_image_width)
+        let original_image_width = self
+            .rectified_img
+            .as_ref()
+            .map(|img| img.width() as f32)
+            .or_else(|| {
+                // Estimate from max element x-coordinate
+                self.layout_elements
+                    .iter()
+                    .map(|e| e.bbox.x_max())
+                    .fold(None, |acc, x| Some(acc.map_or(x, |max: f32| max.max(x))))
+            })
+            .unwrap_or(1.0);
+
         let mut md = String::new();
         let elements = &self.layout_elements;
+        let paragraph_title_levels = infer_paragraph_title_levels(elements);
+        let mut last_label: Option<LayoutElementType> = None;
+        let mut prev_element: Option<&LayoutElement> = None;
 
         for (idx, element) in elements.iter().enumerate() {
             // PP-StructureV3 markdown ignores auxiliary labels.
@@ -306,35 +527,56 @@ impl StructureResult {
                 }
             }
 
+            // Determine seg_start_flag for paragraph continuity (PaddleX get_seg_flag).
+            // When both current and previous are "text" and seg_start_flag is false,
+            // they belong to the same paragraph — join without \n\n separator.
+            let seg_start_flag = get_seg_flag(element, prev_element);
+
+            let is_continuation = element.element_type == LayoutElementType::Text
+                && last_label == Some(LayoutElementType::Text)
+                && !seg_start_flag;
+
+            // Add separator between elements
+            if !is_continuation {
+                // Normal case: separate elements with blank line
+            }
+
             match element.element_type {
                 // Document title
                 LayoutElementType::DocTitle => {
-                    md.push_str("\n# ");
+                    if !md.is_empty() {
+                        md.push_str("\n\n");
+                    }
+                    md.push_str("# ");
                     if let Some(text) = &element.text {
                         let cleaned = clean_ocr_text(text);
                         md.push_str(&cleaned);
                     }
-                    md.push_str("\n\n");
                 }
                 // Paragraph/section title - auto-detect numbering for level
                 LayoutElementType::ParagraphTitle => {
+                    if !md.is_empty() {
+                        md.push_str("\n\n");
+                    }
                     if let Some(text) = &element.text {
                         let cleaned = clean_ocr_text(text);
-                        let (level, formatted_title) = format_title_with_level(&cleaned);
-                        md.push('\n');
+                        let clustered = paragraph_title_levels.get(&idx).copied();
+                        let (level, formatted_title) = format_title_with_level(&cleaned, clustered);
                         for _ in 0..level {
                             md.push('#');
                         }
                         md.push(' ');
                         md.push_str(&formatted_title);
-                        md.push_str("\n\n");
                     } else {
-                        md.push_str("\n## \n\n");
+                        md.push_str("## ");
                     }
                 }
                 // Table - preserve HTML structure with border and center alignment
                 // Following PaddleX's format with <div style="text-align: center;"> wrapper
                 LayoutElementType::Table => {
+                    if !md.is_empty() {
+                        md.push_str("\n\n");
+                    }
                     if let Some(table) =
                         self.tables.iter().find(|t| t.bbox.iou(&element.bbox) > 0.5)
                     {
@@ -343,19 +585,41 @@ impl StructureResult {
                             let simplified = simplify_table_html(html);
                             let table_with_border =
                                 simplified.replacen("<table>", "<table border=\"1\">", 1);
-                            // Wrap with center-aligned div for better markdown rendering
-                            md.push_str("\n<div style=\"text-align: center;\">");
-                            md.push_str(&table_with_border);
-                            md.push_str("</div>\n\n");
+                            // PaddleX format_centered_by_html: clean newlines then wrap
+                            let cleaned = clean_ocr_text(&table_with_border);
+                            md.push_str("<div style=\"text-align: center;\">");
+                            md.push_str(&cleaned);
+                            md.push_str("</div>");
                         } else {
-                            md.push_str("\n[Table]\n\n");
+                            md.push_str("[Table]");
                         }
                     } else {
-                        md.push_str("\n[Table]\n\n");
+                        md.push_str("[Table]");
                     }
                 }
+                // FormulaNumber - equation labels like "(1)", "Eq. 1" etc.
+                // PaddleX does NOT include formula_number in handle_funcs_dict,
+                // so these are silently skipped in markdown output.
+                LayoutElementType::FormulaNumber => {
+                    continue;
+                }
                 // Formula - detect inline vs display formula based on context
-                LayoutElementType::Formula | LayoutElementType::FormulaNumber => {
+                LayoutElementType::Formula => {
+                    // Extract and clean LaTeX content; skip if empty
+                    let raw_content = element.text.as_deref().map(|s| s.trim()).unwrap_or("");
+                    if raw_content.is_empty() {
+                        continue;
+                    }
+                    // Remove only outer $$ or $ wrappers if present (from table cell injection)
+                    let latex_content =
+                        if raw_content.starts_with("$$") && raw_content.ends_with("$$") {
+                            &raw_content[2..raw_content.len() - 2]
+                        } else if raw_content.starts_with('$') && raw_content.ends_with('$') {
+                            &raw_content[1..raw_content.len() - 1]
+                        } else {
+                            raw_content
+                        };
+
                     // Check if this formula is on the same line as adjacent text elements
                     // to determine if it's an inline formula or display formula
                     let is_inline = {
@@ -383,23 +647,25 @@ impl StructureResult {
                     if is_inline {
                         // Inline formula: use $...$
                         md.push('$');
-                        if let Some(latex) = &element.text {
-                            md.push_str(latex);
-                        }
+                        md.push_str(latex_content);
                         md.push_str("$ ");
                     } else {
                         // Display formula: use $$...$$
-                        md.push_str("\n$$");
-                        if let Some(latex) = &element.text {
-                            md.push_str(latex);
+                        if !md.is_empty() {
+                            md.push_str("\n\n");
                         }
-                        md.push_str("$$\n\n");
+                        md.push_str("$$");
+                        md.push_str(latex_content);
+                        md.push_str("$$");
                     }
                 }
                 // Image/Chart - figure format with center alignment
                 LayoutElementType::Image | LayoutElementType::Chart => {
+                    if !md.is_empty() {
+                        md.push_str("\n\n");
+                    }
                     // Use HTML img tag with center alignment for better rendering
-                    md.push_str("\n<div style=\"text-align: center;\"><img src=\"");
+                    md.push_str("<div style=\"text-align: center;\"><img src=\"");
                     // Generate a placeholder image name based on element bbox
                     let img_name = format!(
                         "imgs/img_in_{}_box_{:.0}_{:.0}_{:.0}_{:.0}.jpg",
@@ -415,72 +681,83 @@ impl StructureResult {
                     );
                     md.push_str(&img_name);
                     md.push_str("\" alt=\"Image\" width=\"");
-                    // Calculate width percentage based on element size
-                    let width_pct =
-                        ((element.bbox.x_max() - element.bbox.x_min()) / 12.0).clamp(20.0, 100.0);
-                    md.push_str(&format!("{:.0}%", width_pct));
-                    md.push_str("\" /></div>\n\n");
+                    // Calculate width percentage relative to original image width (PaddleX logic)
+                    let image_width = element.bbox.x_max() - element.bbox.x_min();
+                    let width_pct = (image_width / original_image_width * 100.0) as u32;
+                    let width_pct = width_pct.clamp(1, 100);
+                    md.push_str(&format!("{}%", width_pct));
+                    md.push_str("\" /></div>");
                 }
                 // Seal - show as image with text
                 LayoutElementType::Seal => {
-                    md.push_str("\n![Seal]");
+                    if !md.is_empty() {
+                        md.push_str("\n\n");
+                    }
+                    md.push_str("![Seal]");
                     if let Some(text) = &element.text {
                         md.push_str("\n> ");
                         md.push_str(text);
                     }
-                    md.push_str("\n\n");
                 }
                 // Captions - with center alignment following PaddleX
                 _ if element.element_type.is_caption() => {
                     if let Some(text) = &element.text {
-                        md.push_str("\n<div style=\"text-align: center;\">");
-                        md.push_str(text);
-                        md.push_str(" </div>\n\n");
+                        if !md.is_empty() {
+                            md.push_str("\n\n");
+                        }
+                        let cleaned = clean_ocr_text(text);
+                        md.push_str("<div style=\"text-align: center;\">");
+                        md.push_str(&cleaned);
+                        md.push_str(" </div>");
                     }
                 }
-                // Abstract - following PaddleX format with proper text handling
+                // Abstract - following PaddleX's format_first_line_func with spliter=" "
                 LayoutElementType::Abstract => {
                     if let Some(text) = &element.text {
-                        // Check for "Abstract" or "摘要" heading
-                        let lower = text.to_lowercase();
-                        if lower.contains("abstract") || lower.contains("摘要") {
-                            md.push_str("\n## **Abstract**\n\n");
+                        if !md.is_empty() {
+                            md.push_str("\n\n");
                         }
-                        let formatted = format_text_block(text);
+                        let formatted = format_first_line(text, " ", &["abstract", "摘要"], "## ");
                         md.push_str(&formatted);
-                        md.push_str("\n\n");
                     }
                 }
-                // Reference - following PaddleX's format_reference_block
+                // Reference - following PaddleX's format_first_line_func with spliter="\n"
                 LayoutElementType::Reference => {
                     if let Some(text) = &element.text {
-                        let formatted = format_reference_block(text);
-                        md.push('\n');
+                        if !md.is_empty() {
+                            md.push_str("\n\n");
+                        }
+                        let formatted =
+                            format_first_line(text, "\n", &["references", "参考文献"], "## ");
                         md.push_str(&formatted);
-                        md.push_str("\n\n");
                     }
                 }
                 // Content (table of contents) - following PaddleX's soft breaks
                 LayoutElementType::Content => {
                     if let Some(text) = &element.text {
+                        if !md.is_empty() {
+                            md.push_str("\n\n");
+                        }
                         let formatted = format_content_block(text);
-                        md.push('\n');
                         md.push_str(&formatted);
-                        md.push_str("\n\n");
                     }
                 }
                 // Footnote - following PaddleX's vision_footnote handling
                 LayoutElementType::Footnote => {
                     if let Some(text) = &element.text {
+                        if !md.is_empty() {
+                            md.push_str("\n\n");
+                        }
                         let formatted = format_vision_footnote_block(text);
-                        md.push('\n');
                         md.push_str(&formatted);
-                        md.push_str("\n\n");
                     }
                 }
                 // List
                 LayoutElementType::List => {
                     if let Some(text) = &element.text {
+                        if !md.is_empty() {
+                            md.push_str("\n\n");
+                        }
                         let cleaned = format_text_block(text);
                         // Split by newlines and format as list items
                         for line in cleaned.lines() {
@@ -491,7 +768,15 @@ impl StructureResult {
                                 md.push('\n');
                             }
                         }
-                        md.push('\n');
+                    }
+                }
+                // Algorithm block - PaddleX: block.content.strip("\n")
+                LayoutElementType::Algorithm => {
+                    if let Some(text) = &element.text {
+                        if !md.is_empty() {
+                            md.push_str("\n\n");
+                        }
+                        md.push_str(text.trim_matches('\n'));
                     }
                 }
                 // Header/Footer - smaller text (typically excluded from markdown)
@@ -503,12 +788,23 @@ impl StructureResult {
                 // Default text elements - following PaddleX's text handling
                 _ => {
                     if let Some(text) = &element.text {
-                        let formatted = format_text_block(text);
-                        md.push_str(&formatted);
-                        md.push_str("\n\n");
+                        // For text continuation (same paragraph), join directly
+                        if is_continuation {
+                            let formatted = format_text_block(text);
+                            md.push_str(&formatted);
+                        } else {
+                            if !md.is_empty() {
+                                md.push_str("\n\n");
+                            }
+                            let formatted = format_text_block(text);
+                            md.push_str(&formatted);
+                        }
                     }
                 }
             }
+
+            last_label = Some(element.element_type);
+            prev_element = Some(element);
         }
         md.trim().to_string()
     }
@@ -793,6 +1089,67 @@ impl StructureResult {
     }
 }
 
+/// Determines paragraph continuity flags for the current element relative to the previous.
+///
+/// This implements PaddleX's `get_seg_flag` logic from `layout_parsing/utils.py`:
+/// - `seg_start_flag = true` means this element starts a NEW paragraph
+/// - `seg_start_flag = false` means this element CONTINUES the previous paragraph
+///
+/// The logic checks whether:
+/// 1. Previous block's last line ends near the right edge (text fills to right)
+/// 2. Current block's first line starts near the left edge (no indentation)
+/// 3. Previous block has more than one line
+/// 4. The two blocks are horizontally close enough
+///
+/// Returns `seg_start_flag` (true = new paragraph, false = continuation).
+fn get_seg_flag(current: &LayoutElement, prev: Option<&LayoutElement>) -> bool {
+    const COORD_THRESHOLD: f32 = 10.0;
+
+    let seg_start = current.seg_start_x.unwrap_or(current.bbox.x_min());
+    let mut context_left = current.bbox.x_min();
+    let mut context_right = current.bbox.x_max();
+
+    if let Some(prev) = prev {
+        let prev_seg_end = prev.seg_end_x.unwrap_or(prev.bbox.x_max());
+        let prev_num_lines = prev.num_lines.unwrap_or(1);
+
+        // Check if blocks overlap horizontally
+        let overlap_blocks = context_left < prev.bbox.x_max() && context_right > prev.bbox.x_min();
+
+        let edge_distance;
+        if overlap_blocks {
+            context_left = context_left.min(prev.bbox.x_min());
+            context_right = context_right.max(prev.bbox.x_max());
+            edge_distance = 0.0;
+        } else {
+            edge_distance = (current.bbox.x_min() - prev.bbox.x_max()).abs();
+        }
+
+        let prev_end_space_small = (context_right - prev_seg_end).abs() < COORD_THRESHOLD;
+        let current_start_space_small = seg_start - context_left < COORD_THRESHOLD;
+        let prev_lines_more_than_one = prev_num_lines > 1;
+        let blocks_close = edge_distance
+            < (prev.bbox.x_max() - prev.bbox.x_min())
+                .max(current.bbox.x_max() - current.bbox.x_min());
+
+        if prev_end_space_small
+            && current_start_space_small
+            && prev_lines_more_than_one
+            && blocks_close
+        {
+            return false; // continuation
+        }
+
+        true // new paragraph
+    } else {
+        // First element: check if text starts near the left edge
+        if seg_start - context_left < COORD_THRESHOLD {
+            return false; // continuation from previous page (no indentation)
+        }
+        true
+    }
+}
+
 /// Checks if a text element appears to start a new paragraph.
 ///
 /// Following PaddleX's logic: if the text starts near the left edge of the page
@@ -908,6 +1265,49 @@ fn clean_ocr_text(text: &str) -> String {
     text.replace("-\n", "").replace('\n', " ")
 }
 
+/// Formats the first non-empty line of a block if it matches a template keyword.
+///
+/// This is the Rust equivalent of PaddleX's `format_first_line_func`:
+/// 1. Split text by `spliter`
+/// 2. Find the first non-empty token
+/// 3. If it matches any template (case-insensitive exact match), replace it with `format_func(token)`
+/// 4. Rejoin with `spliter`
+///
+/// For abstract: `spliter=" "`, templates=["abstract","摘要"], format_func= `## {}\n`
+/// For reference: `spliter="\n"`, templates=["references","参考文献"], format_func= `## {}`
+fn format_first_line(
+    text: &str,
+    spliter: &str,
+    templates: &[&str],
+    heading_prefix: &str,
+) -> String {
+    let parts: Vec<&str> = text.split(spliter).collect();
+    let mut result_parts: Vec<String> = Vec::with_capacity(parts.len());
+    let mut found_first = false;
+
+    for part in &parts {
+        if !found_first {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                result_parts.push(part.to_string());
+                continue;
+            }
+            found_first = true;
+            // Check if the first non-empty token matches a template (case-insensitive)
+            if templates.iter().any(|t| trimmed.eq_ignore_ascii_case(t)) {
+                // Replace with formatted heading: "## <original_text>\n"
+                result_parts.push(format!("{}{}\n", heading_prefix, trimmed));
+            } else {
+                result_parts.push(part.to_string());
+            }
+        } else {
+            result_parts.push(part.to_string());
+        }
+    }
+
+    result_parts.join(spliter)
+}
+
 /// Formats text blocks following PaddleX's text handling:
 /// 1. First remove hyphenation: `-\n` -> `` (join broken words)
 /// 2. Then: `.replace("\n\n", "\n").replace("\n", "\n\n")`
@@ -931,49 +1331,6 @@ fn format_content_block(text: &str) -> String {
     let step1 = text.replace("-\n", "  \n");
     // Convert newlines to soft breaks
     step1.replace('\n', "  \n")
-}
-
-/// Formats reference blocks, following PaddleX's `format_first_line_func`:
-/// - First remove hyphenation: `-\n` -> ``
-/// - Detects "References" or "参考文献" keyword
-/// - Adds markdown heading if found
-fn format_reference_block(text: &str) -> String {
-    // First remove hyphenation
-    let dehyphenated = text.replace("-\n", "");
-    let lines: Vec<&str> = dehyphenated.lines().collect();
-
-    // Check first non-empty line for reference keywords
-    let mut result = String::new();
-    let mut added_heading = false;
-
-    for (i, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        // Check if this is a reference heading line
-        if !added_heading && (trimmed.contains("References") || trimmed.contains("参考文献")) {
-            result.push_str("## **References**\n\n");
-            added_heading = true;
-            // Skip the heading line itself, continue with content
-            continue;
-        }
-
-        // Add remaining lines
-        if i > 0 || result.is_empty() {
-            if !result.is_empty() {
-                result.push('\n');
-            }
-            result.push_str(trimmed);
-        }
-    }
-
-    if result.is_empty() {
-        dehyphenated
-    } else {
-        result
-    }
 }
 
 /// Formats vision footnote blocks following PaddleX:
@@ -1018,17 +1375,11 @@ fn is_digit(c: char) -> bool {
 }
 
 /// Removes PDF hyphenation artifacts from text.
+/// Dehyphenation: only handles hyphen-newline patterns (word breaks across lines).
 ///
-/// PDFs often break words at line ends with hyphens like "frame-work",
-/// "com-pared", etc. This function detects and removes these hyphens
-/// when they appear to be line-break hyphens rather than intentional hyphens.
-///
-/// Rules:
-/// 1. Hyphen followed by lowercase letter is likely a hyphenation artifact
-/// 2. Hyphen followed by space and lowercase letter is also artifact
-/// 3. Hyphen followed by newline and lowercase letter is artifact
-/// 4. Preserve intentional hyphens (compound words, hyphenated phrases)
-/// 5. Preserve hyphens in URLs and technical patterns
+/// Matches PaddleX's behavior where hyphens are only stripped at line boundaries
+/// (hyphen immediately followed by newline). Mid-word hyphens in compound words
+/// like "real-time", "end-to-end", "one-to-many" are preserved.
 fn dehyphenate(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let chars: Vec<char> = text.chars().collect();
@@ -1037,7 +1388,6 @@ fn dehyphenate(text: &str) -> String {
 
     // Helper to check if we're in a URL-like pattern
     let is_url_context = |pos: usize| -> bool {
-        // Look at a window around the hyphen for URL patterns
         let start = pos.saturating_sub(10);
         let end = (pos + 5).min(len);
         let window: String = chars[start..end].iter().collect();
@@ -1046,33 +1396,18 @@ fn dehyphenate(text: &str) -> String {
 
     while i < len {
         if chars[i] == '-' {
-            // Skip dehyphenation for URL contexts
             if is_url_context(i) {
                 result.push('-');
                 i += 1;
                 continue;
             }
 
-            // Check if this is a hyphenation artifact
-            let is_artifact = if i + 1 < len {
-                let next = chars[i + 1];
-                if next == '\n' {
-                    // Hyphen followed by newline - check what's after the newline
-                    if i + 2 < len {
-                        let after_newline = chars[i + 2];
-                        is_lowercase(after_newline)
-                    } else {
-                        false
-                    }
-                } else if is_lowercase(next) {
-                    // Hyphen followed directly by lowercase letter (e.g., "com-puted")
-                    // But check if preceded by lowercase to avoid removing intentional hyphens
-                    // like in "RT-DETR" or "one-to-many"
-                    i > 0 && is_lowercase(chars[i - 1])
-                } else if next.is_whitespace() && i + 2 < len {
-                    let after_space = chars[i + 2];
-                    // Hyphen + space + lowercase letter (e.g., "com- puted")
-                    is_lowercase(after_space) && i > 0 && is_lowercase(chars[i - 1])
+            // Only dehyphenate when hyphen is followed by newline (line-break hyphenation).
+            // Pattern: "word-\nletter" → "wordletter"
+            let is_artifact = if i + 1 < len && chars[i + 1] == '\n' {
+                // Hyphen followed by newline — check if next line starts with lowercase
+                if i + 2 < len {
+                    is_lowercase(chars[i + 2])
                 } else {
                     false
                 }
@@ -1081,14 +1416,8 @@ fn dehyphenate(text: &str) -> String {
             };
 
             if is_artifact {
-                // Skip the hyphen
-                // Also skip following newline/space if present
-                if i + 1 < len {
-                    let next = chars[i + 1];
-                    if next == '\n' || next.is_whitespace() {
-                        i += 1;
-                    }
-                }
+                // Skip the hyphen and the following newline
+                i += 1; // skip newline (will be incremented again at end of loop)
             } else {
                 result.push('-');
             }
@@ -1372,9 +1701,31 @@ pub fn postprocess_markdown(markdown: &str) -> String {
             continue;
         }
 
-        // Skip processing inside code/formula blocks
-        if in_code_block || in_formula {
+        // Skip processing inside code blocks
+        if in_code_block {
             result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+
+        // If inside a formula block, ensure it doesn't contain unescaped dollar signs
+        // which cause KaTeX "Can't use function '$' in math mode" errors.
+        if in_formula {
+            // If the formula content looks like regular text (many spaces, few backslashes)
+            // and contains a $, KaTeX will fail. We escape the $ inside the math block.
+            let contains_dollar = line.contains('$');
+            let is_plain_text = line.split_whitespace().count() > 3 && !line.contains('\\');
+
+            if contains_dollar && is_plain_text {
+                result.push_str(&line.replace('$', "\\$"));
+            } else if contains_dollar {
+                // Escape bare dollar signs inside the math block to avoid
+                // "Can't use function '$' in math mode" KaTeX errors while
+                // preserving literal dollars (e.g. \text{$10}).
+                result.push_str(&line.replace('$', "\\$"));
+            } else {
+                result.push_str(line);
+            }
             result.push('\n');
             continue;
         }
@@ -1482,6 +1833,20 @@ pub struct LayoutElement {
     /// formulas, images, etc.) will have an order index assigned.
     /// Headers, footers, and other auxiliary elements may have `None`.
     pub order_index: Option<u32>,
+    /// X-coordinate of the first text span's left edge within this element.
+    /// Used by `get_seg_flag` to detect paragraph continuity across blocks.
+    /// Computed during stitching from the first OCR region (after spatial sort).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seg_start_x: Option<f32>,
+    /// X-coordinate of the last text span's right edge within this element.
+    /// Used by `get_seg_flag` to detect paragraph continuity across blocks.
+    /// Computed during stitching from the last OCR region (after spatial sort).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seg_end_x: Option<f32>,
+    /// Number of text lines within this element.
+    /// Used by `get_seg_flag` to detect paragraph continuity across blocks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_lines: Option<u32>,
 }
 
 impl LayoutElement {
@@ -1494,6 +1859,9 @@ impl LayoutElement {
             label: None,
             text: None,
             order_index: None,
+            seg_start_x: None,
+            seg_end_x: None,
+            num_lines: None,
         }
     }
 
@@ -1985,6 +2353,16 @@ pub struct TableResult {
     /// Structure tokens from table structure recognition (used for HTML generation after stitching)
     #[serde(skip)]
     pub structure_tokens: Option<Vec<String>>,
+    /// Detected cell bounding boxes from the cell detection model (in page coordinates).
+    /// Stored separately from `cells` (which carry structure/grid metadata from the structure model)
+    /// and used by the stitcher for row-aware IoA-based OCR matching.
+    #[serde(skip)]
+    pub detected_cell_bboxes: Option<Vec<BoundingBox>>,
+    /// Whether the table was processed in end-to-end (E2E) mode.
+    /// When true, cells come from the structure model only (no separate cell detection).
+    /// Used by the stitcher to select the appropriate OCR matching strategy.
+    #[serde(skip)]
+    pub is_e2e: bool,
 }
 
 impl TableResult {
@@ -1999,6 +2377,8 @@ impl TableResult {
             html_structure: None,
             cell_texts: None,
             structure_tokens: None,
+            detected_cell_bboxes: None,
+            is_e2e: false,
         }
     }
 
@@ -2035,6 +2415,18 @@ impl TableResult {
     /// Sets the structure tokens for later HTML generation.
     pub fn with_structure_tokens(mut self, tokens: Vec<String>) -> Self {
         self.structure_tokens = Some(tokens);
+        self
+    }
+
+    /// Stores detected cell bounding boxes for the stitcher's row-aware IoA matcher.
+    pub fn with_detected_cell_bboxes(mut self, bboxes: Vec<BoundingBox>) -> Self {
+        self.detected_cell_bboxes = Some(bboxes);
+        self
+    }
+
+    /// Marks this table as processed in end-to-end (E2E) mode.
+    pub fn with_e2e(mut self, is_e2e: bool) -> Self {
+        self.is_e2e = is_e2e;
         self
     }
 
@@ -2205,5 +2597,148 @@ mod tests {
         let html = result.to_html();
         assert!(html.contains("<h1>Test Document</h1>"));
         assert!(html.contains("<p>Hello world</p>"));
+    }
+
+    #[test]
+    fn test_format_title_with_level_keywords() {
+        let (level, text) = format_title_with_level("Abstract", None);
+        assert_eq!(level, 1);
+        assert_eq!(text, "Abstract");
+
+        let (level, text) = format_title_with_level("References:", None);
+        assert_eq!(level, 1);
+        assert_eq!(text, "References:");
+    }
+
+    #[test]
+    fn test_format_title_with_level_cluster_fallback() {
+        let (level, text) = format_title_with_level("Unnumbered Heading", Some(4));
+        assert_eq!(level, 4);
+        assert_eq!(text, "Unnumbered Heading");
+    }
+
+    #[test]
+    fn test_to_markdown_skips_footnote() {
+        let mut result = StructureResult::new("test.jpg", 0);
+        let body = LayoutElement::new(
+            BoundingBox::from_coords(0.0, 0.0, 100.0, 30.0),
+            LayoutElementType::Text,
+            1.0,
+        )
+        .with_text("Body");
+        let footnote = LayoutElement::new(
+            BoundingBox::from_coords(0.0, 40.0, 100.0, 60.0),
+            LayoutElementType::Footnote,
+            1.0,
+        )
+        .with_text("Footnote text");
+        result = result.with_layout_elements(vec![body, footnote]);
+
+        let md = result.to_markdown();
+        assert!(md.contains("Body"));
+        assert!(!md.contains("Footnote text"));
+    }
+
+    #[test]
+    fn test_to_markdown_doc_title_joins_lines_with_space() {
+        let mut result = StructureResult::new("test.jpg", 0);
+        let title = LayoutElement::new(
+            BoundingBox::from_coords(0.0, 0.0, 100.0, 20.0),
+            LayoutElementType::DocTitle,
+            1.0,
+        )
+        .with_text("Main\nTitle");
+        result = result.with_layout_elements(vec![title]);
+        let md = result.to_markdown();
+        assert!(md.contains("# Main Title"));
+    }
+
+    #[test]
+    fn test_to_markdown_content_uses_soft_breaks() {
+        let mut result = StructureResult::new("test.jpg", 0);
+        let toc = LayoutElement::new(
+            BoundingBox::from_coords(0.0, 0.0, 100.0, 40.0),
+            LayoutElementType::Content,
+            1.0,
+        )
+        .with_text("1 Intro\n2 Method");
+        result = result.with_layout_elements(vec![toc]);
+        let md = result.to_markdown();
+        assert!(md.contains("1 Intro  \n2 Method"));
+    }
+
+    #[test]
+    fn test_infer_paragraph_title_levels_by_height() {
+        let titles = vec![
+            LayoutElement::new(
+                BoundingBox::from_coords(0.0, 0.0, 100.0, 40.0),
+                LayoutElementType::ParagraphTitle,
+                1.0,
+            )
+            .with_text("Large"),
+            LayoutElement::new(
+                BoundingBox::from_coords(0.0, 50.0, 100.0, 74.0),
+                LayoutElementType::ParagraphTitle,
+                1.0,
+            )
+            .with_text("Medium"),
+            LayoutElement::new(
+                BoundingBox::from_coords(0.0, 80.0, 100.0, 98.0),
+                LayoutElementType::ParagraphTitle,
+                1.0,
+            )
+            .with_text("Small"),
+        ];
+
+        let levels = infer_paragraph_title_levels(&titles);
+        let l0 = levels.get(&0).copied().unwrap_or(2);
+        let l1 = levels.get(&1).copied().unwrap_or(2);
+        let l2 = levels.get(&2).copied().unwrap_or(2);
+        assert!(l0 <= l1 && l1 <= l2);
+    }
+
+    #[test]
+    fn test_infer_paragraph_title_levels_semantic_vote_wins_tie() {
+        let titles = vec![
+            LayoutElement::new(
+                BoundingBox::from_coords(0.0, 0.0, 100.0, 40.0),
+                LayoutElementType::ParagraphTitle,
+                1.0,
+            )
+            .with_text("1.1 Detail"),
+            LayoutElement::new(
+                BoundingBox::from_coords(0.0, 50.0, 100.0, 70.0),
+                LayoutElementType::ParagraphTitle,
+                1.0,
+            )
+            .with_text("2 Intro"),
+        ];
+
+        let levels = infer_paragraph_title_levels(&titles);
+        assert_eq!(levels.get(&0).copied(), Some(3));
+        assert_eq!(levels.get(&1).copied(), Some(2));
+    }
+
+    #[test]
+    fn test_infer_paragraph_title_levels_uses_relative_indent_signal() {
+        let titles = vec![
+            LayoutElement::new(
+                BoundingBox::from_coords(0.0, 0.0, 100.0, 24.0),
+                LayoutElementType::ParagraphTitle,
+                1.0,
+            )
+            .with_text("Heading A"),
+            LayoutElement::new(
+                BoundingBox::from_coords(40.0, 40.0, 140.0, 64.0),
+                LayoutElementType::ParagraphTitle,
+                1.0,
+            )
+            .with_text("Heading B"),
+        ];
+
+        let levels = infer_paragraph_title_levels(&titles);
+        let left_level = levels.get(&0).copied().unwrap_or(2);
+        let indented_level = levels.get(&1).copied().unwrap_or(2);
+        assert!(left_level < indented_level);
     }
 }

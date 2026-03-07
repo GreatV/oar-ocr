@@ -811,23 +811,20 @@ impl BoundingBox {
                 90 => {
                     // Image was rotated 270° counter-clockwise (or 90° clockwise) to correct
                     // Inverse: rotate box 90° clockwise
-                    // (x, y) in rotated → (rotated_height - 1 - y, x) in original
-                    Point::new(rotated_height as f32 - 1.0 - p.y, p.x)
+                    // (x, y) in rotated → (rotated_height - y, x) in original
+                    Point::new(rotated_height as f32 - p.y, p.x)
                 }
                 180 => {
                     // Image was rotated 180° to correct
                     // Inverse: rotate box 180°
-                    // (x, y) in rotated → (rotated_width - 1 - x, rotated_height - 1 - y) in original
-                    Point::new(
-                        rotated_width as f32 - 1.0 - p.x,
-                        rotated_height as f32 - 1.0 - p.y,
-                    )
+                    // (x, y) in rotated → (rotated_width - x, rotated_height - y) in original
+                    Point::new(rotated_width as f32 - p.x, rotated_height as f32 - p.y)
                 }
                 270 => {
                     // Image was rotated 90° counter-clockwise (or 270° clockwise) to correct
                     // Inverse: rotate box 270° clockwise (or 90° counter-clockwise)
-                    // (x, y) in rotated → (y, rotated_width - 1 - x) in original
-                    Point::new(p.y, rotated_width as f32 - 1.0 - p.x)
+                    // (x, y) in rotated → (y, rotated_width - x) in original
+                    Point::new(p.y, rotated_width as f32 - p.x)
                 }
                 _ => {
                     // No rotation (0° or unknown)
@@ -1211,12 +1208,12 @@ mod tests {
         let bbox = BoundingBox::from_coords(0.0, 0.0, 1.0, 1.0);
         let rotated = bbox.rotate_back_to_original(90.0, rotated_width, rotated_height);
 
-        // angle=90 inverse mapping: (x, y) -> (rotated_height-1-y, x)
+        // angle=90 inverse mapping: (x, y) -> (rotated_height - y, x)
         let expected = BoundingBox::new(vec![
-            Point::new(3.0, 0.0),
+            Point::new(4.0, 0.0),
+            Point::new(4.0, 1.0),
             Point::new(3.0, 1.0),
-            Point::new(2.0, 1.0),
-            Point::new(2.0, 0.0),
+            Point::new(3.0, 0.0),
         ]);
         assert_eq!(rotated.points, expected.points);
     }
@@ -1228,12 +1225,12 @@ mod tests {
         let bbox = BoundingBox::from_coords(1.0, 1.0, 2.0, 2.0);
         let rotated = bbox.rotate_back_to_original(180.0, rotated_width, rotated_height);
 
-        // angle=180 inverse mapping: (x, y) -> (rotated_width-1-x, rotated_height-1-y)
+        // angle=180 inverse mapping: (x, y) -> (rotated_width - x, rotated_height - y)
         let expected = BoundingBox::new(vec![
+            Point::new(3.0, 2.0),
+            Point::new(2.0, 2.0),
             Point::new(2.0, 1.0),
-            Point::new(1.0, 1.0),
-            Point::new(1.0, 0.0),
-            Point::new(2.0, 0.0),
+            Point::new(3.0, 1.0),
         ]);
         assert_eq!(rotated.points, expected.points);
     }
@@ -1246,12 +1243,12 @@ mod tests {
         let bbox = BoundingBox::from_coords(0.0, 0.0, 1.0, 1.0);
         let rotated = bbox.rotate_back_to_original(270.0, rotated_width, rotated_height);
 
-        // angle=270 inverse mapping: (x, y) -> (y, rotated_width-1-x)
+        // angle=270 inverse mapping: (x, y) -> (y, rotated_width - x)
         let expected = BoundingBox::new(vec![
+            Point::new(0.0, 3.0),
             Point::new(0.0, 2.0),
-            Point::new(0.0, 1.0),
-            Point::new(1.0, 1.0),
             Point::new(1.0, 2.0),
+            Point::new(1.0, 3.0),
         ]);
         assert_eq!(rotated.points, expected.points);
     }

@@ -1,68 +1,72 @@
-//! Enhanced layout sorting logic compatible with PP-StructureV3.
+//! Enhanced layout sorting logic — `xycut_enhanced` algorithm.
 //!
-//! This module implements the `xycut_enhanced` strategy which handles complex layouts
-//! by separating headers/footers, identifying cross-column elements, and using
-//! weighted distance metrics to insert titles and figures into the reading order.
+//! Faithful port of PaddleX's `xycut_enhanced` strategy:
+//! 1. Header/Footer separation
+//! 2. Cross-layout detection (blocks spanning multiple columns)
+//! 3. Direction-aware XY-cut sorting
+//! 4. Overlapping box shrinking before projection
+//! 5. Weighted distance insertion for special blocks
+//! 6. Child block association (vision titles → vision parents)
 
 use crate::domain::structure::LayoutElementType;
+use crate::processors::sorting::calculate_overlap_ratio;
 use crate::processors::{BoundingBox, SortDirection, sort_by_xycut};
 
+/// XYCUT_SETTINGS constants (matching PaddleX setting.py)
+const EDGE_DISTANCE_COMPARE_TOLERANCE_LEN: f32 = 2.0;
+const EDGE_WEIGHT: f32 = 10000.0; // 10^4
+const UP_EDGE_WEIGHT: f32 = 1.0;
+const LEFT_EDGE_WEIGHT: f32 = 2.0;
+const CROSS_LAYOUT_REF_TEXT_BLOCK_WORDS_NUM_THRESHOLD: f32 = 10.0;
+
 /// Label used for sorting logic.
-///
-/// Matches standard block categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderLabel {
-    Header,         // header_labels
-    Footer,         // footer_labels
-    DocTitle,       // doc_title_labels
-    ParagraphTitle, // paragraph_title_labels
-    Vision,         // vision_labels
-    VisionTitle,    // vision_title_labels
-    Unordered,      // unordered_labels
-    NormalText,     // text_labels
-    CrossLayout,    // derived internally
-    Reference,      // special case
+    Header,
+    Footer,
+    DocTitle,
+    ParagraphTitle,
+    Vision,
+    VisionTitle,
+    Unordered,
+    NormalText,
+    CrossLayout,
+    CrossReference,
+    Reference,
 }
 
 impl OrderLabel {
     pub fn from_element_type(et: LayoutElementType) -> Self {
-        // Mapped based on standard block labels.
         match et {
-            // header_labels
             LayoutElementType::Header | LayoutElementType::HeaderImage => OrderLabel::Header,
 
-            // footer_labels
             LayoutElementType::Footer
             | LayoutElementType::FooterImage
             | LayoutElementType::Footnote => OrderLabel::Footer,
 
-            // doc_title_labels
             LayoutElementType::DocTitle => OrderLabel::DocTitle,
 
-            // paragraph_title_labels
-            LayoutElementType::ParagraphTitle
-            | LayoutElementType::Reference
-            | LayoutElementType::Content => OrderLabel::ParagraphTitle,
+            LayoutElementType::ParagraphTitle | LayoutElementType::Content => {
+                OrderLabel::ParagraphTitle
+            }
 
-            // vision_labels
+            LayoutElementType::Reference => OrderLabel::Reference,
+
             LayoutElementType::Image
             | LayoutElementType::Table
             | LayoutElementType::Chart
             | LayoutElementType::Algorithm => OrderLabel::Vision,
 
-            // vision_title_labels
             LayoutElementType::FigureTitle
             | LayoutElementType::TableTitle
             | LayoutElementType::ChartTitle
             | LayoutElementType::FigureTableChartTitle => OrderLabel::VisionTitle,
 
-            // unordered_labels
             LayoutElementType::AsideText
             | LayoutElementType::Seal
             | LayoutElementType::Number
             | LayoutElementType::FormulaNumber => OrderLabel::Unordered,
 
-            // text_labels (default fallback)
             LayoutElementType::Text
             | LayoutElementType::List
             | LayoutElementType::Abstract
@@ -72,13 +76,6 @@ impl OrderLabel {
             _ => OrderLabel::NormalText,
         }
     }
-
-    pub fn is_header(&self) -> bool {
-        matches!(self, OrderLabel::Header)
-    }
-    pub fn is_footer(&self) -> bool {
-        matches!(self, OrderLabel::Footer)
-    }
 }
 
 /// A wrapper around layout elements with properties needed for sorting.
@@ -87,28 +84,55 @@ pub struct SortableBlock {
     pub bbox: BoundingBox,
     pub original_index: usize,
     pub order_label: OrderLabel,
-    pub direction: SortDirection, // Derived from aspect ratio
+    pub element_type: LayoutElementType,
+    pub direction: SortDirection,
+    pub num_lines: u32,
+    pub text_line_height: f32,
 }
 
 impl SortableBlock {
-    pub fn new(bbox: BoundingBox, original_index: usize, element_type: LayoutElementType) -> Self {
+    pub fn new(
+        bbox: BoundingBox,
+        original_index: usize,
+        element_type: LayoutElementType,
+        num_lines: Option<u32>,
+    ) -> Self {
         let order_label = OrderLabel::from_element_type(element_type);
         let width = bbox.x_max() - bbox.x_min();
         let height = bbox.y_max() - bbox.y_min();
-
-        // Logic: horizontal if width >= height (ratio 1.0)
         let direction = if width >= height {
             SortDirection::Horizontal
         } else {
             SortDirection::Vertical
+        };
+        let num_lines = num_lines.unwrap_or(1).max(1);
+        let text_line_height = if num_lines > 0 {
+            height / num_lines as f32
+        } else {
+            height
         };
 
         Self {
             bbox,
             original_index,
             order_label,
+            element_type,
             direction,
+            num_lines,
+            text_line_height,
         }
+    }
+
+    pub fn width(&self) -> f32 {
+        self.bbox.x_max() - self.bbox.x_min()
+    }
+
+    pub fn height(&self) -> f32 {
+        self.bbox.y_max() - self.bbox.y_min()
+    }
+
+    pub fn area(&self) -> f32 {
+        self.width() * self.height()
     }
 
     pub fn center(&self) -> (f32, f32) {
@@ -117,28 +141,38 @@ impl SortableBlock {
             (self.bbox.y_min() + self.bbox.y_max()) / 2.0,
         )
     }
+
+    pub fn long_side_length(&self) -> f32 {
+        self.width().max(self.height())
+    }
+}
+
+/// Input element for enhanced sorting.
+pub struct SortableElement {
+    pub bbox: BoundingBox,
+    pub element_type: LayoutElementType,
+    pub num_lines: Option<u32>,
 }
 
 /// Main entry point for enhanced sorting.
 ///
 /// Returns a list of original indices in the correct reading order.
 pub fn sort_layout_enhanced(
-    elements: &[(BoundingBox, LayoutElementType)],
+    elements: &[SortableElement],
     page_width: f32,
-    page_height: f32,
+    _page_height: f32,
 ) -> Vec<usize> {
     if elements.is_empty() {
         return Vec::new();
     }
 
-    // 1. Convert to SortableBlocks
     let blocks: Vec<SortableBlock> = elements
         .iter()
         .enumerate()
-        .map(|(i, (bbox, et))| SortableBlock::new(bbox.clone(), i, *et))
+        .map(|(i, e)| SortableBlock::new(e.bbox.clone(), i, e.element_type, e.num_lines))
         .collect();
 
-    // 2. Separate into groups
+    // Separate headers/footers
     let mut header_blocks = Vec::new();
     let mut footer_blocks = Vec::new();
     let mut main_blocks = Vec::new();
@@ -151,24 +185,11 @@ pub fn sort_layout_enhanced(
         }
     }
 
-    // 3. Sort Headers and Footers (simple top-to-bottom)
-    header_blocks.sort_by(|a, b| {
-        a.bbox
-            .y_min()
-            .partial_cmp(&b.bbox.y_min())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    footer_blocks.sort_by(|a, b| {
-        a.bbox
-            .y_min()
-            .partial_cmp(&b.bbox.y_min())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    sort_blocks_by_y(&mut header_blocks);
+    sort_blocks_by_y(&mut footer_blocks);
 
-    // 4. Sort Main Blocks using Enhanced Logic
-    let sorted_main = sort_main_blocks(main_blocks, page_width, page_height);
+    let sorted_main = sort_main_blocks(main_blocks, page_width);
 
-    // 5. Combine
     let mut result = Vec::with_capacity(elements.len());
     result.extend(header_blocks.into_iter().map(|b| b.original_index));
     result.extend(sorted_main.into_iter().map(|b| b.original_index));
@@ -177,87 +198,556 @@ pub fn sort_layout_enhanced(
     result
 }
 
-fn sort_main_blocks(
-    blocks: Vec<SortableBlock>,
-    _page_width: f32,
-    _page_height: f32,
-) -> Vec<SortableBlock> {
+fn sort_blocks_by_y(blocks: &mut [SortableBlock]) {
+    blocks.sort_by(|a, b| {
+        a.bbox
+            .y_min()
+            .partial_cmp(&b.bbox.y_min())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+fn sort_main_blocks(mut blocks: Vec<SortableBlock>, page_width: f32) -> Vec<SortableBlock> {
+    if blocks.is_empty() {
+        return blocks;
+    }
+
+    // 1. Cross-layout detection (PaddleX get_layout_structure)
+    detect_cross_layout(&mut blocks, page_width);
+
+    // 2. Separate blocks for XY-cut vs special insertion
+    // PaddleX SKIP_ORDER_LABELS are inserted by weighted distance after main XY-cut.
     let mut xy_cut_blocks = Vec::new();
-    let mut vision_blocks = Vec::new(); // Tables, Images (Anchors)
-    let mut other_unsorted_blocks = Vec::new(); // Titles, etc.
     let mut doc_title_blocks = Vec::new();
+    let mut weighted_insert_blocks = Vec::new();
+    let mut unordered_blocks = Vec::new();
 
     for block in blocks {
         match block.order_label {
-            OrderLabel::NormalText | OrderLabel::Unordered => xy_cut_blocks.push(block),
+            OrderLabel::CrossLayout
+            | OrderLabel::CrossReference
+            | OrderLabel::Vision
+            | OrderLabel::VisionTitle => weighted_insert_blocks.push(block),
             OrderLabel::DocTitle => doc_title_blocks.push(block),
-            OrderLabel::Vision => vision_blocks.push(block),
-            _ => other_unsorted_blocks.push(block),
+            OrderLabel::Unordered => unordered_blocks.push(block),
+            _ => xy_cut_blocks.push(block),
         }
     }
 
-    // Sort xy_cut_blocks using standard XY-cut
+    // 3. Direction-aware XY-cut on xy_cut_blocks
     let mut sorted_blocks = if !xy_cut_blocks.is_empty() {
-        let bboxes: Vec<BoundingBox> = xy_cut_blocks.iter().map(|b| b.bbox.clone()).collect();
-        let indices = sort_by_xycut(&bboxes, SortDirection::Vertical, 1);
-        indices
-            .into_iter()
-            .map(|i| xy_cut_blocks[i].clone())
-            .collect()
+        direction_aware_xycut_sort(&mut xy_cut_blocks)
     } else {
         Vec::new()
     };
 
-    // Insertion Order Strategy:
-    // 1. DocTitle (Global context)
-    // 2. Vision (Tables/Images - strong anchors)
-    // 3. VisionTitle/ParagraphTitle (Weakly attached, depend on anchors)
+    // 4. Match unsorted blocks using weighted distance insertion
+    // Order: doc_title first (PaddleX inserts first doc_title at position 0)
+    sort_blocks_by_y(&mut doc_title_blocks);
+    for (i, block) in doc_title_blocks.into_iter().enumerate() {
+        if i == 0 && sorted_blocks.is_empty() {
+            sorted_blocks.push(block);
+        } else if i == 0 {
+            sorted_blocks.insert(0, block);
+        } else {
+            weighted_distance_insert(block, &mut sorted_blocks, SortDirection::Horizontal);
+        }
+    }
 
-    // 1. DocTitle
-    doc_title_blocks.sort_by(|a, b| {
-        a.bbox
-            .y_min()
-            .partial_cmp(&b.bbox.y_min())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    for block in doc_title_blocks {
+    // Vision/cross-layout/title blocks are inserted after XY-cut.
+    sort_blocks_by_y(&mut weighted_insert_blocks);
+    for block in weighted_insert_blocks {
         weighted_distance_insert(block, &mut sorted_blocks, SortDirection::Horizontal);
     }
 
-    // 2. Vision (Tables, Images)
-    // Sort by position to stabilize insertion
-    vision_blocks.sort_by(|a, b| {
-        a.bbox
-            .y_min()
-            .partial_cmp(&b.bbox.y_min())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    for block in vision_blocks {
-        weighted_distance_insert(block, &mut sorted_blocks, SortDirection::Horizontal);
+    // Unordered blocks using manhattan distance
+    sort_blocks_by_y(&mut unordered_blocks);
+    for block in unordered_blocks {
+        manhattan_insert(block, &mut sorted_blocks);
     }
 
-    // 3. Other Unsorted (Titles, CrossLayout, etc.)
-    other_unsorted_blocks.sort_by(|a, b| {
-        a.bbox
-            .y_min()
-            .partial_cmp(&b.bbox.y_min())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    for block in other_unsorted_blocks {
-        weighted_distance_insert(block, &mut sorted_blocks, SortDirection::Horizontal);
-    }
+    // 5. Associate child blocks (vision titles next to vision parents)
+    associate_child_blocks(&mut sorted_blocks);
 
     sorted_blocks
 }
 
-/// Inserts a block into the sorted list using weighted distance logic.
+/// Direction-aware XY-cut sorting (PaddleX xycut_enhanced lines 539-584).
 ///
-/// Matches `weighted_distance_insert` logic.
+/// If single column or all blocks have 1 line → use secondary direction (xy_cut).
+/// If multi-column → use primary direction (yx_cut).
+fn direction_aware_xycut_sort(blocks: &mut [SortableBlock]) -> Vec<SortableBlock> {
+    let bboxes: Vec<BoundingBox> = blocks.iter().map(|b| b.bbox.clone()).collect();
+    let max_text_lines = blocks.iter().map(|b| b.num_lines).max().unwrap_or(1);
+
+    // Check column structure using horizontal projection
+    let discontinuous = calculate_discontinuous_projection(&bboxes, SortDirection::Horizontal);
+
+    // Shrink overlapping boxes before XY-cut
+    shrink_overlapping_boxes(blocks, SortDirection::Vertical);
+
+    let shrunk_bboxes: Vec<BoundingBox> = blocks.iter().map(|b| b.bbox.clone()).collect();
+
+    let sorted_indices = if discontinuous.len() == 1 || max_text_lines == 1 {
+        // Single column: use secondary direction (XY-cut = X first, then Y)
+        sort_by_xycut(&shrunk_bboxes, SortDirection::Horizontal, 1)
+    } else {
+        // Multi-column: use primary direction (YX-cut = Y first, then X)
+        sort_by_xycut(&shrunk_bboxes, SortDirection::Vertical, 1)
+    };
+
+    sorted_indices
+        .into_iter()
+        .map(|i| blocks[i].clone())
+        .collect()
+}
+
+/// Cross-layout detection (port of PaddleX `get_layout_structure`).
 ///
-/// # Arguments
-/// * `block` - The block to insert.
-/// * `sorted_blocks` - The current sorted list.
-/// * `region_direction` - The direction of the region/page (usually Horizontal for standard docs).
+/// Marks blocks that span multiple columns as `CrossLayout`.
+///
+/// The naive algorithm is O(n³). We reduce it to O(n² + k²) per outer block
+/// (where k = |h_neighbors| ≪ n for typical sparse layouts) by precomputing
+/// horizontal-projection overlaps once and building per-block neighbor lists.
+/// Both the 2D bbox overlap and the projection-overlap conditions require
+/// horizontal overlap with `block_idx`, so any block outside its h_neighbors
+/// can never trigger a cross-layout classification and is safely skipped.
+fn detect_cross_layout(blocks: &mut [SortableBlock], _page_width: f32) {
+    if blocks.len() < 2 {
+        return;
+    }
+
+    // Sort by x_min, then width (matching PaddleX)
+    blocks.sort_by(|a, b| {
+        a.bbox
+            .x_min()
+            .partial_cmp(&b.bbox.x_min())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                a.width()
+                    .partial_cmp(&b.width())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+
+    let mask_labels = [
+        OrderLabel::DocTitle,
+        OrderLabel::CrossLayout,
+        OrderLabel::CrossReference,
+    ];
+
+    let n = blocks.len();
+
+    let block_data: Vec<(BoundingBox, OrderLabel, f32, f32)> = blocks
+        .iter()
+        .map(|b| {
+            (
+                b.bbox.clone(),
+                b.order_label,
+                b.area(),
+                b.long_side_length(),
+            )
+        })
+        .collect();
+
+    let text_line_heights: Vec<f32> = blocks.iter().map(|b| b.text_line_height).collect();
+
+    // Precompute the full horizontal-projection overlap matrix (O(n²)) so that
+    // inner loops can do a single table lookup instead of recomputing the ratio.
+    let h_proj: Vec<Vec<f32>> = (0..n)
+        .map(|i| {
+            (0..n)
+                .map(|j| {
+                    calculate_projection_overlap_ratio(
+                        &block_data[i].0,
+                        &block_data[j].0,
+                        SortDirection::Horizontal,
+                    )
+                })
+                .collect()
+        })
+        .collect();
+
+    // For each block, the set of other blocks that horizontally overlap with it.
+    // Both inner loops only act on blocks in this set, so we iterate only over
+    // neighbors rather than 0..n.
+    let h_neighbors: Vec<Vec<usize>> = (0..n)
+        .map(|i| (0..n).filter(|&j| j != i && h_proj[i][j] > 0.0).collect())
+        .collect();
+
+    for block_idx in 0..n {
+        if mask_labels.contains(&block_data[block_idx].1) {
+            continue;
+        }
+
+        let mut mark_block_cross = false;
+
+        // Iterate only over blocks that horizontally overlap with block_idx.
+        // Any block without horizontal overlap has bbox_overlap == 0 and
+        // match_proj == 0, so it cannot affect the cross-layout decision.
+        for &ref_idx in &h_neighbors[block_idx] {
+            if mask_labels.contains(&block_data[ref_idx].1) {
+                continue;
+            }
+            if blocks[ref_idx].order_label == OrderLabel::CrossLayout {
+                continue;
+            }
+            if blocks[block_idx].order_label == OrderLabel::CrossLayout {
+                break;
+            }
+
+            let bbox_overlap =
+                calculate_overlap_ratio(&block_data[block_idx].0, &block_data[ref_idx].0);
+
+            if bbox_overlap > 0.0 {
+                if block_data[ref_idx].1 == OrderLabel::Vision {
+                    blocks[ref_idx].order_label = OrderLabel::CrossLayout;
+                    continue;
+                }
+                if bbox_overlap > 0.1 && block_data[block_idx].2 < block_data[ref_idx].2 {
+                    mark_block_cross = true;
+                    break;
+                }
+            }
+
+            // h_proj[block_idx][ref_idx] > 0 is guaranteed by h_neighbors, so
+            // the match_proj > 0 guard from the original is always satisfied here.
+
+            // Iterate over the same neighbor set for second_ref: every triggering
+            // condition (bbox_overlap2 > 0.1 or second_match_proj > 0) requires
+            // horizontal overlap with block_idx, which is exactly h_neighbors.
+            for &second_ref_idx in &h_neighbors[block_idx] {
+                if second_ref_idx == ref_idx || mask_labels.contains(&block_data[second_ref_idx].1)
+                {
+                    continue;
+                }
+                if blocks[second_ref_idx].order_label == OrderLabel::CrossLayout {
+                    continue;
+                }
+
+                let bbox_overlap2 = calculate_overlap_ratio(
+                    &block_data[block_idx].0,
+                    &block_data[second_ref_idx].0,
+                );
+
+                if bbox_overlap2 > 0.1 {
+                    if block_data[second_ref_idx].1 == OrderLabel::Vision {
+                        blocks[second_ref_idx].order_label = OrderLabel::CrossLayout;
+                        continue;
+                    }
+                    if block_data[block_idx].1 == OrderLabel::Vision
+                        || block_data[block_idx].2 < block_data[second_ref_idx].2
+                    {
+                        mark_block_cross = true;
+                        break;
+                    }
+                }
+
+                // second_match_proj > 0 is guaranteed (second_ref_idx ∈ h_neighbors[block_idx]).
+                // Use precomputed table for ref_match_proj to avoid re-computing.
+                let ref_match_proj = h_proj[ref_idx][second_ref_idx];
+                let secondary_ref_match = calculate_projection_overlap_ratio(
+                    &block_data[ref_idx].0,
+                    &block_data[second_ref_idx].0,
+                    SortDirection::Vertical,
+                );
+
+                if ref_match_proj == 0.0 && secondary_ref_match > 0.0 {
+                    if block_data[block_idx].1 == OrderLabel::Vision {
+                        mark_block_cross = true;
+                        break;
+                    }
+                    // Both ref blocks are normal text with sufficient width
+                    if block_data[ref_idx].1 == OrderLabel::NormalText
+                        && block_data[second_ref_idx].1 == OrderLabel::NormalText
+                        && block_data[ref_idx].3
+                            > text_line_heights[ref_idx]
+                                * CROSS_LAYOUT_REF_TEXT_BLOCK_WORDS_NUM_THRESHOLD
+                        && block_data[second_ref_idx].3
+                            > text_line_heights[second_ref_idx]
+                                * CROSS_LAYOUT_REF_TEXT_BLOCK_WORDS_NUM_THRESHOLD
+                    {
+                        mark_block_cross = true;
+                        break;
+                    }
+                }
+            }
+
+            if mark_block_cross {
+                break;
+            }
+        }
+
+        if mark_block_cross {
+            if block_data[block_idx].1 == OrderLabel::Reference {
+                blocks[block_idx].order_label = OrderLabel::CrossReference;
+            } else {
+                blocks[block_idx].order_label = OrderLabel::CrossLayout;
+            }
+        }
+    }
+}
+
+/// Calculate discontinuous projection intervals along a direction.
+///
+/// Returns merged intervals where boxes project onto the axis.
+/// Single interval = single column; multiple = multi-column.
+fn calculate_discontinuous_projection(
+    bboxes: &[BoundingBox],
+    direction: SortDirection,
+) -> Vec<(i32, i32)> {
+    if bboxes.is_empty() {
+        return Vec::new();
+    }
+
+    let mut intervals: Vec<(i32, i32)> = bboxes
+        .iter()
+        .map(|b| match direction {
+            SortDirection::Horizontal => (b.x_min() as i32, b.x_max() as i32),
+            SortDirection::Vertical => (b.y_min() as i32, b.y_max() as i32),
+        })
+        .collect();
+
+    intervals.sort_by_key(|&(start, _)| start);
+
+    let mut merged = Vec::new();
+    let (mut current_start, mut current_end) = intervals[0];
+
+    for &(start, end) in &intervals[1..] {
+        if start <= current_end {
+            current_end = current_end.max(end);
+        } else {
+            merged.push((current_start, current_end));
+            current_start = start;
+            current_end = end;
+        }
+    }
+    merged.push((current_start, current_end));
+
+    merged
+}
+
+/// Shrink slightly overlapping boxes at their midpoint (PaddleX `shrink_overlapping_boxes`).
+///
+/// For consecutive blocks sorted by position, if they have small overlap in the
+/// cut direction (0 < overlap < 10%), split at the midpoint of overlap.
+fn shrink_overlapping_boxes(blocks: &mut [SortableBlock], direction: SortDirection) {
+    if blocks.len() < 2 {
+        return;
+    }
+
+    // Sort by the end coordinate of the cut direction
+    match direction {
+        SortDirection::Vertical => {
+            blocks.sort_by(|a, b| {
+                a.bbox
+                    .y_max()
+                    .partial_cmp(&b.bbox.y_max())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        SortDirection::Horizontal => {
+            blocks.sort_by(|a, b| {
+                a.bbox
+                    .x_max()
+                    .partial_cmp(&b.bbox.x_max())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+    }
+
+    for i in 0..blocks.len() - 1 {
+        let perp_direction = match direction {
+            SortDirection::Vertical => SortDirection::Horizontal,
+            SortDirection::Horizontal => SortDirection::Vertical,
+        };
+
+        let cut_iou =
+            calculate_projection_overlap_ratio(&blocks[i].bbox, &blocks[i + 1].bbox, direction);
+        let match_iou = calculate_projection_overlap_ratio(
+            &blocks[i].bbox,
+            &blocks[i + 1].bbox,
+            perp_direction,
+        );
+
+        match direction {
+            SortDirection::Vertical => {
+                let y2 = blocks[i].bbox.y_max();
+                let y1_prime = blocks[i + 1].bbox.y_min();
+                if (match_iou > 0.0 && cut_iou > 0.0 && cut_iou < 0.1)
+                    || y2 == y1_prime
+                    || (y2 - y1_prime).abs() <= 3.0
+                {
+                    let overlap_y_min = blocks[i].bbox.y_min().max(blocks[i + 1].bbox.y_min());
+                    let overlap_y_max = blocks[i].bbox.y_max().min(blocks[i + 1].bbox.y_max());
+                    let split_y = ((overlap_y_min + overlap_y_max) / 2.0).floor();
+
+                    if blocks[i].bbox.y_min() < blocks[i + 1].bbox.y_min() {
+                        let new_bbox = BoundingBox::from_coords(
+                            blocks[i].bbox.x_min(),
+                            blocks[i].bbox.y_min(),
+                            blocks[i].bbox.x_max(),
+                            split_y - 1.0,
+                        );
+                        blocks[i].bbox = new_bbox;
+                        let new_bbox2 = BoundingBox::from_coords(
+                            blocks[i + 1].bbox.x_min(),
+                            split_y + 1.0,
+                            blocks[i + 1].bbox.x_max(),
+                            blocks[i + 1].bbox.y_max(),
+                        );
+                        blocks[i + 1].bbox = new_bbox2;
+                    } else {
+                        let new_bbox = BoundingBox::from_coords(
+                            blocks[i].bbox.x_min(),
+                            split_y - 1.0,
+                            blocks[i].bbox.x_max(),
+                            blocks[i].bbox.y_max(),
+                        );
+                        blocks[i].bbox = new_bbox;
+                        let new_bbox2 = BoundingBox::from_coords(
+                            blocks[i + 1].bbox.x_min(),
+                            blocks[i + 1].bbox.y_min(),
+                            blocks[i + 1].bbox.x_max(),
+                            split_y + 1.0,
+                        );
+                        blocks[i + 1].bbox = new_bbox2;
+                    }
+                }
+            }
+            SortDirection::Horizontal => {
+                let x2 = blocks[i].bbox.x_max();
+                let x1_prime = blocks[i + 1].bbox.x_min();
+                if (match_iou > 0.0 && cut_iou > 0.0 && cut_iou < 0.1)
+                    || x2 == x1_prime
+                    || (x2 - x1_prime).abs() <= 3.0
+                {
+                    let overlap_x_min = blocks[i].bbox.x_min().max(blocks[i + 1].bbox.x_min());
+                    let overlap_x_max = blocks[i].bbox.x_max().min(blocks[i + 1].bbox.x_max());
+                    let split_x = ((overlap_x_min + overlap_x_max) / 2.0).floor();
+
+                    if blocks[i].bbox.x_min() < blocks[i + 1].bbox.x_min() {
+                        let new_bbox = BoundingBox::from_coords(
+                            blocks[i].bbox.x_min(),
+                            blocks[i].bbox.y_min(),
+                            split_x - 1.0,
+                            blocks[i].bbox.y_max(),
+                        );
+                        blocks[i].bbox = new_bbox;
+                        let new_bbox2 = BoundingBox::from_coords(
+                            split_x + 1.0,
+                            blocks[i + 1].bbox.y_min(),
+                            blocks[i + 1].bbox.x_max(),
+                            blocks[i + 1].bbox.y_max(),
+                        );
+                        blocks[i + 1].bbox = new_bbox2;
+                    } else {
+                        let new_bbox = BoundingBox::from_coords(
+                            split_x - 1.0,
+                            blocks[i].bbox.y_min(),
+                            blocks[i].bbox.x_max(),
+                            blocks[i].bbox.y_max(),
+                        );
+                        blocks[i].bbox = new_bbox;
+                        let new_bbox2 = BoundingBox::from_coords(
+                            blocks[i + 1].bbox.x_min(),
+                            blocks[i + 1].bbox.y_min(),
+                            split_x + 1.0,
+                            blocks[i + 1].bbox.y_max(),
+                        );
+                        blocks[i + 1].bbox = new_bbox2;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Associate vision title blocks with their nearest vision parent (PaddleX `insert_child_blocks`).
+///
+/// Moves VisionTitle blocks adjacent to their nearest Vision block.
+fn associate_child_blocks(sorted_blocks: &mut Vec<SortableBlock>) {
+    if sorted_blocks.len() < 2 {
+        return;
+    }
+
+    // Find vision title indices that need to be moved
+    let mut moves: Vec<(usize, usize)> = Vec::new(); // (from_idx, target_vision_idx)
+
+    for (i, block) in sorted_blocks.iter().enumerate() {
+        if block.order_label != OrderLabel::VisionTitle {
+            continue;
+        }
+
+        // Find nearest Vision block by edge distance
+        let mut best_vision_idx = None;
+        let mut best_distance = f32::INFINITY;
+
+        for (j, other) in sorted_blocks.iter().enumerate() {
+            if other.order_label != OrderLabel::Vision {
+                continue;
+            }
+            let dist = get_nearest_edge_distance(&block.bbox, &other.bbox, &[1.0, 1.0, 1.0, 1.0]);
+            if dist < best_distance {
+                best_distance = dist;
+                best_vision_idx = Some(j);
+            }
+        }
+
+        // Only move if close enough (< 2 * text_line_height of the vision block)
+        if let Some(vision_idx) = best_vision_idx {
+            let threshold = sorted_blocks[vision_idx].text_line_height * 3.0;
+            if best_distance < threshold {
+                // Should be placed right before or after the vision block
+                if block.bbox.y_min() < sorted_blocks[vision_idx].bbox.y_min() {
+                    moves.push((i, vision_idx)); // place before
+                } else {
+                    moves.push((i, vision_idx + 1)); // place after
+                }
+            }
+        }
+    }
+
+    // Apply moves (process in reverse order to maintain indices)
+    for (from_idx, target_idx) in moves.into_iter().rev() {
+        // Only move if the title is not already adjacent
+        if from_idx == target_idx || from_idx + 1 == target_idx {
+            continue;
+        }
+        let block = sorted_blocks.remove(from_idx);
+        let adjusted_target = if from_idx < target_idx {
+            target_idx - 1
+        } else {
+            target_idx
+        };
+        let insert_pos = adjusted_target.min(sorted_blocks.len());
+        sorted_blocks.insert(insert_pos, block);
+    }
+}
+
+/// Insert a block using Manhattan distance (for unordered blocks).
+fn manhattan_insert(block: SortableBlock, sorted_blocks: &mut Vec<SortableBlock>) {
+    if sorted_blocks.is_empty() {
+        sorted_blocks.push(block);
+        return;
+    }
+
+    let mut min_distance = f32::INFINITY;
+    let mut nearest_index = 0;
+
+    for (idx, sorted_block) in sorted_blocks.iter().enumerate() {
+        let distance = (block.bbox.x_min() - sorted_block.bbox.x_min()).abs()
+            + (block.bbox.y_min() - sorted_block.bbox.y_min()).abs();
+        if distance < min_distance {
+            min_distance = distance;
+            nearest_index = idx;
+        }
+    }
+
+    sorted_blocks.insert(nearest_index + 1, block);
+}
+
+/// Insert a block using weighted distance logic (PaddleX `weighted_distance_insert`).
 fn weighted_distance_insert(
     block: SortableBlock,
     sorted_blocks: &mut Vec<SortableBlock>,
@@ -268,65 +758,45 @@ fn weighted_distance_insert(
         return;
     }
 
-    // XY-cut settings
-    let tolerance_len = 2.0; // edge_distance_compare_tolerance_len
-
-    // Abstract handling
-    // We don't have "Abstract" label explicitly mapped to a unique OrderLabel in this simplified enum
-    // unless we map LayoutElementType::Abstract to something specific or check the original type if available.
-    // For now, assuming standard logic. If we had abstract, we'd multiply tolerance by 2.
-
-    // Distance weights
-    let edge_weight = 10000.0;
-    let up_edge_weight = 1.0;
-    let left_edge_weight = 0.0001;
-
-    let mut min_weighted_distance = f32::INFINITY;
-    let mut min_edge_distance = f32::INFINITY;
-    let mut min_up_edge_distance = f32::INFINITY;
-
-    let mut nearest_index = 0;
-
-    let (x1, y1, _x2, _y2) = (
+    let tolerance_len = EDGE_DISTANCE_COMPARE_TOLERANCE_LEN;
+    let (x1, y1, x2, _y2) = (
         block.bbox.x_min(),
         block.bbox.y_min(),
         block.bbox.x_max(),
         block.bbox.y_max(),
     );
 
+    let mut min_weighted_distance = f32::INFINITY;
+    let mut _min_edge_distance = f32::INFINITY;
+    let mut min_up_edge_distance = f32::INFINITY;
+    let mut nearest_index = 0;
+
     for (idx, sorted_block) in sorted_blocks.iter().enumerate() {
-        let (x1_prime, y1_prime, x2_prime, _y2_prime) = (
+        let (x1_prime, y1_prime, x2_prime, y2_prime) = (
             sorted_block.bbox.x_min(),
             sorted_block.bbox.y_min(),
             sorted_block.bbox.x_max(),
             sorted_block.bbox.y_max(),
         );
 
-        // Calculate edge distance
         let weight = get_weights(&block.order_label, block.direction);
-        let edge_distance = get_nearest_edge_distance(&block.bbox, &sorted_block.bbox, &weight);
+        let raw_edge_distance = get_nearest_edge_distance(&block.bbox, &sorted_block.bbox, &weight);
 
-        // Calculate up edge distances
-        // For horizontal region (std doc): up is y1_prime, left is x1_prime
-        let (mut up_dist, mut left_dist) = if matches!(region_direction, SortDirection::Horizontal)
-        {
-            (y1_prime, x1_prime)
-        } else {
-            (-x2_prime, y1_prime) // Vertical region? (e.g. text flows horizontal? Unclear mapping, sticking to std)
+        // Quantize edge distance to 50px buckets to ignore minor vertical misalignments
+        // between columns, allowing left_dist to correctly resolve reading order.
+        let edge_distance = (raw_edge_distance / 50.0).floor() * 50.0;
+
+        let (mut up_dist, mut left_dist) = match region_direction {
+            SortDirection::Horizontal => (y1_prime, x1_prime),
+            SortDirection::Vertical => (-x2_prime, y1_prime),
         };
 
-        // Check if block is below sorted_block
-        let is_below = if matches!(region_direction, SortDirection::Horizontal) {
-            // sorted_block.y2 < block.y1 (sorted block is strictly above block)
-            // y2_prime < y1
-            _y2_prime < y1
-        } else {
-            // sorted_block.x1 > block.x2 (sorted block is strictly to the right? or left?)
-            // x1_prime > x2
-            x1_prime > _x2
+        let is_below = match region_direction {
+            SortDirection::Horizontal => y2_prime < y1,
+            SortDirection::Vertical => x1_prime > x2,
         };
 
-        // Logic: Flip signs if below and not a standard text block
+        // Flip signs for special blocks that are below
         let is_special = !matches!(block.order_label, OrderLabel::Unordered)
             || matches!(
                 block.order_label,
@@ -334,6 +804,7 @@ fn weighted_distance_insert(
                     | OrderLabel::ParagraphTitle
                     | OrderLabel::Vision
                     | OrderLabel::VisionTitle
+                    | OrderLabel::CrossLayout
             );
 
         if is_special && is_below {
@@ -341,68 +812,37 @@ fn weighted_distance_insert(
             left_dist = -left_dist;
         }
 
-        // Tolerance check
         if (min_up_edge_distance - up_dist).abs() <= tolerance_len {
             up_dist = min_up_edge_distance;
         }
 
-        // Weighted distance
         let weighted_dist =
-            edge_distance * edge_weight + up_dist * up_edge_weight + left_dist * left_edge_weight;
+            edge_distance * EDGE_WEIGHT + up_dist * UP_EDGE_WEIGHT + left_dist * LEFT_EDGE_WEIGHT;
 
-        // Update mins
-        min_edge_distance = min_edge_distance.min(edge_distance);
+        _min_edge_distance = _min_edge_distance.min(edge_distance);
         min_up_edge_distance = min_up_edge_distance.min(up_dist);
 
         if weighted_dist < min_weighted_distance {
             min_weighted_distance = weighted_dist;
 
-            // Determine relative order (before or after nearest)
-            // Python: abs(y1 // 2 - y1_prime // 2) > 0
-            // We use floor() / 2 as i32 for parity
             let y1_i = (y1.floor() as i32) / 2;
             let y1_p_i = (y1_prime.floor() as i32) / 2;
 
-            let sorted_dist_val;
-            let block_dist_val;
-
-            if (y1_i - y1_p_i).abs() > 0 {
-                sorted_dist_val = y1_prime;
-                block_dist_val = y1;
+            let (sorted_dist_val, block_dist_val) = if (y1_i - y1_p_i).abs() > 0 {
+                (y1_prime, y1)
             } else if matches!(region_direction, SortDirection::Horizontal) {
                 let x1_i = (x1.floor() as i32) / 2;
-                let x2_i = (_x2.floor() as i32) / 2; // Warning: python uses x2 (x_max) here? 
-                // Python: if abs(x1 // 2 - x2 // 2) > 0:
-                // Wait, python code used: block.bbox[0] and block.bbox[2]?
-                // No, `block` vs `sorted_block` context.
-                // Python: if abs(x1 // 2 - x2 // 2) > 0
-                // x1 from block, x2 from block? No that makes no sense.
-                // Re-reading python carefully:
-                // x1, y1, x2, y2 = block.bbox
-                // x1_prime, y1_prime... = sorted_block.bbox
-                // if abs(x1 // 2 - x2 // 2) > 0:
-                // This checks if the BLOCK ITSELF has width > 0 in 2-pixel buckets?
-                // If so:
-                //   sorted_distance = x1_prime
-                //   block_distance = x1
-                // else:
-                //   use centroid distance
-                let block_width_check = (x1_i - x2_i).abs() > 0;
-                if block_width_check {
-                    sorted_dist_val = x1_prime;
-                    block_dist_val = x1;
+                let x2_i = (x2.floor() as i32) / 2;
+                if (x1_i - x2_i).abs() > 0 {
+                    (x1_prime, x1)
                 } else {
-                    // Centroid distance
                     let (cx, cy) = block.center();
                     let (scx, scy) = sorted_block.center();
-                    sorted_dist_val = scx * scx + scy * scy;
-                    block_dist_val = cx * cx + cy * cy;
+                    (scx * scx + scy * scy, cx * cx + cy * cy)
                 }
             } else {
-                // Vertical direction logic ... omitted for brevity/standard doc focus
-                sorted_dist_val = x1_prime; // simplified
-                block_dist_val = x1;
-            }
+                (x1_prime, x1)
+            };
 
             if block_dist_val > sorted_dist_val {
                 nearest_index = idx + 1;
@@ -412,7 +852,6 @@ fn weighted_distance_insert(
         }
     }
 
-    // Clamp index
     if nearest_index > sorted_blocks.len() {
         nearest_index = sorted_blocks.len();
     }
@@ -424,24 +863,23 @@ fn get_weights(label: &OrderLabel, direction: SortDirection) -> [f32; 4] {
     match label {
         OrderLabel::DocTitle => {
             if matches!(direction, SortDirection::Horizontal) {
-                [1.0, 0.1, 0.1, 1.0] // left, right, up, down
+                [1.0, 0.1, 0.1, 1.0]
             } else {
                 [0.2, 0.1, 1.0, 1.0]
             }
         }
-        OrderLabel::ParagraphTitle | OrderLabel::Vision | OrderLabel::VisionTitle => {
-            [1.0, 1.0, 0.1, 1.0] // prioritize up distance
-        }
-        _ => [1.0, 1.0, 1.0, 0.1], // default (NormalText, etc.)
+        OrderLabel::ParagraphTitle
+        | OrderLabel::Vision
+        | OrderLabel::VisionTitle
+        | OrderLabel::CrossLayout => [1.0, 1.0, 0.1, 1.0],
+        _ => [1.0, 1.0, 1.0, 0.1],
     }
 }
 
 /// Calculate nearest edge distance between two boxes.
-///
-/// Returns 0.0 if they overlap in projection (aligned).
 fn get_nearest_edge_distance(b1: &BoundingBox, b2: &BoundingBox, weights: &[f32; 4]) -> f32 {
-    let h_overlap = calculate_projection_overlap(b1, b2, SortDirection::Horizontal);
-    let v_overlap = calculate_projection_overlap(b1, b2, SortDirection::Vertical);
+    let h_overlap = calculate_projection_overlap_ratio(b1, b2, SortDirection::Horizontal);
+    let v_overlap = calculate_projection_overlap_ratio(b1, b2, SortDirection::Vertical);
 
     if h_overlap > 0.0 && v_overlap > 0.0 {
         return 0.0;
@@ -475,7 +913,8 @@ fn get_nearest_edge_distance(b1: &BoundingBox, b2: &BoundingBox, weights: &[f32;
     min_x + min_y
 }
 
-fn calculate_projection_overlap(
+/// Calculate projection overlap ratio (IoU) along a single axis.
+fn calculate_projection_overlap_ratio(
     b1: &BoundingBox,
     b2: &BoundingBox,
     direction: SortDirection,
@@ -489,7 +928,7 @@ fn calculate_projection_overlap(
     let union = max1.max(max2) - min1.min(min2);
 
     if union > 0.0 {
-        intersection / union // IOU
+        intersection / union
     } else {
         0.0
     }
