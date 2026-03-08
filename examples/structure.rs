@@ -674,49 +674,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Collect all results for potential concatenation
     let mut all_results: Vec<oar_ocr::domain::structure::StructureResult> = Vec::new();
 
-    // Process each input source
-    for (idx, source) in std::mem::take(&mut input_sources).into_iter().enumerate() {
+    // Collect images and metadata for batch processing (cross-page formula batching)
+    let mut images: Vec<image::RgbImage> = Vec::new();
+    let mut source_meta: Vec<(String, String)> = Vec::new(); // (source_path, source_stem)
+
+    for source in std::mem::take(&mut input_sources) {
         let source_path = source.path();
-        let source_stem = {
-            match &source {
-                InputSource::ImageFile(p) => p
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("result")
-                    .to_string(),
-                InputSource::PdfPage {
-                    pdf_path,
-                    page_number,
-                    ..
-                } => {
-                    format!(
-                        "{}_page_{:03}",
-                        pdf_path
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("pdf"),
-                        page_number
-                    )
-                }
+        let source_stem = match &source {
+            InputSource::ImageFile(p) => p
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("result")
+                .to_string(),
+            InputSource::PdfPage {
+                pdf_path,
+                page_number,
+                ..
+            } => {
+                format!(
+                    "{}_page_{:03}",
+                    pdf_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("pdf"),
+                    page_number
+                )
             }
         };
-        info!("\nProcessing input {}: {}", idx + 1, source_path);
-
-        let image = match source.into_image() {
-            Ok(img) => img,
+        match source.into_image() {
+            Ok(img) => {
+                images.push(img);
+                source_meta.push((source_path, source_stem));
+            }
             Err(err) => {
-                error!("Failed to load image: {}", err);
-                continue;
+                error!("Failed to load image {}: {}", source_path, err);
             }
-        };
+        }
+    }
 
-        let mut result = match analyzer.predict_image(image) {
-            Ok(res) => res,
-            Err(err) => {
-                error!("Failed to analyze {}: {}", source_path, err);
-                continue;
-            }
-        };
+    info!(
+        "Batch processing {} image(s) with cross-page formula batching",
+        images.len()
+    );
+    let batch_results = analyzer.predict_images(images)?;
+
+    // Process each result: assign metadata, save, visualize, log
+    for (idx, (mut result, (source_path, source_stem))) in
+        batch_results.into_iter().zip(source_meta).enumerate()
+    {
+        info!("\nProcessed input {}: {}", idx + 1, source_path);
         result.input_path = std::sync::Arc::from(source_path.clone());
 
         // Always collect results for potential concatenation
