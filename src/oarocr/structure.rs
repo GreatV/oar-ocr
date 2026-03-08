@@ -1169,6 +1169,17 @@ pub struct OARStructure {
     pipeline: StructurePipeline,
 }
 
+/// Intermediate result from preprocessing and layout detection for a single page.
+/// Produced by `OARStructure::prepare_page` and consumed by `complete_page`.
+struct PreparedPage {
+    current_image: std::sync::Arc<image::RgbImage>,
+    orientation_angle: Option<f32>,
+    rectified_img: Option<std::sync::Arc<image::RgbImage>>,
+    rotation: Option<crate::oarocr::preprocess::OrientationCorrection>,
+    layout_elements: Vec<crate::domain::structure::LayoutElement>,
+    detected_region_blocks: Option<Vec<crate::domain::structure::RegionBlock>>,
+}
+
 impl OARStructure {
     /// Refinement of overall OCR results using layout boxes.
     ///
@@ -2242,19 +2253,9 @@ impl OARStructure {
         Ok(result)
     }
 
-    /// Analyzes the structure of a document image.
-    ///
-    /// This method is the core implementation for structure analysis and can be called
-    /// directly with an in-memory image.
-    ///
-    /// # Arguments
-    ///
-    /// * `image` - The input RGB image
-    ///
-    /// # Returns
-    ///
-    /// A `StructureResult` containing detected layout elements, tables, formulas, and text.
-    pub fn predict_image(&self, image: image::RgbImage) -> Result<StructureResult, OCRError> {
+    /// Preprocesses a page image and runs layout detection, returning intermediate
+    /// results ready for formula recognition and downstream processing.
+    fn prepare_page(&self, image: image::RgbImage) -> Result<PreparedPage, OCRError> {
         use crate::oarocr::preprocess::DocumentPreprocessor;
         use std::sync::Arc;
 
@@ -2268,11 +2269,38 @@ impl OARStructure {
         let rectified_img = preprocess.rectified_img;
         let rotation = preprocess.rotation;
 
-        let (mut layout_elements, mut detected_region_blocks) =
+        let (layout_elements, detected_region_blocks) =
             self.detect_layout_and_regions(&current_image)?;
 
+        Ok(PreparedPage {
+            current_image,
+            orientation_angle,
+            rectified_img,
+            rotation,
+            layout_elements,
+            detected_region_blocks,
+        })
+    }
+
+    /// Completes page analysis given a `PreparedPage` and pre-computed formula results.
+    /// Runs seal detection, OCR, table analysis, stitching, and coordinate transforms.
+    fn complete_page(
+        &self,
+        prepared: PreparedPage,
+        mut formulas: Vec<crate::domain::structure::FormulaResult>,
+    ) -> Result<StructureResult, OCRError> {
+        use std::sync::Arc;
+
+        let PreparedPage {
+            current_image,
+            orientation_angle,
+            rectified_img,
+            rotation,
+            mut layout_elements,
+            mut detected_region_blocks,
+        } = prepared;
+
         let mut tables = Vec::new();
-        let mut formulas = self.recognize_formulas(&current_image, &layout_elements)?;
 
         self.detect_seal_text(&current_image, &mut layout_elements)?;
 
@@ -2480,6 +2508,123 @@ impl OARStructure {
         ResultStitcher::stitch_with_config(&mut result, &stitch_cfg);
 
         Ok(result)
+    }
+
+    /// Analyzes the structure of a single document image.
+    pub fn predict_image(&self, image: image::RgbImage) -> Result<StructureResult, OCRError> {
+        let prepared = self.prepare_page(image)?;
+        let formulas =
+            self.recognize_formulas(&prepared.current_image, &prepared.layout_elements)?;
+        self.complete_page(prepared, formulas)
+    }
+
+    /// Analyzes multiple document page images with cross-page formula batching.
+    ///
+    /// All formula crops from every page are collected first and forwarded to the
+    /// formula adapter in a single `execute` call, reducing ONNX inference overhead
+    /// compared to calling [`predict_image`] sequentially.  Layout detection and all
+    /// other per-page steps are still performed independently per page.
+    ///
+    /// Per-page errors are returned individually so that a failure on one page does
+    /// not abort the remaining pages.
+    pub fn predict_images(
+        &self,
+        images: Vec<image::RgbImage>,
+    ) -> Vec<Result<StructureResult, OCRError>> {
+        use oar_ocr_core::core::traits::task::ImageTaskInput;
+        use oar_ocr_core::domain::structure::FormulaResult;
+        use oar_ocr_core::utils::BBoxCrop;
+
+        if images.is_empty() {
+            return Vec::new();
+        }
+
+        // Phase 1: Preprocessing + layout detection for every page.
+        // Pages that fail preparation are recorded as Err and skipped in later phases.
+        let prepared_pages: Vec<Result<PreparedPage, OCRError>> = images
+            .into_iter()
+            .map(|image| self.prepare_page(image))
+            .collect();
+
+        // Phase 2: Batch formula recognition across all successfully prepared pages.
+        let num_pages = prepared_pages.len();
+        let mut per_page_formulas: Vec<Vec<FormulaResult>> =
+            (0..num_pages).map(|_| Vec::new()).collect();
+
+        if let Some(ref formula_adapter) = self.pipeline.formula_recognition_adapter {
+            let mut all_crops: Vec<image::RgbImage> = Vec::new();
+            let mut crop_meta: Vec<(usize, oar_ocr_core::processors::BoundingBox)> = Vec::new();
+
+            for (page_idx, prepared) in prepared_pages.iter().enumerate() {
+                let prepared = match prepared {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                for elem in prepared
+                    .layout_elements
+                    .iter()
+                    .filter(|e| e.element_type.is_formula())
+                {
+                    match BBoxCrop::crop_bounding_box(&prepared.current_image, &elem.bbox) {
+                        Ok(crop) => {
+                            all_crops.push(crop);
+                            crop_meta.push((page_idx, elem.bbox.clone()));
+                        }
+                        Err(err) => {
+                            tracing::warn!("Formula region crop failed (batch): {}", err);
+                        }
+                    }
+                }
+            }
+
+            if !all_crops.is_empty() {
+                let batch_size = formula_adapter.recommended_batch_size().max(1);
+                let mut remaining_crops = all_crops;
+                let mut meta_offset = 0;
+
+                while !remaining_crops.is_empty() {
+                    let chunk_len = batch_size.min(remaining_crops.len());
+                    let rest = remaining_crops.split_off(chunk_len);
+                    let chunk_vec = remaining_crops;
+                    remaining_crops = rest;
+
+                    let chunk_meta = &crop_meta[meta_offset..meta_offset + chunk_len];
+                    match formula_adapter.execute(ImageTaskInput::new(chunk_vec), None) {
+                        Ok(formula_output) => {
+                            for ((page_idx, bbox), (formula_text, score)) in
+                                chunk_meta.iter().cloned().zip(
+                                    formula_output
+                                        .formulas
+                                        .into_iter()
+                                        .zip(formula_output.scores),
+                                )
+                            {
+                                let width = bbox.x_max() - bbox.x_min();
+                                let height = bbox.y_max() - bbox.y_min();
+                                if width > 0.0 && height > 0.0 {
+                                    per_page_formulas[page_idx].push(FormulaResult {
+                                        bbox,
+                                        latex: formula_text,
+                                        confidence: score.unwrap_or(0.0),
+                                    });
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!("Batch formula recognition failed: {}", err);
+                        }
+                    }
+                    meta_offset += chunk_len;
+                }
+            }
+        }
+
+        // Phase 3: Complete each page with its pre-computed formula results.
+        prepared_pages
+            .into_iter()
+            .zip(per_page_formulas)
+            .map(|(prepared, formulas)| self.complete_page(prepared?, formulas))
+            .collect()
     }
 }
 

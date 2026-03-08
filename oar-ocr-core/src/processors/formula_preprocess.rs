@@ -169,7 +169,7 @@ impl FormulaPreprocessor {
         let final_width = new_width.min(target_width);
         let final_height = new_height.min(target_height);
 
-        let resized = resize(img, final_width, final_height, FilterType::Lanczos3);
+        let resized = resize(img, final_width, final_height, FilterType::Triangle);
 
         // Calculate padding to center the image
         let delta_width = target_width - final_width;

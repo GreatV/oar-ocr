@@ -80,7 +80,6 @@ fn cluster_positions(mut positions: Vec<f32>, tolerance: f32) -> Vec<f32> {
         return Vec::new();
     }
     positions.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    positions.dedup_by(|a, b| (*a - *b).abs() < 0.1);
 
     let mut clustered = Vec::new();
     let mut current_cluster = vec![positions[0]];
