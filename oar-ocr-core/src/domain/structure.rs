@@ -552,7 +552,10 @@ impl StructureResult {
                         let cleaned = clean_ocr_text(text);
                         // Downgrade section-level keywords to ## when misclassified as DocTitle
                         let keyword = cleaned.trim().trim_end_matches(':').to_ascii_uppercase();
-                        if matches!(keyword.as_str(), "ABSTRACT" | "REFERENCES" | "REFERENCE") {
+                        if matches!(
+                            keyword.as_str(),
+                            "ABSTRACT" | "INTRODUCTION" | "REFERENCES" | "REFERENCE"
+                        ) {
                             md.push_str("## ");
                         } else {
                             md.push_str("# ");
@@ -1380,19 +1383,15 @@ fn has_bullet_markers(text: &str) -> bool {
 
 /// Formats text with bullet markers as a markdown list.
 ///
-/// Splits by the first matching marker and outputs each non-empty segment as `- item\n`.
+/// Splits on any bullet marker character so mixed markers (e.g. `• item1 ▪ item2`)
+/// are all handled correctly.
 fn format_as_bullet_list(text: &str, md: &mut String) {
-    for &marker in BULLET_MARKERS {
-        if text.contains(marker) {
-            for item in text.split(marker) {
-                let item = item.trim();
-                if !item.is_empty() {
-                    md.push_str("- ");
-                    md.push_str(item);
-                    md.push('\n');
-                }
-            }
-            return;
+    for item in text.split(|c: char| BULLET_MARKERS.contains(&c)) {
+        let item = item.trim();
+        if !item.is_empty() {
+            md.push_str("- ");
+            md.push_str(item);
+            md.push('\n');
         }
     }
 }

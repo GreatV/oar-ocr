@@ -716,12 +716,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Batch processing {} image(s) with cross-page formula batching",
         images.len()
     );
-    let batch_results = analyzer.predict_images(images)?;
+    let batch_results = analyzer.predict_images(images);
 
     // Process each result: assign metadata, save, visualize, log
-    for (idx, (mut result, (source_path, source_stem))) in
+    for (idx, (page_result, (source_path, source_stem))) in
         batch_results.into_iter().zip(source_meta).enumerate()
     {
+        let mut result = match page_result {
+            Ok(res) => res,
+            Err(err) => {
+                error!("Failed to analyze {}: {}", source_path, err);
+                continue;
+            }
+        };
         info!("\nProcessed input {}: {}", idx + 1, source_path);
         result.input_path = std::sync::Arc::from(source_path.clone());
 

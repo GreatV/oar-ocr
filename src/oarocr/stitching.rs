@@ -965,23 +965,15 @@ impl ResultStitcher {
         }
 
         // --- Sort cells into rows ---
-        // When detected bboxes are available we sort them (better spatial accuracy)
-        // to pick the IoA bbox for OCR matching.  We also independently sort the
-        // structure cells so that the td→cell text-assignment step uses a valid
-        // index into `cells[]`.  Without this separation the det-bbox sort indices
-        // are silently reused as structure-cell indices, misassigning OCR to wrong
-        // cells whenever the two orderings differ.
+        // Sort structure cells — their bboxes drive both IoA matching and the
+        // td→cell text-assignment step.  Detected-cell bboxes (cell_bboxes_override)
+        // are intentionally NOT used for IoA because the detected model can produce
+        // a different cell count per row than the structure tokens, causing local_idx
+        // to diverge from td_index and corrupting OCR-to-cell assignments.
         //
-        // We keep TWO separate row-flag arrays:
-        //   match_row_flags  — from detected bboxes, used for the per-row IoA loop
-        //   cell_row_flags   — from structure cells, used for the td→cell index mapping
-        // Previously only match_row_flags was computed (cell_row_flags was discarded),
-        // which caused match_aligned values (in detected-cell space) to be used as
-        // Always sort structure cells — their bboxes drive OCR IoA matching.  Using
-        // detected-cell bboxes for IoA caused a space-mismatch: the key in all_matched
-        // was local_idx (detected-cell position) but the lookup used td_index
-        // (structure-td position), corrupting assignments when the two models produced
-        // different cell counts per row.
+        // When cell_bboxes_override is present, cross-row OCR deduplication is
+        // enabled downstream to prevent large detected cells spanning multiple
+        // structure rows from duplicating content.
         let (cell_sorted_indices, cell_row_flags) =
             Self::sort_table_cells_boxes(cells, row_y_tolerance);
 

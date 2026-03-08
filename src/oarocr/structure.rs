@@ -2525,34 +2525,41 @@ impl OARStructure {
     /// compared to calling [`predict_image`] sequentially.  Layout detection and all
     /// other per-page steps are still performed independently per page.
     ///
-    /// Falls back to per-page inference when no formula adapter is configured.
+    /// Per-page errors are returned individually so that a failure on one page does
+    /// not abort the remaining pages.
     pub fn predict_images(
         &self,
         images: Vec<image::RgbImage>,
-    ) -> Result<Vec<StructureResult>, OCRError> {
+    ) -> Vec<Result<StructureResult, OCRError>> {
         use oar_ocr_core::core::traits::task::ImageTaskInput;
         use oar_ocr_core::domain::structure::FormulaResult;
         use oar_ocr_core::utils::BBoxCrop;
 
         if images.is_empty() {
-            return Ok(Vec::new());
+            return Vec::new();
         }
 
         // Phase 1: Preprocessing + layout detection for every page.
-        let mut prepared_pages = Vec::with_capacity(images.len());
-        for image in images {
-            prepared_pages.push(self.prepare_page(image)?);
-        }
+        // Pages that fail preparation are recorded as Err and skipped in later phases.
+        let prepared_pages: Vec<Result<PreparedPage, OCRError>> = images
+            .into_iter()
+            .map(|image| self.prepare_page(image))
+            .collect();
 
-        // Phase 2: Batch formula recognition across all pages.
+        // Phase 2: Batch formula recognition across all successfully prepared pages.
+        let num_pages = prepared_pages.len();
         let mut per_page_formulas: Vec<Vec<FormulaResult>> =
-            (0..prepared_pages.len()).map(|_| Vec::new()).collect();
+            (0..num_pages).map(|_| Vec::new()).collect();
 
         if let Some(ref formula_adapter) = self.pipeline.formula_recognition_adapter {
             let mut all_crops: Vec<image::RgbImage> = Vec::new();
             let mut crop_meta: Vec<(usize, oar_ocr_core::processors::BoundingBox)> = Vec::new();
 
             for (page_idx, prepared) in prepared_pages.iter().enumerate() {
+                let prepared = match prepared {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
                 for elem in prepared
                     .layout_elements
                     .iter()
@@ -2571,24 +2578,43 @@ impl OARStructure {
             }
 
             if !all_crops.is_empty() {
-                let input = ImageTaskInput::new(all_crops);
-                let formula_output = formula_adapter.execute(input, None)?;
+                let batch_size = formula_adapter.recommended_batch_size().max(1);
+                let mut remaining_crops = all_crops;
+                let mut meta_offset = 0;
 
-                for ((page_idx, bbox), (formula_text, score)) in crop_meta.into_iter().zip(
-                    formula_output
-                        .formulas
-                        .into_iter()
-                        .zip(formula_output.scores),
-                ) {
-                    let width = bbox.x_max() - bbox.x_min();
-                    let height = bbox.y_max() - bbox.y_min();
-                    if width > 0.0 && height > 0.0 {
-                        per_page_formulas[page_idx].push(FormulaResult {
-                            bbox,
-                            latex: formula_text,
-                            confidence: score.unwrap_or(0.0),
-                        });
+                while !remaining_crops.is_empty() {
+                    let chunk_len = batch_size.min(remaining_crops.len());
+                    let rest = remaining_crops.split_off(chunk_len);
+                    let chunk_vec = remaining_crops;
+                    remaining_crops = rest;
+
+                    let chunk_meta = &crop_meta[meta_offset..meta_offset + chunk_len];
+                    match formula_adapter.execute(ImageTaskInput::new(chunk_vec), None) {
+                        Ok(formula_output) => {
+                            for ((page_idx, bbox), (formula_text, score)) in
+                                chunk_meta.iter().cloned().zip(
+                                    formula_output
+                                        .formulas
+                                        .into_iter()
+                                        .zip(formula_output.scores),
+                                )
+                            {
+                                let width = bbox.x_max() - bbox.x_min();
+                                let height = bbox.y_max() - bbox.y_min();
+                                if width > 0.0 && height > 0.0 {
+                                    per_page_formulas[page_idx].push(FormulaResult {
+                                        bbox,
+                                        latex: formula_text,
+                                        confidence: score.unwrap_or(0.0),
+                                    });
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!("Batch formula recognition failed: {}", err);
+                        }
                     }
+                    meta_offset += chunk_len;
                 }
             }
         }
@@ -2597,7 +2623,7 @@ impl OARStructure {
         prepared_pages
             .into_iter()
             .zip(per_page_formulas)
-            .map(|(prepared, formulas)| self.complete_page(prepared, formulas))
+            .map(|(prepared, formulas)| self.complete_page(prepared?, formulas))
             .collect()
     }
 }
