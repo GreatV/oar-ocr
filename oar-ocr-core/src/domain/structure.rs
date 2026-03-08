@@ -68,7 +68,7 @@ fn semantic_title_level_and_format(cleaned: &str) -> Option<(usize, String)> {
         keyword.as_str(),
         "ABSTRACT" | "INTRODUCTION" | "REFERENCES" | "REFERENCE"
     ) {
-        return Some((1, trimmed.to_string()));
+        return Some((2, trimmed.to_string()));
     }
 
     if let Some(captures) = TITLE_NUMBERING_REGEX.captures(cleaned) {
@@ -494,8 +494,9 @@ impl StructureResult {
         let mut md = String::new();
         let elements = &self.layout_elements;
         let paragraph_title_levels = infer_paragraph_title_levels(elements);
-        let mut last_label: Option<LayoutElementType> = None;
-        let mut prev_element: Option<&LayoutElement> = None;
+        // Track the most recent Text/ReferenceContent element so paragraph
+        // continuation works across intervening figures/tables.
+        let mut prev_text_element: Option<&LayoutElement> = None;
 
         for (idx, element) in elements.iter().enumerate() {
             // PP-StructureV3 markdown ignores auxiliary labels.
@@ -530,10 +531,10 @@ impl StructureResult {
             // Determine seg_start_flag for paragraph continuity (PaddleX get_seg_flag).
             // When both current and previous are "text" and seg_start_flag is false,
             // they belong to the same paragraph — join without \n\n separator.
-            let seg_start_flag = get_seg_flag(element, prev_element);
+            let seg_start_flag = get_seg_flag(element, prev_text_element);
 
             let is_continuation = element.element_type == LayoutElementType::Text
-                && last_label == Some(LayoutElementType::Text)
+                && prev_text_element.is_some()
                 && !seg_start_flag;
 
             // Add separator between elements
@@ -547,9 +548,15 @@ impl StructureResult {
                     if !md.is_empty() {
                         md.push_str("\n\n");
                     }
-                    md.push_str("# ");
                     if let Some(text) = &element.text {
                         let cleaned = clean_ocr_text(text);
+                        // Downgrade section-level keywords to ## when misclassified as DocTitle
+                        let keyword = cleaned.trim().trim_end_matches(':').to_ascii_uppercase();
+                        if matches!(keyword.as_str(), "ABSTRACT" | "REFERENCES" | "REFERENCE") {
+                            md.push_str("## ");
+                        } else {
+                            md.push_str("# ");
+                        }
                         md.push_str(&cleaned);
                     }
                 }
@@ -621,27 +628,40 @@ impl StructureResult {
                         };
 
                     // Check if this formula is on the same line as adjacent text elements
-                    // to determine if it's an inline formula or display formula
+                    // to determine if it's an inline formula or display formula.
+                    // Only consider the nearest non-formula/non-formula-number neighbor
+                    // on each side, and require BOTH sides to have text on the same line.
+                    // This prevents display formulas from being misclassified as inline
+                    // when they happen to be vertically aligned with a distant text block.
                     let is_inline = {
-                        // Look for previous non-formula text element on the same line
-                        let has_prev_text = (0..idx).rev().any(|i| {
-                            let prev = &elements[i];
-                            !prev.element_type.is_formula()
-                                && (prev.element_type == LayoutElementType::Text
+                        let has_prev_text = (0..idx)
+                            .rev()
+                            .find(|&i| {
+                                let t = elements[i].element_type;
+                                !t.is_formula() && t != LayoutElementType::FormulaNumber
+                            })
+                            .is_some_and(|i| {
+                                let prev = &elements[i];
+                                (prev.element_type == LayoutElementType::Text
                                     || prev.element_type == LayoutElementType::ReferenceContent)
-                                && is_same_line(&element.bbox, &prev.bbox)
-                        });
+                                    && is_same_line(&element.bbox, &prev.bbox)
+                            });
 
-                        // Look for next non-formula text element on the same line
-                        let has_next_text = ((idx + 1)..elements.len()).any(|i| {
-                            let next = &elements[i];
-                            !next.element_type.is_formula()
-                                && (next.element_type == LayoutElementType::Text
+                        let has_next_text = ((idx + 1)..elements.len())
+                            .find(|&i| {
+                                let t = elements[i].element_type;
+                                !t.is_formula() && t != LayoutElementType::FormulaNumber
+                            })
+                            .is_some_and(|i| {
+                                let next = &elements[i];
+                                (next.element_type == LayoutElementType::Text
                                     || next.element_type == LayoutElementType::ReferenceContent)
-                                && is_same_line(&element.bbox, &next.bbox)
-                        });
+                                    && is_same_line(&element.bbox, &next.bbox)
+                            });
 
-                        has_prev_text || has_next_text
+                        // Require text on BOTH sides for inline — a formula with text
+                        // only on one side is almost always a display equation.
+                        has_prev_text && has_next_text
                     };
 
                     if is_inline {
@@ -788,8 +808,13 @@ impl StructureResult {
                 // Default text elements - following PaddleX's text handling
                 _ => {
                     if let Some(text) = &element.text {
-                        // For text continuation (same paragraph), join directly
-                        if is_continuation {
+                        let cleaned = clean_ocr_text(text);
+                        if has_bullet_markers(&cleaned) {
+                            if !md.is_empty() {
+                                md.push_str("\n\n");
+                            }
+                            format_as_bullet_list(&cleaned, &mut md);
+                        } else if is_continuation {
                             let formatted = format_text_block(text);
                             md.push_str(&formatted);
                         } else {
@@ -803,8 +828,11 @@ impl StructureResult {
                 }
             }
 
-            last_label = Some(element.element_type);
-            prev_element = Some(element);
+            if element.element_type == LayoutElementType::Text
+                || element.element_type == LayoutElementType::ReferenceContent
+            {
+                prev_text_element = Some(element);
+            }
         }
         md.trim().to_string()
     }
@@ -1340,6 +1368,33 @@ fn format_vision_footnote_block(text: &str) -> String {
     let dehyphenated = text.replace("-\n", "");
     let step1 = dehyphenated.replace("\n\n", "\n");
     step1.replace('\n', "\n\n")
+}
+
+/// Bullet marker characters commonly found in OCR text.
+const BULLET_MARKERS: &[char] = &['•', '●', '◦', '▪', '◆'];
+
+/// Checks if text contains bullet markers that should be formatted as a list.
+fn has_bullet_markers(text: &str) -> bool {
+    BULLET_MARKERS.iter().any(|&m| text.contains(m))
+}
+
+/// Formats text with bullet markers as a markdown list.
+///
+/// Splits by the first matching marker and outputs each non-empty segment as `- item\n`.
+fn format_as_bullet_list(text: &str, md: &mut String) {
+    for &marker in BULLET_MARKERS {
+        if text.contains(marker) {
+            for item in text.split(marker) {
+                let item = item.trim();
+                if !item.is_empty() {
+                    md.push_str("- ");
+                    md.push_str(item);
+                    md.push('\n');
+                }
+            }
+            return;
+        }
+    }
 }
 
 /// Checks if a character is a Chinese character.
@@ -2602,11 +2657,11 @@ mod tests {
     #[test]
     fn test_format_title_with_level_keywords() {
         let (level, text) = format_title_with_level("Abstract", None);
-        assert_eq!(level, 1);
+        assert_eq!(level, 2);
         assert_eq!(text, "Abstract");
 
         let (level, text) = format_title_with_level("References:", None);
-        assert_eq!(level, 1);
+        assert_eq!(level, 2);
         assert_eq!(text, "References:");
     }
 

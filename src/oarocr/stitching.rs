@@ -939,7 +939,7 @@ impl ResultStitcher {
                     continue;
                 }
                 if i != candidate_indices.len() - 1 && !content.ends_with(' ') {
-                    content.push(' ');
+                    content.push_str("<br/>");
                 }
             }
             joined.push_str(&content);
@@ -971,24 +971,21 @@ impl ResultStitcher {
         // index into `cells[]`.  Without this separation the det-bbox sort indices
         // are silently reused as structure-cell indices, misassigning OCR to wrong
         // cells whenever the two orderings differ.
-        let (match_sorted_indices, cell_sorted_indices, match_row_flags) =
-            if let Some(det_bboxes) = cell_bboxes_override {
-                let temp_cells: Vec<TableCell> = det_bboxes
-                    .iter()
-                    .map(|b| TableCell::new(b.clone(), 0.5))
-                    .collect();
-                let (det_sorted, row_flags) =
-                    Self::sort_table_cells_boxes(&temp_cells, row_y_tolerance);
-                // Sort structure cells independently so their indices stay valid.
-                let (cell_sorted, _) = Self::sort_table_cells_boxes(cells, row_y_tolerance);
-                (det_sorted, cell_sorted, row_flags)
-            } else {
-                let (sorted, row_flags) = Self::sort_table_cells_boxes(cells, row_y_tolerance);
-                // When there is no override the two index lists are identical.
-                (sorted.clone(), sorted, row_flags)
-            };
+        //
+        // We keep TWO separate row-flag arrays:
+        //   match_row_flags  — from detected bboxes, used for the per-row IoA loop
+        //   cell_row_flags   — from structure cells, used for the td→cell index mapping
+        // Previously only match_row_flags was computed (cell_row_flags was discarded),
+        // which caused match_aligned values (in detected-cell space) to be used as
+        // Always sort structure cells — their bboxes drive OCR IoA matching.  Using
+        // detected-cell bboxes for IoA caused a space-mismatch: the key in all_matched
+        // was local_idx (detected-cell position) but the lookup used td_index
+        // (structure-td position), corrupting assignments when the two models produced
+        // different cell counts per row.
+        let (cell_sorted_indices, cell_row_flags) =
+            Self::sort_table_cells_boxes(cells, row_y_tolerance);
 
-        if match_sorted_indices.is_empty() || match_row_flags.is_empty() {
+        if cell_sorted_indices.is_empty() || cell_row_flags.is_empty() {
             return None;
         }
 
@@ -997,9 +994,10 @@ impl ResultStitcher {
             return None;
         }
 
-        // Align match row flags with structure token row boundaries
-        let mut match_aligned = Self::map_and_get_max(&match_row_flags, &row_start_index);
-        match_aligned.push(match_sorted_indices.len());
+        // Align structure-cell row flags with structure-token row boundaries.
+        // cell_aligned is used both for IoA matching (correct space) and td→cell mapping.
+        let mut cell_aligned = Self::map_and_get_max(&cell_row_flags, &row_start_index);
+        cell_aligned.push(cell_sorted_indices.len());
         row_start_index.push(
             structure_tokens
                 .iter()
@@ -1009,32 +1007,47 @@ impl ResultStitcher {
 
         // --- Per-row matching: cell → OCR (PaddleX style) ---
         // For each cell in the row, collect ALL OCR boxes with IoA > 0.7.
-        // No cross-row deduplication — each row independently checks all OCR boxes,
-        // matching PaddleX v2 behavior. The 0.7 IoA threshold naturally prevents
-        // false cross-row matches.
+        // When using detected cell bboxes (cell_bboxes_override is Some), apply
+        // cross-row deduplication: an OCR box already claimed by an earlier row is
+        // not re-matched in a later row.  This prevents large detected cells that
+        // span multiple structure rows from duplicating their content across those rows.
+        // In pure E2E mode (cell_bboxes_override is None) the PaddleX v2 behavior of
+        // independent per-row matching is preserved.
+        let use_cross_row_dedup = cell_bboxes_override.is_some();
+        let mut globally_matched_ocr: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
         let mut all_matched: Vec<std::collections::HashMap<usize, Vec<usize>>> = Vec::new();
 
-        for k in 0..match_aligned.len().saturating_sub(1) {
-            let row_start = match_aligned[k].min(match_sorted_indices.len());
-            let row_end = match_aligned[k + 1].min(match_sorted_indices.len());
+        for k in 0..cell_aligned.len().saturating_sub(1) {
+            let row_start = cell_aligned[k].min(cell_sorted_indices.len());
+            let row_end = cell_aligned[k + 1].min(cell_sorted_indices.len());
 
             let mut matched: std::collections::HashMap<usize, Vec<usize>> =
                 std::collections::HashMap::new();
 
-            for (local_idx, &bbox_idx) in
-                match_sorted_indices[row_start..row_end].iter().enumerate()
+            for (local_idx, &cell_idx) in cell_sorted_indices[row_start..row_end].iter().enumerate()
             {
-                // Use detected bbox directly when available, else structure cell bbox
-                let cell_box = cell_bboxes_override
-                    .and_then(|bbs| bbs.get(bbox_idx))
-                    .unwrap_or_else(|| &cells[bbox_idx.min(cells.len() - 1)].bbox);
+                // Always use structure cell bbox for IoA matching.  Detected-cell bboxes
+                // (cell_bboxes_override) are not used here because their cell count per
+                // row can differ from the structure td count, causing local_idx to
+                // diverge from td_index and corrupt the OCR-to-cell assignment.
+                let cell_box = &cells[cell_idx.min(cells.len() - 1)].bbox;
 
                 for (ocr_idx, (_, ocr_region)) in ocr_candidates.iter().enumerate() {
+                    if use_cross_row_dedup && globally_matched_ocr.contains(&ocr_idx) {
+                        continue;
+                    }
                     // IoA = intersection / OCR_area (PaddleX compute_inter > 0.7)
                     let ioa = ocr_region.bounding_box.ioa(cell_box);
                     if ioa > 0.7 {
                         matched.entry(local_idx).or_default().push(ocr_idx);
                     }
+                }
+            }
+
+            if use_cross_row_dedup {
+                for indices in matched.values() {
+                    globally_matched_ocr.extend(indices.iter().copied());
                 }
             }
 
@@ -1070,11 +1083,11 @@ impl ResultStitcher {
             }
 
             // Map td position to the original cell index via sorted ordering.
-            // match_aligned[matched_row_idx] + td_index gives the position in the
-            // sorted cell list.  Use cell_sorted_indices (indices into cells[])
-            // rather than match_sorted_indices (which may be indices into det_bboxes
-            // when cell_bboxes_override is active).
-            let mapped_cell_idx = match_aligned
+            // Use cell_aligned (derived from structure-cell row flags) rather than
+            // match_aligned (derived from detected-cell row flags).  When the two
+            // models disagree on cell count per row, using match_aligned here would
+            // offset into the wrong row of cell_sorted_indices.
+            let mapped_cell_idx = cell_aligned
                 .get(matched_row_idx)
                 .copied()
                 .and_then(|row_start| {
@@ -1315,7 +1328,7 @@ impl ResultStitcher {
                     continue;
                 }
                 if i != matched_indices.len() - 1 && !content.ends_with(' ') {
-                    content.push(' ');
+                    content.push_str("<br/>");
                 }
             }
 
