@@ -119,7 +119,7 @@ When building on Windows, you may encounter linker errors like:
 error LNK2001: unresolved external symbol __std_find_trivial_8
 ```
 
-This happens because the pre-built ONNX Runtime static libraries bundled by the `ort` crate are compiled with **Visual Studio 2022** (MSVC v143+). If you are using an older toolchain (e.g., VS 2019 / MSVC v142), the linker cannot resolve newer C++ standard library symbols.
+This happens because the pre-built ONNX Runtime static libraries bundled by the `ort` crate are compiled with **Visual Studio 2022** (MSVC v143). If you are using an older toolchain (e.g., VS 2019 / MSVC v142), the linker cannot resolve newer C++ standard library symbols.
 
 **Solutions (choose one):**
 
