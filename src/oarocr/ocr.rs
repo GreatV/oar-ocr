@@ -376,6 +376,8 @@ pub struct OAROCR {
 }
 
 struct CroppedTextRegion {
+    /// Index of the source image in the batch.
+    img_idx: usize,
     detection_index: usize,
     bbox: BoundingBox,
     image: image::RgbImage,
@@ -386,6 +388,7 @@ struct CroppedTextRegion {
 impl std::fmt::Debug for CroppedTextRegion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CroppedTextRegion")
+            .field("img_idx", &self.img_idx)
             .field("detection_index", &self.detection_index)
             .field("bbox", &self.bbox)
             .field(
@@ -518,52 +521,54 @@ impl OAROCR {
             start = end;
         }
 
+        // Phase 2: Crop text regions from all images, tracking img_idx.
+        let mut all_regions: Vec<CroppedTextRegion> = Vec::new();
+        let per_image_detection_counts: Vec<usize> = all_detection_boxes
+            .iter()
+            .map(|boxes| boxes.len())
+            .collect();
+
+        for (img_idx, ((_img_arc, preprocess), detection_boxes)) in prepared
+            .iter()
+            .zip(all_detection_boxes.iter())
+            .enumerate()
+        {
+            let mut regions =
+                self.crop_text_regions(&preprocess.image, detection_boxes)?;
+            for r in &mut regions {
+                r.img_idx = img_idx;
+            }
+            all_regions.extend(regions);
+        }
+
+        // Phase 3: Classify line orientations for all regions in one batch.
+        self.classify_line_orientations(&mut all_regions)?;
+
+        // Phase 4: Batch-recognize all regions across images.
+        let recognized =
+            self.recognize_text_regions_cross_image(&per_image_detection_counts, all_regions)?;
+
+        // Phase 5: Assemble per-image results.
         let mut results = Vec::with_capacity(prepared.len());
         for (img_idx, (input_img_arc, preprocess)) in prepared.into_iter().enumerate() {
-            let detection_boxes = all_detection_boxes[img_idx].clone();
-            results.push(self.predict_single(
-                img_idx,
-                input_img_arc,
-                preprocess,
-                detection_boxes,
-            )?);
+            let mut text_regions: Vec<crate::oarocr::TextRegion> =
+                recognized[img_idx].iter().filter_map(|r| r.clone()).collect();
+
+            if let Some(rot) = preprocess.rotation {
+                Self::rotate_text_regions_back(&mut text_regions, rot);
+            }
+
+            results.push(crate::oarocr::OAROCRResult {
+                input_path: Arc::from(format!("image_{}", img_idx)),
+                index: img_idx,
+                input_img: input_img_arc,
+                text_regions,
+                orientation_angle: preprocess.orientation_angle,
+                rectified_img: preprocess.rectified_img,
+            });
         }
 
         Ok(results)
-    }
-
-    fn predict_single(
-        &self,
-        img_idx: usize,
-        input_img: std::sync::Arc<image::RgbImage>,
-        preprocess: crate::oarocr::preprocess::PreprocessResult,
-        detection_boxes: Vec<BoundingBox>,
-    ) -> Result<crate::oarocr::OAROCRResult, OCRError> {
-        use std::sync::Arc;
-
-        let current_image = preprocess.image;
-
-        let mut cropped_regions = self.crop_text_regions(&current_image, &detection_boxes)?;
-        self.classify_line_orientations(&mut cropped_regions)?;
-
-        let recognized = self.recognize_text_regions(detection_boxes.len(), cropped_regions)?;
-
-        // Preserve reading order by emitting in detection-index order.
-        let mut text_regions: Vec<crate::oarocr::TextRegion> =
-            recognized.into_iter().flatten().collect();
-
-        if let Some(rot) = preprocess.rotation {
-            Self::rotate_text_regions_back(&mut text_regions, rot);
-        }
-
-        Ok(crate::oarocr::OAROCRResult {
-            input_path: Arc::from(format!("image_{}", img_idx)),
-            index: img_idx,
-            input_img,
-            text_regions,
-            orientation_angle: preprocess.orientation_angle,
-            rectified_img: preprocess.rectified_img,
-        })
     }
 
     fn detect_sorted_text_boxes_batch(
@@ -648,6 +653,7 @@ impl OAROCR {
             let img = (*img).clone();
             let wh_ratio = img.width() as f32 / img.height().max(1) as f32;
             regions.push(CroppedTextRegion {
+                img_idx: 0, // overridden by predict() after collection
                 detection_index: idx,
                 bbox: detection_boxes
                     .get(idx)
@@ -700,16 +706,29 @@ impl OAROCR {
         Ok(())
     }
 
-    fn recognize_text_regions(
+    /// Recognizes text regions batched across all images.
+    ///
+    /// Regions from all images are sorted by aspect ratio and processed in
+    /// `region_batch_size`-sized chunks, improving GPU utilization when multiple
+    /// images are predicted at once. Results are mapped back to per-image
+    /// vectors indexed by `detection_index`.
+    fn recognize_text_regions_cross_image(
         &self,
-        detection_count: usize,
+        per_image_detection_counts: &[usize],
         mut regions: Vec<CroppedTextRegion>,
-    ) -> Result<Vec<Option<crate::oarocr::TextRegion>>, OCRError> {
-        let mut results: Vec<Option<crate::oarocr::TextRegion>> = vec![None; detection_count];
+    ) -> Result<Vec<Vec<Option<crate::oarocr::TextRegion>>>, OCRError> {
+        let mut per_image_results: Vec<Vec<Option<crate::oarocr::TextRegion>>> =
+            per_image_detection_counts
+                .iter()
+                .map(|&count| vec![None; count])
+                .collect();
+
         if regions.is_empty() {
-            return Ok(results);
+            return Ok(per_image_results);
         }
 
+        // Sort all regions by aspect ratio for efficient batching (matching
+        // existing single-image logic).
         regions.sort_by(|a, b| {
             a.wh_ratio
                 .partial_cmp(&b.wh_ratio)
@@ -769,22 +788,24 @@ impl OAROCR {
                     None
                 };
 
-                if region.detection_index < results.len() {
-                    results[region.detection_index] = Some(crate::oarocr::TextRegion {
-                        bounding_box: bbox.clone(),
-                        dt_poly: Some(bbox.clone()),
-                        rec_poly: Some(bbox),
-                        text: Some(std::sync::Arc::from(text)),
-                        confidence: Some(score),
-                        orientation_angle: region.line_orientation_angle,
-                        word_boxes,
-                        label: None,
-                    });
+                if let Some(img_results) = per_image_results.get_mut(region.img_idx) {
+                    if region.detection_index < img_results.len() {
+                        img_results[region.detection_index] = Some(crate::oarocr::TextRegion {
+                            bounding_box: bbox.clone(),
+                            dt_poly: Some(bbox.clone()),
+                            rec_poly: Some(bbox),
+                            text: Some(std::sync::Arc::from(text)),
+                            confidence: Some(score),
+                            orientation_angle: region.line_orientation_angle,
+                            word_boxes,
+                            label: None,
+                        });
+                    }
                 }
             }
         }
 
-        Ok(results)
+        Ok(per_image_results)
     }
 
     fn rotate_text_regions_back(
