@@ -109,6 +109,37 @@ cargo run --example layout_detection -- --help
 cargo run --example table_structure_recognition -- --help
 ```
 
+## Troubleshooting
+
+### Windows Linking Errors
+
+When building on Windows, you may encounter linker errors like:
+
+```
+error LNK2001: unresolved external symbol __std_find_trivial_8
+```
+
+This happens because the pre-built ONNX Runtime static libraries bundled by the `ort` crate are compiled with **Visual Studio 2022** (MSVC v143+). If you are using an older toolchain (e.g., VS 2019 / MSVC v142), the linker cannot resolve newer C++ standard library symbols.
+
+**Solutions (choose one):**
+
+1. **Upgrade to Visual Studio 2022** (recommended):
+   Install [Visual Studio 2022](https://visualstudio.microsoft.com/) with the "Desktop development with C++" workload.
+
+2. **Use dynamic loading** to bypass static linking entirely:
+   ```bash
+   cargo run --no-default-features --features load-dynamic --example ocr -- --help
+   ```
+   This requires the ONNX Runtime shared library (`onnxruntime.dll`) to be available at runtime.
+   Download it from the [ONNX Runtime releases](https://github.com/microsoft/onnxruntime/releases) and place it in your `PATH` or next to the executable.
+
+3. **Provide your own ONNX Runtime build** via the `ORT_LIB_LOCATION` environment variable:
+   ```bash
+   set ORT_LIB_LOCATION=C:\path\to\onnxruntime
+   set ORT_PREFER_DYNAMIC_LINK=1
+   cargo run --no-default-features --example ocr -- --help
+   ```
+
 ## Acknowledgments
 
 This project builds upon the excellent work of several open-source projects:

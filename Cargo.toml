@@ -46,6 +46,11 @@ openvino = ["oar-ocr-core/openvino"]
 # Set ORT_LIB_LOCATION to use a custom installation (skips download).
 # Use --no-default-features for offline/enterprise environments.
 download-binaries = ["oar-ocr-core/download-binaries"]
+# Load ONNX Runtime dynamically at runtime instead of linking at compile time.
+# This avoids static linking issues (e.g., MSVC version mismatches on Windows).
+# Requires the ONNX Runtime shared library (onnxruntime.dll / libonnxruntime.so)
+# to be available at runtime (in PATH or next to the executable).
+load-dynamic = ["oar-ocr-core/load-dynamic"]
 
 [dependencies]
 # Core library with all types and predictors
