@@ -44,4 +44,4 @@ rand = "0.10"
 clap = { version = "4.5.42", features = ["derive"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 criterion = { version = "0.8", features = ["html_reports"] }
-hayro = "0.5"
+hayro = "0.6"
