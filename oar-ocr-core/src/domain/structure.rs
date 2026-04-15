@@ -6,16 +6,16 @@
 use super::text_region::TextRegion;
 use crate::processors::BoundingBox;
 use image::RgbImage;
-use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 /// Title numbering pattern for detecting section numbers like 1, 1.2, 1.2.3, (1), 一、etc.
 /// This follows standard title numbering pattern.
-static TITLE_NUMBERING_REGEX: Lazy<Regex> = Lazy::new(|| {
+static TITLE_NUMBERING_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?x)
         ^\s*

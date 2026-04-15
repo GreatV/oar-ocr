@@ -7,21 +7,21 @@ use crate::core::OCRError;
 use image::imageops::{FilterType, overlay, resize};
 use image::{DynamicImage, RgbImage};
 use ndarray::{Array2, Array3, Array4};
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 
 // Static regex patterns for LaTeX normalization
-static CHINESE_TEXT_PATTERN: Lazy<Regex> = Lazy::new(|| {
+static CHINESE_TEXT_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\\text\s*\{([^{}]*[\u{4e00}-\u{9fff}]+[^{}]*)\}")
         .unwrap_or_else(|e| panic!("Failed to compile Chinese text regex pattern: {e}"))
 });
 
-static TEXT_COMMAND_PATTERN: Lazy<Regex> = Lazy::new(|| {
+static TEXT_COMMAND_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(\\(operatorname|mathrm|text|mathbf)\s?\*?\s*\{.*?\})")
         .unwrap_or_else(|e| panic!("Failed to compile text command regex pattern: {e}"))
 });
 
-static LETTER_TO_NONLETTER_PATTERN: Lazy<Regex> = Lazy::new(|| {
+static LETTER_TO_NONLETTER_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"([a-zA-Z])\s+([^a-zA-Z])")
         .unwrap_or_else(|e| panic!("Failed to compile letter to nonletter regex pattern: {e}"))
 });
