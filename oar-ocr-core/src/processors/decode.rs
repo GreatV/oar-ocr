@@ -5,9 +5,9 @@
 //! It includes structures and methods for converting model predictions into
 //! readable text strings with confidence scores.
 
-use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 /// Decoded batch outputs along with positional metadata.
 pub type PositionedDecodeResult = (
@@ -18,7 +18,7 @@ pub type PositionedDecodeResult = (
     Vec<usize>,
 );
 
-static ALPHANUMERIC_REGEX: Lazy<Regex> = Lazy::new(|| {
+static ALPHANUMERIC_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[a-zA-Z0-9 :*./%+-]")
         .unwrap_or_else(|e| panic!("Failed to compile regex pattern: {e}"))
 });
