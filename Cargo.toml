@@ -3,7 +3,7 @@ members = [".", "oar-ocr-derive", "oar-ocr-core", "oar-ocr-vl"]
 resolver = "2"
 
 [workspace.package]
-version = "0.6.2"
+version = "0.6.3"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["Wang Xin <xinwang614@gmail.com>"]
@@ -11,8 +11,8 @@ repository = "https://github.com/greatv/oar-ocr"
 homepage = "https://github.com/greatv/oar-ocr"
 
 [workspace.dependencies]
-oar-ocr-core = { version = "0.6.2", path = "oar-ocr-core", default-features = false }
-oar-ocr-derive = { version = "0.6.2", path = "oar-ocr-derive", default-features = false }
+oar-ocr-core = { version = "0.6.3", path = "oar-ocr-core", default-features = false }
+oar-ocr-derive = { version = "0.6.3", path = "oar-ocr-derive", default-features = false }
 
 [package]
 name = "oar-ocr"
