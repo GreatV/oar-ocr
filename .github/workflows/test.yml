@@ -21,6 +21,8 @@ jobs:
             clippy-features: ""
           - os: macos-latest
             clippy-features: "--features metal"
+          - os: windows-latest
+            clippy-features: ""
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
