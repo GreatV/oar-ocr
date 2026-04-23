@@ -764,7 +764,7 @@ impl<'a> TableAnalyzer<'a> {
                 &processed_detected_crop,
             );
 
-            for (cell, new_bbox_crop) in cells.iter_mut().zip(reconciled_bboxes.into_iter()) {
+            for (cell, new_bbox_crop) in cells.iter_mut().zip(reconciled_bboxes) {
                 cell.bbox = BoundingBox::from_coords(
                     new_bbox_crop.x_min() + table_x_offset,
                     new_bbox_crop.y_min() + table_y_offset,

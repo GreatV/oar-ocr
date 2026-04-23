@@ -193,9 +193,8 @@ impl GlmOcr {
             let mut logits = self.logits_from_hidden(&last)?;
 
             let mut generated: Vec<u32> = Vec::new();
-            let mut pos = seq_len as i64;
 
-            for _ in 0..max_new_tokens {
+            for (pos, _) in (seq_len as i64..).zip(0..max_new_tokens) {
                 let tok = logits
                     .argmax(D::Minus1)
                     .and_then(|t| t.to_scalar::<u32>())
@@ -242,8 +241,6 @@ impl GlmOcr {
                     )
                 })?;
                 logits = self.logits_from_hidden(&last)?;
-
-                pos += 1;
             }
 
             let decoded =
