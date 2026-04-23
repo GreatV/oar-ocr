@@ -1046,17 +1046,19 @@ impl LayoutDetectionAdapter {
                 }
 
                 match mode {
-                    MergeBboxMode::Large if classes[j] == target_class_id => {
-                        if Self::is_contained(&boxes[i], &boxes[j]) {
-                            contained_by_other[i] = 1;
-                            contains_other[j] = 1;
-                        }
+                    MergeBboxMode::Large
+                        if classes[j] == target_class_id
+                            && Self::is_contained(&boxes[i], &boxes[j]) =>
+                    {
+                        contained_by_other[i] = 1;
+                        contains_other[j] = 1;
                     }
-                    MergeBboxMode::Small if classes[i] == target_class_id => {
-                        if Self::is_contained(&boxes[i], &boxes[j]) {
-                            contained_by_other[i] = 1;
-                            contains_other[j] = 1;
-                        }
+                    MergeBboxMode::Small
+                        if classes[i] == target_class_id
+                            && Self::is_contained(&boxes[i], &boxes[j]) =>
+                    {
+                        contained_by_other[i] = 1;
+                        contains_other[j] = 1;
                     }
                     _ => {}
                 }

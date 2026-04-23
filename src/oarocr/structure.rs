@@ -1312,7 +1312,7 @@ impl OARStructure {
 
             for ((crop_box, is_first), (text, score)) in crop_boxes
                 .into_iter()
-                .zip(rec_texts.into_iter().zip(rec_scores.into_iter()))
+                .zip(rec_texts.into_iter().zip(rec_scores))
             {
                 if text.is_empty() {
                     continue;
@@ -1765,8 +1765,8 @@ impl OARStructure {
         let mut formulas = Vec::new();
         for ((bbox, formula), score) in bboxes
             .into_iter()
-            .zip(formula_result.formulas.into_iter())
-            .zip(formula_result.scores.into_iter())
+            .zip(formula_result.formulas)
+            .zip(formula_result.scores)
         {
             let width = bbox.x_max() - bbox.x_min();
             let height = bbox.y_max() - bbox.y_min();
@@ -1836,7 +1836,7 @@ impl OARStructure {
         let input = ImageTaskInput::new(seal_crops);
         let seal_result = seal_adapter.execute(input, None)?;
 
-        for ((dx, dy), detections) in crop_offsets.iter().zip(seal_result.detections.into_iter()) {
+        for ((dx, dy), detections) in crop_offsets.iter().zip(seal_result.detections) {
             for detection in detections {
                 let translated_bbox = crate::processors::BoundingBox::new(
                     detection
@@ -2181,8 +2181,8 @@ impl OARStructure {
                     if let Ok(rec_result) = text_recognition_adapter.execute(rec_input, None) {
                         for ((det_idx, text), score) in det_indices
                             .into_iter()
-                            .zip(rec_result.texts.into_iter())
-                            .zip(rec_result.scores.into_iter())
+                            .zip(rec_result.texts)
+                            .zip(rec_result.scores)
                         {
                             if text.is_empty() {
                                 continue;
