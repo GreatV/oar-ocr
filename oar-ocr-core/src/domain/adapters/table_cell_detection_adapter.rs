@@ -103,12 +103,12 @@ impl TableCellDetectionAdapter {
 
         for (img_boxes, (img_classes, img_scores)) in boxes
             .into_iter()
-            .zip(class_ids.into_iter().zip(scores.into_iter()))
+            .zip(class_ids.into_iter().zip(scores))
         {
             let mut cells = Vec::new();
             for (bbox, (class_id, score)) in img_boxes
                 .into_iter()
-                .zip(img_classes.into_iter().zip(img_scores.into_iter()))
+                .zip(img_classes.into_iter().zip(img_scores))
             {
                 if score < config.score_threshold {
                     continue;

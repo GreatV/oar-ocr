@@ -780,7 +780,7 @@ pub fn apply_nms_with_merge(
         .take(take_count) // Apply max_detections limit BEFORE reordering
         .collect();
 
-    merged.sort_by(|(a, _, _, _), (b, _, _, _)| a.cmp(b));
+    merged.sort_by_key(|(a, _, _, _)| *a);
 
     let mut final_boxes = Vec::new();
     let mut final_classes = Vec::new();

@@ -78,7 +78,7 @@ impl ModelAdapter for TextRecognitionAdapter {
                 model_output
                     .char_col_indices
                     .into_iter()
-                    .zip(model_output.sequence_lengths.into_iter())
+                    .zip(model_output.sequence_lengths)
                     .chain(std::iter::repeat((Vec::new(), 0))),
             )
         {
