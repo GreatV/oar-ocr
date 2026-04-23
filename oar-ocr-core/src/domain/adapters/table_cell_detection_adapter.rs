@@ -101,9 +101,8 @@ impl TableCellDetectionAdapter {
         let (boxes, class_ids, scores) = self.postprocessor.apply(predictions, img_shapes);
         let mut all_cells = Vec::with_capacity(boxes.len());
 
-        for (img_boxes, (img_classes, img_scores)) in boxes
-            .into_iter()
-            .zip(class_ids.into_iter().zip(scores))
+        for (img_boxes, (img_classes, img_scores)) in
+            boxes.into_iter().zip(class_ids.into_iter().zip(scores))
         {
             let mut cells = Vec::new();
             for (bbox, (class_id, score)) in img_boxes
