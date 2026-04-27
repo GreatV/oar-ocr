@@ -78,7 +78,7 @@ impl ModelAdapter for TableStructureRecognitionAdapter {
         tracing::debug!("Processing {} table images", num_images);
 
         // Run model forward pass on all images
-        let model_output = self.model.forward(input.images).map_err(|e| {
+        let model_output = self.model.forward(input.into_owned_images()).map_err(|e| {
             OCRError::adapter_execution_error(
                 "TableStructureRecognitionAdapter",
                 format!("model forward (batch_size={})", num_images),

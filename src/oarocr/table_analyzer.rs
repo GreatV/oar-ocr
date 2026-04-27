@@ -116,6 +116,33 @@ fn nearest_index(positions: &[f32], value: f32) -> usize {
         .unwrap_or(0)
 }
 
+fn cell_bbox_from_coords(coords: &[f32]) -> BoundingBox {
+    if coords.len() >= 8 {
+        let points = [
+            (coords[0], coords[1]),
+            (coords[2], coords[3]),
+            (coords[4], coords[5]),
+            (coords[6], coords[7]),
+        ];
+        let x_min = points.iter().map(|(x, _)| *x).fold(f32::INFINITY, f32::min);
+        let y_min = points.iter().map(|(_, y)| *y).fold(f32::INFINITY, f32::min);
+        let x_max = points
+            .iter()
+            .map(|(x, _)| *x)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let y_max = points
+            .iter()
+            .map(|(_, y)| *y)
+            .fold(f32::NEG_INFINITY, f32::max);
+
+        BoundingBox::from_coords(x_min, y_min, x_max, y_max)
+    } else if let [x_min, y_min, x_max, y_max, ..] = coords {
+        BoundingBox::from_coords(*x_min, *y_min, *x_max, *y_max)
+    } else {
+        BoundingBox::from_coords(0.0, 0.0, 0.0, 0.0)
+    }
+}
+
 /// Converts detected table cell boxes to PaddleX-like HTML structure tokens and
 /// returns the row-major cell ordering implied by those tokens.
 fn table_cells_to_html_structure(
@@ -542,34 +569,7 @@ impl<'a> TableAnalyzer<'a> {
                     .iter()
                     .enumerate()
                     .map(|(cell_idx, bbox_coords)| {
-                        let mut bbox_crop = if bbox_coords.len() >= 8 {
-                            let xs = [
-                                bbox_coords[0],
-                                bbox_coords[2],
-                                bbox_coords[4],
-                                bbox_coords[6],
-                            ];
-                            let ys = [
-                                bbox_coords[1],
-                                bbox_coords[3],
-                                bbox_coords[5],
-                                bbox_coords[7],
-                            ];
-                            let x_min = xs.iter().fold(f32::INFINITY, |acc, &x| acc.min(x));
-                            let y_min = ys.iter().fold(f32::INFINITY, |acc, &y| acc.min(y));
-                            let x_max = xs.iter().fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
-                            let y_max = ys.iter().fold(f32::NEG_INFINITY, |acc, &y| acc.max(y));
-                            BoundingBox::from_coords(x_min, y_min, x_max, y_max)
-                        } else if bbox_coords.len() >= 4 {
-                            BoundingBox::from_coords(
-                                bbox_coords[0],
-                                bbox_coords[1],
-                                bbox_coords[2],
-                                bbox_coords[3],
-                            )
-                        } else {
-                            BoundingBox::from_coords(0.0, 0.0, 0.0, 0.0)
-                        };
+                        let mut bbox_crop = cell_bbox_from_coords(bbox_coords);
 
                         if let Some(rot) = table_rotation
                             && rot.angle.abs() > 1.0
@@ -1200,27 +1200,12 @@ mod tests {
             10.0, 80.0, // bottom-left
         ];
 
-        let xs = [
-            bbox_coords[0],
-            bbox_coords[2],
-            bbox_coords[4],
-            bbox_coords[6],
-        ];
-        let ys = [
-            bbox_coords[1],
-            bbox_coords[3],
-            bbox_coords[5],
-            bbox_coords[7],
-        ];
-        let x_min = xs.iter().fold(f32::INFINITY, |acc, &x| acc.min(x));
-        let y_min = ys.iter().fold(f32::INFINITY, |acc, &y| acc.min(y));
-        let x_max = xs.iter().fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
-        let y_max = ys.iter().fold(f32::NEG_INFINITY, |acc, &y| acc.max(y));
+        let bbox = cell_bbox_from_coords(&bbox_coords);
 
-        assert_eq!(x_min, 10.0);
-        assert_eq!(y_min, 20.0);
-        assert_eq!(x_max, 90.0);
-        assert_eq!(y_max, 80.0);
+        assert_eq!(bbox.x_min(), 10.0);
+        assert_eq!(bbox.y_min(), 20.0);
+        assert_eq!(bbox.x_max(), 90.0);
+        assert_eq!(bbox.y_max(), 80.0);
     }
 
     #[test]
@@ -1228,16 +1213,7 @@ mod tests {
         // 4-value format: [x_min, y_min, x_max, y_max]
         let bbox_coords: Vec<f32> = vec![10.0, 20.0, 90.0, 80.0];
 
-        let bbox = if bbox_coords.len() >= 4 {
-            BoundingBox::from_coords(
-                bbox_coords[0],
-                bbox_coords[1],
-                bbox_coords[2],
-                bbox_coords[3],
-            )
-        } else {
-            BoundingBox::from_coords(0.0, 0.0, 0.0, 0.0)
-        };
+        let bbox = cell_bbox_from_coords(&bbox_coords);
 
         assert_eq!(bbox.x_min(), 10.0);
         assert_eq!(bbox.y_min(), 20.0);
@@ -1249,34 +1225,7 @@ mod tests {
     fn test_cell_bbox_fallback_for_empty_coords() {
         let bbox_coords: Vec<f32> = vec![];
 
-        let bbox = if bbox_coords.len() >= 8 {
-            let xs = [
-                bbox_coords[0],
-                bbox_coords[2],
-                bbox_coords[4],
-                bbox_coords[6],
-            ];
-            let ys = [
-                bbox_coords[1],
-                bbox_coords[3],
-                bbox_coords[5],
-                bbox_coords[7],
-            ];
-            let x_min = xs.iter().fold(f32::INFINITY, |acc, &x| acc.min(x));
-            let y_min = ys.iter().fold(f32::INFINITY, |acc, &y| acc.min(y));
-            let x_max = xs.iter().fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
-            let y_max = ys.iter().fold(f32::NEG_INFINITY, |acc, &y| acc.max(y));
-            BoundingBox::from_coords(x_min, y_min, x_max, y_max)
-        } else if bbox_coords.len() >= 4 {
-            BoundingBox::from_coords(
-                bbox_coords[0],
-                bbox_coords[1],
-                bbox_coords[2],
-                bbox_coords[3],
-            )
-        } else {
-            BoundingBox::from_coords(0.0, 0.0, 0.0, 0.0)
-        };
+        let bbox = cell_bbox_from_coords(&bbox_coords);
 
         // Fallback to zero-sized bbox
         assert_eq!(bbox.x_min(), 0.0);

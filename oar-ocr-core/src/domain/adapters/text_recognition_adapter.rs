@@ -43,7 +43,7 @@ impl ModelAdapter for TextRecognitionAdapter {
         // Use the CRNN model to recognize text
         let model_output = self
             .model
-            .forward(input.images, self.return_word_box)
+            .forward(input.into_owned_images(), self.return_word_box)
             .map_err(|e| {
                 OCRError::adapter_execution_error(
                     "TextRecognitionAdapter",

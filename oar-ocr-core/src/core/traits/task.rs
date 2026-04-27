@@ -8,6 +8,7 @@ use crate::core::OCRError;
 use image::RgbImage;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
+use std::sync::Arc;
 
 // Generate TaskType enum from the central task registry
 crate::with_task_registry!(crate::impl_task_type_enum);
@@ -155,7 +156,7 @@ impl<T: Task> TaskRunner<T> {
 #[derive(Debug, Clone)]
 pub struct ImageTaskInput {
     /// Input images
-    pub images: Vec<RgbImage>,
+    pub images: Vec<Arc<RgbImage>>,
     /// Optional metadata per image
     pub metadata: Vec<Option<String>>,
 }
@@ -165,6 +166,15 @@ impl ImageTaskInput {
     pub fn new(images: Vec<RgbImage>) -> Self {
         let count = images.len();
         Self {
+            images: images.into_iter().map(Arc::new).collect(),
+            metadata: vec![None; count],
+        }
+    }
+
+    /// Creates a new image task input from shared images.
+    pub fn from_arc_images(images: Vec<Arc<RgbImage>>) -> Self {
+        let count = images.len();
+        Self {
             images,
             metadata: vec![None; count],
         }
@@ -172,13 +182,28 @@ impl ImageTaskInput {
 
     /// Creates a new image task input with metadata.
     pub fn with_metadata(images: Vec<RgbImage>, metadata: Vec<Option<String>>) -> Self {
-        Self { images, metadata }
+        Self {
+            images: images.into_iter().map(Arc::new).collect(),
+            metadata,
+        }
+    }
+
+    /// Converts shared images into owned images for model APIs that still take ownership.
+    ///
+    /// This avoids a copy when the image is uniquely owned and clones only when another
+    /// pipeline stage still holds the same image.
+    pub fn into_owned_images(self) -> Vec<RgbImage> {
+        self.images
+            .into_iter()
+            .map(|img| Arc::try_unwrap(img).unwrap_or_else(|img| (*img).clone()))
+            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_task_type_name() {
@@ -225,5 +250,32 @@ mod tests {
         assert_eq!(input.images.len(), 2);
         assert_eq!(input.metadata.len(), 2);
         assert!(input.metadata.iter().all(|m| m.is_none()));
+    }
+
+    #[test]
+    fn test_into_owned_images_reuses_unique_arc() {
+        let mut image = RgbImage::new(2, 1);
+        image.put_pixel(0, 0, image::Rgb([1, 2, 3]));
+        let input = ImageTaskInput::from_arc_images(vec![Arc::new(image)]);
+
+        let owned = input.into_owned_images();
+
+        assert_eq!(owned.len(), 1);
+        assert_eq!(owned[0].get_pixel(0, 0).0, [1, 2, 3]);
+    }
+
+    #[test]
+    fn test_into_owned_images_clones_when_arc_is_shared() {
+        let mut image = RgbImage::new(2, 1);
+        image.put_pixel(1, 0, image::Rgb([9, 8, 7]));
+        let shared = Arc::new(image);
+        let input = ImageTaskInput::from_arc_images(vec![Arc::clone(&shared)]);
+
+        let owned = input.into_owned_images();
+
+        assert_eq!(Arc::strong_count(&shared), 1);
+        assert_eq!(owned.len(), 1);
+        assert_eq!(owned[0].get_pixel(1, 0).0, [9, 8, 7]);
+        assert_eq!(shared.get_pixel(1, 0).0, [9, 8, 7]);
     }
 }

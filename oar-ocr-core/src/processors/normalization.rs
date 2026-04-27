@@ -6,7 +6,7 @@
 
 use crate::core::OCRError;
 use crate::processors::types::{ColorOrder, TensorLayout};
-use image::DynamicImage;
+use image::{DynamicImage, RgbImage};
 use rayon::prelude::*;
 
 /// Normalizes images for OCR processing.
@@ -27,6 +27,12 @@ pub struct NormalizeImage {
 }
 
 impl NormalizeImage {
+    const PARALLEL_NORMALIZE_MIN_BYTES: usize = 1_048_576;
+
+    fn should_parallelize(batch_size: usize, total_output_bytes: usize) -> bool {
+        batch_size > 1 && total_output_bytes > Self::PARALLEL_NORMALIZE_MIN_BYTES
+    }
+
     /// Creates a new NormalizeImage instance with the specified parameters.
     ///
     /// # Arguments
@@ -451,7 +457,11 @@ impl NormalizeImage {
     ///
     /// A vector of normalized pixel values as f32
     fn normalize(&self, img: DynamicImage) -> Vec<f32> {
-        let rgb_img = img.to_rgb8();
+        let rgb_img = into_rgb8_no_copy(img);
+        self.normalize_rgb(&rgb_img)
+    }
+
+    fn normalize_rgb(&self, rgb_img: &RgbImage) -> Vec<f32> {
         let (width, height) = rgb_img.dimensions();
         let channels = 3;
 
@@ -470,39 +480,33 @@ impl NormalizeImage {
             }
         };
 
+        let mut result = vec![0.0f32; (channels * height * width) as usize];
+
         match self.order {
             TensorLayout::CHW => {
-                let mut result = vec![0.0f32; (channels * height * width) as usize];
+                let plane = (height * width) as usize;
+                for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
+                    for c in 0..channels {
+                        let src_c = map_channel(c);
+                        let channel_value = pixel[src_c] as f32;
+                        let dst_idx = c as usize * plane + pixel_idx;
 
-                for c in 0..channels {
-                    let src_c = map_channel(c);
-                    for y in 0..height {
-                        for x in 0..width {
-                            let pixel = rgb_img.get_pixel(x, y);
-                            let channel_value = pixel[src_c] as f32;
-                            let dst_idx = (c * height * width + y * width + x) as usize;
-
-                            result[dst_idx] =
-                                channel_value * self.alpha[c as usize] + self.beta[c as usize];
-                        }
+                        result[dst_idx] =
+                            channel_value * self.alpha[c as usize] + self.beta[c as usize];
                     }
                 }
                 result
             }
             TensorLayout::HWC => {
-                let mut result = vec![0.0f32; (height * width * channels) as usize];
+                for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
+                    let dst_base = pixel_idx * channels as usize;
+                    for c in 0..channels {
+                        let src_c = map_channel(c);
+                        let channel_value = pixel[src_c] as f32;
+                        let dst_idx = dst_base + c as usize;
 
-                for y in 0..height {
-                    for x in 0..width {
-                        let pixel = rgb_img.get_pixel(x, y);
-                        for c in 0..channels {
-                            let src_c = map_channel(c);
-                            let channel_value = pixel[src_c] as f32;
-                            let dst_idx = (y * width * channels + x * channels + c) as usize;
-
-                            result[dst_idx] =
-                                channel_value * self.alpha[c as usize] + self.beta[c as usize];
-                        }
+                        result[dst_idx] =
+                            channel_value * self.alpha[c as usize] + self.beta[c as usize];
                     }
                 }
                 result
@@ -520,40 +524,13 @@ impl NormalizeImage {
     ///
     /// A Result containing the normalized image as a 4D tensor or an OCRError.
     pub fn normalize_to(&self, img: DynamicImage) -> Result<ndarray::Array4<f32>, OCRError> {
-        let rgb_img = img.to_rgb8();
+        let rgb_img = into_rgb8_no_copy(img);
         let (width, height) = rgb_img.dimensions();
         let channels = 3;
 
-        // Map channel index based on color order
-        let map_channel = |c: u32| -> usize {
-            match self.color_order {
-                ColorOrder::RGB => c as usize,
-                ColorOrder::BGR => match c {
-                    0 => 2,
-                    1 => 1,
-                    2 => 0,
-                    _ => c as usize,
-                },
-            }
-        };
-
         match self.order {
             TensorLayout::CHW => {
-                let mut result = vec![0.0f32; (channels * height * width) as usize];
-
-                for c in 0..channels {
-                    let src_c = map_channel(c);
-                    for y in 0..height {
-                        for x in 0..width {
-                            let pixel = rgb_img.get_pixel(x, y);
-                            let channel_value = pixel[src_c] as f32;
-                            let dst_idx = (c * height * width + y * width + x) as usize;
-
-                            result[dst_idx] =
-                                channel_value * self.alpha[c as usize] + self.beta[c as usize];
-                        }
-                    }
-                }
+                let result = self.normalize_rgb(&rgb_img);
 
                 ndarray::Array4::from_shape_vec(
                     (1, channels as usize, height as usize, width as usize),
@@ -571,21 +548,7 @@ impl NormalizeImage {
                 })
             }
             TensorLayout::HWC => {
-                let mut result = vec![0.0f32; (height * width * channels) as usize];
-
-                for y in 0..height {
-                    for x in 0..width {
-                        let pixel = rgb_img.get_pixel(x, y);
-                        for c in 0..channels {
-                            let src_c = map_channel(c);
-                            let channel_value = pixel[src_c] as f32;
-                            let dst_idx = (y * width * channels + x * channels + c) as usize;
-
-                            result[dst_idx] =
-                                channel_value * self.alpha[c as usize] + self.beta[c as usize];
-                        }
-                    }
-                }
+                let result = self.normalize_rgb(&rgb_img);
 
                 ndarray::Array4::from_shape_vec(
                     (1, height as usize, width as usize, channels as usize),
@@ -629,7 +592,7 @@ impl NormalizeImage {
 
         let batch_size = imgs.len();
 
-        let rgb_imgs: Vec<_> = imgs.into_iter().map(|img| img.to_rgb8()).collect();
+        let rgb_imgs: Vec<_> = imgs.into_iter().map(into_rgb8_no_copy).collect();
         let dimensions: Vec<_> = rgb_imgs.iter().map(|img| img.dimensions()).collect();
 
         let (first_width, first_height) = dimensions.first().copied().unwrap_or((0, 0));
@@ -662,19 +625,25 @@ impl NormalizeImage {
                 let mut result = vec![0.0f32; batch_size * (channels * height * width) as usize];
 
                 let img_size = (channels * height * width) as usize;
-                if batch_size == 1 {
-                    // Avoid rayon overhead for single-image batches
-                    let rgb_img = &rgb_imgs[0];
-                    let batch_slice = &mut result[0..img_size];
-                    for c in 0..channels {
-                        let src_c = src_channels[c as usize];
-                        for y in 0..height {
-                            for x in 0..width {
-                                let pixel = rgb_img.get_pixel(x, y);
-                                let channel_value = pixel[src_c] as f32;
-                                let dst_idx = (c * height * width + y * width + x) as usize;
-                                batch_slice[dst_idx] =
-                                    channel_value * alpha[c as usize] + beta[c as usize];
+                // The threshold is based on total output size for the whole batch rather than
+                // per-image size. This keeps tiny batches serial even when the batch has multiple
+                // images, and avoids rayon overhead for common OCR crops.
+                let use_parallel =
+                    Self::should_parallelize(batch_size, result.len() * std::mem::size_of::<f32>());
+                if !use_parallel {
+                    for (batch_idx, rgb_img) in rgb_imgs.iter().enumerate() {
+                        let batch_offset = batch_idx * img_size;
+                        let batch_slice = &mut result[batch_offset..batch_offset + img_size];
+                        for c in 0..channels {
+                            let src_c = src_channels[c as usize];
+                            for y in 0..height {
+                                for x in 0..width {
+                                    let pixel = rgb_img.get_pixel(x, y);
+                                    let channel_value = pixel[src_c] as f32;
+                                    let dst_idx = (c * height * width + y * width + x) as usize;
+                                    batch_slice[dst_idx] =
+                                        channel_value * alpha[c as usize] + beta[c as usize];
+                                }
                             }
                         }
                     }
@@ -718,19 +687,25 @@ impl NormalizeImage {
                 let mut result = vec![0.0f32; batch_size * (height * width * channels) as usize];
 
                 let img_size = (height * width * channels) as usize;
-                if batch_size == 1 {
-                    // Avoid rayon overhead for single-image batches
-                    let rgb_img = &rgb_imgs[0];
-                    let batch_slice = &mut result[0..img_size];
-                    for y in 0..height {
-                        for x in 0..width {
-                            let pixel = rgb_img.get_pixel(x, y);
-                            for c in 0..channels {
-                                let src_c = src_channels[c as usize];
-                                let channel_value = pixel[src_c] as f32;
-                                let dst_idx = (y * width * channels + x * channels + c) as usize;
-                                batch_slice[dst_idx] =
-                                    channel_value * alpha[c as usize] + beta[c as usize];
+                // Match the CHW path: parallelism is gated by total batch output size so that
+                // small OCR crops stay serial unless the batch is large enough to amortize rayon.
+                let use_parallel =
+                    Self::should_parallelize(batch_size, result.len() * std::mem::size_of::<f32>());
+                if !use_parallel {
+                    for (batch_idx, rgb_img) in rgb_imgs.iter().enumerate() {
+                        let batch_offset = batch_idx * img_size;
+                        let batch_slice = &mut result[batch_offset..batch_offset + img_size];
+                        for y in 0..height {
+                            for x in 0..width {
+                                let pixel = rgb_img.get_pixel(x, y);
+                                for c in 0..channels {
+                                    let src_c = src_channels[c as usize];
+                                    let channel_value = pixel[src_c] as f32;
+                                    let dst_idx =
+                                        (y * width * channels + x * channels + c) as usize;
+                                    batch_slice[dst_idx] =
+                                        channel_value * alpha[c as usize] + beta[c as usize];
+                                }
                             }
                         }
                     }
@@ -775,10 +750,18 @@ impl NormalizeImage {
     }
 }
 
+fn into_rgb8_no_copy(img: DynamicImage) -> RgbImage {
+    match img {
+        DynamicImage::ImageRgb8(img) => img,
+        img => img.to_rgb8(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use image::{Rgb, RgbImage};
+    use ndarray::Axis;
 
     #[test]
     fn test_normalize_image_color_order_rgb_vs_bgr_chw() -> Result<(), OCRError> {
@@ -835,6 +818,80 @@ mod tests {
 
         assert_eq!(rgb_out[0], vec![5.0, 5.0, 6.0]); // (R-1)/2, (G-2)/4, (B-3)/5
         assert_eq!(bgr_out[0], vec![6.0, 5.0, 5.0]); // (B-3)/5, (G-2)/4, (R-1)/2
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_parallelize_threshold_behavior() {
+        assert!(!NormalizeImage::should_parallelize(
+            1,
+            NormalizeImage::PARALLEL_NORMALIZE_MIN_BYTES * 4,
+        ));
+        assert!(!NormalizeImage::should_parallelize(
+            4,
+            NormalizeImage::PARALLEL_NORMALIZE_MIN_BYTES,
+        ));
+        assert!(NormalizeImage::should_parallelize(
+            4,
+            NormalizeImage::PARALLEL_NORMALIZE_MIN_BYTES + 1,
+        ));
+    }
+
+    #[test]
+    fn test_normalize_batch_to_matches_single_image_paths_for_serial_and_parallel()
+    -> Result<(), OCRError> {
+        let normalizer = NormalizeImage::with_color_order(
+            Some(1.0),
+            Some(vec![0.0, 0.0, 0.0]),
+            Some(vec![1.0, 1.0, 1.0]),
+            Some(TensorLayout::CHW),
+            Some(ColorOrder::RGB),
+        )?;
+
+        let mut small_a = RgbImage::new(1, 1);
+        small_a.put_pixel(0, 0, Rgb([1, 2, 3]));
+        let mut small_b = RgbImage::new(1, 1);
+        small_b.put_pixel(0, 0, Rgb([4, 5, 6]));
+        let small_batch = vec![
+            DynamicImage::ImageRgb8(small_a.clone()),
+            DynamicImage::ImageRgb8(small_b.clone()),
+        ];
+        let serial = normalizer.normalize_batch_to(small_batch)?;
+        let serial_expected = [
+            normalizer.normalize_to(DynamicImage::ImageRgb8(small_a))?,
+            normalizer.normalize_to(DynamicImage::ImageRgb8(small_b))?,
+        ];
+
+        assert_eq!(serial.len_of(Axis(0)), serial_expected.len());
+        for (idx, expected) in serial_expected.iter().enumerate() {
+            assert_eq!(
+                serial.index_axis(Axis(0), idx).to_owned(),
+                expected.index_axis(Axis(0), 0)
+            );
+        }
+
+        let large_a =
+            RgbImage::from_fn(512, 512, |x, y| Rgb([(x % 251) as u8, (y % 241) as u8, 7]));
+        let large_b =
+            RgbImage::from_fn(512, 512, |x, y| Rgb([11, (x % 239) as u8, (y % 233) as u8]));
+        let parallel_batch = vec![
+            DynamicImage::ImageRgb8(large_a.clone()),
+            DynamicImage::ImageRgb8(large_b.clone()),
+        ];
+        let parallel = normalizer.normalize_batch_to(parallel_batch)?;
+        let parallel_expected = [
+            normalizer.normalize_to(DynamicImage::ImageRgb8(large_a))?,
+            normalizer.normalize_to(DynamicImage::ImageRgb8(large_b))?,
+        ];
+
+        assert_eq!(parallel.len_of(Axis(0)), parallel_expected.len());
+        for (idx, expected) in parallel_expected.iter().enumerate() {
+            assert_eq!(
+                parallel.index_axis(Axis(0), idx).to_owned(),
+                expected.index_axis(Axis(0), 0)
+            );
+        }
+
         Ok(())
     }
 }

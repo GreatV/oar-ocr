@@ -43,7 +43,7 @@ impl ModelAdapter for TextDetectionAdapter {
         // Use the DB model to detect text with error context
         let model_output = self.model
             .forward(
-                input.images,
+                input.into_owned_images(),
                 effective_config.score_threshold,
                 effective_config.box_threshold,
                 effective_config.unclip_ratio,
