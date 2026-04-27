@@ -481,10 +481,9 @@ impl NormalizeImage {
         match self.order {
             TensorLayout::CHW => {
                 let plane = width as usize * height as usize;
-                for (c, &src_c) in src_channels.iter().enumerate() {
-                    let plane_offset = c * plane;
-                    for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
-                        result[plane_offset + pixel_idx] =
+                for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
+                    for (c, &src_c) in src_channels.iter().enumerate() {
+                        result[c * plane + pixel_idx] =
                             pixel[src_c] as f32 * self.alpha[c] + self.beta[c];
                     }
                 }
@@ -619,10 +618,9 @@ impl NormalizeImage {
                     for (batch_idx, rgb_img) in rgb_imgs.iter().enumerate() {
                         let batch_offset = batch_idx * img_size;
                         let batch_slice = &mut result[batch_offset..batch_offset + img_size];
-                        for (c, &src_c) in src_channels.iter().enumerate() {
-                            let plane_offset = c * plane;
-                            for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
-                                batch_slice[plane_offset + pixel_idx] =
+                        for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
+                            for (c, &src_c) in src_channels.iter().enumerate() {
+                                batch_slice[c * plane + pixel_idx] =
                                     pixel[src_c] as f32 * alpha[c] + beta[c];
                             }
                         }
@@ -631,10 +629,9 @@ impl NormalizeImage {
                     result.par_chunks_mut(img_size).enumerate().for_each(
                         |(batch_idx, batch_slice)| {
                             let rgb_img = &rgb_imgs[batch_idx];
-                            for (c, &src_c) in src_channels.iter().enumerate() {
-                                let plane_offset = c * plane;
-                                for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
-                                    batch_slice[plane_offset + pixel_idx] =
+                            for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
+                                for (c, &src_c) in src_channels.iter().enumerate() {
+                                    batch_slice[c * plane + pixel_idx] =
                                         pixel[src_c] as f32 * alpha[c] + beta[c];
                                 }
                             }
@@ -844,6 +841,61 @@ mod tests {
                 expected.index_axis(Axis(0), 0)
             );
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_normalize_batch_to_preserves_batch_and_layout_semantics() -> Result<(), OCRError> {
+        let chw = NormalizeImage::with_color_order(
+            Some(1.0),
+            Some(vec![0.0, 0.0, 0.0]),
+            Some(vec![1.0, 1.0, 1.0]),
+            Some(TensorLayout::CHW),
+            Some(ColorOrder::RGB),
+        )?;
+        let hwc = NormalizeImage::with_color_order(
+            Some(1.0),
+            Some(vec![0.0, 0.0, 0.0]),
+            Some(vec![1.0, 1.0, 1.0]),
+            Some(TensorLayout::HWC),
+            Some(ColorOrder::RGB),
+        )?;
+
+        let img_a = RgbImage::from_fn(2, 2, |x, y| {
+            let base = (y * 2 + x) as u8 * 3 + 1;
+            Rgb([base, base + 1, base + 2])
+        });
+        let img_b = RgbImage::from_fn(2, 2, |x, y| {
+            let base = (y * 2 + x) as u8 * 3 + 21;
+            Rgb([base, base + 1, base + 2])
+        });
+
+        let chw_batch = chw.normalize_batch_to(vec![
+            DynamicImage::ImageRgb8(img_a.clone()),
+            DynamicImage::ImageRgb8(img_b.clone()),
+        ])?;
+        assert_eq!(chw_batch.shape(), &[2, 3, 2, 2]);
+        assert_eq!(
+            chw_batch.iter().copied().collect::<Vec<_>>(),
+            vec![
+                1.0, 4.0, 7.0, 10.0, 2.0, 5.0, 8.0, 11.0, 3.0, 6.0, 9.0, 12.0, 21.0, 24.0, 27.0,
+                30.0, 22.0, 25.0, 28.0, 31.0, 23.0, 26.0, 29.0, 32.0,
+            ]
+        );
+
+        let hwc_batch = hwc.normalize_batch_to(vec![
+            DynamicImage::ImageRgb8(img_a),
+            DynamicImage::ImageRgb8(img_b),
+        ])?;
+        assert_eq!(hwc_batch.shape(), &[2, 2, 2, 3]);
+        assert_eq!(
+            hwc_batch.iter().copied().collect::<Vec<_>>(),
+            vec![
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 21.0, 22.0, 23.0,
+                24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0,
+            ]
+        );
 
         Ok(())
     }
