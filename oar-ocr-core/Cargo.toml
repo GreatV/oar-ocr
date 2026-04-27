@@ -46,7 +46,7 @@ rayon = "1.8"
 thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tokenizers = { version = "0.22", default-features = false, features = ["progressbar", "onig"] }
+tokenizers = { version = "0.23", default-features = false, features = ["progressbar", "onig"] }
 clipper2 = "0.5.3"
 html-escape = "0.2"
 
