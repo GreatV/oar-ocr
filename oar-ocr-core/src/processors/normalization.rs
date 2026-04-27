@@ -481,8 +481,7 @@ impl NormalizeImage {
         match self.order {
             TensorLayout::CHW => {
                 let plane = width as usize * height as usize;
-                for c in 0..channels {
-                    let src_c = src_channels[c];
+                for (c, &src_c) in src_channels.iter().enumerate() {
                     let plane_offset = c * plane;
                     for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
                         result[plane_offset + pixel_idx] =
@@ -494,8 +493,7 @@ impl NormalizeImage {
             TensorLayout::HWC => {
                 for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
                     let dst_base = pixel_idx * channels;
-                    for c in 0..channels {
-                        let src_c = src_channels[c];
+                    for (c, &src_c) in src_channels.iter().enumerate() {
                         result[dst_base + c] = pixel[src_c] as f32 * self.alpha[c] + self.beta[c];
                     }
                 }
@@ -621,8 +619,7 @@ impl NormalizeImage {
                     for (batch_idx, rgb_img) in rgb_imgs.iter().enumerate() {
                         let batch_offset = batch_idx * img_size;
                         let batch_slice = &mut result[batch_offset..batch_offset + img_size];
-                        for c in 0..channels {
-                            let src_c = src_channels[c];
+                        for (c, &src_c) in src_channels.iter().enumerate() {
                             let plane_offset = c * plane;
                             for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
                                 batch_slice[plane_offset + pixel_idx] =
@@ -634,8 +631,7 @@ impl NormalizeImage {
                     result.par_chunks_mut(img_size).enumerate().for_each(
                         |(batch_idx, batch_slice)| {
                             let rgb_img = &rgb_imgs[batch_idx];
-                            for c in 0..channels {
-                                let src_c = src_channels[c];
+                            for (c, &src_c) in src_channels.iter().enumerate() {
                                 let plane_offset = c * plane;
                                 for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
                                     batch_slice[plane_offset + pixel_idx] =
@@ -671,8 +667,7 @@ impl NormalizeImage {
                         let batch_slice = &mut result[batch_offset..batch_offset + img_size];
                         for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
                             let dst_base = pixel_idx * channels;
-                            for c in 0..channels {
-                                let src_c = src_channels[c];
+                            for (c, &src_c) in src_channels.iter().enumerate() {
                                 batch_slice[dst_base + c] =
                                     pixel[src_c] as f32 * alpha[c] + beta[c];
                             }
@@ -684,8 +679,7 @@ impl NormalizeImage {
                             let rgb_img = &rgb_imgs[batch_idx];
                             for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
                                 let dst_base = pixel_idx * channels;
-                                for c in 0..channels {
-                                    let src_c = src_channels[c];
+                                for (c, &src_c) in src_channels.iter().enumerate() {
                                     batch_slice[dst_base + c] =
                                         pixel[src_c] as f32 * alpha[c] + beta[c];
                                 }
