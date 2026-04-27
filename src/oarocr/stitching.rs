@@ -1664,21 +1664,25 @@ impl ResultStitcher {
                     sorted_for_meta.append(&mut line);
                 }
 
-                // seg_start_x: first span's left edge (PaddleX: line[0].spans[0].box[0])
-                element.seg_start_x = Some(sorted_for_meta[0].0.bounding_box.x_min());
-                // seg_end_x: last span's right edge (PaddleX: line[-1].spans[-1].box[2])
-                element.seg_end_x = Some(sorted_for_meta.last().unwrap().0.bounding_box.x_max());
+                if let Some((first_region, _)) = sorted_for_meta.first() {
+                    // seg_start_x: first span's left edge (PaddleX: line[0].spans[0].box[0])
+                    element.seg_start_x = Some(first_region.bounding_box.x_min());
+                    // seg_end_x: last span's right edge (PaddleX: line[-1].spans[-1].box[2])
+                    element.seg_end_x = sorted_for_meta
+                        .last()
+                        .map(|(region, _)| region.bounding_box.x_max());
 
-                // Count distinct lines (Y-groups)
-                let mut num_lines = 1u32;
-                let mut prev_bbox = &sorted_for_meta[0].0.bounding_box;
-                for (region, _) in &sorted_for_meta[1..] {
-                    if !Self::is_same_text_line_bbox(prev_bbox, &region.bounding_box, cfg) {
-                        num_lines += 1;
-                        prev_bbox = &region.bounding_box;
+                    // Count distinct lines (Y-groups)
+                    let mut num_lines = 1u32;
+                    let mut prev_bbox = &first_region.bounding_box;
+                    for (region, _) in &sorted_for_meta[1..] {
+                        if !Self::is_same_text_line_bbox(prev_bbox, &region.bounding_box, cfg) {
+                            num_lines += 1;
+                            prev_bbox = &region.bounding_box;
+                        }
                     }
+                    element.num_lines = Some(num_lines);
                 }
-                element.num_lines = Some(num_lines);
             }
 
             Self::sort_and_join_texts(&mut element_texts, Some(&element.bbox), cfg, |joined| {

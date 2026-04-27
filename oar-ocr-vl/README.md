@@ -33,6 +33,13 @@ Add `oar-ocr-vl` to your project:
 cargo add oar-ocr-vl
 ```
 
+If you use ONNX-based helpers from `oar-ocr-core` and want ORT binaries to be fetched
+automatically during build, enable `download-binaries` explicitly:
+
+```bash
+cargo add oar-ocr-vl --features download-binaries
+```
+
 To enable GPU acceleration (CUDA), add the feature flag:
 
 ```bash

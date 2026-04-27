@@ -5,10 +5,11 @@
 
 use crate::core::OCRError;
 use image::RgbImage;
+use std::borrow::Borrow;
 
 /// Ensures an image batch is non-empty and each image has positive dimensions.
 pub(crate) fn ensure_non_empty_images(
-    images: &[RgbImage],
+    images: &[impl Borrow<RgbImage>],
     empty_batch_message: &str,
 ) -> Result<(), OCRError> {
     ensure_images_with(images, empty_batch_message, |idx, width, height| {
@@ -20,7 +21,7 @@ pub(crate) fn ensure_non_empty_images(
 
 /// Generic helper for validating non-empty RgbImage collections with custom error messaging.
 pub(crate) fn ensure_images_with(
-    images: &[RgbImage],
+    images: &[impl Borrow<RgbImage>],
     empty_batch_message: &str,
     zero_dim_message: impl Fn(usize, u32, u32) -> String,
 ) -> Result<(), OCRError> {
@@ -31,6 +32,7 @@ pub(crate) fn ensure_images_with(
     }
 
     for (idx, img) in images.iter().enumerate() {
+        let img = img.borrow();
         let (width, height) = (img.width(), img.height());
         if width == 0 || height == 0 {
             return Err(OCRError::InvalidInput {

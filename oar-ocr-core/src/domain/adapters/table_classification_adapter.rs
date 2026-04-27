@@ -74,7 +74,7 @@ impl ModelAdapter for TableClassificationAdapter {
         // Use model to get predictions with error context
         let model_output = self
             .model
-            .forward(input.images, &postprocess_config)
+            .forward(input.into_owned_images(), &postprocess_config)
             .map_err(|e| {
                 OCRError::adapter_execution_error(
                     "TableClassificationAdapter",

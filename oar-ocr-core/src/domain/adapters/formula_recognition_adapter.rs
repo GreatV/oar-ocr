@@ -172,13 +172,16 @@ impl ModelAdapter for FormulaRecognitionAdapter {
         let batch_len = input.images.len();
 
         // Preprocess and infer
-        let batch_tensor = self.model.preprocess(input.images).map_err(|e| {
-            OCRError::adapter_execution_error(
-                "FormulaRecognitionAdapter",
-                format!("preprocess (batch_size={})", batch_len),
-                e,
-            )
-        })?;
+        let batch_tensor = self
+            .model
+            .preprocess(input.into_owned_images())
+            .map_err(|e| {
+                OCRError::adapter_execution_error(
+                    "FormulaRecognitionAdapter",
+                    format!("preprocess (batch_size={})", batch_len),
+                    e,
+                )
+            })?;
         let token_ids = self.model.infer(&batch_tensor).map_err(|e| {
             OCRError::adapter_execution_error(
                 "FormulaRecognitionAdapter",

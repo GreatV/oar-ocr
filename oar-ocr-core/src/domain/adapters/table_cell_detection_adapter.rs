@@ -154,7 +154,7 @@ impl ModelAdapter for TableCellDetectionAdapter {
                     num_classes: self.model_config.num_classes,
                 };
                 let (output, img_shapes) = model
-                    .forward(input.images, &postprocess_config)
+                    .forward(input.into_owned_images(), &postprocess_config)
                     .map_err(|e| {
                         OCRError::adapter_execution_error(
                             "TableCellDetectionAdapter",

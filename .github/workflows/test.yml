@@ -10,19 +10,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            clippy-features: ""
-          - os: macos-latest
-            clippy-features: "--features metal"
-          - os: windows-latest
-            clippy-features: ""
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -30,21 +20,48 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          # Install components needed for linting and formatting
           components: rustfmt, clippy
 
       - name: Cache Cargo dependencies
-        # Use a dedicated action for caching Rust projects
         uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Run Clippy linter
-        # Run clippy on all workspace members with warnings-as-errors
+      - name: Run common Clippy lints
         run: |
           cargo clippy --all-targets --all -- -D warnings
-          cargo clippy --all-targets -p oar-ocr-vl ${{ matrix.clippy-features }} -- -D warnings
+          cargo clippy --all-targets -p oar-ocr-vl -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    needs: preflight
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            vl_feature_check: ""
+          - os: macos-latest
+            vl_feature_check: "--features metal"
+          - os: windows-latest
+            vl_feature_check: ""
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run platform-specific Clippy lints
+        if: matrix.vl_feature_check != ''
+        run: cargo clippy --all-targets -p oar-ocr-vl ${{ matrix.vl_feature_check }} -- -D warnings
 
       - name: Run tests in debug mode
         run: cargo test --verbose --all

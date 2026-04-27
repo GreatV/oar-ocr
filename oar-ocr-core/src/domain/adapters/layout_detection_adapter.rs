@@ -1119,6 +1119,7 @@ impl ModelAdapter for LayoutDetectionAdapter {
         // Use provided config or fall back to stored config
         let effective_config = config.unwrap_or(&self.config);
         let batch_len = input.images.len();
+        let images = input.into_owned_images();
 
         // Run model-specific forward pass
         let (predictions, img_shapes) = match &self.model {
@@ -1126,9 +1127,8 @@ impl ModelAdapter for LayoutDetectionAdapter {
                 let postprocess_config = PicoDetPostprocessConfig {
                     num_classes: self.model_config.num_classes,
                 };
-                let (output, img_shapes) = model
-                    .forward(input.images.clone(), &postprocess_config)
-                    .map_err(|e| {
+                let (output, img_shapes) =
+                    model.forward(images, &postprocess_config).map_err(|e| {
                         OCRError::adapter_execution_error(
                             "LayoutDetectionAdapter",
                             format!("PicoDet forward (batch_size={})", batch_len),
@@ -1141,9 +1141,8 @@ impl ModelAdapter for LayoutDetectionAdapter {
                 let postprocess_config = RTDetrPostprocessConfig {
                     num_classes: self.model_config.num_classes,
                 };
-                let (output, img_shapes) = model
-                    .forward(input.images.clone(), &postprocess_config)
-                    .map_err(|e| {
+                let (output, img_shapes) =
+                    model.forward(images, &postprocess_config).map_err(|e| {
                         OCRError::adapter_execution_error(
                             "LayoutDetectionAdapter",
                             format!("RTDetr forward (batch_size={})", batch_len),
@@ -1156,9 +1155,8 @@ impl ModelAdapter for LayoutDetectionAdapter {
                 let postprocess_config = PPDocLayoutPostprocessConfig {
                     num_classes: self.model_config.num_classes,
                 };
-                let (output, img_shapes) = model
-                    .forward(input.images, &postprocess_config)
-                    .map_err(|e| {
+                let (output, img_shapes) =
+                    model.forward(images, &postprocess_config).map_err(|e| {
                         tracing::error!("PPDocLayout forward error: {:?}", e);
                         OCRError::adapter_execution_error(
                             "LayoutDetectionAdapter",

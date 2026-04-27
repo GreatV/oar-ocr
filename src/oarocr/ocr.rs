@@ -83,6 +83,10 @@ pub struct OAROCRBuilder {
 }
 
 impl OAROCRBuilder {
+    // Guardrail against pathological user input. This is intentionally generous and
+    // not a model-tuned throughput limit.
+    const MAX_BATCH_SIZE: usize = 4096;
+
     /// Creates a new OCR builder with required components.
     ///
     /// # Arguments
@@ -140,7 +144,8 @@ impl OAROCRBuilder {
     ///
     /// This controls how many images are sent to the text detection adapter per call.
     /// If a detector cannot batch the provided images (e.g., mismatched sizes), the
-    /// pipeline falls back to per-image detection.
+    /// pipeline falls back to per-image detection. Values are validated in `build()`
+    /// and must be within `1..=MAX_BATCH_SIZE`.
     pub fn image_batch_size(mut self, size: usize) -> Self {
         self.image_batch_size = Some(size);
         self
@@ -149,7 +154,8 @@ impl OAROCRBuilder {
     /// Sets the batch size for processing detected text regions.
     ///
     /// Controls memory usage during text recognition. Smaller values use less memory.
-    /// Recommended: 32 for medium VRAM, 16 for low VRAM/CPU.
+    /// Recommended: 32 for medium VRAM, 16 for low VRAM/CPU. Values are validated
+    /// in `build()` and must be within `1..=MAX_BATCH_SIZE`.
     pub fn region_batch_size(mut self, size: usize) -> Self {
         self.region_batch_size = Some(size);
         self
@@ -219,6 +225,13 @@ impl OAROCRBuilder {
     ///
     /// This instantiates all adapters and returns an `OAROCR` instance ready for prediction.
     pub fn build(self) -> Result<OAROCR, OCRError> {
+        if let Some(size) = self.image_batch_size {
+            Self::validate_batch_size("image_batch_size", size)?;
+        }
+        if let Some(size) = self.region_batch_size {
+            Self::validate_batch_size("region_batch_size", size)?;
+        }
+
         // Load character dictionary for text recognition
         let char_dict = std::fs::read_to_string(&self.character_dict_path).map_err(|e| {
             OCRError::InvalidInput {
@@ -355,6 +368,19 @@ impl OAROCRBuilder {
             region_batch_size: self.region_batch_size,
         })
     }
+
+    fn validate_batch_size(field: &str, size: usize) -> Result<(), OCRError> {
+        if size == 0 || size > Self::MAX_BATCH_SIZE {
+            return Err(OCRError::validation_error(
+                "OAROCRBuilder",
+                field,
+                &format!("1..={}", Self::MAX_BATCH_SIZE),
+                &size.to_string(),
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 /// OCR runtime for executing text detection and recognition.
@@ -378,7 +404,7 @@ pub struct OAROCR {
 struct CroppedTextRegion {
     detection_index: usize,
     bbox: BoundingBox,
-    image: image::RgbImage,
+    image: Arc<image::RgbImage>,
     wh_ratio: f32,
     line_orientation_angle: Option<f32>,
 }
@@ -488,10 +514,9 @@ impl OAROCR {
         while start < prepared.len() {
             let end = (start + det_batch_size).min(prepared.len());
 
-            // Adapter boundary: must clone to transfer ownership
-            let batch_images: Vec<image::RgbImage> = prepared[start..end]
+            let batch_images: Vec<Arc<image::RgbImage>> = prepared[start..end]
                 .iter()
-                .map(|(_, preprocess)| (*preprocess.image).clone())
+                .map(|(_, preprocess)| Arc::clone(&preprocess.image))
                 .collect();
 
             match self.detect_sorted_text_boxes_batch(batch_images) {
@@ -568,13 +593,13 @@ impl OAROCR {
 
     fn detect_sorted_text_boxes_batch(
         &self,
-        images: Vec<image::RgbImage>,
+        images: Vec<Arc<image::RgbImage>>,
     ) -> Result<Vec<Vec<BoundingBox>>, OCRError> {
         if images.is_empty() {
             return Ok(Vec::new());
         }
 
-        let input = ImageTaskInput::new(images);
+        let input = ImageTaskInput::from_arc_images(images);
         let det = self.pipeline.text_detection_adapter.execute(input, None)?;
 
         let mut results: Vec<Vec<BoundingBox>> = Vec::with_capacity(det.detections.len());
@@ -588,9 +613,9 @@ impl OAROCR {
 
     fn detect_sorted_text_boxes(
         &self,
-        image: &image::RgbImage,
+        image: &Arc<image::RgbImage>,
     ) -> Result<Vec<BoundingBox>, OCRError> {
-        let input = ImageTaskInput::new(vec![image.clone()]);
+        let input = ImageTaskInput::from_arc_images(vec![Arc::clone(image)]);
         let det = self.pipeline.text_detection_adapter.execute(input, None)?;
 
         let boxes = det
@@ -644,8 +669,6 @@ impl OAROCR {
             let Some(img) = crop_result else {
                 continue;
             };
-            // Small cropped images: clone is acceptable
-            let img = (*img).clone();
             let wh_ratio = img.width() as f32 / img.height().max(1) as f32;
             regions.push(CroppedTextRegion {
                 detection_index: idx,
@@ -674,8 +697,8 @@ impl OAROCR {
             return Ok(());
         }
 
-        let input_images = regions.iter().map(|r| r.image.clone()).collect();
-        let input = ImageTaskInput::new(input_images);
+        let input_images = regions.iter().map(|r| Arc::clone(&r.image)).collect();
+        let input = ImageTaskInput::from_arc_images(input_images);
         let orient = line_orientation_adapter.execute(input, None)?;
 
         for (idx, classifications) in orient
@@ -693,7 +716,8 @@ impl OAROCR {
             regions[idx].line_orientation_angle = Some(angle);
 
             if top_class.class_id == 1 {
-                regions[idx].image = image::imageops::rotate180(&regions[idx].image);
+                regions[idx].image =
+                    Arc::new(image::imageops::rotate180(regions[idx].image.as_ref()));
             }
         }
 
@@ -725,7 +749,9 @@ impl OAROCR {
                 .map(|r| r.wh_ratio)
                 .fold(base_rec_ratio, |acc, r| acc.max(r));
 
-            let rec_input = ImageTaskInput::new(chunk.iter().map(|r| r.image.clone()).collect());
+            let rec_input = ImageTaskInput::from_arc_images(
+                chunk.iter().map(|r| Arc::clone(&r.image)).collect(),
+            );
 
             let rec = self
                 .pipeline
@@ -1050,6 +1076,35 @@ mod tests {
 
         assert_eq!(builder.image_batch_size, Some(4));
         assert_eq!(builder.region_batch_size, Some(64));
+    }
+
+    #[test]
+    fn test_validate_batch_size_accepts_bounds() {
+        assert!(OAROCRBuilder::validate_batch_size("image_batch_size", 1).is_ok());
+        assert!(
+            OAROCRBuilder::validate_batch_size("region_batch_size", OAROCRBuilder::MAX_BATCH_SIZE,)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_batch_size_rejects_zero() {
+        let err = OAROCRBuilder::validate_batch_size("image_batch_size", 0).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("image_batch_size"));
+        assert!(msg.contains(&format!("1..={}", OAROCRBuilder::MAX_BATCH_SIZE)));
+    }
+
+    #[test]
+    fn test_validate_batch_size_rejects_values_above_max() {
+        let err = OAROCRBuilder::validate_batch_size(
+            "region_batch_size",
+            OAROCRBuilder::MAX_BATCH_SIZE + 1,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("region_batch_size"));
+        assert!(msg.contains(&format!("1..={}", OAROCRBuilder::MAX_BATCH_SIZE)));
     }
 
     #[test]

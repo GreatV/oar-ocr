@@ -5,6 +5,7 @@ resolver = "2"
 [workspace.package]
 version = "0.6.3"
 edition = "2024"
+rust-version = "1.95"
 license = "Apache-2.0"
 authors = ["Wang Xin <xinwang614@gmail.com>"]
 repository = "https://github.com/greatv/oar-ocr"
@@ -18,6 +19,7 @@ oar-ocr-derive = { version = "0.6.3", path = "oar-ocr-derive", default-features 
 name = "oar-ocr"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true

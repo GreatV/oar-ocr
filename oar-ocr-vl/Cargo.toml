@@ -2,6 +2,7 @@
 name = "oar-ocr-vl"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -19,10 +20,20 @@ categories = ["computer-vision", "science"]
 
 [features]
 default = []
+download-binaries = ["oar-ocr-core/download-binaries"]
 # When enabled, turns on Candle's CUDA backend for GPU acceleration.
-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+cuda = [
+    "candle-core/cuda",
+    "candle-nn/cuda",
+    "candle-transformers/cuda",
+    "oar-ocr-core/cuda",
+]
 # When enabled, turns on Candle's Metal backend for GPU acceleration on Apple devices.
-metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+metal = [
+    "candle-core/metal",
+    "candle-nn/metal",
+    "candle-transformers/metal",
+]
 
 [dependencies]
 oar-ocr-core.workspace = true
