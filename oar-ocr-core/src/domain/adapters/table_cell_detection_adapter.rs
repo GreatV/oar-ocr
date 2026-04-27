@@ -4,7 +4,6 @@
 //! cell structures) and adapts their outputs to the [`TableCellDetectionTask`].
 
 use crate::core::OCRError;
-use crate::core::inference::OrtInfer;
 use crate::core::traits::adapter::{AdapterBuilder, AdapterInfo, ModelAdapter};
 use crate::core::traits::task::{Task, TaskType};
 use crate::domain::tasks::{
@@ -238,9 +237,9 @@ impl TableCellDetectionAdapterBuilder {
                 ort_session: ort_config,
                 ..Default::default()
             };
-            OrtInfer::from_config(&common_config, model_path, None)?
+            crate::core::inference::build(Some(&common_config), model_path, None)?
         } else {
-            OrtInfer::new(model_path, None)?
+            crate::core::inference::build(None, model_path, None)?
         };
 
         let postprocessor = LayoutPostProcess::new(

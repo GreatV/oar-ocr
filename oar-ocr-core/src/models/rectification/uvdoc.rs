@@ -4,7 +4,7 @@
 //! The model takes distorted document images and outputs rectified (flattened) versions.
 
 use crate::core::OCRError;
-use crate::core::inference::{OrtInfer, TensorInput};
+use crate::core::inference::{InferenceBackend, TensorInput};
 use crate::processors::{NormalizeImage, TensorLayout, UVDocPostProcess};
 use image::{DynamicImage, RgbImage, imageops::FilterType};
 
@@ -38,7 +38,7 @@ pub struct UVDocModelOutput {
 #[derive(Debug)]
 pub struct UVDocModel {
     /// ONNX Runtime inference engine
-    inference: OrtInfer,
+    inference: Box<dyn InferenceBackend>,
     /// Image normalizer for preprocessing
     normalizer: NormalizeImage,
     /// UVDoc postprocessor for converting tensor to images
@@ -50,7 +50,7 @@ pub struct UVDocModel {
 impl UVDocModel {
     /// Creates a new UVDoc model.
     pub fn new(
-        inference: OrtInfer,
+        inference: Box<dyn InferenceBackend>,
         normalizer: NormalizeImage,
         postprocessor: UVDocPostProcess,
         rec_image_shape: [usize; 3],
@@ -274,9 +274,9 @@ impl UVDocModelBuilder {
                 ort_session: self.ort_config,
                 ..Default::default()
             };
-            OrtInfer::from_config(&common_config, model_path, Some("image"))?
+            crate::core::inference::build(Some(&common_config), model_path, Some("image"))?
         } else {
-            OrtInfer::new(model_path, Some("image"))?
+            crate::core::inference::build(None, model_path, Some("image"))?
         };
 
         // Create normalizer (scale to [0, 1] without mean shift).

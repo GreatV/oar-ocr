@@ -3,7 +3,7 @@
 //! This module provides a pure implementation of the DB text detection model.
 //! The model handles preprocessing, inference, and postprocessing independently of tasks.
 
-use crate::core::inference::{OrtInfer, TensorInput};
+use crate::core::inference::{InferenceBackend, TensorInput};
 use crate::core::{OCRError, validate_positive, validate_range};
 use crate::processors::{
     BoundingBox, BoxType, DBPostProcess, DBPostProcessConfig, DetResizeForTest, ImageScaleInfo,
@@ -93,8 +93,8 @@ pub struct DBModelOutput {
 /// for different detection tasks through preprocessing and postprocessing configs.
 #[derive(Debug)]
 pub struct DBModel {
-    /// ONNX Runtime inference engine
-    inference: OrtInfer,
+    /// Backend-agnostic inference engine
+    inference: Box<dyn InferenceBackend>,
     /// Image resizer for preprocessing
     resizer: DetResizeForTest,
     /// Image normalizer for preprocessing
@@ -106,7 +106,7 @@ pub struct DBModel {
 impl DBModel {
     /// Creates a new DB model.
     pub fn new(
-        inference: OrtInfer,
+        inference: Box<dyn InferenceBackend>,
         resizer: DetResizeForTest,
         normalizer: NormalizeImage,
         postprocessor: DBPostProcess,
@@ -275,16 +275,16 @@ impl DBModelBuilder {
 
     /// Builds the DB model.
     pub fn build(self, model_path: &Path) -> Result<DBModel, OCRError> {
-        // Create ONNX inference engine
+        // Create inference engine
         let inference = if self.ort_config.is_some() {
             use crate::core::config::ModelInferenceConfig;
             let common_config = ModelInferenceConfig {
                 ort_session: self.ort_config,
                 ..Default::default()
             };
-            OrtInfer::from_config(&common_config, model_path, Some("x"))?
+            crate::core::inference::build(Some(&common_config), model_path, Some("x"))?
         } else {
-            OrtInfer::new(model_path, Some("x"))?
+            crate::core::inference::build(None, model_path, Some("x"))?
         };
 
         // Create resizer

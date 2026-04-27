@@ -10,7 +10,7 @@ use super::scale_aware_detector::{
     ScaleAwareDetectorPreprocessConfig,
 };
 use crate::core::OCRError;
-use crate::core::inference::OrtInfer;
+use crate::core::inference::InferenceBackend;
 
 /// Preprocessing configuration for PP-DocLayout model.
 ///
@@ -60,7 +60,7 @@ impl PPDocLayoutModelBuilder {
     /// Auto-detects the inference mode based on the model's declared inputs:
     /// uses `ScaleFactorAndImageShape` if the model accepts `im_shape`, otherwise
     /// falls back to `ScaleFactorOnly`.
-    pub fn build(self, inference: OrtInfer) -> Result<PPDocLayoutModel, OCRError> {
+    pub fn build(self, inference: Box<dyn InferenceBackend>) -> Result<PPDocLayoutModel, OCRError> {
         let input_names = inference.input_names_from_model();
         let mode = if input_names.iter().any(|n| n == "im_shape") {
             ScaleAwareDetectorInferenceMode::ScaleFactorAndImageShape

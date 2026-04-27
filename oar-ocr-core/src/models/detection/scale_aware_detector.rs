@@ -8,7 +8,7 @@
 //! while maintaining clean, model-specific APIs.
 
 use crate::core::OCRError;
-use crate::core::inference::{OrtInfer, TensorInput};
+use crate::core::inference::{InferenceBackend, TensorInput};
 use crate::core::validation::{
     validate_division, validate_image_dimensions, validate_non_empty, validate_positive,
     validate_same_length,
@@ -140,7 +140,7 @@ type ScaleAwareDetectorPreprocessResult = Result<ScaleAwareDetectorPreprocessArt
 /// by parameterizing the inference mode.
 #[derive(Debug)]
 pub struct ScaleAwareDetectorModel {
-    inference: OrtInfer,
+    inference: Box<dyn InferenceBackend>,
     resizer: DetResizeForTest,
     normalizer: NormalizeImage,
     inference_mode: ScaleAwareDetectorInferenceMode,
@@ -150,7 +150,7 @@ pub struct ScaleAwareDetectorModel {
 impl ScaleAwareDetectorModel {
     /// Creates a new scale-aware detector model.
     pub fn new(
-        inference: OrtInfer,
+        inference: Box<dyn InferenceBackend>,
         preprocess_config: ScaleAwareDetectorPreprocessConfig,
         inference_mode: ScaleAwareDetectorInferenceMode,
     ) -> Result<Self, OCRError> {
@@ -482,7 +482,7 @@ impl ScaleAwareDetectorModelBuilder {
     }
 
     /// Builds the scale-aware detector model.
-    pub fn build(self, inference: OrtInfer) -> Result<ScaleAwareDetectorModel, OCRError> {
+    pub fn build(self, inference: Box<dyn InferenceBackend>) -> Result<ScaleAwareDetectorModel, OCRError> {
         let preprocess_config = self
             .preprocess_config
             .unwrap_or_else(ScaleAwareDetectorPreprocessConfig::picodet);

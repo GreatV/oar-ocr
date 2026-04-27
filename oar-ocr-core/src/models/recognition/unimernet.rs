@@ -4,7 +4,7 @@
 //! The model is independent of any specific task and can be reused in different contexts.
 
 use crate::core::OCRError;
-use crate::core::inference::{OrtInfer, TensorInput};
+use crate::core::inference::{InferenceBackend, TensorInput};
 use crate::processors::{UniMERNetPreprocessParams, UniMERNetPreprocessor};
 use image::RgbImage;
 use ndarray::{ArrayBase, Axis, Data, Ix2};
@@ -71,7 +71,7 @@ pub struct UniMERNetModelOutput {
 /// The model is independent of any specific task or adapter.
 #[derive(Debug)]
 pub struct UniMERNetModel {
-    inference: OrtInfer,
+    inference: Box<dyn InferenceBackend>,
     preprocessor: UniMERNetPreprocessor,
     _preprocess_config: UniMERNetPreprocessConfig,
 }
@@ -79,7 +79,7 @@ pub struct UniMERNetModel {
 impl UniMERNetModel {
     /// Creates a new UniMERNet model.
     pub fn new(
-        inference: OrtInfer,
+        inference: Box<dyn InferenceBackend>,
         preprocess_config: UniMERNetPreprocessConfig,
     ) -> Result<Self, OCRError> {
         // Create UniMERNet-specific preprocessor
@@ -254,9 +254,9 @@ impl UniMERNetModelBuilder {
                 ort_session: self.ort_config,
                 ..Default::default()
             };
-            OrtInfer::from_config(&common_config, model_path, None)?
+            crate::core::inference::build(Some(&common_config), model_path, None)?
         } else {
-            OrtInfer::new(model_path, None)?
+            crate::core::inference::build(None, model_path, None)?
         };
 
         // Determine target size

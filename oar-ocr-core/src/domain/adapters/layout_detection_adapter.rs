@@ -2,7 +2,6 @@
 //!
 //! This module provides adapters for layout detection models.
 
-use crate::core::inference::OrtInfer;
 use crate::core::traits::{
     adapter::{AdapterBuilder, AdapterInfo, ModelAdapter},
     task::Task,
@@ -1252,16 +1251,16 @@ impl LayoutDetectionAdapterBuilder {
                 ort_session: ort_config,
                 ..Default::default()
             };
-            OrtInfer::from_config(&common_config, model_path, input_name)?
+            crate::core::inference::build(Some(&common_config), model_path, input_name)?
         } else {
             match model_config.model_type.as_str() {
                 "pp-doclayout" => {
                     // PP-DocLayout models use "image" as the input name
-                    OrtInfer::new(model_path, Some("image"))?
+                    crate::core::inference::build(None, model_path, Some("image"))?
                 }
                 _ => {
                     // Other models use default or auto-detect
-                    OrtInfer::new(model_path, None)?
+                    crate::core::inference::build(None, model_path, None)?
                 }
             }
         };

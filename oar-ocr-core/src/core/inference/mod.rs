@@ -18,6 +18,11 @@ mod ort_infer_config;
 #[path = "ort_infer_execution.rs"]
 mod ort_infer_execution;
 
+mod backend;
+mod factory;
+
+pub use backend::InferenceBackend;
+pub use factory::build;
 pub use ort_infer_execution::TensorInput;
 pub use session::load_session;
 pub use tensor_output::TensorOutput;
@@ -83,6 +88,35 @@ impl OrtInfer {
             ValueType::Tensor { shape, .. } => Some(shape.iter().copied().collect()),
             _ => None,
         }
+    }
+}
+
+impl backend::InferenceBackend for OrtInfer {
+    fn model_path(&self) -> &std::path::Path {
+        OrtInfer::model_path(self)
+    }
+
+    fn model_name(&self) -> &str {
+        OrtInfer::model_name(self)
+    }
+
+    fn input_name(&self) -> &str {
+        OrtInfer::input_name(self)
+    }
+
+    fn input_names_from_model(&self) -> Vec<String> {
+        OrtInfer::input_names_from_model(self)
+    }
+
+    fn primary_input_shape(&self) -> Option<Vec<i64>> {
+        OrtInfer::primary_input_shape(self)
+    }
+
+    fn infer(
+        &self,
+        inputs: &[(&str, TensorInput<'_>)],
+    ) -> Result<Vec<(String, TensorOutput)>, OCRError> {
+        OrtInfer::infer(self, inputs)
     }
 }
 

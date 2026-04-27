@@ -5,7 +5,7 @@
 //! tasks such as document orientation and text line orientation.
 
 use crate::core::OCRError;
-use crate::core::inference::{OrtInfer, TensorInput};
+use crate::core::inference::{InferenceBackend, TensorInput};
 use crate::domain::adapters::preprocessing::rgb_to_dynamic;
 use crate::processors::{NormalizeImage, TensorLayout};
 use crate::utils::topk::Topk;
@@ -88,7 +88,7 @@ pub struct PPLCNetModelOutput {
 #[derive(Debug)]
 pub struct PPLCNetModel {
     /// ONNX Runtime inference engine
-    inference: OrtInfer,
+    inference: Box<dyn InferenceBackend>,
     /// Image normalizer for preprocessing
     normalizer: NormalizeImage,
     /// Top-k processor for postprocessing
@@ -104,7 +104,7 @@ pub struct PPLCNetModel {
 impl PPLCNetModel {
     /// Creates a new PP-LCNet model.
     pub fn new(
-        inference: OrtInfer,
+        inference: Box<dyn InferenceBackend>,
         normalizer: NormalizeImage,
         topk_processor: Topk,
         input_shape: (u32, u32),
@@ -373,9 +373,9 @@ impl PPLCNetModelBuilder {
                 ort_session: self.ort_config,
                 ..Default::default()
             };
-            OrtInfer::from_config(&common_config, model_path, None)?
+            crate::core::inference::build(Some(&common_config), model_path, None)?
         } else {
-            OrtInfer::new(model_path, None)?
+            crate::core::inference::build(None, model_path, None)?
         };
 
         // Create normalizer (ImageNet normalization).

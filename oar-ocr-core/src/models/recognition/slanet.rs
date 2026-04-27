@@ -17,7 +17,7 @@
 
 use crate::core::OCRError;
 use crate::core::config::InputShape;
-use crate::core::inference::{OrtInfer, TensorInput};
+use crate::core::inference::{InferenceBackend, TensorInput};
 use crate::processors::NormalizeImage;
 use image::{DynamicImage, RgbImage};
 use ndarray::s;
@@ -38,7 +38,7 @@ pub struct SLANetModelOutput {
 #[derive(Debug)]
 pub struct SLANetModel {
     /// ONNX Runtime inference engine
-    inference: OrtInfer,
+    inference: Box<dyn InferenceBackend>,
     /// Image normalizer for preprocessing
     normalizer: NormalizeImage,
     /// Input shape parsed from ONNX model
@@ -47,7 +47,7 @@ pub struct SLANetModel {
 
 impl SLANetModel {
     /// Creates a new SLANet model.
-    pub fn new(inference: OrtInfer, normalizer: NormalizeImage, input_shape: InputShape) -> Self {
+    pub fn new(inference: Box<dyn InferenceBackend>, normalizer: NormalizeImage, input_shape: InputShape) -> Self {
         Self {
             inference,
             normalizer,
@@ -300,9 +300,9 @@ impl SLANetModelBuilder {
                 ort_session: self.ort_config,
                 ..Default::default()
             };
-            OrtInfer::from_config(&common_config, model_path, None)?
+            crate::core::inference::build(Some(&common_config), model_path, None)?
         } else {
-            OrtInfer::new(model_path, None)?
+            crate::core::inference::build(None, model_path, None)?
         };
 
         // Determine input shape: user override > ONNX metadata > default

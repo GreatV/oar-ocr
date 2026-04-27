@@ -4,7 +4,7 @@
 //! The model is independent of any specific task and can be reused in different contexts.
 
 use crate::core::OCRError;
-use crate::core::inference::{OrtInfer, TensorInput};
+use crate::core::inference::{InferenceBackend, TensorInput};
 use crate::processors::{
     DetResizeForTest, ImageScaleInfo, LimitType, NormalizeImage, TensorLayout,
 };
@@ -75,7 +75,7 @@ pub struct RTDetrModelOutput {
 /// The model is independent of any specific task or adapter.
 #[derive(Debug)]
 pub struct RTDetrModel {
-    inference: OrtInfer,
+    inference: Box<dyn InferenceBackend>,
     resizer: DetResizeForTest,
     normalizer: NormalizeImage,
     _preprocess_config: RTDetrPreprocessConfig,
@@ -84,7 +84,7 @@ pub struct RTDetrModel {
 impl RTDetrModel {
     /// Creates a new RT-DETR model.
     pub fn new(
-        inference: OrtInfer,
+        inference: Box<dyn InferenceBackend>,
         preprocess_config: RTDetrPreprocessConfig,
     ) -> Result<Self, OCRError> {
         // Create resizer
@@ -312,7 +312,7 @@ impl RTDetrModelBuilder {
     }
 
     /// Builds the RT-DETR model.
-    pub fn build(self, inference: OrtInfer) -> Result<RTDetrModel, OCRError> {
+    pub fn build(self, inference: Box<dyn InferenceBackend>) -> Result<RTDetrModel, OCRError> {
         let preprocess_config = self.preprocess_config.unwrap_or_default();
         RTDetrModel::new(inference, preprocess_config)
     }

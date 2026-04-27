@@ -4,7 +4,7 @@
 //! The model handles preprocessing, inference, and postprocessing independently of tasks.
 
 use crate::core::OCRError;
-use crate::core::inference::{OrtInfer, TensorInput};
+use crate::core::inference::{InferenceBackend, TensorInput};
 use crate::processors::{CTCLabelDecode, OCRResize};
 use image::RgbImage;
 use std::path::Path;
@@ -32,7 +32,7 @@ pub struct CRNNModelOutput {
 #[derive(Debug)]
 pub struct CRNNModel {
     /// ONNX Runtime inference engine
-    inference: OrtInfer,
+    inference: Box<dyn InferenceBackend>,
     /// Image resizer for preprocessing
     resizer: OCRResize,
     /// CTC decoder for postprocessing
@@ -41,7 +41,7 @@ pub struct CRNNModel {
 
 impl CRNNModel {
     /// Creates a new CRNN model.
-    pub fn new(inference: OrtInfer, resizer: OCRResize, decoder: CTCLabelDecode) -> Self {
+    pub fn new(inference: Box<dyn InferenceBackend>, resizer: OCRResize, decoder: CTCLabelDecode) -> Self {
         Self {
             inference,
             resizer,
@@ -314,9 +314,9 @@ impl CRNNModelBuilder {
                 ort_session: self.ort_config,
                 ..Default::default()
             };
-            OrtInfer::from_config(&common, model_path, None)?
+            crate::core::inference::build(Some(&common), model_path, None)?
         } else {
-            OrtInfer::new(model_path, None)?
+            crate::core::inference::build(None, model_path, None)?
         };
 
         // Create resizer

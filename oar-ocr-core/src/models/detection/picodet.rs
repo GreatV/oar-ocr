@@ -10,7 +10,7 @@ use super::scale_aware_detector::{
     ScaleAwareDetectorPreprocessConfig,
 };
 use crate::core::OCRError;
-use crate::core::inference::OrtInfer;
+use crate::core::inference::InferenceBackend;
 
 /// Preprocessing configuration for PicoDet model.
 ///
@@ -56,7 +56,7 @@ impl PicoDetModelBuilder {
     }
 
     /// Builds the PicoDet model.
-    pub fn build(self, inference: OrtInfer) -> Result<PicoDetModel, OCRError> {
+    pub fn build(self, inference: Box<dyn InferenceBackend>) -> Result<PicoDetModel, OCRError> {
         self.inner
             .inference_mode(ScaleAwareDetectorInferenceMode::ScaleFactorOnly)
             .build(inference)
