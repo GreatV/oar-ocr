@@ -2,13 +2,16 @@
 
 use super::errors::{ConfigError, ConfigValidator};
 use super::onnx::OrtSessionConfig;
+use super::rknn::RknnSessionConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Configuration for model inference and ONNX Runtime session setup.
+/// Configuration for model inference and runtime session setup.
 ///
-/// This struct provides configuration options for building ONNX inference engines,
-/// including runtime settings and model metadata.
+/// This struct provides configuration options for building inference engines,
+/// including runtime settings and model metadata. `enable_logging` is consumed
+/// by ONNX Runtime builders; RKNN logging is controlled by librknnrt
+/// environment variables such as `RKNN_LOG_LEVEL`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInferenceConfig {
     /// The path to the model file (optional).
@@ -22,6 +25,9 @@ pub struct ModelInferenceConfig {
     /// ONNX Runtime session configuration for this model (optional).
     #[serde(default)]
     pub ort_session: Option<OrtSessionConfig>,
+    /// RKNN runtime configuration for this model (optional).
+    #[serde(default)]
+    pub rknn_session: Option<RknnSessionConfig>,
 }
 
 impl ModelInferenceConfig {
@@ -37,6 +43,7 @@ impl ModelInferenceConfig {
             batch_size: None,
             enable_logging: None,
             ort_session: None,
+            rknn_session: None,
         }
     }
 
@@ -57,6 +64,7 @@ impl ModelInferenceConfig {
             batch_size,
             enable_logging: Some(true),
             ort_session: None,
+            rknn_session: None,
         }
     }
 
@@ -76,6 +84,7 @@ impl ModelInferenceConfig {
             batch_size: None,
             enable_logging: Some(true),
             ort_session: None,
+            rknn_session: None,
         }
     }
 
@@ -158,6 +167,12 @@ impl ModelInferenceConfig {
         self
     }
 
+    /// Sets the RKNN session configuration.
+    pub fn rknn_session(mut self, cfg: RknnSessionConfig) -> Self {
+        self.rknn_session = Some(cfg);
+        self
+    }
+
     /// Validates the configuration.
     ///
     /// # Returns
@@ -194,6 +209,9 @@ impl ModelInferenceConfig {
         }
         if other.ort_session.is_some() {
             self.ort_session = other.ort_session.clone();
+        }
+        if other.rknn_session.is_some() {
+            self.rknn_session = other.rknn_session.clone();
         }
         self
     }
@@ -236,6 +254,9 @@ impl ConfigValidator for ModelInferenceConfig {
         if let Some(model_path) = &self.model_path {
             self.validate_model_path(model_path)?;
         }
+        if let Some(rknn_session) = &self.rknn_session {
+            rknn_session.validate()?;
+        }
 
         Ok(())
     }
@@ -252,6 +273,7 @@ impl ConfigValidator for ModelInferenceConfig {
             batch_size: Some(32),
             enable_logging: Some(false),
             ort_session: None,
+            rknn_session: None,
         }
     }
 }
@@ -270,16 +292,19 @@ mod tests {
     #[test]
     fn test_common_builder_config_builder_pattern() {
         let ort_cfg = OrtSessionConfig::default();
+        let rknn_cfg = RknnSessionConfig::default();
         let config = ModelInferenceConfig::new()
             .model_name("test_model")
             .batch_size(16)
             .enable_logging(true)
-            .ort_session(ort_cfg);
+            .ort_session(ort_cfg)
+            .rknn_session(rknn_cfg);
 
         assert_eq!(config.model_name, Some("test_model".to_string()));
         assert_eq!(config.batch_size, Some(16));
         assert_eq!(config.enable_logging, Some(true));
         assert!(config.ort_session.is_some());
+        assert!(config.rknn_session.is_some());
     }
 
     #[test]

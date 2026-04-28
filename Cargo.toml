@@ -36,18 +36,24 @@ keywords = [
 categories = ["computer-vision", "science"]
 
 [features]
-default = ["download-binaries"]
+default = ["ort", "download-binaries"]
+# ONNX Runtime backend.
+ort = ["oar-ocr-core/ort"]
 # ONNX Runtime execution provider features
-cuda = ["oar-ocr-core/cuda"]
-tensorrt = ["oar-ocr-core/tensorrt"]
-directml = ["oar-ocr-core/directml"]
-coreml = ["oar-ocr-core/coreml"]
-webgpu = ["oar-ocr-core/webgpu"]
-openvino = ["oar-ocr-core/openvino"]
+cuda = ["ort", "oar-ocr-core/cuda"]
+tensorrt = ["ort", "oar-ocr-core/tensorrt"]
+directml = ["ort", "oar-ocr-core/directml"]
+coreml = ["ort", "oar-ocr-core/coreml"]
+webgpu = ["ort", "oar-ocr-core/webgpu"]
+openvino = ["ort", "oar-ocr-core/openvino"]
 # Auto-download ONNX Runtime binaries during build (enabled by default).
 # Set ORT_LIB_LOCATION to use a custom installation (skips download).
 # Use --no-default-features for offline/enterprise environments.
-download-binaries = ["oar-ocr-core/download-binaries"]
+download-binaries = ["ort", "oar-ocr-core/download-binaries"]
+# Rockchip RK3588 / RK3576 / RK3568 NPU backend via librknnrt (rknpu2).
+# Only takes effect when target_arch = "aarch64". Set RKNN_LIB_DIR when
+# librknnrt is not in /usr/lib/aarch64-linux-gnu.
+rknpu = ["oar-ocr-core/rknpu"]
 
 [dependencies]
 # Core library with all types and predictors

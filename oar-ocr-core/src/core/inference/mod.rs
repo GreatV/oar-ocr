@@ -3,31 +3,46 @@
 //! This module provides a unified inference interface that is backend-agnostic
 //! and does not make assumptions about input/output semantics.
 
+#[cfg(feature = "ort")]
 use crate::core::errors::OCRError;
+#[cfg(feature = "ort")]
 use ort::{session::Session, value::ValueType};
+#[cfg(feature = "ort")]
 use std::sync::Mutex;
 
+#[cfg(feature = "ort")]
 pub mod session;
+mod tensor_input;
 mod tensor_output;
 
 // OrtInfer implementation modules
+#[cfg(feature = "ort")]
 #[path = "ort_infer_builders.rs"]
 mod ort_infer_builders;
+#[cfg(feature = "ort")]
 #[path = "ort_infer_config.rs"]
 mod ort_infer_config;
+#[cfg(feature = "ort")]
 #[path = "ort_infer_execution.rs"]
 mod ort_infer_execution;
 
 mod backend;
 mod factory;
+pub(crate) mod rknn;
+mod rknn_infer;
 
 pub use backend::InferenceBackend;
 pub use factory::build;
-pub use ort_infer_execution::TensorInput;
+#[cfg(feature = "ort")]
 pub use session::load_session;
+pub use tensor_input::TensorInput;
 pub use tensor_output::TensorOutput;
 
+#[cfg(all(target_arch = "aarch64", feature = "rknpu"))]
+pub use rknn_infer::RknnInfer;
+
 /// Core ONNX Runtime inference engine with support for pooling and configurable sessions.
+#[cfg(feature = "ort")]
 pub struct OrtInfer {
     pub(self) sessions: Vec<Mutex<Session>>,
     pub(self) next_idx: std::sync::atomic::AtomicUsize,
@@ -36,6 +51,7 @@ pub struct OrtInfer {
     pub(self) model_name: String,
 }
 
+#[cfg(feature = "ort")]
 impl std::fmt::Debug for OrtInfer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OrtInfer")
@@ -47,6 +63,7 @@ impl std::fmt::Debug for OrtInfer {
     }
 }
 
+#[cfg(feature = "ort")]
 impl OrtInfer {
     /// Returns the input tensor name.
     pub fn input_name(&self) -> &str {
@@ -91,6 +108,7 @@ impl OrtInfer {
     }
 }
 
+#[cfg(feature = "ort")]
 impl backend::InferenceBackend for OrtInfer {
     fn model_path(&self) -> &std::path::Path {
         OrtInfer::model_path(self)
@@ -120,7 +138,7 @@ impl backend::InferenceBackend for OrtInfer {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ort"))]
 mod tests {
     use super::*;
     use crate::core::config::ModelInferenceConfig;

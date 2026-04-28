@@ -1,0 +1,12 @@
+RKNN runtime headers
+
+The headers in include/rknn_api.h and include/rknn_custom_op.h are supplied by
+Rockchip Corp. for the RKNN runtime API. Their original copyright and
+confidentiality notices are preserved in those files. Confirm redistribution
+rights before publishing source archives that include these vendored headers.
+
+The Rust bindings in rknn_bindings.rs were generated from rknn_custom_op.h with
+bindgen 0.71.x and are included to avoid requiring libclang on target devices.
+
+Header source: Radxa rknpu2-rk3588 package 2.0.0~beta0-2.
+Reference runtime: librknnrt 2.3.2.

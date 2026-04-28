@@ -19,16 +19,24 @@ keywords = [
 categories = ["computer-vision", "science"]
 
 [features]
-default = ["download-binaries"]
+default = ["ort", "download-binaries"]
+# ONNX Runtime backend.
+ort = ["dep:ort"]
 # ONNX Runtime execution provider features
-cuda = ["ort/cuda"]
-tensorrt = ["ort/tensorrt"]
-directml = ["ort/directml"]
-coreml = ["ort/coreml"]
-webgpu = ["ort/webgpu"]
-openvino = ["ort/openvino"]
+cuda = ["ort", "ort/cuda"]
+tensorrt = ["ort", "ort/tensorrt"]
+directml = ["ort", "ort/directml"]
+coreml = ["ort", "ort/coreml"]
+webgpu = ["ort", "ort/webgpu"]
+openvino = ["ort", "ort/openvino"]
 # Auto-download ONNX Runtime binaries during build (enabled by default).
-download-binaries = ["ort/download-binaries", "ort/tls-native"]
+download-binaries = ["ort", "ort/download-binaries", "ort/tls-native"]
+# Rockchip RK3588 / RK3576 / RK3568 NPU backend via librknnrt (rknpu2).
+# Opt-in only; no transitive feature pulls. Has effect only when building
+# for target_arch = "aarch64"; on other targets the rknn module is cfg'd out
+# and build.rs short-circuits. Set RKNN_LIB_DIR when librknnrt is not in the
+# Debian-style default /usr/lib/aarch64-linux-gnu.
+rknpu = ["dep:half"]
 
 [dependencies]
 oar-ocr-derive.workspace = true
@@ -39,7 +47,7 @@ regex = "1.11.1"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 toml = "1.0"
-ort = { version = "2.0.0-rc.12", default-features = false, features = [ "std", "ndarray", "tracing", "copy-dylibs" ] }
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = [ "std", "ndarray", "tracing", "copy-dylibs" ] }
 ndarray = "0.17"
 nalgebra = "0.34"
 rayon = "1.8"
@@ -49,6 +57,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokenizers = { version = "0.22", default-features = false, features = ["progressbar", "onig"] }
 clipper2 = "0.5.3"
 html-escape = "0.2"
+half = { version = "2", optional = true }
 
 [dev-dependencies]
 tempfile = "3.19"
+
+# RKNN FFI bindings are pre-generated and vendored at
+# `vendor/rknn/rknn_bindings.rs`, so no build-time bindgen is needed.
+# Regenerate with `tools/rknn-convert/regen-bindings.sh` after editing
+# `vendor/rknn/include/rknn_api.h`.

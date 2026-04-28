@@ -107,6 +107,7 @@ impl std::fmt::Display for ProcessingStage {
 /// the OCR process, including image loading errors, processing errors,
 /// inference errors, and configuration errors.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum OCRError {
     /// Error occurred while loading an image.
     #[error("image load")]
@@ -180,8 +181,17 @@ pub enum OCRError {
     },
 
     /// Error from the ONNX Runtime session.
+    #[cfg(feature = "ort")]
     #[error(transparent)]
     Session(#[from] ort::Error),
+
+    /// Error from the RKNN backend (Rockchip NPU).
+    #[cfg(all(target_arch = "aarch64", feature = "rknpu"))]
+    #[error("rknn backend: {message}")]
+    Rknn {
+        /// A message describing the RKNN runtime error.
+        message: String,
+    },
 
     /// Error from tensor operations with detailed context.
     #[error(
@@ -222,6 +232,15 @@ pub enum OCRError {
         #[source]
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
+}
+
+#[cfg(all(target_arch = "aarch64", feature = "rknpu"))]
+impl From<crate::core::inference::rknn::RknnError> for OCRError {
+    fn from(error: crate::core::inference::rknn::RknnError) -> Self {
+        Self::Rknn {
+            message: error.to_string(),
+        }
+    }
 }
 
 // From trait implementations for automatic error conversions

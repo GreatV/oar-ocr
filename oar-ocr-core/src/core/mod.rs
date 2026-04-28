@@ -45,7 +45,9 @@ pub use config::{
 pub use constants::*;
 pub use errors::{OCRError, OcrResult, OpaqueError, ProcessingStage};
 pub use image_reader::DefaultImageReader;
-pub use inference::{OrtInfer, TensorInput, TensorOutput, load_session};
+#[cfg(feature = "ort")]
+pub use inference::{OrtInfer, load_session};
+pub use inference::{TensorInput, TensorOutput};
 pub use traits::{
     AdapterBuilder, AdapterInfo, AdapterTask, GranularImageReader, ImageReader, ImageTaskInput,
     ModelAdapter, Postprocessor, Preprocessor, Sampler, Task, TaskRunner, TaskSchema, TaskType,

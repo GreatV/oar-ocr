@@ -1,22 +1,8 @@
 use super::*;
-use crate::core::inference::TensorOutput;
+use crate::core::inference::{TensorInput, TensorOutput};
 use ort::session::SessionInputs;
 use ort::value::TensorRef;
 use std::borrow::Cow;
-
-/// Represents a tensor input of various dimensions for generic inference.
-///
-/// This enum allows passing tensors of different dimensions to the inference engine
-/// without hardcoding specific tensor types or input semantics.
-#[derive(Debug)]
-pub enum TensorInput<'a> {
-    /// A 2D tensor reference (e.g., scale_factor, im_shape)
-    Array2(&'a ndarray::Array2<f32>),
-    /// A 3D tensor reference
-    Array3(&'a ndarray::Array3<f32>),
-    /// A 4D tensor reference (e.g., image batch)
-    Array4(&'a ndarray::Array4<f32>),
-}
 
 impl<'a> TensorInput<'a> {
     /// Converts the tensor input to an ONNX Runtime TensorRef.
@@ -49,15 +35,6 @@ impl<'a> TensorInput<'a> {
                     message: format!("Failed to create Array4 TensorRef: {}", e),
                 })
             }
-        }
-    }
-
-    /// Returns the shape of the tensor as a vector.
-    fn shape(&self) -> Vec<usize> {
-        match self {
-            TensorInput::Array2(arr) => arr.shape().to_vec(),
-            TensorInput::Array3(arr) => arr.shape().to_vec(),
-            TensorInput::Array4(arr) => arr.shape().to_vec(),
         }
     }
 }
