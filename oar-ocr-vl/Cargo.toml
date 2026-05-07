@@ -34,6 +34,15 @@ metal = [
     "candle-nn/metal",
     "candle-transformers/metal",
 ]
+# When enabled, instruments the HSD verifier (DSV phases + Stage 1 region drafts)
+# with NVTX ranges so `nsys --trace=cuda,nvtx` traces show kernel time grouped
+# under labelled DSV phases. Requires `libnvToolsExt` from the CUDA toolkit at
+# link time. Off by default — only turn on for profiling builds.
+nvtx = []
+# Enables the HunyuanOCR prefill-dump replay path controlled by
+# OAROCR_PREFILL_INPUTS_FROM. Off by default; intended for cross-implementation
+# debugging, not normal generation.
+hunyuan-prefill-debug = []
 
 [dependencies]
 oar-ocr-core.workspace = true
@@ -56,3 +65,4 @@ clap = { version = "4.5.42", features = ["derive"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 hayro = "0.6"
+oar-ocr = { path = "..", default-features = false }

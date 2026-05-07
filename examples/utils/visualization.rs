@@ -26,22 +26,25 @@ use tracing::{debug, info, warn};
 
 /// Load a system font for text rendering.
 pub fn load_system_font() -> Option<FontVec> {
-    let font_paths = [
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/System/Library/Fonts/Arial.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
-    ];
+    let mut font_db = fontdb::Database::new();
+    font_db.load_system_fonts();
 
-    for path in &font_paths {
-        if let Ok(font_data) = std::fs::read(path)
-            && let Ok(font) = FontVec::try_from_vec(font_data)
-        {
-            debug!("Loaded font from {}", path);
-            return Some(font);
-        }
+    let query = fontdb::Query {
+        families: &[
+            fontdb::Family::SansSerif,
+            fontdb::Family::Serif,
+            fontdb::Family::Monospace,
+        ],
+        ..Default::default()
+    };
+
+    if let Some(font_id) = font_db.query(&query)
+        && let Some((font_data, face_index)) =
+            font_db.with_face_data(font_id, |data, index| (data.to_vec(), index))
+        && let Ok(font) = FontVec::try_from_vec_and_index(font_data, face_index)
+    {
+        debug!("Loaded system font from font database");
+        return Some(font);
     }
 
     debug!("No system font found");

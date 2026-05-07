@@ -36,14 +36,14 @@
 //! # Using GLM-OCR model
 //! cargo run -p oar-ocr-vl --example doc_parser -- \
 //!     --model-name glmocr \
-//!     --model-dir /path/to/GLM-OCR \
+//!     --model-dir models/GLM-OCR \
 //!     --layout-model models/pp-doclayoutv3.onnx \
 //!     document.jpg
 //!
 //! # Using MinerU2.5 model
 //! cargo run -p oar-ocr-vl --example doc_parser -- \
 //!     --model-name mineru \
-//!     --model-dir /path/to/MinerU2.5-2509-1.2B \
+//!     --model-dir models/MinerU2.5-2509-1.2B \
 //!     --layout-model models/pp-doclayoutv3.onnx \
 //!     document.jpg
 //! ```

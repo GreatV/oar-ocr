@@ -89,7 +89,7 @@ pub fn read_dict_content(path: &Path) -> Result<String, OCRError> {
 /// use oar_ocr_core::utils::require_path;
 /// use std::path::PathBuf;
 ///
-/// let path: Option<PathBuf> = Some(PathBuf::from("/path/to/dict.txt"));
+/// let path: Option<PathBuf> = Some(PathBuf::from("dict.txt"));
 /// let validated = require_path(path, "text_recognition", "character dictionary path")?;
 /// # Ok::<(), oar_ocr_core::core::OCRError>(())
 /// ```
@@ -110,7 +110,7 @@ pub fn require_path<P: AsRef<Path> + Clone>(
 mod tests {
     use super::*;
     use std::io::Write;
-    use tempfile::NamedTempFile;
+    use tempfile::{NamedTempFile, tempdir};
 
     #[test]
     fn test_read_character_dict() -> Result<(), Box<dyn std::error::Error>> {
@@ -135,14 +135,17 @@ mod tests {
     }
 
     #[test]
-    fn test_read_nonexistent_file() {
-        let result = read_character_dict(Path::new("/nonexistent/path/dict.txt"));
+    fn test_read_nonexistent_file() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        let missing_path = dir.path().join("missing-dict.txt");
+        let result = read_character_dict(&missing_path);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
     fn test_require_path_some() {
-        let path = Some(std::path::PathBuf::from("/some/path"));
+        let path = Some(std::path::PathBuf::from("some/path"));
         let result = require_path(path, "test", "test path");
         assert!(result.is_ok());
     }

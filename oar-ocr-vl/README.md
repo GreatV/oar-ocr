@@ -135,7 +135,7 @@ use oar_ocr_vl::MinerU;
 
 let image = load_image("document.png")?;
 let device = candle_core::Device::Cpu;
-let model = MinerU::from_dir("/path/to/MinerU2.5-2509-1.2B", device)?;
+let model = MinerU::from_dir("models/MinerU2.5-2509-1.2B", device)?;
 let result = model.generate(&[image], &["\nDocument Parsing:"], 4096);
 println!("Result: {}", result[0].as_ref()?);
 ```
@@ -228,7 +228,7 @@ Two-step document extraction (layout detection + content extraction):
 
 ```bash
 cargo run --release --features cuda --example mineru -- \
-    --model-dir /path/to/MinerU2.5-2509-1.2B \
+    --model-dir models/MinerU2.5-2509-1.2B \
     --device cuda:0 \
     document.jpg
 ```

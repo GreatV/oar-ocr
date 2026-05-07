@@ -3,19 +3,27 @@ use super::processing::preprocess_images;
 use super::text::MinerUTextModel;
 use super::vision::MinerUVisionModel;
 use crate::attention::{
-    combine_masks, create_causal_mask, create_left_padding_mask, on_compute_device,
+    combine_masks, create_causal_mask, create_left_padding_mask, create_tree_attention_mask,
+    on_compute_device,
 };
+use crate::hsd::drafting::{bbox_xyxy, crop_region_image, format_verified_region, map_layout_kind};
+use crate::hsd::prefix_tree::PrefixTree;
+use crate::hsd::types::{AcceptStats, Draft, HsdConfig, HsdStats};
+use crate::hsd::verify::{SpecBackend, spec_decode};
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
-use candle_core::{DType, Device, IndexOp, Tensor};
+use candle_core::{D, DType, Device, IndexOp, Result as CandleResult, Tensor};
+use candle_nn::ops as cnn_ops;
 use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
 use image::RgbImage;
 use oar_ocr_core::core::OCRError;
+use oar_ocr_core::domain::structure::{LayoutElement, LayoutElementType};
 use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
 use serde::Deserialize;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::path::Path;
+use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
 
 pub struct MinerU {
@@ -241,7 +249,47 @@ impl MinerU {
             })];
         }
 
-        match self.generate_internal(images, instructions, max_new_tokens) {
+        match self.generate_tokens_internal(images, instructions, max_new_tokens) {
+            Ok(results) => results
+                .into_iter()
+                .map(|tokens| self.decode_generated_tokens(&tokens))
+                .collect(),
+            Err(e) => {
+                let msg = format!("generation failed: {e}");
+                (0..images.len())
+                    .map(|_| {
+                        Err(OCRError::InvalidInput {
+                            message: msg.clone(),
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Generate raw baseline tokens for oracle-draft / tokenizer round-trip
+    /// experiments. Tokens are exactly the ids emitted by the decode loop,
+    /// excluding stop tokens, before skip-token filtering and tokenizer decode.
+    pub fn generate_tokens(
+        &self,
+        images: &[RgbImage],
+        instructions: &[impl AsRef<str>],
+        max_new_tokens: usize,
+    ) -> Vec<Result<Vec<u32>, OCRError>> {
+        if images.is_empty() {
+            return Vec::new();
+        }
+        if images.len() != instructions.len() {
+            return vec![Err(OCRError::InvalidInput {
+                message: format!(
+                    "MinerU2.5: images count ({}) != instructions count ({})",
+                    images.len(),
+                    instructions.len()
+                ),
+            })];
+        }
+
+        match self.generate_tokens_internal(images, instructions, max_new_tokens) {
             Ok(results) => results.into_iter().map(Ok).collect(),
             Err(e) => {
                 let msg = format!("generation failed: {e}");
@@ -256,12 +304,12 @@ impl MinerU {
         }
     }
 
-    fn generate_internal(
+    fn generate_tokens_internal(
         &self,
         images: &[RgbImage],
         instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Result<Vec<String>, OCRError> {
+    ) -> Result<Vec<Vec<u32>>, OCRError> {
         let batch_size = images.len();
 
         let image_inputs = preprocess_images(images, &self.image_cfg, &self.device, self.dtype)?;
@@ -528,23 +576,425 @@ impl MinerU {
             }
         }
 
-        let mut results = Vec::with_capacity(batch_size);
-        for tokens in generated.into_iter() {
-            // Filter out bos/eos/pad tokens before decoding (matching official implementation)
-            let filtered: Vec<u32> = tokens
-                .into_iter()
-                .filter(|t| !self.skip_token_ids.contains(t))
-                .collect();
-            let decoded = self
-                .tokenizer
-                .decode(&filtered, false) // skip_special_tokens=false to preserve special tokens
-                .map_err(|e| OCRError::InvalidInput {
-                    message: format!("decode failed: {e}"),
-                })?;
-            results.push(decoded);
+        Ok(generated)
+    }
+
+    pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
+        self.decode_generated_tokens(tokens)
+    }
+
+    fn decode_generated_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
+        // Filter out bos/eos/pad tokens before decoding (matching official implementation).
+        let filtered: Vec<u32> = tokens
+            .iter()
+            .copied()
+            .filter(|t| !self.skip_token_ids.contains(t))
+            .collect();
+        self.tokenizer
+            .decode(&filtered, false) // skip_special_tokens=false to preserve special tokens
+            .map_err(|e| OCRError::InvalidInput {
+                message: format!("decode failed: {e}"),
+            })
+    }
+
+    /// Hierarchical Speculative Decoding entry for a single image / region.
+    ///
+    /// MinerU2.5 is naturally per-region (decoupled VLM in the paper's
+    /// taxonomy), so the only HSD stage that applies is region-level. The
+    /// driver runs greedy verification (sampling parameters from the
+    /// generation_config are not honored on the HSD path).
+    pub fn generate_hsd(
+        &self,
+        image: &RgbImage,
+        instruction: &str,
+        drafts: &[String],
+        hsd_cfg: &HsdConfig,
+    ) -> Result<(String, HsdStats), OCRError> {
+        let t_drafter = Instant::now();
+
+        let mut tokenized: Vec<Draft> = Vec::with_capacity(drafts.len());
+        for d in drafts {
+            if d.trim().is_empty() {
+                continue;
+            }
+            let enc =
+                self.tokenizer
+                    .encode(d.as_str(), false)
+                    .map_err(|e| OCRError::InvalidInput {
+                        message: format!("MinerU2.5 HSD: tokenizer encode failed: {e}"),
+                    })?;
+            let tokens = enc.get_ids().to_vec();
+            if !tokens.is_empty() {
+                tokenized.push(Draft::new(tokens));
+            }
+        }
+        self.generate_hsd_tokenized(image, instruction, &tokenized, hsd_cfg, t_drafter.elapsed())
+    }
+
+    /// HSD entry that consumes already-tokenized drafts. This is the oracle
+    /// path used by benchmarks to avoid `decode -> encode` tokenizer
+    /// round-trips when the draft comes from this backend's own baseline.
+    pub fn generate_hsd_with_token_drafts(
+        &self,
+        image: &RgbImage,
+        instruction: &str,
+        drafts: &[Draft],
+        hsd_cfg: &HsdConfig,
+    ) -> Result<(String, HsdStats), OCRError> {
+        self.generate_hsd_tokenized(image, instruction, drafts, hsd_cfg, Duration::ZERO)
+    }
+
+    fn generate_hsd_tokenized(
+        &self,
+        image: &RgbImage,
+        instruction: &str,
+        tokenized: &[Draft],
+        hsd_cfg: &HsdConfig,
+        drafter_elapsed: Duration,
+    ) -> Result<(String, HsdStats), OCRError> {
+        let mut stats = HsdStats::default();
+        stats.drafter = drafter_elapsed;
+        // Stage 2 fields are reused for stat bookkeeping in the single-image path.
+        let t_pre = Instant::now();
+        let (initial_lp, rope_delta) = self.hsd_prefill_single(image, instruction)?;
+        stats.stage2.vision_prefill = t_pre.elapsed();
+        stats.stage2.forward_passes = 1;
+
+        let t_dec = Instant::now();
+        let mut backend = MinerUSpecBackend::new(self, rope_delta);
+        let mut accept = AcceptStats::default();
+        let mut dsv = Default::default();
+        let generated = spec_decode(
+            &mut backend,
+            &tokenized,
+            initial_lp,
+            hsd_cfg.max_region_tokens,
+            &hsd_cfg.dsv,
+            &mut accept,
+            &mut dsv,
+        )
+        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "spec_decode", e))?;
+        stats.stage2.decode = t_dec.elapsed();
+        stats.stage2.emitted_tokens = generated.len() as u32;
+        stats.stage2.accept = accept;
+        stats.stage2.dsv = dsv;
+        stats.stage2.forward_passes += backend.forward_passes;
+
+        // Strip the first stop token and anything after it before decoding.
+        let stop_pos = generated
+            .iter()
+            .position(|t| self.eos_token_ids.contains(t))
+            .unwrap_or(generated.len());
+        let trimmed = &generated[..stop_pos];
+
+        // Match generate_internal: filter bos/eos/pad before decode, preserve
+        // other special tokens (skip_special_tokens=false).
+        let filtered: Vec<u32> = trimmed
+            .iter()
+            .copied()
+            .filter(|t| !self.skip_token_ids.contains(t))
+            .collect();
+        let text = self
+            .tokenizer
+            .decode(&filtered, false)
+            .map_err(|e| OCRError::InvalidInput {
+                message: format!("MinerU2.5 HSD: tokenizer decode failed: {e}"),
+            })?;
+        Ok((text, stats))
+    }
+
+    /// Run HSD per element across an entire layout-detected page, then
+    /// aggregate the per-region outputs into a markdown-style document.
+    pub fn generate_hsd_full(
+        &self,
+        image: &RgbImage,
+        elements: &[LayoutElement],
+        ignore_labels: &[String],
+        instruction: &str,
+        hsd_cfg: &HsdConfig,
+    ) -> Result<(String, HsdStats), OCRError> {
+        let mut stats = HsdStats::default();
+        let mut region_md: Vec<String> = Vec::with_capacity(elements.len());
+
+        for elem in elements {
+            if let Some(label) = &elem.label
+                && ignore_labels.iter().any(|l| l == label)
+            {
+                continue;
+            }
+            // Visual-only regions have no text to verify.
+            if matches!(
+                elem.element_type,
+                LayoutElementType::Image
+                    | LayoutElementType::HeaderImage
+                    | LayoutElementType::FooterImage
+                    | LayoutElementType::Seal
+            ) {
+                continue;
+            }
+            let Some(text) = elem.text.as_ref() else {
+                continue;
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+
+            let bbox = bbox_xyxy(&elem.bbox);
+            let crop = crop_region_image(image, &bbox)?;
+            let drafts = vec![text.trim().to_string()];
+            let (region_text, region_stats) =
+                self.generate_hsd(&crop, instruction, &drafts, hsd_cfg)?;
+            stats.drafter += region_stats.drafter;
+            stats.stage1.vision_prefill += region_stats.stage2.vision_prefill;
+            stats.stage1.decode += region_stats.stage2.decode;
+            stats.stage1.emitted_tokens += region_stats.stage2.emitted_tokens;
+            stats.stage1.forward_passes += region_stats.stage2.forward_passes;
+            stats.stage1.dsv.add_assign(&region_stats.stage2.dsv);
+            stats
+                .stage1
+                .accept
+                .per_step_accepted
+                .extend(region_stats.stage2.accept.per_step_accepted);
+            stats.stage1.accept.num_steps += region_stats.stage2.accept.num_steps;
+            stats.stage1.accept.num_fallbacks += region_stats.stage2.accept.num_fallbacks;
+
+            let kind = map_layout_kind(elem.element_type);
+            region_md.push(format_verified_region(&region_text, kind));
         }
 
-        Ok(results)
+        let merged = region_md
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        Ok((merged, stats))
+    }
+
+    /// Run a single-image prefill with the supplied instruction. Returns
+    /// the F32 last-position log-probabilities and the MRoPE delta.
+    fn hsd_prefill_single(
+        &self,
+        image: &RgbImage,
+        instruction: &str,
+    ) -> Result<(Tensor, i64), OCRError> {
+        // Preprocess single image.
+        let image_inputs = preprocess_images(
+            std::slice::from_ref(image),
+            &self.image_cfg,
+            &self.device,
+            self.dtype,
+        )?;
+        let (t, h, w) = image_inputs.image_grid_thw[0];
+        let image_token_count = (t * h * w) / (self.spatial_merge_size * self.spatial_merge_size);
+
+        // Build prompt and expand image placeholders.
+        let prompt = build_prompt(instruction);
+        let enc = self
+            .tokenizer
+            .encode(prompt, false)
+            .map_err(|e| OCRError::InvalidInput {
+                message: format!("MinerU2.5 HSD: tokenizer encode failed: {e}"),
+            })?;
+        let input_ids =
+            expand_image_tokens(enc.get_ids(), self.image_token_id, &[image_token_count])?;
+        let seq_len = input_ids.len();
+
+        // Vision features.
+        let image_embeds = self
+            .vision
+            .forward(&image_inputs.pixel_values, &image_inputs.image_grid_thw)?;
+        let actual = image_embeds
+            .dim(0)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "image_embeds dim", e))?;
+        if actual != image_token_count {
+            return Err(OCRError::InvalidInput {
+                message: format!(
+                    "MinerU2.5 HSD: image embeds count mismatch: got {actual}, expected {image_token_count}"
+                ),
+            });
+        }
+
+        // Build embeddings, splice in the image tokens.
+        let input_ids_t = Tensor::new(input_ids.clone(), &self.device)
+            .and_then(|t| t.reshape((1, seq_len)))
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "create input_ids", e))?;
+        let mut inputs_embeds = self.text.embed(&input_ids_t)?;
+
+        if let Some(first_pos) = input_ids.iter().position(|&id| id == self.image_token_id) {
+            let image_end = first_pos + image_token_count;
+            let mut parts: Vec<Tensor> = Vec::with_capacity(3);
+            if first_pos > 0 {
+                parts.push(
+                    inputs_embeds
+                        .narrow(1, 0, first_pos)
+                        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "narrow prefix", e))?,
+                );
+            }
+            parts.push(
+                image_embeds
+                    .unsqueeze(0)
+                    .map_err(|e| candle_to_ocr_inference("MinerU2.5", "unsqueeze img", e))?,
+            );
+            if image_end < seq_len {
+                parts.push(
+                    inputs_embeds
+                        .narrow(1, image_end, seq_len - image_end)
+                        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "narrow suffix", e))?,
+                );
+            }
+            let refs: Vec<&Tensor> = parts.iter().collect();
+            inputs_embeds = Tensor::cat(&refs, 1)
+                .map_err(|e| candle_to_ocr_inference("MinerU2.5", "cat embeds", e))?;
+        }
+
+        // 3-axis MRoPE position ids + delta.
+        let (pos_ids, rope_delta) = get_rope_index(
+            &self.cfg,
+            &input_ids,
+            &[image_inputs.image_grid_thw[0]],
+            self.vision_start_token_id,
+            self.video_token_id,
+            self.spatial_merge_size,
+            &self.device,
+        )?;
+
+        let causal = create_causal_mask(seq_len, seq_len, self.dtype, &self.device)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "create causal", e))?;
+
+        self.text.clear_kv_cache();
+        let hidden = self.text.forward(&inputs_embeds, &pos_ids, Some(&causal))?;
+
+        let last = hidden
+            .i((0, seq_len - 1, ..))
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "get last hidden", e))?;
+        let logits = self
+            .lm_head
+            .forward(&last)
+            .and_then(|t| t.squeeze(0))
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "lm_head prefill", e))?;
+        let lp = cnn_ops::log_softmax(
+            &logits
+                .to_dtype(DType::F32)
+                .map_err(|e| candle_to_ocr_inference("MinerU2.5", "logits to f32", e))?,
+            D::Minus1,
+        )
+        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "log_softmax prefill", e))?;
+        Ok((lp, rope_delta))
+    }
+}
+
+/// HSD adapter for MinerU2.5. Same shape as PaddleOCR-VL (3-axis MRoPE,
+/// independent lm_head, rope_delta captured at prefill).
+struct MinerUSpecBackend<'a> {
+    model: &'a MinerU,
+    rope_delta: i64,
+    pre_verify_kv: usize,
+    forward_passes: u32,
+}
+
+impl<'a> MinerUSpecBackend<'a> {
+    fn new(model: &'a MinerU, rope_delta: i64) -> Self {
+        Self {
+            model,
+            rope_delta,
+            pre_verify_kv: 0,
+            forward_passes: 0,
+        }
+    }
+
+    fn project_logprobs_2d(&self, hidden_2d: &Tensor) -> CandleResult<Tensor> {
+        let logits = self.model.lm_head.forward(hidden_2d)?;
+        cnn_ops::log_softmax(&logits.to_dtype(DType::F32)?, D::Minus1)
+    }
+
+    fn project_logprobs_1d(&self, hidden_1d: &Tensor) -> CandleResult<Tensor> {
+        let logits = self
+            .model
+            .lm_head
+            .forward(&hidden_1d.unsqueeze(0)?)?
+            .squeeze(0)?;
+        cnn_ops::log_softmax(&logits.to_dtype(DType::F32)?, D::Minus1)
+    }
+}
+
+impl<'a> SpecBackend for MinerUSpecBackend<'a> {
+    fn step_one(&mut self, token: u32) -> CandleResult<Tensor> {
+        let model = self.model;
+        let device = &model.device;
+
+        let tok_t = Tensor::new(vec![token], device)?.reshape((1usize, 1usize))?;
+        let embeds = model
+            .text
+            .embed(&tok_t)
+            .map_err(|e| candle_core::Error::Msg(format!("MinerU2.5 HSD step_one embed: {e}")))?;
+
+        let pos = model.text.current_kv_len() as i64 + self.rope_delta;
+        let pos_ids = Tensor::from_vec(vec![pos, pos, pos], (3usize, 1usize, 1usize), device)?;
+
+        let hidden = model
+            .text
+            .forward(&embeds, &pos_ids, None)
+            .map_err(|e| candle_core::Error::Msg(format!("MinerU2.5 HSD step_one forward: {e}")))?;
+        self.forward_passes += 1;
+        let last = hidden.i((0, 0, ..))?;
+        self.project_logprobs_1d(&last)
+    }
+
+    fn verify_tree(&mut self, tree: &PrefixTree) -> CandleResult<Tensor> {
+        let n = tree.num_nodes();
+        let model = self.model;
+        let device = &model.device;
+        let dtype = model.dtype;
+
+        let prefix_kv = model.text.current_kv_len();
+        self.pre_verify_kv = prefix_kv;
+
+        let tok_t = Tensor::new(tree.tokens.clone(), device)?.reshape((1usize, n))?;
+        let embeds = model.text.embed(&tok_t).map_err(|e| {
+            candle_core::Error::Msg(format!("MinerU2.5 HSD verify_tree embed: {e}"))
+        })?;
+
+        // 3-axis position ids — depth-`d` node sits at logical sequence index
+        // `prefix_kv + d - 1`, plus the MRoPE delta.
+        let mut pos_data: Vec<i64> = Vec::with_capacity(3 * n);
+        for _axis in 0..3 {
+            for d in &tree.depths {
+                pos_data.push(prefix_kv as i64 + self.rope_delta + (*d as i64) - 1);
+            }
+        }
+        let pos_ids = Tensor::from_vec(pos_data, (3usize, 1usize, n), device)?;
+
+        let mask = create_tree_attention_mask(&tree.parents, prefix_kv, dtype, device)?;
+
+        let hidden = model
+            .text
+            .forward(&embeds, &pos_ids, Some(&mask))
+            .map_err(|e| {
+                candle_core::Error::Msg(format!("MinerU2.5 HSD verify_tree forward: {e}"))
+            })?;
+        self.forward_passes += 1;
+        let h2 = hidden.squeeze(0)?;
+        self.project_logprobs_2d(&h2)
+    }
+
+    fn commit_verify(&mut self, accepted_path: &[usize]) -> CandleResult<()> {
+        let prefix_kv = self.pre_verify_kv;
+        let mut indices: Vec<u32> = Vec::with_capacity(prefix_kv + accepted_path.len());
+        for i in 0..prefix_kv {
+            indices.push(i as u32);
+        }
+        for &p in accepted_path {
+            indices.push((prefix_kv + p) as u32);
+        }
+        self.model
+            .text
+            .keep_kv_indices(&indices)
+            .map_err(|e| candle_core::Error::Msg(format!("MinerU2.5 HSD commit_verify: {e}")))
+    }
+
+    fn is_eos(&self, tok: u32) -> bool {
+        self.model.eos_token_ids.contains(&tok)
     }
 }
 

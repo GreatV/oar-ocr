@@ -2,11 +2,18 @@ use super::config::HunyuanOcrConfig;
 use crate::attention::{
     RotaryEmbedding, repeat_kv, scaled_dot_product_attention, select_rope_sections,
 };
+use crate::hsd::TrimmableKvCache;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 use candle_core::Tensor;
-use candle_nn::{Module, kv_cache::KvCache};
+use candle_nn::Module;
 use oar_ocr_core::core::OCRError;
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Gates the per-layer dump in `HunyuanLlm::forward` to only the first call in
+/// this process. After the first prefill dump, later documents and model
+/// instances run silently. Set by `OAROCR_DUMP_DIR`; consumed once.
+static DUMP_FIRST_CALL: AtomicBool = AtomicBool::new(true);
 
 fn apply_xdrope_rotary_pos_emb(
     q: &Tensor,
@@ -15,18 +22,33 @@ fn apply_xdrope_rotary_pos_emb(
     sin: &Tensor,
     xdrope_section: &[usize],
 ) -> Result<(Tensor, Tensor), OCRError> {
-    // XDRoPE uses 4 position dimensions
-    let cos = select_rope_sections(cos, xdrope_section, 4)?;
-    let sin = select_rope_sections(sin, xdrope_section, 4)?;
+    // Match upstream HF (`apply_rotary_pos_emb_xdrope`): apply the rotary
+    // mix in F32, then cast q/k back to the original dtype.
+    use candle_core::DType;
+    let origin_dtype = q.dtype();
+    let q_f32 = q
+        .to_dtype(DType::F32)
+        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "xdrope q to_dtype f32", e))?;
+    let k_f32 = k
+        .to_dtype(DType::F32)
+        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "xdrope k to_dtype f32", e))?;
+    let cos_full = select_rope_sections(cos, xdrope_section, 4)?;
+    let sin_full = select_rope_sections(sin, xdrope_section, 4)?;
+    let cos = cos_full
+        .to_dtype(DType::F32)
+        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "xdrope cos to_dtype f32", e))?;
+    let sin = sin_full
+        .to_dtype(DType::F32)
+        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "xdrope sin to_dtype f32", e))?;
 
-    let q_mul = q.broadcast_mul(&cos).map_err(|e| {
+    let q_mul = q_f32.broadcast_mul(&cos).map_err(|e| {
         candle_to_ocr_processing(
             oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "HunyuanOCR: xdrope q*cos failed",
             e,
         )
     })?;
-    let q_half = rotate_half(q)?;
+    let q_half = rotate_half(&q_f32)?;
     let q_half_mul = q_half.broadcast_mul(&sin).map_err(|e| {
         candle_to_ocr_processing(
             oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
@@ -34,22 +56,25 @@ fn apply_xdrope_rotary_pos_emb(
             e,
         )
     })?;
-    let q_rot = (&q_mul + &q_half_mul).map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "HunyuanOCR: xdrope apply on q failed",
-            e,
-        )
-    })?;
+    let q_rot = (&q_mul + &q_half_mul)
+        .map_err(|e| {
+            candle_to_ocr_processing(
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                "HunyuanOCR: xdrope apply on q failed",
+                e,
+            )
+        })?
+        .to_dtype(origin_dtype)
+        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "xdrope q to_dtype back", e))?;
 
-    let k_mul = k.broadcast_mul(&cos).map_err(|e| {
+    let k_mul = k_f32.broadcast_mul(&cos).map_err(|e| {
         candle_to_ocr_processing(
             oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "HunyuanOCR: xdrope k*cos failed",
             e,
         )
     })?;
-    let k_half = rotate_half(k)?;
+    let k_half = rotate_half(&k_f32)?;
     let k_half_mul = k_half.broadcast_mul(&sin).map_err(|e| {
         candle_to_ocr_processing(
             oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
@@ -57,13 +82,16 @@ fn apply_xdrope_rotary_pos_emb(
             e,
         )
     })?;
-    let k_rot = (&k_mul + &k_half_mul).map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "HunyuanOCR: xdrope apply on k failed",
-            e,
-        )
-    })?;
+    let k_rot = (&k_mul + &k_half_mul)
+        .map_err(|e| {
+            candle_to_ocr_processing(
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                "HunyuanOCR: xdrope apply on k failed",
+                e,
+            )
+        })?
+        .to_dtype(origin_dtype)
+        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "xdrope k to_dtype back", e))?;
     Ok((q_rot, k_rot))
 }
 
@@ -125,7 +153,7 @@ struct HunyuanAttention {
     head_dim: usize,
     scaling: f64,
     xdrope_section: Vec<usize>,
-    kv_cache: RefCell<KvCache>,
+    kv_cache: RefCell<TrimmableKvCache>,
 }
 
 impl HunyuanAttention {
@@ -180,12 +208,11 @@ impl HunyuanAttention {
             (None, None)
         };
 
-        // Create KvCache with dim=2 for seq_len dimension
-        // Pre-allocate enough space to avoid O(N) reallocation during generation
-        // Conservative estimate: vision tokens + max_generation_tokens
-        // Typical: ~1000-2000 vision tokens + 4096 generation tokens = ~6000-8000 total
-        // Use 16384 to handle worst case without reallocation
-        let kv_cache = KvCache::new(2, 16384);
+        // Cat-along-seq KV cache. Capacity 16384 covers ~1000-2000 vision tokens
+        // plus the longest realistic generation. Same growth strategy as
+        // candle_nn::kv_cache::KvCache (Tensor::cat per append). Trim/gather
+        // support is required by HSD's tree-verification path.
+        let kv_cache = TrimmableKvCache::new(2, 16384);
 
         Ok(Self {
             q_proj,
@@ -242,6 +269,11 @@ impl HunyuanAttention {
             .transpose(1, 2)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn v transpose", e))?;
 
+        let (q, k) = apply_xdrope_rotary_pos_emb(&q, &k, cos, sin, &self.xdrope_section)?;
+
+        // Match upstream HunyuanVL: apply XDRoPE first, then Q/K RMSNorm.
+        // The learned RMSNorm weight is per head dimension, so it does not
+        // commute with the rotary half-dimension mixing.
         let q = match &self.query_layernorm {
             Some(ln) => ln
                 .forward(&q)
@@ -254,8 +286,6 @@ impl HunyuanAttention {
                 .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn key_layernorm", e))?,
             None => k,
         };
-
-        let (q, k) = apply_xdrope_rotary_pos_emb(&q, &k, cos, sin, &self.xdrope_section)?;
 
         let q = q
             .contiguous()
@@ -285,7 +315,9 @@ impl HunyuanAttention {
             candle_to_ocr_inference("HunyuanOCR", "attn value_states contiguous", e)
         })?;
 
-        // Use unified attention implementation
+        // Use unified attention implementation (BF16 Q·K, F32 softmax, BF16 A·V).
+        // The main Hunyuan-specific numerical requirement is above: upstream
+        // applies XDRoPE in F32 before Q/K RMSNorm.
         let attn_output = scaled_dot_product_attention(
             &q,
             &key_states,
@@ -309,6 +341,17 @@ impl HunyuanAttention {
 
     fn clear_kv_cache(&self) {
         self.kv_cache.borrow_mut().reset();
+    }
+
+    fn current_kv_len(&self) -> usize {
+        self.kv_cache.borrow().current_seq_len()
+    }
+
+    fn keep_kv_indices(&self, indices: &[u32]) -> Result<(), OCRError> {
+        self.kv_cache
+            .borrow_mut()
+            .keep_indices(indices)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "keep_kv_indices", e))
     }
 }
 
@@ -374,6 +417,10 @@ impl HunyuanDecoderLayer {
     fn clear_kv_cache(&self) {
         self.self_attn.clear_kv_cache();
     }
+
+    fn keep_kv_indices(&self, indices: &[u32]) -> Result<(), OCRError> {
+        self.self_attn.keep_kv_indices(indices)
+    }
 }
 
 #[derive(Debug)]
@@ -399,7 +446,13 @@ impl HunyuanLlm {
         let norm = candle_nn::rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("norm"))
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "load final norm", e))?;
 
-        let rotary = RotaryEmbedding::new_multi_axis(cfg.head_dim, cfg.rope_theta, 4, vb.device())?;
+        let rope_theta = match cfg.rope_scaling.alpha {
+            Some(alpha) if alpha != 0.0 => {
+                cfg.rope_theta * alpha.powf(cfg.head_dim as f64 / (cfg.head_dim as f64 - 2.0))
+            }
+            _ => cfg.rope_theta,
+        };
+        let rotary = RotaryEmbedding::new_multi_axis(cfg.head_dim, rope_theta, 4, vb.device())?;
 
         Ok(Self {
             embed_tokens,
@@ -429,14 +482,42 @@ impl HunyuanLlm {
             .rotary
             .forward_multi_axis(position_ids, inputs_embeds.dtype())?;
 
+        // Optional per-layer activation dump for cross-implementation diff.
+        // Triggered by setting OAROCR_DUMP_DIR; otherwise zero-overhead. The
+        // dump fires only on the FIRST forward call in this process (the
+        // prefill). We rely on a process-global atomic gate to suppress
+        // subsequent calls from later documents / model instances.
+        let dump_dir = std::env::var("OAROCR_DUMP_DIR")
+            .ok()
+            .filter(|_| DUMP_FIRST_CALL.swap(false, Ordering::SeqCst));
+        if let Some(d) = &dump_dir {
+            let _ = std::fs::create_dir_all(d);
+            let _ =
+                inputs_embeds.save_safetensors("t", format!("{d}/llm_inputs_embeds.safetensors"));
+            let _ = position_ids.save_safetensors("t", format!("{d}/llm_position_ids.safetensors"));
+            let _ = cos.save_safetensors("t", format!("{d}/rope_cos.safetensors"));
+            let _ = sin.save_safetensors("t", format!("{d}/rope_sin.safetensors"));
+        }
+
         let mut hidden_states = inputs_embeds.clone();
-        for layer in &self.layers {
+        for (idx, layer) in self.layers.iter().enumerate() {
+            if let Some(d) = &dump_dir {
+                let _ = hidden_states
+                    .save_safetensors("t", format!("{d}/layer_{idx:02}_in.safetensors"));
+            }
             hidden_states = layer.forward(&hidden_states, &cos, &sin, causal_mask)?;
+            if let Some(d) = &dump_dir {
+                let _ = hidden_states
+                    .save_safetensors("t", format!("{d}/layer_{idx:02}_out.safetensors"));
+            }
         }
         let hidden_states = self
             .norm
             .forward(&hidden_states)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "llm final norm", e))?;
+        if let Some(d) = &dump_dir {
+            let _ = hidden_states.save_safetensors("t", format!("{d}/final_norm_out.safetensors"));
+        }
         Ok(hidden_states)
     }
 
@@ -444,5 +525,24 @@ impl HunyuanLlm {
         for layer in &self.layers {
             layer.clear_kv_cache();
         }
+    }
+
+    /// Current sequence length held in the KV cache. All layers stay in sync,
+    /// so we read it from layer 0.
+    pub fn current_kv_len(&self) -> usize {
+        self.layers
+            .first()
+            .map(|l| l.self_attn.current_kv_len())
+            .unwrap_or(0)
+    }
+
+    /// Gather every layer's KV cache to keep only the supplied positions
+    /// (in order). Used by HSD after tree-attention verification to retain the
+    /// accepted-path KV entries and drop the rejected-tree positions.
+    pub fn keep_kv_indices(&self, indices: &[u32]) -> Result<(), OCRError> {
+        for layer in &self.layers {
+            layer.keep_kv_indices(indices)?;
+        }
+        Ok(())
     }
 }

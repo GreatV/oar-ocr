@@ -1,10 +1,10 @@
 use super::config::GlmOcrTextConfig;
 use crate::attention::{repeat_kv, scaled_dot_product_attention};
+use crate::hsd::TrimmableKvCache;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::{
-    Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, kv_cache::KvCache, linear_no_bias,
-    rms_norm,
+    Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, linear_no_bias, rms_norm,
 };
 use oar_ocr_core::core::OCRError;
 use std::cell::RefCell;
@@ -511,7 +511,7 @@ struct GlmOcrTextAttention {
     num_kv_groups: usize,
     head_dim: usize,
     scaling: f64,
-    kv_cache: RefCell<KvCache>,
+    kv_cache: RefCell<TrimmableKvCache>,
 }
 
 impl GlmOcrTextAttention {
@@ -554,7 +554,8 @@ impl GlmOcrTextAttention {
         .map_err(|e| candle_to_ocr_inference("GLM-OCR", "text o_proj", e))?;
 
         let cache_cap = cfg.max_position_embeddings.min(16384);
-        let kv_cache = KvCache::new(2, cache_cap);
+        // Trim/gather-capable KV cache (HSD verification path).
+        let kv_cache = TrimmableKvCache::new(2, cache_cap);
 
         Ok(Self {
             q_proj,
@@ -741,6 +742,17 @@ impl GlmOcrTextAttention {
     fn clear_kv_cache(&self) {
         self.kv_cache.borrow_mut().reset();
     }
+
+    fn current_kv_len(&self) -> usize {
+        self.kv_cache.borrow().current_seq_len()
+    }
+
+    fn keep_kv_indices(&self, indices: &[u32]) -> Result<(), OCRError> {
+        self.kv_cache
+            .borrow_mut()
+            .keep_indices(indices)
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "keep_kv_indices", e))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -837,6 +849,10 @@ impl GlmOcrTextDecoderLayer {
     fn clear_kv_cache(&self) {
         self.self_attn.clear_kv_cache();
     }
+
+    fn keep_kv_indices(&self, indices: &[u32]) -> Result<(), OCRError> {
+        self.self_attn.keep_kv_indices(indices)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -899,5 +915,22 @@ impl GlmOcrTextModel {
         for layer in &self.layers {
             layer.clear_kv_cache();
         }
+    }
+
+    /// Current sequence length held in the KV cache (read from layer 0).
+    pub fn current_kv_len(&self) -> usize {
+        self.layers
+            .first()
+            .map(|l| l.self_attn.current_kv_len())
+            .unwrap_or(0)
+    }
+
+    /// Gather every layer's KV cache to keep only the supplied positions
+    /// (in order). Used by HSD after tree-attention verification.
+    pub fn keep_kv_indices(&self, indices: &[u32]) -> Result<(), OCRError> {
+        for layer in &self.layers {
+            layer.keep_kv_indices(indices)?;
+        }
+        Ok(())
     }
 }

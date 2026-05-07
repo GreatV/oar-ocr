@@ -1,7 +1,7 @@
 use super::config::{HunyuanOcrImageProcessorConfig, HunyuanOcrVisionConfig};
 use crate::utils::{
     candle_to_ocr_processing,
-    image::{clamp_to_max_image_size, image_to_chw, pil_resample_to_filter_type, smart_resize},
+    image::{clamp_to_max_image_size, image_to_chw, smart_resize},
 };
 use candle_core::{DType, Device, Tensor};
 use image::{RgbImage, imageops::FilterType};
@@ -86,10 +86,11 @@ pub fn preprocess_image(
         });
     }
 
-    let resize_filter = cfg
-        .resample
-        .and_then(pil_resample_to_filter_type)
-        .unwrap_or(FilterType::CatmullRom);
+    // Match transformers' HunYuanVLImageProcessor._preprocess: it accepts a
+    // resample argument but calls PIL `image.resize((w, h))` without passing it.
+    // HunyuanOCR therefore ignores cfg.resample and always uses the Pillow
+    // default BICUBIC-equivalent path, even when the config says `resample: 1`.
+    let resize_filter = FilterType::CatmullRom;
 
     let (h, w) = (image.height(), image.width());
     let factor = (cfg.patch_size * cfg.merge_size) as u32;

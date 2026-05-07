@@ -2,14 +2,22 @@ use super::config::{EosTokenId, GlmOcrConfig, GlmOcrImageProcessorConfig};
 use super::processing::{GlmOcrImageInputs, preprocess_image};
 use super::text::GlmOcrTextModel;
 use super::vision::GlmOcrVisionModel;
+use crate::attention::create_tree_attention_mask;
+use crate::hsd::drafting::{bbox_xyxy, crop_region_image, format_verified_region, map_layout_kind};
+use crate::hsd::prefix_tree::PrefixTree;
+use crate::hsd::types::{AcceptStats, Draft, HsdConfig, HsdStats};
+use crate::hsd::verify::{SpecBackend, spec_decode};
 use crate::utils::{
     candle_to_ocr_inference, candle_to_ocr_processing, truncate_repetitive_content,
 };
-use candle_core::{D, DType, Device, IndexOp, Tensor};
+use candle_core::{D, DType, Device, IndexOp, Result as CandleResult, Tensor};
+use candle_nn::ops as cnn_ops;
 use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
 use image::RgbImage;
 use oar_ocr_core::core::OCRError;
+use oar_ocr_core::domain::structure::{LayoutElement, LayoutElementType};
 use std::path::Path;
+use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
 
 pub struct GlmOcr {
@@ -122,7 +130,48 @@ impl GlmOcr {
             })];
         }
 
-        match self.generate_internal(images, instructions, max_new_tokens) {
+        match self.generate_tokens_internal(images, instructions, max_new_tokens) {
+            Ok(results) => results
+                .into_iter()
+                .map(|tokens| self.decode_generated_tokens(&tokens))
+                .collect(),
+            Err(e) => {
+                let msg = format!("generation failed: {e}");
+                (0..images.len())
+                    .map(|_| {
+                        Err(OCRError::InvalidInput {
+                            message: msg.clone(),
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Generate raw baseline tokens for oracle-draft / tokenizer round-trip
+    /// experiments. Tokens are exactly the ids emitted by the decode loop,
+    /// excluding stop tokens, before tokenizer decoding or repetition
+    /// truncation.
+    pub fn generate_tokens(
+        &self,
+        images: &[RgbImage],
+        instructions: &[impl AsRef<str>],
+        max_new_tokens: usize,
+    ) -> Vec<Result<Vec<u32>, OCRError>> {
+        if images.is_empty() {
+            return Vec::new();
+        }
+        if images.len() != instructions.len() {
+            return vec![Err(OCRError::InvalidInput {
+                message: format!(
+                    "GLM-OCR: images count ({}) != instructions count ({})",
+                    images.len(),
+                    instructions.len()
+                ),
+            })];
+        }
+
+        match self.generate_tokens_internal(images, instructions, max_new_tokens) {
             Ok(results) => results.into_iter().map(Ok).collect(),
             Err(e) => {
                 let msg = format!("generation failed: {e}");
@@ -137,12 +186,12 @@ impl GlmOcr {
         }
     }
 
-    fn generate_internal(
+    fn generate_tokens_internal(
         &self,
         images: &[RgbImage],
         instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Result<Vec<String>, OCRError> {
+    ) -> Result<Vec<Vec<u32>>, OCRError> {
         let mut results = Vec::with_capacity(images.len());
 
         for (image, instruction) in images.iter().zip(instructions.iter()) {
@@ -243,17 +292,25 @@ impl GlmOcr {
                 logits = self.logits_from_hidden(&last)?;
             }
 
-            let decoded =
-                self.tokenizer
-                    .decode(&generated, true)
-                    .map_err(|e| OCRError::InvalidInput {
-                        message: format!("GLM-OCR: tokenizer decode failed: {e}"),
-                    })?;
-            let decoded = truncate_repetitive_content(&decoded, 10, 10, 10);
-            results.push(decoded.trim().to_string());
+            results.push(generated);
         }
 
         Ok(results)
+    }
+
+    pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
+        self.decode_generated_tokens(tokens)
+    }
+
+    fn decode_generated_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
+        let decoded = self
+            .tokenizer
+            .decode(tokens, true)
+            .map_err(|e| OCRError::InvalidInput {
+                message: format!("GLM-OCR: tokenizer decode failed: {e}"),
+            })?;
+        let decoded = truncate_repetitive_content(&decoded, 10, 10, 10);
+        Ok(decoded.trim().to_string())
     }
 
     fn prepare_inputs(
@@ -388,6 +445,228 @@ impl GlmOcr {
         Ok(embeds)
     }
 
+    /// Hierarchical Speculative Decoding entry for a single image / region.
+    ///
+    /// GLM-OCR is naturally per-region; only region-level HSD applies.
+    pub fn generate_hsd(
+        &self,
+        image: &RgbImage,
+        instruction: &str,
+        drafts: &[String],
+        hsd_cfg: &HsdConfig,
+    ) -> Result<(String, HsdStats), OCRError> {
+        let t_drafter = Instant::now();
+
+        let mut tokenized: Vec<Draft> = Vec::with_capacity(drafts.len());
+        for d in drafts {
+            if d.trim().is_empty() {
+                continue;
+            }
+            let enc =
+                self.tokenizer
+                    .encode(d.as_str(), false)
+                    .map_err(|e| OCRError::InvalidInput {
+                        message: format!("GLM-OCR HSD: tokenizer encode failed: {e}"),
+                    })?;
+            let tokens = enc.get_ids().to_vec();
+            if !tokens.is_empty() {
+                tokenized.push(Draft::new(tokens));
+            }
+        }
+        self.generate_hsd_tokenized(image, instruction, &tokenized, hsd_cfg, t_drafter.elapsed())
+    }
+
+    /// HSD entry that consumes already-tokenized drafts. This is the oracle
+    /// path used by benchmarks to avoid `decode -> encode` tokenizer
+    /// round-trips when the draft comes from this backend's own baseline.
+    pub fn generate_hsd_with_token_drafts(
+        &self,
+        image: &RgbImage,
+        instruction: &str,
+        drafts: &[Draft],
+        hsd_cfg: &HsdConfig,
+    ) -> Result<(String, HsdStats), OCRError> {
+        self.generate_hsd_tokenized(image, instruction, drafts, hsd_cfg, Duration::ZERO)
+    }
+
+    fn generate_hsd_tokenized(
+        &self,
+        image: &RgbImage,
+        instruction: &str,
+        tokenized: &[Draft],
+        hsd_cfg: &HsdConfig,
+        drafter_elapsed: Duration,
+    ) -> Result<(String, HsdStats), OCRError> {
+        let mut stats = HsdStats::default();
+        stats.drafter = drafter_elapsed;
+        let t_pre = Instant::now();
+        let (initial_lp, rope_delta) = self.hsd_prefill_single(image, instruction)?;
+        stats.stage2.vision_prefill = t_pre.elapsed();
+        stats.stage2.forward_passes = 1;
+
+        let t_dec = Instant::now();
+        let mut backend = GlmOcrSpecBackend::new(self, rope_delta);
+        let mut accept = AcceptStats::default();
+        let mut dsv = Default::default();
+        let generated = spec_decode(
+            &mut backend,
+            &tokenized,
+            initial_lp,
+            hsd_cfg.max_region_tokens,
+            &hsd_cfg.dsv,
+            &mut accept,
+            &mut dsv,
+        )
+        .map_err(|e| candle_to_ocr_inference("GLM-OCR", "spec_decode", e))?;
+        stats.stage2.decode = t_dec.elapsed();
+        stats.stage2.emitted_tokens = generated.len() as u32;
+        stats.stage2.accept = accept;
+        stats.stage2.dsv = dsv;
+        stats.stage2.forward_passes += backend.forward_passes;
+
+        // Strip the first stop token and anything after it before decoding.
+        let stop_pos = generated
+            .iter()
+            .position(|t| self.eos_token_ids.contains(t))
+            .unwrap_or(generated.len());
+        let trimmed = &generated[..stop_pos];
+
+        let decoded = self
+            .tokenizer
+            .decode(trimmed, true)
+            .map_err(|e| OCRError::InvalidInput {
+                message: format!("GLM-OCR HSD: tokenizer decode failed: {e}"),
+            })?;
+        let decoded = truncate_repetitive_content(&decoded, 10, 10, 10);
+        Ok((decoded.trim().to_string(), stats))
+    }
+
+    /// Run HSD per element across an entire layout-detected page, then
+    /// aggregate the per-region outputs into a markdown-style document.
+    pub fn generate_hsd_full(
+        &self,
+        image: &RgbImage,
+        elements: &[LayoutElement],
+        ignore_labels: &[String],
+        instruction: &str,
+        hsd_cfg: &HsdConfig,
+    ) -> Result<(String, HsdStats), OCRError> {
+        let mut stats = HsdStats::default();
+        let mut region_md: Vec<String> = Vec::with_capacity(elements.len());
+
+        for elem in elements {
+            if let Some(label) = &elem.label
+                && ignore_labels.iter().any(|l| l == label)
+            {
+                continue;
+            }
+            if matches!(
+                elem.element_type,
+                LayoutElementType::Image
+                    | LayoutElementType::HeaderImage
+                    | LayoutElementType::FooterImage
+                    | LayoutElementType::Seal
+            ) {
+                continue;
+            }
+            let Some(text) = elem.text.as_ref() else {
+                continue;
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+
+            let bbox = bbox_xyxy(&elem.bbox);
+            let crop = crop_region_image(image, &bbox)?;
+            let drafts = vec![text.trim().to_string()];
+            let (region_text, region_stats) =
+                self.generate_hsd(&crop, instruction, &drafts, hsd_cfg)?;
+            stats.drafter += region_stats.drafter;
+            stats.stage1.vision_prefill += region_stats.stage2.vision_prefill;
+            stats.stage1.decode += region_stats.stage2.decode;
+            stats.stage1.emitted_tokens += region_stats.stage2.emitted_tokens;
+            stats.stage1.forward_passes += region_stats.stage2.forward_passes;
+            stats.stage1.dsv.add_assign(&region_stats.stage2.dsv);
+            stats
+                .stage1
+                .accept
+                .per_step_accepted
+                .extend(region_stats.stage2.accept.per_step_accepted);
+            stats.stage1.accept.num_steps += region_stats.stage2.accept.num_steps;
+            stats.stage1.accept.num_fallbacks += region_stats.stage2.accept.num_fallbacks;
+
+            let kind = map_layout_kind(elem.element_type);
+            region_md.push(format_verified_region(&region_text, kind));
+        }
+
+        let merged = region_md
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        Ok((merged, stats))
+    }
+
+    /// Run a single-image prefill with the supplied instruction. Returns
+    /// the F32 last-position log-probabilities and the MRoPE delta.
+    fn hsd_prefill_single(
+        &self,
+        image: &RgbImage,
+        instruction: &str,
+    ) -> Result<(Tensor, i64), OCRError> {
+        let image_inputs = preprocess_image(
+            image,
+            &self.image_cfg,
+            &self.cfg.vision_config,
+            &self.device,
+            self.dtype,
+        )?;
+
+        let prompt = build_prompt(instruction);
+        let prompt = expand_image_tokens(&prompt, image_inputs.num_image_tokens)?;
+        let enc = self
+            .tokenizer
+            .encode(prompt, false)
+            .map_err(|e| OCRError::InvalidInput {
+                message: format!("GLM-OCR HSD: tokenizer encode failed: {e}"),
+            })?;
+        let input_ids = enc.get_ids().to_vec();
+        if input_ids.is_empty() {
+            return Err(OCRError::InvalidInput {
+                message: "GLM-OCR HSD: empty prompt after tokenization".to_string(),
+            });
+        }
+        let seq_len = input_ids.len();
+
+        let inputs_embeds = self.prepare_inputs(&input_ids, &image_inputs)?;
+        let (position_ids, max_pos) = build_position_ids(
+            &input_ids,
+            image_inputs.grid_thw,
+            self.cfg.vision_config.spatial_merge_size,
+            self.image_token_id,
+            &self.device,
+        )?;
+        let rope_delta = max_pos + 1 - seq_len as i64;
+
+        // GLM-OCR's existing prefill calls `text.forward(..., None)` — the
+        // implementation builds its own internal causal mask via the rotary
+        // path. Match that behaviour here.
+        self.text.clear_kv_cache();
+        let hidden = self.text.forward(&inputs_embeds, &position_ids, None)?;
+        let last = hidden
+            .i((0, seq_len - 1, ..))
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "get last hidden", e))?;
+        let logits = self.logits_from_hidden(&last)?;
+        let lp = cnn_ops::log_softmax(
+            &logits
+                .to_dtype(DType::F32)
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "logits to f32", e))?,
+            D::Minus1,
+        )
+        .map_err(|e| candle_to_ocr_inference("GLM-OCR", "log_softmax prefill", e))?;
+        Ok((lp, rope_delta))
+    }
+
     fn logits_from_hidden(&self, hidden: &Tensor) -> Result<Tensor, OCRError> {
         let hidden = hidden.unsqueeze(0).map_err(|e| {
             candle_to_ocr_processing(
@@ -407,6 +686,124 @@ impl GlmOcr {
                 e,
             )
         })
+    }
+}
+
+/// HSD adapter for GLM-OCR. 3-axis MRoPE, independent lm_head, rope_delta
+/// captured at prefill (same shape as MinerU / PaddleOCR-VL).
+struct GlmOcrSpecBackend<'a> {
+    model: &'a GlmOcr,
+    rope_delta: i64,
+    pre_verify_kv: usize,
+    forward_passes: u32,
+}
+
+impl<'a> GlmOcrSpecBackend<'a> {
+    fn new(model: &'a GlmOcr, rope_delta: i64) -> Self {
+        Self {
+            model,
+            rope_delta,
+            pre_verify_kv: 0,
+            forward_passes: 0,
+        }
+    }
+
+    fn project_logprobs_2d(&self, hidden_2d: &Tensor) -> CandleResult<Tensor> {
+        // (N, hidden) → (N, vocab) → log-softmax F32.
+        // GLM-OCR's lm_head expects shape (..., hidden); 2D works directly.
+        let logits = self.model.lm_head.forward(hidden_2d)?;
+        cnn_ops::log_softmax(&logits.to_dtype(DType::F32)?, D::Minus1)
+    }
+
+    fn project_logprobs_1d(&self, hidden_1d: &Tensor) -> CandleResult<Tensor> {
+        // lm_head is a Linear that requires ≥ 2-D input.
+        let logits = self
+            .model
+            .lm_head
+            .forward(&hidden_1d.unsqueeze(0)?)?
+            .squeeze(0)?;
+        cnn_ops::log_softmax(&logits.to_dtype(DType::F32)?, D::Minus1)
+    }
+}
+
+impl<'a> SpecBackend for GlmOcrSpecBackend<'a> {
+    fn step_one(&mut self, token: u32) -> CandleResult<Tensor> {
+        let model = self.model;
+        let device = &model.device;
+
+        let tok_t = Tensor::new(vec![token], device)?.reshape((1usize, 1usize))?;
+        let embeds = model
+            .text
+            .embed(&tok_t)
+            .map_err(|e| candle_core::Error::Msg(format!("GLM-OCR HSD step_one embed: {e}")))?;
+
+        let pos = model.text.current_kv_len() as i64 + self.rope_delta;
+        let pos_ids = Tensor::from_vec(vec![pos, pos, pos], (3usize, 1usize, 1usize), device)?;
+
+        let hidden = model
+            .text
+            .forward(&embeds, &pos_ids, None)
+            .map_err(|e| candle_core::Error::Msg(format!("GLM-OCR HSD step_one forward: {e}")))?;
+        self.forward_passes += 1;
+        let last = hidden.i((0, 0, ..))?;
+        self.project_logprobs_1d(&last)
+    }
+
+    fn verify_tree(&mut self, tree: &PrefixTree) -> CandleResult<Tensor> {
+        let n = tree.num_nodes();
+        let model = self.model;
+        let device = &model.device;
+        let dtype = model.dtype;
+
+        let prefix_kv = model.text.current_kv_len();
+        self.pre_verify_kv = prefix_kv;
+
+        let tok_t = Tensor::new(tree.tokens.clone(), device)?.reshape((1usize, n))?;
+        let embeds = model
+            .text
+            .embed(&tok_t)
+            .map_err(|e| candle_core::Error::Msg(format!("GLM-OCR HSD verify_tree embed: {e}")))?;
+
+        // 3-axis position ids — depth-`d` node sits at logical sequence index
+        // `prefix_kv + d - 1`, plus the MRoPE delta.
+        let mut pos_data: Vec<i64> = Vec::with_capacity(3 * n);
+        for _axis in 0..3 {
+            for d in &tree.depths {
+                pos_data.push(prefix_kv as i64 + self.rope_delta + (*d as i64) - 1);
+            }
+        }
+        let pos_ids = Tensor::from_vec(pos_data, (3usize, 1usize, n), device)?;
+
+        let mask = create_tree_attention_mask(&tree.parents, prefix_kv, dtype, device)?;
+
+        let hidden = model
+            .text
+            .forward(&embeds, &pos_ids, Some(&mask))
+            .map_err(|e| {
+                candle_core::Error::Msg(format!("GLM-OCR HSD verify_tree forward: {e}"))
+            })?;
+        self.forward_passes += 1;
+        let h2 = hidden.squeeze(0)?;
+        self.project_logprobs_2d(&h2)
+    }
+
+    fn commit_verify(&mut self, accepted_path: &[usize]) -> CandleResult<()> {
+        let prefix_kv = self.pre_verify_kv;
+        let mut indices: Vec<u32> = Vec::with_capacity(prefix_kv + accepted_path.len());
+        for i in 0..prefix_kv {
+            indices.push(i as u32);
+        }
+        for &p in accepted_path {
+            indices.push((prefix_kv + p) as u32);
+        }
+        self.model
+            .text
+            .keep_kv_indices(&indices)
+            .map_err(|e| candle_core::Error::Msg(format!("GLM-OCR HSD commit_verify: {e}")))
+    }
+
+    fn is_eos(&self, tok: u32) -> bool {
+        self.model.eos_token_ids.contains(&tok)
     }
 }
 

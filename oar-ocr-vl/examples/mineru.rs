@@ -13,7 +13,7 @@
 //!
 //! ```bash
 //! cargo run -p oar-ocr-vl --example mineru -- \
-//!     --model-dir /path/to/MinerU2.5-2509-1.2B \
+//!     --model-dir models/MinerU2.5-2509-1.2B \
 //!     --device cuda:0 \
 //!     document.jpg
 //! ```

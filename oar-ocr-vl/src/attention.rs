@@ -218,6 +218,67 @@ pub fn combine_masks(causal_mask: &Tensor, padding_mask: &Tensor) -> Result<Tens
     causal_mask.broadcast_add(padding_mask)
 }
 
+/// Create a tree-ancestry attention mask for HSD verification (paper §3.2 / Fig. 2c).
+///
+/// Each candidate token in the prefix tree may attend only to (a) the accepted
+/// prefix already in the KV cache and (b) tokens along its own ancestor path
+/// (including itself). Sibling subtrees and descendants are masked out.
+///
+/// # Arguments
+/// * `parents` - Parent indices for each candidate node, in packed order. `None`
+///   means the node is a direct child of the (implicit) root. Length = `N`.
+/// * `prefix_kv_len` - Number of accepted-prefix tokens already in the KV cache.
+/// * `dtype` - Data type for the mask.
+/// * `device` - Target device.
+///
+/// # Returns
+/// Mask of shape `(1, 1, N, prefix_kv_len + N)` where allowed positions are 0
+/// and forbidden positions are `-inf`.
+pub fn create_tree_attention_mask(
+    parents: &[Option<usize>],
+    prefix_kv_len: usize,
+    dtype: DType,
+    device: &Device,
+) -> Result<Tensor> {
+    let n = parents.len();
+    let total_kv = prefix_kv_len + n;
+
+    if n == 0 {
+        return on_compute_device(device, |compute_device| {
+            Tensor::zeros((1, 1, 0, total_kv), dtype, compute_device)
+        });
+    }
+
+    // Mark each node's ancestors (including itself) by walking parent pointers.
+    let mut ancestors: Vec<Vec<bool>> = vec![vec![false; n]; n];
+    for i in 0..n {
+        let mut cur = Some(i);
+        while let Some(j) = cur {
+            ancestors[i][j] = true;
+            cur = parents[j];
+        }
+    }
+
+    let mut buf = vec![f32::NEG_INFINITY; n * total_kv];
+    for i in 0..n {
+        let row = i * total_kv;
+        // Allow attending to the entire accepted prefix.
+        for k in 0..prefix_kv_len {
+            buf[row + k] = 0.0;
+        }
+        // Allow attending to ancestors (and self) within the candidate region.
+        for j in 0..n {
+            if ancestors[i][j] {
+                buf[row + prefix_kv_len + j] = 0.0;
+            }
+        }
+    }
+
+    on_compute_device(device, move |compute_device| {
+        Tensor::from_vec(buf, (1, 1, n, total_kv), compute_device)?.to_dtype(dtype)
+    })
+}
+
 /// Create a left-padding mask for batched sequences.
 ///
 /// Left-padding aligns sequences at the right edge, which is standard for
@@ -848,6 +909,67 @@ mod tests {
             assert_eq!(v, 0.0);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_tree_attention_mask_shape() -> Result<()> {
+        let device = Device::Cpu;
+        // chain: 0 -> 1 -> 2  (linear), prefix_kv_len = 2
+        let parents = vec![None, Some(0), Some(1)];
+        let mask = create_tree_attention_mask(&parents, 2, DType::F32, &device)?;
+        assert_eq!(mask.dims(), &[1, 1, 3, 5]);
+        let m: Vec<f32> = mask.flatten_all()?.to_vec1()?;
+        // Row 0: prefix [0,1] = 0; cand cols [0]=self -> 0; [1,2]=-inf
+        assert_eq!(m[0], 0.0);
+        assert_eq!(m[1], 0.0);
+        assert_eq!(m[2], 0.0);
+        assert!(m[3].is_infinite());
+        assert!(m[4].is_infinite());
+        // Row 1: prefix=0; cand cols [0,1]=ancestors -> 0; [2]=-inf
+        assert_eq!(m[5 + 0], 0.0);
+        assert_eq!(m[5 + 1], 0.0);
+        assert_eq!(m[5 + 2], 0.0);
+        assert_eq!(m[5 + 3], 0.0);
+        assert!(m[5 + 4].is_infinite());
+        // Row 2: prefix=0; cand cols [0,1,2]=full path -> all 0
+        for col in 0..5 {
+            assert_eq!(m[10 + col], 0.0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_tree_attention_mask_branching() -> Result<()> {
+        let device = Device::Cpu;
+        // tree:
+        //     root
+        //      |
+        //   0 (tok)
+        //    /   \
+        //   1     2
+        let parents = vec![None, Some(0), Some(0)];
+        let mask = create_tree_attention_mask(&parents, 0, DType::F32, &device)?;
+        assert_eq!(mask.dims(), &[1, 1, 3, 3]);
+        let m: Vec<f32> = mask.flatten_all()?.to_vec1()?;
+        // Node 1 should NOT attend to node 2 (its sibling).
+        // Layout: row*3 + col
+        // Row 1 (node 1): col 0 = parent (allowed), col 1 = self (allowed), col 2 = sibling (FORBIDDEN)
+        assert_eq!(m[3 + 0], 0.0);
+        assert_eq!(m[3 + 1], 0.0);
+        assert!(m[3 + 2].is_infinite());
+        // Row 2 (node 2): col 0 = parent, col 1 = sibling, col 2 = self
+        assert_eq!(m[6 + 0], 0.0);
+        assert!(m[6 + 1].is_infinite());
+        assert_eq!(m[6 + 2], 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_tree_attention_mask_empty() -> Result<()> {
+        let device = Device::Cpu;
+        let mask = create_tree_attention_mask(&[], 4, DType::F32, &device)?;
+        assert_eq!(mask.dims(), &[1, 1, 0, 4]);
         Ok(())
     }
 

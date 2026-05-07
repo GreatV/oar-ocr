@@ -48,6 +48,9 @@ pub mod utils;
 // Shared attention implementation
 pub mod attention;
 
+// Hierarchical Speculative Decoding
+pub mod hsd;
+
 // Re-exports for convenience
 pub use paddleocr_vl::{
     PaddleOcrVl, PaddleOcrVlConfig, PaddleOcrVlImageProcessorConfig, PaddleOcrVlTask,
