@@ -8,10 +8,8 @@
 //! ## Module Structure
 //!
 //! - `paddleocr_vl` - PaddleOCR-VL for OCR, table, formula, chart, spotting, and seal recognition
-//! - `unirec` - UniRec unified text/formula/table recognition
 //! - `hunyuanocr` - HunyuanOCR OCR expert VLM
 //! - `glmocr` - GLM-OCR OCR expert VLM
-//! - `lightonocr` - LightOnOCR end-to-end OCR VLM
 //! - `mineru` - MinerU2.5 document parsing VLM (Qwen2-VL backbone)
 //! - `doc_parser` - Unified document parsing with pluggable recognition backends
 //! - `utils` - Utility functions (device parsing, candle helpers, markdown, OTSL conversion)
@@ -39,10 +37,8 @@
 pub mod doc_parser;
 pub mod glmocr;
 pub mod hunyuanocr;
-pub mod lightonocr;
 pub mod mineru;
 pub mod paddleocr_vl;
-pub mod unirec;
 pub mod utils;
 
 // Shared attention implementation
@@ -56,11 +52,8 @@ pub use paddleocr_vl::{
     PaddleOcrVl, PaddleOcrVlConfig, PaddleOcrVlImageProcessorConfig, PaddleOcrVlTask,
 };
 
-pub use unirec::UniRec;
-
 pub use glmocr::GlmOcr;
 pub use hunyuanocr::HunyuanOcr;
-pub use lightonocr::LightOnOcr;
 pub use mineru::MinerU;
 
 pub use doc_parser::{DocParser, DocParserConfig, RecognitionBackend, RecognitionTask};

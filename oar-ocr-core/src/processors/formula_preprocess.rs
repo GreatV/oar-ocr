@@ -326,22 +326,25 @@ pub fn normalize_latex(latex: &str) -> String {
         prev_result = result.clone();
 
         // Python pattern 1: r"(?!\\ )(%s)\s+?(%s)" % (noletter, noletter)
-        // This removes spaces between two non-letters unless preceded by backslash-space
-        // We need to be careful not to remove spaces after \\
+        // In Python's raw regex, `\\ ` matches a literal `\` followed by space —
+        // i.e. the LaTeX thin-space token `\ `. The negative lookahead therefore
+        // refuses to match `(noletter)` when it would start with `\ `, leaving
+        // LaTeX thin spaces untouched. The earlier Rust port checked for `\\ `
+        // (two literal backslashes + space, i.e. LaTeX line break) which is the
+        // wrong token; that bug let `\ \ ` collapse to `\\` and dropped both
+        // thin spaces.
         let mut temp = String::new();
         let chars: Vec<char> = result.chars().collect();
         let mut i = 0;
         while i < chars.len() {
-            if i + 2 < chars.len()
-                && chars[i] == '\\'
-                && chars[i + 1] == '\\'
-                && chars[i + 2] == ' '
-            {
-                // Keep "\\ " as is
+            if i + 1 < chars.len() && chars[i] == '\\' && chars[i + 1] == ' ' {
+                // Python's lookahead refuses to *start* a match at this `\`,
+                // but the following space is still a normal-space candidate for
+                // matches that begin at the next character. Mirror that by only
+                // emitting the backslash here and letting the next iteration
+                // decide what to do with the space.
                 temp.push(chars[i]);
-                temp.push(chars[i + 1]);
-                temp.push(chars[i + 2]);
-                i += 3;
+                i += 1;
             } else if i + 1 < chars.len() && chars[i + 1].is_whitespace() {
                 // Check if current char is noletter
                 let is_noletter_current = !chars[i].is_ascii_alphabetic();

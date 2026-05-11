@@ -564,6 +564,10 @@ impl PaddleOcrVl {
         self.decode_generated_tokens(tokens, task)
     }
 
+    pub fn tokenizer(&self) -> &Tokenizer {
+        &self.tokenizer
+    }
+
     fn decode_generated_tokens(
         &self,
         tokens: &[u32],

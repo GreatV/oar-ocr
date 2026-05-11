@@ -302,6 +302,10 @@ impl GlmOcr {
         self.decode_generated_tokens(tokens)
     }
 
+    pub fn tokenizer(&self) -> &Tokenizer {
+        &self.tokenizer
+    }
+
     fn decode_generated_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
         let decoded = self
             .tokenizer

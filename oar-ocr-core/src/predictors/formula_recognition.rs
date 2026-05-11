@@ -105,6 +105,7 @@ impl FormulaRecognitionPredictorBuilder {
             state: PredictorBuilderState::new(FormulaRecognitionConfig {
                 score_threshold: 0.0,
                 max_length: 1536,
+                batch_size: 8,
             }),
             model_name: "FormulaRecognition".to_string(),
             tokenizer_path: None,

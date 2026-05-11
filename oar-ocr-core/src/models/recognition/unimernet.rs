@@ -43,6 +43,9 @@ pub struct UniMERNetPostprocessConfig {
     pub sos_token_id: i64,
     /// End-of-sequence token id
     pub eos_token_id: i64,
+    /// Tokenizer vocabulary size. Non-negative IDs at or above this value are
+    /// treated as padding/sentinel values emitted by exported ONNX models.
+    pub vocab_size: i64,
 }
 
 impl Default for UniMERNetPostprocessConfig {
@@ -50,6 +53,7 @@ impl Default for UniMERNetPostprocessConfig {
         Self {
             sos_token_id: 0,
             eos_token_id: 2,
+            vocab_size: i64::MAX,
         }
     }
 }
@@ -190,6 +194,7 @@ impl UniMERNetModel {
                 .iter()
                 .copied()
                 .take_while(|&id| id != config.eos_token_id)
+                .take_while(|&id| id < 0 || id < config.vocab_size)
                 .filter(|&id| id >= 0 && id != config.sos_token_id)
                 .map(|id| id as u32)
                 .collect();
@@ -275,5 +280,39 @@ impl UniMERNetModelBuilder {
         }
 
         UniMERNetModel::new(inference, preprocess_config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::arr2;
+
+    #[test]
+    fn filter_tokens_stops_at_vocab_sentinel() {
+        let token_ids = arr2(&[[0, 42, 49_999, 4_096_990_134i64, 77, 2]]);
+        let config = UniMERNetPostprocessConfig {
+            sos_token_id: 0,
+            eos_token_id: 2,
+            vocab_size: 50_000,
+        };
+
+        let filtered = UniMERNetModel::filter_tokens(&token_ids, &config);
+
+        assert_eq!(filtered, vec![vec![42, 49_999]]);
+    }
+
+    #[test]
+    fn filter_tokens_still_stops_at_eos() {
+        let token_ids = arr2(&[[0, 42, 2, 43]]);
+        let config = UniMERNetPostprocessConfig {
+            sos_token_id: 0,
+            eos_token_id: 2,
+            vocab_size: 50_000,
+        };
+
+        let filtered = UniMERNetModel::filter_tokens(&token_ids, &config);
+
+        assert_eq!(filtered, vec![vec![42]]);
     }
 }

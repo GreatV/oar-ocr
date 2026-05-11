@@ -5,7 +5,7 @@
 //!
 //! ## High-level flow
 //!
-//! 1. A lightweight pipeline drafter (e.g., PP-DocLayout + PP-OCRv5/UniRec) emits
+//! 1. A lightweight pipeline drafter (e.g., PP-DocLayout + PP-OCRv5) emits
 //!    a region partition `R = {r_i}` and a coarse text draft for each region.
 //! 2. Each region draft is tokenized with the **target VLM's** tokenizer, yielding
 //!    [`RegionDraft`]. The aggregated reading-order draft becomes [`PageDraft`].

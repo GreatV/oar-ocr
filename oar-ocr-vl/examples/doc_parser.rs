@@ -1,19 +1,16 @@
 //! Unified Document Parser Example
 //!
-//! This example demonstrates the unified DocParser API that supports multiple
-//! recognition models for two-stage document parsing (layout detection + recognition).
+//! This example demonstrates the unified DocParser API for external
+//! layout-first document parsing (layout detection + region recognition).
+//!
+//! HunyuanOCR and MinerU2.5 are intentionally not exposed here:
+//! their reference-quality usage is full-page prompt-driven parsing or a
+//! model-native two-step pipeline, not forced external layout crops.
 //!
 //! # Usage
 //!
 //! ```bash
-//! # Using UniRec model (default, lighter)
-//! cargo run -p oar-ocr-vl --example doc_parser -- \
-//!     --model-name unirec \
-//!     --model-dir models/unirec-0.1b \
-//!     --layout-model models/pp-doclayoutv3.onnx \
-//!     document.jpg
-//!
-//! # Using PaddleOCR-VL model (heavier, more accurate)
+//! # Using PaddleOCR-VL model
 //! cargo run -p oar-ocr-vl --example doc_parser -- \
 //!     --model-name paddleocr-vl \
 //!     --model-dir PaddleOCR-VL \
@@ -27,23 +24,10 @@
 //!     --layout-model models/pp-doclayoutv3.onnx \
 //!     document.jpg
 //!
-//! # Using LightOnOCR model (end-to-end OCR)
-//! cargo run -p oar-ocr-vl --example doc_parser -- \
-//!     --model-name lightonocr \
-//!     --model-dir LightOnOCR-2-1B \
-//!     document.jpg
-//!
 //! # Using GLM-OCR model
 //! cargo run -p oar-ocr-vl --example doc_parser -- \
 //!     --model-name glmocr \
 //!     --model-dir models/GLM-OCR \
-//!     --layout-model models/pp-doclayoutv3.onnx \
-//!     document.jpg
-//!
-//! # Using MinerU2.5 model
-//! cargo run -p oar-ocr-vl --example doc_parser -- \
-//!     --model-name mineru \
-//!     --model-dir models/MinerU2.5-2509-1.2B \
 //!     --layout-model models/pp-doclayoutv3.onnx \
 //!     document.jpg
 //! ```
@@ -65,44 +49,33 @@ use oar_ocr_vl::{DocParser, DocParserConfig};
 /// Recognition model type
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ModelName {
-    /// UniRec: Lightweight unified recognition
-    Unirec,
-    /// PaddleOCR-VL: Large VLM with task prompts
+    /// PaddleOCR-VL: VLM with task prompts
     #[value(name = "paddleocr-vl")]
     PaddleOcrVl,
     /// PaddleOCR-VL-1.5: Next-gen VLM with spotting and seal recognition
     #[value(name = "paddleocr-vl-1.5")]
     PaddleOcrVl15,
-    /// HunyuanOCR: OCR expert VLM (HunYuanVL)
-    #[value(name = "hunyuanocr")]
-    HunyuanOcr,
     /// GLM-OCR: OCR expert VLM (GLM-V)
     #[value(name = "glmocr")]
     GlmOcr,
-    /// LightOnOCR: End-to-end OCR VLM
-    #[value(name = "lightonocr")]
-    LightOnOcr,
-    /// MinerU2.5: Qwen2-VL document parsing model
-    #[value(name = "mineru")]
-    MinerU,
 }
 
 /// Command-line arguments
 #[derive(Parser)]
 #[command(name = "doc_parser")]
 #[command(
-    about = "Unified Document Parser - supports UniRec, PaddleOCR-VL, PaddleOCR-VL-1.5, HunyuanOCR, GLM-OCR, LightOnOCR, and MinerU2.5 models"
+    about = "Unified external-layout DocParser - supports PaddleOCR-VL, PaddleOCR-VL-1.5, and GLM-OCR"
 )]
 struct Args {
     /// Recognition model to use
-    #[arg(short = 'n', long, value_enum, default_value = "unirec")]
+    #[arg(short = 'n', long, value_enum, default_value = "paddleocr-vl-1.5")]
     model_name: ModelName,
 
     /// Path to the model directory
     #[arg(short, long)]
     model_dir: PathBuf,
 
-    /// Path to the PP-DocLayout ONNX model file (v2/v3, required unless using lightonocr)
+    /// Path to the PP-DocLayout ONNX model file (v2/v3, required)
     #[arg(short, long)]
     layout_model: Option<PathBuf>,
 
@@ -132,7 +105,7 @@ struct Args {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use oar_ocr_vl::{GlmOcr, HunyuanOcr, LightOnOcr, MinerU, PaddleOcrVl, UniRec};
+    use oar_ocr_vl::{GlmOcr, PaddleOcrVl};
 
     utils::init_tracing();
     let args = Args::parse();
@@ -145,23 +118,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         error!("Model directory not found: {}", args.model_dir.display());
         return Err("Model directory not found".into());
     }
-    let needs_layout = !matches!(args.model_name, ModelName::LightOnOcr);
-    let layout_model_path = if needs_layout {
-        let path = args.layout_model.as_ref().ok_or_else(|| {
-            error!(
-                "Layout model is required for {:?} (not needed for LightOnOcr)",
-                args.model_name
-            );
-            "Layout model not provided"
-        })?;
-        if !path.exists() {
-            error!("Layout model not found: {}", path.display());
-            return Err("Layout model not found".into());
-        }
-        Some(path)
-    } else {
-        None
-    };
+    let layout_model_path = args.layout_model.as_ref().ok_or_else(|| {
+        error!(
+            "Layout model is required for {:?}. Use the hunyuanocr/mineru examples for model-native full-page parsing.",
+            args.model_name
+        );
+        "Layout model not provided"
+    })?;
+    if !layout_model_path.exists() {
+        error!("Layout model not found: {}", layout_model_path.display());
+        return Err("Layout model not found".into());
+    }
 
     // Filter valid images
     let existing_images: Vec<PathBuf> =
@@ -179,31 +146,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = parse_device(&args.device)?;
     info!("Device: {:?}", device);
 
-    let layout_predictor = if let Some(layout_path) = layout_model_path {
-        info!("Loading layout model...");
-        let normalized_layout_name = args.layout_model_name.to_lowercase().replace('-', "_");
-        let layout_config = match normalized_layout_name.as_str() {
-            "pp_doclayoutv2" | "pp_doclayout_v2" => {
-                Some(LayoutDetectionConfig::with_pp_doclayoutv2_defaults())
-            }
-            "pp_doclayoutv3" | "pp_doclayout_v3" => {
-                Some(LayoutDetectionConfig::with_pp_doclayoutv3_defaults())
-            }
-            "pp_structurev3" | "pp_structure_v3" => {
-                Some(LayoutDetectionConfig::with_pp_structurev3_defaults())
-            }
-            _ => None,
-        };
-
-        let mut layout_builder =
-            LayoutDetectionPredictor::builder().model_name(&args.layout_model_name);
-        if let Some(config) = layout_config {
-            layout_builder = layout_builder.with_config(config);
+    info!("Loading layout model...");
+    let normalized_layout_name = args.layout_model_name.to_lowercase().replace('-', "_");
+    let layout_config = match normalized_layout_name.as_str() {
+        "pp_doclayoutv2" | "pp_doclayout_v2" => {
+            Some(LayoutDetectionConfig::with_pp_doclayoutv2_defaults())
         }
-        Some(layout_builder.build(layout_path)?)
-    } else {
-        None
+        "pp_doclayoutv3" | "pp_doclayout_v3" => {
+            Some(LayoutDetectionConfig::with_pp_doclayoutv3_defaults())
+        }
+        "pp_structurev3" | "pp_structure_v3" => {
+            Some(LayoutDetectionConfig::with_pp_structurev3_defaults())
+        }
+        _ => None,
     };
+
+    let mut layout_builder =
+        LayoutDetectionPredictor::builder().model_name(&args.layout_model_name);
+    if let Some(config) = layout_config {
+        layout_builder = layout_builder.with_config(config);
+    }
+    let layout_predictor = layout_builder.build(layout_model_path)?;
 
     // Create config
     let config = DocParserConfig {
@@ -213,18 +176,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Process images with the selected model
     match args.model_name {
-        ModelName::Unirec => {
-            info!("Loading UniRec model...");
-            let load_start = Instant::now();
-            let unirec = UniRec::from_dir(&args.model_dir, device)?;
-            info!(
-                "UniRec loaded in {:.2}ms",
-                load_start.elapsed().as_secs_f64() * 1000.0
-            );
-
-            let parser = DocParser::with_config(&unirec, config);
-            process_images(&parser, layout_predictor.as_ref(), &existing_images, &args)?;
-        }
         ModelName::PaddleOcrVl | ModelName::PaddleOcrVl15 => {
             info!("Loading PaddleOCR-VL model...");
             let load_start = Instant::now();
@@ -235,19 +186,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             let parser = DocParser::with_config(&vl, config);
-            process_images(&parser, layout_predictor.as_ref(), &existing_images, &args)?;
-        }
-        ModelName::HunyuanOcr => {
-            info!("Loading HunyuanOCR model...");
-            let load_start = Instant::now();
-            let model = HunyuanOcr::from_dir(&args.model_dir, device)?;
-            info!(
-                "HunyuanOCR loaded in {:.2}ms",
-                load_start.elapsed().as_secs_f64() * 1000.0
-            );
-
-            let parser = DocParser::with_config(&model, config);
-            process_images(&parser, layout_predictor.as_ref(), &existing_images, &args)?;
+            process_images(&parser, &layout_predictor, &existing_images, &args)?;
         }
         ModelName::GlmOcr => {
             info!("Loading GLM-OCR model...");
@@ -259,31 +198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             let parser = DocParser::with_config(&model, config);
-            process_images(&parser, layout_predictor.as_ref(), &existing_images, &args)?;
-        }
-        ModelName::LightOnOcr => {
-            info!("Loading LightOnOCR model...");
-            let load_start = Instant::now();
-            let model = LightOnOcr::from_dir(&args.model_dir, device)?;
-            info!(
-                "LightOnOCR loaded in {:.2}ms",
-                load_start.elapsed().as_secs_f64() * 1000.0
-            );
-
-            let parser = DocParser::with_config(&model, config);
-            process_images(&parser, layout_predictor.as_ref(), &existing_images, &args)?;
-        }
-        ModelName::MinerU => {
-            info!("Loading MinerU2.5 model...");
-            let load_start = Instant::now();
-            let model = MinerU::from_dir(&args.model_dir, device)?;
-            info!(
-                "MinerU2.5 loaded in {:.2}ms",
-                load_start.elapsed().as_secs_f64() * 1000.0
-            );
-
-            let parser = DocParser::with_config(&model, config);
-            process_images(&parser, layout_predictor.as_ref(), &existing_images, &args)?;
+            process_images(&parser, &layout_predictor, &existing_images, &args)?;
         }
     }
     Ok(())
@@ -291,7 +206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn process_images<B: oar_ocr_vl::RecognitionBackend>(
     parser: &DocParser<B>,
-    layout_predictor: Option<&LayoutDetectionPredictor>,
+    layout_predictor: &LayoutDetectionPredictor,
     images: &[PathBuf],
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -315,10 +230,7 @@ fn process_images<B: oar_ocr_vl::RecognitionBackend>(
         };
 
         let start = Instant::now();
-        let result = match layout_predictor {
-            Some(predictor) => parser.parse(predictor, rgb_img),
-            None => parser.parse_without_layout(rgb_img),
-        };
+        let result = parser.parse(layout_predictor, rgb_img);
         match result {
             Ok(result) => {
                 info!("  Parsed in {:.2}s", start.elapsed().as_secs_f64());

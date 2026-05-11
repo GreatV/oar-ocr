@@ -22,6 +22,62 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
 
+/// Read `generation_config.json::repetition_penalty`. Returns 1.0 (no-op) if
+/// the file is missing, unparseable, or the field is absent — matches
+/// HuggingFace's default. Local HunyuanOCR config ships 1.03.
+fn load_repetition_penalty(model_dir: &Path) -> f64 {
+    let path = model_dir.join("generation_config.json");
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return 1.0;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return 1.0;
+    };
+    v.get("repetition_penalty").and_then(|x| x.as_f64()).unwrap_or(1.0)
+}
+
+/// Apply HuggingFace's `RepetitionPenaltyLogitsProcessor` rule to a 1D logits
+/// tensor and return the argmax id. For each token id that appears in
+/// `seen`, the rule pushes its logit toward zero **once**:
+/// `logit /= penalty` when positive, `logit *= penalty` when non-positive
+/// (see `transformers.generation.logits_process.RepetitionPenaltyLogitsProcessor`).
+/// HF computes this with `scatter(input_ids, …)`, which collapses duplicate
+/// positions in `input_ids` down to a single penalty per unique vocab id —
+/// applying the penalty per *occurrence* would compound to `penalty^k` for a
+/// token repeated `k` times and quickly suppresses legitimate high-frequency
+/// tokens like `<td>` in a structured HTML page. We dedup before applying.
+fn argmax_with_repetition_penalty(
+    logits: &Tensor,
+    seen: &[u32],
+    penalty: f32,
+) -> Result<u32, OCRError> {
+    let mut vec = logits
+        .to_dtype(DType::F32)
+        .and_then(|t| t.to_vec1::<f32>())
+        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "rep penalty to_vec1", e))?;
+    let vocab = vec.len();
+    let mut unique: Vec<u32> = seen.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    for &id in &unique {
+        let idx = id as usize;
+        if idx >= vocab {
+            continue;
+        }
+        let v = vec[idx];
+        vec[idx] = if v > 0.0 { v / penalty } else { v * penalty };
+    }
+    let mut best_idx = 0usize;
+    let mut best_val = f32::NEG_INFINITY;
+    for (i, &v) in vec.iter().enumerate() {
+        if v > best_val {
+            best_val = v;
+            best_idx = i;
+        }
+    }
+    Ok(best_idx as u32)
+}
+
 pub struct HunyuanOcr {
     model_dir: PathBuf,
     device: Device,
@@ -32,6 +88,14 @@ pub struct HunyuanOcr {
     llm: HunyuanLlm,
     vision: HunyuanVisionModel,
     stop_token_ids: Vec<u32>,
+    /// `generation_config.json::repetition_penalty`. HuggingFace's
+    /// `generate(do_sample=False)` still applies repetition_penalty via the
+    /// LogitsProcessor list before the argmax. Without it, large-context chart
+    /// inputs can collapse into runaway-repeat loops (e.g. Mermaid node IDs
+    /// `A, B, … BZ, BZW, BZWW, BZWWZ …`) that never hit EOS. Default 1.0 means
+    /// the value isn't applied. Only the baseline greedy path consumes this;
+    /// the HSD verification paths intentionally keep raw logits.
+    repetition_penalty: f64,
 }
 
 impl HunyuanOcr {
@@ -70,6 +134,8 @@ impl HunyuanOcr {
         let llm = HunyuanLlm::load(&cfg, vb.pp("model"))?;
         let vision = HunyuanVisionModel::load(&cfg.vision_config, vb.pp("vit"))?;
 
+        let repetition_penalty = load_repetition_penalty(model_dir);
+
         Ok(Self {
             model_dir: model_dir.to_path_buf(),
             device,
@@ -80,6 +146,7 @@ impl HunyuanOcr {
             llm,
             vision,
             stop_token_ids,
+            repetition_penalty,
         })
     }
 
@@ -432,18 +499,27 @@ impl HunyuanOcr {
                 if finished[i] {
                     next_tokens.push(0); // Padding token for finished samples
                 } else {
-                    // Plain greedy argmax. We previously experimented with
-                    // applying `generation_config.json`'s repetition_penalty
-                    // here, but that diverges baseline from the HSD `step_one`
-                    // / `verify_tree` paths (which intentionally consume raw
-                    // logits / log-probs to keep the τ-tolerance test stable),
-                    // and oracle-draft AAL collapses from 64 → ~0.6 across
-                    // the doc_test demo. Keep both paths on the same sampling
-                    // policy until the HSD path also honours rep penalty.
-                    let tok = logits
-                        .argmax(D::Minus1)
-                        .and_then(|t| t.to_scalar::<u32>())
-                        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "argmax", e))?;
+                    // Mirror HuggingFace's `generate(do_sample=False)`: even
+                    // greedy decoding runs the LogitsProcessor list, so the
+                    // `repetition_penalty` from generation_config.json gets
+                    // applied to logits before argmax. Without this the model
+                    // can spiral into runaway-repeat loops on large-context
+                    // inputs (observed on chart_01.jpg, seq≈11584, producing
+                    // 33K chars of synthetic Mermaid node IDs `BZ, BZW, …`).
+                    // HSD paths intentionally skip this to keep raw log-probs
+                    // for the τ-tolerance verification.
+                    let tok = if self.repetition_penalty > 1.0 && !generated[i].is_empty() {
+                        argmax_with_repetition_penalty(
+                            logits,
+                            &generated[i],
+                            self.repetition_penalty as f32,
+                        )?
+                    } else {
+                        logits
+                            .argmax(D::Minus1)
+                            .and_then(|t| t.to_scalar::<u32>())
+                            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "argmax", e))?
+                    };
 
                     if self.stop_token_ids.contains(&tok) {
                         finished[i] = true;
@@ -488,11 +564,16 @@ impl HunyuanOcr {
             }
         }
 
+        self.llm.clear_kv_cache();
         Ok(generated)
     }
 
     pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
         self.decode_generated_tokens(tokens)
+    }
+
+    pub fn tokenizer(&self) -> &Tokenizer {
+        &self.tokenizer
     }
 
     fn decode_generated_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
@@ -665,6 +746,7 @@ impl HunyuanOcr {
         stats.stage2.accept = accept;
         stats.stage2.dsv = dsv;
         stats.stage2.forward_passes += backend.forward_passes;
+        self.llm.clear_kv_cache();
         Ok((generated, stats))
     }
 
@@ -832,6 +914,7 @@ impl HunyuanOcr {
         stats.forward_passes += backend.forward_passes;
         stats.dsv = dsv;
         stats.accept = accept;
+        self.llm.clear_kv_cache();
 
         let text = self
             .tokenizer

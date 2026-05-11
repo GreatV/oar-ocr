@@ -20,6 +20,9 @@ pub struct FormulaRecognitionConfig {
     /// Maximum formula length in tokens (default: 1536)
     #[validate(min = 1)]
     pub max_length: usize,
+    /// Preferred batch size for formula recognition.
+    #[validate(min = 1)]
+    pub batch_size: usize,
 }
 
 impl Default for FormulaRecognitionConfig {
@@ -27,6 +30,7 @@ impl Default for FormulaRecognitionConfig {
         Self {
             score_threshold: 0.0,
             max_length: 1536,
+            batch_size: 8,
         }
     }
 }

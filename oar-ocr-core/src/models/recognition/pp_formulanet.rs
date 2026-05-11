@@ -43,6 +43,9 @@ pub struct PPFormulaNetPostprocessConfig {
     pub sos_token_id: i64,
     /// End-of-sequence token id
     pub eos_token_id: i64,
+    /// Tokenizer vocabulary size. Non-negative IDs at or above this value are
+    /// treated as padding/sentinel values emitted by exported ONNX models.
+    pub vocab_size: i64,
 }
 
 impl Default for PPFormulaNetPostprocessConfig {
@@ -50,6 +53,7 @@ impl Default for PPFormulaNetPostprocessConfig {
         Self {
             sos_token_id: 0,
             eos_token_id: 2,
+            vocab_size: i64::MAX,
         }
     }
 }
@@ -129,12 +133,19 @@ impl PPFormulaNetModel {
                 source: Box::new(e),
             })?;
 
-        let output = outputs
-            .into_iter()
-            .next()
-            .ok_or_else(|| OCRError::InvalidInput {
-                message: "PP-FormulaNet: no output returned from inference".to_string(),
-            })?;
+        let output_shapes = self.inference.output_shapes();
+        tracing::info!("PP-FormulaNet declared output shapes: {:?}", output_shapes);
+
+        let mut outputs = outputs.into_iter();
+        let output = outputs.next().ok_or_else(|| OCRError::InvalidInput {
+            message: "PP-FormulaNet: no output returned from inference".to_string(),
+        })?;
+        tracing::info!(
+            "PP-FormulaNet selected output '{}' dtype={} runtime_shape={:?}",
+            output.0,
+            output.1.dtype_name(),
+            output.1.shape()
+        );
 
         output
             .1
@@ -190,6 +201,7 @@ impl PPFormulaNetModel {
                 .iter()
                 .copied()
                 .take_while(|&id| id != config.eos_token_id)
+                .take_while(|&id| id < 0 || id < config.vocab_size)
                 .filter(|&id| id >= 0 && id != config.sos_token_id)
                 .map(|id| id as u32)
                 .collect();
@@ -275,5 +287,39 @@ impl PPFormulaNetModelBuilder {
         }
 
         PPFormulaNetModel::new(inference, preprocess_config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::arr2;
+
+    #[test]
+    fn filter_tokens_stops_at_vocab_sentinel() {
+        let token_ids = arr2(&[[0, 42, 49_999, 4_096_990_134i64, 77, 2]]);
+        let config = PPFormulaNetPostprocessConfig {
+            sos_token_id: 0,
+            eos_token_id: 2,
+            vocab_size: 50_000,
+        };
+
+        let filtered = PPFormulaNetModel::filter_tokens(&token_ids, &config);
+
+        assert_eq!(filtered, vec![vec![42, 49_999]]);
+    }
+
+    #[test]
+    fn filter_tokens_still_stops_at_eos() {
+        let token_ids = arr2(&[[0, 42, 2, 43]]);
+        let config = PPFormulaNetPostprocessConfig {
+            sos_token_id: 0,
+            eos_token_id: 2,
+            vocab_size: 50_000,
+        };
+
+        let filtered = PPFormulaNetModel::filter_tokens(&token_ids, &config);
+
+        assert_eq!(filtered, vec![vec![42]]);
     }
 }

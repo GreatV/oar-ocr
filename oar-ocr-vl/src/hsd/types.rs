@@ -205,6 +205,12 @@ pub struct SpecDecodeStats {
     pub verify_tree_calls: u32,
     pub step_one_calls: u32,
     pub fallback_argmax_calls: u32,
+    pub candidate_steps: u32,
+    pub candidates_total: u64,
+    pub candidates_max: u32,
+    pub empty_tree_calls: u32,
+    pub rejected_tree_calls: u32,
+    pub accepted_tree_calls: u32,
     pub tree_nodes_total: u64,
     pub tree_nodes_max: u32,
 }
@@ -220,8 +226,22 @@ impl SpecDecodeStats {
         self.verify_tree_calls += other.verify_tree_calls;
         self.step_one_calls += other.step_one_calls;
         self.fallback_argmax_calls += other.fallback_argmax_calls;
+        self.candidate_steps += other.candidate_steps;
+        self.candidates_total += other.candidates_total;
+        self.candidates_max = self.candidates_max.max(other.candidates_max);
+        self.empty_tree_calls += other.empty_tree_calls;
+        self.rejected_tree_calls += other.rejected_tree_calls;
+        self.accepted_tree_calls += other.accepted_tree_calls;
         self.tree_nodes_total += other.tree_nodes_total;
         self.tree_nodes_max = self.tree_nodes_max.max(other.tree_nodes_max);
+    }
+
+    pub fn avg_candidates(&self) -> f32 {
+        if self.candidate_steps == 0 {
+            0.0
+        } else {
+            self.candidates_total as f32 / self.candidate_steps as f32
+        }
     }
 
     pub fn avg_tree_nodes(&self) -> f32 {

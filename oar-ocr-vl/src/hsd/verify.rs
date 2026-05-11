@@ -243,6 +243,10 @@ pub fn spec_decode<B: SpecBackend>(
         let tree = {
             let _r = nvtx::Range::new("dsv.candidate_build");
             let candidates = collect_candidates(tail, drafts, cfg);
+            let candidate_count = candidates.len() as u32;
+            timings.candidate_steps += 1;
+            timings.candidates_total += candidate_count as u64;
+            timings.candidates_max = timings.candidates_max.max(candidate_count);
             build_prefix_tree(&candidates)
         };
         timings.candidate_build += t_build.elapsed();
@@ -252,6 +256,7 @@ pub fn spec_decode<B: SpecBackend>(
         //    full vocab. On pages where most steps are fallbacks this saves
         //    ~20 ms / iteration vs the previous host-side argmax path.
         if tree.is_empty() {
+            timings.empty_tree_calls += 1;
             let t_argmax = Instant::now();
             let u_hat = {
                 let _r = nvtx::Range::new("dsv.fallback_argmax");
@@ -321,6 +326,11 @@ pub fn spec_decode<B: SpecBackend>(
             }
         }
         stats.record(path.len() as u32);
+        if path.is_empty() {
+            timings.rejected_tree_calls += 1;
+        } else {
+            timings.accepted_tree_calls += 1;
+        }
         if path_eos || accepted.len() >= max_new_tokens {
             break;
         }
@@ -367,6 +377,10 @@ fn spec_decode_strict<B: SpecBackend>(
         let tree = {
             let _r = nvtx::Range::new("dsv.candidate_build");
             let candidates = collect_candidates(tail, drafts, cfg);
+            let candidate_count = candidates.len() as u32;
+            timings.candidate_steps += 1;
+            timings.candidates_total += candidate_count as u64;
+            timings.candidates_max = timings.candidates_max.max(candidate_count);
             build_prefix_tree(&candidates)
         };
         timings.candidate_build += t_build.elapsed();
@@ -412,6 +426,7 @@ fn spec_decode_strict<B: SpecBackend>(
         }
 
         if step_accepted > 0 {
+            timings.accepted_tree_calls += 1;
             stats.record(step_accepted);
             if accepted
                 .last()
@@ -424,6 +439,11 @@ fn spec_decode_strict<B: SpecBackend>(
             continue;
         }
 
+        if tree.is_empty() {
+            timings.empty_tree_calls += 1;
+        } else {
+            timings.rejected_tree_calls += 1;
+        }
         let t_argmax = Instant::now();
         let u_hat = {
             let _r = nvtx::Range::new("dsv.fallback_argmax");

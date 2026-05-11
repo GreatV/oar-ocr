@@ -84,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Vision-Language Models (VLM)
 
-For advanced document understanding using Vision-Language Models (like PaddleOCR-VL, **PaddleOCR-VL-1.5**, UniRec, and MinerU2.5), check out the [`oar-ocr-vl`](oar-ocr-vl/README.md) crate.
+For advanced document understanding using Vision-Language Models (like PaddleOCR-VL, **PaddleOCR-VL-1.5**, GLM-OCR, HunyuanOCR, and MinerU2.5), check out the [`oar-ocr-vl`](oar-ocr-vl/README.md) crate.
 
 ## Documentation
 
@@ -116,7 +116,5 @@ This project builds upon the excellent work of several open-source projects:
 - **[ort](https://github.com/pykeio/ort)**: Rust bindings for ONNX Runtime by pykeio. This crate provides the Rust interface to ONNX Runtime that powers the efficient inference engine in this OCR library.
 
 - **[PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)**: Baidu's awesome multilingual OCR toolkits based on PaddlePaddle. This project utilizes PaddleOCR's pre-trained models, which provide excellent accuracy and performance for text detection and recognition across multiple languages.
-
-- **[OpenOCR](https://github.com/Topdu/OpenOCR)**: An open-source toolkit for general OCR research and applications by the FVL Laboratory at Fudan University. We use the UniRec model for unified text, formula, and table recognition.
 
 - **[Candle](https://github.com/huggingface/candle)**: A minimalist ML framework for Rust by Hugging Face. We use Candle to implement Vision-Language model inference.

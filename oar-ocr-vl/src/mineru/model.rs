@@ -583,6 +583,10 @@ impl MinerU {
         self.decode_generated_tokens(tokens)
     }
 
+    pub fn tokenizer(&self) -> &Tokenizer {
+        &self.tokenizer
+    }
+
     fn decode_generated_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
         // Filter out bos/eos/pad tokens before decoding (matching official implementation).
         let filtered: Vec<u32> = tokens

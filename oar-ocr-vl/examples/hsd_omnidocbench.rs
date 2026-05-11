@@ -30,14 +30,17 @@ use clap::{Parser, ValueEnum};
 use image::imageops::FilterType;
 use serde::Deserialize;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokenizers::Tokenizer;
 
 use oar_ocr::prelude::{OARStructure, OARStructureBuilder};
 use oar_ocr_core::core::config::OrtSessionConfig;
 use oar_ocr_core::domain::structure::{LayoutElement, LayoutElementType, StructureResult};
+use oar_ocr_core::domain::tasks::FormulaRecognitionConfig;
 use oar_ocr_core::predictors::TextRecognitionPredictor;
 use oar_ocr_core::processors::{BoundingBox, Point};
 use oar_ocr_core::utils::{BBoxCrop, load_image};
+use oar_ocr_vl::hsd::drafting::region_markdown;
 use oar_ocr_vl::hsd::types::{Draft, DsvConfig, HsdConfig, SpecDecodeStats};
 use oar_ocr_vl::utils::parse_device;
 use oar_ocr_vl::{GlmOcr, HunyuanOcr, MinerU, PaddleOcrVl, PaddleOcrVlTask};
@@ -174,6 +177,23 @@ struct Args {
     /// Print the first N chars of baseline + draft for each page (debug).
     #[arg(long, default_value_t = 0)]
     preview: usize,
+    /// Write baseline-vs-draft token alignment diagnostics to this file.
+    #[arg(long)]
+    token_diff_output: Option<PathBuf>,
+    /// Number of leading tokens to include in token diagnostics.
+    #[arg(long, default_value_t = 200)]
+    token_diff_limit: usize,
+    /// N-gram/window length used for token-match diagnostics.
+    #[arg(long, default_value_t = 3)]
+    token_diff_window_len: usize,
+    /// Stop after writing token diagnostics, before running HSD.
+    #[arg(long, default_value_t = false)]
+    token_diff_only: bool,
+    /// In page mode, run HunyuanOCR's full Stage-1 + Stage-2 HSD path when
+    /// region elements are available from the drafter. Use
+    /// `--page-dual-stage=false` to keep the page-level-only ablation.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    page_dual_stage: bool,
     /// Count pages with AAL at or below this threshold as low-AAL outliers.
     #[arg(long, default_value_t = 0.5)]
     outlier_aal_threshold: f32,
@@ -188,6 +208,11 @@ struct Args {
     /// text/table/formula drafts in region mode).
     #[arg(long, default_value = "gt")]
     draft_source: String,
+    /// Preserve legacy Hunyuan GT draft markdown heuristics (`# title` and
+    /// `$$\nformula\n$$`). The default is tuned for token overlap with
+    /// HunyuanOCR baseline output.
+    #[arg(long, default_value_t = false)]
+    hunyuan_legacy_gt_format: bool,
     /// Apply lightweight PaddleOCR-VL region GT surface normalization. Only
     /// affects `--backend paddleocr_vl --mode region --draft-source gt`.
     #[arg(long, default_value_t = false)]
@@ -255,6 +280,16 @@ struct Args {
     /// Formula model type for structure LaTeX drafts.
     #[arg(long, default_value = "pp_formulanet")]
     structure_formula_type: String,
+    /// Device for structure formula recognition. Defaults to the drafter
+    /// device; use `cpu` to avoid PP-FormulaNet CUDA EP output corruption.
+    #[arg(long)]
+    structure_formula_device: Option<String>,
+    /// Preferred formula recognition batch size for structure drafts.
+    #[arg(long, default_value_t = 8)]
+    structure_formula_batch_size: usize,
+    /// Maximum decoded formula length for structure drafts.
+    #[arg(long, default_value_t = 1536)]
+    structure_formula_max_length: usize,
     /// Strict IoU floor for cross-category structure → region matches. The
     /// previous "max IoU wins regardless of type" policy is preserved at this
     /// floor as a safety net for cases where the structure pipeline assigns
@@ -322,8 +357,51 @@ struct PageInfo {
     page_attribute: serde_json::Value,
 }
 
+#[derive(Clone, Copy)]
+struct DraftFormat {
+    heading_prefix: bool,
+    wrap_formulas: bool,
+    formula_newlines: bool,
+    space_after_sec_dot: bool,
+    separator_after_page_number: bool,
+}
+
+impl DraftFormat {
+    fn markdown() -> Self {
+        Self {
+            heading_prefix: true,
+            wrap_formulas: true,
+            formula_newlines: true,
+            space_after_sec_dot: false,
+            separator_after_page_number: false,
+        }
+    }
+
+    fn hunyuan_aligned() -> Self {
+        Self {
+            heading_prefix: false,
+            wrap_formulas: false,
+            formula_newlines: false,
+            space_after_sec_dot: true,
+            separator_after_page_number: true,
+        }
+    }
+}
+
+fn align_hunyuan_heading(text: &str, fmt: DraftFormat) -> String {
+    if !fmt.space_after_sec_dot {
+        return text.to_string();
+    }
+    if let Some(rest) = text.strip_prefix("SEC.")
+        && rest.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+    {
+        return format!("SEC. {rest}");
+    }
+    text.to_string()
+}
+
 /// Heuristic markdown-style serialisation for one page's draft.
-fn build_draft(entry: &OmniEntry) -> String {
+fn build_draft(entry: &OmniEntry, fmt: DraftFormat) -> String {
     let mut dets: Vec<&LayoutDet> = entry
         .layout_dets
         .iter()
@@ -338,13 +416,17 @@ fn build_draft(entry: &OmniEntry) -> String {
         if text.is_empty() {
             continue;
         }
-        let formatted = match d.category_type.as_str() {
-            "title" | "header" => format!("# {text}"),
+        let category = d.category_type.as_str();
+        let formatted = match category {
+            "title" | "header" if fmt.heading_prefix => format!("# {text}"),
+            "title" | "header" => align_hunyuan_heading(text, fmt),
             "equation_isolated" | "equation_semantic" => {
-                if text.starts_with("$$") || text.starts_with("\\[") {
+                if !fmt.wrap_formulas || text.starts_with("$$") || text.starts_with("\\[") {
                     text.to_string()
-                } else {
+                } else if fmt.formula_newlines {
                     format!("$$\n{text}\n$$")
+                } else {
+                    format!("$${text}$$")
                 }
             }
             _ => text.to_string(),
@@ -353,6 +435,9 @@ fn build_draft(entry: &OmniEntry) -> String {
             out.push_str("\n\n");
         }
         out.push_str(&formatted);
+        if fmt.separator_after_page_number && category == "page_number" {
+            out.push_str("\n\n---");
+        }
     }
     out
 }
@@ -407,16 +492,218 @@ fn build_gt_draft(
     backend: Backend,
     task: Task,
     image_size: (u32, u32),
+    hunyuan_legacy_gt_format: bool,
 ) -> String {
     match backend {
-        Backend::Hunyuan => build_draft(entry),
+        Backend::Hunyuan => build_draft(
+            entry,
+            if hunyuan_legacy_gt_format {
+                DraftFormat::markdown()
+            } else {
+                DraftFormat::hunyuan_aligned()
+            },
+        ),
         Backend::MinerU | Backend::GlmOcr => build_plain_draft(entry),
         Backend::PaddleOcrVl => match task {
             Task::Spotting => build_spotting_draft(entry, image_size.0, image_size.1),
             Task::Ocr | Task::Seal => build_plain_draft(entry),
-            Task::Table | Task::Chart | Task::Formula => build_draft(entry),
+            Task::Table | Task::Chart | Task::Formula => {
+                build_draft(entry, DraftFormat::markdown())
+            }
         },
     }
+}
+
+fn tokenize_draft(
+    tokenizer: &Tokenizer,
+    draft: &str,
+) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+    tokenizer
+        .encode(draft, false)
+        .map(|enc| enc.get_ids().to_vec())
+        .map_err(|e| format!("tokenizer encode failed: {e}").into())
+}
+
+fn token_piece(tokenizer: &Tokenizer, token: u32) -> String {
+    tokenizer
+        .decode(&[token], false)
+        .unwrap_or_else(|_| format!("<decode-error:{token}>"))
+        .replace('\n', "\\n")
+}
+
+fn count_window_hits(reference: &[u32], target: &[u32], window_len: usize) -> (usize, usize) {
+    if window_len == 0 || reference.len() < window_len {
+        return (0, 0);
+    }
+    let total = reference.len() - window_len + 1;
+    if target.len() < window_len {
+        return (0, total);
+    }
+    let hits = reference
+        .windows(window_len)
+        .filter(|w| target.windows(window_len).any(|dw| dw == *w))
+        .count();
+    (hits, total)
+}
+
+fn best_per_draft_window_hits(
+    reference: &[u32],
+    drafts: &[Vec<u32>],
+    window_len: usize,
+) -> (usize, usize) {
+    drafts
+        .iter()
+        .map(|draft| count_window_hits(reference, draft, window_len))
+        .max_by_key(|(hits, _)| *hits)
+        .unwrap_or((
+            0,
+            reference.len().saturating_sub(window_len).saturating_add(1),
+        ))
+}
+
+struct TokenDiffInput<'a> {
+    page_idx: usize,
+    image_path: &'a str,
+    backend: Backend,
+    mode: Mode,
+    draft_source: &'a str,
+    baseline_text: &'a str,
+    draft_text: &'a str,
+    baseline_tokens: &'a [u32],
+    draft_tokens: &'a [u32],
+    structure_elements: Option<&'a [LayoutElement]>,
+    hsd_page_draft_count: usize,
+    region_draft_count: usize,
+    per_draft_max_hits: Option<(usize, usize)>,
+    limit: usize,
+    window_len: usize,
+}
+
+fn preview_text(input: &str, limit: usize) -> String {
+    input
+        .chars()
+        .take(limit)
+        .collect::<String>()
+        .replace('\n', "\\n")
+}
+
+fn append_token_diff_report(out: &mut String, tokenizer: &Tokenizer, input: TokenDiffInput<'_>) {
+    let common = input
+        .baseline_tokens
+        .iter()
+        .zip(input.draft_tokens.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let (hits, total) =
+        count_window_hits(input.baseline_tokens, input.draft_tokens, input.window_len);
+    let hit_rate = if total > 0 {
+        hits as f64 / total as f64
+    } else {
+        0.0
+    };
+    out.push_str(&format!(
+        "# HSD Token Diff\n\n\
+         | field | value |\n\
+         |---|---|\n\
+         | page idx | {} |\n\
+         | image | {} |\n\
+         | backend | {} |\n\
+         | mode | {:?} |\n\
+         | draft source | {} |\n\
+         | baseline chars | {} |\n\
+         | draft chars | {} |\n\
+         | baseline tokens | {} |\n\
+         | draft tokens | {} |\n\
+         | common token prefix | {} |\n\
+         | HSD page draft count | {} |\n\
+         | diagnostic region draft count | {} |\n\
+         | baseline {}-gram hits in concatenated/page draft | {}/{} ({:.3}) |\n",
+        input.page_idx,
+        input.image_path,
+        input.backend.as_str(),
+        input.mode,
+        input.draft_source,
+        input.baseline_text.chars().count(),
+        input.draft_text.chars().count(),
+        input.baseline_tokens.len(),
+        input.draft_tokens.len(),
+        common,
+        input.hsd_page_draft_count,
+        input.region_draft_count,
+        input.window_len,
+        hits,
+        total,
+        hit_rate
+    ));
+    if let Some((per_hits, per_total)) = input.per_draft_max_hits {
+        let per_rate = if per_total > 0 {
+            per_hits as f64 / per_total as f64
+        } else {
+            0.0
+        };
+        out.push_str(&format!(
+            "| best single-region {}-gram hits | {}/{} ({:.3}) |\n",
+            input.window_len, per_hits, per_total, per_rate
+        ));
+    }
+    out.push('\n');
+
+    if let Some(elements) = input.structure_elements {
+        out.push_str("## Structure Element Order\n\n");
+        out.push_str("| idx | type | bbox | text preview |\n");
+        out.push_str("|---:|---|---|---|\n");
+        for (idx, elem) in elements.iter().take(40).enumerate() {
+            let text = elem
+                .text
+                .as_deref()
+                .map(|s| preview_text(s, 120))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "| {} | {:?} | [{:.0},{:.0},{:.0},{:.0}] | `{}` |\n",
+                idx,
+                elem.element_type,
+                elem.bbox.x_min(),
+                elem.bbox.y_min(),
+                elem.bbox.x_max(),
+                elem.bbox.y_max(),
+                text.replace('`', "\\`")
+            ));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## First Differing Tokens\n\n");
+    out.push_str("| idx | baseline id | baseline piece | draft id | draft piece |\n");
+    out.push_str("|---:|---:|---|---:|---|\n");
+    let n = input
+        .limit
+        .min(input.baseline_tokens.len().max(input.draft_tokens.len()));
+    for i in common.saturating_sub(5)..n {
+        let b = input.baseline_tokens.get(i).copied();
+        let d = input.draft_tokens.get(i).copied();
+        let bp = b
+            .map(|t| token_piece(tokenizer, t))
+            .unwrap_or_else(|| "".to_string());
+        let dp = d
+            .map(|t| token_piece(tokenizer, t))
+            .unwrap_or_else(|| "".to_string());
+        out.push_str(&format!(
+            "| {} | {} | `{}` | {} | `{}` |\n",
+            i,
+            b.map(|t| t.to_string()).unwrap_or_default(),
+            bp.replace('`', "\\`"),
+            d.map(|t| t.to_string()).unwrap_or_default(),
+            dp.replace('`', "\\`")
+        ));
+    }
+
+    let bp: String = input.baseline_text.chars().take(1000).collect();
+    let dp: String = input.draft_text.chars().take(1000).collect();
+    out.push_str("\n## Baseline Text Preview\n\n```text\n");
+    out.push_str(&bp);
+    out.push_str("\n```\n\n## Draft Text Preview\n\n```text\n");
+    out.push_str(&dp);
+    out.push_str("\n```\n");
 }
 
 fn page_attr<'a>(entry: &'a OmniEntry, key: &str) -> &'a str {
@@ -879,7 +1166,16 @@ fn build_structure_drafter(args: &Args) -> Result<OARStructure, Box<dyn std::err
         let Some(tokenizer) = &args.structure_formula_tokenizer else {
             return Err("--structure-formula-model requires --structure-formula-tokenizer".into());
         };
-        builder = builder.with_formula_recognition(path, tokenizer, &args.structure_formula_type);
+        builder = builder
+            .with_formula_recognition(path, tokenizer, &args.structure_formula_type)
+            .formula_recognition_config(FormulaRecognitionConfig {
+                score_threshold: 0.0,
+                max_length: args.structure_formula_max_length,
+                batch_size: args.structure_formula_batch_size,
+            });
+        if let Some(formula_device) = &args.structure_formula_device {
+            builder = builder.formula_ort_session(parse_required_ort_device(formula_device)?);
+        }
     }
 
     Ok(builder.build()?)
@@ -898,9 +1194,150 @@ fn run_structure_drafter(
 fn run_structure_page_drafter(
     structure: &OARStructure,
     image: &image::RgbImage,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let result = structure.predict_image(image.clone())?;
-    Ok(result.to_markdown())
+) -> Result<StructureResult, Box<dyn std::error::Error>> {
+    Ok(structure.predict_image(image.clone())?)
+}
+
+fn structure_result_hsd_elements(result: &StructureResult) -> Vec<LayoutElement> {
+    let mut elements = result.layout_elements.clone();
+    for elem in &mut elements {
+        match elem.element_type {
+            LayoutElementType::Table => {
+                if elem.text.as_deref().is_none_or(|s| s.trim().is_empty())
+                    && let Some(table) = result
+                        .tables
+                        .iter()
+                        .filter_map(|table| {
+                            let html = table.html_structure.as_deref()?.trim();
+                            (!html.is_empty()).then(|| (table.bbox.iou(&elem.bbox), html))
+                        })
+                        .filter(|(iou, _)| *iou > 0.5)
+                        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                        .map(|(_, html)| html.to_string())
+                {
+                    elem.text = Some(table);
+                }
+            }
+            LayoutElementType::Formula => {
+                if elem.text.as_deref().is_none_or(|s| s.trim().is_empty())
+                    && let Some(latex) = result
+                        .formulas
+                        .iter()
+                        .filter_map(|formula| {
+                            let latex = formula.latex.trim();
+                            (!latex.is_empty()).then(|| (formula.bbox.iou(&elem.bbox), latex))
+                        })
+                        .filter(|(iou, _)| *iou > 0.5)
+                        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                        .map(|(_, latex)| latex.to_string())
+                {
+                    elem.text = Some(latex);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut unique = Vec::with_capacity(elements.len());
+    for elem in elements {
+        let duplicate = unique.iter().any(|prev: &LayoutElement| {
+            prev.element_type == elem.element_type && prev.bbox.iou(&elem.bbox) > 0.98
+        });
+        if !duplicate {
+            unique.push(elem);
+        }
+    }
+    unique
+}
+
+fn structure_page_draft_hunyuan(elements: &[LayoutElement]) -> String {
+    let mut out = String::new();
+    let first_body_y = elements
+        .iter()
+        .find(|elem| {
+            !matches!(
+                elem.element_type,
+                LayoutElementType::Header
+                    | LayoutElementType::HeaderImage
+                    | LayoutElementType::Number
+                    | LayoutElementType::Footer
+                    | LayoutElementType::FooterImage
+            )
+        })
+        .map(|elem| elem.bbox.y_min())
+        .unwrap_or(f32::INFINITY);
+    let top_page_numbers: Vec<usize> = elements
+        .iter()
+        .enumerate()
+        .filter(|(_, elem)| {
+            elem.element_type == LayoutElementType::Number && elem.bbox.y_min() <= first_body_y
+        })
+        .map(|(idx, _)| idx)
+        .collect();
+    let mut order = Vec::with_capacity(elements.len());
+    for (idx, elem) in elements.iter().enumerate() {
+        order.push(idx);
+        if matches!(
+            elem.element_type,
+            LayoutElementType::Header | LayoutElementType::HeaderImage
+        ) {
+            for &num_idx in &top_page_numbers {
+                if !order.contains(&num_idx) {
+                    order.push(num_idx);
+                }
+            }
+        }
+    }
+
+    let mut emitted_top_page_number = false;
+    for idx in order {
+        let elem = &elements[idx];
+        let is_top_page_number = top_page_numbers.contains(&idx);
+        if is_top_page_number && emitted_top_page_number {
+            continue;
+        }
+        let Some(text) = elem
+            .text
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let formatted = match elem.element_type {
+            LayoutElementType::Header
+            | LayoutElementType::DocTitle
+            | LayoutElementType::ParagraphTitle => {
+                align_hunyuan_heading(text, DraftFormat::hunyuan_aligned())
+            }
+            LayoutElementType::Formula | LayoutElementType::FormulaNumber => {
+                if text.starts_with("$$") || text.starts_with("\\[") {
+                    text.to_string()
+                } else {
+                    format!("$$ {text} $$")
+                }
+            }
+            LayoutElementType::Table => text.to_string(),
+            LayoutElementType::Image
+            | LayoutElementType::HeaderImage
+            | LayoutElementType::FooterImage
+            | LayoutElementType::Seal => continue,
+            _ => text.to_string(),
+        };
+        if formatted.trim().is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(formatted.trim());
+        if elem.element_type == LayoutElementType::Number {
+            out.push_str("\n\n---");
+            if is_top_page_number {
+                emitted_top_page_number = true;
+            }
+        }
+    }
+    out
 }
 
 fn match_structure_to_regions(
@@ -968,6 +1405,19 @@ fn parse_ort_device(device: &str) -> Result<Option<OrtSessionConfig>, Box<dyn st
     }
 
     Err(format!("unsupported device for PP-OCR drafter: {device}").into())
+}
+
+fn parse_required_ort_device(device: &str) -> Result<OrtSessionConfig, Box<dyn std::error::Error>> {
+    let device_lower = device.to_lowercase();
+    if device_lower == "cpu" {
+        use oar_ocr_core::core::config::OrtExecutionProvider;
+        return Ok(
+            OrtSessionConfig::new().with_execution_providers(vec![OrtExecutionProvider::CPU])
+        );
+    }
+
+    parse_ort_device(device)?
+        .ok_or_else(|| format!("unsupported explicit ONNX Runtime device: {device}").into())
 }
 
 fn drafter_device(args: &Args) -> &str {
@@ -1052,7 +1502,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         PathBuf::from(p)
     });
     let mut csv = String::from(
-        "page_idx,image,subset,language,backend,mode,task,device,drafter_device,draft_source,regions,draft_regions,draft_coverage,tau,max_tokens,resize_max,start_idx,prompt_kind,prompt,baseline_ms,hsd_ms,decode_ms,prefill_ms,dsv_candidate_ms,dsv_verify_ms,dsv_traverse_ms,dsv_commit_ms,dsv_step_one_ms,dsv_fallback_argmax_ms,dsv_verify_calls,dsv_step_one_calls,dsv_fallback_argmax_calls,dsv_avg_tree_nodes,dsv_max_tree_nodes,emitted_tokens,verify_steps,fallback_steps,aal,sr_decode,sr_e2e\n",
+        "page_idx,image,subset,language,backend,mode,task,device,drafter_device,draft_source,page_dual_stage,regions,draft_regions,draft_coverage,draft_3gram_hit_rate,tau,max_tokens,resize_max,start_idx,prompt_kind,prompt,baseline_ms,hsd_ms,drafter_ms,decode_ms,prefill_ms,dsv_candidate_ms,dsv_verify_ms,dsv_traverse_ms,dsv_commit_ms,dsv_step_one_ms,dsv_fallback_argmax_ms,dsv_verify_calls,dsv_step_one_calls,dsv_fallback_argmax_calls,dsv_avg_candidates,dsv_max_candidates,dsv_empty_tree_calls,dsv_rejected_tree_calls,dsv_accepted_tree_calls,dsv_avg_tree_nodes,dsv_max_tree_nodes,emitted_tokens,verify_steps,fallback_steps,aal,sr_decode,sr_e2e\n",
     );
 
     let cfg = HsdConfig {
@@ -1062,7 +1512,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_candidates_per_step: 32,
             max_suffix_len: 64,
         },
-        enable_stage1: matches!(args.mode, Mode::Region),
+        enable_stage1: matches!(args.mode, Mode::Region)
+            || (matches!(args.mode, Mode::Page) && args.page_dual_stage),
         enable_stage2: true,
         max_page_tokens: args.max_tokens,
         max_region_tokens: args.max_tokens,
@@ -1127,6 +1578,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sum_hsd_ms: f64 = 0.0;
     let mut sum_decode_ms: f64 = 0.0;
     let mut sum_prefill_ms: f64 = 0.0;
+    let mut sum_drafter_ms: f64 = 0.0;
     let mut sum_aal: f64 = 0.0;
     let mut sum_sr_decode: f64 = 0.0;
     let mut sum_sr_e2e: f64 = 0.0;
@@ -1201,7 +1653,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Vec::new()
         };
         let draft = match args.mode {
-            Mode::Page => build_gt_draft(entry, args.backend, args.task, gt_image_size),
+            Mode::Page => build_gt_draft(
+                entry,
+                args.backend,
+                args.task,
+                gt_image_size,
+                args.hunyuan_legacy_gt_format,
+            ),
             Mode::Region => elements
                 .iter()
                 .filter_map(|e| e.text.as_ref())
@@ -1323,6 +1781,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Pick draft per --draft-source.
         let mut hsd_elements: Option<Vec<LayoutElement>> = None;
+        let mut external_drafter_dur = Duration::ZERO;
+        let mut diagnostic_region_drafts: Vec<String> = Vec::new();
         let actual_draft = match args.draft_source.as_str() {
             "gt" => draft.clone(),
             "baseline" if matches!(args.mode, Mode::Region) => {
@@ -1342,7 +1802,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let predictor = ppocr_rec
                     .as_ref()
                     .ok_or("missing PP-OCR recognition drafter")?;
+                let t_drafter = Instant::now();
                 let ppocr_drafts = run_ppocr_rec_drafter(predictor, &image, &elements)?;
+                external_drafter_dur += t_drafter.elapsed();
                 let mut drafter_elements = elements.clone();
                 for (elem, draft) in drafter_elements
                     .iter_mut()
@@ -1359,6 +1821,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let structure = structure_drafter
                     .as_ref()
                     .ok_or("missing structure drafter")?;
+                let t_drafter = Instant::now();
                 let structure_drafts = run_structure_drafter(
                     structure,
                     &image,
@@ -1369,6 +1832,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         args.structure_allow_generic_fallback,
                     ),
                 )?;
+                external_drafter_dur += t_drafter.elapsed();
                 let mut drafter_elements = elements.clone();
                 for (elem, draft) in drafter_elements
                     .iter_mut()
@@ -1383,7 +1847,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let structure = structure_drafter
                     .as_ref()
                     .ok_or("missing structure drafter")?;
-                run_structure_page_drafter(structure, &image)?
+                let t_drafter = Instant::now();
+                let result = run_structure_page_drafter(structure, &image)?;
+                external_drafter_dur += t_drafter.elapsed();
+                let elems = structure_result_hsd_elements(&result);
+                diagnostic_region_drafts = elems
+                    .iter()
+                    .map(region_markdown)
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                hsd_elements = Some(elems);
+                structure_page_draft_hunyuan(hsd_elements.as_deref().unwrap_or(&[]))
             }
             "baseline" => baseline_text.clone(),
             other => return Err(format!("unknown --draft-source: {other}").into()),
@@ -1392,6 +1867,107 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             skipped += 1;
             continue;
         }
+
+        let page_draft_tokens = if matches!(args.mode, Mode::Page) {
+            Some(match &model {
+                BackendModel::Hunyuan(model) => tokenize_draft(model.tokenizer(), &actual_draft)?,
+                BackendModel::PaddleOcrVl(model) => {
+                    tokenize_draft(model.tokenizer(), &actual_draft)?
+                }
+                BackendModel::MinerU(model) => tokenize_draft(model.tokenizer(), &actual_draft)?,
+                BackendModel::GlmOcr(model) => tokenize_draft(model.tokenizer(), &actual_draft)?,
+            })
+        } else {
+            None
+        };
+        let draft_3gram_hit_rate = if let (Some(baseline_tokens), Some(draft_tokens)) =
+            (baseline_tokens.as_ref(), page_draft_tokens.as_ref())
+        {
+            let (hits, total) =
+                count_window_hits(baseline_tokens, draft_tokens, args.token_diff_window_len);
+            if total > 0 {
+                hits as f64 / total as f64
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        let diagnostic_region_draft_tokens =
+            if matches!(args.mode, Mode::Page) && !diagnostic_region_drafts.is_empty() {
+                let tokenizer = match &model {
+                    BackendModel::Hunyuan(model) => model.tokenizer(),
+                    BackendModel::PaddleOcrVl(model) => model.tokenizer(),
+                    BackendModel::MinerU(model) => model.tokenizer(),
+                    BackendModel::GlmOcr(model) => model.tokenizer(),
+                };
+                Some(
+                    diagnostic_region_drafts
+                        .iter()
+                        .map(|d| tokenize_draft(tokenizer, d))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+            } else {
+                None
+            };
+        let per_draft_max_hits = if let (Some(baseline_tokens), Some(region_drafts)) = (
+            baseline_tokens.as_ref(),
+            diagnostic_region_draft_tokens.as_ref(),
+        ) {
+            Some(best_per_draft_window_hits(
+                baseline_tokens,
+                region_drafts,
+                args.token_diff_window_len,
+            ))
+        } else {
+            None
+        };
+
+        if let Some(path) = &args.token_diff_output {
+            if !matches!(args.mode, Mode::Page) {
+                return Err("--token-diff-output currently supports --mode page only".into());
+            }
+            let baseline_tokens = baseline_tokens
+                .as_ref()
+                .ok_or("--token-diff-output requires page-mode baseline tokens")?;
+            let draft_tokens = page_draft_tokens
+                .as_ref()
+                .ok_or("--token-diff-output requires page-mode draft tokens")?;
+            let tokenizer = match &model {
+                BackendModel::Hunyuan(model) => model.tokenizer(),
+                BackendModel::PaddleOcrVl(model) => model.tokenizer(),
+                BackendModel::MinerU(model) => model.tokenizer(),
+                BackendModel::GlmOcr(model) => model.tokenizer(),
+            };
+            let mut report = String::new();
+            append_token_diff_report(
+                &mut report,
+                tokenizer,
+                TokenDiffInput {
+                    page_idx: i,
+                    image_path: &entry.page_info.image_path,
+                    backend: args.backend,
+                    mode: args.mode,
+                    draft_source: &args.draft_source,
+                    baseline_text: &baseline_text,
+                    draft_text: &actual_draft,
+                    baseline_tokens,
+                    draft_tokens,
+                    structure_elements: hsd_elements.as_deref(),
+                    hsd_page_draft_count: 1,
+                    region_draft_count: diagnostic_region_drafts.len(),
+                    per_draft_max_hits,
+                    limit: args.token_diff_limit,
+                    window_len: args.token_diff_window_len,
+                },
+            );
+            std::fs::write(path, report)?;
+            println!("Token diff report -> {}", path.display());
+            if args.token_diff_only {
+                return Ok(());
+            }
+        }
+
         let draft_region_count = if matches!(args.mode, Mode::Page) {
             usize::from(!actual_draft.trim().is_empty())
         } else {
@@ -1425,12 +2001,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (BackendModel::Hunyuan(model), Mode::Page, Some(token_drafts)) => {
                 model.generate_hsd_with_token_drafts(&image, hunyuan_prompt, token_drafts, &cfg)
             }
-            (BackendModel::Hunyuan(model), Mode::Page, None) => model.generate_hsd(
-                &image,
-                hunyuan_prompt,
-                std::slice::from_ref(&actual_draft),
-                &cfg,
-            ),
+            (BackendModel::Hunyuan(model), Mode::Page, None) => {
+                if args.page_dual_stage {
+                    if let Some(elems) = hsd_elements.as_ref().filter(|e| !e.is_empty()) {
+                        model.generate_hsd_full(&image, hunyuan_prompt, elems, &[], &cfg)
+                    } else {
+                        model.generate_hsd(
+                            &image,
+                            hunyuan_prompt,
+                            std::slice::from_ref(&actual_draft),
+                            &cfg,
+                        )
+                    }
+                } else {
+                    model.generate_hsd(
+                        &image,
+                        hunyuan_prompt,
+                        std::slice::from_ref(&actual_draft),
+                        &cfg,
+                    )
+                }
+            }
             (BackendModel::PaddleOcrVl(model), Mode::Page, Some(token_drafts)) => {
                 model.generate_hsd_with_token_drafts(&image, paddle_task, token_drafts, &cfg)
             }
@@ -1504,11 +2095,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
         };
-        let hsd_dur = t1.elapsed();
-        let (_text, stats) = hsd;
+        let hsd_dur = t1.elapsed() + external_drafter_dur;
+        let (_text, mut stats) = hsd;
+        stats.drafter += external_drafter_dur;
 
         let baseline_ms = baseline_dur.as_secs_f64() * 1000.0;
         let hsd_ms = hsd_dur.as_secs_f64() * 1000.0;
+        let drafter_ms = stats.drafter.as_secs_f64() * 1000.0;
         let stage = match args.mode {
             Mode::Page => &stats.stage2,
             Mode::Region => &stats.stage1,
@@ -1532,6 +2125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sum_hsd_ms += hsd_ms;
         sum_decode_ms += decode_ms;
         sum_prefill_ms += prefill_ms;
+        sum_drafter_ms += drafter_ms;
         sum_aal += aal as f64;
         sum_sr_decode += sr_decode;
         sum_sr_e2e += sr_e2e;
@@ -1580,9 +2174,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.device.clone(),
             drafter_device(&args).to_string(),
             args.draft_source.clone(),
+            args.page_dual_stage.to_string(),
             elements.len().to_string(),
             draft_region_count.to_string(),
             format!("{draft_coverage:.3}"),
+            format!("{draft_3gram_hit_rate:.3}"),
             format!("{:.3}", args.tau),
             args.max_tokens.to_string(),
             args.resize_max.to_string(),
@@ -1591,6 +2187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             prompt_text.to_string(),
             format!("{baseline_ms:.1}"),
             format!("{hsd_ms:.1}"),
+            format!("{drafter_ms:.1}"),
             format!("{decode_ms:.1}"),
             format!("{prefill_ms:.1}"),
             format_duration_ms(stage.dsv.candidate_build),
@@ -1602,6 +2199,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             stage.dsv.verify_tree_calls.to_string(),
             stage.dsv.step_one_calls.to_string(),
             stage.dsv.fallback_argmax_calls.to_string(),
+            format!("{:.1}", stage.dsv.avg_candidates()),
+            stage.dsv.candidates_max.to_string(),
+            stage.dsv.empty_tree_calls.to_string(),
+            stage.dsv.rejected_tree_calls.to_string(),
+            stage.dsv.accepted_tree_calls.to_string(),
             format!("{:.1}", stage.dsv.avg_tree_nodes()),
             stage.dsv.tree_nodes_max.to_string(),
             stage.emitted_tokens.to_string(),
@@ -1611,6 +2213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             format!("{sr_decode:.3}"),
             format!("{sr_e2e:.3}"),
         ]));
+        std::fs::write(&csv_path, &csv)?;
     }
 
     if counted == 0 {
@@ -1626,6 +2229,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("baseline e2e (mean):   {:.1} ms", sum_baseline_ms / n);
     println!("HSD e2e (mean):        {:.1} ms", sum_hsd_ms / n);
+    println!("drafter (mean):        {:.1} ms", sum_drafter_ms / n);
     println!("HSD decode (mean):     {:.1} ms", sum_decode_ms / n);
     println!("HSD prefill (mean):    {:.1} ms", sum_prefill_ms / n);
     println!("emitted tokens (mean): {}", sum_emitted / counted as u64);
@@ -1650,6 +2254,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sum_dsv.verify_tree_calls as f64 / n,
         sum_dsv.avg_tree_nodes(),
         sum_dsv.tree_nodes_max
+    );
+    println!(
+        "DSV candidates:        avg {:.1}, max {}, empty/reject/accept {} / {} / {}",
+        sum_dsv.avg_candidates(),
+        sum_dsv.candidates_max,
+        sum_dsv.empty_tree_calls,
+        sum_dsv.rejected_tree_calls,
+        sum_dsv.accepted_tree_calls
     );
     println!(
         "DSV traverse/commit:   {:.1} / {:.1} ms",
@@ -1686,6 +2298,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          | device | {device} |\n\
          | drafter device | {drafter_device} |\n\
          | draft source | {draft_source} |\n\
+         | page dual stage | {page_dual_stage} |\n\
          | tau | {tau:.3} |\n\
          | max tokens | {max_tokens} |\n\
          | resize max | {resize_max} |\n\
@@ -1703,6 +2316,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          | skipped pages | {skipped} |\n\
          | baseline e2e mean ms | {baseline_mean:.1} |\n\
          | HSD e2e mean ms | {hsd_mean:.1} |\n\
+         | drafter mean ms | {drafter_mean:.1} |\n\
          | HSD decode mean ms | {decode_mean:.1} |\n\
          | HSD prefill mean ms | {prefill_mean:.1} |\n\
          | DSV candidate mean ms | {dsv_candidate_mean:.1} |\n\
@@ -1712,6 +2326,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          | DSV step_one mean ms | {dsv_step_one_mean:.1} |\n\
          | DSV verify calls/page | {dsv_verify_calls_mean:.1} |\n\
          | DSV step_one calls/page | {dsv_step_one_calls_mean:.1} |\n\
+         | DSV avg candidates | {dsv_avg_candidates:.1} |\n\
+         | DSV max candidates | {dsv_max_candidates} |\n\
+         | DSV empty tree calls | {dsv_empty_tree_calls} |\n\
+         | DSV rejected tree calls | {dsv_rejected_tree_calls} |\n\
+         | DSV accepted tree calls | {dsv_accepted_tree_calls} |\n\
          | DSV avg tree nodes | {dsv_avg_tree_nodes:.1} |\n\
          | DSV max tree nodes | {dsv_max_tree_nodes} |\n\
          | emitted tokens mean | {emitted_mean} |\n\
@@ -1738,6 +2357,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         device = args.device,
         drafter_device = drafter_device(&args),
         draft_source = args.draft_source,
+        page_dual_stage = args.page_dual_stage,
         tau = args.tau,
         max_tokens = args.max_tokens,
         resize_max = args.resize_max,
@@ -1750,6 +2370,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         csv_path = csv_path.display(),
         baseline_mean = sum_baseline_ms / n,
         hsd_mean = sum_hsd_ms / n,
+        drafter_mean = sum_drafter_ms / n,
         decode_mean = sum_decode_ms / n,
         prefill_mean = sum_prefill_ms / n,
         dsv_candidate_mean = sum_dsv.candidate_build.as_secs_f64() * 1000.0 / n,
@@ -1759,6 +2380,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dsv_step_one_mean = sum_dsv.step_one.as_secs_f64() * 1000.0 / n,
         dsv_verify_calls_mean = sum_dsv.verify_tree_calls as f64 / n,
         dsv_step_one_calls_mean = sum_dsv.step_one_calls as f64 / n,
+        dsv_avg_candidates = sum_dsv.avg_candidates(),
+        dsv_max_candidates = sum_dsv.candidates_max,
+        dsv_empty_tree_calls = sum_dsv.empty_tree_calls,
+        dsv_rejected_tree_calls = sum_dsv.rejected_tree_calls,
+        dsv_accepted_tree_calls = sum_dsv.accepted_tree_calls,
         dsv_avg_tree_nodes = sum_dsv.avg_tree_nodes(),
         dsv_max_tree_nodes = sum_dsv.tree_nodes_max,
         emitted_mean = sum_emitted / counted as u64,

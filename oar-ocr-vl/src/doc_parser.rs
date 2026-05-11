@@ -7,11 +7,9 @@
 //! 4. Returns structured document results
 //!
 //! Supported backends:
-//! - `UniRec` - Lightweight unified recognition
-//! - `PaddleOcrVl` - Larger VLM with task-specific prompts
+//! - `PaddleOcrVl` - VLM with task-specific prompts
 //! - `HunyuanOcr` - OCR expert VLM (HunYuanVL)
 //! - `GlmOcr` - GLM-OCR OCR expert VLM
-//! - `LightOnOcr` - End-to-end OCR VLM
 //! - `MinerU` - MinerU2.5 document parsing VLM (Qwen2-VL backbone)
 
 use super::utils::{
@@ -59,7 +57,7 @@ pub trait RecognitionBackend {
     ) -> Result<String, OCRError>;
 
     /// Whether this backend requires post-processing for table output.
-    /// UniRec outputs OTSL format that needs conversion; PaddleOCR-VL outputs HTML directly.
+    /// Some backends emit OTSL and need conversion; PaddleOCR-VL outputs HTML directly.
     fn needs_table_postprocess(&self) -> bool {
         false
     }
@@ -150,7 +148,7 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
 
     /// Parse a document image without layout detection (single full-image OCR).
     ///
-    /// Use this for end-to-end models (e.g. LightOnOCR) that handle layout internally.
+    /// Use this for end-to-end models that handle layout internally.
     /// For models requiring separate layout detection, use [`parse`](Self::parse) instead.
     pub fn parse_without_layout(&self, image: RgbImage) -> Result<StructureResult, OCRError> {
         self.recognize_full_image("<memory>".into(), 0, image)
@@ -437,42 +435,8 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
     }
 }
 
-use super::unirec::UniRec;
-
-impl RecognitionBackend for UniRec {
-    fn recognize(
-        &self,
-        image: RgbImage,
-        _task: RecognitionTask,
-        max_tokens: usize,
-    ) -> Result<String, OCRError> {
-        // UniRec doesn't use task-specific prompts; it's a unified model
-        self.generate(&[image], max_tokens)
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| {
-                Err(OCRError::InvalidInput {
-                    message: "UniRec: no result returned".to_string(),
-                })
-            })
-    }
-
-    fn needs_table_postprocess(&self) -> bool {
-        true // UniRec outputs OTSL format
-    }
-
-    fn needs_formula_preprocess(&self) -> bool {
-        true // Benefit from margin cropping
-    }
-
-    fn needs_repetition_truncation(&self) -> bool {
-        true // May produce repetitive output
-    }
-}
-
 use super::glmocr::GlmOcr;
 use super::hunyuanocr::HunyuanOcr;
-use super::lightonocr::LightOnOcr;
 use super::mineru::MinerU;
 use super::paddleocr_vl::{PaddleOcrVl, PaddleOcrVlTask};
 
@@ -579,50 +543,6 @@ impl RecognitionBackend for GlmOcr {
             .unwrap_or_else(|| {
                 Err(OCRError::InvalidInput {
                     message: "GLM-OCR: no result returned".to_string(),
-                })
-            })?;
-        Ok(truncate_repetitive_content(&out, 10, 10, 10)
-            .trim()
-            .to_string())
-    }
-
-    fn needs_table_postprocess(&self) -> bool {
-        false
-    }
-
-    fn needs_formula_preprocess(&self) -> bool {
-        false
-    }
-
-    fn needs_repetition_truncation(&self) -> bool {
-        false // handled inside `recognize()`
-    }
-}
-
-impl RecognitionBackend for LightOnOcr {
-    fn recognize(
-        &self,
-        image: RgbImage,
-        task: RecognitionTask,
-        max_tokens: usize,
-    ) -> Result<String, OCRError> {
-        let prompt = match task {
-            RecognitionTask::Ocr => "",
-            RecognitionTask::Table => "Parse the table in the image into HTML.",
-            RecognitionTask::Formula => {
-                "Identify the formula in the image and represent it using LaTeX format."
-            }
-            RecognitionTask::Chart => {
-                "Parse the chart in the image; use Mermaid format for flowcharts and Markdown for other charts."
-            }
-        };
-        let out = self
-            .generate(&[image], &[prompt], max_tokens)
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| {
-                Err(OCRError::InvalidInput {
-                    message: "LightOnOCR: no result returned".to_string(),
                 })
             })?;
         Ok(truncate_repetitive_content(&out, 10, 10, 10)
@@ -764,9 +684,6 @@ fn should_have_order_index(element_type: LayoutElementType) -> bool {
             | LayoutElementType::FigureTableChartTitle
     )
 }
-
-/// Document parser using UniRec backend.
-pub type UniRecDocParser<'a> = DocParser<'a, UniRec>;
 
 /// Document parser using PaddleOCR-VL backend.
 pub type PaddleOcrVlDocParser<'a> = DocParser<'a, PaddleOcrVl>;

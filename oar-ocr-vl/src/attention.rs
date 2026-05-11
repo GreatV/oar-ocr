@@ -1,14 +1,15 @@
 //! Unified attention implementation for all VLM models.
 //!
 //! This module provides shared attention and rotary embedding implementations
-//! to ensure consistent behavior across LightOnOCR, PaddleOCR-VL, HunyuanOCR, and UniRec models.
+//! to ensure consistent behavior across PaddleOCR-VL, HunyuanOCR, GLM-OCR,
+//! and MinerU2.5 models.
 //!
 //! ## Benefits
 //!
 //! - Single place for attention and RoPE optimizations
 //! - Consistent mask handling across models
 //! - Shared KV cache logic
-//! - Support for multiple RoPE variants (standard, MRoPE, XDRoPE)
+//! - Support for multi-axis RoPE variants (MRoPE, XDRoPE)
 //! - Easier testing and maintenance
 //!
 //! ## Usage
@@ -21,10 +22,6 @@
 //!
 //! // Create causal mask for autoregressive decoding
 //! let mask = create_causal_mask(seq_len, kv_len, dtype, device)?;
-//!
-//! // Standard RoPE (for LightOnOCR)
-//! let rope = RotaryEmbedding::new(base, head_dim, max_pos, device)?;
-//! let (cos, sin) = rope.get_cos_sin(seq_len, dtype)?;
 //!
 //! // Multi-axis RoPE (for PaddleOCR-VL, HunyuanOCR)
 //! let rope = RotaryEmbedding::new_multi_axis(head_dim, rope_theta, num_dims, device)?;
@@ -343,13 +340,6 @@ pub fn create_left_padding_mask(
     })
 }
 
-fn rotate_half(x: &Tensor) -> Result<Tensor> {
-    let last_dim = x.dim(D::Minus1)?;
-    let x1 = x.narrow(D::Minus1, 0, last_dim / 2)?;
-    let x2 = x.narrow(D::Minus1, last_dim / 2, last_dim / 2)?;
-    Tensor::cat(&[&x2.neg()?, &x1], D::Minus1)
-}
-
 // ============================================================================
 // Rotary Positional Embedding (RoPE)
 // ============================================================================
@@ -357,20 +347,17 @@ fn rotate_half(x: &Tensor) -> Result<Tensor> {
 /// Unified Rotary Positional Embedding implementation.
 ///
 /// Supports multiple RoPE variants:
-/// - **Standard RoPE**: Precomputed cos/sin for efficient lookup (LightOnOCR)
-/// - **Dynamic RoPE**: On-the-fly computation from position IDs
+/// - **Dynamic RoPE**: On-the-fly computation from position IDs (single-axis)
 /// - **Multi-axis RoPE (MRoPE)**: 3-axis encoding for text/height/width (PaddleOCR-VL)
 /// - **Extended Dimension RoPE (XDRoPE)**: Configurable num_dims (HunyuanOCR)
 ///
 /// ## Architecture
 ///
-/// The implementation uses an enum to support different RoPE modes while maintaining
-/// a unified interface. This eliminates code duplication across models.
+/// All variants share a single `Dynamic` representation parameterized by
+/// `num_dims`; the constructor functions pick the right `num_dims` for each
+/// model family.
 #[derive(Debug, Clone)]
 pub enum RotaryEmbedding {
-    /// Precomputed cos/sin for standard RoPE (used by LightOnOCR).
-    /// Efficient for inference with fixed max sequence length.
-    Precomputed { cos: Tensor, sin: Tensor },
     /// Dynamic computation from inverse frequencies (used by PaddleOCR-VL, HunyuanOCR).
     /// Supports multi-axis position encoding.
     Dynamic {
@@ -381,48 +368,6 @@ pub enum RotaryEmbedding {
 }
 
 impl RotaryEmbedding {
-    /// Create a standard RoPE with precomputed cos/sin (LightOnOCR style).
-    ///
-    /// This precomputes embeddings for all positions up to max_position_embeddings,
-    /// enabling efficient lookup during inference.
-    ///
-    /// # Arguments
-    /// * `base` - RoPE base frequency (typically 10000.0)
-    /// * `head_dim` - Dimension of each attention head
-    /// * `max_position_embeddings` - Maximum sequence length to precompute
-    /// * `device` - Device for tensor allocation
-    /// * `dtype` - Data type for cos/sin tensors
-    ///
-    /// # Returns
-    /// RotaryEmbedding in Precomputed mode
-    pub fn new_precomputed(
-        base: f32,
-        head_dim: usize,
-        max_position_embeddings: usize,
-        device: &Device,
-        dtype: DType,
-    ) -> Result<Self> {
-        let inv_freq: Vec<_> = (0..head_dim)
-            .step_by(2)
-            .map(|i| 1f32 / base.powf(i as f32 / head_dim as f32))
-            .collect();
-        let inv_freq_len = inv_freq.len();
-
-        // Use on_compute_device to handle Metal's lack of support for arange
-        let freqs = on_compute_device(device, |compute_device| {
-            let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), compute_device)?;
-            let t = Tensor::arange(0u32, max_position_embeddings as u32, compute_device)?
-                .to_dtype(DType::F32)?
-                .reshape((max_position_embeddings, 1))?;
-            t.matmul(&inv_freq)
-        })?;
-
-        let sin = freqs.sin()?.to_dtype(dtype)?;
-        let cos = freqs.cos()?.to_dtype(dtype)?;
-
-        Ok(Self::Precomputed { cos, sin })
-    }
-
     /// Create a dynamic RoPE with on-the-fly computation (standard single-axis).
     ///
     /// This computes embeddings dynamically from position IDs, suitable for
@@ -484,35 +429,7 @@ impl RotaryEmbedding {
         Ok(Self::Dynamic { inv_freq, num_dims })
     }
 
-    /// Get precomputed cos/sin for standard RoPE (Precomputed mode only).
-    ///
-    /// Used by LightOnOCR for efficient embedding lookup.
-    ///
-    /// # Arguments
-    /// * `seq_len` - Sequence length to retrieve embeddings for
-    /// * `dtype` - Target data type
-    ///
-    /// # Returns
-    /// Tuple of (cos, sin) tensors, shape: (seq_len, head_dim/2)
-    ///
-    /// # Panics
-    /// Panics if called on Dynamic mode
-    pub fn get_cos_sin(&self, seq_len: usize, dtype: DType) -> Result<(Tensor, Tensor)> {
-        match self {
-            Self::Precomputed { cos, sin } => {
-                let cos = cos.narrow(0, 0, seq_len)?.to_dtype(dtype)?;
-                let sin = sin.narrow(0, 0, seq_len)?.to_dtype(dtype)?;
-                Ok((cos, sin))
-            }
-            Self::Dynamic { .. } => {
-                panic!(
-                    "get_cos_sin() called on Dynamic RoPE mode. Use forward_multi_axis() instead."
-                )
-            }
-        }
-    }
-
-    /// Forward pass for multi-axis RoPE (Dynamic mode only).
+    /// Forward pass for multi-axis RoPE.
     ///
     /// Computes cos/sin from position IDs dynamically. Supports multi-dimensional
     /// position encoding.
@@ -523,9 +440,6 @@ impl RotaryEmbedding {
     ///
     /// # Returns
     /// Tuple of (cos, sin) tensors, shape: (num_dims, batch, seq, head_dim)
-    ///
-    /// # Panics
-    /// Panics if called on Precomputed mode
     pub fn forward_multi_axis(
         &self,
         position_ids: &Tensor,
@@ -630,95 +544,6 @@ impl RotaryEmbedding {
                         )
                     })?;
                 Ok((cos, sin))
-            }
-            Self::Precomputed { .. } => {
-                panic!(
-                    "forward_multi_axis() called on Precomputed RoPE mode. Use get_cos_sin() instead."
-                )
-            }
-        }
-    }
-
-    /// Apply rotary embeddings to query and key tensors (for Precomputed mode).
-    ///
-    /// This is a convenience method for LightOnOCR-style usage with precomputed embeddings.
-    ///
-    /// # Arguments
-    /// * `q` - Query tensor: (batch, heads, seq, head_dim)
-    /// * `k` - Key tensor: (batch, heads, seq, head_dim)
-    /// * `seqlen_offsets` - Sequence length offsets for each batch item
-    ///
-    /// # Returns
-    /// Tuple of (rotated_q, rotated_k)
-    pub fn apply_rotary_emb(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        seqlen_offsets: &[usize],
-    ) -> Result<(Tensor, Tensor)> {
-        match self {
-            Self::Precomputed { cos, sin } => {
-                let (b_sz, _qh, seq_len, _n_embd) = q.dims4()?;
-
-                // Helper to apply RoPE with full broadcasting support
-                let apply_rope = |x: &Tensor, cos: &Tensor, sin: &Tensor| -> Result<Tensor> {
-                    let x_rot = rotate_half(x)?;
-                    // x * cos + x_rot * sin
-                    // cos/sin shapes must be broadcastable to x shape
-                    let a = x.broadcast_mul(cos)?;
-                    let b = x_rot.broadcast_mul(sin)?;
-                    a.add(&b)
-                };
-
-                // Fast path: if all offsets are equal (e.g. 0 during prefill)
-                if seqlen_offsets.iter().all(|&x| x == seqlen_offsets[0]) {
-                    let offset = seqlen_offsets[0];
-                    let cos_seq = cos.narrow(0, offset, seq_len)?;
-                    let sin_seq = sin.narrow(0, offset, seq_len)?;
-
-                    // Repeat to match head_dim: (S, D/2) -> (S, D)
-                    let cos_seq = Tensor::cat(&[&cos_seq, &cos_seq], D::Minus1)?;
-                    let sin_seq = Tensor::cat(&[&sin_seq, &sin_seq], D::Minus1)?;
-
-                    // (S, D) -> (1, 1, S, D) for broadcasting
-                    let cos_b = cos_seq.unsqueeze(0)?.unsqueeze(0)?;
-                    let sin_b = sin_seq.unsqueeze(0)?.unsqueeze(0)?;
-
-                    let q_out = apply_rope(q, &cos_b, &sin_b)?;
-                    let k_out = apply_rope(k, &cos_b, &sin_b)?;
-                    return Ok((q_out, k_out));
-                }
-
-                // General path: gather embeddings for each batch item
-                let device = q.device();
-                let mut indices = Vec::with_capacity(b_sz * seq_len);
-                for &offset in seqlen_offsets {
-                    for i in 0..seq_len {
-                        indices.push((offset + i) as u32);
-                    }
-                }
-                let indices = Tensor::from_vec(indices, (b_sz * seq_len,), device)?;
-                let cos_gather = cos.index_select(&indices, 0)?; // (B*S, D/2)
-                let sin_gather = sin.index_select(&indices, 0)?;
-
-                // Repeat to match head_dim: (B*S, D/2) -> (B*S, D)
-                let cos_gather = Tensor::cat(&[&cos_gather, &cos_gather], D::Minus1)?;
-                let sin_gather = Tensor::cat(&[&sin_gather, &sin_gather], D::Minus1)?;
-
-                // Reshape to (B, 1, S, D) for broadcasting against (B, H, S, D)
-                // Note: cos.dim(1) is D/2, so after cat it is D.
-                let shape = (b_sz, 1, seq_len, cos_gather.dim(1)?);
-                let cos_b = cos_gather.reshape(shape)?;
-                let sin_b = sin_gather.reshape(shape)?;
-
-                let q_out = apply_rope(q, &cos_b, &sin_b)?;
-                let k_out = apply_rope(k, &cos_b, &sin_b)?;
-                Ok((q_out, k_out))
-            }
-            Self::Dynamic { .. } => {
-                panic!(
-                    "apply_rotary_emb() requires Precomputed mode. Use forward_multi_axis() for Dynamic mode."
-                )
             }
         }
     }
@@ -1057,20 +882,6 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_rotary_embedding_precomputed() -> Result<()> {
-        let device = Device::Cpu;
-        let rope = RotaryEmbedding::new_precomputed(10000.0, 64, 512, &device, DType::F32)
-            .expect("Failed to create RoPE");
-
-        // Test getting cos/sin for a sequence
-        let (cos, sin) = rope.get_cos_sin(128, DType::F32)?;
-        assert_eq!(cos.dims(), &[128, 32]); // head_dim/2
-        assert_eq!(sin.dims(), &[128, 32]);
-
-        Ok(())
-    }
-
-    #[test]
     fn test_rotary_embedding_dynamic_single_axis() -> std::result::Result<(), OCRError> {
         let device = Device::Cpu;
         let rope = RotaryEmbedding::new_dynamic(64, 10000.0, &device)?;
@@ -1160,21 +971,4 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_rotary_embedding_apply() -> Result<()> {
-        let device = Device::Cpu;
-        let rope = RotaryEmbedding::new_precomputed(10000.0, 64, 512, &device, DType::F32)
-            .expect("Failed to create RoPE");
-
-        let q = Tensor::randn(0f32, 1., (2, 4, 8, 64), &device)?; // (batch, heads, seq, dim)
-        let k = Tensor::randn(0f32, 1., (2, 4, 8, 64), &device)?;
-
-        let seqlen_offsets = vec![0, 0];
-        let (q_rot, k_rot) = rope.apply_rotary_emb(&q, &k, &seqlen_offsets)?;
-
-        assert_eq!(q_rot.dims(), q.dims());
-        assert_eq!(k_rot.dims(), k.dims());
-
-        Ok(())
-    }
 }
