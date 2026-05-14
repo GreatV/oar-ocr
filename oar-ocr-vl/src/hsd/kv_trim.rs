@@ -30,21 +30,32 @@ use candle_core::{Result, Tensor};
 pub struct TrimmableKvCache {
     /// Concatenation axis (typically `2` for the seq dim of `(B, H, T, D)` tensors).
     cat_dim: usize,
-    /// Cached keys, shape `(B, H, cur_len, D)`. `None` until first `append`.
-    k: Option<Tensor>,
-    v: Option<Tensor>,
+    /// Cached `(keys, values)`, each shape `(B, H, cur_len, D)`. `None` until
+    /// first `append`. K and V are stored together so the "both populated or
+    /// both empty" invariant is enforced by the type system — earlier
+    /// revisions used parallel `Option<Tensor>` fields and had to assert this
+    /// invariant manually.
+    kv: Option<(Tensor, Tensor)>,
     cur_len: usize,
     /// Configured sequence-length capacity retained for parity with
     /// `candle_nn::kv_cache::KvCache::new`. This wrapper does not enforce it.
+    /// Only read by HSD's `max_seq_len()` accessor.
+    #[cfg_attr(not(feature = "hsd"), allow(dead_code))]
     max_len: usize,
 }
 
+// `TrimmableKvCache` lives at the crate root so every model's attention path
+// can store one. Most of its methods are only consumed by the HSD verify
+// driver (`trim_to`, `keep_indices`, `current_seq_len`, `max_seq_len`, `k`,
+// `v`) — silence dead-code warnings for those when `hsd` is off without
+// gating the methods themselves (they remain available for external
+// callers / future re-enabling).
+#[cfg_attr(not(feature = "hsd"), allow(dead_code))]
 impl TrimmableKvCache {
     pub fn new(cat_dim: usize, max_len: usize) -> Self {
         Self {
             cat_dim,
-            k: None,
-            v: None,
+            kv: None,
             cur_len: 0,
             max_len,
         }
@@ -64,17 +75,15 @@ impl TrimmableKvCache {
     /// by KV-cache copy overhead.
     pub fn append(&mut self, k_new: &Tensor, v_new: &Tensor) -> Result<(Tensor, Tensor)> {
         let new_len = k_new.dim(self.cat_dim)?;
-        let (k_all, v_all) = match (self.k.as_ref(), self.v.as_ref()) {
-            (None, None) => (k_new.clone(), v_new.clone()),
-            (Some(k_old), Some(v_old)) => {
+        let (k_all, v_all) = match self.kv.as_ref() {
+            None => (k_new.clone(), v_new.clone()),
+            Some((k_old, v_old)) => {
                 let k = Tensor::cat(&[k_old, k_new], self.cat_dim)?.contiguous()?;
                 let v = Tensor::cat(&[v_old, v_new], self.cat_dim)?.contiguous()?;
                 (k, v)
             }
-            _ => unreachable!("k/v must be set together"),
         };
-        self.k = Some(k_all.clone());
-        self.v = Some(v_all.clone());
+        self.kv = Some((k_all.clone(), v_all.clone()));
         self.cur_len += new_len;
         Ok((k_all, v_all))
     }
@@ -88,20 +97,16 @@ impl TrimmableKvCache {
             self.reset();
             return Ok(());
         }
-        let k = self
-            .k
-            .as_ref()
-            .expect("cache populated when cur_len > 0")
-            .narrow(self.cat_dim, 0, len)?
-            .contiguous()?;
-        let v = self
-            .v
-            .as_ref()
-            .expect("cache populated when cur_len > 0")
-            .narrow(self.cat_dim, 0, len)?
-            .contiguous()?;
-        self.k = Some(k);
-        self.v = Some(v);
+        // `cur_len > 0` implies `kv.is_some()` by the invariant maintained in
+        // `append` / `reset`.
+        let Some((k_old, v_old)) = self.kv.as_ref() else {
+            return Err(candle_core::Error::Msg(
+                "TrimmableKvCache::trim_to: cache empty but cur_len > 0".into(),
+            ));
+        };
+        let k = k_old.narrow(self.cat_dim, 0, len)?.contiguous()?;
+        let v = v_old.narrow(self.cat_dim, 0, len)?.contiguous()?;
+        self.kv = Some((k, v));
         self.cur_len = len;
         Ok(())
     }
@@ -126,13 +131,10 @@ impl TrimmableKvCache {
                 )));
             }
         }
-        let (k, v) = match (self.k.as_ref(), self.v.as_ref()) {
-            (Some(k), Some(v)) => (k, v),
-            _ => {
-                return Err(candle_core::Error::Msg(
-                    "TrimmableKvCache::keep_indices on empty cache".into(),
-                ));
-            }
+        let Some((k, v)) = self.kv.as_ref() else {
+            return Err(candle_core::Error::Msg(
+                "TrimmableKvCache::keep_indices on empty cache".into(),
+            ));
         };
         if indices.iter().enumerate().all(|(i, &x)| x as usize == i) {
             return self.trim_to(indices.len());
@@ -141,8 +143,7 @@ impl TrimmableKvCache {
         let idx_t = Tensor::from_vec(indices.to_vec(), (indices.len(),), device)?;
         let new_k = k.index_select(&idx_t, self.cat_dim)?.contiguous()?;
         let new_v = v.index_select(&idx_t, self.cat_dim)?.contiguous()?;
-        self.k = Some(new_k);
-        self.v = Some(new_v);
+        self.kv = Some((new_k, new_v));
         self.cur_len = indices.len();
         Ok(())
     }
@@ -156,19 +157,18 @@ impl TrimmableKvCache {
     }
 
     pub fn reset(&mut self) {
-        self.k = None;
-        self.v = None;
+        self.kv = None;
         self.cur_len = 0;
     }
 
     /// Borrow the current K cache, if any.
     pub fn k(&self) -> Option<&Tensor> {
-        self.k.as_ref()
+        self.kv.as_ref().map(|(k, _)| k)
     }
 
     /// Borrow the current V cache, if any.
     pub fn v(&self) -> Option<&Tensor> {
-        self.v.as_ref()
+        self.kv.as_ref().map(|(_, v)| v)
     }
 }
 

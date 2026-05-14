@@ -2,7 +2,10 @@ use super::config::MinerUConfig;
 use crate::attention::{
     RotaryEmbedding, repeat_kv, scaled_dot_product_attention, select_rope_sections,
 };
+#[cfg(feature = "hsd")]
 use crate::hsd::TrimmableKvCache;
+#[cfg(not(feature = "hsd"))]
+use crate::kv_trim::TrimmableKvCache;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 use candle_core::Tensor;
 use candle_nn::{
@@ -267,10 +270,12 @@ impl MinerUAttention {
         self.kv_cache.borrow_mut().reset();
     }
 
+    #[cfg(feature = "hsd")]
     fn current_kv_len(&self) -> usize {
         self.kv_cache.borrow().current_seq_len()
     }
 
+    #[cfg(feature = "hsd")]
     fn keep_kv_indices(&self, indices: &[u32]) -> Result<(), OCRError> {
         self.kv_cache
             .borrow_mut()
@@ -348,6 +353,7 @@ impl MinerUDecoderLayer {
         self.self_attn.clear_kv_cache();
     }
 
+    #[cfg(feature = "hsd")]
     fn keep_kv_indices(&self, indices: &[u32]) -> Result<(), OCRError> {
         self.self_attn.keep_kv_indices(indices)
     }
@@ -426,6 +432,7 @@ impl MinerUTextModel {
 
     /// Current sequence length held in the KV cache. All layers stay in sync,
     /// so we read it from layer 0.
+    #[cfg(feature = "hsd")]
     pub fn current_kv_len(&self) -> usize {
         self.layers
             .first()
@@ -435,6 +442,7 @@ impl MinerUTextModel {
 
     /// Gather every layer's KV cache to keep only the supplied positions
     /// (in order). Used by HSD after tree-attention verification.
+    #[cfg(feature = "hsd")]
     pub fn keep_kv_indices(&self, indices: &[u32]) -> Result<(), OCRError> {
         for layer in &self.layers {
             layer.keep_kv_indices(indices)?;

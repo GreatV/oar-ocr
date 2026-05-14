@@ -385,16 +385,17 @@ impl VisionAttention {
                 .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision qk matmul", e))?
                 .affine(self.scale, 0.0)
                 .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision scaling", e))?;
-            let probs = candle_nn::ops::softmax_last_dim(
-                &scores.to_dtype(DType::F32).map_err(|e| {
+            let probs =
+                candle_nn::ops::softmax_last_dim(&scores.to_dtype(DType::F32).map_err(|e| {
                     candle_to_ocr_inference("PaddleOCR-VL", "vision attn cast f32", e)
-                })?,
-            )
-            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision attn softmax", e))?
-            .to_dtype(v.dtype())
-            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision attn cast back", e))?
-            .contiguous()
-            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision attn contiguous", e))?;
+                })?)
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision attn softmax", e))?
+                .to_dtype(v.dtype())
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision attn cast back", e))?
+                .contiguous()
+                .map_err(|e| {
+                    candle_to_ocr_inference("PaddleOCR-VL", "vision attn contiguous", e)
+                })?;
             probs
                 .matmul(&v)
                 .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision av matmul", e))?
@@ -417,11 +418,7 @@ impl VisionAttention {
                     })?;
                 let probs = candle_nn::ops::softmax_last_dim(
                     &scores.to_dtype(DType::F32).map_err(|e| {
-                        candle_to_ocr_inference(
-                            "PaddleOCR-VL",
-                            "vision attn cast f32 (chunk)",
-                            e,
-                        )
+                        candle_to_ocr_inference("PaddleOCR-VL", "vision attn cast f32 (chunk)", e)
                     })?,
                 )
                 .map_err(|e| {

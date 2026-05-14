@@ -243,14 +243,14 @@ Add the VL crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oar-ocr-vl = "0.6"
+oar-ocr-vl = "0.7"
 ```
 
 For GPU acceleration, enable CUDA:
 
 ```toml
 [dependencies]
-oar-ocr-vl = { version = "0.6", features = ["cuda"] }
+oar-ocr-vl = { version = "0.7", features = ["cuda"] }
 ```
 
 ### Downloading the Model
@@ -342,7 +342,7 @@ cargo run -p oar-ocr-vl --features cuda --example paddleocr_vl -- \
 
 ## HunyuanOCR
 
-[HunyuanOCR](https://huggingface.co/tencent/HunyuanOCR) is a 1B parameter OCR expert VLM powered by Hunyuan's multimodal architecture. It's available in the `oar-ocr-vl` crate and supports prompt-driven image-to-text OCR.
+[HunyuanOCR](https://huggingface.co/tencent/HunyuanOCR) is a 1B parameter OCR expert VLM. It's available in the `oar-ocr-vl` crate and supports prompt-driven image-to-text OCR.
 
 Note: inputs are automatically resized to satisfy the model's image/token limits (e.g., max side length 2048).
 
@@ -573,6 +573,38 @@ cargo run -p oar-ocr-vl --features cuda --example doc_parser -- \
     document.jpg
 
 ```
+
+## Hierarchical Speculative Decoding (HSD)
+
+HSD is a CUDA-only acceleration path available on every VLM backbone (`PaddleOcrVl`, `HunyuanOcr`, `GlmOcr`, `MinerU`). Enable it by building with the `hsd` feature; that pulls in the per-backbone `generate_hsd*` methods and transitively turns on `cuda`.
+
+Each backbone exposes a `generate_hsd*` entry point taking an `HsdConfig`. A typical call site:
+
+```rust
+use oar_ocr_vl::hsd::types::{DsvConfig, HsdConfig};
+
+let cfg = HsdConfig {
+    dsv: DsvConfig::default(),
+    enable_stage1: true,
+    enable_stage2: true,
+    max_page_tokens: 16_384,
+    max_region_tokens: 4_096,
+};
+let (text, stats) = model.generate_hsd(&image, instruction, &drafts, &cfg)?;
+```
+
+Run the demo example end-to-end:
+
+```bash
+cargo run -p oar-ocr-vl --release --features hsd,download-binaries \
+    --example hsd_demo -- \
+    --backend hunyuanocr \
+    --model-dir models/HunyuanOCR \
+    --device cuda \
+    --image document.jpg
+```
+
+See [`docs/hsd.md`](hsd.md) for the algorithm.
 
 ## Configuration Options
 

@@ -14,6 +14,172 @@ const OTSL_LCEL: &str = "<lcel>";
 const OTSL_UCEL: &str = "<ucel>";
 const OTSL_XCEL: &str = "<xcel>";
 
+/// Convert an HTML `<table>` snippet to PaddleOCR-VL's raw OTSL token form.
+///
+/// PaddleOCR-VL's "Table Recognition:" prompt emits OTSL tokens
+/// (`<fcel>`, `<lcel>`, `<ucel>`, `<xcel>`, `<ecel>`, `<nl>`) which the
+/// model's post-process then translates into HTML. To feed an HTML-shaped
+/// draft (e.g. from a layout pipeline) into HSD against PaddleOCR-VL we
+/// need the inverse: HTML → OTSL.
+///
+/// The parser is intentionally tolerant — it uses regex-based extraction
+/// rather than a full HTML parser, mirrors `clean_html_table`'s repair of
+/// common attribute typos (`<tdcolspan=`, `<tdrowspan=`), and falls back to
+/// the input string unchanged when the structure can't be parsed (caller can
+/// then decide whether to skip the draft).
+///
+/// ## Algorithm
+///
+/// 1. Extract rows (`<tr>...</tr>`) and within each row, cells
+///    (`<td>...</td>` / `<th>...</th>`) with optional `colspan` / `rowspan`.
+/// 2. Lay cells onto a 2D grid, skipping positions occupied by an earlier
+///    cell's row/col span.
+/// 3. Emit row-by-row: each original cell anchor becomes `<fcel>content` (or
+///    `<ecel>` if empty); spanned positions emit `<lcel>` (col-only),
+///    `<ucel>` (row-only), or `<xcel>` (both). End each row with `<nl>`.
+///
+/// Returns `None` if the input contains no `<tr>` or no parseable cells.
+pub fn convert_html_to_otsl(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || !trimmed.contains("<tr") {
+        return None;
+    }
+    // Repair the common `<tdcolspan=` / `<tdrowspan=` typos before parsing.
+    let repaired = trimmed
+        .replace("<tdcolspan=", "<td colspan=")
+        .replace("<tdrowspan=", "<td rowspan=");
+
+    // Parsed rows: each row is a Vec of (rowspan, colspan, text).
+    // Empty rows are preserved — a `<tr></tr>` can occur when the previous
+    // row's `rowspan` consumes the entire row, and dropping it would break
+    // the grid's row count.
+    let mut rows: Vec<Vec<(usize, usize, String)>> = Vec::new();
+    for tr_caps in TR_RE.captures_iter(&repaired) {
+        let Some(inner) = tr_caps.get(1) else {
+            continue;
+        };
+        let mut cells: Vec<(usize, usize, String)> = Vec::new();
+        for cell_caps in CELL_RE.captures_iter(inner.as_str()) {
+            let attrs = cell_caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            let body = cell_caps.get(2).map(|m| m.as_str()).unwrap_or("");
+            let colspan = extract_span(attrs, "colspan");
+            let rowspan = extract_span(attrs, "rowspan");
+            let text = clean_cell_text(body);
+            cells.push((rowspan, colspan, text));
+        }
+        rows.push(cells);
+    }
+    if rows.is_empty() {
+        return None;
+    }
+
+    // Determine final grid width: widest row after applying colspans.
+    let mut num_cols = 0usize;
+    for cells in &rows {
+        let row_width: usize = cells.iter().map(|(_, cs, _)| *cs).sum();
+        num_cols = num_cols.max(row_width);
+    }
+    let num_rows = rows.len();
+    if num_cols == 0 {
+        return None;
+    }
+
+    // Place cells onto the grid. `cell_grid[r][c]` is either `None` (still
+    // unassigned), or `Some((anchor_r, anchor_c, rowspan, colspan, text))`.
+    type Anchor = (usize, usize, usize, usize, String);
+    let mut grid: Vec<Vec<Option<Anchor>>> = vec![vec![None; num_cols]; num_rows];
+    for (r, cells) in rows.into_iter().enumerate() {
+        let mut c = 0usize;
+        for (rowspan, colspan, text) in cells {
+            // Skip positions already occupied by a previous rowspan.
+            while c < num_cols && grid[r][c].is_some() {
+                c += 1;
+            }
+            if c >= num_cols {
+                break;
+            }
+            let rs = rowspan.max(1);
+            let cs = colspan.max(1);
+            let rs_end = (r + rs).min(num_rows);
+            let cs_end = (c + cs).min(num_cols);
+            for row in grid[r..rs_end].iter_mut() {
+                for slot in row[c..cs_end].iter_mut() {
+                    *slot = Some((r, c, rs, cs, text.clone()));
+                }
+            }
+            c += cs;
+        }
+    }
+
+    // Emit OTSL row by row.
+    let mut out = String::new();
+    for (r, row) in grid.iter().enumerate() {
+        for (c, slot) in row.iter().enumerate() {
+            match slot {
+                None => out.push_str(OTSL_ECEL),
+                Some((anchor_r, anchor_c, _rs, _cs, text)) => {
+                    let is_row_anchor = *anchor_r == r;
+                    let is_col_anchor = *anchor_c == c;
+                    match (is_row_anchor, is_col_anchor) {
+                        (true, true) => {
+                            if text.is_empty() {
+                                out.push_str(OTSL_ECEL);
+                            } else {
+                                out.push_str(OTSL_FCEL);
+                                out.push_str(text);
+                            }
+                        }
+                        (true, false) => out.push_str(OTSL_LCEL),
+                        (false, true) => out.push_str(OTSL_UCEL),
+                        (false, false) => out.push_str(OTSL_XCEL),
+                    }
+                }
+            }
+        }
+        out.push_str(OTSL_NL);
+    }
+    Some(out)
+}
+
+static TR_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?is)<tr[^>]*>(.*?)</tr>").expect("static regex: <tr>...</tr>"));
+static CELL_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?is)<t[dh]([^>]*)>(.*?)</t[dh]>").expect("static regex: <td|th>...</td|th>")
+});
+static SPAN_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)(\d+)"#).expect("static regex: span integer"));
+
+fn extract_span(attrs: &str, name: &str) -> usize {
+    let lower_attrs = attrs.to_ascii_lowercase();
+    let needle = format!("{}=", name);
+    let Some(start) = lower_attrs.find(&needle) else {
+        return 1;
+    };
+    let tail = &attrs[start + needle.len()..];
+    SPAN_RE
+        .find(tail)
+        .and_then(|m| m.as_str().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(1)
+}
+
+fn clean_cell_text(body: &str) -> String {
+    // Strip any nested tags (rare in OCR tables but possible — e.g. <br>, <b>).
+    let stripped = Regex::new(r"<[^>]*>")
+        .expect("static regex")
+        .replace_all(body, "");
+    // Decode the few HTML entities the existing post-process emits via
+    // `html_escape::encode_text`. We avoid pulling a full entity decoder for
+    // a hot path — these five cover what `otsl_export_to_html` produces.
+    let decoded = stripped
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'");
+    decoded.trim().to_string()
+}
+
 /// Convert OTSL table tokens (or TSV text) to HTML table.
 pub fn convert_otsl_to_html(input: &str) -> String {
     let trimmed = input.trim();
@@ -436,5 +602,79 @@ mod tests {
         let html = simple_otsl_conversion(input);
         assert!(html.contains("<table>"));
         assert!(html.contains("<td>a</td>"));
+    }
+
+    #[test]
+    fn convert_html_to_otsl_simple_grid() {
+        // 2x2 plain table, no merges.
+        let html = "<table><tr><td>a</td><td>b</td></tr><tr><td>c</td><td>d</td></tr></table>";
+        let otsl = convert_html_to_otsl(html).expect("conversion");
+        assert_eq!(otsl, "<fcel>a<fcel>b<nl><fcel>c<fcel>d<nl>");
+    }
+
+    #[test]
+    fn convert_html_to_otsl_empty_cells_become_ecel() {
+        let html = "<table><tr><td>a</td><td></td></tr></table>";
+        let otsl = convert_html_to_otsl(html).expect("conversion");
+        assert_eq!(otsl, "<fcel>a<ecel><nl>");
+    }
+
+    #[test]
+    fn convert_html_to_otsl_colspan_emits_lcel() {
+        // Row 1: <td colspan="2">A</td> → <fcel>A<lcel>
+        let html = "<table><tr><td colspan=\"2\">A</td></tr><tr><td>x</td><td>y</td></tr></table>";
+        let otsl = convert_html_to_otsl(html).expect("conversion");
+        assert_eq!(otsl, "<fcel>A<lcel><nl><fcel>x<fcel>y<nl>");
+    }
+
+    #[test]
+    fn convert_html_to_otsl_rowspan_emits_ucel() {
+        // Column 0 spans both rows; column 1 is two separate cells.
+        let html = "<table><tr><td rowspan=\"2\">A</td><td>b</td></tr><tr><td>c</td></tr></table>";
+        let otsl = convert_html_to_otsl(html).expect("conversion");
+        assert_eq!(otsl, "<fcel>A<fcel>b<nl><ucel><fcel>c<nl>");
+    }
+
+    #[test]
+    fn convert_html_to_otsl_xcel_for_combined_span() {
+        // 2x2 cell merged together; the bottom-right corner must be <xcel>.
+        let html = "<table><tr><td colspan=\"2\" rowspan=\"2\">A</td></tr><tr></tr></table>";
+        let otsl = convert_html_to_otsl(html).expect("conversion");
+        assert_eq!(otsl, "<fcel>A<lcel><nl><ucel><xcel><nl>");
+    }
+
+    #[test]
+    fn convert_html_to_otsl_handles_tdcolspan_typo() {
+        // PaddleOCR-VL post-process repairs `<tdcolspan=` — accept the typo on input too.
+        let html = "<table><tr><tdcolspan=\"2\">A</td></tr><tr><td>x</td><td>y</td></tr></table>";
+        let otsl = convert_html_to_otsl(html).expect("conversion");
+        assert_eq!(otsl, "<fcel>A<lcel><nl><fcel>x<fcel>y<nl>");
+    }
+
+    #[test]
+    fn convert_html_to_otsl_decodes_html_entities() {
+        // The forward converter html_escapes content; the inverse must
+        // round-trip the most common entities.
+        let html = "<table><tr><td>a &amp; b</td><td>x &lt; y</td></tr></table>";
+        let otsl = convert_html_to_otsl(html).expect("conversion");
+        assert_eq!(otsl, "<fcel>a & b<fcel>x < y<nl>");
+    }
+
+    #[test]
+    fn convert_html_to_otsl_returns_none_for_non_table_input() {
+        assert!(convert_html_to_otsl("plain text").is_none());
+        assert!(convert_html_to_otsl("<p>not a table</p>").is_none());
+        assert!(convert_html_to_otsl("").is_none());
+    }
+
+    #[test]
+    fn convert_html_to_otsl_roundtrips_through_otsl_to_html() {
+        // OTSL → HTML → OTSL should reconstruct the same OTSL for a simple
+        // grid (modulo whitespace handling). This guards against drift between
+        // the two converters.
+        let otsl_in = "<fcel>a<fcel>b<nl><fcel>c<fcel>d<nl>";
+        let html = convert_otsl_to_html(otsl_in);
+        let otsl_out = convert_html_to_otsl(&html).expect("round-trip");
+        assert_eq!(otsl_out, otsl_in);
     }
 }

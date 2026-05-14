@@ -231,6 +231,34 @@ pub fn combine_masks(causal_mask: &Tensor, padding_mask: &Tensor) -> Result<Tens
 /// # Returns
 /// Mask of shape `(1, 1, N, prefix_kv_len + N)` where allowed positions are 0
 /// and forbidden positions are `-inf`.
+///
+/// # Performance note (paper parity)
+///
+/// The paper §4.3 runs verification through PyTorch's
+/// [FlexAttention](https://pytorch.org/blog/flexattention/), which compiles the
+/// tree-ancestry predicate directly into a fused attention kernel. The mask
+/// never materialises as a tensor — it's a function evaluated per-thread inside
+/// the FlashAttention-style kernel, so the asymptotic memory cost is `O(N)`
+/// rather than `O((prefix_kv_len + N) * N)` and the attention forward is
+/// compute-bound.
+///
+/// Candle has no FlexAttention equivalent today, so this helper materialises
+/// the full `(1, 1, N, prefix_kv_len + N)` mask tensor and feeds it into the
+/// model's standard attention path (`F.scaled_dot_product_attention` analog).
+/// At the typical HSD scales (`N ≤ 32` candidates after capping, `prefix_kv_len`
+/// up to ~16k for a page) the materialised mask is only a few MiB so memory is
+/// not the constraint, but the **separate mask kernel + standard attention
+/// kernel** combination is measurably slower than a fused FlexAttention path —
+/// this is one source of the gap between the paper's SR_e2e and the
+/// OAR-realised SR_e2e at equal AAL. Fixing it requires either:
+///
+/// 1. A candle-side fused tree-attention kernel (custom CUDA kernel), or
+/// 2. An upstream FlexAttention-equivalent in candle that we can call from
+///    the model's attention path with a tree-ancestry predicate.
+///
+/// Neither is in-scope for this crate; we accept the kernel-level overhead as
+/// the documented gap. Acceptance length (AAL) is unaffected — only wall-clock
+/// SR_decode / SR_e2e.
 pub fn create_tree_attention_mask(
     parents: &[Option<usize>],
     prefix_kv_len: usize,
@@ -246,28 +274,36 @@ pub fn create_tree_attention_mask(
         });
     }
 
-    // Mark each node's ancestors (including itself) by walking parent pointers.
-    let mut ancestors: Vec<Vec<bool>> = vec![vec![false; n]; n];
-    for i in 0..n {
-        let mut cur = Some(i);
-        while let Some(j) = cur {
-            ancestors[i][j] = true;
-            cur = parents[j];
-        }
-    }
-
+    // Host-side mask buffer. Initialised to -inf, then we punch holes for
+    // (a) the accepted prefix (whole left block) and (b) each node's ancestor
+    // chain (sparse hits in the right block).
+    //
+    // Earlier revisions materialised an O(N²) `Vec<Vec<bool>>` ancestor matrix
+    // up front; that's redundant because we only consume each ancestor set
+    // once. Walking the parent chain inline during the buffer fill removes:
+    // - the N² bool allocation (up to 32² = 1 KiB, irrelevant for big-O but
+    //   one extra heap call per HSD step), and
+    // - the per-row O(N) "is this an ancestor?" check (now a tight
+    //   parent-pointer walk of length = node depth, typically ≤ 8 for HSD
+    //   trees of width 32).
+    //
+    // The accepted-prefix block uses `slice::fill` (memset under the hood)
+    // instead of a per-cell loop, which is the dominant cost on long pages —
+    // for a 16k-token prefix and 32 candidates that's ~512K float writes per
+    // verify step, and memset is 5-10× faster than the per-element write.
     let mut buf = vec![f32::NEG_INFINITY; n * total_kv];
     for i in 0..n {
-        let row = i * total_kv;
-        // Allow attending to the entire accepted prefix.
-        for k in 0..prefix_kv_len {
-            buf[row + k] = 0.0;
+        let row_off = i * total_kv;
+        // (a) Allow attending to the entire accepted prefix — single memset.
+        if prefix_kv_len > 0 {
+            buf[row_off..row_off + prefix_kv_len].fill(0.0);
         }
-        // Allow attending to ancestors (and self) within the candidate region.
-        for j in 0..n {
-            if ancestors[i][j] {
-                buf[row + prefix_kv_len + j] = 0.0;
-            }
+        // (b) Allow attending to this node + its ancestors. Walk parent
+        //     pointers in place; no auxiliary bitset.
+        let mut cur = Some(i);
+        while let Some(j) = cur {
+            buf[row_off + prefix_kv_len + j] = 0.0;
+            cur = parents[j];
         }
     }
 
@@ -752,7 +788,7 @@ mod tests {
         assert!(m[3].is_infinite());
         assert!(m[4].is_infinite());
         // Row 1: prefix=0; cand cols [0,1]=ancestors -> 0; [2]=-inf
-        assert_eq!(m[5 + 0], 0.0);
+        assert_eq!(m[5], 0.0);
         assert_eq!(m[5 + 1], 0.0);
         assert_eq!(m[5 + 2], 0.0);
         assert_eq!(m[5 + 3], 0.0);
@@ -780,11 +816,11 @@ mod tests {
         // Node 1 should NOT attend to node 2 (its sibling).
         // Layout: row*3 + col
         // Row 1 (node 1): col 0 = parent (allowed), col 1 = self (allowed), col 2 = sibling (FORBIDDEN)
-        assert_eq!(m[3 + 0], 0.0);
+        assert_eq!(m[3], 0.0);
         assert_eq!(m[3 + 1], 0.0);
         assert!(m[3 + 2].is_infinite());
         // Row 2 (node 2): col 0 = parent, col 1 = sibling, col 2 = self
-        assert_eq!(m[6 + 0], 0.0);
+        assert_eq!(m[6], 0.0);
         assert!(m[6 + 1].is_infinite());
         assert_eq!(m[6 + 2], 0.0);
         Ok(())
@@ -795,6 +831,114 @@ mod tests {
         let device = Device::Cpu;
         let mask = create_tree_attention_mask(&[], 4, DType::F32, &device)?;
         assert_eq!(mask.dims(), &[1, 1, 0, 4]);
+        Ok(())
+    }
+
+    /// Reference implementation kept from the pre-optimization revision
+    /// (the `Vec<Vec<bool>>` ancestor-bitset version). Lets the parity test
+    /// compare the optimized parent-walk path against the original
+    /// O(N²)-bitset path across a battery of randomly shaped trees.
+    fn create_tree_attention_mask_reference(
+        parents: &[Option<usize>],
+        prefix_kv_len: usize,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Tensor> {
+        let n = parents.len();
+        let total_kv = prefix_kv_len + n;
+        if n == 0 {
+            return Tensor::zeros((1, 1, 0, total_kv), dtype, device);
+        }
+        let mut ancestors: Vec<Vec<bool>> = vec![vec![false; n]; n];
+        for (i, row) in ancestors.iter_mut().enumerate() {
+            let mut cur = Some(i);
+            while let Some(j) = cur {
+                row[j] = true;
+                cur = parents[j];
+            }
+        }
+        let mut buf = vec![f32::NEG_INFINITY; n * total_kv];
+        for (row_buf, ancestor_row) in buf.chunks_mut(total_kv).zip(ancestors.iter()) {
+            row_buf[..prefix_kv_len].fill(0.0);
+            for (j, &is_anc) in ancestor_row.iter().enumerate() {
+                if is_anc {
+                    row_buf[prefix_kv_len + j] = 0.0;
+                }
+            }
+        }
+        Tensor::from_vec(buf, (1, 1, n, total_kv), device)?.to_dtype(dtype)
+    }
+
+    #[test]
+    fn test_tree_attention_mask_matches_reference_on_varied_shapes() -> Result<()> {
+        let device = Device::Cpu;
+
+        // Deterministic pseudo-random tree shapes (we hand-pick parents so the
+        // test is reproducible without a seeded RNG dependency).
+        let shapes: Vec<(Vec<Option<usize>>, usize)> = vec![
+            // Linear chain, no prefix.
+            (vec![None, Some(0), Some(1), Some(2)], 0),
+            // Linear chain, with prefix.
+            (vec![None, Some(0), Some(1)], 7),
+            // Branching tree, with prefix.
+            (
+                vec![
+                    None,
+                    Some(0),
+                    Some(0),
+                    Some(1),
+                    Some(1),
+                    Some(2),
+                    Some(2),
+                    Some(2),
+                ],
+                12,
+            ),
+            // Multi-root forest, no prefix.
+            (vec![None, None, Some(0), Some(1), Some(2)], 0),
+            // Single root, deep+wide, with prefix matching a realistic HSD
+            // size: ~16 candidates, 4096-token prefix.
+            (
+                {
+                    let mut p = vec![None];
+                    for i in 1..16 {
+                        // alternate root-children and chains, like an
+                        // expanded prefix-tree from many drafts.
+                        p.push(if i % 4 == 0 { None } else { Some(i - 1) });
+                    }
+                    p
+                },
+                4096,
+            ),
+        ];
+
+        for (parents, prefix_kv_len) in shapes {
+            let opt = create_tree_attention_mask(&parents, prefix_kv_len, DType::F32, &device)?;
+            let reference =
+                create_tree_attention_mask_reference(&parents, prefix_kv_len, DType::F32, &device)?;
+            assert_eq!(
+                opt.dims(),
+                reference.dims(),
+                "shape mismatch for parents={:?}",
+                parents
+            );
+            let opt_vals: Vec<f32> = opt.flatten_all()?.to_vec1()?;
+            let ref_vals: Vec<f32> = reference.flatten_all()?.to_vec1()?;
+            assert_eq!(opt_vals.len(), ref_vals.len());
+            for (i, (&a, &b)) in opt_vals.iter().zip(ref_vals.iter()).enumerate() {
+                let same = match (a.is_infinite(), b.is_infinite()) {
+                    (true, true) => a.is_sign_negative() == b.is_sign_negative(),
+                    (false, false) => (a - b).abs() < 1e-6,
+                    _ => false,
+                };
+                assert!(
+                    same,
+                    "mismatch at idx {i} for parents={:?} prefix={}: opt={a} ref={b}",
+                    parents, prefix_kv_len
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -970,5 +1114,4 @@ mod tests {
 
         Ok(())
     }
-
 }

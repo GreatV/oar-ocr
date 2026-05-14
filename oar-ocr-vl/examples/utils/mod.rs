@@ -3,11 +3,14 @@
 #[allow(dead_code)]
 pub mod structure_match;
 
+#[cfg(feature = "hsd")]
 use std::time::Duration;
 
+#[cfg(feature = "hsd")]
 use oar_ocr_vl::hsd::types::{DsvConfig, HsdConfig, HsdStats, SpecDecodeStats};
 
 /// Initializes the tracing subscriber for logging in examples.
+#[allow(dead_code)]
 pub fn init_tracing() {
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -20,6 +23,7 @@ pub fn init_tracing() {
         .init();
 }
 
+#[cfg(feature = "hsd")]
 #[allow(dead_code)]
 pub fn make_hsd_cfg(
     max_tokens: usize,
@@ -35,6 +39,7 @@ pub fn make_hsd_cfg(
             window_len,
             max_candidates_per_step,
             max_suffix_len,
+            ..Default::default()
         },
         enable_stage1,
         enable_stage2: true,
@@ -43,6 +48,70 @@ pub fn make_hsd_cfg(
     }
 }
 
+/// Default `max_candidates_per_step` for the smoke examples' real-drafter path.
+/// Kept in a constant so per-example clap defaults and the oracle auto-tune
+/// detector ("did the user pass a value different from the default?") agree.
+#[cfg(feature = "hsd")]
+#[allow(dead_code)]
+pub const DEMO_DEFAULT_MAX_CANDIDATES: usize = 32;
+
+/// Default `max_suffix_len` for the smoke examples' real-drafter path. See
+/// [`DEMO_DEFAULT_MAX_CANDIDATES`] for why this is a constant rather than
+/// inlined per-CLI.
+#[cfg(feature = "hsd")]
+#[allow(dead_code)]
+pub const DEMO_DEFAULT_MAX_SUFFIX_LEN: usize = 64;
+
+/// Resolve `(max_candidates_per_step, max_suffix_len)` for an HSD example's
+/// perf pass, transparently auto-tuning to the optimal config when the
+/// caller is on the oracle path (draft = baseline output) and hasn't
+/// overridden the defaults.
+///
+/// Why this exists: the smoke `hsd_*` examples default to oracle (no
+/// `--draft-text` / `--draft-file`) for correctness verification. With the
+/// real-drafter defaults `max_suffix_len = 64, max_candidates = 32`, a 448+
+/// token oracle baseline gets chopped into 64-token chunks; the matcher then
+/// finds many candidates per window on repetition-heavy outputs (table HTML,
+/// formula LaTeX) and explodes the prefix tree to ~2000 nodes per verify
+/// step. The resulting verify_tree forward approaches baseline forward cost
+/// and end-to-end speedup regresses below 1.0×.
+///
+/// When the oracle path is detected:
+/// - `max_suffix_len → max_tokens` so cold-start emits the entire baseline
+///   as a single candidate (its prefix is guaranteed to match target token
+///   for token).
+/// - `max_candidates → 4` because there is only one viable candidate; the
+///   smaller width avoids speculative tree branching that just costs
+///   verify forward time.
+///
+/// If the user explicitly passed `--max-suffix-len` or `--max-candidates`,
+/// their values pass through unchanged.
+///
+/// Returns `Some((eff_max_candidates, eff_max_suffix_len, message))` if
+/// auto-tune fired, `None` if the original defaults remain in effect.
+#[cfg(feature = "hsd")]
+#[allow(dead_code)]
+pub fn auto_tune_hsd_oracle(
+    is_oracle: bool,
+    cli_max_candidates: usize,
+    cli_max_suffix_len: usize,
+    max_tokens: usize,
+) -> (usize, usize, Option<String>) {
+    if is_oracle
+        && cli_max_candidates == DEMO_DEFAULT_MAX_CANDIDATES
+        && cli_max_suffix_len == DEMO_DEFAULT_MAX_SUFFIX_LEN
+    {
+        let note = format!(
+            "      (oracle path detected: auto-tuning max_suffix_len={max_tokens} and \
+             max_candidates=4 — pass --max-suffix-len / --max-candidates to override.)"
+        );
+        (4, max_tokens, Some(note))
+    } else {
+        (cli_max_candidates, cli_max_suffix_len, None)
+    }
+}
+
+#[cfg(feature = "hsd")]
 #[allow(dead_code)]
 pub fn print_hsd_stats(
     baseline_dur: Duration,
@@ -87,6 +156,7 @@ pub fn print_hsd_stats(
     println!("SR_e2e:                 {:.2}x", sr_e2e);
 }
 
+#[cfg(feature = "hsd")]
 #[allow(dead_code)]
 pub fn print_dsv_stats(dsv: &SpecDecodeStats) {
     println!("  DSV candidate build:  {:?}", dsv.candidate_build);

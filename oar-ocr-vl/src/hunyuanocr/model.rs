@@ -4,21 +4,36 @@ use super::config::{HunyuanOcrConfig, HunyuanOcrImageProcessorConfig};
 use super::llm::HunyuanLlm;
 use super::processing::{HunyuanOcrImageInputs, preprocess_image};
 use super::vision::HunyuanVisionModel;
-use crate::attention::{
-    combine_masks, create_causal_mask, create_left_padding_mask, create_tree_attention_mask,
+#[cfg(feature = "hsd")]
+use crate::attention::create_tree_attention_mask;
+use crate::attention::{combine_masks, create_causal_mask, create_left_padding_mask};
+#[cfg(feature = "hsd")]
+use crate::hsd::backend_util::{commit_keep_indices, step_pos_ids, tree_pos_ids};
+#[cfg(feature = "hsd")]
+use crate::hsd::drafting::{
+    TargetDraftAdapter, build_region_draft_candidates_with_adapter, crop_region_image,
+    region_markdown_candidates_for, structure_result_to_layout_elements,
 };
-use crate::hsd::drafting::{build_region_drafts, crop_region_image, page_markdown};
+#[cfg(feature = "hsd")]
 use crate::hsd::prefix_tree::PrefixTree;
-use crate::hsd::types::{AcceptStats, Draft, HsdConfig, HsdStats, RegionDraft, StageStats};
+#[cfg(feature = "hsd")]
+use crate::hsd::types::{
+    AcceptStats, Draft, HsdConfig, HsdStats, RegionDraft, RegionStageStats, StageStats,
+};
+#[cfg(feature = "hsd")]
 use crate::hsd::verify::{SpecBackend, spec_decode};
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
-use candle_core::{D, DType, Device, IndexOp, Result as CandleResult, Tensor};
+#[cfg(feature = "hsd")]
+use candle_core::Result as CandleResult;
+use candle_core::{D, DType, Device, IndexOp, Tensor};
+#[cfg(feature = "hsd")]
 use candle_nn::ops as cnn_ops;
 use image::RgbImage;
 use oar_ocr_core::core::OCRError;
-use oar_ocr_core::domain::structure::LayoutElement;
-use rayon::prelude::*;
+#[cfg(feature = "hsd")]
+use oar_ocr_core::domain::structure::{LayoutElement, StructureResult};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "hsd")]
 use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
 
@@ -33,7 +48,9 @@ fn load_repetition_penalty(model_dir: &Path) -> f64 {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&contents) else {
         return 1.0;
     };
-    v.get("repetition_penalty").and_then(|x| x.as_f64()).unwrap_or(1.0)
+    v.get("repetition_penalty")
+        .and_then(|x| x.as_f64())
+        .unwrap_or(1.0)
 }
 
 /// Apply HuggingFace's `RepetitionPenaltyLogitsProcessor` rule to a 1D logits
@@ -78,8 +95,22 @@ fn argmax_with_repetition_penalty(
     Ok(best_idx as u32)
 }
 
+/// Page-level and region-level instructions for
+/// [`HunyuanOcr::generate_hsd_full`].
+///
+/// `page` is used for Stage 2 full-page verification; `region` is used for
+/// Stage 1 crop verification (each region image is paired with this single
+/// prompt). Kept as a separate struct so the call site reads as
+/// `HunyuanHsdPrompts { page: "...", region: "..." }` rather than two
+/// adjacent untyped `&str`s.
+#[cfg(feature = "hsd")]
+#[derive(Debug, Clone, Copy)]
+pub struct HunyuanHsdPrompts<'a> {
+    pub page: &'a str,
+    pub region: &'a str,
+}
+
 pub struct HunyuanOcr {
-    model_dir: PathBuf,
     device: Device,
     dtype: DType,
     cfg: HunyuanOcrConfig,
@@ -137,7 +168,6 @@ impl HunyuanOcr {
         let repetition_penalty = load_repetition_penalty(model_dir);
 
         Ok(Self {
-            model_dir: model_dir.to_path_buf(),
             device,
             dtype,
             cfg,
@@ -178,23 +208,6 @@ impl HunyuanOcr {
                     instructions.len()
                 ),
             })];
-        }
-
-        #[cfg(feature = "hunyuan-prefill-debug")]
-        if std::env::var_os("OAROCR_PREFILL_INPUTS_FROM").is_some() {
-            return match self.generate_from_prefill_env(images.len(), max_new_tokens) {
-                Ok(results) => results.into_iter().map(Ok).collect(),
-                Err(e) => {
-                    let msg = format!("generation failed: {e}");
-                    (0..images.len())
-                        .map(|_| {
-                            Err(OCRError::InvalidInput {
-                                message: msg.clone(),
-                            })
-                        })
-                        .collect()
-                }
-            };
         }
 
         match self.generate_tokens_internal(images, instructions, max_new_tokens) {
@@ -274,20 +287,6 @@ impl HunyuanOcr {
         max_new_tokens: usize,
     ) -> Result<Vec<Vec<u32>>, OCRError> {
         let batch_size = images.len();
-        #[cfg(feature = "hunyuan-prefill-debug")]
-        if let Some(prefill) = self.load_prefill_dump()? {
-            if batch_size != 1 {
-                return Err(OCRError::InvalidInput {
-                    message: "HunyuanOCR: OAROCR_PREFILL_INPUTS_FROM supports batch_size=1 only"
-                        .to_string(),
-                });
-            }
-            let _ = prefill;
-            let _ = max_new_tokens;
-            return Err(OCRError::InvalidInput {
-                message: "HunyuanOCR: raw token generation is unavailable with OAROCR_PREFILL_INPUTS_FROM".to_string(),
-            });
-        }
 
         // 1. Preprocess all images and build prompts
         let mut all_input_ids: Vec<Vec<u32>> = Vec::with_capacity(batch_size);
@@ -506,8 +505,8 @@ impl HunyuanOcr {
                     // can spiral into runaway-repeat loops on large-context
                     // inputs (observed on chart_01.jpg, seq≈11584, producing
                     // 33K chars of synthetic Mermaid node IDs `BZ, BZW, …`).
-                    // HSD paths intentionally skip this to keep raw log-probs
-                    // for the τ-tolerance verification.
+                    // HSD applies the same processor inside HunyuanSpecBackend
+                    // so τ=1.0 comparisons stay aligned with greedy decoding.
                     let tok = if self.repetition_penalty > 1.0 && !generated[i].is_empty() {
                         argmax_with_repetition_penalty(
                             logits,
@@ -572,40 +571,24 @@ impl HunyuanOcr {
         self.decode_generated_tokens(tokens)
     }
 
+    /// Decode tokens in the form the model actually emitted. HunyuanOCR's
+    /// `decode_tokens` only applies `trim()` post-process, so this is
+    /// effectively an alias provided for API symmetry with backends that do
+    /// have non-trivial post-process (PaddleOCR-VL / GLM-OCR).
+    pub fn decode_tokens_raw(&self, tokens: &[u32]) -> Result<String, OCRError> {
+        self.tokenizer
+            .decode(tokens, true)
+            .map_err(|e| OCRError::InvalidInput {
+                message: format!("HunyuanOCR: tokenizer decode failed: {e}"),
+            })
+    }
+
     pub fn tokenizer(&self) -> &Tokenizer {
         &self.tokenizer
     }
 
     fn decode_generated_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
-        let decoded = self
-            .tokenizer
-            .decode(tokens, true)
-            .map_err(|e| OCRError::InvalidInput {
-                message: format!("HunyuanOCR: tokenizer decode failed: {e}"),
-            })?;
-        Ok(decoded.trim().to_string())
-    }
-
-    #[cfg(feature = "hunyuan-prefill-debug")]
-    fn generate_from_prefill_env(
-        &self,
-        batch_size: usize,
-        max_new_tokens: usize,
-    ) -> Result<Vec<String>, OCRError> {
-        let Some(prefill) = self.load_prefill_dump()? else {
-            return Err(OCRError::InvalidInput {
-                message: "HunyuanOCR: OAROCR_PREFILL_INPUTS_FROM is set but no dump was loaded"
-                    .to_string(),
-            });
-        };
-        if batch_size != 1 {
-            return Err(OCRError::InvalidInput {
-                message: "HunyuanOCR: OAROCR_PREFILL_INPUTS_FROM supports batch_size=1 only"
-                    .to_string(),
-            });
-        }
-        let text = self.generate_from_prefill_dump(prefill, max_new_tokens)?;
-        Ok(vec![text])
+        Ok(self.decode_tokens_raw(tokens)?.trim().to_string())
     }
 
     /// Generate OCR output for a single image using Hierarchical Speculative
@@ -619,6 +602,7 @@ impl HunyuanOcr {
     ///
     /// Returns `(generated_text, stats)` where `stats.stage2.accept` records
     /// the AAL and step counts needed to compute SR_decode / SR_e2e.
+    #[cfg(feature = "hsd")]
     pub fn generate_hsd(
         &self,
         image: &RgbImage,
@@ -657,6 +641,7 @@ impl HunyuanOcr {
     /// HSD entry that consumes already-tokenized drafts. This is the oracle
     /// path used by benchmarks to avoid `decode -> encode` tokenizer
     /// round-trips when the draft comes from this backend's own baseline.
+    #[cfg(feature = "hsd")]
     pub fn generate_hsd_with_token_drafts(
         &self,
         image: &RgbImage,
@@ -676,6 +661,7 @@ impl HunyuanOcr {
     }
 
     /// Token-returning HSD entry for diagnostics and exact oracle checks.
+    #[cfg(feature = "hsd")]
     pub fn generate_hsd_tokens_with_token_drafts(
         &self,
         image: &RgbImage,
@@ -686,6 +672,7 @@ impl HunyuanOcr {
         self.generate_hsd_tokens_tokenized(image, instruction, drafts, hsd_cfg, Duration::ZERO)
     }
 
+    #[cfg(feature = "hsd")]
     fn generate_hsd_tokenized(
         &self,
         image: &RgbImage,
@@ -710,6 +697,7 @@ impl HunyuanOcr {
         Ok((text.trim().to_string(), stats))
     }
 
+    #[cfg(feature = "hsd")]
     fn generate_hsd_tokens_tokenized(
         &self,
         image: &RgbImage,
@@ -718,8 +706,10 @@ impl HunyuanOcr {
         hsd_cfg: &HsdConfig,
         drafter_elapsed: Duration,
     ) -> Result<(Vec<u32>, HsdStats), OCRError> {
-        let mut stats = HsdStats::default();
-        stats.drafter = drafter_elapsed;
+        let mut stats = HsdStats {
+            drafter: drafter_elapsed,
+            ..Default::default()
+        };
         // Stage 2 (page-level) prefill.
         let t_prefill = Instant::now();
         let initial_lp = self.hsd_prefill_single(image, instruction)?;
@@ -733,7 +723,7 @@ impl HunyuanOcr {
         let mut dsv = Default::default();
         let generated = spec_decode(
             &mut backend,
-            &tokenized,
+            tokenized,
             initial_lp,
             hsd_cfg.max_page_tokens,
             &hsd_cfg.dsv,
@@ -753,134 +743,200 @@ impl HunyuanOcr {
     /// Full Hierarchical Speculative Decoding entry: Stage 1 (region-level
     /// local verification) followed by Stage 2 (page-level global verification).
     ///
-    /// `elements` is the drafter pipeline's layout output (PP-DocLayout +
-    /// recognition backend). Each element's recognized text is treated as the
-    /// region draft. Empty / `ignore_labels`-matching elements are skipped.
+    /// Full HSD entry: Stage 1 verifies region-level candidate drafts on
+    /// cropped images, then Stage 2 verifies the Stage-1 output set on the
+    /// full page image.
+    ///
+    /// `text_candidates(elem)` can return top-k recognizer outputs or outputs
+    /// from multiple independent drafters. Candidates are serialized through
+    /// HunyuanOCR's target adapter, tokenized with HunyuanOCR's tokenizer,
+    /// deduplicated per region, and verified together in Stage 1.
     ///
     /// `hsd_cfg.enable_stage1` and `hsd_cfg.enable_stage2` independently gate
     /// the two stages (used for ablations — `enable_stage2 = false` reproduces
     /// the lossy "Stage 1 only" line in the paper's Tab. 7).
-    pub fn generate_hsd_full(
+    #[cfg(feature = "hsd")]
+    pub fn generate_hsd_full<C>(
         &self,
         image: &RgbImage,
-        instruction: &str,
+        prompts: HunyuanHsdPrompts<'_>,
         elements: &[LayoutElement],
         ignore_labels: &[String],
+        text_candidates: C,
         hsd_cfg: &HsdConfig,
-    ) -> Result<(String, HsdStats), OCRError> {
+    ) -> Result<(String, HsdStats), OCRError>
+    where
+        C: Fn(&LayoutElement) -> Vec<String>,
+    {
+        let HunyuanHsdPrompts {
+            page: page_instruction,
+            region: region_instruction,
+        } = prompts;
         let mut stats = HsdStats::default();
 
         // 1. Build region drafts using the target VLM's tokenizer.
         let t_drafter = Instant::now();
         let tokenizer = &self.tokenizer;
-        let region_drafts = build_region_drafts(elements, ignore_labels, |s: &str| {
-            tokenizer
-                .encode(s, false)
-                .map(|enc| enc.get_ids().to_vec())
-                .unwrap_or_default()
-        });
+        let region_drafts = build_region_draft_candidates_with_adapter(
+            elements,
+            ignore_labels,
+            TargetDraftAdapter::HunyuanOcr,
+            &text_candidates,
+            |s: &str| {
+                tokenizer
+                    .encode(s, false)
+                    .map(|enc| enc.get_ids().to_vec())
+                    .unwrap_or_default()
+            },
+        );
         stats.drafter = t_drafter.elapsed();
+        let original_region_drafts = region_markdown_candidates_for(
+            elements,
+            ignore_labels,
+            TargetDraftAdapter::HunyuanOcr,
+            &text_candidates,
+        );
 
         // 2. Stage 1 — build independent region work items, then run
         // target-model verification. Each HunyuanOCR instance owns a mutable
         // LLM KV cache, so parallel verification uses separate model workers.
-        let mut stage1_outputs: Vec<String> = Vec::with_capacity(region_drafts.len());
+        //
+        // Collect (reading_order, text) pairs so Stage 2 can join in the
+        // reading order the layout drafter assigned, not the
+        // worker-completion order. The `RegionDraft::reading_order` field is
+        // populated by `build_region_drafts` and was previously ignored.
+        let mut stage1_outputs: Vec<(usize, String)> = Vec::with_capacity(region_drafts.len());
         if hsd_cfg.enable_stage1 && !region_drafts.is_empty() {
             let t_prep = Instant::now();
             let stage1_work = build_stage1_work_items(image, &region_drafts)?;
             stats.stage1.draft_prep += t_prep.elapsed();
 
-            let stage1_results = self.run_stage1_work(&stage1_work, instruction, hsd_cfg)?;
-            for (text, item_stats) in stage1_results {
-                add_stage_stats(&mut stats.stage1, item_stats);
-                stage1_outputs.push(text);
+            let stage1_results = self.run_stage1_work(&stage1_work, region_instruction, hsd_cfg)?;
+            // Pair each Stage-1 output with its layout-drafter reading_order.
+            // Regions without an explicit order fall back to their input
+            // index (stable, deterministic).
+            for (idx, ((text, item_stats), (region, _img))) in stage1_results
+                .into_iter()
+                .zip(stage1_work.iter())
+                .enumerate()
+            {
+                let order = region.reading_order.unwrap_or(idx);
+                stats.stage1_regions.push(RegionStageStats {
+                    kind: region.kind,
+                    stats: item_stats.clone(),
+                });
+                stats.stage1.add_assign(item_stats);
+                stage1_outputs.push((order, text));
+            }
+            stage1_outputs.sort_by_key(|(order, _)| *order);
+        }
+
+        // 3. Stage 2 — page-level global verification. Per paper Eq. 3 the
+        //    page draft is the *unordered set* `Ỹ^pg = {ŷ^(i)}`, one draft
+        //    per region. We pass that set straight to `spec_decode` instead
+        //    of concatenating into a single markdown string — the sliding
+        //    window in `collect_candidates` scans each draft independently
+        //    (Eqs. 1+2), so per-region n-gram locality is preserved even
+        //    when full-page transitions don't appear naturally in the
+        //    target VLM's output.
+        if hsd_cfg.enable_stage2 {
+            let page_drafts: Vec<String> = if !stage1_outputs.is_empty() {
+                stage1_outputs.iter().map(|(_, t)| t.clone()).collect()
+            } else {
+                original_region_drafts
+            };
+            if !page_drafts.is_empty() {
+                let (text, s2_stats) =
+                    self.generate_hsd(image, page_instruction, &page_drafts, hsd_cfg)?;
+                stats.stage2 = s2_stats.stage2;
+                stats.drafter += s2_stats.drafter;
+                return Ok((text, stats));
             }
         }
 
-        // 3. Stage 2 — page-level global verification.
-        if hsd_cfg.enable_stage2 {
-            let page_draft_text = if !stage1_outputs.is_empty() {
-                stage1_outputs.join("\n\n")
-            } else {
-                page_markdown(elements, ignore_labels)
-            };
-            let (text, s2_stats) = self.generate_hsd(
-                image,
-                instruction,
-                std::slice::from_ref(&page_draft_text),
-                hsd_cfg,
-            )?;
-            stats.stage2 = s2_stats.stage2;
-            stats.drafter += s2_stats.drafter;
-            return Ok((text, stats));
-        }
-
         // 4. Stage 2 disabled — return Stage-1-only aggregation (lossy ablation).
-        Ok((stage1_outputs.join("\n\n"), stats))
+        let stage1_only = stage1_outputs
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        Ok((stage1_only, stats))
     }
 
+    /// One-call HSD entry that consumes a `StructureResult` (i.e. the output of
+    /// the OARStructure / PP-StructureV3 pipeline) directly.
+    ///
+    /// This is the paper's PP-StructureV3 → SpecDecode integration point
+    /// realized as a single Rust call:
+    ///
+    /// ```no_run
+    /// # use oar_ocr::prelude::{OARStructure, OARStructureBuilder};
+    /// # use oar_ocr_vl::HunyuanOcr;
+    /// # use oar_ocr_vl::hsd::types::HsdConfig;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let device = oar_ocr_vl::utils::parse_device("cuda:0")?;
+    /// # let structure: OARStructure = unimplemented!();
+    /// # let model: HunyuanOcr = unimplemented!();
+    /// # let image: image::RgbImage = unimplemented!();
+    /// let s = structure.predict_image(image.clone())?;
+    /// let (output, stats) = model.generate_hsd_with_structure(
+    ///     &image,
+    ///     "Extract and parse the document content as markdown.",
+    ///     "Extract and parse this region.",
+    ///     &s,
+    ///     &[],
+    ///     &HsdConfig::default(),
+    /// )?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// Internally:
+    /// 1. Calls [`structure_result_to_layout_elements`] to backfill table HTML
+    ///    and formula LaTeX from the structure's side records onto the layout
+    ///    elements.
+    /// 2. Delegates to [`Self::generate_hsd_full`] with `text_candidates =
+    ///    |elem| elem.text.iter().cloned().collect()` (single-candidate per
+    ///    region — equivalent to the paper's PP-StructureV3 drafter). Callers
+    ///    that want multi-candidate per region (e.g. top-k OCR) should keep
+    ///    using `generate_hsd_full` directly with a custom closure.
+    #[cfg(feature = "hsd")]
+    pub fn generate_hsd_with_structure(
+        &self,
+        image: &RgbImage,
+        page_instruction: &str,
+        region_instruction: &str,
+        structure: &StructureResult,
+        ignore_labels: &[String],
+        hsd_cfg: &HsdConfig,
+    ) -> Result<(String, HsdStats), OCRError> {
+        let elements = structure_result_to_layout_elements(structure);
+        self.generate_hsd_full(
+            image,
+            HunyuanHsdPrompts {
+                page: page_instruction,
+                region: region_instruction,
+            },
+            &elements,
+            ignore_labels,
+            |elem| elem.text.iter().cloned().collect(),
+            hsd_cfg,
+        )
+    }
+
+    #[cfg(feature = "hsd")]
     fn run_stage1_work(
         &self,
         stage1_work: &[(RegionDraft, RgbImage)],
         instruction: &str,
         hsd_cfg: &HsdConfig,
     ) -> Result<Vec<(String, StageStats)>, OCRError> {
-        let workers = stage1_verify_workers().min(stage1_work.len());
-        if workers > 1 {
-            self.run_stage1_work_parallel(stage1_work, instruction, hsd_cfg, workers)
-        } else {
-            stage1_work
-                .iter()
-                .map(|(region, crop)| self.run_stage1_item(region, crop, instruction, hsd_cfg))
-                .collect()
-        }
+        stage1_work
+            .iter()
+            .map(|(region, crop)| self.run_stage1_item(region, crop, instruction, hsd_cfg))
+            .collect()
     }
 
-    fn run_stage1_work_parallel(
-        &self,
-        stage1_work: &[(RegionDraft, RgbImage)],
-        instruction: &str,
-        hsd_cfg: &HsdConfig,
-        workers: usize,
-    ) -> Result<Vec<(String, StageStats)>, OCRError> {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(workers)
-            .build()
-            .map_err(|e| OCRError::InvalidInput {
-                message: format!("HunyuanOCR HSD: failed to build stage1 verify pool: {e}"),
-            })?;
-        let model_dir = self.model_dir.clone();
-        let device = self.device.clone();
-
-        let worker_outputs: Vec<Result<Vec<(usize, String, StageStats)>, OCRError>> =
-            pool.install(|| {
-                (0..workers)
-                    .into_par_iter()
-                    .map(|worker_id| {
-                        let worker = HunyuanOcr::from_dir(&model_dir, device.clone())?;
-                        let mut out = Vec::new();
-                        for idx in (worker_id..stage1_work.len()).step_by(workers) {
-                            let (region, crop) = &stage1_work[idx];
-                            let (text, stats) =
-                                worker.run_stage1_item(region, crop, instruction, hsd_cfg)?;
-                            out.push((idx, text, stats));
-                        }
-                        Ok(out)
-                    })
-                    .collect()
-            });
-
-        let mut ordered = Vec::with_capacity(stage1_work.len());
-        for worker in worker_outputs {
-            ordered.extend(worker?);
-        }
-        ordered.sort_by_key(|(idx, _, _)| *idx);
-        Ok(ordered
-            .into_iter()
-            .map(|(_, text, stats)| (text, stats))
-            .collect())
-    }
-
+    #[cfg(feature = "hsd")]
     fn run_stage1_item(
         &self,
         region: &RegionDraft,
@@ -901,7 +957,7 @@ impl HunyuanOcr {
         let mut dsv = Default::default();
         let toks = spec_decode(
             &mut backend,
-            std::slice::from_ref(&region.draft),
+            &region.drafts,
             init_lp,
             hsd_cfg.max_region_tokens,
             &hsd_cfg.dsv,
@@ -928,6 +984,7 @@ impl HunyuanOcr {
     /// Run the prefill forward pass for HSD, leaving the LLM's KV cache
     /// populated. Returns the F32 log-probabilities at the last prompt
     /// position (shape `(vocab,)`).
+    #[cfg(feature = "hsd")]
     fn hsd_prefill_single(&self, image: &RgbImage, instruction: &str) -> Result<Tensor, OCRError> {
         // 1. Preprocess.
         let mut image_inputs = preprocess_image(
@@ -1120,209 +1177,22 @@ impl HunyuanOcr {
         Ok(())
     }
 
-    #[cfg(feature = "hunyuan-prefill-debug")]
-    fn load_prefill_dump(&self) -> Result<Option<PrefillDump>, OCRError> {
-        let Some(dir) = std::env::var_os("OAROCR_PREFILL_INPUTS_FROM") else {
-            return Ok(None);
-        };
-        let dir = PathBuf::from(dir);
-        let load_t = |name: &str| -> Result<Tensor, OCRError> {
-            let path = dir.join(name);
-            let mut tensors = candle_core::safetensors::load(&path, &self.device)
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "load prefill dump", e))?;
-            tensors.remove("t").ok_or_else(|| OCRError::InvalidInput {
-                message: format!(
-                    "HunyuanOCR: prefill dump {} is missing tensor named 't'",
-                    path.display()
-                ),
-            })
-        };
-
-        let input_ids_t = load_t("input_ids.safetensors")?;
-        let input_ids = input_ids_t
-            .flatten_all()
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "flatten dumped input_ids", e))?
-            .to_dtype(DType::U32)
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "cast dumped input_ids", e))?
-            .to_vec1::<u32>()
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "read dumped input_ids", e))?;
-
-        let inputs_path = dir.join("inputs_embeds.safetensors");
-        let inputs_embeds = if inputs_path.exists() {
-            load_t("inputs_embeds.safetensors")?
-        } else {
-            load_t("layer_00_in.safetensors")?
-        };
-        let inputs_embeds = inputs_embeds
-            .to_dtype(self.dtype)
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "cast dumped inputs_embeds", e))?;
-
-        let position_ids = normalize_prefill_position_ids(load_t("position_ids.safetensors")?)?;
-        let position_ids = position_ids
-            .to_dtype(DType::I64)
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "cast dumped position_ids", e))?;
-
-        let seq_len = input_ids.len();
-        let (_, embed_seq, _) = inputs_embeds
-            .dims3()
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "dumped inputs_embeds dims3", e))?;
-        let (_, _, pos_seq) = position_ids
-            .dims3()
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "dumped position_ids dims3", e))?;
-        if embed_seq != seq_len || pos_seq != seq_len {
-            return Err(OCRError::InvalidInput {
-                message: format!(
-                    "HunyuanOCR: prefill dump length mismatch: input_ids={seq_len}, inputs_embeds={embed_seq}, position_ids={pos_seq}"
-                ),
-            });
-        }
-
-        Ok(Some(PrefillDump {
-            input_ids,
-            inputs_embeds,
-            position_ids,
-        }))
-    }
-
-    #[cfg(feature = "hunyuan-prefill-debug")]
-    fn generate_from_prefill_dump(
-        &self,
-        prefill: PrefillDump,
-        max_new_tokens: usize,
-    ) -> Result<String, OCRError> {
-        let seq_len = prefill.input_ids.len();
-        let causal = create_causal_mask(seq_len, seq_len, self.dtype, &self.device)
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "create dump causal", e))?;
-
-        if let Ok(d) = std::env::var("OAROCR_DUMP_DIR") {
-            let _ = std::fs::create_dir_all(&d);
-            let _ = prefill
-                .inputs_embeds
-                .save_safetensors("t", format!("{d}/inputs_embeds.safetensors"));
-            let _ = prefill
-                .position_ids
-                .save_safetensors("t", format!("{d}/position_ids.safetensors"));
-        }
-
-        self.llm.clear_kv_cache();
-        let hidden =
-            self.llm
-                .forward(&prefill.inputs_embeds, &prefill.position_ids, Some(&causal))?;
-        let last = hidden
-            .i((0, seq_len - 1, ..))
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "get dumped last hidden", e))?;
-        let mut logits = self.logits_from_hidden(&last)?;
-        if let Ok(d) = std::env::var("OAROCR_DUMP_DIR") {
-            let _ = logits.save_safetensors("t", format!("{d}/first_token_logits.safetensors"));
-        }
-
-        let mut generated: Vec<u32> = Vec::new();
-        let mut position = seq_len as i64;
-        for _ in 0..max_new_tokens {
-            let tok = logits
-                .argmax(D::Minus1)
-                .and_then(|t| t.to_scalar::<u32>())
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "dump argmax", e))?;
-            if self.stop_token_ids.contains(&tok) {
-                break;
-            }
-            generated.push(tok);
-
-            let tokens = Tensor::new(vec![tok], &self.device)
-                .and_then(|t| t.reshape((1usize, 1usize)))
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "dump token tensor", e))?;
-            let embeds = self.llm.embed(&tokens)?;
-            let pos = Tensor::new(vec![position, position, position, position], &self.device)
-                .and_then(|t| t.reshape((4usize, 1usize, 1usize)))
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "dump decode pos", e))?;
-            let hs = self.llm.forward(&embeds, &pos, None)?;
-            let h = hs
-                .i((0, 0, ..))
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "dump decode hidden", e))?;
-            logits = self.logits_from_hidden(&h)?;
-            position += 1;
-        }
-
-        self.tokenizer
-            .decode(&generated, true)
-            .map(|s| s.trim().to_string())
-            .map_err(|e| OCRError::InvalidInput {
-                message: format!("HunyuanOCR: tokenizer decode dumped generation failed: {e}"),
-            })
-    }
 }
 
+#[cfg(feature = "hsd")]
 fn build_stage1_work_items(
     image: &RgbImage,
     region_drafts: &[RegionDraft],
 ) -> Result<Vec<(RegionDraft, RgbImage)>, OCRError> {
-    let crop_one = |region: &RegionDraft| {
-        crop_region_image(image, &region.bbox).map(|crop| (region.clone(), crop))
-    };
-
-    let workers = std::env::var("OAROCR_HSD_STAGE1_CROP_WORKERS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(0);
-    if workers > 1 && region_drafts.len() > 1 {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(workers)
-            .build()
-            .map_err(|e| OCRError::InvalidInput {
-                message: format!("HunyuanOCR HSD: failed to build stage1 crop pool: {e}"),
-            })?;
-        pool.install(|| region_drafts.par_iter().map(crop_one).collect())
-    } else {
-        region_drafts.iter().map(crop_one).collect()
-    }
-}
-
-fn stage1_verify_workers() -> usize {
-    std::env::var("OAROCR_HSD_STAGE1_VERIFY_WORKERS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(1)
-}
-
-fn add_stage_stats(dst: &mut StageStats, src: StageStats) {
-    dst.vision_prefill += src.vision_prefill;
-    dst.draft_prep += src.draft_prep;
-    dst.decode += src.decode;
-    dst.emitted_tokens += src.emitted_tokens;
-    dst.forward_passes += src.forward_passes;
-    dst.dsv.add_assign(&src.dsv);
-    dst.accept
-        .per_step_accepted
-        .extend(src.accept.per_step_accepted);
-    dst.accept.num_steps += src.accept.num_steps;
-    dst.accept.num_fallbacks += src.accept.num_fallbacks;
-}
-
-#[cfg(feature = "hunyuan-prefill-debug")]
-struct PrefillDump {
-    input_ids: Vec<u32>,
-    inputs_embeds: Tensor,
-    position_ids: Tensor,
-}
-
-#[cfg(feature = "hunyuan-prefill-debug")]
-fn normalize_prefill_position_ids(position_ids: Tensor) -> Result<Tensor, OCRError> {
-    let dims = position_ids.dims().to_vec();
-    match dims.as_slice() {
-        [4, 1, _] => Ok(position_ids),
-        [1, 4, _] => position_ids
-            .permute((1usize, 0usize, 2usize))
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "permute dumped position_ids", e)),
-        _ => Err(OCRError::InvalidInput {
-            message: format!(
-                "HunyuanOCR: expected dumped position_ids shape (4,1,S) or (1,4,S), got {dims:?}"
-            ),
-        }),
-    }
+    region_drafts
+        .iter()
+        .map(|region| crop_region_image(image, &region.bbox).map(|crop| (region.clone(), crop)))
+        .collect()
 }
 
 /// HSD adapter for HunyuanOCR. Borrows the model and drives the LLM's KV
 /// cache through tree-attention verifications and single-token decode steps.
+#[cfg(feature = "hsd")]
 struct HunyuanSpecBackend<'a> {
     model: &'a HunyuanOcr,
     /// KV cache length captured at the start of the most recent
@@ -1332,35 +1202,135 @@ struct HunyuanSpecBackend<'a> {
     /// Number of LLM forward passes (verify_tree + step_one) — populated for
     /// the per-stage StageStats accounting in `generate_hsd`.
     forward_passes: u32,
+    /// Generated tokens accepted so far (post-prompt). Used to apply
+    /// `generation_config.json::repetition_penalty` to log-probs in step_one /
+    /// verify_tree, mirroring the baseline greedy path. Without this the
+    /// τ=1.0 oracle correctness check fails when the baseline picks a
+    /// rep-penalized token but HSD's raw argmax picks the same token's
+    /// repetition.
+    committed_tokens: Vec<u32>,
+    /// Token-ids buffer passed into the most recent `verify_tree` call,
+    /// indexed by node id. Needed by `commit_verify` to extend
+    /// `committed_tokens` with the actually accepted tokens.
+    last_verify_tokens: Vec<u32>,
+    /// Parent-pointer array for the most recent `verify_tree` call, indexed
+    /// by node id. Used to compute the per-row "seen" set when applying
+    /// repetition penalty (committed prefix + ancestor chain to that node).
+    last_verify_parents: Vec<Option<usize>>,
 }
 
+#[cfg(feature = "hsd")]
 impl<'a> HunyuanSpecBackend<'a> {
     fn new(model: &'a HunyuanOcr) -> Self {
         Self {
             model,
             pre_verify_kv: 0,
             forward_passes: 0,
+            committed_tokens: Vec::new(),
+            last_verify_tokens: Vec::new(),
+            last_verify_parents: Vec::new(),
         }
     }
 
-    fn project_logprobs_2d(&self, hidden_2d: &Tensor) -> CandleResult<Tensor> {
-        // hidden_2d: (N, hidden). Project to (N, vocab) and log-softmax in F32.
+    fn project_logits_2d(&self, hidden_2d: &Tensor) -> CandleResult<Tensor> {
+        // hidden_2d: (N, hidden). Project to (N, vocab) raw logits in F32.
         let w = self.model.llm.token_embedding_weight();
         let wt = w.transpose(0, 1)?;
-        let logits = hidden_2d.matmul(&wt)?;
-        cnn_ops::log_softmax(&logits.to_dtype(DType::F32)?, D::Minus1)
+        let logits = hidden_2d.matmul(&wt)?.to_dtype(DType::F32)?;
+        Ok(logits)
     }
 
-    fn project_logprobs_1d(&self, hidden_1d: &Tensor) -> CandleResult<Tensor> {
-        // hidden_1d: (hidden,). Project to (vocab,) and log-softmax in F32.
+    fn project_logits_1d(&self, hidden_1d: &Tensor) -> CandleResult<Tensor> {
+        // hidden_1d: (hidden,). Project to (vocab,) raw logits in F32.
         let w = self.model.llm.token_embedding_weight();
         let wt = w.transpose(0, 1)?;
-        // (1, hidden) @ (hidden, vocab) = (1, vocab) -> squeeze -> (vocab,).
-        let logits = hidden_1d.unsqueeze(0)?.matmul(&wt)?.squeeze(0)?;
-        cnn_ops::log_softmax(&logits.to_dtype(DType::F32)?, D::Minus1)
+        let logits = hidden_1d
+            .unsqueeze(0)?
+            .matmul(&wt)?
+            .squeeze(0)?
+            .to_dtype(DType::F32)?;
+        Ok(logits)
+    }
+
+    /// Apply HF's `RepetitionPenaltyLogitsProcessor` rule to one row of raw
+    /// logits in-place. Deduped seen set: each vocab id pays the penalty at
+    /// most once, mirroring HF's `scatter`. Logits are host-side after a
+    /// `to_vec1`; the caller rebuilds a fresh device tensor afterwards.
+    fn apply_rep_penalty_row(row: &mut [f32], seen: &[u32], penalty: f32) {
+        if penalty == 1.0 || seen.is_empty() {
+            return;
+        }
+        let vocab = row.len();
+        let mut unique: Vec<u32> = seen.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        for &id in &unique {
+            let idx = id as usize;
+            if idx >= vocab {
+                continue;
+            }
+            let v = row[idx];
+            row[idx] = if v > 0.0 { v / penalty } else { v * penalty };
+        }
+    }
+
+    /// Apply rep_penalty + log_softmax to a 1D logits tensor with the
+    /// committed-tokens seen set.
+    fn penalize_and_log_softmax_1d(&self, logits_1d: &Tensor) -> CandleResult<Tensor> {
+        let penalty = self.model.repetition_penalty as f32;
+        if penalty == 1.0 || self.committed_tokens.is_empty() {
+            return cnn_ops::log_softmax(logits_1d, D::Minus1);
+        }
+        let device = logits_1d.device().clone();
+        let mut row = logits_1d.to_vec1::<f32>()?;
+        Self::apply_rep_penalty_row(&mut row, &self.committed_tokens, penalty);
+        let len = row.len();
+        let penalized = Tensor::from_vec(row, (len,), &device)?;
+        cnn_ops::log_softmax(&penalized, D::Minus1)
+    }
+
+    /// Apply per-row rep_penalty + log_softmax to a 2D logits tensor where
+    /// row `i` corresponds to verify-tree node `i`. The "seen" set for each
+    /// row is `committed_tokens` plus the ancestor-chain tokens from the
+    /// tree (the node's own token is *included* — the model already saw it
+    /// in the forward pass, so it counts toward the rep-penalty set for
+    /// predicting the next position).
+    fn penalize_and_log_softmax_verify(
+        &self,
+        logits_2d: &Tensor,
+        tree_tokens: &[u32],
+        tree_parents: &[Option<usize>],
+    ) -> CandleResult<Tensor> {
+        let penalty = self.model.repetition_penalty as f32;
+        if penalty == 1.0 || (self.committed_tokens.is_empty() && tree_tokens.is_empty()) {
+            return cnn_ops::log_softmax(logits_2d, D::Minus1);
+        }
+        let (n, vocab) = logits_2d.dims2()?;
+        let device = logits_2d.device().clone();
+        let mut flat: Vec<f32> = logits_2d.to_vec2::<f32>()?.into_iter().flatten().collect();
+        // Build per-node ancestor chains once.
+        let ancestors: Vec<Vec<u32>> = (0..n)
+            .map(|i| {
+                let mut chain = Vec::new();
+                let mut cur = Some(i);
+                while let Some(j) = cur {
+                    chain.push(tree_tokens[j]);
+                    cur = tree_parents[j];
+                }
+                chain
+            })
+            .collect();
+        for (row, ancestor_chain) in flat.chunks_mut(vocab).zip(ancestors.iter()) {
+            let mut seen = self.committed_tokens.clone();
+            seen.extend_from_slice(ancestor_chain);
+            Self::apply_rep_penalty_row(row, &seen, penalty);
+        }
+        let penalized = Tensor::from_vec(flat, (n, vocab), &device)?;
+        cnn_ops::log_softmax(&penalized, D::Minus1)
     }
 }
 
+#[cfg(feature = "hsd")]
 impl<'a> SpecBackend for HunyuanSpecBackend<'a> {
     fn step_one(&mut self, token: u32) -> CandleResult<Tensor> {
         let model = self.model;
@@ -1373,9 +1343,9 @@ impl<'a> SpecBackend for HunyuanSpecBackend<'a> {
             .embed(&tok_t)
             .map_err(|e| candle_core::Error::Msg(format!("HunyuanOCR HSD step_one embed: {e}")))?;
 
-        // Position id = current cache length (next slot).
-        let pos = model.llm.current_kv_len() as i64;
-        let pos_ids = Tensor::from_vec(vec![pos, pos, pos, pos], (4usize, 1usize, 1usize), device)?;
+        // Position id = current cache length (next slot). HunyuanOCR uses
+        // 4-axis MRoPE with rope_delta = 0.
+        let pos_ids = step_pos_ids(4, model.llm.current_kv_len(), 0, device)?;
 
         // Continuation forward — no mask (autoregressive on growing cache).
         let hidden = model.llm.forward(&embeds, &pos_ids, None).map_err(|e| {
@@ -1383,7 +1353,13 @@ impl<'a> SpecBackend for HunyuanSpecBackend<'a> {
         })?;
         self.forward_passes += 1;
         let last = hidden.i((0, 0, ..))?;
-        self.project_logprobs_1d(&last)
+        // Record the just-decoded token before scoring the next position so
+        // rep_penalty includes it in the seen set (mirrors baseline greedy
+        // which calls `argmax_with_repetition_penalty(logits, &generated[..])`
+        // after `generated.push(prev_tok)`).
+        self.committed_tokens.push(token);
+        let logits = self.project_logits_1d(&last)?;
+        self.penalize_and_log_softmax_1d(&logits)
     }
 
     fn verify_tree(&mut self, tree: &PrefixTree) -> CandleResult<Tensor> {
@@ -1404,15 +1380,9 @@ impl<'a> SpecBackend for HunyuanSpecBackend<'a> {
         // Position ids: depth-`d` node represents the d-th newly generated
         // token, so its absolute sequence position is `prefix_kv + d - 1`
         // (depth-1 token sits in the very next cache slot after the prompt,
-        // which is at index `prefix_kv`). Mirrors the baseline decode loop's
-        // first `pos = seq_len` followed by per-step increments.
-        let mut pos_data: Vec<i64> = Vec::with_capacity(4 * n);
-        for _axis in 0..4 {
-            for d in &tree.depths {
-                pos_data.push(prefix_kv as i64 + (*d as i64) - 1);
-            }
-        }
-        let pos_ids = Tensor::from_vec(pos_data, (4usize, 1usize, n), device)?;
+        // which is at index `prefix_kv`). HunyuanOCR uses 4-axis MRoPE with
+        // rope_delta = 0.
+        let pos_ids = tree_pos_ids(4, prefix_kv, 0, tree, device)?;
 
         // Tree-ancestry mask — each candidate token sees prefix + its own
         // ancestor chain only (paper Fig. 2c).
@@ -1427,17 +1397,22 @@ impl<'a> SpecBackend for HunyuanSpecBackend<'a> {
         self.forward_passes += 1;
         // (1, N, hidden) → (N, hidden) → (N, vocab) log-probs.
         let h2 = hidden.squeeze(0)?;
-        self.project_logprobs_2d(&h2)
+        let logits = self.project_logits_2d(&h2)?;
+        // Cache tree shape so `commit_verify` can read off the accepted
+        // tokens and extend `committed_tokens`.
+        self.last_verify_tokens = tree.tokens.clone();
+        self.last_verify_parents = tree.parents.clone();
+        self.penalize_and_log_softmax_verify(&logits, &tree.tokens, &tree.parents)
     }
 
     fn commit_verify(&mut self, accepted_path: &[usize]) -> CandleResult<()> {
-        let prefix_kv = self.pre_verify_kv;
-        let mut indices: Vec<u32> = Vec::with_capacity(prefix_kv + accepted_path.len());
-        for i in 0..prefix_kv {
-            indices.push(i as u32);
-        }
+        let indices = commit_keep_indices(self.pre_verify_kv, accepted_path);
+        // Extend the rep-penalty seen set with the tokens we just committed
+        // (each accepted path index maps to a verify-tree node).
         for &p in accepted_path {
-            indices.push((prefix_kv + p) as u32);
+            if let Some(&tok) = self.last_verify_tokens.get(p) {
+                self.committed_tokens.push(tok);
+            }
         }
         self.model.llm.keep_kv_indices(&indices).map_err(|e| {
             let mut chain = format!("HunyuanOCR HSD commit_verify: {e}");
@@ -1627,4 +1602,32 @@ fn build_position_ids(
             e,
         )
     })
+}
+
+#[cfg(all(test, feature = "hsd"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hsd_repetition_penalty_matches_baseline_argmax_for_nondefault_penalty() {
+        let device = Device::Cpu;
+        let logits = Tensor::from_vec(vec![0.0f32, 8.0, 5.0], (3,), &device).unwrap();
+        let seen = [1u32, 1u32];
+        let penalty = 1.7f32;
+
+        let baseline = argmax_with_repetition_penalty(&logits, &seen, penalty).unwrap();
+
+        let mut row = logits.to_vec1::<f32>().unwrap();
+        HunyuanSpecBackend::apply_rep_penalty_row(&mut row, &seen, penalty);
+        let hsd = row
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Less))
+            .map(|(idx, _)| idx as u32)
+            .unwrap();
+
+        assert_eq!(baseline, hsd);
+        assert_eq!(hsd, 2);
+        assert!((row[1] - 8.0 / penalty).abs() < 1e-6);
+    }
 }

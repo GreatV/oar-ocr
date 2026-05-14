@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 /// A single draft sequence: the tokenized output of the pipeline drafter for one
-/// region (Stage 1) or the aggregated page (Stage 2).
+/// region (Stage 1) or one member of the page-level draft set (Stage 2).
 ///
 /// Tokens are encoded with the **target VLM's** tokenizer so the verification path
 /// can match prefixes at token granularity without re-tokenization.
@@ -27,7 +27,7 @@ impl Draft {
     }
 }
 
-/// Stage-1 input: a draft plus the region geometry needed to crop the page image.
+/// Stage-1 input: draft candidates plus the region geometry needed to crop the page image.
 ///
 /// The crop itself is materialised by the caller (we keep this struct image-agnostic
 /// so the algorithm layer stays free of `image` / `candle` dependencies).
@@ -35,8 +35,10 @@ impl Draft {
 pub struct RegionDraft {
     /// Region bounding box `[x0, y0, x1, y1]` in original image pixel coordinates.
     pub bbox: [f32; 4],
-    /// Tokenized draft for this region.
-    pub draft: Draft,
+    /// Tokenized draft candidates for this region. Stage 1 verifies all
+    /// candidates together through the same prefix-tree batching path used by
+    /// page-level DSV.
+    pub drafts: Vec<Draft>,
     /// Optional reading-order index assigned by the drafter.
     pub reading_order: Option<usize>,
     /// Drafter-side category label (paragraph / table / formula / figure / ...).
@@ -46,7 +48,7 @@ pub struct RegionDraft {
 /// Coarse semantic kind reported by the drafter. Mirrors the layout categories used
 /// by `oar_ocr_core::domain::structure::LayoutElementType` but stays decoupled so the
 /// HSD module compiles without pulling layout dependencies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RegionKind {
     Text,
     Title,
@@ -56,43 +58,29 @@ pub enum RegionKind {
     Figure,
     Header,
     Footer,
+    #[default]
     Other,
-}
-
-impl Default for RegionKind {
-    fn default() -> Self {
-        RegionKind::Other
-    }
-}
-
-/// Stage-2 input: an unordered collection of token sequences treated as page-level
-/// drafts (each entry is one of the Stage-1 verified outputs).
-#[derive(Debug, Clone, Default)]
-pub struct PageDraft {
-    pub drafts: Vec<Draft>,
-}
-
-impl PageDraft {
-    pub fn new(drafts: Vec<Draft>) -> Self {
-        Self { drafts }
-    }
-
-    pub fn push(&mut self, d: Draft) {
-        self.drafts.push(d);
-    }
-
-    pub fn len(&self) -> usize {
-        self.drafts.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.drafts.is_empty()
-    }
 }
 
 /// Configuration for Decoupled Speculative Verification.
 ///
-/// Defaults follow the paper's experimental setup (Section 4.3): n=3, τ=0.75.
+/// Defaults follow the paper's experimental setup (Section 4.3): n=3, τ=0.75,
+/// **but** with three engineering deviations enabled by default:
+///
+/// - `max_candidates_per_step = 32`, `max_suffix_len = 256` cap candidate-tree
+///   width / depth (paper uses *all* matching suffixes — see [`paper_mode`]).
+/// - `cold_start_full_draft = true`: on the very first step (empty accepted
+///   history) the matcher emits each draft's leading prefix as a single
+///   candidate. The paper's window-only formulation would emit no candidates
+///   at step 0 and fall back to a `step_one` argmax for the first token.
+/// - `strict_at_tau_one = true`: when `τ ≥ 1.0` the driver redirects to
+///   [`crate::hsd::verify::spec_decode_strict`] (per-token replay) for a
+///   cheap oracle/correctness path. Setting this to `false` keeps τ=1.0 on
+///   the tree-batched verify path — that matches the paper's "τ as a
+///   tolerance threshold" formulation and produces equivalent outputs at
+///   higher per-step verify cost.
+///
+/// [`paper_mode`]: Self::paper_mode
 #[derive(Debug, Clone, Copy)]
 pub struct DsvConfig {
     /// Reference-window length `n`. Token sequences are matched by sliding a window
@@ -103,11 +91,22 @@ pub struct DsvConfig {
     /// model's unrestricted argmax token.
     pub tau: f32,
     /// Cap on the number of candidate paths kept per verification step. Protects
-    /// against pathological prefix trees on very long drafts.
+    /// against pathological prefix trees on very long drafts. Set to
+    /// `usize::MAX` to match the paper's unbounded candidate set.
     pub max_candidates_per_step: usize,
     /// Cap on the depth of any candidate suffix considered. Drafts longer than this
-    /// are truncated in the suffix extraction step.
+    /// are truncated in the suffix extraction step. Set to `usize::MAX` to
+    /// match the paper's unbounded suffix length.
     pub max_suffix_len: usize,
+    /// When `true` (default) and the accepted history is empty, the matcher
+    /// emits each draft's leading prefix as a candidate so the very first
+    /// verification step has something to verify. The paper's window-only
+    /// formulation has no such fallback and would fall back to `step_one`.
+    pub cold_start_full_draft: bool,
+    /// When `true` (default) and `τ ≥ 1.0`, the driver replays drafts one
+    /// token at a time via [`crate::hsd::verify::spec_decode_strict`]. Set to
+    /// `false` to keep τ=1.0 on the tree-batched verify path (paper-style).
+    pub strict_at_tau_one: bool,
 }
 
 impl Default for DsvConfig {
@@ -116,7 +115,9 @@ impl Default for DsvConfig {
             window_len: 3,
             tau: 0.75,
             max_candidates_per_step: 32,
-            max_suffix_len: 64,
+            max_suffix_len: 256,
+            cold_start_full_draft: true,
+            strict_at_tau_one: true,
         }
     }
 }
@@ -127,8 +128,9 @@ pub struct HsdConfig {
     pub dsv: DsvConfig,
     /// If false, Stage 1 is skipped and only the page-level pass runs.
     ///
-    /// Currently only HunyuanOCR's full HSD path honors the stage gates; the
-    /// GLM-OCR, MinerU, and PaddleOCR-VL helpers run a single page-level pass.
+    /// HunyuanOCR, GLM-OCR, and MinerU honor both stage gates in their
+    /// `generate_hsd_full` / `generate_hsd_with_structure` paths. PaddleOCR-VL
+    /// remains element-level by model design and therefore uses Stage 1 only.
     pub enable_stage1: bool,
     /// If false, Stage 2 is skipped in backends that implement the full
     /// two-stage path.
@@ -184,6 +186,12 @@ impl AcceptStats {
         self.per_step_accepted.push(0);
         self.num_steps += 1;
         self.num_fallbacks += 1;
+    }
+
+    pub fn add_assign(&mut self, other: Self) {
+        self.per_step_accepted.extend(other.per_step_accepted);
+        self.num_steps += other.num_steps;
+        self.num_fallbacks += other.num_fallbacks;
     }
 }
 
@@ -268,11 +276,32 @@ pub struct StageStats {
     pub dsv: SpecDecodeStats,
 }
 
+impl StageStats {
+    pub fn add_assign(&mut self, other: Self) {
+        self.vision_prefill += other.vision_prefill;
+        self.draft_prep += other.draft_prep;
+        self.decode += other.decode;
+        self.emitted_tokens += other.emitted_tokens;
+        self.forward_passes += other.forward_passes;
+        self.dsv.add_assign(&other.dsv);
+        self.accept.add_assign(other.accept);
+    }
+}
+
+/// Stage-1 stats for one verified region, retained for region-kind diagnostics.
+#[derive(Debug, Clone, Default)]
+pub struct RegionStageStats {
+    pub kind: RegionKind,
+    pub stats: StageStats,
+}
+
 /// End-to-end HSD timing breakdown for one page, plus per-stage details.
 #[derive(Debug, Clone, Default)]
 pub struct HsdStats {
     pub stage1: StageStats,
     pub stage2: StageStats,
+    /// Per-region Stage-1 stats, one entry per region that actually ran HSD.
+    pub stage1_regions: Vec<RegionStageStats>,
     /// Drafter pipeline wall-clock (layout + region recognition).
     pub drafter: Duration,
 }
@@ -305,4 +334,36 @@ impl HsdStats {
             sum as f32 / total_steps as f32
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_hsd_config_enables_both_stages() {
+        // Locks the paper-aligned default. Stage 2 is the load-bearing pass
+        // (paper Table 7: Stage-1-only on dots.ocr drops 88.41 → 70.47 on
+        // OmniDocBench). Anyone flipping enable_stage2 = false in Default
+        // silently loses ~18 accuracy points on multi-block pages.
+        let cfg = HsdConfig::default();
+        assert!(cfg.enable_stage1, "Stage 1 should default to enabled");
+        assert!(cfg.enable_stage2, "Stage 2 should default to enabled");
+        assert!(cfg.max_page_tokens > 0);
+        assert!(cfg.max_region_tokens > 0);
+    }
+
+    #[test]
+    fn default_dsv_config_matches_paper_n_and_tau() {
+        // Paper §4.3: n = 3, τ = 0.75. The engineering caps deviate (paper has
+        // no caps), but n and τ must match the paper out of the box.
+        let cfg = DsvConfig::default();
+        assert_eq!(cfg.window_len, 3, "paper §4.3 sets n = 3");
+        assert!(
+            (cfg.tau - 0.75).abs() < 1e-6,
+            "paper §4.3 sets τ = 0.75, got {}",
+            cfg.tau
+        );
+    }
+
 }

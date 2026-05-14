@@ -5,22 +5,36 @@ use super::ernie::Ernie4_5Model;
 use super::processing;
 use super::projector::Projector;
 use super::vision::VisionModel;
-use crate::attention::{
-    combine_masks, create_causal_mask, create_left_padding_mask, create_tree_attention_mask,
+#[cfg(feature = "hsd")]
+use crate::attention::create_tree_attention_mask;
+use crate::attention::{combine_masks, create_causal_mask, create_left_padding_mask};
+#[cfg(feature = "hsd")]
+use crate::hsd::backend_util::{commit_keep_indices, step_pos_ids, tree_pos_ids};
+#[cfg(feature = "hsd")]
+use crate::hsd::drafting::{
+    TargetDraftAdapter, bbox_xyxy, crop_region_image, format_verified_region, map_layout_kind,
+    region_markdown_for, structure_result_to_layout_elements,
 };
-use crate::hsd::drafting::{bbox_xyxy, crop_region_image, format_verified_region, map_layout_kind};
+#[cfg(feature = "hsd")]
 use crate::hsd::prefix_tree::PrefixTree;
-use crate::hsd::types::{AcceptStats, Draft, HsdConfig, HsdStats};
+#[cfg(feature = "hsd")]
+use crate::hsd::types::{AcceptStats, Draft, HsdConfig, HsdStats, RegionStageStats};
+#[cfg(feature = "hsd")]
 use crate::hsd::verify::{SpecBackend, spec_decode};
 use crate::utils::image::pil_resample_to_filter_type;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
-use candle_core::{D, DType, Device, IndexOp, Result as CandleResult, Tensor};
+#[cfg(feature = "hsd")]
+use candle_core::Result as CandleResult;
+use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::Module;
+#[cfg(feature = "hsd")]
 use candle_nn::ops as cnn_ops;
 use image::{RgbImage, imageops::FilterType};
 use oar_ocr_core::core::OCRError;
-use oar_ocr_core::domain::structure::{LayoutElement, LayoutElementType};
+#[cfg(feature = "hsd")]
+use oar_ocr_core::domain::structure::{LayoutElement, LayoutElementType, StructureResult};
 use std::path::Path;
+#[cfg(feature = "hsd")]
 use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
 
@@ -564,6 +578,20 @@ impl PaddleOcrVl {
         self.decode_generated_tokens(tokens, task)
     }
 
+    /// Decode tokens **without** applying PaddleOCR-VL's task-specific
+    /// post-process (OTSL→HTML for tables, `$$..$$` stripping for formulas).
+    /// This is the raw pre-postprocess string the model actually emitted —
+    /// use this when feeding PaddleOCR-VL output as a draft for another
+    /// target VLM. DSV matches at token granularity, so any post-process on
+    /// the source side will byte-mismatch the target's natural output.
+    pub fn decode_tokens_raw(&self, tokens: &[u32]) -> Result<String, OCRError> {
+        self.tokenizer
+            .decode(tokens, true)
+            .map_err(|e| OCRError::InvalidInput {
+                message: format!("decode failed: {e}"),
+            })
+    }
+
     pub fn tokenizer(&self) -> &Tokenizer {
         &self.tokenizer
     }
@@ -573,12 +601,7 @@ impl PaddleOcrVl {
         tokens: &[u32],
         task: PaddleOcrVlTask,
     ) -> Result<(String, String), OCRError> {
-        let decoded = self
-            .tokenizer
-            .decode(tokens, true)
-            .map_err(|e| OCRError::InvalidInput {
-                message: format!("decode failed: {e}"),
-            })?;
+        let decoded = self.decode_tokens_raw(tokens)?;
         let processed = task.postprocess(decoded.clone());
         Ok((decoded, processed))
     }
@@ -590,6 +613,7 @@ impl PaddleOcrVl {
     /// prefix (Ocr / Table / Formula / …); `drafts` are the lightweight
     /// pipeline drafter's region-text candidates, tokenized with PaddleOCR-VL's
     /// own tokenizer before being matched in the verifier.
+    #[cfg(feature = "hsd")]
     pub fn generate_hsd(
         &self,
         image: &RgbImage,
@@ -621,6 +645,7 @@ impl PaddleOcrVl {
     /// HSD entry that consumes already-tokenized drafts. This is the oracle
     /// path used by benchmarks to avoid `decode -> encode` tokenizer
     /// round-trips when the draft comes from this backend's own baseline.
+    #[cfg(feature = "hsd")]
     pub fn generate_hsd_with_token_drafts(
         &self,
         image: &RgbImage,
@@ -631,6 +656,7 @@ impl PaddleOcrVl {
         self.generate_hsd_tokenized(image, task, drafts, hsd_cfg, Duration::ZERO)
     }
 
+    #[cfg(feature = "hsd")]
     fn generate_hsd_tokenized(
         &self,
         image: &RgbImage,
@@ -639,8 +665,10 @@ impl PaddleOcrVl {
         hsd_cfg: &HsdConfig,
         drafter_elapsed: Duration,
     ) -> Result<(String, HsdStats), OCRError> {
-        let mut stats = HsdStats::default();
-        stats.drafter = drafter_elapsed;
+        let mut stats = HsdStats {
+            drafter: drafter_elapsed,
+            ..Default::default()
+        };
         // Stage 2 (page-level) terminology is reused here for stat bookkeeping.
         let t_pre = Instant::now();
         let (initial_lp, rope_delta) = self.hsd_prefill_single(image, task)?;
@@ -653,7 +681,7 @@ impl PaddleOcrVl {
         let mut dsv = Default::default();
         let generated = spec_decode(
             &mut backend,
-            &tokenized,
+            tokenized,
             initial_lp,
             hsd_cfg.max_region_tokens,
             &hsd_cfg.dsv,
@@ -687,10 +715,20 @@ impl PaddleOcrVl {
     /// Run HSD per element across an entire layout-detected page, then
     /// aggregate the per-region outputs into a markdown-style document.
     ///
+    /// **No Stage 2 page-level verify** — PaddleOCR-VL is element-only by
+    /// design (its prompts are task-scoped: "OCR:", "Table Recognition:",
+    /// etc.), so there is no native single-prompt page-level inference to
+    /// verify against. The HunyuanOCR / GLM-OCR / MinerU `generate_hsd_full`
+    /// paths *do* run Stage 2 because their target prompts can describe a
+    /// whole page. For full HSD over a PaddleOCR-VL document use the
+    /// `doc_parser` flow (layout + per-region HSD) — what this function
+    /// already does.
+    ///
     /// Element-type → task mapping follows the same heuristic as
     /// `doc_parser::DocParser` (Table → Table, Formula → Formula, etc.).
     /// Visual-only regions (Image / Seal / HeaderImage / FooterImage) are
     /// skipped, mirroring the `task_for_element_type` logic.
+    #[cfg(feature = "hsd")]
     pub fn generate_hsd_full(
         &self,
         image: &RgbImage,
@@ -701,9 +739,31 @@ impl PaddleOcrVl {
         self.generate_hsd_full_impl(image, elements, ignore_labels, hsd_cfg, None)
     }
 
+    /// One-call HSD entry that consumes a `StructureResult` (the output of
+    /// the OARStructure / PP-StructureV3 pipeline) directly.
+    ///
+    /// Backfills table HTML / formula LaTeX via
+    /// [`structure_result_to_layout_elements`] then delegates to
+    /// [`Self::generate_hsd_full`]. PaddleOCR-VL remains element-level (no
+    /// Stage 2) — `page_instruction` / `region_instruction` are not part of
+    /// this signature because the per-element prompt is picked from the
+    /// layout type by `task_for_element_type` inside `generate_hsd_full_impl`.
+    #[cfg(feature = "hsd")]
+    pub fn generate_hsd_with_structure(
+        &self,
+        image: &RgbImage,
+        structure: &StructureResult,
+        ignore_labels: &[String],
+        hsd_cfg: &HsdConfig,
+    ) -> Result<(String, HsdStats), OCRError> {
+        let elements = structure_result_to_layout_elements(structure);
+        self.generate_hsd_full(image, &elements, ignore_labels, hsd_cfg)
+    }
+
     /// Full per-region HSD where some regions already have target-token drafts.
     /// `token_drafts[i]`, when present, is used for `elements[i]` directly and
     /// avoids re-tokenizing decoded baseline text.
+    #[cfg(feature = "hsd")]
     pub fn generate_hsd_full_with_token_drafts(
         &self,
         image: &RgbImage,
@@ -724,6 +784,7 @@ impl PaddleOcrVl {
         self.generate_hsd_full_impl(image, elements, ignore_labels, hsd_cfg, Some(token_drafts))
     }
 
+    #[cfg(feature = "hsd")]
     fn generate_hsd_full_impl(
         &self,
         image: &RgbImage,
@@ -733,7 +794,7 @@ impl PaddleOcrVl {
         token_drafts: Option<&[Option<Vec<u32>>]>,
     ) -> Result<(String, HsdStats), OCRError> {
         let mut stats = HsdStats::default();
-        let mut region_md: Vec<String> = Vec::with_capacity(elements.len());
+        let mut region_md: Vec<(usize, String)> = Vec::with_capacity(elements.len());
 
         for (idx, elem) in elements.iter().enumerate() {
             if let Some(label) = &elem.label
@@ -748,11 +809,18 @@ impl PaddleOcrVl {
                 .and_then(|drafts| drafts.get(idx))
                 .and_then(|d| d.as_ref())
                 .filter(|d| !d.is_empty());
-            let text_draft = elem
-                .text
-                .as_ref()
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty());
+            // Format `elem.text` into PaddleOCR-VL's raw (pre-postprocess) form:
+            // tables stay OTSL, formulas get `$$..$$` wrapping (post-process
+            // strips it), other elements stay plain. This avoids the trap
+            // where a layout pipeline's HTML/markdown is byte-incompatible
+            // with what the VLM actually emits as logits.
+            let text_draft = region_markdown_for(elem, TargetDraftAdapter::PaddleOcrVl);
+            let text_draft = text_draft.trim();
+            let text_draft = if text_draft.is_empty() {
+                None
+            } else {
+                Some(text_draft)
+            };
             if token_draft.is_none() && text_draft.is_none() {
                 continue;
             }
@@ -768,25 +836,21 @@ impl PaddleOcrVl {
             };
             // Accumulate stats (region-level passes are stored under stage1).
             stats.drafter += region_stats.drafter;
-            stats.stage1.vision_prefill += region_stats.stage2.vision_prefill;
-            stats.stage1.decode += region_stats.stage2.decode;
-            stats.stage1.emitted_tokens += region_stats.stage2.emitted_tokens;
-            stats.stage1.forward_passes += region_stats.stage2.forward_passes;
-            stats.stage1.dsv.add_assign(&region_stats.stage2.dsv);
-            stats
-                .stage1
-                .accept
-                .per_step_accepted
-                .extend(region_stats.stage2.accept.per_step_accepted);
-            stats.stage1.accept.num_steps += region_stats.stage2.accept.num_steps;
-            stats.stage1.accept.num_fallbacks += region_stats.stage2.accept.num_fallbacks;
 
             let kind = map_layout_kind(elem.element_type);
-            region_md.push(format_verified_region(&region_text, kind));
+            stats.stage1_regions.push(RegionStageStats {
+                kind,
+                stats: region_stats.stage2.clone(),
+            });
+            stats.stage1.add_assign(region_stats.stage2);
+            let order = elem.order_index.map(|x| x as usize).unwrap_or(idx);
+            region_md.push((order, format_verified_region(&region_text, kind)));
         }
 
+        region_md.sort_by_key(|(order, _)| *order);
         let merged = region_md
             .into_iter()
+            .map(|(_, text)| text)
             .filter(|s| !s.trim().is_empty())
             .collect::<Vec<_>>()
             .join("\n\n");
@@ -796,6 +860,7 @@ impl PaddleOcrVl {
     /// Run a single-image prefill with the supplied task prompt. Returns
     /// the F32 last-position log-probabilities and the MRoPE delta that
     /// post-image text positions need to add to their token index.
+    #[cfg(feature = "hsd")]
     fn hsd_prefill_single(
         &self,
         image: &RgbImage,
@@ -951,6 +1016,7 @@ impl PaddleOcrVl {
 
 /// Map a layout element type to the PaddleOCR-VL recognition task. Returns
 /// `None` for pure-visual regions that have no textual content to verify.
+#[cfg(feature = "hsd")]
 fn task_for_layout_type(t: LayoutElementType) -> Option<PaddleOcrVlTask> {
     use LayoutElementType::*;
     match t {
@@ -965,6 +1031,7 @@ fn task_for_layout_type(t: LayoutElementType) -> Option<PaddleOcrVlTask> {
 
 /// HSD adapter for PaddleOCR-VL. The MRoPE position offset (`rope_delta`)
 /// is captured during prefill and re-used by every subsequent step / verify.
+#[cfg(feature = "hsd")]
 struct PaddleOcrVlSpecBackend<'a> {
     model: &'a PaddleOcrVl,
     rope_delta: i64,
@@ -972,6 +1039,7 @@ struct PaddleOcrVlSpecBackend<'a> {
     forward_passes: u32,
 }
 
+#[cfg(feature = "hsd")]
 impl<'a> PaddleOcrVlSpecBackend<'a> {
     fn new(model: &'a PaddleOcrVl, rope_delta: i64) -> Self {
         Self {
@@ -999,6 +1067,7 @@ impl<'a> PaddleOcrVlSpecBackend<'a> {
     }
 }
 
+#[cfg(feature = "hsd")]
 impl<'a> SpecBackend for PaddleOcrVlSpecBackend<'a> {
     fn step_one(&mut self, token: u32) -> CandleResult<Tensor> {
         let model = self.model;
@@ -1009,9 +1078,7 @@ impl<'a> SpecBackend for PaddleOcrVlSpecBackend<'a> {
             candle_core::Error::Msg(format!("PaddleOCR-VL HSD step_one embed: {e}"))
         })?;
 
-        // pos = current_kv_len + rope_delta (3 axes, one slot).
-        let pos = model.llm.current_kv_len() as i64 + self.rope_delta;
-        let pos_ids = Tensor::from_vec(vec![pos, pos, pos], (3usize, 1usize, 1usize), device)?;
+        let pos_ids = step_pos_ids(3, model.llm.current_kv_len(), self.rope_delta, device)?;
 
         let hidden = model.llm.forward(&embeds, &pos_ids, None).map_err(|e| {
             candle_core::Error::Msg(format!("PaddleOCR-VL HSD step_one forward: {e}"))
@@ -1030,23 +1097,12 @@ impl<'a> SpecBackend for PaddleOcrVlSpecBackend<'a> {
         let prefix_kv = model.llm.current_kv_len();
         self.pre_verify_kv = prefix_kv;
 
-        // Packed tree tokens: (1, N).
         let tok_t = Tensor::new(tree.tokens.clone(), device)?.reshape((1usize, n))?;
         let embeds = model.llm.embed(&tok_t).map_err(|e| {
             candle_core::Error::Msg(format!("PaddleOCR-VL HSD verify_tree embed: {e}"))
         })?;
 
-        // 3-axis position ids — depth-`d` node sits at logical sequence index
-        // `prefix_kv + d - 1`, plus the MRoPE delta. (depth-1 = first new
-        // token = next cache slot after the prompt.)
-        let mut pos_data: Vec<i64> = Vec::with_capacity(3 * n);
-        for _axis in 0..3 {
-            for d in &tree.depths {
-                pos_data.push(prefix_kv as i64 + self.rope_delta + (*d as i64) - 1);
-            }
-        }
-        let pos_ids = Tensor::from_vec(pos_data, (3usize, 1usize, n), device)?;
-
+        let pos_ids = tree_pos_ids(3, prefix_kv, self.rope_delta, tree, device)?;
         let mask = create_tree_attention_mask(&tree.parents, prefix_kv, dtype, device)?;
 
         let hidden = model
@@ -1061,14 +1117,7 @@ impl<'a> SpecBackend for PaddleOcrVlSpecBackend<'a> {
     }
 
     fn commit_verify(&mut self, accepted_path: &[usize]) -> CandleResult<()> {
-        let prefix_kv = self.pre_verify_kv;
-        let mut indices: Vec<u32> = Vec::with_capacity(prefix_kv + accepted_path.len());
-        for i in 0..prefix_kv {
-            indices.push(i as u32);
-        }
-        for &p in accepted_path {
-            indices.push((prefix_kv + p) as u32);
-        }
+        let indices = commit_keep_indices(self.pre_verify_kv, accepted_path);
         self.model
             .llm
             .keep_kv_indices(&indices)

@@ -33,7 +33,6 @@ use candle_core::{DType, Device, Result as CandleResult, Tensor};
 use std::time::Instant;
 
 use super::matching::collect_candidates;
-use super::nvtx;
 use super::prefix_tree::{PrefixTree, build_prefix_tree};
 use super::types::{AcceptStats, Draft, DsvConfig, SpecDecodeStats};
 
@@ -133,7 +132,6 @@ fn greedy_traverse(
     tau: f32,
 ) -> CandleResult<(Vec<usize>, Vec<f32>)> {
     let log_tau = tau.ln();
-    let trace = std::env::var_os("OAROCR_HSD_TRACE_ACCEPT").is_some();
     let mut path: Vec<usize> = Vec::new();
     let mut s: Option<usize> = None;
 
@@ -163,7 +161,7 @@ fn greedy_traverse(
         if children.is_empty() {
             break;
         }
-        let (u_hat, u_hat_lp) = argmax_host(cur_lp_view);
+        let (_, u_hat_lp) = argmax_host(cur_lp_view);
 
         let mut best_node: Option<usize> = None;
         let mut best_lp = f32::NEG_INFINITY;
@@ -176,15 +174,7 @@ fn greedy_traverse(
             }
         }
         let best = best_node.expect("non-empty children list");
-        let best_tok = tree.tokens[best];
         let margin = best_lp - u_hat_lp;
-
-        if trace {
-            eprintln!(
-                "HSD_ACCEPT depth={} best_tok={} best_lp={:.6} argmax={} argmax_lp={:.6} margin={:.6} log_tau={:.6}",
-                tree.depths[best], best_tok, best_lp, u_hat, u_hat_lp, margin, log_tau
-            );
-        }
 
         if margin >= log_tau {
             path.push(best);
@@ -218,7 +208,7 @@ pub fn spec_decode<B: SpecBackend>(
     stats: &mut AcceptStats,
     timings: &mut SpecDecodeStats,
 ) -> CandleResult<Vec<u32>> {
-    if cfg.tau >= 1.0 {
+    if cfg.tau >= 1.0 && cfg.strict_at_tau_one {
         return spec_decode_strict(
             backend,
             drafts,
@@ -234,15 +224,12 @@ pub fn spec_decode<B: SpecBackend>(
     let mut cur_logprobs = initial_logprobs;
 
     while accepted.len() < max_new_tokens {
-        nvtx::mark("dsv.iter");
-
         // 1. Build candidates from the most recent accepted-token window.
         let n = accepted.len().min(cfg.window_len);
         let tail = &accepted[accepted.len() - n..];
         let t_build = Instant::now();
         let tree = {
-            let _r = nvtx::Range::new("dsv.candidate_build");
-            let candidates = collect_candidates(tail, drafts, cfg);
+            let candidates = collect_candidates(tail, accepted.len(), drafts, cfg);
             let candidate_count = candidates.len() as u32;
             timings.candidate_steps += 1;
             timings.candidates_total += candidate_count as u64;
@@ -258,25 +245,25 @@ pub fn spec_decode<B: SpecBackend>(
         if tree.is_empty() {
             timings.empty_tree_calls += 1;
             let t_argmax = Instant::now();
-            let u_hat = {
-                let _r = nvtx::Range::new("dsv.fallback_argmax");
-                argmax_on_device(&cur_logprobs)?
-            };
+            let u_hat = argmax_on_device(&cur_logprobs)?;
             timings.fallback_argmax += t_argmax.elapsed();
             timings.fallback_argmax_calls += 1;
-            accepted.push(u_hat);
+            // Mirror baseline `generate_tokens_internal`: EOS terminates the
+            // loop without being appended to the output sequence. The
+            // tokenizer would strip it on decode anyway, but keeping it in
+            // `accepted` makes the τ=1.0 oracle check (raw token equality)
+            // diverge by one token at the tail. The fallback step itself
+            // still ran, so `num_fallbacks` counts it.
             stats.record_fallback();
             if backend.is_eos(u_hat) {
                 break;
             }
+            accepted.push(u_hat);
             if accepted.len() >= max_new_tokens {
                 break;
             }
             let t_step = Instant::now();
-            cur_logprobs = {
-                let _r = nvtx::Range::new("dsv.step_one");
-                backend.step_one(u_hat)?
-            };
+            cur_logprobs = backend.step_one(u_hat)?;
             timings.step_one += t_step.elapsed();
             timings.step_one_calls += 1;
             continue;
@@ -285,10 +272,7 @@ pub fn spec_decode<B: SpecBackend>(
         // 3. Verify the tree in one packed forward pass.
         let nodes = tree.num_nodes() as u32;
         let t_verify = Instant::now();
-        let node_logprobs = {
-            let _r = nvtx::Range::new("dsv.verify_tree");
-            backend.verify_tree(&tree)?
-        };
+        let node_logprobs = backend.verify_tree(&tree)?;
         timings.verify_tree += t_verify.elapsed();
         timings.verify_tree_calls += 1;
         timings.tree_nodes_total += nodes as u64;
@@ -298,35 +282,48 @@ pub fn spec_decode<B: SpecBackend>(
         //    and the *host-side* terminal distribution — only one D2H copy
         //    per verify step now, vs one per traversal step before).
         let t_traverse = Instant::now();
-        let (path, term_host) = {
-            let _r = nvtx::Range::new("dsv.traverse");
-            greedy_traverse(&tree, &node_logprobs, &cur_logprobs, cfg.tau)?
-        };
+        let (path, term_host) = greedy_traverse(&tree, &node_logprobs, &cur_logprobs, cfg.tau)?;
         timings.traverse += t_traverse.elapsed();
 
-        // 5. Commit the path: gather the KV cache so it keeps only the
-        //    accepted-path positions.
-        let t_commit = Instant::now();
-        {
-            let _r = nvtx::Range::new("dsv.commit");
-            backend.commit_verify(&path)?;
-        }
-        timings.commit += t_commit.elapsed();
-
-        // 6. Append accepted-path tokens. Note: AAL is recorded as the count of
-        //    *draft* tokens accepted in this step (paper §4.2 / Leviathan et
-        //    al. 2023), excluding the bonus û.
+        // 5. Truncate the accepted path to the remaining token budget *before*
+        //    committing so the KV cache and `accepted` stay in lockstep. The
+        //    tree may have accepted more nodes than we're allowed to emit; we
+        //    keep at most `remaining` tokens (or the path's natural EOS, which
+        //    terminates this step).
+        let remaining = max_new_tokens.saturating_sub(accepted.len());
+        let mut take = 0usize;
         let mut path_eos = false;
         for &node_idx in &path {
-            let tok = tree.tokens[node_idx];
-            accepted.push(tok);
-            if backend.is_eos(tok) {
-                path_eos = true;
+            if take >= remaining {
                 break;
             }
+            let tok = tree.tokens[node_idx];
+            if backend.is_eos(tok) {
+                path_eos = true;
+                take += 1; // include the EOS slot in the commit length
+                break;
+            }
+            take += 1;
         }
-        stats.record(path.len() as u32);
-        if path.is_empty() {
+        let path_cap = &path[..take];
+
+        // 6. Commit only the path prefix we'll actually emit.
+        let t_commit = Instant::now();
+        backend.commit_verify(path_cap)?;
+        timings.commit += t_commit.elapsed();
+
+        // 7. Append accepted-path tokens (EOS is consumed without emit). AAL
+        //    is recorded as the count of *draft* tokens accepted in this step
+        //    (paper §4.2 / Leviathan et al. 2023), excluding the bonus û.
+        for &node_idx in path_cap {
+            let tok = tree.tokens[node_idx];
+            if backend.is_eos(tok) {
+                break;
+            }
+            accepted.push(tok);
+        }
+        stats.record(path_cap.len() as u32);
+        if path_cap.is_empty() {
             timings.rejected_tree_calls += 1;
         } else {
             timings.accepted_tree_calls += 1;
@@ -335,20 +332,20 @@ pub fn spec_decode<B: SpecBackend>(
             break;
         }
 
-        // 7. Take the greedy bonus token û from the terminal distribution
+        // 8. Take the greedy bonus token û from the terminal distribution
         //    (already on host from greedy_traverse).
         let (u_hat, _) = argmax_host(&term_host);
+        if backend.is_eos(u_hat) {
+            break;
+        }
         accepted.push(u_hat);
-        if backend.is_eos(u_hat) || accepted.len() >= max_new_tokens {
+        if accepted.len() >= max_new_tokens {
             break;
         }
 
-        // 8. Step once on û to populate KV and seed the next iteration.
+        // 9. Step once on û to populate KV and seed the next iteration.
         let t_step = Instant::now();
-        cur_logprobs = {
-            let _r = nvtx::Range::new("dsv.step_one");
-            backend.step_one(u_hat)?
-        };
+        cur_logprobs = backend.step_one(u_hat)?;
         timings.step_one += t_step.elapsed();
         timings.step_one_calls += 1;
     }
@@ -369,14 +366,11 @@ fn spec_decode_strict<B: SpecBackend>(
     let mut cur_logprobs = initial_logprobs;
 
     while accepted.len() < max_new_tokens {
-        nvtx::mark("dsv.iter_strict");
-
         let n = accepted.len().min(cfg.window_len);
         let tail = &accepted[accepted.len() - n..];
         let t_build = Instant::now();
         let tree = {
-            let _r = nvtx::Range::new("dsv.candidate_build");
-            let candidates = collect_candidates(tail, drafts, cfg);
+            let candidates = collect_candidates(tail, accepted.len(), drafts, cfg);
             let candidate_count = candidates.len() as u32;
             timings.candidate_steps += 1;
             timings.candidates_total += candidate_count as u64;
@@ -386,6 +380,11 @@ fn spec_decode_strict<B: SpecBackend>(
         timings.candidate_build += t_build.elapsed();
 
         let mut step_accepted = 0u32;
+        // Tracks whether the inner loop terminated by hitting EOS. We can no
+        // longer derive this from `accepted.last()` because the driver no
+        // longer pushes EOS into `accepted` (matches baseline; see the
+        // corresponding rework in the main `spec_decode` path).
+        let mut step_eos = false;
         let mut s: Option<usize> = None;
         loop {
             let children = tree.children_of(s);
@@ -395,7 +394,6 @@ fn spec_decode_strict<B: SpecBackend>(
 
             let t_traverse = Instant::now();
             let best_child = {
-                let _r = nvtx::Range::new("dsv.traverse_strict");
                 let cur_host = lp_to_host(&cur_logprobs)?;
                 let (u_hat, _) = argmax_host(&cur_host);
                 children
@@ -410,16 +408,18 @@ fn spec_decode_strict<B: SpecBackend>(
             };
 
             let tok = tree.tokens[child];
+            if backend.is_eos(tok) {
+                step_accepted += 1;
+                step_eos = true;
+                break;
+            }
             accepted.push(tok);
             step_accepted += 1;
-            if backend.is_eos(tok) || accepted.len() >= max_new_tokens {
+            if accepted.len() >= max_new_tokens {
                 break;
             }
             let t_step = Instant::now();
-            cur_logprobs = {
-                let _r = nvtx::Range::new("dsv.step_one");
-                backend.step_one(tok)?
-            };
+            cur_logprobs = backend.step_one(tok)?;
             timings.step_one += t_step.elapsed();
             timings.step_one_calls += 1;
             s = Some(child);
@@ -428,12 +428,7 @@ fn spec_decode_strict<B: SpecBackend>(
         if step_accepted > 0 {
             timings.accepted_tree_calls += 1;
             stats.record(step_accepted);
-            if accepted
-                .last()
-                .copied()
-                .is_some_and(|tok| backend.is_eos(tok))
-                || accepted.len() >= max_new_tokens
-            {
+            if step_eos || accepted.len() >= max_new_tokens {
                 break;
             }
             continue;
@@ -445,22 +440,20 @@ fn spec_decode_strict<B: SpecBackend>(
             timings.rejected_tree_calls += 1;
         }
         let t_argmax = Instant::now();
-        let u_hat = {
-            let _r = nvtx::Range::new("dsv.fallback_argmax");
-            argmax_on_device(&cur_logprobs)?
-        };
+        let u_hat = argmax_on_device(&cur_logprobs)?;
         timings.fallback_argmax += t_argmax.elapsed();
         timings.fallback_argmax_calls += 1;
+        if backend.is_eos(u_hat) {
+            stats.record_fallback();
+            break;
+        }
         accepted.push(u_hat);
         stats.record_fallback();
-        if backend.is_eos(u_hat) || accepted.len() >= max_new_tokens {
+        if accepted.len() >= max_new_tokens {
             break;
         }
         let t_step = Instant::now();
-        cur_logprobs = {
-            let _r = nvtx::Range::new("dsv.step_one");
-            backend.step_one(u_hat)?
-        };
+        cur_logprobs = backend.step_one(u_hat)?;
         timings.step_one += t_step.elapsed();
         timings.step_one_calls += 1;
     }
@@ -583,8 +576,11 @@ mod tests {
         let mut stats = AcceptStats::default();
         let out = run_spec_decode(&mut backend, &drafts, init_lp, 64, &cfg(), &mut stats).unwrap();
 
-        assert_eq!(out, oracle);
-        // One verify call accepted the entire chain (including EOS).
+        // EOS terminates the output without being appended (matches the
+        // baseline `generate_tokens_internal` contract).
+        assert_eq!(out, &oracle[..oracle.len() - 1]);
+        // One verify call accepted the entire chain (including the EOS that
+        // wasn't emitted).
         assert_eq!(backend.n_verify_tree, 1);
         // step_one is never invoked because EOS was reached inside the path.
         assert_eq!(backend.n_step_one, 0);
@@ -601,12 +597,27 @@ mod tests {
         let mut stats = AcceptStats::default();
         let out = run_spec_decode(&mut backend, &drafts, init_lp, 64, &cfg(), &mut stats).unwrap();
 
-        assert_eq!(out, oracle);
+        // EOS is consumed by the driver and not emitted.
+        assert_eq!(out, &oracle[..oracle.len() - 1]);
         // Step 0: empty-tail tree from the draft → all rejected → fallback.
         // Subsequent steps: tail = [oracle_i], no match in [1,2,3,4] →
         // tree empty → fallback, so every subsequent token also falls back.
-        assert!(backend.n_step_one >= oracle.len() - 1);
-        assert!(stats.num_fallbacks >= (oracle.len() as u32) - 1);
+        // The terminating EOS step also fell back but the driver no longer
+        // pushes EOS into `accepted` *or* counts it in `num_fallbacks`
+        // (matches baseline `generate_tokens_internal`).
+        assert!(
+            backend.n_step_one as usize >= oracle.len() - 1,
+            "n_step_one = {} < {}",
+            backend.n_step_one,
+            oracle.len() - 1
+        );
+        let expected_fallbacks = (oracle.len() as u32) - 1;
+        assert!(
+            stats.num_fallbacks >= expected_fallbacks,
+            "num_fallbacks = {} < {}",
+            stats.num_fallbacks,
+            expected_fallbacks
+        );
     }
 
     #[test]
@@ -619,7 +630,8 @@ mod tests {
         let drafts = vec![Draft::new(draft_tokens)];
         let mut stats = AcceptStats::default();
         let out = run_spec_decode(&mut backend, &drafts, init_lp, 64, &cfg(), &mut stats).unwrap();
-        assert_eq!(out, oracle);
+        // EOS terminates output without being emitted.
+        assert_eq!(out, &oracle[..oracle.len() - 1]);
         // First verify accepts [10, 20, 30] (depths 1..=3 match the oracle),
         // then the depth-4 child carries token 40 which the oracle rejects.
         // After that, the accepted-tail [_,_,30] no longer matches the draft
@@ -632,26 +644,32 @@ mod tests {
 
     #[test]
     fn max_new_tokens_caps_output() {
+        // EOS=63 is unreachable here (oracle is [1..=10]) so the only termination
+        // path is the budget cap. The tree-verify branch must truncate the
+        // accepted path before commit; otherwise the output would overshoot.
         let oracle = vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10];
         let mut backend = OracleBackend::new(64, 63, oracle.clone());
         let init_lp = backend.lp_for(oracle[0]);
         let drafts = vec![Draft::new(oracle.clone())];
         let mut stats = AcceptStats::default();
         let out = run_spec_decode(&mut backend, &drafts, init_lp, 4, &cfg(), &mut stats).unwrap();
-        assert!(out.len() >= 4 && out.len() <= 10);
-        assert_eq!(&out[..4], &oracle[..4]);
+        // Hard cap: the driver must not emit more than `max_new_tokens` tokens
+        // even when the tree path could accept the entire draft in one verify.
+        assert_eq!(out.len(), 4);
+        assert_eq!(&out[..], &oracle[..4]);
     }
 
     #[test]
     fn eos_in_initial_logprobs_short_circuits_via_fallback() {
         // Initial logprobs concentrated at EOS: with a draft starting at EOS,
         // the first verify accepts EOS as path[0] and we exit immediately.
+        // The EOS token itself is *not* emitted (matches baseline).
         let mut backend = OracleBackend::new(32, 31, vec![31]);
         let init_lp = backend.lp_for(31);
         let drafts = vec![Draft::new(vec![31])];
         let mut stats = AcceptStats::default();
         let out = run_spec_decode(&mut backend, &drafts, init_lp, 64, &cfg(), &mut stats).unwrap();
-        assert_eq!(out, vec![31]);
+        assert!(out.is_empty());
     }
 
     #[test]
@@ -666,7 +684,8 @@ mod tests {
         ];
         let mut stats = AcceptStats::default();
         let out = run_spec_decode(&mut backend, &drafts, init_lp, 64, &cfg(), &mut stats).unwrap();
-        assert_eq!(out, oracle);
+        // EOS at the tail of the chain terminates without being emitted.
+        assert_eq!(out, &oracle[..oracle.len() - 1]);
         assert_eq!(backend.n_verify_tree, 1);
     }
 
@@ -674,7 +693,8 @@ mod tests {
     fn tau_one_is_strict() {
         // With τ = 1.0 and a draft containing the oracle, acceptance still
         // succeeds because cur_lp(u*) == cur_lp(û) (both 0.0) so the test
-        // (0 - 0 >= log 1 = 0) just barely passes.
+        // (0 - 0 >= log 1 = 0) just barely passes. EOS terminates without
+        // being emitted, matching baseline.
         let oracle = vec![5u32, 6, 7, 99];
         let mut backend = OracleBackend::new(128, 99, oracle.clone());
         let init_lp = backend.lp_for(oracle[0]);
@@ -685,6 +705,29 @@ mod tests {
         };
         let mut stats = AcceptStats::default();
         let out = run_spec_decode(&mut backend, &drafts, init_lp, 32, &cfg, &mut stats).unwrap();
-        assert_eq!(out, oracle);
+        assert_eq!(out, &oracle[..oracle.len() - 1]);
+    }
+
+    #[test]
+    fn tau_one_tree_path_matches_strict() {
+        // With strict_at_tau_one = false the driver stays on the tree-verify
+        // path even at τ = 1.0. Output must still match the strict-replay
+        // route (paper §3.3: τ is a tolerance, the tree path subsumes strict
+        // replay when the threshold is set to 1.0).
+        let oracle = vec![5u32, 6, 7, 99];
+        let mut backend = OracleBackend::new(128, 99, oracle.clone());
+        let init_lp = backend.lp_for(oracle[0]);
+        let drafts = vec![Draft::new(oracle.clone())];
+        let cfg = DsvConfig {
+            tau: 1.0,
+            strict_at_tau_one: false,
+            ..DsvConfig::default()
+        };
+        let mut stats = AcceptStats::default();
+        let out = run_spec_decode(&mut backend, &drafts, init_lp, 32, &cfg, &mut stats).unwrap();
+        assert_eq!(out, &oracle[..oracle.len() - 1]);
+        // Verify we actually went through the tree path (not the strict path,
+        // which never increments verify-tree calls).
+        assert!(backend.n_verify_tree >= 1);
     }
 }

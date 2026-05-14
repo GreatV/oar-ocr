@@ -10,13 +10,13 @@
 //!   5. Aggregate `SR_decode`, `SR_e2e`, AAL, fallback ratio across pages.
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --release --features cuda,download-binaries \
+//! cargo run -p oar-ocr-vl --release --features hsd,download-binaries \
 //!     --example hsd_omnidocbench -- \
 //!         --bench-dir data/omnidocbench_v1.5 \
 //!         --model-dir models/HunyuanOCR \
 //!         --max-pages 20
 //!
-//! cargo run -p oar-ocr-vl --release --features cuda,download-binaries \
+//! cargo run -p oar-ocr-vl --release --features hsd,download-binaries \
 //!     --example hsd_omnidocbench -- \
 //!         --backend paddleocr_vl --task spotting \
 //!         --bench-dir data/omnidocbench_v1.5 \
@@ -26,44 +26,68 @@
 
 mod utils;
 
+#[cfg(not(feature = "hsd"))]
+fn main() {
+    eprintln!("This example requires the `hsd` feature. Re-run with `--features hsd`.");
+    std::process::exit(1);
+}
+
+#[cfg(feature = "hsd")]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    imp::run()
+}
+
+#[cfg(feature = "hsd")]
+mod imp {
+
+use super::utils;
+
 use clap::{Parser, ValueEnum};
 use image::imageops::FilterType;
 use serde::Deserialize;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
 
 use oar_ocr::prelude::{OARStructure, OARStructureBuilder};
-use oar_ocr_core::core::config::OrtSessionConfig;
+use oar_ocr_core::core::{OCRError, config::OrtSessionConfig};
 use oar_ocr_core::domain::structure::{LayoutElement, LayoutElementType, StructureResult};
 use oar_ocr_core::domain::tasks::FormulaRecognitionConfig;
 use oar_ocr_core::predictors::TextRecognitionPredictor;
 use oar_ocr_core::processors::{BoundingBox, Point};
 use oar_ocr_core::utils::{BBoxCrop, load_image};
-use oar_ocr_vl::hsd::drafting::region_markdown;
-use oar_ocr_vl::hsd::types::{Draft, DsvConfig, HsdConfig, SpecDecodeStats};
+use oar_ocr_vl::hsd::drafting::{
+    TargetDraftAdapter, bbox_xyxy, page_markdown_for, region_markdowns_for,
+};
+use oar_ocr_vl::hsd::types::{Draft, DsvConfig, HsdConfig, HsdStats, RegionKind, SpecDecodeStats};
 use oar_ocr_vl::utils::parse_device;
 use oar_ocr_vl::{GlmOcr, HunyuanOcr, MinerU, PaddleOcrVl, PaddleOcrVlTask};
 
 use utils::structure_match::{MatchThresholds, match_region};
 
 const HUNYUAN_CHINESE_PARSING_PROMPT: &str = "提取文档图片中正文的所有信息用 markdown 格式表示，其中页眉、页脚部分忽略，表格用 html 格式表达，文档中公式用 latex 格式表示，按照阅读顺序组织进行解析。";
+const HUNYUAN_REGION_PROMPT: &str = "Extract all information from the document region image and represent it in markdown format. Tables should be expressed in HTML format, and formulas should be represented using LaTeX format.";
+const HUNYUAN_CHINESE_REGION_PROMPT: &str = "提取文档区域图片中的所有信息用 markdown 格式表示，表格用 html 格式表达，公式用 latex 格式表示。";
+const GLMOCR_TEXT_RECOGNITION_PROMPT: &str = "Text Recognition:";
+const MINERU_TEXT_RECOGNITION_PROMPT: &str = "\nText Recognition:";
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum Backend {
-    Hunyuan,
-    #[value(name = "paddleocr_vl", alias = "paddleocr-vl")]
+    #[value(name = "hunyuanocr")]
+    HunyuanOcr,
+    #[value(name = "paddleocr_vl")]
     PaddleOcrVl,
-    #[value(name = "mineru", alias = "mineru2_5", alias = "mineru2.5")]
+    #[value(name = "mineru")]
     MinerU,
-    #[value(name = "glmocr", alias = "glm_ocr", alias = "glm-ocr")]
+    #[value(name = "glmocr")]
     GlmOcr,
 }
 
 impl Backend {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Hunyuan => "hunyuan",
+            Self::HunyuanOcr => "hunyuanocr",
             Self::PaddleOcrVl => "paddleocr_vl",
             Self::MinerU => "mineru",
             Self::GlmOcr => "glmocr",
@@ -103,7 +127,7 @@ enum Mode {
 }
 
 enum BackendModel {
-    Hunyuan(HunyuanOcr),
+    HunyuanOcr(HunyuanOcr),
     PaddleOcrVl(PaddleOcrVl),
     MinerU(MinerU),
     GlmOcr(GlmOcr),
@@ -126,7 +150,7 @@ struct Args {
     #[arg(long)]
     model_dir: PathBuf,
     /// Target backend to benchmark.
-    #[arg(long, value_enum, default_value_t = Backend::Hunyuan)]
+    #[arg(long, value_enum, default_value_t = Backend::HunyuanOcr)]
     backend: Backend,
     /// PaddleOCR-VL task. Ignored by HunyuanOCR.
     #[arg(long, value_enum, default_value_t = Task::Spotting)]
@@ -164,16 +188,80 @@ struct Args {
     /// Skip pages whose image fails to load (vs. aborting).
     #[arg(long, default_value_t = true)]
     skip_missing: bool,
-    /// Instruction prompt. Defaults to HunyuanOCR's official "Parsing" task
-    /// prompt, which elicits markdown output matching the OmniDocBench GT
-    /// format. (Source: HunyuanOCR README under Quick Start → Tasks.)
+    /// HunyuanOCR instruction prompt. Defaults to HunyuanOCR's official
+    /// "Parsing" task prompt, which elicits markdown output matching the
+    /// OmniDocBench GT format. (Source: HunyuanOCR README under Quick Start
+    /// → Tasks.)
     #[arg(
         long,
         default_value = "Extract all information from the main body of the document image and represent it in markdown format, ignoring headers and footers. Tables should be expressed in HTML format, formulas in the document should be represented using LaTeX format, and the parsing should be organized according to the reading order."
     )]
     instruction: String,
+    /// HunyuanOCR region-level instruction used for Stage 1 crop verification.
+    #[arg(long, default_value = HUNYUAN_REGION_PROMPT)]
+    hunyuanocr_region_instruction: String,
+    /// GLM-OCR instruction prompt. Defaults to the model-native OCR expert
+    /// prompt documented in the local README.
+    #[arg(long, default_value = GLMOCR_TEXT_RECOGNITION_PROMPT)]
+    glmocr_instruction: String,
+    /// GLM-OCR region-level instruction used for Stage 1 crop verification.
+    #[arg(long, default_value = GLMOCR_TEXT_RECOGNITION_PROMPT)]
+    glmocr_region_instruction: String,
+    /// MinerU2.5 instruction prompt. Defaults to the model-native content
+    /// extraction prompt used by the MinerU two-step example.
+    #[arg(long, default_value = MINERU_TEXT_RECOGNITION_PROMPT)]
+    mineru_instruction: String,
+    /// MinerU2.5 region-level instruction used for Stage 1 crop verification.
+    /// Pass an empty string to opt into two-step mode where each layout
+    /// element gets its native MinerU prompt (`\nText Recognition:`,
+    /// `\nTable Recognition:`, `\nFormula Recognition:`, `\nImage Analysis:`),
+    /// matching MinerU's official `two_step_extract` flow.
+    #[arg(long, default_value = MINERU_TEXT_RECOGNITION_PROMPT)]
+    mineru_region_instruction: String,
+    /// Convenience flag for `--mineru-region-instruction ""` — forces MinerU
+    /// Stage 1 into per-element prompt dispatch (`two_step_extract`-style).
+    /// Overrides any explicit `--mineru-region-instruction` value.
+    #[arg(long, default_value_t = false)]
+    mineru_two_step: bool,
+    /// Path to a JSON file containing pre-postprocess raw drafts from a
+    /// *different* VLM. Activates `--draft-source cross-vlm-file`. Schema:
+    /// `{"source_backend": "<name>", "pages": {"<image>": [{"bbox": [...], "raw_text": "..."}]}}`.
+    /// Use the source backend's `decode_tokens_raw` to populate `raw_text`.
+    /// The target adapter handles any per-target surface conversion
+    /// (HTML↔OTSL, formula wrapping, etc.) — no explicit source hint needed.
+    #[arg(long)]
+    cross_vlm_draft_file: Option<PathBuf>,
+    /// IoU floor when matching cross-VLM regions onto layout elements.
+    /// Defaults to 0.5, matching the structure/formula IoU thresholds used
+    /// elsewhere in the bench.
+    #[arg(long, default_value_t = 0.5)]
+    cross_vlm_iou_threshold: f32,
     #[arg(long, default_value_t = 0.75)]
     tau: f32,
+    /// Override `DsvConfig::window_len` (paper §3.2 `n`). Default 0 = honour
+    /// the preset's value (3 for all presets).
+    ///
+    /// **Use with care.** Empirical 2026-05-13 result on HunyuanOCR page+gt: a
+    /// 3-page smoke with `--dsv-window-len 2` *regressed* SR_e2e from 0.45×
+    /// to 0.17× because the matcher then found many more candidates per step
+    /// but most were stale matches — leading to bigger trees that the
+    /// verifier had to forward through anyway, then reject. When the matrix
+    /// reports high `dsv empty tree calls / page`, the right answer is
+    /// usually NOT a smaller window — it's a better drafter (closer
+    /// byte-level alignment with the target VLM's natural output).
+    #[arg(long, default_value_t = 0)]
+    dsv_window_len: usize,
+    /// Override `DsvConfig::max_candidates_per_step`. Default 0 = honour the
+    /// preset's value (32 for default, 128 for omnibench). Lower this when
+    /// `dsv avg tree nodes / page` blows up — each verify_tree forward
+    /// processes the whole packed tree even if all paths get rejected, so
+    /// big trees on divergent drafts pay full compute for no acceptance.
+    #[arg(long, default_value_t = 0)]
+    dsv_max_candidates: usize,
+    /// Override `DsvConfig::max_suffix_len`. Default 0 = honour the preset's
+    /// value (256 for all presets).
+    #[arg(long, default_value_t = 0)]
+    dsv_max_suffix_len: usize,
     /// Print the first N chars of baseline + draft for each page (debug).
     #[arg(long, default_value_t = 0)]
     preview: usize,
@@ -189,8 +277,8 @@ struct Args {
     /// Stop after writing token diagnostics, before running HSD.
     #[arg(long, default_value_t = false)]
     token_diff_only: bool,
-    /// In page mode, run HunyuanOCR's full Stage-1 + Stage-2 HSD path when
-    /// region elements are available from the drafter. Use
+    /// In page mode, run a full Stage-1 + Stage-2 HSD path for backends that
+    /// support it when region elements are available from the drafter. Use
     /// `--page-dual-stage=false` to keep the page-level-only ablation.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     page_dual_stage: bool,
@@ -208,11 +296,11 @@ struct Args {
     /// text/table/formula drafts in region mode).
     #[arg(long, default_value = "gt")]
     draft_source: String,
-    /// Preserve legacy Hunyuan GT draft markdown heuristics (`# title` and
+    /// Preserve legacy HunyuanOCR GT draft markdown heuristics (`# title` and
     /// `$$\nformula\n$$`). The default is tuned for token overlap with
     /// HunyuanOCR baseline output.
     #[arg(long, default_value_t = false)]
-    hunyuan_legacy_gt_format: bool,
+    hunyuanocr_legacy_gt_format: bool,
     /// Apply lightweight PaddleOCR-VL region GT surface normalization. Only
     /// affects `--backend paddleocr_vl --mode region --draft-source gt`.
     #[arg(long, default_value_t = false)]
@@ -223,11 +311,14 @@ struct Args {
     /// default that keeps text readable. Set to 0 to disable.
     #[arg(long, default_value_t = 1280)]
     resize_max: u32,
-    /// PP-OCR recognition model for `--draft-source ppocr-rec`.
-    #[arg(long, default_value = ".oar/pp-ocrv5_mobile_rec.onnx")]
+    /// PP-OCR recognition model for `--draft-source ppocr-rec`. Default
+    /// resolves to `pp-ocrv5_mobile_rec.onnx` in CWD; pass a full path to
+    /// override.
+    #[arg(long, default_value = "pp-ocrv5_mobile_rec.onnx")]
     ppocr_rec_model: PathBuf,
-    /// PP-OCR recognition dictionary for `--draft-source ppocr-rec`.
-    #[arg(long, default_value = ".oar/ppocrv5_dict.txt")]
+    /// PP-OCR recognition dictionary for `--draft-source ppocr-rec`. Default
+    /// resolves to `ppocrv5_dict.txt` in CWD; pass a full path to override.
+    #[arg(long, default_value = "ppocrv5_dict.txt")]
     ppocr_dict_path: PathBuf,
     /// PP-OCR recognition score threshold.
     #[arg(long, default_value_t = 0.0)]
@@ -235,53 +326,92 @@ struct Args {
     /// PP-OCR recognition max text length.
     #[arg(long, default_value_t = 200)]
     ppocr_max_text_length: usize,
-    /// Layout model for `--draft-source structure`.
-    #[arg(long, default_value = ".oar/pp-doclayout_plus-l.onnx")]
+    /// Layout model for `--draft-source structure`. Default resolves to
+    /// `pp-doclayout_plus-l.onnx` in CWD; pass a full path to override.
+    #[arg(long, default_value = "pp-doclayout_plus-l.onnx")]
     structure_layout_model: PathBuf,
     /// Layout model preset for `--draft-source structure`.
     #[arg(long, default_value = "pp-doclayout_plus-l")]
     structure_layout_model_name: String,
-    /// Optional PP-DocBlockLayout model for structure reading order.
-    #[arg(long)]
-    structure_region_model: Option<PathBuf>,
-    /// Optional PP-OCR detection model for structure OCR.
-    #[arg(long, default_value = ".oar/pp-ocrv5_mobile_det.onnx")]
+    /// PP-DocBlockLayout model for structure reading order. **Required for
+    /// paper-equivalent multi-column AAL** — without it, reading order
+    /// degrades to bbox `(y, x)` sort and Stage-2 acceptance collapses on
+    /// multi-column pages. Default resolves to `pp-docblocklayout.onnx` in
+    /// the current working directory; pass a full path (e.g.
+    /// `/some/dir/pp-docblocklayout.onnx`) to use a model placed elsewhere,
+    /// or pass an empty string (`--structure-region-model ""`) to explicitly
+    /// disable.
+    #[arg(long, default_value = "pp-docblocklayout.onnx")]
+    structure_region_model: PathBuf,
+    /// PP-OCR detection model for structure OCR. Default resolves to
+    /// `pp-ocrv5_mobile_det.onnx` in CWD; pass a full path to override.
+    #[arg(long, default_value = "pp-ocrv5_mobile_det.onnx")]
     structure_ocr_det_model: PathBuf,
-    /// Optional PP-OCR recognition model for structure OCR.
-    #[arg(long, default_value = ".oar/pp-ocrv5_mobile_rec.onnx")]
+    /// PP-OCR recognition model for structure OCR. Default resolves to
+    /// `pp-ocrv5_mobile_rec.onnx` in CWD; pass a full path to override.
+    #[arg(long, default_value = "pp-ocrv5_mobile_rec.onnx")]
     structure_ocr_rec_model: PathBuf,
-    /// Optional PP-OCR dictionary for structure OCR.
-    #[arg(long, default_value = ".oar/ppocrv5_dict.txt")]
+    /// PP-OCR dictionary for structure OCR. Default resolves to
+    /// `ppocrv5_dict.txt` in CWD; pass a full path to override.
+    #[arg(long, default_value = "ppocrv5_dict.txt")]
     structure_ocr_dict_path: PathBuf,
-    /// Optional table classifier for structure table routing.
-    #[arg(long)]
-    structure_table_cls_model: Option<PathBuf>,
-    /// Optional wired table structure model for structure table HTML.
-    #[arg(long)]
-    structure_wired_table_model: Option<PathBuf>,
-    /// Optional wireless table structure model for structure table HTML.
-    #[arg(long)]
-    structure_wireless_table_model: Option<PathBuf>,
-    /// Optional table structure dictionary for structure table HTML.
-    #[arg(long)]
-    structure_table_dict_path: Option<PathBuf>,
-    /// Optional wired table cell detection model.
-    #[arg(long)]
-    structure_wired_cell_model: Option<PathBuf>,
-    /// Optional wireless table cell detection model.
-    #[arg(long)]
-    structure_wireless_cell_model: Option<PathBuf>,
-    /// Optional formula model for structure LaTeX drafts.
-    #[arg(long)]
-    structure_formula_model: Option<PathBuf>,
-    /// Optional formula tokenizer for structure LaTeX drafts.
-    #[arg(long)]
-    structure_formula_tokenizer: Option<PathBuf>,
+    /// Table classifier for structure table routing.
+    ///
+    /// Default resolves to `pp-lcnet_x1_0_table_cls.onnx` in CWD; pass a full
+    /// path to load from elsewhere. Pass an empty string to opt out — but
+    /// doing so forces every detected table region to a single structure
+    /// model (wired *or* wireless) and produces no draft for the unused
+    /// branch. Without table coverage the matrix Stage-1 region kind table
+    /// shows 0/N drafts for `table`, leaving acceptance to drop to 0% on
+    /// table-heavy pages.
+    #[arg(long, default_value = "pp-lcnet_x1_0_table_cls.onnx")]
+    structure_table_cls_model: PathBuf,
+    /// Wired table structure model (SLANeXt) for structure table HTML.
+    /// Default: `slanext_wired.onnx` in CWD; pass empty string to skip.
+    #[arg(long, default_value = "slanext_wired.onnx")]
+    structure_wired_table_model: PathBuf,
+    /// Wireless table structure model (SLANet+) for structure table HTML.
+    /// Default: `slanet_plus.onnx` in CWD; pass empty string to skip.
+    #[arg(long, default_value = "slanet_plus.onnx")]
+    structure_wireless_table_model: PathBuf,
+    /// Table structure dictionary for structure table HTML. Default:
+    /// `table_structure_dict_ch.txt` (PaddleX-compatible bilingual dict) in
+    /// CWD; pass empty string to skip.
+    #[arg(long, default_value = "table_structure_dict_ch.txt")]
+    structure_table_dict_path: PathBuf,
+    /// Wired table cell detection model (RT-DETR-L). Default:
+    /// `rt-detr-l_wired_table_cell_det.onnx` in CWD; pass empty string to
+    /// skip cell detection (table structure still works without it, but
+    /// reduced fidelity on complex tables).
+    #[arg(long, default_value = "rt-detr-l_wired_table_cell_det.onnx")]
+    structure_wired_cell_model: PathBuf,
+    /// Wireless table cell detection model (RT-DETR-L). Default:
+    /// `rt-detr-l_wireless_table_cell_det.onnx` in CWD; pass empty string to
+    /// skip.
+    #[arg(long, default_value = "rt-detr-l_wireless_table_cell_det.onnx")]
+    structure_wireless_cell_model: PathBuf,
+    /// Formula model for structure LaTeX drafts.
+    ///
+    /// Default: `pp-formulanet_plus-l.onnx` in CWD (732MB) for accuracy on the
+    /// quality matrix — Plus-S has noticeably worse argmax behavior on
+    /// OmniDocBench academic pages (e.g. `\breve` vs `\check`, dropped
+    /// subscripts) and is recommended only for smoke / perf runs. Pass
+    /// `pp-formulanet_plus-s.onnx` (232MB) explicitly if disk/RAM is tight.
+    /// Empty string skips formula drafting and drops formula AAL to 0 on
+    /// academic pages.
+    #[arg(long, default_value = "pp-formulanet_plus-l.onnx")]
+    structure_formula_model: PathBuf,
+    /// Formula tokenizer for structure LaTeX drafts. Default:
+    /// `pp-formulanet-tokenizer.json` in CWD; pass empty string to skip
+    /// (must match the choice of `--structure-formula-model`).
+    #[arg(long, default_value = "pp-formulanet-tokenizer.json")]
+    structure_formula_tokenizer: PathBuf,
     /// Formula model type for structure LaTeX drafts.
     #[arg(long, default_value = "pp_formulanet")]
     structure_formula_type: String,
     /// Device for structure formula recognition. Defaults to the drafter
-    /// device; use `cpu` to avoid PP-FormulaNet CUDA EP output corruption.
+    /// device through the global structure ORT session; pass `cpu`, `cuda`,
+    /// or `cuda:N` to override just formula recognition.
     #[arg(long)]
     structure_formula_device: Option<String>,
     /// Preferred formula recognition batch size for structure drafts.
@@ -357,6 +487,119 @@ struct PageInfo {
     page_attribute: serde_json::Value,
 }
 
+/// JSON format consumed by `--cross-vlm-draft-file`. Lets the bench exercise
+/// the [`crate::hsd::drafting::convert_raw_to_target_adapter`] un-postprocess
+/// path without loading a second VLM in-process.
+///
+/// The producer is expected to be a separate run of another VLM (e.g.
+/// PaddleOCR-VL) that called `decode_tokens_raw` per region and serialized
+/// the pre-postprocess raw text. The bench then assigns those texts onto the
+/// target backend's layout elements (matched by bbox IoU), and the target's
+/// `TargetDraftAdapter` does the rest of the surface conversion (e.g.
+/// HTML↔OTSL, `$$ ... $$` wrapping).
+///
+/// Minimal schema:
+/// ```json
+/// {
+///   "source_backend": "paddleocr_vl",
+///   "pages": {
+///     "page-001.png": [
+///       {"bbox": [10.0, 20.0, 200.0, 50.0], "raw_text": "$$x = 1$$"}
+///     ]
+///   }
+/// }
+/// ```
+/// `source_backend` is informational only — the target adapter handles
+/// per-element form so the source hint is not required for correctness.
+#[derive(Debug, Clone, Deserialize)]
+struct CrossVlmDraftFile {
+    #[allow(dead_code)]
+    #[serde(default)]
+    source_backend: Option<String>,
+    pages: HashMap<String, Vec<CrossVlmRegion>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CrossVlmRegion {
+    /// `[x_min, y_min, x_max, y_max]` in original image pixel coordinates.
+    bbox: [f32; 4],
+    /// Pre-postprocess decoded string from the source backend (use that
+    /// backend's `decode_tokens_raw`, not `decode_tokens`).
+    raw_text: String,
+}
+
+impl CrossVlmDraftFile {
+    fn load(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let bytes = std::fs::read(path).map_err(|e| {
+            format!(
+                "failed to read --cross-vlm-draft-file {}: {e}",
+                path.display()
+            )
+        })?;
+        let parsed: Self = serde_json::from_slice(&bytes).map_err(|e| {
+            format!(
+                "failed to parse --cross-vlm-draft-file {}: {e}",
+                path.display()
+            )
+        })?;
+        Ok(parsed)
+    }
+
+    /// Look up the per-page region list. Tries the full image path first,
+    /// then the basename (so callers can use either convention).
+    fn lookup_page(&self, image_path: &str) -> Option<&[CrossVlmRegion]> {
+        if let Some(regions) = self.pages.get(image_path) {
+            return Some(regions.as_slice());
+        }
+        let basename = std::path::Path::new(image_path)
+            .file_name()
+            .and_then(|n| n.to_str())?;
+        self.pages.get(basename).map(Vec::as_slice)
+    }
+}
+
+/// Axis-aligned IoU between two `[x_min, y_min, x_max, y_max]` rectangles.
+/// Returns 0.0 when either box has zero area.
+fn axis_aligned_iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
+    let (ax0, ay0, ax1, ay1) = (a[0], a[1], a[2], a[3]);
+    let (bx0, by0, bx1, by1) = (b[0], b[1], b[2], b[3]);
+    let area_a = ((ax1 - ax0).max(0.0)) * ((ay1 - ay0).max(0.0));
+    let area_b = ((bx1 - bx0).max(0.0)) * ((by1 - by0).max(0.0));
+    if area_a <= 0.0 || area_b <= 0.0 {
+        return 0.0;
+    }
+    let ix0 = ax0.max(bx0);
+    let iy0 = ay0.max(by0);
+    let ix1 = ax1.min(bx1);
+    let iy1 = ay1.min(by1);
+    let iw = (ix1 - ix0).max(0.0);
+    let ih = (iy1 - iy0).max(0.0);
+    let inter = iw * ih;
+    let union = area_a + area_b - inter;
+    if union <= 0.0 { 0.0 } else { inter / union }
+}
+
+/// Find the cross-VLM region whose bbox best matches `elem_bbox` (max IoU
+/// above `iou_threshold`). Returns `None` if no candidate clears the bar.
+fn match_cross_vlm_region<'a>(
+    elem_bbox: &[f32; 4],
+    candidates: &'a [CrossVlmRegion],
+    iou_threshold: f32,
+) -> Option<&'a CrossVlmRegion> {
+    let mut best: Option<(&CrossVlmRegion, f32)> = None;
+    for cand in candidates {
+        let iou = axis_aligned_iou(elem_bbox, &cand.bbox);
+        if iou < iou_threshold {
+            continue;
+        }
+        match best {
+            Some((_, best_iou)) if best_iou >= iou => {}
+            _ => best = Some((cand, iou)),
+        }
+    }
+    best.map(|(c, _)| c)
+}
+
 #[derive(Clone, Copy)]
 struct DraftFormat {
     heading_prefix: bool,
@@ -377,7 +620,7 @@ impl DraftFormat {
         }
     }
 
-    fn hunyuan_aligned() -> Self {
+    fn hunyuanocr_aligned() -> Self {
         Self {
             heading_prefix: false,
             wrap_formulas: false,
@@ -492,15 +735,15 @@ fn build_gt_draft(
     backend: Backend,
     task: Task,
     image_size: (u32, u32),
-    hunyuan_legacy_gt_format: bool,
+    hunyuanocr_legacy_gt_format: bool,
 ) -> String {
     match backend {
-        Backend::Hunyuan => build_draft(
+        Backend::HunyuanOcr => build_draft(
             entry,
-            if hunyuan_legacy_gt_format {
+            if hunyuanocr_legacy_gt_format {
                 DraftFormat::markdown()
             } else {
-                DraftFormat::hunyuan_aligned()
+                DraftFormat::hunyuanocr_aligned()
             },
         ),
         Backend::MinerU | Backend::GlmOcr => build_plain_draft(entry),
@@ -511,6 +754,21 @@ fn build_gt_draft(
                 build_draft(entry, DraftFormat::markdown())
             }
         },
+    }
+}
+
+fn target_draft_adapter(backend: Backend, task: Task) -> TargetDraftAdapter {
+    // Pick the target VLM's natural draft surface so structure / cross-VLM
+    // drafts get auto-normalized via the adapter (HTML↔OTSL for tables,
+    // formula wrapper handling, heading shell, etc.). PaddleOCR-VL is
+    // element-only and uses the same `PaddleOcrVl` adapter regardless of
+    // task — the adapter dispatches on element kind, not task.
+    let _ = task;
+    match backend {
+        Backend::HunyuanOcr => TargetDraftAdapter::HunyuanOcr,
+        Backend::MinerU => TargetDraftAdapter::MinerU,
+        Backend::GlmOcr => TargetDraftAdapter::GlmOcr,
+        Backend::PaddleOcrVl => TargetDraftAdapter::PaddleOcrVl,
     }
 }
 
@@ -562,7 +820,8 @@ fn best_per_draft_window_hits(
 }
 
 struct TokenDiffInput<'a> {
-    page_idx: usize,
+    run_row_idx: usize,
+    candidate_idx: usize,
     image_path: &'a str,
     backend: Backend,
     mode: Mode,
@@ -605,7 +864,8 @@ fn append_token_diff_report(out: &mut String, tokenizer: &Tokenizer, input: Toke
         "# HSD Token Diff\n\n\
          | field | value |\n\
          |---|---|\n\
-         | page idx | {} |\n\
+         | run row idx | {} |\n\
+         | candidate idx | {} |\n\
          | image | {} |\n\
          | backend | {} |\n\
          | mode | {:?} |\n\
@@ -618,7 +878,8 @@ fn append_token_diff_report(out: &mut String, tokenizer: &Tokenizer, input: Toke
          | HSD page draft count | {} |\n\
          | diagnostic region draft count | {} |\n\
          | baseline {}-gram hits in concatenated/page draft | {}/{} ({:.3}) |\n",
-        input.page_idx,
+        input.run_row_idx,
+        input.candidate_idx,
         input.image_path,
         input.backend.as_str(),
         input.mode,
@@ -718,17 +979,50 @@ fn page_attr<'a>(entry: &'a OmniEntry, key: &str) -> &'a str {
 
 fn prompt_for_entry<'a>(entry: &OmniEntry, args: &'a Args) -> (&'a str, &'static str) {
     if args.auto_prompt_lang && page_attr(entry, "language").eq_ignore_ascii_case("chinese") {
-        (HUNYUAN_CHINESE_PARSING_PROMPT, "hunyuan_parsing_zh")
+        (HUNYUAN_CHINESE_PARSING_PROMPT, "hunyuanocr_parsing_zh")
     } else {
-        (args.instruction.as_str(), "hunyuan_parsing_en")
+        (args.instruction.as_str(), "hunyuanocr_parsing_en")
     }
 }
 
-fn instruction_prompt<'a>(entry: &OmniEntry, args: &'a Args) -> (&'a str, &'static str) {
+fn hunyuanocr_region_prompt<'a>(entry: &OmniEntry, args: &'a Args) -> (&'a str, &'static str) {
     if args.auto_prompt_lang && page_attr(entry, "language").eq_ignore_ascii_case("chinese") {
-        (HUNYUAN_CHINESE_PARSING_PROMPT, "instruction_zh")
+        (HUNYUAN_CHINESE_REGION_PROMPT, "hunyuanocr_region_zh")
     } else {
-        (args.instruction.as_str(), "instruction")
+        (
+            args.hunyuanocr_region_instruction.as_str(),
+            "hunyuanocr_region_en",
+        )
+    }
+}
+
+fn glmocr_prompt(args: &Args) -> (&str, &'static str) {
+    (args.glmocr_instruction.as_str(), "glmocr_text_recognition")
+}
+
+fn glmocr_region_prompt(args: &Args) -> (&str, &'static str) {
+    (
+        args.glmocr_region_instruction.as_str(),
+        "glmocr_region_text_recognition",
+    )
+}
+
+fn mineru_prompt(args: &Args) -> (&str, &'static str) {
+    (args.mineru_instruction.as_str(), "mineru_text_recognition")
+}
+
+fn mineru_region_prompt(args: &Args) -> (&str, &'static str) {
+    // `--mineru-two-step` forces empty region prompt, which MinerU's
+    // `generate_hsd_full` interprets as "dispatch per-element via
+    // `MinerUTaskPrompt::for_layout`" (matches the official `two_step_extract`
+    // flow).
+    if args.mineru_two_step {
+        ("", "mineru_two_step_per_element")
+    } else {
+        (
+            args.mineru_region_instruction.as_str(),
+            "mineru_region_text_recognition",
+        )
     }
 }
 
@@ -745,6 +1039,117 @@ fn csv_row(fields: &[String]) -> String {
     let mut row = fields.iter().map(csv_escape).collect::<Vec<_>>().join(",");
     row.push('\n');
     row
+}
+
+fn require_hsd_elements<'a>(
+    elements: Option<&'a [LayoutElement]>,
+    backend: &'static str,
+) -> Result<&'a [LayoutElement], OCRError> {
+    let Some(elements) = elements.filter(|elements| !elements.is_empty()) else {
+        return Err(OCRError::InvalidInput {
+            message: format!("{backend} page dual-stage requires non-empty HSD layout elements"),
+        });
+    };
+    Ok(elements)
+}
+
+fn layout_kind_bucket(t: LayoutElementType) -> &'static str {
+    match t {
+        LayoutElementType::Table => "table",
+        LayoutElementType::Formula | LayoutElementType::FormulaNumber => "formula",
+        LayoutElementType::Image
+        | LayoutElementType::Chart
+        | LayoutElementType::Seal
+        | LayoutElementType::HeaderImage
+        | LayoutElementType::FooterImage => "visual",
+        LayoutElementType::DocTitle
+        | LayoutElementType::ParagraphTitle
+        | LayoutElementType::FigureTitle
+        | LayoutElementType::TableTitle
+        | LayoutElementType::ChartTitle
+        | LayoutElementType::FigureTableChartTitle => "title",
+        LayoutElementType::Header | LayoutElementType::Footer | LayoutElementType::Number => {
+            "page_artifact"
+        }
+        LayoutElementType::List => "list",
+        LayoutElementType::Text
+        | LayoutElementType::Content
+        | LayoutElementType::Abstract
+        | LayoutElementType::AsideText
+        | LayoutElementType::Reference
+        | LayoutElementType::ReferenceContent
+        | LayoutElementType::Footnote => "text",
+        _ => "other",
+    }
+}
+
+fn region_kind_buckets(elements: &[LayoutElement]) -> String {
+    let mut counts: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
+    for elem in elements {
+        let entry = counts
+            .entry(layout_kind_bucket(elem.element_type))
+            .or_insert((0, 0));
+        entry.0 += 1;
+        if elem
+            .text
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
+        {
+            entry.1 += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .map(|(kind, (total, drafted))| format!("{kind}:{drafted}/{total}"))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn region_kind_name(kind: RegionKind) -> &'static str {
+    match kind {
+        RegionKind::Text => "text",
+        RegionKind::Title => "title",
+        RegionKind::List => "list",
+        RegionKind::Table => "table",
+        RegionKind::Formula => "formula",
+        RegionKind::Figure => "visual",
+        RegionKind::Header | RegionKind::Footer => "page_artifact",
+        RegionKind::Other => "other",
+    }
+}
+
+fn stage1_region_kind_stats(stats: &HsdStats) -> String {
+    let mut by_kind: BTreeMap<&'static str, (u32, u32, u32, u32)> = BTreeMap::new();
+    for region in &stats.stage1_regions {
+        let entry = by_kind.entry(region_kind_name(region.kind)).or_default();
+        entry.0 += 1;
+        entry.1 += region.stats.accept.num_steps;
+        entry.2 += region.stats.accept.num_fallbacks;
+        entry.3 += region
+            .stats
+            .accept
+            .per_step_accepted
+            .iter()
+            .copied()
+            .sum::<u32>();
+    }
+    by_kind
+        .into_iter()
+        .map(|(kind, (regions, steps, fallbacks, accepted_sum))| {
+            let aal = if steps == 0 {
+                0.0
+            } else {
+                accepted_sum as f32 / steps as f32
+            };
+            let fallback_rate = if steps == 0 {
+                0.0
+            } else {
+                fallbacks as f32 / steps as f32
+            };
+            format!("{kind}:regions={regions},aal={aal:.2},fallback={fallback_rate:.3}")
+        })
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 fn is_mask_or_abandon(category: &str) -> bool {
@@ -804,7 +1209,7 @@ fn build_layout_elements(
             let text = d.text.trim();
             if !text.is_empty() {
                 elem.text = Some(if normalize_text {
-                    normalize_paddle_region_draft(text)
+                    normalize_paddleocr_vl_region_draft(text)
                 } else {
                     text.to_string()
                 });
@@ -815,7 +1220,7 @@ fn build_layout_elements(
         .collect()
 }
 
-fn normalize_paddle_region_draft(input: &str) -> String {
+fn normalize_paddleocr_vl_region_draft(input: &str) -> String {
     let mut s = input.to_string();
     let replacements = [
         ("\u{00a0}", " "),
@@ -1010,7 +1415,7 @@ fn layout_type_from_omni_category(category: &str) -> LayoutElementType {
     }
 }
 
-fn paddle_task_for_layout_type(t: LayoutElementType) -> Option<PaddleOcrVlTask> {
+fn paddleocr_vl_task_for_layout_type(t: LayoutElementType) -> Option<PaddleOcrVlTask> {
     match t {
         LayoutElementType::Table => Some(PaddleOcrVlTask::Table),
         LayoutElementType::Chart => Some(PaddleOcrVlTask::Chart),
@@ -1023,7 +1428,7 @@ fn paddle_task_for_layout_type(t: LayoutElementType) -> Option<PaddleOcrVlTask> 
     }
 }
 
-fn run_paddle_region_baseline(
+fn run_paddleocr_vl_region_baseline(
     model: &PaddleOcrVl,
     image: &image::RgbImage,
     elements: &[LayoutElement],
@@ -1033,7 +1438,7 @@ fn run_paddle_region_baseline(
     let mut per_element = vec![None; elements.len()];
     let mut per_element_tokens = vec![None; elements.len()];
     for (idx, elem) in elements.iter().enumerate() {
-        let Some(task) = paddle_task_for_layout_type(elem.element_type) else {
+        let Some(task) = paddleocr_vl_task_for_layout_type(elem.element_type) else {
             continue;
         };
         let crop = BBoxCrop::crop_bounding_box(image, &elem.bbox)?;
@@ -1090,11 +1495,7 @@ fn run_ppocr_rec_drafter(
 
     let output = predictor.predict(crops)?;
     let mut joined = Vec::new();
-    for ((idx, text), score) in indices
-        .into_iter()
-        .zip(output.texts.into_iter())
-        .zip(output.scores.into_iter())
-    {
+    for ((idx, text), score) in indices.into_iter().zip(output.texts).zip(output.scores) {
         let text = text.trim().to_string();
         if text.is_empty() || score <= 0.0 {
             continue;
@@ -1122,18 +1523,63 @@ fn build_structure_drafter(args: &Args) -> Result<OARStructure, Box<dyn std::err
     if let Some(ort_cfg) = parse_ort_device(drafter_device(args))? {
         builder = builder.ort_session(ort_cfg);
     }
-    if let Some(path) = &args.structure_region_model {
+    // PP-DocBlockLayout reading-order model. Required for paper-equivalent
+    // multi-column AAL. Empty path = explicit user opt-out; missing file =
+    // warn-and-fallback to bbox (y, x) sort.
+    let region_path = &args.structure_region_model;
+    if region_path.as_os_str().is_empty() {
+        eprintln!(
+            "[WARN] --structure-region-model is empty: reading-order falls back to bbox (y,x) sort. \
+             Multi-column pages may miss Stage-2 acceptance; pass the PP-DocBlockLayout ONNX path to recover paper AAL."
+        );
+    } else if !region_path.exists() {
+        eprintln!(
+            "[WARN] --structure-region-model '{}' not found on disk: reading-order falls back to bbox (y,x) sort. \
+             Multi-column pages may miss Stage-2 acceptance.",
+            region_path.display()
+        );
+    } else {
         builder = builder
-            .with_region_detection(path)
+            .with_region_detection(region_path)
             .region_model_name("pp-docblocklayout");
     }
-    if let Some(path) = &args.structure_table_cls_model {
+    // Sub-model resolver: empty path = explicit user opt-out, non-empty +
+    // missing file = warn-and-skip. Returns None when the path should be
+    // dropped so the call-site can branch.
+    fn resolve_submodel<'a>(label: &str, path: &'a PathBuf) -> Option<&'a PathBuf> {
+        if path.as_os_str().is_empty() {
+            return None;
+        }
+        if !path.exists() {
+            eprintln!(
+                "[WARN] {label} '{}' not found on disk: structure drafter will skip this sub-model. \
+                 Affected regions produce 0 drafts and target VLM autoregresses through them.",
+                path.display()
+            );
+            return None;
+        }
+        Some(path)
+    }
+
+    if let Some(path) = resolve_submodel(
+        "--structure-table-cls-model",
+        &args.structure_table_cls_model,
+    ) {
         builder = builder.with_table_classification(path);
     }
-    if let Some(path) = &args.structure_wired_table_model {
-        let Some(dict) = &args.structure_table_dict_path else {
+    // Table structure dict applies to both wired and wireless models. Resolve
+    // once so the wired/wireless branches can borrow it without re-checking.
+    let table_dict = resolve_submodel(
+        "--structure-table-dict-path",
+        &args.structure_table_dict_path,
+    );
+    if let Some(path) = resolve_submodel(
+        "--structure-wired-table-model",
+        &args.structure_wired_table_model,
+    ) {
+        let Some(dict) = table_dict else {
             return Err(
-                "--structure-wired-table-model requires --structure-table-dict-path".into(),
+                "--structure-wired-table-model requires --structure-table-dict-path (or pass empty string to skip wired tables)".into(),
             );
         };
         builder = builder
@@ -1141,10 +1587,13 @@ fn build_structure_drafter(args: &Args) -> Result<OARStructure, Box<dyn std::err
             .wired_table_structure_model_name("slanext_wired")
             .table_structure_dict_path(dict);
     }
-    if let Some(path) = &args.structure_wireless_table_model {
-        let Some(dict) = &args.structure_table_dict_path else {
+    if let Some(path) = resolve_submodel(
+        "--structure-wireless-table-model",
+        &args.structure_wireless_table_model,
+    ) {
+        let Some(dict) = table_dict else {
             return Err(
-                "--structure-wireless-table-model requires --structure-table-dict-path".into(),
+                "--structure-wireless-table-model requires --structure-table-dict-path (or pass empty string to skip wireless tables)".into(),
             );
         };
         builder = builder
@@ -1152,30 +1601,56 @@ fn build_structure_drafter(args: &Args) -> Result<OARStructure, Box<dyn std::err
             .wireless_table_structure_model_name("slanet_plus")
             .table_structure_dict_path(dict);
     }
-    if let Some(path) = &args.structure_wired_cell_model {
+    if let Some(path) = resolve_submodel(
+        "--structure-wired-cell-model",
+        &args.structure_wired_cell_model,
+    ) {
         builder = builder
             .with_wired_table_cell_detection(path)
             .wired_table_cell_model_name("rtdetr-l_wired_table_cell_det");
     }
-    if let Some(path) = &args.structure_wireless_cell_model {
+    if let Some(path) = resolve_submodel(
+        "--structure-wireless-cell-model",
+        &args.structure_wireless_cell_model,
+    ) {
         builder = builder
             .with_wireless_table_cell_detection(path)
             .wireless_table_cell_model_name("rtdetr-l_wireless_table_cell_det");
     }
-    if let Some(path) = &args.structure_formula_model {
-        let Some(tokenizer) = &args.structure_formula_tokenizer else {
-            return Err("--structure-formula-model requires --structure-formula-tokenizer".into());
-        };
-        builder = builder
-            .with_formula_recognition(path, tokenizer, &args.structure_formula_type)
-            .formula_recognition_config(FormulaRecognitionConfig {
-                score_threshold: 0.0,
-                max_length: args.structure_formula_max_length,
-                batch_size: args.structure_formula_batch_size,
-            });
-        if let Some(formula_device) = &args.structure_formula_device {
-            builder = builder.formula_ort_session(parse_required_ort_device(formula_device)?);
+    // Formula recognition requires both the ONNX model and its tokenizer.
+    // Treat them as a single unit: both present → enable; either missing → skip.
+    let formula_model =
+        resolve_submodel("--structure-formula-model", &args.structure_formula_model);
+    let formula_tokenizer = resolve_submodel(
+        "--structure-formula-tokenizer",
+        &args.structure_formula_tokenizer,
+    );
+    match (formula_model, formula_tokenizer) {
+        (Some(path), Some(tokenizer)) => {
+            builder = builder
+                .with_formula_recognition(path, tokenizer, &args.structure_formula_type)
+                .formula_recognition_config(FormulaRecognitionConfig {
+                    score_threshold: 0.0,
+                    max_length: args.structure_formula_max_length,
+                    batch_size: args.structure_formula_batch_size,
+                });
+            if let Some(formula_device) = &args.structure_formula_device {
+                builder = builder.formula_ort_session(parse_required_ort_device(formula_device)?);
+            }
         }
+        (Some(_), None) => {
+            return Err(
+                "--structure-formula-model requires --structure-formula-tokenizer (or pass both as empty strings to skip formula drafting)".into(),
+            );
+        }
+        (None, Some(_)) => {
+            // Tokenizer without model is a no-op; emit a hint but don't fail.
+            eprintln!(
+                "[WARN] --structure-formula-tokenizer set but --structure-formula-model is empty/missing: \
+                 skipping formula drafting. Formula regions will produce 0 drafts."
+            );
+        }
+        (None, None) => {} // both opt-out
     }
 
     Ok(builder.build()?)
@@ -1198,146 +1673,11 @@ fn run_structure_page_drafter(
     Ok(structure.predict_image(image.clone())?)
 }
 
+// Thin wrapper kept for readability at call sites; the real implementation
+// lives in `oar_ocr_vl::hsd::drafting::structure_result_to_layout_elements`
+// so other consumers can share the same OAR-structure → HSD-element bridge.
 fn structure_result_hsd_elements(result: &StructureResult) -> Vec<LayoutElement> {
-    let mut elements = result.layout_elements.clone();
-    for elem in &mut elements {
-        match elem.element_type {
-            LayoutElementType::Table => {
-                if elem.text.as_deref().is_none_or(|s| s.trim().is_empty())
-                    && let Some(table) = result
-                        .tables
-                        .iter()
-                        .filter_map(|table| {
-                            let html = table.html_structure.as_deref()?.trim();
-                            (!html.is_empty()).then(|| (table.bbox.iou(&elem.bbox), html))
-                        })
-                        .filter(|(iou, _)| *iou > 0.5)
-                        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
-                        .map(|(_, html)| html.to_string())
-                {
-                    elem.text = Some(table);
-                }
-            }
-            LayoutElementType::Formula => {
-                if elem.text.as_deref().is_none_or(|s| s.trim().is_empty())
-                    && let Some(latex) = result
-                        .formulas
-                        .iter()
-                        .filter_map(|formula| {
-                            let latex = formula.latex.trim();
-                            (!latex.is_empty()).then(|| (formula.bbox.iou(&elem.bbox), latex))
-                        })
-                        .filter(|(iou, _)| *iou > 0.5)
-                        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
-                        .map(|(_, latex)| latex.to_string())
-                {
-                    elem.text = Some(latex);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut unique = Vec::with_capacity(elements.len());
-    for elem in elements {
-        let duplicate = unique.iter().any(|prev: &LayoutElement| {
-            prev.element_type == elem.element_type && prev.bbox.iou(&elem.bbox) > 0.98
-        });
-        if !duplicate {
-            unique.push(elem);
-        }
-    }
-    unique
-}
-
-fn structure_page_draft_hunyuan(elements: &[LayoutElement]) -> String {
-    let mut out = String::new();
-    let first_body_y = elements
-        .iter()
-        .find(|elem| {
-            !matches!(
-                elem.element_type,
-                LayoutElementType::Header
-                    | LayoutElementType::HeaderImage
-                    | LayoutElementType::Number
-                    | LayoutElementType::Footer
-                    | LayoutElementType::FooterImage
-            )
-        })
-        .map(|elem| elem.bbox.y_min())
-        .unwrap_or(f32::INFINITY);
-    let top_page_numbers: Vec<usize> = elements
-        .iter()
-        .enumerate()
-        .filter(|(_, elem)| {
-            elem.element_type == LayoutElementType::Number && elem.bbox.y_min() <= first_body_y
-        })
-        .map(|(idx, _)| idx)
-        .collect();
-    let mut order = Vec::with_capacity(elements.len());
-    for (idx, elem) in elements.iter().enumerate() {
-        order.push(idx);
-        if matches!(
-            elem.element_type,
-            LayoutElementType::Header | LayoutElementType::HeaderImage
-        ) {
-            for &num_idx in &top_page_numbers {
-                if !order.contains(&num_idx) {
-                    order.push(num_idx);
-                }
-            }
-        }
-    }
-
-    let mut emitted_top_page_number = false;
-    for idx in order {
-        let elem = &elements[idx];
-        let is_top_page_number = top_page_numbers.contains(&idx);
-        if is_top_page_number && emitted_top_page_number {
-            continue;
-        }
-        let Some(text) = elem
-            .text
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        else {
-            continue;
-        };
-        let formatted = match elem.element_type {
-            LayoutElementType::Header
-            | LayoutElementType::DocTitle
-            | LayoutElementType::ParagraphTitle => {
-                align_hunyuan_heading(text, DraftFormat::hunyuan_aligned())
-            }
-            LayoutElementType::Formula | LayoutElementType::FormulaNumber => {
-                if text.starts_with("$$") || text.starts_with("\\[") {
-                    text.to_string()
-                } else {
-                    format!("$$ {text} $$")
-                }
-            }
-            LayoutElementType::Table => text.to_string(),
-            LayoutElementType::Image
-            | LayoutElementType::HeaderImage
-            | LayoutElementType::FooterImage
-            | LayoutElementType::Seal => continue,
-            _ => text.to_string(),
-        };
-        if formatted.trim().is_empty() {
-            continue;
-        }
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        out.push_str(formatted.trim());
-        if elem.element_type == LayoutElementType::Number {
-            out.push_str("\n\n---");
-            if is_top_page_number {
-                emitted_top_page_number = true;
-            }
-        }
-    }
-    out
+    oar_ocr_vl::hsd::drafting::structure_result_to_layout_elements(result)
 }
 
 fn match_structure_to_regions(
@@ -1426,7 +1766,7 @@ fn drafter_device(args: &Args) -> &str {
         .unwrap_or(args.device.as_str())
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     utils::init_tracing();
     let args = Args::parse();
 
@@ -1445,14 +1785,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.model_dir.display()
     );
     let model = match args.backend {
-        Backend::Hunyuan => BackendModel::Hunyuan(HunyuanOcr::from_dir(&args.model_dir, device)?),
+        Backend::HunyuanOcr => {
+            BackendModel::HunyuanOcr(HunyuanOcr::from_dir(&args.model_dir, device)?)
+        }
         Backend::PaddleOcrVl => {
             BackendModel::PaddleOcrVl(PaddleOcrVl::from_dir(&args.model_dir, device)?)
         }
         Backend::MinerU => BackendModel::MinerU(MinerU::from_dir(&args.model_dir, device)?),
         Backend::GlmOcr => BackendModel::GlmOcr(GlmOcr::from_dir(&args.model_dir, device)?),
     };
-    let paddle_task = args.task.to_native();
+    let paddleocr_vl_task = args.task.to_native();
     let ppocr_rec = if args.draft_source == "ppocr-rec" {
         if !matches!(args.mode, Mode::Region) || !matches!(args.backend, Backend::PaddleOcrVl) {
             return Err(
@@ -1476,10 +1818,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let structure_drafter = if args.draft_source == "structure" {
         if matches!(args.mode, Mode::Region)
-            && !matches!(args.backend, Backend::Hunyuan | Backend::PaddleOcrVl)
+            && !matches!(args.backend, Backend::HunyuanOcr | Backend::PaddleOcrVl)
         {
             return Err(
-                "--draft-source structure requires --backend hunyuan or paddleocr_vl with --mode region".into(),
+                "--draft-source structure requires --backend hunyuanocr or paddleocr_vl with --mode region".into(),
             );
         }
         println!(
@@ -1488,6 +1830,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         Some(build_structure_drafter(&args)?)
     } else {
+        None
+    };
+
+    let cross_vlm_drafts = if args.draft_source == "cross-vlm-file" {
+        let path = args
+            .cross_vlm_draft_file
+            .as_ref()
+            .ok_or("--draft-source cross-vlm-file requires --cross-vlm-draft-file <path>")?;
+        println!("Loading cross-VLM drafts from {}", path.display());
+        let parsed = CrossVlmDraftFile::load(path)?;
+        if let Some(name) = parsed.source_backend.as_deref() {
+            println!("  source_backend = {name}, pages = {}", parsed.pages.len());
+        } else {
+            println!("  pages = {}", parsed.pages.len());
+        }
+        Some(parsed)
+    } else {
+        if args.cross_vlm_draft_file.is_some() {
+            eprintln!(
+                "[warn] --cross-vlm-draft-file is set but --draft-source is not cross-vlm-file; ignoring."
+            );
+        }
         None
     };
 
@@ -1502,16 +1866,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         PathBuf::from(p)
     });
     let mut csv = String::from(
-        "page_idx,image,subset,language,backend,mode,task,device,drafter_device,draft_source,page_dual_stage,regions,draft_regions,draft_coverage,draft_3gram_hit_rate,tau,max_tokens,resize_max,start_idx,prompt_kind,prompt,baseline_ms,hsd_ms,drafter_ms,decode_ms,prefill_ms,dsv_candidate_ms,dsv_verify_ms,dsv_traverse_ms,dsv_commit_ms,dsv_step_one_ms,dsv_fallback_argmax_ms,dsv_verify_calls,dsv_step_one_calls,dsv_fallback_argmax_calls,dsv_avg_candidates,dsv_max_candidates,dsv_empty_tree_calls,dsv_rejected_tree_calls,dsv_accepted_tree_calls,dsv_avg_tree_nodes,dsv_max_tree_nodes,emitted_tokens,verify_steps,fallback_steps,aal,sr_decode,sr_e2e\n",
+        "page_idx,image,subset,language,backend,mode,task,device,drafter_device,draft_source,page_dual_stage,hsd_entry,regions,draft_regions,draft_coverage,region_kind_buckets,stage1_region_kind_stats,draft_3gram_hit_rate,tau,max_tokens,resize_max,start_idx,prompt_kind,prompt,region_prompt_kind,region_prompt,baseline_ms,hsd_ms,drafter_ms,decode_ms,prefill_ms,stage1_decode_ms,stage1_prefill_ms,stage1_verify_steps,stage1_fallback_steps,stage1_aal,stage2_decode_ms,stage2_prefill_ms,stage2_verify_steps,stage2_fallback_steps,stage2_aal,dsv_candidate_ms,dsv_verify_ms,dsv_traverse_ms,dsv_commit_ms,dsv_step_one_ms,dsv_fallback_argmax_ms,dsv_verify_calls,dsv_step_one_calls,dsv_fallback_argmax_calls,dsv_avg_candidates,dsv_max_candidates,dsv_empty_tree_calls,dsv_rejected_tree_calls,dsv_accepted_tree_calls,dsv_avg_tree_nodes,dsv_max_tree_nodes,emitted_tokens,verify_steps,fallback_steps,aal,sr_decode,sr_e2e\n",
     );
 
+    let mut dsv = DsvConfig {
+        tau: args.tau,
+        ..Default::default()
+    };
+    // Per-knob CLI overrides. Each defaults to 0 = "honour the preset"; any
+    // non-zero value wins so a user can do e.g. `--dsv-window-len 2` on top of
+    // `--config-preset omnibench` to relax matching on divergent drafts
+    // without having to copy the rest of the preset.
+    if args.dsv_window_len > 0 {
+        dsv.window_len = args.dsv_window_len;
+    }
+    if args.dsv_max_candidates > 0 {
+        dsv.max_candidates_per_step = args.dsv_max_candidates;
+    }
+    if args.dsv_max_suffix_len > 0 {
+        dsv.max_suffix_len = args.dsv_max_suffix_len;
+    }
     let cfg = HsdConfig {
-        dsv: DsvConfig {
-            tau: args.tau,
-            window_len: 3,
-            max_candidates_per_step: 32,
-            max_suffix_len: 64,
-        },
+        dsv,
         enable_stage1: matches!(args.mode, Mode::Region)
             || (matches!(args.mode, Mode::Page) && args.page_dual_stage),
         enable_stage2: true,
@@ -1519,9 +1895,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_region_tokens: args.max_tokens,
     };
     if matches!(args.mode, Mode::Region)
-        && !matches!(args.backend, Backend::Hunyuan | Backend::PaddleOcrVl)
+        && !matches!(args.backend, Backend::HunyuanOcr | Backend::PaddleOcrVl)
     {
-        return Err("--mode region currently supports --backend hunyuan or paddleocr_vl".into());
+        return Err("--mode region currently supports --backend hunyuanocr or paddleocr_vl".into());
     }
 
     // Build the candidate pool with optional substring + subset filter.
@@ -1592,6 +1968,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut worst_sr_e2e = f64::INFINITY;
     let mut worst_aal_page = String::new();
     let mut worst_sr_e2e_page = String::new();
+    let mut hsd_entry_counts: BTreeMap<&'static str, u32> = BTreeMap::new();
     let mut counted = 0u32;
     let mut skipped = 0u32;
 
@@ -1602,6 +1979,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "-".repeat(110));
 
     for (i, entry) in candidates.iter().take(n_pages).enumerate() {
+        let candidate_idx = args.start_idx + i;
         let img_path = args
             .bench_dir
             .join("images")
@@ -1645,7 +2023,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 image = image::imageops::resize(&image, nw, nh, FilterType::Lanczos3);
             }
         }
-        let elements = if matches!(args.mode, Mode::Region) {
+        let need_layout_elements = matches!(args.mode, Mode::Region)
+            || (matches!(args.mode, Mode::Page)
+                && args.page_dual_stage
+                && args.draft_source == "gt");
+        let elements = if need_layout_elements {
             let normalize_text = args.normalize_draft && args.draft_source == "gt";
             let require_text = matches!(args.draft_source.as_str(), "gt" | "ppocr-rec");
             build_layout_elements(entry, x_scale, y_scale, normalize_text, require_text)
@@ -1658,7 +2040,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.backend,
                 args.task,
                 gt_image_size,
-                args.hunyuan_legacy_gt_format,
+                args.hunyuanocr_legacy_gt_format,
             ),
             Mode::Region => elements
                 .iter()
@@ -1669,8 +2051,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .join("\n\n"),
         };
         if draft.trim().is_empty() {
-            let draft_filled_later = matches!(args.draft_source.as_str(), "baseline" | "structure")
-                && (matches!(args.mode, Mode::Page) || matches!(args.mode, Mode::Region));
+            let draft_filled_later = matches!(
+                args.draft_source.as_str(),
+                "baseline" | "structure" | "cross-vlm-file"
+            ) && (matches!(args.mode, Mode::Page)
+                || matches!(args.mode, Mode::Region));
             if !draft_filled_later {
                 // No usable draft text — skip rather than running with empty draft
                 // (which would just be a baseline run with extra overhead).
@@ -1678,13 +2063,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
         }
-        let (hunyuan_prompt, hunyuan_prompt_kind) = prompt_for_entry(entry, &args);
-        let (generic_prompt, generic_prompt_kind) = instruction_prompt(entry, &args);
+        let (hunyuanocr_prompt, hunyuanocr_prompt_kind) = prompt_for_entry(entry, &args);
+        let (hunyuanocr_region_prompt, hunyuanocr_region_prompt_kind) =
+            hunyuanocr_region_prompt(entry, &args);
+        let (mineru_prompt, mineru_prompt_kind) = mineru_prompt(&args);
+        let (mineru_region_prompt, mineru_region_prompt_kind) = mineru_region_prompt(&args);
+        let (glmocr_prompt, glmocr_prompt_kind) = glmocr_prompt(&args);
+        let (glmocr_region_prompt, glmocr_region_prompt_kind) = glmocr_region_prompt(&args);
         let (prompt_text, prompt_kind) = match args.backend {
-            Backend::Hunyuan => (hunyuan_prompt, hunyuan_prompt_kind),
-            Backend::PaddleOcrVl => (paddle_task.prompt(), "paddleocr_vl_task"),
-            Backend::MinerU => (generic_prompt, generic_prompt_kind),
-            Backend::GlmOcr => (generic_prompt, generic_prompt_kind),
+            Backend::HunyuanOcr => (hunyuanocr_prompt, hunyuanocr_prompt_kind),
+            Backend::PaddleOcrVl => (paddleocr_vl_task.prompt(), "paddleocr_vl_task"),
+            Backend::MinerU => (mineru_prompt, mineru_prompt_kind),
+            Backend::GlmOcr => (glmocr_prompt, glmocr_prompt_kind),
+        };
+        let (region_prompt_text, region_prompt_kind) = match args.backend {
+            Backend::HunyuanOcr => (hunyuanocr_region_prompt, hunyuanocr_region_prompt_kind),
+            Backend::PaddleOcrVl => (paddleocr_vl_task.prompt(), "paddleocr_vl_region_task"),
+            Backend::MinerU => (mineru_region_prompt, mineru_region_prompt_kind),
+            Backend::GlmOcr => (glmocr_region_prompt, glmocr_region_prompt_kind),
         };
 
         // Baseline.
@@ -1694,9 +2090,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut baseline_tokens: Option<Vec<u32>> = None;
         let baseline_result: Result<String, Box<dyn std::error::Error>> = match (&model, args.mode)
         {
-            (BackendModel::Hunyuan(model), Mode::Page) => {
+            (BackendModel::HunyuanOcr(model), Mode::Page) => {
                 let toks_result = model
-                    .generate_tokens(&[image.clone()], &[hunyuan_prompt], args.max_tokens)
+                    .generate_tokens(&[image.clone()], &[hunyuanocr_prompt], args.max_tokens)
                     .into_iter()
                     .next()
                     .ok_or("baseline returned no results")?;
@@ -1706,20 +2102,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             (BackendModel::PaddleOcrVl(model), Mode::Page) => {
                 let toks_result = model
-                    .generate_tokens(&[image.clone()], &[paddle_task], args.max_tokens)
+                    .generate_tokens(&[image.clone()], &[paddleocr_vl_task], args.max_tokens)
                     .into_iter()
                     .next()
                     .ok_or("baseline returned no results")?;
                 let toks = toks_result?;
                 baseline_tokens = Some(toks.clone());
                 model
-                    .decode_tokens(&toks, paddle_task)
+                    .decode_tokens(&toks, paddleocr_vl_task)
                     .map(|(_, processed)| processed)
                     .map_err(|e| e.into())
             }
             (BackendModel::MinerU(model), Mode::Page) => {
                 let toks_result = model
-                    .generate_tokens(&[image.clone()], &[generic_prompt], args.max_tokens)
+                    .generate_tokens(&[image.clone()], &[mineru_prompt], args.max_tokens)
                     .into_iter()
                     .next()
                     .ok_or("baseline returned no results")?;
@@ -1729,7 +2125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             (BackendModel::GlmOcr(model), Mode::Page) => {
                 let toks_result = model
-                    .generate_tokens(&[image.clone()], &[generic_prompt], args.max_tokens)
+                    .generate_tokens(&[image.clone()], &[glmocr_prompt], args.max_tokens)
                     .into_iter()
                     .next()
                     .ok_or("baseline returned no results")?;
@@ -1738,14 +2134,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 model.decode_tokens(&toks).map_err(|e| e.into())
             }
             (BackendModel::PaddleOcrVl(model), Mode::Region) => {
-                let drafts = run_paddle_region_baseline(model, &image, &elements, args.max_tokens)?;
+                let drafts =
+                    run_paddleocr_vl_region_baseline(model, &image, &elements, args.max_tokens)?;
                 region_baseline_drafts = Some(drafts.per_element);
                 region_baseline_token_drafts = Some(drafts.per_element_tokens);
                 Ok(drafts.joined)
             }
-            (BackendModel::Hunyuan(model), Mode::Region) => {
+            (BackendModel::HunyuanOcr(model), Mode::Region) => {
                 let toks_result = model
-                    .generate_tokens(&[image.clone()], &[hunyuan_prompt], args.max_tokens)
+                    .generate_tokens(&[image.clone()], &[hunyuanocr_prompt], args.max_tokens)
                     .into_iter()
                     .next()
                     .ok_or("baseline returned no results")?;
@@ -1754,7 +2151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 model.decode_tokens(&toks).map_err(|e| e.into())
             }
             (_, Mode::Region) => {
-                Err("--mode region currently supports --backend hunyuan or paddleocr_vl".into())
+                Err("--mode region currently supports --backend hunyuanocr or paddleocr_vl".into())
             }
         };
         let baseline_dur = t0.elapsed();
@@ -1784,7 +2181,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut external_drafter_dur = Duration::ZERO;
         let mut diagnostic_region_drafts: Vec<String> = Vec::new();
         let actual_draft = match args.draft_source.as_str() {
-            "gt" => draft.clone(),
+            "gt" => {
+                if matches!(args.mode, Mode::Page) && args.page_dual_stage {
+                    hsd_elements = Some(elements.clone());
+                }
+                draft.clone()
+            }
             "baseline" if matches!(args.mode, Mode::Region) => {
                 let per_element = region_baseline_drafts
                     .as_ref()
@@ -1851,16 +2253,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let result = run_structure_page_drafter(structure, &image)?;
                 external_drafter_dur += t_drafter.elapsed();
                 let elems = structure_result_hsd_elements(&result);
-                diagnostic_region_drafts = elems
-                    .iter()
-                    .map(region_markdown)
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
+                let adapter = target_draft_adapter(args.backend, args.task);
+                diagnostic_region_drafts = region_markdowns_for(&elems, &[], adapter);
                 hsd_elements = Some(elems);
-                structure_page_draft_hunyuan(hsd_elements.as_deref().unwrap_or(&[]))
+                page_markdown_for(hsd_elements.as_deref().unwrap_or(&[]), &[], adapter)
             }
             "baseline" => baseline_text.clone(),
+            "cross-vlm-file" => {
+                // Per-page raw drafts from another VLM. The target backend's
+                // adapter handles surface conversion (HTML↔OTSL, formula
+                // wrapping); we just match elements by bbox IoU and stash the
+                // raw text on `elem.text` so downstream `generate_hsd_full`
+                // picks it up via `region_markdown_for`.
+                let cross = cross_vlm_drafts
+                    .as_ref()
+                    .ok_or("missing cross-VLM drafts (loaded earlier?)")?;
+                let regions = cross.lookup_page(&entry.page_info.image_path);
+                let mut drafter_elements = elements.clone();
+                let mut matched = 0usize;
+                if let Some(regions) = regions {
+                    for elem in drafter_elements.iter_mut() {
+                        let elem_bbox = bbox_xyxy(&elem.bbox);
+                        if let Some(region) = match_cross_vlm_region(
+                            &elem_bbox,
+                            regions,
+                            args.cross_vlm_iou_threshold,
+                        ) {
+                            elem.text = Some(region.raw_text.clone());
+                            matched += 1;
+                        } else {
+                            // No matching cross-VLM region — drop the text so
+                            // the element won't contribute a stale draft to
+                            // Stage 1 / Stage 2.
+                            elem.text = None;
+                        }
+                    }
+                } else {
+                    // No page entry — clear all element texts so the bench
+                    // reports `draft_regions=0` rather than silently reusing
+                    // the OmniDocBench GT text on this page.
+                    for elem in drafter_elements.iter_mut() {
+                        elem.text = None;
+                    }
+                }
+                if regions.is_none() {
+                    eprintln!(
+                        "[warn] cross-vlm-file has no entry for {}",
+                        entry.page_info.image_path
+                    );
+                }
+                let adapter = target_draft_adapter(args.backend, args.task);
+                diagnostic_region_drafts = region_markdowns_for(&drafter_elements, &[], adapter);
+                let joined = page_markdown_for(&drafter_elements, &[], adapter);
+                hsd_elements = Some(drafter_elements);
+                println!(
+                    "  cross-vlm-file matched {matched}/{} regions for {}",
+                    elements.len(),
+                    entry.page_info.image_path,
+                );
+                joined
+            }
             other => return Err(format!("unknown --draft-source: {other}").into()),
         };
         if actual_draft.trim().is_empty() {
@@ -1868,9 +2320,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
+        // Build the Stage-2 draft set `Ỹ^pg` per paper Eq. 3. Most draft
+        // sources are inherently single-document (gt = ground-truth page,
+        // baseline = the VLM's own page output), so they form a 1-element
+        // set. The structure+page route splits per layout element so the
+        // matcher can scan each region draft independently (Eqs. 1+2),
+        // preserving per-region n-gram locality even when the drafter's
+        // page-level format diverges from the target VLM's.
+        let actual_drafts: Vec<String> = if matches!(args.mode, Mode::Page)
+            && args.draft_source == "structure"
+            && !diagnostic_region_drafts.is_empty()
+        {
+            diagnostic_region_drafts.clone()
+        } else {
+            vec![actual_draft.clone()]
+        };
+
         let page_draft_tokens = if matches!(args.mode, Mode::Page) {
             Some(match &model {
-                BackendModel::Hunyuan(model) => tokenize_draft(model.tokenizer(), &actual_draft)?,
+                BackendModel::HunyuanOcr(model) => {
+                    tokenize_draft(model.tokenizer(), &actual_draft)?
+                }
                 BackendModel::PaddleOcrVl(model) => {
                     tokenize_draft(model.tokenizer(), &actual_draft)?
                 }
@@ -1896,7 +2366,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let diagnostic_region_draft_tokens =
             if matches!(args.mode, Mode::Page) && !diagnostic_region_drafts.is_empty() {
                 let tokenizer = match &model {
-                    BackendModel::Hunyuan(model) => model.tokenizer(),
+                    BackendModel::HunyuanOcr(model) => model.tokenizer(),
                     BackendModel::PaddleOcrVl(model) => model.tokenizer(),
                     BackendModel::MinerU(model) => model.tokenizer(),
                     BackendModel::GlmOcr(model) => model.tokenizer(),
@@ -1934,7 +2404,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .as_ref()
                 .ok_or("--token-diff-output requires page-mode draft tokens")?;
             let tokenizer = match &model {
-                BackendModel::Hunyuan(model) => model.tokenizer(),
+                BackendModel::HunyuanOcr(model) => model.tokenizer(),
                 BackendModel::PaddleOcrVl(model) => model.tokenizer(),
                 BackendModel::MinerU(model) => model.tokenizer(),
                 BackendModel::GlmOcr(model) => model.tokenizer(),
@@ -1944,7 +2414,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &mut report,
                 tokenizer,
                 TokenDiffInput {
-                    page_idx: i,
+                    run_row_idx: i,
+                    candidate_idx,
                     image_path: &entry.page_info.image_path,
                     backend: args.backend,
                     mode: args.mode,
@@ -1954,7 +2425,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     baseline_tokens,
                     draft_tokens,
                     structure_elements: hsd_elements.as_deref(),
-                    hsd_page_draft_count: 1,
+                    hsd_page_draft_count: actual_drafts.len(),
                     region_draft_count: diagnostic_region_drafts.len(),
                     per_draft_max_hits,
                     limit: args.token_diff_limit,
@@ -1968,8 +2439,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        // For page mode, `draft_region_count` is the size of `Ỹ^pg` (the
+        // Stage-2 draft set per paper Eq. 3) — `actual_drafts.len()` after
+        // the multi-draft refactor, NOT a 0/1 indicator of "is the draft
+        // non-empty?". For region mode it's the count of elements with
+        // non-empty draft text, unchanged.
+        let hsd_element_count = hsd_elements.as_ref().map_or(elements.len(), Vec::len);
         let draft_region_count = if matches!(args.mode, Mode::Page) {
-            usize::from(!actual_draft.trim().is_empty())
+            if let Some(elems) = hsd_elements.as_ref().filter(|elems| !elems.is_empty()) {
+                elems
+                    .iter()
+                    .filter(|e| e.text.as_deref().is_some_and(|s| !s.trim().is_empty()))
+                    .count()
+            } else {
+                actual_drafts
+                    .iter()
+                    .filter(|d| !d.trim().is_empty())
+                    .count()
+            }
         } else {
             hsd_elements
                 .as_ref()
@@ -1978,15 +2465,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .filter(|e| e.text.as_deref().is_some_and(|s| !s.trim().is_empty()))
                 .count()
         };
-        let draft_coverage = if elements.is_empty() {
-            if matches!(args.mode, Mode::Page) && !actual_draft.trim().is_empty() {
+        let draft_coverage = if hsd_element_count == 0 {
+            if matches!(args.mode, Mode::Page) && draft_region_count > 0 {
                 1.0
             } else {
                 0.0
             }
         } else {
-            draft_region_count as f64 / elements.len() as f64
+            draft_region_count as f64 / hsd_element_count as f64
         };
+        let region_kind_buckets = hsd_elements
+            .as_deref()
+            .map(region_kind_buckets)
+            .unwrap_or_else(|| region_kind_buckets(&elements));
 
         // HSD with the draft.
         let t1 = Instant::now();
@@ -1997,86 +2488,134 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map(|t| vec![Draft::new(t.clone())])
             })
             .flatten();
-        let hsd = match (&model, args.mode, oracle_draft.as_deref()) {
-            (BackendModel::Hunyuan(model), Mode::Page, Some(token_drafts)) => {
-                model.generate_hsd_with_token_drafts(&image, hunyuan_prompt, token_drafts, &cfg)
-            }
-            (BackendModel::Hunyuan(model), Mode::Page, None) => {
+        let (hsd_entry, hsd) = match (&model, args.mode, oracle_draft.as_deref()) {
+            (BackendModel::HunyuanOcr(model), Mode::Page, Some(token_drafts)) => (
+                "hunyuanocr.generate_hsd_with_token_drafts",
+                model.generate_hsd_with_token_drafts(&image, hunyuanocr_prompt, token_drafts, &cfg),
+            ),
+            (BackendModel::HunyuanOcr(model), Mode::Page, None) => {
                 if args.page_dual_stage {
-                    if let Some(elems) = hsd_elements.as_ref().filter(|e| !e.is_empty()) {
-                        model.generate_hsd_full(&image, hunyuan_prompt, elems, &[], &cfg)
-                    } else {
-                        model.generate_hsd(
+                    let elems = require_hsd_elements(hsd_elements.as_deref(), "hunyuanocr")?;
+                    (
+                        "hunyuanocr.generate_hsd_full",
+                        model.generate_hsd_full(
                             &image,
-                            hunyuan_prompt,
-                            std::slice::from_ref(&actual_draft),
+                            oar_ocr_vl::HunyuanHsdPrompts {
+                                page: hunyuanocr_prompt,
+                                region: hunyuanocr_region_prompt,
+                            },
+                            elems,
+                            &[],
+                            |elem| elem.text.iter().cloned().collect(),
                             &cfg,
-                        )
-                    }
+                        ),
+                    )
                 } else {
-                    model.generate_hsd(
-                        &image,
-                        hunyuan_prompt,
-                        std::slice::from_ref(&actual_draft),
-                        &cfg,
+                    (
+                        "hunyuanocr.generate_hsd",
+                        model.generate_hsd(&image, hunyuanocr_prompt, &actual_drafts, &cfg),
                     )
                 }
             }
-            (BackendModel::PaddleOcrVl(model), Mode::Page, Some(token_drafts)) => {
-                model.generate_hsd_with_token_drafts(&image, paddle_task, token_drafts, &cfg)
-            }
-            (BackendModel::PaddleOcrVl(model), Mode::Page, None) => model.generate_hsd(
-                &image,
-                paddle_task,
-                std::slice::from_ref(&actual_draft),
-                &cfg,
+            (BackendModel::PaddleOcrVl(model), Mode::Page, Some(token_drafts)) => (
+                "paddleocr_vl.generate_hsd_with_token_drafts",
+                model.generate_hsd_with_token_drafts(&image, paddleocr_vl_task, token_drafts, &cfg),
             ),
-            (BackendModel::MinerU(model), Mode::Page, Some(token_drafts)) => {
-                model.generate_hsd_with_token_drafts(&image, generic_prompt, token_drafts, &cfg)
-            }
-            (BackendModel::MinerU(model), Mode::Page, None) => model.generate_hsd(
-                &image,
-                generic_prompt,
-                std::slice::from_ref(&actual_draft),
-                &cfg,
+            (BackendModel::PaddleOcrVl(model), Mode::Page, None) => (
+                "paddleocr_vl.generate_hsd",
+                model.generate_hsd(&image, paddleocr_vl_task, &actual_drafts, &cfg),
             ),
-            (BackendModel::GlmOcr(model), Mode::Page, Some(token_drafts)) => {
-                model.generate_hsd_with_token_drafts(&image, generic_prompt, token_drafts, &cfg)
-            }
-            (BackendModel::GlmOcr(model), Mode::Page, None) => model.generate_hsd(
-                &image,
-                generic_prompt,
-                std::slice::from_ref(&actual_draft),
-                &cfg,
+            (BackendModel::MinerU(model), Mode::Page, Some(token_drafts)) => (
+                "mineru.generate_hsd_with_token_drafts",
+                model.generate_hsd_with_token_drafts(&image, mineru_prompt, token_drafts, &cfg),
             ),
+            (BackendModel::MinerU(model), Mode::Page, None) => {
+                if args.page_dual_stage {
+                    let elems = require_hsd_elements(hsd_elements.as_deref(), "mineru")?;
+                    (
+                        "mineru.generate_hsd_full",
+                        model.generate_hsd_full(
+                            &image,
+                            elems,
+                            &[],
+                            mineru_prompt,
+                            mineru_region_prompt,
+                            &cfg,
+                        ),
+                    )
+                } else {
+                    (
+                        "mineru.generate_hsd",
+                        model.generate_hsd(&image, mineru_prompt, &actual_drafts, &cfg),
+                    )
+                }
+            }
+            (BackendModel::GlmOcr(model), Mode::Page, Some(token_drafts)) => (
+                "glmocr.generate_hsd_with_token_drafts",
+                model.generate_hsd_with_token_drafts(&image, glmocr_prompt, token_drafts, &cfg),
+            ),
+            (BackendModel::GlmOcr(model), Mode::Page, None) => {
+                if args.page_dual_stage {
+                    let elems = require_hsd_elements(hsd_elements.as_deref(), "glmocr")?;
+                    (
+                        "glmocr.generate_hsd_full",
+                        model.generate_hsd_full(
+                            &image,
+                            elems,
+                            &[],
+                            glmocr_prompt,
+                            glmocr_region_prompt,
+                            &cfg,
+                        ),
+                    )
+                } else {
+                    (
+                        "glmocr.generate_hsd",
+                        model.generate_hsd(&image, glmocr_prompt, &actual_drafts, &cfg),
+                    )
+                }
+            }
             (BackendModel::PaddleOcrVl(model), Mode::Region, _) => {
-                let elems = hsd_elements
-                    .as_ref()
-                    .map(|v| v.as_slice())
-                    .unwrap_or_else(|| elements.as_slice());
+                let elems = hsd_elements.as_deref().unwrap_or(elements.as_slice());
                 if args.draft_source == "baseline" {
                     let token_drafts = region_baseline_token_drafts.as_ref().ok_or_else(|| {
                         oar_ocr_core::core::OCRError::InvalidInput {
                             message: "missing region baseline token drafts".to_string(),
                         }
                     })?;
-                    model.generate_hsd_full_with_token_drafts(
-                        &image,
-                        elems,
-                        &[],
-                        token_drafts,
-                        &cfg,
+                    (
+                        "paddleocr_vl.generate_hsd_full_with_token_drafts",
+                        model.generate_hsd_full_with_token_drafts(
+                            &image,
+                            elems,
+                            &[],
+                            token_drafts,
+                            &cfg,
+                        ),
                     )
                 } else {
-                    model.generate_hsd_full(&image, elems, &[], &cfg)
+                    (
+                        "paddleocr_vl.generate_hsd_full",
+                        model.generate_hsd_full(&image, elems, &[], &cfg),
+                    )
                 }
             }
-            (BackendModel::Hunyuan(model), Mode::Region, _) => {
-                let elems = hsd_elements
-                    .as_ref()
-                    .map(|v| v.as_slice())
-                    .unwrap_or_else(|| elements.as_slice());
-                model.generate_hsd_full(&image, hunyuan_prompt, elems, &[], &cfg)
+            (BackendModel::HunyuanOcr(model), Mode::Region, _) => {
+                let elems = hsd_elements.as_deref().unwrap_or(elements.as_slice());
+                (
+                    "hunyuanocr.generate_hsd_full",
+                    model.generate_hsd_full(
+                        &image,
+                        oar_ocr_vl::HunyuanHsdPrompts {
+                            page: hunyuanocr_prompt,
+                            region: hunyuanocr_region_prompt,
+                        },
+                        elems,
+                        &[],
+                        |elem| elem.text.iter().cloned().collect(),
+                        &cfg,
+                    ),
+                )
             }
             (_, Mode::Region, _) => {
                 unreachable!("--mode region is rejected for unsupported backends before the loop")
@@ -2098,10 +2637,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let hsd_dur = t1.elapsed() + external_drafter_dur;
         let (_text, mut stats) = hsd;
         stats.drafter += external_drafter_dur;
+        *hsd_entry_counts.entry(hsd_entry).or_insert(0) += 1;
 
         let baseline_ms = baseline_dur.as_secs_f64() * 1000.0;
         let hsd_ms = hsd_dur.as_secs_f64() * 1000.0;
         let drafter_ms = stats.drafter.as_secs_f64() * 1000.0;
+        let stage1_decode_ms = stats.stage1.decode.as_secs_f64() * 1000.0;
+        let stage1_prefill_ms = stats.stage1.vision_prefill.as_secs_f64() * 1000.0;
+        let stage1_aal = stats.stage1.accept.aal();
+        let stage2_decode_ms = stats.stage2.decode.as_secs_f64() * 1000.0;
+        let stage2_prefill_ms = stats.stage2.vision_prefill.as_secs_f64() * 1000.0;
+        let stage2_aal = stats.stage2.accept.aal();
+        let stage1_region_kind_stats = stage1_region_kind_stats(&stats);
         let stage = match args.mode {
             Mode::Page => &stats.stage2,
             Mode::Region => &stats.stage1,
@@ -2175,9 +2722,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             drafter_device(&args).to_string(),
             args.draft_source.clone(),
             args.page_dual_stage.to_string(),
-            elements.len().to_string(),
+            hsd_entry.to_string(),
+            hsd_element_count.to_string(),
             draft_region_count.to_string(),
             format!("{draft_coverage:.3}"),
+            region_kind_buckets,
+            stage1_region_kind_stats,
             format!("{draft_3gram_hit_rate:.3}"),
             format!("{:.3}", args.tau),
             args.max_tokens.to_string(),
@@ -2185,11 +2735,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.start_idx.to_string(),
             prompt_kind.to_string(),
             prompt_text.to_string(),
+            region_prompt_kind.to_string(),
+            region_prompt_text.to_string(),
             format!("{baseline_ms:.1}"),
             format!("{hsd_ms:.1}"),
             format!("{drafter_ms:.1}"),
             format!("{decode_ms:.1}"),
             format!("{prefill_ms:.1}"),
+            format!("{stage1_decode_ms:.1}"),
+            format!("{stage1_prefill_ms:.1}"),
+            stats.stage1.accept.num_steps.to_string(),
+            stats.stage1.accept.num_fallbacks.to_string(),
+            format!("{stage1_aal:.2}"),
+            format!("{stage2_decode_ms:.1}"),
+            format!("{stage2_prefill_ms:.1}"),
+            stats.stage2.accept.num_steps.to_string(),
+            stats.stage2.accept.num_fallbacks.to_string(),
+            format!("{stage2_aal:.2}"),
             format_duration_ms(stage.dsv.candidate_build),
             format_duration_ms(stage.dsv.verify_tree),
             format_duration_ms(stage.dsv.traverse),
@@ -2287,6 +2849,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         0.0
     };
+    let hsd_entries = hsd_entry_counts
+        .iter()
+        .map(|(entry, count)| format!("{entry}={count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let summary = format!(
         "# HSD OmniDocBench Summary\n\n\
          ## Run\n\n\
@@ -2299,6 +2866,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          | drafter device | {drafter_device} |\n\
          | draft source | {draft_source} |\n\
          | page dual stage | {page_dual_stage} |\n\
+         | HSD entries | {hsd_entries} |\n\
+         | region prompt | {region_prompt_kind} |\n\
          | tau | {tau:.3} |\n\
          | max tokens | {max_tokens} |\n\
          | resize max | {resize_max} |\n\
@@ -2358,6 +2927,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         drafter_device = drafter_device(&args),
         draft_source = args.draft_source,
         page_dual_stage = args.page_dual_stage,
+        hsd_entries = hsd_entries,
+        region_prompt_kind = match args.backend {
+            Backend::HunyuanOcr => "hunyuanocr_region",
+            Backend::PaddleOcrVl => "paddleocr_vl_region_task",
+            Backend::MinerU => "mineru_region_text_recognition",
+            Backend::GlmOcr => "glmocr_region_text_recognition",
+        },
         tau = args.tau,
         max_tokens = args.max_tokens,
         resize_max = args.resize_max,
@@ -2413,3 +2989,96 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn format_duration_ms(duration: std::time::Duration) -> String {
     format!("{:.3}", duration.as_secs_f64() * 1000.0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn axis_aligned_iou_self_is_one() {
+        let b = [0.0, 0.0, 10.0, 10.0];
+        assert!((axis_aligned_iou(&b, &b) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn axis_aligned_iou_disjoint_is_zero() {
+        let a = [0.0, 0.0, 5.0, 5.0];
+        let b = [10.0, 10.0, 20.0, 20.0];
+        assert_eq!(axis_aligned_iou(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn axis_aligned_iou_half_overlap() {
+        // a = 10x10 at origin; b = 10x10 shifted right by 5 → 5x10 overlap.
+        // intersection = 50, union = 100 + 100 - 50 = 150, IoU = 1/3.
+        let a = [0.0, 0.0, 10.0, 10.0];
+        let b = [5.0, 0.0, 15.0, 10.0];
+        let iou = axis_aligned_iou(&a, &b);
+        assert!((iou - (1.0 / 3.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn axis_aligned_iou_zero_area_returns_zero() {
+        let degenerate = [5.0, 5.0, 5.0, 10.0]; // zero width
+        let b = [0.0, 0.0, 10.0, 10.0];
+        assert_eq!(axis_aligned_iou(&degenerate, &b), 0.0);
+        assert_eq!(axis_aligned_iou(&b, &degenerate), 0.0);
+    }
+
+    fn region(bbox: [f32; 4], raw: &str) -> CrossVlmRegion {
+        CrossVlmRegion {
+            bbox,
+            raw_text: raw.to_string(),
+        }
+    }
+
+    #[test]
+    fn match_cross_vlm_picks_best_iou_above_threshold() {
+        let elem = [0.0, 0.0, 10.0, 10.0];
+        let regions = vec![
+            region([100.0, 100.0, 200.0, 200.0], "far"),
+            region([0.0, 0.0, 9.0, 10.0], "best"), // IoU = 0.9
+            region([2.0, 2.0, 12.0, 12.0], "ok"),  // IoU ≈ 0.471
+        ];
+        let m = match_cross_vlm_region(&elem, &regions, 0.5).expect("match");
+        assert_eq!(m.raw_text, "best");
+    }
+
+    #[test]
+    fn match_cross_vlm_returns_none_below_threshold() {
+        let elem = [0.0, 0.0, 10.0, 10.0];
+        let regions = vec![region([100.0, 100.0, 200.0, 200.0], "far")];
+        assert!(match_cross_vlm_region(&elem, &regions, 0.5).is_none());
+    }
+
+    #[test]
+    fn cross_vlm_draft_file_parses_minimal_json() {
+        let json = r#"{
+            "source_backend": "paddleocr_vl",
+            "pages": {
+                "page-001.png": [
+                    {"bbox": [10.0, 20.0, 200.0, 50.0], "raw_text": "$$x = 1$$"}
+                ]
+            }
+        }"#;
+        let parsed: CrossVlmDraftFile = serde_json::from_str(json).expect("parse");
+        assert_eq!(parsed.source_backend.as_deref(), Some("paddleocr_vl"));
+        let regions = parsed.lookup_page("page-001.png").expect("page");
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].raw_text, "$$x = 1$$");
+        assert_eq!(regions[0].bbox, [10.0, 20.0, 200.0, 50.0]);
+    }
+
+    #[test]
+    fn cross_vlm_draft_file_falls_back_to_basename() {
+        let json = r#"{"pages": {"page-001.png": [{"bbox": [0,0,1,1], "raw_text": "x"}]}}"#;
+        let parsed: CrossVlmDraftFile = serde_json::from_str(json).expect("parse");
+        // Caller may pass a nested path; lookup should fall back to basename.
+        let regions = parsed
+            .lookup_page("images/subset/page-001.png")
+            .expect("page by basename");
+        assert_eq!(regions.len(), 1);
+    }
+}
+
+} // mod imp

@@ -4,7 +4,7 @@
 //! The model is independent of any specific task and can be reused in different contexts.
 
 use crate::core::OCRError;
-use crate::core::inference::{OrtInfer, TensorInput};
+use crate::core::inference::{OrtInfer, TensorInput, TensorOutput};
 use crate::processors::{FormulaPreprocessParams, FormulaPreprocessor};
 use image::RgbImage;
 use ndarray::{ArrayBase, Axis, Data, Ix2};
@@ -133,26 +133,50 @@ impl PPFormulaNetModel {
                 source: Box::new(e),
             })?;
 
-        let output_shapes = self.inference.output_shapes();
-        tracing::info!("PP-FormulaNet declared output shapes: {:?}", output_shapes);
-
-        let mut outputs = outputs.into_iter();
-        let output = outputs.next().ok_or_else(|| OCRError::InvalidInput {
-            message: "PP-FormulaNet: no output returned from inference".to_string(),
-        })?;
-        tracing::info!(
-            "PP-FormulaNet selected output '{}' dtype={} runtime_shape={:?}",
-            output.0,
-            output.1.dtype_name(),
-            output.1.shape()
+        tracing::debug!(
+            "PP-FormulaNet declared output shapes: {:?}",
+            self.inference.output_shapes()
         );
 
-        output
-            .1
+        // Some exported PP-FormulaNet ONNX models emit multiple tensors
+        // (e.g. token IDs + per-step scores). The token-ID tensor is the
+        // unique 2-D i64 output; pick it explicitly rather than trusting
+        // graph output order, which has bitten us before when exporters
+        // reordered metadata vs ids.
+        let candidates: Vec<(String, &'static str, Vec<i64>)> = outputs
+            .iter()
+            .map(|(name, t)| (name.clone(), t.dtype_name(), t.shape().to_vec()))
+            .collect();
+        let mut i64_2d: Vec<(String, TensorOutput)> = outputs
+            .into_iter()
+            .filter(|(_, t)| matches!(t, TensorOutput::I64 { shape, .. } if shape.len() == 2))
+            .collect();
+        if i64_2d.len() != 1 {
+            return Err(OCRError::Inference {
+                model_name: "PP-FormulaNet".to_string(),
+                context: format!(
+                    "expected exactly one 2-D i64 output (token ids); found {} candidate(s) among outputs {:?}",
+                    i64_2d.len(),
+                    candidates
+                ),
+                source: Box::new(OCRError::InvalidInput {
+                    message: "PP-FormulaNet: ambiguous or missing token-id output".to_string(),
+                }),
+            });
+        }
+        let (name, tensor) = i64_2d.pop().expect("len() == 1 checked above");
+        tracing::debug!(
+            "PP-FormulaNet selected output '{}' dtype={} runtime_shape={:?}",
+            name,
+            tensor.dtype_name(),
+            tensor.shape()
+        );
+
+        tensor
             .try_into_array2_i64()
             .map_err(|e| OCRError::Inference {
                 model_name: "PP-FormulaNet".to_string(),
-                context: "failed to convert output to 2D i64 array".to_string(),
+                context: format!("failed to convert output '{name}' to 2-D i64 array"),
                 source: Box::new(e),
             })
     }

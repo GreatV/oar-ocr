@@ -65,3 +65,42 @@ jobs:
 
       - name: Run tests in debug mode
         run: cargo test --verbose --all
+
+  hsd:
+    # HSD compiles candle-core with the `cuda` feature, which uses cudarc with
+    # `cuda-version-from-build-system` + `dynamic-linking`. Both compile-time
+    # (nvcc) and link-time (libcuda / libnvrtc / libcublas) CUDA libraries are
+    # required, so this job installs the CUDA toolkit before running clippy +
+    # tests. Runtime CUDA is not required (no GPU on the runner) — the tests
+    # exercised under `hsd::` are CPU-side algorithms (matching, prefix_tree,
+    # kv_trim, backend_util, verify with OracleBackend).
+    name: HSD checks
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.5.0'
+          method: network
+          sub-packages: '["nvcc", "cudart", "nvrtc", "cublas", "cublas_dev", "cudart_dev", "nvrtc_dev"]'
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: HSD Clippy
+        run: cargo clippy --all-targets -p oar-ocr-vl --features hsd -- -D warnings
+
+      - name: HSD unit tests
+        # `download-binaries` is required so ort-sys can link against a
+        # prebuilt ONNX Runtime; HSD tests in `hsd::` only exercise CPU paths
+        # (no GPU device required at runtime).
+        run: cargo test -p oar-ocr-vl --features hsd,download-binaries --verbose

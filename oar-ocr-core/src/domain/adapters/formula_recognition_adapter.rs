@@ -198,10 +198,6 @@ impl ModelAdapter for FormulaRecognitionAdapter {
             )
         })?;
         let infer_dur = t_infer.elapsed();
-        let raw_token_prefixes: Vec<Vec<i64>> = token_ids
-            .axis_iter(ndarray::Axis(0))
-            .map(|row| row.iter().copied().take(12).collect())
-            .collect();
 
         // Filter tokens and decode
         let t_decode = Instant::now();
@@ -284,18 +280,27 @@ impl ModelAdapter for FormulaRecognitionAdapter {
             scores.push(None);
         }
         let decode_dur = t_decode.elapsed();
-        let token_lens: Vec<usize> = filtered_tokens.iter().map(Vec::len).collect();
-        tracing::info!(
-            "formula adapter: batch={}, tensor_shape={:?}, output_shape={:?}, token_lens={:?}, raw_prefixes={:?}, preprocess={:.1} ms, infer={:.1} ms, decode={:.1} ms",
-            batch_len,
-            batch_shape,
-            token_ids.shape(),
-            token_lens,
-            raw_token_prefixes,
-            preprocess_dur.as_secs_f64() * 1000.0,
-            infer_dur.as_secs_f64() * 1000.0,
-            decode_dur.as_secs_f64() * 1000.0
-        );
+        // Per-batch diagnostics are noisy under bulk structure parsing; emit at
+        // debug so production logs stay clean. Enable with
+        // `RUST_LOG=oar_ocr_core::domain::adapters::formula_recognition_adapter=debug`.
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let token_lens: Vec<usize> = filtered_tokens.iter().map(Vec::len).collect();
+            let raw_token_prefixes: Vec<Vec<i64>> = token_ids
+                .axis_iter(ndarray::Axis(0))
+                .map(|row| row.iter().copied().take(12).collect())
+                .collect();
+            tracing::debug!(
+                "formula adapter: batch={}, tensor_shape={:?}, output_shape={:?}, token_lens={:?}, raw_prefixes={:?}, preprocess={:.1} ms, infer={:.1} ms, decode={:.1} ms",
+                batch_len,
+                batch_shape,
+                token_ids.shape(),
+                token_lens,
+                raw_token_prefixes,
+                preprocess_dur.as_secs_f64() * 1000.0,
+                infer_dur.as_secs_f64() * 1000.0,
+                decode_dur.as_secs_f64() * 1000.0
+            );
+        }
 
         Ok(FormulaRecognitionOutput { formulas, scores })
     }

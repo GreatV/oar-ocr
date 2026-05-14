@@ -2,21 +2,36 @@ use super::config::{EosTokenId, GlmOcrConfig, GlmOcrImageProcessorConfig};
 use super::processing::{GlmOcrImageInputs, preprocess_image};
 use super::text::GlmOcrTextModel;
 use super::vision::GlmOcrVisionModel;
+#[cfg(feature = "hsd")]
 use crate::attention::create_tree_attention_mask;
-use crate::hsd::drafting::{bbox_xyxy, crop_region_image, format_verified_region, map_layout_kind};
+#[cfg(feature = "hsd")]
+use crate::hsd::backend_util::{commit_keep_indices, step_pos_ids, tree_pos_ids};
+#[cfg(feature = "hsd")]
+use crate::hsd::drafting::{
+    TargetDraftAdapter, bbox_xyxy, crop_region_image, format_verified_region, map_layout_kind,
+    region_markdown_for, region_markdowns_for, structure_result_to_layout_elements,
+};
+#[cfg(feature = "hsd")]
 use crate::hsd::prefix_tree::PrefixTree;
-use crate::hsd::types::{AcceptStats, Draft, HsdConfig, HsdStats};
+#[cfg(feature = "hsd")]
+use crate::hsd::types::{AcceptStats, Draft, HsdConfig, HsdStats, RegionStageStats};
+#[cfg(feature = "hsd")]
 use crate::hsd::verify::{SpecBackend, spec_decode};
 use crate::utils::{
     candle_to_ocr_inference, candle_to_ocr_processing, truncate_repetitive_content,
 };
-use candle_core::{D, DType, Device, IndexOp, Result as CandleResult, Tensor};
+#[cfg(feature = "hsd")]
+use candle_core::Result as CandleResult;
+use candle_core::{D, DType, Device, IndexOp, Tensor};
+#[cfg(feature = "hsd")]
 use candle_nn::ops as cnn_ops;
 use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
 use image::RgbImage;
 use oar_ocr_core::core::OCRError;
-use oar_ocr_core::domain::structure::{LayoutElement, LayoutElementType};
+#[cfg(feature = "hsd")]
+use oar_ocr_core::domain::structure::{LayoutElement, LayoutElementType, StructureResult};
 use std::path::Path;
+#[cfg(feature = "hsd")]
 use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
 
@@ -302,19 +317,29 @@ impl GlmOcr {
         self.decode_generated_tokens(tokens)
     }
 
-    pub fn tokenizer(&self) -> &Tokenizer {
-        &self.tokenizer
-    }
-
-    fn decode_generated_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
+    /// Decode tokens **without** applying GLM-OCR's repetition-collapse
+    /// post-process. Use this when feeding GLM-OCR output as a draft to
+    /// another target VLM — DSV matches at token granularity, and any
+    /// repetition collapse on the source side will byte-mismatch the target's
+    /// natural output, destroying acceptance length.
+    pub fn decode_tokens_raw(&self, tokens: &[u32]) -> Result<String, OCRError> {
         let decoded = self
             .tokenizer
             .decode(tokens, true)
             .map_err(|e| OCRError::InvalidInput {
                 message: format!("GLM-OCR: tokenizer decode failed: {e}"),
             })?;
-        let decoded = truncate_repetitive_content(&decoded, 10, 10, 10);
         Ok(decoded.trim().to_string())
+    }
+
+    pub fn tokenizer(&self) -> &Tokenizer {
+        &self.tokenizer
+    }
+
+    fn decode_generated_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
+        let raw = self.decode_tokens_raw(tokens)?;
+        let truncated = truncate_repetitive_content(&raw, 10, 10, 10);
+        Ok(truncated.trim().to_string())
     }
 
     fn prepare_inputs(
@@ -451,7 +476,8 @@ impl GlmOcr {
 
     /// Hierarchical Speculative Decoding entry for a single image / region.
     ///
-    /// GLM-OCR is naturally per-region; only region-level HSD applies.
+    /// Use `generate_hsd_full` for the two-stage document flow.
+    #[cfg(feature = "hsd")]
     pub fn generate_hsd(
         &self,
         image: &RgbImage,
@@ -460,7 +486,40 @@ impl GlmOcr {
         hsd_cfg: &HsdConfig,
     ) -> Result<(String, HsdStats), OCRError> {
         let t_drafter = Instant::now();
+        let tokenized = self.tokenize_drafts(drafts)?;
+        self.generate_hsd_tokenized(
+            image,
+            instruction,
+            &tokenized,
+            hsd_cfg,
+            hsd_cfg.max_region_tokens,
+            t_drafter.elapsed(),
+        )
+    }
 
+    /// HSD entry that consumes already-tokenized drafts. This is the oracle
+    /// path used by benchmarks to avoid `decode -> encode` tokenizer
+    /// round-trips when the draft comes from this backend's own baseline.
+    #[cfg(feature = "hsd")]
+    pub fn generate_hsd_with_token_drafts(
+        &self,
+        image: &RgbImage,
+        instruction: &str,
+        drafts: &[Draft],
+        hsd_cfg: &HsdConfig,
+    ) -> Result<(String, HsdStats), OCRError> {
+        self.generate_hsd_tokenized(
+            image,
+            instruction,
+            drafts,
+            hsd_cfg,
+            hsd_cfg.max_region_tokens,
+            Duration::ZERO,
+        )
+    }
+
+    #[cfg(feature = "hsd")]
+    fn tokenize_drafts(&self, drafts: &[String]) -> Result<Vec<Draft>, OCRError> {
         let mut tokenized: Vec<Draft> = Vec::with_capacity(drafts.len());
         for d in drafts {
             if d.trim().is_empty() {
@@ -477,32 +536,23 @@ impl GlmOcr {
                 tokenized.push(Draft::new(tokens));
             }
         }
-        self.generate_hsd_tokenized(image, instruction, &tokenized, hsd_cfg, t_drafter.elapsed())
+        Ok(tokenized)
     }
 
-    /// HSD entry that consumes already-tokenized drafts. This is the oracle
-    /// path used by benchmarks to avoid `decode -> encode` tokenizer
-    /// round-trips when the draft comes from this backend's own baseline.
-    pub fn generate_hsd_with_token_drafts(
-        &self,
-        image: &RgbImage,
-        instruction: &str,
-        drafts: &[Draft],
-        hsd_cfg: &HsdConfig,
-    ) -> Result<(String, HsdStats), OCRError> {
-        self.generate_hsd_tokenized(image, instruction, drafts, hsd_cfg, Duration::ZERO)
-    }
-
+    #[cfg(feature = "hsd")]
     fn generate_hsd_tokenized(
         &self,
         image: &RgbImage,
         instruction: &str,
         tokenized: &[Draft],
         hsd_cfg: &HsdConfig,
+        max_new_tokens: usize,
         drafter_elapsed: Duration,
     ) -> Result<(String, HsdStats), OCRError> {
-        let mut stats = HsdStats::default();
-        stats.drafter = drafter_elapsed;
+        let mut stats = HsdStats {
+            drafter: drafter_elapsed,
+            ..Default::default()
+        };
         let t_pre = Instant::now();
         let (initial_lp, rope_delta) = self.hsd_prefill_single(image, instruction)?;
         stats.stage2.vision_prefill = t_pre.elapsed();
@@ -514,9 +564,9 @@ impl GlmOcr {
         let mut dsv = Default::default();
         let generated = spec_decode(
             &mut backend,
-            &tokenized,
+            tokenized,
             initial_lp,
-            hsd_cfg.max_region_tokens,
+            max_new_tokens,
             &hsd_cfg.dsv,
             &mut accept,
             &mut dsv,
@@ -545,74 +595,147 @@ impl GlmOcr {
         Ok((decoded.trim().to_string(), stats))
     }
 
-    /// Run HSD per element across an entire layout-detected page, then
-    /// aggregate the per-region outputs into a markdown-style document.
+    /// Run the full two-stage HSD: Stage 1 verifies each layout-detected
+    /// region against the layout drafter's text, then Stage 2 (gated by
+    /// `hsd_cfg.enable_stage2`) verifies the Stage-1-aggregated markdown on
+    /// the full image with `hsd_cfg.max_page_tokens` budget.
+    ///
+    /// - `enable_stage1 = false`: skip per-region verification; build the
+    ///   Stage 2 draft set directly from the layout drafter's per-element
+    ///   markdowns (`region_markdowns`). Mirrors the paper's Table 8
+    ///   "Page-level Spec. Decoding only" ablation.
+    /// - `enable_stage2 = false`: return the Stage-1-only aggregation (lossy
+    ///   ablation matching paper Table 8).
+    ///
+    /// `region_instruction` is used only for Stage 1 crop verification;
+    /// `page_instruction` is used for Stage 2 full-page verification.
+    #[cfg(feature = "hsd")]
     pub fn generate_hsd_full(
         &self,
         image: &RgbImage,
         elements: &[LayoutElement],
         ignore_labels: &[String],
-        instruction: &str,
+        page_instruction: &str,
+        region_instruction: &str,
         hsd_cfg: &HsdConfig,
     ) -> Result<(String, HsdStats), OCRError> {
         let mut stats = HsdStats::default();
-        let mut region_md: Vec<String> = Vec::with_capacity(elements.len());
+        let mut region_md: Vec<(usize, String)> = Vec::with_capacity(elements.len());
 
-        for elem in elements {
-            if let Some(label) = &elem.label
-                && ignore_labels.iter().any(|l| l == label)
-            {
-                continue;
-            }
-            if matches!(
-                elem.element_type,
-                LayoutElementType::Image
-                    | LayoutElementType::HeaderImage
-                    | LayoutElementType::FooterImage
-                    | LayoutElementType::Seal
-            ) {
-                continue;
-            }
-            let Some(text) = elem.text.as_ref() else {
-                continue;
-            };
-            if text.trim().is_empty() {
-                continue;
-            }
+        if hsd_cfg.enable_stage1 {
+            for (idx, elem) in elements.iter().enumerate() {
+                if let Some(label) = &elem.label
+                    && ignore_labels.iter().any(|l| l == label)
+                {
+                    continue;
+                }
+                if matches!(
+                    elem.element_type,
+                    LayoutElementType::Image
+                        | LayoutElementType::HeaderImage
+                        | LayoutElementType::FooterImage
+                        | LayoutElementType::Seal
+                ) {
+                    continue;
+                }
+                let draft = region_markdown_for(elem, TargetDraftAdapter::GlmOcr);
+                if draft.trim().is_empty() {
+                    continue;
+                }
 
-            let bbox = bbox_xyxy(&elem.bbox);
-            let crop = crop_region_image(image, &bbox)?;
-            let drafts = vec![text.trim().to_string()];
-            let (region_text, region_stats) =
-                self.generate_hsd(&crop, instruction, &drafts, hsd_cfg)?;
-            stats.drafter += region_stats.drafter;
-            stats.stage1.vision_prefill += region_stats.stage2.vision_prefill;
-            stats.stage1.decode += region_stats.stage2.decode;
-            stats.stage1.emitted_tokens += region_stats.stage2.emitted_tokens;
-            stats.stage1.forward_passes += region_stats.stage2.forward_passes;
-            stats.stage1.dsv.add_assign(&region_stats.stage2.dsv);
-            stats
-                .stage1
-                .accept
-                .per_step_accepted
-                .extend(region_stats.stage2.accept.per_step_accepted);
-            stats.stage1.accept.num_steps += region_stats.stage2.accept.num_steps;
-            stats.stage1.accept.num_fallbacks += region_stats.stage2.accept.num_fallbacks;
+                let bbox = bbox_xyxy(&elem.bbox);
+                let crop = crop_region_image(image, &bbox)?;
+                let drafts = vec![draft];
+                let (region_text, region_stats) =
+                    self.generate_hsd(&crop, region_instruction, &drafts, hsd_cfg)?;
+                stats.drafter += region_stats.drafter;
 
-            let kind = map_layout_kind(elem.element_type);
-            region_md.push(format_verified_region(&region_text, kind));
+                let kind = map_layout_kind(elem.element_type);
+                stats.stage1_regions.push(RegionStageStats {
+                    kind,
+                    stats: region_stats.stage2.clone(),
+                });
+                stats.stage1.add_assign(region_stats.stage2);
+                let order = elem.order_index.map(|x| x as usize).unwrap_or(idx);
+                region_md.push((order, format_verified_region(&region_text, kind)));
+            }
         }
 
-        let merged = region_md
+        region_md.sort_by_key(|(order, _)| *order);
+        let region_md: Vec<String> = region_md
             .into_iter()
+            .map(|(_, text)| text)
             .filter(|s| !s.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        Ok((merged, stats))
+            .collect();
+
+        // Stage 2 — page-level global verification on the full image. Per
+        // paper Eq. 3 the page draft is the *unordered set* `Ỹ^pg = {ŷ^(i)}`,
+        // one draft per region. We pass the Vec straight to `spec_decode`
+        // instead of pre-joining: `collect_candidates` scans each draft
+        // independently (Eqs. 1+2), so per-region n-gram locality is
+        // preserved even when full-page transitions don't appear naturally
+        // in the target VLM's output. Budget = `max_page_tokens`.
+        if hsd_cfg.enable_stage2 {
+            let t_drafter = Instant::now();
+            let page_drafts: Vec<String> = if !region_md.is_empty() {
+                region_md.clone()
+            } else {
+                region_markdowns_for(elements, ignore_labels, TargetDraftAdapter::GlmOcr)
+            };
+            if !page_drafts.is_empty() {
+                let tokenized = self.tokenize_drafts(&page_drafts)?;
+                let (text, s2_stats) = self.generate_hsd_tokenized(
+                    image,
+                    page_instruction,
+                    &tokenized,
+                    hsd_cfg,
+                    hsd_cfg.max_page_tokens,
+                    t_drafter.elapsed(),
+                )?;
+                stats.stage2 = s2_stats.stage2;
+                stats.drafter += s2_stats.drafter;
+                return Ok((text, stats));
+            }
+        }
+
+        // Stage 2 disabled or no draft to verify — return Stage-1-only join
+        // as a human-readable fallback. The `\n\n` separator here is for the
+        // *output* (caller-facing), not for any further HSD input.
+        Ok((region_md.join("\n\n"), stats))
+    }
+
+    /// One-call HSD entry that consumes a `StructureResult` (the output of
+    /// the OARStructure / PP-StructureV3 pipeline) directly.
+    ///
+    /// Backfills table HTML / formula LaTeX via
+    /// [`structure_result_to_layout_elements`] then delegates to
+    /// [`Self::generate_hsd_full`]. See the HunyuanOCR sibling for the
+    /// full design discussion — GLM-OCR keeps single-draft-per-region semantics
+    /// (its public Recognition prompts emit one canonical output).
+    #[cfg(feature = "hsd")]
+    pub fn generate_hsd_with_structure(
+        &self,
+        image: &RgbImage,
+        page_instruction: &str,
+        region_instruction: &str,
+        structure: &StructureResult,
+        ignore_labels: &[String],
+        hsd_cfg: &HsdConfig,
+    ) -> Result<(String, HsdStats), OCRError> {
+        let elements = structure_result_to_layout_elements(structure);
+        self.generate_hsd_full(
+            image,
+            &elements,
+            ignore_labels,
+            page_instruction,
+            region_instruction,
+            hsd_cfg,
+        )
     }
 
     /// Run a single-image prefill with the supplied instruction. Returns
     /// the F32 last-position log-probabilities and the MRoPE delta.
+    #[cfg(feature = "hsd")]
     fn hsd_prefill_single(
         &self,
         image: &RgbImage,
@@ -695,6 +818,7 @@ impl GlmOcr {
 
 /// HSD adapter for GLM-OCR. 3-axis MRoPE, independent lm_head, rope_delta
 /// captured at prefill (same shape as MinerU / PaddleOCR-VL).
+#[cfg(feature = "hsd")]
 struct GlmOcrSpecBackend<'a> {
     model: &'a GlmOcr,
     rope_delta: i64,
@@ -702,6 +826,7 @@ struct GlmOcrSpecBackend<'a> {
     forward_passes: u32,
 }
 
+#[cfg(feature = "hsd")]
 impl<'a> GlmOcrSpecBackend<'a> {
     fn new(model: &'a GlmOcr, rope_delta: i64) -> Self {
         Self {
@@ -730,6 +855,7 @@ impl<'a> GlmOcrSpecBackend<'a> {
     }
 }
 
+#[cfg(feature = "hsd")]
 impl<'a> SpecBackend for GlmOcrSpecBackend<'a> {
     fn step_one(&mut self, token: u32) -> CandleResult<Tensor> {
         let model = self.model;
@@ -741,8 +867,7 @@ impl<'a> SpecBackend for GlmOcrSpecBackend<'a> {
             .embed(&tok_t)
             .map_err(|e| candle_core::Error::Msg(format!("GLM-OCR HSD step_one embed: {e}")))?;
 
-        let pos = model.text.current_kv_len() as i64 + self.rope_delta;
-        let pos_ids = Tensor::from_vec(vec![pos, pos, pos], (3usize, 1usize, 1usize), device)?;
+        let pos_ids = step_pos_ids(3, model.text.current_kv_len(), self.rope_delta, device)?;
 
         let hidden = model
             .text
@@ -768,16 +893,7 @@ impl<'a> SpecBackend for GlmOcrSpecBackend<'a> {
             .embed(&tok_t)
             .map_err(|e| candle_core::Error::Msg(format!("GLM-OCR HSD verify_tree embed: {e}")))?;
 
-        // 3-axis position ids — depth-`d` node sits at logical sequence index
-        // `prefix_kv + d - 1`, plus the MRoPE delta.
-        let mut pos_data: Vec<i64> = Vec::with_capacity(3 * n);
-        for _axis in 0..3 {
-            for d in &tree.depths {
-                pos_data.push(prefix_kv as i64 + self.rope_delta + (*d as i64) - 1);
-            }
-        }
-        let pos_ids = Tensor::from_vec(pos_data, (3usize, 1usize, n), device)?;
-
+        let pos_ids = tree_pos_ids(3, prefix_kv, self.rope_delta, tree, device)?;
         let mask = create_tree_attention_mask(&tree.parents, prefix_kv, dtype, device)?;
 
         let hidden = model
@@ -792,14 +908,7 @@ impl<'a> SpecBackend for GlmOcrSpecBackend<'a> {
     }
 
     fn commit_verify(&mut self, accepted_path: &[usize]) -> CandleResult<()> {
-        let prefix_kv = self.pre_verify_kv;
-        let mut indices: Vec<u32> = Vec::with_capacity(prefix_kv + accepted_path.len());
-        for i in 0..prefix_kv {
-            indices.push(i as u32);
-        }
-        for &p in accepted_path {
-            indices.push((prefix_kv + p) as u32);
-        }
+        let indices = commit_keep_indices(self.pre_verify_kv, accepted_path);
         self.model
             .text
             .keep_kv_indices(&indices)
