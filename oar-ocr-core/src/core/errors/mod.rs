@@ -8,8 +8,8 @@
 //!
 //! The error system is organized into several modules:
 //!
-//! - [`types`] - Core error types (OCRError, ProcessingStage)
-//! - [`constructors`] - Helper methods for creating errors with context
+//! - `types` - Core error types (OCRError, ProcessingStage)
+//! - `constructors` - Helper methods for creating errors with context
 //!
 //! # Main Error Types
 //!

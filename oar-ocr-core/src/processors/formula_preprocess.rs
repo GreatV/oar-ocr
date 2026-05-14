@@ -13,17 +13,16 @@ use std::sync::LazyLock;
 // Static regex patterns for LaTeX normalization
 static CHINESE_TEXT_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\\text\s*\{([^{}]*[\u{4e00}-\u{9fff}]+[^{}]*)\}")
-        .unwrap_or_else(|e| panic!("Failed to compile Chinese text regex pattern: {e}"))
+        .expect("static regex: Chinese text pattern")
 });
 
 static TEXT_COMMAND_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(\\(operatorname|mathrm|text|mathbf)\s?\*?\s*\{.*?\})")
-        .unwrap_or_else(|e| panic!("Failed to compile text command regex pattern: {e}"))
+        .expect("static regex: text command pattern")
 });
 
 static LETTER_TO_NONLETTER_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"([a-zA-Z])\s+([^a-zA-Z])")
-        .unwrap_or_else(|e| panic!("Failed to compile letter to nonletter regex pattern: {e}"))
+    Regex::new(r"([a-zA-Z])\s+([^a-zA-Z])").expect("static regex: letter to nonletter pattern")
 });
 
 /// Configuration parameters for formula preprocessing pipeline.

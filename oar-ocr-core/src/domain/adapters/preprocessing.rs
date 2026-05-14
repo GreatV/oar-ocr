@@ -104,7 +104,7 @@ pub fn db_preprocess_for_text_type(text_type: Option<&str>) -> DBPreprocessConfi
 ///
 /// # Example
 ///
-/// ```rust,no_run
+/// ```text
 /// // let rgb_images: Vec<RgbImage> = load_images();
 /// // let dynamic_images = rgb_to_dynamic(rgb_images);
 /// ```
@@ -129,7 +129,7 @@ pub fn rgb_to_dynamic(images: Vec<RgbImage>) -> Vec<DynamicImage> {
 ///
 /// # Example
 ///
-/// ```rust,no_run
+/// ```text
 /// // let tensor = resize_and_normalize(
 /// //     images,
 /// //     &self.resizer,
@@ -165,7 +165,7 @@ where
 ///
 /// # Example
 ///
-/// ```rust,no_run
+/// ```text
 /// // let (tensor, scales) = detection_resize_and_normalize(
 /// //     images,
 /// //     &self.resizer,
@@ -215,7 +215,7 @@ pub trait DetectionResizeOperation {
 ///
 /// # Example
 ///
-/// ```rust,no_run
+/// ```text
 /// // let tensor = PreprocessPipelineBuilder::new()
 /// //     .rgb_images(images)
 /// //     .resize(&resizer)

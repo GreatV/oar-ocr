@@ -55,9 +55,9 @@ use std::collections::HashSet;
 /// let cuda1 = parse_device("cuda:1")?;
 ///
 /// // Metal examples (only when metal feature is enabled)
-/// # #[cfg(feature = "metal")]
+/// # #[cfg(all(feature = "metal", target_os = "macos"))]
 /// let metal = parse_device("metal")?;
-/// # #[cfg(feature = "metal")]
+/// # #[cfg(all(feature = "metal", target_os = "macos"))]
 /// let metal1 = parse_device("metal:1")?;
 /// # Ok(())
 /// # }
@@ -69,15 +69,15 @@ fn cuda_not_enabled() -> OCRError {
     }
 }
 
-#[cfg(not(feature = "metal"))]
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
 fn metal_not_enabled() -> OCRError {
     OCRError::ConfigError {
-        message: "Metal support not enabled. Compile with --features metal".to_string(),
+        message: "Metal support not enabled. Compile on macOS with --features metal".to_string(),
     }
 }
 
 /// Helper function to parse a device string with an ordinal (e.g., "cuda:1", "metal:0").
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
 fn parse_device_with_ordinal(
     s: &str,
     prefix: &str,
@@ -114,13 +114,13 @@ pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
             }
         }
         "metal" => {
-            #[cfg(feature = "metal")]
+            #[cfg(all(feature = "metal", target_os = "macos"))]
             {
                 Device::new_metal(0).map_err(|e| OCRError::ConfigError {
                     message: format!("Failed to create Metal device: {}", e),
                 })
             }
-            #[cfg(not(feature = "metal"))]
+            #[cfg(not(all(feature = "metal", target_os = "macos")))]
             {
                 Err(metal_not_enabled())
             }
@@ -136,11 +136,11 @@ pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
             }
         }
         s if s.starts_with("metal:") => {
-            #[cfg(feature = "metal")]
+            #[cfg(all(feature = "metal", target_os = "macos"))]
             {
                 parse_device_with_ordinal(s, "metal:", "Metal", Device::new_metal)
             }
-            #[cfg(not(feature = "metal"))]
+            #[cfg(not(all(feature = "metal", target_os = "macos")))]
             {
                 Err(metal_not_enabled())
             }
@@ -708,7 +708,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     #[test]
     fn test_parse_device_metal_with_ordinal() {
         // Test parsing "metal:0" - should always work on Apple devices
@@ -719,7 +719,7 @@ mod tests {
         // so we don't test them here. The parsing logic itself works correctly.
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     #[test]
     fn test_parse_device_metal_invalid_ordinal() {
         let result = parse_device("metal:abc");
@@ -729,7 +729,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "metal"))]
+    #[cfg(not(all(feature = "metal", target_os = "macos")))]
     #[test]
     fn test_parse_device_metal_not_enabled() {
         let result = parse_device("metal");

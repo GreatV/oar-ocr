@@ -549,6 +549,12 @@ impl GlmOcr {
         max_new_tokens: usize,
         drafter_elapsed: Duration,
     ) -> Result<(String, HsdStats), OCRError> {
+        if !self.device.is_cuda() {
+            return Err(OCRError::ConfigError {
+                message: "HSD requires CUDA device".to_string(),
+            });
+        }
+
         let mut stats = HsdStats {
             drafter: drafter_elapsed,
             ..Default::default()

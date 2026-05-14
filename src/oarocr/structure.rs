@@ -2606,7 +2606,7 @@ impl OARStructure {
     ///
     /// All formula crops from every page are collected first and forwarded to the
     /// formula adapter in a single `execute` call, reducing ONNX inference overhead
-    /// compared to calling [`predict_image`] sequentially.  Layout detection and all
+    /// compared to calling [`Self::predict_image`] sequentially.  Layout detection and all
     /// other per-page steps are still performed independently per page.
     ///
     /// Per-page errors are returned individually so that a failure on one page does

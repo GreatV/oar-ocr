@@ -368,7 +368,11 @@ impl PaddleOcrVl {
 
         // 4. Build embeddings per sample
         let seq_lens: Vec<usize> = all_input_ids.iter().map(|ids| ids.len()).collect();
-        let max_seq_len = *seq_lens.iter().max().unwrap();
+        let Some(&max_seq_len) = seq_lens.iter().max() else {
+            return Err(OCRError::InvalidInput {
+                message: "PaddleOCR-VL: empty batch is not supported".to_string(),
+            });
+        };
 
         let mut batch_embeds: Vec<Tensor> = Vec::with_capacity(batch_size);
         let mut rope_deltas: Vec<i64> = Vec::with_capacity(batch_size);
@@ -665,6 +669,12 @@ impl PaddleOcrVl {
         hsd_cfg: &HsdConfig,
         drafter_elapsed: Duration,
     ) -> Result<(String, HsdStats), OCRError> {
+        if !self.device.is_cuda() {
+            return Err(OCRError::ConfigError {
+                message: "HSD requires CUDA device".to_string(),
+            });
+        }
+
         let mut stats = HsdStats {
             drafter: drafter_elapsed,
             ..Default::default()

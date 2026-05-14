@@ -365,5 +365,4 @@ mod tests {
             cfg.tau
         );
     }
-
 }

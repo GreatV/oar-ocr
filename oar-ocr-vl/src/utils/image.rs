@@ -7,7 +7,13 @@ struct UnsafeSlice<T> {
     slice: *mut [T],
 }
 
+// SAFETY: `UnsafeSlice` only transfers a raw slice pointer between threads.
+// Mutation remains gated behind `write`, whose caller must uphold disjoint
+// in-bounds access. The element type must be safe to send to another thread.
 unsafe impl<T: Send> Send for UnsafeSlice<T> {}
+// SAFETY: Shared references to `UnsafeSlice` do not expose safe mutation.
+// Concurrent writes are only possible through the unsafe `write` contract,
+// which requires callers to avoid aliasing the same element across threads.
 unsafe impl<T: Sync> Sync for UnsafeSlice<T> {}
 
 impl<T> UnsafeSlice<T> {
@@ -67,6 +73,9 @@ pub fn image_to_chw(
         let b_norm = (b - mean[2]) / std[2];
 
         // Write to CHW planes
+        // SAFETY: each parallel iteration owns a unique pixel index `i`.
+        // The three destinations are in separate channel planes and are
+        // therefore distinct for every `i` in `0..num_pixels`.
         unsafe {
             output_slice.write(i, r_norm);
             output_slice.write(num_pixels + i, g_norm);

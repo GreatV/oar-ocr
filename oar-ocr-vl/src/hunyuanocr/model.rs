@@ -706,6 +706,12 @@ impl HunyuanOcr {
         hsd_cfg: &HsdConfig,
         drafter_elapsed: Duration,
     ) -> Result<(Vec<u32>, HsdStats), OCRError> {
+        if !self.device.is_cuda() {
+            return Err(OCRError::ConfigError {
+                message: "HSD requires CUDA device".to_string(),
+            });
+        }
+
         let mut stats = HsdStats {
             drafter: drafter_elapsed,
             ..Default::default()
@@ -1176,7 +1182,6 @@ impl HunyuanOcr {
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "cast pixel_values override", e))?;
         Ok(())
     }
-
 }
 
 #[cfg(feature = "hsd")]

@@ -148,6 +148,8 @@ static CELL_RE: Lazy<Regex> = Lazy::new(|| {
 });
 static SPAN_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?i)(\d+)"#).expect("static regex: span integer"));
+static STRIP_TAG_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"<[^>]*>").expect("static regex: html tag stripper"));
 
 fn extract_span(attrs: &str, name: &str) -> usize {
     let lower_attrs = attrs.to_ascii_lowercase();
@@ -165,9 +167,7 @@ fn extract_span(attrs: &str, name: &str) -> usize {
 
 fn clean_cell_text(body: &str) -> String {
     // Strip any nested tags (rare in OCR tables but possible — e.g. <br>, <b>).
-    let stripped = Regex::new(r"<[^>]*>")
-        .expect("static regex")
-        .replace_all(body, "");
+    let stripped = STRIP_TAG_RE.replace_all(body, "");
     // Decode the few HTML entities the existing post-process emits via
     // `html_escape::encode_text`. We avoid pulling a full entity decoder for
     // a hot path — these five cover what `otsl_export_to_html` produces.

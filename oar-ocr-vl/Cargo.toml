@@ -29,6 +29,8 @@ cuda = [
     "oar-ocr-core/cuda",
 ]
 # When enabled, turns on Candle's Metal backend for GPU acceleration on Apple devices.
+# Cargo features cannot be target-scoped directly, so Linux `--all-features`
+# is intentionally not used for this crate; CI checks Metal on macOS instead.
 metal = [
     "candle-core/metal",
     "candle-nn/metal",
@@ -62,4 +64,3 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 hayro = "0.6"
 oar-ocr = { path = "..", default-features = false }
-

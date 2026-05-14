@@ -329,7 +329,7 @@ pub fn create_tree_attention_mask(
 /// - Valid positions are 0
 ///
 /// # Example
-/// ```ignore
+/// ```text
 /// // seq_lens = [3, 5], max_len = 5
 /// // Produces masks:
 /// // Item 0: [-inf, -inf, 0, 0, 0]  (3 valid tokens, 2 padding)
@@ -823,6 +823,54 @@ mod tests {
         assert_eq!(m[6], 0.0);
         assert!(m[6 + 1].is_infinite());
         assert_eq!(m[6 + 2], 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_tree_attention_mask_changes_sibling_logits() -> Result<()> {
+        let device = Device::Cpu;
+        let parents = vec![None, Some(0), Some(0)];
+        let tree_mask = create_tree_attention_mask(&parents, 0, DType::F32, &device)?;
+        let no_op_mask = Tensor::zeros((1, 1, 3, 3), DType::F32, &device)?;
+
+        let q = Tensor::from_vec(
+            vec![
+                0.0f32, 0.0, // node 0
+                1.0, 0.0, // node 1 strongly matches sibling key
+                0.0, 0.0, // node 2
+            ],
+            (1, 1, 3, 2),
+            &device,
+        )?;
+        let k = Tensor::from_vec(
+            vec![
+                0.0f32, 0.0, // node 0
+                0.0, 0.0, // node 1
+                10.0, 0.0, // node 2 sibling
+            ],
+            (1, 1, 3, 2),
+            &device,
+        )?;
+        let v = Tensor::from_vec(
+            vec![
+                0.0f32, 0.0, // node 0
+                0.0, 0.0, // node 1
+                100.0, 0.0, // node 2 sibling
+            ],
+            (1, 1, 3, 2),
+            &device,
+        )?;
+
+        let masked = scaled_dot_product_attention(&q, &k, &v, Some(&tree_mask), 1.0, false)?;
+        let unmasked = scaled_dot_product_attention(&q, &k, &v, Some(&no_op_mask), 1.0, false)?;
+
+        let masked_node_1: Vec<f32> = masked.i((0, 0, 1, ..))?.to_vec1()?;
+        let unmasked_node_1: Vec<f32> = unmasked.i((0, 0, 1, ..))?.to_vec1()?;
+        assert!(
+            unmasked_node_1[0] - masked_node_1[0] > 90.0,
+            "sibling unmask should materially change node logits: masked={masked_node_1:?}, unmasked={unmasked_node_1:?}"
+        );
+
         Ok(())
     }
 
