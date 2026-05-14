@@ -1710,7 +1710,7 @@ impl OARStructure {
                     .collect();
                 detected_region_blocks = Some(blocks);
             }
-            tracing::info!(
+            tracing::debug!(
                 "structure stage: region detection {:.1} ms, blocks={}",
                 t_region.elapsed().as_secs_f64() * 1000.0,
                 detected_region_blocks.as_ref().map_or(0, Vec::len)
@@ -1732,7 +1732,7 @@ impl OARStructure {
         }
 
         crate::domain::structure::apply_standardized_layout_label_fixes(&mut layout_elements);
-        tracing::info!(
+        tracing::debug!(
             "structure stage: layout detection {:.1} ms, elements={}",
             layout_dur.as_secs_f64() * 1000.0,
             layout_elements.len()
@@ -1805,7 +1805,7 @@ impl OARStructure {
             formula_results.extend(output.formulas);
             score_results.extend(output.scores);
         }
-        tracing::info!(
+        tracing::debug!(
             "structure stage: formula recognition {:.1} ms, crops={}, batches={}, batch_size={}",
             t_formula.elapsed().as_secs_f64() * 1000.0,
             crop_count,
@@ -2245,7 +2245,7 @@ impl OARStructure {
                         }
                     }
                 }
-                tracing::info!(
+                tracing::debug!(
                     "structure stage: text recognition {:.1} ms, crops={}, batches={}, batch_size={}",
                     t_text_rec.elapsed().as_secs_f64() * 1000.0,
                     detection_boxes.len(),
@@ -2282,7 +2282,7 @@ impl OARStructure {
             text_recognition_adapter,
             batch_size,
         )?;
-        tracing::info!(
+        tracing::debug!(
             "structure stage: text detection {:.1} ms, boxes={}, recognized_regions={}",
             text_det_dur.as_secs_f64() * 1000.0,
             detection_boxes.len(),
@@ -2435,13 +2435,13 @@ impl OARStructure {
                 &formulas,
                 &text_regions,
             )?);
-            tracing::info!(
+            tracing::debug!(
                 "structure stage: table analysis {:.1} ms, tables={}",
                 t_tables.elapsed().as_secs_f64() * 1000.0,
                 tables.len()
             );
         }
-        tracing::info!(
+        tracing::debug!(
             "structure stage: overall OCR total {:.1} ms, regions={}",
             ocr_dur.as_secs_f64() * 1000.0,
             text_regions.len()
@@ -2595,7 +2595,7 @@ impl OARStructure {
         let formulas =
             self.recognize_formulas(&prepared.current_image, &prepared.layout_elements)?;
         let result = self.complete_page(prepared, formulas)?;
-        tracing::info!(
+        tracing::debug!(
             "structure stage: total predict_image {:.1} ms",
             t_total.elapsed().as_secs_f64() * 1000.0
         );

@@ -23,10 +23,10 @@ const OTSL_XCEL: &str = "<xcel>";
 /// need the inverse: HTML → OTSL.
 ///
 /// The parser is intentionally tolerant — it uses regex-based extraction
-/// rather than a full HTML parser, mirrors `clean_html_table`'s repair of
-/// common attribute typos (`<tdcolspan=`, `<tdrowspan=`), and falls back to
-/// the input string unchanged when the structure can't be parsed (caller can
-/// then decide whether to skip the draft).
+/// rather than a full HTML parser and mirrors `clean_html_table`'s repair of
+/// common attribute typos (`<tdcolspan=`, `<tdrowspan=`). The cell regexes
+/// match case-insensitively, so tag casing in the input is preserved through
+/// the precheck.
 ///
 /// ## Algorithm
 ///
@@ -38,10 +38,11 @@ const OTSL_XCEL: &str = "<xcel>";
 ///    `<ecel>` if empty); spanned positions emit `<lcel>` (col-only),
 ///    `<ucel>` (row-only), or `<xcel>` (both). End each row with `<nl>`.
 ///
-/// Returns `None` if the input contains no `<tr>` or no parseable cells.
+/// Returns `None` when the input is empty, contains no `<tr>` tag, or has no
+/// parseable cells. Callers can then decide whether to skip the draft.
 pub fn convert_html_to_otsl(input: &str) -> Option<String> {
     let trimmed = input.trim();
-    if trimmed.is_empty() || !trimmed.contains("<tr") {
+    if trimmed.is_empty() || !TR_OPEN_RE.is_match(trimmed) {
         return None;
     }
     // Repair the common `<tdcolspan=` / `<tdrowspan=` typos before parsing.
@@ -143,6 +144,8 @@ pub fn convert_html_to_otsl(input: &str) -> Option<String> {
 
 static TR_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?is)<tr[^>]*>(.*?)</tr>").expect("static regex: <tr>...</tr>"));
+static TR_OPEN_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)<tr[\s>]").expect("static regex: <tr opening"));
 static CELL_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?is)<t[dh]([^>]*)>(.*?)</t[dh]>").expect("static regex: <td|th>...</td|th>")
 });
@@ -665,6 +668,15 @@ mod tests {
         assert!(convert_html_to_otsl("plain text").is_none());
         assert!(convert_html_to_otsl("<p>not a table</p>").is_none());
         assert!(convert_html_to_otsl("").is_none());
+    }
+
+    #[test]
+    fn convert_html_to_otsl_accepts_uppercase_tags() {
+        // The cell regexes are case-insensitive; the precheck must be too,
+        // otherwise mixed-case HTML drops on the floor.
+        let html = "<TABLE><TR><TD>a</TD><TD>b</TD></TR></TABLE>";
+        let otsl = convert_html_to_otsl(html).expect("conversion");
+        assert_eq!(otsl, "<fcel>a<fcel>b<nl>");
     }
 
     #[test]
