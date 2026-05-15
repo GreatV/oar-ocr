@@ -307,10 +307,7 @@ impl DBPostProcess {
         }
 
         let mut perimeter = 0.0f64;
-        for (p1, p2) in clipper_path
-            .iter()
-            .zip(clipper_path.iter().cycle().skip(1))
-        {
+        for (p1, p2) in clipper_path.iter().zip(clipper_path.iter().cycle().skip(1)) {
             perimeter += (p2.x - p1.x).hypot(p2.y - p1.y);
         }
 
