@@ -30,6 +30,7 @@ use std::env;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::core::errors::OCRError;
@@ -184,8 +185,27 @@ fn cached_file_matches(path: &Path, entry: &Entry) -> Result<bool, OCRError> {
         );
         return Ok(false);
     }
+
+    // Fast path: if a sidecar from a previous verified download/check exists
+    // and records the expected hash, skip rehashing the (potentially 1.8 GB)
+    // file. The sidecar is written under the same cache directory we control,
+    // so the threat model matches "trust the cache once we've vouched for it".
+    if sidecar_records_hash(path, entry.sha256) {
+        return Ok(true);
+    }
+
     match sha256_file(path) {
-        Ok(hash) if hash == entry.sha256 => Ok(true),
+        Ok(hash) if hash == entry.sha256 => {
+            // Remember the verification so future loads skip the rehash.
+            if let Err(e) = write_sidecar(path, entry.sha256) {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to write sha256 sidecar; cache will rehash next time"
+                );
+            }
+            Ok(true)
+        }
         Ok(hash) => {
             tracing::warn!(
                 path = %path.display(),
@@ -206,11 +226,40 @@ fn cached_file_matches(path: &Path, entry: &Entry) -> Result<bool, OCRError> {
     }
 }
 
+fn sidecar_path(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    Some(path.with_file_name(format!(".{name}.sha256")))
+}
+
+fn sidecar_records_hash(path: &Path, expected: &str) -> bool {
+    let Some(sidecar) = sidecar_path(path) else {
+        return false;
+    };
+    match fs::read_to_string(&sidecar) {
+        Ok(contents) => contents.trim().eq_ignore_ascii_case(expected),
+        Err(_) => false,
+    }
+}
+
+fn write_sidecar(path: &Path, hash: &str) -> io::Result<()> {
+    let sidecar = sidecar_path(path)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no filename for sidecar"))?;
+    fs::write(&sidecar, hash)
+}
+
 fn download_and_verify(entry: &Entry, target: &Path) -> Result<(), OCRError> {
     let url = format!(
         "https://www.modelscope.cn/api/v1/models/{}/repo?Revision={}&FilePath={}",
         MODELSCOPE_REPO, DEFAULT_REVISION, entry.name,
     );
+
+    // Build the agent once so connection pooling and HTTPS handshakes survive
+    // across retry attempts.
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(REQUEST_TIMEOUT_SECS)))
+        .timeout_connect(Some(Duration::from_secs(CONNECT_TIMEOUT_SECS)))
+        .build()
+        .new_agent();
 
     let mut last_err: Option<OCRError> = None;
     for attempt in 1..=DOWNLOAD_RETRIES {
@@ -220,7 +269,7 @@ fn download_and_verify(entry: &Entry, target: &Path) -> Result<(), OCRError> {
             attempt,
             "downloading from ModelScope"
         );
-        match download_attempt(&url, entry, target) {
+        match download_attempt(&agent, &url, entry, target) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 tracing::warn!(
@@ -238,13 +287,27 @@ fn download_and_verify(entry: &Entry, target: &Path) -> Result<(), OCRError> {
     }))
 }
 
-fn download_attempt(url: &str, entry: &Entry, target: &Path) -> Result<(), OCRError> {
-    let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(REQUEST_TIMEOUT_SECS)))
-        .timeout_connect(Some(Duration::from_secs(CONNECT_TIMEOUT_SECS)))
-        .build()
-        .new_agent();
+/// Monotonic counter used to keep concurrent in-process downloads of the same
+/// entry from sharing a temp path. Combined with the PID it gives a unique
+/// suffix without pulling in a `rand` dependency.
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+fn unique_tmp_path(target: &Path, entry: &Entry) -> PathBuf {
+    let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    target.with_file_name(format!(
+        ".{}.{}.{}.part",
+        entry.name,
+        std::process::id(),
+        counter
+    ))
+}
+
+fn download_attempt(
+    agent: &ureq::Agent,
+    url: &str,
+    entry: &Entry,
+    target: &Path,
+) -> Result<(), OCRError> {
     let response = agent
         .get(url)
         .call()
@@ -253,7 +316,7 @@ fn download_attempt(url: &str, entry: &Entry, target: &Path) -> Result<(), OCREr
     let mut body = response.into_body().into_reader();
 
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
-    let tmp = target.with_file_name(format!(".{}.part", entry.name));
+    let tmp = unique_tmp_path(target, entry);
     let mut file = File::create(&tmp).map_err(|e| {
         io_with_context(
             e,
@@ -311,6 +374,16 @@ fn download_attempt(url: &str, entry: &Entry, target: &Path) -> Result<(), OCREr
             format!("move `{}` -> `{}`", tmp.display(), target.display()),
         )
     })?;
+
+    // Record the verified hash next to the file so subsequent loads can skip
+    // the expensive rehash. Best-effort: a failure here only costs a rehash.
+    if let Err(e) = write_sidecar(target, entry.sha256) {
+        tracing::debug!(
+            path = %target.display(),
+            error = %e,
+            "failed to write sha256 sidecar after download"
+        );
+    }
     Ok(())
 }
 
@@ -423,10 +496,56 @@ mod tests {
         let mismatched_size = Entry { size: 99, ..entry };
         assert!(!cached_file_matches(&path, &mismatched_size).unwrap());
 
-        // Wrong contents → no match (hash differs).
+        // Wrong contents → no match (hash differs). Clear any sidecar left
+        // behind by the earlier matches so the rehash actually runs.
+        let sidecar = sidecar_path(&path).unwrap();
+        let _ = std::fs::remove_file(&sidecar);
         std::fs::write(&path, b"world!").unwrap();
         let same_len = Entry { size: 6, ..entry };
         assert!(!cached_file_matches(&path, &same_len).unwrap());
+    }
+
+    #[test]
+    fn cached_file_matches_writes_sidecar_and_uses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dummy.bin");
+        let entry = Entry {
+            name: "dummy.bin",
+            sha256: "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+            size: 6,
+        };
+        std::fs::write(&path, b"hello\n").unwrap();
+
+        // First match triggers a real hash + writes the sidecar.
+        assert!(cached_file_matches(&path, &entry).unwrap());
+        let sidecar = sidecar_path(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), entry.sha256);
+
+        // Tampering with the file but keeping size: sidecar lets us trust the
+        // (now stale) cache. This is the deliberate tradeoff — see module docs.
+        std::fs::write(&path, b"world!").unwrap();
+        assert!(cached_file_matches(&path, &entry).unwrap());
+
+        // If the sidecar disagrees with the expected hash, we fall back to
+        // rehashing and (here) reject the cache.
+        std::fs::write(&sidecar, "deadbeef").unwrap();
+        assert!(!cached_file_matches(&path, &entry).unwrap());
+    }
+
+    #[test]
+    fn unique_tmp_path_never_repeats_in_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("model.onnx");
+        let entry = Entry {
+            name: "model.onnx",
+            sha256: "00",
+            size: 0,
+        };
+        let a = unique_tmp_path(&target, &entry);
+        let b = unique_tmp_path(&target, &entry);
+        assert_ne!(a, b);
+        let pid = std::process::id().to_string();
+        assert!(a.to_string_lossy().contains(&pid));
     }
 
     #[test]

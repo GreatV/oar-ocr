@@ -190,10 +190,13 @@ For each model path argument the builder applies these checks in order:
 | `"pp-ocrv5_mobile_det.onnx"` | `$OAR_HOME/...` exists, hash OK | Use cached copy, no network |
 | `"pp-ocrv5_mobile_det.onnx"` | absent or hash mismatch | Download to `$OAR_HOME`, verify, use |
 | `"./models/det.onnx"` | absent | Returned as-is → "model not found" |
-| `"~/.oar/pp-ocrv5_mobile_det.onnx"` | (any) | Treated as a `$OAR_HOME` cache path; same as bare name |
+| `"$OAR_HOME/pp-ocrv5_mobile_det.onnx"` (absolute) | (any) | Parent equals the cache dir → same as bare name |
+
+Note: the resolver compares paths verbatim — `~` is not expanded. Pass a bare filename, an absolute path under `$OAR_HOME`, or let your shell expand `~` for you.
 
 ### Cache layout
 
-- Override the cache root with the `OAR_HOME` environment variable. Defaults to `~/.oar`.
+- Override the cache root with the `OAR_HOME` environment variable. Defaults to `~/.oar` (resolved via the platform home directory; the literal `~` is not expanded by the library).
 - Files land at `$OAR_HOME/<name>`, flat (no per-revision subdirectories).
-- Downloads stream into `$OAR_HOME/.<name>.part` and are renamed atomically once the SHA-256 matches, so a crash mid-download won't poison the cache.
+- Downloads stream into a unique `$OAR_HOME/.<name>.<pid>.<n>.part` and are renamed atomically once the SHA-256 matches, so a crash mid-download won't poison the cache and concurrent processes don't clobber each other.
+- After verification a `$OAR_HOME/.<name>.sha256` sidecar records the verified hash. Future loads with a matching cache file + sidecar skip the multi-second rehash; deleting the sidecar forces a fresh hash check.
