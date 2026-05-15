@@ -143,28 +143,32 @@ impl PPFormulaNetModel {
         // unique 2-D i64 output; pick it explicitly rather than trusting
         // graph output order, which has bitten us before when exporters
         // reordered metadata vs ids.
-        let candidates: Vec<(String, &'static str, Vec<i64>)> = outputs
+        let i64_2d_count = outputs
             .iter()
-            .map(|(name, t)| (name.clone(), t.dtype_name(), t.shape().to_vec()))
-            .collect();
-        let mut i64_2d: Vec<(String, TensorOutput)> = outputs
-            .into_iter()
             .filter(|(_, t)| matches!(t, TensorOutput::I64 { shape, .. } if shape.len() == 2))
-            .collect();
-        if i64_2d.len() != 1 {
+            .count();
+        if i64_2d_count != 1 {
+            // Defer the (name, dtype, shape) walk to the error path: on the
+            // happy path we don't pay for a `Vec` we'd immediately drop.
+            let candidates: Vec<(String, &'static str, Vec<i64>)> = outputs
+                .iter()
+                .map(|(name, t)| (name.clone(), t.dtype_name(), t.shape().to_vec()))
+                .collect();
             return Err(OCRError::Inference {
                 model_name: "PP-FormulaNet".to_string(),
                 context: format!(
                     "expected exactly one 2-D i64 output (token ids); found {} candidate(s) among outputs {:?}",
-                    i64_2d.len(),
-                    candidates
+                    i64_2d_count, candidates
                 ),
                 source: Box::new(OCRError::InvalidInput {
                     message: "PP-FormulaNet: ambiguous or missing token-id output".to_string(),
                 }),
             });
         }
-        let (name, tensor) = i64_2d.pop().expect("len() == 1 checked above");
+        let (name, tensor) = outputs
+            .into_iter()
+            .find(|(_, t)| matches!(t, TensorOutput::I64 { shape, .. } if shape.len() == 2))
+            .expect("i64_2d_count == 1 checked above");
         tracing::debug!(
             "PP-FormulaNet selected output '{}' dtype={} runtime_shape={:?}",
             name,

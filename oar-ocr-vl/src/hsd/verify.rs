@@ -137,16 +137,22 @@ fn greedy_traverse(
 
     // Bulk D2H copies: root's (vocab,) and the full (num_nodes, vocab) matrix.
     let root_host: Vec<f32> = lp_to_host(root_logprobs)?;
-    let nodes_host: Vec<f32> = if node_logprobs.dims().len() >= 2 {
+    let vocab = root_host.len();
+    let num_nodes = tree.num_nodes();
+    let nodes_host: Vec<f32> = if num_nodes == 0 {
+        Vec::new()
+    } else {
+        // Reshape rather than `flatten_all` so a backend handing us a 1-D
+        // or batched (B, N, V) tensor still yields a flat `num_nodes * vocab`
+        // buffer — and we get an explicit shape error if the totals disagree
+        // (which would otherwise show up as an out-of-bounds slice in `row`).
         node_logprobs
+            .reshape((num_nodes, vocab))?
             .to_dtype(DType::F32)?
             .to_device(&Device::Cpu)?
             .flatten_all()?
             .to_vec1()?
-    } else {
-        Vec::new()
     };
-    let vocab = root_host.len();
 
     let row = |node_idx: usize| -> &[f32] {
         let start = node_idx * vocab;
@@ -393,6 +399,14 @@ fn spec_decode_strict<B: SpecBackend>(
             }
 
             let t_traverse = Instant::now();
+            // Strict τ=1.0 is an oracle correctness check: it must agree with
+            // the baseline greedy path token-for-token, including tie-break
+            // direction. Baseline (`argmax_with_repetition_penalty`) and
+            // `argmax_host` both pick the *first* index via strict `>`; candle's
+            // CUDA `argmax` may break ties differently (block-reduction order),
+            // so the host-side path stays for correctness. The bulk D2H cost
+            // here is acceptable — strict mode is a debugging tool, not a
+            // production decode path.
             let best_child = {
                 let cur_host = lp_to_host(&cur_logprobs)?;
                 let (u_hat, _) = argmax_host(&cur_host);

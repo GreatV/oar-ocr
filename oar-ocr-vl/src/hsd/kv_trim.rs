@@ -140,7 +140,9 @@ impl TrimmableKvCache {
             return self.trim_to(indices.len());
         }
         let device = k.device();
-        let idx_t = Tensor::from_vec(indices.to_vec(), (indices.len(),), device)?;
+        // `Tensor::new(&[u32], device)` lands the slice directly via candle's
+        // `NdArray for &[S]` impl — no `indices.to_vec()` allocation needed.
+        let idx_t = Tensor::new(indices, device)?;
         let new_k = k.index_select(&idx_t, self.cat_dim)?.contiguous()?;
         let new_v = v.index_select(&idx_t, self.cat_dim)?.contiguous()?;
         self.kv = Some((new_k, new_v));
