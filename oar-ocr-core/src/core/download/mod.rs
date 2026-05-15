@@ -462,6 +462,17 @@ fn network_error(ctx: String, err: ureq::Error) -> OCRError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Rust runs tests in parallel by default. Anything that reads or writes the
+    // process-global `OAR_HOME` env var (directly or via `cache_dir` /
+    // `resolve_path`) must hold this lock so the writer test does not race
+    // with concurrent readers and corrupt their observed cache directory.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
 
     #[test]
     fn find_known_entry() {
@@ -476,6 +487,7 @@ mod tests {
 
     #[test]
     fn resolve_existing_file_returns_input() {
+        let _guard = lock_env();
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("local.onnx");
         std::fs::write(&f, b"hi").unwrap();
@@ -485,6 +497,7 @@ mod tests {
 
     #[test]
     fn resolve_explicit_path_passthrough_for_unknown() {
+        let _guard = lock_env();
         // A nested path that doesn't exist and isn't registered must be
         // returned verbatim so the caller's normal error fires.
         let p = PathBuf::from("/nonexistent/dir/some_random_model.onnx");
@@ -494,6 +507,7 @@ mod tests {
 
     #[test]
     fn resolve_bare_name_unknown_does_not_consult_network() {
+        let _guard = lock_env();
         // No registry hit, no existing file → returned as-is.
         let p = PathBuf::from("not-in-registry.onnx");
         let resolved = resolve_path(&p).unwrap();
@@ -502,6 +516,7 @@ mod tests {
 
     #[test]
     fn cache_dir_honours_env_override() {
+        let _guard = lock_env();
         let dir = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var(OAR_HOME_ENV, dir.path());

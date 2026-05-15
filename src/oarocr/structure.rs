@@ -651,31 +651,31 @@ impl OARStructureBuilder {
         // cache when the `auto-download` feature is enabled. With the feature
         // off these calls are infallible no-ops.
         self.layout_detection_model = resolve_model_path(&self.layout_detection_model)?;
-        fn ro(p: &mut Option<PathBuf>) -> Result<(), OCRError> {
+        fn resolve_opt_path(p: &mut Option<PathBuf>) -> Result<(), OCRError> {
             if let Some(path) = p {
                 *path = resolve_model_path(path)?;
             }
             Ok(())
         }
-        ro(&mut self.document_orientation_model)?;
-        ro(&mut self.document_rectification_model)?;
-        ro(&mut self.region_detection_model)?;
-        ro(&mut self.table_classification_model)?;
-        ro(&mut self.table_orientation_model)?;
-        ro(&mut self.table_cell_detection_model)?;
-        ro(&mut self.table_structure_recognition_model)?;
-        ro(&mut self.table_structure_dict_path)?;
-        ro(&mut self.wired_table_structure_model)?;
-        ro(&mut self.wireless_table_structure_model)?;
-        ro(&mut self.wired_table_cell_model)?;
-        ro(&mut self.wireless_table_cell_model)?;
-        ro(&mut self.formula_recognition_model)?;
-        ro(&mut self.formula_tokenizer_path)?;
-        ro(&mut self.seal_text_detection_model)?;
-        ro(&mut self.text_detection_model)?;
-        ro(&mut self.text_line_orientation_model)?;
-        ro(&mut self.text_recognition_model)?;
-        ro(&mut self.character_dict_path)?;
+        resolve_opt_path(&mut self.document_orientation_model)?;
+        resolve_opt_path(&mut self.document_rectification_model)?;
+        resolve_opt_path(&mut self.region_detection_model)?;
+        resolve_opt_path(&mut self.table_classification_model)?;
+        resolve_opt_path(&mut self.table_orientation_model)?;
+        resolve_opt_path(&mut self.table_cell_detection_model)?;
+        resolve_opt_path(&mut self.table_structure_recognition_model)?;
+        resolve_opt_path(&mut self.table_structure_dict_path)?;
+        resolve_opt_path(&mut self.wired_table_structure_model)?;
+        resolve_opt_path(&mut self.wireless_table_structure_model)?;
+        resolve_opt_path(&mut self.wired_table_cell_model)?;
+        resolve_opt_path(&mut self.wireless_table_cell_model)?;
+        resolve_opt_path(&mut self.formula_recognition_model)?;
+        resolve_opt_path(&mut self.formula_tokenizer_path)?;
+        resolve_opt_path(&mut self.seal_text_detection_model)?;
+        resolve_opt_path(&mut self.text_detection_model)?;
+        resolve_opt_path(&mut self.text_line_orientation_model)?;
+        resolve_opt_path(&mut self.text_recognition_model)?;
+        resolve_opt_path(&mut self.character_dict_path)?;
 
         // Load character dictionary if OCR is enabled
         let char_dict = if let Some(ref dict_path) = self.character_dict_path {
