@@ -21,6 +21,14 @@ With GPU support:
 cargo add oar-ocr --features cuda
 ```
 
+With auto-download of model files from ModelScope:
+
+```bash
+cargo add oar-ocr --features auto-download
+```
+
+Bare file names passed to the builders are then fetched from [`greatv/oar-ocr` on ModelScope](https://www.modelscope.cn/models/greatv/oar-ocr) into `$OAR_HOME` (default `~/.oar`) and verified against their expected SHA-256. See [docs/models.md](docs/models.md#auto-download-via-the-auto-download-feature) for the exact path resolution rules.
+
 ### Basic Usage
 
 ```rust

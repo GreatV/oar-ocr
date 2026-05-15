@@ -4,7 +4,7 @@
 //! It simplifies the process of configuring text detection, recognition, and optional
 //! preprocessing components.
 
-use super::builder_utils::build_optional_adapter;
+use super::builder_utils::{build_optional_adapter, resolve_model_path};
 use oar_ocr_core::core::config::OrtSessionConfig;
 use oar_ocr_core::core::constants::DEFAULT_REC_IMAGE_SHAPE;
 use oar_ocr_core::core::errors::OCRError;
@@ -232,16 +232,21 @@ impl OAROCRBuilder {
             Self::validate_batch_size("region_batch_size", size)?;
         }
 
+        // Resolve required model paths through the auto-download cache when
+        // the feature is enabled. With the feature off these are no-ops.
+        let text_detection_model = resolve_model_path(&self.text_detection_model)?;
+        let text_recognition_model = resolve_model_path(&self.text_recognition_model)?;
+        let character_dict_path = resolve_model_path(&self.character_dict_path)?;
+
         // Load character dictionary for text recognition
-        let char_dict = std::fs::read_to_string(&self.character_dict_path).map_err(|e| {
-            OCRError::InvalidInput {
+        let char_dict =
+            std::fs::read_to_string(&character_dict_path).map_err(|e| OCRError::InvalidInput {
                 message: format!(
                     "Failed to read character dictionary from '{}': {}",
-                    self.character_dict_path.display(),
+                    character_dict_path.display(),
                     e
                 ),
-            }
-        })?;
+            })?;
 
         // Build document rectification adapter if enabled
         let rectification_adapter = build_optional_adapter(
@@ -325,7 +330,7 @@ impl OAROCRBuilder {
             detection_builder = detection_builder.text_type(text_type.clone());
         }
 
-        let text_detection_adapter = detection_builder.build(&self.text_detection_model)?;
+        let text_detection_adapter = detection_builder.build(&text_detection_model)?;
 
         // Build text line orientation adapter if enabled
         let text_line_orientation_adapter = build_optional_adapter(
@@ -350,7 +355,7 @@ impl OAROCRBuilder {
             recognition_builder = recognition_builder.with_config(rec_config.clone());
         }
 
-        let text_recognition_adapter = recognition_builder.build(&self.text_recognition_model)?;
+        let text_recognition_adapter = recognition_builder.build(&text_recognition_model)?;
 
         let pipeline = OCRPipeline {
             rectification_adapter,

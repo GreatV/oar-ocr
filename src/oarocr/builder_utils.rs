@@ -4,7 +4,29 @@ use oar_ocr_core::core::OCRError;
 use oar_ocr_core::core::config::OrtSessionConfig;
 use oar_ocr_core::core::traits::OrtConfigurable;
 use oar_ocr_core::core::traits::adapter::AdapterBuilder;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Resolves a model path through the auto-download cache when the
+/// `auto-download` feature is enabled.
+///
+/// Behaviour:
+///
+/// - With `auto-download` on, delegates to
+///   [`oar_ocr_core::core::download::resolve_path`]. Bare file names that
+///   match the registry are fetched from ModelScope and verified against
+///   the expected SHA-256; on-disk paths are returned unchanged.
+/// - Without the feature, returns the input verbatim. The caller's normal
+///   error path produces the usual "model not found" message.
+pub fn resolve_model_path(path: &Path) -> Result<PathBuf, OCRError> {
+    #[cfg(feature = "auto-download")]
+    {
+        oar_ocr_core::core::download::resolve_path(path)
+    }
+    #[cfg(not(feature = "auto-download"))]
+    {
+        Ok(path.to_path_buf())
+    }
+}
 
 /// Builds an optional adapter from a model path using a builder factory.
 ///
@@ -37,11 +59,12 @@ where
     let Some(model) = model_path else {
         return Ok(None);
     };
+    let resolved = resolve_model_path(model)?;
 
     let mut builder = create_builder();
     if let Some(config) = ort_config {
         builder = builder.with_ort_config(config.clone());
     }
 
-    Ok(Some(builder.build(model)?))
+    Ok(Some(builder.build(&resolved)?))
 }

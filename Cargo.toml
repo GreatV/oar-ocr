@@ -48,6 +48,10 @@ openvino = ["oar-ocr-core/openvino"]
 # Set ORT_LIB_LOCATION to use a custom installation (skips download).
 # Use --no-default-features for offline/enterprise environments.
 download-binaries = ["oar-ocr-core/download-binaries"]
+# Auto-download OCR model files at runtime from ModelScope into `$OAR_HOME`
+# (default `~/.oar`). When enabled, builder methods that take a model path
+# accept either a filesystem path or a bare registered file name.
+auto-download = ["oar-ocr-core/auto-download"]
 
 [dependencies]
 # Core library with all types and predictors

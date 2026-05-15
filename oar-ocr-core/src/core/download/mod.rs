@@ -1,0 +1,442 @@
+//! Auto-download of OCR model files from ModelScope (feature `auto-download`).
+//!
+//! When this feature is enabled, callers can pass *just a filename* (such as
+//! `"pp-ocrv5_mobile_det.onnx"`) anywhere the OCR builders accept a model
+//! path. If the file is not already on disk it is fetched from
+//! [`greatv/oar-ocr`](https://www.modelscope.cn/models/greatv/oar-ocr),
+//! its SHA-256 verified against [`registry::REGISTRY`], and cached under
+//! `$OAR_HOME` (default `~/.oar`).
+//!
+//! ## Lookup rules
+//!
+//! [`resolve_path`] is the single entry point used by the builders:
+//!
+//! 1. If the input path exists on disk and refers to a file, it is returned
+//!    as-is (no hash check) — users keep full control over local files.
+//! 2. Otherwise, if the file *name* matches an entry in the registry, the
+//!    cached copy under `$OAR_HOME` is reused (verified) or downloaded and
+//!    verified.
+//! 3. Otherwise, the path is returned unchanged so the caller produces its
+//!    usual "model not found" error.
+//!
+//! ## Cache location
+//!
+//! - `$OAR_HOME` environment variable (if set), else
+//! - `<home>/.oar`
+//!
+//! The directory is created lazily on first download.
+
+use std::env;
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use crate::core::errors::OCRError;
+
+pub mod registry;
+
+pub use registry::{DEFAULT_REVISION, MODELSCOPE_REPO, REGISTRY};
+
+/// A registered file mirrored to ModelScope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Entry {
+    /// File name as stored in the repo and in the cache directory.
+    pub name: &'static str,
+    /// Lowercase hex-encoded SHA-256 of the file contents.
+    pub sha256: &'static str,
+    /// Size in bytes.
+    pub size: u64,
+}
+
+/// Environment variable used to override the cache directory.
+pub const OAR_HOME_ENV: &str = "OAR_HOME";
+
+/// Default cache directory name placed under the user's home dir.
+const DEFAULT_CACHE_SUBDIR: &str = ".oar";
+
+const DOWNLOAD_RETRIES: u32 = 3;
+const READ_BUFFER_BYTES: usize = 64 * 1024;
+/// Whole-request timeout for a single download attempt. Sized to allow the
+/// largest registered file (~1.8 GB) to complete on slow links (~1 MB/s);
+/// the retry loop applies this per attempt.
+const REQUEST_TIMEOUT_SECS: u64 = 30 * 60;
+const CONNECT_TIMEOUT_SECS: u64 = 30;
+
+/// Look up an entry by file name. Returns `None` if the file isn't registered.
+pub fn find(name: &str) -> Option<&'static Entry> {
+    REGISTRY
+        .binary_search_by_key(&name, |e| e.name)
+        .ok()
+        .map(|idx| &REGISTRY[idx])
+}
+
+/// Returns the cache directory used to store auto-downloaded models.
+///
+/// Resolution order:
+/// 1. `$OAR_HOME`, if set and non-empty.
+/// 2. `<home>/.oar` where `<home>` is the platform user home directory.
+///
+/// Falls back to `./.oar` (relative to the current working directory) when
+/// the user home cannot be determined — this matches what the repository's
+/// existing examples already use.
+pub fn cache_dir() -> PathBuf {
+    if let Some(dir) = env::var_os(OAR_HOME_ENV) {
+        let dir = PathBuf::from(dir);
+        if !dir.as_os_str().is_empty() {
+            return dir;
+        }
+    }
+    dirs::home_dir()
+        .map(|h| h.join(DEFAULT_CACHE_SUBDIR))
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_CACHE_SUBDIR))
+}
+
+/// Resolve a user-supplied path through the auto-download cache.
+///
+/// See module docs for the lookup rules. Returns the resolved path (either
+/// the original `input`, an existing cache entry, or a freshly downloaded
+/// file).
+pub fn resolve_path(input: impl AsRef<Path>) -> Result<PathBuf, OCRError> {
+    let input = input.as_ref();
+
+    // Rule 1: trust paths that already exist on disk.
+    if input.is_file() {
+        return Ok(input.to_path_buf());
+    }
+
+    // Rule 2: registry lookup keyed on the file name component.
+    let name = match input.file_name().and_then(|s| s.to_str()) {
+        Some(n) => n,
+        None => return Ok(input.to_path_buf()),
+    };
+
+    // Only match when the user gave just a filename (no parent component) or
+    // when the parent is the configured cache directory. This avoids quietly
+    // overriding a user's explicit path like `./models/pp-ocrv4_mobile_det.onnx`.
+    let parent_is_bare = input.parent().is_none_or(|p| p.as_os_str().is_empty());
+    let cache = cache_dir();
+    let parent_is_cache = input.parent() == Some(cache.as_path());
+
+    if !(parent_is_bare || parent_is_cache) {
+        return Ok(input.to_path_buf());
+    }
+
+    if let Some(entry) = find(name) {
+        return fetch_entry(entry);
+    }
+
+    Ok(input.to_path_buf())
+}
+
+/// Fetch a registered file by name, returning its path in the cache.
+///
+/// If the file is already present and its SHA-256 matches, no network access
+/// occurs; otherwise it is downloaded from ModelScope and verified.
+pub fn fetch(name: &str) -> Result<PathBuf, OCRError> {
+    let entry = find(name).ok_or_else(|| OCRError::ConfigError {
+        message: format!(
+            "model file `{}` is not registered for auto-download. \
+             Pass an explicit path or add an entry to oar_ocr_core::core::download::registry::REGISTRY.",
+            name
+        ),
+    })?;
+    fetch_entry(entry)
+}
+
+fn fetch_entry(entry: &Entry) -> Result<PathBuf, OCRError> {
+    let dir = cache_dir();
+    if let Err(e) = fs::create_dir_all(&dir) {
+        return Err(OCRError::Io(io::Error::new(
+            e.kind(),
+            format!(
+                "failed to create OAR cache directory `{}`: {}",
+                dir.display(),
+                e
+            ),
+        )));
+    }
+    let target = dir.join(entry.name);
+
+    if cached_file_matches(&target, entry)? {
+        return Ok(target);
+    }
+
+    download_and_verify(entry, &target)?;
+    Ok(target)
+}
+
+fn cached_file_matches(path: &Path, entry: &Entry) -> Result<bool, OCRError> {
+    let meta = match fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(io_with_context(e, format!("stat `{}`", path.display()))),
+    };
+    if !meta.is_file() {
+        return Ok(false);
+    }
+    if meta.len() != entry.size {
+        tracing::warn!(
+            path = %path.display(),
+            expected_size = entry.size,
+            actual_size = meta.len(),
+            "cached model has wrong size; redownloading"
+        );
+        return Ok(false);
+    }
+    match sha256_file(path) {
+        Ok(hash) if hash == entry.sha256 => Ok(true),
+        Ok(hash) => {
+            tracing::warn!(
+                path = %path.display(),
+                expected = entry.sha256,
+                actual = %hash,
+                "cached model sha256 mismatch; redownloading"
+            );
+            Ok(false)
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to hash cached model; redownloading"
+            );
+            Ok(false)
+        }
+    }
+}
+
+fn download_and_verify(entry: &Entry, target: &Path) -> Result<(), OCRError> {
+    let url = format!(
+        "https://www.modelscope.cn/api/v1/models/{}/repo?Revision={}&FilePath={}",
+        MODELSCOPE_REPO, DEFAULT_REVISION, entry.name,
+    );
+
+    let mut last_err: Option<OCRError> = None;
+    for attempt in 1..=DOWNLOAD_RETRIES {
+        tracing::info!(
+            file = entry.name,
+            size = entry.size,
+            attempt,
+            "downloading from ModelScope"
+        );
+        match download_attempt(&url, entry, target) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                tracing::warn!(
+                    file = entry.name,
+                    attempt,
+                    error = %e,
+                    "download attempt failed",
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| OCRError::ConfigError {
+        message: format!("download of `{}` failed after retries", entry.name),
+    }))
+}
+
+fn download_attempt(url: &str, entry: &Entry, target: &Path) -> Result<(), OCRError> {
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(REQUEST_TIMEOUT_SECS)))
+        .timeout_connect(Some(Duration::from_secs(CONNECT_TIMEOUT_SECS)))
+        .build()
+        .new_agent();
+
+    let response = agent
+        .get(url)
+        .call()
+        .map_err(|e| network_error(format!("GET {}", url), e))?;
+
+    let mut body = response.into_body().into_reader();
+
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = target.with_file_name(format!(".{}.part", entry.name));
+    let mut file = File::create(&tmp).map_err(|e| {
+        io_with_context(
+            e,
+            format!(
+                "create temp download `{}` in `{}`",
+                tmp.display(),
+                parent.display()
+            ),
+        )
+    })?;
+
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+    let mut buf = vec![0u8; READ_BUFFER_BYTES];
+    let mut written: u64 = 0;
+    loop {
+        let n = body
+            .read(&mut buf)
+            .map_err(|e| io_with_context(e, format!("read body for `{}`", entry.name)))?;
+        if n == 0 {
+            break;
+        }
+        sha2::Digest::update(&mut hasher, &buf[..n]);
+        file.write_all(&buf[..n])
+            .map_err(|e| io_with_context(e, format!("write `{}`", tmp.display())))?;
+        written += n as u64;
+    }
+    file.sync_all()
+        .map_err(|e| io_with_context(e, format!("sync `{}`", tmp.display())))?;
+    drop(file);
+
+    if written != entry.size {
+        let _ = fs::remove_file(&tmp);
+        return Err(OCRError::ConfigError {
+            message: format!(
+                "downloaded `{}` is {} bytes but the registry expects {}",
+                entry.name, written, entry.size
+            ),
+        });
+    }
+
+    let actual_hash = encode_hex(&sha2::Digest::finalize(hasher));
+    if actual_hash != entry.sha256 {
+        let _ = fs::remove_file(&tmp);
+        return Err(OCRError::ConfigError {
+            message: format!(
+                "sha256 mismatch for `{}`: expected {}, got {}",
+                entry.name, entry.sha256, actual_hash
+            ),
+        });
+    }
+
+    fs::rename(&tmp, target).map_err(|e| {
+        io_with_context(
+            e,
+            format!("move `{}` -> `{}`", tmp.display(), target.display()),
+        )
+    })?;
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> io::Result<String> {
+    let mut file = File::open(path)?;
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+    let mut buf = vec![0u8; READ_BUFFER_BYTES];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        sha2::Digest::update(&mut hasher, &buf[..n]);
+    }
+    Ok(encode_hex(&sha2::Digest::finalize(hasher)))
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0xf) as usize] as char);
+    }
+    out
+}
+
+fn io_with_context(e: io::Error, ctx: String) -> OCRError {
+    OCRError::Io(io::Error::new(e.kind(), format!("{ctx}: {e}")))
+}
+
+fn network_error(ctx: String, err: ureq::Error) -> OCRError {
+    OCRError::Io(io::Error::other(format!("{ctx}: {err}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_known_entry() {
+        let entry = find("ppocrv5_en_dict.txt").expect("registered");
+        assert_eq!(entry.size, 1416);
+    }
+
+    #[test]
+    fn find_unknown_entry_returns_none() {
+        assert!(find("does-not-exist.onnx").is_none());
+    }
+
+    #[test]
+    fn resolve_existing_file_returns_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("local.onnx");
+        std::fs::write(&f, b"hi").unwrap();
+        let resolved = resolve_path(&f).unwrap();
+        assert_eq!(resolved, f);
+    }
+
+    #[test]
+    fn resolve_explicit_path_passthrough_for_unknown() {
+        // A nested path that doesn't exist and isn't registered must be
+        // returned verbatim so the caller's normal error fires.
+        let p = PathBuf::from("/nonexistent/dir/some_random_model.onnx");
+        let resolved = resolve_path(&p).unwrap();
+        assert_eq!(resolved, p);
+    }
+
+    #[test]
+    fn resolve_bare_name_unknown_does_not_consult_network() {
+        // No registry hit, no existing file → returned as-is.
+        let p = PathBuf::from("not-in-registry.onnx");
+        let resolved = resolve_path(&p).unwrap();
+        assert_eq!(resolved, p);
+    }
+
+    #[test]
+    fn cache_dir_honours_env_override() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var(OAR_HOME_ENV, dir.path());
+        }
+        assert_eq!(cache_dir(), dir.path());
+        unsafe {
+            std::env::remove_var(OAR_HOME_ENV);
+        }
+    }
+
+    #[test]
+    fn cached_file_matches_detects_size_and_hash_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dummy.bin");
+
+        // Fake registry entry pinned to known SHA-256 of "hello\n" (6 bytes).
+        let entry = Entry {
+            name: "dummy.bin",
+            // sha256 of b"hello\n"
+            sha256: "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+            size: 6,
+        };
+
+        // Missing file → no match (no network needed).
+        assert!(!cached_file_matches(&path, &entry).unwrap());
+
+        // Correct contents → match.
+        std::fs::write(&path, b"hello\n").unwrap();
+        assert!(cached_file_matches(&path, &entry).unwrap());
+
+        // Same hash but wrong size when we lie about expected size → no match.
+        let mismatched_size = Entry { size: 99, ..entry };
+        assert!(!cached_file_matches(&path, &mismatched_size).unwrap());
+
+        // Wrong contents → no match (hash differs).
+        std::fs::write(&path, b"world!").unwrap();
+        let same_len = Entry { size: 6, ..entry };
+        assert!(!cached_file_matches(&path, &same_len).unwrap());
+    }
+
+    #[test]
+    fn fetch_unregistered_name_returns_config_error() {
+        let err = fetch("does-not-exist.onnx").unwrap_err();
+        match err {
+            OCRError::ConfigError { message } => {
+                assert!(message.contains("not registered"));
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+}
