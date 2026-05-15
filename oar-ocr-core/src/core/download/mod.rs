@@ -302,6 +302,39 @@ fn unique_tmp_path(target: &Path, entry: &Entry) -> PathBuf {
     ))
 }
 
+/// RAII guard that deletes a temp file on drop unless explicitly disarmed.
+/// Keeps `$OAR_HOME` from accumulating stale `.part` files when a download
+/// fails mid-stream (read error, write error, hash mismatch, …).
+struct TempFileGuard {
+    path: Option<PathBuf>,
+}
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn path(&self) -> &Path {
+        // Only `disarm` clears `path`, and it consumes `self`, so anywhere
+        // we still hold the guard the path is present.
+        self.path.as_deref().expect("guard already disarmed")
+    }
+
+    /// Hand off ownership of the temp file to a successful rename; nothing
+    /// gets deleted on drop after this point.
+    fn disarm(mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 fn download_attempt(
     agent: &ureq::Agent,
     url: &str,
@@ -327,6 +360,8 @@ fn download_attempt(
             ),
         )
     })?;
+    // From here on, any early return must not leak the temp file.
+    let guard = TempFileGuard::new(tmp);
 
     let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
     let mut buf = vec![0u8; READ_BUFFER_BYTES];
@@ -340,15 +375,14 @@ fn download_attempt(
         }
         sha2::Digest::update(&mut hasher, &buf[..n]);
         file.write_all(&buf[..n])
-            .map_err(|e| io_with_context(e, format!("write `{}`", tmp.display())))?;
+            .map_err(|e| io_with_context(e, format!("write `{}`", guard.path().display())))?;
         written += n as u64;
     }
     file.sync_all()
-        .map_err(|e| io_with_context(e, format!("sync `{}`", tmp.display())))?;
+        .map_err(|e| io_with_context(e, format!("sync `{}`", guard.path().display())))?;
     drop(file);
 
     if written != entry.size {
-        let _ = fs::remove_file(&tmp);
         return Err(OCRError::ConfigError {
             message: format!(
                 "downloaded `{}` is {} bytes but the registry expects {}",
@@ -359,7 +393,6 @@ fn download_attempt(
 
     let actual_hash = encode_hex(&sha2::Digest::finalize(hasher));
     if actual_hash != entry.sha256 {
-        let _ = fs::remove_file(&tmp);
         return Err(OCRError::ConfigError {
             message: format!(
                 "sha256 mismatch for `{}`: expected {}, got {}",
@@ -368,12 +401,19 @@ fn download_attempt(
         });
     }
 
-    fs::rename(&tmp, target).map_err(|e| {
+    fs::rename(guard.path(), target).map_err(|e| {
         io_with_context(
             e,
-            format!("move `{}` -> `{}`", tmp.display(), target.display()),
+            format!(
+                "move `{}` -> `{}`",
+                guard.path().display(),
+                target.display()
+            ),
         )
     })?;
+    // The temp path no longer exists (renamed onto `target`); disarm so
+    // Drop doesn't try to remove a now-missing file.
+    guard.disarm();
 
     // Record the verified hash next to the file so subsequent loads can skip
     // the expensive rehash. Best-effort: a failure here only costs a rehash.
@@ -530,6 +570,28 @@ mod tests {
         // rehashing and (here) reject the cache.
         std::fs::write(&sidecar, "deadbeef").unwrap();
         assert!(!cached_file_matches(&path, &entry).unwrap());
+    }
+
+    #[test]
+    fn temp_file_guard_removes_on_drop_and_keeps_when_disarmed() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Drop-without-disarm deletes the file.
+        let p = dir.path().join("dropme.part");
+        std::fs::write(&p, b"x").unwrap();
+        drop(TempFileGuard::new(p.clone()));
+        assert!(!p.exists(), "guard should remove the temp file on drop");
+
+        // Disarm keeps the file.
+        let p = dir.path().join("keepme.part");
+        std::fs::write(&p, b"x").unwrap();
+        let guard = TempFileGuard::new(p.clone());
+        guard.disarm();
+        assert!(p.exists(), "disarmed guard must not delete the file");
+
+        // Missing temp path on drop is silently ignored (no panic).
+        let p = dir.path().join("ghost.part");
+        drop(TempFileGuard::new(p));
     }
 
     #[test]
