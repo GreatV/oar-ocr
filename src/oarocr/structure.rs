@@ -4,7 +4,7 @@
 //! analysis pipelines that can detect layout elements, recognize tables, extract formulas,
 //! and optionally integrate OCR for text extraction.
 
-use super::builder_utils::build_optional_adapter;
+use super::builder_utils::{build_optional_adapter, resolve_model_path};
 use oar_ocr_core::core::OCRError;
 use oar_ocr_core::core::config::OrtSessionConfig;
 use oar_ocr_core::core::traits::OrtConfigurable;
@@ -646,7 +646,37 @@ impl OARStructureBuilder {
     /// Builds the structure analyzer runtime.
     ///
     /// This method instantiates all adapters and returns a ready-to-use structure analyzer.
-    pub fn build(self) -> Result<OARStructure, OCRError> {
+    pub fn build(mut self) -> Result<OARStructure, OCRError> {
+        // Resolve every model/dict/tokenizer path through the auto-download
+        // cache when the `auto-download` feature is enabled. With the feature
+        // off these calls are infallible no-ops.
+        self.layout_detection_model = resolve_model_path(&self.layout_detection_model)?;
+        fn resolve_opt_path(p: &mut Option<PathBuf>) -> Result<(), OCRError> {
+            if let Some(path) = p {
+                *path = resolve_model_path(path)?;
+            }
+            Ok(())
+        }
+        resolve_opt_path(&mut self.document_orientation_model)?;
+        resolve_opt_path(&mut self.document_rectification_model)?;
+        resolve_opt_path(&mut self.region_detection_model)?;
+        resolve_opt_path(&mut self.table_classification_model)?;
+        resolve_opt_path(&mut self.table_orientation_model)?;
+        resolve_opt_path(&mut self.table_cell_detection_model)?;
+        resolve_opt_path(&mut self.table_structure_recognition_model)?;
+        resolve_opt_path(&mut self.table_structure_dict_path)?;
+        resolve_opt_path(&mut self.wired_table_structure_model)?;
+        resolve_opt_path(&mut self.wireless_table_structure_model)?;
+        resolve_opt_path(&mut self.wired_table_cell_model)?;
+        resolve_opt_path(&mut self.wireless_table_cell_model)?;
+        resolve_opt_path(&mut self.formula_recognition_model)?;
+        resolve_opt_path(&mut self.formula_tokenizer_path)?;
+        resolve_opt_path(&mut self.seal_text_detection_model)?;
+        resolve_opt_path(&mut self.text_detection_model)?;
+        resolve_opt_path(&mut self.text_line_orientation_model)?;
+        resolve_opt_path(&mut self.text_recognition_model)?;
+        resolve_opt_path(&mut self.character_dict_path)?;
+
         // Load character dictionary if OCR is enabled
         let char_dict = if let Some(ref dict_path) = self.character_dict_path {
             Some(

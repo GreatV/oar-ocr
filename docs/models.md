@@ -1,6 +1,6 @@
 # Pre-trained Models
 
-OAROCR provides pre-trained models for OCR and document understanding tasks. Download them from the [GitHub Releases](https://github.com/GreatV/oar-ocr/releases) page.
+OAROCR provides pre-trained models for OCR and document understanding tasks. Download them manually from the [GitHub Releases](https://github.com/GreatV/oar-ocr/releases) page (linked in the tables below), or have the library fetch them on demand from ModelScope — see [§ Auto-download](#auto-download-via-the-auto-download-feature) at the bottom.
 
 ## Text Detection Models
 
@@ -155,41 +155,48 @@ Models for document structure analysis with `OARStructureBuilder`:
 | Seal Detection (Mobile) | [`pp-ocrv4_mobile_seal_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv4_mobile_seal_det.onnx) | 4.6MB | Fast seal detection |
 | Seal Detection (Server) | [`pp-ocrv4_server_seal_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv4_server_seal_det.onnx) | 108.2MB | Accurate seal detection |
 
-## Recommended Configurations
+## Auto-download (via the `auto-download` feature)
 
-### Fast Processing (Real-time)
-
-```
-Detection: pp-ocrv5_mobile_det.onnx
-Recognition: pp-ocrv5_mobile_rec.onnx
-Dictionary: ppocrv5_dict.txt
+```bash
+cargo add oar-ocr --features auto-download
 ```
 
-### High Accuracy
-
-```
-Detection: pp-ocrv5_server_det.onnx
-Recognition: pp-ocrv5_server_rec.onnx
-Dictionary: ppocrv5_dict.txt
-```
-
-### Document Processing
-
-```
-Detection: pp-ocrv4_server_det.onnx
-Recognition: pp-ocrv4_server_rec_doc.onnx
-Dictionary: ppocrv4_doc_dict.txt
-Orientation: pp-lcnet_x1_0_doc_ori.onnx
-Rectification: uvdoc.onnx
+```rust,no_run
+use oar_ocr::prelude::*;
+let ocr = OAROCRBuilder::new(
+    "pp-ocrv5_mobile_det.onnx",   // bare name → resolved via registry
+    "pp-ocrv5_mobile_rec.onnx",
+    "ppocrv5_dict.txt",
+).build()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-### Document Structure Analysis
+When the feature is enabled, registered file names are fetched from [`greatv/oar-ocr` on ModelScope](https://www.modelscope.cn/models/greatv/oar-ocr) into `$OAR_HOME` (default `~/.oar`) and verified against the expected SHA-256 before use. Subsequent runs reuse the cached copy. The bundled registry lives at [`oar_ocr::download::REGISTRY`](../oar-ocr-core/src/core/download/registry.rs).
 
-```
-Layout: pp-doclayout_plus-l.onnx
-Table Classification: pp-lcnet_x1_0_table_cls.onnx
-Table Structure (Wired): slanext_wired.onnx
-Table Structure (Wireless): slanet_plus.onnx
-Table Structure Dict: table_structure_dict_ch.txt
-Formula: pp-formulanet_plus-l.onnx
-```
+### Path resolution rules
+
+For each model path argument the builder applies these checks in order:
+
+1. **Existing file wins.** If the path refers to a real file on disk it is used as-is — no registry lookup, no hash check, no network. A `./pp-ocrv5_mobile_det.onnx` next to the binary always shadows the registry.
+2. **Only bare names or `$OAR_HOME`-rooted paths are eligible for auto-download.** A path is considered for registry resolution only when it has no parent component (e.g. `"pp-ocrv5_mobile_det.onnx"`) or when its parent equals the cache directory. Explicit paths like `./models/foo.onnx` or `/data/foo.onnx` are returned verbatim even if their file name is registered — the library never silently overrides an explicit path.
+3. **Registry hit → cache or download.** If the file name appears in `REGISTRY`:
+   - `$OAR_HOME/<name>` exists with matching size + SHA-256 → cached copy is used (no network).
+   - Cached copy is missing or its hash mismatches → download from ModelScope, verify SHA-256, atomically replace.
+4. **Unregistered + missing → returned verbatim** so the builder produces its normal "model not found" error.
+
+| Input | On disk | Behaviour |
+|---|---|---|
+| `"pp-ocrv5_mobile_det.onnx"` | `./pp-ocrv5_mobile_det.onnx` exists | Use the local CWD file |
+| `"pp-ocrv5_mobile_det.onnx"` | `$OAR_HOME/...` exists, hash OK | Use cached copy, no network |
+| `"pp-ocrv5_mobile_det.onnx"` | absent or hash mismatch | Download to `$OAR_HOME`, verify, use |
+| `"./models/det.onnx"` | absent | Returned as-is → "model not found" |
+| `"$OAR_HOME/pp-ocrv5_mobile_det.onnx"` (absolute) | (any) | Parent equals the cache dir → same as bare name |
+
+Note: the resolver compares paths verbatim — `~` is not expanded. Pass a bare filename, an absolute path under `$OAR_HOME`, or let your shell expand `~` for you.
+
+### Cache layout
+
+- Override the cache root with the `OAR_HOME` environment variable. Defaults to `~/.oar` (resolved via the platform home directory; the literal `~` is not expanded by the library).
+- Files land at `$OAR_HOME/<name>`, flat (no per-revision subdirectories).
+- Downloads stream into a unique `$OAR_HOME/.<name>.<pid>.<n>.part` and are renamed atomically once the SHA-256 matches, so a crash mid-download won't poison the cache and concurrent processes don't clobber each other.
+- After verification a `$OAR_HOME/.<name>.sha256` sidecar records the verified hash. Future loads with a matching cache file + sidecar skip the multi-second rehash; deleting the sidecar forces a fresh hash check.

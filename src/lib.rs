@@ -104,6 +104,18 @@ pub mod core {
     pub use oar_ocr_core::core::*;
 }
 
+/// Auto-download of model files from ModelScope.
+///
+/// Available only when the `auto-download` feature is enabled. See
+/// [`oar_ocr_core::core::download`] for details. When the feature is on,
+/// the high-level OCR builders accept either a filesystem path or a bare
+/// registered file name (e.g. `"pp-ocrv5_mobile_det.onnx"`) for any model
+/// path argument.
+#[cfg(feature = "auto-download")]
+pub mod download {
+    pub use oar_ocr_core::core::download::*;
+}
+
 pub mod domain {
     pub use oar_ocr_core::domain::*;
 }

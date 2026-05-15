@@ -14,6 +14,8 @@
 pub mod batch;
 pub mod config;
 pub mod constants;
+#[cfg(feature = "auto-download")]
+pub mod download;
 pub mod errors;
 pub mod image_reader;
 pub mod inference;
