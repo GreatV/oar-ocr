@@ -307,12 +307,11 @@ impl DBPostProcess {
         }
 
         let mut perimeter = 0.0f64;
-        for i in 0..clipper_path.len() {
-            let p1 = &clipper_path[i];
-            let p2 = &clipper_path[(i + 1) % clipper_path.len()];
-            let dx = p2.x - p1.x;
-            let dy = p2.y - p1.y;
-            perimeter += (dx * dx + dy * dy).sqrt();
+        for (p1, p2) in clipper_path
+            .iter()
+            .zip(clipper_path.iter().cycle().skip(1))
+        {
+            perimeter += (p2.x - p1.x).hypot(p2.y - p1.y);
         }
 
         if perimeter <= f64::EPSILON {
