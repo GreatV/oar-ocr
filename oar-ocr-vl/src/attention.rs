@@ -1,14 +1,15 @@
 //! Unified attention implementation for all VLM models.
 //!
 //! This module provides shared attention and rotary embedding implementations
-//! to ensure consistent behavior across LightOnOCR, PaddleOCR-VL, HunyuanOCR, and UniRec models.
+//! to ensure consistent behavior across PaddleOCR-VL, HunyuanOCR, GLM-OCR,
+//! and MinerU2.5 models.
 //!
 //! ## Benefits
 //!
 //! - Single place for attention and RoPE optimizations
 //! - Consistent mask handling across models
 //! - Shared KV cache logic
-//! - Support for multiple RoPE variants (standard, MRoPE, XDRoPE)
+//! - Support for multi-axis RoPE variants (MRoPE, XDRoPE)
 //! - Easier testing and maintenance
 //!
 //! ## Usage
@@ -21,10 +22,6 @@
 //!
 //! // Create causal mask for autoregressive decoding
 //! let mask = create_causal_mask(seq_len, kv_len, dtype, device)?;
-//!
-//! // Standard RoPE (for LightOnOCR)
-//! let rope = RotaryEmbedding::new(base, head_dim, max_pos, device)?;
-//! let (cos, sin) = rope.get_cos_sin(seq_len, dtype)?;
 //!
 //! // Multi-axis RoPE (for PaddleOCR-VL, HunyuanOCR)
 //! let rope = RotaryEmbedding::new_multi_axis(head_dim, rope_theta, num_dims, device)?;
@@ -218,6 +215,103 @@ pub fn combine_masks(causal_mask: &Tensor, padding_mask: &Tensor) -> Result<Tens
     causal_mask.broadcast_add(padding_mask)
 }
 
+/// Create a tree-ancestry attention mask for HSD verification (paper §3.2 / Fig. 2c).
+///
+/// Each candidate token in the prefix tree may attend only to (a) the accepted
+/// prefix already in the KV cache and (b) tokens along its own ancestor path
+/// (including itself). Sibling subtrees and descendants are masked out.
+///
+/// # Arguments
+/// * `parents` - Parent indices for each candidate node, in packed order. `None`
+///   means the node is a direct child of the (implicit) root. Length = `N`.
+/// * `prefix_kv_len` - Number of accepted-prefix tokens already in the KV cache.
+/// * `dtype` - Data type for the mask.
+/// * `device` - Target device.
+///
+/// # Returns
+/// Mask of shape `(1, 1, N, prefix_kv_len + N)` where allowed positions are 0
+/// and forbidden positions are `-inf`.
+///
+/// # Performance note (paper parity)
+///
+/// The paper §4.3 runs verification through PyTorch's
+/// [FlexAttention](https://pytorch.org/blog/flexattention/), which compiles the
+/// tree-ancestry predicate directly into a fused attention kernel. The mask
+/// never materialises as a tensor — it's a function evaluated per-thread inside
+/// the FlashAttention-style kernel, so the asymptotic memory cost is `O(N)`
+/// rather than `O((prefix_kv_len + N) * N)` and the attention forward is
+/// compute-bound.
+///
+/// Candle has no FlexAttention equivalent today, so this helper materialises
+/// the full `(1, 1, N, prefix_kv_len + N)` mask tensor and feeds it into the
+/// model's standard attention path (`F.scaled_dot_product_attention` analog).
+/// At the typical HSD scales (`N ≤ 32` candidates after capping, `prefix_kv_len`
+/// up to ~16k for a page) the materialised mask is only a few MiB so memory is
+/// not the constraint, but the **separate mask kernel + standard attention
+/// kernel** combination is measurably slower than a fused FlexAttention path —
+/// this is one source of the gap between the paper's SR_e2e and the
+/// OAR-realised SR_e2e at equal AAL. Fixing it requires either:
+///
+/// 1. A candle-side fused tree-attention kernel (custom CUDA kernel), or
+/// 2. An upstream FlexAttention-equivalent in candle that we can call from
+///    the model's attention path with a tree-ancestry predicate.
+///
+/// Neither is in-scope for this crate; we accept the kernel-level overhead as
+/// the documented gap. Acceptance length (AAL) is unaffected — only wall-clock
+/// SR_decode / SR_e2e.
+pub fn create_tree_attention_mask(
+    parents: &[Option<usize>],
+    prefix_kv_len: usize,
+    dtype: DType,
+    device: &Device,
+) -> Result<Tensor> {
+    let n = parents.len();
+    let total_kv = prefix_kv_len + n;
+
+    if n == 0 {
+        return on_compute_device(device, |compute_device| {
+            Tensor::zeros((1, 1, 0, total_kv), dtype, compute_device)
+        });
+    }
+
+    // Host-side mask buffer. Initialised to -inf, then we punch holes for
+    // (a) the accepted prefix (whole left block) and (b) each node's ancestor
+    // chain (sparse hits in the right block).
+    //
+    // Earlier revisions materialised an O(N²) `Vec<Vec<bool>>` ancestor matrix
+    // up front; that's redundant because we only consume each ancestor set
+    // once. Walking the parent chain inline during the buffer fill removes:
+    // - the N² bool allocation (up to 32² = 1 KiB, irrelevant for big-O but
+    //   one extra heap call per HSD step), and
+    // - the per-row O(N) "is this an ancestor?" check (now a tight
+    //   parent-pointer walk of length = node depth, typically ≤ 8 for HSD
+    //   trees of width 32).
+    //
+    // The accepted-prefix block uses `slice::fill` (memset under the hood)
+    // instead of a per-cell loop, which is the dominant cost on long pages —
+    // for a 16k-token prefix and 32 candidates that's ~512K float writes per
+    // verify step, and memset is 5-10× faster than the per-element write.
+    let mut buf = vec![f32::NEG_INFINITY; n * total_kv];
+    for i in 0..n {
+        let row_off = i * total_kv;
+        // (a) Allow attending to the entire accepted prefix — single memset.
+        if prefix_kv_len > 0 {
+            buf[row_off..row_off + prefix_kv_len].fill(0.0);
+        }
+        // (b) Allow attending to this node + its ancestors. Walk parent
+        //     pointers in place; no auxiliary bitset.
+        let mut cur = Some(i);
+        while let Some(j) = cur {
+            buf[row_off + prefix_kv_len + j] = 0.0;
+            cur = parents[j];
+        }
+    }
+
+    on_compute_device(device, move |compute_device| {
+        Tensor::from_vec(buf, (1, 1, n, total_kv), compute_device)?.to_dtype(dtype)
+    })
+}
+
 /// Create a left-padding mask for batched sequences.
 ///
 /// Left-padding aligns sequences at the right edge, which is standard for
@@ -235,7 +329,7 @@ pub fn combine_masks(causal_mask: &Tensor, padding_mask: &Tensor) -> Result<Tens
 /// - Valid positions are 0
 ///
 /// # Example
-/// ```ignore
+/// ```text
 /// // seq_lens = [3, 5], max_len = 5
 /// // Produces masks:
 /// // Item 0: [-inf, -inf, 0, 0, 0]  (3 valid tokens, 2 padding)
@@ -282,13 +376,6 @@ pub fn create_left_padding_mask(
     })
 }
 
-fn rotate_half(x: &Tensor) -> Result<Tensor> {
-    let last_dim = x.dim(D::Minus1)?;
-    let x1 = x.narrow(D::Minus1, 0, last_dim / 2)?;
-    let x2 = x.narrow(D::Minus1, last_dim / 2, last_dim / 2)?;
-    Tensor::cat(&[&x2.neg()?, &x1], D::Minus1)
-}
-
 // ============================================================================
 // Rotary Positional Embedding (RoPE)
 // ============================================================================
@@ -296,20 +383,17 @@ fn rotate_half(x: &Tensor) -> Result<Tensor> {
 /// Unified Rotary Positional Embedding implementation.
 ///
 /// Supports multiple RoPE variants:
-/// - **Standard RoPE**: Precomputed cos/sin for efficient lookup (LightOnOCR)
-/// - **Dynamic RoPE**: On-the-fly computation from position IDs
+/// - **Dynamic RoPE**: On-the-fly computation from position IDs (single-axis)
 /// - **Multi-axis RoPE (MRoPE)**: 3-axis encoding for text/height/width (PaddleOCR-VL)
 /// - **Extended Dimension RoPE (XDRoPE)**: Configurable num_dims (HunyuanOCR)
 ///
 /// ## Architecture
 ///
-/// The implementation uses an enum to support different RoPE modes while maintaining
-/// a unified interface. This eliminates code duplication across models.
+/// All variants share a single `Dynamic` representation parameterized by
+/// `num_dims`; the constructor functions pick the right `num_dims` for each
+/// model family.
 #[derive(Debug, Clone)]
 pub enum RotaryEmbedding {
-    /// Precomputed cos/sin for standard RoPE (used by LightOnOCR).
-    /// Efficient for inference with fixed max sequence length.
-    Precomputed { cos: Tensor, sin: Tensor },
     /// Dynamic computation from inverse frequencies (used by PaddleOCR-VL, HunyuanOCR).
     /// Supports multi-axis position encoding.
     Dynamic {
@@ -320,48 +404,6 @@ pub enum RotaryEmbedding {
 }
 
 impl RotaryEmbedding {
-    /// Create a standard RoPE with precomputed cos/sin (LightOnOCR style).
-    ///
-    /// This precomputes embeddings for all positions up to max_position_embeddings,
-    /// enabling efficient lookup during inference.
-    ///
-    /// # Arguments
-    /// * `base` - RoPE base frequency (typically 10000.0)
-    /// * `head_dim` - Dimension of each attention head
-    /// * `max_position_embeddings` - Maximum sequence length to precompute
-    /// * `device` - Device for tensor allocation
-    /// * `dtype` - Data type for cos/sin tensors
-    ///
-    /// # Returns
-    /// RotaryEmbedding in Precomputed mode
-    pub fn new_precomputed(
-        base: f32,
-        head_dim: usize,
-        max_position_embeddings: usize,
-        device: &Device,
-        dtype: DType,
-    ) -> Result<Self> {
-        let inv_freq: Vec<_> = (0..head_dim)
-            .step_by(2)
-            .map(|i| 1f32 / base.powf(i as f32 / head_dim as f32))
-            .collect();
-        let inv_freq_len = inv_freq.len();
-
-        // Use on_compute_device to handle Metal's lack of support for arange
-        let freqs = on_compute_device(device, |compute_device| {
-            let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), compute_device)?;
-            let t = Tensor::arange(0u32, max_position_embeddings as u32, compute_device)?
-                .to_dtype(DType::F32)?
-                .reshape((max_position_embeddings, 1))?;
-            t.matmul(&inv_freq)
-        })?;
-
-        let sin = freqs.sin()?.to_dtype(dtype)?;
-        let cos = freqs.cos()?.to_dtype(dtype)?;
-
-        Ok(Self::Precomputed { cos, sin })
-    }
-
     /// Create a dynamic RoPE with on-the-fly computation (standard single-axis).
     ///
     /// This computes embeddings dynamically from position IDs, suitable for
@@ -423,35 +465,7 @@ impl RotaryEmbedding {
         Ok(Self::Dynamic { inv_freq, num_dims })
     }
 
-    /// Get precomputed cos/sin for standard RoPE (Precomputed mode only).
-    ///
-    /// Used by LightOnOCR for efficient embedding lookup.
-    ///
-    /// # Arguments
-    /// * `seq_len` - Sequence length to retrieve embeddings for
-    /// * `dtype` - Target data type
-    ///
-    /// # Returns
-    /// Tuple of (cos, sin) tensors, shape: (seq_len, head_dim/2)
-    ///
-    /// # Panics
-    /// Panics if called on Dynamic mode
-    pub fn get_cos_sin(&self, seq_len: usize, dtype: DType) -> Result<(Tensor, Tensor)> {
-        match self {
-            Self::Precomputed { cos, sin } => {
-                let cos = cos.narrow(0, 0, seq_len)?.to_dtype(dtype)?;
-                let sin = sin.narrow(0, 0, seq_len)?.to_dtype(dtype)?;
-                Ok((cos, sin))
-            }
-            Self::Dynamic { .. } => {
-                panic!(
-                    "get_cos_sin() called on Dynamic RoPE mode. Use forward_multi_axis() instead."
-                )
-            }
-        }
-    }
-
-    /// Forward pass for multi-axis RoPE (Dynamic mode only).
+    /// Forward pass for multi-axis RoPE.
     ///
     /// Computes cos/sin from position IDs dynamically. Supports multi-dimensional
     /// position encoding.
@@ -462,9 +476,6 @@ impl RotaryEmbedding {
     ///
     /// # Returns
     /// Tuple of (cos, sin) tensors, shape: (num_dims, batch, seq, head_dim)
-    ///
-    /// # Panics
-    /// Panics if called on Precomputed mode
     pub fn forward_multi_axis(
         &self,
         position_ids: &Tensor,
@@ -569,95 +580,6 @@ impl RotaryEmbedding {
                         )
                     })?;
                 Ok((cos, sin))
-            }
-            Self::Precomputed { .. } => {
-                panic!(
-                    "forward_multi_axis() called on Precomputed RoPE mode. Use get_cos_sin() instead."
-                )
-            }
-        }
-    }
-
-    /// Apply rotary embeddings to query and key tensors (for Precomputed mode).
-    ///
-    /// This is a convenience method for LightOnOCR-style usage with precomputed embeddings.
-    ///
-    /// # Arguments
-    /// * `q` - Query tensor: (batch, heads, seq, head_dim)
-    /// * `k` - Key tensor: (batch, heads, seq, head_dim)
-    /// * `seqlen_offsets` - Sequence length offsets for each batch item
-    ///
-    /// # Returns
-    /// Tuple of (rotated_q, rotated_k)
-    pub fn apply_rotary_emb(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        seqlen_offsets: &[usize],
-    ) -> Result<(Tensor, Tensor)> {
-        match self {
-            Self::Precomputed { cos, sin } => {
-                let (b_sz, _qh, seq_len, _n_embd) = q.dims4()?;
-
-                // Helper to apply RoPE with full broadcasting support
-                let apply_rope = |x: &Tensor, cos: &Tensor, sin: &Tensor| -> Result<Tensor> {
-                    let x_rot = rotate_half(x)?;
-                    // x * cos + x_rot * sin
-                    // cos/sin shapes must be broadcastable to x shape
-                    let a = x.broadcast_mul(cos)?;
-                    let b = x_rot.broadcast_mul(sin)?;
-                    a.add(&b)
-                };
-
-                // Fast path: if all offsets are equal (e.g. 0 during prefill)
-                if seqlen_offsets.iter().all(|&x| x == seqlen_offsets[0]) {
-                    let offset = seqlen_offsets[0];
-                    let cos_seq = cos.narrow(0, offset, seq_len)?;
-                    let sin_seq = sin.narrow(0, offset, seq_len)?;
-
-                    // Repeat to match head_dim: (S, D/2) -> (S, D)
-                    let cos_seq = Tensor::cat(&[&cos_seq, &cos_seq], D::Minus1)?;
-                    let sin_seq = Tensor::cat(&[&sin_seq, &sin_seq], D::Minus1)?;
-
-                    // (S, D) -> (1, 1, S, D) for broadcasting
-                    let cos_b = cos_seq.unsqueeze(0)?.unsqueeze(0)?;
-                    let sin_b = sin_seq.unsqueeze(0)?.unsqueeze(0)?;
-
-                    let q_out = apply_rope(q, &cos_b, &sin_b)?;
-                    let k_out = apply_rope(k, &cos_b, &sin_b)?;
-                    return Ok((q_out, k_out));
-                }
-
-                // General path: gather embeddings for each batch item
-                let device = q.device();
-                let mut indices = Vec::with_capacity(b_sz * seq_len);
-                for &offset in seqlen_offsets {
-                    for i in 0..seq_len {
-                        indices.push((offset + i) as u32);
-                    }
-                }
-                let indices = Tensor::from_vec(indices, (b_sz * seq_len,), device)?;
-                let cos_gather = cos.index_select(&indices, 0)?; // (B*S, D/2)
-                let sin_gather = sin.index_select(&indices, 0)?;
-
-                // Repeat to match head_dim: (B*S, D/2) -> (B*S, D)
-                let cos_gather = Tensor::cat(&[&cos_gather, &cos_gather], D::Minus1)?;
-                let sin_gather = Tensor::cat(&[&sin_gather, &sin_gather], D::Minus1)?;
-
-                // Reshape to (B, 1, S, D) for broadcasting against (B, H, S, D)
-                // Note: cos.dim(1) is D/2, so after cat it is D.
-                let shape = (b_sz, 1, seq_len, cos_gather.dim(1)?);
-                let cos_b = cos_gather.reshape(shape)?;
-                let sin_b = sin_gather.reshape(shape)?;
-
-                let q_out = apply_rope(q, &cos_b, &sin_b)?;
-                let k_out = apply_rope(k, &cos_b, &sin_b)?;
-                Ok((q_out, k_out))
-            }
-            Self::Dynamic { .. } => {
-                panic!(
-                    "apply_rotary_emb() requires Precomputed mode. Use forward_multi_axis() for Dynamic mode."
-                )
             }
         }
     }
@@ -852,6 +774,223 @@ mod tests {
     }
 
     #[test]
+    fn test_tree_attention_mask_shape() -> Result<()> {
+        let device = Device::Cpu;
+        // chain: 0 -> 1 -> 2  (linear), prefix_kv_len = 2
+        let parents = vec![None, Some(0), Some(1)];
+        let mask = create_tree_attention_mask(&parents, 2, DType::F32, &device)?;
+        assert_eq!(mask.dims(), &[1, 1, 3, 5]);
+        let m: Vec<f32> = mask.flatten_all()?.to_vec1()?;
+        // Row 0: prefix [0,1] = 0; cand cols [0]=self -> 0; [1,2]=-inf
+        assert_eq!(m[0], 0.0);
+        assert_eq!(m[1], 0.0);
+        assert_eq!(m[2], 0.0);
+        assert!(m[3].is_infinite());
+        assert!(m[4].is_infinite());
+        // Row 1: prefix=0; cand cols [0,1]=ancestors -> 0; [2]=-inf
+        assert_eq!(m[5], 0.0);
+        assert_eq!(m[5 + 1], 0.0);
+        assert_eq!(m[5 + 2], 0.0);
+        assert_eq!(m[5 + 3], 0.0);
+        assert!(m[5 + 4].is_infinite());
+        // Row 2: prefix=0; cand cols [0,1,2]=full path -> all 0
+        for col in 0..5 {
+            assert_eq!(m[10 + col], 0.0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_tree_attention_mask_branching() -> Result<()> {
+        let device = Device::Cpu;
+        // tree:
+        //     root
+        //      |
+        //   0 (tok)
+        //    /   \
+        //   1     2
+        let parents = vec![None, Some(0), Some(0)];
+        let mask = create_tree_attention_mask(&parents, 0, DType::F32, &device)?;
+        assert_eq!(mask.dims(), &[1, 1, 3, 3]);
+        let m: Vec<f32> = mask.flatten_all()?.to_vec1()?;
+        // Node 1 should NOT attend to node 2 (its sibling).
+        // Layout: row*3 + col
+        // Row 1 (node 1): col 0 = parent (allowed), col 1 = self (allowed), col 2 = sibling (FORBIDDEN)
+        assert_eq!(m[3], 0.0);
+        assert_eq!(m[3 + 1], 0.0);
+        assert!(m[3 + 2].is_infinite());
+        // Row 2 (node 2): col 0 = parent, col 1 = sibling, col 2 = self
+        assert_eq!(m[6], 0.0);
+        assert!(m[6 + 1].is_infinite());
+        assert_eq!(m[6 + 2], 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_tree_attention_mask_changes_sibling_logits() -> Result<()> {
+        let device = Device::Cpu;
+        let parents = vec![None, Some(0), Some(0)];
+        let tree_mask = create_tree_attention_mask(&parents, 0, DType::F32, &device)?;
+        let no_op_mask = Tensor::zeros((1, 1, 3, 3), DType::F32, &device)?;
+
+        let q = Tensor::from_vec(
+            vec![
+                0.0f32, 0.0, // node 0
+                1.0, 0.0, // node 1 strongly matches sibling key
+                0.0, 0.0, // node 2
+            ],
+            (1, 1, 3, 2),
+            &device,
+        )?;
+        let k = Tensor::from_vec(
+            vec![
+                0.0f32, 0.0, // node 0
+                0.0, 0.0, // node 1
+                10.0, 0.0, // node 2 sibling
+            ],
+            (1, 1, 3, 2),
+            &device,
+        )?;
+        let v = Tensor::from_vec(
+            vec![
+                0.0f32, 0.0, // node 0
+                0.0, 0.0, // node 1
+                100.0, 0.0, // node 2 sibling
+            ],
+            (1, 1, 3, 2),
+            &device,
+        )?;
+
+        let masked = scaled_dot_product_attention(&q, &k, &v, Some(&tree_mask), 1.0, false)?;
+        let unmasked = scaled_dot_product_attention(&q, &k, &v, Some(&no_op_mask), 1.0, false)?;
+
+        let masked_node_1: Vec<f32> = masked.i((0, 0, 1, ..))?.to_vec1()?;
+        let unmasked_node_1: Vec<f32> = unmasked.i((0, 0, 1, ..))?.to_vec1()?;
+        assert!(
+            unmasked_node_1[0] - masked_node_1[0] > 90.0,
+            "sibling unmask should materially change node logits: masked={masked_node_1:?}, unmasked={unmasked_node_1:?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tree_attention_mask_empty() -> Result<()> {
+        let device = Device::Cpu;
+        let mask = create_tree_attention_mask(&[], 4, DType::F32, &device)?;
+        assert_eq!(mask.dims(), &[1, 1, 0, 4]);
+        Ok(())
+    }
+
+    /// Reference implementation kept from the pre-optimization revision
+    /// (the `Vec<Vec<bool>>` ancestor-bitset version). Lets the parity test
+    /// compare the optimized parent-walk path against the original
+    /// O(N²)-bitset path across a battery of randomly shaped trees.
+    fn create_tree_attention_mask_reference(
+        parents: &[Option<usize>],
+        prefix_kv_len: usize,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Tensor> {
+        let n = parents.len();
+        let total_kv = prefix_kv_len + n;
+        if n == 0 {
+            return Tensor::zeros((1, 1, 0, total_kv), dtype, device);
+        }
+        let mut ancestors: Vec<Vec<bool>> = vec![vec![false; n]; n];
+        for (i, row) in ancestors.iter_mut().enumerate() {
+            let mut cur = Some(i);
+            while let Some(j) = cur {
+                row[j] = true;
+                cur = parents[j];
+            }
+        }
+        let mut buf = vec![f32::NEG_INFINITY; n * total_kv];
+        for (row_buf, ancestor_row) in buf.chunks_mut(total_kv).zip(ancestors.iter()) {
+            row_buf[..prefix_kv_len].fill(0.0);
+            for (j, &is_anc) in ancestor_row.iter().enumerate() {
+                if is_anc {
+                    row_buf[prefix_kv_len + j] = 0.0;
+                }
+            }
+        }
+        Tensor::from_vec(buf, (1, 1, n, total_kv), device)?.to_dtype(dtype)
+    }
+
+    #[test]
+    fn test_tree_attention_mask_matches_reference_on_varied_shapes() -> Result<()> {
+        let device = Device::Cpu;
+
+        // Deterministic pseudo-random tree shapes (we hand-pick parents so the
+        // test is reproducible without a seeded RNG dependency).
+        let shapes: Vec<(Vec<Option<usize>>, usize)> = vec![
+            // Linear chain, no prefix.
+            (vec![None, Some(0), Some(1), Some(2)], 0),
+            // Linear chain, with prefix.
+            (vec![None, Some(0), Some(1)], 7),
+            // Branching tree, with prefix.
+            (
+                vec![
+                    None,
+                    Some(0),
+                    Some(0),
+                    Some(1),
+                    Some(1),
+                    Some(2),
+                    Some(2),
+                    Some(2),
+                ],
+                12,
+            ),
+            // Multi-root forest, no prefix.
+            (vec![None, None, Some(0), Some(1), Some(2)], 0),
+            // Single root, deep+wide, with prefix matching a realistic HSD
+            // size: ~16 candidates, 4096-token prefix.
+            (
+                {
+                    let mut p = vec![None];
+                    for i in 1..16 {
+                        // alternate root-children and chains, like an
+                        // expanded prefix-tree from many drafts.
+                        p.push(if i % 4 == 0 { None } else { Some(i - 1) });
+                    }
+                    p
+                },
+                4096,
+            ),
+        ];
+
+        for (parents, prefix_kv_len) in shapes {
+            let opt = create_tree_attention_mask(&parents, prefix_kv_len, DType::F32, &device)?;
+            let reference =
+                create_tree_attention_mask_reference(&parents, prefix_kv_len, DType::F32, &device)?;
+            assert_eq!(
+                opt.dims(),
+                reference.dims(),
+                "shape mismatch for parents={:?}",
+                parents
+            );
+            let opt_vals: Vec<f32> = opt.flatten_all()?.to_vec1()?;
+            let ref_vals: Vec<f32> = reference.flatten_all()?.to_vec1()?;
+            assert_eq!(opt_vals.len(), ref_vals.len());
+            for (i, (&a, &b)) in opt_vals.iter().zip(ref_vals.iter()).enumerate() {
+                let same = match (a.is_infinite(), b.is_infinite()) {
+                    (true, true) => a.is_sign_negative() == b.is_sign_negative(),
+                    (false, false) => (a - b).abs() < 1e-6,
+                    _ => false,
+                };
+                assert!(
+                    same,
+                    "mismatch at idx {i} for parents={:?} prefix={}: opt={a} ref={b}",
+                    parents, prefix_kv_len
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn test_repeat_kv() -> Result<()> {
         let device = Device::Cpu;
         let x = Tensor::randn(0f32, 1., (1, 4, 8, 64), &device)?;
@@ -933,20 +1072,6 @@ mod tests {
     // ========================================================================
     // RoPE Tests
     // ========================================================================
-
-    #[test]
-    fn test_rotary_embedding_precomputed() -> Result<()> {
-        let device = Device::Cpu;
-        let rope = RotaryEmbedding::new_precomputed(10000.0, 64, 512, &device, DType::F32)
-            .expect("Failed to create RoPE");
-
-        // Test getting cos/sin for a sequence
-        let (cos, sin) = rope.get_cos_sin(128, DType::F32)?;
-        assert_eq!(cos.dims(), &[128, 32]); // head_dim/2
-        assert_eq!(sin.dims(), &[128, 32]);
-
-        Ok(())
-    }
 
     #[test]
     fn test_rotary_embedding_dynamic_single_axis() -> std::result::Result<(), OCRError> {
@@ -1034,24 +1159,6 @@ mod tests {
         } else {
             panic!("Expected InvalidInput error");
         }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_rotary_embedding_apply() -> Result<()> {
-        let device = Device::Cpu;
-        let rope = RotaryEmbedding::new_precomputed(10000.0, 64, 512, &device, DType::F32)
-            .expect("Failed to create RoPE");
-
-        let q = Tensor::randn(0f32, 1., (2, 4, 8, 64), &device)?; // (batch, heads, seq, dim)
-        let k = Tensor::randn(0f32, 1., (2, 4, 8, 64), &device)?;
-
-        let seqlen_offsets = vec![0, 0];
-        let (q_rot, k_rot) = rope.apply_rotary_emb(&q, &k, &seqlen_offsets)?;
-
-        assert_eq!(q_rot.dims(), q.dims());
-        assert_eq!(k_rot.dims(), k.dims());
 
         Ok(())
     }

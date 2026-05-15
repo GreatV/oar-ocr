@@ -1,6 +1,6 @@
 # OAR-OCR
 
-![Crates.io Version](https://img.shields.io/crates/v/oar-ocr)
+[![Crates.io Version](https://img.shields.io/crates/v/oar-ocr)](https://crates.io/crates/oar-ocr)
 ![Crates.io Downloads (recent)](https://img.shields.io/crates/dr/oar-ocr)
 [![dependency status](https://deps.rs/repo/github/GreatV/oar-ocr/status.svg)](https://deps.rs/repo/github/GreatV/oar-ocr)
 ![GitHub License](https://img.shields.io/github/license/GreatV/oar-ocr)
@@ -84,12 +84,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Vision-Language Models (VLM)
 
-For advanced document understanding using Vision-Language Models (like PaddleOCR-VL, **PaddleOCR-VL-1.5**, UniRec, and MinerU2.5), check out the [`oar-ocr-vl`](oar-ocr-vl/README.md) crate.
+For advanced document understanding using Vision-Language Models (like PaddleOCR-VL, **PaddleOCR-VL-1.5**, GLM-OCR, HunyuanOCR, and MinerU2.5), check out the [`oar-ocr-vl`](oar-ocr-vl/README.md) crate.
+
+### Hierarchical Speculative Decoding (HSD)
+
+`oar-ocr-vl` ships a training-free CUDA acceleration scheme for the VLM backbones above. A cheap pipeline drafter (layout + OCR) proposes text candidates and the target VLM verifies them in batches via tree-attention, typically delivering several-fold wall-time speedups on document-heavy pages at `τ = 0.75`. Build with `--features hsd` (implies `cuda`); see [`docs/hsd.md`](docs/hsd.md) for the algorithm overview, config knobs, supported backbones, and AAL guidance.
 
 ## Documentation
 
 - [**Usage Guide**](docs/usage.md) - Detailed API usage, builder patterns, GPU configuration
 - [**Pre-trained Models**](docs/models.md) - Model download links and recommended configurations
+- [**HSD**](docs/hsd.md) - Hierarchical Speculative Decoding for VLM inference
 
 ## Examples
 
@@ -116,7 +121,5 @@ This project builds upon the excellent work of several open-source projects:
 - **[ort](https://github.com/pykeio/ort)**: Rust bindings for ONNX Runtime by pykeio. This crate provides the Rust interface to ONNX Runtime that powers the efficient inference engine in this OCR library.
 
 - **[PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)**: Baidu's awesome multilingual OCR toolkits based on PaddlePaddle. This project utilizes PaddleOCR's pre-trained models, which provide excellent accuracy and performance for text detection and recognition across multiple languages.
-
-- **[OpenOCR](https://github.com/Topdu/OpenOCR)**: An open-source toolkit for general OCR research and applications by the FVL Laboratory at Fudan University. We use the UniRec model for unified text, formula, and table recognition.
 
 - **[Candle](https://github.com/huggingface/candle)**: A minimalist ML framework for Rust by Hugging Face. We use Candle to implement Vision-Language model inference.

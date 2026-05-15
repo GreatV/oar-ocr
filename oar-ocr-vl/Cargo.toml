@@ -29,11 +29,18 @@ cuda = [
     "oar-ocr-core/cuda",
 ]
 # When enabled, turns on Candle's Metal backend for GPU acceleration on Apple devices.
+# Cargo features cannot be target-scoped directly, so Linux `--all-features`
+# is intentionally not used for this crate; CI checks Metal on macOS instead.
 metal = [
     "candle-core/metal",
     "candle-nn/metal",
     "candle-transformers/metal",
 ]
+# When enabled, compiles the Hierarchical Speculative Decoding (HSD) module
+# and the per-model `generate_hsd*` paths. HSD relies on Candle's CUDA backend
+# (custom KV-cache gather, tree-attention forwards) and is not supported on
+# CPU/Metal, so it transitively requires the `cuda` feature.
+hsd = ["cuda"]
 
 [dependencies]
 oar-ocr-core.workspace = true
@@ -56,3 +63,4 @@ clap = { version = "4.5.42", features = ["derive"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 hayro = "0.6"
+oar-ocr = { path = "..", default-features = false }

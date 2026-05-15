@@ -5,6 +5,28 @@ use candle_nn::Module;
 use oar_ocr_core::core::OCRError;
 use rayon::prelude::*;
 
+/// Above this seq length the vision attention computes softmax in chunks
+/// along the query dim, instead of allocating the full `[seq, seq]` F32 buffer.
+/// Mirrors the memory profile of PyTorch's `F.scaled_dot_product_attention`,
+/// which is what `modeling_paddleocr_vl.py::PaddleOCRAttention` picks at
+/// runtime when `_attn_implementation == "sdpa"` (the transformers default for
+/// models with `_supports_sdpa = True`).
+///
+/// The threshold is set above PaddleOCR-VL-1.5's worst-case seq length so
+/// that v1.5 always takes the single-shot full-matrix path. Vision attention
+/// runs on the pre-merge SigLIP patch grid (patch_size² = 196), so v1.5 at
+/// max_pixels = 1_003_520 produces seq ≈ 5040 and v1 at max_pixels =
+/// 2_822_400 produces seq ≈ 14200. Going through chunked matmul changes
+/// cuBLAS' kernel tiling and shifts a few low-confidence argmax tokens;
+/// keeping v1.5 on its original path preserves byte-stable output. Above
+/// 8192 the chunked path kicks in — that's the regime where the full
+/// `[seq, seq]` F32 buffer would OOM (12+ GB on v1 / chart_01.jpg).
+const ATTN_FULL_SEQ_THRESHOLD: usize = 8192;
+/// Query chunk size when chunked attention kicks in. 512 keeps each chunk's
+/// F32 softmax scratch at `chunk * seq_k * num_heads * 4 bytes` — about
+/// 110 MB at seq_k = 3600 / heads = 16, well within VRAM headroom.
+const ATTN_CHUNK_SIZE: usize = 512;
+
 /// SigLIP-style 2D rotary embedding for vision encoder
 #[derive(Debug, Clone)]
 struct SigLIPRotaryEmbedding {
@@ -341,33 +363,82 @@ impl VisionAttention {
             )
         };
 
-        let attn_weights = q
-            .matmul(
-                &k.transpose(2, 3)
-                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision k t23", e))?
-                    .contiguous()
+        let kt = k
+            .transpose(2, 3)
+            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision k t23", e))?
+            .contiguous()
+            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision k t23 contiguous", e))?;
+
+        // Chunked attention over the query dim to mirror PyTorch's `sdpa_attention_forward`
+        // memory profile (no full [seq, seq] materialization). Each iteration only allocates
+        // O(chunk * seq_k) F32 scratch for the softmax, instead of O(seq_q * seq_k) for the
+        // full eager path. Numerically equivalent to the original code, and matches Python's
+        // PaddleOCRAttention which auto-selects sdpa at runtime (modeling_paddleocr_vl.py:1298).
+        let attn_output = if seq <= ATTN_FULL_SEQ_THRESHOLD {
+            // Original eager attention path — kept byte-identical to the pre-fix
+            // implementation so that small/medium seq inputs (incl. all v1.5
+            // inputs) produce the exact same output. Removing the final
+            // `.contiguous()` here changes cuBLAS' matmul-shape selection and
+            // shifts low-confidence argmax tokens, so we preserve it.
+            let scores = q
+                .matmul(&kt)
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision qk matmul", e))?
+                .affine(self.scale, 0.0)
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision scaling", e))?;
+            let probs =
+                candle_nn::ops::softmax_last_dim(&scores.to_dtype(DType::F32).map_err(|e| {
+                    candle_to_ocr_inference("PaddleOCR-VL", "vision attn cast f32", e)
+                })?)
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision attn softmax", e))?
+                .to_dtype(v.dtype())
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision attn cast back", e))?
+                .contiguous()
+                .map_err(|e| {
+                    candle_to_ocr_inference("PaddleOCR-VL", "vision attn contiguous", e)
+                })?;
+            probs
+                .matmul(&v)
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision av matmul", e))?
+        } else {
+            let mut chunks: Vec<Tensor> = Vec::with_capacity(seq.div_ceil(ATTN_CHUNK_SIZE));
+            let mut start = 0;
+            while start < seq {
+                let len = ATTN_CHUNK_SIZE.min(seq - start);
+                let q_chunk = q
+                    .narrow(2, start, len)
+                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision q narrow", e))?;
+                let scores = q_chunk
+                    .matmul(&kt)
                     .map_err(|e| {
-                        candle_to_ocr_inference("PaddleOCR-VL", "vision k t23 contiguous", e)
+                        candle_to_ocr_inference("PaddleOCR-VL", "vision qk matmul (chunk)", e)
+                    })?
+                    .affine(self.scale, 0.0)
+                    .map_err(|e| {
+                        candle_to_ocr_inference("PaddleOCR-VL", "vision scaling (chunk)", e)
+                    })?;
+                let probs = candle_nn::ops::softmax_last_dim(
+                    &scores.to_dtype(DType::F32).map_err(|e| {
+                        candle_to_ocr_inference("PaddleOCR-VL", "vision attn cast f32 (chunk)", e)
                     })?,
-            )
-            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision qk matmul", e))?
-            .affine(self.scale, 0.0)
-            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision scaling", e))?;
+                )
+                .map_err(|e| {
+                    candle_to_ocr_inference("PaddleOCR-VL", "vision attn softmax (chunk)", e)
+                })?
+                .to_dtype(v.dtype())
+                .map_err(|e| {
+                    candle_to_ocr_inference("PaddleOCR-VL", "vision attn cast back (chunk)", e)
+                })?;
+                let out_chunk = probs.matmul(&v).map_err(|e| {
+                    candle_to_ocr_inference("PaddleOCR-VL", "vision av matmul (chunk)", e)
+                })?;
+                chunks.push(out_chunk);
+                start += len;
+            }
+            Tensor::cat(&chunks, 2)
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision av concat", e))?
+        };
 
-        let attn_weights = candle_nn::ops::softmax_last_dim(
-            &attn_weights
-                .to_dtype(DType::F32)
-                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision attn cast f32", e))?,
-        )
-        .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision attn softmax", e))?
-        .to_dtype(v.dtype())
-        .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision attn cast back", e))?
-        .contiguous()
-        .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision attn contiguous", e))?;
-
-        let attn_output = attn_weights
-            .matmul(&v)
-            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision av matmul", e))?
+        let attn_output = attn_output
             .transpose(1, 2)
             .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision out transpose", e))?
             .reshape((b, seq, embed_dim))

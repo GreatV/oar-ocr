@@ -4,6 +4,7 @@
 //! The model is independent of any specific task and can be reused in different contexts.
 
 use crate::core::OCRError;
+use crate::core::config::{OrtExecutionProvider, OrtGraphOptimizationLevel, OrtSessionConfig};
 use crate::core::inference::{OrtInfer, TensorInput};
 use crate::processors::{UniMERNetPreprocessParams, UniMERNetPreprocessor};
 use image::RgbImage;
@@ -43,6 +44,9 @@ pub struct UniMERNetPostprocessConfig {
     pub sos_token_id: i64,
     /// End-of-sequence token id
     pub eos_token_id: i64,
+    /// Tokenizer vocabulary size. Non-negative IDs at or above this value are
+    /// treated as padding/sentinel values emitted by exported ONNX models.
+    pub vocab_size: i64,
 }
 
 impl Default for UniMERNetPostprocessConfig {
@@ -50,6 +54,7 @@ impl Default for UniMERNetPostprocessConfig {
         Self {
             sos_token_id: 0,
             eos_token_id: 2,
+            vocab_size: i64::MAX,
         }
     }
 }
@@ -190,6 +195,7 @@ impl UniMERNetModel {
                 .iter()
                 .copied()
                 .take_while(|&id| id != config.eos_token_id)
+                .take_while(|&id| id < 0 || id < config.vocab_size)
                 .filter(|&id| id >= 0 && id != config.sos_token_id)
                 .map(|id| id as u32)
                 .collect();
@@ -248,10 +254,12 @@ impl UniMERNetModelBuilder {
     /// Builds the UniMERNet model.
     pub fn build(self, model_path: &std::path::Path) -> Result<UniMERNetModel, OCRError> {
         // Create ONNX inference engine
-        let inference = if self.ort_config.is_some() {
+        let ort_config = self.ort_config.map(Self::configure_unimernet_ort_for_cuda);
+
+        let inference = if ort_config.is_some() {
             use crate::core::config::ModelInferenceConfig;
             let common_config = ModelInferenceConfig {
-                ort_session: self.ort_config,
+                ort_session: ort_config,
                 ..Default::default()
             };
             OrtInfer::from_config(&common_config, model_path, None)?
@@ -275,5 +283,123 @@ impl UniMERNetModelBuilder {
         }
 
         UniMERNetModel::new(inference, preprocess_config)
+    }
+
+    fn configure_unimernet_ort_for_cuda(mut config: OrtSessionConfig) -> OrtSessionConfig {
+        if !Self::uses_cuda(&config) {
+            return config;
+        }
+
+        config.optimization_level = Some(OrtGraphOptimizationLevel::Level1);
+        if config.enable_mem_pattern.is_none() {
+            config.enable_mem_pattern = Some(false);
+        }
+
+        let entries = config
+            .session_config_entries
+            .get_or_insert_with(Default::default);
+        let disabled_optimizers = entries
+            .entry("optimization.disable_specified_optimizers".to_string())
+            .or_default();
+        if !disabled_optimizers
+            .split(',')
+            .any(|name| name.trim() == "ConstantFolding")
+        {
+            if !disabled_optimizers.trim().is_empty() {
+                disabled_optimizers.push(',');
+            }
+            disabled_optimizers.push_str("ConstantFolding");
+        }
+
+        config
+    }
+
+    fn uses_cuda(config: &OrtSessionConfig) -> bool {
+        config
+            .execution_providers
+            .as_ref()
+            .is_some_and(|providers| {
+                providers
+                    .iter()
+                    .any(|provider| matches!(provider, OrtExecutionProvider::CUDA { .. }))
+            })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::arr2;
+
+    #[test]
+    fn filter_tokens_stops_at_vocab_sentinel() {
+        let token_ids = arr2(&[[0, 42, 49_999, 4_096_990_134i64, 77, 2]]);
+        let config = UniMERNetPostprocessConfig {
+            sos_token_id: 0,
+            eos_token_id: 2,
+            vocab_size: 50_000,
+        };
+
+        let filtered = UniMERNetModel::filter_tokens(&token_ids, &config);
+
+        assert_eq!(filtered, vec![vec![42, 49_999]]);
+    }
+
+    #[test]
+    fn filter_tokens_still_stops_at_eos() {
+        let token_ids = arr2(&[[0, 42, 2, 43]]);
+        let config = UniMERNetPostprocessConfig {
+            sos_token_id: 0,
+            eos_token_id: 2,
+            vocab_size: 50_000,
+        };
+
+        let filtered = UniMERNetModel::filter_tokens(&token_ids, &config);
+
+        assert_eq!(filtered, vec![vec![42]]);
+    }
+
+    #[test]
+    fn cuda_config_disables_constant_folding_for_unimernet() {
+        let config = OrtSessionConfig::new().with_execution_providers(vec![
+            OrtExecutionProvider::CUDA {
+                device_id: Some(0),
+                gpu_mem_limit: None,
+                arena_extend_strategy: None,
+                cudnn_conv_algo_search: None,
+                cudnn_conv_use_max_workspace: None,
+            },
+            OrtExecutionProvider::CPU,
+        ]);
+
+        let configured = UniMERNetModelBuilder::configure_unimernet_ort_for_cuda(config);
+
+        assert!(matches!(
+            configured.optimization_level,
+            Some(OrtGraphOptimizationLevel::Level1)
+        ));
+        assert_eq!(configured.enable_mem_pattern, Some(false));
+        assert_eq!(
+            configured
+                .session_config_entries
+                .as_ref()
+                .and_then(|entries| entries.get("optimization.disable_specified_optimizers"))
+                .map(String::as_str),
+            Some("ConstantFolding")
+        );
+    }
+
+    #[test]
+    fn cpu_config_keeps_unimernet_ort_config_unchanged() {
+        let config =
+            OrtSessionConfig::new().with_optimization_level(OrtGraphOptimizationLevel::All);
+
+        let configured = UniMERNetModelBuilder::configure_unimernet_ort_for_cuda(config);
+
+        assert!(matches!(
+            configured.optimization_level,
+            Some(OrtGraphOptimizationLevel::All)
+        ));
+        assert!(configured.session_config_entries.is_none());
     }
 }

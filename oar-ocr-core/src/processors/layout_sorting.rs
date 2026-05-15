@@ -933,3 +933,102 @@ fn calculate_projection_overlap_ratio(
         0.0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn elem(
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        element_type: LayoutElementType,
+    ) -> SortableElement {
+        SortableElement {
+            bbox: BoundingBox::from_coords(x1, y1, x2, y2),
+            element_type,
+            num_lines: Some(2),
+        }
+    }
+
+    fn sort(elements: Vec<SortableElement>) -> Vec<usize> {
+        sort_layout_enhanced(&elements, 400.0, 600.0)
+    }
+
+    #[test]
+    fn sort_layout_enhanced_empty_input_returns_empty_order() {
+        assert!(sort_layout_enhanced(&[], 400.0, 600.0).is_empty());
+    }
+
+    #[test]
+    fn sort_layout_enhanced_places_headers_first_and_footers_last() {
+        let elements = vec![
+            elem(20.0, 110.0, 380.0, 135.0, LayoutElementType::Text),
+            elem(20.0, 560.0, 380.0, 585.0, LayoutElementType::Footer),
+            elem(20.0, 25.0, 380.0, 45.0, LayoutElementType::Header),
+            elem(20.0, 5.0, 380.0, 20.0, LayoutElementType::Header),
+            elem(20.0, 145.0, 380.0, 170.0, LayoutElementType::Text),
+        ];
+
+        assert_eq!(sort(elements), vec![3, 2, 0, 4, 1]);
+    }
+
+    #[test]
+    fn sort_layout_enhanced_inserts_document_title_before_body_text() {
+        let elements = vec![
+            elem(20.0, 90.0, 380.0, 120.0, LayoutElementType::Text),
+            elem(20.0, 55.0, 380.0, 80.0, LayoutElementType::DocTitle),
+            elem(20.0, 130.0, 380.0, 160.0, LayoutElementType::Text),
+        ];
+
+        assert_eq!(sort(elements), vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn sort_layout_enhanced_orders_two_column_text_by_rows() {
+        let elements = vec![
+            elem(215.0, 120.0, 380.0, 150.0, LayoutElementType::Text),
+            elem(20.0, 40.0, 185.0, 70.0, LayoutElementType::Text),
+            elem(215.0, 40.0, 380.0, 70.0, LayoutElementType::Text),
+            elem(20.0, 120.0, 185.0, 150.0, LayoutElementType::Text),
+        ];
+
+        assert_eq!(sort(elements), vec![1, 2, 3, 0]);
+    }
+
+    #[test]
+    fn associate_child_blocks_keeps_near_vision_title_next_to_vision() {
+        let mut blocks = vec![
+            SortableBlock::new(
+                BoundingBox::from_coords(20.0, 20.0, 380.0, 45.0),
+                0,
+                LayoutElementType::Text,
+                Some(1),
+            ),
+            SortableBlock::new(
+                BoundingBox::from_coords(20.0, 90.0, 220.0, 190.0),
+                1,
+                LayoutElementType::Image,
+                Some(5),
+            ),
+            SortableBlock::new(
+                BoundingBox::from_coords(20.0, 192.0, 220.0, 210.0),
+                2,
+                LayoutElementType::FigureTitle,
+                Some(1),
+            ),
+            SortableBlock::new(
+                BoundingBox::from_coords(20.0, 230.0, 380.0, 255.0),
+                3,
+                LayoutElementType::Text,
+                Some(1),
+            ),
+        ];
+
+        associate_child_blocks(&mut blocks);
+
+        let order: Vec<usize> = blocks.iter().map(|b| b.original_index).collect();
+        assert_eq!(order, vec![0, 1, 2, 3]);
+    }
+}

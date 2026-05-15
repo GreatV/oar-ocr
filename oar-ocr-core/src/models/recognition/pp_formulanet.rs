@@ -4,7 +4,7 @@
 //! The model is independent of any specific task and can be reused in different contexts.
 
 use crate::core::OCRError;
-use crate::core::inference::{OrtInfer, TensorInput};
+use crate::core::inference::{OrtInfer, TensorInput, TensorOutput};
 use crate::processors::{FormulaPreprocessParams, FormulaPreprocessor};
 use image::RgbImage;
 use ndarray::{ArrayBase, Axis, Data, Ix2};
@@ -43,6 +43,9 @@ pub struct PPFormulaNetPostprocessConfig {
     pub sos_token_id: i64,
     /// End-of-sequence token id
     pub eos_token_id: i64,
+    /// Tokenizer vocabulary size. Non-negative IDs at or above this value are
+    /// treated as padding/sentinel values emitted by exported ONNX models.
+    pub vocab_size: i64,
 }
 
 impl Default for PPFormulaNetPostprocessConfig {
@@ -50,6 +53,7 @@ impl Default for PPFormulaNetPostprocessConfig {
         Self {
             sos_token_id: 0,
             eos_token_id: 2,
+            vocab_size: i64::MAX,
         }
     }
 }
@@ -129,19 +133,54 @@ impl PPFormulaNetModel {
                 source: Box::new(e),
             })?;
 
-        let output = outputs
-            .into_iter()
-            .next()
-            .ok_or_else(|| OCRError::InvalidInput {
-                message: "PP-FormulaNet: no output returned from inference".to_string(),
-            })?;
+        tracing::debug!(
+            "PP-FormulaNet declared output shapes: {:?}",
+            self.inference.output_shapes()
+        );
 
-        output
-            .1
+        // Some exported PP-FormulaNet ONNX models emit multiple tensors
+        // (e.g. token IDs + per-step scores). The token-ID tensor is the
+        // unique 2-D i64 output; pick it explicitly rather than trusting
+        // graph output order, which has bitten us before when exporters
+        // reordered metadata vs ids.
+        let i64_2d_count = outputs
+            .iter()
+            .filter(|(_, t)| matches!(t, TensorOutput::I64 { shape, .. } if shape.len() == 2))
+            .count();
+        if i64_2d_count != 1 {
+            // Defer the (name, dtype, shape) walk to the error path: on the
+            // happy path we don't pay for a `Vec` we'd immediately drop.
+            let candidates: Vec<(String, &'static str, Vec<i64>)> = outputs
+                .iter()
+                .map(|(name, t)| (name.clone(), t.dtype_name(), t.shape().to_vec()))
+                .collect();
+            return Err(OCRError::Inference {
+                model_name: "PP-FormulaNet".to_string(),
+                context: format!(
+                    "expected exactly one 2-D i64 output (token ids); found {} candidate(s) among outputs {:?}",
+                    i64_2d_count, candidates
+                ),
+                source: Box::new(OCRError::InvalidInput {
+                    message: "PP-FormulaNet: ambiguous or missing token-id output".to_string(),
+                }),
+            });
+        }
+        let (name, tensor) = outputs
+            .into_iter()
+            .find(|(_, t)| matches!(t, TensorOutput::I64 { shape, .. } if shape.len() == 2))
+            .expect("i64_2d_count == 1 checked above");
+        tracing::debug!(
+            "PP-FormulaNet selected output '{}' dtype={} runtime_shape={:?}",
+            name,
+            tensor.dtype_name(),
+            tensor.shape()
+        );
+
+        tensor
             .try_into_array2_i64()
             .map_err(|e| OCRError::Inference {
                 model_name: "PP-FormulaNet".to_string(),
-                context: "failed to convert output to 2D i64 array".to_string(),
+                context: format!("failed to convert output '{name}' to 2-D i64 array"),
                 source: Box::new(e),
             })
     }
@@ -190,6 +229,7 @@ impl PPFormulaNetModel {
                 .iter()
                 .copied()
                 .take_while(|&id| id != config.eos_token_id)
+                .take_while(|&id| id < 0 || id < config.vocab_size)
                 .filter(|&id| id >= 0 && id != config.sos_token_id)
                 .map(|id| id as u32)
                 .collect();
@@ -275,5 +315,39 @@ impl PPFormulaNetModelBuilder {
         }
 
         PPFormulaNetModel::new(inference, preprocess_config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::arr2;
+
+    #[test]
+    fn filter_tokens_stops_at_vocab_sentinel() {
+        let token_ids = arr2(&[[0, 42, 49_999, 4_096_990_134i64, 77, 2]]);
+        let config = PPFormulaNetPostprocessConfig {
+            sos_token_id: 0,
+            eos_token_id: 2,
+            vocab_size: 50_000,
+        };
+
+        let filtered = PPFormulaNetModel::filter_tokens(&token_ids, &config);
+
+        assert_eq!(filtered, vec![vec![42, 49_999]]);
+    }
+
+    #[test]
+    fn filter_tokens_still_stops_at_eos() {
+        let token_ids = arr2(&[[0, 42, 2, 43]]);
+        let config = PPFormulaNetPostprocessConfig {
+            sos_token_id: 0,
+            eos_token_id: 2,
+            vocab_size: 50_000,
+        };
+
+        let filtered = PPFormulaNetModel::filter_tokens(&token_ids, &config);
+
+        assert_eq!(filtered, vec![vec![42]]);
     }
 }

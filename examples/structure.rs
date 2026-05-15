@@ -334,6 +334,10 @@ struct Args {
     #[arg(long, default_value_t = 1536)]
     formula_max_length: usize,
 
+    /// Preferred formula recognition batch size
+    #[arg(long, default_value_t = 8)]
+    formula_batch_size: usize,
+
     /// Text detection score threshold (DB thresh, default: 0.3)
     #[arg(long, default_value = "0.3")]
     det_score_thresh: f32,
@@ -551,6 +555,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let formula_config = FormulaRecognitionConfig {
         score_threshold: args.formula_score_thresh,
         max_length: args.formula_max_length,
+        batch_size: args.formula_batch_size,
     };
 
     let text_det_config = TextDetectionConfig {

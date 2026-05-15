@@ -14,6 +14,7 @@ use crate::models::recognition::{
 };
 use crate::processors::normalize_latex;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use tokenizers::Tokenizer;
 
 /// Special token IDs extracted from a tokenizer.
@@ -107,12 +108,14 @@ impl FormulaModel {
         token_ids: &ndarray::Array2<i64>,
         sos_token_id: i64,
         eos_token_id: i64,
+        vocab_size: i64,
     ) -> Vec<Vec<u32>> {
         match self {
             FormulaModel::PPFormulaNet(_) => {
                 let config = PPFormulaNetPostprocessConfig {
                     sos_token_id,
                     eos_token_id,
+                    vocab_size,
                 };
                 PPFormulaNetModel::filter_tokens(token_ids, &config)
             }
@@ -120,6 +123,7 @@ impl FormulaModel {
                 let config = UniMERNetPostprocessConfig {
                     sos_token_id,
                     eos_token_id,
+                    vocab_size,
                 };
                 UniMERNetModel::filter_tokens(token_ids, &config)
             }
@@ -172,6 +176,7 @@ impl ModelAdapter for FormulaRecognitionAdapter {
         let batch_len = input.images.len();
 
         // Preprocess and infer
+        let t_preprocess = Instant::now();
         let batch_tensor = self
             .model
             .preprocess(input.into_owned_images())
@@ -182,6 +187,9 @@ impl ModelAdapter for FormulaRecognitionAdapter {
                     e,
                 )
             })?;
+        let preprocess_dur = t_preprocess.elapsed();
+        let batch_shape = batch_tensor.shape().to_vec();
+        let t_infer = Instant::now();
         let token_ids = self.model.infer(&batch_tensor).map_err(|e| {
             OCRError::adapter_execution_error(
                 "FormulaRecognitionAdapter",
@@ -189,12 +197,15 @@ impl ModelAdapter for FormulaRecognitionAdapter {
                 e,
             )
         })?;
+        let infer_dur = t_infer.elapsed();
 
         // Filter tokens and decode
+        let t_decode = Instant::now();
         let filtered_tokens = self.model.filter_tokens(
             &token_ids,
             self.model_config.sos_token_id,
             self.model_config.eos_token_id,
+            self.tokenizer.get_vocab_size(true) as i64,
         );
 
         let mut formulas = Vec::new();
@@ -221,11 +232,14 @@ impl ModelAdapter for FormulaRecognitionAdapter {
             {
                 tracing::warn!(
                     "Token id(s) exceed tokenizer vocab (max_id={} >= vocab_size={}). \
-                     This usually means model/tokenizer mismatch. If you're using external models, \
-                     please supply the matching tokenizer via --tokenizer-path.",
+                     Skipping this formula to avoid emitting corrupt LaTeX. \
+                     This usually means model/tokenizer mismatch or an unsupported model output type.",
                     max_id,
                     vocab_size
                 );
+                formulas.push(String::new());
+                scores.push(None);
+                continue;
             }
 
             let latex = match self.tokenizer.decode(tokens_to_decode, true) {
@@ -265,6 +279,28 @@ impl ModelAdapter for FormulaRecognitionAdapter {
             formulas.push(latex);
             scores.push(None);
         }
+        let decode_dur = t_decode.elapsed();
+        // Per-batch diagnostics are noisy under bulk structure parsing; emit at
+        // debug so production logs stay clean. Enable with
+        // `RUST_LOG=oar_ocr_core::domain::adapters::formula_recognition_adapter=debug`.
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let token_lens: Vec<usize> = filtered_tokens.iter().map(Vec::len).collect();
+            let raw_token_prefixes: Vec<Vec<i64>> = token_ids
+                .axis_iter(ndarray::Axis(0))
+                .map(|row| row.iter().copied().take(12).collect())
+                .collect();
+            tracing::debug!(
+                "formula adapter: batch={}, tensor_shape={:?}, output_shape={:?}, token_lens={:?}, raw_prefixes={:?}, preprocess={:.1} ms, infer={:.1} ms, decode={:.1} ms",
+                batch_len,
+                batch_shape,
+                token_ids.shape(),
+                token_lens,
+                raw_token_prefixes,
+                preprocess_dur.as_secs_f64() * 1000.0,
+                infer_dur.as_secs_f64() * 1000.0,
+                decode_dur.as_secs_f64() * 1000.0
+            );
+        }
 
         Ok(FormulaRecognitionOutput { formulas, scores })
     }
@@ -274,7 +310,7 @@ impl ModelAdapter for FormulaRecognitionAdapter {
     }
 
     fn recommended_batch_size(&self) -> usize {
-        8
+        self.config.batch_size
     }
 }
 
@@ -345,6 +381,12 @@ impl_adapter_builder! {
         /// Sets the maximum sequence length.
         pub fn max_length(mut self, length: usize) -> Self {
             self.config.task_config.max_length = length;
+            self
+        }
+
+        /// Sets the preferred formula recognition batch size.
+        pub fn batch_size(mut self, size: usize) -> Self {
+            self.config.task_config.batch_size = size;
             self
         }
 
@@ -445,6 +487,12 @@ impl_adapter_builder! {
             self
         }
 
+        /// Sets the preferred formula recognition batch size.
+        pub fn batch_size(mut self, size: usize) -> Self {
+            self.config.task_config.batch_size = size;
+            self
+        }
+
         /// Sets the task configuration (alias for with_config).
         pub fn task_config(mut self, config: FormulaRecognitionConfig) -> Self {
             self.config = self.config.with_task_config(config);
@@ -525,11 +573,13 @@ mod tests {
         let config = FormulaRecognitionConfig {
             score_threshold: 0.8,
             max_length: 512,
+            batch_size: 4,
         };
 
         let builder = PPFormulaNetAdapterBuilder::new().with_config(config);
         assert_eq!(builder.config.task_config().score_threshold, 0.8);
         assert_eq!(builder.config.task_config().max_length, 512);
+        assert_eq!(builder.config.task_config().batch_size, 4);
     }
 
     #[test]
@@ -537,10 +587,12 @@ mod tests {
         let builder = PPFormulaNetAdapterBuilder::new()
             .score_threshold(0.9)
             .max_length(1024)
+            .batch_size(2)
             .target_size(640, 640);
 
         assert_eq!(builder.config.task_config().score_threshold, 0.9);
         assert_eq!(builder.config.task_config().max_length, 1024);
+        assert_eq!(builder.config.task_config().batch_size, 2);
         assert_eq!(builder.target_size, Some((640, 640)));
     }
 
@@ -551,6 +603,7 @@ mod tests {
         // Default config values
         assert_eq!(builder.config.task_config().score_threshold, 0.0);
         assert_eq!(builder.config.task_config().max_length, 1536);
+        assert_eq!(builder.config.task_config().batch_size, 8);
     }
 
     #[test]
@@ -564,11 +617,13 @@ mod tests {
         let config = FormulaRecognitionConfig {
             score_threshold: 0.7,
             max_length: 2048,
+            batch_size: 4,
         };
 
         let builder = UniMERNetAdapterBuilder::new().with_config(config);
         assert_eq!(builder.config.task_config().score_threshold, 0.7);
         assert_eq!(builder.config.task_config().max_length, 2048);
+        assert_eq!(builder.config.task_config().batch_size, 4);
     }
 
     #[test]
@@ -576,10 +631,12 @@ mod tests {
         let builder = UniMERNetAdapterBuilder::new()
             .score_threshold(0.85)
             .max_length(768)
+            .batch_size(2)
             .target_size(512, 512);
 
         assert_eq!(builder.config.task_config().score_threshold, 0.85);
         assert_eq!(builder.config.task_config().max_length, 768);
+        assert_eq!(builder.config.task_config().batch_size, 2);
         assert_eq!(builder.target_size, Some((512, 512)));
     }
 
@@ -590,6 +647,7 @@ mod tests {
         // Default config values
         assert_eq!(builder.config.task_config().score_threshold, 0.0);
         assert_eq!(builder.config.task_config().max_length, 1536);
+        assert_eq!(builder.config.task_config().batch_size, 8);
     }
 
     #[test]

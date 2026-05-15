@@ -2,9 +2,13 @@ use super::config::PaddleOcrVlConfig;
 use crate::attention::{
     RotaryEmbedding, repeat_kv, scaled_dot_product_attention, select_rope_sections,
 };
+#[cfg(feature = "hsd")]
+use crate::hsd::TrimmableKvCache;
+#[cfg(not(feature = "hsd"))]
+use crate::kv_trim::TrimmableKvCache;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 use candle_core::Tensor;
-use candle_nn::{Module, kv_cache::KvCache};
+use candle_nn::Module;
 use oar_ocr_core::core::OCRError;
 use std::cell::RefCell;
 
@@ -134,7 +138,7 @@ struct Ernie4_5Attention {
     head_dim: usize,
     scaling: f64,
     mrope_section: Vec<usize>,
-    kv_cache: RefCell<KvCache>,
+    kv_cache: RefCell<TrimmableKvCache>,
 }
 
 impl Ernie4_5Attention {
@@ -186,7 +190,8 @@ impl Ernie4_5Attention {
         // Conservative estimate: vision tokens + max_generation_tokens
         // Typical: ~1000-2000 vision tokens + 4096 generation tokens = ~6000-8000 total
         // Use 16384 to handle worst case without reallocation
-        let kv_cache = KvCache::new(2, 16384);
+        // Trim/gather-capable KV cache (HSD verification path).
+        let kv_cache = TrimmableKvCache::new(2, 16384);
 
         Ok(Self {
             q_proj,
@@ -296,6 +301,19 @@ impl Ernie4_5Attention {
     fn clear_kv_cache(&self) {
         self.kv_cache.borrow_mut().reset();
     }
+
+    #[cfg(feature = "hsd")]
+    fn current_kv_len(&self) -> usize {
+        self.kv_cache.borrow().current_seq_len()
+    }
+
+    #[cfg(feature = "hsd")]
+    fn keep_kv_indices(&self, indices: &[u32]) -> Result<(), OCRError> {
+        self.kv_cache
+            .borrow_mut()
+            .keep_indices(indices)
+            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "keep_kv_indices", e))
+    }
 }
 
 #[derive(Debug)]
@@ -359,6 +377,11 @@ impl Ernie4_5DecoderLayer {
 
     fn clear_kv_cache(&self) {
         self.self_attn.clear_kv_cache();
+    }
+
+    #[cfg(feature = "hsd")]
+    fn keep_kv_indices(&self, indices: &[u32]) -> Result<(), OCRError> {
+        self.self_attn.keep_kv_indices(indices)
     }
 }
 
@@ -424,5 +447,25 @@ impl Ernie4_5Model {
         for layer in &self.layers {
             layer.clear_kv_cache();
         }
+    }
+
+    /// Current sequence length held in the KV cache (read from layer 0; all
+    /// layers stay in sync).
+    #[cfg(feature = "hsd")]
+    pub fn current_kv_len(&self) -> usize {
+        self.layers
+            .first()
+            .map(|l| l.self_attn.current_kv_len())
+            .unwrap_or(0)
+    }
+
+    /// Gather every layer's KV cache to keep only the supplied positions.
+    /// Used by HSD after tree-attention verification.
+    #[cfg(feature = "hsd")]
+    pub fn keep_kv_indices(&self, indices: &[u32]) -> Result<(), OCRError> {
+        for layer in &self.layers {
+            layer.keep_kv_indices(indices)?;
+        }
+        Ok(())
     }
 }

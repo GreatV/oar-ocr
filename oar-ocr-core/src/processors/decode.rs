@@ -19,8 +19,7 @@ pub type PositionedDecodeResult = (
 );
 
 static ALPHANUMERIC_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"[a-zA-Z0-9 :*./%+-]")
-        .unwrap_or_else(|e| panic!("Failed to compile regex pattern: {e}"))
+    Regex::new(r"[a-zA-Z0-9 :*./%+-]").expect("static regex: alphanumeric decoder pattern")
 });
 
 /// A base decoder for text recognition that handles character mapping and basic decoding operations.

@@ -33,6 +33,34 @@ jobs:
           cargo clippy --all-targets --all -- -D warnings
           cargo clippy --all-targets -p oar-ocr-vl -- -D warnings
 
+      - name: Check rustdoc warnings
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+
+  feature-matrix:
+    name: Feature matrix (${{ matrix.package }})
+    needs: preflight
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: oar-ocr
+          - package: oar-ocr-core
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check all feature combinations
+        run: cargo check -p ${{ matrix.package }} --all-features
+
   test:
     name: Test (${{ matrix.os }})
     needs: preflight

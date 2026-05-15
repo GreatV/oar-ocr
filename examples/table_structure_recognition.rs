@@ -40,7 +40,7 @@
 //! ```bash
 //! cargo run --example table_structure_recognition -- \
 //!     --model-path path/to/model.onnx \
-//!     --dict-path /path/to/table_structure_dict_ch.txt \
+//!     --dict-path path/to/table_structure_dict_ch.txt \
 //!     --image-path path/to/image.jpg
 //! ```
 //!
@@ -49,7 +49,7 @@
 //! ```bash
 //! cargo run --example table_structure_recognition -- \
 //!     --model-path path/to/model.onnx \
-//!     --dict-path /path/to/table_structure_dict.txt \
+//!     --dict-path path/to/table_structure_dict.txt \
 //!     --model-name SLANet_plus \
 //!     --image-path path/to/image.jpg
 //! ```

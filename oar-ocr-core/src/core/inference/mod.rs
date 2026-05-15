@@ -84,6 +84,30 @@ impl OrtInfer {
             _ => None,
         }
     }
+
+    /// Returns the declared output names and tensor shapes from the first session.
+    ///
+    /// This is intended for model adapters that need to choose among multiple
+    /// ONNX outputs before interpreting tensors semantically.
+    pub fn output_shapes(&self) -> Vec<(String, Vec<i64>)> {
+        let Some(session_mutex) = self.sessions.first() else {
+            return Vec::new();
+        };
+        let Ok(session_guard) = session_mutex.lock() else {
+            return Vec::new();
+        };
+        session_guard
+            .outputs()
+            .iter()
+            .filter_map(|output| match output.dtype() {
+                ValueType::Tensor { shape, .. } => Some((
+                    output.name().to_string(),
+                    shape.iter().copied().collect::<Vec<_>>(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

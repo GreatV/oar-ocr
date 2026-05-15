@@ -29,6 +29,14 @@ impl TensorOutput {
         }
     }
 
+    /// Returns a compact name for the tensor element type.
+    pub fn dtype_name(&self) -> &'static str {
+        match self {
+            TensorOutput::F32 { .. } => "f32",
+            TensorOutput::I64 { .. } => "i64",
+        }
+    }
+
     /// Returns the number of dimensions.
     pub fn ndim(&self) -> usize {
         self.shape().len()

@@ -34,19 +34,25 @@ enum TableStructureModelFamily {
 }
 
 impl TableStructureModelFamily {
+    /// `Wired` carries the 512×512 default that matches SLANeXt ONNX exports;
+    /// `Wireless` carries the 488×488 default that matches PaddleX's
+    /// `ResizeTableImage(max_len=488)+PaddingTableImage(488,488)` pipeline used
+    /// by both SLANet and SLANet_plus.
     fn from_model_name(model_name: &str) -> Option<Self> {
         match model_name {
-            "SLANet" | "SLANeXt_wired" | "SLANeXt_wireless" => Some(Self::Wired),
-            "SLANet_plus" => Some(Self::Wireless),
+            "SLANeXt_wired" | "SLANeXt_wireless" => Some(Self::Wired),
+            "SLANet" | "SLANet_plus" => Some(Self::Wireless),
             _ => None,
         }
     }
 
     fn detect_from_path(path: &Path) -> Option<Self> {
         let stem = path.file_stem()?.to_str()?.to_ascii_lowercase();
-        if stem.contains("slanet_plus") {
+        if stem.contains("slanext") {
+            Some(Self::Wired)
+        } else if stem.contains("slanet_plus") || stem.contains("slanet") {
             Some(Self::Wireless)
-        } else if stem.contains("wired") || stem.contains("slanet") || stem.contains("slanext") {
+        } else if stem.contains("wired") {
             Some(Self::Wired)
         } else {
             None

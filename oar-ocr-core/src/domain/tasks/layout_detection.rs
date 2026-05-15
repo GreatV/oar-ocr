@@ -45,7 +45,9 @@ impl Default for UnclipRatio {
 /// Configuration for layout detection task.
 #[derive(Debug, Clone, Serialize, Deserialize, ConfigValidator)]
 pub struct LayoutDetectionConfig {
-    /// Default score threshold for detection (default: 0.5)
+    /// Default score threshold for detection (default: 0.5, matches PaddleX's
+    /// `draw_threshold: 0.5` post-NMS visibility threshold from the published
+    /// `inference.yml` for the PP-DocLayout / PicoDet layout families).
     #[validate(range(min = 0.0, max = 1.0))]
     pub score_threshold: f32,
     /// Maximum number of layout elements (default: 100)
@@ -128,8 +130,8 @@ impl LayoutDetectionConfig {
 
     /// Creates a config with PP-DocLayoutV2 default thresholds and merge modes.
     ///
-    /// These defaults are aligned with OpenOCR/OpenDoc's pipeline config:
-    /// `OpenOCR/configs/rec/unirec/opendoc_pipeline.yml`.
+    /// These defaults follow the per-class thresholds and merge-mode settings
+    /// used by upstream PP-DocLayoutV2 deployments.
     ///
     /// Notes:
     /// - The postprocessor applies `score_threshold` before per-class thresholds, so we set it
