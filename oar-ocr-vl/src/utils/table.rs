@@ -149,20 +149,26 @@ static TR_OPEN_RE: Lazy<Regex> =
 static CELL_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?is)<t[dh]([^>]*)>(.*?)</t[dh]>").expect("static regex: <td|th>...</td|th>")
 });
-static SPAN_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"(?i)(\d+)"#).expect("static regex: span integer"));
 static STRIP_TAG_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"<[^>]*>").expect("static regex: html tag stripper"));
+// `colspan` / `rowspan` attribute scanners. The leading `(?:^|\s)` anchors
+// the match so substrings like `data-colspan=` or `class="mycolspan"` don't
+// trip the parser (mis-extracting a span from an unrelated attribute).
+static COLSPAN_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)(?:^|\s)colspan\s*=\s*"?(\d+)"?"#).expect("static regex: colspan attr")
+});
+static ROWSPAN_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)(?:^|\s)rowspan\s*=\s*"?(\d+)"?"#).expect("static regex: rowspan attr")
+});
 
 fn extract_span(attrs: &str, name: &str) -> usize {
-    let lower_attrs = attrs.to_ascii_lowercase();
-    let needle = format!("{}=", name);
-    let Some(start) = lower_attrs.find(&needle) else {
-        return 1;
+    let re: &Regex = match name {
+        "colspan" => &COLSPAN_RE,
+        "rowspan" => &ROWSPAN_RE,
+        _ => return 1,
     };
-    let tail = &attrs[start + needle.len()..];
-    SPAN_RE
-        .find(tail)
+    re.captures(attrs)
+        .and_then(|caps| caps.get(1))
         .and_then(|m| m.as_str().parse::<usize>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(1)
@@ -677,6 +683,20 @@ mod tests {
         let html = "<TABLE><TR><TD>a</TD><TD>b</TD></TR></TABLE>";
         let otsl = convert_html_to_otsl(html).expect("conversion");
         assert_eq!(otsl, "<fcel>a<fcel>b<nl>");
+    }
+
+    #[test]
+    fn extract_span_ignores_substring_attribute_matches() {
+        // `data-colspan=` / `xrowspan=` are unrelated attributes that happen
+        // to end with our needle. The scanner must not pick numbers out of
+        // them — a plain `<td>` should still yield colspan=1, rowspan=1.
+        assert_eq!(extract_span(r#" data-colspan="7""#, "colspan"), 1);
+        assert_eq!(extract_span(r#" xrowspan="9""#, "rowspan"), 1);
+        assert_eq!(extract_span(r#" class="mycolspan""#, "colspan"), 1);
+        // Genuine match still works, including unquoted and mixed-case forms.
+        assert_eq!(extract_span(r#" colspan="3""#, "colspan"), 3);
+        assert_eq!(extract_span(" COLSPAN=4", "colspan"), 4);
+        assert_eq!(extract_span(r#" class="data" rowspan="2""#, "rowspan"), 2);
     }
 
     #[test]

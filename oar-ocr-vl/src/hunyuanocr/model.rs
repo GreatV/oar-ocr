@@ -1091,7 +1091,6 @@ impl HunyuanOcr {
             .squeeze(0)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "squeeze logits", e))
     }
-
 }
 
 #[cfg(feature = "hsd")]
