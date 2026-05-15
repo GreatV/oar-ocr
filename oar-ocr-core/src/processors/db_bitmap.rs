@@ -1,6 +1,10 @@
 use crate::processors::geometry::{BoundingBox, MinAreaRect, Point};
 use crate::processors::types::ScoreMode;
-use clipper2::{EndType, JoinType, Path as ClipperPath};
+use clipper2_rust::{
+    clipper::inflate_paths_d,
+    core::{PathD, PathsD, PointD, area},
+    offset::{EndType, JoinType},
+};
 use image::GrayImage;
 use imageproc::contours::{Contour, find_contours};
 use std::cmp::Ordering;
@@ -284,29 +288,30 @@ impl DBPostProcess {
             return bbox.clone();
         }
 
-        let clipper_path: ClipperPath = bbox
+        let clipper_path: PathD = bbox
             .points
             .iter()
-            .map(|point| (point.x as f64, point.y as f64))
-            .collect::<Vec<_>>()
-            .into();
+            .map(|point| PointD {
+                x: point.x as f64,
+                y: point.y as f64,
+            })
+            .collect();
 
         if clipper_path.len() < 3 {
             return BoundingBox::new(Vec::new());
         }
 
-        let area = clipper_path.signed_area().abs();
-        if area <= f64::EPSILON {
+        let polygon_area = area(&clipper_path).abs();
+        if polygon_area <= f64::EPSILON {
             return BoundingBox::new(Vec::new());
         }
 
-        let coords: Vec<(f64, f64)> = clipper_path.iter().map(|p| (p.x(), p.y())).collect();
         let mut perimeter = 0.0f64;
-        for i in 0..coords.len() {
-            let (x1, y1) = coords[i];
-            let (x2, y2) = coords[(i + 1) % coords.len()];
-            let dx = x2 - x1;
-            let dy = y2 - y1;
+        for i in 0..clipper_path.len() {
+            let p1 = &clipper_path[i];
+            let p2 = &clipper_path[(i + 1) % clipper_path.len()];
+            let dx = p2.x - p1.x;
+            let dy = p2.y - p1.y;
             perimeter += (dx * dx + dy * dy).sqrt();
         }
 
@@ -314,12 +319,24 @@ impl DBPostProcess {
             return BoundingBox::new(Vec::new());
         }
 
-        let delta = area * unclip_ratio as f64 / perimeter;
+        let delta = polygon_area * unclip_ratio as f64 / perimeter;
         if delta.abs() <= f64::EPSILON {
             return BoundingBox::new(Vec::new());
         }
 
-        let offset_paths = clipper_path.inflate(delta, JoinType::Round, EndType::Polygon, 2.0);
+        // `precision = 2` and `arc_tolerance = 0.0` match Clipper2's PathsD
+        // defaults: two decimal places of internal fixed-point precision
+        // (the C++ default) and an arc-tolerance derived from `delta`.
+        let paths: PathsD = vec![clipper_path];
+        let offset_paths = inflate_paths_d(
+            &paths,
+            delta,
+            JoinType::Round,
+            EndType::Polygon,
+            2.0,
+            2,
+            0.0,
+        );
 
         if offset_paths.len() != 1 {
             return BoundingBox::new(Vec::new());
@@ -330,7 +347,7 @@ impl DBPostProcess {
 
         let mut points: Vec<Point> = path
             .iter()
-            .map(|pt| Point::new(pt.x() as f32, pt.y() as f32))
+            .map(|pt| Point::new(pt.x as f32, pt.y as f32))
             .collect();
 
         // Remove duplicate closing point if present
