@@ -291,22 +291,16 @@ impl HunyuanOcr {
         // 1. Preprocess all images and build prompts
         let mut all_input_ids: Vec<Vec<u32>> = Vec::with_capacity(batch_size);
         let mut all_image_inputs: Vec<HunyuanOcrImageInputs> = Vec::with_capacity(batch_size);
-        let dump_dir = if batch_size == 1 {
-            std::env::var("OAROCR_DUMP_DIR").ok()
-        } else {
-            None
-        };
 
         for (image, instruction) in images.iter().zip(instructions.iter()) {
             let instruction = instruction.as_ref();
-            let mut image_inputs = preprocess_image(
+            let image_inputs = preprocess_image(
                 image,
                 &self.image_cfg,
                 &self.cfg.vision_config,
                 &self.device,
                 self.dtype,
             )?;
-            self.maybe_override_pixel_values(&mut image_inputs)?;
 
             let prompt = build_prompt(instruction);
             let enc = self
@@ -318,18 +312,6 @@ impl HunyuanOcr {
 
             let mut input_ids = enc.get_ids().to_vec();
             expand_image_tokens_in_place(&mut input_ids, &self.cfg, &image_inputs)?;
-            if let Some(d) = &dump_dir {
-                let _ = std::fs::create_dir_all(d);
-                let seq_len = input_ids.len();
-                let _ = image_inputs
-                    .pixel_values
-                    .save_safetensors("t", format!("{d}/pixel_values.safetensors"));
-                if let Ok(t) = Tensor::new(input_ids.clone(), &self.device)
-                    .and_then(|x| x.reshape((1, seq_len)))
-                {
-                    let _ = t.save_safetensors("t", format!("{d}/input_ids.safetensors"));
-                }
-            }
 
             all_input_ids.push(input_ids);
             all_image_inputs.push(image_inputs);
@@ -354,9 +336,6 @@ impl HunyuanOcr {
 
             // Get vision features
             let (image_embeds, merged_hw) = self.vision.forward(&image_inputs.pixel_values)?;
-            if let Some(d) = &dump_dir {
-                let _ = image_embeds.save_safetensors("t", format!("{d}/vit_out.safetensors"));
-            }
             if merged_hw
                 != (
                     image_inputs.grid_thw_merged.1,
@@ -449,10 +428,6 @@ impl HunyuanOcr {
         let pos_refs: Vec<&Tensor> = batch_position_ids.iter().collect();
         let position_ids = Tensor::cat(&pos_refs, 1)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "stack pos", e))?;
-        if let Some(d) = &dump_dir {
-            let _ = inputs_embeds.save_safetensors("t", format!("{d}/inputs_embeds.safetensors"));
-            let _ = position_ids.save_safetensors("t", format!("{d}/position_ids.safetensors"));
-        }
 
         // 4. Create attention mask
         let causal = create_causal_mask(max_seq_len, max_seq_len, self.dtype, &self.device)
@@ -475,11 +450,6 @@ impl HunyuanOcr {
                 .i((i, max_seq_len - 1, ..))
                 .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "get last hidden", e))?;
             let logits = self.logits_from_hidden(&last)?;
-            if i == 0
-                && let Some(d) = &dump_dir
-            {
-                let _ = logits.save_safetensors("t", format!("{d}/first_token_logits.safetensors"));
-            }
             logits_list.push(logits);
         }
 
@@ -993,14 +963,13 @@ impl HunyuanOcr {
     #[cfg(feature = "hsd")]
     fn hsd_prefill_single(&self, image: &RgbImage, instruction: &str) -> Result<Tensor, OCRError> {
         // 1. Preprocess.
-        let mut image_inputs = preprocess_image(
+        let image_inputs = preprocess_image(
             image,
             &self.image_cfg,
             &self.cfg.vision_config,
             &self.device,
             self.dtype,
         )?;
-        self.maybe_override_pixel_values(&mut image_inputs)?;
         let prompt = build_prompt(instruction);
         let enc = self
             .tokenizer
@@ -1012,25 +981,8 @@ impl HunyuanOcr {
         expand_image_tokens_in_place(&mut input_ids, &self.cfg, &image_inputs)?;
         let seq_len = input_ids.len();
 
-        let dump_dir = std::env::var("OAROCR_DUMP_DIR").ok();
-        if let Some(d) = &dump_dir {
-            let _ = std::fs::create_dir_all(d);
-            let _ = image_inputs
-                .pixel_values
-                .save_safetensors("t", format!("{d}/pixel_values.safetensors"));
-            // Save input_ids as a U32 tensor.
-            if let Ok(t) =
-                Tensor::new(input_ids.clone(), &self.device).and_then(|x| x.reshape((1, seq_len)))
-            {
-                let _ = t.save_safetensors("t", format!("{d}/input_ids.safetensors"));
-            }
-        }
-
         // 2. Vision features.
         let (image_embeds, merged_hw) = self.vision.forward(&image_inputs.pixel_values)?;
-        if let Some(d) = &dump_dir {
-            let _ = image_embeds.save_safetensors("t", format!("{d}/vit_out.safetensors"));
-        }
         if merged_hw
             != (
                 image_inputs.grid_thw_merged.1,
@@ -1098,11 +1050,6 @@ impl HunyuanOcr {
         let causal = create_causal_mask(seq_len, seq_len, self.dtype, &self.device)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "create causal", e))?;
 
-        if let Some(d) = &dump_dir {
-            let _ = inputs_embeds.save_safetensors("t", format!("{d}/inputs_embeds.safetensors"));
-            let _ = pos_ids.save_safetensors("t", format!("{d}/position_ids.safetensors"));
-        }
-
         // 5. Prefill.
         self.llm.clear_kv_cache();
         let hidden = self.llm.forward(&inputs_embeds, &pos_ids, Some(&causal))?;
@@ -1112,9 +1059,6 @@ impl HunyuanOcr {
             .i((0, seq_len - 1, ..))
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "get last hidden", e))?;
         let logits = self.logits_from_hidden(&last)?; // (vocab,)
-        if let Some(d) = &dump_dir {
-            let _ = logits.save_safetensors("t", format!("{d}/first_token_logits.safetensors"));
-        }
         let lp = cnn_ops::log_softmax(
             &logits
                 .to_dtype(DType::F32)
@@ -1148,40 +1092,6 @@ impl HunyuanOcr {
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "squeeze logits", e))
     }
 
-    fn maybe_override_pixel_values(
-        &self,
-        image_inputs: &mut HunyuanOcrImageInputs,
-    ) -> Result<(), OCRError> {
-        // Debug-only alignment hook: lets us feed processor dumps from the
-        // Python upstream into the Rust vision stack without changing the
-        // normal preprocessor path.
-        let Some(path) = std::env::var_os("OAROCR_PIXEL_VALUES_FROM") else {
-            return Ok(());
-        };
-        let path = PathBuf::from(path);
-        let mut tensors = candle_core::safetensors::load(&path, &self.device)
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "load pixel_values override", e))?;
-        let tensor = tensors.remove("t").ok_or_else(|| OCRError::InvalidInput {
-            message: format!(
-                "HunyuanOCR: pixel_values override {} is missing tensor named 't'",
-                path.display()
-            ),
-        })?;
-        let expected = image_inputs.pixel_values.shape().clone();
-        if tensor.shape() != &expected {
-            return Err(OCRError::InvalidInput {
-                message: format!(
-                    "HunyuanOCR: pixel_values override shape {:?} does not match preprocessed shape {:?}",
-                    tensor.shape(),
-                    expected
-                ),
-            });
-        }
-        image_inputs.pixel_values = tensor
-            .to_dtype(self.dtype)
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "cast pixel_values override", e))?;
-        Ok(())
-    }
 }
 
 #[cfg(feature = "hsd")]

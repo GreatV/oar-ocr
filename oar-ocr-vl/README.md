@@ -51,7 +51,7 @@ A training-free CUDA acceleration scheme for the VLMs listed above. A cheap pipe
 cargo add oar-ocr-vl --features hsd,download-binaries
 ```
 
-See [`docs/hsd.md`](../docs/hsd.md) at the workspace root for the algorithm overview, `DsvConfig` / `HsdConfig` knobs, supported backbones, environment variables (`OAROCR_HSD_*`), and Average-Acceptance-Length (AAL) guidance. End-to-end runnable examples live under `examples/hsd_*.rs`.
+See [`docs/hsd.md`](../docs/hsd.md) at the workspace root for the algorithm overview, `DsvConfig` / `HsdConfig` knobs, supported backbones, and Average-Acceptance-Length (AAL) guidance. End-to-end runnable examples live under `examples/hsd_*.rs`.
 
 ## Usage
 

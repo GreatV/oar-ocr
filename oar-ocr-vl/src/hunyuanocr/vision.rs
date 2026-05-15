@@ -3,7 +3,13 @@ use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::{Conv2d, Conv2dConfig, LayerNorm, LayerNormConfig, Linear, Module};
 use oar_ocr_core::core::OCRError;
-use std::collections::BTreeSet;
+
+/// Late vit layers are the cross-implementation drift hotspot: BF16 Q·K
+/// accumulation drift redirects attention "sink" positions enough to swap the
+/// dominant attention head by layer 26 (cosine to upstream drops from
+/// ~0.999 at layer 11 to ~0.95). Running attention in F32 from this layer
+/// onwards is the empirically stable compromise. See `VisionAttention::forward`.
+const VIT_LATE_F32_THRESHOLD: usize = 20;
 
 #[derive(Debug, Clone)]
 struct VisionEmbeddings {
@@ -177,11 +183,9 @@ struct VisionAttention {
     num_heads: usize,
     head_dim: usize,
     scaling: f64,
-    /// Layer index. Used to gate the F32 attention path on late vit layers
-    /// where BF16 Q·K accumulation drift causes attention "sink" positions
-    /// to diverge from upstream (cross-implementation cosine drops from
-    /// ~0.999 at layer 11 to ~0.95 at layer 26 with BF16 attention).
-    layer_idx: usize,
+    /// Precomputed `layer_idx >= VIT_LATE_F32_THRESHOLD` — true when this
+    /// layer's attention runs in F32 (see [`VIT_LATE_F32_THRESHOLD`]).
+    use_f32: bool,
 }
 
 impl VisionAttention {
@@ -216,7 +220,7 @@ impl VisionAttention {
             num_heads: cfg.num_attention_heads,
             head_dim,
             scaling: (head_dim as f64).powf(-0.5),
-            layer_idx,
+            use_f32: layer_idx >= VIT_LATE_F32_THRESHOLD,
         })
     }
 
@@ -241,25 +245,6 @@ impl VisionAttention {
             .v_proj
             .forward(hidden_states)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "vit attn v_proj", e))?;
-
-        let debug_dir = std::env::var("OAROCR_DUMP_DIR").ok();
-        let debug_layers = parse_layer_set_from_env("OAROCR_VIT_DEBUG_LAYERS", 0, None);
-        if debug_layers.contains(&self.layer_idx)
-            && let Some(d) = &debug_dir
-        {
-            let _ = q_proj.save_safetensors(
-                "t",
-                format!("{d}/vit_layer_{:02}_q_proj.safetensors", self.layer_idx),
-            );
-            let _ = k_proj.save_safetensors(
-                "t",
-                format!("{d}/vit_layer_{:02}_k_proj.safetensors", self.layer_idx),
-            );
-            let _ = v_proj.save_safetensors(
-                "t",
-                format!("{d}/vit_layer_{:02}_v_proj.safetensors", self.layer_idx),
-            );
-        }
 
         let q = q_proj
             .reshape((b, seq_len, self.num_heads, self.head_dim))
@@ -293,20 +278,12 @@ impl VisionAttention {
         // (B, H, N, N) attention matrix at N=4320 (the vit's full patch
         // sequence) needs ~4 GB just for the BF16 buffer, OOM'ing the 4090.
         //
-        // Late layers are the current drift hotspot: tiny q/k/v differences
-        // can redirect attention to different sink tokens and then get
-        // amplified by the final MLPs. Keep the default late-F32 path as the
-        // most stable observed compromise, with OAROCR_VIT_ATTN_MODE available
-        // for A/B drift experiments (`bf16`, `upstream`, `f32`, `late-f32`).
+        // Late layers (idx >= VIT_LATE_F32_THRESHOLD) run attention in F32
+        // because BF16 Q·K accumulation drift redirects attention to different
+        // sink tokens and gets amplified by the final MLPs — see the constant
+        // for the cross-implementation cosine numbers.
         const VIT_ATTN_QUERY_CHUNK: usize = 1024;
-        const LATE_F32_THRESHOLD: usize = 20;
-        let attn_mode =
-            std::env::var("OAROCR_VIT_ATTN_MODE").unwrap_or_else(|_| "late-f32".to_string());
-        let use_f32 = match attn_mode.as_str() {
-            "bf16" | "upstream" => false,
-            "f32" => true,
-            _ => self.layer_idx >= LATE_F32_THRESHOLD,
-        };
+        let use_f32 = self.use_f32;
         let v_dtype = v.dtype();
         let kt = k
             .transpose(2, 3)
@@ -438,7 +415,6 @@ impl VisionMlp {
 
 #[derive(Debug, Clone)]
 struct VisionEncoderLayer {
-    layer_idx: usize,
     self_attn: VisionAttention,
     mlp: VisionMlp,
     input_layernorm: LayerNorm,
@@ -470,7 +446,6 @@ impl VisionEncoderLayer {
                 })?;
 
         Ok(Self {
-            layer_idx,
             self_attn,
             mlp,
             input_layernorm,
@@ -479,27 +454,12 @@ impl VisionEncoderLayer {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor, OCRError> {
-        let debug_dir = std::env::var("OAROCR_DUMP_DIR").ok();
-        let debug_layers = parse_layer_set_from_env("OAROCR_VIT_DEBUG_LAYERS", 0, None);
-        let debug = debug_layers.contains(&self.layer_idx);
         let residual = xs;
         let hidden = self
             .input_layernorm
             .forward(xs)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "vit input_layernorm forward", e))?;
-        if debug && let Some(d) = &debug_dir {
-            let _ = hidden.save_safetensors(
-                "t",
-                format!("{d}/vit_layer_{:02}_ln1.safetensors", self.layer_idx),
-            );
-        }
         let attn_out = self.self_attn.forward(&hidden)?;
-        if debug && let Some(d) = &debug_dir {
-            let _ = attn_out.save_safetensors(
-                "t",
-                format!("{d}/vit_layer_{:02}_attn.safetensors", self.layer_idx),
-            );
-        }
         let hidden = (residual + &attn_out)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "vit attention residual add", e))?;
 
@@ -510,19 +470,7 @@ impl VisionEncoderLayer {
             .map_err(|e| {
                 candle_to_ocr_inference("HunyuanOCR", "vit post_attention_layernorm forward", e)
             })?;
-        if debug && let Some(d) = &debug_dir {
-            let _ = hidden.save_safetensors(
-                "t",
-                format!("{d}/vit_layer_{:02}_ln2.safetensors", self.layer_idx),
-            );
-        }
         let mlp_out = self.mlp.forward(&hidden)?;
-        if debug && let Some(d) = &debug_dir {
-            let _ = mlp_out.save_safetensors(
-                "t",
-                format!("{d}/vit_layer_{:02}_mlp.safetensors", self.layer_idx),
-            );
-        }
         (&residual + &mlp_out)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "vit mlp residual add", e))
     }
@@ -795,52 +743,6 @@ pub struct HunyuanVisionModel {
     perceive: VisionPerceive,
 }
 
-fn parse_layer_set(spec: &str, n_layers: usize) -> BTreeSet<usize> {
-    let mut out = BTreeSet::new();
-    for part in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        if part == "last" {
-            out.insert(n_layers.saturating_sub(1));
-        } else if let Some((lo, hi)) = part.split_once('-') {
-            if let (Ok(lo), Ok(hi)) = (lo.parse::<usize>(), hi.parse::<usize>()) {
-                for idx in lo..=hi {
-                    if n_layers == 0 || idx < n_layers {
-                        out.insert(idx);
-                    }
-                }
-            }
-        } else if let Ok(idx) = part.parse::<usize>()
-            && (n_layers == 0 || idx < n_layers)
-        {
-            out.insert(idx);
-        }
-    }
-    out
-}
-
-fn parse_layer_set_from_env(
-    env_name: &str,
-    n_layers: usize,
-    default: Option<BTreeSet<usize>>,
-) -> BTreeSet<usize> {
-    let fallback = default.unwrap_or_default();
-    let Ok(spec) = std::env::var(env_name) else {
-        return fallback;
-    };
-    if spec.trim().is_empty() {
-        return fallback;
-    }
-    let out = parse_layer_set(&spec, n_layers);
-    if out.is_empty() { fallback } else { out }
-}
-
-fn parse_vit_dump_layers(n_layers: usize) -> BTreeSet<usize> {
-    parse_layer_set_from_env(
-        "OAROCR_VIT_DUMP_LAYERS",
-        n_layers,
-        Some(BTreeSet::from([0, 1, 11, n_layers.saturating_sub(1)])),
-    )
-}
-
 impl HunyuanVisionModel {
     pub fn load(cfg: &HunyuanOcrVisionConfig, vb: candle_nn::VarBuilder) -> Result<Self, OCRError> {
         let embeddings = VisionEmbeddings::load(cfg, vb.pp("embeddings"))?;
@@ -936,15 +838,6 @@ impl HunyuanVisionModel {
         let patch_pos =
             self.embeddings
                 .interpolate_patch_pos(h, w, pixel_values.device(), patches.dtype())?;
-        let dump_dir = std::env::var("OAROCR_DUMP_DIR").ok();
-        if let Some(d) = &dump_dir {
-            let _ = patches
-                .unsqueeze(0)
-                .and_then(|t| t.save_safetensors("t", format!("{d}/vit_patch_tokens.safetensors")));
-            let _ = patch_pos
-                .unsqueeze(0)
-                .and_then(|t| t.save_safetensors("t", format!("{d}/vit_patch_pos.safetensors")));
-        }
         let patch_tokens = patches.broadcast_add(&patch_pos).map_err(|e| {
             candle_to_ocr_processing(
                 oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
@@ -972,20 +865,8 @@ impl HunyuanVisionModel {
             )
         })?;
 
-        // Optional vit-internal dump for cross-impl drift localisation.
-        let dump_layers = parse_vit_dump_layers(self.layers.len());
-        if let Some(d) = &dump_dir {
-            let _ = hidden.save_safetensors("t", format!("{d}/vit_pre_layers.safetensors"));
-        }
-
         let mut hidden_states = hidden;
         for (i, layer) in self.layers.iter().enumerate() {
-            if let Some(d) = &dump_dir
-                && dump_layers.contains(&i)
-            {
-                let _ = hidden_states
-                    .save_safetensors("t", format!("{d}/vit_layer_{i:02}_in.safetensors"));
-            }
             hidden_states = layer
                 .forward(&hidden_states)
                 .map_err(|e| OCRError::Inference {
@@ -993,15 +874,6 @@ impl HunyuanVisionModel {
                     context: format!("vit encoder layer {i} forward failed"),
                     source: Box::new(e),
                 })?;
-            if let Some(d) = &dump_dir
-                && dump_layers.contains(&i)
-            {
-                let _ = hidden_states
-                    .save_safetensors("t", format!("{d}/vit_layer_{i:02}_out.safetensors"));
-            }
-        }
-        if let Some(d) = &dump_dir {
-            let _ = hidden_states.save_safetensors("t", format!("{d}/vit_post_layers.safetensors"));
         }
 
         // No extra token to drop now (see above). Just unbatch.

@@ -11,12 +11,6 @@ use candle_core::Tensor;
 use candle_nn::Module;
 use oar_ocr_core::core::OCRError;
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-/// Gates the per-layer dump in `HunyuanLlm::forward` to only the first call in
-/// this process. After the first prefill dump, later documents and model
-/// instances run silently. Set by `OAROCR_DUMP_DIR`; consumed once.
-static DUMP_FIRST_CALL: AtomicBool = AtomicBool::new(true);
 
 fn apply_xdrope_rotary_pos_emb(
     q: &Tensor,
@@ -488,42 +482,14 @@ impl HunyuanLlm {
             .rotary
             .forward_multi_axis(position_ids, inputs_embeds.dtype())?;
 
-        // Optional per-layer activation dump for cross-implementation diff.
-        // Triggered by setting OAROCR_DUMP_DIR; otherwise zero-overhead. The
-        // dump fires only on the FIRST forward call in this process (the
-        // prefill). We rely on a process-global atomic gate to suppress
-        // subsequent calls from later documents / model instances.
-        let dump_dir = std::env::var("OAROCR_DUMP_DIR")
-            .ok()
-            .filter(|_| DUMP_FIRST_CALL.swap(false, Ordering::SeqCst));
-        if let Some(d) = &dump_dir {
-            let _ = std::fs::create_dir_all(d);
-            let _ =
-                inputs_embeds.save_safetensors("t", format!("{d}/llm_inputs_embeds.safetensors"));
-            let _ = position_ids.save_safetensors("t", format!("{d}/llm_position_ids.safetensors"));
-            let _ = cos.save_safetensors("t", format!("{d}/rope_cos.safetensors"));
-            let _ = sin.save_safetensors("t", format!("{d}/rope_sin.safetensors"));
-        }
-
         let mut hidden_states = inputs_embeds.clone();
-        for (idx, layer) in self.layers.iter().enumerate() {
-            if let Some(d) = &dump_dir {
-                let _ = hidden_states
-                    .save_safetensors("t", format!("{d}/layer_{idx:02}_in.safetensors"));
-            }
+        for layer in self.layers.iter() {
             hidden_states = layer.forward(&hidden_states, &cos, &sin, causal_mask)?;
-            if let Some(d) = &dump_dir {
-                let _ = hidden_states
-                    .save_safetensors("t", format!("{d}/layer_{idx:02}_out.safetensors"));
-            }
         }
         let hidden_states = self
             .norm
             .forward(&hidden_states)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "llm final norm", e))?;
-        if let Some(d) = &dump_dir {
-            let _ = hidden_states.save_safetensors("t", format!("{d}/final_norm_out.safetensors"));
-        }
         Ok(hidden_states)
     }
 
