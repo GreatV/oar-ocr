@@ -62,5 +62,5 @@ rand = "0.10"
 clap = { version = "4.5.42", features = ["derive"] }
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 criterion = { version = "0.8", features = ["html_reports"] }
-hayro = "0.6"
+hayro = "0.7"
 oar-ocr = { path = "..", default-features = false }

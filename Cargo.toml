@@ -73,5 +73,5 @@ clap = { version = "4.5.42", features = ["derive"] }
 tempfile = "3.19"
 ab_glyph = "0.2"
 fontdb = "0.23"
-hayro = "0.6"
+hayro = "0.7"
 regex = "1.11.1"
