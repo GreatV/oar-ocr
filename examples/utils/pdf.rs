@@ -83,7 +83,7 @@ impl PdfDocument {
         page_num: usize,
         max_size: Option<(u32, u32)>,
     ) -> Result<RenderedPage, PdfError> {
-        use hayro::RenderSettings;
+        use hayro::{RenderCache, RenderSettings};
 
         if page_num < 1 || page_num > self.page_count {
             return Err(PdfError::PageNotFound(page_num));
@@ -118,7 +118,7 @@ impl PdfDocument {
             None => 2.0, // Default scale factor for better quality
         };
 
-        // Create render settings (hayro 0.5 defaults bg_color to TRANSPARENT;
+        // Create render settings (hayro defaults bg_color to TRANSPARENT;
         // we need WHITE so the RGBA→RGB conversion produces a white background)
         let settings = RenderSettings {
             x_scale: scale,
@@ -128,8 +128,9 @@ impl PdfDocument {
         };
 
         // Render the page using hayro's render function
+        let cache = RenderCache::new();
         let interpreter_settings = hayro::hayro_interpret::InterpreterSettings::default();
-        let pixmap = hayro::render(page, &interpreter_settings, &settings);
+        let pixmap = hayro::render(page, &cache, &interpreter_settings, &settings);
 
         // Convert pixmap to RGB image
         let rgba_data = pixmap.data_as_u8_slice();

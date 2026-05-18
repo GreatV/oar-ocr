@@ -66,12 +66,12 @@ serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 rayon = "1.8"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 
 [dev-dependencies]
 clap = { version = "4.5.42", features = ["derive"] }
 tempfile = "3.19"
 ab_glyph = "0.2"
 fontdb = "0.23"
-hayro = "0.5"
-regex = "1"
+hayro = "0.6"
+regex = "1.5.5"
