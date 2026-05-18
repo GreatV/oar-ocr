@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use hayro::hayro_syntax::Pdf;
+use hayro::{RenderCache, hayro_syntax::Pdf};
 
 /// Error type for PDF processing.
 #[derive(Debug)]
@@ -83,7 +83,17 @@ impl PdfDocument {
         page_num: usize,
         max_size: Option<(u32, u32)>,
     ) -> Result<RenderedPage, PdfError> {
-        use hayro::{RenderCache, RenderSettings};
+        let cache = RenderCache::new();
+        self.render_page_with_cache(page_num, max_size, &cache)
+    }
+
+    fn render_page_with_cache<'a>(
+        &'a self,
+        page_num: usize,
+        max_size: Option<(u32, u32)>,
+        cache: &RenderCache<'a>,
+    ) -> Result<RenderedPage, PdfError> {
+        use hayro::RenderSettings;
 
         if page_num < 1 || page_num > self.page_count {
             return Err(PdfError::PageNotFound(page_num));
@@ -128,9 +138,8 @@ impl PdfDocument {
         };
 
         // Render the page using hayro's render function
-        let cache = RenderCache::new();
         let interpreter_settings = hayro::hayro_interpret::InterpreterSettings::default();
-        let pixmap = hayro::render(page, &cache, &interpreter_settings, &settings);
+        let pixmap = hayro::render(page, cache, &interpreter_settings, &settings);
 
         // Convert pixmap to RGB image
         let rgba_data = pixmap.data_as_u8_slice();
@@ -165,9 +174,10 @@ impl PdfDocument {
     /// If `max_size` is provided, pages are scaled to fit within the specified bounds.
     /// Otherwise, a default 2x scale is used.
     pub fn render_all(&self, max_size: Option<(u32, u32)>) -> Result<Vec<RenderedPage>, PdfError> {
+        let cache = RenderCache::new();
         let mut pages = Vec::with_capacity(self.page_count);
         for page_num in 1..=self.page_count {
-            pages.push(self.render_page(page_num, max_size)?);
+            pages.push(self.render_page_with_cache(page_num, max_size, &cache)?);
         }
         Ok(pages)
     }
