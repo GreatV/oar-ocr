@@ -18,15 +18,15 @@ The document path has two stages:
 
 - **Stage 1: region-level local verification.** For each region $r_i \in \mathcal{R}$, the target VLM verifies the region draft set $\tilde{\mathcal{Y}}^{(i)}$ on the cropped image $z_i = x|_{r_i}$:
 
-  ```math
-  \hat{y}^{(i)} = \mathrm{SpecDecode}(p_\theta, z_i, \tilde{\mathcal{Y}}^{(i)})
-  ```
+```math
+\hat{y}^{(i)} = \mathrm{SpecDecode}(p_\theta, z_i, \tilde{\mathcal{Y}}^{(i)})
+```
 
 - **Stage 2: page-level global verification.** Stage 1 outputs are aggregated into an unordered page-level draft set
 
-  ```math
-  \tilde{\mathcal{Y}}^{\mathrm{pg}} = \{\hat{y}^{(i)} \mid r_i \in \mathcal{R}\}
-  ```
+```math
+\tilde{\mathcal{Y}}^{\mathrm{pg}} = \{\hat{y}^{(i)} \mid r_i \in \mathcal{R}\}
+```
 
    which the target VLM then verifies in a single full-page pass: $\hat{y}^{\mathrm{pg}} = \mathrm{SpecDecode}(p_\theta, x, \tilde{\mathcal{Y}}^{\mathrm{pg}})$. Because the matcher scans each $\hat{y}^{(i)}$ independently, draft order has no semantic effect; the target model resolves the final reading order during verification.
 
@@ -36,32 +36,34 @@ Backends that implement the full document path can turn either stage off through
 
 For the accepted prefix $\hat{y}_{1:t}$ and a draft set $\tilde{\mathcal{Y}}$:
 
-1. **Draft-target matching.** Let the reference window be the most recent $n$ accepted tokens, $w = \hat{y}_{t-n+1:t}$. For each draft $\tilde{y} \in \tilde{\mathcal{Y}}$, record every start index $j$ with $\tilde{y}_{j:j+n-1} = w$. Collect the suffixes that follow each match:
+1. **Draft-target matching.** Let the reference window be the most recent $n$ accepted tokens, $`w = \hat{y}_{t-n+1:t}`$. For each draft $`\tilde{y} \in \tilde{\mathcal{Y}}`$, record every start index $j$ with $`\tilde{y}_{j:j+n-1} = w`$. Collect the suffixes that follow each match:
 
-   ```math
-   \mathcal{C} = \big\{\, \tilde{y}_{j+n:|\tilde{y}|} \,\big|\, \tilde{y} \in \tilde{\mathcal{Y}},\; j \in \mathcal{J}(\tilde{y}),\; j + n \le |\tilde{y}|\,\big\}
-   ```
+```math
+\mathcal{C} = \big\{\, \tilde{y}_{j+n:|\tilde{y}|} \,\big|\, \tilde{y} \in \tilde{\mathcal{Y}},\; j \in \mathcal{J}(\tilde{y}),\; j + n \le |\tilde{y}|\,\big\}
+```
 
 2. **Prefix-tree batching.** Merge $\mathcal{C}$ into a prefix tree $\mathcal{T}$ whose root represents the empty prefix and whose every path from the root to a leaf is one element of $\mathcal{C}$. For a node $v$, $\pi(v)$ is the token sequence on the path from the root to $v$, and $\mathrm{Next}(v) = \{c_{|\pi(v)|+1} \mid c \in \mathcal{C},\; c_{1:|\pi(v)|} = \pi(v)\}$ is the set of distinct next tokens shared by candidates that pass through $v$.
-3. **One tree-batched forward.** Linearize $\mathcal{T}$ into a packed sequence and run the target VLM under a tree-ancestry attention mask. A token at node $v$ attends only to $\hat{y}_{1:t}$ and to the tokens on $v$'s ancestor path. This produces $p_\theta(\cdot \mid z, \hat{y}_{1:t} \oplus \pi(v))$ at every node in one pass.
+
+3. **One tree-batched forward.** Linearize $\mathcal{T}$ into a packed sequence and run the target VLM under a tree-ancestry attention mask. A token at node $v$ attends only to $`\hat{y}_{1:t}`$ and to the tokens on $v$'s ancestor path. This produces $`p_\theta(\cdot \mid z, \hat{y}_{1:t} \oplus \pi(v))`$ at every node in one pass.
+
 4. **Greedy traversal with the $\tau$-test.** Start at the root $s$. At each step, select the best child token in the tree's local candidate set and compare it with the unrestricted argmax over the full vocabulary $\mathcal{V}$:
 
-   ```math
-   u^\star = \arg\max_{u \in \mathrm{Next}(s)} p_\theta(u \mid z, \hat{y}_{1:t} \oplus \pi(s)), \qquad \hat{u} = \arg\max_{u \in \mathcal{V}} p_\theta(u \mid z, \hat{y}_{1:t} \oplus \pi(s))
-   ```
+```math
+u^\star = \arg\max_{u \in \mathrm{Next}(s)} p_\theta(u \mid z, \hat{y}_{1:t} \oplus \pi(s)), \qquad \hat{u} = \arg\max_{u \in \mathcal{V}} p_\theta(u \mid z, \hat{y}_{1:t} \oplus \pi(s))
+```
+  Accept $u^\star$ and descend to its child node if
 
-   Accept $u^\star$ and descend to its child node iff
+```math
+\log p_\theta(u^\star \mid z, \hat{y}_{1:t} \oplus \pi(s)) - \log p_\theta(\hat{u} \mid z, \hat{y}_{1:t} \oplus \pi(s)) \ge \log \tau
+```
 
-   ```math
-   \log p_\theta(u^\star \mid z, \hat{y}_{1:t} \oplus \pi(s)) - \log p_\theta(\hat{u} \mid z, \hat{y}_{1:t} \oplus \pi(s)) \ge \log \tau
-   ```
+  Stop when the test fails, when $\mathrm{Next}(s) = \emptyset$, or when $s$ is a leaf.
 
-   Stop when the test fails, when $\mathrm{Next}(s) = \emptyset$, or when $s$ is a leaf.
 5. **Bonus target token.** At the terminal node $s$, append the unrestricted argmax $\hat{u}$ to extend the accepted sequence by one extra target token:
 
-   ```math
-   \hat{y}_{1:t_\mathrm{new}} = \hat{y}_{1:t} \oplus \pi(s) \oplus \hat{u}
-   ```
+```math
+\hat{y}_{1:t_\mathrm{new}} = \hat{y}_{1:t} \oplus \pi(s) \oplus \hat{u}
+```
 
 6. **Commit KV state.** Gather the KV cache so it keeps only the accepted prefix and the path through $s$, then continue decoding from $\hat{u}$.
 
