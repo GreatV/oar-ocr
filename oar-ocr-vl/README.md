@@ -10,6 +10,7 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 |-------|------------|-------------|
 | [PaddleOCR-VL](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) | 0.9B | SOTA document parsing VLM supporting 109 languages, text, tables, formulas, and 11 chart types |
 | [PaddleOCR-VL-1.5](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5) | 0.9B | Next-gen PaddleOCR-VL with 94.5% on OmniDocBench v1.5, adds text spotting and seal recognition |
+| [PaddleOCR-VL-1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) | 1.0B | Region-aware refinement on top of PaddleOCR-VL-1.5; 96.33% on OmniDocBench v1.6 (SOTA), drop-in compatible with the 1.5 loader |
 | [HunyuanOCR](https://huggingface.co/tencent/HunyuanOCR) | 1B | End-to-end OCR VLM for multilingual document parsing, text spotting, and information extraction |
 | [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) | 0.9B | #1 on OmniDocBench v1.5 (94.62), optimized for real-world scenarios with MTP loss and RL training |
 | [MinerU2.5](https://huggingface.co/opendatalab/MinerU2.5-2509-1.2B) | 1.2B | Decoupled document parsing VLM with strong text, formula, and table recognition |
@@ -21,7 +22,7 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 1. **Layout detection** (ONNX models like PP-DocLayoutV3) to identify document regions
 2. **VL-based recognition** to extract content from each region
 
-Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, and GLM-OCR. HunyuanOCR should be used with its model-native full-page prompts, and MinerU2.5 should use its model-native two-step extraction example.
+Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, and GLM-OCR. HunyuanOCR should be used with its model-native full-page prompts, and MinerU2.5 should use its model-native two-step extraction example.
 
 ## Installation
 
@@ -78,7 +79,7 @@ let result = model
 println!("Result: {}", result);
 ```
 
-PaddleOCR-VL-1.5 is loaded the same way, with additional tasks:
+PaddleOCR-VL-1.5 and PaddleOCR-VL-1.6 are loaded the same way, with additional tasks. PaddleOCR-VL-1.6 is plug-compatible with the 1.5 loader (`PaddleOcrVl::from_dir("PaddleOCR-VL-1.6", device)`):
 
 ```rust
 use oar_ocr_core::utils::load_image;
@@ -97,7 +98,7 @@ println!("Result: {}", result);
 
 ### DocParser
 
-Parse an entire page into Markdown with a layout predictor. This path is intended for external layout-first backends such as PaddleOCR-VL, PaddleOCR-VL-1.5, and GLM-OCR.
+Parse an entire page into Markdown with a layout predictor. This path is intended for external layout-first backends such as PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, and GLM-OCR.
 
 ```rust
 use oar_ocr_core::utils::load_image;
@@ -148,7 +149,7 @@ The `oar-ocr-vl` crate includes several examples demonstrating its capabilities.
 
 ### DocParser
 
-This example combines layout detection (ONNX) with a VLM for recognition. It supports PaddleOCR-VL, PaddleOCR-VL-1.5, and GLM-OCR.
+This example combines layout detection (ONNX) with a VLM for recognition. It supports PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, and GLM-OCR.
 
 ```bash
 cargo run --release --features cuda --example doc_parser -- \

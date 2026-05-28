@@ -7,6 +7,7 @@ use crate::core::OCRError;
 use crate::core::inference::{OrtInfer, TensorInput};
 use crate::processors::{CTCLabelDecode, OCRResize};
 use image::RgbImage;
+use rayon::prelude::*;
 use std::path::Path;
 
 /// CRNN model output containing recognized text and confidence scores.
@@ -76,45 +77,45 @@ impl CRNNModel {
         // Calculate final tensor width
         let tensor_width = ((img_h as f32 * max_wh_ratio) as usize).min(self.resizer.max_img_w);
 
-        // Process each image: resize → normalize → pad
         let batch_size = images.len();
-        let mut batch_tensor = ndarray::Array4::<f32>::zeros((batch_size, 3, img_h, tensor_width));
+        let plane = img_h * tensor_width;
+        let image_len = 3 * plane;
 
-        for (batch_idx, img) in images.iter().enumerate() {
-            let (orig_w, orig_h) = (img.width() as f32, img.height() as f32);
-            let ratio = orig_w / orig_h;
+        let per_image: Vec<Vec<f32>> = images
+            .par_iter()
+            .map(|img| {
+                let (orig_w, orig_h) = (img.width() as f32, img.height() as f32);
+                let ratio = orig_w / orig_h;
+                let resized_w = ((img_h as f32 * ratio).ceil() as usize).min(tensor_width);
+                let resized = image::imageops::resize(
+                    img,
+                    resized_w as u32,
+                    img_h as u32,
+                    image::imageops::FilterType::Triangle,
+                );
 
-            // Calculate resize width
-            let resized_w = ((img_h as f32 * ratio).ceil() as usize).min(tensor_width);
-
-            // Resize image (without padding)
-            let resized = image::imageops::resize(
-                img,
-                resized_w as u32,
-                img_h as u32,
-                image::imageops::FilterType::Triangle,
-            );
-
-            // Normalize and copy to tensor with zero padding
-            // Channel order: BGR, so we need to swap channels
-            // Normalization: (pixel / 255 - 0.5) / 0.5
-            for y in 0..img_h {
-                for x in 0..resized_w {
-                    let pixel = resized.get_pixel(x as u32, y as u32);
-                    // BGR order for PaddlePaddle models
-                    let b = (pixel[2] as f32 / 255.0 - 0.5) / 0.5;
-                    let g = (pixel[1] as f32 / 255.0 - 0.5) / 0.5;
-                    let r = (pixel[0] as f32 / 255.0 - 0.5) / 0.5;
-
-                    batch_tensor[[batch_idx, 0, y, x]] = b;
-                    batch_tensor[[batch_idx, 1, y, x]] = g;
-                    batch_tensor[[batch_idx, 2, y, x]] = r;
+                let mut tensor = vec![0.0f32; image_len];
+                for y in 0..img_h {
+                    let row_offset = y * tensor_width;
+                    for x in 0..resized_w {
+                        let pixel = resized.get_pixel(x as u32, y as u32);
+                        let idx = row_offset + x;
+                        tensor[idx] = (pixel[2] as f32 / 255.0 - 0.5) / 0.5;
+                        tensor[plane + idx] = (pixel[1] as f32 / 255.0 - 0.5) / 0.5;
+                        tensor[2 * plane + idx] = (pixel[0] as f32 / 255.0 - 0.5) / 0.5;
+                    }
                 }
-            }
-            // Rest of the tensor remains zero (zero-padding)
+                tensor
+            })
+            .collect();
+
+        let mut data = Vec::with_capacity(batch_size * image_len);
+        for tensor in per_image {
+            data.extend(tensor);
         }
 
-        Ok(batch_tensor)
+        ndarray::Array4::from_shape_vec((batch_size, 3, img_h, tensor_width), data)
+            .map_err(|e| OCRError::tensor_operation("Failed to create CRNN input tensor", e))
     }
 
     /// Runs inference on the preprocessed tensor.

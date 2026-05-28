@@ -9,7 +9,7 @@ use crate::processors::{
     BoundingBox, BoxType, DBPostProcess, DBPostProcessConfig, DetResizeForTest, ImageScaleInfo,
     LimitType, NormalizeImage, ScoreMode, TensorLayout,
 };
-use image::{DynamicImage, RgbImage};
+use image::{DynamicImage, GenericImageView, RgbImage};
 use std::path::Path;
 use tracing::debug;
 
@@ -162,6 +162,24 @@ impl DBModel {
         Ok((batch_tensor, img_shapes))
     }
 
+    fn resize_images(&self, images: Vec<RgbImage>) -> Vec<(usize, DynamicImage, ImageScaleInfo)> {
+        let dynamic_images: Vec<DynamicImage> =
+            images.into_iter().map(DynamicImage::ImageRgb8).collect();
+        let (resized_images, img_shapes) = self.resizer.apply(
+            dynamic_images,
+            None, // Use default limit_side_len
+            None, // Use default limit_type
+            None, // Use default max_side_limit
+        );
+
+        resized_images
+            .into_iter()
+            .zip(img_shapes)
+            .enumerate()
+            .map(|(idx, (image, shape))| (idx, image, shape))
+            .collect()
+    }
+
     /// Runs inference on the preprocessed batch.
     pub fn infer(
         &self,
@@ -215,6 +233,51 @@ impl DBModel {
         DBModelOutput { boxes, scores }
     }
 
+    fn forward_resized_batch(
+        &self,
+        batch: Vec<(usize, DynamicImage, ImageScaleInfo)>,
+        boxes_by_image: &mut [Vec<BoundingBox>],
+        scores_by_image: &mut [Vec<f32>],
+        score_threshold: f32,
+        box_threshold: f32,
+        unclip_ratio: f32,
+    ) -> Result<(), OCRError> {
+        let mut original_indices = Vec::with_capacity(batch.len());
+        let mut resized_images = Vec::with_capacity(batch.len());
+        let mut img_shapes = Vec::with_capacity(batch.len());
+
+        for (original_idx, resized_image, img_shape) in batch {
+            original_indices.push(original_idx);
+            resized_images.push(resized_image);
+            img_shapes.push(img_shape);
+        }
+
+        let batch_tensor = self.normalizer.normalize_batch_to(resized_images)?;
+        let predictions = self.infer(&batch_tensor)?;
+        let group_output = self.postprocess(
+            &predictions,
+            img_shapes,
+            score_threshold,
+            box_threshold,
+            unclip_ratio,
+        );
+
+        for (group_idx, original_idx) in original_indices.into_iter().enumerate() {
+            boxes_by_image[original_idx] = group_output
+                .boxes
+                .get(group_idx)
+                .cloned()
+                .unwrap_or_default();
+            scores_by_image[original_idx] = group_output
+                .scores
+                .get(group_idx)
+                .cloned()
+                .unwrap_or_default();
+        }
+
+        Ok(())
+    }
+
     /// Runs the complete forward pass: preprocess -> infer -> postprocess.
     pub fn forward(
         &self,
@@ -223,15 +286,53 @@ impl DBModel {
         box_threshold: f32,
         unclip_ratio: f32,
     ) -> Result<DBModelOutput, OCRError> {
-        let (batch_tensor, img_shapes) = self.preprocess(images)?;
-        let predictions = self.infer(&batch_tensor)?;
-        Ok(self.postprocess(
-            &predictions,
-            img_shapes,
-            score_threshold,
-            box_threshold,
-            unclip_ratio,
-        ))
+        if images.is_empty() {
+            return Ok(DBModelOutput {
+                boxes: Vec::new(),
+                scores: Vec::new(),
+            });
+        }
+
+        let image_count = images.len();
+        let resized = self.resize_images(images);
+        let mut groups: Vec<Vec<(usize, DynamicImage, ImageScaleInfo)>> = Vec::new();
+
+        for item in resized {
+            let dims = item.1.dimensions();
+            if let Some(group) = groups
+                .iter_mut()
+                .find(|group| group.first().map(|(_, img, _)| img.dimensions()) == Some(dims))
+            {
+                group.push(item);
+            } else {
+                groups.push(vec![item]);
+            }
+        }
+
+        debug!(
+            "DB forward: {} images grouped into {} shape batch(es)",
+            image_count,
+            groups.len()
+        );
+
+        let mut boxes_by_image = vec![Vec::new(); image_count];
+        let mut scores_by_image = vec![Vec::new(); image_count];
+
+        for group in groups {
+            self.forward_resized_batch(
+                group,
+                &mut boxes_by_image,
+                &mut scores_by_image,
+                score_threshold,
+                box_threshold,
+                unclip_ratio,
+            )?;
+        }
+
+        Ok(DBModelOutput {
+            boxes: boxes_by_image,
+            scores: scores_by_image,
+        })
     }
 }
 
