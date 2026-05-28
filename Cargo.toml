@@ -15,6 +15,20 @@ homepage = "https://github.com/greatv/oar-ocr"
 oar-ocr-core = { version = "0.7.0", path = "oar-ocr-core", default-features = false }
 oar-ocr-derive = { version = "0.7.0", path = "oar-ocr-derive", default-features = false }
 
+# Shared third-party dependencies (kept in sync via workspace inheritance).
+clap = { version = "4.5.42", features = ["derive"] }
+hayro = "0.7"
+image = "0.25.6"
+imageproc = "0.26.0"
+rayon = "1.8"
+regex = "1.11.1"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+tempfile = "3.19"
+tokenizers = { version = "0.23", default-features = false, features = ["progressbar", "onig"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+
 [package]
 name = "oar-ocr"
 version.workspace = true
@@ -54,24 +68,20 @@ download-binaries = ["oar-ocr-core/download-binaries"]
 auto-download = ["oar-ocr-core/auto-download"]
 
 [dependencies]
-# Core library with all types and predictors
+image.workspace = true
+imageproc.workspace = true
 oar-ocr-core.workspace = true
-# Derive macros
 oar-ocr-derive.workspace = true
-
-# Direct dependencies for oarocr module
-image = "0.25.6"
-imageproc = "0.26.0"
-serde = { version = "1.0", features = ["derive", "rc"] }
-serde_json = "1.0"
-rayon = "1.8"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [dev-dependencies]
-clap = { version = "4.5.42", features = ["derive"] }
-tempfile = "3.19"
 ab_glyph = "0.2"
+clap.workspace = true
 fontdb = "0.23"
-hayro = "0.7"
-regex = "1.11.1"
+hayro.workspace = true
+regex.workspace = true
+tempfile.workspace = true

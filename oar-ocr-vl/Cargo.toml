@@ -43,24 +43,24 @@ metal = [
 hsd = ["cuda"]
 
 [dependencies]
-oar-ocr-core.workspace = true
-image = "0.25.6"
 candle-core = "0.10.2"
 candle-nn = "0.10.2"
 candle-transformers = "0.10.2"
-once_cell = "1.19"
-regex = "1.11.1"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tokenizers = { version = "0.23", default-features = false, features = ["progressbar", "onig"] }
-tracing = "0.1"
-rayon = "1.8"
 html-escape = "0.2"
+image.workspace = true
+oar-ocr-core.workspace = true
+once_cell = "1.19"
 rand = "0.10"
+rayon.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokenizers.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
-clap = { version = "4.5.42", features = ["derive"] }
-tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+clap.workspace = true
 criterion = { version = "0.8", features = ["html_reports"] }
-hayro = "0.7"
+hayro.workspace = true
 oar-ocr = { path = "..", default-features = false }
+tracing-subscriber.workspace = true
