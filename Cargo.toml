@@ -16,18 +16,18 @@ oar-ocr-core = { version = "0.7.0", path = "oar-ocr-core", default-features = fa
 oar-ocr-derive = { version = "0.7.0", path = "oar-ocr-derive", default-features = false }
 
 # Shared third-party dependencies (kept in sync via workspace inheritance).
-image = "0.25.6"
-imageproc = "0.26.0"
-serde = { version = "1.0", features = ["derive", "rc"] }
-serde_json = "1.0"
-rayon = "1.8"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
-regex = "1.11.1"
-tokenizers = { version = "0.23", default-features = false, features = ["progressbar", "onig"] }
-tempfile = "3.19"
 clap = { version = "4.5.42", features = ["derive"] }
 hayro = "0.7"
+image = "0.25.6"
+imageproc = "0.26.0"
+rayon = "1.8"
+regex = "1.11.1"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+tempfile = "3.19"
+tokenizers = { version = "0.23", default-features = false, features = ["progressbar", "onig"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 
 [package]
 name = "oar-ocr"
@@ -68,24 +68,20 @@ download-binaries = ["oar-ocr-core/download-binaries"]
 auto-download = ["oar-ocr-core/auto-download"]
 
 [dependencies]
-# Core library with all types and predictors
-oar-ocr-core.workspace = true
-# Derive macros
-oar-ocr-derive.workspace = true
-
-# Direct dependencies for oarocr module
 image.workspace = true
 imageproc.workspace = true
+oar-ocr-core.workspace = true
+oar-ocr-derive.workspace = true
+rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-rayon.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-clap.workspace = true
-tempfile.workspace = true
 ab_glyph = "0.2"
+clap.workspace = true
 fontdb = "0.23"
 hayro.workspace = true
 regex.workspace = true
+tempfile.workspace = true
