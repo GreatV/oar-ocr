@@ -39,11 +39,8 @@ enum OcrSource {
 ///
 /// NOTE: After inline formula injection, formula elements have been absorbed
 /// into text regions and should be excluded from stitching to prevent duplication.
-const EXCLUDED_FROM_OCR_LABELS: [LayoutElementType; 3] = [
-    LayoutElementType::Table,
-    LayoutElementType::Seal,
-    LayoutElementType::Formula, // Exclude formulas to prevent duplicate rendering after injection
-];
+const EXCLUDED_FROM_OCR_LABELS: [LayoutElementType; 2] =
+    [LayoutElementType::Table, LayoutElementType::Seal];
 
 #[derive(Clone)]
 pub struct StitchConfig {
@@ -139,6 +136,7 @@ impl ResultStitcher {
             &regions,
             &mut used_region_indices,
             cfg,
+            !result.formulas.is_empty(),
         );
 
         tracing::debug!(
@@ -1573,6 +1571,7 @@ impl ResultStitcher {
         text_regions: &[TextRegion],
         used_indices: &mut std::collections::HashSet<usize>,
         cfg: &StitchConfig,
+        exclude_formula_from_ocr: bool,
     ) {
         tracing::debug!(
             "stitch_layout_elements: {} elements, {} regions, {} already used",
@@ -1587,7 +1586,9 @@ impl ResultStitcher {
             // - Formula: filled with LaTeX content
             // - Seal: may have specialized seal OCR results
             // This matches PP-StructureV3's behavior in standardized_data()
-            if EXCLUDED_FROM_OCR_LABELS.contains(&element.element_type) {
+            if EXCLUDED_FROM_OCR_LABELS.contains(&element.element_type)
+                || (exclude_formula_from_ocr && element.element_type == LayoutElementType::Formula)
+            {
                 continue;
             }
 

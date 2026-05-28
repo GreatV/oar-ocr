@@ -83,7 +83,8 @@ struct StructurePipeline {
     text_line_orientation_adapter: Option<TextLineOrientationAdapter>,
     text_recognition_adapter: Option<TextRecognitionAdapter>,
 
-    // Batch size for region-level processing (table cells, text recognition)
+    // Batch sizes for image-level and region-level processing.
+    image_batch_size: Option<usize>,
     region_batch_size: Option<usize>,
 }
 
@@ -195,6 +196,8 @@ pub struct OARStructureBuilder {
 }
 
 impl OARStructureBuilder {
+    const MAX_BATCH_SIZE: usize = 4096;
+
     /// Creates a new structure builder with the required layout detection model.
     ///
     /// # Arguments
@@ -339,7 +342,8 @@ impl OARStructureBuilder {
 
     /// Sets the batch size for image-level processing.
     ///
-    /// Note: Currently not used in structure analysis as each image is processed individually.
+    /// Controls how many pages are processed together by image-level stages such as
+    /// layout detection, region detection, and OCR text detection.
     pub fn image_batch_size(mut self, size: usize) -> Self {
         self.image_batch_size = Some(size);
         self
@@ -647,6 +651,13 @@ impl OARStructureBuilder {
     ///
     /// This method instantiates all adapters and returns a ready-to-use structure analyzer.
     pub fn build(mut self) -> Result<OARStructure, OCRError> {
+        if let Some(size) = self.image_batch_size {
+            Self::validate_batch_size("image_batch_size", size)?;
+        }
+        if let Some(size) = self.region_batch_size {
+            Self::validate_batch_size("region_batch_size", size)?;
+        }
+
         // Resolve every model/dict/tokenizer path through the auto-download
         // cache when the `auto-download` feature is enabled. With the feature
         // off these calls are infallible no-ops.
@@ -1024,8 +1035,6 @@ impl OARStructureBuilder {
 
                     builder = builder.tokenizer_path(tokenizer_path);
 
-                    // Note: region_batch_size batching not yet implemented for structure analysis
-
                     if let Some(ref config) = self.formula_recognition_config {
                         builder = builder.task_config(config.clone());
                     }
@@ -1044,8 +1053,6 @@ impl OARStructureBuilder {
                     let mut builder = UniMERNetAdapterBuilder::new();
 
                     builder = builder.tokenizer_path(tokenizer_path);
-
-                    // Note: region_batch_size batching not yet implemented for structure analysis
 
                     if let Some(ref config) = self.formula_recognition_config {
                         builder = builder.task_config(config.clone());
@@ -1101,8 +1108,6 @@ impl OARStructureBuilder {
         // explicitly overrides them via `text_detection_config`.
         let text_detection_adapter = if let Some(ref model_path) = self.text_detection_model {
             let mut builder = TextDetectionAdapterBuilder::new();
-
-            // Note: image_batch_size batching not yet implemented for structure analysis
 
             let mut effective_cfg = self.text_detection_config.clone().unwrap_or_default();
 
@@ -1164,8 +1169,6 @@ impl OARStructureBuilder {
 
             let mut builder = TextRecognitionAdapterBuilder::new().character_dict(char_vec);
 
-            // Note: region_batch_size batching not yet implemented for structure analysis
-
             if let Some(ref config) = self.text_recognition_config {
                 builder = builder.with_config(config.clone());
             }
@@ -1201,10 +1204,24 @@ impl OARStructureBuilder {
             text_detection_adapter,
             text_line_orientation_adapter,
             text_recognition_adapter,
+            image_batch_size: self.image_batch_size,
             region_batch_size: self.region_batch_size,
         };
 
         Ok(OARStructure { pipeline })
+    }
+
+    fn validate_batch_size(field: &str, size: usize) -> Result<(), OCRError> {
+        if size == 0 || size > Self::MAX_BATCH_SIZE {
+            return Err(OCRError::validation_error(
+                "OARStructureBuilder",
+                field,
+                &format!("1..={}", Self::MAX_BATCH_SIZE),
+                &size.to_string(),
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -1225,9 +1242,47 @@ struct PreparedPage {
     rotation: Option<crate::oarocr::preprocess::OrientationCorrection>,
     layout_elements: Vec<crate::domain::structure::LayoutElement>,
     detected_region_blocks: Option<Vec<crate::domain::structure::RegionBlock>>,
+    precomputed_text_regions: Option<Vec<crate::oarocr::TextRegion>>,
 }
 
 impl OARStructure {
+    fn finish_layout_elements(layout_elements: &mut Vec<crate::domain::structure::LayoutElement>) {
+        if layout_elements.len() > 1 {
+            let removed = crate::domain::structure::remove_overlapping_layout_elements(
+                layout_elements,
+                LAYOUT_OVERLAP_IOU_THRESHOLD,
+            );
+            if removed > 0 {
+                tracing::info!(
+                    "Removing {} overlapping layout elements (threshold={})",
+                    removed,
+                    LAYOUT_OVERLAP_IOU_THRESHOLD
+                );
+            }
+        }
+
+        crate::domain::structure::apply_standardized_layout_label_fixes(layout_elements);
+    }
+
+    fn layout_elements_from_detection(
+        elements: &[oar_ocr_core::domain::tasks::LayoutDetectionElement],
+    ) -> Vec<crate::domain::structure::LayoutElement> {
+        use oar_ocr_core::domain::structure::LayoutElementType;
+
+        elements
+            .iter()
+            .map(|element| {
+                let element_type_enum = LayoutElementType::from_label(&element.element_type);
+                crate::domain::structure::LayoutElement::new(
+                    element.bbox.clone(),
+                    element_type_enum,
+                    element.score,
+                )
+                .with_label(element.element_type.clone())
+            })
+            .collect()
+    }
+
     /// Refinement of overall OCR results using layout boxes.
     ///
     /// This mirrors two behaviors in `layout_parsing/pipeline_v2.py`:
@@ -1700,7 +1755,7 @@ impl OARStructure {
         OCRError,
     > {
         use oar_ocr_core::core::traits::task::ImageTaskInput;
-        use oar_ocr_core::domain::structure::{LayoutElement, LayoutElementType, RegionBlock};
+        use oar_ocr_core::domain::structure::RegionBlock;
 
         let input = ImageTaskInput::new(vec![page_image.clone()]);
         let t_layout = Instant::now();
@@ -1710,16 +1765,11 @@ impl OARStructure {
             .execute(input, None)?;
         let layout_dur = t_layout.elapsed();
 
-        let mut layout_elements: Vec<LayoutElement> = Vec::new();
-        if let Some(elements) = layout_result.elements.first() {
-            for element in elements {
-                let element_type_enum = LayoutElementType::from_label(&element.element_type);
-                layout_elements.push(
-                    LayoutElement::new(element.bbox.clone(), element_type_enum, element.score)
-                        .with_label(element.element_type.clone()),
-                );
-            }
-        }
+        let mut layout_elements = layout_result
+            .elements
+            .first()
+            .map(|elements| Self::layout_elements_from_detection(elements))
+            .unwrap_or_default();
 
         let mut detected_region_blocks: Option<Vec<RegionBlock>> = None;
         if let Some(ref region_adapter) = self.pipeline.region_detection_adapter {
@@ -1747,21 +1797,7 @@ impl OARStructure {
             );
         }
 
-        if layout_elements.len() > 1 {
-            let removed = crate::domain::structure::remove_overlapping_layout_elements(
-                &mut layout_elements,
-                LAYOUT_OVERLAP_IOU_THRESHOLD,
-            );
-            if removed > 0 {
-                tracing::info!(
-                    "Removing {} overlapping layout elements (threshold={})",
-                    removed,
-                    LAYOUT_OVERLAP_IOU_THRESHOLD
-                );
-            }
-        }
-
-        crate::domain::structure::apply_standardized_layout_label_fixes(&mut layout_elements);
+        Self::finish_layout_elements(&mut layout_elements);
         tracing::debug!(
             "structure stage: layout detection {:.1} ms, elements={}",
             layout_dur.as_secs_f64() * 1000.0,
@@ -2046,16 +2082,20 @@ impl OARStructure {
 
         let mut text_regions = Vec::new();
 
-        // Mask formula regions before text detection (PP-StructureV3 behavior).
+        // Mask formula regions before text detection only when formula
+        // recognition is enabled. With formula recognition disabled, PaddleX
+        // keeps formula-like regions in overall OCR output.
         let mut ocr_image = page_image.clone();
-        let mask_bboxes: Vec<crate::processors::BoundingBox> = layout_elements
-            .iter()
-            .filter(|e| e.element_type.is_formula())
-            .map(|e| e.bbox.clone())
-            .collect();
+        if self.pipeline.formula_recognition_adapter.is_some() {
+            let mask_bboxes: Vec<crate::processors::BoundingBox> = layout_elements
+                .iter()
+                .filter(|e| e.element_type.is_formula())
+                .map(|e| e.bbox.clone())
+                .collect();
 
-        if !mask_bboxes.is_empty() {
-            crate::utils::mask_regions(&mut ocr_image, &mask_bboxes, [255, 255, 255]);
+            if !mask_bboxes.is_empty() {
+                crate::utils::mask_regions(&mut ocr_image, &mask_bboxes, [255, 255, 255]);
+            }
         }
 
         // Text detection (on masked image).
@@ -2240,7 +2280,11 @@ impl OARStructure {
 
                 items.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-                let batch_size = self.pipeline.region_batch_size.unwrap_or(8).max(1);
+                let batch_size = self
+                    .pipeline
+                    .region_batch_size
+                    .unwrap_or_else(|| text_recognition_adapter.recommended_batch_size())
+                    .max(1);
                 let mut recognized_by_det_idx: Vec<Option<(String, f32)>> =
                     vec![None; detection_boxes.len()];
                 let mut rec_batches = 0usize;
@@ -2303,7 +2347,11 @@ impl OARStructure {
             }
         }
 
-        let batch_size = self.pipeline.region_batch_size.unwrap_or(8).max(1);
+        let batch_size = self
+            .pipeline
+            .region_batch_size
+            .unwrap_or_else(|| text_recognition_adapter.recommended_batch_size())
+            .max(1);
         Self::refine_overall_ocr_with_layout(
             &mut text_regions,
             layout_elements,
@@ -2348,9 +2396,9 @@ impl OARStructure {
         Ok(result)
     }
 
-    /// Preprocesses a page image and runs layout detection, returning intermediate
-    /// results ready for formula recognition and downstream processing.
-    fn prepare_page(&self, image: image::RgbImage) -> Result<PreparedPage, OCRError> {
+    /// Preprocesses a page image before layout detection. Batch callers fill the
+    /// layout fields later so model inference can run across pages.
+    fn preprocess_page(&self, image: image::RgbImage) -> Result<PreparedPage, OCRError> {
         use crate::oarocr::preprocess::DocumentPreprocessor;
         use std::sync::Arc;
 
@@ -2364,17 +2412,26 @@ impl OARStructure {
         let rectified_img = preprocess.rectified_img;
         let rotation = preprocess.rotation;
 
-        let (layout_elements, detected_region_blocks) =
-            self.detect_layout_and_regions(&current_image)?;
-
         Ok(PreparedPage {
             current_image,
             orientation_angle,
             rectified_img,
             rotation,
-            layout_elements,
-            detected_region_blocks,
+            layout_elements: Vec::new(),
+            detected_region_blocks: None,
+            precomputed_text_regions: None,
         })
+    }
+
+    /// Preprocesses a page image and runs layout detection, returning intermediate
+    /// results ready for formula recognition and downstream processing.
+    fn prepare_page(&self, image: image::RgbImage) -> Result<PreparedPage, OCRError> {
+        let mut prepared = self.preprocess_page(image)?;
+        let (layout_elements, detected_region_blocks) =
+            self.detect_layout_and_regions(&prepared.current_image)?;
+        prepared.layout_elements = layout_elements;
+        prepared.detected_region_blocks = detected_region_blocks;
+        Ok(prepared)
     }
 
     /// Completes page analysis given a `PreparedPage` and pre-computed formula results.
@@ -2393,6 +2450,7 @@ impl OARStructure {
             rotation,
             mut layout_elements,
             mut detected_region_blocks,
+            precomputed_text_regions,
         } = prepared;
 
         let mut tables = Vec::new();
@@ -2415,11 +2473,15 @@ impl OARStructure {
         }
 
         let t_ocr = Instant::now();
-        let mut text_regions = self.run_overall_ocr(
-            &current_image,
-            &layout_elements,
-            detected_region_blocks.as_deref(),
-        )?;
+        let mut text_regions = if let Some(text_regions) = precomputed_text_regions {
+            text_regions
+        } else {
+            self.run_overall_ocr(
+                &current_image,
+                &layout_elements,
+                detected_region_blocks.as_deref(),
+            )?
+        };
         let ocr_dur = t_ocr.elapsed();
 
         {
@@ -2632,12 +2694,425 @@ impl OARStructure {
         Ok(result)
     }
 
-    /// Analyzes multiple document page images with cross-page formula batching.
+    fn precompute_overall_ocr_across_pages(
+        &self,
+        prepared_pages: &mut [Result<PreparedPage, OCRError>],
+    ) {
+        use crate::oarocr::TextRegion;
+        use crate::oarocr::processors::{EdgeProcessor, TextCroppingProcessor};
+        use oar_ocr_core::core::traits::task::ImageTaskInput;
+        use std::sync::Arc;
+
+        let Some(ref text_detection_adapter) = self.pipeline.text_detection_adapter else {
+            return;
+        };
+        let Some(ref text_recognition_adapter) = self.pipeline.text_recognition_adapter else {
+            return;
+        };
+
+        // Seal detection augments layout before OCR in the single-page path. Keep
+        // that path for seal-enabled pipelines until seal detection is batched too.
+        if self.pipeline.seal_text_detection_adapter.is_some() {
+            return;
+        }
+
+        let image_batch_size = self
+            .pipeline
+            .image_batch_size
+            .unwrap_or_else(|| text_detection_adapter.recommended_batch_size())
+            .max(1);
+
+        let t_total = Instant::now();
+
+        #[derive(Default)]
+        struct PageOcrState {
+            detection_boxes: Vec<crate::processors::BoundingBox>,
+            recognized: Vec<Option<(String, f32)>>,
+        }
+
+        struct RecItem {
+            page_idx: usize,
+            det_idx: usize,
+            wh_ratio: f32,
+            image: image::RgbImage,
+        }
+
+        let mut page_states: Vec<Option<PageOcrState>> =
+            (0..prepared_pages.len()).map(|_| None).collect();
+        let mut rec_items: Vec<RecItem> = Vec::new();
+        let cropper = TextCroppingProcessor::new(true);
+        let mut batched_detection_boxes: Vec<Option<Vec<crate::processors::BoundingBox>>> =
+            (0..prepared_pages.len()).map(|_| None).collect();
+
+        let t_detection = Instant::now();
+        let mut det_page_indices = Vec::new();
+        let mut det_images = Vec::new();
+        for (page_idx, prepared) in prepared_pages.iter().enumerate() {
+            let Ok(prepared) = prepared else {
+                continue;
+            };
+
+            let mut ocr_image = (*prepared.current_image).clone();
+            if self.pipeline.formula_recognition_adapter.is_some() {
+                let mask_bboxes: Vec<crate::processors::BoundingBox> = prepared
+                    .layout_elements
+                    .iter()
+                    .filter(|e| e.element_type.is_formula())
+                    .map(|e| e.bbox.clone())
+                    .collect();
+                if !mask_bboxes.is_empty() {
+                    crate::utils::mask_regions(&mut ocr_image, &mask_bboxes, [255, 255, 255]);
+                }
+            }
+
+            det_page_indices.push(page_idx);
+            det_images.push(ocr_image);
+        }
+
+        while !det_images.is_empty() {
+            let take_n = image_batch_size.min(det_images.len());
+            let batch_images: Vec<_> = det_images.drain(0..take_n).collect();
+            let batch_page_indices: Vec<_> = det_page_indices.drain(0..take_n).collect();
+            match text_detection_adapter.execute(ImageTaskInput::new(batch_images), None) {
+                Ok(det_result) => {
+                    for (offset, detections) in det_result.detections.into_iter().enumerate() {
+                        let page_idx = batch_page_indices[offset];
+                        batched_detection_boxes[page_idx] =
+                            Some(detections.into_iter().map(|d| d.bbox).collect());
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "Batch structure OCR text detection failed; falling back to per-page detection: {}",
+                        err
+                    );
+                }
+            }
+        }
+        let detection_ms = t_detection.elapsed().as_secs_f64() * 1000.0;
+
+        let t_crop = Instant::now();
+        for page_idx in 0..prepared_pages.len() {
+            let prepared = match &prepared_pages[page_idx] {
+                Ok(prepared) => prepared,
+                Err(_) => continue,
+            };
+
+            let mut detection_boxes = if let Some(boxes) = batched_detection_boxes[page_idx].take()
+            {
+                boxes
+            } else {
+                let mut ocr_image = (*prepared.current_image).clone();
+                if self.pipeline.formula_recognition_adapter.is_some() {
+                    let mask_bboxes: Vec<crate::processors::BoundingBox> = prepared
+                        .layout_elements
+                        .iter()
+                        .filter(|e| e.element_type.is_formula())
+                        .map(|e| e.bbox.clone())
+                        .collect();
+                    if !mask_bboxes.is_empty() {
+                        crate::utils::mask_regions(&mut ocr_image, &mask_bboxes, [255, 255, 255]);
+                    }
+                }
+
+                let det_result = match text_detection_adapter
+                    .execute(ImageTaskInput::new(vec![ocr_image]), None)
+                {
+                    Ok(result) => result,
+                    Err(err) => {
+                        prepared_pages[page_idx] = Err(err);
+                        continue;
+                    }
+                };
+
+                det_result
+                    .detections
+                    .first()
+                    .map(|detections| {
+                        detections
+                            .iter()
+                            .map(|d| d.bbox.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            };
+
+            if !detection_boxes.is_empty() {
+                let mut split_boxes = Vec::new();
+                let container_boxes: Vec<crate::processors::BoundingBox> = prepared
+                    .detected_region_blocks
+                    .as_ref()
+                    .map(|regions| regions.iter().map(|r| r.bbox.clone()).collect())
+                    .unwrap_or_else(|| {
+                        prepared
+                            .layout_elements
+                            .iter()
+                            .filter(|e| {
+                                matches!(
+                                    e.element_type,
+                                    crate::domain::structure::LayoutElementType::DocTitle
+                                        | crate::domain::structure::LayoutElementType::ParagraphTitle
+                                        | crate::domain::structure::LayoutElementType::Text
+                                        | crate::domain::structure::LayoutElementType::Content
+                                        | crate::domain::structure::LayoutElementType::Abstract
+                                        | crate::domain::structure::LayoutElementType::Header
+                                        | crate::domain::structure::LayoutElementType::Footer
+                                        | crate::domain::structure::LayoutElementType::Footnote
+                                        | crate::domain::structure::LayoutElementType::Number
+                                        | crate::domain::structure::LayoutElementType::Reference
+                                        | crate::domain::structure::LayoutElementType::ReferenceContent
+                                        | crate::domain::structure::LayoutElementType::Algorithm
+                                        | crate::domain::structure::LayoutElementType::AsideText
+                                        | crate::domain::structure::LayoutElementType::List
+                                        | crate::domain::structure::LayoutElementType::FigureTitle
+                                        | crate::domain::structure::LayoutElementType::TableTitle
+                                        | crate::domain::structure::LayoutElementType::ChartTitle
+                                        | crate::domain::structure::LayoutElementType::FigureTableChartTitle
+                                )
+                            })
+                            .map(|e| e.bbox.clone())
+                            .collect()
+                    });
+
+                if !container_boxes.is_empty() {
+                    for bbox in detection_boxes.into_iter() {
+                        let mut intersections: Vec<crate::processors::BoundingBox> = Vec::new();
+                        let self_area = bbox.area();
+                        if self_area <= 0.0 {
+                            split_boxes.push(bbox);
+                            continue;
+                        }
+
+                        for container in &container_boxes {
+                            let inter_x_min = bbox.x_min().max(container.x_min());
+                            let inter_y_min = bbox.y_min().max(container.y_min());
+                            let inter_x_max = bbox.x_max().min(container.x_max());
+                            let inter_y_max = bbox.y_max().min(container.y_max());
+
+                            if inter_x_max - inter_x_min <= 2.0 || inter_y_max - inter_y_min <= 2.0
+                            {
+                                continue;
+                            }
+
+                            let inter_bbox = crate::processors::BoundingBox::from_coords(
+                                inter_x_min,
+                                inter_y_min,
+                                inter_x_max,
+                                inter_y_max,
+                            );
+                            let inter_area = inter_bbox.area();
+                            if inter_area <= 0.0 {
+                                continue;
+                            }
+
+                            if inter_area / self_area >= TEXT_BOX_SPLIT_IOA_THRESHOLD {
+                                intersections.push(inter_bbox);
+                            }
+                        }
+
+                        if intersections.len() >= 2 {
+                            split_boxes.extend(intersections);
+                        } else {
+                            split_boxes.push(bbox);
+                        }
+                    }
+                    detection_boxes = split_boxes;
+                }
+            }
+
+            if !detection_boxes.is_empty() {
+                detection_boxes = oar_ocr_core::processors::sort_quad_boxes(&detection_boxes);
+            }
+
+            let state = PageOcrState {
+                recognized: vec![None; detection_boxes.len()],
+                detection_boxes,
+            };
+
+            if !state.detection_boxes.is_empty() {
+                match cropper.process((
+                    Arc::clone(&prepared.current_image),
+                    state.detection_boxes.clone(),
+                )) {
+                    Ok(cropped) => {
+                        for (det_idx, crop_result) in cropped.into_iter().enumerate() {
+                            let Some(img) = crop_result else {
+                                continue;
+                            };
+                            let image = (*img).clone();
+                            let wh_ratio = image.width() as f32 / image.height().max(1) as f32;
+                            rec_items.push(RecItem {
+                                page_idx,
+                                det_idx,
+                                wh_ratio,
+                                image,
+                            });
+                        }
+                    }
+                    Err(err) => {
+                        prepared_pages[page_idx] = Err(err);
+                        continue;
+                    }
+                }
+            }
+
+            page_states[page_idx] = Some(state);
+        }
+        let crop_ms = t_crop.elapsed().as_secs_f64() * 1000.0;
+
+        let mut tlo_ms = 0.0;
+        let mut recognition_ms = 0.0;
+        if !rec_items.is_empty() {
+            if let Some(ref tlo_adapter) = self.pipeline.text_line_orientation_adapter {
+                let t_tlo = Instant::now();
+                let input =
+                    ImageTaskInput::new(rec_items.iter().map(|item| item.image.clone()).collect());
+                if let Ok(tlo_result) = tlo_adapter.execute(input, None) {
+                    for (item, classifications) in
+                        rec_items.iter_mut().zip(tlo_result.classifications)
+                    {
+                        if let Some(top_cls) = classifications.first()
+                            && top_cls.class_id == 1
+                        {
+                            item.image = image::imageops::rotate180(&item.image);
+                        }
+                    }
+                }
+                tlo_ms = t_tlo.elapsed().as_secs_f64() * 1000.0;
+            }
+
+            rec_items.sort_by(|a, b| {
+                a.wh_ratio
+                    .partial_cmp(&b.wh_ratio)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            let batch_size = self
+                .pipeline
+                .region_batch_size
+                .unwrap_or_else(|| text_recognition_adapter.recommended_batch_size())
+                .max(1);
+
+            let t_recognition = Instant::now();
+            let mut pending_ranges = Vec::new();
+            let mut start = 0usize;
+            while start < rec_items.len() {
+                let end = (start + batch_size).min(rec_items.len());
+                pending_ranges.push((start, end));
+                start = end;
+            }
+
+            while let Some((start, end)) = pending_ranges.pop() {
+                let chunk = &rec_items[start..end];
+                let rec_input =
+                    ImageTaskInput::new(chunk.iter().map(|item| item.image.clone()).collect());
+                match text_recognition_adapter.execute(rec_input, None) {
+                    Ok(rec_result) => {
+                        for (i, item) in chunk.iter().enumerate() {
+                            let text = rec_result.texts.get(i).cloned().unwrap_or_default();
+                            if text.is_empty() {
+                                continue;
+                            }
+                            let score = rec_result.scores.get(i).copied().unwrap_or(0.0);
+                            if let Some(Some(state)) = page_states.get_mut(item.page_idx)
+                                && let Some(slot) = state.recognized.get_mut(item.det_idx)
+                            {
+                                *slot = Some((text, score));
+                            }
+                        }
+                    }
+                    Err(err) if end - start > 1 => {
+                        let mid = start + (end - start) / 2;
+                        tracing::warn!(
+                            "Text recognition batch failed for {} crops; retrying as {} + {} crops: {}",
+                            end - start,
+                            mid - start,
+                            end - mid,
+                            err
+                        );
+                        pending_ranges.push((mid, end));
+                        pending_ranges.push((start, mid));
+                    }
+                    Err(err) => {
+                        tracing::warn!("Text recognition crop failed and will be skipped: {}", err);
+                    }
+                }
+            }
+            recognition_ms = t_recognition.elapsed().as_secs_f64() * 1000.0;
+        }
+
+        let batch_size = self
+            .pipeline
+            .region_batch_size
+            .unwrap_or_else(|| text_recognition_adapter.recommended_batch_size())
+            .max(1);
+
+        let t_refine = Instant::now();
+        let mut precomputed_pages = 0usize;
+        let mut text_region_count = 0usize;
+        for page_idx in 0..prepared_pages.len() {
+            let Some(state) = page_states[page_idx].take() else {
+                continue;
+            };
+            let Ok(prepared) = &mut prepared_pages[page_idx] else {
+                continue;
+            };
+
+            let mut text_regions = Vec::new();
+            for (det_idx, rec) in state.recognized.into_iter().enumerate() {
+                let Some((text, score)) = rec else {
+                    continue;
+                };
+                let bbox = state.detection_boxes[det_idx].clone();
+                text_regions.push(TextRegion {
+                    bounding_box: bbox.clone(),
+                    dt_poly: Some(bbox.clone()),
+                    rec_poly: Some(bbox),
+                    text: Some(Arc::from(text)),
+                    confidence: Some(score),
+                    orientation_angle: None,
+                    word_boxes: None,
+                    label: None,
+                });
+            }
+
+            if let Err(err) = Self::refine_overall_ocr_with_layout(
+                &mut text_regions,
+                &prepared.layout_elements,
+                prepared.detected_region_blocks.as_deref(),
+                &prepared.current_image,
+                text_recognition_adapter,
+                batch_size,
+            ) {
+                prepared_pages[page_idx] = Err(err);
+                continue;
+            }
+
+            text_region_count += text_regions.len();
+            prepared.precomputed_text_regions = Some(text_regions);
+            precomputed_pages += 1;
+        }
+        let refine_ms = t_refine.elapsed().as_secs_f64() * 1000.0;
+
+        tracing::debug!(
+            "structure batch OCR: pages={}, regions={}, detection={:.1} ms, crop/split={:.1} ms, tlo={:.1} ms, recognition={:.1} ms, refine={:.1} ms, total={:.1} ms",
+            precomputed_pages,
+            text_region_count,
+            detection_ms,
+            crop_ms,
+            tlo_ms,
+            recognition_ms,
+            refine_ms,
+            t_total.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    /// Analyzes multiple document page images with configured batching.
     ///
-    /// All formula crops from every page are collected first and forwarded to the
-    /// formula adapter in a single `execute` call, reducing ONNX inference overhead
-    /// compared to calling [`Self::predict_image`] sequentially.  Layout detection and all
-    /// other per-page steps are still performed independently per page.
+    /// Image-level stages are chunked according to `image_batch_size` when
+    /// configured, otherwise the layout adapter's recommended batch size is used.
+    /// OCR recognition crops are aggregated across the full input set and split
+    /// according to `region_batch_size` when configured.
     ///
     /// Per-page errors are returned individually so that a failure on one page does
     /// not abort the remaining pages.
@@ -2649,18 +3124,139 @@ impl OARStructure {
         use oar_ocr_core::domain::structure::FormulaResult;
         use oar_ocr_core::utils::BBoxCrop;
 
+        let image_batch_size = self
+            .pipeline
+            .image_batch_size
+            .unwrap_or_else(|| {
+                self.pipeline
+                    .layout_detection_adapter
+                    .recommended_batch_size()
+            })
+            .max(1);
+
         if images.is_empty() {
             return Vec::new();
         }
 
-        // Phase 1: Preprocessing + layout detection for every page.
+        let t_total = Instant::now();
+
+        // Phase 1: Preprocess every page, then run layout/region detection in
+        // batches. The original single-page path is still used as a fallback if
+        // a batched layout call fails.
         // Pages that fail preparation are recorded as Err and skipped in later phases.
-        let prepared_pages: Vec<Result<PreparedPage, OCRError>> = images
+        let t_preprocess = Instant::now();
+        let mut prepared_pages: Vec<Result<PreparedPage, OCRError>> = images
             .into_iter()
-            .map(|image| self.prepare_page(image))
+            .map(|image| self.preprocess_page(image))
+            .collect();
+        let preprocess_ms = t_preprocess.elapsed().as_secs_f64() * 1000.0;
+
+        let batch_pages: Vec<(usize, std::sync::Arc<image::RgbImage>)> = prepared_pages
+            .iter()
+            .enumerate()
+            .filter_map(|(page_idx, prepared)| {
+                prepared
+                    .as_ref()
+                    .ok()
+                    .map(|page| (page_idx, std::sync::Arc::clone(&page.current_image)))
+            })
             .collect();
 
+        let t_layout = Instant::now();
+        if !batch_pages.is_empty() {
+            for page_chunk in batch_pages.chunks(image_batch_size) {
+                let layout_input = ImageTaskInput::from_arc_images(
+                    page_chunk
+                        .iter()
+                        .map(|(_, img)| std::sync::Arc::clone(img))
+                        .collect(),
+                );
+                match self
+                    .pipeline
+                    .layout_detection_adapter
+                    .execute(layout_input, None)
+                {
+                    Ok(layout_result) => {
+                        for (batch_idx, (page_idx, _)) in page_chunk.iter().enumerate() {
+                            if let Ok(prepared) = &mut prepared_pages[*page_idx] {
+                                let mut layout_elements = layout_result
+                                    .elements
+                                    .get(batch_idx)
+                                    .map(|elements| Self::layout_elements_from_detection(elements))
+                                    .unwrap_or_default();
+                                Self::finish_layout_elements(&mut layout_elements);
+                                prepared.layout_elements = layout_elements;
+                            }
+                        }
+
+                        if let Some(ref region_adapter) = self.pipeline.region_detection_adapter {
+                            let region_input = ImageTaskInput::from_arc_images(
+                                page_chunk
+                                    .iter()
+                                    .map(|(_, img)| std::sync::Arc::clone(img))
+                                    .collect(),
+                            );
+                            match region_adapter.execute(region_input, None) {
+                                Ok(region_result) => {
+                                    for (batch_idx, (page_idx, _)) in page_chunk.iter().enumerate()
+                                    {
+                                        let Some(region_elements) =
+                                            region_result.elements.get(batch_idx)
+                                        else {
+                                            continue;
+                                        };
+                                        if region_elements.is_empty() {
+                                            continue;
+                                        }
+                                        if let Ok(prepared) = &mut prepared_pages[*page_idx] {
+                                            prepared.detected_region_blocks = Some(
+                                                region_elements
+                                                    .iter()
+                                                    .map(|e| {
+                                                        crate::domain::structure::RegionBlock {
+                                                            bbox: e.bbox.clone(),
+                                                            confidence: e.score,
+                                                            order_index: None,
+                                                            element_indices: Vec::new(),
+                                                        }
+                                                    })
+                                                    .collect(),
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    tracing::warn!("Batch region detection failed: {}", err);
+                                }
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            "Batch layout detection failed; falling back to per-page layout: {}",
+                            err
+                        );
+                        for (page_idx, _) in page_chunk {
+                            if let Ok(prepared) = &mut prepared_pages[*page_idx] {
+                                match self.detect_layout_and_regions(&prepared.current_image) {
+                                    Ok((layout_elements, region_blocks)) => {
+                                        prepared.layout_elements = layout_elements;
+                                        prepared.detected_region_blocks = region_blocks;
+                                    }
+                                    Err(err) => {
+                                        prepared_pages[*page_idx] = Err(err);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let layout_ms = t_layout.elapsed().as_secs_f64() * 1000.0;
+
         // Phase 2: Batch formula recognition across all successfully prepared pages.
+        let t_formula = Instant::now();
         let num_pages = prepared_pages.len();
         let mut per_page_formulas: Vec<Vec<FormulaResult>> =
             (0..num_pages).map(|_| Vec::new()).collect();
@@ -2732,13 +3328,30 @@ impl OARStructure {
                 }
             }
         }
+        let formula_ms = t_formula.elapsed().as_secs_f64() * 1000.0;
+
+        let t_ocr = Instant::now();
+        self.precompute_overall_ocr_across_pages(&mut prepared_pages);
+        let ocr_ms = t_ocr.elapsed().as_secs_f64() * 1000.0;
 
         // Phase 3: Complete each page with its pre-computed formula results.
-        prepared_pages
+        let t_complete = Instant::now();
+        let results: Vec<_> = prepared_pages
             .into_iter()
             .zip(per_page_formulas)
             .map(|(prepared, formulas)| self.complete_page(prepared?, formulas))
-            .collect()
+            .collect();
+        tracing::debug!(
+            "structure batch: pages={}, preprocess={:.1} ms, layout/region={:.1} ms, formula={:.1} ms, ocr={:.1} ms, complete={:.1} ms, total={:.1} ms",
+            num_pages,
+            preprocess_ms,
+            layout_ms,
+            formula_ms,
+            ocr_ms,
+            t_complete.elapsed().as_secs_f64() * 1000.0,
+            t_total.elapsed().as_secs_f64() * 1000.0
+        );
+        results
     }
 }
 
@@ -2824,5 +3437,22 @@ mod tests {
         assert!(builder.layout_detection_config.is_some());
         assert_eq!(builder.image_batch_size, Some(4));
         assert_eq!(builder.region_batch_size, Some(64));
+    }
+
+    #[test]
+    fn test_structure_batch_size_validation() {
+        assert!(OARStructureBuilder::validate_batch_size("image_batch_size", 1).is_ok());
+        assert!(
+            OARStructureBuilder::validate_batch_size(
+                "region_batch_size",
+                OARStructureBuilder::MAX_BATCH_SIZE,
+            )
+            .is_ok()
+        );
+
+        let err = OARStructureBuilder::validate_batch_size("image_batch_size", 0).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("image_batch_size"));
+        assert!(msg.contains(&format!("1..={}", OARStructureBuilder::MAX_BATCH_SIZE)));
     }
 }

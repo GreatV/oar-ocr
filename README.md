@@ -92,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Vision-Language Models (VLM)
 
-For advanced document understanding using Vision-Language Models (like PaddleOCR-VL, **PaddleOCR-VL-1.5**, GLM-OCR, HunyuanOCR, and MinerU2.5), check out the [`oar-ocr-vl`](oar-ocr-vl/README.md) crate.
+For advanced document understanding using Vision-Language Models (like PaddleOCR-VL, PaddleOCR-VL-1.5, **PaddleOCR-VL-1.6**, GLM-OCR, HunyuanOCR, and MinerU2.5), check out the [`oar-ocr-vl`](oar-ocr-vl/README.md) crate.
 
 ### Hierarchical Speculative Decoding (HSD)
 

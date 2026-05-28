@@ -112,7 +112,7 @@ impl ModelAdapter for TextRecognitionAdapter {
     }
 
     fn recommended_batch_size(&self) -> usize {
-        32
+        64
     }
 }
 

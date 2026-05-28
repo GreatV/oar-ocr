@@ -307,7 +307,7 @@ impl ScaleAwareDetectorModel {
                     ("image", TensorInput::Array4(batch_tensor)),
                     ("scale_factor", TensorInput::Array2(&scale_factor)),
                 ];
-                self.run_inference_with_inputs(&inputs)
+                self.run_inference_with_inputs(&inputs, batch_size)
             }
             ScaleAwareDetectorInferenceMode::ScaleFactorAndImageShape => {
                 // PP-DocLayout-style: both scale_factor and image_shape
@@ -327,7 +327,7 @@ impl ScaleAwareDetectorModel {
                     ("scale_factor", TensorInput::Array2(&scale_factor)),
                     ("im_shape", TensorInput::Array2(&image_shape)),
                 ];
-                self.run_inference_with_inputs(&inputs)
+                self.run_inference_with_inputs(&inputs, batch_size)
             }
         }
     }
@@ -336,6 +336,7 @@ impl ScaleAwareDetectorModel {
     fn run_inference_with_inputs(
         &self,
         inputs: &[(&str, TensorInput)],
+        batch_size: usize,
     ) -> Result<ndarray::Array4<f32>, OCRError> {
         let outputs = self
             .inference
@@ -369,7 +370,18 @@ impl ScaleAwareDetectorModel {
                     });
                 }
 
-                // Convert to 4D format [1, num_boxes, 1, N]
+                if !num_boxes.is_multiple_of(batch_size) {
+                    return Err(OCRError::InvalidInput {
+                        message: format!(
+                            "2D detector output has {} boxes, not divisible by batch size {}",
+                            num_boxes, batch_size
+                        ),
+                    });
+                }
+
+                // Convert flattened 2D output back to [batch, boxes_per_image, 1, N].
+                // PP-DocLayout exports output as [300 * batch, N].
+                let boxes_per_image = num_boxes / batch_size;
                 let output_array =
                     output
                         .1
@@ -379,11 +391,10 @@ impl ScaleAwareDetectorModel {
                             message: format!("Failed to extract output tensor: {}", e),
                         })?;
                 let (data, _offset) = output_array.into_raw_vec_and_offset();
-                ndarray::Array::from_shape_vec((1, num_boxes, 1, box_dim), data).map_err(|e| {
-                    OCRError::InvalidInput {
+                ndarray::Array::from_shape_vec((batch_size, boxes_per_image, 1, box_dim), data)
+                    .map_err(|e| OCRError::InvalidInput {
                         message: format!("Failed to reshape 2D output to 4D: {}", e),
-                    }
-                })
+                    })
             }
             4 => {
                 // Standard 4D output format

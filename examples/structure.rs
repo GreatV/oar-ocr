@@ -314,6 +314,14 @@ struct Args {
     #[arg(long, default_value = "cuda")]
     device: String,
 
+    /// Number of pages/images to process per image-level batch
+    #[arg(long = "image-batch-size")]
+    image_batch_size: Option<usize>,
+
+    /// Number of cropped regions to process per recognition batch
+    #[arg(long = "region-batch-size")]
+    region_batch_size: Option<usize>,
+
     /// Layout detection score threshold (varies by class, 0.3-0.5)
     #[arg(long, default_value = "0.5")]
     layout_score_thresh: f32,
@@ -585,6 +593,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder = builder.ort_session(config);
     }
 
+    if let Some(size) = args.image_batch_size {
+        builder = builder.image_batch_size(size);
+    }
+
+    if let Some(size) = args.region_batch_size {
+        builder = builder.region_batch_size(size);
+    }
+
     if let Some(path) = args.orientation_model {
         builder = builder.with_document_orientation(path);
     }
@@ -679,7 +695,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Collect all results for potential concatenation
     let mut all_results: Vec<oar_ocr::domain::structure::StructureResult> = Vec::new();
 
-    // Collect images and metadata for batch processing (cross-page formula batching)
+    // Collect images and metadata for configured batch processing.
     let mut images: Vec<image::RgbImage> = Vec::new();
     let mut source_meta: Vec<(String, String)> = Vec::new(); // (source_path, source_stem)
 
@@ -718,7 +734,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     info!(
-        "Batch processing {} image(s) with cross-page formula batching",
+        "Batch processing {} image(s) with configured batching",
         images.len()
     );
     let batch_results = analyzer.predict_images(images);

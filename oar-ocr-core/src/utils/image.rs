@@ -91,24 +91,6 @@ pub fn load_image<P: AsRef<Path>>(path: P) -> Result<RgbImage, OCRError> {
 }
 
 fn open_image_any_format(path: &Path) -> Result<DynamicImage, ImageError> {
-    match image::open(path) {
-        Ok(img) => Ok(img),
-        Err(err) if should_retry(&err) => {
-            tracing::warn!(
-                "Standard decode failed for {} ({err}). Retrying with format sniffing.",
-                path.display()
-            );
-            decode_with_guessed_format(path)
-        }
-        Err(err) => Err(err),
-    }
-}
-
-fn should_retry(err: &ImageError) -> bool {
-    matches!(err, ImageError::Decoding(_) | ImageError::Unsupported(_))
-}
-
-fn decode_with_guessed_format(path: &Path) -> Result<DynamicImage, ImageError> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let reader = ImageReader::new(reader).with_guessed_format()?;

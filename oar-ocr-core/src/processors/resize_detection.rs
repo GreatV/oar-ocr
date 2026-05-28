@@ -19,6 +19,7 @@
 use crate::core::constants::{DEFAULT_LIMIT_SIDE_LEN, DEFAULT_MAX_SIDE_LIMIT};
 use crate::processors::types::{ImageScaleInfo, LimitType, ResizeType};
 use image::{DynamicImage, GenericImageView};
+use rayon::prelude::*;
 use tracing::{error, warn};
 
 /// A struct for resizing images for OCR testing
@@ -126,13 +127,14 @@ impl DetResizeForTest {
         limit_type: Option<LimitType>,
         max_side_limit: Option<u32>,
     ) -> (Vec<DynamicImage>, Vec<ImageScaleInfo>) {
-        let mut resize_imgs = Vec::new();
-        let mut img_shapes = Vec::new();
+        let resized: Vec<(DynamicImage, ImageScaleInfo)> = imgs
+            .into_par_iter()
+            .map(|img| self.resize(img, limit_side_len, limit_type.as_ref(), max_side_limit))
+            .collect();
 
-        // Process each image in the batch
-        for img in imgs {
-            let (resized_img, shape) =
-                self.resize(img, limit_side_len, limit_type.as_ref(), max_side_limit);
+        let mut resize_imgs = Vec::with_capacity(resized.len());
+        let mut img_shapes = Vec::with_capacity(resized.len());
+        for (resized_img, shape) in resized {
             resize_imgs.push(resized_img);
             img_shapes.push(shape);
         }
