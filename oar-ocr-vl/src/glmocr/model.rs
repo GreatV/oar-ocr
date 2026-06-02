@@ -73,14 +73,11 @@ impl GlmOcr {
         }
 
         let dtype = device.bf16_default_to_f32();
-        // SAFETY: The mmap'd file must not be modified or deleted while in use.
+        let weight_files = crate::utils::collect_safetensors(model_dir, "GLM-OCR")?;
+        // SAFETY: The mmap'd files must not be modified or deleted while in use.
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                &[model_dir.join("model.safetensors")],
-                dtype,
-                &device,
-            )
-            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "load model.safetensors", e))?
+            VarBuilder::from_mmaped_safetensors(&weight_files, dtype, &device)
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "load safetensors", e))?
         };
 
         let image_token_id = cfg.image_token_id;

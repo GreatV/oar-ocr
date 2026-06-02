@@ -217,13 +217,12 @@ impl MinerU {
         }
 
         let dtype = device.bf16_default_to_f32();
+        let weight_files = crate::utils::collect_safetensors(model_dir, "MinerU2.5")?;
+        // SAFETY: from_mmaped_safetensors memory-maps the weight files directly;
+        // the caller must ensure they are valid and not modified while in use.
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                &[model_dir.join("model.safetensors")],
-                dtype,
-                &device,
-            )
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "load model.safetensors", e))?
+            VarBuilder::from_mmaped_safetensors(&weight_files, dtype, &device)
+                .map_err(|e| candle_to_ocr_inference("MinerU2.5", "load safetensors", e))?
         };
 
         let text = MinerUTextModel::load(&cfg, vb.pp("model"))?;
@@ -257,7 +256,7 @@ impl MinerU {
         let video_token_id = cfg.video_token_id;
         let spatial_merge_size = cfg.vision_config.spatial_merge_size;
 
-        let lm_head = if cfg.tie_word_embeddings {
+        let lm_head = if cfg.tie_word_embeddings() {
             Linear::new(text.token_embedding_weight(), None)
         } else {
             linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))
@@ -1550,6 +1549,8 @@ fn get_rope_index(
     spatial_merge_size: usize,
     device: &Device,
 ) -> Result<(Tensor, i64), OCRError> {
+    // Qwen2-VL multimodal RoPE has three position axes: temporal, height, width.
+    const NUM_ROPE_AXES: usize = 3;
     let image_token_id = cfg.image_token_id;
     let mut image_count = 0usize;
     for i in 0..input_ids.len().saturating_sub(1) {
@@ -1631,7 +1632,7 @@ fn get_rope_index(
         });
     }
 
-    let mut pos_ids: Vec<i64> = vec![0; 3 * input_ids.len()];
+    let mut pos_ids: Vec<i64> = vec![0; NUM_ROPE_AXES * input_ids.len()];
     let len = input_ids.len();
     for (i, v) in positions.iter().enumerate() {
         pos_ids[i] = v[0];
@@ -1641,7 +1642,7 @@ fn get_rope_index(
 
     let rope_delta = (current_max + 1) - (input_ids.len() as i64);
 
-    let position_ids = Tensor::from_vec(pos_ids, (3usize, 1usize, input_ids.len()), device)
+    let position_ids = Tensor::from_vec(pos_ids, (NUM_ROPE_AXES, 1usize, input_ids.len()), device)
         .map_err(|e| {
             candle_to_ocr_processing(
                 oar_ocr_core::core::errors::ProcessingStage::TensorOperation,

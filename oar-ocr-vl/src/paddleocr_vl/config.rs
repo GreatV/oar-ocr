@@ -22,29 +22,17 @@ pub struct PaddleOcrVlImageProcessorConfig {
 
 impl PaddleOcrVlImageProcessorConfig {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
-        let contents = std::fs::read_to_string(path)?;
-        serde_json::from_str(&contents).map_err(|e| OCRError::ConfigError {
-            message: format!("failed to parse PaddleOCR-VL preprocessor_config.json: {e}"),
-        })
+        crate::utils::load_json_config(path, "PaddleOCR-VL", "preprocessor_config.json")
     }
 
     pub fn validate(&self) -> Result<(), OCRError> {
-        if self.image_mean.len() != 3 || self.image_std.len() != 3 {
-            return Err(OCRError::ConfigError {
-                message: format!(
-                    "PaddleOCR-VL image_mean/std must have length 3, got mean={} std={}",
-                    self.image_mean.len(),
-                    self.image_std.len()
-                ),
-            });
-        }
-        if self.patch_size == 0 || self.merge_size == 0 || self.temporal_patch_size == 0 {
-            return Err(OCRError::ConfigError {
-                message: "PaddleOCR-VL patch_size/merge_size/temporal_patch_size must be > 0"
-                    .to_string(),
-            });
-        }
-        Ok(())
+        crate::utils::validate_image_mean_std("PaddleOCR-VL", &self.image_mean, &self.image_std)?;
+        crate::utils::validate_patch_merge_temporal(
+            "PaddleOCR-VL",
+            self.patch_size,
+            self.merge_size,
+            self.temporal_patch_size,
+        )
     }
 }
 
@@ -92,9 +80,6 @@ pub struct PaddleOcrVlConfig {
 
 impl PaddleOcrVlConfig {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
-        let contents = std::fs::read_to_string(path)?;
-        serde_json::from_str(&contents).map_err(|e| OCRError::ConfigError {
-            message: format!("failed to parse PaddleOCR-VL config.json: {e}"),
-        })
+        crate::utils::load_json_config(path, "PaddleOCR-VL", "config.json")
     }
 }

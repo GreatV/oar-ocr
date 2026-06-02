@@ -12,7 +12,7 @@ pub mod table;
 pub mod text;
 
 use ::image::{GrayImage, RgbImage};
-use candle_core::{Device, IndexOp, Tensor};
+use candle_core::{Device, Tensor};
 use oar_ocr_core::core::OCRError;
 use oar_ocr_core::domain::structure::{LayoutElement, LayoutElementType};
 use oar_ocr_core::processors::BoundingBox;
@@ -180,7 +180,138 @@ pub fn candle_to_ocr_processing(
     }
 }
 
-/// Rotate half of the tensor dimensions for RoPE.
+/// Resolve the safetensors weight files for a model directory.
+///
+/// Returns the single `model.safetensors` when present, otherwise the sorted
+/// list of sharded `model-*.safetensors` files. The returned order is
+/// deterministic so `VarBuilder::from_mmaped_safetensors` sees a stable layout.
+///
+/// `model_name` is only used to prefix the error message when no weights are
+/// found.
+pub fn collect_safetensors(
+    model_dir: &std::path::Path,
+    model_name: &str,
+) -> Result<Vec<std::path::PathBuf>, OCRError> {
+    let single = model_dir.join("model.safetensors");
+    if single.exists() {
+        return Ok(vec![single]);
+    }
+
+    let mut shards: Vec<std::path::PathBuf> = std::fs::read_dir(model_dir)
+        .map_err(|e| OCRError::ConfigError {
+            message: format!("{model_name}: cannot read model dir {}: {e}", model_dir.display()),
+        })?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.starts_with("model-") && s.ends_with(".safetensors"))
+        })
+        .collect();
+    shards.sort();
+    if shards.is_empty() {
+        return Err(OCRError::ConfigError {
+            message: format!(
+                "{model_name}: no model.safetensors or model-*.safetensors found in {}",
+                model_dir.display()
+            ),
+        });
+    }
+    Ok(shards)
+}
+
+/// Read and deserialize a JSON config file (e.g. `config.json` or
+/// `preprocessor_config.json`) into `T`.
+///
+/// `model_name` and `file_name` are only used to build the parse-error message,
+/// matching the historical `"failed to parse {model} {file}: {err}"` format.
+pub fn load_json_config<T: serde::de::DeserializeOwned>(
+    path: impl AsRef<std::path::Path>,
+    model_name: &str,
+    file_name: &str,
+) -> Result<T, OCRError> {
+    let contents = std::fs::read_to_string(path)?;
+    serde_json::from_str(&contents).map_err(|e| OCRError::ConfigError {
+        message: format!("failed to parse {model_name} {file_name}: {e}"),
+    })
+}
+
+/// `serde` default helper: boolean fields that default to `true`.
+pub fn default_true() -> bool {
+    true
+}
+
+/// `serde` default helper: the standard `1/255` pixel rescale factor.
+pub fn default_rescale_factor() -> f32 {
+    1.0 / 255.0
+}
+
+/// Validate that image normalization `mean`/`std` vectors both have length 3
+/// (one entry per RGB channel). Shared by every VL image-processor config.
+pub fn validate_image_mean_std(
+    model_name: &str,
+    image_mean: &[f32],
+    image_std: &[f32],
+) -> Result<(), OCRError> {
+    if image_mean.len() != 3 || image_std.len() != 3 {
+        return Err(OCRError::ConfigError {
+            message: format!(
+                "{model_name} image_mean/std must have length 3, got mean={} std={}",
+                image_mean.len(),
+                image_std.len()
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Validate that the patch / merge / temporal-patch sizes are all non-zero.
+/// Shared by the VL image-processor configs that emit a single combined check.
+pub fn validate_patch_merge_temporal(
+    model_name: &str,
+    patch_size: usize,
+    merge_size: usize,
+    temporal_patch_size: usize,
+) -> Result<(), OCRError> {
+    if patch_size == 0 || merge_size == 0 || temporal_patch_size == 0 {
+        return Err(OCRError::ConfigError {
+            message: format!(
+                "{model_name} patch_size/merge_size/temporal_patch_size must be > 0"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Build the inverse-frequency vector for a vision rotary embedding:
+/// `inv_freq[j] = 1 / theta^(2j / dim)` for `j in 0..dim/2`, as a `(dim/2,)`
+/// F32 tensor. Computed in f64 then cast to f32 to match the reference. Shared
+/// by the Qwen2-VL-style vision towers (MinerU, PaddleOCR-VL).
+pub fn vision_inv_freq(
+    dim: usize,
+    theta: f64,
+    model_name: &str,
+    device: &Device,
+) -> Result<Tensor, OCRError> {
+    let mut inv_freq = Vec::with_capacity(dim / 2);
+    for i in (0..dim).step_by(2) {
+        let v = 1f64 / theta.powf(i as f64 / dim as f64);
+        inv_freq.push(v as f32);
+    }
+    Tensor::from_vec(inv_freq, (dim / 2,), device).map_err(|e| {
+        candle_to_ocr_processing(
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            format!("{model_name}: vision inv_freq tensor failed"),
+            e,
+        )
+    })
+}
+
+/// Rotate half of the last dimension for RoPE: `[x1, x2] -> [-x2, x1]`.
+///
+/// Operates on the final axis only, so it is rank-agnostic — both the 4D
+/// text-attention tensors `(batch, heads, seq, head_dim)` and the 3D
+/// vision-attention tensors `(seq, heads, head_dim)` share this path.
 pub fn rotate_half(x: &Tensor) -> Result<Tensor, OCRError> {
     let d = x.dim(candle_core::D::Minus1).map_err(|e| {
         candle_to_ocr_processing(
@@ -190,14 +321,14 @@ pub fn rotate_half(x: &Tensor) -> Result<Tensor, OCRError> {
         )
     })?;
     let half = d / 2;
-    let x1 = x.i((.., .., .., 0..half)).map_err(|e| {
+    let x1 = x.narrow(candle_core::D::Minus1, 0, half).map_err(|e| {
         candle_to_ocr_processing(
             oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "rotate_half slice x1 failed",
             e,
         )
     })?;
-    let x2 = x.i((.., .., .., half..d)).map_err(|e| {
+    let x2 = x.narrow(candle_core::D::Minus1, half, d - half).map_err(|e| {
         candle_to_ocr_processing(
             oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
             "rotate_half slice x2 failed",

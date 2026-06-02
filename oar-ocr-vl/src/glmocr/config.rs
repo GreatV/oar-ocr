@@ -3,14 +3,6 @@ use oar_ocr_core::core::OCRError;
 use serde::Deserialize;
 use std::path::Path;
 
-fn default_true() -> bool {
-    true
-}
-
-fn default_rescale_factor() -> f32 {
-    1.0 / 255.0
-}
-
 fn default_partial_rotary_factor() -> f64 {
     1.0
 }
@@ -119,10 +111,7 @@ pub struct GlmOcrConfig {
 
 impl GlmOcrConfig {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
-        let contents = std::fs::read_to_string(path)?;
-        serde_json::from_str(&contents).map_err(|e| OCRError::ConfigError {
-            message: format!("failed to parse GLM-OCR config.json: {e}"),
-        })
+        crate::utils::load_json_config(path, "GLM-OCR", "config.json")
     }
 }
 
@@ -136,13 +125,13 @@ pub struct GlmOcrImageProcessorSize {
 pub struct GlmOcrImageProcessorConfig {
     pub size: GlmOcrImageProcessorSize,
     pub do_rescale: bool,
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::utils::default_true")]
     pub do_resize: bool,
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::utils::default_true")]
     pub do_normalize: bool,
-    #[serde(default = "default_rescale_factor")]
+    #[serde(default = "crate::utils::default_rescale_factor")]
     pub rescale_factor: f32,
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::utils::default_true")]
     pub do_convert_rgb: bool,
     #[serde(default)]
     pub resample: Option<u32>,
@@ -159,22 +148,11 @@ pub struct GlmOcrImageProcessorConfig {
 
 impl GlmOcrImageProcessorConfig {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
-        let contents = std::fs::read_to_string(path)?;
-        serde_json::from_str(&contents).map_err(|e| OCRError::ConfigError {
-            message: format!("failed to parse GLM-OCR preprocessor_config.json: {e}"),
-        })
+        crate::utils::load_json_config(path, "GLM-OCR", "preprocessor_config.json")
     }
 
     pub fn validate(&self) -> Result<(), OCRError> {
-        if self.image_mean.len() != 3 || self.image_std.len() != 3 {
-            return Err(OCRError::ConfigError {
-                message: format!(
-                    "GLM-OCR image_mean/std must have length 3, got mean={} std={}",
-                    self.image_mean.len(),
-                    self.image_std.len()
-                ),
-            });
-        }
+        crate::utils::validate_image_mean_std("GLM-OCR", &self.image_mean, &self.image_std)?;
         if self.image_std.contains(&0.0) {
             return Err(OCRError::ConfigError {
                 message: "GLM-OCR image_std values must be non-zero (used as divisor)".to_string(),
