@@ -79,6 +79,17 @@ struct SdarAttention {
 
 impl SdarAttention {
     fn load(cfg: &SdarConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+        if !cfg
+            .num_attention_heads
+            .is_multiple_of(cfg.num_key_value_heads)
+        {
+            return Err(OCRError::ConfigError {
+                message: format!(
+                    "MinerU-Diffusion: num_attention_heads ({}) must be divisible by num_key_value_heads ({})",
+                    cfg.num_attention_heads, cfg.num_key_value_heads
+                ),
+            });
+        }
         let head_dim = cfg.head_dim()?;
         let q_dim = cfg.num_attention_heads * head_dim;
         let kv_dim = cfg.num_key_value_heads * head_dim;

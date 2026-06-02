@@ -354,6 +354,7 @@ impl MinerUDiffusion {
             // Every block position starts masked; decoded tokens overwrite it.
             let mut cur_tokens = vec![self.mask_token_id; block];
 
+            let mut committed = false;
             for step in 0..=gen_cfg.denoising_steps {
                 let masked: Vec<usize> = cur_tokens
                     .iter()
@@ -366,6 +367,7 @@ impl MinerUDiffusion {
                     // Commit the fully-decoded block's KV and move on.
                     self.text
                         .forward(&cur_embeds, &positions, None, &mut cache, true)?;
+                    committed = true;
                     break;
                 }
 
@@ -381,15 +383,28 @@ impl MinerUDiffusion {
                     rng,
                 )?;
 
-                let want = num_transfer[step.min(gen_cfg.denoising_steps - 1)];
+                // `num_transfer` always has at least one entry (steps is clamped
+                // to >= 1 in `num_transfer_tokens`); `saturating_sub` keeps the
+                // index in range when `denoising_steps == 0`.
+                let want = num_transfer[step.min(gen_cfg.denoising_steps.saturating_sub(1))];
                 let transfer = select_transfer(&masked, &confs, gen_cfg.dynamic_threshold, want);
                 for pos in transfer {
                     cur_tokens[pos] = tokens[pos];
                 }
             }
 
-            // Safety net: if denoising left anything masked, accept the greedy
-            // prediction for the remaining positions (commits next round/block).
+            // Fallback commit: the in-loop commit only fires when a later
+            // iteration observes a fully-unmasked block, which never happens
+            // when the schedule unmasks everything on the final step (e.g.
+            // `denoising_steps == 0`, or an early exit). Without this the block's
+            // KV is missing from the cache and the next block prefills on stale
+            // state.
+            if !committed {
+                let cur_embeds = self.embed_tokens_block(&cur_tokens)?;
+                self.text
+                    .forward(&cur_embeds, &positions, None, &mut cache, true)?;
+            }
+
             generated.extend_from_slice(&cur_tokens);
             if cur_tokens.iter().any(|id| self.eos_token_ids.contains(id)) {
                 break;
@@ -558,8 +573,11 @@ fn apply_top_k(logits: &mut [f32], top_k: usize) {
     if top_k == 0 || top_k >= logits.len() {
         return;
     }
+    // Only the top-`top_k`/rest partition matters, not the full order, so a
+    // linear-time partial selection beats an O(N log N) sort over the whole
+    // vocabulary (~152k entries) on every denoising step.
     let mut order: Vec<usize> = (0..logits.len()).collect();
-    order.sort_by(|&a, &b| {
+    order.select_nth_unstable_by(top_k, |&a, &b| {
         logits[b]
             .partial_cmp(&logits[a])
             .unwrap_or(std::cmp::Ordering::Equal)

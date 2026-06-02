@@ -197,20 +197,32 @@ pub fn collect_safetensors(
         return Ok(vec![single]);
     }
 
-    let mut shards: Vec<std::path::PathBuf> = std::fs::read_dir(model_dir)
-        .map_err(|e| OCRError::ConfigError {
-            message: format!(
-                "{model_name}: cannot read model dir {}: {e}",
-                model_dir.display()
-            ),
-        })?
-        .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.file_name()
-                .and_then(|s| s.to_str())
-                .is_some_and(|s| s.starts_with("model-") && s.ends_with(".safetensors"))
-        })
-        .collect();
+    let read_dir = std::fs::read_dir(model_dir).map_err(|e| OCRError::ConfigError {
+        message: format!(
+            "{model_name}: cannot read model dir {}: {e}",
+            model_dir.display()
+        ),
+    })?;
+    let mut shards: Vec<std::path::PathBuf> = Vec::new();
+    for entry in read_dir {
+        // Propagate per-entry I/O errors instead of silently dropping them, so a
+        // partially-failed directory scan can't masquerade as "no shards found".
+        let path = entry
+            .map_err(|e| OCRError::ConfigError {
+                message: format!(
+                    "{model_name}: error reading entry in model dir {}: {e}",
+                    model_dir.display()
+                ),
+            })?
+            .path();
+        if path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.starts_with("model-") && s.ends_with(".safetensors"))
+        {
+            shards.push(path);
+        }
+    }
     shards.sort();
     if shards.is_empty() {
         return Err(OCRError::ConfigError {
