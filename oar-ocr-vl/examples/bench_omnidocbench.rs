@@ -18,32 +18,26 @@
 //!         --device cuda:0 --max-pages 30
 //! ```
 
+mod utils;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, ValueEnum};
 use image::{RgbImage, imageops};
-use once_cell::sync::Lazy;
-use regex::Regex;
 use serde::Deserialize;
 use tracing::{error, info, warn};
 
 use oar_ocr_core::core::OCRError;
 use oar_ocr_core::utils::load_image;
 use oar_ocr_vl::mineru_diffusion::DEFAULT_PROMPT;
-use oar_ocr_vl::utils::image::resize_for_mineru;
 use oar_ocr_vl::utils::parse_device;
 use oar_ocr_vl::utils::{convert_otsl_to_html, truncate_repetitive_content};
 use oar_ocr_vl::{DiffusionGenerationConfig, MinerU, MinerUDiffusion};
 
-// --- MinerU2.5 two-step extraction prompts (mirrors the `mineru` example) ---
-const LAYOUT_PROMPT: &str = "\nLayout Detection:";
-const TABLE_PROMPT: &str = "\nTable Recognition:";
-const EQUATION_PROMPT: &str = "\nFormula Recognition:";
-const MINERU_TEXT_PROMPT: &str = "\nText Recognition:";
-const LAYOUT_IMAGE_SIZE: u32 = 1036;
-const LAYOUT_RE: &str = r"^<\|box_start\|>(\d+)\s+(\d+)\s+(\d+)\s+(\d+)<\|box_end\|><\|ref_start\|>(\w+?)<\|ref_end\|>(.*)$";
-static LAYOUT_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(LAYOUT_RE).expect("layout regex"));
+use utils::mineru_layout::{
+    LAYOUT_IMAGE_SIZE, LAYOUT_PROMPT, parse_layout_output, prepare_for_extract,
+};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum Backend {
@@ -241,14 +235,6 @@ fn ned(pred: &[char], gt: &[char]) -> f64 {
 
 // ============================= MinerU2.5 two-step =============================
 
-/// One detected layout region.
-struct ContentBlock {
-    block_type: String,
-    bbox: [f32; 4],
-    angle: Option<u16>,
-    content: Option<String>,
-}
-
 /// Layout types excluded from the assembled body text, to parallel the GT
 /// builder (which drops headers, footers, page numbers and abandoned regions).
 fn is_excluded_block(t: &str) -> bool {
@@ -316,129 +302,6 @@ fn two_step_text(
         .collect::<Vec<_>>()
         .join("\n");
     Ok(text)
-}
-
-fn parse_layout_output(output: &str) -> Vec<ContentBlock> {
-    let mut blocks = Vec::new();
-    for line in output.lines() {
-        let Some(caps) = LAYOUT_REGEX.captures(line) else {
-            continue;
-        };
-        let Some((x1, y1, x2, y2)) = (|| {
-            Some((
-                caps.get(1)?.as_str().parse().ok()?,
-                caps.get(2)?.as_str().parse().ok()?,
-                caps.get(3)?.as_str().parse().ok()?,
-                caps.get(4)?.as_str().parse().ok()?,
-            ))
-        })() else {
-            continue;
-        };
-        let ref_type = caps.get(5).map(|m| m.as_str().to_lowercase()).unwrap_or_default();
-        let tail = caps.get(6).map(|m| m.as_str()).unwrap_or("");
-        let Some((x1, y1, x2, y2)) = normalize_bbox(x1, y1, x2, y2) else {
-            continue;
-        };
-        if !is_block_type(&ref_type) {
-            continue;
-        }
-        blocks.push(ContentBlock {
-            block_type: ref_type,
-            bbox: [x1, y1, x2, y2],
-            angle: parse_angle(tail),
-            content: None,
-        });
-    }
-    blocks
-}
-
-fn normalize_bbox(x1: i32, y1: i32, x2: i32, y2: i32) -> Option<(f32, f32, f32, f32)> {
-    if [x1, y1, x2, y2].iter().any(|&v| !(0..=1000).contains(&v)) {
-        return None;
-    }
-    let (x1, x2) = if x2 < x1 { (x2, x1) } else { (x1, x2) };
-    let (y1, y2) = if y2 < y1 { (y2, y1) } else { (y1, y2) };
-    if x1 == x2 || y1 == y2 {
-        return None;
-    }
-    Some((
-        x1 as f32 / 1000.0,
-        y1 as f32 / 1000.0,
-        x2 as f32 / 1000.0,
-        y2 as f32 / 1000.0,
-    ))
-}
-
-fn parse_angle(tail: &str) -> Option<u16> {
-    if tail.contains("<|rotate_up|>") {
-        Some(0)
-    } else if tail.contains("<|rotate_right|>") {
-        Some(90)
-    } else if tail.contains("<|rotate_down|>") {
-        Some(180)
-    } else if tail.contains("<|rotate_left|>") {
-        Some(270)
-    } else {
-        None
-    }
-}
-
-fn is_block_type(value: &str) -> bool {
-    matches!(
-        value,
-        "text" | "title" | "table" | "image" | "code" | "algorithm" | "header" | "footer"
-            | "page_number" | "page_footnote" | "aside_text" | "equation" | "equation_block"
-            | "ref_text" | "list" | "phonetic" | "table_caption" | "image_caption"
-            | "code_caption" | "table_footnote" | "image_footnote" | "unknown"
-    )
-}
-
-fn prepare_for_extract(
-    image: &RgbImage,
-    blocks: &[ContentBlock],
-    min_image_edge: u32,
-    max_image_edge_ratio: f32,
-) -> (Vec<RgbImage>, Vec<String>, Vec<usize>) {
-    let mut block_images = Vec::new();
-    let mut prompts = Vec::new();
-    let mut indices = Vec::new();
-    let width = image.width() as f32;
-    let height = image.height() as f32;
-
-    for (idx, block) in blocks.iter().enumerate() {
-        if matches!(block.block_type.as_str(), "image" | "list" | "equation_block") {
-            continue;
-        }
-        let x1 = (block.bbox[0] * width).round().clamp(0.0, width - 1.0) as u32;
-        let y1 = (block.bbox[1] * height).round().clamp(0.0, height - 1.0) as u32;
-        let x2 = (block.bbox[2] * width).round().clamp(0.0, width) as u32;
-        let y2 = (block.bbox[3] * height).round().clamp(0.0, height) as u32;
-        if x2 <= x1 || y2 <= y1 {
-            continue;
-        }
-        let mut crop = imageops::crop_imm(image, x1, y1, x2 - x1, y2 - y1).to_image();
-        if let Some(angle) = block.angle {
-            crop = match angle {
-                90 => imageops::rotate90(&crop),
-                180 => imageops::rotate180(&crop),
-                270 => imageops::rotate270(&crop),
-                _ => crop,
-            };
-        }
-        crop = resize_for_mineru(&crop, min_image_edge, max_image_edge_ratio);
-        block_images.push(crop);
-        prompts.push(prompt_for_block(&block.block_type).to_string());
-        indices.push(idx);
-    }
-    (block_images, prompts, indices)
-}
-
-fn prompt_for_block(block_type: &str) -> &'static str {
-    match block_type {
-        "table" => TABLE_PROMPT,
-        "equation" => EQUATION_PROMPT,
-        _ => MINERU_TEXT_PROMPT,
-    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
