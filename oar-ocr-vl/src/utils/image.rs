@@ -43,19 +43,25 @@ pub fn image_to_chw(
     std: &[f32],
     rescale_factor: Option<f32>,
 ) -> Vec<f32> {
+    // RGB layout of the source buffer: 3 interleaved channels per pixel.
+    const RGB_CHANNELS: usize = 3;
+    const R: usize = 0;
+    const G: usize = 1;
+    const B: usize = 2;
+
     let width = image.width() as usize;
     let height = image.height() as usize;
     let num_pixels = width * height;
     let scale = rescale_factor.unwrap_or(1.0);
 
     #[allow(clippy::uninit_vec)]
-    let mut output = Vec::with_capacity(num_pixels * 3);
+    let mut output = Vec::with_capacity(num_pixels * RGB_CHANNELS);
     // SAFETY: We will overwrite all elements in the parallel loop.
     // The loop covers 0..num_pixels, writing to i, i+num_pixels, i+2*num_pixels.
     // Total written: 3 * num_pixels.
     #[allow(clippy::uninit_vec)]
     unsafe {
-        output.set_len(num_pixels * 3)
+        output.set_len(num_pixels * RGB_CHANNELS)
     };
 
     let output_slice = UnsafeSlice::new(&mut output);
@@ -63,9 +69,9 @@ pub fn image_to_chw(
 
     // Parallel iteration over pixels
     (0..num_pixels).into_par_iter().for_each(|i| {
-        let r = raw_pixels[3 * i] as f32 * scale;
-        let g = raw_pixels[3 * i + 1] as f32 * scale;
-        let b = raw_pixels[3 * i + 2] as f32 * scale;
+        let r = raw_pixels[RGB_CHANNELS * i + R] as f32 * scale;
+        let g = raw_pixels[RGB_CHANNELS * i + G] as f32 * scale;
+        let b = raw_pixels[RGB_CHANNELS * i + B] as f32 * scale;
 
         // Normalize
         let r_norm = (r - mean[0]) / std[0];

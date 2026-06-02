@@ -35,18 +35,7 @@ struct SigLIPRotaryEmbedding {
 
 impl SigLIPRotaryEmbedding {
     fn new(dim: usize, theta: f64, device: &Device) -> Result<Self, OCRError> {
-        let mut inv_freq = Vec::with_capacity(dim / 2);
-        for i in (0..dim).step_by(2) {
-            let v = 1f64 / theta.powf(i as f64 / dim as f64);
-            inv_freq.push(v as f32);
-        }
-        let inv_freq = Tensor::from_vec(inv_freq, (dim / 2,), device).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "PaddleOCR-VL: failed to create vision inv_freq tensor",
-                e,
-            )
-        })?;
+        let inv_freq = crate::utils::vision_inv_freq(dim, theta, "PaddleOCR-VL", device)?;
         Ok(Self { inv_freq })
     }
 

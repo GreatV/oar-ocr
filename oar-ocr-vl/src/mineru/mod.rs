@@ -2,9 +2,12 @@
 
 mod config;
 mod model;
-mod processing;
+pub(crate) mod processing;
 mod text;
-mod vision;
+pub(crate) mod vision;
 
-pub use config::{MinerUConfig, MinerUImageProcessorConfig, MinerURopeScaling, MinerUVisionConfig};
+pub use config::{
+    MinerUConfig, MinerUImageProcessorConfig, MinerURopeScaling, MinerUTextConfig,
+    MinerUVisionConfig,
+};
 pub use model::MinerU;

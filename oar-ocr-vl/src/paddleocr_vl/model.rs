@@ -133,13 +133,12 @@ impl PaddleOcrVl {
             })?;
 
         let dtype = device.bf16_default_to_f32();
+        let weight_files = crate::utils::collect_safetensors(model_dir, "PaddleOCR-VL")?;
+        // SAFETY: from_mmaped_safetensors memory-maps the weight files directly;
+        // the caller must ensure they are valid and not modified while in use.
         let vb = unsafe {
-            candle_nn::VarBuilder::from_mmaped_safetensors(
-                &[model_dir.join("model.safetensors")],
-                dtype,
-                &device,
-            )
-            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "load model.safetensors", e))?
+            candle_nn::VarBuilder::from_mmaped_safetensors(&weight_files, dtype, &device)
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "load safetensors", e))?
         };
 
         let llm = Ernie4_5Model::load(&cfg, vb.pp("model"))?;
@@ -277,7 +276,7 @@ impl PaddleOcrVl {
 
         // 1. Preprocess all images
         let needs_spotting = tasks.iter().any(|t| t.needs_spotting_preprocess());
-        let resized_images;
+        let resized_images: Vec<RgbImage>;
         let images_for_preprocess = if needs_spotting {
             let resize_filter = self
                 .image_cfg
@@ -300,8 +299,8 @@ impl PaddleOcrVl {
                     processed.push(img.clone());
                 }
             }
-            resized_images = Some(processed);
-            resized_images.as_ref().unwrap().as_slice()
+            resized_images = processed;
+            resized_images.as_slice()
         } else {
             images
         };

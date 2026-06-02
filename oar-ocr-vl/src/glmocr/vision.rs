@@ -158,8 +158,8 @@ fn apply_rotary_pos_emb_vision(
         )
     })?;
 
-    let q_rot = rotate_half_vision(q)?;
-    let k_rot = rotate_half_vision(k)?;
+    let q_rot = crate::utils::rotate_half(q)?;
+    let k_rot = crate::utils::rotate_half(k)?;
 
     let q_mul = q.broadcast_mul(&cos).map_err(|e| {
         candle_to_ocr_processing(
@@ -205,45 +205,6 @@ fn apply_rotary_pos_emb_vision(
         )
     })?;
     Ok((q_out, k_out))
-}
-
-fn rotate_half_vision(x: &Tensor) -> Result<Tensor, OCRError> {
-    let d = x.dim(D::Minus1).map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "GLM-OCR: vision rotate_half dim",
-            e,
-        )
-    })?;
-    let half = d / 2;
-    let x1 = x.narrow(D::Minus1, 0, half).map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "GLM-OCR: vision rotate_half narrow x1",
-            e,
-        )
-    })?;
-    let x2 = x.narrow(D::Minus1, half, half).map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "GLM-OCR: vision rotate_half narrow x2",
-            e,
-        )
-    })?;
-    let nx2 = x2.neg().map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "GLM-OCR: vision rotate_half neg",
-            e,
-        )
-    })?;
-    Tensor::cat(&[&nx2, &x1], D::Minus1).map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "GLM-OCR: vision rotate_half cat",
-            e,
-        )
-    })
 }
 
 #[derive(Debug, Clone)]

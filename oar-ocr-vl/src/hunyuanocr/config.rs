@@ -70,10 +70,7 @@ pub struct HunyuanOcrConfig {
 
 impl HunyuanOcrConfig {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
-        let contents = std::fs::read_to_string(path)?;
-        serde_json::from_str(&contents).map_err(|e| OCRError::ConfigError {
-            message: format!("failed to parse HunyuanOCR config.json: {e}"),
-        })
+        crate::utils::load_json_config(path, "HunyuanOCR", "config.json")
     }
 }
 
@@ -92,28 +89,16 @@ pub struct HunyuanOcrImageProcessorConfig {
 
 impl HunyuanOcrImageProcessorConfig {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
-        let contents = std::fs::read_to_string(path)?;
-        serde_json::from_str(&contents).map_err(|e| OCRError::ConfigError {
-            message: format!("failed to parse HunyuanOCR preprocessor_config.json: {e}"),
-        })
+        crate::utils::load_json_config(path, "HunyuanOCR", "preprocessor_config.json")
     }
 
     pub fn validate(&self) -> Result<(), OCRError> {
-        if self.image_mean.len() != 3 || self.image_std.len() != 3 {
-            return Err(OCRError::ConfigError {
-                message: format!(
-                    "HunyuanOCR image_mean/std must have length 3, got mean={} std={}",
-                    self.image_mean.len(),
-                    self.image_std.len()
-                ),
-            });
-        }
-        if self.patch_size == 0 || self.merge_size == 0 || self.temporal_patch_size == 0 {
-            return Err(OCRError::ConfigError {
-                message: "HunyuanOCR patch_size/merge_size/temporal_patch_size must be > 0"
-                    .to_string(),
-            });
-        }
-        Ok(())
+        crate::utils::validate_image_mean_std("HunyuanOCR", &self.image_mean, &self.image_std)?;
+        crate::utils::validate_patch_merge_temporal(
+            "HunyuanOCR",
+            self.patch_size,
+            self.merge_size,
+            self.temporal_patch_size,
+        )
     }
 }

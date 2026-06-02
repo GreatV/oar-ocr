@@ -3,6 +3,9 @@
 #[allow(dead_code)]
 pub mod structure_match;
 
+#[allow(dead_code)]
+pub mod mineru_layout;
+
 #[cfg(feature = "hsd")]
 use std::time::Duration;
 

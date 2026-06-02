@@ -74,45 +74,6 @@ impl VisionAct {
     }
 }
 
-fn rotate_half_3d(x: &Tensor) -> Result<Tensor, OCRError> {
-    let d = x.dim(candle_core::D::Minus1).map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "MinerU2.5: rotate_half dim failed",
-            e,
-        )
-    })?;
-    let half = d / 2;
-    let x1 = x.i((.., .., 0..half)).map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "MinerU2.5: rotate_half slice x1 failed",
-            e,
-        )
-    })?;
-    let x2 = x.i((.., .., half..d)).map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "MinerU2.5: rotate_half slice x2 failed",
-            e,
-        )
-    })?;
-    let nx2 = x2.neg().map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "MinerU2.5: rotate_half neg failed",
-            e,
-        )
-    })?;
-    Tensor::cat(&[&nx2, &x1], candle_core::D::Minus1).map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "MinerU2.5: rotate_half cat failed",
-            e,
-        )
-    })
-}
-
 fn apply_rotary_pos_emb_vision(
     q: &Tensor,
     k: &Tensor,
@@ -171,7 +132,7 @@ fn apply_rotary_pos_emb_vision(
             )
         })?;
 
-    let q_rot = rotate_half_3d(&q)?;
+    let q_rot = crate::utils::rotate_half(&q)?;
     let q_embed = q
         .broadcast_mul(&cos)
         .map_err(|e| {
@@ -196,7 +157,7 @@ fn apply_rotary_pos_emb_vision(
             )
         })?;
 
-    let k_rot = rotate_half_3d(&k)?;
+    let k_rot = crate::utils::rotate_half(&k)?;
     let k_embed = k
         .broadcast_mul(&cos)
         .map_err(|e| {
@@ -247,18 +208,7 @@ struct VisionRotaryEmbedding {
 
 impl VisionRotaryEmbedding {
     fn new(dim: usize, theta: f64, device: &Device) -> Result<Self, OCRError> {
-        let mut inv_freq = Vec::with_capacity(dim / 2);
-        for i in (0..dim).step_by(2) {
-            let v = 1f64 / theta.powf(i as f64 / dim as f64);
-            inv_freq.push(v as f32);
-        }
-        let inv_freq = Tensor::from_vec(inv_freq, (dim / 2,), device).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "MinerU2.5: vision inv_freq tensor failed",
-                e,
-            )
-        })?;
+        let inv_freq = crate::utils::vision_inv_freq(dim, theta, "MinerU2.5", device)?;
         Ok(Self { inv_freq, dim })
     }
 
@@ -293,7 +243,8 @@ struct PatchEmbed {
 
 impl PatchEmbed {
     fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
-        let patch_dim = cfg.in_channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size;
+        let patch_dim =
+            cfg.in_channels() * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size;
         let weight = match vb.get((cfg.embed_dim, patch_dim), "patch_embed.proj.weight") {
             Ok(weight) => weight,
             Err(_) => {
@@ -301,7 +252,7 @@ impl PatchEmbed {
                     .get(
                         (
                             cfg.embed_dim,
-                            cfg.in_channels,
+                            cfg.in_channels(),
                             cfg.temporal_patch_size,
                             cfg.patch_size,
                             cfg.patch_size,
@@ -623,20 +574,45 @@ impl PatchMerger {
 pub struct MinerUVisionModel {
     patch_embed: PatchEmbed,
     blocks: Vec<VisionBlock>,
-    merger: PatchMerger,
+    merger: Option<PatchMerger>,
     rotary_pos_emb: VisionRotaryEmbedding,
     spatial_merge_size: usize,
 }
 
 impl MinerUVisionModel {
     pub fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+        Self::load_inner(cfg, vb, true)
+    }
+
+    /// Load only the patch-embedding + transformer backbone, skipping the
+    /// `merger` head. Used by checkpoints (e.g. MinerU-Diffusion) that set the
+    /// vision merger to identity and project the raw per-patch hidden states
+    /// with an external abstractor instead. Pair with [`forward_tokens`].
+    ///
+    /// [`forward_tokens`]: MinerUVisionModel::forward_tokens
+    pub(crate) fn load_backbone(
+        cfg: &MinerUVisionConfig,
+        vb: VarBuilder,
+    ) -> Result<Self, OCRError> {
+        Self::load_inner(cfg, vb, false)
+    }
+
+    fn load_inner(
+        cfg: &MinerUVisionConfig,
+        vb: VarBuilder,
+        with_merger: bool,
+    ) -> Result<Self, OCRError> {
         let patch_embed = PatchEmbed::load(cfg, vb.clone())?;
         let mut blocks = Vec::with_capacity(cfg.depth);
         for i in 0..cfg.depth {
             let block_vb = vb.pp(format!("blocks.{i}"));
             blocks.push(VisionBlock::load(cfg, block_vb)?);
         }
-        let merger = PatchMerger::load(cfg, vb.clone())?;
+        let merger = if with_merger {
+            Some(PatchMerger::load(cfg, vb.clone())?)
+        } else {
+            None
+        };
         let head_dim = cfg.embed_dim / cfg.num_heads;
         if !head_dim.is_multiple_of(2) {
             return Err(OCRError::ConfigError {
@@ -656,11 +632,62 @@ impl MinerUVisionModel {
         })
     }
 
+    /// Run the patch embedding + transformer blocks per image and return the
+    /// per-patch hidden states (one row per patch, dim `embed_dim`), without
+    /// applying the spatial merger. Attention is isolated per image.
+    pub(crate) fn forward_tokens(
+        &self,
+        pixel_values: &Tensor,
+        grid_thw: &[(usize, usize, usize)],
+    ) -> Result<Tensor, OCRError> {
+        let max_grid = grid_thw
+            .iter()
+            .map(|(_, h, w)| (*h).max(*w))
+            .max()
+            .unwrap_or(0);
+        let rotary_full = self
+            .rotary_pos_emb
+            .forward(max_grid, pixel_values.device())?;
+        let freq_dim = self.rotary_pos_emb.dim() / 2;
+
+        let mut outputs: Vec<Tensor> = Vec::with_capacity(grid_thw.len());
+        let mut offset = 0usize;
+        for &(t, h, w) in grid_thw {
+            let num_patches = t * h * w;
+            let patches = pixel_values
+                .narrow(0, offset, num_patches)
+                .map_err(|e| candle_to_ocr_inference("MinerU2.5", "vision narrow patches", e))?;
+            offset += num_patches;
+
+            let mut hidden = self.patch_embed.forward(&patches)?;
+            let (cos, sin) = build_vision_pos_emb(
+                &rotary_full,
+                freq_dim,
+                t,
+                h,
+                w,
+                self.spatial_merge_size,
+                pixel_values.device(),
+            )?;
+            for block in &self.blocks {
+                hidden = block.forward(&hidden, &cos, &sin)?;
+            }
+            outputs.push(hidden);
+        }
+
+        let refs: Vec<&Tensor> = outputs.iter().collect();
+        Tensor::cat(&refs, 0)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "vision tokens cat", e))
+    }
+
     pub fn forward(
         &self,
         pixel_values: &Tensor,
         grid_thw: &[(usize, usize, usize)],
     ) -> Result<Tensor, OCRError> {
+        let merger = self.merger.as_ref().ok_or_else(|| OCRError::ConfigError {
+            message: "MinerU2.5: vision merger not loaded (backbone-only model)".to_string(),
+        })?;
         let mut outputs: Vec<Tensor> = Vec::with_capacity(grid_thw.len());
 
         let max_grid = grid_thw
@@ -697,7 +724,7 @@ impl MinerUVisionModel {
                 hidden = block.forward(&hidden, &cos, &sin)?;
             }
 
-            let merged = self.merger.forward(&hidden)?;
+            let merged = merger.forward(&hidden)?;
             outputs.push(merged);
         }
 

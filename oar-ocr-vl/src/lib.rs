@@ -11,6 +11,7 @@
 //! - `hunyuanocr` - HunyuanOCR OCR expert VLM
 //! - `glmocr` - GLM-OCR OCR expert VLM
 //! - `mineru` - MinerU2.5 document parsing VLM (Qwen2-VL backbone)
+//! - `mineru_diffusion` - MinerU-Diffusion-V1 block-diffusion document OCR (Qwen2-VL vision + SDAR decoder)
 //! - `doc_parser` - Unified document parsing with pluggable recognition backends
 //! - `utils` - Utility functions (device parsing, candle helpers, markdown, OTSL conversion)
 //! - `attention` - Unified attention implementation shared by all models
@@ -43,6 +44,7 @@ pub mod doc_parser;
 pub mod glmocr;
 pub mod hunyuanocr;
 pub mod mineru;
+pub mod mineru_diffusion;
 pub mod paddleocr_vl;
 pub mod utils;
 
@@ -71,5 +73,6 @@ pub use glmocr::GlmOcr;
 pub use hunyuanocr::HunyuanHsdPrompts;
 pub use hunyuanocr::HunyuanOcr;
 pub use mineru::MinerU;
+pub use mineru_diffusion::{DiffusionGenerationConfig, MinerUDiffusion};
 
 pub use doc_parser::{DocParser, DocParserConfig, RecognitionBackend, RecognitionTask};

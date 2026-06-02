@@ -32,7 +32,7 @@ use image::RgbImage;
 use oar_ocr_core::core::OCRError;
 #[cfg(feature = "hsd")]
 use oar_ocr_core::domain::structure::{LayoutElement, StructureResult};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 #[cfg(feature = "hsd")]
 use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
@@ -154,7 +154,7 @@ impl HunyuanOcr {
 
         let dtype = device.bf16_default_to_f32();
 
-        let weight_files = resolve_safetensors_shards(model_dir)?;
+        let weight_files = crate::utils::collect_safetensors(model_dir, "HunyuanOCR")?;
         // SAFETY: from_mmaped_safetensors is unsafe because it memory-maps weight files
         // directly. The caller must ensure the safetensors files are valid and not corrupted.
         let vb = unsafe {
@@ -1342,33 +1342,6 @@ impl<'a> SpecBackend for HunyuanSpecBackend<'a> {
     fn is_eos(&self, tok: u32) -> bool {
         self.model.stop_token_ids.contains(&tok)
     }
-}
-
-fn resolve_safetensors_shards(model_dir: &Path) -> Result<Vec<PathBuf>, OCRError> {
-    let single = model_dir.join("model.safetensors");
-    if single.exists() {
-        return Ok(vec![single]);
-    }
-
-    let mut shards: Vec<PathBuf> = std::fs::read_dir(model_dir)?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|s| s.to_str())
-                .is_some_and(|s| s.starts_with("model-") && s.ends_with(".safetensors"))
-        })
-        .collect();
-    shards.sort();
-    if shards.is_empty() {
-        return Err(OCRError::ConfigError {
-            message: format!(
-                "HunyuanOCR: no safetensors shards found in {}",
-                model_dir.display()
-            ),
-        });
-    }
-    Ok(shards)
 }
 
 fn build_prompt(instruction: &str) -> String {

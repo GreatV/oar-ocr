@@ -18,6 +18,21 @@ pub struct MinerURopeScaling {
     pub mrope_section: Vec<usize>,
 }
 
+/// Subset of the nested `text_config` block emitted by newer transformers
+/// (>= 4.52) checkpoints such as `MinerU2.5-Pro-2605`. These checkpoints share
+/// the Qwen2-VL backbone and the exact same weight layout as `MinerU2.5-2509`,
+/// but relocate a handful of text-tower fields out of the config root and into
+/// `text_config`. We only need `tie_word_embeddings` from it: the Pro config
+/// omits the field at the root (so it would default to `false`), yet the
+/// checkpoint ties the LM head to the input embeddings and ships no
+/// `lm_head.weight` tensor. Resolving the effective flag from either location
+/// keeps both the 2509 and Pro layouts loadable through the same path.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MinerUTextConfig {
+    #[serde(default)]
+    pub tie_word_embeddings: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct MinerUVisionConfig {
     pub depth: usize,
@@ -27,8 +42,15 @@ pub struct MinerUVisionConfig {
     pub hidden_act: String,
     pub mlp_ratio: f64,
     pub num_heads: usize,
-    #[serde(alias = "in_chans", alias = "in_channels")]
-    pub in_channels: usize,
+    // Qwen2-VL checkpoints spell the input-channel count as `in_chans` (the
+    // 2509 layout) or `in_channels` (Pro-2605); some newer configs emit BOTH
+    // keys with identical values. A single field with two serde aliases trips
+    // serde's duplicate-field detection when both keys are present, so capture
+    // each spelling separately and resolve through `in_channels()`.
+    #[serde(default, rename = "in_chans")]
+    in_chans: Option<usize>,
+    #[serde(default, rename = "in_channels")]
+    in_channels_alias: Option<usize>,
     pub patch_size: usize,
     pub spatial_merge_size: usize,
     #[serde(default)]
@@ -36,13 +58,15 @@ pub struct MinerUVisionConfig {
     pub temporal_patch_size: usize,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 impl MinerUVisionConfig {
     pub fn mlp_hidden_dim(&self) -> usize {
         (self.embed_dim as f64 * self.mlp_ratio).round() as usize
+    }
+
+    /// Input channel count, resolving the `in_chans`/`in_channels` spellings.
+    /// Defaults to 3 (RGB) when neither key is present.
+    pub fn in_channels(&self) -> usize {
+        self.in_chans.or(self.in_channels_alias).unwrap_or(3)
     }
 }
 
@@ -82,14 +106,21 @@ pub struct MinerUConfig {
     #[serde(default)]
     pub rope_scaling: MinerURopeScaling,
     pub vision_config: MinerUVisionConfig,
+    /// Nested text-tower config present in newer transformers checkpoints
+    /// (e.g. `MinerU2.5-Pro-2605`). Absent on the original 2509 layout.
+    #[serde(default)]
+    pub text_config: MinerUTextConfig,
 }
 
 impl MinerUConfig {
+    /// Effective `tie_word_embeddings` flag, honouring both the legacy root
+    /// field (2509) and the newer nested `text_config` field (Pro-2605).
+    pub fn tie_word_embeddings(&self) -> bool {
+        self.tie_word_embeddings || self.text_config.tie_word_embeddings
+    }
+
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
-        let contents = std::fs::read_to_string(path)?;
-        serde_json::from_str(&contents).map_err(|e| OCRError::ConfigError {
-            message: format!("failed to parse MinerU2.5 config.json: {e}"),
-        })
+        crate::utils::load_json_config(path, "MinerU2.5", "config.json")
     }
 
     pub fn head_dim(&self) -> Result<usize, OCRError> {
@@ -113,13 +144,13 @@ pub struct MinerUImageProcessorConfig {
     pub max_pixels: Option<u32>,
     #[serde(default)]
     pub size: Option<MinerUImageSize>,
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::utils::default_true")]
     pub do_resize: bool,
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::utils::default_true")]
     pub do_rescale: bool,
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::utils::default_true")]
     pub do_normalize: bool,
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::utils::default_true")]
     pub do_convert_rgb: bool,
     pub patch_size: usize,
     pub temporal_patch_size: usize,
@@ -128,7 +159,7 @@ pub struct MinerUImageProcessorConfig {
     pub image_std: Vec<f32>,
     #[serde(default)]
     pub resample: Option<u32>,
-    #[serde(default = "default_rescale_factor")]
+    #[serde(default = "crate::utils::default_rescale_factor")]
     pub rescale_factor: f32,
 }
 
@@ -138,16 +169,9 @@ pub struct MinerUImageSize {
     pub longest_edge: u32,
 }
 
-fn default_rescale_factor() -> f32 {
-    1.0 / 255.0
-}
-
 impl MinerUImageProcessorConfig {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
-        let contents = std::fs::read_to_string(path)?;
-        serde_json::from_str(&contents).map_err(|e| OCRError::ConfigError {
-            message: format!("failed to parse MinerU2.5 preprocessor_config.json: {e}"),
-        })
+        crate::utils::load_json_config(path, "MinerU2.5", "preprocessor_config.json")
     }
 
     pub fn pixel_bounds(&self) -> Result<(u32, u32), OCRError> {
@@ -170,27 +194,19 @@ impl MinerUImageProcessorConfig {
 
     pub fn validate(&self) -> Result<(), OCRError> {
         if self.do_normalize {
-            if self.image_mean.len() != 3 || self.image_std.len() != 3 {
-                return Err(OCRError::ConfigError {
-                    message: format!(
-                        "MinerU2.5 image_mean/std must have length 3, got mean={} std={}",
-                        self.image_mean.len(),
-                        self.image_std.len()
-                    ),
-                });
-            }
+            crate::utils::validate_image_mean_std("MinerU2.5", &self.image_mean, &self.image_std)?;
             if self.image_std.contains(&0.0) {
                 return Err(OCRError::ConfigError {
                     message: "MinerU2.5 image_std values must be non-zero".to_string(),
                 });
             }
         }
-        if self.patch_size == 0 || self.merge_size == 0 || self.temporal_patch_size == 0 {
-            return Err(OCRError::ConfigError {
-                message: "MinerU2.5 patch_size/merge_size/temporal_patch_size must be > 0"
-                    .to_string(),
-            });
-        }
+        crate::utils::validate_patch_merge_temporal(
+            "MinerU2.5",
+            self.patch_size,
+            self.merge_size,
+            self.temporal_patch_size,
+        )?;
         if self.do_resize {
             let (min_pixels, max_pixels) = self.pixel_bounds()?;
             if min_pixels == 0 || max_pixels == 0 {
