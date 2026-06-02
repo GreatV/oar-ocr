@@ -590,7 +590,10 @@ impl MinerUVisionModel {
     /// with an external abstractor instead. Pair with [`forward_tokens`].
     ///
     /// [`forward_tokens`]: MinerUVisionModel::forward_tokens
-    pub(crate) fn load_backbone(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    pub(crate) fn load_backbone(
+        cfg: &MinerUVisionConfig,
+        vb: VarBuilder,
+    ) -> Result<Self, OCRError> {
         Self::load_inner(cfg, vb, false)
     }
 

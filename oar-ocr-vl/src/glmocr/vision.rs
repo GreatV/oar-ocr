@@ -207,7 +207,6 @@ fn apply_rotary_pos_emb_vision(
     Ok((q_out, k_out))
 }
 
-
 #[derive(Debug, Clone)]
 struct GlmOcrVisionAttention {
     qkv: Linear,

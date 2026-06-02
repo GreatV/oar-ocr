@@ -54,7 +54,9 @@ impl SdarKvCache {
 }
 
 fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, OCRError> {
-    let a = x.broadcast_mul(cos).map_err(|e| proc_err("SDAR rope x*cos", e))?;
+    let a = x
+        .broadcast_mul(cos)
+        .map_err(|e| proc_err("SDAR rope x*cos", e))?;
     let b = rotate_half(x)?
         .broadcast_mul(sin)
         .map_err(|e| proc_err("SDAR rope rotate_half*sin", e))?;
@@ -123,24 +125,25 @@ impl SdarAttention {
             .dims3()
             .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "attn dims", e))?;
 
-        let project = |proj: &Linear, heads: usize, norm: Option<&RmsNorm>| -> Result<Tensor, OCRError> {
-            let x = proj
-                .forward(hidden)
-                .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "attn proj", e))?;
-            let x = x
-                .reshape((b, s, heads, self.head_dim))
-                .map_err(|e| proc_err("SDAR attn reshape", e))?;
-            let x = match norm {
-                Some(n) => n
-                    .forward(&x)
-                    .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "attn qk-norm", e))?,
-                None => x,
+        let project =
+            |proj: &Linear, heads: usize, norm: Option<&RmsNorm>| -> Result<Tensor, OCRError> {
+                let x = proj
+                    .forward(hidden)
+                    .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "attn proj", e))?;
+                let x = x
+                    .reshape((b, s, heads, self.head_dim))
+                    .map_err(|e| proc_err("SDAR attn reshape", e))?;
+                let x = match norm {
+                    Some(n) => n.forward(&x).map_err(|e| {
+                        candle_to_ocr_inference("MinerU-Diffusion", "attn qk-norm", e)
+                    })?,
+                    None => x,
+                };
+                x.transpose(1, 2)
+                    .map_err(|e| proc_err("SDAR attn transpose", e))?
+                    .contiguous()
+                    .map_err(|e| proc_err("SDAR attn contiguous", e))
             };
-            x.transpose(1, 2)
-                .map_err(|e| proc_err("SDAR attn transpose", e))?
-                .contiguous()
-                .map_err(|e| proc_err("SDAR attn contiguous", e))
-        };
 
         let q = project(&self.q_proj, self.num_heads, Some(&self.q_norm))?;
         let k = project(&self.k_proj, self.num_kv_heads, Some(&self.k_norm))?;
@@ -165,10 +168,10 @@ impl SdarAttention {
         }
 
         let n_rep = self.num_heads / self.num_kv_heads;
-        let k_rep =
-            repeat_kv(&full_k, n_rep).map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "repeat_kv k", e))?;
-        let v_rep =
-            repeat_kv(&full_v, n_rep).map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "repeat_kv v", e))?;
+        let k_rep = repeat_kv(&full_k, n_rep)
+            .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "repeat_kv k", e))?;
+        let v_rep = repeat_kv(&full_v, n_rep)
+            .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "repeat_kv v", e))?;
 
         let attn = scaled_dot_product_attention(&q, &k_rep, &v_rep, mask, self.scale, false)
             .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "attention", e))?;
@@ -259,7 +262,9 @@ impl SdarLayer {
             .input_layernorm
             .forward(hidden)
             .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "input_layernorm", e))?;
-        let attn = self.self_attn.forward(&normed, cos, sin, mask, cache, store_kv)?;
+        let attn = self
+            .self_attn
+            .forward(&normed, cos, sin, mask, cache, store_kv)?;
         let hidden = (hidden + attn).map_err(|e| proc_err("SDAR attn residual", e))?;
         let normed = self
             .post_attention_layernorm

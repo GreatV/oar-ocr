@@ -225,8 +225,12 @@ impl MinerUDiffusion {
         }
 
         // 1) Vision features.
-        let image_inputs =
-            preprocess_images(std::slice::from_ref(image), &self.image_cfg, &self.device, self.dtype)?;
+        let image_inputs = preprocess_images(
+            std::slice::from_ref(image),
+            &self.image_cfg,
+            &self.device,
+            self.dtype,
+        )?;
         let patches = self
             .vision
             .forward_tokens(&image_inputs.pixel_values, &image_inputs.image_grid_thw)?;
@@ -590,12 +594,7 @@ fn apply_top_p(logits: &mut [f32], top_p: f32) {
 
 /// Select which masked positions to unmask this step: all above `threshold`,
 /// but at least `want` (the highest-confidence masked positions).
-fn select_transfer(
-    masked: &[usize],
-    confs: &[f32],
-    threshold: f32,
-    want: usize,
-) -> Vec<usize> {
+fn select_transfer(masked: &[usize], confs: &[f32], threshold: f32, want: usize) -> Vec<usize> {
     let above: Vec<usize> = masked
         .iter()
         .copied()
@@ -809,7 +808,9 @@ mod tests {
             Tensor::from_vec(vec![1.0f32, 1.0, 1.0, 1.0], (1, 2, 2), &Device::Cpu).unwrap();
         let run = || {
             let mut rng = StdRng::seed_from_u64(42);
-            sample_tokens_and_conf(&logits, 1.0, 0, 1.0, &mut rng).unwrap().0
+            sample_tokens_and_conf(&logits, 1.0, 0, 1.0, &mut rng)
+                .unwrap()
+                .0
         };
         assert_eq!(run(), run());
     }

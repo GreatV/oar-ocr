@@ -326,7 +326,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.max_pages
     );
 
-    let prompt = args.prompt.clone().unwrap_or_else(|| DEFAULT_PROMPT.to_string());
+    let prompt = args
+        .prompt
+        .clone()
+        .unwrap_or_else(|| DEFAULT_PROMPT.to_string());
 
     if let Some(dir) = &args.dump_dir {
         std::fs::create_dir_all(dir)?;
@@ -387,7 +390,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let m = mineru.as_ref().unwrap();
                 let res = match args.mineru_mode {
                     MineruMode::Page => m
-                        .generate(std::slice::from_ref(&image), &[prompt.as_str()], args.max_tokens)
+                        .generate(
+                            std::slice::from_ref(&image),
+                            &[prompt.as_str()],
+                            args.max_tokens,
+                        )
                         .into_iter()
                         .next()
                         .unwrap(),
@@ -460,7 +467,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mean_s = total_time.as_secs_f64() / n as f64;
     let chars_per_s = total_chars as f64 / total_time.as_secs_f64();
     let mean_ned = sum_ned / n as f64;
-    println!("\n================ OmniDocBench v1.5 — {:?} ================", args.backend);
+    println!(
+        "\n================ OmniDocBench v1.5 — {:?} ================",
+        args.backend
+    );
     println!("model_dir       : {}", args.model_dir.display());
     println!("pages evaluated : {n}");
     println!("speed           : {mean_s:.3} s/page, {chars_per_s:.1} output chars/s");

@@ -199,7 +199,10 @@ pub fn collect_safetensors(
 
     let mut shards: Vec<std::path::PathBuf> = std::fs::read_dir(model_dir)
         .map_err(|e| OCRError::ConfigError {
-            message: format!("{model_name}: cannot read model dir {}: {e}", model_dir.display()),
+            message: format!(
+                "{model_name}: cannot read model dir {}: {e}",
+                model_dir.display()
+            ),
         })?
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .filter(|p| {
@@ -275,9 +278,7 @@ pub fn validate_patch_merge_temporal(
 ) -> Result<(), OCRError> {
     if patch_size == 0 || merge_size == 0 || temporal_patch_size == 0 {
         return Err(OCRError::ConfigError {
-            message: format!(
-                "{model_name} patch_size/merge_size/temporal_patch_size must be > 0"
-            ),
+            message: format!("{model_name} patch_size/merge_size/temporal_patch_size must be > 0"),
         });
     }
     Ok(())
@@ -328,13 +329,15 @@ pub fn rotate_half(x: &Tensor) -> Result<Tensor, OCRError> {
             e,
         )
     })?;
-    let x2 = x.narrow(candle_core::D::Minus1, half, d - half).map_err(|e| {
-        candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-            "rotate_half slice x2 failed",
-            e,
-        )
-    })?;
+    let x2 = x
+        .narrow(candle_core::D::Minus1, half, d - half)
+        .map_err(|e| {
+            candle_to_ocr_processing(
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                "rotate_half slice x2 failed",
+                e,
+            )
+        })?;
     let nx2 = x2.neg().map_err(|e| {
         candle_to_ocr_processing(
             oar_ocr_core::core::errors::ProcessingStage::TensorOperation,

@@ -127,7 +127,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = parse_device(&args.device)?;
     info!("Using device: {device:?}");
 
-    info!("Loading MinerU-Diffusion model from: {}", args.model_dir.display());
+    info!(
+        "Loading MinerU-Diffusion model from: {}",
+        args.model_dir.display()
+    );
     let load_start = Instant::now();
     let model = MinerUDiffusion::from_dir(&args.model_dir, device)?;
     info!("Model loaded in {:.2?}", load_start.elapsed());
@@ -180,7 +183,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(e) => error!("Failed to serialize output: {e}"),
                 }
             }
-            Err(e) => error!("Two-step extraction failed for {}: {e}", image_path.display()),
+            Err(e) => error!(
+                "Two-step extraction failed for {}: {e}",
+                image_path.display()
+            ),
         }
     }
 
