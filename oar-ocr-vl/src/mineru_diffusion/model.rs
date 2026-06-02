@@ -35,7 +35,7 @@ pub const DEFAULT_PROMPT: &str = "\nText Recognition:";
 /// Defaults match the reference `generate_with_embeds` signature and the
 /// README inference call: `temperature = 1.0`, `top_k = 0`, `top_p = 1.0`,
 /// `dynamic_threshold = 0.95`. The reference samples each denoising step with
-/// `torch.multinomial` (see [`sample_tokens_and_conf`]); `seed` makes that
+/// `torch.multinomial` (see `sample_tokens_and_conf`); `seed` makes that
 /// sampling reproducible. Set `temperature <= 0.0` for deterministic greedy
 /// (argmax) decoding, which ignores `seed`/`top_k`/`top_p`.
 #[derive(Debug, Clone)]
