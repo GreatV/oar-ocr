@@ -229,7 +229,7 @@ impl UniMERNetPreprocessor {
             }
         }
 
-        // Padding area remains as zeros (which corresponds to white after normalization)
+        // Fill the padding area with the normalized value of white (1.0)
         for y in height..padded_h {
             for x in 0..padded_w {
                 let normalized =

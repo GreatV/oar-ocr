@@ -226,62 +226,6 @@ impl UVDocPostProcess {
         coords.iter().map(|&coord| coord.round() as i32).collect()
     }
 
-    /// Processes transformation matrix values.
-    ///
-    /// # Arguments
-    ///
-    /// * `matrix` - 3x3 transformation matrix as a flat vector.
-    ///
-    /// # Returns
-    ///
-    /// * `Vec<f32>` - Processed transformation matrix.
-    pub fn process_transformation_matrix(&self, matrix: &[f32; 9]) -> [f32; 9] {
-        // Apply scale to translation components (indices 2 and 5)
-        let mut processed = *matrix;
-        processed[2] *= self.scale; // tx
-        processed[5] *= self.scale; // ty
-        processed
-    }
-
-    /// Applies inverse transformation to coordinates.
-    ///
-    /// # Arguments
-    ///
-    /// * `coords` - Vector of coordinates to transform.
-    /// * `matrix` - 3x3 transformation matrix.
-    ///
-    /// # Returns
-    ///
-    /// * `OcrResult<Vec<[f32; 2]>>` - Transformed coordinates or error.
-    pub fn apply_inverse_transform(
-        &self,
-        coords: &[[f32; 2]],
-        matrix: &[f32; 9],
-    ) -> OcrResult<Vec<[f32; 2]>> {
-        // Calculate determinant for matrix inversion
-        let det = matrix[0] * (matrix[4] * matrix[8] - matrix[5] * matrix[7])
-            - matrix[1] * (matrix[3] * matrix[8] - matrix[5] * matrix[6])
-            + matrix[2] * (matrix[3] * matrix[7] - matrix[4] * matrix[6]);
-
-        if det.abs() < f32::EPSILON {
-            return Err(OCRError::InvalidInput {
-                message: "Matrix is not invertible (determinant is zero)".to_string(),
-            });
-        }
-
-        // For simplicity, this is a basic implementation
-        // In practice, you might want to use a proper matrix library
-        let mut transformed = Vec::new();
-        for &[x, y] in coords {
-            // Apply inverse transformation (simplified)
-            let new_x = (x - matrix[2]) / matrix[0];
-            let new_y = (y - matrix[5]) / matrix[4];
-            transformed.push([new_x, new_y]);
-        }
-
-        Ok(transformed)
-    }
-
     /// Applies batch processing to tensor output to produce rectified images.
     ///
     /// # Arguments

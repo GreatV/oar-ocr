@@ -184,13 +184,9 @@ impl Ernie4_5Attention {
             });
         }
 
-        // Create KvCache with dim=2 for seq_len dimension, use 8192 as reasonable max length
-        // Create KvCache with dim=2 for seq_len dimension
-        // Pre-allocate enough space to avoid O(N) reallocation during generation
-        // Conservative estimate: vision tokens + max_generation_tokens
-        // Typical: ~1000-2000 vision tokens + 4096 generation tokens = ~6000-8000 total
-        // Use 16384 to handle worst case without reallocation
-        // Trim/gather-capable KV cache (HSD verification path).
+        // Trim/gather-capable KV cache (HSD verification path), dim=2 for the
+        // seq_len axis. Pre-allocate 16384 (vision + generation tokens) to avoid
+        // reallocation during generation.
         let kv_cache = TrimmableKvCache::new(2, 16384);
 
         Ok(Self {

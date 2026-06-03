@@ -30,15 +30,13 @@ enum OcrSource {
     Original(usize),
 }
 
-/// Labels that should be excluded from OCR text matching.
-/// These regions have their own specialized content (LaTeX, HTML, etc.)
 /// Labels excluded from OCR text matching in `stitch_layout_elements`.
+/// These regions have their own specialized content (LaTeX, HTML, etc.).
 /// PaddleX: formula results are injected into the OCR pool (via
 /// `convert_formula_res_to_ocr_format`), so formula blocks participate
-/// in normal OCR matching — only Table and Seal are excluded.
-///
-/// NOTE: After inline formula injection, formula elements have been absorbed
-/// into text regions and should be excluded from stitching to prevent duplication.
+/// in normal OCR matching — only Table and Seal are excluded here.
+/// (Formula exclusion, when needed, is handled by `stitch_layout_elements`'s
+/// `exclude_formula_from_ocr` flag.)
 const EXCLUDED_FROM_OCR_LABELS: [LayoutElementType; 2] =
     [LayoutElementType::Table, LayoutElementType::Seal];
 

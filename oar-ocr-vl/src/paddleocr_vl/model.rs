@@ -7,7 +7,9 @@ use super::projector::Projector;
 use super::vision::VisionModel;
 #[cfg(feature = "hsd")]
 use crate::attention::create_tree_attention_mask;
-use crate::attention::{combine_masks, create_causal_mask, create_left_padding_mask};
+use crate::attention::{
+    combine_masks, create_causal_mask, create_generation_mask, create_left_padding_mask,
+};
 #[cfg(feature = "hsd")]
 use crate::hsd::backend_util::{commit_keep_indices, step_pos_ids, tree_pos_ids};
 #[cfg(feature = "hsd")]
@@ -508,6 +510,12 @@ impl PaddleOcrVl {
             .map(|(&len, &d)| (len as i64) + d)
             .collect();
 
+        // Left-padding lengths per row, and current KV-cache length (grows by one
+        // each decode step). Used to mask out padding KV during generation so a
+        // batch with unequal prompt lengths does not attend to padding positions.
+        let pad_lens: Vec<usize> = seq_lens.iter().map(|&len| max_seq_len - len).collect();
+        let mut kv_len = max_seq_len;
+
         for _ in 0..max_new_tokens {
             if finished.iter().all(|&f| f) {
                 break;
@@ -547,7 +555,12 @@ impl PaddleOcrVl {
                 .and_then(|t| t.reshape((3, batch_size, 1)))
                 .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create pos", e))?;
 
-            let hs = self.llm.forward(&embeds, &pos, None)?;
+            // Mask out left-padding positions in the KV cache for this step.
+            kv_len += 1;
+            let gen_mask = create_generation_mask(&pad_lens, kv_len, self.dtype, &self.device)
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create gen mask", e))?;
+
+            let hs = self.llm.forward(&embeds, &pos, Some(&gen_mask))?;
 
             logits_list.clear();
             for i in 0..batch_size {

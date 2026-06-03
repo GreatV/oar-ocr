@@ -5,7 +5,7 @@ use super::vision::MinerUVisionModel;
 #[cfg(feature = "hsd")]
 use crate::attention::create_tree_attention_mask;
 use crate::attention::{
-    combine_masks, create_causal_mask, create_left_padding_mask, on_compute_device,
+    combine_masks, create_causal_mask, create_generation_mask, create_left_padding_mask,
 };
 #[cfg(feature = "hsd")]
 use crate::hsd::backend_util::{commit_keep_indices, step_pos_ids, tree_pos_ids};
@@ -1232,56 +1232,6 @@ impl<'a> SpecBackend for MinerUSpecBackend<'a> {
     fn is_eos(&self, tok: u32) -> bool {
         self.model.eos_token_ids.contains(&tok)
     }
-}
-
-/// Create attention mask for generation steps.
-///
-/// During generation, we need to mask out the left-padding positions in the KV cache.
-/// The mask allows the current query position to attend to all non-padding positions.
-///
-/// # Arguments
-/// * `pad_lens` - Number of padding tokens at the start of each sequence
-/// * `kv_len` - Current KV cache length
-/// * `dtype` - Data type for the mask
-/// * `device` - Device for the mask
-///
-/// # Returns
-/// Mask tensor of shape (batch, 1, 1, kv_len) where padding positions are -inf
-fn create_generation_mask(
-    pad_lens: &[usize],
-    kv_len: usize,
-    dtype: DType,
-    device: &Device,
-) -> Result<Tensor, candle_core::Error> {
-    let batch_size = pad_lens.len();
-
-    on_compute_device(device, |compute_device| {
-        // pad_lens as tensor: (batch, 1, 1, 1)
-        let pad_lens_tensor = Tensor::from_vec(
-            pad_lens.iter().map(|&x| x as u32).collect::<Vec<_>>(),
-            (batch_size, 1, 1, 1),
-            compute_device,
-        )?
-        .to_dtype(dtype)?;
-
-        // Position indices: (1, 1, 1, kv_len)
-        let pos_tensor = Tensor::arange(0u32, kv_len as u32, compute_device)?
-            .reshape((1, 1, 1, kv_len))?
-            .to_dtype(dtype)?;
-
-        // Mask condition: pos < pad_len -> masked (large negative value)
-        let mask_cond = pos_tensor.broadcast_lt(&pad_lens_tensor)?;
-
-        let zero = Tensor::new(0f32, compute_device)?
-            .to_dtype(dtype)?
-            .broadcast_as(mask_cond.shape())?;
-        // Use large negative value instead of -inf to avoid potential numerical issues
-        let mask_value = Tensor::new(-1e9_f32, compute_device)?
-            .to_dtype(dtype)?
-            .broadcast_as(mask_cond.shape())?;
-
-        mask_cond.where_cond(&mask_value, &zero)
-    })
 }
 
 fn build_prompt(instruction: &str) -> String {

@@ -79,18 +79,10 @@ struct GlmOcrVisionRotaryEmbedding {
 
 impl GlmOcrVisionRotaryEmbedding {
     fn new(dim: usize, device: &Device, dtype: DType) -> Result<Self, OCRError> {
-        let inv_freq: Vec<f32> = (0..dim)
-            .step_by(2)
-            .map(|i| 1f32 / 10000f32.powf(i as f32 / dim as f32))
-            .collect();
-        let inv_freq = Tensor::from_vec(inv_freq, (dim / 2,), device)
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "GLM-OCR: create vision inv_freq",
-                    e,
-                )
-            })?
+        // Shared with MinerU2.5 / PaddleOCR-VL: `1 / theta^(i/dim)` computed in
+        // f64 then narrowed to f32 (theta = 10000). The subsequent dtype cast
+        // dominates any f64-vs-f32 difference at the model's working precision.
+        let inv_freq = crate::utils::vision_inv_freq(dim, 10000.0, "GLM-OCR", device)?
             .to_dtype(dtype)
             .map_err(|e| {
                 candle_to_ocr_processing(

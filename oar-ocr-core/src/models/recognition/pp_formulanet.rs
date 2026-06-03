@@ -285,13 +285,48 @@ impl PPFormulaNetModelBuilder {
         self
     }
 
+    /// On CUDA, make PP-FormulaNet's BFC arena grow tightly (SameAsRequested)
+    /// instead of the ORT default (NextPowerOfTwo).
+    ///
+    /// PP-FormulaNet decodes many variable-size formula crops; with the default
+    /// power-of-two arena growth, per-shape reservations round up and accumulate
+    /// — the session balloons to ~5 GB in the structure pipeline vs ~2.7 GB
+    /// standalone. Stacked on the other resident models that pushes peak VRAM
+    /// into the ceiling and OOMs later forwards. Scoped to this session only.
+    fn configure_ppformulanet_ort_for_cuda(
+        mut config: crate::core::config::OrtSessionConfig,
+    ) -> crate::core::config::OrtSessionConfig {
+        use crate::core::config::OrtExecutionProvider;
+        if let Some(eps) = config.execution_providers.as_mut() {
+            for ep in eps.iter_mut() {
+                if let OrtExecutionProvider::CUDA {
+                    arena_extend_strategy,
+                    ..
+                } = ep
+                    && arena_extend_strategy.is_none()
+                {
+                    *arena_extend_strategy = Some("SameAsRequested".to_string());
+                }
+            }
+        }
+        config
+    }
+
     /// Builds the PP-FormulaNet model.
     pub fn build(self, model_path: &std::path::Path) -> Result<PPFormulaNetModel, OCRError> {
         // Create ONNX inference engine
-        let inference = if self.ort_config.is_some() {
+        let ort_config = self
+            .ort_config
+            .map(Self::configure_ppformulanet_ort_for_cuda);
+        let inference = if ort_config.is_some() {
             use crate::core::config::ModelInferenceConfig;
             let common_config = ModelInferenceConfig {
-                ort_session: self.ort_config,
+                ort_session: ort_config,
+                // Identify the model so name-based configuration switching works
+                // (e.g. the PP-FormulaNet CUDA `CUDA_LAUNCH_BLOCKING` workaround,
+                // and any model-specific handling keyed on the name). Leaving this
+                // `None` reports the model as "unknown_model".
+                model_name: Some("PP-FormulaNet".to_string()),
                 ..Default::default()
             };
             OrtInfer::from_config(&common_config, model_path, None)?

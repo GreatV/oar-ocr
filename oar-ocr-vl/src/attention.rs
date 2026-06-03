@@ -62,7 +62,7 @@ where
 
 /// Scaled dot-product attention.
 ///
-/// Computes attention as: softmax(Q @ K^T / scale) @ V
+/// Computes attention as: softmax(Q @ K^T * scale) @ V
 ///
 /// # Arguments
 /// * `q` - Query tensor: (batch, heads, seq_q, head_dim)
@@ -373,6 +373,55 @@ pub fn create_left_padding_mask(
 
         // if pos < pad_len (padded region), return -inf
         mask_cond.where_cond(&neg_inf, &zero)
+    })
+}
+
+/// Builds the per-step attention mask for autoregressive decoding with a
+/// left-padded batch.
+///
+/// During decode each query is a single new token that may attend to the
+/// entire KV cache (length `kv_len`). The leading `pad_lens[i]` positions of
+/// row `i` are left-padding and must be masked out, otherwise the new token
+/// attends to padding KV and the output is corrupted for batches with unequal
+/// prompt lengths. Returns a `(batch, 1, 1, kv_len)` additive mask (`0` for
+/// attendable positions, a large negative value for padding).
+///
+/// For a batch of size 1 (or any batch with no padding) every `pad_len` is 0
+/// and the mask is all-zeros, i.e. a no-op.
+pub fn create_generation_mask(
+    pad_lens: &[usize],
+    kv_len: usize,
+    dtype: DType,
+    device: &Device,
+) -> Result<Tensor> {
+    let batch_size = pad_lens.len();
+
+    on_compute_device(device, |compute_device| {
+        // pad_lens as tensor: (batch, 1, 1, 1)
+        let pad_lens_tensor = Tensor::from_vec(
+            pad_lens.iter().map(|&x| x as u32).collect::<Vec<_>>(),
+            (batch_size, 1, 1, 1),
+            compute_device,
+        )?
+        .to_dtype(dtype)?;
+
+        // Position indices: (1, 1, 1, kv_len)
+        let pos_tensor = Tensor::arange(0u32, kv_len as u32, compute_device)?
+            .reshape((1, 1, 1, kv_len))?
+            .to_dtype(dtype)?;
+
+        // Mask condition: pos < pad_len -> masked (large negative value)
+        let mask_cond = pos_tensor.broadcast_lt(&pad_lens_tensor)?;
+
+        let zero = Tensor::new(0f32, compute_device)?
+            .to_dtype(dtype)?
+            .broadcast_as(mask_cond.shape())?;
+        // Use large negative value instead of -inf to avoid potential numerical issues
+        let mask_value = Tensor::new(-1e9_f32, compute_device)?
+            .to_dtype(dtype)?
+            .broadcast_as(mask_cond.shape())?;
+
+        mask_cond.where_cond(&mask_value, &zero)
     })
 }
 

@@ -260,7 +260,7 @@ fn get_perspective_transform(
 /// Applies a perspective transformation to an image.
 ///
 /// This function transforms an image using a given perspective transformation matrix.
-/// It uses inverse mapping with bilinear interpolation to produce the output image.
+/// It uses inverse mapping with bicubic interpolation to produce the output image.
 ///
 /// # Arguments
 ///

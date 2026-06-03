@@ -1304,8 +1304,9 @@ fn clean_ocr_text(text: &str) -> String {
 /// 3. If it matches any template (case-insensitive exact match), replace it with `format_func(token)`
 /// 4. Rejoin with `spliter`
 ///
-/// For abstract: `spliter=" "`, templates=["abstract","摘要"], format_func= `## {}\n`
-/// For reference: `spliter="\n"`, templates=["references","参考文献"], format_func= `## {}`
+/// The matched token is replaced with `{heading_prefix}{token}\n`.
+/// For abstract: `spliter=" "`, templates=["abstract","摘要"], heading_prefix=`## `
+/// For reference: `spliter="\n"`, templates=["references","参考文献"], heading_prefix=`## `
 fn format_first_line(
     text: &str,
     spliter: &str,

@@ -628,13 +628,8 @@ impl BoundingBox {
             return 0.0;
         }
 
-        // Compute areas of both bounding boxes
-        // Note: Using simple rectangle areas for union calculation might be slightly inaccurate
-        // if boxes are rotated polygons, but intersection is calculated as AABB intersection.
-        // For consistency, we should probably use AABB area for IOU if we use AABB intersection.
-        // However, existing IOU implementation used (x_max-x_min)*(y_max-y_min) which is AABB area.
-        // So let's stick to AABB area for consistency with previous implementation.
-
+        // Use AABB areas for both boxes, matching the AABB-based intersection.
+        // For rotated polygons this is approximate but keeps IoU consistent.
         let x1_min = self.x_min();
         let y1_min = self.y_min();
         let x1_max = self.x_max();

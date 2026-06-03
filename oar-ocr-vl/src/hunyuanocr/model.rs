@@ -6,7 +6,9 @@ use super::processing::{HunyuanOcrImageInputs, preprocess_image};
 use super::vision::HunyuanVisionModel;
 #[cfg(feature = "hsd")]
 use crate::attention::create_tree_attention_mask;
-use crate::attention::{combine_masks, create_causal_mask, create_left_padding_mask};
+use crate::attention::{
+    combine_masks, create_causal_mask, create_generation_mask, create_left_padding_mask,
+};
 #[cfg(feature = "hsd")]
 use crate::hsd::backend_util::{commit_keep_indices, step_pos_ids, tree_pos_ids};
 #[cfg(feature = "hsd")]
@@ -458,6 +460,12 @@ impl HunyuanOcr {
         let mut finished: Vec<bool> = vec![false; batch_size];
         let mut positions: Vec<i64> = seq_lens.iter().map(|&len| len as i64).collect();
 
+        // Left-padding lengths per row, and current KV-cache length (grows by one
+        // each decode step). Used to mask out padding KV during generation so a
+        // batch with unequal prompt lengths does not attend to padding positions.
+        let pad_lens: Vec<usize> = seq_lens.iter().map(|&len| max_seq_len - len).collect();
+        let mut kv_len = max_seq_len;
+
         for _ in 0..max_new_tokens {
             if finished.iter().all(|&f| f) {
                 break;
@@ -515,7 +523,12 @@ impl HunyuanOcr {
                 .and_then(|t| t.reshape((4, batch_size, 1)))
                 .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "create pos", e))?;
 
-            let hs = self.llm.forward(&embeds, &pos, None)?;
+            // Mask out left-padding positions in the KV cache for this step.
+            kv_len += 1;
+            let gen_mask = create_generation_mask(&pad_lens, kv_len, self.dtype, &self.device)
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "create gen mask", e))?;
+
+            let hs = self.llm.forward(&embeds, &pos, Some(&gen_mask))?;
 
             logits_list.clear();
             for i in 0..batch_size {
@@ -716,12 +729,9 @@ impl HunyuanOcr {
         Ok((generated, stats))
     }
 
-    /// Full Hierarchical Speculative Decoding entry: Stage 1 (region-level
-    /// local verification) followed by Stage 2 (page-level global verification).
-    ///
-    /// Full HSD entry: Stage 1 verifies region-level candidate drafts on
-    /// cropped images, then Stage 2 verifies the Stage-1 output set on the
-    /// full page image.
+    /// Full Hierarchical Speculative Decoding entry: Stage 1 verifies
+    /// region-level candidate drafts on cropped images, then Stage 2 verifies
+    /// the Stage-1 output set on the full page image.
     ///
     /// `text_candidates(elem)` can return top-k recognizer outputs or outputs
     /// from multiple independent drafters. Candidates are serialized through

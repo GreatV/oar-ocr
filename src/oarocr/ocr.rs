@@ -859,9 +859,11 @@ impl OAROCR {
     /// # Arguments
     ///
     /// * `line_bbox` - The bounding box of the entire text line
+    /// * `text` - The recognized text string
     /// * `col_indices` - Column indices (timesteps) for each character from CTC output
     /// * `seq_len` - Total number of columns (sequence length) in the CTC output
-    /// * `text` - The recognized text string
+    /// * `wh_ratio` - Width/height ratio of this region's crop
+    /// * `max_wh_ratio` - Max width/height ratio in the batch (used to undo padding)
     ///
     /// # Returns
     ///
@@ -942,7 +944,7 @@ impl OAROCR {
     /// Converts normalized character positions to word-level bounding boxes.
     ///
     /// This is a fallback method that uses uniform character width distribution.
-    /// Use col_indices_to_word_boxes when CTC column indices are available for better accuracy.
+    /// Use `ctc_word_boxes` when CTC column indices are available for better accuracy.
     ///
     /// # Arguments
     ///

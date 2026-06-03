@@ -13,18 +13,14 @@
 //! # Arguments
 //!
 //! * `-m, --model-path` - Path to the table structure recognition model file
-//! * `--dict-path` - Path to table structure dictionary file (required)
-//! * `--model-name` - Table structure model preset (`SLANeXt_wired`, `SLANeXt_wireless`, `SLANet`, `SLANet_plus`)
+//! * `--dict-path` - Path to table structure dictionary file (required). Common dictionaries:
 //!   - `table_structure_dict_ch.txt` - Chinese dictionary (48 entries)
 //!   - `table_structure_dict.txt` - English dictionary (28 entries)
 //!   - `table_master_structure_dict.txt` - Master dictionary with extended tags
+//! * `--model-name` - Table structure model preset (`SLANeXt_wired`, `SLANeXt_wireless`, `SLANet`, `SLANet_plus`)
 //! * `<IMAGES>...` - Paths to input table images to process
 //!
-//! # Output
-//!
-//! that match standard output format for easy comparison and verification.
-//!
-//! # Usage
+//! # Examples
 //!
 //! Simple run with default settings:
 //!

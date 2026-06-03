@@ -1546,14 +1546,15 @@ impl PPDocLayoutAdapterBuilder {
     ///
     /// # Arguments
     ///
-    /// * `model_name` - Model variant name. Supported values:
-    ///   - `"pp-doclayout-s"` or `"pp_doclayout_s"` - Small model (480x480)
-    ///   - `"pp-doclayout-m"` or `"pp_doclayout_m"` - Medium model (640x640)
-    ///   - `"pp-doclayout-l"` or `"pp_doclayout_l"` - Large model (640x640, default)
-    ///   - `"pp-doclayout_plus-l"` or `"pp_doclayout_plus_l"` - Plus-Large model (800x800)
-    ///   - `"pp-doclayoutv2"` or `"pp_doclayoutv2"` - PP-DocLayoutV2 model (800x800)
-    ///   - `"pp-doclayoutv3"` or `"pp_doclayoutv3"` - PP-DocLayoutV3 model (800x800)
-    ///   - `"pp-docblocklayout"` or `"pp_docblocklayout"` - Block layout model (640x640)
+    /// * `model_name` - Model variant name. Supported values (any other value
+    ///   falls back to `"PP-DocLayout-L"`):
+    ///   - `"PP-DocLayout-S"` - Small model (480x480)
+    ///   - `"PP-DocLayout-M"` - Medium model (640x640)
+    ///   - `"PP-DocLayout-L"` - Large model (640x640, default)
+    ///   - `"PP-DocLayout_plus-L"` - Plus-Large model (800x800)
+    ///   - `"PP-DocLayoutV2"` / `"PP-DocLayout-V2"` - PP-DocLayoutV2 model (800x800)
+    ///   - `"PP-DocLayoutV3"` / `"PP-DocLayout-V3"` - PP-DocLayoutV3 model (800x800)
+    ///   - `"PP-DocBlockLayout"` - Block layout model (640x640)
     ///
     /// # Example
     ///
@@ -1563,7 +1564,7 @@ impl PPDocLayoutAdapterBuilder {
     /// use oar_ocr_core::domain::adapters::PPDocLayoutAdapterBuilder;
     ///
     /// # fn main() -> Result<(), oar_ocr_core::core::OCRError> {
-    /// let _adapter = PPDocLayoutAdapterBuilder::new("pp-doclayout-s")
+    /// let _adapter = PPDocLayoutAdapterBuilder::new("PP-DocLayout-S")
     ///     .build(Path::new("model.onnx"))?;
     /// # Ok(())
     /// # }

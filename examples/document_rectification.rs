@@ -63,14 +63,6 @@ struct Args {
     #[arg(long, default_value = "cpu")]
     device: String,
 
-    /// Model input height (default: dynamic input size)
-    #[arg(long, default_value = "0")]
-    input_height: usize,
-
-    /// Model input width (default: dynamic input size)
-    #[arg(long, default_value = "0")]
-    input_width: usize,
-
     /// Enable verbose output
     #[arg(short, long)]
     verbose: bool,
@@ -123,14 +115,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.verbose {
         info!("Building rectification predictor...");
         info!("  Model: {}", args.model_path.display());
-        if args.input_height > 0 && args.input_width > 0 {
-            info!(
-                "  Input shape override: [3, {}, {}]",
-                args.input_height, args.input_width
-            );
-        } else {
-            info!("  Input shape override: dynamic (use original image size)");
-        }
     }
 
     let predictor = DocumentRectificationPredictor::builder()

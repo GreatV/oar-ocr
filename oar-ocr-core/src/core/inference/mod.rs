@@ -18,6 +18,7 @@ mod ort_infer_config;
 #[path = "ort_infer_execution.rs"]
 mod ort_infer_execution;
 
+pub use ort_infer_builders::ensure_cuda_launch_blocking;
 pub use ort_infer_execution::TensorInput;
 pub use session::load_session;
 pub use tensor_output::TensorOutput;

@@ -257,7 +257,6 @@ impl ConfigValidator for ModelInferenceConfig {
 }
 
 impl Default for ModelInferenceConfig {
-    /// This allows ModelInferenceConfig to be created with default values.
     fn default() -> Self {
         Self::new()
     }
