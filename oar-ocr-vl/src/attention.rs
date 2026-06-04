@@ -413,13 +413,9 @@ pub fn create_generation_mask(
         // Mask condition: pos < pad_len -> masked (large negative value)
         let mask_cond = pos_tensor.broadcast_lt(&pad_lens_tensor)?;
 
-        let zero = Tensor::new(0f32, compute_device)?
-            .to_dtype(dtype)?
-            .broadcast_as(mask_cond.shape())?;
+        let zero = Tensor::zeros(mask_cond.shape(), dtype, compute_device)?;
         // Use large negative value instead of -inf to avoid potential numerical issues
-        let mask_value = Tensor::new(-1e9_f32, compute_device)?
-            .to_dtype(dtype)?
-            .broadcast_as(mask_cond.shape())?;
+        let mask_value = Tensor::full(-1e9_f32, mask_cond.shape(), compute_device)?.to_dtype(dtype)?;
 
         mask_cond.where_cond(&mask_value, &zero)
     })
