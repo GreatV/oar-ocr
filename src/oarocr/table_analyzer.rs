@@ -334,7 +334,13 @@ impl<'a> TableAnalyzer<'a> {
                     error = %e,
                     "Failed to crop table region"
                 );
-                return Err(e);
+                // Wrap with table context so the returned error is actionable even
+                // without tracing output, while preserving the crop error as source.
+                return Err(OCRError::adapter_execution_error(
+                    "table_analyzer",
+                    format!("table {idx}: failed to crop table region"),
+                    e,
+                ));
             }
         };
 
@@ -513,8 +519,15 @@ impl<'a> TableAnalyzer<'a> {
                                 "Structure adapter failed; falling back to cells->html mode"
                             );
                         } else {
-                            // Surface the failure instead of emitting a stub table.
-                            return Err(e);
+                            // Surface the failure instead of emitting a stub table,
+                            // wrapping with table context while preserving the source.
+                            return Err(OCRError::adapter_execution_error(
+                                "table_structure_recognition",
+                                format!(
+                                    "table {idx} ({table_type:?}): structure recognition failed"
+                                ),
+                                e,
+                            ));
                         }
                     }
                 }
