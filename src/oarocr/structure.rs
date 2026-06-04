@@ -272,12 +272,18 @@ impl OARStructureBuilder {
     /// Overrides the built-in layout model preset used to configure preprocessing/postprocessing.
     ///
     /// This is useful when the ONNX file name alone is not enough to infer the correct
-    /// model family. Supported presets include:
-    /// - `pp-doclayout_plus-l` (default)
-    /// - `pp-doclayout-s`, `pp-doclayout-m`, `pp-doclayout-l`
-    /// - `pp-docblocklayout`
-    /// - `picodet_layout_1x`, `picodet_layout_1x_table`
-    /// - `rt-detr-h_layout_3cls`, `rt-detr-h_layout_17cls`
+    /// model family. Preset names are matched case- and separator-insensitively
+    /// (`-` and `_` are interchangeable), so `PP-DocLayout_plus-L` and
+    /// `pp_doclayout_plus_l` are equivalent. Supported presets:
+    /// - `PP-DocLayout_plus-L` (default)
+    /// - `PP-DocLayout-S`, `PP-DocLayout-M`, `PP-DocLayout-L`
+    /// - `PP-DocBlockLayout`
+    /// - `PicoDet_layout_1x`, `PicoDet_layout_1x_table`
+    /// - `PicoDet-S_layout_3cls`, `PicoDet-L_layout_3cls`
+    /// - `PicoDet-S_layout_17cls`, `PicoDet-L_layout_17cls`
+    /// - `RT-DETR-H_layout_3cls`, `RT-DETR-H_layout_17cls`
+    ///
+    /// An unrecognized name logs a warning and falls back to the default preset.
     pub fn layout_model_name(mut self, name: impl Into<String>) -> Self {
         self.layout_model_name = Some(name.into());
         self
@@ -292,49 +298,50 @@ impl OARStructureBuilder {
         self
     }
 
-    /// Sets the wired table structure model name preset.
+    /// Sets the reported model name for the wired table structure model
+    /// (e.g. `SLANeXt_wired`).
     ///
-    /// Supported presets: `SLANet`, `SLANeXt_wired`.
+    /// This is identification metadata: it labels the model in logs and error
+    /// messages. The wired/wireless slot and the table-structure config govern
+    /// the actual input shape and decoding.
     pub fn wired_table_structure_model_name(mut self, name: impl Into<String>) -> Self {
         self.wired_table_structure_model_name = Some(name.into());
         self
     }
 
-    /// Sets the wireless table structure model name preset.
-    ///
-    /// Supported presets: `SLANet_plus`.
+    /// Sets the reported model name for the wireless table structure model
+    /// (e.g. `SLANet_plus`). Identification metadata only; see
+    /// [`Self::wired_table_structure_model_name`].
     pub fn wireless_table_structure_model_name(mut self, name: impl Into<String>) -> Self {
         self.wireless_table_structure_model_name = Some(name.into());
         self
     }
 
-    /// Sets the wired table cell detection model name preset.
-    ///
-    /// Supported presets: `RT-DETR-L_wired_table_cell_det`.
+    /// Sets the reported model name for the wired table cell detector
+    /// (e.g. `RT-DETR-L_wired_table_cell_det`). Identification metadata only.
     pub fn wired_table_cell_model_name(mut self, name: impl Into<String>) -> Self {
         self.wired_table_cell_model_name = Some(name.into());
         self
     }
 
-    /// Sets the wireless table cell detection model name preset.
-    ///
-    /// Supported presets: `RT-DETR-L_wireless_table_cell_det`.
+    /// Sets the reported model name for the wireless table cell detector
+    /// (e.g. `RT-DETR-L_wireless_table_cell_det`). Identification metadata only.
     pub fn wireless_table_cell_model_name(mut self, name: impl Into<String>) -> Self {
         self.wireless_table_cell_model_name = Some(name.into());
         self
     }
 
-    /// Sets the text detection model name preset.
-    ///
-    /// Supported presets: `PP-OCRv5_mobile_det`, `PP-OCRv5_server_det`.
+    /// Sets the reported model name for the text detector
+    /// (e.g. `PP-OCRv5_server_det`). Identification metadata only: detection
+    /// behavior is driven by the config and the ONNX model.
     pub fn text_detection_model_name(mut self, name: impl Into<String>) -> Self {
         self.text_detection_model_name = Some(name.into());
         self
     }
 
-    /// Sets the text recognition model name preset.
-    ///
-    /// Supported presets: `PP-OCRv5_mobile_rec`, `PP-OCRv5_server_rec`.
+    /// Sets the reported model name for the text recognizer
+    /// (e.g. `PP-OCRv5_server_rec`). Identification metadata only: recognition
+    /// behavior is driven by the config, dictionary, and the ONNX model.
     pub fn text_recognition_model_name(mut self, name: impl Into<String>) -> Self {
         self.text_recognition_model_name = Some(name.into());
         self
@@ -658,6 +665,33 @@ impl OARStructureBuilder {
             Self::validate_batch_size("region_batch_size", size)?;
         }
 
+        // PP-FormulaNet's CUDA autoregressive Loop races on EP arena buffers when
+        // its `session.run()`s interleave with other models' (onnxruntime#4829),
+        // garbling later formulas. The fix is `CUDA_LAUNCH_BLOCKING=1`, but it
+        // only takes effect if set before the first CUDA session is created — and
+        // here the formula adapter is built after ~10 other CUDA models. So set it
+        // up front whenever a formula model will run on CUDA.
+        if self.formula_recognition_model.is_some() {
+            use oar_ocr_core::core::config::OrtExecutionProvider;
+            let uses_cuda = self
+                .formula_ort_session_config
+                .as_ref()
+                .or(self.ort_session_config.as_ref())
+                .and_then(|cfg| cfg.execution_providers.as_ref())
+                .is_some_and(|eps| {
+                    eps.iter().any(|ep| {
+                        matches!(
+                            ep,
+                            OrtExecutionProvider::CUDA { .. }
+                                | OrtExecutionProvider::TensorRT { .. }
+                        )
+                    })
+                });
+            if uses_cuda {
+                oar_ocr_core::core::inference::ensure_cuda_launch_blocking();
+            }
+        }
+
         // Resolve every model/dict/tokenizer path through the auto-download
         // cache when the `auto-download` feature is enabled. With the feature
         // off these calls are infallible no-ops.
@@ -723,21 +757,32 @@ impl OARStructureBuilder {
         // Use explicit model name or default
         let layout_model_config = if let Some(name) = &self.layout_model_name {
             use oar_ocr_core::domain::adapters::LayoutModelConfig;
-            match name.as_str() {
+            // Match presets case- and separator-insensitively so the documented
+            // forms (e.g. `PicoDet-L_layout_17cls`, `RT-DETR-H_layout_17cls`,
+            // `PP-DocLayout_plus-L`) resolve correctly. Mirrors the normalization
+            // used by `region_model_name` below.
+            match name.to_lowercase().replace('-', "_").as_str() {
                 "picodet_layout_1x" => LayoutModelConfig::picodet_layout_1x(),
                 "picodet_layout_1x_table" => LayoutModelConfig::picodet_layout_1x_table(),
                 "picodet_s_layout_3cls" => LayoutModelConfig::picodet_s_layout_3cls(),
                 "picodet_l_layout_3cls" => LayoutModelConfig::picodet_l_layout_3cls(),
                 "picodet_s_layout_17cls" => LayoutModelConfig::picodet_s_layout_17cls(),
                 "picodet_l_layout_17cls" => LayoutModelConfig::picodet_l_layout_17cls(),
-                "rt-detr-h_layout_3cls" => LayoutModelConfig::rtdetr_h_layout_3cls(),
-                "rt-detr-h_layout_17cls" => LayoutModelConfig::rtdetr_h_layout_17cls(),
-                "pp-docblocklayout" => LayoutModelConfig::pp_docblocklayout(),
-                "pp-doclayout-s" => LayoutModelConfig::pp_doclayout_s(),
-                "pp-doclayout-m" => LayoutModelConfig::pp_doclayout_m(),
-                "pp-doclayout-l" => LayoutModelConfig::pp_doclayout_l(),
-                "pp-doclayout_plus-l" => LayoutModelConfig::pp_doclayout_plus_l(),
-                _ => LayoutModelConfig::pp_doclayout_plus_l(),
+                "rt_detr_h_layout_3cls" => LayoutModelConfig::rtdetr_h_layout_3cls(),
+                "rt_detr_h_layout_17cls" => LayoutModelConfig::rtdetr_h_layout_17cls(),
+                "pp_docblocklayout" => LayoutModelConfig::pp_docblocklayout(),
+                "pp_doclayout_s" => LayoutModelConfig::pp_doclayout_s(),
+                "pp_doclayout_m" => LayoutModelConfig::pp_doclayout_m(),
+                "pp_doclayout_l" => LayoutModelConfig::pp_doclayout_l(),
+                "pp_doclayout_plus_l" => LayoutModelConfig::pp_doclayout_plus_l(),
+                _ => {
+                    tracing::warn!(
+                        requested = %name,
+                        "Unknown --layout-model-name preset; falling back to PP-DocLayout_plus-L. \
+                         This may apply the wrong class labels/preprocessing for your model."
+                    );
+                    LayoutModelConfig::pp_doclayout_plus_l()
+                }
             }
         } else {
             // Default fallback
@@ -932,6 +977,13 @@ impl OARStructureBuilder {
 
             let mut builder = SLANetWiredAdapterBuilder::new().dict_path(dict_path);
 
+            // Label the model in logs/errors with the caller-provided preset name
+            // (e.g. `SLANeXt_wired`). The wired/wireless slot already fixes the
+            // SLANet variant's input shape, so this is identification metadata.
+            if let Some(ref name) = self.wired_table_structure_model_name {
+                builder = builder.model_name(name.clone());
+            }
+
             if let Some(ref config) = self.table_structure_recognition_config {
                 builder = builder.with_config(config.clone());
             }
@@ -957,6 +1009,10 @@ impl OARStructureBuilder {
 
             let mut builder = SLANetWirelessAdapterBuilder::new().dict_path(dict_path);
 
+            if let Some(ref name) = self.wireless_table_structure_model_name {
+                builder = builder.model_name(name.clone());
+            }
+
             if let Some(ref config) = self.table_structure_recognition_config {
                 builder = builder.with_config(config.clone());
             }
@@ -974,7 +1030,11 @@ impl OARStructureBuilder {
         let wired_table_cell_adapter = if let Some(ref model_path) = self.wired_table_cell_model {
             use oar_ocr_core::domain::adapters::table_cell_detection_adapter::TableCellModelConfig;
 
-            let model_config = TableCellModelConfig::rtdetr_l_wired_table_cell_det();
+            let mut model_config = TableCellModelConfig::rtdetr_l_wired_table_cell_det();
+            // Honor the caller-provided preset name for model identification.
+            if let Some(ref name) = self.wired_table_cell_model_name {
+                model_config.model_name = name.clone();
+            }
             let mut builder = TableCellDetectionAdapterBuilder::new().model_config(model_config);
 
             if let Some(ref config) = self.table_cell_detection_config {
@@ -995,7 +1055,10 @@ impl OARStructureBuilder {
         {
             use oar_ocr_core::domain::adapters::table_cell_detection_adapter::TableCellModelConfig;
 
-            let model_config = TableCellModelConfig::rtdetr_l_wireless_table_cell_det();
+            let mut model_config = TableCellModelConfig::rtdetr_l_wireless_table_cell_det();
+            if let Some(ref name) = self.wireless_table_cell_model_name {
+                model_config.model_name = name.clone();
+            }
             let mut builder = TableCellDetectionAdapterBuilder::new().model_config(model_config);
 
             if let Some(ref config) = self.table_cell_detection_config {
@@ -1135,6 +1198,13 @@ impl OARStructureBuilder {
             }
             builder = builder.with_config(effective_cfg);
 
+            // Label the detector with the caller-provided preset name (e.g.
+            // `PP-OCRv5_server_det`) for logs/errors. Detection behavior is
+            // driven by the config and ONNX model, not the name.
+            if let Some(ref name) = self.text_detection_model_name {
+                builder = builder.model_name(name.clone());
+            }
+
             if let Some(ref ort_config) = self.ort_session_config {
                 builder = builder.with_ort_config(ort_config.clone());
             }
@@ -1171,6 +1241,13 @@ impl OARStructureBuilder {
 
             if let Some(ref config) = self.text_recognition_config {
                 builder = builder.with_config(config.clone());
+            }
+
+            // Label the recognizer with the caller-provided preset name (e.g.
+            // `PP-OCRv5_server_rec`) for logs/errors. Recognition behavior is
+            // driven by the config, dictionary, and ONNX model, not the name.
+            if let Some(ref name) = self.text_recognition_model_name {
+                builder = builder.model_name(name.clone());
             }
 
             if let Some(ref ort_config) = self.ort_session_config {
@@ -2255,16 +2332,27 @@ impl OARStructure {
                 // PaddleX applies textline orientation in detection order first.
                 if let Some(ref tlo_adapter) = self.pipeline.text_line_orientation_adapter {
                     let tlo_input = ImageTaskInput::new(cropped_images.clone());
-                    if let Ok(tlo_result) = tlo_adapter.execute(tlo_input, None) {
-                        for (i, classifications) in tlo_result.classifications.iter().enumerate() {
-                            if i >= cropped_images.len() {
-                                break;
-                            }
-                            if let Some(top_cls) = classifications.first()
-                                && top_cls.class_id == 1
+                    match tlo_adapter.execute(tlo_input, None) {
+                        Ok(tlo_result) => {
+                            for (i, classifications) in
+                                tlo_result.classifications.iter().enumerate()
                             {
-                                cropped_images[i] = image::imageops::rotate180(&cropped_images[i]);
+                                if i >= cropped_images.len() {
+                                    break;
+                                }
+                                if let Some(top_cls) = classifications.first()
+                                    && top_cls.class_id == 1
+                                {
+                                    cropped_images[i] =
+                                        image::imageops::rotate180(&cropped_images[i]);
+                                }
                             }
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                "Text-line orientation failed; proceeding without rotation: {}",
+                                err
+                            );
                         }
                     }
                 }
@@ -2304,18 +2392,30 @@ impl OARStructure {
 
                     let rec_input = ImageTaskInput::new(rec_imgs);
                     rec_batches += 1;
-                    if let Ok(rec_result) = text_recognition_adapter.execute(rec_input, None) {
-                        for ((det_idx, text), score) in det_indices
-                            .into_iter()
-                            .zip(rec_result.texts)
-                            .zip(rec_result.scores)
-                        {
-                            if text.is_empty() {
-                                continue;
+                    match text_recognition_adapter.execute(rec_input, None) {
+                        Ok(rec_result) => {
+                            for ((det_idx, text), score) in det_indices
+                                .into_iter()
+                                .zip(rec_result.texts)
+                                .zip(rec_result.scores)
+                            {
+                                if text.is_empty() {
+                                    continue;
+                                }
+                                if let Some(slot) = recognized_by_det_idx.get_mut(det_idx) {
+                                    *slot = Some((text, score));
+                                }
                             }
-                            if let Some(slot) = recognized_by_det_idx.get_mut(det_idx) {
-                                *slot = Some((text, score));
-                            }
+                        }
+                        // Mirror the batch path (`precompute_overall_ocr_across_pages`):
+                        // surface the failure instead of silently dropping the text
+                        // for these crops.
+                        Err(err) => {
+                            tracing::warn!(
+                                "Text recognition batch failed for {} crops and will be skipped: {}",
+                                det_indices.len(),
+                                err
+                            );
                         }
                     }
                 }
@@ -2521,12 +2621,7 @@ impl OARStructure {
                         .use_wireless_table_cells_trans_to_html,
                 },
             );
-            tables.extend(analyzer.analyze_tables(
-                &current_image,
-                &layout_elements,
-                &formulas,
-                &text_regions,
-            )?);
+            tables.extend(analyzer.analyze_tables(&current_image, &layout_elements)?);
             tracing::debug!(
                 "structure stage: table analysis {:.1} ms, tables={}",
                 t_tables.elapsed().as_secs_f64() * 1000.0,
@@ -2967,15 +3062,23 @@ impl OARStructure {
                 let t_tlo = Instant::now();
                 let input =
                     ImageTaskInput::new(rec_items.iter().map(|item| item.image.clone()).collect());
-                if let Ok(tlo_result) = tlo_adapter.execute(input, None) {
-                    for (item, classifications) in
-                        rec_items.iter_mut().zip(tlo_result.classifications)
-                    {
-                        if let Some(top_cls) = classifications.first()
-                            && top_cls.class_id == 1
+                match tlo_adapter.execute(input, None) {
+                    Ok(tlo_result) => {
+                        for (item, classifications) in
+                            rec_items.iter_mut().zip(tlo_result.classifications)
                         {
-                            item.image = image::imageops::rotate180(&item.image);
+                            if let Some(top_cls) = classifications.first()
+                                && top_cls.class_id == 1
+                            {
+                                item.image = image::imageops::rotate180(&item.image);
+                            }
                         }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            "Text-line orientation failed; proceeding without rotation: {}",
+                            err
+                        );
                     }
                 }
                 tlo_ms = t_tlo.elapsed().as_secs_f64() * 1000.0;
@@ -2994,15 +3097,9 @@ impl OARStructure {
                 .max(1);
 
             let t_recognition = Instant::now();
-            let mut pending_ranges = Vec::new();
             let mut start = 0usize;
             while start < rec_items.len() {
                 let end = (start + batch_size).min(rec_items.len());
-                pending_ranges.push((start, end));
-                start = end;
-            }
-
-            while let Some((start, end)) = pending_ranges.pop() {
                 let chunk = &rec_items[start..end];
                 let rec_input =
                     ImageTaskInput::new(chunk.iter().map(|item| item.image.clone()).collect());
@@ -3021,22 +3118,15 @@ impl OARStructure {
                             }
                         }
                     }
-                    Err(err) if end - start > 1 => {
-                        let mid = start + (end - start) / 2;
+                    Err(err) => {
                         tracing::warn!(
-                            "Text recognition batch failed for {} crops; retrying as {} + {} crops: {}",
+                            "Text recognition batch failed for {} crops and will be skipped: {}",
                             end - start,
-                            mid - start,
-                            end - mid,
                             err
                         );
-                        pending_ranges.push((mid, end));
-                        pending_ranges.push((start, mid));
-                    }
-                    Err(err) => {
-                        tracing::warn!("Text recognition crop failed and will be skipped: {}", err);
                     }
                 }
+                start = end;
             }
             recognition_ms = t_recognition.elapsed().as_secs_f64() * 1000.0;
         }

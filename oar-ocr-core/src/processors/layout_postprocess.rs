@@ -133,7 +133,7 @@ impl LayoutPostProcess {
             if feature_dim == 4 + self.num_classes {
                 // Format: [x1, y1, x2, y2, scores...]
                 let (max_class, max_score) = row[4..].iter().enumerate().fold(
-                    (0usize, 0.0f32),
+                    (0usize, f32::NEG_INFINITY),
                     |(best_cls, best_score), (cls_idx, &score)| {
                         if score > best_score {
                             (cls_idx, score)
@@ -227,13 +227,21 @@ impl LayoutPostProcess {
         // PP-DocLayout outputs in [num_boxes, 1, N] format
         // where N is 6 or 8 depending on model version
         let shape = predictions.shape();
-        let num_boxes = shape[0];
-        let feature_dim = shape[2];
 
         let mut boxes = Vec::new();
         let mut classes = Vec::new();
         let mut scores = Vec::new();
         let mut reading_orders: Vec<(f32, f32)> = Vec::new();
+
+        // Guard against unexpected/under-width model output before indexing
+        // `[box_idx, 0, 0..=5]` (and `..=7` for the 8-dim variant). Mirrors the
+        // shape validation in `process_picodet`.
+        if shape.len() != 3 || shape[1] == 0 || shape[2] < 6 {
+            return (boxes, classes, scores);
+        }
+
+        let num_boxes = shape[0];
+        let feature_dim = shape[2];
 
         let orig_width = img_shape.src_w;
         let orig_height = img_shape.src_h;
@@ -869,5 +877,45 @@ mod tests {
         ]);
 
         assert_eq!(processor.calculate_iou(&box1, &box3), 0.0);
+    }
+
+    #[test]
+    fn test_pp_doclayout_under_width_output_does_not_panic() {
+        // Regression: `process_pp_doclayout` must not index `[box_idx, 0, 5]`
+        // when the model emits fewer than 6 feature columns. It should return
+        // empty results instead of panicking.
+        let processor = LayoutPostProcess::new(17, 0.5, 0.5, 100, "pp-doclayout".to_string());
+        let img_shape = ImageScaleInfo::new(100.0, 100.0, 1.0, 1.0);
+
+        // feature_dim = 4 (< 6)
+        let preds = ndarray::Array3::<f32>::zeros((3, 1, 4));
+        let (boxes, classes, scores) = processor.process_pp_doclayout(preds.view(), &img_shape);
+        assert!(boxes.is_empty() && classes.is_empty() && scores.is_empty());
+
+        // Zero rows in the middle dimension.
+        let preds = ndarray::Array3::<f32>::zeros((3, 0, 8));
+        let (boxes, _, _) = processor.process_pp_doclayout(preds.view(), &img_shape);
+        assert!(boxes.is_empty());
+    }
+
+    #[test]
+    fn test_picodet_argmax_handles_non_positive_scores() {
+        // Regression: the class argmax must not seed with 0.0, otherwise a box
+        // whose true max class score is negative is mislabeled as class 0 / 0.0.
+        // Use a negative threshold so the (correctly-found) max survives filtering.
+        let processor = LayoutPostProcess::new(3, -1.0, 1.0, 100, "picodet".to_string());
+        let img_shape = ImageScaleInfo::new(100.0, 100.0, 1.0, 1.0);
+
+        // One box: bbox [10,10,50,50], class scores [-0.9, -0.2, -0.5].
+        // The true argmax is class 1 (-0.2), not class 0.
+        let preds = ndarray::Array3::<f32>::from_shape_vec(
+            (1, 1, 4 + 3),
+            vec![10.0, 10.0, 50.0, 50.0, -0.9, -0.2, -0.5],
+        )
+        .unwrap();
+        let (boxes, classes, scores) = processor.process_picodet(preds.view(), &img_shape);
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(classes[0], 1);
+        assert!((scores[0] - (-0.2)).abs() < 1e-6);
     }
 }

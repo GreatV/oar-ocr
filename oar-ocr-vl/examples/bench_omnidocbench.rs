@@ -233,7 +233,7 @@ fn ned(pred: &[char], gt: &[char]) -> f64 {
     edit_distance(pred, gt) as f64 / denom as f64
 }
 
-// ============================= MinerU2.5 two-step =============================
+// MinerU2.5 two-step
 
 /// Layout types excluded from the assembled body text, to parallel the GT
 /// builder (which drops headers, footers, page numbers and abandoned regions).

@@ -694,7 +694,7 @@ fn associate_child_blocks(sorted_blocks: &mut Vec<SortableBlock>) {
             }
         }
 
-        // Only move if close enough (< 2 * text_line_height of the vision block)
+        // Only move if close enough (< 3 * text_line_height of the vision block)
         if let Some(vision_idx) = best_vision_idx {
             let threshold = sorted_blocks[vision_idx].text_line_height * 3.0;
             if best_distance < threshold {

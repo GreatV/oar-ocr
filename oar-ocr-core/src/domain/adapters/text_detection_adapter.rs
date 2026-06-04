@@ -97,6 +97,7 @@ impl_adapter_builder! {
 
     fields: {
         text_type: Option<String> = None,
+        model_name_override: Option<String> = None,
     },
 
     methods: {
@@ -107,6 +108,16 @@ impl_adapter_builder! {
         /// - Other values or None: Uses general text configuration (limit_side_len=960, limit_type=Max) and quad boxes
         pub fn text_type(mut self, text_type: impl Into<String>) -> Self {
             self.text_type = Some(text_type.into());
+            self
+        }
+
+        /// Overrides the reported model name (e.g. `PP-OCRv5_server_det`).
+        ///
+        /// This is identification metadata only — it labels the model in logs and
+        /// error messages and does not change preprocessing/inference, which are
+        /// driven by the config and the ONNX model itself.
+        pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
+            self.model_name_override = Some(model_name.into());
             self
         }
     }
@@ -171,7 +182,10 @@ impl_adapter_builder! {
         .build(model_path)?;
 
         // Create adapter info using the helper
-        let info = TextDetectionAdapterBuilder::base_adapter_info();
+        let mut info = TextDetectionAdapterBuilder::base_adapter_info();
+        if let Some(model_name) = builder.model_name_override {
+            info.model_name = model_name;
+        }
 
         Ok(TextDetectionAdapter {
             model,

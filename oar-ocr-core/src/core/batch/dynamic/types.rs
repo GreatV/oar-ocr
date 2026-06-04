@@ -54,7 +54,7 @@ pub struct CompatibleBatch {
     pub images: Vec<RgbImage>,
     /// Original indices of the images
     pub indices: Vec<usize>,
-    /// Target dimensions for this batch (height, width)
+    /// Target dimensions for this batch (width, height)
     pub target_dimensions: (u32, u32),
     /// Batch identifier/name
     pub batch_id: String,

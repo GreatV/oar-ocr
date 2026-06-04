@@ -260,6 +260,9 @@ impl UniMERNetModelBuilder {
             use crate::core::config::ModelInferenceConfig;
             let common_config = ModelInferenceConfig {
                 ort_session: ort_config,
+                // Identify the model so name-based configuration switching works
+                // and it is not reported as "unknown_model".
+                model_name: Some("UniMERNet".to_string()),
                 ..Default::default()
             };
             OrtInfer::from_config(&common_config, model_path, None)?

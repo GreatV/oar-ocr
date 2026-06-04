@@ -1,7 +1,7 @@
 //! Granular traits for composable predictor components.
 //!
-//! This module provides granular traits that separate the concerns of the StandardPredictor
-//! trait, making it easier to compose, test, and extend individual pipeline components.
+//! This module provides granular traits that separate predictor concerns into
+//! individual components, making them easier to compose, test, and extend.
 //!
 //! The design focuses on practical composability and clean separation of concerns:
 //! - **ImageReader**: Handles I/O operations (loading images from files/memory)

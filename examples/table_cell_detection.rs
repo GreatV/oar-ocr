@@ -1,8 +1,8 @@
 //! Table Cell Detection Example
 //!
-//! This example runs the table cell detection models (wired / wireless) exported
-//! from table detection models and prints the detected cell bounding boxes.
-//! It will also produce an annotated image when visualization is enabled.
+//! This example runs the table cell detection models (wired / wireless) and prints
+//! the detected cell bounding boxes. It also produces an annotated image when
+//! visualization is enabled.
 //!
 //! # Usage
 //!

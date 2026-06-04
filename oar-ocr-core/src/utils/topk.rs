@@ -206,7 +206,7 @@ impl Topk {
     ///
     /// # Returns
     ///
-    /// * `Vec<String>` - Vector of class names. Unknown indexes are mapped to "Unknown".
+    /// * `Vec<String>` - Vector of class names. Unknown indexes are mapped to "Unknown(idx)".
     fn map_indexes_to_names(&self, indexes: &[usize]) -> Vec<String> {
         if let Some(ref class_map) = self.class_id_map {
             indexes

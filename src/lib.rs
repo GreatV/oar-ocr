@@ -143,7 +143,7 @@ pub use oar_ocr_derive::{ConfigValidator, TaskPredictorBuilder};
 
 /// Prelude module for convenient imports.
 ///
-///  Bring the essentials into scope with a single use statement:
+/// Bring the essentials into scope with a single use statement:
 ///
 /// ```rust
 /// use oar_ocr::prelude::*;

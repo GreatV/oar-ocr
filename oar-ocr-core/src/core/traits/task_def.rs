@@ -9,8 +9,8 @@ use std::fmt::Debug;
 /// Trait for compile-time task registration.
 ///
 /// Implemented by each task's output type to provide metadata for enum generation
-/// and dynamic dispatch. The trait constants are used by the `define_task_system!`
-/// macro to generate documentation and helper methods.
+/// and dynamic dispatch. The trait constants feed the task registry macros that
+/// generate documentation and helper methods.
 ///
 /// # Example
 ///

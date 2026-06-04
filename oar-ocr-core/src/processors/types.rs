@@ -71,9 +71,8 @@ pub enum TensorLayout {
     HWC,
 }
 
-/// Specifies the color channel ordering of an image.
-///
 /// Specifies whether the model expects RGB or BGR channel ordering.
+///
 /// Most image libraries (PIL, image-rs) use RGB, while OpenCV and
 /// PaddlePaddle models typically expect BGR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

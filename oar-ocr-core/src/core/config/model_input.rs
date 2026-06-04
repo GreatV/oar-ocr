@@ -6,8 +6,8 @@
 //! # Input Shape Representation
 //!
 //! ONNX models define input shapes as `[batch, channels, height, width]` where:
-//! - Positive values indicate fixed dimensions
-//! - -1 (or 0) indicates dynamic dimensions
+//! - Non-negative values indicate fixed dimensions
+//! - Negative values (-1) indicate dynamic dimensions
 //!
 //! Examples:
 //! - `[1, 3, 512, 512]` - Fixed batch=1, channels=3, height=512, width=512
@@ -96,7 +96,7 @@ impl InputShape {
     }
 
     /// Creates an input shape from an array of i64 values.
-    /// Values <= 0 are treated as dynamic dimensions.
+    /// Negative values are treated as dynamic dimensions.
     pub fn from_array(shape: [i64; 4]) -> Self {
         Self {
             batch: shape[0].into(),
@@ -182,8 +182,8 @@ impl InputShape {
     /// Parses input shape from ONNX model input dimensions.
     ///
     /// Handles various dimension representations:
-    /// - Positive values: fixed dimensions
-    /// - Negative values or 0: dynamic dimensions
+    /// - Non-negative values: fixed dimensions
+    /// - Negative values: dynamic dimensions
     ///
     /// # Arguments
     /// * `dims` - Dimensions from ONNX model (typically 4 elements: [batch, channels, height, width])
@@ -201,7 +201,7 @@ impl InputShape {
 
 impl Default for InputShape {
     fn default() -> Self {
-        // Default: dynamic batch, 3 channels, dynamic spatial
+        // Default: fixed batch=1, 3 channels, dynamic spatial
         Self::dynamic_spatial(1, 3)
     }
 }

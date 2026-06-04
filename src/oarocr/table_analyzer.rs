@@ -2,16 +2,17 @@
 //!
 //! This service is considered "Done" when it fulfills the following contract:
 //!
-//! - **Inputs**: Full page `image::RgbImage`, detected `LayoutElement`s, `FormulaResult`s, and `TextRegion`s.
+//! - **Inputs**: Full page `image::RgbImage` and detected `LayoutElement`s.
 //! - **Outputs**: `Vec<TableResult>` containing parsed grid structure, cells mapped to page coordinates, and HTML.
 //! - **Logging**: Traces table classification, rotation, and whether E2E or cell-detection mode was selected.
-//! - **Error Behavior**: Returns `OCRError` for fatal adapter failures, but emits stub `TableResult` for soft recognition failures to maintain alignment with layout boxes.
+//! - **Error Behavior**: Returns `OCRError` whenever a detected table cannot be turned into a real `TableResult` — crop failure, adapter failure, no structure adapter, no detected cells, or no structure tokens. No stub/placeholder results are emitted; failures are surfaced to the caller rather than producing empty tables.
 //! - **Invariants**:
 //!     - Output cell coordinates are always transformed back to the original page space.
 //!     - Table results include both logical grid info (row/col) and visual bounding boxes.
-//!     - OCR results overlapping table regions are used to refine cell bounding boxes.
+//!     - This stage does not match OCR text to cells; OCR/formula stitching into
+//!       cells happens downstream in `stitch_layout_elements`. Detected cell boxes
+//!       are carried on the result (in page coordinates) for that later matching.
 
-use crate::oarocr::TextRegion;
 use oar_ocr_core::core::OCRError;
 use oar_ocr_core::core::traits::adapter::ModelAdapter;
 use oar_ocr_core::core::traits::task::ImageTaskInput;
@@ -20,7 +21,7 @@ use oar_ocr_core::domain::adapters::{
     TableStructureRecognitionAdapter,
 };
 use oar_ocr_core::domain::structure::{
-    FormulaResult, LayoutElement, LayoutElementType, TableCell, TableResult, TableType,
+    LayoutElement, LayoutElementType, TableCell, TableResult, TableType,
 };
 use oar_ocr_core::processors::BoundingBox;
 use oar_ocr_core::utils::BBoxCrop;
@@ -285,26 +286,15 @@ impl<'a> TableAnalyzer<'a> {
         &self,
         page_image: &image::RgbImage,
         layout_elements: &[LayoutElement],
-        formulas: &[FormulaResult],
-        text_regions: &[TextRegion],
     ) -> Result<Vec<TableResult>, OCRError> {
         let table_regions: Vec<_> = layout_elements
             .iter()
             .filter(|e| e.element_type == LayoutElementType::Table)
             .collect();
 
-        let mut tables = Vec::new();
+        let mut tables = Vec::with_capacity(table_regions.len());
         for (idx, table_element) in table_regions.iter().enumerate() {
-            if let Some(table_result) = self.analyze_single_table(
-                idx,
-                table_element,
-                page_image,
-                layout_elements,
-                formulas,
-                text_regions,
-            )? {
-                tables.push(table_result);
-            }
+            tables.push(self.analyze_single_table(idx, table_element, page_image)?);
         }
 
         Ok(tables)
@@ -315,10 +305,7 @@ impl<'a> TableAnalyzer<'a> {
         idx: usize,
         table_element: &LayoutElement,
         page_image: &image::RgbImage,
-        layout_elements: &[LayoutElement],
-        formulas: &[FormulaResult],
-        text_regions: &[TextRegion],
-    ) -> Result<Option<TableResult>, OCRError> {
+    ) -> Result<TableResult, OCRError> {
         let table_bbox = &table_element.bbox;
 
         let cropped_table = match BBoxCrop::crop_bounding_box(page_image, table_bbox) {
@@ -338,13 +325,22 @@ impl<'a> TableAnalyzer<'a> {
                 img
             }
             Err(e) => {
+                // Surface the failure instead of silently skipping the table; a
+                // detected table that cannot be cropped never becomes a real
+                // TableResult, which is exactly the contract this stage promises.
                 tracing::warn!(
                     target: "structure",
                     table_index = idx,
                     error = %e,
-                    "Failed to crop table region; skipping"
+                    "Failed to crop table region"
                 );
-                return Ok(None);
+                // Wrap with table context so the returned error is actionable even
+                // without tracing output, while preserving the crop error as source.
+                return Err(OCRError::adapter_execution_error(
+                    "table_analyzer",
+                    format!("table {idx}: failed to crop table region"),
+                    e,
+                ));
             }
         };
 
@@ -523,35 +519,27 @@ impl<'a> TableAnalyzer<'a> {
                                 "Structure adapter failed; falling back to cells->html mode"
                             );
                         } else {
-                            tracing::warn!(
-                                target: "structure",
-                                table_index = idx,
-                                table_type = ?table_type,
-                                error = %e,
-                                "Structure adapter failed; adding stub result"
-                            );
-                            let mut table_result = TableResult::new(table_bbox.clone(), table_type);
-                            if let Some(conf) = classification_confidence {
-                                table_result = table_result.with_classification_confidence(conf);
-                            }
-                            return Ok(Some(table_result));
+                            // Surface the failure instead of emitting a stub table,
+                            // wrapping with table context while preserving the source.
+                            return Err(OCRError::adapter_execution_error(
+                                "table_structure_recognition",
+                                format!(
+                                    "table {idx} ({table_type:?}): structure recognition failed"
+                                ),
+                                e,
+                            ));
                         }
                     }
                 }
             }
             None => {
                 if !use_cells_trans_to_html || effective_use_e2e {
-                    tracing::warn!(
-                        target: "structure",
-                        table_index = idx,
-                        table_type = ?table_type,
-                        "No structure adapter available; adding stub result"
-                    );
-                    let mut table_result = TableResult::new(table_bbox.clone(), table_type);
-                    if let Some(conf) = classification_confidence {
-                        table_result = table_result.with_classification_confidence(conf);
-                    }
-                    return Ok(Some(table_result));
+                    return Err(OCRError::config_error_detailed(
+                        "table_structure_recognition",
+                        format!(
+                            "table {idx} ({table_type:?}): no structure adapter available and cells->html conversion is disabled"
+                        ),
+                    ));
                 }
                 tracing::info!(
                     target: "structure",
@@ -685,101 +673,12 @@ impl<'a> TableAnalyzer<'a> {
             }
         }
 
-        // Fallback: if we have detected cells but no cells yet, try to generate from detected boxes
-        if !detected_bboxes_crop.is_empty() && cells.is_empty() {
-            let structure_bboxes_crop: Vec<_> = cells
-                .iter()
-                .map(|c| {
-                    BoundingBox::from_coords(
-                        c.bbox.x_min() - table_x_offset,
-                        c.bbox.y_min() - table_y_offset,
-                        c.bbox.x_max() - table_x_offset,
-                        c.bbox.y_max() - table_y_offset,
-                    )
-                })
-                .collect();
-
-            let mut ocr_boxes_crop: Vec<BoundingBox> = Vec::new();
-            for region in text_regions {
-                let b = &region.bounding_box;
-                if b.x_min() >= table_bbox.x_min()
-                    && b.y_min() >= table_bbox.y_min()
-                    && b.x_max() <= table_bbox.x_max()
-                    && b.y_max() <= table_bbox.y_max()
-                {
-                    ocr_boxes_crop.push(BoundingBox::from_coords(
-                        b.x_min() - table_x_offset,
-                        b.y_min() - table_y_offset,
-                        b.x_max() - table_x_offset,
-                        b.y_max() - table_y_offset,
-                    ));
-                }
-            }
-            for formula in formulas {
-                let b = &formula.bbox;
-                if b.x_min() >= table_bbox.x_min()
-                    && b.y_min() >= table_bbox.y_min()
-                    && b.x_max() <= table_bbox.x_max()
-                    && b.y_max() <= table_bbox.y_max()
-                {
-                    ocr_boxes_crop.push(BoundingBox::from_coords(
-                        b.x_min() - table_x_offset,
-                        b.y_min() - table_y_offset,
-                        b.x_max() - table_x_offset,
-                        b.y_max() - table_y_offset,
-                    ));
-                }
-            }
-            for elem in layout_elements {
-                if matches!(
-                    elem.element_type,
-                    LayoutElementType::Image | LayoutElementType::Chart
-                ) {
-                    let b = &elem.bbox;
-                    if b.x_min() >= table_bbox.x_min()
-                        && b.y_min() >= table_bbox.y_min()
-                        && b.x_max() <= table_bbox.x_max()
-                        && b.y_max() <= table_bbox.y_max()
-                    {
-                        ocr_boxes_crop.push(BoundingBox::from_coords(
-                            b.x_min() - table_x_offset,
-                            b.y_min() - table_y_offset,
-                            b.x_max() - table_x_offset,
-                            b.y_max() - table_y_offset,
-                        ));
-                    }
-                }
-            }
-
-            let expected_n = structure_bboxes_crop.len();
-            let processed_detected_crop = crate::processors::reprocess_table_cells_with_ocr(
-                &detected_bboxes_crop,
-                &detected_scores,
-                &ocr_boxes_crop,
-                expected_n,
-            );
-
-            let reconciled_bboxes = crate::processors::reconcile_table_cells(
-                &structure_bboxes_crop,
-                &processed_detected_crop,
-            );
-
-            for (cell, new_bbox_crop) in cells.iter_mut().zip(reconciled_bboxes) {
-                cell.bbox = BoundingBox::from_coords(
-                    new_bbox_crop.x_min() + table_x_offset,
-                    new_bbox_crop.y_min() + table_y_offset,
-                    new_bbox_crop.x_max() + table_x_offset,
-                    new_bbox_crop.y_max() + table_y_offset,
-                );
-            }
-        }
-
         if cells.is_empty() {
-            let mut stub_result = TableResult::new(table_bbox.clone(), table_type);
-            if let Some(conf) = classification_confidence {
-                stub_result = stub_result.with_classification_confidence(conf);
-            }
-            return Ok(Some(stub_result));
+            return Err(OCRError::InvalidInput {
+                message: format!(
+                    "table {idx} ({table_type:?}): structure recognition produced no cells"
+                ),
+            });
         }
 
         if use_cells_trans_to_html {
@@ -818,11 +717,11 @@ impl<'a> TableAnalyzer<'a> {
         }
 
         let Some(structure_tokens) = structure_tokens_opt else {
-            let mut stub_result = TableResult::new(table_bbox.clone(), table_type);
-            if let Some(conf) = classification_confidence {
-                stub_result = stub_result.with_classification_confidence(conf);
-            }
-            return Ok(Some(stub_result));
+            return Err(OCRError::InvalidInput {
+                message: format!(
+                    "table {idx} ({table_type:?}): structure recognition produced no structure tokens"
+                ),
+            });
         };
 
         let html_structure = crate::processors::wrap_table_html(&structure_tokens);
@@ -844,7 +743,7 @@ impl<'a> TableAnalyzer<'a> {
             final_result = final_result.with_detected_cell_bboxes(detected_bboxes);
         }
 
-        Ok(Some(final_result))
+        Ok(final_result)
     }
 }
 
@@ -852,7 +751,7 @@ impl<'a> TableAnalyzer<'a> {
 mod tests {
     use super::*;
 
-    /// Creates a minimal TableAnalyzer with no adapters for testing stub behavior.
+    /// Creates a minimal TableAnalyzer with no adapters.
     fn create_stub_analyzer() -> TableAnalyzer<'static> {
         TableAnalyzer::new(TableAnalyzerConfig {
             table_classification_adapter: None,
@@ -1100,11 +999,8 @@ mod tests {
 
         // No table elements in layout
         let layout_elements: Vec<LayoutElement> = vec![];
-        let formulas: Vec<FormulaResult> = vec![];
-        let text_regions: Vec<TextRegion> = vec![];
 
-        let result =
-            analyzer.analyze_tables(&page_image, &layout_elements, &formulas, &text_regions)?;
+        let result = analyzer.analyze_tables(&page_image, &layout_elements)?;
 
         assert!(result.is_empty());
         Ok(())
@@ -1112,8 +1008,7 @@ mod tests {
 
     #[test]
     fn test_stub_result_has_correct_bbox_and_type() {
-        // When structure adapter is not available, a stub result should be returned
-        // with the original bbox and table type.
+        // A bare TableResult (no cells) carries the original bbox and table type.
         let table_bbox = BoundingBox::from_coords(100.0, 100.0, 400.0, 300.0);
         let table_type = TableType::Wired;
 
@@ -1306,9 +1201,9 @@ mod tests {
     }
 
     #[test]
-    fn test_analyze_tables_with_table_element_no_adapters() -> Result<(), OCRError> {
+    fn test_analyze_tables_with_table_element_no_adapters() {
         // When a table element exists but no structure adapter is available,
-        // the analyzer should return a stub TableResult.
+        // the analyzer surfaces an error rather than emitting a stub table.
         let analyzer = create_stub_analyzer();
         let page_image = create_test_image(800, 600);
 
@@ -1319,29 +1214,12 @@ mod tests {
             0.9,
         );
         let layout_elements = vec![table_element];
-        let formulas: Vec<FormulaResult> = vec![];
-        let text_regions: Vec<TextRegion> = vec![];
 
-        let result =
-            analyzer.analyze_tables(&page_image, &layout_elements, &formulas, &text_regions)?;
-
-        // Should produce one stub result
-        assert_eq!(result.len(), 1);
-        let table = &result[0];
-
-        // Stub should have correct bbox
-        assert!((table.bbox.x_min() - 100.0).abs() < 0.01);
-        assert!((table.bbox.y_min() - 100.0).abs() < 0.01);
-        assert!((table.bbox.x_max() - 400.0).abs() < 0.01);
-        assert!((table.bbox.y_max() - 300.0).abs() < 0.01);
-
-        // Stub should have no cells or HTML (no structure recognition)
-        assert!(table.cells.is_empty());
-        assert!(table.html_structure.is_none());
-
-        // Classification confidence should be None (no classifier)
-        assert!(table.classification_confidence.is_none());
-        Ok(())
+        let result = analyzer.analyze_tables(&page_image, &layout_elements);
+        assert!(
+            result.is_err(),
+            "expected an error when no structure adapter is available, got {result:?}"
+        );
     }
 
     #[test]
@@ -1361,11 +1239,8 @@ mod tests {
             0.85,
         );
         let layout_elements = vec![text_element, image_element];
-        let formulas: Vec<FormulaResult> = vec![];
-        let text_regions: Vec<TextRegion> = vec![];
 
-        let result =
-            analyzer.analyze_tables(&page_image, &layout_elements, &formulas, &text_regions)?;
+        let result = analyzer.analyze_tables(&page_image, &layout_elements)?;
 
         // No tables should be returned since there are no Table elements
         assert!(result.is_empty());
@@ -1373,11 +1248,12 @@ mod tests {
     }
 
     #[test]
-    fn test_analyze_tables_multiple_tables() -> Result<(), OCRError> {
+    fn test_analyze_tables_multiple_tables_no_adapter_errors() {
+        // With table elements but no structure adapter, the first table that
+        // cannot be recognized aborts the whole call with an error (no stubs).
         let analyzer = create_stub_analyzer();
         let page_image = create_test_image(1000, 800);
 
-        // Create multiple table layout elements
         let table1 = LayoutElement::new(
             BoundingBox::from_coords(50.0, 50.0, 300.0, 200.0),
             LayoutElementType::Table,
@@ -1388,55 +1264,36 @@ mod tests {
             LayoutElementType::Table,
             0.85,
         );
-        let table3 = LayoutElement::new(
-            BoundingBox::from_coords(400.0, 50.0, 700.0, 300.0),
-            LayoutElementType::Table,
-            0.95,
+        let layout_elements = vec![table1, table2];
+
+        let result = analyzer.analyze_tables(&page_image, &layout_elements);
+        assert!(
+            result.is_err(),
+            "expected an error when no structure adapter is available, got {result:?}"
         );
-        let layout_elements = vec![table1, table2, table3];
-        let formulas: Vec<FormulaResult> = vec![];
-        let text_regions: Vec<TextRegion> = vec![];
-
-        let result =
-            analyzer.analyze_tables(&page_image, &layout_elements, &formulas, &text_regions)?;
-
-        // Should produce three stub results
-        assert_eq!(result.len(), 3);
-
-        // Verify each has distinct bbox
-        let bboxes: Vec<_> = result
-            .iter()
-            .map(|t| (t.bbox.x_min(), t.bbox.y_min()))
-            .collect();
-        assert!(bboxes.contains(&(50.0, 50.0)));
-        assert!(bboxes.contains(&(50.0, 250.0)));
-        assert!(bboxes.contains(&(400.0, 50.0)));
-        Ok(())
     }
 
     #[test]
-    fn test_analyze_tables_handles_edge_crop_region() -> Result<(), OCRError> {
+    fn test_analyze_tables_handles_edge_crop_region() {
         let analyzer = create_stub_analyzer();
         // Small image where table bbox extends beyond bounds
         let page_image = create_test_image(100, 100);
 
-        // Table element with bbox starting outside image bounds
-        // BBoxCrop clamps coordinates but can still produce a valid crop region
+        // Table element with bbox starting outside image bounds.
+        // BBoxCrop clamps coordinates and still produces a valid crop region, so
+        // the table reaches structure recognition — which, with no adapter,
+        // surfaces an error rather than a stub.
         let table_element = LayoutElement::new(
             BoundingBox::from_coords(200.0, 200.0, 500.0, 400.0),
             LayoutElementType::Table,
             0.9,
         );
         let layout_elements = vec![table_element];
-        let formulas: Vec<FormulaResult> = vec![];
-        let text_regions: Vec<TextRegion> = vec![];
 
-        let result =
-            analyzer.analyze_tables(&page_image, &layout_elements, &formulas, &text_regions)?;
-
-        // BBoxCrop clamps to image bounds and produces a 1x1 crop
-        // which is still valid, resulting in a stub table result
-        assert_eq!(result.len(), 1);
-        Ok(())
+        let result = analyzer.analyze_tables(&page_image, &layout_elements);
+        assert!(
+            result.is_err(),
+            "expected an error when no structure adapter is available, got {result:?}"
+        );
     }
 }

@@ -89,17 +89,33 @@ impl OrtInfer {
         if !wants_cuda {
             return;
         }
-        static SET_ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        SET_ONCE.get_or_init(|| {
-            if std::env::var_os("CUDA_LAUNCH_BLOCKING").is_none() {
-                // SAFETY: set_var is not thread-safe in general, but OnceLock
-                // serializes us, and we only run before any CUDA work in the
-                // process (caller is about to build their first CUDA session).
-                unsafe { std::env::set_var("CUDA_LAUNCH_BLOCKING", "1") };
-                tracing::info!(
-                    "ort_infer: CUDA EP detected; set CUDA_LAUNCH_BLOCKING=1 to work around onnxruntime#4829"
-                );
-            }
-        });
+        ensure_cuda_launch_blocking();
     }
+}
+
+/// Idempotently sets `CUDA_LAUNCH_BLOCKING=1`, respecting any value already
+/// present in the environment.
+///
+/// MUST be called before the first CUDA session in the process is created: the
+/// CUDA runtime reads this variable once, at context initialization, so setting
+/// it after another CUDA session already exists has no effect. Pipelines that
+/// build several CUDA models should therefore call this up front (before
+/// building any adapter) rather than relying on a per-model trigger.
+///
+/// Works around onnxruntime#4829: PP-FormulaNet's autoregressive `Loop`
+/// corrupts CUDA-EP arena buffers reused across `session.run()` calls when its
+/// runs interleave with other models', producing garbage tokens. Serializing
+/// CUDA launches avoids the race.
+pub fn ensure_cuda_launch_blocking() {
+    static SET_ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    SET_ONCE.get_or_init(|| {
+        if std::env::var_os("CUDA_LAUNCH_BLOCKING").is_none() {
+            // SAFETY: set_var is not thread-safe in general, but OnceLock
+            // serializes us, and callers must invoke this before any CUDA work.
+            unsafe { std::env::set_var("CUDA_LAUNCH_BLOCKING", "1") };
+            tracing::info!(
+                "set CUDA_LAUNCH_BLOCKING=1 to work around onnxruntime#4829 (PP-FormulaNet CUDA Loop race)"
+            );
+        }
+    });
 }

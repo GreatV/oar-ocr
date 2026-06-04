@@ -104,5 +104,3 @@ pub fn export_concatenated_markdown_with_images(
 
     Ok(processed_markdown)
 }
-
-// Remove redundant local helpers that are now handled by core library

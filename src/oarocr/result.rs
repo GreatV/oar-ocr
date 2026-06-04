@@ -40,7 +40,6 @@ pub struct OAROCRResult {
     #[serde(skip)]
     pub input_img: Arc<RgbImage>,
     /// Structured text regions containing detection and recognition results.
-    /// This is the modern, preferred way to access OCR results as it groups related data together.
     pub text_regions: Vec<TextRegion>,
     /// Document orientation angle (if orientation classification was used).
     pub orientation_angle: Option<f32>,

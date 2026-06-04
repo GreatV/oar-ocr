@@ -158,20 +158,6 @@ impl VisionEmbeddings {
                 )
             })
     }
-
-    #[allow(dead_code)]
-    fn extra_pos(&self) -> Result<Tensor, OCRError> {
-        self.position_embedding
-            .embeddings()
-            .i((0, ..))
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "HunyuanOCR: vit slice extra position embedding failed",
-                    e,
-                )
-            })
-    }
 }
 
 #[derive(Debug, Clone)]

@@ -55,7 +55,9 @@ pub trait SpecBackend {
     /// - Use a tree-ancestry attention mask
     ///   ([`crate::attention::create_tree_attention_mask`]) so each node only
     ///   sees the accepted prefix and its own ancestor chain.
-    /// - Use position ids `accepted_kv_len + tree.depths[i]` for node `i`.
+    /// - Use position ids `accepted_kv_len + tree.depths[i] - 1` for node `i`
+    ///   (depth-1 nodes land in the first slot past the prefix), plus any
+    ///   backbone-specific MRoPE delta — see [`super::backend_util::tree_pos_ids`].
     /// - Return `(num_nodes, vocab)` log-probabilities.
     ///
     /// The KV cache is left in the post-append state; the driver will call

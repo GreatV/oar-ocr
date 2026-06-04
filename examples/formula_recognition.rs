@@ -1,8 +1,8 @@
 //! Formula Recognition Example
 //!
 //! This example demonstrates how to use the OCR pipeline to recognize mathematical formulas
-//! in images and convert them to LaTeX strings. It supports various formula recognition models
-//! from formula recognition models, including UniMERNet and PP-FormulaNet.
+//! in images and convert them to LaTeX strings. It supports various formula recognition models,
+//! including UniMERNet and PP-FormulaNet.
 //!
 //! # Usage
 //!

@@ -280,8 +280,6 @@ impl UVDocModelBuilder {
         };
 
         // Create normalizer (scale to [0, 1] without mean shift).
-        // Images are read in BGR and UVDoc models are trained with BGR order,
-        // so keep color order consistent here.
         let normalizer = NormalizeImage::with_color_order(
             Some(1.0 / 255.0),
             Some(vec![0.0, 0.0, 0.0]),

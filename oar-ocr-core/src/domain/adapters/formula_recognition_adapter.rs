@@ -253,29 +253,9 @@ impl ModelAdapter for FormulaRecognitionAdapter {
                 }
             };
 
-            // Note: Confidence score computation is not currently implemented.
-            // The current model interface only returns token IDs via infer_2d_i64(),
-            // not the underlying logits or probabilities from which confidence could be computed.
-            //
-            // To implement score_threshold filtering, we would need to:
-            // 1. Modify the model inference to also return logits/probabilities
-            // 2. Compute confidence scores (e.g., mean/min token probability, or sequence probability)
-            // 3. Filter formulas based on: score >= effective_config.score_threshold
-            // 4. Only push formulas that pass the threshold
-            //
-            // Example implementation once probabilities are available:
-            // ```
-            // let confidence = compute_sequence_confidence(&token_probs);
-            // if confidence >= effective_config.score_threshold {
-            //     formulas.push(latex);
-            //     scores.push(Some(confidence));
-            // } else {
-            //     tracing::debug!("Filtered formula with confidence {} < threshold {}",
-            //                    confidence, effective_config.score_threshold);
-            // }
-            // ```
-            //
-            // For now, we accept all formulas without filtering:
+            // Confidence scores are unavailable: the model interface returns only
+            // token IDs, not logits/probabilities, so score_threshold filtering
+            // cannot be applied. All formulas are accepted with a None score.
             formulas.push(latex);
             scores.push(None);
         }

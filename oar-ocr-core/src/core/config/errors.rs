@@ -3,10 +3,7 @@
 use std::path::Path;
 use thiserror::Error;
 
-/// Errors that can occur during configuration validation.
-///
-/// This enum represents various errors that can occur when validating
-/// configuration parameters in the OCR pipeline.
+/// Errors that can occur when validating configuration parameters.
 #[derive(Error, Debug)]
 pub enum ConfigError {
     /// Error indicating that a batch size is invalid (must be greater than 0).
