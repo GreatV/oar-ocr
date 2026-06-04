@@ -5,11 +5,13 @@
 //! - **Inputs**: Full page `image::RgbImage` and detected `LayoutElement`s.
 //! - **Outputs**: `Vec<TableResult>` containing parsed grid structure, cells mapped to page coordinates, and HTML.
 //! - **Logging**: Traces table classification, rotation, and whether E2E or cell-detection mode was selected.
-//! - **Error Behavior**: Returns `OCRError` whenever a detected table cannot be turned into a real `TableResult` — adapter failure, no structure adapter, no detected cells, or no structure tokens. No stub/placeholder results are emitted; failures are surfaced to the caller rather than producing empty tables.
+//! - **Error Behavior**: Returns `OCRError` whenever a detected table cannot be turned into a real `TableResult` — crop failure, adapter failure, no structure adapter, no detected cells, or no structure tokens. No stub/placeholder results are emitted; failures are surfaced to the caller rather than producing empty tables.
 //! - **Invariants**:
 //!     - Output cell coordinates are always transformed back to the original page space.
 //!     - Table results include both logical grid info (row/col) and visual bounding boxes.
-//!     - OCR results overlapping table regions are used to refine cell bounding boxes.
+//!     - This stage does not match OCR text to cells; OCR/formula stitching into
+//!       cells happens downstream in `stitch_layout_elements`. Detected cell boxes
+//!       are carried on the result (in page coordinates) for that later matching.
 
 use oar_ocr_core::core::OCRError;
 use oar_ocr_core::core::traits::adapter::ModelAdapter;
@@ -290,11 +292,9 @@ impl<'a> TableAnalyzer<'a> {
             .filter(|e| e.element_type == LayoutElementType::Table)
             .collect();
 
-        let mut tables = Vec::new();
+        let mut tables = Vec::with_capacity(table_regions.len());
         for (idx, table_element) in table_regions.iter().enumerate() {
-            if let Some(table_result) = self.analyze_single_table(idx, table_element, page_image)? {
-                tables.push(table_result);
-            }
+            tables.push(self.analyze_single_table(idx, table_element, page_image)?);
         }
 
         Ok(tables)
@@ -305,7 +305,7 @@ impl<'a> TableAnalyzer<'a> {
         idx: usize,
         table_element: &LayoutElement,
         page_image: &image::RgbImage,
-    ) -> Result<Option<TableResult>, OCRError> {
+    ) -> Result<TableResult, OCRError> {
         let table_bbox = &table_element.bbox;
 
         let cropped_table = match BBoxCrop::crop_bounding_box(page_image, table_bbox) {
@@ -325,13 +325,16 @@ impl<'a> TableAnalyzer<'a> {
                 img
             }
             Err(e) => {
+                // Surface the failure instead of silently skipping the table; a
+                // detected table that cannot be cropped never becomes a real
+                // TableResult, which is exactly the contract this stage promises.
                 tracing::warn!(
                     target: "structure",
                     table_index = idx,
                     error = %e,
-                    "Failed to crop table region; skipping"
+                    "Failed to crop table region"
                 );
-                return Ok(None);
+                return Err(e);
             }
         };
 
@@ -727,7 +730,7 @@ impl<'a> TableAnalyzer<'a> {
             final_result = final_result.with_detected_cell_bboxes(detected_bboxes);
         }
 
-        Ok(Some(final_result))
+        Ok(final_result)
     }
 }
 
