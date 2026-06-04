@@ -415,15 +415,14 @@ pub fn create_generation_mask(
 
         let zero = Tensor::zeros(mask_cond.shape(), dtype, compute_device)?;
         // Use large negative value instead of -inf to avoid potential numerical issues
-        let mask_value = Tensor::full(-1e9_f32, mask_cond.shape(), compute_device)?.to_dtype(dtype)?;
+        let mask_value =
+            Tensor::full(-1e9_f32, mask_cond.shape(), compute_device)?.to_dtype(dtype)?;
 
         mask_cond.where_cond(&mask_value, &zero)
     })
 }
 
-// ============================================================================
 // Rotary Positional Embedding (RoPE)
-// ============================================================================
 
 /// Unified Rotary Positional Embedding implementation.
 ///
@@ -1114,9 +1113,7 @@ mod tests {
         Ok(())
     }
 
-    // ========================================================================
     // RoPE Tests
-    // ========================================================================
 
     #[test]
     fn test_rotary_embedding_dynamic_single_axis() -> std::result::Result<(), OCRError> {
