@@ -44,16 +44,6 @@ To enable GPU acceleration (CUDA), add the feature flag:
 cargo add oar-ocr-vl --features cuda
 ```
 
-### Hierarchical Speculative Decoding (HSD)
-
-A training-free CUDA acceleration scheme for the VLMs listed above. A cheap pipeline drafter (layout + OCR) proposes per-region text candidates and the target VLM verifies them in batches via tree-attention. Each backbone exposes `generate_hsd*` methods alongside its baseline `generate`. Build with `--features hsd` (transitively enables `cuda`):
-
-```bash
-cargo add oar-ocr-vl --features hsd,download-binaries
-```
-
-See [`docs/hsd.md`](../docs/hsd.md) at the workspace root for the algorithm overview, `DsvConfig` / `HsdConfig` knobs, supported backbones, and Average-Acceptance-Length (AAL) guidance. End-to-end runnable examples live under `examples/hsd_*.rs`.
-
 ## Usage
 
 ### PaddleOCR-VL
@@ -227,21 +217,3 @@ cargo run --release --features cuda --example mineru -- \
     document.jpg
 ```
 
-### HSD (Hierarchical Speculative Decoding)
-
-The shared `hsd_demo` example runs baseline and HSD back-to-back so you can
-compare wall time and outputs. Select the target VLM via `--backend`:
-
-```bash
-# Single-page smoke test (HunyuanOCR backbone).
-cargo run --release --features hsd,download-binaries --example hsd_demo -- \
-    --backend hunyuanocr \
-    --model-dir models/HunyuanOCR \
-    --device cuda \
-    --image document.jpg
-
-# Quality + perf matrix over OmniDocBench-style inputs.
-cargo run --release --features hsd,download-binaries --example hsd_omnidocbench -- --help
-```
-
-See [`docs/hsd.md`](../docs/hsd.md) for the full set of HSD knobs and the backbone-by-backbone capability matrix.

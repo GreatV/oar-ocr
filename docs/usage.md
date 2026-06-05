@@ -574,38 +574,6 @@ cargo run -p oar-ocr-vl --features cuda --example doc_parser -- \
 
 ```
 
-## Hierarchical Speculative Decoding (HSD)
-
-HSD is a CUDA-only acceleration path available on every VLM backbone (`PaddleOcrVl`, `HunyuanOcr`, `GlmOcr`, `MinerU`). Enable it by building with the `hsd` feature; that pulls in the per-backbone `generate_hsd*` methods and transitively turns on `cuda`.
-
-Each backbone exposes a `generate_hsd*` entry point taking an `HsdConfig`. A typical call site:
-
-```rust
-use oar_ocr_vl::hsd::types::{DsvConfig, HsdConfig};
-
-let cfg = HsdConfig {
-    dsv: DsvConfig::default(),
-    enable_stage1: true,
-    enable_stage2: true,
-    max_page_tokens: 16_384,
-    max_region_tokens: 4_096,
-};
-let (text, stats) = model.generate_hsd(&image, instruction, &drafts, &cfg)?;
-```
-
-Run the demo example end-to-end:
-
-```bash
-cargo run -p oar-ocr-vl --release --features hsd,download-binaries \
-    --example hsd_demo -- \
-    --backend hunyuanocr \
-    --model-dir models/HunyuanOCR \
-    --device cuda \
-    --image document.jpg
-```
-
-See [`docs/hsd.md`](hsd.md) for the algorithm.
-
 ## Configuration Options
 
 ### OrtSessionConfig

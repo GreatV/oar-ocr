@@ -12,6 +12,4 @@ mod vision;
 pub use config::{
     HunyuanOcrConfig, HunyuanOcrImageProcessorConfig, HunyuanOcrRopeScaling, HunyuanOcrVisionConfig,
 };
-#[cfg(feature = "hsd")]
-pub use model::HunyuanHsdPrompts;
 pub use model::HunyuanOcr;

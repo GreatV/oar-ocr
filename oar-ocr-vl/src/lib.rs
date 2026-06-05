@@ -15,15 +15,10 @@
 //! - `doc_parser` - Unified document parsing with pluggable recognition backends
 //! - `utils` - Utility functions (device parsing, candle helpers, markdown, OTSL conversion)
 //! - `attention` - Unified attention implementation shared by all models
-//! - `hsd` - Hierarchical Speculative Decoding (DSV-on-OAR engineering of paper
-//!   arXiv:2602.12957 §3.2); gated behind the `hsd` feature, which requires
-//!   `cuda` for tree-attention and KV-cache gather. See the module docs for
-//!   the two-stage flow, prefix-tree batching, and per-backend integration.
 //!
 //! ## Features
 //!
 //! - `cuda` - Enable CUDA support for GPU acceleration
-//! - `hsd` - Enable Hierarchical Speculative Decoding (implies `cuda`)
 //!
 //! ## Device Configuration
 //!
@@ -52,16 +47,8 @@ pub mod utils;
 pub mod attention;
 
 // `TrimmableKvCache` backs the KV cache used by every model's attention
-// forward path, so it must remain accessible regardless of the `hsd` feature.
-// The source lives under `hsd/kv_trim.rs` and is also re-exported from
-// `crate::hsd` when that module is compiled in.
-#[path = "hsd/kv_trim.rs"]
+// forward path.
 pub(crate) mod kv_trim;
-
-// Hierarchical Speculative Decoding (requires CUDA-backed Candle for KV-cache
-// gather and tree-attention; gated behind the `hsd` cargo feature).
-#[cfg(feature = "hsd")]
-pub mod hsd;
 
 // Re-exports for convenience
 pub use paddleocr_vl::{
@@ -69,8 +56,6 @@ pub use paddleocr_vl::{
 };
 
 pub use glmocr::GlmOcr;
-#[cfg(feature = "hsd")]
-pub use hunyuanocr::HunyuanHsdPrompts;
 pub use hunyuanocr::HunyuanOcr;
 pub use mineru::MinerU;
 pub use mineru_diffusion::{DiffusionGenerationConfig, MinerUDiffusion};
