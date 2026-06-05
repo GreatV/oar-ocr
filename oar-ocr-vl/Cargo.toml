@@ -36,11 +36,6 @@ metal = [
     "candle-nn/metal",
     "candle-transformers/metal",
 ]
-# When enabled, compiles the Hierarchical Speculative Decoding (HSD) module
-# and the per-model `generate_hsd*` paths. HSD relies on Candle's CUDA backend
-# (custom KV-cache gather, tree-attention forwards) and is not supported on
-# CPU/Metal, so it transitively requires the `cuda` feature.
-hsd = ["cuda"]
 
 [dependencies]
 candle-core = "0.10.2"

@@ -94,15 +94,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 For advanced document understanding using Vision-Language Models (like PaddleOCR-VL, PaddleOCR-VL-1.5, **PaddleOCR-VL-1.6**, GLM-OCR, HunyuanOCR, and MinerU2.5), check out the [`oar-ocr-vl`](oar-ocr-vl/README.md) crate.
 
-### Hierarchical Speculative Decoding (HSD)
-
-`oar-ocr-vl` ships a training-free CUDA acceleration scheme for the VLM backbones above. A cheap pipeline drafter (layout + OCR) proposes text candidates and the target VLM verifies them in batches via tree-attention, typically delivering several-fold wall-time speedups on document-heavy pages at `τ = 0.75`. Build with `--features hsd` (implies `cuda`); see [`docs/hsd.md`](docs/hsd.md) for the algorithm overview, config knobs, supported backbones, and AAL guidance.
-
 ## Documentation
 
 - [**Usage Guide**](docs/usage.md) - Detailed API usage, builder patterns, GPU configuration
 - [**Pre-trained Models**](docs/models.md) - Model download links and recommended configurations
-- [**HSD**](docs/hsd.md) - Hierarchical Speculative Decoding for VLM inference
 
 ## Examples
 

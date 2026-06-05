@@ -2,44 +2,21 @@ use super::config::{MinerUConfig, MinerUImageProcessorConfig};
 use super::processing::preprocess_images;
 use super::text::MinerUTextModel;
 use super::vision::MinerUVisionModel;
-#[cfg(feature = "hsd")]
-use crate::attention::create_tree_attention_mask;
 use crate::attention::{
     combine_masks, create_causal_mask, create_generation_mask, create_left_padding_mask,
 };
-#[cfg(feature = "hsd")]
-use crate::hsd::backend_util::{commit_keep_indices, step_pos_ids, tree_pos_ids};
-#[cfg(feature = "hsd")]
-use crate::hsd::drafting::{
-    TargetDraftAdapter, bbox_xyxy, crop_region_image, format_verified_region, map_layout_kind,
-    region_markdown_for, region_markdowns_for, structure_result_to_layout_elements,
-};
-#[cfg(feature = "hsd")]
-use crate::hsd::prefix_tree::PrefixTree;
-#[cfg(feature = "hsd")]
-use crate::hsd::types::{AcceptStats, Draft, HsdConfig, HsdStats, RegionStageStats};
-#[cfg(feature = "hsd")]
-use crate::hsd::verify::{SpecBackend, spec_decode};
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
-#[cfg(feature = "hsd")]
-use candle_core::{D, Result as CandleResult};
 use candle_core::{DType, Device, IndexOp, Tensor};
-#[cfg(feature = "hsd")]
-use candle_nn::ops as cnn_ops;
 use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
 use image::RgbImage;
 use oar_ocr_core::core::OCRError;
 use oar_ocr_core::domain::structure::LayoutElementType;
-#[cfg(feature = "hsd")]
-use oar_ocr_core::domain::structure::{LayoutElement, StructureResult};
 use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
 use serde::Deserialize;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::path::Path;
-#[cfg(feature = "hsd")]
-use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
 
 /// Canonical MinerU2.5 per-element prompts as defined by the official
@@ -49,10 +26,9 @@ use tokenizers::Tokenizer;
 /// cropped region to a per-type recognizer with the matching prompt. Outside
 /// of `two_step_extract`, callers can still mix and match: a single
 /// `Text Recognition:` prompt fed an entire page yields a generic markdown
-/// output (the non-standard usage we previously defaulted to in
-/// `hsd_omnidocbench`).
+/// output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(feature = "hsd"), allow(dead_code))]
+#[allow(dead_code)]
 pub enum MinerUTaskPrompt {
     /// `\nText Recognition:` — default for body text, titles, paragraphs,
     /// lists, captions, references, footnotes, page numbers, etc.
@@ -65,14 +41,14 @@ pub enum MinerUTaskPrompt {
     /// `\nImage Analysis:` — figure / image / chart blocks.
     ImageAnalysis,
     /// `\nLayout Detection:` — full-page layout dump (only used by
-    /// `two_step_extract` Stage 0, not HSD verify). Kept for completeness
-    /// with the official `mineru_vl_utils` prompt set so callers can drive
-    /// the layout pass externally if they choose.
+    /// `two_step_extract` Stage 0). Kept for completeness with the official
+    /// `mineru_vl_utils` prompt set so callers can drive the layout pass
+    /// externally if they choose.
     #[allow(dead_code)]
     LayoutDetection,
 }
 
-#[cfg_attr(not(feature = "hsd"), allow(dead_code))]
+#[allow(dead_code)]
 impl MinerUTaskPrompt {
     /// Canonical prompt string (with the leading `\n` that MinerU's
     /// `two_step_extract` builds via its chat-template wrapper).
@@ -87,7 +63,7 @@ impl MinerUTaskPrompt {
     }
 
     /// Map an OAR `LayoutElementType` to the MinerU element prompt that best
-    /// matches its content kind. Mirrors the heuristic the official `mineru_vl_utils`
+    /// matches its content kind. Mirrors the mapping the official `mineru_vl_utils`
     /// client uses when picking a per-block prompt (text-like → `[default]`,
     /// table → `table`, equation → `equation`, image/chart → `image`).
     pub fn for_layout(t: LayoutElementType) -> Self {
@@ -691,547 +667,6 @@ impl MinerU {
                 message: format!("decode failed: {e}"),
             })
     }
-
-    /// Hierarchical Speculative Decoding entry for a single image / region.
-    ///
-    /// MinerU2.5 is naturally per-region (decoupled VLM in the paper's
-    /// taxonomy), so the only HSD stage that applies is region-level. The
-    /// verifier applies the same repetition / n-gram / sampling logits
-    /// processors as the baseline generator before DSV acceptance decisions.
-    #[cfg(feature = "hsd")]
-    pub fn generate_hsd(
-        &self,
-        image: &RgbImage,
-        instruction: &str,
-        drafts: &[String],
-        hsd_cfg: &HsdConfig,
-    ) -> Result<(String, HsdStats), OCRError> {
-        let t_drafter = Instant::now();
-        let tokenized = self.tokenize_drafts(drafts)?;
-        self.generate_hsd_tokenized(
-            image,
-            instruction,
-            &tokenized,
-            hsd_cfg,
-            hsd_cfg.max_region_tokens,
-            t_drafter.elapsed(),
-        )
-    }
-
-    /// HSD entry that consumes already-tokenized drafts. This is the oracle
-    /// path used by benchmarks to avoid `decode -> encode` tokenizer
-    /// round-trips when the draft comes from this backend's own baseline.
-    #[cfg(feature = "hsd")]
-    pub fn generate_hsd_with_token_drafts(
-        &self,
-        image: &RgbImage,
-        instruction: &str,
-        drafts: &[Draft],
-        hsd_cfg: &HsdConfig,
-    ) -> Result<(String, HsdStats), OCRError> {
-        self.generate_hsd_tokenized(
-            image,
-            instruction,
-            drafts,
-            hsd_cfg,
-            hsd_cfg.max_region_tokens,
-            Duration::ZERO,
-        )
-    }
-
-    #[cfg(feature = "hsd")]
-    fn tokenize_drafts(&self, drafts: &[String]) -> Result<Vec<Draft>, OCRError> {
-        let mut tokenized: Vec<Draft> = Vec::with_capacity(drafts.len());
-        for d in drafts {
-            if d.trim().is_empty() {
-                continue;
-            }
-            let enc =
-                self.tokenizer
-                    .encode(d.as_str(), false)
-                    .map_err(|e| OCRError::InvalidInput {
-                        message: format!("MinerU2.5 HSD: tokenizer encode failed: {e}"),
-                    })?;
-            let tokens = enc.get_ids().to_vec();
-            if !tokens.is_empty() {
-                tokenized.push(Draft::new(tokens));
-            }
-        }
-        Ok(tokenized)
-    }
-
-    #[cfg(feature = "hsd")]
-    fn generate_hsd_tokenized(
-        &self,
-        image: &RgbImage,
-        instruction: &str,
-        tokenized: &[Draft],
-        hsd_cfg: &HsdConfig,
-        max_new_tokens: usize,
-        drafter_elapsed: Duration,
-    ) -> Result<(String, HsdStats), OCRError> {
-        if !self.device.is_cuda() {
-            return Err(OCRError::ConfigError {
-                message: "HSD requires CUDA device".to_string(),
-            });
-        }
-
-        let mut stats = HsdStats {
-            drafter: drafter_elapsed,
-            ..Default::default()
-        };
-        // Stage 2 fields are reused for stat bookkeeping in the single-image path.
-        let t_pre = Instant::now();
-        let (initial_lp, rope_delta, prompt_tokens) =
-            self.hsd_prefill_single(image, instruction)?;
-        stats.stage2.vision_prefill = t_pre.elapsed();
-        stats.stage2.forward_passes = 1;
-
-        let t_dec = Instant::now();
-        let mut backend = MinerUSpecBackend::new(self, rope_delta, prompt_tokens);
-        let mut accept = AcceptStats::default();
-        let mut dsv = Default::default();
-        let generated = spec_decode(
-            &mut backend,
-            tokenized,
-            initial_lp,
-            max_new_tokens,
-            &hsd_cfg.dsv,
-            &mut accept,
-            &mut dsv,
-        )
-        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "spec_decode", e))?;
-        stats.stage2.decode = t_dec.elapsed();
-        stats.stage2.emitted_tokens = generated.len() as u32;
-        stats.stage2.accept = accept;
-        stats.stage2.dsv = dsv;
-        stats.stage2.forward_passes += backend.forward_passes;
-
-        // Strip the first stop token and anything after it before decoding.
-        let stop_pos = generated
-            .iter()
-            .position(|t| self.eos_token_ids.contains(t))
-            .unwrap_or(generated.len());
-        let trimmed = &generated[..stop_pos];
-
-        // Match generate_internal: filter bos/eos/pad before decode, preserve
-        // other special tokens (skip_special_tokens=false).
-        let filtered: Vec<u32> = trimmed
-            .iter()
-            .copied()
-            .filter(|t| !self.skip_token_ids.contains(t))
-            .collect();
-        let text = self
-            .tokenizer
-            .decode(&filtered, false)
-            .map_err(|e| OCRError::InvalidInput {
-                message: format!("MinerU2.5 HSD: tokenizer decode failed: {e}"),
-            })?;
-        Ok((text, stats))
-    }
-
-    /// Run the full two-stage HSD: Stage 1 verifies each layout-detected
-    /// region against the layout drafter's text, then Stage 2 (gated by
-    /// `hsd_cfg.enable_stage2`) verifies the Stage-1-aggregated markdown on
-    /// the full image with `hsd_cfg.max_page_tokens` budget.
-    ///
-    /// - `enable_stage1 = false`: skip per-region verification; build the
-    ///   Stage 2 draft set directly from the layout drafter's per-element
-    ///   markdowns (`region_markdowns`). Mirrors the paper's Table 8
-    ///   "Page-level Spec. Decoding only" ablation.
-    /// - `enable_stage2 = false`: return the Stage-1-only aggregation (lossy
-    ///   ablation matching paper Table 8).
-    ///
-    /// `region_instruction` is used only for Stage 1 crop verification;
-    /// `page_instruction` is used for Stage 2 full-page verification.
-    ///
-    /// **Two-step mode**: when `region_instruction` is empty, Stage 1
-    /// dispatches a per-element prompt via [`MinerUTaskPrompt::for_layout`]
-    /// (e.g. `\nText Recognition:`, `\nTable Recognition:`,
-    /// `\nFormula Recognition:`). This mirrors MinerU's official
-    /// `two_step_extract` flow where each layout-detected block is routed to
-    /// its matching recognizer. Passing a non-empty `region_instruction` keeps
-    /// the legacy "one prompt for all regions" behaviour for ablation.
-    #[cfg(feature = "hsd")]
-    pub fn generate_hsd_full(
-        &self,
-        image: &RgbImage,
-        elements: &[LayoutElement],
-        ignore_labels: &[String],
-        page_instruction: &str,
-        region_instruction: &str,
-        hsd_cfg: &HsdConfig,
-    ) -> Result<(String, HsdStats), OCRError> {
-        let mut stats = HsdStats::default();
-        let mut region_md: Vec<(usize, String)> = Vec::with_capacity(elements.len());
-        let two_step_mode = region_instruction.trim().is_empty();
-
-        if hsd_cfg.enable_stage1 {
-            for (idx, elem) in elements.iter().enumerate() {
-                if let Some(label) = &elem.label
-                    && ignore_labels.iter().any(|l| l == label)
-                {
-                    continue;
-                }
-                // Visual-only regions have no text to verify.
-                if matches!(
-                    elem.element_type,
-                    LayoutElementType::Image
-                        | LayoutElementType::HeaderImage
-                        | LayoutElementType::FooterImage
-                        | LayoutElementType::Seal
-                ) {
-                    continue;
-                }
-                let draft = region_markdown_for(elem, TargetDraftAdapter::MinerU);
-                if draft.trim().is_empty() {
-                    continue;
-                }
-
-                let bbox = bbox_xyxy(&elem.bbox);
-                let crop = crop_region_image(image, &bbox)?;
-                let drafts = vec![draft];
-                // Two-step dispatch: pick the official MinerU per-element
-                // prompt based on `LayoutElementType`. The legacy fixed-prompt
-                // path is taken only when the caller explicitly passes a
-                // non-empty `region_instruction`.
-                let effective_region_instruction = if two_step_mode {
-                    MinerUTaskPrompt::for_layout(elem.element_type).prompt()
-                } else {
-                    region_instruction
-                };
-                let (region_text, region_stats) =
-                    self.generate_hsd(&crop, effective_region_instruction, &drafts, hsd_cfg)?;
-                stats.drafter += region_stats.drafter;
-
-                let kind = map_layout_kind(elem.element_type);
-                stats.stage1_regions.push(RegionStageStats {
-                    kind,
-                    stats: region_stats.stage2.clone(),
-                });
-                stats.stage1.add_assign(region_stats.stage2);
-                let order = elem.order_index.map(|x| x as usize).unwrap_or(idx);
-                region_md.push((order, format_verified_region(&region_text, kind)));
-            }
-        }
-
-        region_md.sort_by_key(|(order, _)| *order);
-        let region_md: Vec<String> = region_md
-            .into_iter()
-            .map(|(_, text)| text)
-            .filter(|s| !s.trim().is_empty())
-            .collect();
-
-        // Stage 2 — page-level global verification on the full image. Per
-        // paper Eq. 3 the page draft is the *unordered set* `Ỹ^pg = {ŷ^(i)}`,
-        // one draft per region. We pass the Vec straight to `spec_decode`
-        // instead of pre-joining: `collect_candidates` scans each draft
-        // independently (Eqs. 1+2), so per-region n-gram locality is
-        // preserved even when full-page transitions don't appear naturally
-        // in the target VLM's output. Budget = `max_page_tokens`.
-        if hsd_cfg.enable_stage2 {
-            let t_drafter = Instant::now();
-            let page_drafts: Vec<String> = if !region_md.is_empty() {
-                region_md.clone()
-            } else {
-                region_markdowns_for(elements, ignore_labels, TargetDraftAdapter::MinerU)
-            };
-            if !page_drafts.is_empty() {
-                let tokenized = self.tokenize_drafts(&page_drafts)?;
-                let (text, s2_stats) = self.generate_hsd_tokenized(
-                    image,
-                    page_instruction,
-                    &tokenized,
-                    hsd_cfg,
-                    hsd_cfg.max_page_tokens,
-                    t_drafter.elapsed(),
-                )?;
-                stats.stage2 = s2_stats.stage2;
-                stats.drafter += s2_stats.drafter;
-                return Ok((text, stats));
-            }
-        }
-
-        // Stage 2 disabled or no draft to verify — return Stage-1-only join
-        // as a human-readable fallback. The `\n\n` separator here is for the
-        // *output* (caller-facing), not for any further HSD input.
-        Ok((region_md.join("\n\n"), stats))
-    }
-
-    /// One-call HSD entry that consumes a `StructureResult` (the output of
-    /// the OARStructure / PP-StructureV3 pipeline) directly.
-    ///
-    /// Backfills table HTML / formula LaTeX via
-    /// [`structure_result_to_layout_elements`] then delegates to
-    /// [`Self::generate_hsd_full`]. When `region_instruction` is empty the
-    /// MinerU two-step mode kicks in and each region uses its canonical
-    /// per-type prompt (`MinerUTaskPrompt::for_layout`).
-    #[cfg(feature = "hsd")]
-    pub fn generate_hsd_with_structure(
-        &self,
-        image: &RgbImage,
-        page_instruction: &str,
-        region_instruction: &str,
-        structure: &StructureResult,
-        ignore_labels: &[String],
-        hsd_cfg: &HsdConfig,
-    ) -> Result<(String, HsdStats), OCRError> {
-        let elements = structure_result_to_layout_elements(structure);
-        self.generate_hsd_full(
-            image,
-            &elements,
-            ignore_labels,
-            page_instruction,
-            region_instruction,
-            hsd_cfg,
-        )
-    }
-
-    /// Run a single-image prefill with the supplied instruction. Returns
-    /// the F32 last-position log-probabilities and the MRoPE delta.
-    #[cfg(feature = "hsd")]
-    fn hsd_prefill_single(
-        &self,
-        image: &RgbImage,
-        instruction: &str,
-    ) -> Result<(Tensor, i64, Vec<u32>), OCRError> {
-        // Preprocess single image.
-        let image_inputs = preprocess_images(
-            std::slice::from_ref(image),
-            &self.image_cfg,
-            &self.device,
-            self.dtype,
-        )?;
-        let (t, h, w) = image_inputs.image_grid_thw[0];
-        let image_token_count = (t * h * w) / (self.spatial_merge_size * self.spatial_merge_size);
-
-        // Build prompt and expand image placeholders.
-        let prompt = build_prompt(instruction);
-        let enc = self
-            .tokenizer
-            .encode(prompt, false)
-            .map_err(|e| OCRError::InvalidInput {
-                message: format!("MinerU2.5 HSD: tokenizer encode failed: {e}"),
-            })?;
-        let input_ids =
-            expand_image_tokens(enc.get_ids(), self.image_token_id, &[image_token_count])?;
-        let seq_len = input_ids.len();
-
-        // Vision features.
-        let image_embeds = self
-            .vision
-            .forward(&image_inputs.pixel_values, &image_inputs.image_grid_thw)?;
-        let actual = image_embeds
-            .dim(0)
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "image_embeds dim", e))?;
-        if actual != image_token_count {
-            return Err(OCRError::InvalidInput {
-                message: format!(
-                    "MinerU2.5 HSD: image embeds count mismatch: got {actual}, expected {image_token_count}"
-                ),
-            });
-        }
-
-        // Build embeddings, splice in the image tokens.
-        let input_ids_t = Tensor::new(input_ids.clone(), &self.device)
-            .and_then(|t| t.reshape((1, seq_len)))
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "create input_ids", e))?;
-        let mut inputs_embeds = self.text.embed(&input_ids_t)?;
-
-        if let Some(first_pos) = input_ids.iter().position(|&id| id == self.image_token_id) {
-            let image_end = first_pos + image_token_count;
-            let mut parts: Vec<Tensor> = Vec::with_capacity(3);
-            if first_pos > 0 {
-                parts.push(
-                    inputs_embeds
-                        .narrow(1, 0, first_pos)
-                        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "narrow prefix", e))?,
-                );
-            }
-            parts.push(
-                image_embeds
-                    .unsqueeze(0)
-                    .map_err(|e| candle_to_ocr_inference("MinerU2.5", "unsqueeze img", e))?,
-            );
-            if image_end < seq_len {
-                parts.push(
-                    inputs_embeds
-                        .narrow(1, image_end, seq_len - image_end)
-                        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "narrow suffix", e))?,
-                );
-            }
-            let refs: Vec<&Tensor> = parts.iter().collect();
-            inputs_embeds = Tensor::cat(&refs, 1)
-                .map_err(|e| candle_to_ocr_inference("MinerU2.5", "cat embeds", e))?;
-        }
-
-        // 3-axis MRoPE position ids + delta.
-        let (pos_ids, rope_delta) = get_rope_index(
-            &self.cfg,
-            &input_ids,
-            &[image_inputs.image_grid_thw[0]],
-            self.vision_start_token_id,
-            self.video_token_id,
-            self.spatial_merge_size,
-            &self.device,
-        )?;
-
-        let causal = create_causal_mask(seq_len, seq_len, self.dtype, &self.device)
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "create causal", e))?;
-
-        self.text.clear_kv_cache();
-        let hidden = self.text.forward(&inputs_embeds, &pos_ids, Some(&causal))?;
-
-        let last = hidden
-            .i((0, seq_len - 1, ..))
-            .and_then(|t| t.unsqueeze(0))
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "get last hidden", e))?;
-        let logits = self
-            .lm_head
-            .forward(&last)
-            .and_then(|t| t.squeeze(0))
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "lm_head prefill", e))?;
-        let lp = processed_logprobs_from_logits(
-            &logits,
-            &input_ids,
-            &self.sampling_params(),
-            &self.device,
-        )
-        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "logits processors prefill", e))?;
-        Ok((lp, rope_delta, input_ids))
-    }
-}
-
-/// HSD adapter for MinerU2.5. Same shape as PaddleOCR-VL (3-axis MRoPE,
-/// independent lm_head, rope_delta captured at prefill).
-#[cfg(feature = "hsd")]
-struct MinerUSpecBackend<'a> {
-    model: &'a MinerU,
-    rope_delta: i64,
-    history: Vec<u32>,
-    pending_tree: Option<PrefixTree>,
-    pre_verify_kv: usize,
-    forward_passes: u32,
-}
-
-#[cfg(feature = "hsd")]
-impl<'a> MinerUSpecBackend<'a> {
-    fn new(model: &'a MinerU, rope_delta: i64, prompt_tokens: Vec<u32>) -> Self {
-        Self {
-            model,
-            rope_delta,
-            history: prompt_tokens,
-            pending_tree: None,
-            pre_verify_kv: 0,
-            forward_passes: 0,
-        }
-    }
-
-    fn project_logprobs_2d(&self, hidden_2d: &Tensor, tree: &PrefixTree) -> CandleResult<Tensor> {
-        let logits = self.model.lm_head.forward(hidden_2d)?;
-        let params = self.model.sampling_params();
-        let mut rows: Vec<Tensor> = Vec::with_capacity(tree.num_nodes());
-        for node_idx in 0..tree.num_nodes() {
-            let mut node_history = self.history.clone();
-            node_history.extend(tree.path_tokens(node_idx));
-            let row = logits.i(node_idx)?;
-            rows.push(processed_logprobs_from_logits(
-                &row,
-                &node_history,
-                &params,
-                &self.model.device,
-            )?);
-        }
-        let refs: Vec<&Tensor> = rows.iter().collect();
-        Tensor::stack(&refs, 0)
-    }
-
-    fn project_logprobs_1d(&self, hidden_1d: &Tensor) -> CandleResult<Tensor> {
-        let logits = self
-            .model
-            .lm_head
-            .forward(&hidden_1d.unsqueeze(0)?)?
-            .squeeze(0)?;
-        processed_logprobs_from_logits(
-            &logits,
-            &self.history,
-            &self.model.sampling_params(),
-            &self.model.device,
-        )
-    }
-}
-
-#[cfg(feature = "hsd")]
-impl<'a> SpecBackend for MinerUSpecBackend<'a> {
-    fn step_one(&mut self, token: u32) -> CandleResult<Tensor> {
-        let model = self.model;
-        let device = &model.device;
-        self.history.push(token);
-
-        let tok_t = Tensor::new(vec![token], device)?.reshape((1usize, 1usize))?;
-        let embeds = model
-            .text
-            .embed(&tok_t)
-            .map_err(|e| candle_core::Error::Msg(format!("MinerU2.5 HSD step_one embed: {e}")))?;
-
-        let pos_ids = step_pos_ids(3, model.text.current_kv_len(), self.rope_delta, device)?;
-
-        let hidden = model
-            .text
-            .forward(&embeds, &pos_ids, None)
-            .map_err(|e| candle_core::Error::Msg(format!("MinerU2.5 HSD step_one forward: {e}")))?;
-        self.forward_passes += 1;
-        let last = hidden.i((0, 0, ..))?;
-        self.project_logprobs_1d(&last)
-    }
-
-    fn verify_tree(&mut self, tree: &PrefixTree) -> CandleResult<Tensor> {
-        let n = tree.num_nodes();
-        let model = self.model;
-        let device = &model.device;
-        let dtype = model.dtype;
-
-        let prefix_kv = model.text.current_kv_len();
-        self.pre_verify_kv = prefix_kv;
-
-        let tok_t = Tensor::new(tree.tokens.clone(), device)?.reshape((1usize, n))?;
-        let embeds = model.text.embed(&tok_t).map_err(|e| {
-            candle_core::Error::Msg(format!("MinerU2.5 HSD verify_tree embed: {e}"))
-        })?;
-
-        let pos_ids = tree_pos_ids(3, prefix_kv, self.rope_delta, tree, device)?;
-        let mask = create_tree_attention_mask(&tree.parents, prefix_kv, dtype, device)?;
-
-        let hidden = model
-            .text
-            .forward(&embeds, &pos_ids, Some(&mask))
-            .map_err(|e| {
-                candle_core::Error::Msg(format!("MinerU2.5 HSD verify_tree forward: {e}"))
-            })?;
-        self.forward_passes += 1;
-        let h2 = hidden.squeeze(0)?;
-        self.pending_tree = Some(tree.clone());
-        self.project_logprobs_2d(&h2, tree)
-    }
-
-    fn commit_verify(&mut self, accepted_path: &[usize]) -> CandleResult<()> {
-        let indices = commit_keep_indices(self.pre_verify_kv, accepted_path);
-        self.model
-            .text
-            .keep_kv_indices(&indices)
-            .map_err(|e| candle_core::Error::Msg(format!("MinerU2.5 HSD commit_verify: {e}")))?;
-
-        if let Some(tree) = self.pending_tree.take() {
-            for &p in accepted_path {
-                self.history.push(tree.tokens[p]);
-            }
-        }
-        Ok(())
-    }
-
-    fn is_eos(&self, tok: u32) -> bool {
-        self.model.eos_token_ids.contains(&tok)
-    }
 }
 
 fn build_prompt(instruction: &str) -> String {
@@ -1285,22 +720,6 @@ fn select_next_token(
     } else {
         Ok(argmax_token(&logits_vec))
     }
-}
-
-#[cfg(feature = "hsd")]
-fn processed_logprobs_from_logits(
-    logits: &Tensor,
-    history: &[u32],
-    params: &SamplingParams,
-    device: &Device,
-) -> CandleResult<Tensor> {
-    let logits = logits.to_dtype(DType::F32)?.to_device(&Device::Cpu)?;
-    let mut logits_vec = logits.to_vec1::<f32>()?;
-    apply_sampling_processors(&mut logits_vec, history, params);
-
-    let vocab = logits_vec.len();
-    let processed = Tensor::from_vec(logits_vec, vocab, device)?;
-    cnn_ops::log_softmax(&processed, D::Minus1)
 }
 
 fn apply_sampling_processors(logits: &mut [f32], history: &[u32], params: &SamplingParams) {

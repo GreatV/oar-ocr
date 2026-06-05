@@ -2,25 +2,23 @@
 //!
 //! `candle_nn::kv_cache::KvCache` exposes `append` / `reset` but no way to
 //! roll back the cache to an earlier sequence length, nor to keep an
-//! arbitrary subset of positions. HSD's verifier needs both: after a
-//! tree-attention forward pass we may accept fewer tokens than were
-//! appended, and the unaccepted suffix must be discarded so the next forward
-//! pass sees a clean prefix.
+//! arbitrary subset of positions. This wrapper adds both: callers can trim the
+//! cache to an earlier length or gather an arbitrary subset of positions while
+//! leaving the rest of the attention path untouched.
 //!
 //! ## Implementation note
 //!
 //! Append uses `Tensor::cat`, matching the public-API behaviour of
 //! `candle_nn::KvCache` before its preallocation rewrite. We tried a
 //! preallocation + `slice_set` strategy (see git history) for parity with
-//! `candle_nn::kv_cache::Cache`, but the resulting K/V values caused HSD
-//! acceptance to collapse on the same workloads where the cat-based
-//! implementation was correct, despite kv-only unit tests passing. The cause
-//! turned out to be subtle and we reverted; rare per-page slowdowns observed
-//! on long benchmarks remain an open issue tracked separately.
+//! `candle_nn::kv_cache::Cache`, but reverted it: the rewrite passed unit
+//! tests and didn't change per-page wall time, while introducing subtle K/V
+//! value differences. Rare per-page slowdowns observed on long benchmarks
+//! remain an open issue tracked separately.
 
 use candle_core::{Result, Tensor};
 
-/// Append-and-trim KV cache for use during HSD verification.
+/// Append-and-trim KV cache.
 ///
 /// `Clone` mirrors `candle_nn::kv_cache::KvCache::Clone`: it produces a
 /// shallow copy that shares the same underlying `Tensor` storage. Cheap; only
@@ -39,18 +37,17 @@ pub struct TrimmableKvCache {
     cur_len: usize,
     /// Configured sequence-length capacity retained for parity with
     /// `candle_nn::kv_cache::KvCache::new`. This wrapper does not enforce it.
-    /// Only read by HSD's `max_seq_len()` accessor.
-    #[cfg_attr(not(feature = "hsd"), allow(dead_code))]
+    /// Only read by the `max_seq_len()` accessor.
+    #[allow(dead_code)]
     max_len: usize,
 }
 
 // `TrimmableKvCache` lives at the crate root so every model's attention path
-// can store one. Most of its methods are only consumed by the HSD verify
-// driver (`trim_to`, `keep_indices`, `current_seq_len`, `max_seq_len`, `k`,
-// `v`) — silence dead-code warnings for those when `hsd` is off without
-// gating the methods themselves (they remain available for external
-// callers / future re-enabling).
-#[cfg_attr(not(feature = "hsd"), allow(dead_code))]
+// can store one. Several of its trim/gather methods (`trim_to`,
+// `keep_indices`, `current_seq_len`, `max_seq_len`, `k`, `v`) are not used on
+// the baseline decode path; they stay available for external callers without
+// triggering dead-code warnings.
+#[allow(dead_code)]
 impl TrimmableKvCache {
     pub fn new(cat_dim: usize, max_len: usize) -> Self {
         Self {
@@ -67,12 +64,11 @@ impl TrimmableKvCache {
     /// Cat-based growth (not preallocated). We tried a `slice_set` /
     /// preallocated-buffer rewrite to match `candle_nn::kv_cache::Cache` —
     /// nsys profiling had pointed to per-step cat as a candidate bottleneck
-    /// on long-output pages. The rewrite passed unit tests, didn't change
-    /// per-page wall time on either fast or slow images, and *regressed*
-    /// HSD acceptance length (AAL collapsed from ~22 → ~15 on 30 v1.5
-    /// pages). Reverted: the wall-time outliers we were chasing are
-    /// dominated by candle's per-op CPU dispatch on long decode loops, not
-    /// by KV-cache copy overhead.
+    /// on long-output pages. The rewrite passed unit tests and didn't change
+    /// per-page wall time on either fast or slow images, so it was reverted:
+    /// the wall-time outliers we were chasing are dominated by candle's
+    /// per-op CPU dispatch on long decode loops, not by KV-cache copy
+    /// overhead.
     pub fn append(&mut self, k_new: &Tensor, v_new: &Tensor) -> Result<(Tensor, Tensor)> {
         let new_len = k_new.dim(self.cat_dim)?;
         let (k_all, v_all) = match self.kv.as_ref() {
@@ -112,12 +108,11 @@ impl TrimmableKvCache {
     }
 
     /// Gather the cache to keep only the supplied positions, in the supplied
-    /// order. This is the operation HSD performs after a tree-attention
-    /// verification pass: keep `[0..prefix_kv_len)` (the accepted history)
-    /// then append the path-node positions.
+    /// order — e.g. keep `[0..prefix_len)` (an accepted history) then append
+    /// a selected subset of newer positions.
     ///
-    /// Each index must be `< current_seq_len()`. Indices may be repeated, but
-    /// in normal HSD use they are distinct.
+    /// Each index must be `< current_seq_len()`. Indices may be repeated,
+    /// though typical callers pass distinct positions.
     pub fn keep_indices(&mut self, indices: &[u32]) -> Result<()> {
         if indices.is_empty() {
             self.reset();

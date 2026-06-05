@@ -2,9 +2,6 @@ use super::config::HunyuanOcrConfig;
 use crate::attention::{
     RotaryEmbedding, repeat_kv, scaled_dot_product_attention, select_rope_sections,
 };
-#[cfg(feature = "hsd")]
-use crate::hsd::TrimmableKvCache;
-#[cfg(not(feature = "hsd"))]
 use crate::kv_trim::TrimmableKvCache;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 use candle_core::Tensor;
@@ -204,8 +201,8 @@ impl HunyuanAttention {
 
         // Cat-along-seq KV cache. Capacity 16384 covers ~1000-2000 vision tokens
         // plus the longest realistic generation. Same growth strategy as
-        // candle_nn::kv_cache::KvCache (Tensor::cat per append). Trim/gather
-        // support is required by HSD's tree-verification path.
+        // candle_nn::kv_cache::KvCache (Tensor::cat per append).
+        // Trim/gather support allows selective KV retention after generation steps.
         let kv_cache = TrimmableKvCache::new(2, 16384);
 
         Ok(Self {
@@ -335,19 +332,6 @@ impl HunyuanAttention {
     fn clear_kv_cache(&self) {
         self.kv_cache.borrow_mut().reset();
     }
-
-    #[cfg(feature = "hsd")]
-    fn current_kv_len(&self) -> usize {
-        self.kv_cache.borrow().current_seq_len()
-    }
-
-    #[cfg(feature = "hsd")]
-    fn keep_kv_indices(&self, indices: &[u32]) -> Result<(), OCRError> {
-        self.kv_cache
-            .borrow_mut()
-            .keep_indices(indices)
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "keep_kv_indices", e))
-    }
 }
 
 #[derive(Debug)]
@@ -411,11 +395,6 @@ impl HunyuanDecoderLayer {
 
     fn clear_kv_cache(&self) {
         self.self_attn.clear_kv_cache();
-    }
-
-    #[cfg(feature = "hsd")]
-    fn keep_kv_indices(&self, indices: &[u32]) -> Result<(), OCRError> {
-        self.self_attn.keep_kv_indices(indices)
     }
 }
 
@@ -512,26 +491,5 @@ impl HunyuanLlm {
         for layer in &self.layers {
             layer.clear_kv_cache();
         }
-    }
-
-    /// Current sequence length held in the KV cache. All layers stay in sync,
-    /// so we read it from layer 0.
-    #[cfg(feature = "hsd")]
-    pub fn current_kv_len(&self) -> usize {
-        self.layers
-            .first()
-            .map(|l| l.self_attn.current_kv_len())
-            .unwrap_or(0)
-    }
-
-    /// Gather every layer's KV cache to keep only the supplied positions
-    /// (in order). Used by HSD after tree-attention verification to retain the
-    /// accepted-path KV entries and drop the rejected-tree positions.
-    #[cfg(feature = "hsd")]
-    pub fn keep_kv_indices(&self, indices: &[u32]) -> Result<(), OCRError> {
-        for layer in &self.layers {
-            layer.keep_kv_indices(indices)?;
-        }
-        Ok(())
     }
 }

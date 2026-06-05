@@ -19,7 +19,7 @@ const OTSL_XCEL: &str = "<xcel>";
 /// PaddleOCR-VL's "Table Recognition:" prompt emits OTSL tokens
 /// (`<fcel>`, `<lcel>`, `<ucel>`, `<xcel>`, `<ecel>`, `<nl>`) which the
 /// model's post-process then translates into HTML. To feed an HTML-shaped
-/// draft (e.g. from a layout pipeline) into HSD against PaddleOCR-VL we
+/// table (e.g. from a layout pipeline) back into PaddleOCR-VL's token form we
 /// need the inverse: HTML → OTSL.
 ///
 /// The parser is intentionally tolerant — it uses regex-based extraction
