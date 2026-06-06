@@ -1,7 +1,7 @@
 use super::config::{GlmOcrImageProcessorConfig, GlmOcrVisionConfig};
 use crate::utils::{
     candle_to_ocr_processing,
-    image::{image_to_chw, pil_resample_to_filter_type},
+    image::{image_to_chw, patchify_merge_grouped, pil_resample_to_filter_type},
 };
 use candle_core::{DType, Device, Tensor};
 use image::{RgbImage, imageops::FilterType};
@@ -178,16 +178,11 @@ pub fn preprocess_image(
     let merge_size = cfg.merge_size;
     let temporal_patch = cfg.temporal_patch_size;
 
-    let mut frames = Vec::with_capacity(temporal_patch * channel * height * width);
-    frames.extend_from_slice(&chw);
-    if temporal_patch > 1 {
-        let needed = temporal_patch - 1;
-        for _ in 0..needed {
-            frames.extend_from_slice(&chw);
-        }
-    }
+    // For static images the single CHW frame is repeated `temporal_patch` times
+    // to fill the temporal dimension expected by the vision encoder.
+    let frames: Vec<&[f32]> = std::iter::repeat_n(chw.as_slice(), temporal_patch).collect();
 
-    let grid_t = frames.len() / (channel * height * width * temporal_patch);
+    let grid_t = frames.len() / temporal_patch;
     let grid_h = height / patch_size;
     let grid_w = width / patch_size;
 
@@ -201,40 +196,19 @@ pub fn preprocess_image(
 
     let patch_dim = channel * temporal_patch * patch_size * patch_size;
     let num_patches = grid_t * grid_h * grid_w;
-    let mut flat = Vec::with_capacity(num_patches * patch_dim);
 
-    let grid_h_blocks = grid_h / merge_size;
-    let grid_w_blocks = grid_w / merge_size;
-
-    let frame_stride = channel * height * width;
-    let channel_stride = height * width;
-
-    for t in 0..grid_t {
-        for hb in 0..grid_h_blocks {
-            for wb in 0..grid_w_blocks {
-                for hm in 0..merge_size {
-                    for wm in 0..merge_size {
-                        let patch_row = hb * merge_size + hm;
-                        let patch_col = wb * merge_size + wm;
-                        for c in 0..channel {
-                            for tp in 0..temporal_patch {
-                                let frame = t * temporal_patch + tp;
-                                let base = frame * frame_stride + c * channel_stride;
-                                for ph in 0..patch_size {
-                                    let h_idx = patch_row * patch_size + ph;
-                                    let row_base = base + h_idx * width;
-                                    for pw in 0..patch_size {
-                                        let w_idx = patch_col * patch_size + pw;
-                                        flat.push(frames[row_base + w_idx]);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let flat = patchify_merge_grouped(
+        &frames,
+        channel,
+        height,
+        width,
+        grid_t,
+        grid_h,
+        grid_w,
+        patch_size,
+        merge_size,
+        temporal_patch,
+    );
 
     let num_image_tokens = num_patches / (merge_size * merge_size);
     let pixel_values = Tensor::from_vec(flat, (num_patches, patch_dim), device)

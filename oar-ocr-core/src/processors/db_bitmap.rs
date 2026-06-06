@@ -26,12 +26,15 @@ impl DBPostProcess {
         let width = bitmap.width() as usize;
         let width_scale = dest_width as f32 / width as f32;
         let height_scale = dest_height as f32 / height as f32;
+        let dest_w_f = dest_width as f32;
+        let dest_h_f = dest_height as f32;
 
         let contours = find_contours::<u32>(bitmap);
-        let mut boxes = Vec::new();
-        let mut scores = Vec::new();
+        let max_candidates = self.max_candidates;
+        let mut boxes: Vec<BoundingBox> = Vec::with_capacity(contours.len().min(max_candidates));
+        let mut scores: Vec<f32> = Vec::with_capacity(boxes.capacity());
 
-        for contour in contours.into_iter().take(self.max_candidates) {
+        for contour in contours.into_iter().take(max_candidates) {
             if contour.points.len() < 4 {
                 continue;
             }
@@ -49,11 +52,10 @@ impl DBPostProcess {
                 continue;
             }
 
-            let unclipped = if approx.points.len() > 2 {
-                self.unclip(&approx, unclip_ratio)
-            } else {
+            if approx.points.len() <= 2 {
                 continue;
-            };
+            }
+            let unclipped = self.unclip(&approx, unclip_ratio);
             if unclipped.points.is_empty() {
                 continue;
             }
@@ -65,19 +67,15 @@ impl DBPostProcess {
                 continue;
             }
 
-            let scaled_points: Vec<Point> = unclipped
-                .points
-                .iter()
-                .map(|point| {
-                    let x = (point.x * width_scale)
-                        .round()
-                        .clamp(0.0, dest_width as f32);
-                    let y = (point.y * height_scale)
-                        .round()
-                        .clamp(0.0, dest_height as f32);
-                    Point::new(x, y)
-                })
-                .collect();
+            // Scale unclipped points back to the original image coords
+            // in a single pass with pre-allocated capacity.
+            let n = unclipped.points.len();
+            let mut scaled_points: Vec<Point> = Vec::with_capacity(n);
+            for point in &unclipped.points {
+                let x = (point.x * width_scale).round().clamp(0.0, dest_w_f);
+                let y = (point.y * height_scale).round().clamp(0.0, dest_h_f);
+                scaled_points.push(Point::new(x, y));
+            }
 
             boxes.push(BoundingBox::new(scaled_points));
             scores.push(score);
@@ -99,12 +97,15 @@ impl DBPostProcess {
         let width = bitmap.width() as usize;
         let width_scale = dest_width as f32 / width as f32;
         let height_scale = dest_height as f32 / height as f32;
+        let dest_w_f = dest_width as f32;
+        let dest_h_f = dest_height as f32;
 
         let contours = find_contours::<u32>(bitmap);
-        let mut boxes = Vec::new();
-        let mut scores = Vec::new();
+        let max_candidates = self.max_candidates;
+        let mut boxes: Vec<BoundingBox> = Vec::with_capacity(contours.len().min(max_candidates));
+        let mut scores: Vec<f32> = Vec::with_capacity(boxes.capacity());
 
-        for contour in contours.into_iter().take(self.max_candidates) {
+        for contour in contours.into_iter().take(max_candidates) {
             let Some((mini_box_points, min_side)) = self.get_mini_boxes_from_contour(&contour)
             else {
                 continue;
@@ -136,18 +137,13 @@ impl DBPostProcess {
                 continue;
             }
 
-            let scaled_points: Vec<Point> = box_points
-                .iter()
-                .map(|point| {
-                    let x = (point.x * width_scale)
-                        .round()
-                        .clamp(0.0, dest_width as f32);
-                    let y = (point.y * height_scale)
-                        .round()
-                        .clamp(0.0, dest_height as f32);
-                    Point::new(x, y)
-                })
-                .collect();
+            let n = box_points.len();
+            let mut scaled_points: Vec<Point> = Vec::with_capacity(n);
+            for point in &box_points {
+                let x = (point.x * width_scale).round().clamp(0.0, dest_w_f);
+                let y = (point.y * height_scale).round().clamp(0.0, dest_h_f);
+                scaled_points.push(Point::new(x, y));
+            }
 
             boxes.push(BoundingBox::new(scaled_points));
             scores.push(score);
@@ -177,7 +173,7 @@ impl DBPostProcess {
             return None;
         }
 
-        let min_rect = BoundingBox::new(points.to_vec()).get_min_area_rect();
+        let min_rect = BoundingBox::get_min_area_rect_from_points(points);
         let min_side = min_rect.min_side();
         if !min_side.is_finite() || min_side <= 0.0 {
             return None;
@@ -306,9 +302,17 @@ impl DBPostProcess {
             return BoundingBox::new(Vec::new());
         }
 
+        // Sum the perimeter as a manual wrap-around loop to avoid the
+        // `zip(cycle().skip(1))` allocation pattern (which clones the
+        // iterator to advance the cycle by one).
         let mut perimeter = 0.0f64;
-        for (p1, p2) in clipper_path.iter().zip(clipper_path.iter().cycle().skip(1)) {
-            perimeter += (p2.x - p1.x).hypot(p2.y - p1.y);
+        let n = clipper_path.len();
+        if n >= 2 {
+            for i in 0..n {
+                let p1 = &clipper_path[i];
+                let p2 = &clipper_path[(i + 1) % n];
+                perimeter += (p2.x - p1.x).hypot(p2.y - p1.y);
+            }
         }
 
         if perimeter <= f64::EPSILON {
@@ -348,7 +352,6 @@ impl DBPostProcess {
 
         // Remove duplicate closing point if present
         if points.len() > 1 {
-            // Safe: we just verified len() > 1
             if let (Some(first), Some(last)) = (points.first(), points.last())
                 && (first.x - last.x).abs() < f32::EPSILON
                 && (first.y - last.y).abs() < f32::EPSILON

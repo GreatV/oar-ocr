@@ -3,37 +3,6 @@ use image::imageops::FilterType;
 use oar_ocr_core::core::OCRError;
 use rayon::prelude::*;
 
-struct UnsafeSlice<T> {
-    slice: *mut [T],
-}
-
-// SAFETY: `UnsafeSlice` only transfers a raw slice pointer between threads.
-// Mutation remains gated behind `write`, whose caller must uphold disjoint
-// in-bounds access. The element type must be safe to send to another thread.
-unsafe impl<T: Send> Send for UnsafeSlice<T> {}
-// SAFETY: Shared references to `UnsafeSlice` do not expose safe mutation.
-// Concurrent writes are only possible through the unsafe `write` contract,
-// which requires callers to avoid aliasing the same element across threads.
-unsafe impl<T: Sync> Sync for UnsafeSlice<T> {}
-
-impl<T> UnsafeSlice<T> {
-    fn new(slice: &mut [T]) -> Self {
-        let slice = slice as *mut [T];
-        Self { slice }
-    }
-
-    /// SAFETY: The caller must ensure that `idx` is in bounds and that
-    /// no other thread is accessing the same index.
-    unsafe fn write(&self, idx: usize, value: T) {
-        // SAFETY: dereferencing the raw pointer is unsafe, but guaranteed by
-        // the type invariant and caller contract.
-        unsafe {
-            let slice = &mut *self.slice;
-            slice[idx] = value;
-        }
-    }
-}
-
 /// Convert an RGB image to a CHW tensor buffer with normalization and parallel processing.
 ///
 /// Output layout: [R0...Rn, G0...Gn, B0...Bn]
@@ -54,42 +23,108 @@ pub fn image_to_chw(
     let num_pixels = width * height;
     let scale = rescale_factor.unwrap_or(1.0);
 
-    #[allow(clippy::uninit_vec)]
-    let mut output = Vec::with_capacity(num_pixels * RGB_CHANNELS);
-    // SAFETY: We will overwrite all elements in the parallel loop.
-    // The loop covers 0..num_pixels, writing to i, i+num_pixels, i+2*num_pixels.
-    // Total written: 3 * num_pixels.
-    #[allow(clippy::uninit_vec)]
-    unsafe {
-        output.set_len(num_pixels * RGB_CHANNELS)
-    };
-
-    let output_slice = UnsafeSlice::new(&mut output);
+    let mut output = vec![0.0f32; num_pixels * RGB_CHANNELS];
     let raw_pixels = image.as_raw();
 
-    // Parallel iteration over pixels
-    (0..num_pixels).into_par_iter().for_each(|i| {
-        let r = raw_pixels[RGB_CHANNELS * i + R] as f32 * scale;
-        let g = raw_pixels[RGB_CHANNELS * i + G] as f32 * scale;
-        let b = raw_pixels[RGB_CHANNELS * i + B] as f32 * scale;
+    // Split the output into the three contiguous channel planes. Each plane is
+    // a disjoint `&mut [f32]`, so writing them concurrently is safe — no raw
+    // pointers or `UnsafeSlice` needed.
+    let (r_plane, rest) = output.split_at_mut(num_pixels);
+    let (g_plane, b_plane) = rest.split_at_mut(num_pixels);
 
-        // Normalize
-        let r_norm = (r - mean[0]) / std[0];
-        let g_norm = (g - mean[1]) / std[1];
-        let b_norm = (b - mean[2]) / std[2];
+    // Parallel iteration over pixels: each iteration writes one element in each
+    // plane at the same index, and the three planes are non-overlapping.
+    r_plane
+        .par_iter_mut()
+        .zip(g_plane.par_iter_mut())
+        .zip(b_plane.par_iter_mut())
+        .enumerate()
+        .for_each(|(i, ((r_out, g_out), b_out))| {
+            let r = raw_pixels[RGB_CHANNELS * i + R] as f32 * scale;
+            let g = raw_pixels[RGB_CHANNELS * i + G] as f32 * scale;
+            let b = raw_pixels[RGB_CHANNELS * i + B] as f32 * scale;
 
-        // Write to CHW planes
-        // SAFETY: each parallel iteration owns a unique pixel index `i`.
-        // The three destinations are in separate channel planes and are
-        // therefore distinct for every `i` in `0..num_pixels`.
-        unsafe {
-            output_slice.write(i, r_norm);
-            output_slice.write(num_pixels + i, g_norm);
-            output_slice.write(2 * num_pixels + i, b_norm);
-        }
-    });
+            *r_out = (r - mean[0]) / std[0];
+            *g_out = (g - mean[1]) / std[1];
+            *b_out = (b - mean[2]) / std[2];
+        });
 
     output
+}
+
+/// Rearrange CHW frame buffers into Qwen2-VL style merge-grouped flat patches.
+///
+/// This is the shared "patchify" used by GLM-OCR and MinerU2.5 preprocessing:
+/// it flattens per-frame CHW pixel buffers into the `pixel_values` layout
+/// `(num_patches, patch_dim)` expected by the vision encoder, where
+/// `patch_dim = channel * temporal_patch * patch_size * patch_size`.
+///
+/// Patch ordering follows the spatial-merge convention: iterate
+/// `(temporal, h-block, w-block, h-in-block, w-in-block)`, and each patch is
+/// laid out as `[channel][temporal][ph][pw]`.
+///
+/// # Arguments
+///
+/// * `frames` - `grid_t * temporal_patch` CHW buffers, each of length
+///   `channel * height * width`. Frame `t * temporal_patch + tp` is the `tp`-th
+///   temporal sample of grid-time `t`.
+/// * `channel`, `height`, `width` - dimensions of each CHW frame buffer.
+/// * `grid_t`, `grid_h`, `grid_w` - patch grid dimensions. `grid_h` and
+///   `grid_w` must be multiples of `merge_size` (callers validate this).
+/// * `patch_size`, `merge_size`, `temporal_patch` - patch/merge configuration.
+///
+/// # Returns
+///
+/// A flat `Vec<f32>` of length `grid_t * grid_h * grid_w * patch_dim`, ready to
+/// be wrapped as a `(num_patches, patch_dim)` tensor.
+pub fn patchify_merge_grouped(
+    frames: &[&[f32]],
+    channel: usize,
+    height: usize,
+    width: usize,
+    grid_t: usize,
+    grid_h: usize,
+    grid_w: usize,
+    patch_size: usize,
+    merge_size: usize,
+    temporal_patch: usize,
+) -> Vec<f32> {
+    let patch_dim = channel * temporal_patch * patch_size * patch_size;
+    let num_patches = grid_t * grid_h * grid_w;
+    let mut flat = Vec::with_capacity(num_patches * patch_dim);
+
+    let channel_stride = height * width;
+    let grid_h_blocks = grid_h / merge_size;
+    let grid_w_blocks = grid_w / merge_size;
+
+    for t in 0..grid_t {
+        for hb in 0..grid_h_blocks {
+            for wb in 0..grid_w_blocks {
+                for hm in 0..merge_size {
+                    for wm in 0..merge_size {
+                        let patch_row = hb * merge_size + hm;
+                        let patch_col = wb * merge_size + wm;
+                        for c in 0..channel {
+                            for tp in 0..temporal_patch {
+                                let frame = frames[t * temporal_patch + tp];
+                                let base = c * channel_stride;
+                                for ph in 0..patch_size {
+                                    let h_idx = patch_row * patch_size + ph;
+                                    let row_base = base + h_idx * width;
+                                    for pw in 0..patch_size {
+                                        let w_idx = patch_col * patch_size + pw;
+                                        flat.push(frame[row_base + w_idx]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    flat
 }
 
 /// Convert PIL/Transformers integer resampling constants to `image::FilterType`.
@@ -302,6 +337,75 @@ pub fn resize_for_mineru(image: &RgbImage, min_edge: u32, max_aspect_ratio: f32)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_patchify_merge_grouped_ordering() {
+        // channel=2, height=width=4, patch_size=2, merge_size=2 => one 2x2
+        // merge block of 2x2-pixel patches, temporal=1, grid_t=1.
+        let channel = 2usize;
+        let (height, width) = (4usize, 4usize);
+        let (patch_size, merge_size, temporal) = (2usize, 2usize, 1usize);
+        let (grid_t, grid_h, grid_w) = (1usize, 2usize, 2usize);
+
+        // frame[c*16 + y*4 + x] = c*100 + y*10 + x
+        let mut frame = vec![0.0f32; channel * height * width];
+        for c in 0..channel {
+            for y in 0..height {
+                for x in 0..width {
+                    frame[c * height * width + y * width + x] =
+                        (c * 100 + y * 10 + x) as f32;
+                }
+            }
+        }
+        let frames: Vec<&[f32]> = vec![frame.as_slice()];
+
+        let flat = patchify_merge_grouped(
+            &frames, channel, height, width, grid_t, grid_h, grid_w, patch_size, merge_size,
+            temporal,
+        );
+
+        // Expected order: (hm, wm) over the merge block, then channel, then the
+        // 2x2 pixels of each patch laid out row-major.
+        let expected: Vec<f32> = vec![
+            0., 1., 10., 11., 100., 101., 110., 111., // hm0,wm0: c0 then c1
+            2., 3., 12., 13., 102., 103., 112., 113., // hm0,wm1
+            20., 21., 30., 31., 120., 121., 130., 131., // hm1,wm0
+            22., 23., 32., 33., 122., 123., 132., 133., // hm1,wm1
+        ];
+        assert_eq!(flat, expected);
+        // num_patches * patch_dim = (1*2*2) * (2*1*2*2) = 4 * 8 = 32
+        assert_eq!(flat.len(), 32);
+    }
+
+    #[test]
+    fn test_patchify_merge_grouped_merge1_is_raster() {
+        // merge_size=1 => patches are emitted in raster (gh, gw) order, each
+        // patch being a contiguous channel-major block.
+        let channel = 1usize;
+        let (height, width) = (2usize, 4usize);
+        let (patch_size, merge_size, temporal) = (2usize, 1usize, 1usize);
+        let (grid_t, grid_h, grid_w) = (1usize, 1usize, 2usize);
+
+        let mut frame = vec![0.0f32; channel * height * width];
+        for y in 0..height {
+            for x in 0..width {
+                frame[y * width + x] = (y * width + x) as f32;
+            }
+        }
+        let frames: Vec<&[f32]> = vec![frame.as_slice()];
+
+        let flat = patchify_merge_grouped(
+            &frames, channel, height, width, grid_t, grid_h, grid_w, patch_size, merge_size,
+            temporal,
+        );
+
+        // Patch (0,0): x in {0,1}; patch (0,1): x in {2,3}
+        let expected: Vec<f32> = vec![
+            0., 1., 4., 5., // first patch
+            2., 3., 6., 7., // second patch
+        ];
+        assert_eq!(flat, expected);
+    }
 
     #[test]
     fn test_smart_resize_factor_divisibility() -> Result<(), OCRError> {

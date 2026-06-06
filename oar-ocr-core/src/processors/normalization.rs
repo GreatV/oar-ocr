@@ -332,53 +332,6 @@ impl NormalizeImage {
         Ok((batch_size, channels, height, max_width))
     }
 
-    /// Applies normalization to a batch of images and stores the result in a pre-allocated tensor.
-    ///
-    /// # Arguments
-    ///
-    /// * `imgs` - A vector of DynamicImage instances to normalize
-    /// * `batch_tensor` - A mutable slice where the normalized batch will be stored
-    /// * `shapes` - Shapes of the images as (channels, height, width) tuples
-    ///
-    /// # Returns
-    ///
-    /// A Result indicating success or an OCRError if validation fails.
-    pub fn apply_to_batch(
-        &self,
-        imgs: Vec<DynamicImage>,
-        batch_tensor: &mut [f32],
-        shapes: &[(usize, usize, usize)],
-    ) -> Result<(), OCRError> {
-        let (batch_size, channels, height, max_width) =
-            self.validate_batch_inputs(imgs.len(), shapes, batch_tensor)?;
-
-        if batch_size == 0 {
-            return Ok(());
-        }
-
-        let img_size = channels * height * max_width;
-
-        for (batch_idx, (img, &(_c, h, w))) in imgs.into_iter().zip(shapes.iter()).enumerate() {
-            let normalized_img = self.normalize(img);
-
-            let batch_offset = batch_idx * img_size;
-
-            for ch in 0.._c {
-                for y in 0..h {
-                    for x in 0..w {
-                        let src_idx = ch * h * w + y * w + x;
-                        let dst_idx = batch_offset + ch * height * max_width + y * max_width + x;
-                        if src_idx < normalized_img.len() && dst_idx < batch_tensor.len() {
-                            batch_tensor[dst_idx] = normalized_img[src_idx];
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     /// Applies normalization to a batch of images and stores the result in a pre-allocated tensor,
     /// processing images in a streaming fashion.
     ///
