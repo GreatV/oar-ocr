@@ -162,6 +162,10 @@ impl MinerU {
             .as_ref()
             .and_then(|cfg| cfg.repetition_penalty)
             .unwrap_or(1.0);
+        // generation_config.json ships no `no_repeat_ngram_size`, but the
+        // official two-step extraction (mineru_vl_utils) sets it to 100 for the
+        // default/table/formula recognition passes, which is exactly how this
+        // model is driven here. Match that default when the config is silent.
         let no_repeat_ngram_size = gen_cfg
             .as_ref()
             .and_then(|cfg| cfg.no_repeat_ngram_size)

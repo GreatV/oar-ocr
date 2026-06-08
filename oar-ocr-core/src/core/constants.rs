@@ -11,7 +11,8 @@ pub const DEFAULT_MAX_IMG_WIDTH: usize = 3200;
 pub const DEFAULT_MAX_SIDE_LIMIT: u32 = 4000;
 
 /// The default size to which image sides are limited during processing.
-pub const DEFAULT_LIMIT_SIDE_LEN: u32 = 736;
+/// Matches the official PaddleOCR DBNet default of 960 (was previously 736).
+pub const DEFAULT_LIMIT_SIDE_LEN: u32 = 960;
 
 /// The minimum number of items required before parallel processing is used.
 pub const DEFAULT_PARALLEL_THRESHOLD: usize = 4;

@@ -30,6 +30,22 @@ fn load_repetition_penalty(model_dir: &Path) -> f64 {
         .unwrap_or(1.0)
 }
 
+/// Read `generation_config.json::eos_token_id`. The official config provides
+/// a list (e.g. `[120007, 120020]`). Returns `None` if the file is missing
+/// or the field is absent.
+fn load_generation_eos_ids(model_dir: &Path) -> Option<Vec<u32>> {
+    let contents = std::fs::read_to_string(model_dir.join("generation_config.json")).ok()?;
+    let v = serde_json::from_str::<serde_json::Value>(&contents).ok()?;
+    let eos = v.get("eos_token_id")?;
+    if let Some(single) = eos.as_u64() {
+        Some(vec![single as u32])
+    } else if let Some(arr) = eos.as_array() {
+        Some(arr.iter().filter_map(|x| x.as_u64().map(|v| v as u32)).collect())
+    } else {
+        None
+    }
+}
+
 /// Apply HuggingFace's `RepetitionPenaltyLogitsProcessor` rule to a 1D logits
 /// tensor and return the argmax id. For each token id that appears in
 /// `seen`, the rule pushes its logit toward zero **once**:
@@ -109,6 +125,12 @@ impl HunyuanOcr {
         stop_token_ids.push(cfg.eos_token_id);
         if let Some(id) = tokenizer.token_to_id("<｜hy_Assistant｜>") {
             stop_token_ids.push(id);
+        }
+        // Also include eos_token_ids from generation_config.json — the official
+        // config lists [120007, 120020]; missing 120007 can cause the model to
+        // overshoot past a valid stop point.
+        if let Some(gen_eos) = load_generation_eos_ids(model_dir) {
+            stop_token_ids.extend(gen_eos);
         }
         stop_token_ids.sort_unstable();
         stop_token_ids.dedup();

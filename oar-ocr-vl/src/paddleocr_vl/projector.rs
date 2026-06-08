@@ -117,8 +117,8 @@ impl Projector {
                 candle_to_ocr_inference("PaddleOCR-VL", "projector linear_1 forward", e)
             })?;
             let hidden = hidden
-                .gelu()
-                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "projector gelu", e))?;
+                .gelu_erf()
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "projector gelu_erf", e))?;
             let hidden = self.linear_2.forward(&hidden).map_err(|e| {
                 candle_to_ocr_inference("PaddleOCR-VL", "projector linear_2 forward", e)
             })?;

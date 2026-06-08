@@ -2,9 +2,7 @@ use super::config::{EosTokenId, GlmOcrConfig, GlmOcrImageProcessorConfig};
 use super::processing::{GlmOcrImageInputs, preprocess_image};
 use super::text::GlmOcrTextModel;
 use super::vision::GlmOcrVisionModel;
-use crate::utils::{
-    candle_to_ocr_inference, candle_to_ocr_processing, truncate_repetitive_content,
-};
+use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
 use image::RgbImage;
@@ -309,9 +307,9 @@ impl GlmOcr {
     }
 
     fn decode_generated_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
-        let raw = self.decode_tokens_raw(tokens)?;
-        let truncated = truncate_repetitive_content(&raw, 10, 10, 10);
-        Ok(truncated.trim().to_string())
+        // No Rust-specific truncation heuristic — match official GLM-OCR behavior.
+        // The official implementation relies on EOS-based stopping only.
+        self.decode_tokens_raw(tokens)
     }
 
     fn prepare_inputs(
