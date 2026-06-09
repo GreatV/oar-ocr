@@ -38,11 +38,13 @@ fn load_generation_eos_ids(model_dir: &Path) -> Option<Vec<u32>> {
     let v = serde_json::from_str::<serde_json::Value>(&contents).ok()?;
     let eos = v.get("eos_token_id")?;
     if let Some(single) = eos.as_u64() {
-        Some(vec![single as u32])
-    } else if let Some(arr) = eos.as_array() {
-        Some(arr.iter().filter_map(|x| x.as_u64().map(|v| v as u32)).collect())
+        u32::try_from(single).ok().map(|id| vec![id])
     } else {
-        None
+        eos.as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_u64().and_then(|v| u32::try_from(v).ok()))
+                .collect()
+        })
     }
 }
 

@@ -157,6 +157,13 @@ impl DBPostProcess {
         let height = pred.shape()[0];
         let width = pred.shape()[1];
 
+        // Guard against an empty prediction map or contour: the bounds math
+        // below subtracts 1 from the dimensions, which would underflow (and the
+        // scanline loop would index out of bounds) for a 0-sized input.
+        if height == 0 || width == 0 || contour.points.is_empty() {
+            return 0.0;
+        }
+
         // Convert contour to a BoundingBox for scanline-based fill, identical
         // to the approach in `box_score_fast`. This gives the same area-averaged
         // score as the official `cv2.fillPoly` path.
@@ -164,7 +171,10 @@ impl DBPostProcess {
             points: contour
                 .points
                 .iter()
-                .map(|p| Point { x: p.x as f32, y: p.y as f32 })
+                .map(|p| Point {
+                    x: p.x as f32,
+                    y: p.y as f32,
+                })
                 .collect(),
         };
 

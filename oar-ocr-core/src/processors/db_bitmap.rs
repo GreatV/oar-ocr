@@ -308,11 +308,15 @@ impl DBPostProcess {
         let mut perimeter = 0.0f64;
         let n = clipper_path.len();
         if n >= 2 {
-            for i in 0..n {
-                let p1 = &clipper_path[i];
-                let p2 = &clipper_path[(i + 1) % n];
+            // Walk consecutive edges, then close the loop separately, so the
+            // hot inner loop avoids a `%` per iteration.
+            let mut p1 = &clipper_path[0];
+            for p2 in &clipper_path[1..] {
                 perimeter += (p2.x - p1.x).hypot(p2.y - p1.y);
+                p1 = p2;
             }
+            let first = &clipper_path[0];
+            perimeter += (first.x - p1.x).hypot(first.y - p1.y);
         }
 
         if perimeter <= f64::EPSILON {
@@ -351,13 +355,12 @@ impl DBPostProcess {
             .collect();
 
         // Remove duplicate closing point if present
-        if points.len() > 1 {
-            if let (Some(first), Some(last)) = (points.first(), points.last())
-                && (first.x - last.x).abs() < f32::EPSILON
-                && (first.y - last.y).abs() < f32::EPSILON
-            {
-                points.pop();
-            }
+        if points.len() > 1
+            && let (Some(first), Some(last)) = (points.first(), points.last())
+            && (first.x - last.x).abs() < f32::EPSILON
+            && (first.y - last.y).abs() < f32::EPSILON
+        {
+            points.pop();
         }
 
         if points.len() < 3 {

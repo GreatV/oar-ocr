@@ -77,6 +77,7 @@ pub fn image_to_chw(
 ///
 /// A flat `Vec<f32>` of length `grid_t * grid_h * grid_w * patch_dim`, ready to
 /// be wrapped as a `(num_patches, patch_dim)` tensor.
+#[allow(clippy::too_many_arguments)]
 pub fn patchify_merge_grouped(
     frames: &[&[f32]],
     channel: usize,
@@ -89,6 +90,18 @@ pub fn patchify_merge_grouped(
     merge_size: usize,
     temporal_patch: usize,
 ) -> Vec<f32> {
+    debug_assert_eq!(
+        frames.len(),
+        grid_t * temporal_patch,
+        "patchify_merge_grouped: expected {} frames (grid_t * temporal_patch), got {}",
+        grid_t * temporal_patch,
+        frames.len()
+    );
+    debug_assert!(
+        frames.iter().all(|f| f.len() == channel * height * width),
+        "patchify_merge_grouped: every frame must have length channel * height * width"
+    );
+
     let patch_dim = channel * temporal_patch * patch_size * patch_size;
     let num_patches = grid_t * grid_h * grid_w;
     let mut flat = Vec::with_capacity(num_patches * patch_dim);
@@ -352,8 +365,7 @@ mod tests {
         for c in 0..channel {
             for y in 0..height {
                 for x in 0..width {
-                    frame[c * height * width + y * width + x] =
-                        (c * 100 + y * 10 + x) as f32;
+                    frame[c * height * width + y * width + x] = (c * 100 + y * 10 + x) as f32;
                 }
             }
         }

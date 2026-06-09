@@ -182,11 +182,7 @@ impl DBPostProcess {
     ///
     /// Writes into the `GrayImage` row buffer directly (no per-pixel
     /// `put_pixel` overhead) and parallelises the work over rows.
-    fn threshold_to_mask(
-        &self,
-        pred: &ndarray::ArrayView2<f32>,
-        thresh: f32,
-    ) -> image::GrayImage {
+    fn threshold_to_mask(&self, pred: &ndarray::ArrayView2<f32>, thresh: f32) -> image::GrayImage {
         let height = pred.shape()[0] as u32;
         let width = pred.shape()[1] as u32;
         let mut mask_img = image::GrayImage::new(width, height);
@@ -199,8 +195,16 @@ impl DBPostProcess {
         // predictions), the parallel branch wins by a wide margin.
         let fill_row = |y: usize, row: &mut [u8]| {
             let pred_row = pred.row(y);
-            for (x, dst) in row.iter_mut().enumerate() {
-                *dst = if pred_row[x] > thresh { 255 } else { 0 };
+            // When the row is contiguous (typical row-major `pred`), iterate it
+            // as a slice so the compiler can drop bounds checks and vectorize.
+            if let Some(slice) = pred_row.as_slice() {
+                for (dst, &val) in row.iter_mut().zip(slice) {
+                    *dst = if val > thresh { 255 } else { 0 };
+                }
+            } else {
+                for (x, dst) in row.iter_mut().enumerate() {
+                    *dst = if pred_row[x] > thresh { 255 } else { 0 };
+                }
             }
         };
         if height >= 64 {

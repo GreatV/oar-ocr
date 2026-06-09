@@ -391,8 +391,7 @@ impl BoundingBox {
             let mut min_p = f32::MAX;
             let mut max_p = f32::MIN;
 
-            for k in 0..n {
-                let point = &hull_points[k];
+            for point in hull_points {
                 let dx = point.x - hix;
                 let dy = point.y - hiy;
                 let proj_n = nx * dx + ny * dy;

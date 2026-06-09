@@ -503,7 +503,8 @@ impl LayoutPostProcess {
         let mut keep = Vec::new();
         let mut suppressed = vec![false; boxes.len()];
 
-        for &i in &indices {
+        for pos in 0..indices.len() {
+            let i = indices[pos];
             if suppressed[i] {
                 continue;
             }
@@ -517,11 +518,12 @@ impl LayoutPostProcess {
             let ic = classes[i];
             let area_i = (ix2 - ix1) * (iy2 - iy1);
 
-            // Suppress later boxes with high IoU against `i`. Uses the
-            // precomputed AABB bounds and skips mismatched classes / already
-            // suppressed boxes to keep the inner loop cheap.
-            for &j in &indices {
-                if i == j || suppressed[j] || classes[j] != ic {
+            // Suppress later boxes with high IoU against `i`. `indices` is sorted
+            // by descending score, so only boxes after `pos` can be suppressed by
+            // `i` (earlier ones were already processed). Uses precomputed AABB
+            // bounds and skips mismatched classes / already-suppressed boxes.
+            for &j in &indices[pos + 1..] {
+                if suppressed[j] || classes[j] != ic {
                     continue;
                 }
                 let (jx1, jy1, jx2, jy2) = bounds[j];
