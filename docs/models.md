@@ -63,11 +63,11 @@ Choose between mobile and server variants based on your needs:
 
 PP-OCRv6 is the newest PP-OCR generation. Unlike the older models mirrored on this project's GitHub Releases, the v6 ONNX models are referenced **directly from PaddlePaddle's official channels**.
 
-> **Source / attribution.** Published by PaddlePaddle under the [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) project (Apache-2.0); links and naming follow the official [PP-OCRv6 Android deployment guide](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/inference_deployment/cross_platform/android_deployment.md). Models are served from Baidu Object Storage (`paddle-model-ecology.bj.bcebos.com`).
+> **Source / attribution.** Published by PaddlePaddle under the [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) project (Apache-2.0).
 
 ### Detection
 
-| Size | ONNX | BOS (`.tar`) |
+| Size | ONNX | BOS |
 |------|------|--------------|
 | tiny | 1.7MB | [`PP-OCRv6_tiny_det_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_det_onnx_infer.tar) |
 | small | 9.4MB | [`PP-OCRv6_small_det_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_det_onnx_infer.tar) |
@@ -75,13 +75,12 @@ PP-OCRv6 is the newest PP-OCR generation. Unlike the older models mirrored on th
 
 ### Recognition
 
-| Size | ONNX | Dict size | BOS (`.tar`) |
+| Size | ONNX | Dict size | BOS |
 |------|------|-----------|--------------|
 | tiny | 4.3MB | 6904 chars | [`PP-OCRv6_tiny_rec_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_rec_onnx_infer.tar) |
 | small | 20.2MB | 18708 chars | [`PP-OCRv6_small_rec_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_rec_onnx_infer.tar) |
 | medium | 73.0MB | 18708 chars | [`PP-OCRv6_medium_rec_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_medium_rec_onnx_infer.tar) |
 
-> **Each v6 size ships its own dictionary**, embedded in the archive's `inference.yml` under `PostProcess.character_dict`.
 
 ## Character Dictionaries
 
