@@ -1,6 +1,5 @@
 use super::DBPostProcess;
 use crate::processors::geometry::{BoundingBox, Point, ScanlineBuffer};
-use itertools::Itertools;
 use rayon::prelude::*;
 
 #[derive(Debug, Clone, Copy)]
@@ -36,20 +35,8 @@ impl DBPostProcess {
         let height = pred.shape()[0];
         let width = pred.shape()[1];
 
-        let (min_x, max_x) = bbox
-            .points
-            .iter()
-            .map(|p| p.x)
-            .minmax()
-            .into_option()
-            .unwrap_or((0.0, 0.0));
-        let (min_y, max_y) = bbox
-            .points
-            .iter()
-            .map(|p| p.y)
-            .minmax()
-            .into_option()
-            .unwrap_or((0.0, 0.0));
+        // Single-pass axis-aligned bounding box (returns (0,0,0,0) when empty).
+        let (min_x, min_y, max_x, max_y) = bbox.aabb();
 
         // Match PaddleX / OpenCV semantics:
         // xmin,ymin use floor; xmax,ymax use ceil before inclusive slicing.
@@ -178,20 +165,8 @@ impl DBPostProcess {
                 .collect(),
         };
 
-        let (min_x, max_x) = bbox
-            .points
-            .iter()
-            .map(|p| p.x)
-            .minmax()
-            .into_option()
-            .unwrap_or((0.0, 0.0));
-        let (min_y, max_y) = bbox
-            .points
-            .iter()
-            .map(|p| p.y)
-            .minmax()
-            .into_option()
-            .unwrap_or((0.0, 0.0));
+        // Single-pass axis-aligned bounding box (returns (0,0,0,0) when empty).
+        let (min_x, min_y, max_x, max_y) = bbox.aabb();
 
         let start_y = min_y.floor().max(0.0).min(height as f32 - 1.0) as usize;
         let end_y = max_y.ceil().max(0.0).min(height as f32 - 1.0) as usize + 1;

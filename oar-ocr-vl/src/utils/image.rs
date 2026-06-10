@@ -34,15 +34,17 @@ pub fn image_to_chw(
 
     // Parallel iteration over pixels: each iteration writes one element in each
     // plane at the same index, and the three planes are non-overlapping.
-    r_plane
-        .par_iter_mut()
+    // `par_chunks_exact` walks `raw_pixels` in `RGB_CHANNELS`-sized strides so
+    // the compiler can elide bounds checks on the source indexing.
+    raw_pixels
+        .par_chunks_exact(RGB_CHANNELS)
+        .zip(r_plane.par_iter_mut())
         .zip(g_plane.par_iter_mut())
         .zip(b_plane.par_iter_mut())
-        .enumerate()
-        .for_each(|(i, ((r_out, g_out), b_out))| {
-            let r = raw_pixels[RGB_CHANNELS * i + R] as f32 * scale;
-            let g = raw_pixels[RGB_CHANNELS * i + G] as f32 * scale;
-            let b = raw_pixels[RGB_CHANNELS * i + B] as f32 * scale;
+        .for_each(|(((chunk, r_out), g_out), b_out)| {
+            let r = chunk[R] as f32 * scale;
+            let g = chunk[G] as f32 * scale;
+            let b = chunk[B] as f32 * scale;
 
             *r_out = (r - mean[0]) / std[0];
             *g_out = (g - mean[1]) / std[1];

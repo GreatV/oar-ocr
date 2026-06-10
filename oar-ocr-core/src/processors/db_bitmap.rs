@@ -52,9 +52,6 @@ impl DBPostProcess {
                 continue;
             }
 
-            if approx.points.len() <= 2 {
-                continue;
-            }
             let unclipped = self.unclip(&approx, unclip_ratio);
             if unclipped.points.is_empty() {
                 continue;

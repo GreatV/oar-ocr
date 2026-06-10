@@ -495,10 +495,7 @@ impl LayoutPostProcess {
 
         // Precompute AABB bounds once (used by every IoU). This collapses
         // the original 4 separate `fold` passes per box down to one pass.
-        let mut bounds: Vec<(f32, f32, f32, f32)> = Vec::with_capacity(boxes.len());
-        for b in boxes {
-            bounds.push(b.aabb());
-        }
+        let bounds: Vec<(f32, f32, f32, f32)> = boxes.iter().map(|b| b.aabb()).collect();
 
         let mut keep = Vec::new();
         let mut suppressed = vec![false; boxes.len()];
