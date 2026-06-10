@@ -1,5 +1,7 @@
 use super::config::MinerUImageProcessorConfig;
-use crate::utils::image::{image_to_chw, pil_resample_to_filter_type, smart_resize};
+use crate::utils::image::{
+    image_to_chw, patchify_merge_grouped, pil_resample_to_filter_type, smart_resize,
+};
 use candle_core::{DType, Device, Tensor};
 use image::{RgbImage, imageops::FilterType};
 use oar_ocr_core::core::OCRError;
@@ -109,36 +111,18 @@ pub fn preprocess_images(
         let patch_dim = channel * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size;
         let num_patches = grid_t * grid_h * grid_w;
 
-        let mut flat_patches: Vec<f32> = Vec::with_capacity(num_patches * patch_dim);
-
-        let frame_area = height * width;
-        for tt in 0..grid_t {
-            for hb in 0..(grid_h / merge) {
-                for wb in 0..(grid_w / merge) {
-                    for h_inner in 0..merge {
-                        for w_inner in 0..merge {
-                            let base_y = (hb * merge + h_inner) * cfg.patch_size;
-                            let base_x = (wb * merge + w_inner) * cfg.patch_size;
-
-                            for c in 0..channel {
-                                for t in 0..cfg.temporal_patch_size {
-                                    let frame_idx = tt * cfg.temporal_patch_size + t;
-                                    let frame_data = frames[frame_idx];
-                                    for dy in 0..cfg.patch_size {
-                                        let y = base_y + dy;
-                                        let row_base = c * frame_area + y * width;
-                                        for dx in 0..cfg.patch_size {
-                                            let x = base_x + dx;
-                                            flat_patches.push(frame_data[row_base + x]);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let flat_patches = patchify_merge_grouped(
+            &frames,
+            channel,
+            height,
+            width,
+            grid_t,
+            grid_h,
+            grid_w,
+            cfg.patch_size,
+            merge,
+            cfg.temporal_patch_size,
+        );
 
         if flat_patches.len() != num_patches * patch_dim {
             return Err(OCRError::Processing {

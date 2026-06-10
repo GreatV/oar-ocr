@@ -6,7 +6,6 @@
 
 use imageproc::contours::Contour;
 use imageproc::point::Point as ImageProcPoint;
-use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -176,14 +175,18 @@ impl BoundingBox {
     /// # Returns
     ///
     /// The minimum x-coordinate, or 0.0 if there are no points.
+    #[inline]
     pub fn x_min(&self) -> f32 {
         if self.points.is_empty() {
             return 0.0;
         }
-        self.points
-            .iter()
-            .map(|p| p.x)
-            .fold(f32::INFINITY, f32::min)
+        let mut m = f32::INFINITY;
+        for p in &self.points {
+            if p.x < m {
+                m = p.x;
+            }
+        }
+        m
     }
 
     /// Gets the minimum y-coordinate of all points in the bounding box.
@@ -191,14 +194,18 @@ impl BoundingBox {
     /// # Returns
     ///
     /// The minimum y-coordinate, or 0.0 if there are no points.
+    #[inline]
     pub fn y_min(&self) -> f32 {
         if self.points.is_empty() {
             return 0.0;
         }
-        self.points
-            .iter()
-            .map(|p| p.y)
-            .fold(f32::INFINITY, f32::min)
+        let mut m = f32::INFINITY;
+        for p in &self.points {
+            if p.y < m {
+                m = p.y;
+            }
+        }
+        m
     }
 
     /// Computes the convex hull of the bounding box using Graham's scan algorithm.
@@ -207,12 +214,21 @@ impl BoundingBox {
     ///
     /// A new `BoundingBox` representing the convex hull. If the bounding box has fewer than 3 points,
     /// returns a clone of the original bounding box.
+    #[allow(dead_code)]
     fn convex_hull(&self) -> BoundingBox {
-        if self.points.len() < 3 {
-            return self.clone();
+        Self::convex_hull_from_points(&self.points)
+    }
+
+    /// Computes the convex hull of a slice of points using Graham's scan.
+    ///
+    /// Equivalent to `convex_hull` but does not require a `BoundingBox`
+    /// wrapper — useful in hot paths that have a `&[Point]` directly.
+    fn convex_hull_from_points(src: &[Point]) -> BoundingBox {
+        if src.len() < 3 {
+            return BoundingBox::new(src.to_vec());
         }
 
-        let mut points = self.points.clone();
+        let mut points = src.to_vec();
 
         // Find the point with the lowest y-coordinate (and leftmost if tied)
         let mut start_idx = 0;
@@ -226,7 +242,8 @@ impl BoundingBox {
         points.swap(0, start_idx);
         let start_point = points[0];
 
-        // Sort points by polar angle with respect to the start point
+        // Sort points by polar angle with respect to the start point.
+        // Ties (collinear points, equal angle) are broken by squared distance.
         points[1..].sort_by(|a, b| {
             let angle_a = (a.y - start_point.y).atan2(a.x - start_point.x);
             let angle_b = (b.y - start_point.y).atan2(b.x - start_point.x);
@@ -242,7 +259,7 @@ impl BoundingBox {
         });
 
         // Build the convex hull using a stack
-        let mut hull = Vec::new();
+        let mut hull = Vec::with_capacity(points.len());
         for point in points {
             // Remove points that make clockwise turns
             while hull.len() > 1
@@ -282,65 +299,64 @@ impl BoundingBox {
     /// A `MinAreaRect` representing the minimum area rectangle. If the bounding box has fewer than
     /// 3 points, returns a rectangle with zero dimensions.
     pub fn get_min_area_rect(&self) -> MinAreaRect {
-        if self.points.len() < 3 {
-            return MinAreaRect {
-                center: Point::new(0.0, 0.0),
-                width: 0.0,
-                height: 0.0,
-                angle: 0.0,
-            };
-        }
+        Self::get_min_area_rect_from_points(&self.points)
+    }
 
-        // Get the convex hull of the bounding box
-        let hull = self.convex_hull();
-        let hull_points = &hull.points;
-
-        // Handle degenerate cases
-        if hull_points.len() < 3 {
-            let (min_x, max_x) = match self.points.iter().map(|p| p.x).minmax().into_option() {
-                Some((min, max)) => (min, max),
-                None => {
-                    return MinAreaRect {
-                        center: Point::new(0.0, 0.0),
-                        width: 0.0,
-                        height: 0.0,
-                        angle: 0.0,
-                    };
-                }
-            };
-
-            let (min_y, max_y) = match self.points.iter().map(|p| p.y).minmax().into_option() {
-                Some((min, max)) => (min, max),
-                None => {
-                    return MinAreaRect {
-                        center: Point::new(0.0, 0.0),
-                        width: 0.0,
-                        height: 0.0,
-                        angle: 0.0,
-                    };
-                }
-            };
-
-            let center = Point::new((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
-            let width = max_x - min_x;
-            let height = max_y - min_y;
-
-            return MinAreaRect {
-                center,
-                width,
-                height,
-                angle: 0.0,
-            };
-        }
-
-        // Find the minimum area rectangle using rotating calipers
-        let mut min_area = f32::MAX;
-        let mut min_rect = MinAreaRect {
+    /// Computes the minimum area rectangle that encloses a slice of points.
+    ///
+    /// Same algorithm as [`Self::get_min_area_rect`] but operates on a `&[Point]`
+    /// directly, avoiding the cost of a `BoundingBox` wrapper allocation. This
+    /// is the version called from DB postprocess hot paths.
+    pub fn get_min_area_rect_from_points(src: &[Point]) -> MinAreaRect {
+        let zero = MinAreaRect {
             center: Point::new(0.0, 0.0),
             width: 0.0,
             height: 0.0,
             angle: 0.0,
         };
+        if src.len() < 3 {
+            return zero;
+        }
+
+        // Get the convex hull of the bounding box
+        let hull = Self::convex_hull_from_points(src);
+        let hull_points = &hull.points;
+
+        // Handle degenerate cases
+        if hull_points.len() < 3 {
+            let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
+            let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+            for p in src {
+                if p.x < min_x {
+                    min_x = p.x;
+                }
+                if p.x > max_x {
+                    max_x = p.x;
+                }
+                if p.y < min_y {
+                    min_y = p.y;
+                }
+                if p.y > max_y {
+                    max_y = p.y;
+                }
+            }
+            if !min_x.is_finite() {
+                return zero;
+            }
+            let center = Point::new((min_x + max_x) * 0.5, (min_y + max_y) * 0.5);
+            return MinAreaRect {
+                center,
+                width: max_x - min_x,
+                height: max_y - min_y,
+                angle: 0.0,
+            };
+        }
+
+        // Find the minimum area rectangle using rotating calipers: for each
+        // hull edge, project all points onto the edge and its perpendicular,
+        // and track the orientation that yields the smallest bounding area.
+        let mut min_area = f32::MAX;
+        let mut min_rect = zero;
 
         let n = hull_points.len();
         for i in 0..n {
@@ -349,37 +365,49 @@ impl BoundingBox {
             // Calculate the edge vector
             let edge_x = hull_points[j].x - hull_points[i].x;
             let edge_y = hull_points[j].y - hull_points[i].y;
-            let edge_length = (edge_x * edge_x + edge_y * edge_y).sqrt();
+            let edge_length_sq = edge_x * edge_x + edge_y * edge_y;
 
             // Skip degenerate edges
-            if edge_length < f32::EPSILON {
+            if edge_length_sq < f32::EPSILON {
                 continue;
             }
+            let inv_edge_length = 1.0 / edge_length_sq.sqrt();
 
             // Normalize the edge vector
-            let nx = edge_x / edge_length;
-            let ny = edge_y / edge_length;
+            let nx = edge_x * inv_edge_length;
+            let ny = edge_y * inv_edge_length;
 
-            // Calculate the perpendicular vector
+            // Perpendicular vector (rotate 90°)
             let px = -ny;
             let py = nx;
 
-            // Project all points onto the edge and perpendicular vectors
+            // Project all points onto the edge and perpendicular vectors.
+            // Cache `hull_points[i]` reads in locals to help the optimizer.
+            let hix = hull_points[i].x;
+            let hiy = hull_points[i].y;
+
             let mut min_n = f32::MAX;
             let mut max_n = f32::MIN;
             let mut min_p = f32::MAX;
             let mut max_p = f32::MIN;
 
-            for k in 0..n {
-                let point = &hull_points[k];
-
-                let proj_n = nx * (point.x - hull_points[i].x) + ny * (point.y - hull_points[i].y);
-                min_n = min_n.min(proj_n);
-                max_n = max_n.max(proj_n);
-
-                let proj_p = px * (point.x - hull_points[i].x) + py * (point.y - hull_points[i].y);
-                min_p = min_p.min(proj_p);
-                max_p = max_p.max(proj_p);
+            for point in hull_points {
+                let dx = point.x - hix;
+                let dy = point.y - hiy;
+                let proj_n = nx * dx + ny * dy;
+                let proj_p = px * dx + py * dy;
+                if proj_n < min_n {
+                    min_n = proj_n;
+                }
+                if proj_n > max_n {
+                    max_n = proj_n;
+                }
+                if proj_p < min_p {
+                    min_p = proj_p;
+                }
+                if proj_p > max_p {
+                    max_p = proj_p;
+                }
             }
 
             // Calculate the width, height, and area of the rectangle
@@ -391,11 +419,11 @@ impl BoundingBox {
             if area < min_area {
                 min_area = area;
 
-                let center_n = (min_n + max_n) / 2.0;
-                let center_p = (min_p + max_p) / 2.0;
+                let center_n = (min_n + max_n) * 0.5;
+                let center_p = (min_p + max_p) * 0.5;
 
-                let center_x = hull_points[i].x + center_n * nx + center_p * px;
-                let center_y = hull_points[i].y + center_n * ny + center_p * py;
+                let center_x = hix + center_n * nx + center_p * px;
+                let center_y = hiy + center_n * ny + center_p * py;
 
                 let angle_rad = f32::atan2(ny, nx);
                 let angle_deg = angle_rad * 180.0 / PI;
@@ -537,14 +565,18 @@ impl BoundingBox {
     /// # Returns
     ///
     /// The maximum x-coordinate, or 0.0 if there are no points.
+    #[inline]
     pub fn x_max(&self) -> f32 {
         if self.points.is_empty() {
             return 0.0;
         }
-        self.points
-            .iter()
-            .map(|p| p.x)
-            .fold(f32::NEG_INFINITY, f32::max)
+        let mut m = f32::NEG_INFINITY;
+        for p in &self.points {
+            if p.x > m {
+                m = p.x;
+            }
+        }
+        m
     }
 
     /// Gets the maximum y-coordinate of all points in the bounding box.
@@ -552,14 +584,48 @@ impl BoundingBox {
     /// # Returns
     ///
     /// The maximum y-coordinate, or 0.0 if there are no points.
+    #[inline]
     pub fn y_max(&self) -> f32 {
         if self.points.is_empty() {
             return 0.0;
         }
-        self.points
-            .iter()
-            .map(|p| p.y)
-            .fold(f32::NEG_INFINITY, f32::max)
+        let mut m = f32::NEG_INFINITY;
+        for p in &self.points {
+            if p.y > m {
+                m = p.y;
+            }
+        }
+        m
+    }
+
+    /// Computes the axis-aligned bounding box of all points in a single pass.
+    ///
+    /// Returns `(x_min, y_min, x_max, y_max)`. Returns `(0, 0, 0, 0)` if the
+    /// bounding box is empty. This avoids four separate iterations over the
+    /// points — useful in hot paths (IoU, intersection, NMS) that need all
+    /// four bounds.
+    #[inline]
+    pub fn aabb(&self) -> (f32, f32, f32, f32) {
+        if self.points.is_empty() {
+            return (0.0, 0.0, 0.0, 0.0);
+        }
+        let (mut xmin, mut ymin) = (f32::INFINITY, f32::INFINITY);
+        let (mut xmax, mut ymax) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for p in &self.points {
+            if p.x < xmin {
+                xmin = p.x;
+            }
+            if p.x > xmax {
+                xmax = p.x;
+            }
+            if p.y < ymin {
+                ymin = p.y;
+            }
+            if p.y > ymax {
+                ymax = p.y;
+            }
+        }
+        (xmin, ymin, xmax, ymax)
     }
 
     /// Gets the geometric center (centroid) of the bounding box.
@@ -571,8 +637,11 @@ impl BoundingBox {
         if self.points.is_empty() {
             return Point::new(0.0, 0.0);
         }
-        let sum_x: f32 = self.points.iter().map(|p| p.x).sum();
-        let sum_y: f32 = self.points.iter().map(|p| p.y).sum();
+        let (mut sum_x, mut sum_y) = (0.0f32, 0.0f32);
+        for p in &self.points {
+            sum_x += p.x;
+            sum_y += p.y;
+        }
         let count = self.points.len() as f32;
         Point::new(sum_x / count, sum_y / count)
     }
@@ -586,16 +655,10 @@ impl BoundingBox {
     /// # Returns
     ///
     /// The area of the intersection. Returns 0.0 if there is no intersection.
+    #[inline]
     pub fn intersection_area(&self, other: &BoundingBox) -> f32 {
-        let x1_min = self.x_min();
-        let y1_min = self.y_min();
-        let x1_max = self.x_max();
-        let y1_max = self.y_max();
-
-        let x2_min = other.x_min();
-        let y2_min = other.y_min();
-        let x2_max = other.x_max();
-        let y2_max = other.y_max();
+        let (x1_min, y1_min, x1_max, y1_max) = self.aabb();
+        let (x2_min, y2_min, x2_max, y2_max) = other.aabb();
 
         // Compute intersection rectangle
         let inter_x_min = x1_min.max(x2_min);
@@ -621,27 +684,29 @@ impl BoundingBox {
     /// # Returns
     ///
     /// The IoU value between 0.0 and 1.0. Returns 0.0 if there is no intersection.
+    #[inline]
     pub fn iou(&self, other: &BoundingBox) -> f32 {
-        let inter_area = self.intersection_area(other);
+        let (x1_min, y1_min, x1_max, y1_max) = self.aabb();
+        let (x2_min, y2_min, x2_max, y2_max) = other.aabb();
 
+        let inter_x_min = x1_min.max(x2_min);
+        let inter_y_min = y1_min.max(y2_min);
+        let inter_x_max = x1_max.min(x2_max);
+        let inter_y_max = y1_max.min(y2_max);
+
+        if inter_x_min >= inter_x_max || inter_y_min >= inter_y_max {
+            return 0.0;
+        }
+
+        let inter_area = (inter_x_max - inter_x_min) * (inter_y_max - inter_y_min);
         if inter_area <= 0.0 {
             return 0.0;
         }
 
         // Use AABB areas for both boxes, matching the AABB-based intersection.
         // For rotated polygons this is approximate but keeps IoU consistent.
-        let x1_min = self.x_min();
-        let y1_min = self.y_min();
-        let x1_max = self.x_max();
-        let y1_max = self.y_max();
         let aabb_area1 = (x1_max - x1_min) * (y1_max - y1_min);
-
-        let x2_min = other.x_min();
-        let y2_min = other.y_min();
-        let x2_max = other.x_max();
-        let y2_max = other.y_max();
         let aabb_area2 = (x2_max - x2_min) * (y2_max - y2_min);
-
         let union_area = aabb_area1 + aabb_area2 - inter_area;
 
         if union_area <= 0.0 {
@@ -665,19 +730,26 @@ impl BoundingBox {
     /// # Returns
     ///
     /// The IoA value between 0.0 and 1.0. Returns 0.0 if self has zero area or no intersection.
+    #[inline]
     pub fn ioa(&self, other: &BoundingBox) -> f32 {
-        let inter_area = self.intersection_area(other);
+        let (x1_min, y1_min, x1_max, y1_max) = self.aabb();
+        let (x2_min, y2_min, x2_max, y2_max) = other.aabb();
 
+        let inter_x_min = x1_min.max(x2_min);
+        let inter_y_min = y1_min.max(y2_min);
+        let inter_x_max = x1_max.min(x2_max);
+        let inter_y_max = y1_max.min(y2_max);
+
+        if inter_x_min >= inter_x_max || inter_y_min >= inter_y_max {
+            return 0.0;
+        }
+
+        let inter_area = (inter_x_max - inter_x_min) * (inter_y_max - inter_y_min);
         if inter_area <= 0.0 {
             return 0.0;
         }
 
-        let x_min = self.x_min();
-        let y_min = self.y_min();
-        let x_max = self.x_max();
-        let y_max = self.y_max();
-        let self_area = (x_max - x_min) * (y_max - y_min);
-
+        let self_area = (x1_max - x1_min) * (y1_max - y1_min);
         if self_area <= 0.0 {
             return 0.0;
         }
@@ -695,10 +767,12 @@ impl BoundingBox {
     ///
     /// A new `BoundingBox` that encloses both input bounding boxes.
     pub fn union(&self, other: &Self) -> Self {
-        let new_x_min = self.x_min().min(other.x_min());
-        let new_y_min = self.y_min().min(other.y_min());
-        let new_x_max = self.x_max().max(other.x_max());
-        let new_y_max = self.y_max().max(other.y_max());
+        let (x1_min, y1_min, x1_max, y1_max) = self.aabb();
+        let (x2_min, y2_min, x2_max, y2_max) = other.aabb();
+        let new_x_min = x1_min.min(x2_min);
+        let new_y_min = y1_min.min(y2_min);
+        let new_x_max = x1_max.max(x2_max);
+        let new_y_max = y1_max.max(y2_max);
         BoundingBox::from_coords(new_x_min, new_y_min, new_x_max, new_y_max)
     }
 
@@ -712,21 +786,15 @@ impl BoundingBox {
     /// # Returns
     ///
     /// `true` if this bounding box is fully contained within the container, `false` otherwise.
+    #[inline]
     pub fn is_fully_inside(&self, container: &BoundingBox, tolerance: f32) -> bool {
-        let self_x_min = self.x_min();
-        let self_y_min = self.y_min();
-        let self_x_max = self.x_max();
-        let self_y_max = self.y_max();
+        let (sx_min, sy_min, sx_max, sy_max) = self.aabb();
+        let (cx_min, cy_min, cx_max, cy_max) = container.aabb();
 
-        let cont_x_min = container.x_min();
-        let cont_y_min = container.y_min();
-        let cont_x_max = container.x_max();
-        let cont_y_max = container.y_max();
-
-        self_x_min + tolerance >= cont_x_min
-            && self_y_min + tolerance >= cont_y_min
-            && self_x_max - tolerance <= cont_x_max
-            && self_y_max - tolerance <= cont_y_max
+        sx_min + tolerance >= cx_min
+            && sy_min + tolerance >= cy_min
+            && sx_max - tolerance <= cx_max
+            && sy_max - tolerance <= cy_max
     }
 
     /// Checks if this bounding box overlaps with another bounding box.
@@ -744,28 +812,14 @@ impl BoundingBox {
     /// # Returns
     ///
     /// `true` if the boxes overlap significantly, `false` otherwise.
+    #[inline]
     pub fn overlaps_with(&self, other: &BoundingBox, threshold: f32) -> bool {
-        let x1_min = self.x_min();
-        let y1_min = self.y_min();
-        let x1_max = self.x_max();
-        let y1_max = self.y_max();
+        let (x1_min, y1_min, x1_max, y1_max) = self.aabb();
+        let (x2_min, y2_min, x2_max, y2_max) = other.aabb();
 
-        let x2_min = other.x_min();
-        let y2_min = other.y_min();
-        let x2_max = other.x_max();
-        let y2_max = other.y_max();
+        let inter_width = x1_max.min(x2_max) - x1_min.max(x2_min);
+        let inter_height = y1_max.min(y2_max) - y1_min.max(y2_min);
 
-        // Compute intersection rectangle
-        let inter_x_min = x1_min.max(x2_min);
-        let inter_y_min = y1_min.max(y2_min);
-        let inter_x_max = x1_max.min(x2_max);
-        let inter_y_max = y1_max.min(y2_max);
-
-        // Compute intersection dimensions
-        let inter_width = inter_x_max - inter_x_min;
-        let inter_height = inter_y_max - inter_y_min;
-
-        // Check if intersection is significant
         inter_width > threshold && inter_height > threshold
     }
 

@@ -16,6 +16,7 @@ mod db_score;
 use crate::processors::geometry::BoundingBox;
 use crate::processors::types::{BoxType, ImageScaleInfo, ScoreMode};
 use ndarray::Axis;
+use rayon::prelude::*;
 
 /// Runtime configuration for DB post-processing.
 ///
@@ -107,8 +108,15 @@ impl DBPostProcess {
         let box_thresh = config.map(|c| c.box_thresh).unwrap_or(self.box_thresh);
         let unclip_ratio = config.map(|c| c.unclip_ratio).unwrap_or(self.unclip_ratio);
 
-        let mut all_boxes = Vec::new();
-        let mut all_scores = Vec::new();
+        // Process per-image: each batch entry is independent, so we can
+        // process them in parallel via rayon. The body of `process` itself
+        // parallelises the thresholding step below, so we keep this loop
+        // serial here — fanning out the contour/postprocess work for a
+        // small batch (<= a few images) rarely pays back the rayon setup
+        // cost, but the dominant cost is the thresholded bitmap build
+        // which is now multi-threaded.
+        let mut all_boxes = Vec::with_capacity(img_shapes.len());
+        let mut all_scores = Vec::with_capacity(img_shapes.len());
 
         for (batch_idx, shape_batch) in img_shapes.iter().enumerate() {
             let pred_slice = preds.index_axis(Axis(0), batch_idx);
@@ -145,14 +153,13 @@ impl DBPostProcess {
             src_w
         );
 
-        // Create binary mask directly as GrayImage to avoid intermediate Vec<Vec<bool>>
-        let mut mask_img = image::GrayImage::new(width, height);
-        for y in 0..height as usize {
-            for x in 0..width as usize {
-                let pixel_value = if pred[[y, x]] > thresh { 255 } else { 0 };
-                mask_img.put_pixel(x as u32, y as u32, image::Luma([pixel_value]));
-            }
-        }
+        // Build binary mask directly as a `GrayImage` buffer. The previous
+        // implementation called `put_pixel` per element, which involves a
+        // bounds check and a function call for every pixel. Writing into
+        // the buffer with a single pass over the prediction map (chunked
+        // across rows) is several times faster and trivially parallelises
+        // over rows via rayon.
+        let mask_img = self.threshold_to_mask(pred, thresh);
 
         // Apply dilation if needed
         let mask_img = if self.use_dilation {
@@ -169,5 +176,47 @@ impl DBPostProcess {
                 self.boxes_from_bitmap(pred, &mask_img, src_w, src_h, box_thresh, unclip_ratio)
             }
         }
+    }
+
+    /// Builds a binary segmentation mask from a prediction heatmap.
+    ///
+    /// Writes into the `GrayImage` row buffer directly (no per-pixel
+    /// `put_pixel` overhead) and parallelises the work over rows.
+    fn threshold_to_mask(&self, pred: &ndarray::ArrayView2<f32>, thresh: f32) -> image::GrayImage {
+        let height = pred.shape()[0] as u32;
+        let width = pred.shape()[1] as u32;
+        let mut mask_img = image::GrayImage::new(width, height);
+        let buf: &mut [u8] = mask_img.as_mut();
+        let row_bytes = width as usize;
+
+        // Fill the mask row by row. Pick between serial and parallel branches
+        // based on the number of rows: for small masks the rayon per-row
+        // overhead dominates; for typical 800x800 DB outputs (640x640
+        // predictions), the parallel branch wins by a wide margin.
+        let fill_row = |y: usize, row: &mut [u8]| {
+            let pred_row = pred.row(y);
+            // When the row is contiguous (typical row-major `pred`), iterate it
+            // as a slice so the compiler can drop bounds checks and vectorize.
+            if let Some(slice) = pred_row.as_slice() {
+                for (dst, &val) in row.iter_mut().zip(slice) {
+                    *dst = if val > thresh { 255 } else { 0 };
+                }
+            } else {
+                for (x, dst) in row.iter_mut().enumerate() {
+                    *dst = if pred_row[x] > thresh { 255 } else { 0 };
+                }
+            }
+        };
+        if height >= 64 {
+            buf.par_chunks_mut(row_bytes)
+                .enumerate()
+                .for_each(|(y, row)| fill_row(y, row));
+        } else {
+            buf.chunks_mut(row_bytes)
+                .enumerate()
+                .for_each(|(y, row)| fill_row(y, row));
+        }
+
+        mask_img
     }
 }

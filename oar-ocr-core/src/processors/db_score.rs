@@ -1,6 +1,5 @@
 use super::DBPostProcess;
-use crate::processors::geometry::{BoundingBox, ScanlineBuffer};
-use itertools::Itertools;
+use crate::processors::geometry::{BoundingBox, Point, ScanlineBuffer};
 use rayon::prelude::*;
 
 #[derive(Debug, Clone, Copy)]
@@ -36,20 +35,8 @@ impl DBPostProcess {
         let height = pred.shape()[0];
         let width = pred.shape()[1];
 
-        let (min_x, max_x) = bbox
-            .points
-            .iter()
-            .map(|p| p.x)
-            .minmax()
-            .into_option()
-            .unwrap_or((0.0, 0.0));
-        let (min_y, max_y) = bbox
-            .points
-            .iter()
-            .map(|p| p.y)
-            .minmax()
-            .into_option()
-            .unwrap_or((0.0, 0.0));
+        // Single-pass axis-aligned bounding box (returns (0,0,0,0) when empty).
+        let (min_x, min_y, max_x, max_y) = bbox.aabb();
 
         // Match PaddleX / OpenCV semantics:
         // xmin,ymin use floor; xmax,ymax use ceil before inclusive slicing.
@@ -146,28 +133,47 @@ impl DBPostProcess {
         }
     }
 
+    /// Score a region using a filled polygon mask (matching official PaddleOCR
+    /// `det_db_score_mode='slow'` which uses `cv2.fillPoly` to average the
+    /// prediction map over the entire enclosed area, not just the contour boundary).
     pub(super) fn box_score_slow(
         &self,
         pred: &ndarray::ArrayView2<f32>,
         contour: &imageproc::contours::Contour<u32>,
     ) -> f32 {
-        let mut total_score = 0.0;
-        let mut pixel_count = 0;
+        let height = pred.shape()[0];
+        let width = pred.shape()[1];
 
-        for point in &contour.points {
-            let x = point.x as usize;
-            let y = point.y as usize;
-
-            if y < pred.shape()[0] && x < pred.shape()[1] {
-                total_score += pred[[y, x]];
-                pixel_count += 1;
-            }
+        // Guard against an empty prediction map or contour: the bounds math
+        // below subtracts 1 from the dimensions, which would underflow (and the
+        // scanline loop would index out of bounds) for a 0-sized input.
+        if height == 0 || width == 0 || contour.points.is_empty() {
+            return 0.0;
         }
 
-        if pixel_count > 0 {
-            total_score / pixel_count as f32
-        } else {
-            0.0
-        }
+        // Convert contour to a BoundingBox for scanline-based fill, identical
+        // to the approach in `box_score_fast`. This gives the same area-averaged
+        // score as the official `cv2.fillPoly` path.
+        let bbox = BoundingBox {
+            points: contour
+                .points
+                .iter()
+                .map(|p| Point {
+                    x: p.x as f32,
+                    y: p.y as f32,
+                })
+                .collect(),
+        };
+
+        // Single-pass axis-aligned bounding box (returns (0,0,0,0) when empty).
+        let (min_x, min_y, max_x, max_y) = bbox.aabb();
+
+        let start_y = min_y.floor().max(0.0).min(height as f32 - 1.0) as usize;
+        let end_y = max_y.ceil().max(0.0).min(height as f32 - 1.0) as usize + 1;
+        let start_x = min_x.floor().max(0.0).min(width as f32 - 1.0) as usize;
+        let end_x = max_x.ceil().max(0.0).min(width as f32 - 1.0) as usize + 1;
+
+        let region = Region::new(start_y, end_y, start_x, end_x);
+        self.box_score_fast_contour_with_policy(pred, &bbox, region, None)
     }
 }

@@ -8,7 +8,6 @@ use super::vision::VisionModel;
 use crate::attention::{
     combine_masks, create_causal_mask, create_generation_mask, create_left_padding_mask,
 };
-use crate::utils::image::pil_resample_to_filter_type;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::Module;
@@ -257,11 +256,11 @@ impl PaddleOcrVl {
         let needs_spotting = tasks.iter().any(|t| t.needs_spotting_preprocess());
         let resized_images: Vec<RgbImage>;
         let images_for_preprocess = if needs_spotting {
-            let resize_filter = self
-                .image_cfg
-                .resample
-                .and_then(pil_resample_to_filter_type)
-                .unwrap_or(FilterType::CatmullRom);
+            // The official spotting preprocessing hardcodes LANCZOS for the 2x
+            // pre-upscale (README inference script), independent of the
+            // processor's `resample` (which only governs the model-internal
+            // smart_resize). Match it with Lanczos3 here.
+            let resize_filter = FilterType::Lanczos3;
             let mut processed = Vec::with_capacity(images.len());
             for (img, task) in images.iter().zip(tasks.iter()) {
                 if task.needs_spotting_preprocess()

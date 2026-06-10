@@ -93,9 +93,11 @@ impl DetResizeForTest {
         Self {
             resize_type,
             limit_side_len: limit_side_len.or(Some(DEFAULT_LIMIT_SIDE_LEN)),
-            limit_type: limit_type.or(Some(LimitType::Min)),
+            limit_type: limit_type.or(Some(LimitType::Max)),
             max_side_limit: max_side_limit.unwrap_or(DEFAULT_MAX_SIDE_LIMIT),
-            filter: image::imageops::FilterType::Lanczos3,
+            // PaddleOCR's DetResizeForTest resizes with cv2.resize default
+            // INTER_LINEAR (bilinear); Triangle is image-rs's bilinear filter.
+            filter: image::imageops::FilterType::Triangle,
         }
     }
 

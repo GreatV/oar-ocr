@@ -49,12 +49,15 @@ use oar_ocr_vl::{DocParser, DocParserConfig};
 /// Recognition model type
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ModelName {
-    /// PaddleOCR-VL: VLM with task prompts
+    /// PaddleOCR-VL 0.9B: VLM with task prompts
     #[value(name = "paddleocr-vl")]
     PaddleOcrVl,
-    /// PaddleOCR-VL-1.5: Next-gen VLM with spotting and seal recognition
+    /// PaddleOCR-VL 1.5: Next-gen VLM with spotting and seal recognition
     #[value(name = "paddleocr-vl-1.5")]
     PaddleOcrVl15,
+    /// PaddleOCR-VL 1.6: Latest VLM with enhanced recognition
+    #[value(name = "paddleocr-vl-1.6")]
+    PaddleOcrVl16,
     /// GLM-OCR: OCR expert VLM (GLM-V)
     #[value(name = "glmocr")]
     GlmOcr,
@@ -176,7 +179,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Process images with the selected model
     match args.model_name {
-        ModelName::PaddleOcrVl | ModelName::PaddleOcrVl15 => {
+        ModelName::PaddleOcrVl | ModelName::PaddleOcrVl15 | ModelName::PaddleOcrVl16 => {
             info!("Loading PaddleOCR-VL model...");
             let load_start = Instant::now();
             let vl = PaddleOcrVl::from_dir(&args.model_dir, device)?;
