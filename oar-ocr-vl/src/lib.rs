@@ -1,11 +1,8 @@
 //! # OAR OCR VL
 //!
-//! Vision-Language models for document understanding.
+//! Vision-Language models for document understanding, integrating with oar-ocr-core.
 //!
-//! This crate provides Vision-Language models that integrate with oar-ocr-core
-//! for advanced document processing tasks.
-//!
-//! ## Module Structure
+//! ## Modules
 //!
 //! - `paddleocr_vl` - PaddleOCR-VL for OCR, table, formula, chart, spotting, and seal recognition
 //! - `hunyuanocr` - HunyuanOCR OCR expert VLM
@@ -13,16 +10,11 @@
 //! - `mineru` - MinerU2.5 document parsing VLM (Qwen2-VL backbone)
 //! - `mineru_diffusion` - MinerU-Diffusion-V1 block-diffusion document OCR (Qwen2-VL vision + SDAR decoder)
 //! - `doc_parser` - Unified document parsing with pluggable recognition backends
-//! - `utils` - Utility functions (device parsing, candle helpers, markdown, OTSL conversion)
-//! - `attention` - Unified attention implementation shared by all models
+//! - `utils` - Device parsing, candle helpers, markdown, OTSL conversion
+//! - `attention` - Unified attention shared by all models
 //!
-//! ## Features
-//!
-//! - `cuda` - Enable CUDA support for GPU acceleration
-//!
-//! ## Device Configuration
-//!
-//! Use [`utils::parse_device`] to parse device strings:
+//! GPU acceleration is gated behind the `cuda` feature. Parse device strings
+//! with [`utils::parse_device`]:
 //!
 //! ```no_run
 //! use oar_ocr_vl::utils::parse_device;

@@ -1,16 +1,6 @@
-//! Unified attention implementation for all VLM models.
-//!
-//! This module provides shared attention and rotary embedding implementations
-//! to ensure consistent behavior across PaddleOCR-VL, HunyuanOCR, GLM-OCR,
-//! and MinerU2.5 models.
-//!
-//! ## Benefits
-//!
-//! - Single place for attention and RoPE optimizations
-//! - Consistent mask handling across models
-//! - Shared KV cache logic
-//! - Support for multi-axis RoPE variants (MRoPE, XDRoPE)
-//! - Easier testing and maintenance
+//! Unified attention and rotary embedding shared by all VLM models
+//! (PaddleOCR-VL, HunyuanOCR, GLM-OCR, MinerU2.5), for consistent mask handling,
+//! KV-cache logic, and multi-axis RoPE (MRoPE, XDRoPE).
 //!
 //! ## Usage
 //!
@@ -215,29 +205,12 @@ pub fn combine_masks(causal_mask: &Tensor, padding_mask: &Tensor) -> Result<Tens
     causal_mask.broadcast_add(padding_mask)
 }
 
-/// Create a left-padding mask for batched sequences.
+/// Create a left-padding mask for batched sequences (right-aligned, standard for
+/// autoregressive generation).
 ///
-/// Left-padding aligns sequences at the right edge, which is standard for
-/// autoregressive generation. The mask marks left-padded positions as -inf.
-///
-/// # Arguments
-/// * `seq_lens` - Actual sequence lengths for each batch item
-/// * `max_len` - Maximum (padded) sequence length
-/// * `dtype` - Data type for the mask tensor
-/// * `device` - Device for the mask tensor
-///
-/// # Returns
-/// Mask tensor of shape (batch, 1, 1, max_len) where:
-/// - Left-padded positions (j < max_len - seq_len) are -inf
-/// - Valid positions are 0
-///
-/// # Example
-/// ```text
-/// // seq_lens = [3, 5], max_len = 5
-/// // Produces masks:
-/// // Item 0: [-inf, -inf, 0, 0, 0]  (3 valid tokens, 2 padding)
-/// // Item 1: [0, 0, 0, 0, 0]        (5 valid tokens, 0 padding)
-/// ```
+/// Returns a `(batch, 1, 1, max_len)` mask where left-padded positions
+/// (`j < max_len - seq_len`) are `-inf` and valid positions are `0`. With
+/// `seq_lens = [3, 5]` and `max_len = 5`, item 0 is `[-inf, -inf, 0, 0, 0]`.
 pub fn create_left_padding_mask(
     seq_lens: &[usize],
     max_len: usize,
@@ -279,18 +252,12 @@ pub fn create_left_padding_mask(
     })
 }
 
-/// Builds the per-step attention mask for autoregressive decoding with a
-/// left-padded batch.
+/// Builds the per-step decode attention mask for a left-padded batch.
 ///
-/// During decode each query is a single new token that may attend to the
-/// entire KV cache (length `kv_len`). The leading `pad_lens[i]` positions of
-/// row `i` are left-padding and must be masked out, otherwise the new token
-/// attends to padding KV and the output is corrupted for batches with unequal
-/// prompt lengths. Returns a `(batch, 1, 1, kv_len)` additive mask (`0` for
-/// attendable positions, a large negative value for padding).
-///
-/// For a batch of size 1 (or any batch with no padding) every `pad_len` is 0
-/// and the mask is all-zeros, i.e. a no-op.
+/// Masks out the leading `pad_lens[i]` padding positions of each row so the new
+/// token never attends to padding KV (which would corrupt unequal-length
+/// batches). Returns a `(batch, 1, 1, kv_len)` additive mask (`0` attendable, a
+/// large negative for padding); a no-op when there is no padding.
 pub fn create_generation_mask(
     pad_lens: &[usize],
     kv_len: usize,
@@ -327,18 +294,10 @@ pub fn create_generation_mask(
 
 // Rotary Positional Embedding (RoPE)
 
-/// Unified Rotary Positional Embedding implementation.
-///
-/// Supports multiple RoPE variants:
-/// - **Dynamic RoPE**: On-the-fly computation from position IDs (single-axis)
-/// - **Multi-axis RoPE (MRoPE)**: 3-axis encoding for text/height/width (PaddleOCR-VL)
-/// - **Extended Dimension RoPE (XDRoPE)**: Configurable num_dims (HunyuanOCR)
-///
-/// ## Architecture
-///
-/// All variants share a single `Dynamic` representation parameterized by
-/// `num_dims`; the constructor functions pick the right `num_dims` for each
-/// model family.
+/// Unified Rotary Positional Embedding supporting single-axis RoPE, MRoPE
+/// (3-axis text/height/width, PaddleOCR-VL), and XDRoPE (configurable `num_dims`,
+/// HunyuanOCR). All variants share one `Dynamic` representation parameterized by
+/// `num_dims`; constructors pick the right value per model family.
 #[derive(Debug, Clone)]
 pub enum RotaryEmbedding {
     /// Dynamic computation from inverse frequencies (used by PaddleOCR-VL, HunyuanOCR).
@@ -351,18 +310,10 @@ pub enum RotaryEmbedding {
 }
 
 impl RotaryEmbedding {
-    /// Create a dynamic RoPE with on-the-fly computation (standard single-axis).
+    /// Create a dynamic single-axis RoPE computed on-the-fly from position IDs
+    /// (suitable for variable-length sequences).
     ///
-    /// This computes embeddings dynamically from position IDs, suitable for
-    /// variable-length sequences.
-    ///
-    /// # Arguments
-    /// * `head_dim` - Dimension of each attention head (must be even)
-    /// * `rope_theta` - Base frequency (typically 10000.0)
-    /// * `device` - Device for tensor allocation
-    ///
-    /// # Returns
-    /// RotaryEmbedding in Dynamic mode with num_dims=1
+    /// `head_dim` must be even; `rope_theta` is the base frequency (typically 10000.0).
     pub fn new_dynamic(
         head_dim: usize,
         rope_theta: f64,
@@ -371,20 +322,10 @@ impl RotaryEmbedding {
         Self::new_multi_axis(head_dim, rope_theta, 1, device)
     }
 
-    /// Create a multi-axis RoPE for position encoding (MRoPE/XDRoPE).
+    /// Create a multi-axis RoPE (MRoPE/XDRoPE) with `num_dims` position
+    /// dimensions (1 = standard, 3 = MRoPE text/height/width).
     ///
-    /// Supports multiple position dimensions for complex position encoding:
-    /// - num_dims=1: Standard RoPE (single position)
-    /// - num_dims=3: MRoPE (text position, height, width)
-    ///
-    /// # Arguments
-    /// * `head_dim` - Dimension of each attention head (must be even)
-    /// * `rope_theta` - Base frequency (typically 10000.0)
-    /// * `num_dims` - Number of position dimensions
-    /// * `device` - Device for tensor allocation
-    ///
-    /// # Returns
-    /// RotaryEmbedding in Dynamic mode with specified num_dims
+    /// `head_dim` must be even; `rope_theta` is the base frequency (typically 10000.0).
     pub fn new_multi_axis(
         head_dim: usize,
         rope_theta: f64,
@@ -553,25 +494,16 @@ pub fn repeat_kv(x: &Tensor, n_rep: usize) -> Result<Tensor> {
         .reshape((batch, num_kv_heads * n_rep, seq_len, head_dim))
 }
 
-/// Select and combine RoPE sections for multi-axis position encoding.
+/// Select and combine RoPE sections for multi-axis encoding (MRoPE 3-axis,
+/// XDRoPE 4-axis): different `head_dim` sections take different position
+/// dimensions, encoding spatial (height, width) and temporal positions separately.
 ///
-/// This is a unified implementation for both MRoPE (3-axis) and XDRoPE (4-axis).
-/// It selects different position dimensions for different head_dim sections,
-/// enabling the model to encode spatial (height, width) and temporal positions separately.
-///
-/// # Arguments
-/// * `cos_or_sin` - Input tensor: (num_dims, batch, seq, head_dim)
-/// * `rope_section` - Section sizes, must sum to head_dim/2
-/// * `num_dims` - Number of position dimensions (3 for MRoPE, 4 for XDRoPE)
-///
-/// # Returns
-/// Output tensor: (batch, 1, seq, head_dim)
+/// `cos_or_sin` is `(num_dims, batch, seq, head_dim)`, `rope_section` sums to
+/// `head_dim/2`; returns `(batch, 1, seq, head_dim)`.
 ///
 /// # Example
-/// For MRoPE with rope_section=[16, 24, 24] and head_dim=128:
-/// - Sections are doubled: [16, 24, 24, 16, 24, 24]
-/// - Each section picks from dim (i % 3): [dim0, dim1, dim2, dim0, dim1, dim2]
-/// - Results are concatenated along head_dim axis
+/// MRoPE with `rope_section=[16, 24, 24]`, `head_dim=128`: sections double to
+/// `[16, 24, 24, 16, 24, 24]`, each picking dim `i % 3`, concatenated along `head_dim`.
 pub fn select_rope_sections(
     cos_or_sin: &Tensor,
     rope_section: &[usize],

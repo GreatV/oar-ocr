@@ -4,13 +4,8 @@ use crate::processors::BoundingBox;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// A text region containing detection and recognition results.
-///
-/// This struct groups together all the information related to a single detected text region,
-/// including the bounding box, recognized text, confidence score, orientation angle, and
-/// optional word-level boxes for fine-grained text localization.
-/// This design eliminates the need for parallel vectors and provides better ergonomics
-/// for iterating over text regions.
+/// A single detected text region: bounding box, recognized text, confidence,
+/// orientation, and optional word-level boxes — grouped to avoid parallel vectors.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextRegion {
     /// The bounding box of the detected text region.

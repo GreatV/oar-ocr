@@ -1118,18 +1118,42 @@ impl ScanlineBuffer {
         let mut line_score = 0.0;
         let mut line_pixels = 0;
 
-        // Process pairs of intersections (segments of the scanline inside the polygon)
-        for chunk in self.intersections.chunks(2) {
-            if chunk.len() == 2 {
-                let x1 = chunk[0].max(start_x as f32) as usize;
-                let x2 = chunk[1].min(end_x as f32) as usize;
+        // The scanline row `y` is fixed across all segments, so fetch it once and
+        // sum each in-bounds segment over a contiguous slice rather than indexing
+        // `pred[[y, x]]` per pixel (a strided 2-D lookup with a bounds check each
+        // time). Accumulation remains a sequential left-to-right `+=` into
+        // `line_score`, in the same order as before, so the result is
+        // bit-identical — which matters because the score is compared against
+        // `box_thresh`. (Note: an explicit SIMD reduction would reassociate the
+        // additions and could perturb scores near the threshold, so it is
+        // deliberately avoided here.)
+        let yi = y as usize;
+        let height = pred.shape()[0];
+        let width = pred.shape()[1];
+        if yi < height {
+            let row = pred.row(yi);
+            let row_slice = row.as_slice();
+            for chunk in self.intersections.chunks(2) {
+                if chunk.len() == 2 {
+                    let x1 = chunk[0].max(start_x as f32) as usize;
+                    let x2 = chunk[1].min(end_x as f32) as usize;
 
-                // Accumulate scores for pixels within the segment
-                if x1 < x2 && x1 >= start_x && x2 <= end_x {
-                    for x in x1..x2 {
-                        if (y as usize) < pred.shape()[0] && x < pred.shape()[1] {
-                            line_score += pred[[y as usize, x]];
-                            line_pixels += 1;
+                    if x1 < x2 && x1 >= start_x && x2 <= end_x {
+                        let x_end = x2.min(width);
+                        if x1 < x_end {
+                            match row_slice {
+                                Some(s) => {
+                                    for &v in &s[x1..x_end] {
+                                        line_score += v;
+                                    }
+                                }
+                                None => {
+                                    for x in x1..x_end {
+                                        line_score += row[x];
+                                    }
+                                }
+                            }
+                            line_pixels += x_end - x1;
                         }
                     }
                 }

@@ -41,23 +41,9 @@ impl OrientationResult {
     }
 }
 
-/// Parses orientation angle from various label formats
-///
-/// This function provides robust parsing that can handle:
-/// - String labels: "0", "90", "180", "270"
-/// - Numeric strings: "0.0", "90.0", etc.
-/// - Direct numeric values when converted to strings
-///
-/// # Arguments
-///
-/// * `label` - The label string to parse
-/// * `confidence` - The confidence score for this prediction
-/// * `threshold` - Optional confidence threshold
-/// * `valid_angles` - Set of valid angles to accept
-///
-/// # Returns
-///
-/// An `OrientationResult` containing the parsed angle and confidence information
+/// Parses an orientation angle from a label, accepting numeric ("0", "90.0")
+/// and descriptive ("upright", "inverted", …) forms, validated against
+/// `valid_angles`. Unknown or out-of-set labels yield an uncertain result.
 pub fn parse_orientation_angle(
     label: &str,
     confidence: f32,
@@ -130,19 +116,8 @@ pub fn parse_text_line_orientation(
     parse_orientation_angle(label, confidence, threshold, VALID_LINE_ANGLES)
 }
 
-/// Applies document orientation rotation to an image
-///
-/// This function rotates an image based on the detected orientation angle.
-/// It supports rotation by 0°, 90°, 180°, and 270° degrees.
-///
-/// # Arguments
-///
-/// * `image` - The input image to rotate
-/// * `angle` - The rotation angle in degrees (0, 90, 180, or 270)
-///
-/// # Returns
-///
-/// The rotated image
+/// Rotates the image by the detected document orientation (0/90/180/270°);
+/// unsupported angles return the image unchanged.
 pub fn apply_document_orientation(image: RgbImage, angle: f32) -> RgbImage {
     match angle as i32 {
         0 => image,
@@ -159,19 +134,8 @@ pub fn apply_document_orientation(image: RgbImage, angle: f32) -> RgbImage {
     }
 }
 
-/// Applies text line orientation rotation to an image
-///
-/// This function rotates a text line image based on the detected orientation angle.
-/// It supports rotation by 0° and 180° degrees.
-///
-/// # Arguments
-///
-/// * `image` - The input image to rotate
-/// * `angle` - The rotation angle in degrees (0 or 180)
-///
-/// # Returns
-///
-/// The rotated image
+/// Rotates the text-line image by the detected orientation (0/180°);
+/// unsupported angles return the image unchanged.
 pub fn apply_text_line_orientation(image: RgbImage, angle: f32) -> RgbImage {
     match angle as i32 {
         0 => image,
@@ -186,15 +150,7 @@ pub fn apply_text_line_orientation(image: RgbImage, angle: f32) -> RgbImage {
     }
 }
 
-/// Converts a numeric orientation label to a human-readable degree representation
-///
-/// # Arguments
-///
-/// * `label` - The numeric label (e.g., "0", "90", "180", "270")
-///
-/// # Returns
-///
-/// A string representation with degree symbol (e.g., "0°", "90°", "180°", "270°")
+/// Converts a numeric orientation label (e.g. "90") to a degree string (e.g. "90°").
 pub fn format_orientation_label(label: &str) -> String {
     match label {
         "0" => "0°".to_string(),

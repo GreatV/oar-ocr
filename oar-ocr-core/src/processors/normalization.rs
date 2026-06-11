@@ -285,132 +285,6 @@ impl NormalizeImage {
         imgs.into_iter().map(|img| self.normalize(img)).collect()
     }
 
-    /// Validates inputs for batch processing operations.
-    ///
-    /// # Arguments
-    ///
-    /// * `imgs_len` - Number of images in the batch
-    /// * `shapes` - Shapes of the images as (channels, height, width) tuples
-    /// * `batch_tensor` - The batch tensor to validate against
-    ///
-    /// # Returns
-    ///
-    /// A Result containing a tuple of (batch_size, channels, height, max_width) or an OCRError.
-    fn validate_batch_inputs(
-        &self,
-        imgs_len: usize,
-        shapes: &[(usize, usize, usize)],
-        batch_tensor: &[f32],
-    ) -> Result<(usize, usize, usize, usize), OCRError> {
-        if imgs_len != shapes.len() {
-            return Err(OCRError::InvalidInput {
-                message: format!(
-                    "Images and shapes length mismatch: {} images vs {} shapes",
-                    imgs_len,
-                    shapes.len()
-                ),
-            });
-        }
-
-        let batch_size = imgs_len;
-        if batch_size == 0 {
-            return Ok((0, 0, 0, 0));
-        }
-
-        let max_width = shapes.iter().map(|(_, _, w)| *w).max().unwrap_or(0);
-        let channels = shapes.first().map(|(c, _, _)| *c).unwrap_or(0);
-        let height = shapes.first().map(|(_, h, _)| *h).unwrap_or(0);
-        let img_size = channels * height * max_width;
-
-        if batch_tensor.len() < batch_size * img_size {
-            return Err(OCRError::BufferTooSmall {
-                expected: batch_size * img_size,
-                actual: batch_tensor.len(),
-            });
-        }
-
-        Ok((batch_size, channels, height, max_width))
-    }
-
-    /// Applies normalization to a batch of images and stores the result in a pre-allocated tensor,
-    /// processing images in a streaming fashion.
-    ///
-    /// # Arguments
-    ///
-    /// * `imgs` - A vector of DynamicImage instances to normalize
-    /// * `batch_tensor` - A mutable slice where the normalized batch will be stored
-    /// * `shapes` - Shapes of the images as (channels, height, width) tuples
-    ///
-    /// # Returns
-    ///
-    /// A Result indicating success or an OCRError if validation fails.
-    pub fn normalize_streaming_to_batch(
-        &self,
-        imgs: Vec<DynamicImage>,
-        batch_tensor: &mut [f32],
-        shapes: &[(usize, usize, usize)],
-    ) -> Result<(), OCRError> {
-        let (batch_size, channels, height, max_width) =
-            self.validate_batch_inputs(imgs.len(), shapes, batch_tensor)?;
-
-        if batch_size == 0 {
-            return Ok(());
-        }
-
-        let img_size = channels * height * max_width;
-        batch_tensor.fill(0.0);
-
-        // Pre-compute channel mapping for BGR support
-        let src_channels: [usize; 3] = match self.color_order {
-            ColorOrder::RGB => [0, 1, 2],
-            ColorOrder::BGR => [2, 1, 0],
-        };
-
-        for (batch_idx, (img, &(_c, h, w))) in imgs.into_iter().zip(shapes.iter()).enumerate() {
-            let rgb_img = img.to_rgb8();
-            let (width, height_img) = rgb_img.dimensions();
-            let batch_offset = batch_idx * img_size;
-
-            match self.order {
-                TensorLayout::CHW => {
-                    for (c, &src_c) in src_channels.iter().enumerate().take(channels.min(3)) {
-                        for y in 0..h.min(height_img as usize) {
-                            for x in 0..w.min(width as usize) {
-                                let pixel = rgb_img.get_pixel(x as u32, y as u32);
-                                let channel_value = pixel[src_c] as f32;
-                                let dst_idx =
-                                    batch_offset + c * height * max_width + y * max_width + x;
-                                if dst_idx < batch_tensor.len() {
-                                    batch_tensor[dst_idx] =
-                                        channel_value * self.alpha[c] + self.beta[c];
-                                }
-                            }
-                        }
-                    }
-                }
-                TensorLayout::HWC => {
-                    for y in 0..h.min(height_img as usize) {
-                        for x in 0..w.min(width as usize) {
-                            let pixel = rgb_img.get_pixel(x as u32, y as u32);
-                            for (c, &src_c) in src_channels.iter().enumerate().take(channels.min(3))
-                            {
-                                let channel_value = pixel[src_c] as f32;
-                                let dst_idx =
-                                    batch_offset + y * max_width * channels + x * channels + c;
-                                if dst_idx < batch_tensor.len() {
-                                    batch_tensor[dst_idx] =
-                                        channel_value * self.alpha[c] + self.beta[c];
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     /// Normalizes a single image.
     ///
     /// # Arguments
@@ -428,29 +302,44 @@ impl NormalizeImage {
     fn normalize_rgb(&self, rgb_img: &RgbImage) -> Vec<f32> {
         let (width, height) = rgb_img.dimensions();
         let channels = 3usize;
-        let src_channels = self.src_channels();
         let mut result = vec![0.0f32; Self::image_len(width, height, channels)];
+        self.normalize_rgb_into(rgb_img, &mut result);
+        result
+    }
+
+    /// Normalizes `rgb_img` into a pre-allocated, tightly packed output buffer.
+    ///
+    /// `out` must have length `width * height * 3` and is laid out per
+    /// [`self.order`](TensorLayout). Writes through the SIMD kernels (see
+    /// [`crate::processors::simd`]) operating on the raw interleaved RGB bytes,
+    /// avoiding per-pixel `get_pixel`/`pixels()` overhead.
+    fn normalize_rgb_into(&self, rgb_img: &RgbImage, out: &mut [f32]) {
+        let (width, height) = rgb_img.dimensions();
+        let (width, height) = (width as usize, height as usize);
+        let src_channels = self.src_channels();
+        let alpha = [self.alpha[0], self.alpha[1], self.alpha[2]];
+        let beta = [self.beta[0], self.beta[1], self.beta[2]];
+        let rgb = rgb_img.as_raw();
 
         match self.order {
-            TensorLayout::CHW => {
-                let plane = width as usize * height as usize;
-                for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
-                    for (c, &src_c) in src_channels.iter().enumerate() {
-                        result[c * plane + pixel_idx] =
-                            pixel[src_c] as f32 * self.alpha[c] + self.beta[c];
-                    }
-                }
-                result
-            }
-            TensorLayout::HWC => {
-                for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
-                    let dst_base = pixel_idx * channels;
-                    for (c, &src_c) in src_channels.iter().enumerate() {
-                        result[dst_base + c] = pixel[src_c] as f32 * self.alpha[c] + self.beta[c];
-                    }
-                }
-                result
-            }
+            TensorLayout::CHW => crate::processors::simd::normalize_chw_into(
+                rgb,
+                width,
+                height,
+                src_channels,
+                &alpha,
+                &beta,
+                out,
+            ),
+            TensorLayout::HWC => crate::processors::simd::normalize_hwc_into(
+                rgb,
+                width,
+                height,
+                src_channels,
+                &alpha,
+                &beta,
+                out,
+            ),
         }
     }
 
@@ -549,107 +438,35 @@ impl NormalizeImage {
 
         let (width, height) = (first_width, first_height);
         let channels = 3usize;
+        let img_size = Self::image_len(width, height, channels);
+        let mut result = vec![0.0f32; batch_size * img_size];
 
-        let src_channels = self.src_channels();
-
-        // Clone alpha/beta for parallel closure
-        let alpha = self.alpha.clone();
-        let beta = self.beta.clone();
-
-        match self.order {
-            TensorLayout::CHW => {
-                let img_size = Self::image_len(width, height, channels);
-                let plane = width as usize * height as usize;
-                let mut result = vec![0.0f32; batch_size * img_size];
-
-                // The threshold is based on total output size for the whole batch rather than
-                // per-image size. This keeps tiny batches serial even when the batch has multiple
-                // images, and avoids rayon overhead for common OCR crops.
-                let use_parallel =
-                    Self::should_parallelize(batch_size, result.len() * std::mem::size_of::<f32>());
-                if !use_parallel {
-                    for (batch_idx, rgb_img) in rgb_imgs.iter().enumerate() {
-                        let batch_offset = batch_idx * img_size;
-                        let batch_slice = &mut result[batch_offset..batch_offset + img_size];
-                        for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
-                            for (c, &src_c) in src_channels.iter().enumerate() {
-                                batch_slice[c * plane + pixel_idx] =
-                                    pixel[src_c] as f32 * alpha[c] + beta[c];
-                            }
-                        }
-                    }
-                } else {
-                    result.par_chunks_mut(img_size).enumerate().for_each(
-                        |(batch_idx, batch_slice)| {
-                            let rgb_img = &rgb_imgs[batch_idx];
-                            for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
-                                for (c, &src_c) in src_channels.iter().enumerate() {
-                                    batch_slice[c * plane + pixel_idx] =
-                                        pixel[src_c] as f32 * alpha[c] + beta[c];
-                                }
-                            }
-                        },
-                    );
-                }
-
-                ndarray::Array4::from_shape_vec(
-                    (batch_size, channels, height as usize, width as usize),
-                    result,
-                )
-                .map_err(|e| {
-                    OCRError::tensor_operation(
-                        "Failed to create batch normalization tensor in CHW format",
-                        e,
-                    )
-                })
+        // Parallelism is gated by total batch output size (not per-image size)
+        // so tiny OCR crops stay serial unless the batch is large enough to
+        // amortize rayon overhead. Each image is normalized into its own
+        // contiguous `img_size` slice via the shared SIMD-backed kernel.
+        let use_parallel =
+            Self::should_parallelize(batch_size, result.len() * std::mem::size_of::<f32>());
+        if !use_parallel {
+            for (rgb_img, batch_slice) in rgb_imgs.iter().zip(result.chunks_mut(img_size)) {
+                self.normalize_rgb_into(rgb_img, batch_slice);
             }
-            TensorLayout::HWC => {
-                let img_size = Self::image_len(width, height, channels);
-                let mut result = vec![0.0f32; batch_size * img_size];
-
-                // Match the CHW path: parallelism is gated by total batch output size so that
-                // small OCR crops stay serial unless the batch is large enough to amortize rayon.
-                let use_parallel =
-                    Self::should_parallelize(batch_size, result.len() * std::mem::size_of::<f32>());
-                if !use_parallel {
-                    for (batch_idx, rgb_img) in rgb_imgs.iter().enumerate() {
-                        let batch_offset = batch_idx * img_size;
-                        let batch_slice = &mut result[batch_offset..batch_offset + img_size];
-                        for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
-                            let dst_base = pixel_idx * channels;
-                            for (c, &src_c) in src_channels.iter().enumerate() {
-                                batch_slice[dst_base + c] =
-                                    pixel[src_c] as f32 * alpha[c] + beta[c];
-                            }
-                        }
-                    }
-                } else {
-                    result.par_chunks_mut(img_size).enumerate().for_each(
-                        |(batch_idx, batch_slice)| {
-                            let rgb_img = &rgb_imgs[batch_idx];
-                            for (pixel_idx, pixel) in rgb_img.pixels().enumerate() {
-                                let dst_base = pixel_idx * channels;
-                                for (c, &src_c) in src_channels.iter().enumerate() {
-                                    batch_slice[dst_base + c] =
-                                        pixel[src_c] as f32 * alpha[c] + beta[c];
-                                }
-                            }
-                        },
-                    );
-                }
-
-                ndarray::Array4::from_shape_vec(
-                    (batch_size, height as usize, width as usize, channels),
-                    result,
-                )
-                .map_err(|e| {
-                    OCRError::tensor_operation(
-                        "Failed to create batch normalization tensor in HWC format",
-                        e,
-                    )
-                })
-            }
+        } else {
+            result
+                .par_chunks_mut(img_size)
+                .zip(rgb_imgs.par_iter())
+                .for_each(|(batch_slice, rgb_img)| {
+                    self.normalize_rgb_into(rgb_img, batch_slice);
+                });
         }
+
+        let shape = match self.order {
+            TensorLayout::CHW => (batch_size, channels, height as usize, width as usize),
+            TensorLayout::HWC => (batch_size, height as usize, width as usize, channels),
+        };
+        ndarray::Array4::from_shape_vec(shape, result).map_err(|e| {
+            OCRError::tensor_operation("Failed to create batch normalization tensor", e)
+        })
     }
 }
 

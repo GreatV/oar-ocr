@@ -5,22 +5,15 @@ use candle_nn::Module;
 use oar_ocr_core::core::OCRError;
 use rayon::prelude::*;
 
-/// Above this seq length the vision attention computes softmax in chunks
-/// along the query dim, instead of allocating the full `[seq, seq]` F32 buffer.
-/// Mirrors the memory profile of PyTorch's `F.scaled_dot_product_attention`,
-/// which is what `modeling_paddleocr_vl.py::PaddleOCRAttention` picks at
-/// runtime when `_attn_implementation == "sdpa"` (the transformers default for
-/// models with `_supports_sdpa = True`).
+/// Above this seq length vision attention computes softmax in chunks along the
+/// query dim instead of allocating the full `[seq, seq]` F32 buffer (mirroring
+/// PyTorch SDPA's memory profile).
 ///
-/// The threshold is set above PaddleOCR-VL-1.5's worst-case seq length so
-/// that v1.5 always takes the single-shot full-matrix path. Vision attention
-/// runs on the pre-merge SigLIP patch grid (patch_size² = 196), so v1.5 at
-/// max_pixels = 1_003_520 produces seq ≈ 5040 and v1 at max_pixels =
-/// 2_822_400 produces seq ≈ 14200. Going through chunked matmul changes
-/// cuBLAS' kernel tiling and shifts a few low-confidence argmax tokens;
-/// keeping v1.5 on its original path preserves byte-stable output. Above
-/// 8192 the chunked path kicks in — that's the regime where the full
-/// `[seq, seq]` F32 buffer would OOM (12+ GB on v1 / chart_01.jpg).
+/// Set above PaddleOCR-VL-1.5's worst-case seq (≈5040 at max_pixels=1_003_520)
+/// so v1.5 always takes the single-shot full-matrix path: chunked matmul shifts
+/// cuBLAS tiling and a few low-confidence argmax tokens, so the full path keeps
+/// v1.5 byte-stable. v1 (seq≈14200) crosses the threshold, where the full buffer
+/// would otherwise OOM (12+ GB on chart_01.jpg).
 const ATTN_FULL_SEQ_THRESHOLD: usize = 8192;
 /// Query chunk size when chunked attention kicks in. 512 keeps each chunk's
 /// F32 softmax scratch at `chunk * seq_k * num_heads * 4 bytes` — about

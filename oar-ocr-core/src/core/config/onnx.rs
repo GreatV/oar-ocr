@@ -124,84 +124,36 @@ impl OrtSessionConfig {
     }
 
     /// Sets the number of intra-op threads.
-    ///
-    /// # Arguments
-    ///
-    /// * `threads` - Number of threads for intra-op parallelism.
-    ///
-    /// # Returns
-    ///
-    /// Self for method chaining.
     pub fn with_intra_threads(mut self, threads: usize) -> Self {
         self.intra_threads = Some(threads);
         self
     }
 
     /// Sets the number of inter-op threads.
-    ///
-    /// # Arguments
-    ///
-    /// * `threads` - Number of threads for inter-op parallelism.
-    ///
-    /// # Returns
-    ///
-    /// Self for method chaining.
     pub fn with_inter_threads(mut self, threads: usize) -> Self {
         self.inter_threads = Some(threads);
         self
     }
 
     /// Enables or disables parallel execution.
-    ///
-    /// # Arguments
-    ///
-    /// * `enabled` - Whether to enable parallel execution.
-    ///
-    /// # Returns
-    ///
-    /// Self for method chaining.
     pub fn with_parallel_execution(mut self, enabled: bool) -> Self {
         self.parallel_execution = Some(enabled);
         self
     }
 
     /// Sets the graph optimization level.
-    ///
-    /// # Arguments
-    ///
-    /// * `level` - The optimization level to use.
-    ///
-    /// # Returns
-    ///
-    /// Self for method chaining.
     pub fn with_optimization_level(mut self, level: OrtGraphOptimizationLevel) -> Self {
         self.optimization_level = Some(level);
         self
     }
 
-    /// Sets the execution providers.
-    ///
-    /// # Arguments
-    ///
-    /// * `providers` - Vector of execution providers in order of preference.
-    ///
-    /// # Returns
-    ///
-    /// Self for method chaining.
+    /// Sets the execution providers, in order of preference.
     pub fn with_execution_providers(mut self, providers: Vec<OrtExecutionProvider>) -> Self {
         self.execution_providers = Some(providers);
         self
     }
 
-    /// Adds a single execution provider.
-    ///
-    /// # Arguments
-    ///
-    /// * `provider` - The execution provider to add.
-    ///
-    /// # Returns
-    ///
-    /// Self for method chaining.
+    /// Appends a single execution provider.
     pub fn add_execution_provider(mut self, provider: OrtExecutionProvider) -> Self {
         if let Some(ref mut providers) = self.execution_providers {
             providers.push(provider);
@@ -212,57 +164,24 @@ impl OrtSessionConfig {
     }
 
     /// Enables or disables memory pattern optimization.
-    ///
-    /// # Arguments
-    ///
-    /// * `enable` - Whether to enable memory pattern optimization.
-    ///
-    /// # Returns
-    ///
-    /// Self for method chaining.
     pub fn with_memory_pattern(mut self, enable: bool) -> Self {
         self.enable_mem_pattern = Some(enable);
         self
     }
 
-    /// Sets the log severity level.
-    ///
-    /// # Arguments
-    ///
-    /// * `level` - Log severity level (0=Verbose, 1=Info, 2=Warning, 3=Error, 4=Fatal).
-    ///
-    /// # Returns
-    ///
-    /// Self for method chaining.
+    /// Sets the log severity level (0=Verbose, 1=Info, 2=Warning, 3=Error, 4=Fatal).
     pub fn with_log_severity_level(mut self, level: i32) -> Self {
         self.log_severity_level = Some(level);
         self
     }
 
     /// Sets the log verbosity level.
-    ///
-    /// # Arguments
-    ///
-    /// * `level` - Log verbosity level.
-    ///
-    /// # Returns
-    ///
-    /// Self for method chaining.
     pub fn with_log_verbosity_level(mut self, level: i32) -> Self {
         self.log_verbosity_level = Some(level);
         self
     }
 
     /// Adds a session configuration entry.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - Configuration key.
-    /// * `value` - Configuration value.
-    ///
-    /// # Returns
-    ///
-    /// Self for method chaining.
     pub fn add_config_entry<K: Into<String>, V: Into<String>>(mut self, key: K, value: V) -> Self {
         if let Some(ref mut entries) = self.session_config_entries {
             entries.insert(key.into(), value.into());
@@ -274,11 +193,7 @@ impl OrtSessionConfig {
         self
     }
 
-    /// Gets the effective number of intra-op threads.
-    ///
-    /// # Returns
-    ///
-    /// The number of intra-op threads, or a default value if not set.
+    /// Effective intra-op thread count, defaulting to available parallelism.
     pub fn get_intra_threads(&self) -> usize {
         self.intra_threads.unwrap_or_else(|| {
             std::thread::available_parallelism()
@@ -287,29 +202,17 @@ impl OrtSessionConfig {
         })
     }
 
-    /// Gets the effective number of inter-op threads.
-    ///
-    /// # Returns
-    ///
-    /// The number of inter-op threads, or a default value if not set.
+    /// Effective inter-op thread count, defaulting to 1.
     pub fn get_inter_threads(&self) -> usize {
         self.inter_threads.unwrap_or(1)
     }
 
-    /// Gets the effective graph optimization level.
-    ///
-    /// # Returns
-    ///
-    /// The graph optimization level, or a default value if not set.
+    /// Effective graph optimization level, defaulting to `OrtGraphOptimizationLevel::default()`.
     pub fn get_optimization_level(&self) -> OrtGraphOptimizationLevel {
         self.optimization_level.unwrap_or_default()
     }
 
-    /// Gets the execution providers.
-    ///
-    /// # Returns
-    ///
-    /// A reference to the execution providers, or a default CPU provider if not set.
+    /// Configured execution providers, defaulting to CPU.
     pub fn get_execution_providers(&self) -> Vec<OrtExecutionProvider> {
         self.execution_providers
             .clone()

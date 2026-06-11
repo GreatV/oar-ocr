@@ -1,20 +1,13 @@
 //! KV-cache wrapper supporting head-only trimming and gather.
 //!
-//! `candle_nn::kv_cache::KvCache` exposes `append` / `reset` but no way to
-//! roll back the cache to an earlier sequence length, nor to keep an
-//! arbitrary subset of positions. This wrapper adds both: callers can trim the
-//! cache to an earlier length or gather an arbitrary subset of positions while
-//! leaving the rest of the attention path untouched.
+//! Unlike `candle_nn::kv_cache::KvCache` (only `append` / `reset`), this lets
+//! callers roll the cache back to an earlier sequence length or keep an
+//! arbitrary subset of positions, leaving the rest of the attention path intact.
 //!
-//! ## Implementation note
-//!
-//! Append uses `Tensor::cat`, matching the public-API behaviour of
-//! `candle_nn::KvCache` before its preallocation rewrite. We tried a
-//! preallocation + `slice_set` strategy (see git history) for parity with
-//! `candle_nn::kv_cache::Cache`, but reverted it: the rewrite passed unit
-//! tests and didn't change per-page wall time, while introducing subtle K/V
-//! value differences. Rare per-page slowdowns observed on long benchmarks
-//! remain an open issue tracked separately.
+//! Append uses `Tensor::cat` (candle's pre-preallocation behaviour). A
+//! preallocation + `slice_set` rewrite was tried for parity with
+//! `candle_nn::kv_cache::Cache` but reverted: it didn't improve per-page wall
+//! time and introduced subtle K/V value differences.
 
 use candle_core::{Result, Tensor};
 
@@ -58,17 +51,9 @@ impl TrimmableKvCache {
         }
     }
 
-    /// Append `(k_new, v_new)` to the cache and return the concatenated
-    /// `(K_all, V_all)` tensors that the attention path will consume.
-    ///
-    /// Cat-based growth (not preallocated). We tried a `slice_set` /
-    /// preallocated-buffer rewrite to match `candle_nn::kv_cache::Cache` —
-    /// nsys profiling had pointed to per-step cat as a candidate bottleneck
-    /// on long-output pages. The rewrite passed unit tests and didn't change
-    /// per-page wall time on either fast or slow images, so it was reverted:
-    /// the wall-time outliers we were chasing are dominated by candle's
-    /// per-op CPU dispatch on long decode loops, not by KV-cache copy
-    /// overhead.
+    /// Append `(k_new, v_new)` and return the concatenated `(K_all, V_all)`
+    /// tensors the attention path consumes. Uses cat-based growth (see the
+    /// module note on why preallocation was not adopted).
     pub fn append(&mut self, k_new: &Tensor, v_new: &Tensor) -> Result<(Tensor, Tensor)> {
         let new_len = k_new.dim(self.cat_dim)?;
         let (k_all, v_all) = match self.kv.as_ref() {

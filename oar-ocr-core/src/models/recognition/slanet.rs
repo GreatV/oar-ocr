@@ -114,9 +114,10 @@ impl SLANetModel {
             );
 
             // Normalize resized image first, then optionally pad in normalized space.
+            // `resized` is not used afterwards, so move it in rather than clone.
             let normalized = self
                 .normalizer
-                .normalize_to(DynamicImage::ImageRgb8(resized.clone()))?;
+                .normalize_to(DynamicImage::ImageRgb8(resized))?;
 
             let (tensor, pad_h, pad_w) = if needs_padding {
                 let target_size_u32 = target_size as usize;

@@ -30,6 +30,7 @@ pub mod layout_utils;
 mod normalization;
 pub mod resize_detection;
 pub mod resize_recognition;
+pub mod simd;
 mod sorting;
 pub mod table_ocr_split;
 pub mod table_structure_decode;

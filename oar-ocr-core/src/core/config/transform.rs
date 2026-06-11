@@ -105,11 +105,7 @@ pub struct TransformRegistry {
 }
 
 impl TransformRegistry {
-    /// Creates a new empty TransformRegistry.
-    ///
-    /// # Returns
-    ///
-    /// A new empty TransformRegistry.
+    /// Creates a new empty registry.
     ///
     /// # Examples
     ///
@@ -126,11 +122,6 @@ impl TransformRegistry {
     }
 
     /// Adds a transform to the registry.
-    ///
-    /// # Arguments
-    ///
-    /// * `transform_type` - The type of transform to add.
-    /// * `config` - The configuration for the transform.
     ///
     /// # Examples
     ///
@@ -152,35 +143,19 @@ impl TransformRegistry {
         self.transforms.push((transform_type, config));
     }
 
-    /// Removes all transforms of a specific type from the registry.
-    ///
-    /// # Arguments
-    ///
-    /// * `transform_type` - The type of transform to remove.
-    ///
-    /// # Returns
-    ///
-    /// The number of transforms removed.
+    /// Removes all transforms of the given type, returning how many were removed.
     pub fn remove(&mut self, transform_type: &TransformType) -> usize {
         let initial_len = self.transforms.len();
         self.transforms.retain(|(t, _)| t != transform_type);
         initial_len - self.transforms.len()
     }
 
-    /// Gets the number of transforms in the registry.
-    ///
-    /// # Returns
-    ///
-    /// The number of transforms in the registry.
+    /// Returns the number of transforms in the registry.
     pub fn len(&self) -> usize {
         self.transforms.len()
     }
 
-    /// Checks if the registry is empty.
-    ///
-    /// # Returns
-    ///
-    /// True if the registry is empty, false otherwise.
+    /// Returns true if the registry has no transforms.
     pub fn is_empty(&self) -> bool {
         self.transforms.is_empty()
     }
@@ -190,46 +165,22 @@ impl TransformRegistry {
         self.transforms.clear();
     }
 
-    /// Gets an iterator over the transforms in the registry.
-    ///
-    /// # Returns
-    ///
-    /// An iterator over tuples of (TransformType, TransformConfig).
+    /// Returns an iterator over the `(type, config)` transforms.
     pub fn iter(&self) -> std::slice::Iter<'_, (TransformType, TransformConfig)> {
         self.transforms.iter()
     }
 
-    /// Gets a mutable iterator over the transforms in the registry.
-    ///
-    /// # Returns
-    ///
-    /// A mutable iterator over tuples of (TransformType, TransformConfig).
+    /// Returns a mutable iterator over the `(type, config)` transforms.
     pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, (TransformType, TransformConfig)> {
         self.transforms.iter_mut()
     }
 
-    /// Checks if the registry contains a specific transform type.
-    ///
-    /// # Arguments
-    ///
-    /// * `transform_type` - The type of transform to check for.
-    ///
-    /// # Returns
-    ///
-    /// True if the registry contains the transform type, false otherwise.
+    /// Returns true if the registry contains a transform of the given type.
     pub fn contains(&self, transform_type: &TransformType) -> bool {
         self.transforms.iter().any(|(t, _)| t == transform_type)
     }
 
-    /// Gets all transforms of a specific type.
-    ///
-    /// # Arguments
-    ///
-    /// * `transform_type` - The type of transform to get.
-    ///
-    /// # Returns
-    ///
-    /// A vector of references to the configurations for the specified transform type.
+    /// Returns all configs for transforms of the given type.
     pub fn get_all(&self, transform_type: &TransformType) -> Vec<&TransformConfig> {
         self.transforms
             .iter()
@@ -243,15 +194,7 @@ impl TransformRegistry {
             .collect()
     }
 
-    /// Gets the first transform of a specific type.
-    ///
-    /// # Arguments
-    ///
-    /// * `transform_type` - The type of transform to get.
-    ///
-    /// # Returns
-    ///
-    /// An optional reference to the configuration for the first transform of the specified type.
+    /// Returns the config for the first transform of the given type, if any.
     pub fn get_first(&self, transform_type: &TransformType) -> Option<&TransformConfig> {
         self.transforms.iter().find_map(|(t, config)| {
             if t == transform_type {
