@@ -259,18 +259,36 @@ impl UVDocPostProcess {
         let mut images = Vec::with_capacity(batch_size);
 
         let scale = self.scale;
+        let plane = height * width;
 
         for b in 0..batch_size {
             let mut img = RgbImage::new(width as u32, height as u32);
 
-            for y in 0..height {
-                for x in 0..width {
-                    // Model outputs are in BGR order; convert back to RGB.
-                    let b_val = (output[[b, 0, y, x]] * scale).clamp(0.0, 255.0) as u8;
-                    let g_val = (output[[b, 1, y, x]] * scale).clamp(0.0, 255.0) as u8;
-                    let r_val = (output[[b, 2, y, x]] * scale).clamp(0.0, 255.0) as u8;
-
-                    img.put_pixel(x as u32, y as u32, Rgb([r_val, g_val, b_val]));
+            // Model outputs are in BGR order; convert back to RGB. For the
+            // common standard-layout tensor the three channel planes are
+            // contiguous, so the SIMD kernel scales + clamps them straight into
+            // the image buffer (no per-pixel `put_pixel`/strided indexing).
+            // Fall back to indexed access for non-standard layouts.
+            match output.as_slice() {
+                Some(buf) => {
+                    let base = b * 3 * plane;
+                    crate::processors::simd::scale_clamp_bgr_planes_to_rgb(
+                        &buf[base..base + plane],
+                        &buf[base + plane..base + 2 * plane],
+                        &buf[base + 2 * plane..base + 3 * plane],
+                        scale,
+                        img.as_mut(),
+                    );
+                }
+                None => {
+                    for y in 0..height {
+                        for x in 0..width {
+                            let b_val = (output[[b, 0, y, x]] * scale).clamp(0.0, 255.0) as u8;
+                            let g_val = (output[[b, 1, y, x]] * scale).clamp(0.0, 255.0) as u8;
+                            let r_val = (output[[b, 2, y, x]] * scale).clamp(0.0, 255.0) as u8;
+                            img.put_pixel(x as u32, y as u32, Rgb([r_val, g_val, b_val]));
+                        }
+                    }
                 }
             }
 

@@ -40,13 +40,8 @@ pub struct FormulaPreprocessParams {
     pub normalize_std: [f32; 3],
 }
 
-/// Preprocessor implementing the standard formula recognition pipeline.
-///
-/// This preprocessor applies the following transformations:
-/// 1. Margin cropping - removes background margins by binarization
-/// 2. Resize and padding - scales image to target size with aspect ratio preservation
-/// 3. Normalization and grayscale conversion - normalizes pixel values and converts to grayscale
-/// 4. Tensor formatting - converts to 4D tensor with proper padding alignment
+/// Formula recognition preprocessor: margin crop → resize-and-pad →
+/// normalize-and-grayscale → 4D tensor formatting.
 #[derive(Debug, Clone)]
 pub struct FormulaPreprocessor {
     params: FormulaPreprocessParams,
@@ -78,14 +73,8 @@ impl FormulaPreprocessor {
         self.format_to_tensor(normalized)
     }
 
-    /// Removes background margins by binarization and cropping.
-    ///
-    /// The algorithm:
-    /// 1. Converts to grayscale
-    /// 2. Normalizes pixel values to 0-255 range
-    /// 3. Binarizes using the configured threshold
-    /// 4. Finds bounding box of foreground pixels
-    /// 5. Crops to the bounding box
+    /// Removes background margins: binarizes (grayscale, normalized, thresholded)
+    /// and crops to the foreground bounding box.
     fn crop_margin(&self, img: &RgbImage) -> RgbImage {
         let gray = DynamicImage::ImageRgb8(img.clone()).to_luma8();
         let (width, height) = gray.dimensions();
@@ -145,12 +134,8 @@ impl FormulaPreprocessor {
             .to_image()
     }
 
-    /// Resizes image to target size while preserving aspect ratio, then pads with black.
-    ///
-    /// The resize strategy:
-    /// 1. Calculates scale factor based on the smaller dimension of target size
-    /// 2. Resizes maintaining aspect ratio
-    /// 3. Centers the resized image on black background of target size
+    /// Resizes to fit the target size (preserving aspect ratio) and centers the
+    /// result on a black background.
     fn resize_and_pad(&self, img: &RgbImage) -> RgbImage {
         let (target_width, target_height) = self.params.target_size;
         let (img_width, img_height) = img.dimensions();
@@ -183,12 +168,9 @@ impl FormulaPreprocessor {
         padded
     }
 
-    /// Normalizes pixel values and converts to grayscale representation.
-    ///
-    /// The normalization follows UniMERNet's preprocessing:
-    /// 1. Normalizes RGB channels using mean and std (in BGR order for OpenCV compatibility)
-    /// 2. Converts to grayscale using standard weights (0.299*R + 0.587*G + 0.114*B)
-    /// 3. Replicates grayscale to 3 channels for model input
+    /// Normalizes and converts to grayscale, following UniMERNet's preprocessing:
+    /// per-channel normalize (BGR order, for OpenCV compatibility), luminance
+    /// grayscale (0.299R + 0.587G + 0.114B), then replicate to 3 channels.
     fn normalize_and_to_grayscale(&self, img: &RgbImage) -> Array3<f32> {
         let (width, height) = img.dimensions();
 

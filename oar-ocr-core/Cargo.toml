@@ -19,7 +19,7 @@ keywords = [
 categories = ["computer-vision", "science"]
 
 [features]
-default = ["download-binaries"]
+default = ["download-binaries", "simd"]
 # ONNX Runtime execution provider features
 cuda = ["ort/cuda"]
 tensorrt = ["ort/tensorrt"]
@@ -29,11 +29,12 @@ webgpu = ["ort/webgpu"]
 openvino = ["ort/openvino"]
 # Auto-download ONNX Runtime binaries during build (enabled by default).
 download-binaries = ["ort/download-binaries", "ort/tls-native"]
-# Auto-download OCR model files at runtime from ModelScope into the on-disk
-# cache (`$OAR_HOME` or `~/.oar`). When enabled, model paths handed to the
-# OCR builders that do not exist on disk but match the bundled registry are
-# resolved by fetching the file over HTTPS and verifying its SHA-256.
+# Auto-download registered OCR model files at runtime from ModelScope into the
+# on-disk cache (`$OAR_HOME` or `~/.oar`), verifying each file's SHA-256.
 auto-download = ["dep:ureq", "dep:sha2", "dep:dirs"]
+# SIMD-accelerate the hot CPU kernels (image normalization, CTC argmax decode)
+# via `wide` + `multiversion`. Bit-identical to the scalar fallback.
+simd = ["dep:wide", "dep:multiversion"]
 
 [dependencies]
 clipper2-rust = "1.0.3"
@@ -41,6 +42,7 @@ dirs = { version = "6.0", optional = true }
 image.workspace = true
 imageproc.workspace = true
 itertools = "0.14"
+multiversion = { version = "0.8", optional = true }
 nalgebra = "0.35"
 ndarray = "0.17"
 oar-ocr-derive.workspace = true
@@ -55,6 +57,7 @@ tokenizers.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 ureq = { version = "3.0", default-features = false, features = ["rustls", "platform-verifier"], optional = true }
+wide = { version = "1.5", optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

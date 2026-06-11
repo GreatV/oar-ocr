@@ -22,6 +22,24 @@ static ALPHANUMERIC_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[a-zA-Z0-9 :*./%+-]").expect("static regex: alphanumeric decoder pattern")
 });
 
+/// Argmax over a 1-D prediction row, returning `(index, value)`.
+///
+/// Contiguous rows (the common row-major case for the per-timestep logits) are
+/// routed through the SIMD kernel in [`crate::processors::simd`]; a scalar scan
+/// handles non-contiguous views. Tie-breaking matches [`Iterator::max_by`]
+/// (the last maximal index wins), so decoded output is unchanged.
+#[inline]
+fn argmax_row(row: ndarray::ArrayView1<f32>) -> Option<(usize, f32)> {
+    match row.as_slice() {
+        Some(slice) => crate::processors::simd::argmax(slice),
+        None => row
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)),
+    }
+}
+
 /// A base decoder for text recognition that handles character mapping and basic decoding operations.
 ///
 /// This struct is responsible for converting model predictions into readable text strings.
@@ -264,11 +282,7 @@ impl BaseRecLabelDecode {
             let mut sequence_prob = Vec::new();
 
             for row in preds.outer_iter() {
-                if let Some((idx, &prob)) = row
-                    .iter()
-                    .enumerate()
-                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                {
+                if let Some((idx, prob)) = argmax_row(row) {
                     sequence_idx.push(idx);
                     sequence_prob.push(prob);
                 } else {
@@ -453,11 +467,7 @@ impl CTCLabelDecode {
             let mut sequence_timesteps = Vec::new();
 
             for (timestep, row) in preds.outer_iter().enumerate() {
-                if let Some((idx, &prob)) = row
-                    .iter()
-                    .enumerate()
-                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                {
+                if let Some((idx, prob)) = argmax_row(row) {
                     sequence_idx.push(idx);
                     sequence_prob.push(prob);
                     sequence_timesteps.push(timestep);
@@ -569,11 +579,7 @@ impl CTCLabelDecode {
             let mut sequence_prob = Vec::new();
 
             for row in preds.outer_iter() {
-                if let Some((idx, &prob)) = row
-                    .iter()
-                    .enumerate()
-                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                {
+                if let Some((idx, prob)) = argmax_row(row) {
                     sequence_idx.push(idx);
                     sequence_prob.push(prob);
                 } else {

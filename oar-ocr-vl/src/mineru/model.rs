@@ -19,14 +19,10 @@ use std::collections::HashSet;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
-/// Canonical MinerU2.5 per-element prompts as defined by the official
-/// `mineru_vl_utils` package (`DEFAULT_PROMPTS` in `mineru_client.py`).
-///
-/// MinerU's `two_step_extract` flow first runs a layout pass, then routes each
-/// cropped region to a per-type recognizer with the matching prompt. Outside
-/// of `two_step_extract`, callers can still mix and match: a single
-/// `Text Recognition:` prompt fed an entire page yields a generic markdown
-/// output.
+/// Canonical MinerU2.5 per-element prompts (mirrors `DEFAULT_PROMPTS` in the
+/// official `mineru_vl_utils`). The `two_step_extract` flow routes each cropped
+/// region to the matching prompt; a lone `Text Recognition:` prompt over a whole
+/// page yields generic markdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum MinerUTaskPrompt {

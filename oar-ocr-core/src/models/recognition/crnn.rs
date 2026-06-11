@@ -95,16 +95,16 @@ impl CRNNModel {
                 );
 
                 let mut tensor = vec![0.0f32; image_len];
-                for y in 0..img_h {
-                    let row_offset = y * tensor_width;
-                    for x in 0..resized_w {
-                        let pixel = resized.get_pixel(x as u32, y as u32);
-                        let idx = row_offset + x;
-                        tensor[idx] = (pixel[2] as f32 / 255.0 - 0.5) / 0.5;
-                        tensor[plane + idx] = (pixel[1] as f32 / 255.0 - 0.5) / 0.5;
-                        tensor[2 * plane + idx] = (pixel[0] as f32 / 255.0 - 0.5) / 0.5;
-                    }
-                }
+                // Normalize `(v / 255 - 0.5) / 0.5` in BGR order into the padded
+                // CHW tensor via the SIMD kernel, reading the resized crop's raw
+                // interleaved bytes (no per-pixel `get_pixel`).
+                crate::processors::simd::normalize_crnn_chw_into(
+                    resized.as_raw(),
+                    resized_w,
+                    img_h,
+                    tensor_width,
+                    &mut tensor,
+                );
                 tensor
             })
             .collect();

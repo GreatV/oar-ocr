@@ -25,11 +25,7 @@ pub struct ModelInferenceConfig {
 }
 
 impl ModelInferenceConfig {
-    /// Creates a new ModelInferenceConfig with default values.
-    ///
-    /// # Returns
-    ///
-    /// A new ModelInferenceConfig instance.
+    /// Creates a new config with all fields unset.
     pub fn new() -> Self {
         Self {
             model_path: None,
@@ -40,16 +36,7 @@ impl ModelInferenceConfig {
         }
     }
 
-    /// Creates a new ModelInferenceConfig with default values for model name and batch size.
-    ///
-    /// # Arguments
-    ///
-    /// * `model_name` - The name of the model (optional).
-    /// * `batch_size` - The batch size for processing (optional).
-    ///
-    /// # Returns
-    ///
-    /// A new ModelInferenceConfig instance.
+    /// Creates a config with the given model name and batch size, logging enabled.
     pub fn with_defaults(model_name: Option<String>, batch_size: Option<usize>) -> Self {
         Self {
             model_path: None,
@@ -60,15 +47,7 @@ impl ModelInferenceConfig {
         }
     }
 
-    /// Creates a new ModelInferenceConfig with a model path.
-    ///
-    /// # Arguments
-    ///
-    /// * `model_path` - The path to the model file.
-    ///
-    /// # Returns
-    ///
-    /// A new ModelInferenceConfig instance.
+    /// Creates a config with the given model path, logging enabled.
     pub fn with_model_path(model_path: PathBuf) -> Self {
         Self {
             model_path: Some(model_path),
@@ -79,106 +58,47 @@ impl ModelInferenceConfig {
         }
     }
 
-    /// Sets the model path for the configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `model_path` - The path to the model file.
-    ///
-    /// # Returns
-    ///
-    /// The updated ModelInferenceConfig instance.
+    /// Sets the model path.
     pub fn model_path(mut self, model_path: impl Into<PathBuf>) -> Self {
         self.model_path = Some(model_path.into());
         self
     }
 
-    /// Sets the model name for the configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `model_name` - The name of the model.
-    ///
-    /// # Returns
-    ///
-    /// The updated ModelInferenceConfig instance.
+    /// Sets the model name.
     pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
         self.model_name = Some(model_name.into());
         self
     }
 
-    /// Sets the batch size for the configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `batch_size` - The batch size for processing.
-    ///
-    /// # Returns
-    ///
-    /// The updated ModelInferenceConfig instance.
+    /// Sets the batch size.
     pub fn batch_size(mut self, batch_size: usize) -> Self {
         self.batch_size = Some(batch_size);
         self
     }
 
-    /// Sets whether logging is enabled for the configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `enable` - Whether to enable logging.
-    ///
-    /// # Returns
-    ///
-    /// The updated ModelInferenceConfig instance.
+    /// Enables or disables logging.
     pub fn enable_logging(mut self, enable: bool) -> Self {
         self.enable_logging = Some(enable);
         self
     }
 
-    /// Gets whether logging is enabled for the configuration.
-    ///
-    /// # Returns
-    ///
-    /// True if logging is enabled, false otherwise.
+    /// Returns whether logging is enabled (defaults to true).
     pub fn get_enable_logging(&self) -> bool {
         self.enable_logging.unwrap_or(true)
     }
 
-    /// Sets the ORT session configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `cfg` - The ONNX Runtime session configuration.
-    ///
-    /// # Returns
-    ///
-    /// The updated ModelInferenceConfig instance.
+    /// Sets the ONNX Runtime session configuration.
     pub fn ort_session(mut self, cfg: OrtSessionConfig) -> Self {
         self.ort_session = Some(cfg);
         self
     }
 
     /// Validates the configuration.
-    ///
-    /// # Returns
-    ///
-    /// A Result indicating success or a ConfigError if validation fails.
     pub fn validate(&self) -> Result<(), ConfigError> {
         ConfigValidator::validate(self)
     }
 
-    /// Merges this configuration with another configuration.
-    ///
-    /// Values from the other configuration will override values in this configuration
-    /// if they are present in the other configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The other configuration to merge with.
-    ///
-    /// # Returns
-    ///
-    /// The updated ModelInferenceConfig instance.
+    /// Merges in another config; its set fields override this one's.
     pub fn merge_with(mut self, other: &ModelInferenceConfig) -> Self {
         if other.model_path.is_some() {
             self.model_path = other.model_path.clone();
@@ -198,20 +118,12 @@ impl ModelInferenceConfig {
         self
     }
 
-    /// Gets the effective batch size.
-    ///
-    /// # Returns
-    ///
-    /// The batch size, or a default value if not set.
+    /// Effective batch size, defaulting to 1.
     pub fn get_batch_size(&self) -> usize {
         self.batch_size.unwrap_or(1)
     }
 
-    /// Gets the model name.
-    ///
-    /// # Returns
-    ///
-    /// The model name, or a default value if not set.
+    /// Model name, defaulting to `"unnamed_model"`.
     pub fn get_model_name(&self) -> String {
         self.model_name
             .clone()
@@ -220,14 +132,7 @@ impl ModelInferenceConfig {
 }
 
 impl ConfigValidator for ModelInferenceConfig {
-    /// Validates the configuration.
-    ///
-    /// This method checks that the batch size is valid and that the model path exists
-    /// if it is specified.
-    ///
-    /// # Returns
-    ///
-    /// A Result indicating success or a ConfigError if validation fails.
+    /// Validates the batch size (if set) and that the model path exists (if set).
     fn validate(&self) -> Result<(), ConfigError> {
         if let Some(batch_size) = self.batch_size {
             self.validate_batch_size_with_limits(batch_size, 1000)?;
@@ -241,10 +146,6 @@ impl ConfigValidator for ModelInferenceConfig {
     }
 
     /// Returns the default configuration.
-    ///
-    /// # Returns
-    ///
-    /// The default ModelInferenceConfig instance.
     fn get_defaults() -> Self {
         Self {
             model_path: None,

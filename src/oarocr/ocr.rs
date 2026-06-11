@@ -746,7 +746,21 @@ impl OAROCR {
         });
 
         let base_rec_ratio = DEFAULT_REC_IMAGE_SHAPE[2] as f32 / DEFAULT_REC_IMAGE_SHAPE[1] as f32;
-        let batch_size = self.region_batch_size.unwrap_or(regions.len()).max(1);
+        // Regions are sorted by width/height ratio above; chunking them into
+        // fixed-size batches keeps each batch width-homogeneous so the per-batch
+        // padding (to `chunk_max_wh_ratio`) stays close to each crop's own width.
+        // Defaulting to `regions.len()` would put every crop in one batch padded
+        // to the single widest crop, wasting recognition compute on dense pages —
+        // so fall back to the adapter's recommended batch size (mirroring the
+        // detection path), not the region count.
+        let batch_size = self
+            .region_batch_size
+            .unwrap_or_else(|| {
+                self.pipeline
+                    .text_recognition_adapter
+                    .recommended_batch_size()
+            })
+            .max(1);
 
         for chunk in regions.chunks(batch_size) {
             let chunk_max_wh_ratio = chunk

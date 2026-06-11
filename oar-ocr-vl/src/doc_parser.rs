@@ -1,10 +1,6 @@
-//! Unified document parser using layout-first approach.
-//!
-//! This module provides a generic document parsing pipeline that:
-//! 1. Detects layout elements with PP-DocLayout (v2/v3)
-//! 2. Filters and sorts elements by reading order
-//! 3. Crops regions and recognizes each with a pluggable backend
-//! 4. Returns structured document results
+//! Unified layout-first document parser: detect layout (PP-DocLayout v2/v3),
+//! sort by reading order, then crop and recognize each region with a pluggable
+//! backend into structured results.
 //!
 //! Supported backends:
 //! - `PaddleOcrVl` - VLM with task-specific prompts

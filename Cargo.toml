@@ -50,7 +50,9 @@ keywords = [
 categories = ["computer-vision", "science"]
 
 [features]
-default = ["download-binaries"]
+default = ["download-binaries", "simd"]
+# SIMD-accelerate hot CPU pre/post-processing kernels (see oar-ocr-core).
+simd = ["oar-ocr-core/simd"]
 # ONNX Runtime execution provider features
 cuda = ["oar-ocr-core/cuda"]
 tensorrt = ["oar-ocr-core/tensorrt"]

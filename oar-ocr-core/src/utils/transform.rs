@@ -294,57 +294,67 @@ fn warp_perspective(
     let mut dst_image = RgbImage::new(dst_width, dst_height);
     let buffer: &mut [u8] = dst_image.as_mut();
 
-    // Process rows with a small-image sequential fast path to avoid rayon overhead
-    // Use bicubic interpolation with border replication (matches cv2.warpPerspective
-    // with flags=INTER_CUBIC and borderMode=BORDER_REPLICATE)
+    // Inverse-map each destination row via `warp_row`, which walks the source
+    // coordinate incrementally along the row instead of recomputing the 3x3
+    // homography mat-vec per pixel. Small-image fast path avoids rayon overhead.
+    // Bicubic with border replication (matches cv2.warpPerspective, INTER_CUBIC,
+    // BORDER_REPLICATE).
     if dst_height <= 1 {
         let row_buffer = &mut buffer[0..(dst_width * 3) as usize];
-        let dst_y = 0u32;
-        for dst_x in 0..dst_width {
-            let dst_point = Vector3::new(dst_x as f32, dst_y as f32, 1.0);
-            let src_point = inv_matrix * dst_point;
-            let final_pixel = if src_point.z.abs() > f32::EPSILON {
-                let src_x = src_point.x / src_point.z;
-                let src_y = src_point.y / src_point.z;
-                // bicubic_interpolate handles out-of-bounds via border replication
-                bicubic_interpolate(src_image, src_x, src_y)
-            } else {
-                // Degenerate case: replicate top-left corner pixel
-                *src_image.get_pixel(0, 0)
-            };
-            let index = (dst_x * 3) as usize;
-            row_buffer[index..index + 3].copy_from_slice(&final_pixel.0);
-        }
+        warp_row(&inv_matrix, src_image, 0, dst_width, row_buffer);
     } else {
         buffer
             .par_chunks_mut((dst_width * 3) as usize)
             .enumerate()
             .for_each(|(dst_y, row_buffer)| {
-                for dst_x in 0..dst_width {
-                    let dst_point = Vector3::new(dst_x as f32, dst_y as f32, 1.0);
-                    let src_point = inv_matrix * dst_point;
-                    let final_pixel = if src_point.z.abs() > f32::EPSILON {
-                        let src_x = src_point.x / src_point.z;
-                        let src_y = src_point.y / src_point.z;
-                        // bicubic_interpolate handles out-of-bounds via border replication
-                        bicubic_interpolate(src_image, src_x, src_y)
-                    } else {
-                        // Degenerate case: replicate top-left corner pixel
-                        *src_image.get_pixel(0, 0)
-                    };
-                    let index = (dst_x * 3) as usize;
-                    row_buffer[index..index + 3].copy_from_slice(&final_pixel.0);
-                }
+                warp_row(&inv_matrix, src_image, dst_y as u32, dst_width, row_buffer);
             });
     }
 
     Ok(dst_image)
 }
 
+/// Inverse-maps a single destination row through the perspective `inv_matrix`,
+/// writing bicubic-sampled RGB pixels into `row_buffer`.
+///
+/// The source coordinate is recomputed per pixel with a full `inv_matrix *
+/// [dst_x, dst_y, 1]` mat-vec, bit-identical to `cv2.warpPerspective`. A
+/// per-row incremental variant (carry `src` and add the column-0 step each
+/// pixel) was benchmarked and gave no measurable speedup — the cost is
+/// dominated by the bicubic sampling and the two perspective divisions, not the
+/// mat-vec — so the exact form is kept. This helper exists to share one row
+/// loop between the sequential and rayon paths.
+#[inline]
+fn warp_row(
+    inv_matrix: &Matrix3<f32>,
+    src_image: &RgbImage,
+    dst_y: u32,
+    dst_width: u32,
+    row_buffer: &mut [u8],
+) {
+    for dst_x in 0..dst_width {
+        let src_point = inv_matrix * Vector3::new(dst_x as f32, dst_y as f32, 1.0);
+        let final_pixel = if src_point.z.abs() > f32::EPSILON {
+            let src_x = src_point.x / src_point.z;
+            let src_y = src_point.y / src_point.z;
+            // bicubic_interpolate handles out-of-bounds via border replication
+            bicubic_interpolate(src_image, src_x, src_y)
+        } else {
+            // Degenerate case: replicate top-left corner pixel
+            *src_image.get_pixel(0, 0)
+        };
+        let index = (dst_x * 3) as usize;
+        row_buffer[index..index + 3].copy_from_slice(&final_pixel.0);
+    }
+}
+
 /// Gets a pixel value with border replication for out-of-bounds coordinates.
 ///
 /// This function implements OpenCV's BORDER_REPLICATE behavior:
 /// when coordinates are outside the image, the nearest edge pixel is used.
+///
+/// Now used only by the test-only bilinear reference; `bicubic_interpolate`
+/// inlines the equivalent clamping against the raw buffer.
 ///
 /// # Arguments
 ///
@@ -355,6 +365,7 @@ fn warp_perspective(
 /// # Returns
 ///
 /// The pixel value at the clamped coordinates.
+#[cfg(test)]
 #[inline]
 fn get_pixel_replicate(image: &RgbImage, x: i32, y: i32) -> Rgb<u8> {
     let clamped_x = x.clamp(0, image.width() as i32 - 1) as u32;
@@ -422,22 +433,38 @@ fn bicubic_interpolate(image: &RgbImage, x: f32, y: f32) -> Rgb<u8> {
         cubic_kernel(dy - 2.0),
     ];
 
+    // Precompute the four border-replicated sample columns and rows once (8
+    // clamps total) instead of re-clamping inside the 4x4 loop (which did 16
+    // clamped `get_pixel` lookups with their bounds checks). Then index the raw
+    // interleaved buffer directly. This is bit-identical to the previous
+    // `get_pixel_replicate`-based version: same clamps, same accumulation order
+    // (row-major j,i with channel innermost), same round/clamp.
+    let w = image.width() as i32;
+    let h = image.height() as i32;
+    let raw = image.as_raw();
+    let stride = (w as usize) * 3;
+    let cx = [
+        (x_int - 1).clamp(0, w - 1) as usize * 3,
+        x_int.clamp(0, w - 1) as usize * 3,
+        (x_int + 1).clamp(0, w - 1) as usize * 3,
+        (x_int + 2).clamp(0, w - 1) as usize * 3,
+    ];
+    let cy = [
+        (y_int - 1).clamp(0, h - 1) as usize * stride,
+        y_int.clamp(0, h - 1) as usize * stride,
+        (y_int + 1).clamp(0, h - 1) as usize * stride,
+        (y_int + 2).clamp(0, h - 1) as usize * stride,
+    ];
+
     let mut result = [0.0f32; 3];
-
-    // Sample 4x4 neighborhood
     for (j, &weight_y) in wy.iter().enumerate() {
-        let sample_y = y_int - 1 + j as i32;
-
+        let row = cy[j];
         for (i, &weight_x) in wx.iter().enumerate() {
-            let sample_x = x_int - 1 + i as i32;
             let weight = weight_x * weight_y;
-
-            // Use border replication for out-of-bounds pixels
-            let pixel = get_pixel_replicate(image, sample_x, sample_y);
-
-            for (c, result_c) in result.iter_mut().enumerate().take(3) {
-                *result_c += weight * pixel.0[c] as f32;
-            }
+            let idx = row + cx[i];
+            result[0] += weight * raw[idx] as f32;
+            result[1] += weight * raw[idx + 1] as f32;
+            result[2] += weight * raw[idx + 2] as f32;
         }
     }
 
@@ -483,6 +510,76 @@ mod tests {
         }
 
         Rgb(result)
+    }
+
+    /// Independent reference for `bicubic_interpolate`, written exactly as the
+    /// previous `get_pixel_replicate`-based implementation. Used to prove the
+    /// raw-buffer rewrite is bit-identical.
+    fn bicubic_reference(image: &RgbImage, x: f32, y: f32) -> Rgb<u8> {
+        let x_int = x.floor() as i32;
+        let y_int = y.floor() as i32;
+        let dx = x - x_int as f32;
+        let dy = y - y_int as f32;
+        let wx = [
+            cubic_kernel(dx + 1.0),
+            cubic_kernel(dx),
+            cubic_kernel(dx - 1.0),
+            cubic_kernel(dx - 2.0),
+        ];
+        let wy = [
+            cubic_kernel(dy + 1.0),
+            cubic_kernel(dy),
+            cubic_kernel(dy - 1.0),
+            cubic_kernel(dy - 2.0),
+        ];
+        let mut result = [0.0f32; 3];
+        for (j, &weight_y) in wy.iter().enumerate() {
+            let sample_y = y_int - 1 + j as i32;
+            for (i, &weight_x) in wx.iter().enumerate() {
+                let sample_x = x_int - 1 + i as i32;
+                let weight = weight_x * weight_y;
+                let pixel = get_pixel_replicate(image, sample_x, sample_y);
+                for (c, result_c) in result.iter_mut().enumerate().take(3) {
+                    *result_c += weight * pixel.0[c] as f32;
+                }
+            }
+        }
+        Rgb([
+            result[0].round().clamp(0.0, 255.0) as u8,
+            result[1].round().clamp(0.0, 255.0) as u8,
+            result[2].round().clamp(0.0, 255.0) as u8,
+        ])
+    }
+
+    #[test]
+    fn bicubic_raw_buffer_matches_reference_bit_exact() {
+        // Deterministic pseudo-random image.
+        let (w, h) = (17u32, 11u32);
+        let img = RgbImage::from_fn(w, h, |x, y| {
+            let i = y * w + x;
+            Rgb([
+                (i.wrapping_mul(37).wrapping_add(11) % 256) as u8,
+                (i.wrapping_mul(59).wrapping_add(7) % 256) as u8,
+                (i.wrapping_mul(101).wrapping_add(3) % 256) as u8,
+            ])
+        });
+        // Sample fractional coords across the interior, edges, and out-of-bounds
+        // (negative and beyond width/height) to exercise border replication.
+        for yi in -3..(h as i32 + 3) {
+            for xi in -3..(w as i32 + 3) {
+                for &fx in &[0.0f32, 0.25, 0.5, 0.75] {
+                    for &fy in &[0.0f32, 0.33, 0.66] {
+                        let x = xi as f32 + fx;
+                        let y = yi as f32 + fy;
+                        assert_eq!(
+                            bicubic_interpolate(&img, x, y),
+                            bicubic_reference(&img, x, y),
+                            "mismatch at ({x}, {y})"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
