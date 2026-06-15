@@ -61,6 +61,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### PP-OCRv6
+
+PP-OCRv6 ships in three sizes. Pass the bare file names below and enable the `auto-download` feature to fetch them automatically or point to local paths:
+
+Size | Detection | Recognition | Dictionary
+-----|-----|-----|-----
+tiny | `pp-ocrv6_tiny_det.onnx` | `pp-ocrv6_tiny_rec.onnx` | `ppocrv6_tiny_dict.txt`
+small | `pp-ocrv6_small_det.onnx` | `pp-ocrv6_small_rec.onnx` | `ppocrv6_dict.txt`
+medium | `pp-ocrv6_medium_det.onnx` | `pp-ocrv6_medium_rec.onnx` | `ppocrv6_dict.txt`
+
+```rust
+use oar_ocr::prelude::*;
+use oar_ocr::domain::tasks::TextDetectionConfig;
+use std::path::Path;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // PP-OCRv6 "tiny" — swap in small/medium (with ppocrv6_dict.txt) for higher accuracy.
+    let ocr = OAROCRBuilder::new(
+        "pp-ocrv6_tiny_det.onnx",
+        "pp-ocrv6_tiny_rec.onnx",
+        "ppocrv6_tiny_dict.txt",
+    )
+    // Official PP-OCRv6 detection defaults.
+    .text_detection_config(TextDetectionConfig {
+        score_threshold: 0.2,
+        box_threshold: 0.45,
+        unclip_ratio: 1.4,
+        ..Default::default()
+    })
+    .build()?;
+
+    let image = load_image(Path::new("document.jpg"))?;
+    let results = ocr.predict(vec![image])?;
+
+    for region in &results[0].text_regions {
+        if let Some((text, confidence)) = region.text_with_confidence() {
+            println!("{text}  ({confidence:.2})");
+        }
+    }
+
+    Ok(())
+}
+```
+
 ### Document Structure Analysis
 
 ```rust

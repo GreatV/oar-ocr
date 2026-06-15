@@ -175,7 +175,7 @@ impl CRNNModel {
     /// Model output containing recognized texts, scores, and optionally character positions
     pub fn postprocess(
         &self,
-        predictions: &ndarray::Array3<f32>,
+        predictions: ndarray::ArrayView3<f32>,
         return_positions: bool,
     ) -> CRNNModelOutput {
         if return_positions {
@@ -227,9 +227,29 @@ impl CRNNModel {
         }
         let batch_tensor = self.preprocess(images)?;
         tracing::debug!("CRNN preprocess output shape: {:?}", batch_tensor.shape());
-        let predictions = self.infer(&batch_tensor)?;
-        tracing::debug!("CRNN infer output shape: {:?}", predictions.shape());
-        let output = self.postprocess(&predictions, return_positions);
+
+        // Decode straight from ONNX Runtime's output buffer. Building an owned
+        // `Array3` here would force a multi-hundred-MB (often multi-GB) copy of
+        // the `(batch, time, vocab)` logits per call; instead we wrap the
+        // borrowed slice in a zero-copy `ArrayView3` and run CTC decode on it.
+        let input_name = self.inference.input_name();
+        let inputs = vec![(input_name, TensorInput::Array4(&batch_tensor))];
+        let output = self
+            .inference
+            .infer_first_output_f32(&inputs, |shape, data| {
+                if shape.len() != 3 {
+                    return Err(OCRError::InvalidInput {
+                        message: format!(
+                            "CRNN: expected 3D output (batch, time, vocab), got shape {shape:?}"
+                        ),
+                    });
+                }
+                let view = ndarray::ArrayView3::from_shape((shape[0], shape[1], shape[2]), data)
+                    .map_err(|e| OCRError::InvalidInput {
+                        message: format!("CRNN: failed to view output as 3D array: {e}"),
+                    })?;
+                Ok(self.postprocess(view, return_positions))
+            })?;
         tracing::debug!(
             "CRNN postprocess: {} texts, first 3: {:?}",
             output.texts.len(),
