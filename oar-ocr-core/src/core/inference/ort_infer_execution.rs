@@ -263,9 +263,8 @@ impl OrtInfer {
                 ),
             })?;
 
-        // Validate the model declares at least one output; we read the first one.
-        // We index the result by position (`outputs[0]`) rather than by name to
-        // avoid allocating a `String` for the output name on every inference call.
+        // Read the first output by position (`outputs[0]`) below to avoid
+        // allocating its name as a `String` on every call; validate it exists here.
         if session_guard.outputs().is_empty() {
             return Err(OCRError::InvalidInput {
                 message: format!("Model '{}': no declared outputs", self.model_name),

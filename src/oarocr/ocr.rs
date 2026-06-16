@@ -548,20 +548,24 @@ impl OAROCR {
             start = end;
         }
 
-        // Phase 1: crop + line-orientation per image, but collect every crop into
-        // a single global pool tagged by image index. Recognizing all crops
-        // together (instead of one batch per image) lets us form batches that are
-        // simultaneously *larger* (better GPU utilization, fewer launches) and
-        // *width-tighter* (less zero-padding, so less wasted conv work and no
-        // padding-induced output drift): across 20 dense pages there are far more
-        // same-width crops to fill a homogeneous batch than within any one page.
+        // Phase 1: crop + line-orientation per image into a shared pool tagged by
+        // image index. Recognizing crops together (vs one batch per image) yields
+        // batches that are both larger (better GPU use) and width-tighter (less
+        // padding waste/drift), since same-width crops are plentiful across pages.
+        //
+        // Bounded by `MAX_POOLED_CROPS`: each crop's `Arc<RgbImage>` lives until its
+        // batch runs, so an unbounded pool grows peak memory with the input and can
+        // OOM on big multi-page calls. We flush (recognize + scatter) on reaching
+        // the cap; it's high enough that typical batches still pool fully.
+        const MAX_POOLED_CROPS: usize = 4096;
         let mut per_image_results: Vec<Vec<Option<crate::oarocr::TextRegion>>> =
             all_detection_boxes
                 .iter()
                 .map(|b| vec![None; b.len()])
                 .collect();
         let total_crops: usize = all_detection_boxes.iter().map(|b| b.len()).sum();
-        let mut global_crops: Vec<(usize, CroppedTextRegion)> = Vec::with_capacity(total_crops);
+        let mut global_crops: Vec<(usize, CroppedTextRegion)> =
+            Vec::with_capacity(total_crops.min(MAX_POOLED_CROPS));
         for (img_idx, (_, preprocess)) in prepared.iter().enumerate() {
             let mut crops =
                 self.crop_text_regions(&preprocess.image, &all_detection_boxes[img_idx])?;
@@ -569,10 +573,16 @@ impl OAROCR {
             for crop in crops {
                 global_crops.push((img_idx, crop));
             }
+            if global_crops.len() >= MAX_POOLED_CROPS {
+                let pool = std::mem::take(&mut global_crops);
+                self.recognize_global(pool, &mut per_image_results)?;
+            }
         }
 
-        // Phase 2: recognize the global pool and scatter results back per image.
-        self.recognize_global(global_crops, &mut per_image_results)?;
+        // Phase 2: recognize the remaining pool and scatter results back per image.
+        if !global_crops.is_empty() {
+            self.recognize_global(global_crops, &mut per_image_results)?;
+        }
 
         // Phase 3: assemble per-image results (reading order + rotate-back).
         let mut results = Vec::with_capacity(prepared.len());

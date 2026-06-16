@@ -506,10 +506,12 @@ impl CTCLabelDecode {
                 let mut filtered_timesteps = Vec::with_capacity(sequence_idx.len());
                 let mut char_list: Vec<char> = Vec::with_capacity(sequence_idx.len());
                 for (i, &idx) in sequence_idx.iter().enumerate() {
-                    if selection[i] {
-                        if let Some(&ch) = self.base.character.get(idx) {
-                            char_list.push(ch);
-                        }
+                    // Push char/prob/timestep together so an out-of-vocab index can't
+                    // desync `char_list` from `char_positions` and corrupt word boxes.
+                    if selection[i]
+                        && let Some(&ch) = self.base.character.get(idx)
+                    {
+                        char_list.push(ch);
                         filtered_prob.push(sequence_prob[i]);
                         filtered_timesteps.push(i);
                     }
@@ -628,10 +630,12 @@ impl CTCLabelDecode {
                 let mut filtered_prob = Vec::with_capacity(sequence_idx.len());
                 let mut text = String::with_capacity(sequence_idx.len());
                 for (i, &idx) in sequence_idx.iter().enumerate() {
-                    if selection[i] {
-                        if let Some(&ch) = self.base.character.get(idx) {
-                            text.push(ch);
-                        }
+                    // Only count a prob when its glyph lands in `text`, else an
+                    // out-of-vocab index would inflate `mean_conf`.
+                    if selection[i]
+                        && let Some(&ch) = self.base.character.get(idx)
+                    {
+                        text.push(ch);
                         filtered_prob.push(sequence_prob[i]);
                     }
                 }
