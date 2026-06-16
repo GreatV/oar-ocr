@@ -261,7 +261,8 @@ impl BaseRecLabelDecode {
     /// Applies the decoder to a tensor of model predictions.
     ///
     /// # Arguments
-    /// * `pred` - A 3D tensor containing the model predictions.
+    /// * `pred` - A 3D tensor containing the model predictions. Accepts any
+    ///   `ndarray` storage (owned `Array3<f32>` or a zero-copy `ArrayView3<f32>`).
     ///
     /// # Returns
     /// A tuple containing:
@@ -438,7 +439,8 @@ impl CTCLabelDecode {
     /// the timestep positions of each character for word box generation.
     ///
     /// # Arguments
-    /// * `pred` - A 3D tensor containing the model predictions.
+    /// * `pred` - A 3D tensor containing the model predictions. Accepts any
+    ///   `ndarray` storage (owned `Array3<f32>` or a zero-copy `ArrayView3<f32>`).
     ///
     /// # Returns
     /// A tuple containing:
@@ -447,7 +449,13 @@ impl CTCLabelDecode {
     /// * A vector of character positions (normalized 0.0-1.0) for each text string
     /// * A vector of column indices for each character in each text string
     /// * A vector of sequence lengths (total columns) for each text string
-    pub fn apply_with_positions(&self, pred: ndarray::ArrayView3<f32>) -> PositionedDecodeResult {
+    pub fn apply_with_positions<S>(
+        &self,
+        pred: &ndarray::ArrayBase<S, ndarray::Ix3>,
+    ) -> PositionedDecodeResult
+    where
+        S: ndarray::Data<Elem = f32> + Sync,
+    {
         if pred.is_empty() {
             return (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         }
@@ -459,10 +467,11 @@ impl CTCLabelDecode {
             .into_par_iter()
             .map(|batch_idx| {
                 let preds = pred.index_axis(ndarray::Axis(0), batch_idx);
-                let seq_len = preds.shape()[0] as f32;
+                let seq_len_usize = preds.shape()[0];
+                let seq_len = seq_len_usize as f32;
 
-                let mut sequence_idx = Vec::new();
-                let mut sequence_prob = Vec::new();
+                let mut sequence_idx = Vec::with_capacity(seq_len_usize);
+                let mut sequence_prob = Vec::with_capacity(seq_len_usize);
 
                 for row in preds.outer_iter() {
                     if let Some((idx, prob)) = argmax_row(row) {
@@ -493,9 +502,9 @@ impl CTCLabelDecode {
                 }
 
                 // Collect filtered results (timestep == sequence position)
-                let mut filtered_prob = Vec::new();
-                let mut filtered_timesteps = Vec::new();
-                let mut char_list: Vec<char> = Vec::new();
+                let mut filtered_prob = Vec::with_capacity(sequence_idx.len());
+                let mut filtered_timesteps = Vec::with_capacity(sequence_idx.len());
+                let mut char_list: Vec<char> = Vec::with_capacity(sequence_idx.len());
                 for (i, &idx) in sequence_idx.iter().enumerate() {
                     if selection[i] {
                         if let Some(&ch) = self.base.character.get(idx) {
@@ -560,13 +569,17 @@ impl CTCLabelDecode {
     /// 4. Calculating confidence scores
     ///
     /// # Arguments
-    /// * `pred` - A 3D tensor containing the model predictions.
+    /// * `pred` - A 3D tensor containing the model predictions. Accepts any
+    ///   `ndarray` storage (owned `Array3<f32>` or a zero-copy `ArrayView3<f32>`).
     ///
     /// # Returns
     /// A tuple containing:
     /// * A vector of decoded text strings
     /// * A vector of confidence scores for each text string
-    pub fn apply(&self, pred: ndarray::ArrayView3<f32>) -> (Vec<String>, Vec<f32>) {
+    pub fn apply<S>(&self, pred: &ndarray::ArrayBase<S, ndarray::Ix3>) -> (Vec<String>, Vec<f32>)
+    where
+        S: ndarray::Data<Elem = f32> + Sync,
+    {
         if pred.is_empty() {
             return (Vec::new(), Vec::new());
         }
@@ -581,9 +594,10 @@ impl CTCLabelDecode {
             .into_par_iter()
             .map(|batch_idx| {
                 let preds = pred.index_axis(ndarray::Axis(0), batch_idx);
+                let seq_len_usize = preds.shape()[0];
 
-                let mut sequence_idx = Vec::new();
-                let mut sequence_prob = Vec::new();
+                let mut sequence_idx = Vec::with_capacity(seq_len_usize);
+                let mut sequence_prob = Vec::with_capacity(seq_len_usize);
 
                 for row in preds.outer_iter() {
                     if let Some((idx, prob)) = argmax_row(row) {
@@ -611,8 +625,8 @@ impl CTCLabelDecode {
                     }
                 }
 
-                let mut filtered_prob = Vec::new();
-                let mut text = String::new();
+                let mut filtered_prob = Vec::with_capacity(sequence_idx.len());
+                let mut text = String::with_capacity(sequence_idx.len());
                 for (i, &idx) in sequence_idx.iter().enumerate() {
                     if selection[i] {
                         if let Some(&ch) = self.base.character.get(idx) {

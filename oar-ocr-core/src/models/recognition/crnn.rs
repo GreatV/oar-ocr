@@ -173,11 +173,14 @@ impl CRNNModel {
     /// # Returns
     ///
     /// Model output containing recognized texts, scores, and optionally character positions
-    pub fn postprocess(
+    pub fn postprocess<S>(
         &self,
-        predictions: ndarray::ArrayView3<f32>,
+        predictions: &ndarray::ArrayBase<S, ndarray::Ix3>,
         return_positions: bool,
-    ) -> CRNNModelOutput {
+    ) -> CRNNModelOutput
+    where
+        S: ndarray::Data<Elem = f32> + Sync,
+    {
         if return_positions {
             // Decode CTC predictions with character positions and column indices
             let (texts, scores, char_positions, char_col_indices, sequence_lengths) =
@@ -248,7 +251,7 @@ impl CRNNModel {
                     .map_err(|e| OCRError::InvalidInput {
                         message: format!("CRNN: failed to view output as 3D array: {e}"),
                     })?;
-                Ok(self.postprocess(view, return_positions))
+                Ok(self.postprocess(&view, return_positions))
             })?;
         tracing::debug!(
             "CRNN postprocess: {} texts, first 3: {:?}",

@@ -117,13 +117,13 @@ impl OrtInfer {
                     // benchmarking), which on PP-OCRv6 cuts detection ~2x and
                     // recognition ~3x with byte-identical text output. Callers can
                     // still opt back into `heuristic`/`exhaustive` explicitly.
-                    let search = match cudnn_conv_algo_search
-                        .as_deref()
-                        .map(str::to_lowercase)
-                        .as_deref()
-                    {
-                        Some("heuristic") => ConvAlgorithmSearch::Heuristic,
-                        Some("exhaustive") => ConvAlgorithmSearch::Exhaustive,
+                    let search = match cudnn_conv_algo_search.as_deref() {
+                        Some(s) if s.eq_ignore_ascii_case("heuristic") => {
+                            ConvAlgorithmSearch::Heuristic
+                        }
+                        Some(s) if s.eq_ignore_ascii_case("exhaustive") => {
+                            ConvAlgorithmSearch::Exhaustive
+                        }
                         _ => ConvAlgorithmSearch::Default,
                     };
                     cuda_provider = cuda_provider.with_conv_algorithm_search(search);

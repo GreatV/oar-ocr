@@ -263,13 +263,14 @@ impl OrtInfer {
                 ),
             })?;
 
-        let first_output: String = session_guard
-            .outputs()
-            .first()
-            .map(|o| o.name().to_string())
-            .ok_or_else(|| OCRError::InvalidInput {
+        // Validate the model declares at least one output; we read the first one.
+        // We index the result by position (`outputs[0]`) rather than by name to
+        // avoid allocating a `String` for the output name on every inference call.
+        if session_guard.outputs().is_empty() {
+            return Err(OCRError::InvalidInput {
                 message: format!("Model '{}': no declared outputs", self.model_name),
-            })?;
+            });
+        }
 
         let tensor_refs: Result<Vec<_>, _> = inputs
             .iter()
@@ -289,14 +290,14 @@ impl OrtInfer {
                 .build(e)
         })?;
 
-        let value = &outputs[first_output.as_str()];
+        let value = &outputs[0];
         let (shape, data) =
             value
                 .try_extract_tensor::<f32>()
                 .map_err(|e| OCRError::InvalidInput {
                     message: format!(
-                        "Model '{}': failed to extract f32 output '{}': {}",
-                        self.model_name, first_output, e
+                        "Model '{}': failed to extract f32 first output: {}",
+                        self.model_name, e
                     ),
                 })?;
         let shape: Vec<usize> = shape.iter().map(|&d| d as usize).collect();

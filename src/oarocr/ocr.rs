@@ -560,7 +560,8 @@ impl OAROCR {
                 .iter()
                 .map(|b| vec![None; b.len()])
                 .collect();
-        let mut global_crops: Vec<(usize, CroppedTextRegion)> = Vec::new();
+        let total_crops: usize = all_detection_boxes.iter().map(|b| b.len()).sum();
+        let mut global_crops: Vec<(usize, CroppedTextRegion)> = Vec::with_capacity(total_crops);
         for (img_idx, (_, preprocess)) in prepared.iter().enumerate() {
             let mut crops =
                 self.crop_text_regions(&preprocess.image, &all_detection_boxes[img_idx])?;
@@ -575,12 +576,11 @@ impl OAROCR {
 
         // Phase 3: assemble per-image results (reading order + rotate-back).
         let mut results = Vec::with_capacity(prepared.len());
-        for (img_idx, (input_img_arc, preprocess)) in prepared.into_iter().enumerate() {
+        for (img_idx, ((input_img_arc, preprocess), image_results)) in
+            prepared.into_iter().zip(per_image_results).enumerate()
+        {
             let mut text_regions: Vec<crate::oarocr::TextRegion> =
-                std::mem::take(&mut per_image_results[img_idx])
-                    .into_iter()
-                    .flatten()
-                    .collect();
+                image_results.into_iter().flatten().collect();
 
             if let Some(rot) = preprocess.rotation {
                 Self::rotate_text_regions_back(&mut text_regions, rot);
