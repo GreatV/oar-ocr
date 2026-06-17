@@ -4,7 +4,7 @@
 //! For example, cropping and perspective transformation between detection and recognition.
 
 use image::{Rgb, RgbImage};
-use imageproc::geometric_transformations::{Interpolation, rotate_about_center};
+use imageproc::geometric_transformations::{Border, Interpolation, rotate_about_center};
 use oar_ocr_core::core::OCRError;
 use oar_ocr_core::processors::BoundingBox;
 use oar_ocr_core::utils::BBoxCrop;
@@ -163,7 +163,9 @@ impl EdgeProcessor for ImageRotationProcessor {
                             &img,
                             angle_radians,
                             Interpolation::Bilinear,
-                            Rgb([255u8, 255u8, 255u8]), // White background for padding
+                            // imageproc 0.27 takes a `Border` for out-of-bounds fill;
+                            // `Constant` reproduces the prior raw-pixel behavior.
+                            Border::Constant(Rgb([255u8, 255u8, 255u8])), // White background for padding
                         );
 
                         Some(Arc::new(rotated))
