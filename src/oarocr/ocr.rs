@@ -574,7 +574,10 @@ impl OAROCR {
                 global_crops.push((img_idx, crop));
             }
             if global_crops.len() >= MAX_POOLED_CROPS {
-                let pool = std::mem::take(&mut global_crops);
+                // `replace` (not `take`) keeps a pre-sized buffer for the next wave,
+                // so repeated flushes on large inputs don't re-grow from zero.
+                let pool =
+                    std::mem::replace(&mut global_crops, Vec::with_capacity(MAX_POOLED_CROPS));
                 self.recognize_global(pool, &mut per_image_results)?;
             }
         }

@@ -535,7 +535,7 @@ impl CTCLabelDecode {
                     mean_conf,
                     char_positions,
                     filtered_timesteps,
-                    seq_len as usize,
+                    seq_len_usize,
                 )
             })
             .collect();
