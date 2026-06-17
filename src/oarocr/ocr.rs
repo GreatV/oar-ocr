@@ -572,13 +572,16 @@ impl OAROCR {
             self.classify_line_orientations(&mut crops)?;
             for crop in crops {
                 global_crops.push((img_idx, crop));
-            }
-            if global_crops.len() >= MAX_POOLED_CROPS {
-                // `replace` (not `take`) keeps a pre-sized buffer for the next wave,
-                // so repeated flushes on large inputs don't re-grow from zero.
-                let pool =
-                    std::mem::replace(&mut global_crops, Vec::with_capacity(MAX_POOLED_CROPS));
-                self.recognize_global(pool, &mut per_image_results)?;
+                if global_crops.len() >= MAX_POOLED_CROPS {
+                    // Flush mid-image as well: a single dense page can exceed the cap
+                    // on its own, so checking only between images would let the pool
+                    // (and its live `Arc<RgbImage>`s) grow past the bound before any
+                    // flush runs. `replace` (not `take`) keeps a pre-sized buffer for
+                    // the next wave, so repeated flushes don't re-grow from zero.
+                    let pool =
+                        std::mem::replace(&mut global_crops, Vec::with_capacity(MAX_POOLED_CROPS));
+                    self.recognize_global(pool, &mut per_image_results)?;
+                }
             }
         }
 

@@ -241,13 +241,6 @@ impl OrtInfer {
             });
         }
 
-        let input_shape = inputs[0].1.shape();
-        let input_names: Vec<&str> = inputs.iter().map(|(name, _)| *name).collect();
-        let context = format!(
-            "ONNX Runtime inference failed with inputs: {}",
-            input_names.join(", ")
-        );
-
         let idx = self
             .next_idx
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -282,7 +275,15 @@ impl OrtInfer {
         let tensor_refs = tensor_refs?;
 
         let ort_inputs: SessionInputs<'_, '_, 0> = SessionInputs::ValueMap(tensor_refs);
+        // Build the error context lazily: formatting the input names only matters
+        // when `run` fails, so keep it out of the happy path's allocations.
         let outputs = session_guard.run(ort_inputs).map_err(|e| {
+            let input_shape = inputs[0].1.shape();
+            let input_names: Vec<&str> = inputs.iter().map(|(name, _)| *name).collect();
+            let context = format!(
+                "ONNX Runtime inference failed with inputs: {}",
+                input_names.join(", ")
+            );
             OCRError::model_inference_error_builder(&self.model_name, "forward_pass")
                 .input_shape(&input_shape)
                 .context(&context)

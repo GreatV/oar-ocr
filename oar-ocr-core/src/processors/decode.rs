@@ -483,38 +483,27 @@ impl CTCLabelDecode {
                     }
                 }
 
-                let mut selection = vec![true; sequence_idx.len()];
-
-                // Remove consecutive duplicates
-                if sequence_idx.len() > 1 {
-                    for i in 1..sequence_idx.len() {
-                        if sequence_idx[i] == sequence_idx[i - 1] {
-                            selection[i] = false;
-                        }
-                    }
-                }
-
-                // Remove blanks
-                for (i, &idx) in sequence_idx.iter().enumerate() {
-                    if idx == self.blank_index {
-                        selection[i] = false;
-                    }
-                }
-
-                // Collect filtered results (timestep == sequence position)
+                // Single CTC collapse pass (timestep == sequence position): drop
+                // blanks and consecutive duplicates and map to glyphs in one go,
+                // avoiding the `selection` scratch vector and two extra passes.
+                // `prev_idx` is updated on every step (blanks included), so dedup
+                // runs on the raw indices exactly as before. Pushing char/prob/
+                // timestep together keeps an out-of-vocab index from desyncing
+                // `char_list` from `char_positions` and corrupting word boxes.
                 let mut filtered_prob = Vec::with_capacity(sequence_idx.len());
                 let mut filtered_timesteps = Vec::with_capacity(sequence_idx.len());
                 let mut char_list: Vec<char> = Vec::with_capacity(sequence_idx.len());
+                let mut prev_idx = self.blank_index;
                 for (i, &idx) in sequence_idx.iter().enumerate() {
-                    // Push char/prob/timestep together so an out-of-vocab index can't
-                    // desync `char_list` from `char_positions` and corrupt word boxes.
-                    if selection[i]
+                    if idx != self.blank_index
+                        && idx != prev_idx
                         && let Some(&ch) = self.base.character.get(idx)
                     {
                         char_list.push(ch);
                         filtered_prob.push(sequence_prob[i]);
                         filtered_timesteps.push(i);
                     }
+                    prev_idx = idx;
                 }
 
                 let mean_conf = if filtered_prob.is_empty() {
@@ -611,33 +600,24 @@ impl CTCLabelDecode {
                     }
                 }
 
-                let mut selection = vec![true; sequence_idx.len()];
-
-                if sequence_idx.len() > 1 {
-                    for i in 1..sequence_idx.len() {
-                        if sequence_idx[i] == sequence_idx[i - 1] {
-                            selection[i] = false;
-                        }
-                    }
-                }
-
-                for (i, &idx) in sequence_idx.iter().enumerate() {
-                    if idx == self.blank_index {
-                        selection[i] = false;
-                    }
-                }
-
+                // Single CTC collapse pass: drop blanks and consecutive duplicates
+                // and map to glyphs in one go, avoiding the `selection` scratch
+                // vector and two extra passes. `prev_idx` is updated on every step
+                // (blanks included), so dedup runs on the raw indices exactly as
+                // before. Only count a prob when its glyph lands in `text`, else an
+                // out-of-vocab index would inflate `mean_conf`.
                 let mut filtered_prob = Vec::with_capacity(sequence_idx.len());
                 let mut text = String::with_capacity(sequence_idx.len());
+                let mut prev_idx = self.blank_index;
                 for (i, &idx) in sequence_idx.iter().enumerate() {
-                    // Only count a prob when its glyph lands in `text`, else an
-                    // out-of-vocab index would inflate `mean_conf`.
-                    if selection[i]
+                    if idx != self.blank_index
+                        && idx != prev_idx
                         && let Some(&ch) = self.base.character.get(idx)
                     {
                         text.push(ch);
                         filtered_prob.push(sequence_prob[i]);
                     }
+                    prev_idx = idx;
                 }
 
                 let mean_conf = if filtered_prob.is_empty() {
