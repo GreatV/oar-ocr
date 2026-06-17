@@ -217,4 +217,90 @@ impl OrtInfer {
 
         Ok(results)
     }
+
+    /// Runs inference and hands the **first** output's f32 data to `f` as a
+    /// borrowed slice, without copying it out of ONNX Runtime.
+    ///
+    /// `infer()` copies every output via `to_vec()` so it can return owned data
+    /// after the session lock is dropped. For text recognition that copy is
+    /// ruinous: the `(batch, time, vocab)` logits tensor can total **gigabytes**
+    /// per pipeline run (vocab is 6.9k–18.7k), and the copy alone can exceed the
+    /// inference time. This variant keeps the ONNX Runtime output alive and lets
+    /// the caller (e.g. the CTC decoder) read straight from it under the lock,
+    /// eliminating that copy and the intermediate `Array4`/`Array3`.
+    ///
+    /// `f` receives `(shape, data)` where `data` is row-major contiguous.
+    pub fn infer_first_output_f32<R>(
+        &self,
+        inputs: &[(&str, TensorInput)],
+        f: impl FnOnce(&[usize], &[f32]) -> Result<R, OCRError>,
+    ) -> Result<R, OCRError> {
+        if inputs.is_empty() {
+            return Err(OCRError::InvalidInput {
+                message: "No inputs provided for inference".to_string(),
+            });
+        }
+
+        let idx = self
+            .next_idx
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % self.sessions.len();
+        let mut session_guard = self.sessions[idx]
+            .lock()
+            .map_err(|_| OCRError::InvalidInput {
+                message: format!(
+                    "Model '{}': Failed to acquire session lock for session {}/{}",
+                    self.model_name,
+                    idx,
+                    self.sessions.len()
+                ),
+            })?;
+
+        // Read the first output by position (`outputs[0]`) below to avoid
+        // allocating its name as a `String` on every call; validate it exists here.
+        if session_guard.outputs().is_empty() {
+            return Err(OCRError::InvalidInput {
+                message: format!("Model '{}': no declared outputs", self.model_name),
+            });
+        }
+
+        let tensor_refs: Result<Vec<_>, _> = inputs
+            .iter()
+            .map(|(name, tensor_input)| {
+                tensor_input
+                    .to_tensor_ref()
+                    .map(|tensor_ref| (Cow::Borrowed(*name), tensor_ref.into()))
+            })
+            .collect();
+        let tensor_refs = tensor_refs?;
+
+        let ort_inputs: SessionInputs<'_, '_, 0> = SessionInputs::ValueMap(tensor_refs);
+        // Build the error context lazily: formatting the input names only matters
+        // when `run` fails, so keep it out of the happy path's allocations.
+        let outputs = session_guard.run(ort_inputs).map_err(|e| {
+            let input_shape = inputs[0].1.shape();
+            let input_names: Vec<&str> = inputs.iter().map(|(name, _)| *name).collect();
+            let context = format!(
+                "ONNX Runtime inference failed with inputs: {}",
+                input_names.join(", ")
+            );
+            OCRError::model_inference_error_builder(&self.model_name, "forward_pass")
+                .input_shape(&input_shape)
+                .context(&context)
+                .build(e)
+        })?;
+
+        let value = &outputs[0];
+        let (shape, data) =
+            value
+                .try_extract_tensor::<f32>()
+                .map_err(|e| OCRError::InvalidInput {
+                    message: format!(
+                        "Model '{}': failed to extract f32 first output: {}",
+                        self.model_name, e
+                    ),
+                })?;
+        let shape: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
+        f(&shape, data)
+    }
 }

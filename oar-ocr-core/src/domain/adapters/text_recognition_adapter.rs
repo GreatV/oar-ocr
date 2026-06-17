@@ -112,6 +112,14 @@ impl ModelAdapter for TextRecognitionAdapter {
     }
 
     fn recommended_batch_size(&self) -> usize {
+        // The pipeline pools crops across *all* images, sorts them by width/height
+        // ratio, and chunks them into batches — so consecutive crops in a batch
+        // have nearly identical widths and the per-batch zero-padding stays
+        // minimal regardless of batch size. That decouples batch size from the
+        // padding-induced output drift that plagues per-image batching, leaving
+        // batch size as a pure throughput knob: larger batches keep the GPU busy
+        // and amortize launch/decode overhead. On PP-OCRv6 + OmniDocBench, 64 is
+        // the throughput sweet spot. Callers can override via `region_batch_size`.
         64
     }
 }

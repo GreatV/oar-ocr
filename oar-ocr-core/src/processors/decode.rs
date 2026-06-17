@@ -5,6 +5,7 @@
 //! It includes structures and methods for converting model predictions into
 //! readable text strings with confidence scores.
 
+use rayon::prelude::*;
 use regex::Regex;
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -260,7 +261,8 @@ impl BaseRecLabelDecode {
     /// Applies the decoder to a tensor of model predictions.
     ///
     /// # Arguments
-    /// * `pred` - A 3D tensor containing the model predictions.
+    /// * `pred` - A 3D tensor containing the model predictions. Accepts any
+    ///   `ndarray` storage (owned `Array3<f32>` or a zero-copy `ArrayView3<f32>`).
     ///
     /// # Returns
     /// A tuple containing:
@@ -437,7 +439,8 @@ impl CTCLabelDecode {
     /// the timestep positions of each character for word box generation.
     ///
     /// # Arguments
-    /// * `pred` - A 3D tensor containing the model predictions.
+    /// * `pred` - A 3D tensor containing the model predictions. Accepts any
+    ///   `ndarray` storage (owned `Array3<f32>` or a zero-copy `ArrayView3<f32>`).
     ///
     /// # Returns
     /// A tuple containing:
@@ -446,96 +449,97 @@ impl CTCLabelDecode {
     /// * A vector of character positions (normalized 0.0-1.0) for each text string
     /// * A vector of column indices for each character in each text string
     /// * A vector of sequence lengths (total columns) for each text string
-    pub fn apply_with_positions(&self, pred: &ndarray::Array3<f32>) -> PositionedDecodeResult {
+    pub fn apply_with_positions<S>(
+        &self,
+        pred: &ndarray::ArrayBase<S, ndarray::Ix3>,
+    ) -> PositionedDecodeResult
+    where
+        S: ndarray::Data<Elem = f32> + Sync,
+    {
         if pred.is_empty() {
             return (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         }
 
         let batch_size = pred.shape()[0];
-        let mut all_texts = Vec::new();
-        let mut all_scores = Vec::new();
-        let mut all_positions = Vec::new();
-        let mut all_col_indices = Vec::new();
-        let mut all_seq_lengths = Vec::new();
 
-        for batch_idx in 0..batch_size {
-            let preds = pred.index_axis(ndarray::Axis(0), batch_idx);
-            let seq_len = preds.shape()[0] as f32;
+        type PerItem = (String, f32, Vec<f32>, Vec<usize>, usize);
+        let per: Vec<PerItem> = (0..batch_size)
+            .into_par_iter()
+            .map(|batch_idx| {
+                let preds = pred.index_axis(ndarray::Axis(0), batch_idx);
+                let seq_len_usize = preds.shape()[0];
+                let seq_len = seq_len_usize as f32;
 
-            let mut sequence_idx = Vec::new();
-            let mut sequence_prob = Vec::new();
-            let mut sequence_timesteps = Vec::new();
+                let mut sequence_idx = Vec::with_capacity(seq_len_usize);
+                let mut sequence_prob = Vec::with_capacity(seq_len_usize);
 
-            for (timestep, row) in preds.outer_iter().enumerate() {
-                if let Some((idx, prob)) = argmax_row(row) {
-                    sequence_idx.push(idx);
-                    sequence_prob.push(prob);
-                    sequence_timesteps.push(timestep);
-                } else {
-                    sequence_idx.push(self.blank_index);
-                    sequence_prob.push(0.0);
-                    sequence_timesteps.push(timestep);
-                }
-            }
-
-            let mut filtered_idx = Vec::new();
-            let mut filtered_prob = Vec::new();
-            let mut filtered_timesteps = Vec::new();
-            let mut selection = vec![true; sequence_idx.len()];
-
-            // Remove consecutive duplicates
-            if sequence_idx.len() > 1 {
-                for i in 1..sequence_idx.len() {
-                    if sequence_idx[i] == sequence_idx[i - 1] {
-                        selection[i] = false;
+                for row in preds.outer_iter() {
+                    if let Some((idx, prob)) = argmax_row(row) {
+                        sequence_idx.push(idx);
+                        sequence_prob.push(prob);
+                    } else {
+                        sequence_idx.push(self.blank_index);
+                        sequence_prob.push(0.0);
                     }
                 }
-            }
 
-            // Remove blanks
-            for (i, &idx) in sequence_idx.iter().enumerate() {
-                if idx == self.blank_index {
-                    selection[i] = false;
+                // Single CTC collapse pass (timestep == sequence position): drop
+                // blanks and consecutive duplicates and map to glyphs in one go,
+                // avoiding the `selection` scratch vector and two extra passes.
+                // `prev_idx` is updated on every step (blanks included), so dedup
+                // runs on the raw indices exactly as before. Pushing char/prob/
+                // timestep together keeps an out-of-vocab index from desyncing
+                // `char_list` from `char_positions` and corrupting word boxes.
+                let mut filtered_prob = Vec::with_capacity(sequence_idx.len());
+                let mut filtered_timesteps = Vec::with_capacity(sequence_idx.len());
+                let mut char_list: Vec<char> = Vec::with_capacity(sequence_idx.len());
+                let mut prev_idx = self.blank_index;
+                for (i, &idx) in sequence_idx.iter().enumerate() {
+                    if idx != self.blank_index
+                        && idx != prev_idx
+                        && let Some(&ch) = self.base.character.get(idx)
+                    {
+                        char_list.push(ch);
+                        filtered_prob.push(sequence_prob[i]);
+                        filtered_timesteps.push(i);
+                    }
+                    prev_idx = idx;
                 }
-            }
 
-            // Collect filtered results
-            for (i, &idx) in sequence_idx.iter().enumerate() {
-                if selection[i] {
-                    filtered_idx.push(idx);
-                    filtered_prob.push(sequence_prob[i]);
-                    filtered_timesteps.push(sequence_timesteps[i]);
-                }
-            }
+                let mean_conf = if filtered_prob.is_empty() {
+                    0.0
+                } else {
+                    filtered_prob.iter().sum::<f32>() / filtered_prob.len() as f32
+                };
 
-            let char_list: Vec<char> = filtered_idx
-                .iter()
-                .filter_map(|&text_id| self.base.character.get(text_id).copied())
-                .collect();
+                // Calculate normalized character positions (0.0 to 1.0)
+                let char_positions: Vec<f32> = filtered_timesteps
+                    .iter()
+                    .map(|&timestep| timestep as f32 / seq_len)
+                    .collect();
 
-            let conf_list = if filtered_prob.is_empty() {
-                vec![0.0]
-            } else {
-                filtered_prob
-            };
+                let text: String = char_list.iter().collect();
+                (
+                    text,
+                    mean_conf,
+                    char_positions,
+                    filtered_timesteps,
+                    seq_len_usize,
+                )
+            })
+            .collect();
 
-            // Calculate normalized character positions (0.0 to 1.0)
-            let char_positions: Vec<f32> = filtered_timesteps
-                .iter()
-                .map(|&timestep| timestep as f32 / seq_len)
-                .collect();
-
-            // Store column indices (raw timesteps) for accurate word box generation
-            let col_indices: Vec<usize> = filtered_timesteps.clone();
-
-            let text: String = char_list.iter().collect();
-            let mean_conf = conf_list.iter().sum::<f32>() / conf_list.len() as f32;
-
+        let mut all_texts = Vec::with_capacity(batch_size);
+        let mut all_scores = Vec::with_capacity(batch_size);
+        let mut all_positions = Vec::with_capacity(batch_size);
+        let mut all_col_indices = Vec::with_capacity(batch_size);
+        let mut all_seq_lengths = Vec::with_capacity(batch_size);
+        for (text, score, pos, cols, seq_len) in per {
             all_texts.push(text);
-            all_scores.push(mean_conf);
-            all_positions.push(char_positions);
-            all_col_indices.push(col_indices);
-            all_seq_lengths.push(seq_len as usize);
+            all_scores.push(score);
+            all_positions.push(pos);
+            all_col_indices.push(cols);
+            all_seq_lengths.push(seq_len);
         }
 
         (
@@ -556,92 +560,75 @@ impl CTCLabelDecode {
     /// 4. Calculating confidence scores
     ///
     /// # Arguments
-    /// * `pred` - A 3D tensor containing the model predictions.
+    /// * `pred` - A 3D tensor containing the model predictions. Accepts any
+    ///   `ndarray` storage (owned `Array3<f32>` or a zero-copy `ArrayView3<f32>`).
     ///
     /// # Returns
     /// A tuple containing:
     /// * A vector of decoded text strings
     /// * A vector of confidence scores for each text string
-    pub fn apply(&self, pred: &ndarray::Array3<f32>) -> (Vec<String>, Vec<f32>) {
+    pub fn apply<S>(&self, pred: &ndarray::ArrayBase<S, ndarray::Ix3>) -> (Vec<String>, Vec<f32>)
+    where
+        S: ndarray::Data<Elem = f32> + Sync,
+    {
         if pred.is_empty() {
             return (Vec::new(), Vec::new());
         }
 
         let batch_size = pred.shape()[0];
-        let mut all_texts = Vec::new();
-        let mut all_scores = Vec::new();
-        let mut batches_with_text = 0;
 
-        for batch_idx in 0..batch_size {
-            let preds = pred.index_axis(ndarray::Axis(0), batch_idx);
+        // Decode each sequence in the batch independently. The argmax over the
+        // (large) vocab dimension for every timestep dominates this work, so we
+        // fan the per-sequence loop out across rayon — order is preserved by
+        // collecting into an indexed Vec.
+        let (all_texts, all_scores): (Vec<String>, Vec<f32>) = (0..batch_size)
+            .into_par_iter()
+            .map(|batch_idx| {
+                let preds = pred.index_axis(ndarray::Axis(0), batch_idx);
+                let seq_len_usize = preds.shape()[0];
 
-            let mut sequence_idx = Vec::new();
-            let mut sequence_prob = Vec::new();
+                let mut sequence_idx = Vec::with_capacity(seq_len_usize);
+                let mut sequence_prob = Vec::with_capacity(seq_len_usize);
 
-            for row in preds.outer_iter() {
-                if let Some((idx, prob)) = argmax_row(row) {
-                    sequence_idx.push(idx);
-                    sequence_prob.push(prob);
-                } else {
-                    sequence_idx.push(self.blank_index);
-                    sequence_prob.push(0.0);
-                }
-            }
-
-            let mut filtered_idx = Vec::new();
-            let mut filtered_prob = Vec::new();
-            let mut selection = vec![true; sequence_idx.len()];
-
-            if sequence_idx.len() > 1 {
-                for i in 1..sequence_idx.len() {
-                    if sequence_idx[i] == sequence_idx[i - 1] {
-                        selection[i] = false;
+                for row in preds.outer_iter() {
+                    if let Some((idx, prob)) = argmax_row(row) {
+                        sequence_idx.push(idx);
+                        sequence_prob.push(prob);
+                    } else {
+                        sequence_idx.push(self.blank_index);
+                        sequence_prob.push(0.0);
                     }
                 }
-            }
 
-            for (i, &idx) in sequence_idx.iter().enumerate() {
-                if idx == self.blank_index {
-                    selection[i] = false;
+                // Single CTC collapse pass: drop blanks and consecutive duplicates
+                // and map to glyphs in one go, avoiding the `selection` scratch
+                // vector and two extra passes. `prev_idx` is updated on every step
+                // (blanks included), so dedup runs on the raw indices exactly as
+                // before. Only count a prob when its glyph lands in `text`, else an
+                // out-of-vocab index would inflate `mean_conf`.
+                let mut filtered_prob = Vec::with_capacity(sequence_idx.len());
+                let mut text = String::with_capacity(sequence_idx.len());
+                let mut prev_idx = self.blank_index;
+                for (i, &idx) in sequence_idx.iter().enumerate() {
+                    if idx != self.blank_index
+                        && idx != prev_idx
+                        && let Some(&ch) = self.base.character.get(idx)
+                    {
+                        text.push(ch);
+                        filtered_prob.push(sequence_prob[i]);
+                    }
+                    prev_idx = idx;
                 }
-            }
 
-            for (i, &idx) in sequence_idx.iter().enumerate() {
-                if selection[i] {
-                    filtered_idx.push(idx);
-                    filtered_prob.push(sequence_prob[i]);
-                }
-            }
+                let mean_conf = if filtered_prob.is_empty() {
+                    0.0
+                } else {
+                    filtered_prob.iter().sum::<f32>() / filtered_prob.len() as f32
+                };
 
-            let char_list: Vec<char> = filtered_idx
-                .iter()
-                .filter_map(|&text_id| self.base.character.get(text_id).copied())
-                .collect();
-
-            let conf_list = if filtered_prob.is_empty() {
-                vec![0.0]
-            } else {
-                filtered_prob
-            };
-
-            let text: String = char_list.iter().collect();
-            let mean_conf = conf_list.iter().sum::<f32>() / conf_list.len() as f32;
-
-            if !text.is_empty() {
-                batches_with_text += 1;
-            }
-
-            all_texts.push(text);
-            all_scores.push(mean_conf);
-        }
-
-        // Log summary of decoding results
-        tracing::debug!(
-            "CTC decode summary: batch_size={}, batches_with_text={}, empty_batches={}",
-            batch_size,
-            batches_with_text,
-            batch_size - batches_with_text
-        );
+                (text, mean_conf)
+            })
+            .unzip();
 
         (all_texts, all_scores)
     }

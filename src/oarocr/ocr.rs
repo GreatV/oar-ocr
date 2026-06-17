@@ -548,52 +548,71 @@ impl OAROCR {
             start = end;
         }
 
+        // Phase 1: crop + line-orientation per image into a shared pool tagged by
+        // image index. Recognizing crops together (vs one batch per image) yields
+        // batches that are both larger (better GPU use) and width-tighter (less
+        // padding waste/drift), since same-width crops are plentiful across pages.
+        //
+        // Bounded by `MAX_POOLED_CROPS`: each crop's `Arc<RgbImage>` lives until its
+        // batch runs, so an unbounded pool grows peak memory with the input and can
+        // OOM on big multi-page calls. We flush (recognize + scatter) on reaching
+        // the cap; it's high enough that typical batches still pool fully.
+        const MAX_POOLED_CROPS: usize = 4096;
+        let mut per_image_results: Vec<Vec<Option<crate::oarocr::TextRegion>>> =
+            all_detection_boxes
+                .iter()
+                .map(|b| vec![None; b.len()])
+                .collect();
+        let total_crops: usize = all_detection_boxes.iter().map(|b| b.len()).sum();
+        let mut global_crops: Vec<(usize, CroppedTextRegion)> =
+            Vec::with_capacity(total_crops.min(MAX_POOLED_CROPS));
+        for (img_idx, (_, preprocess)) in prepared.iter().enumerate() {
+            let mut crops =
+                self.crop_text_regions(&preprocess.image, &all_detection_boxes[img_idx])?;
+            self.classify_line_orientations(&mut crops)?;
+            for crop in crops {
+                global_crops.push((img_idx, crop));
+                if global_crops.len() >= MAX_POOLED_CROPS {
+                    // Flush mid-image as well: a single dense page can exceed the cap
+                    // on its own, so checking only between images would let the pool
+                    // (and its live `Arc<RgbImage>`s) grow past the bound before any
+                    // flush runs. `replace` (not `take`) keeps a pre-sized buffer for
+                    // the next wave, so repeated flushes don't re-grow from zero.
+                    let pool =
+                        std::mem::replace(&mut global_crops, Vec::with_capacity(MAX_POOLED_CROPS));
+                    self.recognize_global(pool, &mut per_image_results)?;
+                }
+            }
+        }
+
+        // Phase 2: recognize the remaining pool and scatter results back per image.
+        if !global_crops.is_empty() {
+            self.recognize_global(global_crops, &mut per_image_results)?;
+        }
+
+        // Phase 3: assemble per-image results (reading order + rotate-back).
         let mut results = Vec::with_capacity(prepared.len());
-        for (img_idx, (input_img_arc, preprocess)) in prepared.into_iter().enumerate() {
-            let detection_boxes = all_detection_boxes[img_idx].clone();
-            results.push(self.predict_single(
-                img_idx,
-                input_img_arc,
-                preprocess,
-                detection_boxes,
-            )?);
+        for (img_idx, ((input_img_arc, preprocess), image_results)) in
+            prepared.into_iter().zip(per_image_results).enumerate()
+        {
+            let mut text_regions: Vec<crate::oarocr::TextRegion> =
+                image_results.into_iter().flatten().collect();
+
+            if let Some(rot) = preprocess.rotation {
+                Self::rotate_text_regions_back(&mut text_regions, rot);
+            }
+
+            results.push(crate::oarocr::OAROCRResult {
+                input_path: Arc::from(format!("image_{}", img_idx)),
+                index: img_idx,
+                input_img: input_img_arc,
+                text_regions,
+                orientation_angle: preprocess.orientation_angle,
+                rectified_img: preprocess.rectified_img,
+            });
         }
 
         Ok(results)
-    }
-
-    fn predict_single(
-        &self,
-        img_idx: usize,
-        input_img: std::sync::Arc<image::RgbImage>,
-        preprocess: crate::oarocr::preprocess::PreprocessResult,
-        detection_boxes: Vec<BoundingBox>,
-    ) -> Result<crate::oarocr::OAROCRResult, OCRError> {
-        use std::sync::Arc;
-
-        let current_image = preprocess.image;
-
-        let mut cropped_regions = self.crop_text_regions(&current_image, &detection_boxes)?;
-        self.classify_line_orientations(&mut cropped_regions)?;
-
-        let recognized = self.recognize_text_regions(detection_boxes.len(), cropped_regions)?;
-
-        // Preserve reading order by emitting in detection-index order.
-        let mut text_regions: Vec<crate::oarocr::TextRegion> =
-            recognized.into_iter().flatten().collect();
-
-        if let Some(rot) = preprocess.rotation {
-            Self::rotate_text_regions_back(&mut text_regions, rot);
-        }
-
-        Ok(crate::oarocr::OAROCRResult {
-            input_path: Arc::from(format!("image_{}", img_idx)),
-            index: img_idx,
-            input_img,
-            text_regions,
-            orientation_angle: preprocess.orientation_angle,
-            rectified_img: preprocess.rectified_img,
-        })
     }
 
     fn detect_sorted_text_boxes_batch(
@@ -729,30 +748,30 @@ impl OAROCR {
         Ok(())
     }
 
-    fn recognize_text_regions(
+    /// Recognizes a global pool of crops (gathered across all images) and scatters
+    /// each result back into `per_image_results[image_index][detection_index]`.
+    ///
+    /// Crops are sorted by width/height ratio across the whole batch of images and
+    /// chunked into fixed-size batches, so each recognition batch is
+    /// width-homogeneous (minimal zero-padding) yet well-filled. Pooling across
+    /// images gives many more same-width crops than any single page, which makes
+    /// the batches both tighter and larger than per-image batching could.
+    fn recognize_global(
         &self,
-        detection_count: usize,
-        mut regions: Vec<CroppedTextRegion>,
-    ) -> Result<Vec<Option<crate::oarocr::TextRegion>>, OCRError> {
-        let mut results: Vec<Option<crate::oarocr::TextRegion>> = vec![None; detection_count];
-        if regions.is_empty() {
-            return Ok(results);
+        mut crops: Vec<(usize, CroppedTextRegion)>,
+        per_image_results: &mut [Vec<Option<crate::oarocr::TextRegion>>],
+    ) -> Result<(), OCRError> {
+        if crops.is_empty() {
+            return Ok(());
         }
 
-        regions.sort_by(|a, b| {
-            a.wh_ratio
-                .partial_cmp(&b.wh_ratio)
+        crops.sort_by(|a, b| {
+            a.1.wh_ratio
+                .partial_cmp(&b.1.wh_ratio)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         let base_rec_ratio = DEFAULT_REC_IMAGE_SHAPE[2] as f32 / DEFAULT_REC_IMAGE_SHAPE[1] as f32;
-        // Regions are sorted by width/height ratio above; chunking them into
-        // fixed-size batches keeps each batch width-homogeneous so the per-batch
-        // padding (to `chunk_max_wh_ratio`) stays close to each crop's own width.
-        // Defaulting to `regions.len()` would put every crop in one batch padded
-        // to the single widest crop, wasting recognition compute on dense pages —
-        // so fall back to the adapter's recommended batch size (mirroring the
-        // detection path), not the region count.
         let batch_size = self
             .region_batch_size
             .unwrap_or_else(|| {
@@ -762,14 +781,14 @@ impl OAROCR {
             })
             .max(1);
 
-        for chunk in regions.chunks(batch_size) {
+        for chunk in crops.chunks(batch_size) {
             let chunk_max_wh_ratio = chunk
                 .iter()
-                .map(|r| r.wh_ratio)
+                .map(|(_, r)| r.wh_ratio)
                 .fold(base_rec_ratio, |acc, r| acc.max(r));
 
             let rec_input = ImageTaskInput::from_arc_images(
-                chunk.iter().map(|r| Arc::clone(&r.image)).collect(),
+                chunk.iter().map(|(_, r)| Arc::clone(&r.image)).collect(),
             );
 
             let rec = self
@@ -778,7 +797,7 @@ impl OAROCR {
                 .execute(rec_input, None)?;
 
             let n = rec.texts.len().min(chunk.len());
-            for (i, region) in chunk.iter().take(n).enumerate() {
+            for (i, (img_idx, region)) in chunk.iter().take(n).enumerate() {
                 let text = rec.texts.get(i).map(String::as_str).unwrap_or("");
                 let score = *rec.scores.get(i).unwrap_or(&0.0);
 
@@ -814,8 +833,10 @@ impl OAROCR {
                     None
                 };
 
-                if region.detection_index < results.len() {
-                    results[region.detection_index] = Some(crate::oarocr::TextRegion {
+                if let Some(image_results) = per_image_results.get_mut(*img_idx)
+                    && region.detection_index < image_results.len()
+                {
+                    image_results[region.detection_index] = Some(crate::oarocr::TextRegion {
                         bounding_box: bbox.clone(),
                         dt_poly: Some(bbox.clone()),
                         rec_poly: Some(bbox),
@@ -829,7 +850,7 @@ impl OAROCR {
             }
         }
 
-        Ok(results)
+        Ok(())
     }
 
     fn rotate_text_regions_back(
