@@ -39,7 +39,7 @@ metal = [
 
 [dependencies]
 candle-core = "0.11.0"
-candle-nn = "0.10.2"
+candle-nn = "0.11.0"
 candle-transformers = "0.11.0"
 html-escape = "0.2"
 image.workspace = true
