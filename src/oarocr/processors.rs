@@ -7,7 +7,7 @@ use image::{Rgb, RgbImage};
 use imageproc::geometric_transformations::{Border, Interpolation, rotate_about_center};
 use oar_ocr_core::core::OCRError;
 use oar_ocr_core::processors::BoundingBox;
-use oar_ocr_core::utils::BBoxCrop;
+use oar_ocr_core::utils::{BBoxCrop, get_rotate_crop_image};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -89,8 +89,7 @@ impl TextCroppingProcessor {
     /// Crop a single bounding box from an image
     fn crop_single(&self, image: &RgbImage, bbox: &BoundingBox) -> Result<RgbImage, OCRError> {
         if self.handle_rotation && bbox.points.len() == 4 {
-            // Rotated bounding box (quadrilateral) - use perspective transform
-            BBoxCrop::crop_rotated_bounding_box(image, bbox)
+            get_rotate_crop_image(image, &bbox.points)
         } else {
             // Regular axis-aligned bounding box
             BBoxCrop::crop_bounding_box(image, bbox)
