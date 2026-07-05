@@ -135,63 +135,8 @@ impl BBoxCrop {
     ) -> Vec<Result<RgbImage, OCRError>> {
         bboxes
             .iter()
-            .map(|bbox| Self::crop_rotated_bounding_box(image, bbox))
+            .map(|bbox| get_rotate_crop_image(image, &bbox.points))
             .collect()
-    }
-
-    /// Crops and rectifies an image region using rotated crop with perspective transformation.
-    ///
-    /// This function implements the same functionality as OpenCV's GetRotateCropImage.
-    /// It takes a bounding box (quadrilateral) and applies perspective transformation
-    /// to rectify it into a rectangular image. This is particularly useful for text
-    /// regions that may be rotated or have perspective distortion.
-    ///
-    /// # Arguments
-    ///
-    /// * `image` - The source image
-    /// * `bbox` - The bounding box defining the quadrilateral region
-    ///
-    /// # Returns
-    ///
-    /// A Result containing the rotated and cropped image or an OCRError
-    pub fn crop_rotated_bounding_box(
-        image: &RgbImage,
-        bbox: &BoundingBox,
-    ) -> Result<RgbImage, OCRError> {
-        // Check if the bounding box has exactly 4 points
-        if bbox.points.len() != 4 {
-            return Err(OCRError::image_processing_error(format!(
-                "Bounding box must have exactly 4 points, got {}",
-                bbox.points.len()
-            )));
-        }
-
-        let box_points = bbox.points.clone();
-
-        // Fast path: if the quadrilateral is axis-aligned rectangle, use simple crop
-        if let [p0, p1, p2, p3] = &box_points[..] {
-            let is_axis_aligned = (p0.y == p1.y && p2.y == p3.y && p0.x == p3.x && p1.x == p2.x)
-                || (p0.x == p1.x && p2.x == p3.x && p0.y == p3.y && p1.y == p2.y);
-            if is_axis_aligned {
-                let min_x = p0.x.min(p1.x).min(p2.x).min(p3.x).max(0.0) as u32;
-                let min_y = p0.y.min(p1.y).min(p2.y).min(p3.y).max(0.0) as u32;
-                let max_x = p0.x.max(p1.x).max(p2.x).max(p3.x).min(image.width() as f32) as u32;
-                let max_y =
-                    p0.y.max(p1.y)
-                        .max(p2.y)
-                        .max(p3.y)
-                        .min(image.height() as f32) as u32;
-                if max_x > min_x && max_y > min_y {
-                    use image::imageops;
-                    let w = max_x - min_x;
-                    let h = max_y - min_y;
-                    return Ok(imageops::crop_imm(image, min_x, min_y, w, h).to_image());
-                }
-            }
-        }
-
-        // Apply rotated crop transformation
-        get_rotate_crop_image(image, &box_points)
     }
 }
 
@@ -338,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn test_crop_rotated_bounding_box_valid() {
+    fn test_batch_crop_rotated_bounding_boxes_valid() {
         let img = create_test_image(100, 100);
         let bbox = BoundingBox {
             points: vec![
@@ -349,8 +294,9 @@ mod tests {
             ],
         };
 
-        let result = BBoxCrop::crop_rotated_bounding_box(&img, &bbox);
-        assert!(result.is_ok());
+        let mut results = BBoxCrop::batch_crop_rotated_bounding_boxes(&img, &[bbox]);
+        assert_eq!(results.len(), 1);
+        let result = results.remove(0);
 
         let cropped = match result {
             Ok(cropped) => cropped,
@@ -361,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn test_crop_rotated_bounding_box_wrong_point_count() {
+    fn test_batch_crop_rotated_bounding_boxes_wrong_point_count() {
         let img = create_test_image(100, 100);
         let bbox = BoundingBox {
             points: vec![
@@ -371,15 +317,17 @@ mod tests {
             ], // Only 3 points instead of 4
         };
 
-        let result = BBoxCrop::crop_rotated_bounding_box(&img, &bbox);
+        let mut results = BBoxCrop::batch_crop_rotated_bounding_boxes(&img, &[bbox]);
+        assert_eq!(results.len(), 1);
+        let result = results.remove(0);
         assert!(result.is_err());
 
         let error_msg = result.unwrap_err().to_string();
-        assert!(error_msg.contains("must have exactly 4 points"));
+        assert!(error_msg.contains("Box must contain exactly 4 points"));
     }
 
     #[test]
-    fn test_crop_rotated_bounding_box_axis_aligned_fast_path() {
+    fn test_get_rotate_crop_image_axis_aligned_wide_box() {
         let img = create_test_image(100, 100);
         // Define an axis-aligned rectangle with 4 points
         let bbox = BoundingBox {
@@ -390,16 +338,30 @@ mod tests {
                 Point { x: 10.0, y: 50.0 },
             ],
         };
-        let cropped_fast = match BBoxCrop::crop_rotated_bounding_box(&img, &bbox) {
+        let cropped_fast = match get_rotate_crop_image(&img, &bbox.points) {
             Ok(cropped_fast) => cropped_fast,
             Err(err) => panic!("expected rotated crop to succeed: {err}"),
         };
-        // Expected via simple crop
-        let expected = imageops::crop_imm(&img, 10, 20, 50, 30).to_image();
-        assert_eq!(cropped_fast.dimensions(), expected.dimensions());
-        // Sample a couple of pixels to ensure identical content
-        assert_eq!(cropped_fast.get_pixel(0, 0), expected.get_pixel(0, 0));
-        assert_eq!(cropped_fast.get_pixel(49, 29), expected.get_pixel(49, 29));
+        assert_eq!(cropped_fast.dimensions(), (50, 30));
+    }
+
+    #[test]
+    fn test_get_rotate_crop_image_axis_aligned_tall_box_rotates() {
+        let img = create_test_image(100, 100);
+        let bbox = BoundingBox {
+            points: vec![
+                Point { x: 10.0, y: 20.0 },
+                Point { x: 30.0, y: 20.0 },
+                Point { x: 30.0, y: 80.0 },
+                Point { x: 10.0, y: 80.0 },
+            ],
+        };
+
+        let cropped = match get_rotate_crop_image(&img, &bbox.points) {
+            Ok(cropped) => cropped,
+            Err(err) => panic!("expected rotated crop to succeed: {err}"),
+        };
+        assert_eq!(cropped.dimensions(), (60, 20));
     }
 
     #[test]
