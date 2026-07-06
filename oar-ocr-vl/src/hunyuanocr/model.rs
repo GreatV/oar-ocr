@@ -137,7 +137,7 @@ impl HunyuanOcr {
         stop_token_ids.sort_unstable();
         stop_token_ids.dedup();
 
-        let dtype = device.bf16_default_to_f32();
+        let dtype = crate::utils::select_dtype(&device);
 
         let weight_files = crate::utils::collect_safetensors(model_dir, "HunyuanOCR")?;
         // SAFETY: from_mmaped_safetensors is unsafe because it memory-maps weight files

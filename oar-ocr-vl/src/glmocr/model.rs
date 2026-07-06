@@ -47,7 +47,7 @@ impl GlmOcr {
             });
         }
 
-        let dtype = device.bf16_default_to_f32();
+        let dtype = crate::utils::select_dtype(&device);
         let weight_files = crate::utils::collect_safetensors(model_dir, "GLM-OCR")?;
         // SAFETY: The mmap'd files must not be modified or deleted while in use.
         let vb = unsafe {
