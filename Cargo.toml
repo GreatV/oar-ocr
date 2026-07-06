@@ -3,7 +3,7 @@ members = [".", "oar-ocr-derive", "oar-ocr-core", "oar-ocr-vl"]
 resolver = "2"
 
 [workspace.package]
-version = "0.7.2"
+version = "0.7.3"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
@@ -12,8 +12,8 @@ repository = "https://github.com/greatv/oar-ocr"
 homepage = "https://github.com/greatv/oar-ocr"
 
 [workspace.dependencies]
-oar-ocr-core = { version = "0.7.2", path = "oar-ocr-core", default-features = false }
-oar-ocr-derive = { version = "0.7.2", path = "oar-ocr-derive", default-features = false }
+oar-ocr-core = { version = "0.7.3", path = "oar-ocr-core", default-features = false }
+oar-ocr-derive = { version = "0.7.3", path = "oar-ocr-derive", default-features = false }
 
 # Shared third-party dependencies (kept in sync via workspace inheritance).
 clap = { version = "4.5.42", features = ["derive"] }
