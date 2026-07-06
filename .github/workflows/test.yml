@@ -71,7 +71,9 @@ jobs:
         include:
           - os: ubuntu-latest
             vl_feature_check: ""
-          - os: macos-latest
+          # Pinned: macos-latest drifts between images, breaking cached
+          # ort-sys linker paths (see #145).
+          - os: macos-26
             vl_feature_check: "--features metal"
           - os: windows-latest
             vl_feature_check: ""
