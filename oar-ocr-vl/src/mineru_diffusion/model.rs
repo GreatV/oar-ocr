@@ -129,7 +129,7 @@ impl MinerUDiffusion {
             });
         }
 
-        let dtype = device.bf16_default_to_f32();
+        let dtype = crate::utils::select_dtype(&device);
         let weight_files = crate::utils::collect_safetensors(model_dir, "MinerU-Diffusion")?;
         let vb = unsafe {
             candle_nn::VarBuilder::from_mmaped_safetensors(&weight_files, dtype, &device)

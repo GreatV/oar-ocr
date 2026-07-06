@@ -110,7 +110,7 @@ impl PaddleOcrVl {
                     .to_string(),
             })?;
 
-        let dtype = device.bf16_default_to_f32();
+        let dtype = crate::utils::select_dtype(&device);
         let weight_files = crate::utils::collect_safetensors(model_dir, "PaddleOCR-VL")?;
         // SAFETY: from_mmaped_safetensors memory-maps the weight files directly;
         // the caller must ensure they are valid and not modified while in use.

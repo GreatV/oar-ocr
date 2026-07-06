@@ -12,7 +12,7 @@ pub mod table;
 pub mod text;
 
 use ::image::{GrayImage, RgbImage};
-use candle_core::{Device, Tensor};
+use candle_core::{DType, Device, Tensor};
 use oar_ocr_core::core::OCRError;
 use oar_ocr_core::domain::structure::{LayoutElement, LayoutElementType};
 use oar_ocr_core::processors::BoundingBox;
@@ -151,6 +151,76 @@ pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
                 device_str
             ),
         }),
+    }
+}
+
+/// Selects the weight/compute dtype for a VL model on `device`.
+///
+/// BF16 is preferred on accelerators, but Candle's CUDA BF16 kernels are only
+/// compiled for compute capability >= 8.0 (Ampere and newer). On older GPUs
+/// (GTX 10xx/16xx, RTX 20xx, ...) the first BF16 op fails at runtime, so this
+/// probes a tiny BF16 computation on the device and falls back to F16 when
+/// the probe fails. CPU always uses F32.
+///
+/// The `OAR_VL_DTYPE` environment variable (`bf16`, `f16`, or `f32`,
+/// case-insensitive) overrides the automatic choice.
+pub fn select_dtype(device: &Device) -> DType {
+    if let Ok(v) = std::env::var("OAR_VL_DTYPE") {
+        match dtype_from_str(&v) {
+            Some(dtype) => {
+                tracing::info!("using dtype {dtype:?} from OAR_VL_DTYPE={v}");
+                return dtype;
+            }
+            None => {
+                tracing::warn!(
+                    "ignoring invalid OAR_VL_DTYPE value '{v}' (expected bf16, f16, or f32)"
+                );
+            }
+        }
+    }
+
+    if !device.supports_bf16() {
+        return DType::F32;
+    }
+    if bf16_works(device) {
+        DType::BF16
+    } else {
+        tracing::warn!(
+            "device does not support BF16 kernels (CUDA compute capability < 8.0?); \
+             falling back to F16. Set OAR_VL_DTYPE=f32 if you see numerical issues."
+        );
+        DType::F16
+    }
+}
+
+/// Parses a dtype name as accepted by the `OAR_VL_DTYPE` environment variable.
+fn dtype_from_str(s: &str) -> Option<DType> {
+    match s.to_lowercase().as_str() {
+        "bf16" | "bfloat16" => Some(DType::BF16),
+        "f16" | "fp16" | "float16" | "half" => Some(DType::F16),
+        "f32" | "fp32" | "float32" => Some(DType::F32),
+        _ => None,
+    }
+}
+
+/// Runs a tiny BF16 computation on `device` covering the kernel families used
+/// during inference (fill, matmul, affine, cast) and reads the result back,
+/// so missing-kernel and unsupported-cuBLAS errors surface here instead of
+/// mid-inference.
+fn bf16_works(device: &Device) -> bool {
+    let probe = || -> candle_core::Result<()> {
+        let t = Tensor::ones((2, 2), DType::BF16, device)?;
+        let t = t.matmul(&t)?;
+        let t = (t * 2.0)?;
+        t.to_dtype(DType::F32)?.sum_all()?.to_scalar::<f32>()?;
+        Ok(())
+    };
+    match probe() {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::debug!("BF16 probe failed on {device:?}: {e}");
+            false
+        }
     }
 }
 
@@ -843,6 +913,33 @@ mod tests {
     fn test_parse_device_cpu() {
         let device = parse_device("cpu").unwrap();
         assert!(matches!(device, Device::Cpu));
+    }
+
+    #[test]
+    fn test_dtype_from_str() {
+        assert_eq!(dtype_from_str("bf16"), Some(DType::BF16));
+        assert_eq!(dtype_from_str("BF16"), Some(DType::BF16));
+        assert_eq!(dtype_from_str("bfloat16"), Some(DType::BF16));
+        assert_eq!(dtype_from_str("f16"), Some(DType::F16));
+        assert_eq!(dtype_from_str("fp16"), Some(DType::F16));
+        assert_eq!(dtype_from_str("f32"), Some(DType::F32));
+        assert_eq!(dtype_from_str("float32"), Some(DType::F32));
+        assert_eq!(dtype_from_str("f64"), None);
+        assert_eq!(dtype_from_str(""), None);
+    }
+
+    #[test]
+    fn test_bf16_probe_detects_incomplete_backend() {
+        // Candle's CPU backend lacks BF16 matmul, so the probe must report
+        // false — the same signal a pre-Ampere CUDA device produces. (The CPU
+        // path never reaches the probe in select_dtype; supports_bf16() short
+        // circuits it to F32.)
+        assert!(!bf16_works(&Device::Cpu));
+    }
+
+    #[test]
+    fn test_select_dtype_cpu_is_f32() {
+        assert_eq!(select_dtype(&Device::Cpu), DType::F32);
     }
 
     #[test]
