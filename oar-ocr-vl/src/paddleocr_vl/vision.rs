@@ -19,6 +19,66 @@ const ATTN_FULL_SEQ_THRESHOLD: usize = 8192;
 /// F32 softmax scratch at `chunk * seq_k * num_heads * 4 bytes` — about
 /// 110 MB at seq_k = 3600 / heads = 16, well within VRAM headroom.
 const ATTN_CHUNK_SIZE: usize = 512;
+/// Device memory to leave untouched when deciding whether the full-matrix
+/// attention path fits: later ops (attn @ v output, MLP activations) still
+/// need allocations after the softmax scratch peak.
+const ATTN_FREE_MEM_HEADROOM: usize = 256 * 1024 * 1024;
+
+/// The seq length above which vision attention always uses the chunked path.
+/// Defaults to [`ATTN_FULL_SEQ_THRESHOLD`]; the `OAR_VL_ATTN_FULL_SEQ_THRESHOLD`
+/// environment variable overrides it (e.g. `0` forces chunked attention).
+fn attn_full_seq_threshold() -> usize {
+    static THRESHOLD: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        match std::env::var("OAR_VL_ATTN_FULL_SEQ_THRESHOLD") {
+            Ok(v) => match v.trim().parse() {
+                Ok(t) => {
+                    tracing::info!(
+                        "vision attention full-seq threshold {t} from OAR_VL_ATTN_FULL_SEQ_THRESHOLD"
+                    );
+                    t
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "ignoring invalid OAR_VL_ATTN_FULL_SEQ_THRESHOLD value '{v}' (expected an integer)"
+                    );
+                    ATTN_FULL_SEQ_THRESHOLD
+                }
+            },
+            Err(_) => ATTN_FULL_SEQ_THRESHOLD,
+        }
+    })
+}
+
+/// Peak transient device memory (bytes) of the full-matrix attention path:
+/// the `[b, heads, seq, seq]` scores in the compute dtype, their F32 copy fed
+/// to the softmax, the F32 softmax output, and the cast back to the compute
+/// dtype are all live at once.
+fn eager_attn_scratch_bytes(b: usize, heads: usize, seq: usize, dtype: DType) -> usize {
+    b * heads * seq * seq * (2 * dtype.size_in_bytes() + 2 * DType::F32.size_in_bytes())
+}
+
+/// Whether the full-matrix attention path fits on `device` next to what is
+/// already allocated. Unknown free memory (CPU, Metal, query failure) keeps
+/// the pre-existing behavior of always taking the full path below the seq
+/// threshold.
+fn eager_attn_fits(device: &Device, scratch_bytes: usize) -> bool {
+    match crate::utils::free_device_memory(device) {
+        Some(free) => match scratch_bytes.checked_add(ATTN_FREE_MEM_HEADROOM) {
+            Some(needed) if needed <= free => true,
+            _ => {
+                tracing::debug!(
+                    "vision attention falling back to chunked path: needs ~{} MiB scratch \
+                     but only {} MiB device memory is free",
+                    scratch_bytes / (1024 * 1024),
+                    free / (1024 * 1024),
+                );
+                false
+            }
+        },
+        None => true,
+    }
+}
 
 /// SigLIP-style 2D rotary embedding for vision encoder
 #[derive(Debug, Clone)]
@@ -356,7 +416,15 @@ impl VisionAttention {
         // O(chunk * seq_k) F32 scratch for the softmax, instead of O(seq_q * seq_k) for the
         // full eager path. Numerically equivalent to the original code, and matches Python's
         // PaddleOCRAttention which auto-selects sdpa at runtime (modeling_paddleocr_vl.py:1298).
-        let attn_output = if seq <= ATTN_FULL_SEQ_THRESHOLD {
+        //
+        // Besides the seq threshold, the full path also requires its softmax scratch to fit
+        // in the device's currently-free memory: on small-VRAM GPUs (e.g. 4 GB GTX 1650 Ti)
+        // large images otherwise OOM inside the softmax (issue #147).
+        let attn_output = if seq <= attn_full_seq_threshold()
+            && eager_attn_fits(
+                hidden_states.device(),
+                eager_attn_scratch_bytes(b, self.num_heads, seq, q.dtype()),
+            ) {
             // Original eager attention path — kept byte-identical to the pre-fix
             // implementation so that small/medium seq inputs (incl. all v1.5
             // inputs) produce the exact same output. Removing the final

@@ -237,6 +237,40 @@ pub fn candle_to_ocr_inference(
     }
 }
 
+/// Returns the free device memory in bytes when it can be queried.
+///
+/// Only CUDA devices can be queried (`cuMemGetInfo`); CPU and Metal return
+/// `None`, as does a CUDA query failure. Callers use `None` as "unknown, don't
+/// gate on memory".
+pub fn free_device_memory(device: &Device) -> Option<usize> {
+    #[cfg(feature = "cuda")]
+    if let Device::Cuda(dev) = device {
+        return match dev.cuda_stream().context().mem_get_info() {
+            Ok((free, _total)) => Some(free),
+            Err(e) => {
+                tracing::debug!("querying free CUDA memory failed: {e}");
+                None
+            }
+        };
+    }
+    let _ = device;
+    None
+}
+
+/// Formats an error together with its full `source()` chain, so underlying
+/// candle / CUDA failures (e.g. out-of-memory) aren't hidden behind the
+/// top-level error's Display output.
+pub fn error_chain_message(prefix: &str, e: &(dyn std::error::Error + 'static)) -> String {
+    use std::fmt::Write;
+    let mut chain = format!("{prefix}: {e}");
+    let mut cur = e.source();
+    while let Some(s) = cur {
+        let _ = write!(chain, "\n  caused by: {s}");
+        cur = s.source();
+    }
+    chain
+}
+
 /// Convert Candle error to OCRError for processing operations.
 pub fn candle_to_ocr_processing(
     kind: oar_ocr_core::core::errors::ProcessingStage,
@@ -913,6 +947,21 @@ mod tests {
     fn test_parse_device_cpu() {
         let device = parse_device("cpu").unwrap();
         assert!(matches!(device, Device::Cpu));
+    }
+
+    #[test]
+    fn test_error_chain_message_includes_sources() {
+        let root = std::io::Error::other("CUDA_ERROR_OUT_OF_MEMORY");
+        let err = OCRError::Inference {
+            model_name: "PaddleOCR-VL".to_string(),
+            context: "vision attn softmax".to_string(),
+            source: Box::new(root),
+        };
+        let msg = error_chain_message("generation failed", &err);
+        assert_eq!(
+            msg,
+            "generation failed: inference failed in model 'PaddleOCR-VL': vision attn softmax\n  caused by: CUDA_ERROR_OUT_OF_MEMORY"
+        );
     }
 
     #[test]

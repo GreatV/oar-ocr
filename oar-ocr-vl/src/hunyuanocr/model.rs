@@ -201,15 +201,7 @@ impl HunyuanOcr {
                 .map(|tokens| self.decode_generated_tokens(&tokens))
                 .collect(),
             Err(e) => {
-                // Walk the source chain so the underlying candle / CUDA
-                // failure isn't hidden behind the top-level OCRError.
-                let mut chain = format!("generation failed: {e}");
-                let mut cur: Option<&dyn std::error::Error> = std::error::Error::source(&e);
-                while let Some(s) = cur {
-                    chain.push_str(&format!("\n  caused by: {s}"));
-                    cur = s.source();
-                }
-                let msg = chain;
+                let msg = crate::utils::error_chain_message("generation failed", &e);
                 (0..images.len())
                     .map(|_| {
                         Err(OCRError::InvalidInput {
@@ -246,13 +238,7 @@ impl HunyuanOcr {
         match self.generate_tokens_internal(images, instructions, max_new_tokens) {
             Ok(results) => results.into_iter().map(Ok).collect(),
             Err(e) => {
-                let mut chain = format!("generation failed: {e}");
-                let mut cur: Option<&dyn std::error::Error> = std::error::Error::source(&e);
-                while let Some(s) = cur {
-                    chain.push_str(&format!("\n  caused by: {s}"));
-                    cur = s.source();
-                }
-                let msg = chain;
+                let msg = crate::utils::error_chain_message("generation failed", &e);
                 (0..images.len())
                     .map(|_| {
                         Err(OCRError::InvalidInput {
