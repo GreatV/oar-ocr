@@ -5,28 +5,19 @@ use candle_nn::Module;
 use oar_ocr_core::core::OCRError;
 use rayon::prelude::*;
 
-/// Above this seq length vision attention computes softmax in chunks along the
-/// query dim instead of allocating the full `[seq, seq]` F32 buffer (mirroring
-/// PyTorch SDPA's memory profile).
-///
-/// Set above PaddleOCR-VL-1.5's worst-case seq (≈5040 at max_pixels=1_003_520)
-/// so v1.5 always takes the single-shot full-matrix path: chunked matmul shifts
-/// cuBLAS tiling and a few low-confidence argmax tokens, so the full path keeps
-/// v1.5 byte-stable. v1 (seq≈14200) crosses the threshold, where the full buffer
-/// would otherwise OOM (12+ GB on chart_01.jpg).
+/// Above this seq length vision attention runs chunked along the query dim
+/// instead of materializing the full `[seq, seq]` buffer. Kept above v1.5's
+/// worst-case seq (≈5040) because chunking shifts cuBLAS tiling and a few
+/// low-confidence argmax tokens; the full path keeps v1.5 byte-stable.
 const ATTN_FULL_SEQ_THRESHOLD: usize = 8192;
-/// Query chunk size when chunked attention kicks in. 512 keeps each chunk's
-/// F32 softmax scratch at `chunk * seq_k * num_heads * 4 bytes` — about
-/// 110 MB at seq_k = 3600 / heads = 16, well within VRAM headroom.
+/// Query chunk size for chunked attention (~110 MB F32 softmax scratch at
+/// seq_k = 3600, heads = 16).
 const ATTN_CHUNK_SIZE: usize = 512;
-/// Device memory to leave untouched when deciding whether the full-matrix
-/// attention path fits: later ops (attn @ v output, MLP activations) still
-/// need allocations after the softmax scratch peak.
+/// Free-memory headroom for allocations after the softmax scratch peak.
 const ATTN_FREE_MEM_HEADROOM: usize = 256 * 1024 * 1024;
 
-/// The seq length above which vision attention always uses the chunked path.
-/// Defaults to [`ATTN_FULL_SEQ_THRESHOLD`]; the `OAR_VL_ATTN_FULL_SEQ_THRESHOLD`
-/// environment variable overrides it (e.g. `0` forces chunked attention).
+/// [`ATTN_FULL_SEQ_THRESHOLD`], overridable via the
+/// `OAR_VL_ATTN_FULL_SEQ_THRESHOLD` env var (`0` forces chunked attention).
 fn attn_full_seq_threshold() -> usize {
     static THRESHOLD: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *THRESHOLD.get_or_init(|| {
@@ -50,11 +41,9 @@ fn attn_full_seq_threshold() -> usize {
     })
 }
 
-/// Peak transient device memory (bytes) of the full-matrix attention path:
-/// the `[b, heads, seq, seq]` scores in the compute dtype, their F32 copy fed
-/// to the softmax, the F32 softmax output, and the cast back to the compute
-/// dtype are all live at once. `None` means the product overflows `usize`
-/// (only possible on 32-bit targets), which certainly doesn't fit either.
+/// Peak transient bytes of the full-matrix path: the `[b, heads, seq, seq]`
+/// scores in the compute dtype, their F32 copy, the F32 softmax output, and
+/// the cast back are all live at once. `None` on `usize` overflow.
 fn eager_attn_scratch_bytes(b: usize, heads: usize, seq: usize, dtype: DType) -> Option<usize> {
     let per_element = 2 * dtype.size_in_bytes() + 2 * DType::F32.size_in_bytes();
     b.checked_mul(heads)?
@@ -63,10 +52,9 @@ fn eager_attn_scratch_bytes(b: usize, heads: usize, seq: usize, dtype: DType) ->
         .checked_mul(per_element)
 }
 
-/// Whether the full-matrix attention path fits on `device` next to what is
-/// already allocated. Unknown free memory (CPU, Metal, query failure) keeps
-/// the pre-existing behavior of always taking the full path below the seq
-/// threshold; an overflowing scratch estimate (`None`) never fits.
+/// Whether the full-matrix path fits in free device memory. Unknown free
+/// memory (CPU, Metal, query failure) keeps the full path; an overflowed
+/// scratch estimate (`None`) never fits.
 fn eager_attn_fits(device: &Device, scratch_bytes: Option<usize>) -> bool {
     let Some(scratch_bytes) = scratch_bytes else {
         return false;
@@ -419,25 +407,18 @@ impl VisionAttention {
             .contiguous()
             .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision k t23 contiguous", e))?;
 
-        // Chunked attention over the query dim to mirror PyTorch's `sdpa_attention_forward`
-        // memory profile (no full [seq, seq] materialization). Each iteration only allocates
-        // O(chunk * seq_k) F32 scratch for the softmax, instead of O(seq_q * seq_k) for the
-        // full eager path. Numerically equivalent to the original code, and matches Python's
-        // PaddleOCRAttention which auto-selects sdpa at runtime (modeling_paddleocr_vl.py:1298).
-        //
-        // Besides the seq threshold, the full path also requires its softmax scratch to fit
-        // in the device's currently-free memory: on small-VRAM GPUs (e.g. 4 GB GTX 1650 Ti)
-        // large images otherwise OOM inside the softmax (issue #147).
+        // Full-matrix path only when seq is below the threshold AND its softmax
+        // scratch fits in free device memory — large images otherwise OOM on
+        // small-VRAM GPUs (issue #147). The chunked fallback is numerically
+        // equivalent (mirrors PyTorch SDPA's memory profile).
         let attn_output = if seq <= attn_full_seq_threshold()
             && eager_attn_fits(
                 hidden_states.device(),
                 eager_attn_scratch_bytes(b, self.num_heads, seq, q.dtype()),
             ) {
-            // Original eager attention path — kept byte-identical to the pre-fix
-            // implementation so that small/medium seq inputs (incl. all v1.5
-            // inputs) produce the exact same output. Removing the final
-            // `.contiguous()` here changes cuBLAS' matmul-shape selection and
-            // shifts low-confidence argmax tokens, so we preserve it.
+            // Kept byte-identical to the original implementation: removing the
+            // final `.contiguous()` changes cuBLAS' matmul-shape selection and
+            // shifts low-confidence argmax tokens.
             let scores = q
                 .matmul(&kt)
                 .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision qk matmul", e))?

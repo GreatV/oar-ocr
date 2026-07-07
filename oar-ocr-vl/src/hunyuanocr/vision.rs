@@ -674,20 +674,12 @@ impl VisionPerceive {
         //   2. cat([image_begin, mlp_out, image_end])
         //   3. after_rms(cat)
         //
-        // We previously (a) applied `after_rms` to the mlp output BEFORE
-        // concatenating the begin/end markers and (b) broadcast-added an
-        // unused `image_sep` parameter to every token. Both wrong:
-        // upstream's `after_rms` runs once over the full begin+tokens+end
-        // sequence, which lifts the image_begin / image_end embedding
-        // magnitudes from their stored norm (~0.9) up to the post-RMSNorm
-        // scale (~22), matching the surrounding patch tokens. Our pre-fix
-        // perceive output had image_begin / image_end at norm ~0.9 — 25×
-        // smaller than upstream — so the LLM saw those marker positions as
-        // near-zero vectors and the prefill's last-position logits diverged
-        // (cos 0.69 vs upstream → wrong argmax → hallucinated
-        // continuations like "The presence of factors…" instead of OCR text).
-        // The `image_sep` Parameter is declared in upstream weights but
-        // *never used in the forward path*; we now drop it on the floor too.
+        // `after_rms` must run over the full begin+tokens+end sequence: it
+        // lifts the image_begin / image_end embeddings from their stored norm
+        // (~0.9) to the post-RMSNorm scale (~22). Normalizing before the cat
+        // leaves the markers as near-zero vectors and the prefill logits
+        // diverge into hallucinated text. The `image_sep` parameter exists in
+        // the upstream weights but is never used in the forward path.
         let begin = self.image_begin.reshape((1usize, 1024usize)).map_err(|e| {
             candle_to_ocr_processing(
                 oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
@@ -832,17 +824,11 @@ impl HunyuanVisionModel {
             )
         })?;
 
-        // No extra/cls token. The upstream HunYuanVisionPatchEmbed
-        // (`transformers/models/hunyuan_vl/modeling_hunyuan_vl.py`) declares
-        // `num_positions = max_num_patches + 1` but the runtime path uses
-        // `position_embedding.weight[1:, :]` and feeds only the patch tokens
-        // through the encoder — the slot-0 entry is a vestigial cls token
-        // present in the trained weights for compatibility but never
-        // propagated. An earlier internal Tencent variant (which this Rust
-        // port originally followed) prepended a mean-pooled extra token plus
-        // a learned `extra_pos`, which contributed unwanted attention scores
-        // to every patch and accumulated noise across 27 encoder layers.
-        // Removing that prepend halves the residual vit_out drift vs upstream.
+        // No extra/cls token: upstream HunYuanVisionPatchEmbed declares
+        // `num_positions = max_num_patches + 1` but uses
+        // `position_embedding.weight[1:, :]` and feeds only patch tokens —
+        // slot 0 is a vestigial cls token in the trained weights, never
+        // propagated. Prepending one adds attention noise across all layers.
         let hidden = patch_tokens.unsqueeze(0).map_err(|e| {
             candle_to_ocr_processing(
                 oar_ocr_core::core::errors::ProcessingStage::TensorOperation,

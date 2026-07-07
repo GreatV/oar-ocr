@@ -142,6 +142,7 @@ For advanced document understanding using Vision-Language Models (like PaddleOCR
 
 - [**Usage Guide**](docs/usage.md) - Detailed API usage, builder patterns, GPU configuration
 - [**Pre-trained Models**](docs/models.md) - Model download links and recommended configurations
+- [**Environment Variables**](docs/environment-variables.md) - Runtime configuration via `OAR_*` variables
 
 ## Examples
 

@@ -237,11 +237,8 @@ pub fn candle_to_ocr_inference(
     }
 }
 
-/// Returns the free device memory in bytes when it can be queried.
-///
-/// Only CUDA devices can be queried (`cuMemGetInfo`); CPU and Metal return
-/// `None`, as does a CUDA query failure. Callers use `None` as "unknown, don't
-/// gate on memory".
+/// Free device memory in bytes; `None` when it can't be queried
+/// (CPU, Metal, or a CUDA `cuMemGetInfo` failure).
 pub fn free_device_memory(device: &Device) -> Option<usize> {
     #[cfg(feature = "cuda")]
     if let Device::Cuda(dev) = device {
@@ -257,9 +254,8 @@ pub fn free_device_memory(device: &Device) -> Option<usize> {
     None
 }
 
-/// Formats an error together with its full `source()` chain, so underlying
-/// candle / CUDA failures (e.g. out-of-memory) aren't hidden behind the
-/// top-level error's Display output.
+/// Formats an error with its full `source()` chain, so underlying candle /
+/// CUDA failures (e.g. out-of-memory) aren't hidden by the top-level Display.
 pub fn error_chain_message(prefix: &str, e: &(dyn std::error::Error + 'static)) -> String {
     use std::fmt::Write;
     let mut chain = format!("{prefix}: {e}");
