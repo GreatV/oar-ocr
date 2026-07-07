@@ -126,10 +126,6 @@ struct Args {
     #[arg(long, default_value_t = 0.0)]
     rec_score_thresh: f32,
 
-    /// Maximum text length for recognition (default: 100)
-    #[arg(long, default_value_t = 100)]
-    rec_max_text_length: usize,
-
     /// Detection session pool size (sets detection batch concurrency)
     #[arg(long)]
     image_batch_size: Option<usize>,
@@ -220,7 +216,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let rec_config = TextRecognitionConfig {
         score_threshold: args.rec_score_thresh,
-        max_text_length: args.rec_max_text_length,
     };
 
     // Construct OCR pipeline

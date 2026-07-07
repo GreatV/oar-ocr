@@ -59,7 +59,6 @@ impl TextRecognitionPredictorBuilder {
         Self {
             state: PredictorBuilderState::new(TextRecognitionConfig {
                 score_threshold: 0.0,
-                max_text_length: 100,
             }),
             dict_path: None,
         }
@@ -67,11 +66,6 @@ impl TextRecognitionPredictorBuilder {
 
     pub fn score_threshold(mut self, threshold: f32) -> Self {
         self.state.config_mut().score_threshold = threshold;
-        self
-    }
-
-    pub fn max_text_length(mut self, max_length: usize) -> Self {
-        self.state.config_mut().max_text_length = max_length;
         self
     }
 
