@@ -366,10 +366,6 @@ struct Args {
     #[arg(long, default_value = "0.0")]
     rec_score_thresh: f32,
 
-    /// Max text length for recognition
-    #[arg(long, default_value_t = 320)]
-    text_rec_max_length: usize,
-
     /// Seal detection score threshold (default: 0.2, lower than general text)
     #[arg(long, default_value = "0.2")]
     seal_det_score_thresh: f32,
@@ -579,7 +575,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let text_rec_config = TextRecognitionConfig {
         score_threshold: args.rec_score_thresh,
-        max_text_length: args.text_rec_max_length,
     };
 
     // Build structure pipeline

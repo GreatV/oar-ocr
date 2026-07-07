@@ -7,7 +7,7 @@ use crate::ConfigValidator;
 use crate::core::OCRError;
 use crate::core::traits::TaskDefinition;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
-use crate::utils::{ScoreValidator, validate_length_match, validate_max_value};
+use crate::utils::ScoreValidator;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for text recognition task.
@@ -18,16 +18,12 @@ pub struct TextRecognitionConfig {
     /// Score threshold for recognition (default: 0.0, no filtering)
     #[validate(range(min = 0.0, max = 1.0))]
     pub score_threshold: f32,
-    /// Maximum text length (default: 25)
-    #[validate(min = 1)]
-    pub max_text_length: usize,
 }
 
 impl Default for TextRecognitionConfig {
     fn default() -> Self {
         Self {
             score_threshold: 0.0,
-            max_text_length: 25,
         }
     }
 }
@@ -91,14 +87,12 @@ impl TaskDefinition for TextRecognitionOutput {
 
 /// Text recognition task implementation.
 #[derive(Debug, Default)]
-pub struct TextRecognitionTask {
-    config: TextRecognitionConfig,
-}
+pub struct TextRecognitionTask;
 
 impl TextRecognitionTask {
     /// Creates a new text recognition task.
-    pub fn new(config: TextRecognitionConfig) -> Self {
-        Self { config }
+    pub fn new(_config: TextRecognitionConfig) -> Self {
+        Self
     }
 }
 
@@ -126,22 +120,9 @@ impl Task for TextRecognitionTask {
     }
 
     fn validate_output(&self, output: &Self::Output) -> Result<(), OCRError> {
-        // Validate that texts and scores have matching lengths
-        validate_length_match(output.texts.len(), output.scores.len(), "texts", "scores")?;
-
         // Validate score ranges
         let validator = ScoreValidator::new_unit_range("score");
         validator.validate_scores_with(&output.scores, |idx| format!("Text {}", idx))?;
-
-        // Validate text lengths
-        for (idx, text) in output.texts.iter().enumerate() {
-            validate_max_value(
-                text.len(),
-                self.config.max_text_length,
-                "length",
-                &format!("Text {}", idx),
-            )?;
-        }
 
         Ok(())
     }
@@ -158,13 +139,13 @@ mod tests {
 
     #[test]
     fn test_text_recognition_task_creation() {
-        let task = TextRecognitionTask::default();
+        let task = TextRecognitionTask;
         assert_eq!(task.task_type(), TaskType::TextRecognition);
     }
 
     #[test]
     fn test_input_validation() {
-        let task = TextRecognitionTask::default();
+        let task = TextRecognitionTask;
 
         // Empty images should fail
         let empty_input = ImageTaskInput::new(vec![]);
@@ -177,7 +158,7 @@ mod tests {
 
     #[test]
     fn test_output_validation() {
-        let task = TextRecognitionTask::default();
+        let task = TextRecognitionTask;
 
         // Matching texts and scores should pass
         let output = TextRecognitionOutput {
@@ -186,14 +167,6 @@ mod tests {
             ..Default::default()
         };
         assert!(task.validate_output(&output).is_ok());
-
-        // Mismatched lengths should fail
-        let bad_output = TextRecognitionOutput {
-            texts: vec![],
-            scores: vec![0.95],
-            ..Default::default()
-        };
-        assert!(task.validate_output(&bad_output).is_err());
 
         // Invalid score should fail
         let bad_score = TextRecognitionOutput {
@@ -206,7 +179,7 @@ mod tests {
 
     #[test]
     fn test_schema() {
-        let task = TextRecognitionTask::default();
+        let task = TextRecognitionTask;
         let schema = task.schema();
         assert_eq!(schema.task_type, TaskType::TextRecognition);
         assert!(schema.input_types.contains(&"text_boxes".to_string()));
