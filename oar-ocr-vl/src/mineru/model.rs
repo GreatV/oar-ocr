@@ -305,7 +305,7 @@ impl MinerU {
                 .map(|tokens| self.decode_generated_tokens(&tokens))
                 .collect(),
             Err(e) => {
-                let msg = format!("generation failed: {e}");
+                let msg = crate::utils::error_chain_message("generation failed", &e);
                 (0..images.len())
                     .map(|_| {
                         Err(OCRError::InvalidInput {
@@ -342,7 +342,7 @@ impl MinerU {
         match self.generate_tokens_internal(images, instructions, max_new_tokens) {
             Ok(results) => results.into_iter().map(Ok).collect(),
             Err(e) => {
-                let msg = format!("generation failed: {e}");
+                let msg = crate::utils::error_chain_message("generation failed", &e);
                 (0..images.len())
                     .map(|_| {
                         Err(OCRError::InvalidInput {
