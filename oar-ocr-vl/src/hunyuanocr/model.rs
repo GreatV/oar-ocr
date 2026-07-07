@@ -581,16 +581,11 @@ fn expand_image_tokens_in_place(
     image_inputs: &HunyuanOcrImageInputs,
 ) -> Result<(), OCRError> {
     let (_, hm, wm) = image_inputs.grid_thw_merged;
-    // Match the upstream HuggingFace processor:
-    //   transformers/models/hunyuan_vl/processing_hunyuan_vl.py:62
-    //   num_image_tokens = patch_h * (patch_w + 1) + 2
-    // The `+ 2` accounts for the begin/end markers that the vit's perceive
-    // step prepends/appends to the spatial sequence — those positions also
-    // get replaced by image embeddings (rather than carrying separate
-    // `image_start` / `image_end` text embeddings, which is the scheme an
-    // earlier internal Tencent variant used and which this Rust port
-    // originally followed). The placeholder run is contiguous and uses
-    // `image_token_id` exclusively — no `image_newline_token_id` interleaving.
+    // Upstream processor: num_image_tokens = patch_h * (patch_w + 1) + 2
+    // (processing_hunyuan_vl.py:62). The `+ 2` covers the perceive step's
+    // begin/end markers, whose positions are also replaced by image
+    // embeddings. The placeholder run is contiguous `image_token_id` only —
+    // no `image_newline_token_id` interleaving.
     let expected_tokens = hm.saturating_mul(wm.saturating_add(1)).saturating_add(2);
     if expected_tokens == 0 {
         return Err(OCRError::InvalidInput {
@@ -657,15 +652,10 @@ fn build_position_ids(
     //   - h is `[h]*(patch_w+1)` for `h` in `0..patch_h`,
     //   - t is 0 across the run.
     // The run starts at `first_image_token + 1` and spans `(patch_w+1)*patch_h`
-    // tokens — i.e. the *middle* of the expanded `patch_h*(patch_w+1) + 2`
-    // image-token block. The first and last image_tokens (perceive begin/end
-    // markers) keep their default arange position.
-    //
-    // Earlier this port used pure-sequential position ids for all four axes,
-    // which made the model produce hallucinated text (e.g. "The text in the
-    // image is not complete.") instead of OCR output: the trained weights
-    // expect the spatial xdrope rotation to encode 2-D image structure, and
-    // collapsing to 1-D destroys the geometry.
+    // tokens — the *middle* of the expanded `patch_h*(patch_w+1) + 2` block;
+    // the perceive begin/end markers keep their default arange position.
+    // Collapsing the spatial axes to plain 1-D sequence ids destroys the 2-D
+    // geometry the trained weights expect and yields hallucinated text.
     let mut pos: Vec<i64> = vec![0; 4 * seq_len];
     for i in 0..seq_len {
         let p = i as i64;
