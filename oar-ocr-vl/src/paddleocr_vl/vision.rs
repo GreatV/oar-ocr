@@ -53,16 +53,24 @@ fn attn_full_seq_threshold() -> usize {
 /// Peak transient device memory (bytes) of the full-matrix attention path:
 /// the `[b, heads, seq, seq]` scores in the compute dtype, their F32 copy fed
 /// to the softmax, the F32 softmax output, and the cast back to the compute
-/// dtype are all live at once.
-fn eager_attn_scratch_bytes(b: usize, heads: usize, seq: usize, dtype: DType) -> usize {
-    b * heads * seq * seq * (2 * dtype.size_in_bytes() + 2 * DType::F32.size_in_bytes())
+/// dtype are all live at once. `None` means the product overflows `usize`
+/// (only possible on 32-bit targets), which certainly doesn't fit either.
+fn eager_attn_scratch_bytes(b: usize, heads: usize, seq: usize, dtype: DType) -> Option<usize> {
+    let per_element = 2 * dtype.size_in_bytes() + 2 * DType::F32.size_in_bytes();
+    b.checked_mul(heads)?
+        .checked_mul(seq)?
+        .checked_mul(seq)?
+        .checked_mul(per_element)
 }
 
 /// Whether the full-matrix attention path fits on `device` next to what is
 /// already allocated. Unknown free memory (CPU, Metal, query failure) keeps
 /// the pre-existing behavior of always taking the full path below the seq
-/// threshold.
-fn eager_attn_fits(device: &Device, scratch_bytes: usize) -> bool {
+/// threshold; an overflowing scratch estimate (`None`) never fits.
+fn eager_attn_fits(device: &Device, scratch_bytes: Option<usize>) -> bool {
+    let Some(scratch_bytes) = scratch_bytes else {
+        return false;
+    };
     match crate::utils::free_device_memory(device) {
         Some(free) => match scratch_bytes.checked_add(ATTN_FREE_MEM_HEADROOM) {
             Some(needed) if needed <= free => true,
@@ -1044,6 +1052,21 @@ fn interpolate_bilinear_align_corners_false(
 #[cfg(test)]
 mod tests {
     use super::interpolate_bilinear_align_corners_false;
+
+    #[test]
+    fn eager_attn_scratch_bytes_estimate_and_overflow() {
+        use candle_core::DType;
+        // f16 scores + f32 copy + f32 softmax output + f16 cast back = 12 B/elem.
+        assert_eq!(
+            super::eager_attn_scratch_bytes(1, 16, 5000, DType::F16),
+            Some(16 * 5000 * 5000 * 12)
+        );
+        // An overflowing product must report "doesn't fit", not wrap around.
+        assert_eq!(
+            super::eager_attn_scratch_bytes(1, 16, usize::MAX / 2, DType::F16),
+            None
+        );
+    }
 
     #[test]
     fn interpolate_same_size_is_identity() {
