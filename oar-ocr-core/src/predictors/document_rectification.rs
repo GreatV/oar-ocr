@@ -66,7 +66,7 @@ impl DocumentRectificationPredictorBuilder {
             adapter_builder = adapter_builder.with_ort_config(ort_cfg);
         }
 
-        let adapter = Box::new(adapter_builder.build(model_path.as_ref())?);
+        let adapter = super::build_adapter(adapter_builder, model_path.as_ref())?;
         let task = DocumentRectificationTask::new(config.clone());
         Ok(DocumentRectificationPredictor {
             core: TaskPredictorCore::new(adapter, task, config),

@@ -8,7 +8,34 @@
 mod builder;
 mod core;
 
+use std::path::{Path, PathBuf};
+
+use crate::core::traits::adapter::{AdapterBuilder, ModelAdapter};
+
 pub use core::TaskPredictorCore;
+
+pub(crate) fn resolve_asset_path(path: &Path) -> crate::core::OcrResult<PathBuf> {
+    #[cfg(feature = "auto-download")]
+    {
+        crate::core::download::resolve_path(path)
+    }
+    #[cfg(not(feature = "auto-download"))]
+    {
+        Ok(path.to_path_buf())
+    }
+}
+
+pub(crate) fn build_adapter<B>(
+    builder: B,
+    model_path: &Path,
+) -> crate::core::OcrResult<Box<B::Adapter>>
+where
+    B: AdapterBuilder,
+    B::Adapter: ModelAdapter + 'static,
+{
+    let model_path = resolve_asset_path(model_path)?;
+    Ok(Box::new(builder.build(&model_path)?))
+}
 
 pub mod document_orientation;
 pub mod document_rectification;
