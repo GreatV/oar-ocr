@@ -7,6 +7,7 @@
 //!
 //! - Complete OCR pipeline from image to text
 //! - High-level builder APIs for easy pipeline configuration
+//! - Models load from file paths or in-memory bytes (`include_bytes!`)
 //! - Model adapter system for easy model swapping
 //! - Batch processing support
 //! - ONNX Runtime integration for fast inference
