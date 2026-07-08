@@ -11,7 +11,6 @@ use crate::domain::adapters::TextDetectionAdapterBuilder;
 use crate::domain::tasks::text_detection::{TextDetectionConfig, TextDetectionTask};
 use crate::predictors::TaskPredictorCore;
 use image::RgbImage;
-use std::path::Path;
 
 /// Text detection prediction result
 #[derive(Debug, Clone)]
@@ -93,7 +92,10 @@ impl TextDetectionPredictorBuilder {
     }
 
     /// Build the text detection predictor
-    pub fn build<P: AsRef<Path>>(self, model_path: P) -> OcrResult<TextDetectionPredictor> {
+    pub fn build(
+        self,
+        model_source: impl Into<crate::core::ModelSource>,
+    ) -> OcrResult<TextDetectionPredictor> {
         let (config, ort_config) = self.state.into_parts();
         let mut adapter_builder = TextDetectionAdapterBuilder::new().with_config(config.clone());
 
@@ -101,7 +103,7 @@ impl TextDetectionPredictorBuilder {
             adapter_builder = adapter_builder.with_ort_config(ort_cfg);
         }
 
-        let adapter = super::build_adapter(adapter_builder, model_path.as_ref())?;
+        let adapter = super::build_adapter(adapter_builder, model_source)?;
         let task = TextDetectionTask::new(config.clone());
 
         Ok(TextDetectionPredictor {

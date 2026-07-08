@@ -10,6 +10,7 @@ mod core;
 
 use std::path::{Path, PathBuf};
 
+use crate::core::ModelSource;
 use crate::core::traits::adapter::{AdapterBuilder, ModelAdapter};
 
 pub use core::TaskPredictorCore;
@@ -25,16 +26,25 @@ pub(crate) fn resolve_asset_path(path: &Path) -> crate::core::OcrResult<PathBuf>
     }
 }
 
+/// Resolves `Path` sources through the auto-download cache; in-memory
+/// sources pass through untouched.
+pub(crate) fn resolve_model_source(source: ModelSource) -> crate::core::OcrResult<ModelSource> {
+    match source {
+        ModelSource::Path(path) => Ok(ModelSource::Path(resolve_asset_path(&path)?)),
+        memory @ ModelSource::Memory(_) => Ok(memory),
+    }
+}
+
 pub(crate) fn build_adapter<B>(
     builder: B,
-    model_path: &Path,
+    model_source: impl Into<ModelSource>,
 ) -> crate::core::OcrResult<Box<B::Adapter>>
 where
     B: AdapterBuilder,
     B::Adapter: ModelAdapter + 'static,
 {
-    let model_path = resolve_asset_path(model_path)?;
-    Ok(Box::new(builder.build(&model_path)?))
+    let model_source = resolve_model_source(model_source.into())?;
+    Ok(Box::new(builder.build(model_source)?))
 }
 
 pub mod document_orientation;

@@ -605,9 +605,12 @@ macro_rules! impl_adapter_builder {
             type Config = $Config;
             type Adapter = $Adapter;
 
-            fn build(self, model_path: &std::path::Path) -> Result<Self::Adapter, $crate::core::OCRError> {
-                let build_fn: fn(Self, &std::path::Path) -> Result<$Adapter, $crate::core::OCRError> = $build_closure;
-                build_fn(self, model_path)
+            fn build(
+                self,
+                model_source: impl Into<$crate::core::ModelSource>,
+            ) -> Result<Self::Adapter, $crate::core::OCRError> {
+                let build_fn: fn(Self, $crate::core::ModelSource) -> Result<$Adapter, $crate::core::OCRError> = $build_closure;
+                build_fn(self, model_source.into())
             }
 
             fn with_config(mut self, config: Self::Config) -> Self {
@@ -763,9 +766,12 @@ macro_rules! impl_adapter_builder {
             type Config = $Config;
             type Adapter = $Adapter;
 
-            fn build(self, model_path: &std::path::Path) -> Result<Self::Adapter, $crate::core::OCRError> {
-                let build_fn: fn(Self, &std::path::Path) -> Result<$Adapter, $crate::core::OCRError> = $build_closure;
-                build_fn(self, model_path)
+            fn build(
+                self,
+                model_source: impl Into<$crate::core::ModelSource>,
+            ) -> Result<Self::Adapter, $crate::core::OCRError> {
+                let build_fn: fn(Self, $crate::core::ModelSource) -> Result<$Adapter, $crate::core::OCRError> = $build_closure;
+                build_fn(self, model_source.into())
             }
 
             fn with_config(self, config: Self::Config) -> Self {
@@ -827,9 +833,12 @@ macro_rules! impl_adapter_builder {
             type Config = $Config;
             type Adapter = $Adapter;
 
-            fn build(self, model_path: &std::path::Path) -> Result<Self::Adapter, $crate::core::OCRError> {
-                let build_fn: fn(Self, &std::path::Path) -> Result<$Adapter, $crate::core::OCRError> = $build_closure;
-                build_fn(self, model_path)
+            fn build(
+                self,
+                model_source: impl Into<$crate::core::ModelSource>,
+            ) -> Result<Self::Adapter, $crate::core::OCRError> {
+                let build_fn: fn(Self, $crate::core::ModelSource) -> Result<$Adapter, $crate::core::OCRError> = $build_closure;
+                build_fn(self, model_source.into())
             }
 
             fn with_config(self, config: Self::Config) -> Self {

@@ -93,7 +93,7 @@ impl_adapter_builder! {
         },
     }
 
-    build: |builder: UVDocRectifierAdapterBuilder, model_path: &std::path::Path| -> Result<UVDocRectifierAdapter, OCRError> {
+    build: |builder: UVDocRectifierAdapterBuilder, model_source: crate::core::ModelSource| -> Result<UVDocRectifierAdapter, OCRError> {
         let (task_config, ort_config) = builder.config
             .into_validated_parts()
             .map_err(|err| OCRError::ConfigError {
@@ -105,7 +105,7 @@ impl_adapter_builder! {
             UVDocModelBuilder::new().preprocess_config(builder.preprocess_config),
             ort_config
         )
-        .build(model_path)?;
+        .build(model_source)?;
 
         // Create adapter info using the helper
         let mut info = UVDocRectifierAdapterBuilder::base_adapter_info();

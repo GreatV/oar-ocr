@@ -10,7 +10,6 @@ use crate::processors::{
     LimitType, NormalizeImage, ScoreMode, TensorLayout,
 };
 use image::{DynamicImage, GenericImageView, RgbImage};
-use std::path::Path;
 use tracing::debug;
 
 /// Configuration for DB model preprocessing.
@@ -375,7 +374,10 @@ impl DBModelBuilder {
     }
 
     /// Builds the DB model.
-    pub fn build(self, model_path: &Path) -> Result<DBModel, OCRError> {
+    pub fn build(
+        self,
+        model_source: impl Into<crate::core::ModelSource>,
+    ) -> Result<DBModel, OCRError> {
         // Create ONNX inference engine
         let inference = if self.ort_config.is_some() {
             use crate::core::config::ModelInferenceConfig;
@@ -383,9 +385,9 @@ impl DBModelBuilder {
                 ort_session: self.ort_config,
                 ..Default::default()
             };
-            OrtInfer::from_config(&common_config, model_path, Some("x"))?
+            OrtInfer::from_config(&common_config, model_source, Some("x"))?
         } else {
-            OrtInfer::new(model_path, Some("x"))?
+            OrtInfer::new(model_source, Some("x"))?
         };
 
         // Create resizer

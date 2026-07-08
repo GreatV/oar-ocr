@@ -150,7 +150,10 @@ impl FormulaRecognitionPredictorBuilder {
     }
 
     /// Build the formula recognition predictor
-    pub fn build<P: AsRef<Path>>(self, model_path: P) -> OcrResult<FormulaRecognitionPredictor> {
+    pub fn build(
+        self,
+        model_source: impl Into<crate::core::ModelSource>,
+    ) -> OcrResult<FormulaRecognitionPredictor> {
         let Self {
             state,
             model_name,
@@ -185,7 +188,7 @@ impl FormulaRecognitionPredictorBuilder {
                     builder = builder.with_ort_config(ort_cfg);
                 }
 
-                super::build_adapter(builder, model_path.as_ref())?
+                super::build_adapter(builder, model_source)?
             }
             FormulaModelKind::PPFormulaNet => {
                 let mut builder = PPFormulaNetAdapterBuilder::new()
@@ -201,7 +204,7 @@ impl FormulaRecognitionPredictorBuilder {
                     builder = builder.with_ort_config(ort_cfg);
                 }
 
-                super::build_adapter(builder, model_path.as_ref())?
+                super::build_adapter(builder, model_source)?
             }
         };
 

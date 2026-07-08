@@ -181,7 +181,7 @@ impl_adapter_builder! {
         }
     }
 
-    build: |builder: TextRecognitionAdapterBuilder, model_path: &std::path::Path| -> Result<TextRecognitionAdapter, OCRError> {
+    build: |builder: TextRecognitionAdapterBuilder, model_source: crate::core::ModelSource| -> Result<TextRecognitionAdapter, OCRError> {
         let (task_config, ort_config) = builder.config
             .into_validated_parts()
             .map_err(|err| OCRError::ConfigError {
@@ -195,7 +195,7 @@ impl_adapter_builder! {
             model_builder = model_builder.character_dict(character_dict);
         }
 
-        let model = apply_ort_config!(model_builder, ort_config).build(model_path)?;
+        let model = apply_ort_config!(model_builder, ort_config).build(model_source)?;
 
         // Create adapter info using the helper
         let mut info = TextRecognitionAdapterBuilder::base_adapter_info();

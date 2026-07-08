@@ -14,7 +14,6 @@ use crate::domain::tasks::document_rectification::{
 };
 use crate::predictors::TaskPredictorCore;
 use image::RgbImage;
-use std::path::Path;
 
 /// Document rectification prediction result
 #[derive(Debug, Clone)]
@@ -58,7 +57,10 @@ impl DocumentRectificationPredictorBuilder {
         }
     }
 
-    pub fn build<P: AsRef<Path>>(self, model_path: P) -> OcrResult<DocumentRectificationPredictor> {
+    pub fn build(
+        self,
+        model_source: impl Into<crate::core::ModelSource>,
+    ) -> OcrResult<DocumentRectificationPredictor> {
         let (config, ort_config) = self.state.into_parts();
         let mut adapter_builder = UVDocRectifierAdapterBuilder::new().with_config(config.clone());
 
@@ -66,7 +68,7 @@ impl DocumentRectificationPredictorBuilder {
             adapter_builder = adapter_builder.with_ort_config(ort_cfg);
         }
 
-        let adapter = super::build_adapter(adapter_builder, model_path.as_ref())?;
+        let adapter = super::build_adapter(adapter_builder, model_source)?;
         let task = DocumentRectificationTask::new(config.clone());
         Ok(DocumentRectificationPredictor {
             core: TaskPredictorCore::new(adapter, task, config),

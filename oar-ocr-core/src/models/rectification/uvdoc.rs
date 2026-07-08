@@ -261,12 +261,15 @@ impl UVDocModelBuilder {
     ///
     /// # Arguments
     ///
-    /// * `model_path` - Path to the ONNX model file
+    /// * `model_source` - Path to the ONNX model file
     ///
     /// # Returns
     ///
     /// A configured UVDoc model instance
-    pub fn build(self, model_path: &std::path::Path) -> Result<UVDocModel, OCRError> {
+    pub fn build(
+        self,
+        model_source: impl Into<crate::core::ModelSource>,
+    ) -> Result<UVDocModel, OCRError> {
         // Create ONNX inference engine
         let inference = if self.ort_config.is_some() {
             use crate::core::config::ModelInferenceConfig;
@@ -274,9 +277,9 @@ impl UVDocModelBuilder {
                 ort_session: self.ort_config,
                 ..Default::default()
             };
-            OrtInfer::from_config(&common_config, model_path, Some("image"))?
+            OrtInfer::from_config(&common_config, model_source, Some("image"))?
         } else {
-            OrtInfer::new(model_path, Some("image"))?
+            OrtInfer::new(model_source, Some("image"))?
         };
 
         // Create normalizer (scale to [0, 1] without mean shift).

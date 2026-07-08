@@ -360,12 +360,15 @@ impl PPLCNetModelBuilder {
     ///
     /// # Arguments
     ///
-    /// * `model_path` - Path to the ONNX model file
+    /// * `model_source` - Path to the ONNX model file
     ///
     /// # Returns
     ///
     /// A configured PP-LCNet model instance
-    pub fn build(self, model_path: &std::path::Path) -> Result<PPLCNetModel, OCRError> {
+    pub fn build(
+        self,
+        model_source: impl Into<crate::core::ModelSource>,
+    ) -> Result<PPLCNetModel, OCRError> {
         // Create ONNX inference engine
         let inference = if self.ort_config.is_some() {
             use crate::core::config::ModelInferenceConfig;
@@ -373,9 +376,9 @@ impl PPLCNetModelBuilder {
                 ort_session: self.ort_config,
                 ..Default::default()
             };
-            OrtInfer::from_config(&common_config, model_path, None)?
+            OrtInfer::from_config(&common_config, model_source, None)?
         } else {
-            OrtInfer::new(model_path, None)?
+            OrtInfer::new(model_source, None)?
         };
 
         // Create normalizer (ImageNet normalization).

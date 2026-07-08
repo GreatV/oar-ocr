@@ -13,7 +13,6 @@ use crate::domain::tasks::{
 };
 use crate::impl_adapter_builder;
 use crate::models::classification::{PPLCNetModel, PPLCNetModelBuilder, PPLCNetPostprocessConfig};
-use std::path::Path;
 
 /// Table classification adapter that uses the PP-LCNet model.
 #[derive(Debug)]
@@ -159,7 +158,7 @@ impl_adapter_builder! {
         }
     }
 
-    build: |builder: TableClassificationAdapterBuilder, model_path: &Path| -> Result<TableClassificationAdapter, OCRError> {
+    build: |builder: TableClassificationAdapterBuilder, model_source: crate::core::ModelSource| -> Result<TableClassificationAdapter, OCRError> {
         let (task_config, ort_config) = builder.config
             .into_validated_parts()
             .map_err(|err| OCRError::ConfigError {
@@ -173,7 +172,7 @@ impl_adapter_builder! {
             PPLCNetModelBuilder::new().preprocess_config(preprocess_config),
             ort_config
         )
-        .build(model_path)?;
+        .build(model_source)?;
 
         // Create postprocessing configuration
         let postprocess_config = PPLCNetPostprocessConfig {

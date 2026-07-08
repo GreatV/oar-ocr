@@ -1,15 +1,18 @@
 use super::{session, *};
 use crate::core::config::ModelInferenceConfig;
+use crate::core::inference::ModelSource;
 use ort::logging::LogLevel;
-use std::path::Path;
 use std::sync::Mutex;
 
 impl OrtInfer {
     /// Creates a new OrtInfer instance with default ONNX Runtime settings and a single session.
-    pub fn new(model_path: impl AsRef<Path>, input_name: Option<&str>) -> Result<Self, OCRError> {
-        let path = model_path.as_ref();
+    pub fn new(
+        model_source: impl Into<ModelSource>,
+        input_name: Option<&str>,
+    ) -> Result<Self, OCRError> {
+        let source = model_source.into();
         let session = session::load_session_with(
-            path,
+            source.clone(),
             |builder| Ok(builder.with_log_level(LogLevel::Error)?),
             Some("verify model path and compatibility with selected execution providers"),
         )?;
@@ -19,7 +22,7 @@ impl OrtInfer {
             sessions: vec![Mutex::new(session)],
             next_idx: std::sync::atomic::AtomicUsize::new(0),
             input_name: input_name.unwrap_or("x").to_string(),
-            model_path: path.to_path_buf(),
+            model_path: source.display_path(),
             model_name,
         })
     }
@@ -28,10 +31,10 @@ impl OrtInfer {
     /// configuration.
     pub fn from_config(
         common: &ModelInferenceConfig,
-        model_path: impl AsRef<Path>,
+        model_source: impl Into<ModelSource>,
         input_name: Option<&str>,
     ) -> Result<Self, OCRError> {
-        let path = model_path.as_ref();
+        let source = model_source.into();
 
         // Workaround for a non-deterministic data race in ORT's CUDA EP that
         // corrupts arena buffers reused across `session.run()` calls.
@@ -41,7 +44,7 @@ impl OrtInfer {
         Self::ensure_cuda_launch_blocking_if_needed(common);
 
         let session = session::load_session_with(
-            path,
+            source.clone(),
             |builder| {
                 if let Some(cfg) = &common.ort_session {
                     Self::apply_ort_config(builder, cfg)
@@ -61,7 +64,7 @@ impl OrtInfer {
             sessions: vec![Mutex::new(session)],
             next_idx: std::sync::atomic::AtomicUsize::new(0),
             input_name: input_name.unwrap_or("x").to_string(),
-            model_path: path.to_path_buf(),
+            model_path: source.display_path(),
             model_name,
         })
     }

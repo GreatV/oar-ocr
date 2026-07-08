@@ -8,7 +8,6 @@ use crate::core::inference::{OrtInfer, TensorInput};
 use crate::processors::{CTCLabelDecode, OCRResize};
 use image::RgbImage;
 use rayon::prelude::*;
-use std::path::Path;
 
 /// CRNN model output containing recognized text and confidence scores.
 #[derive(Debug, Clone)]
@@ -331,16 +330,19 @@ impl CRNNModelBuilder {
     }
 
     /// Builds the CRNN model.
-    pub fn build(self, model_path: &Path) -> Result<CRNNModel, OCRError> {
+    pub fn build(
+        self,
+        model_source: impl Into<crate::core::ModelSource>,
+    ) -> Result<CRNNModel, OCRError> {
         // Create ONNX inference engine
         let inference = if self.ort_config.is_some() {
             let common = crate::core::config::ModelInferenceConfig {
                 ort_session: self.ort_config,
                 ..Default::default()
             };
-            OrtInfer::from_config(&common, model_path, None)?
+            OrtInfer::from_config(&common, model_source, None)?
         } else {
-            OrtInfer::new(model_path, None)?
+            OrtInfer::new(model_source, None)?
         };
 
         // Create resizer

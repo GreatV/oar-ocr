@@ -134,9 +134,9 @@ impl TableStructureRecognitionPredictorBuilder {
         self
     }
 
-    pub fn build<P: AsRef<Path>>(
+    pub fn build(
         self,
-        model_path: P,
+        model_source: impl Into<crate::core::ModelSource>,
     ) -> OcrResult<TableStructureRecognitionPredictor> {
         let Self {
             state,
@@ -148,7 +148,7 @@ impl TableStructureRecognitionPredictorBuilder {
         let dict_path = dict_path.ok_or_else(|| {
             OCRError::missing_field("dict_path", "TableStructureRecognitionPredictor")
         })?;
-        let model_path_ref = model_path.as_ref();
+        let model_source = model_source.into();
 
         let model_family = if let Some(name) = model_name.as_deref() {
             TableStructureModelFamily::from_model_name(name).ok_or_else(|| {
@@ -161,7 +161,9 @@ impl TableStructureRecognitionPredictorBuilder {
                 }
             })?
         } else {
-            TableStructureModelFamily::detect_from_path(model_path_ref)
+            model_source
+                .as_path()
+                .and_then(TableStructureModelFamily::detect_from_path)
                 .unwrap_or(TableStructureModelFamily::Wired)
         };
 
@@ -185,7 +187,7 @@ impl TableStructureRecognitionPredictorBuilder {
                     adapter_builder = adapter_builder.with_ort_config(ort_cfg);
                 }
 
-                super::build_adapter(adapter_builder, model_path_ref)?
+                super::build_adapter(adapter_builder, model_source)?
             }
             TableStructureModelFamily::Wireless => {
                 let mut adapter_builder = SLANetWirelessAdapterBuilder::new()
@@ -204,7 +206,7 @@ impl TableStructureRecognitionPredictorBuilder {
                     adapter_builder = adapter_builder.with_ort_config(ort_cfg);
                 }
 
-                super::build_adapter(adapter_builder, model_path_ref)?
+                super::build_adapter(adapter_builder, model_source)?
             }
         };
         let task = TableStructureRecognitionTask::new(config.clone());
