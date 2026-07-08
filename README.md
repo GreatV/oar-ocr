@@ -29,6 +29,8 @@ cargo add oar-ocr --features auto-download
 
 Bare file names passed to the builders are then fetched from [ModelScope](https://www.modelscope.cn/models/greatv/oar-ocr) into `$OAR_HOME` (default `~/.oar`) and verified against their expected SHA-256. See [docs/models.md](docs/models.md#auto-download-via-the-auto-download-feature) for the exact path resolution rules.
 
+Everywhere a builder accepts a model path it also accepts raw ONNX bytes (e.g. `include_bytes!`), so models can be embedded into a single binary — see [Loading Models from Memory](docs/usage.md#loading-models-from-memory).
+
 ### Basic Usage
 
 ```rust
@@ -143,6 +145,7 @@ For advanced document understanding using Vision-Language Models (like PaddleOCR
 - [**Usage Guide**](docs/usage.md) - Detailed API usage, builder patterns, GPU configuration
 - [**Pre-trained Models**](docs/models.md) - Model download links and recommended configurations
 - [**Environment Variables**](docs/environment-variables.md) - Runtime configuration via `OAR_*` variables
+- [**FAQ**](docs/FAQ.md) - Common build and runtime questions
 
 ## Examples
 

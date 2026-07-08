@@ -198,6 +198,10 @@ When the feature is enabled, registered file names are fetched from [`greatv/oar
 
 ### Path resolution rules
 
+These rules apply to *path* sources only; models passed as in-memory bytes
+(see [Loading Models from Memory](usage.md#loading-models-from-memory)) bypass
+path resolution entirely.
+
 For each model path argument the builder applies these checks in order:
 
 1. **Existing file wins.** If the path refers to a real file on disk it is used as-is — no registry lookup, no hash check, no network. A `./pp-ocrv5_mobile_det.onnx` next to the binary always shadows the registry.
