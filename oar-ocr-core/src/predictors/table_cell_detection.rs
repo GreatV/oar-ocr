@@ -7,7 +7,6 @@ use crate::TaskPredictorBuilder;
 use crate::core::OcrResult;
 use crate::core::errors::OCRError;
 use crate::core::traits::OrtConfigurable;
-use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
 use crate::domain::adapters::{TableCellDetectionAdapterBuilder, TableCellModelConfig};
 use crate::domain::tasks::table_cell_detection::{
@@ -148,7 +147,7 @@ impl TableCellDetectionPredictorBuilder {
             adapter_builder = adapter_builder.with_ort_config(ort_cfg);
         }
 
-        let adapter = Box::new(adapter_builder.build(path_ref)?);
+        let adapter = super::build_adapter(adapter_builder, path_ref)?;
         let task = TableCellDetectionTask::new(config.clone());
         Ok(TableCellDetectionPredictor {
             core: TaskPredictorCore::new(adapter, task, config),

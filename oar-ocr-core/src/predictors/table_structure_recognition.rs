@@ -7,7 +7,6 @@ use crate::TaskPredictorBuilder;
 use crate::core::OcrResult;
 use crate::core::errors::OCRError;
 use crate::core::traits::OrtConfigurable;
-use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
 use crate::domain::adapters::{SLANetWiredAdapterBuilder, SLANetWirelessAdapterBuilder};
 use crate::domain::tasks::table_structure_recognition::{
@@ -149,7 +148,7 @@ impl TableStructureRecognitionPredictorBuilder {
         let dict_path = dict_path.ok_or_else(|| {
             OCRError::missing_field("dict_path", "TableStructureRecognitionPredictor")
         })?;
-        let model_path = model_path.as_ref();
+        let model_path_ref = model_path.as_ref();
 
         let model_family = if let Some(name) = model_name.as_deref() {
             TableStructureModelFamily::from_model_name(name).ok_or_else(|| {
@@ -162,9 +161,11 @@ impl TableStructureRecognitionPredictorBuilder {
                 }
             })?
         } else {
-            TableStructureModelFamily::detect_from_path(model_path)
+            TableStructureModelFamily::detect_from_path(model_path_ref)
                 .unwrap_or(TableStructureModelFamily::Wired)
         };
+
+        let dict_path = super::resolve_asset_path(&dict_path)?;
 
         let adapter = match model_family {
             TableStructureModelFamily::Wired => {
@@ -184,7 +185,7 @@ impl TableStructureRecognitionPredictorBuilder {
                     adapter_builder = adapter_builder.with_ort_config(ort_cfg);
                 }
 
-                Box::new(adapter_builder.build(model_path)?)
+                super::build_adapter(adapter_builder, model_path_ref)?
             }
             TableStructureModelFamily::Wireless => {
                 let mut adapter_builder = SLANetWirelessAdapterBuilder::new()
@@ -203,7 +204,7 @@ impl TableStructureRecognitionPredictorBuilder {
                     adapter_builder = adapter_builder.with_ort_config(ort_cfg);
                 }
 
-                Box::new(adapter_builder.build(model_path)?)
+                super::build_adapter(adapter_builder, model_path_ref)?
             }
         };
         let task = TableStructureRecognitionTask::new(config.clone());

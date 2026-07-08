@@ -7,7 +7,6 @@ use crate::TaskPredictorBuilder;
 use crate::core::OcrResult;
 use crate::core::errors::OCRError;
 use crate::core::traits::OrtConfigurable;
-use crate::core::traits::adapter::AdapterBuilder;
 use crate::core::traits::task::ImageTaskInput;
 use crate::domain::adapters::{PPFormulaNetAdapterBuilder, UniMERNetAdapterBuilder};
 use crate::domain::tasks::formula_recognition::{FormulaRecognitionConfig, FormulaRecognitionTask};
@@ -165,6 +164,7 @@ impl FormulaRecognitionPredictorBuilder {
         let tokenizer_path = tokenizer_path.ok_or_else(|| {
             OCRError::missing_field("tokenizer_path", "FormulaRecognitionPredictor")
         })?;
+        let tokenizer_path = super::resolve_asset_path(&tokenizer_path)?;
 
         // Determine model kind
         let model_kind =
@@ -185,7 +185,7 @@ impl FormulaRecognitionPredictorBuilder {
                     builder = builder.with_ort_config(ort_cfg);
                 }
 
-                Box::new(builder.build(model_path.as_ref())?)
+                super::build_adapter(builder, model_path.as_ref())?
             }
             FormulaModelKind::PPFormulaNet => {
                 let mut builder = PPFormulaNetAdapterBuilder::new()
@@ -201,7 +201,7 @@ impl FormulaRecognitionPredictorBuilder {
                     builder = builder.with_ort_config(ort_cfg);
                 }
 
-                Box::new(builder.build(model_path.as_ref())?)
+                super::build_adapter(builder, model_path.as_ref())?
             }
         };
 
