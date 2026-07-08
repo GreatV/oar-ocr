@@ -4,7 +4,8 @@
 //! It simplifies the process of configuring text detection, recognition, and optional
 //! preprocessing components.
 
-use super::builder_utils::{build_optional_adapter, resolve_model_path};
+use super::builder_utils::{build_optional_adapter, resolve_model_path, resolve_model_source};
+use oar_ocr_core::core::ModelSource;
 use oar_ocr_core::core::config::OrtSessionConfig;
 use oar_ocr_core::core::constants::DEFAULT_REC_IMAGE_SHAPE;
 use oar_ocr_core::core::errors::OCRError;
@@ -61,14 +62,15 @@ struct OCRPipeline {
 #[derive(Debug)]
 pub struct OAROCRBuilder {
     // Required fields
-    text_detection_model: PathBuf,
-    text_recognition_model: PathBuf,
+    text_detection_model: ModelSource,
+    text_recognition_model: ModelSource,
     character_dict_path: PathBuf,
+    character_dict_content: Option<String>,
 
     // Optional components
-    document_orientation_model: Option<PathBuf>,
-    text_line_orientation_model: Option<PathBuf>,
-    document_rectification_model: Option<PathBuf>,
+    document_orientation_model: Option<ModelSource>,
+    text_line_orientation_model: Option<ModelSource>,
+    document_rectification_model: Option<ModelSource>,
 
     // Configuration
     ort_session_config: Option<OrtSessionConfig>,
@@ -91,18 +93,22 @@ impl OAROCRBuilder {
     ///
     /// # Arguments
     ///
-    /// * `text_detection_model` - Path to the text detection ONNX model
-    /// * `text_recognition_model` - Path to the text recognition ONNX model
-    /// * `character_dict_path` - Path to the character dictionary file
+    /// * `text_detection_model` - Text detection ONNX model: a path, or raw
+    ///   model bytes (e.g. from `include_bytes!`)
+    /// * `text_recognition_model` - Text recognition ONNX model: a path or
+    ///   raw model bytes
+    /// * `character_dict_path` - Path to the character dictionary file (see
+    ///   [`Self::character_dict_content`] for the in-memory alternative)
     pub fn new(
-        text_detection_model: impl Into<PathBuf>,
-        text_recognition_model: impl Into<PathBuf>,
+        text_detection_model: impl Into<ModelSource>,
+        text_recognition_model: impl Into<ModelSource>,
         character_dict_path: impl Into<PathBuf>,
     ) -> Self {
         Self {
             text_detection_model: text_detection_model.into(),
             text_recognition_model: text_recognition_model.into(),
             character_dict_path: character_dict_path.into(),
+            character_dict_content: None,
             document_orientation_model: None,
             text_line_orientation_model: None,
             document_rectification_model: None,
@@ -114,6 +120,13 @@ impl OAROCRBuilder {
             text_type: None,
             return_word_box: false,
         }
+    }
+
+    /// Sets the character dictionary from an in-memory string (e.g. from
+    /// `include_str!`). When set, `character_dict_path` is ignored.
+    pub fn character_dict_content(mut self, content: impl Into<String>) -> Self {
+        self.character_dict_content = Some(content.into());
+        self
     }
 
     /// Sets the ONNX Runtime session configuration.
@@ -166,9 +179,9 @@ impl OAROCRBuilder {
     /// This component detects and corrects document orientation before text detection.
     pub fn with_document_image_orientation_classification(
         mut self,
-        model_path: impl Into<PathBuf>,
+        model_source: impl Into<ModelSource>,
     ) -> Self {
-        self.document_orientation_model = Some(model_path.into());
+        self.document_orientation_model = Some(model_source.into());
         self
     }
 
@@ -177,17 +190,20 @@ impl OAROCRBuilder {
     /// This component detects and corrects text line orientation after text detection.
     pub fn with_text_line_orientation_classification(
         mut self,
-        model_path: impl Into<PathBuf>,
+        model_source: impl Into<ModelSource>,
     ) -> Self {
-        self.text_line_orientation_model = Some(model_path.into());
+        self.text_line_orientation_model = Some(model_source.into());
         self
     }
 
     /// Adds document image rectification to the pipeline.
     ///
     /// This component corrects document distortion before text detection.
-    pub fn with_document_image_rectification(mut self, model_path: impl Into<PathBuf>) -> Self {
-        self.document_rectification_model = Some(model_path.into());
+    pub fn with_document_image_rectification(
+        mut self,
+        model_source: impl Into<ModelSource>,
+    ) -> Self {
+        self.document_rectification_model = Some(model_source.into());
         self
     }
 
@@ -234,19 +250,25 @@ impl OAROCRBuilder {
 
         // Resolve required model paths through the auto-download cache when
         // the feature is enabled. With the feature off these are no-ops.
-        let text_detection_model = resolve_model_path(&self.text_detection_model)?;
-        let text_recognition_model = resolve_model_path(&self.text_recognition_model)?;
-        let character_dict_path = resolve_model_path(&self.character_dict_path)?;
+        let text_detection_model = resolve_model_source(&self.text_detection_model)?;
+        let text_recognition_model = resolve_model_source(&self.text_recognition_model)?;
 
         // Load character dictionary for text recognition
-        let char_dict =
-            std::fs::read_to_string(&character_dict_path).map_err(|e| OCRError::InvalidInput {
-                message: format!(
-                    "Failed to read character dictionary from '{}': {}",
-                    character_dict_path.display(),
-                    e
-                ),
-            })?;
+        let char_dict = match &self.character_dict_content {
+            Some(content) => content.clone(),
+            None => {
+                let character_dict_path = resolve_model_path(&self.character_dict_path)?;
+                std::fs::read_to_string(&character_dict_path).map_err(|e| {
+                    OCRError::InvalidInput {
+                        message: format!(
+                            "Failed to read character dictionary from '{}': {}",
+                            character_dict_path.display(),
+                            e
+                        ),
+                    }
+                })?
+            }
+        };
 
         // Build document rectification adapter if enabled
         let rectification_adapter = build_optional_adapter(
@@ -330,7 +352,7 @@ impl OAROCRBuilder {
             detection_builder = detection_builder.text_type(text_type.clone());
         }
 
-        let text_detection_adapter = detection_builder.build(&text_detection_model)?;
+        let text_detection_adapter = detection_builder.build(text_detection_model)?;
 
         // Build text line orientation adapter if enabled
         let text_line_orientation_adapter = build_optional_adapter(
@@ -355,7 +377,7 @@ impl OAROCRBuilder {
             recognition_builder = recognition_builder.with_config(rec_config.clone());
         }
 
-        let text_recognition_adapter = recognition_builder.build(&text_recognition_model)?;
+        let text_recognition_adapter = recognition_builder.build(text_recognition_model)?;
 
         let pipeline = OCRPipeline {
             rectification_adapter,
@@ -1048,12 +1070,12 @@ mod tests {
         let builder = OAROCRBuilder::new("models/det.onnx", "models/rec.onnx", "models/dict.txt");
 
         assert_eq!(
-            builder.text_detection_model,
-            PathBuf::from("models/det.onnx")
+            builder.text_detection_model.as_path(),
+            Some(std::path::Path::new("models/det.onnx"))
         );
         assert_eq!(
-            builder.text_recognition_model,
-            PathBuf::from("models/rec.onnx")
+            builder.text_recognition_model.as_path(),
+            Some(std::path::Path::new("models/rec.onnx"))
         );
         assert_eq!(
             builder.character_dict_path,
@@ -1071,18 +1093,27 @@ mod tests {
             .with_text_line_orientation_classification("models/line_orient.onnx")
             .with_document_image_rectification("models/rectify.onnx");
 
-        let Some(path) = builder.document_orientation_model.as_ref() else {
+        let Some(source) = builder.document_orientation_model.as_ref() else {
             panic!("expected document_orientation_model to be Some");
         };
-        assert_eq!(path, &PathBuf::from("models/doc_orient.onnx"));
-        let Some(path) = builder.text_line_orientation_model.as_ref() else {
+        assert_eq!(
+            source.as_path(),
+            Some(std::path::Path::new("models/doc_orient.onnx"))
+        );
+        let Some(source) = builder.text_line_orientation_model.as_ref() else {
             panic!("expected text_line_orientation_model to be Some");
         };
-        assert_eq!(path, &PathBuf::from("models/line_orient.onnx"));
-        let Some(path) = builder.document_rectification_model.as_ref() else {
+        assert_eq!(
+            source.as_path(),
+            Some(std::path::Path::new("models/line_orient.onnx"))
+        );
+        let Some(source) = builder.document_rectification_model.as_ref() else {
             panic!("expected document_rectification_model to be Some");
         };
-        assert_eq!(path, &PathBuf::from("models/rectify.onnx"));
+        assert_eq!(
+            source.as_path(),
+            Some(std::path::Path::new("models/rectify.onnx"))
+        );
     }
 
     #[test]

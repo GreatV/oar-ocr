@@ -153,7 +153,7 @@ impl_adapter_builder! {
         }
     }
 
-    build: |builder: DocumentOrientationAdapterBuilder, model_path: &std::path::Path| -> Result<DocumentOrientationAdapter, OCRError> {
+    build: |builder: DocumentOrientationAdapterBuilder, model_source: crate::core::ModelSource| -> Result<DocumentOrientationAdapter, OCRError> {
         let (task_config, ort_config) = builder.config
             .into_validated_parts()
             .map_err(|err| OCRError::ConfigError {
@@ -167,7 +167,7 @@ impl_adapter_builder! {
             PPLCNetModelBuilder::new().preprocess_config(preprocess_config),
             ort_config
         )
-        .build(model_path)?;
+        .build(model_source)?;
 
         // Create postprocessing configuration
         let postprocess_config = PPLCNetPostprocessConfig {

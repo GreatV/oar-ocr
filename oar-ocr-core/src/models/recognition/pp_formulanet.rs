@@ -313,7 +313,10 @@ impl PPFormulaNetModelBuilder {
     }
 
     /// Builds the PP-FormulaNet model.
-    pub fn build(self, model_path: &std::path::Path) -> Result<PPFormulaNetModel, OCRError> {
+    pub fn build(
+        self,
+        model_source: impl Into<crate::core::ModelSource>,
+    ) -> Result<PPFormulaNetModel, OCRError> {
         // Create ONNX inference engine
         let ort_config = self
             .ort_config
@@ -329,9 +332,9 @@ impl PPFormulaNetModelBuilder {
                 model_name: Some("PP-FormulaNet".to_string()),
                 ..Default::default()
             };
-            OrtInfer::from_config(&common_config, model_path, None)?
+            OrtInfer::from_config(&common_config, model_source, None)?
         } else {
-            OrtInfer::new(model_path, None)?
+            OrtInfer::new(model_source, None)?
         };
 
         // Determine target size

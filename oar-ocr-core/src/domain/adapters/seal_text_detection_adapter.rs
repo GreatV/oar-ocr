@@ -109,7 +109,7 @@ impl_adapter_builder! {
     fields: {},
     methods: {}
 
-    build: |builder: SealTextDetectionAdapterBuilder, model_path: &std::path::Path| -> Result<SealTextDetectionAdapter, OCRError> {
+    build: |builder: SealTextDetectionAdapterBuilder, model_source: crate::core::ModelSource| -> Result<SealTextDetectionAdapter, OCRError> {
         let (task_config, ort_config) = builder.config
             .into_validated_parts()
             .map_err(|err| OCRError::ConfigError {
@@ -137,7 +137,7 @@ impl_adapter_builder! {
                 .postprocess_config(postprocess_config),
             ort_config
         )
-        .build(model_path)?;
+        .build(model_source)?;
 
         // Create adapter info using the helper
         let info = SealTextDetectionAdapterBuilder::base_adapter_info();

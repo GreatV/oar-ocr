@@ -252,7 +252,10 @@ impl UniMERNetModelBuilder {
     }
 
     /// Builds the UniMERNet model.
-    pub fn build(self, model_path: &std::path::Path) -> Result<UniMERNetModel, OCRError> {
+    pub fn build(
+        self,
+        model_source: impl Into<crate::core::ModelSource>,
+    ) -> Result<UniMERNetModel, OCRError> {
         // Create ONNX inference engine
         let ort_config = self.ort_config.map(Self::configure_unimernet_ort_for_cuda);
 
@@ -265,9 +268,9 @@ impl UniMERNetModelBuilder {
                 model_name: Some("UniMERNet".to_string()),
                 ..Default::default()
             };
-            OrtInfer::from_config(&common_config, model_path, None)?
+            OrtInfer::from_config(&common_config, model_source, None)?
         } else {
-            OrtInfer::new(model_path, None)?
+            OrtInfer::new(model_source, None)?
         };
 
         // Determine target size

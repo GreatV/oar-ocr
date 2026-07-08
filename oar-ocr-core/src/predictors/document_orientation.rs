@@ -13,7 +13,6 @@ use crate::domain::tasks::document_orientation::{
 };
 use crate::predictors::TaskPredictorCore;
 use image::RgbImage;
-use std::path::Path;
 
 /// Document orientation prediction result
 #[derive(Debug, Clone)]
@@ -77,7 +76,10 @@ impl DocumentOrientationPredictorBuilder {
         self
     }
 
-    pub fn build<P: AsRef<Path>>(self, model_path: P) -> OcrResult<DocumentOrientationPredictor> {
+    pub fn build(
+        self,
+        model_source: impl Into<crate::core::ModelSource>,
+    ) -> OcrResult<DocumentOrientationPredictor> {
         let Self { state, input_shape } = self;
         let (config, ort_config) = state.into_parts();
         let mut adapter_builder = DocumentOrientationAdapterBuilder::new()
@@ -88,7 +90,7 @@ impl DocumentOrientationPredictorBuilder {
             adapter_builder = adapter_builder.with_ort_config(ort_cfg);
         }
 
-        let adapter = super::build_adapter(adapter_builder, model_path.as_ref())?;
+        let adapter = super::build_adapter(adapter_builder, model_source)?;
         let task = DocumentOrientationTask::new(config.clone());
         Ok(DocumentOrientationPredictor {
             core: TaskPredictorCore::new(adapter, task, config),

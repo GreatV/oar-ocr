@@ -21,7 +21,6 @@ use crate::core::inference::{OrtInfer, TensorInput};
 use crate::processors::NormalizeImage;
 use image::{DynamicImage, RgbImage};
 use ndarray::s;
-use std::path::Path;
 
 /// Output from SLANet model containing structure predictions and bounding boxes.
 #[derive(Debug, Clone)]
@@ -293,7 +292,10 @@ impl SLANetModelBuilder {
     /// 1. If explicitly set via `input_shape()` or `input_size()`, use that
     /// 2. Otherwise, parse from ONNX model metadata
     /// 3. If ONNX has dynamic spatial dimensions, use default 512x512
-    pub fn build(self, model_path: &Path) -> Result<SLANetModel, OCRError> {
+    pub fn build(
+        self,
+        model_source: impl Into<crate::core::ModelSource>,
+    ) -> Result<SLANetModel, OCRError> {
         // Create ONNX inference engine
         let inference = if self.ort_config.is_some() {
             use crate::core::config::ModelInferenceConfig;
@@ -301,9 +303,9 @@ impl SLANetModelBuilder {
                 ort_session: self.ort_config,
                 ..Default::default()
             };
-            OrtInfer::from_config(&common_config, model_path, None)?
+            OrtInfer::from_config(&common_config, model_source, None)?
         } else {
-            OrtInfer::new(model_path, None)?
+            OrtInfer::new(model_source, None)?
         };
 
         // Determine input shape: user override > ONNX metadata > default

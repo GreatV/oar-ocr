@@ -12,7 +12,6 @@ use crate::domain::tasks::{TableStructureRecognitionConfig, TableStructureRecogn
 use crate::impl_adapter_builder;
 use crate::models::recognition::{SLANetModel, SLANetModelBuilder};
 use crate::processors::TableStructureDecode;
-use std::path::Path;
 
 /// Table structure recognition adapter that uses the SLANet model.
 #[derive(Debug)]
@@ -241,7 +240,7 @@ impl_adapter_builder! {
         }
     }
 
-    build: |builder: SLANetWiredAdapterBuilder, model_path: &Path| -> Result<TableStructureRecognitionAdapter, OCRError> {
+    build: |builder: SLANetWiredAdapterBuilder, model_source: crate::core::ModelSource| -> Result<TableStructureRecognitionAdapter, OCRError> {
         let (task_config, ort_config) = builder.config
             .into_validated_parts()
             .map_err(|err| OCRError::ConfigError {
@@ -256,7 +255,7 @@ impl_adapter_builder! {
             model_builder = model_builder.input_size(input_shape);
         }
 
-        let model = apply_ort_config!(model_builder, ort_config).build(model_path)?;
+        let model = apply_ort_config!(model_builder, ort_config).build(model_source)?;
 
         // Dictionary path is required
         let dict_path = builder.dict_path.ok_or_else(|| OCRError::ConfigError {
@@ -318,7 +317,7 @@ impl_adapter_builder! {
         }
     }
 
-    build: |builder: SLANetWirelessAdapterBuilder, model_path: &Path| -> Result<TableStructureRecognitionAdapter, OCRError> {
+    build: |builder: SLANetWirelessAdapterBuilder, model_source: crate::core::ModelSource| -> Result<TableStructureRecognitionAdapter, OCRError> {
         let (task_config, ort_config) = builder.config
             .into_validated_parts()
             .map_err(|err| OCRError::ConfigError {
@@ -333,7 +332,7 @@ impl_adapter_builder! {
             model_builder = model_builder.input_size(input_shape);
         }
 
-        let model = apply_ort_config!(model_builder, ort_config).build(model_path)?;
+        let model = apply_ort_config!(model_builder, ort_config).build(model_source)?;
 
         // Dictionary path is required
         let dict_path = builder.dict_path.ok_or_else(|| OCRError::ConfigError {

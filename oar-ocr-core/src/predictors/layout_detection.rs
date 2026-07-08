@@ -12,7 +12,6 @@ use crate::domain::adapters::LayoutDetectionAdapterBuilder;
 use crate::domain::tasks::layout_detection::{LayoutDetectionConfig, LayoutDetectionTask};
 use crate::predictors::TaskPredictorCore;
 use image::RgbImage;
-use std::path::Path;
 
 /// Layout detection prediction result
 #[derive(Debug, Clone)]
@@ -82,7 +81,10 @@ impl LayoutDetectionPredictorBuilder {
         self
     }
 
-    pub fn build<P: AsRef<Path>>(self, model_path: P) -> OcrResult<LayoutDetectionPredictor> {
+    pub fn build(
+        self,
+        model_source: impl Into<crate::core::ModelSource>,
+    ) -> OcrResult<LayoutDetectionPredictor> {
         let (config, ort_config) = self.state.into_parts();
         let mut adapter_builder = LayoutDetectionAdapterBuilder::new().task_config(config.clone());
 
@@ -96,7 +98,7 @@ impl LayoutDetectionPredictorBuilder {
             adapter_builder = adapter_builder.with_ort_config(ort_cfg);
         }
 
-        let adapter = super::build_adapter(adapter_builder, model_path.as_ref())?;
+        let adapter = super::build_adapter(adapter_builder, model_source)?;
         let task = LayoutDetectionTask::new(config.clone());
         Ok(LayoutDetectionPredictor {
             core: TaskPredictorCore::new(adapter, task, config),

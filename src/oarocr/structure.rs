@@ -4,11 +4,11 @@
 //! analysis pipelines that can detect layout elements, recognize tables, extract formulas,
 //! and optionally integrate OCR for text extraction.
 
-use super::builder_utils::{build_optional_adapter, resolve_model_path};
-use oar_ocr_core::core::OCRError;
+use super::builder_utils::{build_optional_adapter, resolve_model_path, resolve_model_source};
 use oar_ocr_core::core::config::OrtSessionConfig;
 use oar_ocr_core::core::traits::OrtConfigurable;
 use oar_ocr_core::core::traits::adapter::{AdapterBuilder, ModelAdapter};
+use oar_ocr_core::core::{ModelSource, OCRError};
 use oar_ocr_core::domain::adapters::{
     DocumentOrientationAdapter, DocumentOrientationAdapterBuilder, FormulaRecognitionAdapter,
     LayoutDetectionAdapter, LayoutDetectionAdapterBuilder, PPFormulaNetAdapterBuilder,
@@ -124,29 +124,29 @@ struct StructurePipeline {
 #[derive(Debug, Clone)]
 pub struct OARStructureBuilder {
     // Required models
-    layout_detection_model: PathBuf,
+    layout_detection_model: ModelSource,
     layout_model_name: Option<String>,
 
     // Optional document preprocessing
-    document_orientation_model: Option<PathBuf>,
-    document_rectification_model: Option<PathBuf>,
+    document_orientation_model: Option<ModelSource>,
+    document_rectification_model: Option<ModelSource>,
 
     // Optional region detection for hierarchical ordering (PP-DocBlockLayout)
-    region_detection_model: Option<PathBuf>,
+    region_detection_model: Option<ModelSource>,
 
     // Optional table analysis models
-    table_classification_model: Option<PathBuf>,
-    table_orientation_model: Option<PathBuf>, // Reuses doc orientation model for rotated tables
-    table_cell_detection_model: Option<PathBuf>,
+    table_classification_model: Option<ModelSource>,
+    table_orientation_model: Option<ModelSource>, // Reuses doc orientation model for rotated tables
+    table_cell_detection_model: Option<ModelSource>,
     table_cell_detection_type: Option<String>, // "wired" or "wireless"
-    table_structure_recognition_model: Option<PathBuf>,
+    table_structure_recognition_model: Option<ModelSource>,
     table_structure_recognition_type: Option<String>, // "wired" or "wireless"
     table_structure_dict_path: Option<PathBuf>,
 
-    wired_table_structure_model: Option<PathBuf>,
-    wireless_table_structure_model: Option<PathBuf>,
-    wired_table_cell_model: Option<PathBuf>,
-    wireless_table_cell_model: Option<PathBuf>,
+    wired_table_structure_model: Option<ModelSource>,
+    wireless_table_structure_model: Option<ModelSource>,
+    wired_table_cell_model: Option<ModelSource>,
+    wireless_table_cell_model: Option<ModelSource>,
     // E2E mode: when true, skip cell detection and use only structure model output
     // Defaults: wired=false, wireless=true
     use_e2e_wired_table_rec: bool,
@@ -157,18 +157,18 @@ pub struct OARStructureBuilder {
     use_wireless_table_cells_trans_to_html: bool,
 
     // Optional formula recognition
-    formula_recognition_model: Option<PathBuf>,
+    formula_recognition_model: Option<ModelSource>,
     formula_recognition_type: Option<String>, // "pp_formulanet" or "unimernet"
     formula_tokenizer_path: Option<PathBuf>,
     formula_ort_session_config: Option<OrtSessionConfig>,
 
     // Optional seal text detection
-    seal_text_detection_model: Option<PathBuf>,
+    seal_text_detection_model: Option<ModelSource>,
 
     // Optional OCR integration
-    text_detection_model: Option<PathBuf>,
-    text_line_orientation_model: Option<PathBuf>,
-    text_recognition_model: Option<PathBuf>,
+    text_detection_model: Option<ModelSource>,
+    text_line_orientation_model: Option<ModelSource>,
+    text_recognition_model: Option<ModelSource>,
     character_dict_path: Option<PathBuf>,
 
     // Model name presets for loading correct pre/post processors
@@ -203,7 +203,7 @@ impl OARStructureBuilder {
     /// # Arguments
     ///
     /// * `layout_detection_model` - Path to the layout detection model file
-    pub fn new(layout_detection_model: impl Into<PathBuf>) -> Self {
+    pub fn new(layout_detection_model: impl Into<ModelSource>) -> Self {
         Self {
             layout_detection_model: layout_detection_model.into(),
             layout_model_name: None,
@@ -369,8 +369,8 @@ impl OARStructureBuilder {
     ///
     /// This component detects and corrects document rotation (0°, 90°, 180°, 270°).
     /// Should be run before other processing for best results.
-    pub fn with_document_orientation(mut self, model_path: impl Into<PathBuf>) -> Self {
-        self.document_orientation_model = Some(model_path.into());
+    pub fn with_document_orientation(mut self, model_source: impl Into<ModelSource>) -> Self {
+        self.document_orientation_model = Some(model_source.into());
         self
     }
 
@@ -378,8 +378,8 @@ impl OARStructureBuilder {
     ///
     /// This component corrects document distortion and perspective issues.
     /// Should be run after orientation detection if both are enabled.
-    pub fn with_document_rectification(mut self, model_path: impl Into<PathBuf>) -> Self {
-        self.document_rectification_model = Some(model_path.into());
+    pub fn with_document_rectification(mut self, model_source: impl Into<ModelSource>) -> Self {
+        self.document_rectification_model = Some(model_source.into());
         self
     }
 
@@ -395,8 +395,8 @@ impl OARStructureBuilder {
     /// 1. Group layout elements by their parent regions
     /// 2. Apply XY-cut ordering within each region
     /// 3. Order regions based on their relative positions
-    pub fn with_region_detection(mut self, model_path: impl Into<PathBuf>) -> Self {
-        self.region_detection_model = Some(model_path.into());
+    pub fn with_region_detection(mut self, model_source: impl Into<ModelSource>) -> Self {
+        self.region_detection_model = Some(model_source.into());
         self
     }
 
@@ -404,16 +404,16 @@ impl OARStructureBuilder {
     ///
     /// This component detects circular/curved seal and stamp text regions.
     /// Seal regions will be included in the layout elements.
-    pub fn with_seal_text_detection(mut self, model_path: impl Into<PathBuf>) -> Self {
-        self.seal_text_detection_model = Some(model_path.into());
+    pub fn with_seal_text_detection(mut self, model_source: impl Into<ModelSource>) -> Self {
+        self.seal_text_detection_model = Some(model_source.into());
         self
     }
 
     /// Adds table classification to the pipeline.
     ///
     /// This component classifies tables as wired or wireless.
-    pub fn with_table_classification(mut self, model_path: impl Into<PathBuf>) -> Self {
-        self.table_classification_model = Some(model_path.into());
+    pub fn with_table_classification(mut self, model_source: impl Into<ModelSource>) -> Self {
+        self.table_classification_model = Some(model_source.into());
         self
     }
 
@@ -432,8 +432,8 @@ impl OARStructureBuilder {
     /// # Arguments
     ///
     /// * `model_path` - Path to the orientation classification model (same as document orientation)
-    pub fn with_table_orientation(mut self, model_path: impl Into<PathBuf>) -> Self {
-        self.table_orientation_model = Some(model_path.into());
+    pub fn with_table_orientation(mut self, model_source: impl Into<ModelSource>) -> Self {
+        self.table_orientation_model = Some(model_source.into());
         self
     }
 
@@ -487,10 +487,10 @@ impl OARStructureBuilder {
     /// * `cell_type` - Type of cells to detect: "wired" or "wireless"
     pub fn with_table_cell_detection(
         mut self,
-        model_path: impl Into<PathBuf>,
+        model_source: impl Into<ModelSource>,
         cell_type: impl Into<String>,
     ) -> Self {
-        self.table_cell_detection_model = Some(model_path.into());
+        self.table_cell_detection_model = Some(model_source.into());
         self.table_cell_detection_type = Some(cell_type.into());
         self
     }
@@ -511,10 +511,10 @@ impl OARStructureBuilder {
     /// This component recognizes the structure of tables and outputs HTML.
     pub fn with_table_structure_recognition(
         mut self,
-        model_path: impl Into<PathBuf>,
+        model_source: impl Into<ModelSource>,
         table_type: impl Into<String>,
     ) -> Self {
-        self.table_structure_recognition_model = Some(model_path.into());
+        self.table_structure_recognition_model = Some(model_source.into());
         self.table_structure_recognition_type = Some(table_type.into());
         self
     }
@@ -543,8 +543,8 @@ impl OARStructureBuilder {
     ///
     /// When both wired and wireless models are configured along with table classification,
     /// the system automatically selects the appropriate model based on classification results.
-    pub fn with_wired_table_structure(mut self, model_path: impl Into<PathBuf>) -> Self {
-        self.wired_table_structure_model = Some(model_path.into());
+    pub fn with_wired_table_structure(mut self, model_source: impl Into<ModelSource>) -> Self {
+        self.wired_table_structure_model = Some(model_source.into());
         self
     }
 
@@ -552,8 +552,8 @@ impl OARStructureBuilder {
     ///
     /// When both wired and wireless models are configured along with table classification,
     /// the system automatically selects the appropriate model based on classification results.
-    pub fn with_wireless_table_structure(mut self, model_path: impl Into<PathBuf>) -> Self {
-        self.wireless_table_structure_model = Some(model_path.into());
+    pub fn with_wireless_table_structure(mut self, model_source: impl Into<ModelSource>) -> Self {
+        self.wireless_table_structure_model = Some(model_source.into());
         self
     }
 
@@ -561,8 +561,8 @@ impl OARStructureBuilder {
     ///
     /// When both wired and wireless models are configured along with table classification,
     /// the system automatically selects the appropriate model based on classification results.
-    pub fn with_wired_table_cell_detection(mut self, model_path: impl Into<PathBuf>) -> Self {
-        self.wired_table_cell_model = Some(model_path.into());
+    pub fn with_wired_table_cell_detection(mut self, model_source: impl Into<ModelSource>) -> Self {
+        self.wired_table_cell_model = Some(model_source.into());
         self
     }
 
@@ -570,8 +570,11 @@ impl OARStructureBuilder {
     ///
     /// When both wired and wireless models are configured along with table classification,
     /// the system automatically selects the appropriate model based on classification results.
-    pub fn with_wireless_table_cell_detection(mut self, model_path: impl Into<PathBuf>) -> Self {
-        self.wireless_table_cell_model = Some(model_path.into());
+    pub fn with_wireless_table_cell_detection(
+        mut self,
+        model_source: impl Into<ModelSource>,
+    ) -> Self {
+        self.wireless_table_cell_model = Some(model_source.into());
         self
     }
 
@@ -586,11 +589,11 @@ impl OARStructureBuilder {
     /// This component recognizes mathematical formulas and outputs LaTeX.
     pub fn with_formula_recognition(
         mut self,
-        model_path: impl Into<PathBuf>,
+        model_source: impl Into<ModelSource>,
         tokenizer_path: impl Into<PathBuf>,
         model_type: impl Into<String>,
     ) -> Self {
-        self.formula_recognition_model = Some(model_path.into());
+        self.formula_recognition_model = Some(model_source.into());
         self.formula_tokenizer_path = Some(tokenizer_path.into());
         self.formula_recognition_type = Some(model_type.into());
         self
@@ -612,13 +615,13 @@ impl OARStructureBuilder {
     ///
     /// # Arguments
     ///
-    /// * `text_detection_model` - Path to the text detection model
-    /// * `text_recognition_model` - Path to the text recognition model
+    /// * `text_detection_model` - Text detection model: a path or raw model bytes
+    /// * `text_recognition_model` - Text recognition model: a path or raw model bytes
     /// * `character_dict_path` - Path to the character dictionary file
     pub fn with_ocr(
         mut self,
-        text_detection_model: impl Into<PathBuf>,
-        text_recognition_model: impl Into<PathBuf>,
+        text_detection_model: impl Into<ModelSource>,
+        text_recognition_model: impl Into<ModelSource>,
         character_dict_path: impl Into<PathBuf>,
     ) -> Self {
         self.text_detection_model = Some(text_detection_model.into());
@@ -637,8 +640,8 @@ impl OARStructureBuilder {
     /// When enabled, detected text lines are classified before recognition:
     /// - Lines classified as 180° rotated are flipped before OCR
     /// - This improves accuracy for documents scanned upside-down or with mixed orientations
-    pub fn with_text_line_orientation(mut self, model_path: impl Into<PathBuf>) -> Self {
-        self.text_line_orientation_model = Some(model_path.into());
+    pub fn with_text_line_orientation(mut self, model_source: impl Into<ModelSource>) -> Self {
+        self.text_line_orientation_model = Some(model_source.into());
         self
     }
 
@@ -695,31 +698,37 @@ impl OARStructureBuilder {
         // Resolve every model/dict/tokenizer path through the auto-download
         // cache when the `auto-download` feature is enabled. With the feature
         // off these calls are infallible no-ops.
-        self.layout_detection_model = resolve_model_path(&self.layout_detection_model)?;
+        self.layout_detection_model = resolve_model_source(&self.layout_detection_model)?;
         fn resolve_opt_path(p: &mut Option<PathBuf>) -> Result<(), OCRError> {
             if let Some(path) = p {
                 *path = resolve_model_path(path)?;
             }
             Ok(())
         }
-        resolve_opt_path(&mut self.document_orientation_model)?;
-        resolve_opt_path(&mut self.document_rectification_model)?;
-        resolve_opt_path(&mut self.region_detection_model)?;
-        resolve_opt_path(&mut self.table_classification_model)?;
-        resolve_opt_path(&mut self.table_orientation_model)?;
-        resolve_opt_path(&mut self.table_cell_detection_model)?;
-        resolve_opt_path(&mut self.table_structure_recognition_model)?;
+        fn resolve_opt_source(s: &mut Option<ModelSource>) -> Result<(), OCRError> {
+            if let Some(source) = s {
+                *source = resolve_model_source(source)?;
+            }
+            Ok(())
+        }
+        resolve_opt_source(&mut self.document_orientation_model)?;
+        resolve_opt_source(&mut self.document_rectification_model)?;
+        resolve_opt_source(&mut self.region_detection_model)?;
+        resolve_opt_source(&mut self.table_classification_model)?;
+        resolve_opt_source(&mut self.table_orientation_model)?;
+        resolve_opt_source(&mut self.table_cell_detection_model)?;
+        resolve_opt_source(&mut self.table_structure_recognition_model)?;
         resolve_opt_path(&mut self.table_structure_dict_path)?;
-        resolve_opt_path(&mut self.wired_table_structure_model)?;
-        resolve_opt_path(&mut self.wireless_table_structure_model)?;
-        resolve_opt_path(&mut self.wired_table_cell_model)?;
-        resolve_opt_path(&mut self.wireless_table_cell_model)?;
-        resolve_opt_path(&mut self.formula_recognition_model)?;
+        resolve_opt_source(&mut self.wired_table_structure_model)?;
+        resolve_opt_source(&mut self.wireless_table_structure_model)?;
+        resolve_opt_source(&mut self.wired_table_cell_model)?;
+        resolve_opt_source(&mut self.wireless_table_cell_model)?;
+        resolve_opt_source(&mut self.formula_recognition_model)?;
         resolve_opt_path(&mut self.formula_tokenizer_path)?;
-        resolve_opt_path(&mut self.seal_text_detection_model)?;
-        resolve_opt_path(&mut self.text_detection_model)?;
-        resolve_opt_path(&mut self.text_line_orientation_model)?;
-        resolve_opt_path(&mut self.text_recognition_model)?;
+        resolve_opt_source(&mut self.seal_text_detection_model)?;
+        resolve_opt_source(&mut self.text_detection_model)?;
+        resolve_opt_source(&mut self.text_line_orientation_model)?;
+        resolve_opt_source(&mut self.text_recognition_model)?;
         resolve_opt_path(&mut self.character_dict_path)?;
 
         // Load character dictionary if OCR is enabled
@@ -3453,8 +3462,8 @@ mod tests {
     fn test_structure_builder_new() {
         let builder = OARStructureBuilder::new("models/layout.onnx");
         assert_eq!(
-            builder.layout_detection_model,
-            PathBuf::from("models/layout.onnx")
+            builder.layout_detection_model.as_path(),
+            Some(std::path::Path::new("models/layout.onnx"))
         );
         assert!(builder.table_classification_model.is_none());
         assert!(builder.formula_recognition_model.is_none());

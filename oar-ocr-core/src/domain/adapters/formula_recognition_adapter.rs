@@ -13,7 +13,7 @@ use crate::models::recognition::{
     pp_formulanet::PPFormulaNetPostprocessConfig, unimernet::UniMERNetPostprocessConfig,
 };
 use crate::processors::normalize_latex;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 use tokenizers::Tokenizer;
 
@@ -383,7 +383,7 @@ impl_adapter_builder! {
         }
     }
 
-    build: |builder: PPFormulaNetAdapterBuilder, model_path: &Path| -> Result<FormulaRecognitionAdapter, OCRError> {
+    build: |builder: PPFormulaNetAdapterBuilder, model_source: crate::core::ModelSource| -> Result<FormulaRecognitionAdapter, OCRError> {
         let (task_config, ort_config) = builder.config
             .into_validated_parts()
             .map_err(|err| OCRError::ConfigError {
@@ -396,7 +396,7 @@ impl_adapter_builder! {
             model_builder = model_builder.target_size(width, height);
         }
         let model = FormulaModel::PPFormulaNet(
-            apply_ort_config!(model_builder, ort_config).build(model_path)?
+            apply_ort_config!(model_builder, ort_config).build(model_source)?
         );
 
         // Tokenizer path is required
@@ -486,7 +486,7 @@ impl_adapter_builder! {
         }
     }
 
-    build: |builder: UniMERNetAdapterBuilder, model_path: &Path| -> Result<FormulaRecognitionAdapter, OCRError> {
+    build: |builder: UniMERNetAdapterBuilder, model_source: crate::core::ModelSource| -> Result<FormulaRecognitionAdapter, OCRError> {
         let (task_config, ort_config) = builder.config
             .into_validated_parts()
             .map_err(|err| OCRError::ConfigError {
@@ -499,7 +499,7 @@ impl_adapter_builder! {
             model_builder = model_builder.target_size(width, height);
         }
         let model = FormulaModel::UniMERNet(
-            apply_ort_config!(model_builder, ort_config).build(model_path)?
+            apply_ort_config!(model_builder, ort_config).build(model_source)?
         );
 
         // Tokenizer path is required

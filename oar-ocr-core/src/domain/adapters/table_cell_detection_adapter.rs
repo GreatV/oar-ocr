@@ -14,7 +14,6 @@ use crate::impl_adapter_builder;
 use crate::models::detection::{RTDetrModel, RTDetrModelBuilder, RTDetrPostprocessConfig};
 use crate::processors::{ImageScaleInfo, LayoutPostProcess};
 use std::collections::HashMap;
-use std::path::Path;
 
 /// Configuration describing a table cell detection model.
 #[derive(Debug, Clone)]
@@ -210,7 +209,7 @@ impl_adapter_builder! {
         }
     }
 
-    build: |builder: TableCellDetectionAdapterBuilder, model_path: &Path| -> Result<TableCellDetectionAdapter, OCRError> {
+    build: |builder: TableCellDetectionAdapterBuilder, model_source: crate::core::ModelSource| -> Result<TableCellDetectionAdapter, OCRError> {
         let model_config = builder.model_config.ok_or_else(|| OCRError::InvalidInput {
             message: "Table cell model configuration is required".to_string(),
         })?;
@@ -221,13 +220,13 @@ impl_adapter_builder! {
                 message: err.to_string(),
             })?;
 
-        TableCellDetectionAdapterBuilder::build_with_config(model_path, model_config, task_config, ort_config)
+        TableCellDetectionAdapterBuilder::build_with_config(model_source, model_config, task_config, ort_config)
     },
 }
 
 impl TableCellDetectionAdapterBuilder {
     fn build_with_config(
-        model_path: &Path,
+        model_source: crate::core::ModelSource,
         model_config: TableCellModelConfig,
         task_config: TableCellDetectionConfig,
         ort_config: Option<crate::core::config::OrtSessionConfig>,
@@ -238,9 +237,9 @@ impl TableCellDetectionAdapterBuilder {
                 ort_session: ort_config,
                 ..Default::default()
             };
-            OrtInfer::from_config(&common_config, model_path, None)?
+            OrtInfer::from_config(&common_config, model_source, None)?
         } else {
-            OrtInfer::new(model_path, None)?
+            OrtInfer::new(model_source, None)?
         };
 
         let postprocessor = LayoutPostProcess::new(
@@ -341,8 +340,11 @@ impl AdapterBuilder for RTDetrTableCellAdapterBuilder {
     type Config = TableCellDetectionConfig;
     type Adapter = TableCellDetectionAdapter;
 
-    fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError> {
-        self.inner.build(model_path)
+    fn build(
+        self,
+        model_source: impl Into<crate::core::ModelSource>,
+    ) -> Result<Self::Adapter, OCRError> {
+        self.inner.build(model_source)
     }
 
     fn with_config(mut self, config: Self::Config) -> Self {

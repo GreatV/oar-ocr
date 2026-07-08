@@ -7,7 +7,6 @@
 use super::task::{Task, TaskSchema, TaskType};
 use crate::core::OCRError;
 use std::fmt::Debug;
-use std::path::Path;
 
 /// Information about a model adapter.
 #[derive(Debug, Clone)]
@@ -122,16 +121,19 @@ pub trait AdapterBuilder: Sized {
     /// The adapter type that this builder creates
     type Adapter: ModelAdapter;
 
-    /// Builds an adapter from a model file.
+    /// Builds an adapter from a model source.
     ///
     /// # Arguments
     ///
-    /// * `model_path` - Path to the model file (e.g., ONNX file)
+    /// * `model_source` - Model file path or in-memory model bytes
     ///
     /// # Returns
     ///
     /// The built adapter or an error
-    fn build(self, model_path: &Path) -> Result<Self::Adapter, OCRError>;
+    fn build(
+        self,
+        model_source: impl Into<crate::core::inference::ModelSource>,
+    ) -> Result<Self::Adapter, OCRError>;
 
     /// Configures the builder with the given configuration.
     ///

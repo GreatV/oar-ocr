@@ -101,6 +101,30 @@ let ocr = OAROCRBuilder::new(
 | `.image_batch_size(n)` | Set batch size for image processing |
 | `.region_batch_size(n)` | Set batch size for region processing |
 | `.ort_session(config)` | Apply ONNX Runtime configuration |
+| `.character_dict_content(text)` | Provide the character dictionary as an in-memory string |
+
+#### Loading Models from Memory
+
+Everywhere a builder accepts a model path it also accepts raw ONNX bytes
+(`Vec<u8>`, `&'static [u8]`, or `Arc<[u8]>`), so models can be embedded into
+the binary or decrypted at runtime without touching the filesystem:
+
+```rust
+use oar_ocr::oarocr::OAROCRBuilder;
+
+static DET_MODEL: &[u8] = include_bytes!("../models/pp-ocrv6_tiny_det.onnx");
+static REC_MODEL: &[u8] = include_bytes!("../models/pp-ocrv6_tiny_rec.onnx");
+static DICT: &str = include_str!("../models/ppocrv6_tiny_dict.txt");
+
+let ocr = OAROCRBuilder::new(DET_MODEL, REC_MODEL, "")
+    .character_dict_content(DICT)
+    .build()?;
+```
+
+In-memory sources skip auto-download resolution, and models that reference
+external-data sidecar files cannot be loaded this way. The same applies to
+the per-task predictors (`TextDetectionPredictorBuilder::build(...)` etc.),
+`OARStructureBuilder` model setters, and `AdapterBuilder::build(...)`.
 
 ### OARStructureBuilder - Document Structure Analysis
 
