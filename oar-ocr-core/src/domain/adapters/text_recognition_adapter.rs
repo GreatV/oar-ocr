@@ -9,7 +9,7 @@ use crate::core::traits::{
     task::Task,
 };
 use crate::domain::tasks::{
-    TextDirection, TextRecognitionConfig, TextRecognitionOutput, TextRecognitionTask,
+    TextRecognitionConfig, TextRecognitionOutput, TextRecognitionTask,
     postprocess_text_direction_with_order_change,
 };
 use crate::impl_adapter_builder;
@@ -24,8 +24,6 @@ pub struct TextRecognitionAdapter {
     info: AdapterInfo,
     /// Task configuration
     config: TextRecognitionConfig,
-    /// Reading direction used for text post-processing
-    text_direction: TextDirection,
     /// Whether to return character positions for word box generation
     return_word_box: bool,
 }
@@ -88,8 +86,7 @@ impl ModelAdapter for TextRecognitionAdapter {
             )
         {
             if score >= effective_config.score_threshold {
-                let (text, changed_order) =
-                    postprocess_text_direction_with_order_change(text, self.text_direction);
+                let (text, changed_order) = postprocess_text_direction_with_order_change(text);
                 result_scores.push(score);
                 result_texts.push(text);
                 if changed_order {
@@ -149,7 +146,6 @@ impl_adapter_builder! {
         preprocess_config: CRNNPreprocessConfig = CRNNPreprocessConfig::default(),
         character_dict: Option<Vec<String>> = None,
         return_word_box: bool = false,
-        text_direction: TextDirection = TextDirection::Ltr,
         model_name_override: Option<String> = None,
     },
 
@@ -194,11 +190,6 @@ impl_adapter_builder! {
             self
         }
 
-        /// Sets reading-direction post-processing.
-        pub fn text_direction(mut self, direction: TextDirection) -> Self {
-            self.text_direction = direction;
-            self
-        }
     }
 
     build: |builder: TextRecognitionAdapterBuilder, model_source: crate::core::ModelSource| -> Result<TextRecognitionAdapter, OCRError> {
@@ -227,7 +218,6 @@ impl_adapter_builder! {
             model,
             info,
             config: task_config,
-            text_direction: builder.text_direction,
             return_word_box: builder.return_word_box,
         })
     },

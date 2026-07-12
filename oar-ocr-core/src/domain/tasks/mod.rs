@@ -45,6 +45,6 @@ pub use text_line_orientation::{
     TextLineOrientationConfig, TextLineOrientationOutput, TextLineOrientationTask,
 };
 pub use text_recognition::{
-    TextDirection, TextRecognitionConfig, TextRecognitionOutput, TextRecognitionTask,
-    postprocess_text_direction, postprocess_text_direction_with_order_change,
+    TextRecognitionConfig, TextRecognitionOutput, TextRecognitionTask, postprocess_text_direction,
+    postprocess_text_direction_with_order_change,
 };

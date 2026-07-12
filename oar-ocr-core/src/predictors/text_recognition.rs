@@ -9,9 +9,7 @@ use crate::core::errors::OCRError;
 use crate::core::traits::OrtConfigurable;
 use crate::core::traits::task::ImageTaskInput;
 use crate::domain::adapters::TextRecognitionAdapterBuilder;
-use crate::domain::tasks::text_recognition::{
-    TextDirection, TextRecognitionConfig, TextRecognitionTask,
-};
+use crate::domain::tasks::text_recognition::{TextRecognitionConfig, TextRecognitionTask};
 use crate::predictors::TaskPredictorCore;
 use image::RgbImage;
 use std::path::{Path, PathBuf};
@@ -53,7 +51,6 @@ impl TextRecognitionPredictor {
 pub struct TextRecognitionPredictorBuilder {
     state: PredictorBuilderState<TextRecognitionConfig>,
     dict_path: Option<PathBuf>,
-    text_direction: TextDirection,
 }
 
 impl TextRecognitionPredictorBuilder {
@@ -63,17 +60,11 @@ impl TextRecognitionPredictorBuilder {
                 score_threshold: 0.0,
             }),
             dict_path: None,
-            text_direction: TextDirection::Ltr,
         }
     }
 
     pub fn score_threshold(mut self, threshold: f32) -> Self {
         self.state.config_mut().score_threshold = threshold;
-        self
-    }
-
-    pub fn text_direction(mut self, direction: TextDirection) -> Self {
-        self.text_direction = direction;
         self
     }
 
@@ -86,11 +77,7 @@ impl TextRecognitionPredictorBuilder {
         self,
         model_source: impl Into<crate::core::ModelSource>,
     ) -> OcrResult<TextRecognitionPredictor> {
-        let Self {
-            state,
-            dict_path,
-            text_direction,
-        } = self;
+        let Self { state, dict_path } = self;
         let (config, ort_config) = state.into_parts();
 
         let dict_path = dict_path
@@ -105,7 +92,6 @@ impl TextRecognitionPredictorBuilder {
 
         let mut adapter_builder = TextRecognitionAdapterBuilder::new()
             .with_config(config.clone())
-            .text_direction(text_direction)
             .character_dict(character_dict);
 
         if let Some(ort_cfg) = ort_config {

@@ -32,7 +32,6 @@
 mod utils;
 
 use clap::Parser;
-use oar_ocr::domain::tasks::TextDirection;
 use oar_ocr::predictors::TextRecognitionPredictor;
 use oar_ocr::utils::load_image;
 use std::path::PathBuf;
@@ -74,10 +73,6 @@ struct Args {
     #[arg(long, default_value = "0.0")]
     score_thresh: f32,
 
-    /// Text direction post-processing: ltr, rtl, or auto
-    #[arg(long, default_value = "ltr")]
-    text_direction: TextDirectionArg,
-
     /// Maximum image width for resizing (optional, e.g., 320)
     #[arg(long)]
     max_img_w: Option<usize>,
@@ -93,23 +88,6 @@ struct Args {
     /// Enable verbose output
     #[arg(short, long)]
     verbose: bool,
-}
-
-#[derive(Clone, Copy, Debug, clap::ValueEnum)]
-enum TextDirectionArg {
-    Ltr,
-    Rtl,
-    Auto,
-}
-
-impl From<TextDirectionArg> for TextDirection {
-    fn from(value: TextDirectionArg) -> Self {
-        match value {
-            TextDirectionArg::Ltr => TextDirection::Ltr,
-            TextDirectionArg::Rtl => TextDirection::Rtl,
-            TextDirectionArg::Auto => TextDirection::Auto,
-        }
-    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -164,7 +142,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.verbose {
         info!("Recognition Configuration:");
         info!("  Score threshold: {}", args.score_thresh);
-        info!("  Text direction: {:?}", args.text_direction);
         info!(
             "  Input shape: [3, {}, {}]",
             args.input_height, args.input_width
@@ -179,7 +156,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let predictor = TextRecognitionPredictor::builder()
         .score_threshold(args.score_thresh)
-        .text_direction(args.text_direction.into())
         .dict_path(&args.dict_path)
         .with_ort_config(ort_config)
         .build(&args.model_path)?;
