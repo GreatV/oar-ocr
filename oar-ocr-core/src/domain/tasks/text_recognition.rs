@@ -67,7 +67,7 @@ fn is_ltr_token_char(c: char) -> bool {
             | BidiClass::ET
             | BidiClass::CS
             | BidiClass::NSM
-    ) || "._:/%+-#@&".contains(c)
+    ) || "._:/%+-#@&'’`".contains(c)
 }
 
 fn matching_open_bracket(close: char) -> Option<char> {
@@ -124,10 +124,20 @@ fn normalize_leading_combining_marks(chars: Vec<char>) -> Vec<char> {
     let mut normalized: Vec<char> = Vec::with_capacity(chars.len());
     let mut pending_marks = Vec::new();
 
-    for c in chars {
+    for (idx, c) in chars.iter().copied().enumerate() {
         if is_combining_mark(c) {
-            if let Some(&last) = normalized.last()
-                && !last.is_whitespace()
+            let last_base = normalized
+                .iter()
+                .rev()
+                .copied()
+                .find(|last| !is_combining_mark(*last));
+            let next_base = chars
+                .iter()
+                .skip(idx + 1)
+                .copied()
+                .find(|next| !is_combining_mark(*next));
+            if last_base.is_some_and(is_ltr_token_char)
+                || next_base.is_none_or(|next| next.is_whitespace())
             {
                 normalized.push(c);
                 continue;
@@ -161,12 +171,15 @@ fn has_rtl_char(text: &str) -> bool {
     text.chars().any(is_rtl_char)
 }
 
-fn has_rtl_base_direction(line: &str) -> bool {
-    for c in line.chars() {
+fn has_rtl_visual_line_end(line: &str) -> bool {
+    for c in line.chars().rev() {
+        if c.is_whitespace() || is_combining_mark(c) {
+            continue;
+        }
         if is_rtl_char(c) {
             return true;
         }
-        if is_strong_ltr_char(c) {
+        if is_strong_ltr_char(c) || is_ltr_token_char(c) {
             return false;
         }
     }
@@ -177,7 +190,7 @@ fn should_convert_visual_rtl_line(line: &str, direction: TextDirection) -> bool 
     match direction {
         TextDirection::Ltr => false,
         TextDirection::Rtl => has_rtl_char(line),
-        TextDirection::Auto => has_rtl_base_direction(line),
+        TextDirection::Auto => has_rtl_visual_line_end(line),
     }
 }
 
@@ -188,15 +201,17 @@ fn visual_rtl_to_logical(text: &str, direction: TextDirection) -> (String, bool)
     for segment in text.split_inclusive('\n') {
         if let Some(line) = segment.strip_suffix('\n') {
             if should_convert_visual_rtl_line(line, direction) {
-                out.push_str(&visual_rtl_line_to_logical(line));
-                changed_order = true;
+                let converted = visual_rtl_line_to_logical(line);
+                changed_order |= converted != line;
+                out.push_str(&converted);
             } else {
                 out.push_str(line);
             }
             out.push('\n');
         } else if should_convert_visual_rtl_line(segment, direction) {
-            out.push_str(&visual_rtl_line_to_logical(segment));
-            changed_order = true;
+            let converted = visual_rtl_line_to_logical(segment);
+            changed_order |= converted != segment;
+            out.push_str(&converted);
         } else {
             out.push_str(segment);
         }
@@ -428,10 +443,26 @@ mod tests {
     }
 
     #[test]
+    fn auto_postprocess_detects_rtl_from_visual_line_end() {
+        assert_eq!(
+            postprocess_text_direction("abc 123 ابحرم".to_string(), TextDirection::Auto),
+            "مرحبا abc 123"
+        );
+    }
+
+    #[test]
     fn rtl_postprocess_keeps_combining_marks_on_rtl_base() {
         assert_eq!(
             postprocess_text_direction("لكشي ّراطإ".to_string(), TextDirection::Rtl),
             "إطارّ يشكل"
+        );
+    }
+
+    #[test]
+    fn rtl_postprocess_keeps_multiple_combining_marks_on_each_rtl_base() {
+        assert_eq!(
+            postprocess_text_direction("بَتِكُ".to_string(), TextDirection::Rtl),
+            "كُتِبَ"
         );
     }
 
@@ -460,6 +491,22 @@ mod tests {
     }
 
     #[test]
+    fn rtl_postprocess_preserves_ltr_combining_marks_before_another_ltr_word() {
+        assert_eq!(
+            postprocess_text_direction("cafe\u{301} xyz ابحرم".to_string(), TextDirection::Rtl),
+            "مرحبا cafe\u{301} xyz"
+        );
+    }
+
+    #[test]
+    fn rtl_postprocess_preserves_apostrophes_inside_ltr_tokens() {
+        assert_eq!(
+            postprocess_text_direction("O'Reilly ابحرم".to_string(), TextDirection::Rtl),
+            "مرحبا O'Reilly"
+        );
+    }
+
+    #[test]
     fn postprocess_reports_order_changes() {
         assert_eq!(
             postprocess_text_direction_with_order_change(
@@ -471,6 +518,10 @@ mod tests {
         assert_eq!(
             postprocess_text_direction_with_order_change("ابحرم".to_string(), TextDirection::Rtl),
             ("مرحبا".to_string(), true)
+        );
+        assert_eq!(
+            postprocess_text_direction_with_order_change("م".to_string(), TextDirection::Rtl),
+            ("م".to_string(), false)
         );
     }
 
