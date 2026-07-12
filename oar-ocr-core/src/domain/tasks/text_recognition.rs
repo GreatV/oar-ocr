@@ -9,6 +9,20 @@ use crate::core::traits::TaskDefinition;
 use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
 use crate::utils::ScoreValidator;
 use serde::{Deserialize, Serialize};
+use unicode_bidi::{BidiClass, bidi_class};
+
+/// Reading direction for recognized text post-processing.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TextDirection {
+    /// Keep decoded text in the model's left-to-right sequence order.
+    #[default]
+    Ltr,
+    /// Convert visual right-to-left OCR output into logical string order.
+    Rtl,
+    /// Convert only when decoded text contains right-to-left characters.
+    Auto,
+}
 
 /// Configuration for text recognition task.
 ///
@@ -18,13 +32,122 @@ pub struct TextRecognitionConfig {
     /// Score threshold for recognition (default: 0.0, no filtering)
     #[validate(range(min = 0.0, max = 1.0))]
     pub score_threshold: f32,
+    /// Reading direction used for text post-processing.
+    #[serde(default)]
+    pub text_direction: TextDirection,
 }
 
 impl Default for TextRecognitionConfig {
     fn default() -> Self {
         Self {
             score_threshold: 0.0,
+            text_direction: TextDirection::Ltr,
         }
+    }
+}
+
+fn is_rtl_char(c: char) -> bool {
+    matches!(
+        bidi_class(c),
+        BidiClass::AL | BidiClass::R | BidiClass::RLE | BidiClass::RLI | BidiClass::RLO
+    )
+}
+
+fn is_combining_mark(c: char) -> bool {
+    bidi_class(c) == BidiClass::NSM
+}
+
+fn is_ltr_token_char(c: char) -> bool {
+    matches!(
+        bidi_class(c),
+        BidiClass::L
+            | BidiClass::EN
+            | BidiClass::AN
+            | BidiClass::ES
+            | BidiClass::ET
+            | BidiClass::CS
+    ) || "._:/%+-#@&".contains(c)
+}
+
+fn preserve_ltr_phrase_order(chars: &mut [char]) {
+    let mut i = 0;
+    while i < chars.len() {
+        if !is_ltr_token_char(chars[i]) {
+            i += 1;
+            continue;
+        }
+
+        let start = i;
+        i += 1;
+        while i < chars.len() && (is_ltr_token_char(chars[i]) || chars[i].is_whitespace()) {
+            i += 1;
+        }
+        let mut end = i;
+        while end > start && chars[end - 1].is_whitespace() {
+            end -= 1;
+        }
+        chars[start..end].reverse();
+    }
+}
+
+fn normalize_leading_combining_marks(chars: Vec<char>) -> Vec<char> {
+    let mut normalized = Vec::with_capacity(chars.len());
+    let mut pending_marks = Vec::new();
+
+    for c in chars {
+        if is_combining_mark(c) {
+            pending_marks.push(c);
+            continue;
+        }
+
+        normalized.push(c);
+        if is_rtl_char(c) && !pending_marks.is_empty() {
+            normalized.append(&mut pending_marks);
+        } else if !pending_marks.is_empty() {
+            let insertion = normalized.len().saturating_sub(1);
+            normalized.splice(insertion..insertion, pending_marks.drain(..));
+        }
+    }
+
+    normalized.extend(pending_marks);
+    normalized
+}
+
+fn visual_rtl_line_to_logical(line: &str) -> String {
+    if !line.chars().any(is_rtl_char) {
+        return line.to_string();
+    }
+
+    // PaddleOCR/PaddleX Arabic CTC recognizers can expose visual RTL order.
+    // Convert to logical order while using Unicode bidi classes for RTL,
+    // non-spacing marks, and embedded LTR/number phrases.
+    let mut chars: Vec<char> = line.chars().rev().collect();
+    preserve_ltr_phrase_order(&mut chars);
+    normalize_leading_combining_marks(chars)
+        .into_iter()
+        .collect()
+}
+
+fn visual_rtl_to_logical(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for segment in text.split_inclusive('\n') {
+        if let Some(line) = segment.strip_suffix('\n') {
+            out.push_str(&visual_rtl_line_to_logical(line));
+            out.push('\n');
+        } else {
+            out.push_str(&visual_rtl_line_to_logical(segment));
+        }
+    }
+    out
+}
+
+/// Applies configured reading-direction post-processing to decoded OCR text.
+pub fn postprocess_text_direction(text: String, direction: TextDirection) -> String {
+    match direction {
+        TextDirection::Ltr => text,
+        TextDirection::Rtl => visual_rtl_to_logical(&text),
+        TextDirection::Auto if text.chars().any(is_rtl_char) => visual_rtl_to_logical(&text),
+        TextDirection::Auto => text,
     }
 }
 
@@ -184,5 +307,69 @@ mod tests {
         assert_eq!(schema.task_type, TaskType::TextRecognition);
         assert!(schema.input_types.contains(&"text_boxes".to_string()));
         assert!(schema.output_types.contains(&"text_strings".to_string()));
+    }
+
+    #[test]
+    fn rtl_postprocess_reverses_visual_arabic_order() {
+        assert_eq!(
+            postprocess_text_direction(
+                "دحاو نآ يف لوؤسمو يعاديإ لمع مجرتملا لمع".to_string(),
+                TextDirection::Rtl,
+            ),
+            "عمل المترجم عمل إيداعي ومسؤول في آن واحد"
+        );
+    }
+
+    #[test]
+    fn rtl_postprocess_preserves_ltr_token_order() {
+        assert_eq!(
+            postprocess_text_direction("abc 123 ابحرم".to_string(), TextDirection::Rtl),
+            "مرحبا abc 123"
+        );
+    }
+
+    #[test]
+    fn ltr_postprocess_leaves_text_unchanged() {
+        let text = "دحاو نآ يف".to_string();
+        assert_eq!(
+            postprocess_text_direction(text.clone(), TextDirection::Ltr),
+            text
+        );
+    }
+
+    #[test]
+    fn auto_postprocess_only_reverses_rtl_text() {
+        assert_eq!(
+            postprocess_text_direction("دحاو نآ يف".to_string(), TextDirection::Auto),
+            "في آن واحد"
+        );
+        assert_eq!(
+            postprocess_text_direction("hello 123".to_string(), TextDirection::Auto),
+            "hello 123"
+        );
+    }
+
+    #[test]
+    fn rtl_postprocess_keeps_combining_marks_on_rtl_base() {
+        assert_eq!(
+            postprocess_text_direction("لكشي ّراطإ".to_string(), TextDirection::Rtl),
+            "إطارّ يشكل"
+        );
+    }
+
+    #[test]
+    fn rtl_postprocess_preserves_paired_punctuation() {
+        assert_eq!(
+            postprocess_text_direction(")OCR 2026( ابحرم".to_string(), TextDirection::Rtl),
+            "مرحبا (OCR 2026)"
+        );
+    }
+
+    #[test]
+    fn rtl_postprocess_preserves_arabic_indic_number_order() {
+        assert_eq!(
+            postprocess_text_direction("١٢٣ ابحرم".to_string(), TextDirection::Rtl),
+            "مرحبا ١٢٣"
+        );
     }
 }

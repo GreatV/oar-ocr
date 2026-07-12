@@ -216,6 +216,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let rec_config = TextRecognitionConfig {
         score_threshold: args.rec_score_thresh,
+        ..Default::default()
     };
 
     // Construct OCR pipeline

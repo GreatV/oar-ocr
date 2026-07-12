@@ -1130,6 +1130,7 @@ mod tests {
 
         let rec_config = TextRecognitionConfig {
             score_threshold: 0.7,
+            ..Default::default()
         };
 
         let builder = OAROCRBuilder::new("models/det.onnx", "models/rec.onnx", "models/dict.txt")

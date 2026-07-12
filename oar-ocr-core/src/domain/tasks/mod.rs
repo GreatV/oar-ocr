@@ -44,4 +44,7 @@ pub use text_detection::{Detection, TextDetectionConfig, TextDetectionOutput, Te
 pub use text_line_orientation::{
     TextLineOrientationConfig, TextLineOrientationOutput, TextLineOrientationTask,
 };
-pub use text_recognition::{TextRecognitionConfig, TextRecognitionOutput, TextRecognitionTask};
+pub use text_recognition::{
+    TextDirection, TextRecognitionConfig, TextRecognitionOutput, TextRecognitionTask,
+    postprocess_text_direction,
+};

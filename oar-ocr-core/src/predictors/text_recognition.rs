@@ -9,7 +9,9 @@ use crate::core::errors::OCRError;
 use crate::core::traits::OrtConfigurable;
 use crate::core::traits::task::ImageTaskInput;
 use crate::domain::adapters::TextRecognitionAdapterBuilder;
-use crate::domain::tasks::text_recognition::{TextRecognitionConfig, TextRecognitionTask};
+use crate::domain::tasks::text_recognition::{
+    TextDirection, TextRecognitionConfig, TextRecognitionTask,
+};
 use crate::predictors::TaskPredictorCore;
 use image::RgbImage;
 use std::path::{Path, PathBuf};
@@ -58,6 +60,7 @@ impl TextRecognitionPredictorBuilder {
         Self {
             state: PredictorBuilderState::new(TextRecognitionConfig {
                 score_threshold: 0.0,
+                text_direction: TextDirection::Ltr,
             }),
             dict_path: None,
         }
@@ -65,6 +68,11 @@ impl TextRecognitionPredictorBuilder {
 
     pub fn score_threshold(mut self, threshold: f32) -> Self {
         self.state.config_mut().score_threshold = threshold;
+        self
+    }
+
+    pub fn text_direction(mut self, direction: TextDirection) -> Self {
+        self.state.config_mut().text_direction = direction;
         self
     }
 

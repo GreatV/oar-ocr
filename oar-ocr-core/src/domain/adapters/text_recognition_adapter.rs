@@ -8,7 +8,9 @@ use crate::core::traits::{
     adapter::{AdapterInfo, ModelAdapter},
     task::Task,
 };
-use crate::domain::tasks::{TextRecognitionConfig, TextRecognitionOutput, TextRecognitionTask};
+use crate::domain::tasks::{
+    TextRecognitionConfig, TextRecognitionOutput, TextRecognitionTask, postprocess_text_direction,
+};
 use crate::impl_adapter_builder;
 use crate::models::recognition::crnn::{CRNNModel, CRNNModelBuilder, CRNNPreprocessConfig};
 
@@ -83,7 +85,10 @@ impl ModelAdapter for TextRecognitionAdapter {
             )
         {
             if score >= effective_config.score_threshold {
-                result_texts.push(text);
+                result_texts.push(postprocess_text_direction(
+                    text,
+                    effective_config.text_direction,
+                ));
                 result_scores.push(score);
                 result_positions.push(positions);
                 result_col_indices.push(col_indices);
