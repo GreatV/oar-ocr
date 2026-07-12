@@ -23,7 +23,7 @@ use oar_ocr_core::domain::adapters::{
 use oar_ocr_core::domain::structure::{StructureResult, TableResult};
 use oar_ocr_core::domain::tasks::{
     FormulaRecognitionConfig, LayoutDetectionConfig, TableCellDetectionConfig,
-    TableClassificationConfig, TableStructureRecognitionConfig, TextDetectionConfig,
+    TableClassificationConfig, TableStructureRecognitionConfig, TextDetectionConfig, TextDirection,
     TextRecognitionConfig,
 };
 use std::path::PathBuf;
@@ -189,6 +189,7 @@ pub struct OARStructureBuilder {
     formula_recognition_config: Option<FormulaRecognitionConfig>,
     text_detection_config: Option<TextDetectionConfig>,
     text_recognition_config: Option<TextRecognitionConfig>,
+    text_direction: TextDirection,
 
     // Batch sizes
     image_batch_size: Option<usize>,
@@ -250,6 +251,7 @@ impl OARStructureBuilder {
             formula_recognition_config: None,
             text_detection_config: None,
             text_recognition_config: None,
+            text_direction: TextDirection::Ltr,
             image_batch_size: None,
             region_batch_size: None,
         }
@@ -654,6 +656,12 @@ impl OARStructureBuilder {
     /// Sets the text recognition configuration.
     pub fn text_recognition_config(mut self, config: TextRecognitionConfig) -> Self {
         self.text_recognition_config = Some(config);
+        self
+    }
+
+    /// Sets reading-direction post-processing for recognized text.
+    pub fn text_direction(mut self, direction: TextDirection) -> Self {
+        self.text_direction = direction;
         self
     }
 
@@ -1246,7 +1254,9 @@ impl OARStructureBuilder {
             // Parse dict into Vec<String> - one character per line
             let char_vec: Vec<String> = dict.lines().map(|s| s.to_string()).collect();
 
-            let mut builder = TextRecognitionAdapterBuilder::new().character_dict(char_vec);
+            let mut builder = TextRecognitionAdapterBuilder::new()
+                .character_dict(char_vec)
+                .text_direction(self.text_direction);
 
             if let Some(ref config) = self.text_recognition_config {
                 builder = builder.with_config(config.clone());

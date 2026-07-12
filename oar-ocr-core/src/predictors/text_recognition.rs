@@ -53,6 +53,7 @@ impl TextRecognitionPredictor {
 pub struct TextRecognitionPredictorBuilder {
     state: PredictorBuilderState<TextRecognitionConfig>,
     dict_path: Option<PathBuf>,
+    text_direction: TextDirection,
 }
 
 impl TextRecognitionPredictorBuilder {
@@ -60,9 +61,9 @@ impl TextRecognitionPredictorBuilder {
         Self {
             state: PredictorBuilderState::new(TextRecognitionConfig {
                 score_threshold: 0.0,
-                text_direction: TextDirection::Ltr,
             }),
             dict_path: None,
+            text_direction: TextDirection::Ltr,
         }
     }
 
@@ -72,7 +73,7 @@ impl TextRecognitionPredictorBuilder {
     }
 
     pub fn text_direction(mut self, direction: TextDirection) -> Self {
-        self.state.config_mut().text_direction = direction;
+        self.text_direction = direction;
         self
     }
 
@@ -85,7 +86,11 @@ impl TextRecognitionPredictorBuilder {
         self,
         model_source: impl Into<crate::core::ModelSource>,
     ) -> OcrResult<TextRecognitionPredictor> {
-        let Self { state, dict_path } = self;
+        let Self {
+            state,
+            dict_path,
+            text_direction,
+        } = self;
         let (config, ort_config) = state.into_parts();
 
         let dict_path = dict_path
@@ -100,6 +105,7 @@ impl TextRecognitionPredictorBuilder {
 
         let mut adapter_builder = TextRecognitionAdapterBuilder::new()
             .with_config(config.clone())
+            .text_direction(text_direction)
             .character_dict(character_dict);
 
         if let Some(ort_cfg) = ort_config {

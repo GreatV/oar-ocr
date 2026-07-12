@@ -575,7 +575,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let text_rec_config = TextRecognitionConfig {
         score_threshold: args.rec_score_thresh,
-        ..Default::default()
     };
 
     // Build structure pipeline

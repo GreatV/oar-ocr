@@ -20,7 +20,7 @@ pub enum TextDirection {
     Ltr,
     /// Convert visual right-to-left OCR output into logical string order.
     Rtl,
-    /// Convert only when decoded text contains right-to-left characters.
+    /// Convert only when a decoded line's first strong directional character is right-to-left.
     Auto,
 }
 
@@ -32,16 +32,12 @@ pub struct TextRecognitionConfig {
     /// Score threshold for recognition (default: 0.0, no filtering)
     #[validate(range(min = 0.0, max = 1.0))]
     pub score_threshold: f32,
-    /// Reading direction used for text post-processing.
-    #[serde(default)]
-    pub text_direction: TextDirection,
 }
 
 impl Default for TextRecognitionConfig {
     fn default() -> Self {
         Self {
             score_threshold: 0.0,
-            text_direction: TextDirection::Ltr,
         }
     }
 }
@@ -57,6 +53,10 @@ fn is_combining_mark(c: char) -> bool {
     bidi_class(c) == BidiClass::NSM
 }
 
+fn is_strong_ltr_char(c: char) -> bool {
+    bidi_class(c) == BidiClass::L
+}
+
 fn is_ltr_token_char(c: char) -> bool {
     matches!(
         bidi_class(c),
@@ -66,7 +66,22 @@ fn is_ltr_token_char(c: char) -> bool {
             | BidiClass::ES
             | BidiClass::ET
             | BidiClass::CS
+            | BidiClass::NSM
     ) || "._:/%+-#@&".contains(c)
+}
+
+fn matching_open_bracket(close: char) -> Option<char> {
+    match close {
+        ')' => Some('('),
+        ']' => Some('['),
+        '}' => Some('{'),
+        '>' => Some('<'),
+        _ => None,
+    }
+}
+
+fn is_open_bracket(c: char) -> bool {
+    matches!(c, '(' | '[' | '{' | '<')
 }
 
 fn preserve_ltr_phrase_order(chars: &mut [char]) {
@@ -77,35 +92,53 @@ fn preserve_ltr_phrase_order(chars: &mut [char]) {
             continue;
         }
 
-        let start = i;
+        let mut start = i;
         i += 1;
-        while i < chars.len() && (is_ltr_token_char(chars[i]) || chars[i].is_whitespace()) {
+        while i < chars.len()
+            && (is_ltr_token_char(chars[i])
+                || chars[i].is_whitespace()
+                || (is_open_bracket(chars[i])
+                    && chars
+                        .get(i + 1)
+                        .is_some_and(|next| is_ltr_token_char(*next))))
+        {
             i += 1;
         }
         let mut end = i;
         while end > start && chars[end - 1].is_whitespace() {
             end -= 1;
         }
+
+        if start > 0
+            && let Some(open) = matching_open_bracket(chars[start - 1])
+            && chars[start..end].contains(&open)
+        {
+            start -= 1;
+        }
+
         chars[start..end].reverse();
     }
 }
 
 fn normalize_leading_combining_marks(chars: Vec<char>) -> Vec<char> {
-    let mut normalized = Vec::with_capacity(chars.len());
+    let mut normalized: Vec<char> = Vec::with_capacity(chars.len());
     let mut pending_marks = Vec::new();
 
     for c in chars {
         if is_combining_mark(c) {
+            if let Some(&last) = normalized.last()
+                && !last.is_whitespace()
+            {
+                normalized.push(c);
+                continue;
+            }
             pending_marks.push(c);
             continue;
         }
 
         normalized.push(c);
-        if is_rtl_char(c) && !pending_marks.is_empty() {
+        if !pending_marks.is_empty() && !c.is_whitespace() {
             normalized.append(&mut pending_marks);
-        } else if !pending_marks.is_empty() {
-            let insertion = normalized.len().saturating_sub(1);
-            normalized.splice(insertion..insertion, pending_marks.drain(..));
         }
     }
 
@@ -114,10 +147,6 @@ fn normalize_leading_combining_marks(chars: Vec<char>) -> Vec<char> {
 }
 
 fn visual_rtl_line_to_logical(line: &str) -> String {
-    if !line.chars().any(is_rtl_char) {
-        return line.to_string();
-    }
-
     // PaddleOCR/PaddleX Arabic CTC recognizers can expose visual RTL order.
     // Convert to logical order while using Unicode bidi classes for RTL,
     // non-spacing marks, and embedded LTR/number phrases.
@@ -128,26 +157,67 @@ fn visual_rtl_line_to_logical(line: &str) -> String {
         .collect()
 }
 
-fn visual_rtl_to_logical(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for segment in text.split_inclusive('\n') {
-        if let Some(line) = segment.strip_suffix('\n') {
-            out.push_str(&visual_rtl_line_to_logical(line));
-            out.push('\n');
-        } else {
-            out.push_str(&visual_rtl_line_to_logical(segment));
+fn has_rtl_char(text: &str) -> bool {
+    text.chars().any(is_rtl_char)
+}
+
+fn has_rtl_base_direction(line: &str) -> bool {
+    for c in line.chars() {
+        if is_rtl_char(c) {
+            return true;
+        }
+        if is_strong_ltr_char(c) {
+            return false;
         }
     }
-    out
+    false
+}
+
+fn should_convert_visual_rtl_line(line: &str, direction: TextDirection) -> bool {
+    match direction {
+        TextDirection::Ltr => false,
+        TextDirection::Rtl => has_rtl_char(line),
+        TextDirection::Auto => has_rtl_base_direction(line),
+    }
+}
+
+fn visual_rtl_to_logical(text: &str, direction: TextDirection) -> (String, bool) {
+    let mut out = String::with_capacity(text.len());
+    let mut changed_order = false;
+
+    for segment in text.split_inclusive('\n') {
+        if let Some(line) = segment.strip_suffix('\n') {
+            if should_convert_visual_rtl_line(line, direction) {
+                out.push_str(&visual_rtl_line_to_logical(line));
+                changed_order = true;
+            } else {
+                out.push_str(line);
+            }
+            out.push('\n');
+        } else if should_convert_visual_rtl_line(segment, direction) {
+            out.push_str(&visual_rtl_line_to_logical(segment));
+            changed_order = true;
+        } else {
+            out.push_str(segment);
+        }
+    }
+
+    (out, changed_order)
 }
 
 /// Applies configured reading-direction post-processing to decoded OCR text.
 pub fn postprocess_text_direction(text: String, direction: TextDirection) -> String {
+    postprocess_text_direction_with_order_change(text, direction).0
+}
+
+/// Applies reading-direction post-processing and reports whether character order changed.
+pub fn postprocess_text_direction_with_order_change(
+    text: String,
+    direction: TextDirection,
+) -> (String, bool) {
     match direction {
-        TextDirection::Ltr => text,
-        TextDirection::Rtl => visual_rtl_to_logical(&text),
-        TextDirection::Auto if text.chars().any(is_rtl_char) => visual_rtl_to_logical(&text),
-        TextDirection::Auto => text,
+        TextDirection::Ltr => (text, false),
+        TextDirection::Rtl | TextDirection::Auto => visual_rtl_to_logical(&text, direction),
     }
 }
 
@@ -350,6 +420,14 @@ mod tests {
     }
 
     #[test]
+    fn auto_postprocess_leaves_ltr_base_mixed_text_unchanged() {
+        assert_eq!(
+            postprocess_text_direction("Issue رقم 123".to_string(), TextDirection::Auto),
+            "Issue رقم 123"
+        );
+    }
+
+    #[test]
     fn rtl_postprocess_keeps_combining_marks_on_rtl_base() {
         assert_eq!(
             postprocess_text_direction("لكشي ّراطإ".to_string(), TextDirection::Rtl),
@@ -362,6 +440,37 @@ mod tests {
         assert_eq!(
             postprocess_text_direction(")OCR 2026( ابحرم".to_string(), TextDirection::Rtl),
             "مرحبا (OCR 2026)"
+        );
+    }
+
+    #[test]
+    fn rtl_postprocess_preserves_internal_paired_punctuation_in_ltr_token() {
+        assert_eq!(
+            postprocess_text_direction("abc(def) ابحرم".to_string(), TextDirection::Rtl),
+            "مرحبا abc(def)"
+        );
+    }
+
+    #[test]
+    fn rtl_postprocess_preserves_ltr_combining_marks() {
+        assert_eq!(
+            postprocess_text_direction("cafe\u{301} ابحرم".to_string(), TextDirection::Rtl),
+            "مرحبا cafe\u{301}"
+        );
+    }
+
+    #[test]
+    fn postprocess_reports_order_changes() {
+        assert_eq!(
+            postprocess_text_direction_with_order_change(
+                "Issue رقم 123".to_string(),
+                TextDirection::Auto,
+            ),
+            ("Issue رقم 123".to_string(), false)
+        );
+        assert_eq!(
+            postprocess_text_direction_with_order_change("ابحرم".to_string(), TextDirection::Rtl),
+            ("مرحبا".to_string(), true)
         );
     }
 

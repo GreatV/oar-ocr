@@ -9,7 +9,8 @@ use crate::core::traits::{
     task::Task,
 };
 use crate::domain::tasks::{
-    TextRecognitionConfig, TextRecognitionOutput, TextRecognitionTask, postprocess_text_direction,
+    TextDirection, TextRecognitionConfig, TextRecognitionOutput, TextRecognitionTask,
+    postprocess_text_direction_with_order_change,
 };
 use crate::impl_adapter_builder;
 use crate::models::recognition::crnn::{CRNNModel, CRNNModelBuilder, CRNNPreprocessConfig};
@@ -23,6 +24,8 @@ pub struct TextRecognitionAdapter {
     info: AdapterInfo,
     /// Task configuration
     config: TextRecognitionConfig,
+    /// Reading direction used for text post-processing
+    text_direction: TextDirection,
     /// Whether to return character positions for word box generation
     return_word_box: bool,
 }
@@ -85,14 +88,19 @@ impl ModelAdapter for TextRecognitionAdapter {
             )
         {
             if score >= effective_config.score_threshold {
-                result_texts.push(postprocess_text_direction(
-                    text,
-                    effective_config.text_direction,
-                ));
+                let (text, changed_order) =
+                    postprocess_text_direction_with_order_change(text, self.text_direction);
                 result_scores.push(score);
-                result_positions.push(positions);
-                result_col_indices.push(col_indices);
-                result_seq_lengths.push(seq_len);
+                result_texts.push(text);
+                if changed_order {
+                    result_positions.push(Vec::new());
+                    result_col_indices.push(Vec::new());
+                    result_seq_lengths.push(0);
+                } else {
+                    result_positions.push(positions);
+                    result_col_indices.push(col_indices);
+                    result_seq_lengths.push(seq_len);
+                }
             } else {
                 // Keep entry to preserve index correspondence, but mark as filtered
                 result_texts.push(String::new());
@@ -141,6 +149,7 @@ impl_adapter_builder! {
         preprocess_config: CRNNPreprocessConfig = CRNNPreprocessConfig::default(),
         character_dict: Option<Vec<String>> = None,
         return_word_box: bool = false,
+        text_direction: TextDirection = TextDirection::Ltr,
         model_name_override: Option<String> = None,
     },
 
@@ -184,6 +193,12 @@ impl_adapter_builder! {
             self.return_word_box = enable;
             self
         }
+
+        /// Sets reading-direction post-processing.
+        pub fn text_direction(mut self, direction: TextDirection) -> Self {
+            self.text_direction = direction;
+            self
+        }
     }
 
     build: |builder: TextRecognitionAdapterBuilder, model_source: crate::core::ModelSource| -> Result<TextRecognitionAdapter, OCRError> {
@@ -212,6 +227,7 @@ impl_adapter_builder! {
             model,
             info,
             config: task_config,
+            text_direction: builder.text_direction,
             return_word_box: builder.return_word_box,
         })
     },

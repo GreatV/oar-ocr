@@ -18,7 +18,7 @@ use oar_ocr_core::domain::adapters::{
     TextRecognitionAdapter, TextRecognitionAdapterBuilder, UVDocRectifierAdapter,
     UVDocRectifierAdapterBuilder,
 };
-use oar_ocr_core::domain::tasks::{TextDetectionConfig, TextRecognitionConfig};
+use oar_ocr_core::domain::tasks::{TextDetectionConfig, TextDirection, TextRecognitionConfig};
 use oar_ocr_core::processors::BoundingBox;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -81,6 +81,7 @@ pub struct OAROCRBuilder {
 
     // Text type and word box options
     text_type: Option<String>,
+    text_direction: TextDirection,
     return_word_box: bool,
 }
 
@@ -118,6 +119,7 @@ impl OAROCRBuilder {
             image_batch_size: None,
             region_batch_size: None,
             text_type: None,
+            text_direction: TextDirection::Ltr,
             return_word_box: false,
         }
     }
@@ -219,6 +221,12 @@ impl OAROCRBuilder {
     /// * `text_type` - Text type identifier ("seal", etc.)
     pub fn text_type(mut self, text_type: impl Into<String>) -> Self {
         self.text_type = Some(text_type.into());
+        self
+    }
+
+    /// Sets reading-direction post-processing for recognized text.
+    pub fn text_direction(mut self, direction: TextDirection) -> Self {
+        self.text_direction = direction;
         self
     }
 
@@ -367,6 +375,7 @@ impl OAROCRBuilder {
 
         let mut recognition_builder = TextRecognitionAdapterBuilder::new()
             .character_dict(char_dict_vec)
+            .text_direction(self.text_direction)
             .return_word_box(self.return_word_box);
 
         if let Some(ref ort_config) = self.ort_session_config {
@@ -1130,7 +1139,6 @@ mod tests {
 
         let rec_config = TextRecognitionConfig {
             score_threshold: 0.7,
-            ..Default::default()
         };
 
         let builder = OAROCRBuilder::new("models/det.onnx", "models/rec.onnx", "models/dict.txt")
