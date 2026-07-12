@@ -57,6 +57,10 @@ fn is_strong_ltr_char(c: char) -> bool {
     bidi_class(c) == BidiClass::L
 }
 
+fn is_weak_number_char(c: char) -> bool {
+    matches!(bidi_class(c), BidiClass::EN | BidiClass::AN)
+}
+
 fn is_ltr_token_char(c: char) -> bool {
     matches!(
         bidi_class(c),
@@ -171,12 +175,33 @@ fn has_rtl_char(text: &str) -> bool {
     text.chars().any(is_rtl_char)
 }
 
+fn has_ltr_base_direction(line: &str) -> bool {
+    for c in line.chars() {
+        if is_strong_ltr_char(c) {
+            return true;
+        }
+        if is_rtl_char(c) {
+            return false;
+        }
+    }
+    false
+}
+
 fn has_rtl_visual_line_end(line: &str) -> bool {
+    let mut skipped_trailing_number = false;
+
     for c in line.chars().rev() {
         if c.is_whitespace() || is_combining_mark(c) {
             continue;
         }
+        if is_weak_number_char(c) {
+            skipped_trailing_number = true;
+            continue;
+        }
         if is_rtl_char(c) {
+            if skipped_trailing_number && has_ltr_base_direction(line) {
+                return false;
+            }
             return true;
         }
         if is_strong_ltr_char(c) || is_ltr_token_char(c) {
@@ -447,6 +472,14 @@ mod tests {
         assert_eq!(
             postprocess_text_direction("abc 123 ابحرم".to_string(), TextDirection::Auto),
             "مرحبا abc 123"
+        );
+    }
+
+    #[test]
+    fn auto_postprocess_skips_trailing_weak_digits_for_rtl_base() {
+        assert_eq!(
+            postprocess_text_direction("ابحرم ١٢٣".to_string(), TextDirection::Auto),
+            "١٢٣ مرحبا"
         );
     }
 
