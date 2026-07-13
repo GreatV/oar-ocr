@@ -214,8 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn test_v15_preprocess_allows_side_above_position_base()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn test_v15_preprocess_allows_large_side() -> Result<(), Box<dyn std::error::Error>> {
         let cfg = HunyuanOcrImageProcessorConfig {
             min_pixels: 0,
             max_pixels: 100_000_000,

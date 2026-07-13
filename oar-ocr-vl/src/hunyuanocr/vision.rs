@@ -63,7 +63,12 @@ impl VisionEmbeddings {
             });
         }
         let position_edge = cfg.max_image_size / cfg.patch_size;
-        let num_positions = position_edge * position_edge + cfg.cat_extra_token;
+        let num_positions = position_edge
+            .checked_mul(position_edge)
+            .and_then(|positions| positions.checked_add(cfg.cat_extra_token))
+            .ok_or_else(|| OCRError::ConfigError {
+                message: "HunyuanOCR: position embedding size overflow".to_string(),
+            })?;
         let position_embedding =
             candle_nn::embedding(num_positions, cfg.hidden_size, vb.pp("position_embedding"))
                 .map_err(|e| {

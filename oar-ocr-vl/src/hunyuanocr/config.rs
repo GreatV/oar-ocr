@@ -100,7 +100,12 @@ impl HunyuanOcrConfig {
     }
 
     pub fn version(&self) -> HunyuanOcrVersion {
-        if self.text_config.is_some() {
+        if self
+            .text_config
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .is_some()
+        {
             HunyuanOcrVersion::V1_5
         } else {
             HunyuanOcrVersion::V1
