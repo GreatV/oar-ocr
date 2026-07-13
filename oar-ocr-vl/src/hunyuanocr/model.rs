@@ -1,6 +1,6 @@
 //! HunyuanOCR model wrapper (HunYuanVLForConditionalGeneration).
 
-use super::config::{HunyuanOcrConfig, HunyuanOcrImageProcessorConfig};
+use super::config::{HunyuanOcrConfig, HunyuanOcrImageProcessorConfig, HunyuanOcrVersion};
 use super::llm::HunyuanLlm;
 use super::processing::{HunyuanOcrImageInputs, preprocess_image};
 use super::vision::HunyuanVisionModel;
@@ -14,20 +14,21 @@ use oar_ocr_core::core::OCRError;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
-/// Read `generation_config.json::repetition_penalty`. Returns 1.0 (no-op) if
-/// the file is missing, unparseable, or the field is absent — matches
-/// HuggingFace's default. Local HunyuanOCR config ships 1.03.
-fn load_repetition_penalty(model_dir: &Path) -> f64 {
+/// Read `generation_config.json::repetition_penalty`, using the checkpoint
+/// generation's reference fallback when the field is absent. V1.0 ships 1.03
+/// in the file; V1.5 omits it there but specifies 1.08 for its benchmark and
+/// client inference paths.
+fn load_repetition_penalty(model_dir: &Path, default: f64) -> f64 {
     let path = model_dir.join("generation_config.json");
     let Ok(contents) = std::fs::read_to_string(&path) else {
-        return 1.0;
+        return default;
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return 1.0;
+        return default;
     };
     v.get("repetition_penalty")
         .and_then(|x| x.as_f64())
-        .unwrap_or(1.0)
+        .unwrap_or(default)
 }
 
 /// Read `generation_config.json::eos_token_id`. The official config provides
@@ -106,6 +107,7 @@ pub struct HunyuanOcr {
     /// `A, B, … BZ, BZW, BZWW, BZWWZ …`) that never hit EOS. Default 1.0 means
     /// the value isn't applied.
     repetition_penalty: f64,
+    version: HunyuanOcrVersion,
 }
 
 impl HunyuanOcr {
@@ -113,6 +115,7 @@ impl HunyuanOcr {
         let model_dir = model_dir.as_ref();
 
         let cfg = HunyuanOcrConfig::from_path(model_dir.join("config.json"))?;
+        let version = cfg.version();
         let image_cfg =
             HunyuanOcrImageProcessorConfig::from_path(model_dir.join("preprocessor_config.json"))?;
 
@@ -148,9 +151,15 @@ impl HunyuanOcr {
         };
 
         let llm = HunyuanLlm::load(&cfg, vb.pp("model"))?;
-        let vision = HunyuanVisionModel::load(&cfg.vision_config, vb.pp("vit"))?;
+        let vision = HunyuanVisionModel::load(&cfg.vision_config, version, vb.pp("vit"))?;
 
-        let repetition_penalty = load_repetition_penalty(model_dir);
+        // V1.5's generation_config.json omits the value, while its reference
+        // benchmark/client paths use 1.08. V1.0 ships its own value (1.03).
+        let default_repetition_penalty = match version {
+            HunyuanOcrVersion::V1 => 1.0,
+            HunyuanOcrVersion::V1_5 => 1.08,
+        };
+        let repetition_penalty = load_repetition_penalty(model_dir, default_repetition_penalty);
 
         Ok(Self {
             device,
@@ -162,7 +171,13 @@ impl HunyuanOcr {
             vision,
             stop_token_ids,
             repetition_penalty,
+            version,
         })
+    }
+
+    /// The checkpoint generation detected from `config.json`.
+    pub fn version(&self) -> HunyuanOcrVersion {
+        self.version
     }
 
     /// Generate OCR output for one or more images with custom instructions.
@@ -269,11 +284,12 @@ impl HunyuanOcr {
                 image,
                 &self.image_cfg,
                 &self.cfg.vision_config,
+                self.version,
                 &self.device,
                 self.dtype,
             )?;
 
-            let prompt = build_prompt(instruction);
+            let prompt = build_prompt(instruction, self.version);
             let enc = self
                 .tokenizer
                 .encode(prompt, false)
@@ -565,11 +581,16 @@ impl HunyuanOcr {
     }
 }
 
-fn build_prompt(instruction: &str) -> String {
-    // Matches the tokenizer chat_template in the model repo (empty system message).
-    // The model expects the generation prompt to end with `<｜hy_User｜>`.
+fn build_prompt(instruction: &str, version: HunyuanOcrVersion) -> String {
+    // V1.0's reference invocation supplies an empty system message, which the
+    // template renders as placeholder no.3. V1.5's official invocation starts
+    // directly with the user message and therefore omits that token.
+    let system_prefix = match version {
+        HunyuanOcrVersion::V1 => "<｜hy_place▁holder▁no▁3｜>",
+        HunyuanOcrVersion::V1_5 => "",
+    };
     format!(
-        "<｜hy_begin▁of▁sentence｜><｜hy_place▁holder▁no▁3｜>\
+        "<｜hy_begin▁of▁sentence｜>{system_prefix}\
 <｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>{instruction}\
 <｜hy_User｜>"
     )
@@ -700,4 +721,23 @@ fn build_position_ids(
             e,
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v15_prompt_omits_legacy_empty_system_token() {
+        let prompt = build_prompt("read", HunyuanOcrVersion::V1_5);
+        assert!(prompt.starts_with("<｜hy_begin▁of▁sentence｜><｜hy_place▁holder▁no▁100｜>"));
+        assert!(!prompt.contains("<｜hy_place▁holder▁no▁3｜>"));
+        assert!(prompt.ends_with("read<｜hy_User｜>"));
+    }
+
+    #[test]
+    fn v1_prompt_keeps_empty_system_token() {
+        let prompt = build_prompt("read", HunyuanOcrVersion::V1);
+        assert!(prompt.starts_with("<｜hy_begin▁of▁sentence｜><｜hy_place▁holder▁no▁3｜>"));
+    }
 }

@@ -1,7 +1,8 @@
-//! HunyuanOCR (HunYuanVL) Vision-Language model.
+//! HunyuanOCR 1.5 / 1.0 (HunYuanVL) Vision-Language model.
 //!
-//! This module provides native Rust inference for the `tencent/HunyuanOCR` model
-//! (config `model_type=hunyuan_vl`) using Candle.
+//! This module provides native Rust inference for the `tencent/HunyuanOCR`
+//! model (1.5 at the repository root and archived 1.0 under `v1.0/`) using
+//! Candle.
 
 mod config;
 mod llm;
@@ -10,6 +11,7 @@ mod processing;
 mod vision;
 
 pub use config::{
-    HunyuanOcrConfig, HunyuanOcrImageProcessorConfig, HunyuanOcrRopeScaling, HunyuanOcrVisionConfig,
+    HunyuanOcrConfig, HunyuanOcrImageProcessorConfig, HunyuanOcrRopeScaling, HunyuanOcrVersion,
+    HunyuanOcrVisionConfig,
 };
 pub use model::HunyuanOcr;

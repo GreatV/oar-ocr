@@ -1,4 +1,4 @@
-use super::config::HunyuanOcrVisionConfig;
+use super::config::{HunyuanOcrVersion, HunyuanOcrVisionConfig};
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::{Conv2d, Conv2dConfig, LayerNorm, LayerNormConfig, Linear, Module};
@@ -15,10 +15,15 @@ const VIT_LATE_F32_THRESHOLD: usize = 20;
 struct VisionEmbeddings {
     patch_embedding: Conv2d,
     position_embedding: candle_nn::Embedding,
+    version: HunyuanOcrVersion,
 }
 
 impl VisionEmbeddings {
-    fn load(cfg: &HunyuanOcrVisionConfig, vb: candle_nn::VarBuilder) -> Result<Self, OCRError> {
+    fn load(
+        cfg: &HunyuanOcrVisionConfig,
+        version: HunyuanOcrVersion,
+        vb: candle_nn::VarBuilder,
+    ) -> Result<Self, OCRError> {
         let conv_cfg = Conv2dConfig {
             stride: cfg.patch_size,
             padding: 0,
@@ -46,7 +51,24 @@ impl VisionEmbeddings {
         }
         .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "load vit patch_embedding", e))?;
 
-        let num_positions = cfg.max_vit_seq_len + cfg.cat_extra_token;
+        // V1.5 raises max_vit_seq_len to 65,536 for 4K inputs, but retains
+        // the 2048px learned positional base (16,384 patches + cls slot).
+        // The input grid is interpolated from this base, matching upstream.
+        if cfg.patch_size == 0 || !cfg.max_image_size.is_multiple_of(cfg.patch_size) {
+            return Err(OCRError::ConfigError {
+                message: format!(
+                    "HunyuanOCR: max_image_size {} must be divisible by patch_size {}",
+                    cfg.max_image_size, cfg.patch_size
+                ),
+            });
+        }
+        let position_edge = cfg.max_image_size / cfg.patch_size;
+        let num_positions = position_edge
+            .checked_mul(position_edge)
+            .and_then(|positions| positions.checked_add(cfg.cat_extra_token))
+            .ok_or_else(|| OCRError::ConfigError {
+                message: "HunyuanOCR: position embedding size overflow".to_string(),
+            })?;
         let position_embedding =
             candle_nn::embedding(num_positions, cfg.hidden_size, vb.pp("position_embedding"))
                 .map_err(|e| {
@@ -56,6 +78,7 @@ impl VisionEmbeddings {
         Ok(Self {
             patch_embedding,
             position_embedding,
+            version,
         })
     }
 
@@ -140,7 +163,15 @@ impl VisionEmbeddings {
                 )
             })?;
 
-        let out = interpolate_bilinear_align_corners_false(&base, grid, grid, height, width, dim);
+        let out = interpolate_bilinear_align_corners_false(
+            &base,
+            grid,
+            grid,
+            height,
+            width,
+            dim,
+            self.version,
+        );
         Tensor::from_vec(out, (height * width, dim), device)
             .map_err(|e| {
                 candle_to_ocr_processing(
@@ -722,8 +753,12 @@ pub struct HunyuanVisionModel {
 }
 
 impl HunyuanVisionModel {
-    pub fn load(cfg: &HunyuanOcrVisionConfig, vb: candle_nn::VarBuilder) -> Result<Self, OCRError> {
-        let embeddings = VisionEmbeddings::load(cfg, vb.pp("embeddings"))?;
+    pub fn load(
+        cfg: &HunyuanOcrVisionConfig,
+        version: HunyuanOcrVersion,
+        vb: candle_nn::VarBuilder,
+    ) -> Result<Self, OCRError> {
+        let embeddings = VisionEmbeddings::load(cfg, version, vb.pp("embeddings"))?;
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         for i in 0..cfg.num_hidden_layers {
             layers.push(VisionEncoderLayer::load(
@@ -886,23 +921,23 @@ fn interpolate_bilinear_align_corners_false(
     out_h: usize,
     out_w: usize,
     dim: usize,
+    version: HunyuanOcrVersion,
 ) -> Vec<f32> {
     let mut out = vec![0f32; out_h * out_w * dim];
     if in_h == 0 || in_w == 0 || out_h == 0 || out_w == 0 {
         return out;
     }
 
-    // Match upstream HF (`HunYuanVisionPatchEmbed.forward` in
-    // modeling_hunyuan_vl.py:143-148): the sample stride is computed from
-    // `(out_h + 0.1) / in_h` (a deliberate `+0.1` to "avoid floating point
-    // error in the interpolation" — see the comment + facebookresearch/dino#8).
-    // PyTorch's `interpolate(scale_factor)` then derives the source coord as
-    // `(out_x + 0.5) / scale_factor - 0.5`, which is *not* the same as
-    // `(out_x + 0.5) * (in / out) - 0.5` we used before.
-    let scale_factor_y = (out_h as f32 + 0.1) / in_h as f32;
-    let scale_factor_x = (out_w as f32 + 0.1) / in_w as f32;
-    let inv_scale_y = 1.0 / scale_factor_y;
-    let inv_scale_x = 1.0 / scale_factor_x;
+    let (inv_scale_y, inv_scale_x) = match version {
+        // V1.0's Transformers path passed scale_factor=(out + 0.1) / in.
+        HunyuanOcrVersion::V1 => (
+            in_h as f32 / (out_h as f32 + 0.1),
+            in_w as f32 / (out_w as f32 + 0.1),
+        ),
+        // V1.5 passes an explicit output size to interpolate(), whose
+        // align_corners=false source scale is in/out.
+        HunyuanOcrVersion::V1_5 => (in_h as f32 / out_h as f32, in_w as f32 / out_w as f32),
+    };
 
     for oy in 0..out_h {
         let fy = ((oy as f32 + 0.5) * inv_scale_y - 0.5).max(0.0);

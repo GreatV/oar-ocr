@@ -1,4 +1,4 @@
-use super::config::{HunyuanOcrImageProcessorConfig, HunyuanOcrVisionConfig};
+use super::config::{HunyuanOcrImageProcessorConfig, HunyuanOcrVersion, HunyuanOcrVisionConfig};
 use crate::utils::{
     candle_to_ocr_processing,
     image::{clamp_to_max_image_size, image_to_chw, smart_resize},
@@ -65,6 +65,7 @@ pub fn preprocess_image(
     image: &RgbImage,
     cfg: &HunyuanOcrImageProcessorConfig,
     vision_cfg: &HunyuanOcrVisionConfig,
+    version: HunyuanOcrVersion,
     device: &Device,
     dtype: DType,
 ) -> Result<HunyuanOcrImageInputs, OCRError> {
@@ -94,15 +95,23 @@ pub fn preprocess_image(
 
     let (h, w) = (image.height(), image.width());
     let factor = (cfg.patch_size * cfg.merge_size) as u32;
-    let (rh, rw) = smart_resize_token_limited(
-        h,
-        w,
-        factor,
-        cfg.min_pixels,
-        cfg.max_pixels,
-        vision_cfg.img_max_token_num,
-    )?;
-    let (rh, rw) = clamp_to_max_image_size(rh, rw, factor, vision_cfg.max_image_size)?;
+    let (rh, rw) = match version {
+        HunyuanOcrVersion::V1 => {
+            let (rh, rw) = smart_resize_token_limited(
+                h,
+                w,
+                factor,
+                cfg.min_pixels,
+                cfg.max_pixels,
+                vision_cfg.img_max_token_num,
+            )?;
+            clamp_to_max_image_size(rh, rw, factor, vision_cfg.max_image_size)?
+        }
+        // V1.5 raises the processor budget to 16M pixels (4K square).
+        // `max_image_size` is the learned positional-embedding base grid, not
+        // an input side-length cap; the official processor only smart-resizes.
+        HunyuanOcrVersion::V1_5 => smart_resize(h, w, factor, cfg.min_pixels, cfg.max_pixels)?,
+    };
 
     let resized = if rh != h || rw != w {
         image::imageops::resize(image, rw, rh, resize_filter)
@@ -143,16 +152,6 @@ pub fn preprocess_image(
             )
         })?;
 
-    // Sanity-check max image size constraint.
-    if rh as usize > vision_cfg.max_image_size || rw as usize > vision_cfg.max_image_size {
-        return Err(OCRError::InvalidInput {
-            message: format!(
-                "HunyuanOCR: resized image {rw}x{rh} exceeds max_image_size={}",
-                vision_cfg.max_image_size
-            ),
-        });
-    }
-
     Ok(HunyuanOcrImageInputs {
         pixel_values,
         grid_thw_merged,
@@ -165,7 +164,7 @@ mod tests {
     use image::RgbImage;
 
     #[test]
-    fn test_preprocess_image_clamps_to_max_image_size() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_v1_preprocess_clamps_to_max_image_size() -> Result<(), Box<dyn std::error::Error>> {
         let cfg = HunyuanOcrImageProcessorConfig {
             min_pixels: 0,
             max_pixels: 100_000_000,
@@ -195,7 +194,14 @@ mod tests {
         };
 
         let img = RgbImage::new(512, 3000);
-        let out = preprocess_image(&img, &cfg, &vision_cfg, &Device::Cpu, DType::F32)?;
+        let out = preprocess_image(
+            &img,
+            &cfg,
+            &vision_cfg,
+            HunyuanOcrVersion::V1,
+            &Device::Cpu,
+            DType::F32,
+        )?;
         let (_b, _c, rh, rw) = out.pixel_values.dims4()?;
         assert!(rh <= vision_cfg.max_image_size);
         assert!(rw <= vision_cfg.max_image_size);
@@ -204,6 +210,50 @@ mod tests {
         assert_eq!(rh % factor, 0);
         assert_eq!(rw % factor, 0);
         assert_eq!(out.grid_thw_merged, (1, rh / factor, rw / factor));
+        Ok(())
+    }
+
+    #[test]
+    fn test_v15_preprocess_allows_large_side() -> Result<(), Box<dyn std::error::Error>> {
+        let cfg = HunyuanOcrImageProcessorConfig {
+            min_pixels: 0,
+            max_pixels: 100_000_000,
+            patch_size: 16,
+            resample: None,
+            temporal_patch_size: 1,
+            merge_size: 2,
+            image_mean: vec![0.5, 0.5, 0.5],
+            image_std: vec![0.5, 0.5, 0.5],
+        };
+        let vision_cfg = HunyuanOcrVisionConfig {
+            hidden_size: 1,
+            intermediate_size: 1,
+            num_attention_heads: 1,
+            num_hidden_layers: 1,
+            num_channels: 3,
+            patch_size: 16,
+            spatial_merge_size: 2,
+            rms_norm_eps: 1e-5,
+            hidden_act: "gelu".to_string(),
+            add_patchemb_bias: false,
+            cat_extra_token: 1,
+            max_vit_seq_len: 65_536,
+            max_image_size: 2048,
+            img_max_token_num: 16_384,
+            interpolate_mode: "bilinear".to_string(),
+        };
+
+        let img = RgbImage::new(512, 3000);
+        let out = preprocess_image(
+            &img,
+            &cfg,
+            &vision_cfg,
+            HunyuanOcrVersion::V1_5,
+            &Device::Cpu,
+            DType::F32,
+        )?;
+        let (_b, _c, rh, rw) = out.pixel_values.dims4()?;
+        assert!(rh > vision_cfg.max_image_size || rw > vision_cfg.max_image_size);
         Ok(())
     }
 }

@@ -1,6 +1,7 @@
-//! HunyuanOCR Recognition Example (Candle-based)
+//! HunyuanOCR 1.5 / 1.0 Recognition Example (Candle-based)
 //!
-//! This example demonstrates how to run `tencent/HunyuanOCR` (HunYuanVL) in Rust.
+//! This example demonstrates how to run `tencent/HunyuanOCR` (1.5 at the model
+//! repository root, or archived 1.0 under `v1.0/`) in Rust.
 //!
 //! # Usage
 //!
@@ -30,7 +31,7 @@ use oar_ocr_vl::utils::parse_device;
 
 #[derive(Parser)]
 #[command(name = "hunyuanocr")]
-#[command(about = "HunyuanOCR Recognition Example - image-to-text using Candle")]
+#[command(about = "HunyuanOCR 1.5/1.0 - image-to-text using Candle")]
 struct Args {
     /// Path to the HunyuanOCR model directory
     #[arg(short, long)]
@@ -91,7 +92,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let load_start = Instant::now();
     let model = HunyuanOcr::from_dir(&args.model_dir, device)?;
     info!(
-        "Model loaded in {:.2}ms",
+        "HunyuanOCR {} loaded in {:.2}ms",
+        model.version(),
         load_start.elapsed().as_secs_f64() * 1000.0
     );
 

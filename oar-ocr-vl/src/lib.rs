@@ -5,7 +5,7 @@
 //! ## Modules
 //!
 //! - `paddleocr_vl` - PaddleOCR-VL for OCR, table, formula, chart, spotting, and seal recognition
-//! - `hunyuanocr` - HunyuanOCR OCR expert VLM
+//! - `hunyuanocr` - HunyuanOCR 1.5 / 1.0 OCR expert VLM
 //! - `glmocr` - GLM-OCR OCR expert VLM
 //! - `mineru` - MinerU2.5 document parsing VLM (Qwen2-VL backbone)
 //! - `mineru_diffusion` - MinerU-Diffusion-V1 block-diffusion document OCR (Qwen2-VL vision + SDAR decoder)
@@ -48,7 +48,7 @@ pub use paddleocr_vl::{
 };
 
 pub use glmocr::GlmOcr;
-pub use hunyuanocr::HunyuanOcr;
+pub use hunyuanocr::{HunyuanOcr, HunyuanOcrVersion};
 pub use mineru::MinerU;
 pub use mineru_diffusion::{DiffusionGenerationConfig, MinerUDiffusion};
 
