@@ -364,11 +364,11 @@ cargo run -p oar-ocr-vl --features cuda --example paddleocr_vl -- \
 | `PaddleOcrVlTask::Spotting` | Text spotting (localization + recognition) | Structured text |
 | `PaddleOcrVlTask::Seal` | Seal recognition | Plain text |
 
-## HunyuanOCR
+## HunyuanOCR 1.5
 
-[HunyuanOCR](https://huggingface.co/tencent/HunyuanOCR) is a 1B parameter OCR expert VLM. It's available in the `oar-ocr-vl` crate and supports prompt-driven image-to-text OCR.
+[HunyuanOCR 1.5](https://huggingface.co/tencent/HunyuanOCR) is a lightweight OCR expert VLM. It is available in the `oar-ocr-vl` crate and supports prompt-driven image-to-text OCR. `HunyuanOcr::from_dir` automatically detects 1.5 at the model repository root and remains compatible with archived 1.0 weights under `v1.0/`.
 
-Note: inputs are automatically resized to satisfy the model's image/token limits (e.g., max side length 2048).
+HunyuanOCR 1.5 inputs use the checkpoint's 16M-pixel budget (up to a 4K square input). The 2048 value in `vision_config.max_image_size` describes the learned positional-embedding base grid; larger input grids are interpolated, as in the official implementation.
 
 ### Downloading the Model
 
@@ -379,6 +379,8 @@ git clone https://huggingface.co/tencent/HunyuanOCR
 # Or using hf
 hf download tencent/HunyuanOCR --local-dir HunyuanOCR
 ```
+
+The download places 1.5 weights directly in `HunyuanOCR/`. To use 1.0 instead, pass `HunyuanOCR/v1.0` as the model directory.
 
 ### Basic Usage
 
@@ -391,6 +393,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = load_image("document.jpg")?;
     let device = parse_device("cpu")?; // or "cuda", "cuda:0"
 
+    // Repository root = HunyuanOCR 1.5; `HunyuanOCR/v1.0` also works.
     let model = HunyuanOcr::from_dir("HunyuanOCR", device)?;
 
     let prompt = "Detect and recognize text in the image, and output the text coordinates in a formatted manner.";

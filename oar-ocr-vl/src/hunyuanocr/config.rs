@@ -2,6 +2,26 @@ use oar_ocr_core::core::OCRError;
 use serde::Deserialize;
 use std::path::Path;
 
+/// Checkpoint generation supported by the HunyuanOCR backend.
+///
+/// The upstream config does not expose a dedicated version field. V1.5 uses
+/// the newer nested `text_config` schema, while the archived V1.0 checkpoint
+/// keeps all text fields at the top level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HunyuanOcrVersion {
+    V1,
+    V1_5,
+}
+
+impl std::fmt::Display for HunyuanOcrVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::V1 => f.write_str("1.0"),
+            Self::V1_5 => f.write_str("1.5"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct HunyuanOcrRopeScaling {
     #[serde(default)]
@@ -66,11 +86,25 @@ pub struct HunyuanOcrConfig {
     pub use_qk_norm: bool,
     pub rope_scaling: HunyuanOcrRopeScaling,
     pub vision_config: HunyuanOcrVisionConfig,
+
+    /// Present in HunyuanOCR 1.5's Transformers config. The text backbone
+    /// parameters remain duplicated at the top level for checkpoint
+    /// compatibility, so only presence is needed for version detection.
+    #[serde(default)]
+    pub text_config: Option<serde_json::Value>,
 }
 
 impl HunyuanOcrConfig {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
         crate::utils::load_json_config(path, "HunyuanOCR", "config.json")
+    }
+
+    pub fn version(&self) -> HunyuanOcrVersion {
+        if self.text_config.is_some() {
+            HunyuanOcrVersion::V1_5
+        } else {
+            HunyuanOcrVersion::V1
+        }
     }
 }
 
