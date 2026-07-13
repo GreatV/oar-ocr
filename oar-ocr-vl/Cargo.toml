@@ -24,6 +24,7 @@ download-binaries = ["oar-ocr-core/download-binaries"]
 # When enabled, turns on Candle's CUDA backend for GPU acceleration.
 cuda = [
     "candle-core/cuda",
+    "dep:candle-flash-attn",
     "candle-nn/cuda",
     "candle-transformers/cuda",
     "oar-ocr-core/cuda",
@@ -39,9 +40,11 @@ metal = [
 
 [dependencies]
 candle-core = "0.11.0"
+candle-flash-attn = { version = "0.11.0", optional = true }
 candle-nn = "0.11.0"
 candle-transformers = "0.11.0"
 html-escape = "0.2"
+half = "2"
 image.workspace = true
 oar-ocr-core.workspace = true
 once_cell = "1.19"

@@ -11,7 +11,7 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 | [PaddleOCR-VL](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) | 0.9B | SOTA document parsing VLM supporting 109 languages, text, tables, formulas, and 11 chart types |
 | [PaddleOCR-VL-1.5](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5) | 0.9B | Next-gen PaddleOCR-VL with 94.5% on OmniDocBench v1.5, adds text spotting and seal recognition |
 | [PaddleOCR-VL-1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) | 1.0B | Region-aware refinement on top of PaddleOCR-VL-1.5; 96.33% on OmniDocBench v1.6 (SOTA), drop-in compatible with the 1.5 loader |
-| [HunyuanOCR 1.5](https://huggingface.co/tencent/HunyuanOCR) | Lightweight | End-to-end OCR VLM for multilingual document parsing, text spotting, and information extraction (archived 1.0 weights also supported) |
+| [HunyuanOCR 1.5](https://huggingface.co/tencent/HunyuanOCR) | 1.0B | End-to-end OCR VLM for multilingual document parsing, text spotting, and information extraction (archived 1.0 weights also supported) |
 | [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) | 0.9B | #1 on OmniDocBench v1.5 (94.62), optimized for real-world scenarios with MTP loss and RL training |
 | [MinerU2.5](https://huggingface.co/opendatalab/MinerU2.5-2509-1.2B) | 1.2B | Decoupled document parsing VLM with strong text, formula, and table recognition |
 
@@ -191,12 +191,13 @@ cargo run --release --features cuda --example paddleocr_vl -- \
 ```bash
 cargo run --release --features cuda --example hunyuanocr -- \
     --model-dir models/HunyuanOCR \
+    --dflash-dir models/HunyuanOCR/dflash \
     --device cuda \
     --prompt "Detect and recognize text in the image, and output the text coordinates in a formatted manner." \
     document.jpg
 ```
 
-The model repository root contains HunyuanOCR 1.5. The loader detects it automatically; use `--model-dir models/HunyuanOCR/v1.0` for the archived 1.0 checkpoint.
+The model repository root contains HunyuanOCR 1.5. The loader detects it automatically; use `--model-dir models/HunyuanOCR/v1.0` for the archived 1.0 checkpoint. `--dflash-dir` enables the official 15-token parallel draft path for 1.5; omit it for ordinary autoregressive decoding. Library callers can use `HunyuanOcr::from_dirs(target_dir, dflash_dir, device)` or `HunyuanOcr::from_dir_with_dflash(model_dir, device)` when the draft is stored in the official `dflash/` subdirectory.
 
 ### GLM-OCR (Direct Inference)
 

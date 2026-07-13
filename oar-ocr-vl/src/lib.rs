@@ -48,7 +48,7 @@ pub use paddleocr_vl::{
 };
 
 pub use glmocr::GlmOcr;
-pub use hunyuanocr::{HunyuanOcr, HunyuanOcrVersion};
+pub use hunyuanocr::{DFlashConfig, DFlashTargetConfig, HunyuanOcr, HunyuanOcrVersion};
 pub use mineru::MinerU;
 pub use mineru_diffusion::{DiffusionGenerationConfig, MinerUDiffusion};
 
