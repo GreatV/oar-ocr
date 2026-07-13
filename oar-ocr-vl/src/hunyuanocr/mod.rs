@@ -5,6 +5,7 @@
 //! Candle.
 
 mod config;
+mod dflash;
 mod llm;
 mod model;
 mod processing;
@@ -14,4 +15,5 @@ pub use config::{
     HunyuanOcrConfig, HunyuanOcrImageProcessorConfig, HunyuanOcrRopeScaling, HunyuanOcrVersion,
     HunyuanOcrVisionConfig,
 };
+pub use dflash::{DFlashConfig, DFlashTargetConfig};
 pub use model::HunyuanOcr;

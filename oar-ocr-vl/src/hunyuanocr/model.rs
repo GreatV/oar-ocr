@@ -1,6 +1,7 @@
 //! HunyuanOCR model wrapper (HunYuanVLForConditionalGeneration).
 
 use super::config::{HunyuanOcrConfig, HunyuanOcrImageProcessorConfig, HunyuanOcrVersion};
+use super::dflash::DFlashModel;
 use super::llm::HunyuanLlm;
 use super::processing::{HunyuanOcrImageInputs, preprocess_image};
 use super::vision::HunyuanVisionModel;
@@ -98,6 +99,7 @@ pub struct HunyuanOcr {
     image_cfg: HunyuanOcrImageProcessorConfig,
     tokenizer: Tokenizer,
     llm: HunyuanLlm,
+    dflash: Option<DFlashModel>,
     vision: HunyuanVisionModel,
     stop_token_ids: Vec<u32>,
     /// `generation_config.json::repetition_penalty`. HuggingFace's
@@ -168,11 +170,81 @@ impl HunyuanOcr {
             image_cfg,
             tokenizer,
             llm,
+            dflash: None,
             vision,
             stop_token_ids,
             repetition_penalty,
             version,
         })
+    }
+
+    /// Load HunyuanOCR together with an explicitly located DFlash draft.
+    ///
+    /// DFlash is supported by HunyuanOCR 1.5 only. The official checkpoint
+    /// places the draft under `<model_dir>/dflash`.
+    pub fn from_dirs(
+        model_dir: impl AsRef<Path>,
+        dflash_dir: impl AsRef<Path>,
+        device: Device,
+    ) -> Result<Self, OCRError> {
+        let mut model = Self::from_dir(model_dir, device)?;
+        if model.version != HunyuanOcrVersion::V1_5 {
+            return Err(OCRError::ConfigError {
+                message: "HunyuanOCR: DFlash requires the 1.5 checkpoint".to_string(),
+            });
+        }
+        let dflash = DFlashModel::from_dir(dflash_dir, model.dtype, &model.device)?;
+        if dflash.config().hidden_size != model.cfg.hidden_size
+            || dflash.config().vocab_size != model.cfg.vocab_size
+        {
+            return Err(OCRError::ConfigError {
+                message: format!(
+                    "HunyuanOCR: DFlash target mismatch (hidden/vocab draft={}/{}, target={}/{})",
+                    dflash.config().hidden_size,
+                    dflash.config().vocab_size,
+                    model.cfg.hidden_size,
+                    model.cfg.vocab_size
+                ),
+            });
+        }
+        if dflash
+            .config()
+            .dflash_config
+            .target_layer_ids
+            .iter()
+            .any(|&id| id == 0 || id > model.cfg.num_hidden_layers)
+        {
+            return Err(OCRError::ConfigError {
+                message: format!(
+                    "HunyuanOCR: invalid DFlash target layers {:?} for {}-layer target",
+                    dflash.config().dflash_config.target_layer_ids,
+                    model.cfg.num_hidden_layers
+                ),
+            });
+        }
+        model.dflash = Some(dflash);
+        Ok(model)
+    }
+
+    /// Load the official `<model_dir>/dflash` draft alongside the target.
+    pub fn from_dir_with_dflash(
+        model_dir: impl AsRef<Path>,
+        device: Device,
+    ) -> Result<Self, OCRError> {
+        let model_dir = model_dir.as_ref();
+        Self::from_dirs(model_dir, model_dir.join("dflash"), device)
+    }
+
+    pub fn dflash_enabled(&self) -> bool {
+        self.dflash.is_some()
+    }
+
+    /// Number of parallel draft tokens per DFlash step (15 for the official
+    /// 16-position bonus+mask block).
+    pub fn dflash_num_speculative_tokens(&self) -> Option<usize> {
+        self.dflash
+            .as_ref()
+            .map(|draft| draft.config().block_size.saturating_sub(1))
     }
 
     /// The checkpoint generation detected from `config.json`.
@@ -426,9 +498,30 @@ impl HunyuanOcr {
 
         // 5. Prefill
         self.llm.clear_kv_cache();
-        let hidden = self
-            .llm
-            .forward(&inputs_embeds, &position_ids, Some(&mask))?;
+        let active_dflash = if batch_size == 1 {
+            self.dflash.as_ref()
+        } else {
+            None
+        };
+        let hidden = if let Some(dflash) = active_dflash {
+            let output = self.llm.forward_with_aux(
+                &inputs_embeds,
+                &position_ids,
+                Some(&mask),
+                &dflash.config().dflash_config.target_layer_ids,
+            )?;
+            let aux = output
+                .aux_hidden_states
+                .ok_or_else(|| OCRError::ConfigError {
+                    message: "HunyuanOCR DFlash: target did not return auxiliary hidden states"
+                        .to_string(),
+                })?;
+            dflash.reset_context(&aux)?;
+            output.hidden_states
+        } else {
+            self.llm
+                .forward(&inputs_embeds, &position_ids, Some(&mask))?
+        };
 
         // 6. Get initial logits per sample
         let mut logits_list: Vec<Tensor> = Vec::with_capacity(batch_size);
@@ -438,6 +531,17 @@ impl HunyuanOcr {
                 .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "get last hidden", e))?;
             let logits = self.logits_from_hidden(&last)?;
             logits_list.push(logits);
+        }
+
+        // DFlash currently targets the latency-sensitive single-document path.
+        // Multi-image calls retain the existing true-batch autoregressive path.
+        if let Some(dflash) = active_dflash {
+            let initial_logits = logits_list.pop().ok_or_else(|| OCRError::ConfigError {
+                message: "HunyuanOCR DFlash: missing target prefill logits".to_string(),
+            })?;
+            let tokens =
+                self.generate_dflash_tokens(dflash, initial_logits, seq_lens[0], max_new_tokens)?;
+            return Ok(vec![tokens]);
         }
 
         // 7. Autoregressive decode
@@ -533,6 +637,196 @@ impl HunyuanOcr {
         Ok(generated)
     }
 
+    fn greedy_token(&self, logits: &Tensor, seen: &[u32]) -> Result<u32, OCRError> {
+        if self.repetition_penalty > 1.0 && !seen.is_empty() {
+            argmax_with_repetition_penalty(logits, seen, self.repetition_penalty as f32)
+        } else {
+            logits
+                .argmax(D::Minus1)
+                .and_then(|t| t.to_scalar::<u32>())
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "argmax", e))
+        }
+    }
+
+    /// Greedy DFlash speculative decoding for one document. The target model
+    /// remains authoritative: accepted draft prefixes plus the first target
+    /// recovery/bonus token are exactly equivalent to autoregressive greedy
+    /// decoding, including repetition-penalty processing.
+    fn generate_dflash_tokens(
+        &self,
+        dflash: &DFlashModel,
+        initial_logits: Tensor,
+        prompt_len: usize,
+        max_new_tokens: usize,
+    ) -> Result<Vec<u32>, OCRError> {
+        if max_new_tokens == 0 {
+            self.llm.clear_kv_cache();
+            dflash.clear_context();
+            return Ok(Vec::new());
+        }
+
+        let first = self.greedy_token(&initial_logits, &[])?;
+        if self.stop_token_ids.contains(&first) {
+            self.llm.clear_kv_cache();
+            dflash.clear_context();
+            return Ok(Vec::new());
+        }
+
+        let num_spec = dflash.config().block_size.saturating_sub(1);
+        if num_spec == 0 {
+            return Err(OCRError::ConfigError {
+                message: "HunyuanOCR DFlash: block_size must include at least one mask position"
+                    .to_string(),
+            });
+        }
+        let mask_id = dflash.config().dflash_config.mask_token_id;
+        let target_layers = &dflash.config().dflash_config.target_layer_ids;
+        let mut generated = vec![first];
+
+        while generated.len() < max_new_tokens {
+            let bonus = *generated
+                .last()
+                .expect("generated contains the bonus token");
+
+            // One bonus query followed by parallel mask queries.
+            let mut query_ids = Vec::with_capacity(num_spec + 1);
+            query_ids.push(bonus);
+            query_ids.resize(num_spec + 1, mask_id);
+            let query_ids = Tensor::new(query_ids, &self.device)
+                .and_then(|t| t.reshape((1, num_spec + 1)))
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "query ids", e))?;
+            let query_embeds = self.llm.embed(&query_ids)?;
+            let draft_hidden = dflash.forward_queries(&query_embeds)?;
+            let draft_rows = draft_hidden
+                .narrow(1, 1, num_spec)
+                .and_then(|t| t.squeeze(0))
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "draft mask rows", e))?;
+            let draft_logits = self.logits_from_hidden_batch(&draft_rows)?;
+            // All draft rows are independent. Keep their sampling as one GPU
+            // operation; target-side processors remain authoritative during
+            // verification and therefore preserve the target distribution.
+            let proposals = draft_logits
+                .argmax(D::Minus1)
+                .and_then(|t| t.to_vec1::<u32>())
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "draft argmax", e))?;
+
+            // The target verifies [bonus, proposal_1, ..., proposal_N] in one
+            // causal pass. Row i predicts proposal i+1; the final row predicts
+            // the target-only bonus token used when every proposal is accepted.
+            let context_len = self.llm.kv_cache_len();
+            debug_assert_eq!(context_len, dflash.context_len());
+            let mut verify_ids = Vec::with_capacity(num_spec + 1);
+            verify_ids.push(bonus);
+            verify_ids.extend_from_slice(&proposals);
+            let verify_ids = Tensor::new(verify_ids, &self.device)
+                .and_then(|t| t.reshape((1, num_spec + 1)))
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "verify ids", e))?;
+            let verify_embeds = self.llm.embed(&verify_ids)?;
+            let positions: Vec<i64> = (context_len..context_len + num_spec + 1)
+                .flat_map(|position| [position as i64; 4])
+                .collect();
+            let positions = Tensor::new(positions, &self.device)
+                .and_then(|t| t.reshape((num_spec + 1, 4)))
+                .and_then(|t| t.transpose(0, 1))
+                .and_then(|t| t.unsqueeze(1))
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "verify positions", e))?;
+            let mask = create_causal_mask(
+                num_spec + 1,
+                context_len + num_spec + 1,
+                self.dtype,
+                &self.device,
+            )
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "verify causal mask", e))?;
+            let output = self.llm.forward_with_aux(
+                &verify_embeds,
+                &positions,
+                Some(&mask),
+                target_layers,
+            )?;
+            let aux = output
+                .aux_hidden_states
+                .ok_or_else(|| OCRError::ConfigError {
+                    message:
+                        "HunyuanOCR DFlash: target verification did not return auxiliary states"
+                            .to_string(),
+                })?;
+            let target_rows = output.hidden_states.squeeze(0).map_err(|e| {
+                candle_to_ocr_inference("HunyuanOCR DFlash", "target verify rows", e)
+            })?;
+            let target_logits = self.logits_from_hidden_batch(&target_rows)?;
+
+            let mut accepted = 0usize;
+            let mut recovery = None;
+            let mut seen = generated.clone();
+            for (index, &proposal) in proposals.iter().enumerate() {
+                let logits = target_logits.i((index, ..)).map_err(|e| {
+                    candle_to_ocr_inference("HunyuanOCR DFlash", "target verify logits", e)
+                })?;
+                let target_token = self.greedy_token(&logits, &seen)?;
+                if target_token != proposal {
+                    recovery = Some(target_token);
+                    break;
+                }
+                accepted += 1;
+                seen.push(proposal);
+            }
+
+            let (processed_inputs, next_tokens) = if let Some(recovery) = recovery {
+                let mut tokens = proposals[..accepted].to_vec();
+                tokens.push(recovery);
+                // bonus plus the accepted proposal prefix were actually part
+                // of the authoritative history before the recovery token.
+                (1 + accepted, tokens)
+            } else {
+                let bonus_logits = target_logits.i((num_spec, ..)).map_err(|e| {
+                    candle_to_ocr_inference("HunyuanOCR DFlash", "target bonus logits", e)
+                })?;
+                let target_bonus = self.greedy_token(&bonus_logits, &seen)?;
+                let mut tokens = proposals;
+                tokens.push(target_bonus);
+                (num_spec + 1, tokens)
+            };
+            tracing::debug!(
+                accepted,
+                processed_inputs,
+                proposals = ?next_tokens.get(..accepted),
+                recovery_or_bonus = ?next_tokens.last(),
+                "HunyuanOCR DFlash verification"
+            );
+
+            // Verification appended the whole candidate block. Keep only the
+            // prefix that precedes the newly emitted recovery/bonus token.
+            self.llm.trim_kv_cache(context_len + processed_inputs)?;
+            let accepted_aux = aux.narrow(1, 0, processed_inputs).map_err(|e| {
+                candle_to_ocr_inference("HunyuanOCR DFlash", "accepted auxiliary states", e)
+            })?;
+            dflash.append_context(&accepted_aux)?;
+
+            let mut stop = false;
+            for token in next_tokens {
+                if self.stop_token_ids.contains(&token) {
+                    stop = true;
+                    break;
+                }
+                if generated.len() == max_new_tokens {
+                    stop = true;
+                    break;
+                }
+                generated.push(token);
+            }
+            if stop {
+                break;
+            }
+
+            debug_assert_eq!(self.llm.kv_cache_len(), dflash.context_len());
+            debug_assert!(self.llm.kv_cache_len() >= prompt_len);
+        }
+
+        self.llm.clear_kv_cache();
+        dflash.clear_context();
+        Ok(generated)
+    }
+
     pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
         self.decode_generated_tokens(tokens)
     }
@@ -578,6 +872,20 @@ impl HunyuanOcr {
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "matmul logits", e))?
             .squeeze(0)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "squeeze logits", e))
+    }
+
+    fn logits_from_hidden_batch(&self, hidden: &Tensor) -> Result<Tensor, OCRError> {
+        let w = self.llm.token_embedding_weight();
+        let wt = w.transpose(0, 1).map_err(|e| {
+            candle_to_ocr_processing(
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                "HunyuanOCR: transpose embedding weight failed",
+                e,
+            )
+        })?;
+        hidden
+            .matmul(&wt)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "batched matmul logits", e))
     }
 }
 

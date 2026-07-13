@@ -332,6 +332,17 @@ impl HunyuanAttention {
     fn clear_kv_cache(&self) {
         self.kv_cache.borrow_mut().reset();
     }
+
+    fn trim_kv_cache(&self, len: usize) -> Result<(), OCRError> {
+        self.kv_cache
+            .borrow_mut()
+            .trim_to(len)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "trim kv_cache", e))
+    }
+
+    fn kv_cache_len(&self) -> usize {
+        self.kv_cache.borrow().current_seq_len()
+    }
 }
 
 #[derive(Debug)]
@@ -396,6 +407,23 @@ impl HunyuanDecoderLayer {
     fn clear_kv_cache(&self) {
         self.self_attn.clear_kv_cache();
     }
+
+    fn trim_kv_cache(&self, len: usize) -> Result<(), OCRError> {
+        self.self_attn.trim_kv_cache(len)
+    }
+
+    fn kv_cache_len(&self) -> usize {
+        self.self_attn.kv_cache_len()
+    }
+}
+
+/// Target-model outputs needed by DFlash. `hidden_states` is the regular
+/// post-norm decoder output. `aux_hidden_states` concatenates the requested
+/// intermediate layer outputs along the hidden dimension, matching vLLM's
+/// DFlash target interface.
+pub(crate) struct HunyuanLlmOutput {
+    pub hidden_states: Tensor,
+    pub aux_hidden_states: Option<Tensor>,
 }
 
 #[derive(Debug)]
@@ -458,7 +486,37 @@ impl HunyuanLlm {
         position_ids: &Tensor,
         causal_mask: Option<&Tensor>,
     ) -> Result<Tensor, OCRError> {
+        Ok(self
+            .forward_with_aux(inputs_embeds, position_ids, causal_mask, &[])?
+            .hidden_states)
+    }
+
+    /// Forward the target decoder and optionally retain intermediate features.
+    ///
+    /// Layer ids are one-based boundary ids: id `1` is the output after the
+    /// first decoder layer. This is the convention used by DFlash/vLLM and by
+    /// the checkpoint's `dflash_config.target_layer_ids`.
+    pub(crate) fn forward_with_aux(
+        &self,
+        inputs_embeds: &Tensor,
+        position_ids: &Tensor,
+        causal_mask: Option<&Tensor>,
+        aux_layer_ids: &[usize],
+    ) -> Result<HunyuanLlmOutput, OCRError> {
         use candle_core::DType;
+
+        if aux_layer_ids
+            .iter()
+            .any(|&id| id == 0 || id > self.layers.len())
+        {
+            return Err(OCRError::ConfigError {
+                message: format!(
+                    "HunyuanOCR: DFlash target layer ids must be in 1..={}, got {:?}",
+                    self.layers.len(),
+                    aux_layer_ids
+                ),
+            });
+        }
 
         let (cos, sin) = self
             .rotary
@@ -477,19 +535,47 @@ impl HunyuanLlm {
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "xdrope sin to_dtype f32", e))?;
 
         let mut hidden_states = inputs_embeds.clone();
-        for layer in self.layers.iter() {
+        let mut aux = Vec::with_capacity(aux_layer_ids.len());
+        for (index, layer) in self.layers.iter().enumerate() {
             hidden_states = layer.forward(&hidden_states, &cos, &sin, causal_mask)?;
+            if aux_layer_ids.contains(&(index + 1)) {
+                aux.push(hidden_states.clone());
+            }
         }
+        let aux_hidden_states = if aux.is_empty() {
+            None
+        } else {
+            let refs: Vec<&Tensor> = aux.iter().collect();
+            Some(Tensor::cat(&refs, 2).map_err(|e| {
+                candle_to_ocr_inference("HunyuanOCR", "concatenate DFlash target features", e)
+            })?)
+        };
         let hidden_states = self
             .norm
             .forward(&hidden_states)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "llm final norm", e))?;
-        Ok(hidden_states)
+        Ok(HunyuanLlmOutput {
+            hidden_states,
+            aux_hidden_states,
+        })
     }
 
     pub fn clear_kv_cache(&self) {
         for layer in &self.layers {
             layer.clear_kv_cache();
         }
+    }
+
+    pub(crate) fn trim_kv_cache(&self, len: usize) -> Result<(), OCRError> {
+        for layer in &self.layers {
+            layer.trim_kv_cache(len)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn kv_cache_len(&self) -> usize {
+        self.layers
+            .first()
+            .map_or(0, HunyuanDecoderLayer::kv_cache_len)
     }
 }

@@ -121,18 +121,18 @@ pub fn create_causal_mask(
     device: &Device,
 ) -> Result<Tensor> {
     on_compute_device(device, |compute_device| {
-        let row_idx = Tensor::arange(0u32, seq_len as u32, compute_device)?
-            .reshape((seq_len, 1))?
-            .to_dtype(dtype)?;
-        let col_idx = Tensor::arange(0u32, kv_len as u32, compute_device)?
-            .reshape((1, kv_len))?
-            .to_dtype(dtype)?;
+        let row_idx =
+            Tensor::arange(0u32, seq_len as u32, compute_device)?.reshape((seq_len, 1))?;
+        let col_idx = Tensor::arange(0u32, kv_len as u32, compute_device)?.reshape((1, kv_len))?;
 
-        let offset = (kv_len.saturating_sub(seq_len)) as f64;
+        let offset = kv_len.saturating_sub(seq_len) as u32;
         // Condition: col <= row + offset
-        // col - offset <= row
-        let diff = col_idx.broadcast_sub(&Tensor::new(offset, compute_device)?.to_dtype(dtype)?)?;
-        let mask_cond = diff.broadcast_le(&row_idx)?;
+        // Keep this comparison in integer space. BF16 cannot distinguish
+        // adjacent absolute positions once a document context grows beyond
+        // 256 tokens, which would let verification queries see future draft
+        // tokens and invalidate speculative decoding.
+        let row_limit = row_idx.broadcast_add(&Tensor::new(offset, compute_device)?)?;
+        let mask_cond = col_idx.broadcast_le(&row_limit)?;
 
         let zero = Tensor::new(0f32, compute_device)?
             .to_dtype(dtype)?
@@ -649,6 +649,29 @@ mod tests {
             assert_eq!(v, 0.0);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_bf16_causal_mask_preserves_adjacent_positions_in_long_context() -> Result<()> {
+        let device = Device::Cpu;
+        let query_len = 16;
+        let kv_len = 2048;
+        let context_len = kv_len - query_len;
+        let mask = create_causal_mask(query_len, kv_len, DType::BF16, &device)?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+
+        for row in 0..query_len {
+            let start = row * kv_len;
+            let last_visible = context_len + row;
+            assert_eq!(mask[start + last_visible], 0.0);
+            if last_visible + 1 < kv_len {
+                assert!(mask[start + last_visible + 1].is_infinite());
+                assert!(mask[start + last_visible + 1].is_sign_negative());
+            }
+        }
         Ok(())
     }
 
