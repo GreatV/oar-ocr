@@ -1,5 +1,6 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include <math_constants.h>
 #include <stdint.h>
 
 // Copy one fixed-size verification block into a preallocated KV cache.  The
@@ -90,17 +91,338 @@ extern "C" __global__ void silu_mul_bf16(
     const __nv_bfloat16* gate,
     const __nv_bfloat16* up,
     __nv_bfloat16* output,
-    uint32_t count) {
+    uint32_t count,
+    uint32_t ncols,
+    uint32_t gate_row_stride,
+    uint32_t up_row_stride) {
   const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
   if (index >= count) {
     return;
   }
+  const uint32_t row = index / ncols;
+  const uint32_t col = index - row * ncols;
+  const uint32_t gate_index = row * gate_row_stride + col;
+  const uint32_t up_index = row * up_row_stride + col;
   const __nv_bfloat16 one = __float2bfloat16_rn(1.0f);
-  const __nv_bfloat16 negative = -gate[index];
+  const __nv_bfloat16 gate_value = gate[gate_index];
+  const __nv_bfloat16 negative = -gate_value;
   const __nv_bfloat16 exponential = hexp(negative);
   const __nv_bfloat16 denominator = one + exponential;
-  const __nv_bfloat16 activated = gate[index] / denominator;
-  output[index] = activated * up[index];
+  const __nv_bfloat16 activated = gate_value / denominator;
+  output[index] = activated * up[up_index];
+}
+
+// Apply HuggingFace's repetition-penalty rule sparsely. token_ids contains one
+// deduplicated row per logits row; UINT32_MAX pads rows to a common width. The
+// logits are F32 so this has the same rounding points as the previous CPU
+// implementation while avoiding a full-vocabulary device-to-host copy.
+extern "C" __global__ void repetition_penalty_f32(
+    float* logits,
+    const uint32_t* token_ids,
+    uint32_t token_stride,
+    uint32_t token_rows,
+    uint32_t rows,
+    uint32_t vocab_size,
+    float penalty) {
+  const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  const uint32_t count = rows * token_stride;
+  if (index >= count) {
+    return;
+  }
+  const uint32_t row = index / token_stride;
+  const uint32_t col = index - row * token_stride;
+  const uint32_t token_row = token_rows == 1 ? 0 : row;
+  const uint32_t token = token_ids[token_row * token_stride + col];
+  if (token >= vocab_size) {
+    return;
+  }
+  const uint32_t offset = row * vocab_size + token;
+  const float value = logits[offset];
+  logits[offset] = value > 0.0f ? __fdiv_rn(value, penalty)
+                                : __fmul_rn(value, penalty);
+}
+
+// Maintain a device-resident presence map for generated tokens. Repetition
+// penalty is set-based, so duplicate ids may race while writing the same byte
+// value without changing the result.
+extern "C" __global__ void mark_repetition_history_u8(
+    uint8_t* history,
+    const uint32_t* token_ids,
+    uint32_t token_count,
+    uint32_t vocab_size) {
+  const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= token_count) {
+    return;
+  }
+  const uint32_t token = token_ids[index];
+  if (token < vocab_size) {
+    history[token] = 1;
+  }
+}
+
+extern "C" __global__ void argmax_first_bf16_stage1(
+    const __nv_bfloat16* logits,
+    float* partial_values,
+    uint32_t* partial_indices,
+    uint32_t rows,
+    uint32_t vocab_size,
+    uint32_t partitions_per_row) {
+  const uint32_t row = blockIdx.x / partitions_per_row;
+  const uint32_t partition = blockIdx.x - row * partitions_per_row;
+  const uint32_t lane = threadIdx.x;
+  if (row >= rows) {
+    return;
+  }
+
+  float best_value = -CUDART_INF_F;
+  uint32_t best_index = UINT32_MAX;
+  const uint32_t global_lane = partition * blockDim.x + lane;
+  const uint32_t global_stride = partitions_per_row * blockDim.x;
+  for (uint32_t col = global_lane; col < vocab_size; col += global_stride) {
+    const float value = __bfloat162float(logits[row * vocab_size + col]);
+    if (value > best_value || (value == best_value && col < best_index)) {
+      best_value = value;
+      best_index = col;
+    }
+  }
+
+  __shared__ float values[256];
+  __shared__ uint32_t indices[256];
+  values[lane] = best_value;
+  indices[lane] = best_index;
+  for (uint32_t width = blockDim.x / 2; width > 0; width >>= 1) {
+    __syncthreads();
+    if (lane < width) {
+      const float other_value = values[lane + width];
+      const uint32_t other_index = indices[lane + width];
+      if (other_value > values[lane] ||
+          (other_value == values[lane] && other_index < indices[lane])) {
+        values[lane] = other_value;
+        indices[lane] = other_index;
+      }
+    }
+  }
+  if (lane == 0) {
+    partial_values[blockIdx.x] = values[0];
+    partial_indices[blockIdx.x] = indices[0];
+  }
+}
+
+// Fuse BF16-to-F32 conversion, set-based repetition penalty, and stable
+// argmax for autoregressive sampling.
+extern "C" __global__ void repetition_argmax_bf16_stage1(
+    const __nv_bfloat16* logits,
+    const uint8_t* history,
+    float* partial_values,
+    uint32_t* partial_indices,
+    uint32_t rows,
+    uint32_t vocab_size,
+    uint32_t partitions_per_row,
+    float penalty) {
+  const uint32_t row = blockIdx.x / partitions_per_row;
+  const uint32_t partition = blockIdx.x - row * partitions_per_row;
+  const uint32_t lane = threadIdx.x;
+  if (row >= rows) {
+    return;
+  }
+
+  float best_value = -CUDART_INF_F;
+  uint32_t best_index = UINT32_MAX;
+  const uint32_t global_lane = partition * blockDim.x + lane;
+  const uint32_t global_stride = partitions_per_row * blockDim.x;
+  for (uint32_t col = global_lane; col < vocab_size; col += global_stride) {
+    float value = __bfloat162float(logits[row * vocab_size + col]);
+    if (history[row * vocab_size + col] != 0) {
+      value = value > 0.0f ? __fdiv_rn(value, penalty)
+                           : __fmul_rn(value, penalty);
+    }
+    if (value > best_value || (value == best_value && col < best_index)) {
+      best_value = value;
+      best_index = col;
+    }
+  }
+
+  __shared__ float values[256];
+  __shared__ uint32_t indices[256];
+  values[lane] = best_value;
+  indices[lane] = best_index;
+  for (uint32_t width = blockDim.x / 2; width > 0; width >>= 1) {
+    __syncthreads();
+    if (lane < width) {
+      const float other_value = values[lane + width];
+      const uint32_t other_index = indices[lane + width];
+      if (other_value > values[lane] ||
+          (other_value == values[lane] && other_index < indices[lane])) {
+        values[lane] = other_value;
+        indices[lane] = other_index;
+      }
+    }
+  }
+  if (lane == 0) {
+    partial_values[blockIdx.x] = values[0];
+    partial_indices[blockIdx.x] = indices[0];
+  }
+}
+
+// DFlash row r sees the common generated history plus proposals [0, r);
+// equal maxima keep the lowest vocabulary id.
+extern "C" __global__ void dflash_repetition_argmax_bf16_stage1(
+    const __nv_bfloat16* logits,
+    const uint8_t* history,
+    const uint32_t* proposals,
+    float* partial_values,
+    uint32_t* partial_indices,
+    uint32_t proposal_count,
+    uint32_t rows,
+    uint32_t vocab_size,
+    uint32_t partitions_per_row,
+    float penalty) {
+  const uint32_t row = blockIdx.x / partitions_per_row;
+  const uint32_t partition = blockIdx.x - row * partitions_per_row;
+  const uint32_t lane = threadIdx.x;
+  if (row >= rows) {
+    return;
+  }
+
+  extern __shared__ uint32_t proposal_ids[];
+  for (uint32_t i = lane; i < proposal_count; i += blockDim.x) {
+    proposal_ids[i] = proposals[i];
+  }
+  __syncthreads();
+
+  const uint32_t prefix_len = row < proposal_count ? row : proposal_count;
+  float best_value = -CUDART_INF_F;
+  uint32_t best_index = UINT32_MAX;
+  const uint32_t global_lane = partition * blockDim.x + lane;
+  const uint32_t global_stride = partitions_per_row * blockDim.x;
+  for (uint32_t col = global_lane; col < vocab_size; col += global_stride) {
+    bool seen = history[col] != 0;
+    for (uint32_t i = 0; !seen && i < prefix_len; ++i) {
+      seen = proposal_ids[i] == col;
+    }
+    float value = __bfloat162float(logits[row * vocab_size + col]);
+    if (seen) {
+      value = value > 0.0f ? __fdiv_rn(value, penalty)
+                           : __fmul_rn(value, penalty);
+    }
+    if (value > best_value || (value == best_value && col < best_index)) {
+      best_value = value;
+      best_index = col;
+    }
+  }
+
+  __shared__ float values[256];
+  __shared__ uint32_t indices[256];
+  values[lane] = best_value;
+  indices[lane] = best_index;
+  for (uint32_t width = blockDim.x / 2; width > 0; width >>= 1) {
+    __syncthreads();
+    if (lane < width) {
+      const float other_value = values[lane + width];
+      const uint32_t other_index = indices[lane + width];
+      if (other_value > values[lane] ||
+          (other_value == values[lane] && other_index < indices[lane])) {
+        values[lane] = other_value;
+        indices[lane] = other_index;
+      }
+    }
+  }
+  if (lane == 0) {
+    partial_values[blockIdx.x] = values[0];
+    partial_indices[blockIdx.x] = indices[0];
+  }
+}
+
+extern "C" __global__ void dflash_repetition_argmax_stage2(
+    const float* partial_values,
+    const uint32_t* partial_indices,
+    uint32_t* output,
+    uint32_t partitions_per_row,
+    uint32_t rows) {
+  const uint32_t row = blockIdx.x;
+  const uint32_t lane = threadIdx.x;
+  if (row >= rows) {
+    return;
+  }
+  float best_value = -CUDART_INF_F;
+  uint32_t best_index = UINT32_MAX;
+  for (uint32_t partition = lane; partition < partitions_per_row;
+       partition += blockDim.x) {
+    const float value =
+        partial_values[row * partitions_per_row + partition];
+    const uint32_t index =
+        partial_indices[row * partitions_per_row + partition];
+    if (value > best_value ||
+        (value == best_value && index < best_index)) {
+      best_value = value;
+      best_index = index;
+    }
+  }
+  __shared__ float values[32];
+  __shared__ uint32_t indices[32];
+  values[lane] = best_value;
+  indices[lane] = best_index;
+  for (uint32_t width = blockDim.x / 2; width > 0; width >>= 1) {
+    __syncthreads();
+    if (lane < width) {
+      const float other_value = values[lane + width];
+      const uint32_t other_index = indices[lane + width];
+      if (other_value > values[lane] ||
+          (other_value == values[lane] && other_index < indices[lane])) {
+        values[lane] = other_value;
+        indices[lane] = other_index;
+      }
+    }
+  }
+  if (lane == 0) {
+    output[row] = indices[0] == UINT32_MAX ? 0 : indices[0];
+  }
+}
+
+// Candle's parallel argmax does not preserve the lowest vocabulary index when
+// equal maxima land in different reduction lanes. BF16 logits produce real
+// ties, while the previous CPU loop deliberately kept the first index. Reduce
+// (value, index) pairs so GPU repetition penalty remains token-exact.
+extern "C" __global__ void argmax_first_f32(
+    const float* logits,
+    uint32_t* output,
+    uint32_t rows,
+    uint32_t vocab_size) {
+  const uint32_t row = blockIdx.x;
+  const uint32_t lane = threadIdx.x;
+  if (row >= rows) {
+    return;
+  }
+
+  float best_value = -CUDART_INF_F;
+  uint32_t best_index = UINT32_MAX;
+  for (uint32_t col = lane; col < vocab_size; col += blockDim.x) {
+    const float value = logits[row * vocab_size + col];
+    if (value > best_value || (value == best_value && col < best_index)) {
+      best_value = value;
+      best_index = col;
+    }
+  }
+
+  __shared__ float values[256];
+  __shared__ uint32_t indices[256];
+  values[lane] = best_value;
+  indices[lane] = best_index;
+  for (uint32_t width = blockDim.x / 2; width > 0; width >>= 1) {
+    __syncthreads();
+    if (lane < width) {
+      const float other_value = values[lane + width];
+      const uint32_t other_index = indices[lane + width];
+      if (other_value > values[lane] ||
+          (other_value == values[lane] && other_index < indices[lane])) {
+        values[lane] = other_value;
+        indices[lane] = other_index;
+      }
+    }
+  }
+  if (lane == 0) {
+    output[row] = indices[0] == UINT32_MAX ? 0 : indices[0];
+  }
 }
 
 // Projected QKV is laid out [token, q+k+v]. Produce the contiguous

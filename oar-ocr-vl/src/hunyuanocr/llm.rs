@@ -10,7 +10,7 @@ use crate::kv_trim::TrimmableKvCache;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 #[cfg(feature = "cuda")]
 use candle_core::Device;
-use candle_core::Tensor;
+use candle_core::{D, Tensor};
 use candle_nn::Module;
 use oar_ocr_core::core::OCRError;
 use std::cell::RefCell;
@@ -20,6 +20,22 @@ const DECODE_ROPE_CACHE_LEN: usize = 16_384;
 #[cfg(any(feature = "cuda", test))]
 fn target_cuda_graph_dtype_supported(dtype: candle_core::DType) -> bool {
     matches!(dtype, candle_core::DType::F16 | candle_core::DType::BF16)
+}
+
+#[cfg(any(feature = "cuda", test))]
+fn ar_cuda_graph_capacity(prompt_len: usize, max_new_tokens: usize) -> Option<usize> {
+    if max_new_tokens == 0 || prompt_len >= DECODE_ROPE_CACHE_LEN {
+        return None;
+    }
+    let required = prompt_len
+        .saturating_add(max_new_tokens)
+        .min(DECODE_ROPE_CACHE_LEN);
+    Some(
+        required
+            .max(1)
+            .next_power_of_two()
+            .min(DECODE_ROPE_CACHE_LEN),
+    )
 }
 
 /// Apply XDRoPE to `(q, k)` using already-section-mixed F32 `cos`/`sin`.
@@ -114,9 +130,9 @@ fn cuda_graph_error(
 
 #[derive(Debug)]
 struct HunyuanMlp {
-    gate_proj: candle_nn::Linear,
-    up_proj: candle_nn::Linear,
+    gate_up_proj: candle_nn::Linear,
     down_proj: candle_nn::Linear,
+    intermediate_size: usize,
 }
 
 impl HunyuanMlp {
@@ -130,28 +146,29 @@ impl HunyuanMlp {
         let down_proj =
             candle_nn::linear_no_bias(cfg.intermediate_size, cfg.hidden_size, vb.pp("down_proj"))
                 .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "load down_proj", e))?;
+        let gate_up_weight = Tensor::cat(&[gate_proj.weight(), up_proj.weight()], 0)
+            .and_then(|weight| weight.contiguous())
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "fuse gate/up weights", e))?;
         Ok(Self {
-            gate_proj,
-            up_proj,
+            gate_up_proj: candle_nn::Linear::new(gate_up_weight, None),
             down_proj,
+            intermediate_size: cfg.intermediate_size,
         })
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor, OCRError> {
-        let gate = self
-            .gate_proj
+        let gate_up = self
+            .gate_up_proj
             .forward(xs)
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "mlp gate_proj", e))?;
-        let up = self
-            .up_proj
-            .forward(xs)
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "mlp up_proj", e))?;
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "mlp gate_up_proj", e))?;
+        let gate = gate_up
+            .narrow(D::Minus1, 0, self.intermediate_size)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "mlp gate", e))?;
+        let up = gate_up
+            .narrow(D::Minus1, self.intermediate_size, self.intermediate_size)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "mlp up", e))?;
         #[cfg(feature = "cuda")]
-        let prod = if gate.device().is_cuda()
-            && gate.dtype() == candle_core::DType::BF16
-            && gate.is_contiguous()
-            && up.is_contiguous()
-        {
+        let prod = if gate.device().is_cuda() && gate.dtype() == candle_core::DType::BF16 {
             gate.apply_op2_no_bwd(&up, &FusedSiluMulBf16)
                 .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "fused mlp silu*up", e))?
         } else {
@@ -553,7 +570,7 @@ impl HunyuanAttention {
     }
 
     #[cfg(feature = "cuda")]
-    fn prepare_dynamic_cache(&self, query_len: usize) -> Result<(), OCRError> {
+    fn prepare_dynamic_cache(&self, query_len: usize, cache_len: usize) -> Result<(), OCRError> {
         let device = self.qkv_proj.weight().device();
         let template = Tensor::zeros(
             (1, self.num_kv_heads, query_len, self.head_dim),
@@ -563,7 +580,7 @@ impl HunyuanAttention {
         .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "dynamic KV template", e))?;
         self.kv_cache
             .borrow_mut()
-            .initialize_storage(&template)
+            .initialize_storage_with_capacity(&template, cache_len)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "initialize dynamic KV", e))
     }
 
@@ -586,16 +603,15 @@ impl HunyuanAttention {
                     .to_string(),
             });
         }
-        let (cache_k, cache_v) =
-            self.kv_cache
-                .borrow()
-                .storage()
-                .ok_or_else(|| OCRError::ConfigError {
-                    message: "HunyuanOCR dynamic KV storage is not initialized".to_string(),
-                })?;
+        let cache = self.kv_cache.borrow();
+        let cache_len = cache.storage_capacity();
+        let (cache_k, cache_v) = cache.storage().ok_or_else(|| OCRError::ConfigError {
+            message: "HunyuanOCR dynamic KV storage is not initialized".to_string(),
+        })?;
+        drop(cache);
         let append = DynamicKvAppend {
             query_len,
-            cache_len: DECODE_ROPE_CACHE_LEN,
+            cache_len,
         };
         cache_k
             .inplace_op3(k, kv_lengths, &append)
@@ -623,7 +639,7 @@ impl HunyuanAttention {
             query_lengths,
             kv_lengths,
             query_len,
-            DECODE_ROPE_CACHE_LEN,
+            cache_len,
             self.scaling as f32,
             true,
         )
@@ -669,8 +685,10 @@ struct TargetDecoderCudaGraph {
     _query_lengths: Tensor,
     kv_lengths: Tensor,
     hidden_output: Tensor,
-    aux_output: Tensor,
+    logits_output: Tensor,
+    aux_output: Option<Tensor>,
     aux_layer_ids: Vec<usize>,
+    cache_len: usize,
 }
 
 #[cfg(feature = "cuda")]
@@ -679,6 +697,7 @@ impl std::fmt::Debug for TargetDecoderCudaGraph {
         f.debug_struct("TargetDecoderCudaGraph")
             .field("hidden", &self.hidden_input.shape())
             .field("aux_layer_ids", &self.aux_layer_ids)
+            .field("cache_len", &self.cache_len)
             .finish_non_exhaustive()
     }
 }
@@ -838,13 +857,17 @@ impl HunyuanDecoderLayer {
 /// DFlash target interface.
 pub(crate) struct HunyuanLlmOutput {
     pub hidden_states: Tensor,
+    /// LM-head output is populated when decode runs through a CUDA graph.
+    /// Prefill/eager paths leave it absent to avoid projecting every prompt
+    /// position into the full vocabulary.
+    pub logits: Option<Tensor>,
     pub aux_hidden_states: Option<Tensor>,
 }
 
 #[derive(Debug)]
 pub struct HunyuanLlm {
     #[cfg(feature = "cuda")]
-    dflash_decode_graph: RefCell<Option<TargetDecoderCudaGraph>>,
+    decode_graph: RefCell<Option<TargetDecoderCudaGraph>>,
     embed_tokens: candle_nn::Embedding,
     layers: Vec<HunyuanDecoderLayer>,
     norm: candle_nn::RmsNorm,
@@ -897,7 +920,7 @@ impl HunyuanLlm {
 
         Ok(Self {
             #[cfg(feature = "cuda")]
-            dflash_decode_graph: RefCell::new(None),
+            decode_graph: RefCell::new(None),
             embed_tokens,
             layers,
             norm,
@@ -974,7 +997,7 @@ impl HunyuanLlm {
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "decode sequence length", e))?;
         if start + len > DECODE_ROPE_CACHE_LEN {
             #[cfg(feature = "cuda")]
-            self.invalidate_dflash_cuda_graph();
+            self.invalidate_cuda_graph();
             let positions: Vec<i64> = (start..start + len)
                 .flat_map(|position| [position as i64; 4])
                 .collect();
@@ -995,7 +1018,7 @@ impl HunyuanLlm {
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "decode rope sin slice", e))?;
         #[cfg(feature = "cuda")]
         if let Some(output) =
-            self.replay_dflash_cuda_graph(inputs_embeds, &cos, &sin, start + len, aux_layer_ids)?
+            self.replay_cuda_graph(inputs_embeds, &cos, &sin, start + len, aux_layer_ids)?
         {
             return Ok(output);
         }
@@ -1003,7 +1026,7 @@ impl HunyuanLlm {
     }
 
     #[cfg(feature = "cuda")]
-    fn replay_dflash_cuda_graph(
+    fn replay_cuda_graph(
         &self,
         inputs_embeds: &Tensor,
         cos: &Tensor,
@@ -1011,14 +1034,15 @@ impl HunyuanLlm {
         kv_len: usize,
         aux_layer_ids: &[usize],
     ) -> Result<Option<HunyuanLlmOutput>, OCRError> {
-        if kv_len > DECODE_ROPE_CACHE_LEN {
-            self.invalidate_dflash_cuda_graph();
-            return Ok(None);
-        }
-        let captured_ref = self.dflash_decode_graph.borrow();
+        let captured_ref = self.decode_graph.borrow();
         let Some(captured) = captured_ref.as_ref() else {
             return Ok(None);
         };
+        if kv_len > captured.cache_len {
+            drop(captured_ref);
+            self.invalidate_cuda_graph();
+            return Ok(None);
+        }
         if inputs_embeds.shape() != captured.hidden_input.shape()
             || cos.shape() != captured.cos_input.shape()
             || sin.shape() != captured.sin_input.shape()
@@ -1054,7 +1078,8 @@ impl HunyuanLlm {
         }
         Ok(Some(HunyuanLlmOutput {
             hidden_states: captured.hidden_output.clone(),
-            aux_hidden_states: Some(captured.aux_output.clone()),
+            logits: Some(captured.logits_output.clone()),
+            aux_hidden_states: captured.aux_output.clone(),
         }))
     }
 
@@ -1071,8 +1096,14 @@ impl HunyuanLlm {
             let incoming_len = inputs_embeds.dim(1).map_err(|e| {
                 candle_to_ocr_inference("HunyuanOCR", "prepared sequence length", e)
             })?;
-            if self.kv_cache_len().saturating_add(incoming_len) > DECODE_ROPE_CACHE_LEN {
-                self.invalidate_dflash_cuda_graph();
+            let required = self.kv_cache_len().saturating_add(incoming_len);
+            let graph_capacity = self
+                .decode_graph
+                .borrow()
+                .as_ref()
+                .map(|graph| graph.cache_len);
+            if graph_capacity.is_some_and(|capacity| required > capacity) {
+                self.invalidate_cuda_graph();
             }
         }
         // Decode invokes the same non-contiguous elementwise layouts thousands
@@ -1131,6 +1162,7 @@ impl HunyuanLlm {
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "llm final norm", e))?;
         Ok(HunyuanLlmOutput {
             hidden_states,
+            logits: None,
             aux_hidden_states,
         })
     }
@@ -1167,18 +1199,44 @@ impl HunyuanLlm {
                 aux.push(hidden_states.clone());
             }
         }
-        let refs: Vec<&Tensor> = aux.iter().collect();
-        let aux_hidden_states = Tensor::cat(&refs, 2).map_err(|e| {
-            candle_to_ocr_inference("HunyuanOCR", "dynamic target auxiliary states", e)
-        })?;
+        let aux_hidden_states = if aux.is_empty() {
+            None
+        } else {
+            let refs: Vec<&Tensor> = aux.iter().collect();
+            Some(Tensor::cat(&refs, 2).map_err(|e| {
+                candle_to_ocr_inference("HunyuanOCR", "dynamic target auxiliary states", e)
+            })?)
+        };
         let hidden_states = self
             .norm
             .forward(&hidden_states)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "dynamic target final norm", e))?;
         Ok(HunyuanLlmOutput {
             hidden_states,
-            aux_hidden_states: Some(aux_hidden_states),
+            logits: None,
+            aux_hidden_states,
         })
+    }
+
+    #[cfg(feature = "cuda")]
+    fn project_logits(&self, hidden_states: &Tensor) -> Result<Tensor, OCRError> {
+        let (batch_size, sequence_length, hidden_size) = hidden_states
+            .dims3()
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "graph hidden shape", e))?;
+        let weight_t = self
+            .embed_tokens
+            .embeddings()
+            .transpose(0, 1)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "transpose LM head", e))?;
+        let vocab_size = weight_t
+            .dim(1)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "LM head vocab size", e))?;
+        hidden_states
+            .reshape((batch_size * sequence_length, hidden_size))
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "flatten graph hidden", e))?
+            .matmul(&weight_t)
+            .and_then(|logits| logits.reshape((batch_size, sequence_length, vocab_size)))
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "project graph logits", e))
     }
 
     pub fn clear_kv_cache(&self) {
@@ -1193,6 +1251,8 @@ impl HunyuanLlm {
         aux_layer_ids: &[usize],
     ) -> Result<(), OCRError> {
         if std::env::var_os("OAR_HUNYUAN_DISABLE_CUDA_GRAPH").is_some() {
+            #[cfg(feature = "cuda")]
+            self.invalidate_cuda_graph();
             return Ok(());
         }
         // Dynamic target attention pins an F16 KV cache for graph replay.
@@ -1202,23 +1262,85 @@ impl HunyuanLlm {
         if self.decode_cos.device().is_cuda()
             && target_cuda_graph_dtype_supported(self.embed_tokens.embeddings().dtype())
         {
+            let reusable = self.decode_graph.borrow().as_ref().is_some_and(|graph| {
+                graph.hidden_input.dim(1).ok() == Some(query_len)
+                    && graph.cache_len == DECODE_ROPE_CACHE_LEN
+                    && graph.aux_layer_ids == aux_layer_ids
+            });
+            if reusable {
+                return Ok(());
+            }
+            self.invalidate_cuda_graph();
             let cos = self.decode_cos.narrow(2, 0, query_len).map_err(|e| {
                 candle_to_ocr_inference("HunyuanOCR", "graph decode cos template", e)
             })?;
             let sin = self.decode_sin.narrow(2, 0, query_len).map_err(|e| {
                 candle_to_ocr_inference("HunyuanOCR", "graph decode sin template", e)
             })?;
-            self.capture_dflash_cuda_graph(query_len, &cos, &sin, aux_layer_ids)?;
+            self.capture_cuda_graph(query_len, DECODE_ROPE_CACHE_LEN, &cos, &sin, aux_layer_ids)?;
         }
         let _ = query_len;
         let _ = aux_layer_ids;
         Ok(())
     }
 
+    /// Lazily capture the single-token autoregressive decoder. Capacity is
+    /// selected per workload and rounded up so short requests do not reserve
+    /// the full 16K-token graph cache. A later larger request transparently
+    /// recaptures with a larger bucket.
+    pub(crate) fn prepare_ar_cuda_graph(
+        &self,
+        prompt_len: usize,
+        max_new_tokens: usize,
+    ) -> Result<(), OCRError> {
+        if std::env::var_os("OAR_HUNYUAN_DISABLE_CUDA_GRAPH").is_some()
+            || std::env::var_os("OAR_HUNYUAN_DISABLE_AR_CUDA_GRAPH").is_some()
+        {
+            #[cfg(feature = "cuda")]
+            self.invalidate_cuda_graph();
+            return Ok(());
+        }
+        if max_new_tokens == 0 {
+            return Ok(());
+        }
+        #[cfg(feature = "cuda")]
+        if self.decode_cos.device().is_cuda()
+            && target_cuda_graph_dtype_supported(self.embed_tokens.embeddings().dtype())
+        {
+            let Some(cache_len) = ar_cuda_graph_capacity(prompt_len, max_new_tokens) else {
+                self.invalidate_cuda_graph();
+                return Ok(());
+            };
+            let required = prompt_len
+                .saturating_add(max_new_tokens)
+                .min(DECODE_ROPE_CACHE_LEN);
+            let reusable = self.decode_graph.borrow().as_ref().is_some_and(|graph| {
+                graph.hidden_input.dim(1).ok() == Some(1)
+                    && graph.cache_len >= required
+                    && graph.aux_layer_ids.is_empty()
+            });
+            if reusable {
+                return Ok(());
+            }
+            self.invalidate_cuda_graph();
+            let cos = self.decode_cos.narrow(2, 0, 1).map_err(|e| {
+                candle_to_ocr_inference("HunyuanOCR", "AR graph decode cos template", e)
+            })?;
+            let sin = self.decode_sin.narrow(2, 0, 1).map_err(|e| {
+                candle_to_ocr_inference("HunyuanOCR", "AR graph decode sin template", e)
+            })?;
+            self.capture_cuda_graph(1, cache_len, &cos, &sin, &[])?;
+        }
+        let _ = prompt_len;
+        let _ = max_new_tokens;
+        Ok(())
+    }
+
     #[cfg(feature = "cuda")]
-    fn capture_dflash_cuda_graph(
+    fn capture_cuda_graph(
         &self,
         query_len: usize,
+        cache_len: usize,
         cos_template: &Tensor,
         sin_template: &Tensor,
         aux_layer_ids: &[usize],
@@ -1227,20 +1349,16 @@ impl HunyuanLlm {
             CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
         };
 
-        if self.dflash_decode_graph.borrow().is_some() {
+        if self.decode_graph.borrow().is_some() {
             return Ok(());
         }
         let Device::Cuda(cuda) = self.decode_cos.device() else {
             return Ok(());
         };
-        if aux_layer_ids.is_empty() {
-            return Err(OCRError::ConfigError {
-                message: "HunyuanOCR DFlash CUDA graph requires auxiliary target layers"
-                    .to_string(),
-            });
-        }
         for layer in &self.layers {
-            layer.self_attn.prepare_dynamic_cache(query_len)?;
+            layer
+                .self_attn
+                .prepare_dynamic_cache(query_len, cache_len)?;
         }
         let hidden_size = self
             .embed_tokens
@@ -1265,7 +1383,7 @@ impl HunyuanLlm {
         .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph sin input", e))?;
         let query_lengths = Tensor::new(&[0u32, query_len as u32], self.decode_cos.device())
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph query lengths", e))?;
-        // These must not share storage: query length stays fixed at 16 while
+        // These must not share storage: query length stays fixed while
         // the cumulative KV length is overwritten before every graph replay.
         let kv_lengths = Tensor::new(&[0u32, query_len as u32], self.decode_cos.device())
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph KV lengths", e))?;
@@ -1280,19 +1398,25 @@ impl HunyuanLlm {
             &kv_lengths,
             aux_layer_ids,
         )?;
-        sync_graph_tensor(&warm.hidden_states, "warm full target decoder graph")?;
+        let warm_logits = self.project_logits(&warm.hidden_states)?;
+        sync_graph_tensor(&warm_logits, "warm full target decoder graph")?;
 
         stream
             .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
             .map_err(|e| cuda_graph_error("begin full target decoder graph capture", e))?;
-        let output = match self.forward_with_aux_dynamic(
-            &hidden_input,
-            &cos_input,
-            &sin_input,
-            &query_lengths,
-            &kv_lengths,
-            aux_layer_ids,
-        ) {
+        let captured_output = (|| {
+            let output = self.forward_with_aux_dynamic(
+                &hidden_input,
+                &cos_input,
+                &sin_input,
+                &query_lengths,
+                &kv_lengths,
+                aux_layer_ids,
+            )?;
+            let logits = self.project_logits(&output.hidden_states)?;
+            Ok::<_, OCRError>((output, logits))
+        })();
+        let (output, logits_output) = match captured_output {
             Ok(output) => output,
             Err(error) => {
                 let _ = stream.end_capture(
@@ -1309,18 +1433,13 @@ impl HunyuanLlm {
             .ok_or_else(|| OCRError::ConfigError {
                 message: "HunyuanOCR full target decoder capture returned no graph".to_string(),
             })?;
-        let aux_output = output
-            .aux_hidden_states
-            .ok_or_else(|| OCRError::ConfigError {
-                message: "HunyuanOCR full target decoder graph produced no auxiliary states"
-                    .to_string(),
-            })?;
+        let aux_output = output.aux_hidden_states;
         graph
             .launch()
             .map_err(|e| cuda_graph_error("warm full target decoder graph", e))?;
-        sync_graph_tensor(&output.hidden_states, "sync full target decoder graph")?;
+        sync_graph_tensor(&logits_output, "sync full target decoder graph")?;
         self.clear_kv_cache();
-        *self.dflash_decode_graph.borrow_mut() = Some(TargetDecoderCudaGraph {
+        *self.decode_graph.borrow_mut() = Some(TargetDecoderCudaGraph {
             graph,
             hidden_input,
             cos_input,
@@ -1328,18 +1447,20 @@ impl HunyuanLlm {
             _query_lengths: query_lengths,
             kv_lengths,
             hidden_output: output.hidden_states,
+            logits_output,
             aux_output,
             aux_layer_ids: aux_layer_ids.to_vec(),
+            cache_len,
         });
         Ok(())
     }
 
     #[cfg(feature = "cuda")]
-    fn invalidate_dflash_cuda_graph(&self) {
+    fn invalidate_cuda_graph(&self) {
         // Eager cache growth reallocates the storage whose raw pointers were
         // captured by the graph. Dropping it before growth also prevents a
         // stale replay after the logical cache is reset for another document.
-        self.dflash_decode_graph.borrow_mut().take();
+        self.decode_graph.borrow_mut().take();
     }
 
     /// Drop any captured target-decoder CUDA graph.
@@ -1352,7 +1473,7 @@ impl HunyuanLlm {
     /// could replay the graph against that freed memory.
     pub(crate) fn invalidate_target_cuda_graph(&self) {
         #[cfg(feature = "cuda")]
-        self.invalidate_dflash_cuda_graph();
+        self.invalidate_cuda_graph();
     }
 
     pub(crate) fn trim_kv_cache(&self, len: usize) -> Result<(), OCRError> {
@@ -1371,7 +1492,7 @@ impl HunyuanLlm {
 
 #[cfg(test)]
 mod tests {
-    use super::target_cuda_graph_dtype_supported;
+    use super::{DECODE_ROPE_CACHE_LEN, ar_cuda_graph_capacity, target_cuda_graph_dtype_supported};
     use candle_core::DType;
 
     #[test]
@@ -1380,5 +1501,17 @@ mod tests {
         assert!(target_cuda_graph_dtype_supported(DType::BF16));
         assert!(!target_cuda_graph_dtype_supported(DType::F32));
         assert!(!target_cuda_graph_dtype_supported(DType::F64));
+    }
+
+    #[test]
+    fn ar_graph_capacity_uses_bounded_power_of_two_buckets() {
+        assert_eq!(ar_cuda_graph_capacity(1500, 256), Some(2048));
+        assert_eq!(ar_cuda_graph_capacity(2000, 4096), Some(8192));
+        assert_eq!(
+            ar_cuda_graph_capacity(10_000, 20_000),
+            Some(DECODE_ROPE_CACHE_LEN)
+        );
+        assert_eq!(ar_cuda_graph_capacity(100, 0), None);
+        assert_eq!(ar_cuda_graph_capacity(DECODE_ROPE_CACHE_LEN, 1), None);
     }
 }
