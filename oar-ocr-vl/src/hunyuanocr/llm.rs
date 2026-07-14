@@ -17,6 +17,11 @@ use std::cell::RefCell;
 
 const DECODE_ROPE_CACHE_LEN: usize = 16_384;
 
+#[cfg(any(feature = "cuda", test))]
+fn target_cuda_graph_dtype_supported(dtype: candle_core::DType) -> bool {
+    matches!(dtype, candle_core::DType::F16 | candle_core::DType::BF16)
+}
+
 /// Apply XDRoPE to `(q, k)` using already-section-mixed F32 `cos`/`sin`.
 ///
 /// The section-mix (`select_rope_sections`) and the F32 cast of cos/sin are
@@ -1190,8 +1195,13 @@ impl HunyuanLlm {
         if std::env::var_os("OAR_HUNYUAN_DISABLE_CUDA_GRAPH").is_some() {
             return Ok(());
         }
+        // Dynamic target attention pins an F16 KV cache for graph replay.
+        // F32 keeps its higher-precision eager path instead of failing capture
+        // when the append kernel sees F32 Q/K/V and F16 cache storage.
         #[cfg(feature = "cuda")]
-        if self.decode_cos.device().is_cuda() {
+        if self.decode_cos.device().is_cuda()
+            && target_cuda_graph_dtype_supported(self.embed_tokens.embeddings().dtype())
+        {
             let cos = self.decode_cos.narrow(2, 0, query_len).map_err(|e| {
                 candle_to_ocr_inference("HunyuanOCR", "graph decode cos template", e)
             })?;
@@ -1356,5 +1366,19 @@ impl HunyuanLlm {
         self.layers
             .first()
             .map_or(0, HunyuanDecoderLayer::kv_cache_len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::target_cuda_graph_dtype_supported;
+    use candle_core::DType;
+
+    #[test]
+    fn target_cuda_graph_skips_unsupported_dtypes() {
+        assert!(target_cuda_graph_dtype_supported(DType::F16));
+        assert!(target_cuda_graph_dtype_supported(DType::BF16));
+        assert!(!target_cuda_graph_dtype_supported(DType::F32));
+        assert!(!target_cuda_graph_dtype_supported(DType::F64));
     }
 }
