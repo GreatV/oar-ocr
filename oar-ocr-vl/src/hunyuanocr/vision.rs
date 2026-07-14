@@ -935,33 +935,44 @@ fn interpolate_bilinear_align_corners_false(
         HunyuanOcrVersion::V1_5 => (in_h as f32 / out_h as f32, in_w as f32 / out_w as f32),
     };
 
-    out.par_chunks_mut(out_w * dim)
-        .enumerate()
-        .for_each(|(oy, out_row)| {
-            let fy = ((oy as f32 + 0.5) * inv_scale_y - 0.5).max(0.0);
-            let y0 = fy.floor().max(0.0) as usize;
-            let y1 = (y0 + 1).min(in_h - 1);
-            let wy = fy - y0 as f32;
-            for ox in 0..out_w {
-                let fx = ((ox as f32 + 0.5) * inv_scale_x - 0.5).max(0.0);
-                let x0 = fx.floor().max(0.0) as usize;
-                let x1 = (x0 + 1).min(in_w - 1);
-                let wx = fx - x0 as f32;
-                let out_base = ox * dim;
-                let i00 = (y0 * in_w + x0) * dim;
-                let i01 = (y0 * in_w + x1) * dim;
-                let i10 = (y1 * in_w + x0) * dim;
-                let i11 = (y1 * in_w + x1) * dim;
-                for c in 0..dim {
-                    let v00 = base[i00 + c];
-                    let v01 = base[i01 + c];
-                    let v10 = base[i10 + c];
-                    let v11 = base[i11 + c];
-                    let v0 = v00 + (v01 - v00) * wx;
-                    let v1 = v10 + (v11 - v10) * wx;
-                    out_row[out_base + c] = v0 + (v1 - v0) * wy;
-                }
+    let row = |oy: usize, out_row: &mut [f32]| {
+        let fy = ((oy as f32 + 0.5) * inv_scale_y - 0.5).max(0.0);
+        let y0 = fy.floor().max(0.0) as usize;
+        let y1 = (y0 + 1).min(in_h - 1);
+        let wy = fy - y0 as f32;
+        for ox in 0..out_w {
+            let fx = ((ox as f32 + 0.5) * inv_scale_x - 0.5).max(0.0);
+            let x0 = fx.floor().max(0.0) as usize;
+            let x1 = (x0 + 1).min(in_w - 1);
+            let wx = fx - x0 as f32;
+            let out_base = ox * dim;
+            let i00 = (y0 * in_w + x0) * dim;
+            let i01 = (y0 * in_w + x1) * dim;
+            let i10 = (y1 * in_w + x0) * dim;
+            let i11 = (y1 * in_w + x1) * dim;
+            for c in 0..dim {
+                let v00 = base[i00 + c];
+                let v01 = base[i01 + c];
+                let v10 = base[i10 + c];
+                let v11 = base[i11 + c];
+                let v0 = v00 + (v01 - v00) * wx;
+                let v1 = v10 + (v11 - v10) * wx;
+                out_row[out_base + c] = v0 + (v1 - v0) * wy;
             }
-        });
+        }
+    };
+
+    // Below this row count, Rayon's scheduling overhead outweighs the gain
+    // from parallelizing; run sequentially instead.
+    const PAR_ROW_THRESHOLD: usize = 16;
+    if out_h < PAR_ROW_THRESHOLD {
+        for (oy, out_row) in out.chunks_mut(out_w * dim).enumerate() {
+            row(oy, out_row);
+        }
+    } else {
+        out.par_chunks_mut(out_w * dim)
+            .enumerate()
+            .for_each(|(oy, out_row)| row(oy, out_row));
+    }
     out
 }

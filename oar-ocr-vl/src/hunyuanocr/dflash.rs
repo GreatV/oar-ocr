@@ -970,8 +970,15 @@ impl DFlashModel {
             dtype,
             device: device.clone(),
         };
+        // `DynamicPagedKvAppend` (the graph's per-layer append kernel) only
+        // accepts BF16; capturing under another dtype override would fail
+        // model load entirely even though the eager DFlash path below
+        // supports F16/F32.
         #[cfg(feature = "cuda")]
-        if device.is_cuda() && std::env::var_os("OAR_HUNYUAN_DISABLE_CUDA_GRAPH").is_none() {
+        if device.is_cuda()
+            && dtype == DType::BF16
+            && std::env::var_os("OAR_HUNYUAN_DISABLE_CUDA_GRAPH").is_none()
+        {
             model.capture_cuda_graph()?;
         }
         Ok(model)

@@ -26,11 +26,16 @@ pub struct TrimmableKvCache {
     /// Current `(B, H, cur_len, D)` views into `storage`.
     kv: Option<(Tensor, Tensor)>,
     cur_len: usize,
-    /// Configured sequence-length capacity retained for parity with
-    /// `candle_nn::kv_cache::KvCache::new`. This wrapper does not enforce it.
-    /// Only read by the `max_seq_len()` accessor.
-    #[allow(dead_code)]
-    max_len: usize,
+    /// Capacity of `storage` along `cat_dim`, zero until the first `append`
+    /// or `initialize_storage` call. `append` grows this organically (like a
+    /// `Vec`) instead of jumping straight to `configured_capacity`, so a
+    /// cache that never needs a fixed CUDA-graph buffer doesn't pay for one.
+    capacity: usize,
+    /// Capacity requested via `new()`. Used by `initialize_storage` (CUDA
+    /// graph decode paths that need a fixed-size buffer pinned before the
+    /// first append) and the `max_seq_len()` accessor; organic growth in
+    /// `append` does not preallocate to this size.
+    configured_capacity: usize,
 }
 
 // `TrimmableKvCache` lives at the crate root so every model's attention path
@@ -46,7 +51,8 @@ impl TrimmableKvCache {
             storage: None,
             kv: None,
             cur_len: 0,
-            max_len,
+            capacity: 0,
+            configured_capacity: max_len,
         }
     }
 
@@ -83,15 +89,20 @@ impl TrimmableKvCache {
         // prefix in the replacement storage.
         let required = self.cur_len + new_len;
         if self.storage.is_none() {
+            // Grow from what's actually needed rather than jumping straight
+            // to `configured_capacity`: most callers never trigger a CUDA
+            // graph (which instead pins a fixed buffer up front via
+            // `initialize_storage`), so a short document should not reserve
+            // e.g. 16K tokens of K/V per layer on its first token.
             let mut shape = k_new.dims().to_vec();
-            shape[self.cat_dim] = self.max_len.max(required);
-            self.max_len = shape[self.cat_dim];
+            shape[self.cat_dim] = required;
+            self.capacity = required;
             self.storage = Some((
                 Tensor::zeros(shape.as_slice(), k_new.dtype(), k_new.device())?,
                 Tensor::zeros(shape.as_slice(), v_new.dtype(), v_new.device())?,
             ));
-        } else if required > self.max_len {
-            let grow_by = self.max_len.max(new_len);
+        } else if required > self.capacity {
+            let grow_by = self.capacity.max(new_len);
             let mut shape = k_new.dims().to_vec();
             shape[self.cat_dim] = grow_by;
             let (old_k, old_v) = self.storage.as_ref().expect("storage initialized");
@@ -101,7 +112,7 @@ impl TrimmableKvCache {
                 Tensor::cat(&[old_k, &extra_k], self.cat_dim)?.contiguous()?,
                 Tensor::cat(&[old_v, &extra_v], self.cat_dim)?.contiguous()?,
             ));
-            self.max_len += grow_by;
+            self.capacity += grow_by;
         }
 
         let (storage_k, storage_v) = self.storage.as_mut().expect("storage initialized");
@@ -190,7 +201,8 @@ impl TrimmableKvCache {
     pub fn initialize_storage(&mut self, template: &Tensor) -> Result<()> {
         if self.storage.is_none() {
             let mut shape = template.dims().to_vec();
-            shape[self.cat_dim] = self.max_len;
+            shape[self.cat_dim] = self.configured_capacity;
+            self.capacity = self.configured_capacity;
             self.storage = Some((
                 Tensor::zeros(shape.as_slice(), template.dtype(), template.device())?,
                 Tensor::zeros(shape.as_slice(), template.dtype(), template.device())?,
@@ -206,10 +218,10 @@ impl TrimmableKvCache {
 
     /// Update only the logical length after a device-side graph append.
     pub fn set_current_len(&mut self, len: usize) -> Result<()> {
-        if len > self.max_len {
+        if len > self.capacity {
             return Err(candle_core::Error::Msg(format!(
                 "TrimmableKvCache::set_current_len: {len} exceeds capacity {}",
-                self.max_len
+                self.capacity
             )));
         }
         if len == 0 {
@@ -231,7 +243,7 @@ impl TrimmableKvCache {
     }
 
     pub fn max_seq_len(&self) -> usize {
-        self.max_len
+        self.configured_capacity
     }
 
     pub fn reset(&mut self) {

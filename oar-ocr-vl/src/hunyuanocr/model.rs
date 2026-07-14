@@ -537,6 +537,14 @@ impl HunyuanOcr {
         let active_dflash = if batch_size == 1 {
             self.dflash.as_ref()
         } else {
+            // Multi-image requests disable DFlash and prefill a batch>1
+            // shape, which is incompatible with the batch=1 KV storage a
+            // captured target CUDA graph points at. Drop the graph before
+            // that reallocation so a later single-image DFlash decode can't
+            // replay it against freed memory.
+            if self.dflash.is_some() {
+                self.llm.invalidate_target_cuda_graph();
+            }
             None
         };
         let hidden = if let Some(dflash) = active_dflash {

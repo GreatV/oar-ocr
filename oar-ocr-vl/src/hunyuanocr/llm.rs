@@ -450,8 +450,10 @@ impl HunyuanAttention {
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn v contiguous", e))?;
         // Keep the model in BF16 but use FP16 inside CUDA attention. The
         // FlashAttention BF16 verification path can amplify tiny per-round
-        // differences into a different greedy branch on long documents.
-        let attention_dtype = if q.device().is_cuda() {
+        // differences into a different greedy branch on long documents. Only
+        // BF16 gets downcast this way: an explicit `OAR_VL_DTYPE=f32`
+        // override is meant to raise precision, not get silently discarded.
+        let attention_dtype = if q.device().is_cuda() && q.dtype() == candle_core::DType::BF16 {
             candle_core::DType::F16
         } else {
             q.dtype()
@@ -1328,6 +1330,19 @@ impl HunyuanLlm {
         // captured by the graph. Dropping it before growth also prevents a
         // stale replay after the logical cache is reset for another document.
         self.dflash_decode_graph.borrow_mut().take();
+    }
+
+    /// Drop any captured target-decoder CUDA graph.
+    ///
+    /// Callers must invoke this before feeding a batch shape the graph
+    /// wasn't captured for (e.g. a multi-image request that disables DFlash
+    /// and falls back to plain batched prefill): the batched append would
+    /// otherwise reallocate the per-layer KV storage the graph's raw device
+    /// pointers still reference, and a later single-image DFlash decode
+    /// could replay the graph against that freed memory.
+    pub(crate) fn invalidate_target_cuda_graph(&self) {
+        #[cfg(feature = "cuda")]
+        self.invalidate_dflash_cuda_graph();
     }
 
     pub(crate) fn trim_kv_cache(&self, len: usize) -> Result<(), OCRError> {
