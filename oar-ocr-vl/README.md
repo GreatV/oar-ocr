@@ -44,6 +44,12 @@ To enable GPU acceleration (CUDA), add the feature flag:
 cargo add oar-ocr-vl --features cuda
 ```
 
+HunyuanOCR's custom CUDA kernels compile PTX for the oldest GPU detected by
+`nvidia-smi` at build time. For headless, container, or cross-machine builds,
+set the target explicitly, for example
+`CUDA_COMPUTE_CAP=89 cargo build --features cuda`. The DFlash kernels require
+compute capability 8.0 or newer.
+
 ## Usage
 
 ### PaddleOCR-VL

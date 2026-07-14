@@ -164,9 +164,15 @@ pub fn scaled_dot_product_attention_gqa(
         .reshape((batch, num_heads, query_len, head_dim))
 }
 
+#[cfg(any(feature = "cuda", test))]
+fn flash_attention_dtype_supported(dtype: DType) -> bool {
+    matches!(dtype, DType::F16 | DType::BF16)
+}
+
 /// Run CUDA FlashAttention v2 for Q/K/V tensors in `(batch, heads, seq,
-/// head_dim)` layout. Returns `None` on non-CUDA devices so callers can retain
-/// their portable eager fallback.
+/// head_dim)` layout. Returns `None` on non-CUDA devices or for dtypes not
+/// supported by the CUDA kernel so callers can retain their portable eager
+/// fallback.
 pub fn flash_attention(
     q: &Tensor,
     k: &Tensor,
@@ -175,7 +181,11 @@ pub fn flash_attention(
     causal: bool,
 ) -> Result<Option<Tensor>> {
     #[cfg(feature = "cuda")]
-    if q.device().is_cuda() {
+    if q.device().is_cuda()
+        && flash_attention_dtype_supported(q.dtype())
+        && k.dtype() == q.dtype()
+        && v.dtype() == q.dtype()
+    {
         // The CUDA kernel consumes (batch, seq, heads, head_dim) and natively
         // supports GQA when K/V have fewer heads than Q.
         let q = q.transpose(1, 2)?;
@@ -677,6 +687,14 @@ pub fn select_rope_sections(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flash_attention_rejects_unsupported_dtypes() {
+        assert!(flash_attention_dtype_supported(DType::F16));
+        assert!(flash_attention_dtype_supported(DType::BF16));
+        assert!(!flash_attention_dtype_supported(DType::F32));
+        assert!(!flash_attention_dtype_supported(DType::F64));
+    }
 
     #[test]
     fn test_scaled_dot_product_attention() -> Result<()> {

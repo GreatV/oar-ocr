@@ -127,6 +127,8 @@ impl ContextKv {
         let reusable = self.storage.as_ref().is_some_and(|(storage_k, storage_v)| {
             storage_k.dtype() == template_k.dtype()
                 && storage_v.dtype() == template_v.dtype()
+                && storage_k.device().same_device(template_k.device())
+                && storage_v.device().same_device(template_v.device())
                 && storage_k.dims()
                     == [
                         self.capacity / CONTEXT_KV_PAGE_SIZE,
@@ -139,6 +141,7 @@ impl ContextKv {
         if self.storage.is_some() && !reusable {
             self.storage = None;
             self.block_table = None;
+            self.reset();
         }
         if self.storage.is_none() {
             self.capacity =
@@ -219,6 +222,9 @@ impl ContextKv {
             .map_err(|e| tensor_err("HunyuanOCR DFlash: context K length", e))?;
         let required = self.len + added;
         self.ensure_capacity(k, v, required)?;
+        // `ensure_capacity` may have discarded incompatible storage and reset
+        // the logical cache, so do not retain the pre-reset length.
+        let required = self.len + added;
         let (storage_k, storage_v) = self.storage.as_mut().expect("context storage initialized");
         let (_, heads, _, head_dim) = k
             .dims4()
@@ -975,6 +981,14 @@ impl DFlashModel {
         &self.cfg
     }
 
+    #[cfg(feature = "cuda")]
+    fn invalidate_cuda_graph(&self) {
+        // A captured graph owns raw pointers into the fixed-size cache. Once
+        // that cache must grow, the graph cannot safely be reused, including
+        // after a later page-level reset.
+        self.decode_graph.borrow_mut().take();
+    }
+
     fn rope(&self, start: usize, len: usize) -> Result<(Tensor, Tensor), OCRError> {
         if start + len <= ROPE_CACHE_LEN {
             let cos = self
@@ -1041,6 +1055,10 @@ impl DFlashModel {
         let len = aux_hidden
             .dim(1)
             .map_err(|e| tensor_err("HunyuanOCR DFlash: target context length", e))?;
+        #[cfg(feature = "cuda")]
+        if len > CONTEXT_KV_INITIAL_CAPACITY {
+            self.invalidate_cuda_graph();
+        }
         let target = self.transform_target(aux_hidden)?;
         let (cos, sin) = self.rope(0, len)?;
         let mut caches = self.caches.borrow_mut();
@@ -1063,6 +1081,10 @@ impl DFlashModel {
             return Ok(());
         }
         let start = self.context_len();
+        #[cfg(feature = "cuda")]
+        if start.saturating_add(added) > CONTEXT_KV_INITIAL_CAPACITY {
+            self.invalidate_cuda_graph();
+        }
         let target = self.transform_target(aux_hidden)?;
         let (cos, sin) = self.rope(start, added)?;
         let mut caches = self.caches.borrow_mut();
@@ -1221,6 +1243,10 @@ impl DFlashModel {
         sin: &Tensor,
         total_kv_len: usize,
     ) -> Result<Option<Tensor>, OCRError> {
+        if total_kv_len > CONTEXT_KV_INITIAL_CAPACITY {
+            self.invalidate_cuda_graph();
+            return Ok(None);
+        }
         let captured_ref = self.decode_graph.borrow();
         let Some(captured) = captured_ref.as_ref() else {
             return Ok(None);
@@ -1305,7 +1331,8 @@ impl DFlashModel {
 
 #[cfg(test)]
 mod tests {
-    use super::DFlashConfig;
+    use super::{ContextKv, DFlashConfig};
+    use candle_core::{DType, Device, Tensor};
 
     #[test]
     fn parses_hunyuan_dflash_config() {
@@ -1331,5 +1358,31 @@ mod tests {
         assert_eq!(cfg.block_size, 16);
         assert_eq!(cfg.dflash_config.target_layer_ids, [1, 8, 15, 22]);
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn incompatible_context_storage_starts_a_new_logical_cache() {
+        let device = Device::Cpu;
+        let mut cache = ContextKv::default();
+        let old = Tensor::zeros((1, 1, 3, 4), DType::F32, &device).unwrap();
+        cache.append(&old, &old).unwrap();
+
+        // Changing the number of heads forces replacement storage.
+        let new = Tensor::ones((1, 2, 2, 4), DType::F32, &device).unwrap();
+        cache.append(&new, &new).unwrap();
+
+        assert_eq!(cache.len, 2);
+        let k = cache.k.as_ref().unwrap();
+        let v = cache.v.as_ref().unwrap();
+        assert_eq!(k.dims(), &[1, 2, 2, 4]);
+        assert_eq!(v.dims(), &[1, 2, 2, 4]);
+        assert!(
+            k.flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+                .iter()
+                .all(|&x| x == 1.0)
+        );
     }
 }

@@ -240,7 +240,7 @@ impl HunyuanAttention {
         // plus the longest realistic generation. Same growth strategy as
         // candle_nn::kv_cache::KvCache (Tensor::cat per append).
         // Trim/gather support allows selective KV retention after generation steps.
-        let kv_cache = TrimmableKvCache::new(2, 16384);
+        let kv_cache = TrimmableKvCache::new(2, DECODE_ROPE_CACHE_LEN);
 
         Ok(Self {
             qkv_proj,
@@ -515,7 +515,7 @@ impl HunyuanAttention {
                     &value_states,
                     causal_mask,
                     self.scaling,
-                    false,
+                    seq_len > 1,
                 )
                 .map_err(|e| {
                     candle_to_ocr_inference("HunyuanOCR", "scaled dot-product attention", e)
@@ -966,6 +966,8 @@ impl HunyuanLlm {
             .dim(1)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "decode sequence length", e))?;
         if start + len > DECODE_ROPE_CACHE_LEN {
+            #[cfg(feature = "cuda")]
+            self.invalidate_dflash_cuda_graph();
             let positions: Vec<i64> = (start..start + len)
                 .flat_map(|position| [position as i64; 4])
                 .collect();
@@ -1002,6 +1004,10 @@ impl HunyuanLlm {
         kv_len: usize,
         aux_layer_ids: &[usize],
     ) -> Result<Option<HunyuanLlmOutput>, OCRError> {
+        if kv_len > DECODE_ROPE_CACHE_LEN {
+            self.invalidate_dflash_cuda_graph();
+            return Ok(None);
+        }
         let captured_ref = self.dflash_decode_graph.borrow();
         let Some(captured) = captured_ref.as_ref() else {
             return Ok(None);
@@ -1053,6 +1059,15 @@ impl HunyuanLlm {
         causal_mask: Option<&Tensor>,
         aux_layer_ids: &[usize],
     ) -> Result<HunyuanLlmOutput, OCRError> {
+        #[cfg(feature = "cuda")]
+        {
+            let incoming_len = inputs_embeds.dim(1).map_err(|e| {
+                candle_to_ocr_inference("HunyuanOCR", "prepared sequence length", e)
+            })?;
+            if self.kv_cache_len().saturating_add(incoming_len) > DECODE_ROPE_CACHE_LEN {
+                self.invalidate_dflash_cuda_graph();
+            }
+        }
         // Decode invokes the same non-contiguous elementwise layouts thousands
         // of times. Candle otherwise uploads their dims/strides for every
         // kernel. Restrict the built-in HtoD cache to the pure model forward so
@@ -1305,6 +1320,14 @@ impl HunyuanLlm {
             aux_layer_ids: aux_layer_ids.to_vec(),
         });
         Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    fn invalidate_dflash_cuda_graph(&self) {
+        // Eager cache growth reallocates the storage whose raw pointers were
+        // captured by the graph. Dropping it before growth also prevents a
+        // stale replay after the logical cache is reset for another document.
+        self.dflash_decode_graph.borrow_mut().take();
     }
 
     pub(crate) fn trim_kv_cache(&self, len: usize) -> Result<(), OCRError> {

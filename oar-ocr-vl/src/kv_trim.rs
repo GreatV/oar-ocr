@@ -54,10 +54,11 @@ impl TrimmableKvCache {
     /// logical K/V views.
     pub fn append(&mut self, k_new: &Tensor, v_new: &Tensor) -> Result<(Tensor, Tensor)> {
         let new_len = k_new.dim(self.cat_dim)?;
-        let required = self.cur_len + new_len;
         let reusable = self.storage.as_ref().is_some_and(|(storage_k, storage_v)| {
             storage_k.dtype() == k_new.dtype()
                 && storage_v.dtype() == v_new.dtype()
+                && storage_k.device().same_device(k_new.device())
+                && storage_v.device().same_device(v_new.device())
                 && storage_k.dims().len() == k_new.dims().len()
                 && storage_k
                     .dims()
@@ -74,7 +75,13 @@ impl TrimmableKvCache {
         });
         if self.storage.is_some() && !reusable {
             self.storage = None;
+            self.kv = None;
+            self.cur_len = 0;
         }
+        // Compatibility changes start a new logical cache. Compute this only
+        // after the reset above; otherwise the old length becomes a zero-filled
+        // prefix in the replacement storage.
+        let required = self.cur_len + new_len;
         if self.storage.is_none() {
             let mut shape = k_new.dims().to_vec();
             shape[self.cat_dim] = self.max_len.max(required);
@@ -309,6 +316,24 @@ mod tests {
         let (k, _) = c.append(&s, &s)?;
         assert_eq!(k.dims(), &[1, 2, 2, 4]);
         assert_eq!(c.current_seq_len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn incompatible_storage_starts_a_new_logical_cache() -> Result<()> {
+        let mut c = TrimmableKvCache::new(2, 64);
+        let old = Tensor::zeros((1, 1, 3, 4), DType::F32, &dev())?;
+        c.append(&old, &old)?;
+
+        // Changing the number of heads makes the retained storage
+        // incompatible with the new sequence.
+        let new = Tensor::ones((1, 2, 2, 4), DType::F32, &dev())?;
+        let (k, v) = c.append(&new, &new)?;
+
+        assert_eq!(c.current_seq_len(), 2);
+        assert_eq!(k.dims(), &[1, 2, 2, 4]);
+        assert_eq!(v.dims(), &[1, 2, 2, 4]);
+        assert!(k.flatten_all()?.to_vec1::<f32>()?.iter().all(|&x| x == 1.0));
         Ok(())
     }
 
