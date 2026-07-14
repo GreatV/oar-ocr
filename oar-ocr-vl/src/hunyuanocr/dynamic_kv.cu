@@ -1,0 +1,364 @@
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
+#include <stdint.h>
+
+// Copy one fixed-size verification block into a preallocated KV cache.  The
+// destination offset is read from a device-side cumulative-length tensor, so
+// the same kernel node can be replayed inside a CUDA graph for every decode
+// round without patching graph parameters on the host.
+extern "C" __global__ void append_kv_f16(
+    half* cache,
+    const half* source,
+    const uint32_t* cumulative_lengths,
+    uint32_t query_len,
+    uint32_t num_heads,
+    uint32_t head_dim,
+    uint32_t cache_len) {
+  const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  const uint32_t count = num_heads * query_len * head_dim;
+  if (index >= count) {
+    return;
+  }
+
+  const uint32_t head_stride = query_len * head_dim;
+  const uint32_t head = index / head_stride;
+  const uint32_t within_head = index - head * head_stride;
+  const uint32_t token = within_head / head_dim;
+  const uint32_t lane = within_head - token * head_dim;
+  const uint32_t end = cumulative_lengths[1];
+  const uint32_t start = end - query_len;
+  cache[(head * cache_len + start + token) * head_dim + lane] = source[index];
+}
+
+extern "C" __global__ void append_kv_bf16(
+    __nv_bfloat16* cache,
+    const __nv_bfloat16* source,
+    const uint32_t* cumulative_lengths,
+    uint32_t query_len,
+    uint32_t num_heads,
+    uint32_t head_dim,
+    uint32_t cache_len) {
+  const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  const uint32_t count = num_heads * query_len * head_dim;
+  if (index >= count) {
+    return;
+  }
+
+  const uint32_t head_stride = query_len * head_dim;
+  const uint32_t head = index / head_stride;
+  const uint32_t within_head = index - head * head_stride;
+  const uint32_t token = within_head / head_dim;
+  const uint32_t lane = within_head - token * head_dim;
+  const uint32_t end = cumulative_lengths[1];
+  const uint32_t start = end - query_len;
+  cache[(head * cache_len + start + token) * head_dim + lane] = source[index];
+}
+
+// Write head-major [head, query, lane] data into the token-major physical
+// layout consumed by FlashAttention's paged split-KV kernel. Blocks are stored
+// in identity order, so the flattened destination is [token, head, lane].
+extern "C" __global__ void append_paged_kv_bf16(
+    __nv_bfloat16* cache,
+    const __nv_bfloat16* source,
+    const uint32_t* cumulative_lengths,
+    uint32_t query_len,
+    uint32_t num_heads,
+    uint32_t head_dim,
+    uint32_t cache_len) {
+  const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  const uint32_t count = num_heads * query_len * head_dim;
+  if (index >= count) {
+    return;
+  }
+
+  const uint32_t head_stride = query_len * head_dim;
+  const uint32_t head = index / head_stride;
+  const uint32_t within_head = index - head * head_stride;
+  const uint32_t token = within_head / head_dim;
+  const uint32_t lane = within_head - token * head_dim;
+  const uint32_t end = cumulative_lengths[1];
+  const uint32_t start = end - query_len;
+  const uint32_t destination_token = start + token;
+  if (destination_token < cache_len) {
+    cache[(destination_token * num_heads + head) * head_dim + lane] = source[index];
+  }
+}
+
+// Match Candle's separate BF16 SiLU and multiply kernels, including the BF16
+// rounding after every SiLU arithmetic operation and before multiplication.
+extern "C" __global__ void silu_mul_bf16(
+    const __nv_bfloat16* gate,
+    const __nv_bfloat16* up,
+    __nv_bfloat16* output,
+    uint32_t count) {
+  const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= count) {
+    return;
+  }
+  const __nv_bfloat16 one = __float2bfloat16_rn(1.0f);
+  const __nv_bfloat16 negative = -gate[index];
+  const __nv_bfloat16 exponential = hexp(negative);
+  const __nv_bfloat16 denominator = one + exponential;
+  const __nv_bfloat16 activated = gate[index] / denominator;
+  output[index] = activated * up[index];
+}
+
+// Projected QKV is laid out [token, q+k+v]. Produce the contiguous
+// [head, token, lane] Q or K tensor while applying XDRoPE with the exact
+// upstream rounding points: BF16 -> F32, two RN multiplies, one RN add, then
+// F32 -> BF16. This replaces the generic cast/mul/neg/cat/add/cast sequence.
+extern "C" __global__ void xdrope_bf16(
+    __nv_bfloat16* output,
+    const __nv_bfloat16* qkv,
+    const float* cos_sin,
+    uint32_t projection_width,
+    uint32_t projection_offset,
+    uint32_t num_heads,
+    uint32_t query_len,
+    uint32_t head_dim) {
+  const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  const uint32_t count = num_heads * query_len * head_dim;
+  if (index >= count) {
+    return;
+  }
+
+  const uint32_t head_stride = query_len * head_dim;
+  const uint32_t head = index / head_stride;
+  const uint32_t within_head = index - head * head_stride;
+  const uint32_t token = within_head / head_dim;
+  const uint32_t lane = within_head - token * head_dim;
+  const uint32_t half_dim = head_dim / 2;
+  const uint32_t partner_lane =
+      lane < half_dim ? lane + half_dim : lane - half_dim;
+  const uint32_t source_base =
+      token * projection_width + projection_offset + head * head_dim;
+  const float x = __bfloat162float(qkv[source_base + lane]);
+  float rotated = __bfloat162float(qkv[source_base + partner_lane]);
+  if (lane < half_dim) {
+    rotated = -rotated;
+  }
+  const uint32_t rope_index = token * head_dim + lane;
+  const uint32_t rope_elements = query_len * head_dim;
+  const float direct = __fmul_rn(x, cos_sin[rope_index]);
+  const float cross =
+      __fmul_rn(rotated, cos_sin[rope_elements + rope_index]);
+  output[index] = __float2bfloat16_rn(__fadd_rn(direct, cross));
+}
+
+static __device__ __forceinline__ float warp_sum(float value) {
+#pragma unroll
+  for (int mask = 16; mask > 0; mask >>= 1) {
+    value += __shfl_xor_sync(0xffffffff, value, mask, 32);
+  }
+  return value;
+}
+
+// Fuse the target model's XDRoPE, per-head RMSNorm, and BF16-to-F16
+// conversion. Candle uses one 32-thread warp for a 128-wide RMSNorm, with
+// each lane accumulating four columns; duplicate that reduction order so the
+// verification logits remain bit-for-bit unchanged. For K, optionally emit V
+// beside it to also remove the generic slice/transpose/copy/cast chain.
+extern "C" __global__ void xdrope_rmsnorm_f16(
+    const __nv_bfloat16* qkv,
+    const float* cos_sin,
+    const __nv_bfloat16* weight,
+    half* output,
+    uint32_t projection_width,
+    uint32_t projection_offset,
+    uint32_t num_heads,
+    uint32_t query_len,
+    uint32_t head_dim,
+    float eps,
+    uint32_t include_v) {
+  const uint32_t row = blockIdx.x;
+  const uint32_t lane_id = threadIdx.x;
+  const uint32_t head = row / query_len;
+  const uint32_t token = row - head * query_len;
+  const uint32_t half_dim = head_dim / 2;
+  const uint32_t source_base =
+      token * projection_width + projection_offset + head * head_dim;
+  const uint32_t rope_elements = query_len * head_dim;
+  __nv_bfloat16 values[4];
+  float sum = 0.0f;
+
+#pragma unroll
+  for (uint32_t item = 0; item < 4; ++item) {
+    const uint32_t col = lane_id + item * 32;
+    const uint32_t partner_col =
+        col < half_dim ? col + half_dim : col - half_dim;
+    const float x = __bfloat162float(qkv[source_base + col]);
+    float partner = __bfloat162float(qkv[source_base + partner_col]);
+    if (col < half_dim) {
+      partner = -partner;
+    }
+    const uint32_t rope_index = token * head_dim + col;
+    const float direct = __fmul_rn(x, cos_sin[rope_index]);
+    const float cross =
+        __fmul_rn(partner, cos_sin[rope_elements + rope_index]);
+    values[item] = __float2bfloat16_rn(__fadd_rn(direct, cross));
+    const float value = __bfloat162float(values[item]);
+    sum += value * value;
+  }
+  sum = warp_sum(sum);
+  const float scale = rsqrtf(sum / static_cast<float>(head_dim) + eps);
+  const uint32_t output_base = row * head_dim;
+
+#pragma unroll
+  for (uint32_t item = 0; item < 4; ++item) {
+    const uint32_t col = lane_id + item * 32;
+    const float normalized = scale * __bfloat162float(values[item]) *
+        __bfloat162float(weight[col]);
+    const __nv_bfloat16 rounded = __float2bfloat16_rn(normalized);
+    output[output_base + col] = __float2half_rn(__bfloat162float(rounded));
+    if (include_v) {
+      const uint32_t count = num_heads * query_len * head_dim;
+      const uint32_t v_offset = projection_offset + num_heads * head_dim;
+      output[count + output_base + col] = __float2half_rn(__bfloat162float(
+          qkv[token * projection_width + v_offset + head * head_dim + col]));
+    }
+  }
+}
+
+// Draft attention normalizes Q/K before RoPE. Fuse that ordering while
+// matching Candle's 32-thread/128-column RMSNorm and the three BF16 rounding
+// points in the existing RoPE path. K can emit V in the same transposed
+// [head, token, lane] layout.
+extern "C" __global__ void rmsnorm_rope_bf16(
+    const __nv_bfloat16* qkv,
+    const __nv_bfloat16* cos_sin,
+    const __nv_bfloat16* weight,
+    __nv_bfloat16* output,
+    uint32_t projection_width,
+    uint32_t projection_offset,
+    uint32_t num_heads,
+    uint32_t query_len,
+    uint32_t head_dim,
+    float eps,
+    uint32_t include_v) {
+  const uint32_t row = blockIdx.x;
+  const uint32_t lane_id = threadIdx.x;
+  const uint32_t head = row / query_len;
+  const uint32_t token = row - head * query_len;
+  const uint32_t source_base =
+      token * projection_width + projection_offset + head * head_dim;
+  __nv_bfloat16 normalized[4];
+  float sum = 0.0f;
+
+#pragma unroll
+  for (uint32_t item = 0; item < 4; ++item) {
+    const uint32_t col = lane_id + item * 32;
+    const float value = __bfloat162float(qkv[source_base + col]);
+    sum += value * value;
+  }
+  sum = warp_sum(sum);
+  const float scale = rsqrtf(sum / static_cast<float>(head_dim) + eps);
+
+#pragma unroll
+  for (uint32_t item = 0; item < 4; ++item) {
+    const uint32_t col = lane_id + item * 32;
+    normalized[item] = __float2bfloat16_rn(
+        scale * __bfloat162float(qkv[source_base + col]) *
+        __bfloat162float(weight[col]));
+  }
+
+  const uint32_t output_base = row * head_dim;
+  const uint32_t rope_elements = query_len * head_dim;
+#pragma unroll
+  for (uint32_t item = 0; item < 4; ++item) {
+    const uint32_t col = lane_id + item * 32;
+    const uint32_t partner_item = col < head_dim / 2 ? item + 2 : item - 2;
+    float partner = __bfloat162float(normalized[partner_item]);
+    if (col < head_dim / 2) {
+      partner = -partner;
+    }
+    const uint32_t rope_index = token * head_dim + col;
+    const __nv_bfloat16 direct = __float2bfloat16_rn(
+        __bfloat162float(normalized[item]) *
+        __bfloat162float(cos_sin[rope_index]));
+    const __nv_bfloat16 cross = __float2bfloat16_rn(
+        partner * __bfloat162float(cos_sin[rope_elements + rope_index]));
+    output[output_base + col] = __float2bfloat16_rn(
+        __bfloat162float(direct) + __bfloat162float(cross));
+    if (include_v) {
+      const uint32_t count = num_heads * query_len * head_dim;
+      const uint32_t v_offset = projection_offset + num_heads * head_dim;
+      output[count + output_base + col] =
+          qkv[token * projection_width + v_offset + head * head_dim + col];
+    }
+  }
+}
+
+// DFlash applies RoPE directly in BF16. Preserve all three BF16 rounding
+// points (both products and their sum) while replacing the generic operation
+// chain with one kernel.
+extern "C" __global__ void rope_bf16(
+    __nv_bfloat16* output,
+    const __nv_bfloat16* input,
+    const __nv_bfloat16* cos_sin,
+    uint32_t num_heads,
+    uint32_t query_len,
+    uint32_t head_dim) {
+  const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  const uint32_t count = num_heads * query_len * head_dim;
+  if (index >= count) {
+    return;
+  }
+
+  const uint32_t head_stride = query_len * head_dim;
+  const uint32_t within_head = index % head_stride;
+  const uint32_t token = within_head / head_dim;
+  const uint32_t lane = within_head - token * head_dim;
+  const uint32_t half_dim = head_dim / 2;
+  const uint32_t partner =
+      lane < half_dim ? index + half_dim : index - half_dim;
+  float rotated = __bfloat162float(input[partner]);
+  if (lane < half_dim) {
+    rotated = -rotated;
+  }
+  const uint32_t rope_index = token * head_dim + lane;
+  const uint32_t rope_elements = query_len * head_dim;
+  const float x = __bfloat162float(input[index]);
+  const __nv_bfloat16 direct = __float2bfloat16_rn(
+      __fmul_rn(x, __bfloat162float(cos_sin[rope_index])));
+  const __nv_bfloat16 cross = __float2bfloat16_rn(__fmul_rn(
+      rotated, __bfloat162float(cos_sin[rope_elements + rope_index])));
+  output[index] = __float2bfloat16_rn(__fadd_rn(
+      __bfloat162float(direct), __bfloat162float(cross)));
+}
+
+// Match Candle's BF16 badd followed by its F32-accumulating RMSNorm, but write
+// both the rounded residual and normalized value in one pass. Output is
+// [2, rows, cols]: residual first, normalized second.
+extern "C" __global__ void add_rmsnorm_bf16(
+    const __nv_bfloat16* input,
+    const __nv_bfloat16* delta,
+    const __nv_bfloat16* weight,
+    __nv_bfloat16* output,
+    uint32_t ncols,
+    float eps) {
+  const uint32_t row = blockIdx.x;
+  const uint32_t col = threadIdx.x;
+  const uint32_t row_offset = row * ncols;
+  const uint32_t element_count = gridDim.x * ncols;
+
+  const __nv_bfloat16 residual = __float2bfloat16_rn(__fadd_rn(
+      __bfloat162float(input[row_offset + col]),
+      __bfloat162float(delta[row_offset + col])));
+  output[row_offset + col] = residual;
+  const float value = __bfloat162float(residual);
+  float sum = value * value;
+  sum = warp_sum(sum);
+
+  __shared__ float warp_sums[32];
+  const uint32_t warp = col / 32;
+  const uint32_t lane = col % 32;
+  if (lane == 0) {
+    warp_sums[warp] = sum;
+  }
+  __syncthreads();
+  sum = warp_sums[lane];
+  sum = warp_sum(sum);
+  const float scale = rsqrtf(sum / static_cast<float>(ncols) + eps);
+  output[element_count + row_offset + col] = __float2bfloat16_rn(
+      scale * value * __bfloat162float(weight[col]));
+}

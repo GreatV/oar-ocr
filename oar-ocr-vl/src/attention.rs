@@ -101,6 +101,104 @@ pub fn scaled_dot_product_attention(
     attn_weights.matmul(v)
 }
 
+/// Scaled dot-product attention for grouped-query attention without expanding
+/// K/V heads. Query heads that share one KV head are folded into the matrix row
+/// dimension, preserving the usual head order in the returned tensor.
+pub fn scaled_dot_product_attention_gqa(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    mask: Option<&Tensor>,
+    scale: f64,
+    is_causal: bool,
+    num_kv_groups: usize,
+) -> Result<Tensor> {
+    if num_kv_groups == 1 {
+        return scaled_dot_product_attention(q, k, v, mask, scale, is_causal);
+    }
+
+    let (batch, num_heads, query_len, head_dim) = q.dims4()?;
+    let (k_batch, num_kv_heads, kv_len, k_head_dim) = k.dims4()?;
+    let (v_batch, v_heads, v_len, v_head_dim) = v.dims4()?;
+    if batch != k_batch
+        || batch != v_batch
+        || num_heads != num_kv_heads * num_kv_groups
+        || num_kv_heads != v_heads
+        || kv_len != v_len
+        || head_dim != k_head_dim
+        || head_dim != v_head_dim
+    {
+        candle_core::bail!(
+            "invalid GQA shapes q={:?}, k={:?}, v={:?}, groups={num_kv_groups}",
+            q.dims(),
+            k.dims(),
+            v.dims()
+        )
+    }
+
+    let grouped_batch = batch * num_kv_heads;
+    let grouped_queries = num_kv_groups * query_len;
+    let grouped_q = q.reshape((grouped_batch, grouped_queries, head_dim))?;
+    let grouped_k = k
+        .reshape((grouped_batch, kv_len, head_dim))?
+        .transpose(1, 2)?;
+    let mut weights =
+        (grouped_q.matmul(&grouped_k)? * scale)?.reshape((batch, num_heads, query_len, kv_len))?;
+
+    weights = match mask {
+        Some(mask) => weights.broadcast_add(mask)?,
+        None if is_causal => {
+            let causal = create_causal_mask(query_len, kv_len, weights.dtype(), q.device())?;
+            weights.broadcast_add(&causal)?
+        }
+        None => weights,
+    };
+
+    let weight_dtype = weights.dtype();
+    let weights = candle_nn::ops::softmax_last_dim(&weights.to_dtype(DType::F32)?)?
+        .to_dtype(weight_dtype)?
+        .reshape((grouped_batch, grouped_queries, kv_len))?;
+    let grouped_v = v.reshape((grouped_batch, kv_len, head_dim))?;
+    weights
+        .matmul(&grouped_v)?
+        .reshape((batch, num_heads, query_len, head_dim))
+}
+
+#[cfg(any(feature = "cuda", test))]
+fn flash_attention_dtype_supported(dtype: DType) -> bool {
+    matches!(dtype, DType::F16 | DType::BF16)
+}
+
+/// Run CUDA FlashAttention v2 for Q/K/V tensors in `(batch, heads, seq,
+/// head_dim)` layout. Returns `None` on non-CUDA devices or for dtypes not
+/// supported by the CUDA kernel so callers can retain their portable eager
+/// fallback.
+pub fn flash_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    scale: f64,
+    causal: bool,
+) -> Result<Option<Tensor>> {
+    #[cfg(feature = "cuda")]
+    if q.device().is_cuda()
+        && flash_attention_dtype_supported(q.dtype())
+        && k.dtype() == q.dtype()
+        && v.dtype() == q.dtype()
+    {
+        // The CUDA kernel consumes (batch, seq, heads, head_dim) and natively
+        // supports GQA when K/V have fewer heads than Q.
+        let q = q.transpose(1, 2)?;
+        let k = k.transpose(1, 2)?;
+        let v = v.transpose(1, 2)?;
+        let output = candle_flash_attn::flash_attn(&q, &k, &v, scale as f32, causal)?;
+        return Ok(Some(output.transpose(1, 2)?));
+    }
+
+    let _ = (q, k, v, scale, causal);
+    Ok(None)
+}
+
 /// Create a causal (lower-triangular) attention mask.
 ///
 /// Returns a mask where position i can only attend to positions <= i.
@@ -121,18 +219,18 @@ pub fn create_causal_mask(
     device: &Device,
 ) -> Result<Tensor> {
     on_compute_device(device, |compute_device| {
-        let row_idx = Tensor::arange(0u32, seq_len as u32, compute_device)?
-            .reshape((seq_len, 1))?
-            .to_dtype(dtype)?;
-        let col_idx = Tensor::arange(0u32, kv_len as u32, compute_device)?
-            .reshape((1, kv_len))?
-            .to_dtype(dtype)?;
+        let row_idx =
+            Tensor::arange(0u32, seq_len as u32, compute_device)?.reshape((seq_len, 1))?;
+        let col_idx = Tensor::arange(0u32, kv_len as u32, compute_device)?.reshape((1, kv_len))?;
 
-        let offset = (kv_len.saturating_sub(seq_len)) as f64;
+        let offset = kv_len.saturating_sub(seq_len) as u32;
         // Condition: col <= row + offset
-        // col - offset <= row
-        let diff = col_idx.broadcast_sub(&Tensor::new(offset, compute_device)?.to_dtype(dtype)?)?;
-        let mask_cond = diff.broadcast_le(&row_idx)?;
+        // Keep this comparison in integer space. BF16 cannot distinguish
+        // adjacent absolute positions once a document context grows beyond
+        // 256 tokens, which would let verification queries see future draft
+        // tokens and invalidate speculative decoding.
+        let row_limit = row_idx.broadcast_add(&Tensor::new(offset, compute_device)?)?;
+        let mask_cond = col_idx.broadcast_le(&row_limit)?;
 
         let zero = Tensor::new(0f32, compute_device)?
             .to_dtype(dtype)?
@@ -591,6 +689,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn flash_attention_rejects_unsupported_dtypes() {
+        assert!(flash_attention_dtype_supported(DType::F16));
+        assert!(flash_attention_dtype_supported(DType::BF16));
+        assert!(!flash_attention_dtype_supported(DType::F32));
+        assert!(!flash_attention_dtype_supported(DType::F64));
+    }
+
+    #[test]
     fn test_scaled_dot_product_attention() -> Result<()> {
         let device = Device::Cpu;
 
@@ -609,6 +715,35 @@ mod tests {
         let out = scaled_dot_product_attention(&q, &k, &v, None, scale, true)?;
         assert_eq!(out.dims(), &[1, 4, 8, 64]);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_grouped_query_attention_matches_repeated_kv() -> Result<()> {
+        let device = Device::Cpu;
+        let q = Tensor::randn(0f32, 1., (1, 4, 3, 8), &device)?;
+        let k = Tensor::randn(0f32, 1., (1, 2, 5, 8), &device)?;
+        let v = Tensor::randn(0f32, 1., (1, 2, 5, 8), &device)?;
+        let mask = create_causal_mask(3, 5, DType::F32, &device)?;
+        let scale = 1.0 / (8f64).sqrt();
+
+        let repeated = scaled_dot_product_attention(
+            &q,
+            &repeat_kv(&k, 2)?,
+            &repeat_kv(&v, 2)?,
+            Some(&mask),
+            scale,
+            false,
+        )?;
+        let grouped = scaled_dot_product_attention_gqa(&q, &k, &v, Some(&mask), scale, false, 2)?;
+        let repeated = repeated.flatten_all()?.to_vec1::<f32>()?;
+        let grouped = grouped.flatten_all()?.to_vec1::<f32>()?;
+        assert!(
+            repeated
+                .iter()
+                .zip(grouped)
+                .all(|(left, right)| (left - right).abs() < 1e-5)
+        );
         Ok(())
     }
 
@@ -649,6 +784,29 @@ mod tests {
             assert_eq!(v, 0.0);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_bf16_causal_mask_preserves_adjacent_positions_in_long_context() -> Result<()> {
+        let device = Device::Cpu;
+        let query_len = 16;
+        let kv_len = 2048;
+        let context_len = kv_len - query_len;
+        let mask = create_causal_mask(query_len, kv_len, DType::BF16, &device)?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+
+        for row in 0..query_len {
+            let start = row * kv_len;
+            let last_visible = context_len + row;
+            assert_eq!(mask[start + last_visible], 0.0);
+            if last_visible + 1 < kv_len {
+                assert!(mask[start + last_visible + 1].is_infinite());
+                assert!(mask[start + last_visible + 1].is_sign_negative());
+            }
+        }
         Ok(())
     }
 

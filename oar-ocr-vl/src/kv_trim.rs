@@ -4,10 +4,9 @@
 //! callers roll the cache back to an earlier sequence length or keep an
 //! arbitrary subset of positions, leaving the rest of the attention path intact.
 //!
-//! Append uses `Tensor::cat` (candle's pre-preallocation behaviour). A
-//! preallocation + `slice_set` rewrite was tried for parity with
-//! `candle_nn::kv_cache::Cache` but reverted: it didn't improve per-page wall
-//! time and introduced subtle K/V value differences.
+//! Append uses a fixed-capacity backing tensor and `slice_set`, so speculative
+//! verification never copies the accepted history. `kv` contains narrow views
+//! over that backing storage and rollback only changes the logical length.
 
 use candle_core::{Result, Tensor};
 
@@ -21,18 +20,22 @@ use candle_core::{Result, Tensor};
 pub struct TrimmableKvCache {
     /// Concatenation axis (typically `2` for the seq dim of `(B, H, T, D)` tensors).
     cat_dim: usize,
-    /// Cached `(keys, values)`, each shape `(B, H, cur_len, D)`. `None` until
-    /// first `append`. K and V are stored together so the "both populated or
-    /// both empty" invariant is enforced by the type system — earlier
-    /// revisions used parallel `Option<Tensor>` fields and had to assert this
-    /// invariant manually.
+    /// Full-capacity backing storage, allocated lazily once the batch/head
+    /// dimensions are known and retained across page-level resets.
+    storage: Option<(Tensor, Tensor)>,
+    /// Current `(B, H, cur_len, D)` views into `storage`.
     kv: Option<(Tensor, Tensor)>,
     cur_len: usize,
-    /// Configured sequence-length capacity retained for parity with
-    /// `candle_nn::kv_cache::KvCache::new`. This wrapper does not enforce it.
-    /// Only read by the `max_seq_len()` accessor.
-    #[allow(dead_code)]
-    max_len: usize,
+    /// Capacity of `storage` along `cat_dim`, zero until the first `append`
+    /// or `initialize_storage` call. `append` grows this organically (like a
+    /// `Vec`) instead of jumping straight to `configured_capacity`, so a
+    /// cache that never needs a fixed CUDA-graph buffer doesn't pay for one.
+    capacity: usize,
+    /// Capacity requested via `new()`. Used by `initialize_storage` (CUDA
+    /// graph decode paths that need a fixed-size buffer pinned before the
+    /// first append) and the `max_seq_len()` accessor; organic growth in
+    /// `append` does not preallocate to this size.
+    configured_capacity: usize,
 }
 
 // `TrimmableKvCache` lives at the crate root so every model's attention path
@@ -45,27 +48,80 @@ impl TrimmableKvCache {
     pub fn new(cat_dim: usize, max_len: usize) -> Self {
         Self {
             cat_dim,
+            storage: None,
             kv: None,
             cur_len: 0,
-            max_len,
+            capacity: 0,
+            configured_capacity: max_len,
         }
     }
 
-    /// Append `(k_new, v_new)` and return the concatenated `(K_all, V_all)`
-    /// tensors the attention path consumes. Uses cat-based growth (see the
-    /// module note on why preallocation was not adopted).
+    /// Append `(k_new, v_new)` into preallocated storage and return current
+    /// logical K/V views.
     pub fn append(&mut self, k_new: &Tensor, v_new: &Tensor) -> Result<(Tensor, Tensor)> {
         let new_len = k_new.dim(self.cat_dim)?;
-        let (k_all, v_all) = match self.kv.as_ref() {
-            None => (k_new.clone(), v_new.clone()),
-            Some((k_old, v_old)) => {
-                let k = Tensor::cat(&[k_old, k_new], self.cat_dim)?.contiguous()?;
-                let v = Tensor::cat(&[v_old, v_new], self.cat_dim)?.contiguous()?;
-                (k, v)
-            }
-        };
+        let reusable = self.storage.as_ref().is_some_and(|(storage_k, storage_v)| {
+            storage_k.dtype() == k_new.dtype()
+                && storage_v.dtype() == v_new.dtype()
+                && storage_k.device().same_device(k_new.device())
+                && storage_v.device().same_device(v_new.device())
+                && storage_k.dims().len() == k_new.dims().len()
+                && storage_k
+                    .dims()
+                    .iter()
+                    .zip(k_new.dims())
+                    .enumerate()
+                    .all(|(dim, (stored, new))| dim == self.cat_dim || stored == new)
+                && storage_v
+                    .dims()
+                    .iter()
+                    .zip(v_new.dims())
+                    .enumerate()
+                    .all(|(dim, (stored, new))| dim == self.cat_dim || stored == new)
+        });
+        if self.storage.is_some() && !reusable {
+            self.storage = None;
+            self.kv = None;
+            self.cur_len = 0;
+        }
+        // Compatibility changes start a new logical cache. Compute this only
+        // after the reset above; otherwise the old length becomes a zero-filled
+        // prefix in the replacement storage.
+        let required = self.cur_len + new_len;
+        if self.storage.is_none() {
+            // Grow from what's actually needed rather than jumping straight
+            // to `configured_capacity`: most callers never trigger a CUDA
+            // graph (which instead pins a fixed buffer up front via
+            // `initialize_storage`), so a short document should not reserve
+            // e.g. 16K tokens of K/V per layer on its first token.
+            let mut shape = k_new.dims().to_vec();
+            shape[self.cat_dim] = required;
+            self.capacity = required;
+            self.storage = Some((
+                Tensor::zeros(shape.as_slice(), k_new.dtype(), k_new.device())?,
+                Tensor::zeros(shape.as_slice(), v_new.dtype(), v_new.device())?,
+            ));
+        } else if required > self.capacity {
+            let grow_by = self.capacity.max(new_len);
+            let mut shape = k_new.dims().to_vec();
+            shape[self.cat_dim] = grow_by;
+            let (old_k, old_v) = self.storage.as_ref().expect("storage initialized");
+            let extra_k = Tensor::zeros(shape.as_slice(), k_new.dtype(), k_new.device())?;
+            let extra_v = Tensor::zeros(shape.as_slice(), v_new.dtype(), v_new.device())?;
+            self.storage = Some((
+                Tensor::cat(&[old_k, &extra_k], self.cat_dim)?.contiguous()?,
+                Tensor::cat(&[old_v, &extra_v], self.cat_dim)?.contiguous()?,
+            ));
+            self.capacity += grow_by;
+        }
+
+        let (storage_k, storage_v) = self.storage.as_mut().expect("storage initialized");
+        storage_k.slice_set(k_new, self.cat_dim, self.cur_len)?;
+        storage_v.slice_set(v_new, self.cat_dim, self.cur_len)?;
+        self.cur_len = required;
+        let k_all = storage_k.narrow(self.cat_dim, 0, self.cur_len)?;
+        let v_all = storage_v.narrow(self.cat_dim, 0, self.cur_len)?;
         self.kv = Some((k_all.clone(), v_all.clone()));
-        self.cur_len += new_len;
         Ok((k_all, v_all))
     }
 
@@ -80,13 +136,18 @@ impl TrimmableKvCache {
         }
         // `cur_len > 0` implies `kv.is_some()` by the invariant maintained in
         // `append` / `reset`.
-        let Some((k_old, v_old)) = self.kv.as_ref() else {
+        if self.kv.is_none() {
             return Err(candle_core::Error::Msg(
                 "TrimmableKvCache::trim_to: cache empty but cur_len > 0".into(),
             ));
-        };
-        let k = k_old.narrow(self.cat_dim, 0, len)?.contiguous()?;
-        let v = v_old.narrow(self.cat_dim, 0, len)?.contiguous()?;
+        }
+        let (storage_k, storage_v) = self.storage.as_ref().ok_or_else(|| {
+            candle_core::Error::Msg(
+                "TrimmableKvCache::trim_to: storage empty but cur_len > 0".into(),
+            )
+        })?;
+        let k = storage_k.narrow(self.cat_dim, 0, len)?;
+        let v = storage_v.narrow(self.cat_dim, 0, len)?;
         self.kv = Some((k, v));
         self.cur_len = len;
         Ok(())
@@ -125,17 +186,64 @@ impl TrimmableKvCache {
         let idx_t = Tensor::new(indices, device)?;
         let new_k = k.index_select(&idx_t, self.cat_dim)?.contiguous()?;
         let new_v = v.index_select(&idx_t, self.cat_dim)?.contiguous()?;
-        self.kv = Some((new_k, new_v));
-        self.cur_len = indices.len();
-        Ok(())
+        self.cur_len = 0;
+        self.kv = None;
+        self.append(&new_k, &new_v).map(|_| ())
     }
 
     pub fn current_seq_len(&self) -> usize {
         self.cur_len
     }
 
+    /// Ensure fixed-capacity storage exists without retaining a logical token.
+    /// This is used by CUDA-graph decode paths whose device kernel writes at a
+    /// runtime offset while the host only tracks the resulting logical length.
+    pub fn initialize_storage(&mut self, template: &Tensor) -> Result<()> {
+        if self.storage.is_none() {
+            let mut shape = template.dims().to_vec();
+            shape[self.cat_dim] = self.configured_capacity;
+            self.capacity = self.configured_capacity;
+            self.storage = Some((
+                Tensor::zeros(shape.as_slice(), template.dtype(), template.device())?,
+                Tensor::zeros(shape.as_slice(), template.dtype(), template.device())?,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Return the fixed backing tensors used by dynamic CUDA-graph appends.
+    pub fn storage(&self) -> Option<(Tensor, Tensor)> {
+        self.storage.as_ref().map(|(k, v)| (k.clone(), v.clone()))
+    }
+
+    /// Update only the logical length after a device-side graph append.
+    pub fn set_current_len(&mut self, len: usize) -> Result<()> {
+        if len > self.capacity {
+            return Err(candle_core::Error::Msg(format!(
+                "TrimmableKvCache::set_current_len: {len} exceeds capacity {}",
+                self.capacity
+            )));
+        }
+        if len == 0 {
+            self.kv = None;
+            self.cur_len = 0;
+            return Ok(());
+        }
+        let (storage_k, storage_v) = self.storage.as_ref().ok_or_else(|| {
+            candle_core::Error::Msg(
+                "TrimmableKvCache::set_current_len: storage is not initialized".into(),
+            )
+        })?;
+        self.kv = Some((
+            storage_k.narrow(self.cat_dim, 0, len)?,
+            storage_v.narrow(self.cat_dim, 0, len)?,
+        ));
+        self.cur_len = len;
+        Ok(())
+    }
+
     pub fn max_seq_len(&self) -> usize {
-        self.max_len
+        self.configured_capacity
     }
 
     pub fn reset(&mut self) {
@@ -220,6 +328,24 @@ mod tests {
         let (k, _) = c.append(&s, &s)?;
         assert_eq!(k.dims(), &[1, 2, 2, 4]);
         assert_eq!(c.current_seq_len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn incompatible_storage_starts_a_new_logical_cache() -> Result<()> {
+        let mut c = TrimmableKvCache::new(2, 64);
+        let old = Tensor::zeros((1, 1, 3, 4), DType::F32, &dev())?;
+        c.append(&old, &old)?;
+
+        // Changing the number of heads makes the retained storage
+        // incompatible with the new sequence.
+        let new = Tensor::ones((1, 2, 2, 4), DType::F32, &dev())?;
+        let (k, v) = c.append(&new, &new)?;
+
+        assert_eq!(c.current_seq_len(), 2);
+        assert_eq!(k.dims(), &[1, 2, 2, 4]);
+        assert_eq!(v.dims(), &[1, 2, 2, 4]);
+        assert!(k.flatten_all()?.to_vec1::<f32>()?.iter().all(|&x| x == 1.0));
         Ok(())
     }
 

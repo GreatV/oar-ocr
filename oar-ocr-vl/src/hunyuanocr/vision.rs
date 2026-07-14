@@ -1,8 +1,11 @@
 use super::config::{HunyuanOcrVersion, HunyuanOcrVisionConfig};
+use crate::attention::flash_attention;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::{Conv2d, Conv2dConfig, LayerNorm, LayerNormConfig, Linear, Module};
 use oar_ocr_core::core::OCRError;
+use rayon::prelude::*;
+use std::sync::Arc;
 
 /// Late vit layers are the cross-implementation drift hotspot: BF16 Q·K
 /// accumulation drift redirects attention "sink" positions enough to swap the
@@ -14,7 +17,9 @@ const VIT_LATE_F32_THRESHOLD: usize = 20;
 #[derive(Debug, Clone)]
 struct VisionEmbeddings {
     patch_embedding: Conv2d,
-    position_embedding: candle_nn::Embedding,
+    patch_position_base: Arc<[f32]>,
+    position_grid: usize,
+    position_dim: usize,
     version: HunyuanOcrVersion,
 }
 
@@ -74,10 +79,52 @@ impl VisionEmbeddings {
                 .map_err(|e| {
                     candle_to_ocr_inference("HunyuanOCR", "load vit position_embedding", e)
                 })?;
+        let pos_w = position_embedding.embeddings();
+        let (loaded_positions, position_dim) = pos_w.dims2().map_err(|e| {
+            candle_to_ocr_processing(
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                "HunyuanOCR: vit position_embedding dims2 failed",
+                e,
+            )
+        })?;
+        if loaded_positions < 2 {
+            return Err(OCRError::ConfigError {
+                message: format!(
+                    "HunyuanOCR: vit position_embedding is too small: {loaded_positions}"
+                ),
+            });
+        }
+        let num_patch_positions = loaded_positions - 1;
+        let position_grid = (num_patch_positions as f64).sqrt() as usize;
+        if position_grid * position_grid != num_patch_positions {
+            return Err(OCRError::ConfigError {
+                message: format!(
+                    "HunyuanOCR: vit patch position grid is not square: num={num_patch_positions}"
+                ),
+            });
+        }
+        // Position weights never change. Copy the BF16->F32 base once while
+        // loading instead of transferring the same 75.5 MB GPU tensor back to
+        // the CPU for every page before interpolation.
+        let patch_position_base: Arc<[f32]> = pos_w
+            .i((1..loaded_positions, ..))
+            .and_then(|x| x.to_dtype(DType::F32))
+            .and_then(|x| x.flatten_all())
+            .and_then(|x| x.to_vec1::<f32>())
+            .map_err(|e| {
+                candle_to_ocr_processing(
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    "HunyuanOCR: cache vit patch position embedding failed",
+                    e,
+                )
+            })?
+            .into();
 
         Ok(Self {
             patch_embedding,
-            position_embedding,
+            patch_position_base,
+            position_grid,
+            position_dim,
             version,
         })
     }
@@ -97,82 +144,16 @@ impl VisionEmbeddings {
             });
         }
 
-        let pos_w = self.position_embedding.embeddings();
-        let (num_positions, dim) = pos_w.dims2().map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "HunyuanOCR: vit position_embedding dims2 failed",
-                e,
-            )
-        })?;
-        if num_positions < 2 {
-            return Err(OCRError::ConfigError {
-                message: format!(
-                    "HunyuanOCR: vit position_embedding is too small: {num_positions}"
-                ),
-            });
-        }
-
-        let patch_pos = pos_w.i((1..num_positions, ..)).map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "HunyuanOCR: vit slice patch position embedding failed",
-                e,
-            )
-        })?;
-        let (num_patch_positions, _) = patch_pos.dims2().map_err(|e| {
-            candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                "HunyuanOCR: vit patch position dims2 failed",
-                e,
-            )
-        })?;
-
-        let grid = (num_patch_positions as f64).sqrt() as usize;
-        if grid * grid != num_patch_positions {
-            return Err(OCRError::ConfigError {
-                message: format!(
-                    "HunyuanOCR: vit patch position grid is not square: num={num_patch_positions}"
-                ),
-            });
-        }
-
-        let base = patch_pos
-            .to_dtype(DType::F32)
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "HunyuanOCR: vit patch position cast to f32 failed",
-                    e,
-                )
-            })?
-            .flatten_all()
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "HunyuanOCR: vit patch position flatten failed",
-                    e,
-                )
-            })?
-            .to_vec1::<f32>()
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "HunyuanOCR: vit patch position to_vec failed",
-                    e,
-                )
-            })?;
-
         let out = interpolate_bilinear_align_corners_false(
-            &base,
-            grid,
-            grid,
+            &self.patch_position_base,
+            self.position_grid,
+            self.position_grid,
             height,
             width,
-            dim,
+            self.position_dim,
             self.version,
         );
-        Tensor::from_vec(out, (height * width, dim), device)
+        Tensor::from_vec(out, (height * width, self.position_dim), device)
             .map_err(|e| {
                 candle_to_ocr_processing(
                     oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
@@ -290,6 +271,24 @@ impl VisionAttention {
         let v = v
             .contiguous()
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "vit attn v contiguous", e))?;
+
+        // The official CUDA path uses fused full attention for the vision
+        // encoder. Besides avoiding the quadratic attention buffer, the
+        // kernel accumulates the BF16 dot products stably without the late
+        // F32 eager fallback below.
+        if let Some(attn_output) = flash_attention(&q, &k, &v, self.scaling, false)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "vit flash attention", e))?
+        {
+            let attn_output = attn_output
+                .transpose(1, 2)
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "vit flash transpose", e))?
+                .reshape((b, seq_len, self.num_heads * self.head_dim))
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "vit flash reshape", e))?;
+            return self
+                .o_proj
+                .forward(&attn_output)
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "vit attn o_proj", e));
+        }
 
         // Chunked attention over the query dimension. Without chunking the
         // (B, H, N, N) attention matrix at N=4320 (the vit's full patch
@@ -929,34 +928,28 @@ fn interpolate_bilinear_align_corners_false(
     }
 
     let (inv_scale_y, inv_scale_x) = match version {
-        // V1.0's Transformers path passed scale_factor=(out + 0.1) / in.
         HunyuanOcrVersion::V1 => (
             in_h as f32 / (out_h as f32 + 0.1),
             in_w as f32 / (out_w as f32 + 0.1),
         ),
-        // V1.5 passes an explicit output size to interpolate(), whose
-        // align_corners=false source scale is in/out.
         HunyuanOcrVersion::V1_5 => (in_h as f32 / out_h as f32, in_w as f32 / out_w as f32),
     };
 
-    for oy in 0..out_h {
+    let row = |oy: usize, out_row: &mut [f32]| {
         let fy = ((oy as f32 + 0.5) * inv_scale_y - 0.5).max(0.0);
         let y0 = fy.floor().max(0.0) as usize;
         let y1 = (y0 + 1).min(in_h - 1);
         let wy = fy - y0 as f32;
-
         for ox in 0..out_w {
             let fx = ((ox as f32 + 0.5) * inv_scale_x - 0.5).max(0.0);
             let x0 = fx.floor().max(0.0) as usize;
             let x1 = (x0 + 1).min(in_w - 1);
             let wx = fx - x0 as f32;
-
-            let out_base = (oy * out_w + ox) * dim;
+            let out_base = ox * dim;
             let i00 = (y0 * in_w + x0) * dim;
             let i01 = (y0 * in_w + x1) * dim;
             let i10 = (y1 * in_w + x0) * dim;
             let i11 = (y1 * in_w + x1) * dim;
-
             for c in 0..dim {
                 let v00 = base[i00 + c];
                 let v01 = base[i01 + c];
@@ -964,9 +957,22 @@ fn interpolate_bilinear_align_corners_false(
                 let v11 = base[i11 + c];
                 let v0 = v00 + (v01 - v00) * wx;
                 let v1 = v10 + (v11 - v10) * wx;
-                out[out_base + c] = v0 + (v1 - v0) * wy;
+                out_row[out_base + c] = v0 + (v1 - v0) * wy;
             }
         }
+    };
+
+    // Below this row count, Rayon's scheduling overhead outweighs the gain
+    // from parallelizing; run sequentially instead.
+    const PAR_ROW_THRESHOLD: usize = 16;
+    if out_h < PAR_ROW_THRESHOLD {
+        for (oy, out_row) in out.chunks_mut(out_w * dim).enumerate() {
+            row(oy, out_row);
+        }
+    } else {
+        out.par_chunks_mut(out_w * dim)
+            .enumerate()
+            .for_each(|(oy, out_row)| row(oy, out_row));
     }
     out
 }
