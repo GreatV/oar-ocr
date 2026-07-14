@@ -346,9 +346,17 @@ extern "C" __global__ void dflash_repetition_argmax_stage2(
   }
   float best_value = -CUDART_INF_F;
   uint32_t best_index = UINT32_MAX;
-  if (lane < partitions_per_row) {
-    best_value = partial_values[row * partitions_per_row + lane];
-    best_index = partial_indices[row * partitions_per_row + lane];
+  for (uint32_t partition = lane; partition < partitions_per_row;
+       partition += blockDim.x) {
+    const float value =
+        partial_values[row * partitions_per_row + partition];
+    const uint32_t index =
+        partial_indices[row * partitions_per_row + partition];
+    if (value > best_value ||
+        (value == best_value && index < best_index)) {
+      best_value = value;
+      best_index = index;
+    }
   }
   __shared__ float values[32];
   __shared__ uint32_t indices[32];

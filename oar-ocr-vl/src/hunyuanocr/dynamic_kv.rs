@@ -4,6 +4,7 @@ use candle_core::{
 };
 
 const PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/hunyuan_dynamic_kv.ptx"));
+const PARTITIONS_PER_ROW: usize = 8;
 
 pub(super) struct DynamicKvAppend {
     pub query_len: usize,
@@ -145,7 +146,6 @@ impl CustomOp1 for ArgmaxFirstBf16 {
         let device = storage.device().clone();
         let logits = storage.as_cuda_slice::<half::bf16>()?;
         let logits = logits.slice(layout.start_offset()..);
-        const PARTITIONS_PER_ROW: usize = 8;
         let partial_count = rows * PARTITIONS_PER_ROW;
         let partial_values = unsafe { device.alloc::<f32>(partial_count) }?;
         let partial_indices = unsafe { device.alloc::<u32>(partial_count) }?;
@@ -306,7 +306,6 @@ impl CustomOp2 for RepetitionArgmaxBf16 {
         let history = history.as_cuda_slice::<u8>()?;
         let logits = logits.slice(logits_layout.start_offset()..);
         let history = history.slice(history_layout.start_offset()..);
-        const PARTITIONS_PER_ROW: usize = 8;
         let partial_count = rows * PARTITIONS_PER_ROW;
         let partial_values = unsafe { device.alloc::<f32>(partial_count) }?;
         let partial_indices = unsafe { device.alloc::<u32>(partial_count) }?;
@@ -426,7 +425,6 @@ impl CustomOp3 for DFlashRepetitionArgmaxBf16 {
         let logits = logits.slice(logits_layout.start_offset()..);
         let history = history.slice(history_layout.start_offset()..);
         let proposals = proposals.slice(proposals_layout.start_offset()..);
-        const PARTITIONS_PER_ROW: usize = 8;
         let partial_count = rows * PARTITIONS_PER_ROW;
         let partial_values = unsafe { device.alloc::<f32>(partial_count) }?;
         let partial_indices = unsafe { device.alloc::<u32>(partial_count) }?;
