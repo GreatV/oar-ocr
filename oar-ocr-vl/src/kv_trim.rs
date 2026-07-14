@@ -199,14 +199,54 @@ impl TrimmableKvCache {
     /// This is used by CUDA-graph decode paths whose device kernel writes at a
     /// runtime offset while the host only tracks the resulting logical length.
     pub fn initialize_storage(&mut self, template: &Tensor) -> Result<()> {
-        if self.storage.is_none() {
+        self.initialize_storage_with_capacity(template, self.configured_capacity)
+    }
+
+    /// Ensure fixed-capacity storage of exactly `capacity` tokens exists.
+    /// CUDA graphs capture the backing pointers and the physical head stride,
+    /// so a larger existing allocation cannot be reused with a smaller
+    /// captured `cache_len` value.
+    pub fn initialize_storage_with_capacity(
+        &mut self,
+        template: &Tensor,
+        capacity: usize,
+    ) -> Result<()> {
+        if capacity == 0 {
+            return Err(candle_core::Error::Msg(
+                "TrimmableKvCache capacity must be non-zero".into(),
+            ));
+        }
+        let reusable = self.storage.as_ref().is_some_and(|(storage_k, storage_v)| {
+            self.capacity == capacity
+                && storage_k.dtype() == template.dtype()
+                && storage_v.dtype() == template.dtype()
+                && storage_k.device().same_device(template.device())
+                && storage_v.device().same_device(template.device())
+                && storage_k.dims().len() == template.dims().len()
+                && storage_k
+                    .dims()
+                    .iter()
+                    .zip(template.dims())
+                    .enumerate()
+                    .all(|(dim, (stored, new))| {
+                        if dim == self.cat_dim {
+                            *stored == capacity
+                        } else {
+                            stored == new
+                        }
+                    })
+                && storage_v.dims() == storage_k.dims()
+        });
+        if !reusable {
             let mut shape = template.dims().to_vec();
-            shape[self.cat_dim] = self.configured_capacity;
-            self.capacity = self.configured_capacity;
+            shape[self.cat_dim] = capacity;
+            self.capacity = capacity;
             self.storage = Some((
                 Tensor::zeros(shape.as_slice(), template.dtype(), template.device())?,
                 Tensor::zeros(shape.as_slice(), template.dtype(), template.device())?,
             ));
+            self.kv = None;
+            self.cur_len = 0;
         }
         Ok(())
     }
@@ -244,6 +284,11 @@ impl TrimmableKvCache {
 
     pub fn max_seq_len(&self) -> usize {
         self.configured_capacity
+    }
+
+    /// Physical sequence capacity of the current backing storage.
+    pub fn storage_capacity(&self) -> usize {
+        self.capacity
     }
 
     pub fn reset(&mut self) {
@@ -329,6 +374,29 @@ mod tests {
         assert_eq!(k.dims(), &[1, 2, 2, 4]);
         assert_eq!(c.current_seq_len(), 2);
         Ok(())
+    }
+
+    #[test]
+    fn fixed_storage_uses_exact_requested_capacity() -> Result<()> {
+        let mut c = TrimmableKvCache::new(2, 64);
+        let template = Tensor::zeros((1, 2, 1, 4), DType::F32, &dev())?;
+        c.initialize_storage_with_capacity(&template, 8)?;
+        assert_eq!(c.storage_capacity(), 8);
+        assert_eq!(c.storage().unwrap().0.dims(), &[1, 2, 8, 4]);
+
+        c.set_current_len(4)?;
+        c.initialize_storage_with_capacity(&template, 16)?;
+        assert_eq!(c.storage_capacity(), 16);
+        assert_eq!(c.current_seq_len(), 0);
+        assert_eq!(c.storage().unwrap().0.dims(), &[1, 2, 16, 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn fixed_storage_rejects_zero_capacity() {
+        let mut c = TrimmableKvCache::new(2, 64);
+        let template = Tensor::zeros((1, 2, 1, 4), DType::F32, &dev()).unwrap();
+        assert!(c.initialize_storage_with_capacity(&template, 0).is_err());
     }
 
     #[test]

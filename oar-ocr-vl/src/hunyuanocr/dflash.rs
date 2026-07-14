@@ -7,12 +7,12 @@
 
 #[cfg(feature = "cuda")]
 use super::dynamic_kv::{
-    DynamicPagedKvAppend, FusedAddRmsNormBf16, FusedRmsNormRopeBf16, FusedRopeBf16,
-    FusedSiluMulBf16,
+    ArgmaxFirstBf16, DynamicPagedKvAppend, FusedAddRmsNormBf16, FusedRmsNormRopeBf16,
+    FusedRopeBf16, FusedSiluMulBf16,
 };
 use crate::attention::{RotaryEmbedding, flash_attention, scaled_dot_product_attention_gqa};
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
-use candle_core::{DType, Device, Tensor};
+use candle_core::{D, DType, Device, Tensor};
 use candle_nn::{Linear, Module, RmsNorm, VarBuilder, linear_no_bias, rms_norm};
 use oar_ocr_core::core::OCRError;
 use serde::Deserialize;
@@ -57,14 +57,12 @@ impl DFlashConfig {
     }
 
     fn validate(&self) -> Result<(), OCRError> {
-        if self.block_size == 0
+        if self.block_size < 2
             || self.num_hidden_layers == 0
             || self.dflash_config.target_layer_ids.is_empty()
         {
             return Err(OCRError::ConfigError {
-                message:
-                    "HunyuanOCR DFlash: block size, layer count, and target layers must be non-zero"
-                        .to_string(),
+                message: "HunyuanOCR DFlash: block size must be at least 2, and layer count and target layers must be non-zero".to_string(),
             });
         }
         if !self
@@ -113,6 +111,14 @@ impl ContextKv {
         self.k = None;
         self.v = None;
         self.len = 0;
+    }
+
+    #[cfg(feature = "cuda")]
+    fn reset_graph_storage(&mut self) {
+        self.storage = None;
+        self.block_table = None;
+        self.capacity = CONTEXT_KV_INITIAL_CAPACITY;
+        self.reset();
     }
 
     fn ensure_capacity(
@@ -695,11 +701,7 @@ impl DFlashMlp {
             .narrow(2, self.intermediate_size, self.intermediate_size)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "MLP up", e))?;
         #[cfg(feature = "cuda")]
-        let hidden = if gate.device().is_cuda()
-            && gate.dtype() == DType::BF16
-            && gate.is_contiguous()
-            && up.is_contiguous()
-        {
+        let hidden = if gate.device().is_cuda() && gate.dtype() == DType::BF16 {
             gate.apply_op2_no_bwd(&up, &FusedSiluMulBf16)
                 .map_err(|e| tensor_err("HunyuanOCR DFlash: fused MLP SiLU*up", e))?
         } else {
@@ -875,7 +877,8 @@ struct DFlashCudaGraph {
     sin_input: Tensor,
     _query_lengths: Tensor,
     kv_lengths: Tensor,
-    output: Tensor,
+    hidden_output: Tensor,
+    proposals_output: Tensor,
 }
 
 #[cfg(feature = "cuda")]
@@ -883,7 +886,8 @@ impl std::fmt::Debug for DFlashCudaGraph {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DFlashCudaGraph")
             .field("query_input", &self.query_input.shape())
-            .field("output", &self.output.shape())
+            .field("hidden_output", &self.hidden_output.shape())
+            .field("proposals_output", &self.proposals_output.shape())
             .finish_non_exhaustive()
     }
 }
@@ -901,6 +905,7 @@ pub(crate) struct DFlashModel {
     rope_cos: Tensor,
     rope_sin: Tensor,
     context_kv_proj: Linear,
+    lm_head_weight_t: Tensor,
     caches: RefCell<Vec<ContextKv>>,
     dtype: DType,
     device: Device,
@@ -911,10 +916,25 @@ impl DFlashModel {
         model_dir: impl AsRef<Path>,
         dtype: DType,
         device: &Device,
+        lm_head_weight: &Tensor,
     ) -> Result<Self, OCRError> {
         let model_dir = model_dir.as_ref();
         let cfg = DFlashConfig::from_path(model_dir.join("config.json"))?;
         cfg.validate()?;
+        let (target_vocab_size, target_hidden_size) = lm_head_weight
+            .dims2()
+            .map_err(|e| tensor_err("HunyuanOCR DFlash: target LM head shape", e))?;
+        if target_vocab_size != cfg.vocab_size || target_hidden_size != cfg.hidden_size {
+            return Err(OCRError::ConfigError {
+                message: format!(
+                    "HunyuanOCR DFlash: target LM head shape {target_vocab_size}x{target_hidden_size} does not match draft vocab/hidden {}x{}",
+                    cfg.vocab_size, cfg.hidden_size
+                ),
+            });
+        }
+        let lm_head_weight_t = lm_head_weight
+            .transpose(0, 1)
+            .map_err(|e| tensor_err("HunyuanOCR DFlash: transpose target LM head", e))?;
         let files = crate::utils::collect_safetensors(model_dir, "HunyuanOCR DFlash")?;
         // SAFETY: the checkpoint files remain mapped for the lifetime of the tensors.
         let vb = unsafe {
@@ -966,26 +986,49 @@ impl DFlashModel {
             rope_cos,
             rope_sin,
             context_kv_proj,
+            lm_head_weight_t,
             caches: RefCell::new(caches),
             dtype,
             device: device.clone(),
         };
-        // `DynamicPagedKvAppend` (the graph's per-layer append kernel) only
-        // accepts BF16; capturing under another dtype override would fail
-        // model load entirely even though the eager DFlash path below
-        // supports F16/F32.
-        #[cfg(feature = "cuda")]
-        if device.is_cuda()
-            && dtype == DType::BF16
-            && std::env::var_os("OAR_HUNYUAN_DISABLE_CUDA_GRAPH").is_none()
-        {
-            model.capture_cuda_graph()?;
-        }
+        model.prepare_cuda_graph()?;
         Ok(model)
     }
 
     pub(crate) fn config(&self) -> &DFlashConfig {
         &self.cfg
+    }
+
+    pub(crate) fn prepare_cuda_graph(&self) -> Result<(), OCRError> {
+        #[cfg(feature = "cuda")]
+        {
+            if std::env::var_os("OAR_HUNYUAN_DISABLE_CUDA_GRAPH").is_some() {
+                self.invalidate_cuda_graph();
+                return Ok(());
+            }
+            // `DynamicPagedKvAppend` accepts BF16 only. Other dtype
+            // overrides retain the eager path instead of failing model load.
+            if self.device.is_cuda()
+                && self.dtype == DType::BF16
+                && self.decode_graph.borrow().is_none()
+            {
+                let mut caches = self.caches.borrow_mut();
+                if caches.iter().any(|cache| cache.len != 0) {
+                    return Ok(());
+                }
+                // A long-context eager fallback may have grown the physical
+                // cache beyond the graph's fixed 16K stride. At the next page
+                // boundary it is safe to shrink and capture fresh pointers.
+                for cache in caches.iter_mut() {
+                    if cache.capacity != CONTEXT_KV_INITIAL_CAPACITY {
+                        cache.reset_graph_storage();
+                    }
+                }
+                drop(caches);
+                self.capture_cuda_graph()?;
+            }
+        }
+        Ok(())
     }
 
     #[cfg(feature = "cuda")]
@@ -1137,6 +1180,26 @@ impl DFlashModel {
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "dynamic final norm", e))
     }
 
+    fn proposals_from_hidden(&self, hidden: &Tensor) -> Result<Tensor, OCRError> {
+        let num_spec = self.cfg.block_size.saturating_sub(1);
+        let draft_rows = hidden
+            .narrow(1, 1, num_spec)
+            .and_then(|tensor| tensor.squeeze(0))
+            .map_err(|e| tensor_err("HunyuanOCR DFlash: draft mask rows", e))?;
+        let logits = draft_rows
+            .matmul(&self.lm_head_weight_t)
+            .map_err(|e| tensor_err("HunyuanOCR DFlash: graph draft logits", e))?;
+        #[cfg(feature = "cuda")]
+        if logits.device().is_cuda() && logits.dtype() == DType::BF16 {
+            return logits
+                .apply_op1_no_bwd(&ArgmaxFirstBf16)
+                .map_err(|e| tensor_err("HunyuanOCR DFlash: fused draft argmax", e));
+        }
+        logits
+            .argmax(D::Minus1)
+            .map_err(|e| tensor_err("HunyuanOCR DFlash: draft argmax", e))
+    }
+
     #[cfg(feature = "cuda")]
     fn capture_cuda_graph(&self) -> Result<(), OCRError> {
         use candle_core::cuda_backend::cudarc::driver::sys::{
@@ -1197,18 +1260,24 @@ impl DFlashModel {
             &query_lengths,
             &kv_lengths,
         )?;
-        sync_dflash_graph_tensor(&warm, "warm full draft graph")?;
+        let warm_proposals = self.proposals_from_hidden(&warm)?;
+        sync_dflash_graph_tensor(&warm_proposals, "warm full draft graph")?;
 
         stream
             .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
             .map_err(|e| dflash_cuda_graph_error("begin full draft graph capture", e))?;
-        let output = match self.forward_queries_dynamic(
-            &query_input,
-            &cos_input,
-            &sin_input,
-            &query_lengths,
-            &kv_lengths,
-        ) {
+        let captured_output = (|| {
+            let hidden = self.forward_queries_dynamic(
+                &query_input,
+                &cos_input,
+                &sin_input,
+                &query_lengths,
+                &kv_lengths,
+            )?;
+            let proposals = self.proposals_from_hidden(&hidden)?;
+            Ok::<_, OCRError>((hidden, proposals))
+        })();
+        let (hidden_output, proposals_output) = match captured_output {
             Ok(output) => output,
             Err(error) => {
                 let _ = stream.end_capture(
@@ -1228,7 +1297,7 @@ impl DFlashModel {
         graph
             .launch()
             .map_err(|e| dflash_cuda_graph_error("warm full draft graph", e))?;
-        sync_dflash_graph_tensor(&output, "sync full draft graph")?;
+        sync_dflash_graph_tensor(&proposals_output, "sync full draft graph")?;
         self.clear_context();
         *self.decode_graph.borrow_mut() = Some(DFlashCudaGraph {
             graph,
@@ -1237,7 +1306,8 @@ impl DFlashModel {
             sin_input,
             _query_lengths: query_lengths,
             kv_lengths,
-            output,
+            hidden_output,
+            proposals_output,
         });
         Ok(())
     }
@@ -1286,12 +1356,13 @@ impl DFlashModel {
             .graph
             .launch()
             .map_err(|e| dflash_cuda_graph_error("launch full draft graph", e))?;
-        Ok(Some(captured.output.clone()))
+        Ok(Some(captured.proposals_output.clone()))
     }
 
-    /// Run the bonus+mask query block. Returns post-norm hidden states for all
-    /// query positions; the caller samples only rows `1..` (the mask rows).
-    pub(crate) fn forward_queries(&self, query_embeds: &Tensor) -> Result<Tensor, OCRError> {
+    /// Run the bonus+mask query block and project all mask rows into draft
+    /// proposals. CUDA graph replay includes both the shared LM head and the
+    /// argmax so they do not incur per-round host dispatch.
+    pub(crate) fn forward_proposals(&self, query_embeds: &Tensor) -> Result<Tensor, OCRError> {
         #[cfg(feature = "cuda")]
         let _cuda_htod_cache = match &self.device {
             Device::Cuda(device) => Some(device.enable_cuda_graph_htod_cache()),
@@ -1324,9 +1395,11 @@ impl DFlashModel {
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             hidden = layer.forward(&hidden, &cos, &sin, cos_sin.as_ref(), cache)?;
         }
-        self.norm
+        let hidden = self
+            .norm
             .forward(&hidden)
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "final norm", e))
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "final norm", e))?;
+        self.proposals_from_hidden(&hidden)
     }
 
     pub(crate) fn clear_context(&self) {

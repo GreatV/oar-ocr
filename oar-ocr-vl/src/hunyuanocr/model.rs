@@ -2,6 +2,11 @@
 
 use super::config::{HunyuanOcrConfig, HunyuanOcrImageProcessorConfig, HunyuanOcrVersion};
 use super::dflash::DFlashModel;
+#[cfg(feature = "cuda")]
+use super::dynamic_kv::{
+    ArgmaxFirstF32, DFlashRepetitionArgmaxBf16, MarkRepetitionHistoryU8, RepetitionArgmaxBf16,
+    RepetitionPenaltyF32,
+};
 use super::llm::HunyuanLlm;
 use super::processing::{HunyuanOcrImageInputs, preprocess_image};
 use super::vision::HunyuanVisionModel;
@@ -60,7 +65,7 @@ fn load_generation_eos_ids(model_dir: &Path) -> Option<Vec<u32>> {
 /// applying the penalty per *occurrence* would compound to `penalty^k` for a
 /// token repeated `k` times and quickly suppresses legitimate high-frequency
 /// tokens like `<td>` in a structured HTML page. We dedup before applying.
-fn argmax_with_repetition_penalty(
+fn argmax_with_repetition_penalty_cpu(
     logits: &Tensor,
     seen: &[u32],
     penalty: f32,
@@ -90,6 +95,273 @@ fn argmax_with_repetition_penalty(
         }
     }
     Ok(best_idx as u32)
+}
+
+/// Incrementally maintained unique generated-token history. Repetition
+/// penalty is presence-based, so keeping another full ordered copy and
+/// sorting/deduplicating it for every decode step is unnecessary.
+struct RepetitionHistory {
+    present: Vec<bool>,
+    unique: Vec<u32>,
+}
+
+impl RepetitionHistory {
+    fn new(vocab_size: usize) -> Self {
+        Self {
+            present: vec![false; vocab_size],
+            unique: Vec::new(),
+        }
+    }
+
+    fn insert(&mut self, token: u32) {
+        let index = token as usize;
+        if index < self.present.len() && !self.present[index] {
+            self.present[index] = true;
+            self.unique.push(token);
+        }
+    }
+
+    fn contains(&self, token: u32) -> bool {
+        self.present.get(token as usize).copied().unwrap_or(false)
+    }
+
+    fn ids(&self) -> &[u32] {
+        &self.unique
+    }
+
+    fn is_empty(&self) -> bool {
+        self.unique.is_empty()
+    }
+}
+
+/// Apply a common unique history to every row plus a small unique per-row
+/// suffix. DFlash uses the generated history as the common set and only the
+/// preceding proposal tokens as row suffixes, avoiding 16 copies of the full
+/// history on every verification round.
+fn batched_argmax_with_unique_repetition_parts(
+    logits: &Tensor,
+    common: &[u32],
+    row_extras: &[&[u32]],
+    penalty: f32,
+) -> Result<Vec<u32>, OCRError> {
+    let vocab_size = logits
+        .dim(D::Minus1)
+        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "repetition penalty vocab", e))?;
+    let rows = logits.elem_count() / vocab_size;
+    if row_extras.len() != rows {
+        return Err(OCRError::ConfigError {
+            message: format!(
+                "HunyuanOCR: repetition penalty got {} suffix rows for {rows} logits rows",
+                row_extras.len()
+            ),
+        });
+    }
+    let logits = logits
+        .reshape((rows, vocab_size))
+        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "reshape penalty logits", e))?;
+
+    #[cfg(feature = "cuda")]
+    if logits.device().is_cuda() {
+        let adjusted = logits
+            .to_dtype(DType::F32)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "cast repetition logits", e))?;
+        let common: Vec<u32> = common
+            .iter()
+            .copied()
+            .filter(|&token| (token as usize) < vocab_size)
+            .collect();
+        if !common.is_empty() {
+            let common_len = common.len();
+            let token_ids =
+                Tensor::from_vec(common, (1, common_len), logits.device()).map_err(|e| {
+                    candle_to_ocr_inference("HunyuanOCR", "upload common repetition ids", e)
+                })?;
+            adjusted
+                .inplace_op2(&token_ids, &RepetitionPenaltyF32 { penalty })
+                .map_err(|e| {
+                    candle_to_ocr_inference("HunyuanOCR", "GPU common repetition penalty", e)
+                })?;
+        }
+
+        let token_stride = row_extras
+            .iter()
+            .map(|extra| extra.len())
+            .max()
+            .unwrap_or(0);
+        if token_stride > 0 {
+            let mut token_ids = vec![u32::MAX; rows * token_stride];
+            for (row, extra) in row_extras.iter().enumerate() {
+                let start = row * token_stride;
+                let mut write = start;
+                for &token in *extra {
+                    if (token as usize) < vocab_size {
+                        token_ids[write] = token;
+                        write += 1;
+                    }
+                }
+            }
+            let token_ids = Tensor::from_vec(token_ids, (rows, token_stride), logits.device())
+                .map_err(|e| {
+                    candle_to_ocr_inference("HunyuanOCR", "upload row repetition ids", e)
+                })?;
+            adjusted
+                .inplace_op2(&token_ids, &RepetitionPenaltyF32 { penalty })
+                .map_err(|e| {
+                    candle_to_ocr_inference("HunyuanOCR", "GPU row repetition penalty", e)
+                })?;
+        }
+        return adjusted
+            .apply_op1_no_bwd(&ArgmaxFirstF32)
+            .and_then(|tokens| tokens.to_vec1::<u32>())
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "GPU penalized argmax", e));
+    }
+
+    let mut tokens = Vec::with_capacity(rows);
+    for (row, extra) in row_extras.iter().enumerate() {
+        let row_logits = logits
+            .i((row, ..))
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "penalty logits row", e))?;
+        let mut seen = Vec::with_capacity(common.len() + extra.len());
+        seen.extend_from_slice(common);
+        seen.extend_from_slice(extra);
+        tokens.push(argmax_with_repetition_penalty_cpu(
+            &row_logits,
+            &seen,
+            penalty,
+        )?);
+    }
+    Ok(tokens)
+}
+
+fn dflash_argmax_with_host_proposals(
+    logits: &Tensor,
+    repetition_history: &RepetitionHistory,
+    proposals: &[u32],
+    penalty: f32,
+) -> Result<Vec<u32>, OCRError> {
+    let mut row_extras = Vec::with_capacity(proposals.len() + 1);
+    let mut proposal_prefix = Vec::with_capacity(proposals.len());
+    for prefix_len in 0..=proposals.len() {
+        row_extras.push(proposal_prefix.clone());
+        if let Some(&proposal) = proposals.get(prefix_len)
+            && !repetition_history.contains(proposal)
+            && !proposal_prefix.contains(&proposal)
+        {
+            proposal_prefix.push(proposal);
+        }
+    }
+    let extra_refs: Vec<&[u32]> = row_extras.iter().map(Vec::as_slice).collect();
+    batched_argmax_with_unique_repetition_parts(
+        logits,
+        repetition_history.ids(),
+        &extra_refs,
+        penalty,
+    )
+}
+
+#[cfg(feature = "cuda")]
+fn dflash_argmax_with_repetition_penalty(
+    logits: &Tensor,
+    history: &Tensor,
+    proposals: &Tensor,
+    penalty: f32,
+) -> Result<Vec<u32>, OCRError> {
+    let vocab_size = logits
+        .dim(D::Minus1)
+        .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "penalty vocab", e))?;
+    let rows = logits.elem_count() / vocab_size;
+    let proposal_count = proposals
+        .dims1()
+        .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "proposal count", e))?;
+    if rows != proposal_count + 1 {
+        return Err(OCRError::ConfigError {
+            message: format!(
+                "HunyuanOCR DFlash: {rows} target rows do not match {proposal_count} proposals"
+            ),
+        });
+    }
+    logits
+        .reshape((rows, vocab_size))
+        .and_then(|logits| {
+            logits.apply_op3_no_bwd(history, proposals, &DFlashRepetitionArgmaxBf16 { penalty })
+        })
+        .and_then(|tokens| tokens.to_vec1::<u32>())
+        .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "penalized argmax", e))
+}
+
+#[cfg(feature = "cuda")]
+fn mark_repetition_history(history: &Tensor, token_ids: &[u32]) -> Result<(), OCRError> {
+    if token_ids.is_empty() {
+        return Ok(());
+    }
+    let token_ids = Tensor::new(token_ids, history.device())
+        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "upload repetition history ids", e))?;
+    history
+        .inplace_op2(&token_ids, &MarkRepetitionHistoryU8)
+        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "mark repetition history", e))
+}
+
+#[cfg(feature = "cuda")]
+fn argmax_with_device_repetition_history(
+    logits: &Tensor,
+    history: &Tensor,
+    penalty: f32,
+) -> Result<u32, OCRError> {
+    let vocab_size = logits
+        .dim(D::Minus1)
+        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "device penalty vocab", e))?;
+    logits
+        .reshape((1, vocab_size))
+        .and_then(|logits| logits.apply_op2_no_bwd(history, &RepetitionArgmaxBf16 { penalty }))
+        .and_then(|tokens| tokens.i(0))
+        .and_then(|tokens| tokens.to_scalar::<u32>())
+        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "device penalized argmax", e))
+}
+
+/// Apply repetition penalty to one or more rows and return one greedy token per
+/// row. CUDA keeps both the sparse penalty update and argmax on-device; only
+/// the resulting token ids cross back to the host. Other backends retain the
+/// reference CPU implementation above.
+#[cfg(test)]
+fn batched_argmax_with_repetition_penalty(
+    logits: &Tensor,
+    seen_rows: &[&[u32]],
+    penalty: f32,
+) -> Result<Vec<u32>, OCRError> {
+    let vocab_size = logits
+        .dim(D::Minus1)
+        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "repetition penalty vocab", e))?;
+    let rows = logits.elem_count() / vocab_size;
+    if seen_rows.len() != rows {
+        return Err(OCRError::ConfigError {
+            message: format!(
+                "HunyuanOCR: repetition penalty got {} history rows for {rows} logits rows",
+                seen_rows.len()
+            ),
+        });
+    }
+    let mut unique_rows = Vec::with_capacity(rows);
+    for seen in seen_rows {
+        let mut unique: Vec<u32> = seen
+            .iter()
+            .copied()
+            .filter(|&token| (token as usize) < vocab_size)
+            .collect();
+        unique.sort_unstable();
+        unique.dedup();
+        unique_rows.push(unique);
+    }
+    let unique_refs: Vec<&[u32]> = unique_rows.iter().map(Vec::as_slice).collect();
+    batched_argmax_with_unique_repetition_parts(logits, &[], &unique_refs, penalty)
+}
+
+fn argmax_with_unique_repetition_penalty(
+    logits: &Tensor,
+    seen: &[u32],
+    penalty: f32,
+) -> Result<u32, OCRError> {
+    batched_argmax_with_unique_repetition_parts(logits, seen, &[&[]], penalty)
+        .map(|tokens| tokens[0])
 }
 
 pub struct HunyuanOcr {
@@ -193,7 +465,12 @@ impl HunyuanOcr {
                 message: "HunyuanOCR: DFlash requires the 1.5 checkpoint".to_string(),
             });
         }
-        let dflash = DFlashModel::from_dir(dflash_dir, model.dtype, &model.device)?;
+        let dflash = DFlashModel::from_dir(
+            dflash_dir,
+            model.dtype,
+            &model.device,
+            &model.llm.token_embedding_weight(),
+        )?;
         if dflash.config().hidden_size != model.cfg.hidden_size
             || dflash.config().vocab_size != model.cfg.vocab_size
         {
@@ -535,6 +812,24 @@ impl HunyuanOcr {
         // 5. Prefill
         self.llm.clear_kv_cache();
         let active_dflash = if batch_size == 1 {
+            if let Some(dflash) = self.dflash.as_ref() {
+                // A previous multi-image request or an over-capacity decode
+                // may have invalidated either graph. Recreate them before
+                // prefill; steady state is an inexpensive capacity check.
+                dflash.prepare_cuda_graph()?;
+                let target_layers: Vec<usize> = dflash
+                    .config()
+                    .dflash_config
+                    .target_layer_ids
+                    .iter()
+                    .map(|id| id + 1)
+                    .collect();
+                self.llm
+                    .prepare_dflash_cuda_graphs(dflash.config().block_size, &target_layers)?;
+            } else {
+                self.llm
+                    .prepare_ar_cuda_graph(max_seq_len, max_new_tokens)?;
+            }
             self.dflash.as_ref()
         } else {
             // Multi-image requests disable DFlash and prefill a batch>1
@@ -542,9 +837,7 @@ impl HunyuanOcr {
             // captured target CUDA graph points at. Drop the graph before
             // that reallocation so a later single-image DFlash decode can't
             // replay it against freed memory.
-            if self.dflash.is_some() {
-                self.llm.invalidate_target_cuda_graph();
-            }
+            self.llm.invalidate_target_cuda_graph();
             None
         };
         let hidden = if let Some(dflash) = active_dflash {
@@ -600,6 +893,23 @@ impl HunyuanOcr {
 
         // 7. Autoregressive decode
         let mut generated: Vec<Vec<u32>> = vec![Vec::new(); batch_size];
+        let mut repetition_histories: Vec<RepetitionHistory> = (0..batch_size)
+            .map(|_| RepetitionHistory::new(self.cfg.vocab_size))
+            .collect();
+        #[cfg(feature = "cuda")]
+        let repetition_history_device = if batch_size == 1
+            && self.device.is_cuda()
+            && self.dtype == DType::BF16
+            && self.repetition_penalty > 1.0
+        {
+            Some(
+                Tensor::zeros((1, self.cfg.vocab_size), DType::U8, &self.device).map_err(|e| {
+                    candle_to_ocr_inference("HunyuanOCR", "allocate AR repetition history", e)
+                })?,
+            )
+        } else {
+            None
+        };
         let mut finished: Vec<bool> = vec![false; batch_size];
         let mut positions: Vec<i64> = seq_lens.iter().map(|&len| len as i64).collect();
 
@@ -626,23 +936,50 @@ impl HunyuanOcr {
                     // can spiral into runaway-repeat loops on large-context
                     // inputs (observed on chart_01.jpg, seq≈11584, producing
                     // 33K chars of synthetic Mermaid node IDs `BZ, BZW, …`).
-                    let tok = if self.repetition_penalty > 1.0 && !generated[i].is_empty() {
-                        argmax_with_repetition_penalty(
-                            logits,
-                            &generated[i],
-                            self.repetition_penalty as f32,
-                        )?
-                    } else {
-                        logits
-                            .argmax(D::Minus1)
-                            .and_then(|t| t.to_scalar::<u32>())
-                            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "argmax", e))?
-                    };
+                    let tok =
+                        if self.repetition_penalty > 1.0 && !repetition_histories[i].is_empty() {
+                            #[cfg(feature = "cuda")]
+                            {
+                                if let Some(history) = repetition_history_device.as_ref() {
+                                    argmax_with_device_repetition_history(
+                                        logits,
+                                        history,
+                                        self.repetition_penalty as f32,
+                                    )?
+                                } else {
+                                    argmax_with_unique_repetition_penalty(
+                                        logits,
+                                        repetition_histories[i].ids(),
+                                        self.repetition_penalty as f32,
+                                    )?
+                                }
+                            }
+                            #[cfg(not(feature = "cuda"))]
+                            {
+                                argmax_with_unique_repetition_penalty(
+                                    logits,
+                                    repetition_histories[i].ids(),
+                                    self.repetition_penalty as f32,
+                                )?
+                            }
+                        } else {
+                            logits
+                                .argmax(D::Minus1)
+                                .and_then(|t| t.to_scalar::<u32>())
+                                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "argmax", e))?
+                        };
 
                     if self.stop_token_ids.contains(&tok) {
                         finished[i] = true;
                     } else {
                         generated[i].push(tok);
+                        repetition_histories[i].insert(tok);
+                        #[cfg(feature = "cuda")]
+                        if i == 0
+                            && let Some(history) = repetition_history_device.as_ref()
+                        {
+                            mark_repetition_history(history, &[tok])?;
+                        }
                     }
                     next_tokens.push(tok);
                 }
@@ -658,26 +995,44 @@ impl HunyuanOcr {
                 .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "create tokens", e))?;
             let embeds = self.llm.embed(&tokens)?;
 
-            // Build 4-axis position IDs for decode step
-            let pos_data: Vec<i64> = positions.iter().flat_map(|&p| [p, p, p, p]).collect();
-            let pos = Tensor::new(pos_data, &self.device)
-                .and_then(|t| t.reshape((4, batch_size, 1)))
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "create pos", e))?;
-
-            // Mask out left-padding positions in the KV cache for this step.
             kv_len += 1;
-            let gen_mask = create_generation_mask(&pad_lens, kv_len, self.dtype, &self.device)
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "create gen mask", e))?;
+            let (hs, graph_logits) = if batch_size == 1 {
+                // There is no left padding and a one-token query cannot see a
+                // future key. Reuse the precomputed scalar-position RoPE cache
+                // and avoid rebuilding four-axis positions plus an unused
+                // generation mask on every decode step.
+                let output =
+                    self.llm
+                        .forward_with_aux_decode(&embeds, positions[0] as usize, None, &[])?;
+                (output.hidden_states, output.logits)
+            } else {
+                // Build 4-axis position IDs for the true-batch decode path.
+                let pos_data: Vec<i64> = positions.iter().flat_map(|&p| [p, p, p, p]).collect();
+                let pos = Tensor::new(pos_data, &self.device)
+                    .and_then(|t| t.reshape((4, batch_size, 1)))
+                    .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "create pos", e))?;
 
-            let hs = self.llm.forward(&embeds, &pos, Some(&gen_mask))?;
+                // Mask out left-padding positions in the KV cache for this
+                // step when prompt lengths differ across the batch.
+                let gen_mask = create_generation_mask(&pad_lens, kv_len, self.dtype, &self.device)
+                    .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "create gen mask", e))?;
+                (self.llm.forward(&embeds, &pos, Some(&gen_mask))?, None)
+            };
 
             logits_list.clear();
-            for i in 0..batch_size {
-                let h = hs
-                    .i((i, 0, ..))
-                    .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "get hs", e))?;
-                let logits = self.logits_from_hidden(&h)?;
+            if let Some(logits) = graph_logits {
+                let logits = logits
+                    .i((0, 0, ..))
+                    .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "get graph logits", e))?;
                 logits_list.push(logits);
+            } else {
+                for i in 0..batch_size {
+                    let h = hs
+                        .i((i, 0, ..))
+                        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "get hs", e))?;
+                    let logits = self.logits_from_hidden(&h)?;
+                    logits_list.push(logits);
+                }
             }
 
             for (i, p) in positions.iter_mut().enumerate() {
@@ -689,17 +1044,6 @@ impl HunyuanOcr {
 
         self.llm.clear_kv_cache();
         Ok(generated)
-    }
-
-    fn greedy_token(&self, logits: &Tensor, seen: &[u32]) -> Result<u32, OCRError> {
-        if self.repetition_penalty > 1.0 && !seen.is_empty() {
-            argmax_with_repetition_penalty(logits, seen, self.repetition_penalty as f32)
-        } else {
-            logits
-                .argmax(D::Minus1)
-                .and_then(|t| t.to_scalar::<u32>())
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "argmax", e))
-        }
     }
 
     /// Greedy DFlash speculative decoding for one document. The target model
@@ -719,7 +1063,10 @@ impl HunyuanOcr {
             return Ok(Vec::new());
         }
 
-        let first = self.greedy_token(&initial_logits, &[])?;
+        let first = initial_logits
+            .argmax(D::Minus1)
+            .and_then(|token| token.to_scalar::<u32>())
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "initial argmax", e))?;
         if self.stop_token_ids.contains(&first) {
             self.llm.clear_kv_cache();
             dflash.clear_context();
@@ -742,6 +1089,22 @@ impl HunyuanOcr {
             .map(|id| id + 1)
             .collect();
         let mut generated = vec![first];
+        let mut repetition_history = RepetitionHistory::new(self.cfg.vocab_size);
+        repetition_history.insert(first);
+        #[cfg(feature = "cuda")]
+        let repetition_history_device = if self.device.is_cuda()
+            && self.dtype == DType::BF16
+            && self.repetition_penalty > 1.0
+        {
+            let history =
+                Tensor::zeros((self.cfg.vocab_size,), DType::U8, &self.device).map_err(|e| {
+                    candle_to_ocr_inference("HunyuanOCR DFlash", "allocate repetition history", e)
+                })?;
+            mark_repetition_history(&history, &[first])?;
+            Some(history)
+        } else {
+            None
+        };
         let mut draft_rounds = 0usize;
         let mut accepted_draft_tokens = 0usize;
 
@@ -759,18 +1122,10 @@ impl HunyuanOcr {
                 .and_then(|t| t.reshape((1, num_spec + 1)))
                 .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "query ids", e))?;
             let query_embeds = self.llm.embed(&query_ids)?;
-            let draft_hidden = dflash.forward_queries(&query_embeds)?;
-            let draft_rows = draft_hidden
-                .narrow(1, 1, num_spec)
-                .and_then(|t| t.squeeze(0))
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "draft mask rows", e))?;
-            let draft_logits = self.logits_from_hidden_batch(&draft_rows)?;
-            // All draft rows are independent. Keep their sampling as one GPU
-            // operation; target-side processors remain authoritative during
-            // verification and therefore preserve the target distribution.
-            let proposals = draft_logits
-                .argmax(D::Minus1)
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "draft argmax", e))?;
+            // All draft rows are independent. The CUDA graph includes their
+            // shared LM head and argmax; target-side processors remain
+            // authoritative during verification.
+            let proposals = dflash.forward_proposals(&query_embeds)?;
 
             // The target verifies [bonus, proposal_1, ..., proposal_N] in one
             // causal pass. Row i predicts proposal i+1; the final row predicts
@@ -818,49 +1173,92 @@ impl HunyuanOcr {
                         "HunyuanOCR DFlash: target verification did not return auxiliary states"
                             .to_string(),
                 })?;
-            let target_rows = output.hidden_states.squeeze(0).map_err(|e| {
-                candle_to_ocr_inference("HunyuanOCR DFlash", "target verify rows", e)
-            })?;
-            let target_logits = self.logits_from_hidden_batch(&target_rows)?;
-            let target_tokens = if self.repetition_penalty <= 1.0 {
-                Some(
-                    target_logits
-                        .argmax(D::Minus1)
-                        .and_then(|t| t.to_vec1::<u32>())
-                        .map_err(|e| {
-                            candle_to_ocr_inference("HunyuanOCR DFlash", "batched target argmax", e)
-                        })?,
-                )
+            let target_logits = if let Some(logits) = output.logits.as_ref() {
+                logits.squeeze(0).map_err(|e| {
+                    candle_to_ocr_inference("HunyuanOCR DFlash", "graph target logits", e)
+                })?
             } else {
-                None
+                let target_rows = output.hidden_states.squeeze(0).map_err(|e| {
+                    candle_to_ocr_inference("HunyuanOCR DFlash", "target verify rows", e)
+                })?;
+                self.logits_from_hidden_batch(&target_rows)?
             };
-            let proposals = proposals
-                .to_vec1::<u32>()
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "draft proposals", e))?;
+            // CPU backends need proposal values to build each row's history.
+            // CUDA keeps them device-resident through target sampling so the
+            // target-token transfer is the round's only blocking D2H copy.
+            let proposals_host = if self.device.is_cuda()
+                && (self.repetition_penalty <= 1.0 || self.dtype == DType::BF16)
+            {
+                None
+            } else {
+                Some(proposals.to_vec1::<u32>().map_err(|e| {
+                    candle_to_ocr_inference("HunyuanOCR DFlash", "draft proposals", e)
+                })?)
+            };
+            let target_tokens = if self.repetition_penalty <= 1.0 {
+                target_logits
+                    .argmax(D::Minus1)
+                    .and_then(|t| t.to_vec1::<u32>())
+                    .map_err(|e| {
+                        candle_to_ocr_inference("HunyuanOCR DFlash", "batched target argmax", e)
+                    })?
+            } else {
+                #[cfg(feature = "cuda")]
+                {
+                    if self.device.is_cuda() && self.dtype == DType::BF16 {
+                        dflash_argmax_with_repetition_penalty(
+                            &target_logits,
+                            repetition_history_device.as_ref().ok_or_else(|| {
+                                OCRError::ConfigError {
+                                    message: "HunyuanOCR DFlash: missing CUDA repetition history"
+                                        .to_string(),
+                                }
+                            })?,
+                            &proposals,
+                            self.repetition_penalty as f32,
+                        )?
+                    } else {
+                        dflash_argmax_with_host_proposals(
+                            &target_logits,
+                            &repetition_history,
+                            proposals_host
+                                .as_deref()
+                                .expect("non-CUDA proposals were copied to the host"),
+                            self.repetition_penalty as f32,
+                        )?
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    dflash_argmax_with_host_proposals(
+                        &target_logits,
+                        &repetition_history,
+                        proposals_host
+                            .as_deref()
+                            .expect("non-CUDA proposals were copied to the host"),
+                        self.repetition_penalty as f32,
+                    )?
+                }
+            };
+            // Target sampling above has already synchronized CUDA. This small
+            // proposal copy is now ready immediately and does not stall the
+            // draft/target pipeline a second time.
+            let proposals = match proposals_host {
+                Some(proposals) => proposals,
+                None => proposals.to_vec1::<u32>().map_err(|e| {
+                    candle_to_ocr_inference("HunyuanOCR DFlash", "draft proposals", e)
+                })?,
+            };
 
             let mut accepted = 0usize;
             let mut recovery = None;
-            let mut seen = if self.repetition_penalty > 1.0 {
-                generated.clone()
-            } else {
-                Vec::new()
-            };
             for (index, &proposal) in proposals.iter().enumerate() {
-                let target_token = match &target_tokens {
-                    Some(tokens) => tokens[index],
-                    None => {
-                        let logits = target_logits.i((index, ..)).map_err(|e| {
-                            candle_to_ocr_inference("HunyuanOCR DFlash", "target verify logits", e)
-                        })?;
-                        self.greedy_token(&logits, &seen)?
-                    }
-                };
+                let target_token = target_tokens[index];
                 if target_token != proposal {
                     recovery = Some(target_token);
                     break;
                 }
                 accepted += 1;
-                seen.push(proposal);
             }
             accepted_draft_tokens += accepted;
 
@@ -871,15 +1269,7 @@ impl HunyuanOcr {
                 // of the authoritative history before the recovery token.
                 (1 + accepted, tokens)
             } else {
-                let target_bonus = match &target_tokens {
-                    Some(tokens) => tokens[num_spec],
-                    None => {
-                        let bonus_logits = target_logits.i((num_spec, ..)).map_err(|e| {
-                            candle_to_ocr_inference("HunyuanOCR DFlash", "target bonus logits", e)
-                        })?;
-                        self.greedy_token(&bonus_logits, &seen)?
-                    }
-                };
+                let target_bonus = target_tokens[num_spec];
                 let mut tokens = proposals;
                 tokens.push(target_bonus);
                 (num_spec + 1, tokens)
@@ -901,6 +1291,8 @@ impl HunyuanOcr {
             dflash.append_context(&accepted_aux)?;
 
             let mut stop = false;
+            #[cfg(feature = "cuda")]
+            let mut new_history_tokens = Vec::with_capacity(next_tokens.len());
             for token in next_tokens {
                 if self.stop_token_ids.contains(&token) {
                     stop = true;
@@ -911,9 +1303,16 @@ impl HunyuanOcr {
                     break;
                 }
                 generated.push(token);
+                repetition_history.insert(token);
+                #[cfg(feature = "cuda")]
+                new_history_tokens.push(token);
             }
             if stop {
                 break;
+            }
+            #[cfg(feature = "cuda")]
+            if let Some(history) = repetition_history_device.as_ref() {
+                mark_repetition_history(history, &new_history_tokens)?;
             }
 
             debug_assert_eq!(self.llm.kv_cache_len(), dflash.context_len());
@@ -1143,6 +1542,96 @@ fn build_position_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_repetition_penalty_tokens(device: &Device) {
+        let logits = Tensor::from_vec(
+            vec![
+                10.0f32, 9.0, 8.0, -1.0, // duplicate + out-of-range ids
+                -1.0, -2.0, 3.0, 2.5, // positive penalized winner
+                -1.0, -1.1, -1.2, -1.3, // negative penalized winner
+            ],
+            (3, 4),
+            device,
+        )
+        .unwrap();
+        let row0 = [0u32, 0, 99];
+        let row1 = [2u32, 2];
+        let row2 = [0u32];
+        let histories: [&[u32]; 3] = [&row0, &row1, &row2];
+        let tokens = batched_argmax_with_repetition_penalty(&logits, &histories, 2.0).unwrap();
+        assert_eq!(tokens, vec![1, 3, 1]);
+    }
+
+    #[test]
+    fn repetition_penalty_cpu_matches_huggingface_semantics() {
+        assert_repetition_penalty_tokens(&Device::Cpu);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn repetition_penalty_cuda_matches_cpu() {
+        let Ok(device) = Device::new_cuda(0) else {
+            return;
+        };
+        assert_repetition_penalty_tokens(&device);
+
+        // Candle's generic CUDA argmax can choose index 1024 here because the
+        // equal maxima live in different reduction lanes. The reference CPU
+        // scan, and our deterministic kernel, must keep the first index.
+        let mut tied = vec![0.0f32; 1030];
+        tied[1] = 10.0;
+        tied[1024] = 10.0;
+        let logits = Tensor::from_vec(tied, (1, 1030), &device).unwrap();
+        let history = [2u32];
+        let tokens = batched_argmax_with_repetition_penalty(&logits, &[&history], 1.08).unwrap();
+        assert_eq!(tokens, vec![1]);
+
+        let mut tied = vec![0.0f32; 1030];
+        tied[1] = 10.0;
+        tied[1024] = 10.0;
+        let logits = Tensor::from_vec(tied, (1, 1030), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let history = Tensor::zeros((1, 1030), DType::U8, &device).unwrap();
+        mark_repetition_history(&history, &[2]).unwrap();
+        let token = argmax_with_device_repetition_history(&logits, &history, 1.08).unwrap();
+        assert_eq!(token, 1);
+
+        let logits = Tensor::from_vec(
+            vec![10.0f32, 9.0, 0.0, 0.0, 8.0, 7.0, 0.0, 0.0],
+            (2, 4),
+            &device,
+        )
+        .unwrap();
+        let empty: &[u32] = &[];
+        let tokens =
+            batched_argmax_with_unique_repetition_parts(&logits, &[0], &[empty, empty], 2.0)
+                .unwrap();
+        assert_eq!(tokens, vec![1, 1]);
+
+        // Row r sees only proposal ids [0, r), with ids already present in
+        // the common history and duplicate proposals penalized exactly once.
+        let logits = Tensor::from_vec(
+            vec![
+                10.0f32, 9.0, 5.2, 0.0, // common history only
+                10.0, 9.0, 5.2, 0.0, // common + proposal 1
+                10.0, 20.0, 7.0, 0.0, // duplicate proposal 1 stays once
+                10.0, 20.0, 7.0, 0.0, // proposal 0 is already common
+            ],
+            (4, 4),
+            &device,
+        )
+        .unwrap()
+        .to_dtype(DType::BF16)
+        .unwrap();
+        let proposals = Tensor::new(&[1u32, 1, 0], &device).unwrap();
+        let history = Tensor::zeros((4,), DType::U8, &device).unwrap();
+        mark_repetition_history(&history, &[0, 0, 99]).unwrap();
+        let tokens =
+            dflash_argmax_with_repetition_penalty(&logits, &history, &proposals, 2.0).unwrap();
+        assert_eq!(tokens, vec![1, 2, 1, 1]);
+    }
 
     #[test]
     fn v15_prompt_omits_legacy_empty_system_token() {

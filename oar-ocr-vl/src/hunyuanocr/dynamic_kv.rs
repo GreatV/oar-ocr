@@ -1,5 +1,7 @@
 use candle_core::backend::BackendStorage;
-use candle_core::{CpuStorage, CustomOp2, CustomOp3, InplaceOp3, Layout, Result, Shape};
+use candle_core::{
+    CpuStorage, CustomOp1, CustomOp2, CustomOp3, InplaceOp2, InplaceOp3, Layout, Result, Shape,
+};
 
 const PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/hunyuan_dynamic_kv.ptx"));
 
@@ -49,6 +51,511 @@ pub(super) struct FusedAddRmsNormBf16 {
 
 pub(super) struct FusedSiluMulBf16;
 
+pub(super) struct RepetitionPenaltyF32 {
+    pub penalty: f32,
+}
+
+pub(super) struct ArgmaxFirstF32;
+
+pub(super) struct ArgmaxFirstBf16;
+
+pub(super) struct MarkRepetitionHistoryU8;
+
+pub(super) struct DFlashRepetitionArgmaxBf16 {
+    pub penalty: f32,
+}
+
+pub(super) struct RepetitionArgmaxBf16 {
+    pub penalty: f32,
+}
+
+impl CustomOp1 for ArgmaxFirstF32 {
+    fn name(&self) -> &'static str {
+        "hunyuan-argmax-first-f32"
+    }
+
+    fn cpu_fwd(&self, _storage: &CpuStorage, _layout: &Layout) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("deterministic argmax is CUDA-only")
+    }
+
+    fn cuda_fwd(
+        &self,
+        storage: &candle_core::CudaStorage,
+        layout: &Layout,
+    ) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::cuda_backend::WrapErr;
+        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+
+        if !layout.is_contiguous() || storage.dtype() != candle_core::DType::F32 {
+            candle_core::bail!("deterministic argmax requires contiguous F32 logits")
+        }
+        let (rows, vocab_size) = layout.shape().dims2()?;
+        if vocab_size == 0 {
+            candle_core::bail!("deterministic argmax does not support an empty vocabulary")
+        }
+        let device = storage.device().clone();
+        let logits = storage.as_cuda_slice::<f32>()?;
+        let logits = logits.slice(layout.start_offset()..);
+        let output = unsafe { device.alloc::<u32>(rows) }?;
+        let function =
+            device.get_or_load_custom_func("argmax_first_f32", "hunyuan_dynamic_kv", PTX)?;
+        let mut builder = function.builder();
+        builder.arg(&logits);
+        builder.arg(&output);
+        candle_core::builder_arg!(builder, rows as u32, vocab_size as u32);
+        unsafe {
+            builder.launch(LaunchConfig {
+                grid_dim: (rows as u32, 1, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            })
+        }
+        .w()?;
+        Ok((
+            candle_core::CudaStorage::wrap_cuda_slice(output, device),
+            Shape::from_dims(&[rows]),
+        ))
+    }
+}
+
+impl CustomOp1 for ArgmaxFirstBf16 {
+    fn name(&self) -> &'static str {
+        "hunyuan-argmax-first-bf16"
+    }
+
+    fn cpu_fwd(&self, _storage: &CpuStorage, _layout: &Layout) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("deterministic BF16 argmax is CUDA-only")
+    }
+
+    fn cuda_fwd(
+        &self,
+        storage: &candle_core::CudaStorage,
+        layout: &Layout,
+    ) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::cuda_backend::WrapErr;
+        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+
+        if !layout.is_contiguous() || storage.dtype() != candle_core::DType::BF16 {
+            candle_core::bail!("deterministic BF16 argmax requires contiguous logits")
+        }
+        let (rows, vocab_size) = layout.shape().dims2()?;
+        if vocab_size == 0 {
+            candle_core::bail!("deterministic BF16 argmax does not support an empty vocabulary")
+        }
+        let device = storage.device().clone();
+        let logits = storage.as_cuda_slice::<half::bf16>()?;
+        let logits = logits.slice(layout.start_offset()..);
+        const PARTITIONS_PER_ROW: usize = 8;
+        let partial_count = rows * PARTITIONS_PER_ROW;
+        let partial_values = unsafe { device.alloc::<f32>(partial_count) }?;
+        let partial_indices = unsafe { device.alloc::<u32>(partial_count) }?;
+        let output = unsafe { device.alloc::<u32>(rows) }?;
+        let stage1 = device.get_or_load_custom_func(
+            "argmax_first_bf16_stage1",
+            "hunyuan_dynamic_kv",
+            PTX,
+        )?;
+        let mut builder = stage1.builder();
+        builder.arg(&logits);
+        builder.arg(&partial_values);
+        builder.arg(&partial_indices);
+        candle_core::builder_arg!(
+            builder,
+            rows as u32,
+            vocab_size as u32,
+            PARTITIONS_PER_ROW as u32
+        );
+        unsafe {
+            builder.launch(LaunchConfig {
+                grid_dim: (partial_count as u32, 1, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            })
+        }
+        .w()?;
+        let stage2 = device.get_or_load_custom_func(
+            "dflash_repetition_argmax_stage2",
+            "hunyuan_dynamic_kv",
+            PTX,
+        )?;
+        let mut builder = stage2.builder();
+        builder.arg(&partial_values);
+        builder.arg(&partial_indices);
+        builder.arg(&output);
+        candle_core::builder_arg!(builder, PARTITIONS_PER_ROW as u32, rows as u32);
+        unsafe {
+            builder.launch(LaunchConfig {
+                grid_dim: (rows as u32, 1, 1),
+                block_dim: (32, 1, 1),
+                shared_mem_bytes: 0,
+            })
+        }
+        .w()?;
+        Ok((
+            candle_core::CudaStorage::wrap_cuda_slice(output, device),
+            Shape::from_dims(&[rows]),
+        ))
+    }
+}
+
+impl InplaceOp2 for MarkRepetitionHistoryU8 {
+    fn name(&self) -> &'static str {
+        "hunyuan-mark-repetition-history-u8"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _history: &mut CpuStorage,
+        _history_layout: &Layout,
+        _token_ids: &CpuStorage,
+        _token_ids_layout: &Layout,
+    ) -> Result<()> {
+        candle_core::bail!("repetition-history marking is CUDA-only")
+    }
+
+    fn cuda_fwd(
+        &self,
+        history: &mut candle_core::CudaStorage,
+        history_layout: &Layout,
+        token_ids: &candle_core::CudaStorage,
+        token_ids_layout: &Layout,
+    ) -> Result<()> {
+        use candle_core::cuda_backend::WrapErr;
+        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+
+        if !history_layout.is_contiguous()
+            || !token_ids_layout.is_contiguous()
+            || history.dtype() != candle_core::DType::U8
+            || token_ids.dtype() != candle_core::DType::U32
+        {
+            candle_core::bail!(
+                "repetition-history marking requires contiguous U8 history and U32 ids"
+            )
+        }
+        let vocab_size = history_layout.shape().elem_count();
+        let token_count = token_ids_layout.shape().dims1()?;
+        if token_count == 0 {
+            return Ok(());
+        }
+        let device = history.device().clone();
+        let history = history.as_cuda_slice_mut::<u8>()?;
+        let token_ids = token_ids.as_cuda_slice::<u32>()?;
+        let mut history = history.slice_mut(history_layout.start_offset()..);
+        let token_ids = token_ids.slice(token_ids_layout.start_offset()..);
+        let function = device.get_or_load_custom_func(
+            "mark_repetition_history_u8",
+            "hunyuan_dynamic_kv",
+            PTX,
+        )?;
+        let mut builder = function.builder();
+        builder.arg(&mut history);
+        builder.arg(&token_ids);
+        candle_core::builder_arg!(builder, token_count as u32, vocab_size as u32);
+        unsafe { builder.launch(LaunchConfig::for_num_elems(token_count as u32)) }.w()?;
+        Ok(())
+    }
+}
+
+impl CustomOp2 for RepetitionArgmaxBf16 {
+    fn name(&self) -> &'static str {
+        "hunyuan-repetition-argmax-bf16"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _logits: &CpuStorage,
+        _logits_layout: &Layout,
+        _history: &CpuStorage,
+        _history_layout: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("fused repetition argmax is CUDA-only")
+    }
+
+    fn cuda_fwd(
+        &self,
+        logits: &candle_core::CudaStorage,
+        logits_layout: &Layout,
+        history: &candle_core::CudaStorage,
+        history_layout: &Layout,
+    ) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::cuda_backend::WrapErr;
+        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+
+        if !logits_layout.is_contiguous() || !history_layout.is_contiguous() {
+            candle_core::bail!("fused repetition argmax requires contiguous tensors")
+        }
+        let (rows, vocab_size) = logits_layout.shape().dims2()?;
+        if history_layout.shape().dims() != [rows, vocab_size]
+            || logits.dtype() != candle_core::DType::BF16
+            || history.dtype() != candle_core::DType::U8
+            || !self.penalty.is_finite()
+            || self.penalty < 1.0
+        {
+            candle_core::bail!(
+                "fused repetition argmax mismatch logits={:?}/{:?} history={:?}/{:?} penalty={}",
+                logits_layout.shape(),
+                logits.dtype(),
+                history_layout.shape(),
+                history.dtype(),
+                self.penalty
+            )
+        }
+
+        let device = logits.device().clone();
+        let logits = logits.as_cuda_slice::<half::bf16>()?;
+        let history = history.as_cuda_slice::<u8>()?;
+        let logits = logits.slice(logits_layout.start_offset()..);
+        let history = history.slice(history_layout.start_offset()..);
+        const PARTITIONS_PER_ROW: usize = 8;
+        let partial_count = rows * PARTITIONS_PER_ROW;
+        let partial_values = unsafe { device.alloc::<f32>(partial_count) }?;
+        let partial_indices = unsafe { device.alloc::<u32>(partial_count) }?;
+        let output = unsafe { device.alloc::<u32>(rows) }?;
+        let stage1 = device.get_or_load_custom_func(
+            "repetition_argmax_bf16_stage1",
+            "hunyuan_dynamic_kv",
+            PTX,
+        )?;
+        let mut builder = stage1.builder();
+        builder.arg(&logits);
+        builder.arg(&history);
+        builder.arg(&partial_values);
+        builder.arg(&partial_indices);
+        candle_core::builder_arg!(
+            builder,
+            rows as u32,
+            vocab_size as u32,
+            PARTITIONS_PER_ROW as u32,
+            self.penalty
+        );
+        unsafe {
+            builder.launch(LaunchConfig {
+                grid_dim: (partial_count as u32, 1, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            })
+        }
+        .w()?;
+        let stage2 = device.get_or_load_custom_func(
+            "dflash_repetition_argmax_stage2",
+            "hunyuan_dynamic_kv",
+            PTX,
+        )?;
+        let mut builder = stage2.builder();
+        builder.arg(&partial_values);
+        builder.arg(&partial_indices);
+        builder.arg(&output);
+        candle_core::builder_arg!(builder, PARTITIONS_PER_ROW as u32, rows as u32);
+        unsafe {
+            builder.launch(LaunchConfig {
+                grid_dim: (rows as u32, 1, 1),
+                block_dim: (32, 1, 1),
+                shared_mem_bytes: 0,
+            })
+        }
+        .w()?;
+        Ok((
+            candle_core::CudaStorage::wrap_cuda_slice(output, device),
+            Shape::from_dims(&[rows]),
+        ))
+    }
+}
+
+impl CustomOp3 for DFlashRepetitionArgmaxBf16 {
+    fn name(&self) -> &'static str {
+        "hunyuan-dflash-repetition-argmax-bf16"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _logits: &CpuStorage,
+        _logits_layout: &Layout,
+        _history: &CpuStorage,
+        _history_layout: &Layout,
+        _proposals: &CpuStorage,
+        _proposals_layout: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("fused DFlash repetition argmax is CUDA-only")
+    }
+
+    fn cuda_fwd(
+        &self,
+        logits: &candle_core::CudaStorage,
+        logits_layout: &Layout,
+        history: &candle_core::CudaStorage,
+        history_layout: &Layout,
+        proposals: &candle_core::CudaStorage,
+        proposals_layout: &Layout,
+    ) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::cuda_backend::WrapErr;
+        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+
+        if !logits_layout.is_contiguous()
+            || !history_layout.is_contiguous()
+            || !proposals_layout.is_contiguous()
+        {
+            candle_core::bail!("fused DFlash repetition argmax requires contiguous tensors")
+        }
+        let (rows, vocab_size) = logits_layout.shape().dims2()?;
+        let history_size = history_layout.shape().dims1()?;
+        let proposal_count = proposals_layout.shape().dims1()?;
+        if rows != proposal_count + 1
+            || history_size != vocab_size
+            || logits.dtype() != candle_core::DType::BF16
+            || history.dtype() != candle_core::DType::U8
+            || proposals.dtype() != candle_core::DType::U32
+            || !self.penalty.is_finite()
+            || self.penalty < 1.0
+        {
+            candle_core::bail!(
+                "fused DFlash repetition argmax mismatch logits={:?}/{:?} history={:?}/{:?} proposals={:?}/{:?} penalty={}",
+                logits_layout.shape(),
+                logits.dtype(),
+                history_layout.shape(),
+                history.dtype(),
+                proposals_layout.shape(),
+                proposals.dtype(),
+                self.penalty
+            )
+        }
+
+        let device = logits.device().clone();
+        let logits = logits.as_cuda_slice::<half::bf16>()?;
+        let history = history.as_cuda_slice::<u8>()?;
+        let proposals = proposals.as_cuda_slice::<u32>()?;
+        let logits = logits.slice(logits_layout.start_offset()..);
+        let history = history.slice(history_layout.start_offset()..);
+        let proposals = proposals.slice(proposals_layout.start_offset()..);
+        const PARTITIONS_PER_ROW: usize = 8;
+        let partial_count = rows * PARTITIONS_PER_ROW;
+        let partial_values = unsafe { device.alloc::<f32>(partial_count) }?;
+        let partial_indices = unsafe { device.alloc::<u32>(partial_count) }?;
+        let output = unsafe { device.alloc::<u32>(rows) }?;
+        let stage1 = device.get_or_load_custom_func(
+            "dflash_repetition_argmax_bf16_stage1",
+            "hunyuan_dynamic_kv",
+            PTX,
+        )?;
+        let mut builder = stage1.builder();
+        builder.arg(&logits);
+        builder.arg(&history);
+        builder.arg(&proposals);
+        builder.arg(&partial_values);
+        builder.arg(&partial_indices);
+        candle_core::builder_arg!(
+            builder,
+            proposal_count as u32,
+            rows as u32,
+            vocab_size as u32,
+            PARTITIONS_PER_ROW as u32,
+            self.penalty
+        );
+        unsafe {
+            builder.launch(LaunchConfig {
+                grid_dim: (partial_count as u32, 1, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: (proposal_count * std::mem::size_of::<u32>()) as u32,
+            })
+        }
+        .w()?;
+        let stage2 = device.get_or_load_custom_func(
+            "dflash_repetition_argmax_stage2",
+            "hunyuan_dynamic_kv",
+            PTX,
+        )?;
+        let mut builder = stage2.builder();
+        builder.arg(&partial_values);
+        builder.arg(&partial_indices);
+        builder.arg(&output);
+        candle_core::builder_arg!(builder, PARTITIONS_PER_ROW as u32, rows as u32);
+        unsafe {
+            builder.launch(LaunchConfig {
+                grid_dim: (rows as u32, 1, 1),
+                block_dim: (32, 1, 1),
+                shared_mem_bytes: 0,
+            })
+        }
+        .w()?;
+        Ok((
+            candle_core::CudaStorage::wrap_cuda_slice(output, device),
+            Shape::from_dims(&[rows]),
+        ))
+    }
+}
+
+impl InplaceOp2 for RepetitionPenaltyF32 {
+    fn name(&self) -> &'static str {
+        "hunyuan-repetition-penalty-f32"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _logits: &mut CpuStorage,
+        _logits_layout: &Layout,
+        _token_ids: &CpuStorage,
+        _token_ids_layout: &Layout,
+    ) -> Result<()> {
+        candle_core::bail!("fused repetition penalty is CUDA-only")
+    }
+
+    fn cuda_fwd(
+        &self,
+        logits: &mut candle_core::CudaStorage,
+        logits_layout: &Layout,
+        token_ids: &candle_core::CudaStorage,
+        token_ids_layout: &Layout,
+    ) -> Result<()> {
+        use candle_core::cuda_backend::WrapErr;
+        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+
+        if !logits_layout.is_contiguous() || !token_ids_layout.is_contiguous() {
+            candle_core::bail!("repetition penalty requires contiguous tensors")
+        }
+        let (rows, vocab_size) = logits_layout.shape().dims2()?;
+        let (token_rows, token_stride) = token_ids_layout.shape().dims2()?;
+        if !matches!(token_rows, 1) && rows != token_rows
+            || logits.dtype() != candle_core::DType::F32
+            || token_ids.dtype() != candle_core::DType::U32
+            || !self.penalty.is_finite()
+            || self.penalty < 1.0
+        {
+            candle_core::bail!(
+                "repetition penalty shape/dtype mismatch logits={:?}/{:?} ids={:?}/{:?} penalty={}",
+                logits_layout.shape(),
+                logits.dtype(),
+                token_ids_layout.shape(),
+                token_ids.dtype(),
+                self.penalty
+            )
+        }
+        if token_stride == 0 {
+            return Ok(());
+        }
+
+        let device = logits.device().clone();
+        let logits = logits.as_cuda_slice_mut::<f32>()?;
+        let token_ids = token_ids.as_cuda_slice::<u32>()?;
+        let mut logits = logits.slice_mut(logits_layout.start_offset()..);
+        let token_ids = token_ids.slice(token_ids_layout.start_offset()..);
+        let count = rows * token_stride;
+        let function =
+            device.get_or_load_custom_func("repetition_penalty_f32", "hunyuan_dynamic_kv", PTX)?;
+        let mut builder = function.builder();
+        builder.arg(&mut logits);
+        builder.arg(&token_ids);
+        candle_core::builder_arg!(
+            builder,
+            token_stride as u32,
+            token_rows as u32,
+            rows as u32,
+            vocab_size as u32,
+            self.penalty
+        );
+        unsafe { builder.launch(LaunchConfig::for_num_elems(count as u32)) }.w()?;
+        Ok(())
+    }
+}
+
 impl CustomOp2 for FusedSiluMulBf16 {
     fn name(&self) -> &'static str {
         "hunyuan-fused-silu-mul-bf16"
@@ -74,14 +581,50 @@ impl CustomOp2 for FusedSiluMulBf16 {
         use candle_core::cuda_backend::WrapErr;
         use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
 
-        if !gate_layout.is_contiguous()
-            || !up_layout.is_contiguous()
-            || gate_layout.shape() != up_layout.shape()
+        if gate_layout.shape() != up_layout.shape()
             || gate.dtype() != candle_core::DType::BF16
             || up.dtype() != candle_core::DType::BF16
         {
-            candle_core::bail!("fused SiLU*up requires matching contiguous BF16 tensors")
+            candle_core::bail!("fused SiLU*up requires matching BF16 tensors")
         }
+        let dims = gate_layout.shape().dims();
+        let Some(&ncols) = dims.last() else {
+            candle_core::bail!("fused SiLU*up does not support scalar tensors")
+        };
+        if ncols == 0 {
+            candle_core::bail!("fused SiLU*up does not support empty rows")
+        }
+        // A last-dimension narrow of fused [gate, up] projections has unit
+        // column stride but a row stride of 2*ncols. Accept that layout
+        // directly so the fusion does not need two materializing copies.
+        let flat_row_stride = |layout: &Layout| -> Option<usize> {
+            let dims = layout.shape().dims();
+            let strides = layout.stride();
+            if strides.last().copied()? != 1 {
+                return None;
+            }
+            if dims.len() == 1 {
+                return Some(dims[0]);
+            }
+            let row_dim = dims.len() - 2;
+            let row_stride = strides[row_dim];
+            let mut expected = row_stride.checked_mul(dims[row_dim])?;
+            for dim in (0..row_dim).rev() {
+                if dims[dim] > 1 && strides[dim] != expected {
+                    return None;
+                }
+                expected = expected.checked_mul(dims[dim])?;
+            }
+            Some(row_stride)
+        };
+        let gate_row_stride = flat_row_stride(gate_layout).ok_or_else(|| {
+            candle_core::Error::Msg(format!(
+                "unsupported fused SiLU gate layout {gate_layout:?}"
+            ))
+        })?;
+        let up_row_stride = flat_row_stride(up_layout).ok_or_else(|| {
+            candle_core::Error::Msg(format!("unsupported fused SiLU up layout {up_layout:?}"))
+        })?;
         let device = gate.device().clone();
         let gate = gate.as_cuda_slice::<half::bf16>()?;
         let up = up.as_cuda_slice::<half::bf16>()?;
@@ -95,7 +638,13 @@ impl CustomOp2 for FusedSiluMulBf16 {
         builder.arg(&gate);
         builder.arg(&up);
         builder.arg(&output);
-        candle_core::builder_arg!(builder, count as u32);
+        candle_core::builder_arg!(
+            builder,
+            count as u32,
+            ncols as u32,
+            gate_row_stride as u32,
+            up_row_stride as u32
+        );
         unsafe { builder.launch(LaunchConfig::for_num_elems(count as u32)) }.w()?;
         Ok((
             candle_core::CudaStorage::wrap_cuda_slice(output, device),
@@ -680,6 +1229,59 @@ impl InplaceOp3 for DynamicPagedKvAppend {
             self.cache_len as u32
         );
         unsafe { builder.launch(LaunchConfig::for_num_elems(count as u32)) }.w()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::{DType, Device, Tensor};
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn deterministic_bf16_argmax_keeps_first_index() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let mut values = vec![0.0f32; 2 * 1030];
+        values[1] = 10.0;
+        values[1024] = 10.0;
+        values[1030 + 2] = 7.0;
+        values[1030 + 1025] = 7.0;
+        let logits = Tensor::from_vec(values, (2, 1030), &device)?.to_dtype(DType::BF16)?;
+        let tokens = logits
+            .apply_op1_no_bwd(&ArgmaxFirstBf16)?
+            .to_vec1::<u32>()?;
+        assert_eq!(tokens, vec![1, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn fused_silu_mul_supports_strided_projection_halves() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let gate_up = Tensor::from_vec(
+            vec![
+                -2.0f32, -1.0, 0.5, 2.0, 3.0, -4.0, // row 0: gate, up
+                1.5, -0.5, 4.0, -3.0, 2.0, 0.25, // row 1: gate, up
+            ],
+            (1, 2, 6),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let gate = gate_up.narrow(2, 0, 3)?;
+        let up = gate_up.narrow(2, 3, 3)?;
+        assert!(!gate.is_contiguous());
+        assert!(!up.is_contiguous());
+
+        let actual = gate.apply_op2_no_bwd(&up, &FusedSiluMulBf16)?;
+        let expected = (candle_nn::ops::silu(&gate)? * up)?;
+        assert_eq!(
+            actual.to_vec3::<half::bf16>()?,
+            expected.to_vec3::<half::bf16>()?
+        );
         Ok(())
     }
 }
