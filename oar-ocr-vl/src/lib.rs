@@ -38,6 +38,15 @@ pub mod utils;
 // Shared attention implementation
 pub mod attention;
 
+// Small CUDA primitives shared by multiple VLM backends. Model-specific
+// kernels remain in their respective modules, while stable sampling and other
+// reusable decode operations live here.
+#[cfg(feature = "cuda")]
+pub(crate) mod cuda_kernels;
+
+// Shared lifetime and capacity plumbing for batch-1 decoder CUDA graphs.
+pub(crate) mod decoder_graph;
+
 // `TrimmableKvCache` backs the KV cache used by every model's attention
 // forward path.
 pub(crate) mod kv_trim;

@@ -1,6 +1,6 @@
 use std::process::Command;
 
-const MIN_DFLASH_COMPUTE_CAP: u32 = 80;
+const MIN_CUDA_COMPUTE_CAP: u32 = 80;
 
 fn parse_compute_cap(value: &str) -> Option<(String, u32)> {
     let value = value.trim().to_ascii_lowercase();
@@ -48,25 +48,25 @@ fn cuda_compute_arch() -> String {
             )
         });
         assert!(
-            base >= MIN_DFLASH_COMPUTE_CAP,
-            "HunyuanOCR DFlash CUDA kernels require compute capability 8.0 or newer; got CUDA_COMPUTE_CAP={value:?}"
+            base >= MIN_CUDA_COMPUTE_CAP,
+            "oar-ocr-vl CUDA kernels require compute capability 8.0 or newer; got CUDA_COMPUTE_CAP={value:?}"
         );
         return format!("compute_{arch}");
     }
 
     match detect_local_compute_cap() {
-        Some(base) if base >= MIN_DFLASH_COMPUTE_CAP => format!("compute_{base}"),
+        Some(base) if base >= MIN_CUDA_COMPUTE_CAP => format!("compute_{base}"),
         Some(base) => {
             println!(
-                "cargo:warning=detected GPU compute capability {base} is below the HunyuanOCR DFlash minimum; compiling forward-compatible compute_{MIN_DFLASH_COMPUTE_CAP} PTX"
+                "cargo:warning=detected GPU compute capability {base} is below the oar-ocr-vl CUDA kernel minimum; compiling forward-compatible compute_{MIN_CUDA_COMPUTE_CAP} PTX"
             );
-            format!("compute_{MIN_DFLASH_COMPUTE_CAP}")
+            format!("compute_{MIN_CUDA_COMPUTE_CAP}")
         }
         None => {
             println!(
-                "cargo:warning=could not detect a CUDA GPU; compiling compute_{MIN_DFLASH_COMPUTE_CAP} PTX (set CUDA_COMPUTE_CAP to override for cross/headless builds)"
+                "cargo:warning=could not detect a CUDA GPU; compiling compute_{MIN_CUDA_COMPUTE_CAP} PTX (set CUDA_COMPUTE_CAP to override for cross/headless builds)"
             );
-            format!("compute_{MIN_DFLASH_COMPUTE_CAP}")
+            format!("compute_{MIN_CUDA_COMPUTE_CAP}")
         }
     }
 }
@@ -93,18 +93,18 @@ fn main() {
             .args(["--ptx", "--std=c++17", "-O3"])
             .arg(format!("--gpu-architecture={cuda_arch}"))
             .arg("-o")
-            .arg(out_dir.join("hunyuan_dynamic_kv.ptx"))
+            .arg(out_dir.join("oar_vl_kernels.ptx"))
             .arg("src/hunyuanocr/dynamic_kv.cu")
             .output()
             .unwrap_or_else(|error| {
                 panic!(
-                    "failed to invoke {:?} for HunyuanOCR dynamic KV kernel; install the CUDA toolkit or set NVCC to the compiler path: {error}",
+                    "failed to invoke {:?} for oar-ocr-vl CUDA kernels; install the CUDA toolkit or set NVCC to the compiler path: {error}",
                     nvcc
                 )
             });
         if !output.status.success() {
             panic!(
-                "{:?} failed for HunyuanOCR dynamic KV kernel ({cuda_arch}):\n{}",
+                "{:?} failed for oar-ocr-vl CUDA kernels ({cuda_arch}):\n{}",
                 nvcc,
                 String::from_utf8_lossy(&output.stderr)
             );

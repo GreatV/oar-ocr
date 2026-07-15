@@ -160,6 +160,45 @@ extern "C" __global__ void mark_repetition_history_u8(
   }
 }
 
+// Apply a common sparse banned-token list to every logits row. This is used
+// by exact greedy processors such as no-repeat-ngram without copying the full
+// vocabulary to the host.
+extern "C" __global__ void mask_token_ids_bf16(
+    __nv_bfloat16* logits,
+    const uint32_t* token_ids,
+    uint32_t rows,
+    uint32_t vocab_size,
+    uint32_t token_count) {
+  const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  const uint32_t count = rows * token_count;
+  if (index >= count) {
+    return;
+  }
+  const uint32_t row = index / token_count;
+  const uint32_t token = token_ids[index - row * token_count];
+  if (token < vocab_size) {
+    logits[row * vocab_size + token] = __float2bfloat16(-CUDART_INF_F);
+  }
+}
+
+extern "C" __global__ void mask_token_ids_f32(
+    float* logits,
+    const uint32_t* token_ids,
+    uint32_t rows,
+    uint32_t vocab_size,
+    uint32_t token_count) {
+  const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  const uint32_t count = rows * token_count;
+  if (index >= count) {
+    return;
+  }
+  const uint32_t row = index / token_count;
+  const uint32_t token = token_ids[index - row * token_count];
+  if (token < vocab_size) {
+    logits[row * vocab_size + token] = -CUDART_INF_F;
+  }
+}
+
 extern "C" __global__ void argmax_first_bf16_stage1(
     const __nv_bfloat16* logits,
     float* partial_values,
@@ -683,4 +722,178 @@ extern "C" __global__ void add_rmsnorm_bf16(
   const float scale = rsqrtf(sum / static_cast<float>(ncols) + eps);
   output[element_count + row_offset + col] = __float2bfloat16_rn(
       scale * value * __bfloat162float(weight[col]));
+}
+
+template <typename T>
+static __device__ __forceinline__ float sampling_logit(const T* logits,
+                                                        uint32_t index);
+
+template <>
+__device__ __forceinline__ float sampling_logit<float>(const float* logits,
+                                                        uint32_t index) {
+  return logits[index];
+}
+
+template <>
+__device__ __forceinline__ float sampling_logit<__nv_bfloat16>(
+    const __nv_bfloat16* logits,
+    uint32_t index) {
+  return __bfloat162float(logits[index]);
+}
+
+// Select one token per logits row and return both the token id and its softmax
+// probability. The output is F32 [rows, 2]; vocabulary ids below 2^24 are
+// exactly representable, and MinerU's vocabulary is much smaller than that.
+//
+// Sampling uses a caller-provided U[0, 1) variate. This keeps RNG ownership on
+// the host (and therefore preserves seeded/reproducible generation) while the
+// O(rows*vocab) softmax/CDF work stays on the GPU. The scan is tiled so all 256
+// lanes evaluate exponentials in parallel instead of making one lane walk the
+// full vocabulary.
+template <typename T>
+static __device__ void sample_with_confidence_impl(
+    const T* logits,
+    const float* uniforms,
+    float* output,
+    uint32_t rows,
+    uint32_t vocab_size,
+    float inv_temperature,
+    uint32_t greedy,
+    float* scratch_values,
+    uint32_t* scratch_indices) {
+  const uint32_t row = blockIdx.x;
+  const uint32_t lane = threadIdx.x;
+  if (row >= rows) {
+    return;
+  }
+
+  const uint32_t row_offset = row * vocab_size;
+  float best_value = -CUDART_INF_F;
+  uint32_t best_index = UINT32_MAX;
+  for (uint32_t col = lane; col < vocab_size; col += blockDim.x) {
+    const float value = sampling_logit(logits, row_offset + col) *
+                        inv_temperature;
+    if (value > best_value || (value == best_value && col < best_index)) {
+      best_value = value;
+      best_index = col;
+    }
+  }
+
+  scratch_values[lane] = best_value;
+  scratch_indices[lane] = best_index;
+  for (uint32_t width = blockDim.x / 2; width > 0; width >>= 1) {
+    __syncthreads();
+    if (lane < width) {
+      const float other_value = scratch_values[lane + width];
+      const uint32_t other_index = scratch_indices[lane + width];
+      if (other_value > scratch_values[lane] ||
+          (other_value == scratch_values[lane] &&
+           other_index < scratch_indices[lane])) {
+        scratch_values[lane] = other_value;
+        scratch_indices[lane] = other_index;
+      }
+    }
+  }
+  __syncthreads();
+  const float max_value = scratch_values[0];
+  const uint32_t argmax =
+      scratch_indices[0] == UINT32_MAX ? 0 : scratch_indices[0];
+
+  float local_sum = 0.0f;
+  for (uint32_t col = lane; col < vocab_size; col += blockDim.x) {
+    const float value = sampling_logit(logits, row_offset + col) *
+                        inv_temperature;
+    local_sum += expf(value - max_value);
+  }
+  scratch_values[lane] = local_sum;
+  for (uint32_t width = blockDim.x / 2; width > 0; width >>= 1) {
+    __syncthreads();
+    if (lane < width) {
+      scratch_values[lane] += scratch_values[lane + width];
+    }
+  }
+  __syncthreads();
+  const float sum = scratch_values[0];
+
+  uint32_t selected = argmax;
+  if (!greedy && isfinite(sum) && sum > 0.0f) {
+    const float threshold = uniforms[row] * sum;
+    float cumulative = 0.0f;
+    for (uint32_t base = 0; base < vocab_size; base += blockDim.x) {
+      const uint32_t col = base + lane;
+      const float weight = col < vocab_size
+          ? expf(sampling_logit(logits, row_offset + col) * inv_temperature -
+                 max_value)
+          : 0.0f;
+      scratch_values[lane] = weight;
+      __syncthreads();
+
+      // Inclusive scan of this 256-token tile.
+      for (uint32_t offset = 1; offset < blockDim.x; offset <<= 1) {
+        const float add = lane >= offset ? scratch_values[lane - offset] : 0.0f;
+        __syncthreads();
+        if (lane >= offset) {
+          scratch_values[lane] += add;
+        }
+        __syncthreads();
+      }
+
+      if (lane == 0) {
+        scratch_indices[0] = UINT32_MAX;
+      }
+      __syncthreads();
+      if (col < vocab_size && cumulative + scratch_values[lane] > threshold) {
+        atomicMin(scratch_indices, col);
+      }
+      __syncthreads();
+      const uint32_t crossing = scratch_indices[0];
+      const float tile_sum = scratch_values[blockDim.x - 1];
+      if (crossing != UINT32_MAX) {
+        selected = crossing;
+        break;
+      }
+      cumulative += tile_sum;
+      __syncthreads();
+    }
+  }
+
+  if (lane == 0) {
+    const float selected_value =
+        sampling_logit(logits, row_offset + selected) * inv_temperature;
+    const float confidence = isfinite(sum) && sum > 0.0f
+        ? expf(selected_value - max_value) / sum
+        : 1.0f;
+    output[row * 2] = static_cast<float>(selected);
+    output[row * 2 + 1] = confidence;
+  }
+}
+
+extern "C" __global__ void sample_with_confidence_f32(
+    const float* logits,
+    const float* uniforms,
+    float* output,
+    uint32_t rows,
+    uint32_t vocab_size,
+    float inv_temperature,
+    uint32_t greedy) {
+  __shared__ float scratch_values[256];
+  __shared__ uint32_t scratch_indices[256];
+  sample_with_confidence_impl(logits, uniforms, output, rows, vocab_size,
+                              inv_temperature, greedy, scratch_values,
+                              scratch_indices);
+}
+
+extern "C" __global__ void sample_with_confidence_bf16(
+    const __nv_bfloat16* logits,
+    const float* uniforms,
+    float* output,
+    uint32_t rows,
+    uint32_t vocab_size,
+    float inv_temperature,
+    uint32_t greedy) {
+  __shared__ float scratch_values[256];
+  __shared__ uint32_t scratch_indices[256];
+  sample_with_confidence_impl(logits, uniforms, output, rows, vocab_size,
+                              inv_temperature, greedy, scratch_values,
+                              scratch_indices);
 }

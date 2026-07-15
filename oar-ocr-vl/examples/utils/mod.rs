@@ -20,6 +20,14 @@ pub fn init_tracing() {
         .init();
 }
 
+/// Stable FNV-1a fingerprint used to compare generated token streams.
+#[allow(dead_code)]
+pub fn token_fingerprint(tokens: &[u32]) -> u64 {
+    tokens.iter().fold(0xcbf29ce484222325_u64, |hash, token| {
+        (hash ^ u64::from(*token)).wrapping_mul(0x100000001b3)
+    })
+}
+
 #[allow(dead_code)]
 pub fn print_preview(tag: &str, text: &str) {
     let preview: String = text.chars().take(400).collect();

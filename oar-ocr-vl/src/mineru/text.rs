@@ -1,16 +1,30 @@
 use super::config::MinerUConfig;
 use crate::attention::{
-    RotaryEmbedding, repeat_kv, scaled_dot_product_attention, select_rope_sections,
+    RotaryEmbedding, flash_attention, scaled_dot_product_attention_gqa, select_rope_sections,
 };
+#[cfg(feature = "cuda")]
+use crate::decoder_graph::decoder_cache_capacity;
+#[cfg(feature = "cuda")]
+use crate::decoder_graph::{
+    CudaGraphKvLengths, SingleTokenDecoderCudaGraph, cuda_graph_error, decoder_attention_is_causal,
+    sync_graph_tensor,
+};
+#[cfg(feature = "cuda")]
+use crate::hunyuanocr::dynamic_kv::DynamicKvAppend;
 use crate::kv_trim::TrimmableKvCache;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
-use candle_core::Tensor;
+#[cfg(feature = "cuda")]
+use candle_core::{DType, Device};
+use candle_core::{IndexOp, Tensor};
 use candle_nn::{
     Embedding, Linear, Module, VarBuilder, embedding, linear, linear_no_bias, rms_norm,
 };
 use oar_ocr_core::core::OCRError;
 use std::cell::RefCell;
 use std::sync::Arc;
+
+#[cfg(feature = "cuda")]
+const MINERU_DECODE_CACHE_LEN: usize = 16_384;
 
 fn apply_multimodal_rotary_pos_emb(
     q: &Tensor,
@@ -192,13 +206,12 @@ impl MinerUAttention {
         })
     }
 
-    fn forward(
+    fn project_qkv(
         &self,
         hidden_states: &Tensor,
         cos: &Tensor,
         sin: &Tensor,
-        attention_mask: Option<&Tensor>,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<(Tensor, Tensor, Tensor), OCRError> {
         let (b, seq_len, _) = hidden_states
             .dims3()
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "attn hidden_states dims3", e))?;
@@ -238,24 +251,59 @@ impl MinerUAttention {
             .contiguous()
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "attn v contiguous", e))?;
 
+        Ok((q, k, v))
+    }
+
+    fn forward(
+        &self,
+        hidden_states: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        attention_mask: Option<&Tensor>,
+    ) -> Result<Tensor, OCRError> {
+        let (b, seq_len, _) = hidden_states
+            .dims3()
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "attn hidden_states dims3", e))?;
+        let (q, k, v) = self.project_qkv(hidden_states, cos, sin)?;
+
         let (k, v) = self
             .kv_cache
             .borrow_mut()
             .append(&k, &v)
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "attn kv_cache append", e))?;
-        let k = repeat_kv(&k, self.num_kv_groups)
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "repeat kv k", e))?;
-        let v = repeat_kv(&v, self.num_kv_groups)
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "repeat kv v", e))?;
-
         let is_causal = attention_mask.is_none();
-        let attn_output =
-            scaled_dot_product_attention(&q, &k, &v, attention_mask, self.scaling, is_causal)
-                .map_err(|e| candle_to_ocr_inference("MinerU2.5", "attn scaled_dot_product", e))?;
+        let flash = if b == 1 {
+            flash_attention(&q, &k, &v, self.scaling, seq_len > 1)
+                .map_err(|e| candle_to_ocr_inference("MinerU2.5", "flash attention", e))?
+        } else {
+            None
+        };
+        let attn_output = match flash {
+            Some(attn) => attn,
+            None => scaled_dot_product_attention_gqa(
+                &q,
+                &k,
+                &v,
+                attention_mask,
+                self.scaling,
+                is_causal,
+                self.num_kv_groups,
+            )
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "grouped-query attention", e))?,
+        };
+        self.project_attention_output(&attn_output, b, seq_len)
+    }
+
+    fn project_attention_output(
+        &self,
+        attn_output: &Tensor,
+        batch: usize,
+        seq_len: usize,
+    ) -> Result<Tensor, OCRError> {
         let attn_output = attn_output
             .transpose(1, 2)
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "attn output transpose", e))?
-            .reshape((b, seq_len, self.num_heads * self.head_dim))
+            .reshape((batch, seq_len, self.num_heads * self.head_dim))
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "attn output reshape", e))?;
 
         self.o_proj
@@ -263,8 +311,100 @@ impl MinerUAttention {
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "attn o_proj", e))
     }
 
+    #[cfg(feature = "cuda")]
+    fn prepare_dynamic_cache(&self, query_len: usize, cache_len: usize) -> Result<(), OCRError> {
+        let template = Tensor::zeros(
+            (1, self.num_kv_heads, query_len, self.head_dim),
+            self.k_proj.weight().dtype(),
+            self.k_proj.weight().device(),
+        )
+        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "dynamic KV template", e))?;
+        self.kv_cache
+            .borrow_mut()
+            .initialize_storage_with_capacity(&template, cache_len)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "initialize dynamic KV", e))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn forward_dynamic(
+        &self,
+        hidden_states: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        query_lengths: &Tensor,
+        kv_lengths: &Tensor,
+    ) -> Result<Tensor, OCRError> {
+        let (batch, query_len, _) = hidden_states.dims3().map_err(|e| {
+            candle_to_ocr_inference("MinerU2.5", "dynamic attention hidden shape", e)
+        })?;
+        if batch != 1 {
+            return Err(OCRError::ConfigError {
+                message: "MinerU2.5 CUDA-graph attention requires batch size 1".to_string(),
+            });
+        }
+        let (q, k, v) = self.project_qkv(hidden_states, cos, sin)?;
+        let cache = self.kv_cache.borrow();
+        let cache_len = cache.storage_capacity();
+        let (cache_k, cache_v) = cache.storage().ok_or_else(|| OCRError::ConfigError {
+            message: "MinerU2.5 dynamic KV storage is not initialized".to_string(),
+        })?;
+        drop(cache);
+        let append = DynamicKvAppend {
+            query_len,
+            cache_len,
+        };
+        cache_k
+            .inplace_op3(&k, kv_lengths, &append)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "dynamic key cache append", e))?;
+        cache_v
+            .inplace_op3(&v, kv_lengths, &append)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "dynamic value cache append", e))?;
+
+        let q = q
+            .squeeze(0)
+            .and_then(|q| q.transpose(0, 1))
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "dynamic Q layout", e))?;
+        let cache_k = cache_k
+            .squeeze(0)
+            .and_then(|k| k.transpose(0, 1))
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "dynamic K layout", e))?;
+        let cache_v = cache_v
+            .squeeze(0)
+            .and_then(|v| v.transpose(0, 1))
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "dynamic V layout", e))?;
+        let attn = candle_flash_attn::flash_attn_varlen(
+            &q,
+            &cache_k,
+            &cache_v,
+            query_lengths,
+            kv_lengths,
+            query_len,
+            cache_len,
+            self.scaling as f32,
+            decoder_attention_is_causal(query_len),
+        )
+        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "dynamic flash attention", e))?
+        .transpose(0, 1)
+        .and_then(|attn| attn.unsqueeze(0))
+        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "dynamic attention layout", e))?;
+        self.project_attention_output(&attn, batch, query_len)
+    }
+
     fn clear_kv_cache(&self) {
         self.kv_cache.borrow_mut().reset();
+    }
+
+    #[cfg(feature = "cuda")]
+    fn kv_cache_len(&self) -> usize {
+        self.kv_cache.borrow().current_seq_len()
+    }
+
+    #[cfg(feature = "cuda")]
+    fn set_kv_cache_len(&self, len: usize) -> Result<(), OCRError> {
+        self.kv_cache
+            .borrow_mut()
+            .set_current_len(len)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "set dynamic KV length", e))
     }
 }
 
@@ -333,12 +473,64 @@ impl MinerUDecoderLayer {
         })
     }
 
+    #[cfg(feature = "cuda")]
+    fn forward_dynamic(
+        &self,
+        hidden_states: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        query_lengths: &Tensor,
+        kv_lengths: &Tensor,
+    ) -> Result<Tensor, OCRError> {
+        let residual = hidden_states.clone();
+        let hidden_states = self
+            .input_layernorm
+            .forward(hidden_states)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "input_layernorm", e))?;
+        let hidden_states =
+            self.self_attn
+                .forward_dynamic(&hidden_states, cos, sin, query_lengths, kv_lengths)?;
+        let hidden_states = (&residual + &hidden_states).map_err(|e| {
+            candle_to_ocr_processing(
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                "MinerU2.5: attn residual add failed",
+                e,
+            )
+        })?;
+
+        let residual = hidden_states.clone();
+        let hidden_states = self
+            .post_attention_layernorm
+            .forward(&hidden_states)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "post_attention_layernorm", e))?;
+        let hidden_states = self.mlp.forward(&hidden_states)?;
+        (&residual + &hidden_states).map_err(|e| {
+            candle_to_ocr_processing(
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                "MinerU2.5: mlp residual add failed",
+                e,
+            )
+        })
+    }
+
     fn clear_kv_cache(&self) {
         self.self_attn.clear_kv_cache();
+    }
+
+    #[cfg(feature = "cuda")]
+    fn kv_cache_len(&self) -> usize {
+        self.self_attn.kv_cache_len()
+    }
+
+    #[cfg(feature = "cuda")]
+    fn set_kv_cache_len(&self, len: usize) -> Result<(), OCRError> {
+        self.self_attn.set_kv_cache_len(len)
     }
 }
 
 pub struct MinerUTextModel {
+    #[cfg(feature = "cuda")]
+    decode_graph: RefCell<Option<SingleTokenDecoderCudaGraph>>,
     embed_tokens: Embedding,
     layers: Vec<MinerUDecoderLayer>,
     norm: candle_nn::RmsNorm,
@@ -367,6 +559,8 @@ impl MinerUTextModel {
         )?);
 
         Ok(Self {
+            #[cfg(feature = "cuda")]
+            decode_graph: RefCell::new(None),
             embed_tokens,
             layers,
             norm,
@@ -397,6 +591,252 @@ impl MinerUTextModel {
         self.norm
             .forward(&hidden_states)
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "norm forward", e))
+    }
+
+    fn project_logits(&self, hidden_states: &Tensor, lm_head: &Linear) -> Result<Tensor, OCRError> {
+        lm_head
+            .forward(hidden_states)
+            .and_then(|logits| logits.i((0, 0, ..)))
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "decode LM head", e))
+    }
+
+    pub(crate) fn forward_decode_logits(
+        &self,
+        inputs_embeds: &Tensor,
+        position_ids: &Tensor,
+        attention_mask: Option<&Tensor>,
+        lm_head: &Linear,
+    ) -> Result<Tensor, OCRError> {
+        #[cfg(feature = "cuda")]
+        {
+            let kv_len = self.kv_cache_len().saturating_add(1);
+            if let Some(logits) = self.replay_cuda_graph(inputs_embeds, position_ids, kv_len)? {
+                return Ok(logits);
+            }
+        }
+        let hidden = self.forward(inputs_embeds, position_ids, attention_mask)?;
+        self.project_logits(&hidden, lm_head)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn forward_dynamic(
+        &self,
+        inputs_embeds: &Tensor,
+        position_ids: &Tensor,
+        query_lengths: &Tensor,
+        kv_lengths: &Tensor,
+    ) -> Result<Tensor, OCRError> {
+        let (cos, sin) = self
+            .rotary_emb
+            .forward_multi_axis(position_ids, inputs_embeds.dtype())?;
+        let mut hidden_states = inputs_embeds.clone();
+        for layer in &self.layers {
+            hidden_states =
+                layer.forward_dynamic(&hidden_states, &cos, &sin, query_lengths, kv_lengths)?;
+        }
+        self.norm
+            .forward(&hidden_states)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "dynamic norm", e))
+    }
+
+    pub(crate) fn prepare_ar_cuda_graph(
+        &self,
+        prompt_len: usize,
+        max_new_tokens: usize,
+        lm_head: &Linear,
+    ) -> Result<(), OCRError> {
+        if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
+            || std::env::var_os("OAR_MINERU_DISABLE_CUDA_GRAPH").is_some()
+        {
+            #[cfg(feature = "cuda")]
+            self.invalidate_cuda_graph();
+            return Ok(());
+        }
+        #[cfg(feature = "cuda")]
+        if self.embed_tokens.embeddings().device().is_cuda()
+            && matches!(
+                self.embed_tokens.embeddings().dtype(),
+                DType::BF16 | DType::F16
+            )
+        {
+            let Some(cache_len) =
+                decoder_cache_capacity(prompt_len, max_new_tokens, MINERU_DECODE_CACHE_LEN)
+            else {
+                self.invalidate_cuda_graph();
+                return Ok(());
+            };
+            let required = prompt_len
+                .saturating_add(max_new_tokens)
+                .min(MINERU_DECODE_CACHE_LEN);
+            let reusable = self
+                .decode_graph
+                .borrow()
+                .as_ref()
+                .is_some_and(|graph| graph.cache_len >= required);
+            if reusable {
+                return Ok(());
+            }
+            self.invalidate_cuda_graph();
+            self.capture_cuda_graph(cache_len, lm_head)?;
+        }
+        let _ = prompt_len;
+        let _ = max_new_tokens;
+        let _ = lm_head;
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    fn capture_cuda_graph(&self, cache_len: usize, lm_head: &Linear) -> Result<(), OCRError> {
+        use candle_core::cuda_backend::cudarc::driver::sys::{
+            CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
+        };
+
+        if self.decode_graph.borrow().is_some() {
+            return Ok(());
+        }
+        let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
+            return Ok(());
+        };
+        let query_len = 1;
+        for layer in &self.layers {
+            layer
+                .self_attn
+                .prepare_dynamic_cache(query_len, cache_len)?;
+        }
+        let hidden_size = self
+            .embed_tokens
+            .embeddings()
+            .dim(1)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "graph hidden size", e))?;
+        let device = self.embed_tokens.embeddings().device();
+        let hidden_input = Tensor::zeros(
+            (1, query_len, hidden_size),
+            self.embed_tokens.embeddings().dtype(),
+            device,
+        )
+        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "graph hidden input", e))?;
+        let position_input = Tensor::zeros((3, 1, query_len), DType::I64, device)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "graph position input", e))?;
+        let query_lengths = Tensor::new(&[0u32, query_len as u32], device)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "graph query lengths", e))?;
+        let kv_lengths = CudaGraphKvLengths::new(query_len, device)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "graph KV lengths", e))?;
+        let stream = cuda.cuda_stream();
+        let _htod_cache = cuda.enable_cuda_graph_htod_cache();
+
+        let warm = self.forward_dynamic(
+            &hidden_input,
+            &position_input,
+            &query_lengths,
+            kv_lengths.tensor(),
+        )?;
+        let warm_logits = self.project_logits(&warm, lm_head)?;
+        sync_graph_tensor("MinerU2.5", &warm_logits, "warm decoder CUDA graph")?;
+
+        stream
+            .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
+            .map_err(|e| cuda_graph_error("MinerU2.5", "begin decoder CUDA graph capture", e))?;
+        let captured_output = (|| {
+            let hidden = self.forward_dynamic(
+                &hidden_input,
+                &position_input,
+                &query_lengths,
+                kv_lengths.tensor(),
+            )?;
+            self.project_logits(&hidden, lm_head)
+        })();
+        let logits_output = match captured_output {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = stream.end_capture(
+                    CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+                );
+                return Err(error);
+            }
+        };
+        let graph = stream
+            .end_capture(
+                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            )
+            .map_err(|e| cuda_graph_error("MinerU2.5", "end decoder CUDA graph capture", e))?
+            .ok_or_else(|| OCRError::ConfigError {
+                message: "MinerU2.5 decoder capture returned no graph".to_string(),
+            })?;
+        graph
+            .launch()
+            .map_err(|e| cuda_graph_error("MinerU2.5", "warm decoder CUDA graph", e))?;
+        sync_graph_tensor("MinerU2.5", &logits_output, "sync decoder CUDA graph")?;
+        self.clear_kv_cache();
+        *self.decode_graph.borrow_mut() = Some(SingleTokenDecoderCudaGraph {
+            graph,
+            hidden_input,
+            position_input,
+            _query_lengths: query_lengths,
+            kv_lengths,
+            logits_output,
+            cache_len,
+        });
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    fn replay_cuda_graph(
+        &self,
+        inputs_embeds: &Tensor,
+        position_ids: &Tensor,
+        kv_len: usize,
+    ) -> Result<Option<Tensor>, OCRError> {
+        let captured_ref = self.decode_graph.borrow();
+        let Some(captured) = captured_ref.as_ref() else {
+            return Ok(None);
+        };
+        if kv_len > captured.cache_len {
+            drop(captured_ref);
+            self.invalidate_cuda_graph();
+            return Ok(None);
+        }
+        if inputs_embeds.shape() != captured.hidden_input.shape()
+            || position_ids.shape() != captured.position_input.shape()
+        {
+            return Ok(None);
+        }
+        captured
+            .hidden_input
+            .slice_set(inputs_embeds, 0, 0)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "copy graph hidden", e))?;
+        captured
+            .position_input
+            .slice_set(position_ids, 0, 0)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "copy graph positions", e))?;
+        captured
+            .kv_lengths
+            .update(kv_len)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "update graph KV lengths", e))?;
+        captured
+            .graph
+            .launch()
+            .map_err(|e| cuda_graph_error("MinerU2.5", "launch decoder CUDA graph", e))?;
+        for layer in &self.layers {
+            layer.set_kv_cache_len(kv_len)?;
+        }
+        Ok(Some(captured.logits_output.clone()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn invalidate_cuda_graph(&self) {
+        self.decode_graph.borrow_mut().take();
+    }
+
+    pub(crate) fn invalidate_ar_cuda_graph(&self) {
+        #[cfg(feature = "cuda")]
+        self.invalidate_cuda_graph();
+    }
+
+    #[cfg(feature = "cuda")]
+    fn kv_cache_len(&self) -> usize {
+        let len = self.layers.first().map_or(0, |layer| layer.kv_cache_len());
+        debug_assert!(self.layers.iter().all(|layer| layer.kv_cache_len() == len));
+        len
     }
 
     pub fn token_embedding_weight(&self) -> Tensor {

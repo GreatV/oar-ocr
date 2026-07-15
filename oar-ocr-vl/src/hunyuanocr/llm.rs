@@ -6,6 +6,10 @@ use super::dynamic_kv::{
 use crate::attention::{
     RotaryEmbedding, flash_attention, repeat_kv, scaled_dot_product_attention, select_rope_sections,
 };
+#[cfg(feature = "cuda")]
+use crate::decoder_graph::{
+    CudaGraphKvLengths, cuda_graph_error, decoder_attention_is_causal, sync_graph_tensor,
+};
 use crate::kv_trim::TrimmableKvCache;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 #[cfg(feature = "cuda")]
@@ -114,18 +118,6 @@ fn apply_xdrope_rotary_pos_emb(
         .to_dtype(origin_dtype)
         .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "xdrope k to_dtype back", e))?;
     Ok((q_rot, k_rot))
-}
-
-#[cfg(feature = "cuda")]
-fn cuda_graph_error(
-    context: impl Into<String>,
-    source: impl std::error::Error + Send + Sync + 'static,
-) -> OCRError {
-    OCRError::Inference {
-        model_name: "HunyuanOCR".to_string(),
-        context: context.into(),
-        source: Box::new(source),
-    }
 }
 
 #[derive(Debug)]
@@ -641,7 +633,7 @@ impl HunyuanAttention {
             query_len,
             cache_len,
             self.scaling as f32,
-            true,
+            decoder_attention_is_causal(query_len),
         )
         .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "dynamic flash attention", e))?
         .transpose(0, 1)
@@ -683,7 +675,7 @@ struct TargetDecoderCudaGraph {
     cos_input: Tensor,
     sin_input: Tensor,
     _query_lengths: Tensor,
-    kv_lengths: Tensor,
+    kv_lengths: CudaGraphKvLengths,
     hidden_output: Tensor,
     logits_output: Tensor,
     aux_output: Option<Tensor>,
@@ -700,17 +692,6 @@ impl std::fmt::Debug for TargetDecoderCudaGraph {
             .field("cache_len", &self.cache_len)
             .finish_non_exhaustive()
     }
-}
-
-#[cfg(feature = "cuda")]
-fn sync_graph_tensor(tensor: &Tensor, operation: &'static str) -> Result<(), OCRError> {
-    tensor
-        .flatten_all()
-        .and_then(|x| x.narrow(0, 0, 1))
-        .and_then(|x| x.to_dtype(candle_core::DType::F32))
-        .and_then(|x| x.to_vec1::<f32>())
-        .map(|_| ())
-        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", operation, e))
 }
 
 #[derive(Debug)]
@@ -1062,17 +1043,13 @@ impl HunyuanLlm {
             .sin_input
             .slice_set(sin, 0, 0)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "copy full graph sin", e))?;
-        let lengths = Tensor::new(&[0u32, kv_len as u32], inputs_embeds.device()).map_err(|e| {
-            candle_to_ocr_inference("HunyuanOCR", "create full graph KV lengths", e)
+        captured.kv_lengths.update(kv_len).map_err(|e| {
+            candle_to_ocr_inference("HunyuanOCR", "update full graph KV lengths", e)
         })?;
-        captured
-            .kv_lengths
-            .slice_set(&lengths, 0, 0)
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "copy full graph KV lengths", e))?;
         captured
             .graph
             .launch()
-            .map_err(|e| cuda_graph_error("launch full target decoder graph", e))?;
+            .map_err(|e| cuda_graph_error("HunyuanOCR", "launch full target decoder graph", e))?;
         for layer in &self.layers {
             layer.set_kv_cache_len(kv_len)?;
         }
@@ -1385,7 +1362,7 @@ impl HunyuanLlm {
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph query lengths", e))?;
         // These must not share storage: query length stays fixed while
         // the cumulative KV length is overwritten before every graph replay.
-        let kv_lengths = Tensor::new(&[0u32, query_len as u32], self.decode_cos.device())
+        let kv_lengths = CudaGraphKvLengths::new(query_len, self.decode_cos.device())
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph KV lengths", e))?;
         let stream = cuda.cuda_stream();
         let _htod_cache = cuda.enable_cuda_graph_htod_cache();
@@ -1395,22 +1372,24 @@ impl HunyuanLlm {
             &cos_input,
             &sin_input,
             &query_lengths,
-            &kv_lengths,
+            kv_lengths.tensor(),
             aux_layer_ids,
         )?;
         let warm_logits = self.project_logits(&warm.hidden_states)?;
-        sync_graph_tensor(&warm_logits, "warm full target decoder graph")?;
+        sync_graph_tensor("HunyuanOCR", &warm_logits, "warm full target decoder graph")?;
 
         stream
             .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
-            .map_err(|e| cuda_graph_error("begin full target decoder graph capture", e))?;
+            .map_err(|e| {
+                cuda_graph_error("HunyuanOCR", "begin full target decoder graph capture", e)
+            })?;
         let captured_output = (|| {
             let output = self.forward_with_aux_dynamic(
                 &hidden_input,
                 &cos_input,
                 &sin_input,
                 &query_lengths,
-                &kv_lengths,
+                kv_lengths.tensor(),
                 aux_layer_ids,
             )?;
             let logits = self.project_logits(&output.hidden_states)?;
@@ -1429,15 +1408,21 @@ impl HunyuanLlm {
             .end_capture(
                 CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
             )
-            .map_err(|e| cuda_graph_error("end full target decoder graph capture", e))?
+            .map_err(|e| {
+                cuda_graph_error("HunyuanOCR", "end full target decoder graph capture", e)
+            })?
             .ok_or_else(|| OCRError::ConfigError {
                 message: "HunyuanOCR full target decoder capture returned no graph".to_string(),
             })?;
         let aux_output = output.aux_hidden_states;
         graph
             .launch()
-            .map_err(|e| cuda_graph_error("warm full target decoder graph", e))?;
-        sync_graph_tensor(&logits_output, "sync full target decoder graph")?;
+            .map_err(|e| cuda_graph_error("HunyuanOCR", "warm full target decoder graph", e))?;
+        sync_graph_tensor(
+            "HunyuanOCR",
+            &logits_output,
+            "sync full target decoder graph",
+        )?;
         self.clear_kv_cache();
         *self.decode_graph.borrow_mut() = Some(TargetDecoderCudaGraph {
             graph,

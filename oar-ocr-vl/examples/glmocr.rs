@@ -27,6 +27,7 @@ use tracing::{error, info};
 use oar_ocr_core::utils::load_image;
 use oar_ocr_vl::GlmOcr;
 use oar_ocr_vl::utils::parse_device;
+use utils::token_fingerprint;
 
 #[derive(Parser)]
 #[command(name = "glmocr")]
@@ -102,16 +103,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let infer_start = Instant::now();
         match model
-            .generate(&[rgb_img], &[args.prompt.as_str()], args.max_tokens)
+            .generate_tokens(&[rgb_img], &[args.prompt.as_str()], args.max_tokens)
             .into_iter()
             .next()
         {
-            Some(Ok(result)) => {
+            Some(Ok(tokens)) => {
                 info!(
-                    "  Inference time: {:.2}ms",
-                    infer_start.elapsed().as_secs_f64() * 1000.0
+                    "  Inference time: {:.2}ms, tokens: {}, fingerprint: {:016x}",
+                    infer_start.elapsed().as_secs_f64() * 1000.0,
+                    tokens.len(),
+                    token_fingerprint(&tokens)
                 );
-                println!("{}", result);
+                println!("{}", model.decode_tokens(&tokens)?);
             }
             Some(Err(e)) => error!("  Inference failed: {}", e),
             None => error!("  No result returned from model"),

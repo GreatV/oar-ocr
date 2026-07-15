@@ -1,4 +1,6 @@
 use super::config::{EosTokenId, GlmOcrConfig, GlmOcrImageProcessorConfig};
+#[cfg(feature = "cuda")]
+use super::mtp::GlmOcrMtpModel;
 use super::processing::{GlmOcrImageInputs, preprocess_image};
 use super::text::GlmOcrTextModel;
 use super::vision::GlmOcrVisionModel;
@@ -10,6 +12,14 @@ use oar_ocr_core::core::OCRError;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
+#[cfg(feature = "cuda")]
+// Four recurrent proposals are fastest on the reference 4090 across text,
+// formula, table, and long document outputs. The upstream-recommended three
+// leaves useful acceptance on the table for Candle's batch-1 path.
+const GLM_MTP_DRAFT_TOKENS: usize = 4;
+#[cfg(feature = "cuda")]
+const GLM_MTP_QUERY_LEN: usize = GLM_MTP_DRAFT_TOKENS + 1;
+
 pub struct GlmOcr {
     device: Device,
     dtype: DType,
@@ -17,6 +27,8 @@ pub struct GlmOcr {
     image_cfg: GlmOcrImageProcessorConfig,
     tokenizer: Tokenizer,
     text: GlmOcrTextModel,
+    #[cfg(feature = "cuda")]
+    mtp: Option<GlmOcrMtpModel>,
     vision: GlmOcrVisionModel,
     lm_head: Linear,
     eos_token_ids: Vec<u32>,
@@ -56,7 +68,22 @@ impl GlmOcr {
         };
 
         let image_token_id = cfg.image_token_id;
-        let text = GlmOcrTextModel::load(&cfg.text_config, vb.pp("model").pp("language_model"))?;
+        let vb_language_model = vb.pp("model").pp("language_model");
+        let text = GlmOcrTextModel::load(&cfg.text_config, vb_language_model.clone())?;
+        #[cfg(feature = "cuda")]
+        let mtp = if device.is_cuda()
+            && cfg.text_config.num_nextn_predict_layers == 1
+            && std::env::var_os("OAR_GLMOCR_DISABLE_MTP").is_none()
+            && std::env::var_os("OAR_VL_DISABLE_SPECULATIVE").is_none()
+        {
+            Some(GlmOcrMtpModel::load(
+                &cfg.text_config,
+                cfg.text_config.num_hidden_layers,
+                vb_language_model,
+            )?)
+        } else {
+            None
+        };
         let vision = GlmOcrVisionModel::load(&cfg.vision_config, vb.pp("model").pp("visual"))?;
 
         let lm_head = if cfg.text_config.tie_word_embeddings || cfg.tie_word_embeddings {
@@ -82,6 +109,8 @@ impl GlmOcr {
             image_cfg,
             tokenizer,
             text,
+            #[cfg(feature = "cuda")]
+            mtp,
             vision,
             lm_head,
             eos_token_ids,
@@ -217,71 +246,315 @@ impl GlmOcr {
             let rope_delta = max_pos + 1 - seq_len as i64;
 
             self.text.clear_kv_cache();
-            let hidden = self.text.forward(&inputs_embeds, &position_ids, None)?;
-            let last = hidden.i((0, seq_len - 1, ..)).map_err(|e| {
-                candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                    "GLM-OCR: get last hidden",
-                    e,
-                )
-            })?;
-            let mut logits = self.logits_from_hidden(&last)?;
+            #[cfg(feature = "cuda")]
+            let use_mtp = self.mtp.is_some()
+                && self.dtype == DType::BF16
+                && max_new_tokens >= 8
+                && std::env::var_os("OAR_VL_DISABLE_SPECULATIVE").is_none();
+            #[cfg(not(feature = "cuda"))]
+            let use_mtp = false;
 
-            let mut generated: Vec<u32> = Vec::new();
-
-            for (pos, _) in (seq_len as i64..).zip(0..max_new_tokens) {
-                let tok = logits
-                    .argmax(D::Minus1)
-                    .and_then(|t| t.to_scalar::<u32>())
-                    .map_err(|e| {
-                        candle_to_ocr_processing(
-                            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                            "GLM-OCR: argmax",
-                            e,
-                        )
-                    })?;
-                if self.eos_token_ids.contains(&tok) {
-                    break;
+            #[cfg(feature = "cuda")]
+            if use_mtp {
+                let mtp = self.mtp.as_ref().expect("MTP availability checked");
+                mtp.clear_kv_cache();
+                if let Some(cache_len) = self.text.prepare_verification_cuda_graph(
+                    seq_len,
+                    max_new_tokens,
+                    GLM_MTP_QUERY_LEN,
+                    &self.lm_head,
+                )? {
+                    mtp.prepare_cuda_graph(cache_len)?;
+                } else {
+                    // An eager prefill may grow/reallocate MTP storage. Any
+                    // graph captured for an earlier page would then retain
+                    // stale device pointers.
+                    mtp.disable_cuda_graph();
                 }
-                generated.push(tok);
-
-                let token = Tensor::new(&[tok], &self.device)
-                    .and_then(|t| t.reshape((1, 1)))
-                    .map_err(|e| {
-                        candle_to_ocr_processing(
-                            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                            "GLM-OCR: create next token",
-                            e,
-                        )
-                    })?;
-                let embed = self.text.embed(&token)?;
-
-                let pos_val = pos + rope_delta;
-                let pos_ids = Tensor::new(vec![pos_val, pos_val, pos_val], &self.device)
-                    .and_then(|t| t.reshape((3, 1, 1)))
-                    .map_err(|e| {
-                        candle_to_ocr_processing(
-                            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                            "GLM-OCR: create position ids",
-                            e,
-                        )
-                    })?;
-
-                let hs = self.text.forward(&embed, &pos_ids, None)?;
-                let last = hs.i((0, 0, ..)).map_err(|e| {
-                    candle_to_ocr_processing(
-                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-                        "GLM-OCR: get decode hidden",
-                        e,
-                    )
-                })?;
-                logits = self.logits_from_hidden(&last)?;
             }
+            if !use_mtp {
+                self.text
+                    .prepare_ar_cuda_graph(seq_len, max_new_tokens, &self.lm_head)?;
+            }
+
+            let hidden = self.text.forward(&inputs_embeds, &position_ids, None)?;
+            #[cfg(feature = "cuda")]
+            if use_mtp {
+                let generated = self.generate_mtp_tokens(
+                    &input_ids,
+                    &position_ids,
+                    &hidden,
+                    rope_delta,
+                    max_new_tokens,
+                    self.mtp.as_ref().expect("MTP availability checked"),
+                )?;
+                results.push(generated);
+                continue;
+            }
+
+            let generated =
+                self.generate_ar_tokens(&hidden, seq_len, rope_delta, max_new_tokens)?;
 
             results.push(generated);
         }
 
         Ok(results)
+    }
+
+    fn generate_ar_tokens(
+        &self,
+        prompt_hidden: &Tensor,
+        seq_len: usize,
+        rope_delta: i64,
+        max_new_tokens: usize,
+    ) -> Result<Vec<u32>, OCRError> {
+        let last = prompt_hidden.i((0, seq_len - 1, ..)).map_err(|e| {
+            candle_to_ocr_processing(
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                "GLM-OCR: get last hidden",
+                e,
+            )
+        })?;
+        let mut logits = self.logits_from_hidden(&last)?;
+        let mut generated = Vec::with_capacity(max_new_tokens);
+
+        for (step, pos) in (seq_len as i64..).take(max_new_tokens).enumerate() {
+            let tok = logits
+                .argmax(D::Minus1)
+                .and_then(|t| t.to_scalar::<u32>())
+                .map_err(|e| {
+                    candle_to_ocr_processing(
+                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                        "GLM-OCR: argmax",
+                        e,
+                    )
+                })?;
+            if self.eos_token_ids.contains(&tok) {
+                break;
+            }
+            generated.push(tok);
+            if step + 1 == max_new_tokens {
+                break;
+            }
+
+            let token = token_tensor(tok, &self.device)?;
+            let embed = self.text.embed(&token)?;
+            let pos_ids = text_position_ids(pos + rope_delta, 1, &self.device)?;
+            logits = self
+                .text
+                .forward_decode_logits(&embed, &pos_ids, &self.lm_head)?;
+        }
+        Ok(generated)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn generate_mtp_tokens(
+        &self,
+        prompt_ids: &[u32],
+        prompt_position_ids: &Tensor,
+        prompt_hidden: &Tensor,
+        rope_delta: i64,
+        max_new_tokens: usize,
+        mtp: &GlmOcrMtpModel,
+    ) -> Result<Vec<u32>, OCRError> {
+        let prompt_len = prompt_ids.len();
+        let last = prompt_hidden.i((0, prompt_len - 1, ..)).map_err(|e| {
+            candle_to_ocr_processing(
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                "GLM-OCR: get MTP target hidden",
+                e,
+            )
+        })?;
+        let mut current_token = self
+            .logits_from_hidden(&last)?
+            .argmax(D::Minus1)
+            .and_then(|token| token.to_scalar::<u32>())
+            .map_err(|e| {
+                candle_to_ocr_processing(
+                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    "GLM-OCR: initial MTP target argmax",
+                    e,
+                )
+            })?;
+        if max_new_tokens == 0 || self.eos_token_ids.contains(&current_token) {
+            return Ok(Vec::new());
+        }
+
+        // Match vLLM's EAGLE/MTP alignment: shift prompt token ids left,
+        // insert the target's certain next token at the tail, and pair that
+        // sequence with the target hidden states at the original positions.
+        let mut shifted_ids = Vec::with_capacity(prompt_len);
+        shifted_ids.extend_from_slice(&prompt_ids[1..]);
+        shifted_ids.push(current_token);
+        let shifted_ids = Tensor::from_vec(shifted_ids, (1, prompt_len), &self.device)
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "initial MTP shifted ids", e))?;
+        let (mtp_hidden, first_draft) =
+            mtp.sync_target_span(&shifted_ids, prompt_hidden, prompt_position_ids, true)?;
+
+        let mut target_position = prompt_len as i64 + rope_delta;
+        let mut drafts =
+            self.complete_mtp_drafts(mtp, &mtp_hidden, &first_draft, target_position)?;
+        let mut target_cache_len = prompt_len;
+        let mut generated = Vec::with_capacity(max_new_tokens);
+        let mut rounds = 0usize;
+        let mut accepted_drafts = 0usize;
+        let mut accepted_by_position = [0usize; GLM_MTP_DRAFT_TOKENS];
+
+        loop {
+            if self.eos_token_ids.contains(&current_token) {
+                break;
+            }
+            generated.push(current_token);
+            if generated.len() == max_new_tokens {
+                break;
+            }
+
+            let mut query_ids = Vec::with_capacity(GLM_MTP_QUERY_LEN);
+            query_ids.push(current_token);
+            query_ids.extend_from_slice(&drafts);
+            let query =
+                Tensor::from_vec(query_ids.clone(), (1, GLM_MTP_QUERY_LEN), &self.device)
+                    .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP verification ids", e))?;
+            let query_embeds = self.text.embed(&query)?;
+            let query_positions =
+                text_position_ids(target_position, GLM_MTP_QUERY_LEN, &self.device)?;
+            let (target_hidden, target_tokens) = self.text.forward_verification_tokens(
+                &query_embeds,
+                &query_positions,
+                &self.lm_head,
+            )?;
+            let target_tokens = target_tokens.to_vec1::<u32>().map_err(|e| {
+                candle_to_ocr_inference("GLM-OCR", "copy MTP verification tokens", e)
+            })?;
+            if target_tokens.len() != GLM_MTP_QUERY_LEN {
+                return Err(OCRError::InvalidInput {
+                    message: format!(
+                        "GLM-OCR: verification returned {} tokens, expected {}",
+                        target_tokens.len(),
+                        GLM_MTP_QUERY_LEN
+                    ),
+                });
+            }
+
+            rounds += 1;
+            let mut accepted = 0usize;
+            let mut stop = false;
+            while accepted < GLM_MTP_DRAFT_TOKENS && drafts[accepted] == target_tokens[accepted] {
+                let token = drafts[accepted];
+                accepted += 1;
+                accepted_drafts += 1;
+                accepted_by_position[accepted - 1] += 1;
+                if self.eos_token_ids.contains(&token) {
+                    stop = true;
+                    break;
+                }
+                generated.push(token);
+                if generated.len() == max_new_tokens {
+                    stop = true;
+                    break;
+                }
+            }
+            if stop {
+                break;
+            }
+
+            let next_token = target_tokens[accepted];
+            let keep = accepted + 1;
+
+            // Target verification writes the whole block. Retain only the
+            // certain current token and its accepted draft prefix. The MTP
+            // recurrent tail is speculative too, so roll it back to the same
+            // pre-query base before synchronizing the accepted target span.
+            self.text.trim_kv_cache(target_cache_len + keep)?;
+            mtp.trim_kv_cache(target_cache_len)?;
+            target_cache_len += keep;
+            target_position += keep as i64;
+            current_token = next_token;
+
+            if self.eos_token_ids.contains(&current_token) {
+                break;
+            }
+
+            let mut shifted_sync_ids = query_ids[1..keep].to_vec();
+            shifted_sync_ids.push(current_token);
+            let shifted_sync_ids = Tensor::from_vec(shifted_sync_ids, (1, keep), &self.device)
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP sync ids", e))?;
+            let sync_hidden = target_hidden
+                .narrow(1, 0, keep)
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP sync target hidden", e))?;
+            let sync_positions = query_positions
+                .narrow(2, 0, keep)
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP sync positions", e))?;
+            let (mtp_hidden, first_draft) =
+                mtp.sync_target_span(&shifted_sync_ids, &sync_hidden, &sync_positions, false)?;
+            drafts = self.complete_mtp_drafts(mtp, &mtp_hidden, &first_draft, target_position)?;
+        }
+
+        if rounds > 0 {
+            tracing::debug!(
+                rounds,
+                accepted_drafts,
+                ?accepted_by_position,
+                mean_acceptance_length = 1.0 + accepted_drafts as f64 / rounds as f64,
+                "GLM-OCR MTP acceptance"
+            );
+        }
+        Ok(generated)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn complete_mtp_drafts(
+        &self,
+        mtp: &GlmOcrMtpModel,
+        first_hidden: &Tensor,
+        first_tokens: &Tensor,
+        target_position: i64,
+    ) -> Result<Vec<u32>, OCRError> {
+        let seq_len = first_hidden
+            .dim(1)
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP result length", e))?;
+        let mut hidden = first_hidden
+            .narrow(1, seq_len - 1, 1)
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP final hidden state", e))?;
+        let token_count = first_tokens
+            .dim(0)
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP token count", e))?;
+        let mut token = first_tokens
+            .narrow(0, token_count - 1, 1)
+            .and_then(|token| token.reshape((1, 1)))
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP first proposal", e))?;
+        let mut draft_tensors = Vec::with_capacity(GLM_MTP_DRAFT_TOKENS);
+
+        while draft_tensors.len() < GLM_MTP_DRAFT_TOKENS {
+            // CUDA-graph replay overwrites its captured output storage. Keep
+            // each proposal in independent storage before launching the next
+            // recurrent step, otherwise earlier draft handles would silently
+            // observe the newest token.
+            draft_tensors.push(
+                token
+                    .copy()
+                    .map_err(|e| candle_to_ocr_inference("GLM-OCR", "save MTP proposal", e))?,
+            );
+            if draft_tensors.len() == GLM_MTP_DRAFT_TOKENS {
+                break;
+            }
+            let position = text_position_ids(
+                target_position + draft_tensors.len() as i64 - 1,
+                1,
+                &self.device,
+            )?;
+            let (next_hidden, next_token) = mtp.predict_single(&token, &hidden, &position)?;
+            hidden = next_hidden;
+            token = next_token
+                .reshape((1, 1))
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP proposal shape", e))?;
+        }
+
+        let refs: Vec<&Tensor> = draft_tensors.iter().collect();
+        Tensor::cat(&refs, 1)
+            .and_then(|drafts| drafts.flatten_all())
+            .and_then(|drafts| drafts.to_vec1::<u32>())
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "copy MTP proposals", e))
     }
 
     pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
@@ -464,6 +737,33 @@ impl GlmOcr {
             )
         })
     }
+}
+
+fn token_tensor(token: u32, device: &Device) -> Result<Tensor, OCRError> {
+    Tensor::new(&[token], device)
+        .and_then(|token| token.reshape((1, 1)))
+        .map_err(|e| {
+            candle_to_ocr_processing(
+                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                "GLM-OCR: create token tensor",
+                e,
+            )
+        })
+}
+
+fn text_position_ids(start: i64, len: usize, device: &Device) -> Result<Tensor, OCRError> {
+    let positions: Vec<i64> = (0..len).map(|offset| start + offset as i64).collect();
+    let mut data = Vec::with_capacity(3 * len);
+    data.extend_from_slice(&positions);
+    data.extend_from_slice(&positions);
+    data.extend_from_slice(&positions);
+    Tensor::from_vec(data, (3, 1, len), device).map_err(|e| {
+        candle_to_ocr_processing(
+            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            "GLM-OCR: create text position ids",
+            e,
+        )
+    })
 }
 
 fn build_prompt(instruction: &str) -> String {

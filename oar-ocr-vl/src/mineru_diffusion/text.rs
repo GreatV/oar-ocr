@@ -15,7 +15,7 @@
 //! committed once (`store_kv = true`).
 
 use super::config::SdarConfig;
-use crate::attention::{RotaryEmbedding, repeat_kv, scaled_dot_product_attention};
+use crate::attention::{RotaryEmbedding, flash_attention, scaled_dot_product_attention_gqa};
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{
@@ -179,13 +179,21 @@ impl SdarAttention {
         }
 
         let n_rep = self.num_heads / self.num_kv_heads;
-        let k_rep = repeat_kv(&full_k, n_rep)
-            .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "repeat_kv k", e))?;
-        let v_rep = repeat_kv(&full_v, n_rep)
-            .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "repeat_kv v", e))?;
-
-        let attn = scaled_dot_product_attention(&q, &k_rep, &v_rep, mask, self.scale, false)
-            .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "attention", e))?;
+        let flash = if mask.is_none() {
+            flash_attention(&q, &full_k, &full_v, self.scale, false)
+                .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "flash attention", e))?
+        } else {
+            None
+        };
+        let attn = match flash {
+            Some(attn) => attn,
+            None => scaled_dot_product_attention_gqa(
+                &q, &full_k, &full_v, mask, self.scale, false, n_rep,
+            )
+            .map_err(|e| {
+                candle_to_ocr_inference("MinerU-Diffusion", "grouped-query attention", e)
+            })?,
+        };
         let attn = attn
             .transpose(1, 2)
             .map_err(|e| proc_err("SDAR attn out transpose", e))?

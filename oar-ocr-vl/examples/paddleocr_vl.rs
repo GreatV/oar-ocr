@@ -60,6 +60,7 @@ use tracing::{error, info};
 use oar_ocr_core::utils::load_image;
 use oar_ocr_vl::utils::parse_device;
 use oar_ocr_vl::{PaddleOcrVl, PaddleOcrVlTask};
+use utils::token_fingerprint;
 
 /// Command-line arguments for the PaddleOCR-VL example
 #[derive(Parser)]
@@ -174,17 +175,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Run inference
         let infer_start = Instant::now();
         match model
-            .generate(&[rgb_img], &[task], args.max_tokens)
+            .generate_tokens(&[rgb_img], &[task], args.max_tokens)
             .pop()
             .unwrap()
         {
-            Ok(result) => {
+            Ok(tokens) => {
                 let infer_duration = infer_start.elapsed();
                 info!(
-                    "  Inference time: {:.2}ms",
-                    infer_duration.as_secs_f64() * 1000.0
+                    "  Inference time: {:.2}ms, tokens: {}, fingerprint: {:016x}",
+                    infer_duration.as_secs_f64() * 1000.0,
+                    tokens.len(),
+                    token_fingerprint(&tokens)
                 );
-                println!("{}", result);
+                println!("{}", model.decode_tokens(&tokens, task)?.1);
             }
             Err(e) => {
                 error!("  Inference failed: {}", e);

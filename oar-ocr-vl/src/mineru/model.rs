@@ -5,6 +5,8 @@ use super::vision::MinerUVisionModel;
 use crate::attention::{
     combine_masks, create_causal_mask, create_generation_mask, create_left_padding_mask,
 };
+#[cfg(feature = "cuda")]
+use crate::cuda_kernels::{ArgmaxFirstBf16, ArgmaxFirstF32, MaskTokenIds};
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
@@ -94,6 +96,8 @@ pub struct MinerU {
     temperature: f32,
     top_p: f32,
     top_k: usize,
+    #[cfg(feature = "cuda")]
+    gpu_greedy_sampling: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -260,6 +264,8 @@ impl MinerU {
             temperature,
             top_p,
             top_k,
+            #[cfg(feature = "cuda")]
+            gpu_greedy_sampling: std::env::var_os("OAR_MINERU_DISABLE_GPU_SAMPLING").is_none(),
         })
     }
 
@@ -512,32 +518,48 @@ impl MinerU {
         let position_ids = Tensor::cat(&pos_refs, 1)
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "stack pos", e))?;
 
-        let causal = create_causal_mask(max_seq_len, max_seq_len, self.dtype, &self.device)
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "create causal", e))?;
-        let padding = create_left_padding_mask(&seq_lens, max_seq_len, self.dtype, &self.device)
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "create padding", e))?;
-        let mask = combine_masks(&causal, &padding)
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "combine masks", e))?;
+        let mask = if batch_size == 1 {
+            None
+        } else {
+            let causal = create_causal_mask(max_seq_len, max_seq_len, self.dtype, &self.device)
+                .map_err(|e| candle_to_ocr_inference("MinerU2.5", "create causal", e))?;
+            let padding =
+                create_left_padding_mask(&seq_lens, max_seq_len, self.dtype, &self.device)
+                    .map_err(|e| candle_to_ocr_inference("MinerU2.5", "create padding", e))?;
+            Some(
+                combine_masks(&causal, &padding)
+                    .map_err(|e| candle_to_ocr_inference("MinerU2.5", "combine masks", e))?,
+            )
+        };
 
         self.text.clear_kv_cache();
+        if batch_size == 1 {
+            self.text
+                .prepare_ar_cuda_graph(max_seq_len, max_new_tokens, &self.lm_head)?;
+        } else {
+            // Batch-shaped prefill replaces the batch-1 KV backing storage.
+            // Drop the captured graph before those raw pointers become stale.
+            self.text.invalidate_ar_cuda_graph();
+        }
         let hidden = self
             .text
-            .forward(&inputs_embeds, &position_ids, Some(&mask))?;
+            .forward(&inputs_embeds, &position_ids, mask.as_ref())?;
 
+        let last_hidden = hidden
+            .i((.., max_seq_len - 1, ..))
+            .and_then(|hidden| hidden.contiguous())
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "get last hidden", e))?;
+        let batched_logits = self
+            .lm_head
+            .forward(&last_hidden)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "lm_head", e))?;
         let mut logits_list: Vec<Tensor> = Vec::with_capacity(batch_size);
         for i in 0..batch_size {
-            let last = hidden
-                .i((i, max_seq_len - 1, ..))
-                .and_then(|t| t.unsqueeze(0))
-                .map_err(|e| candle_to_ocr_inference("MinerU2.5", "get last hidden", e))?;
-            let logits = self
-                .lm_head
-                .forward(&last)
-                .map_err(|e| candle_to_ocr_inference("MinerU2.5", "lm_head", e))?;
-            let logits = logits
-                .squeeze(0)
-                .map_err(|e| candle_to_ocr_inference("MinerU2.5", "lm_head squeeze", e))?;
-            logits_list.push(logits);
+            logits_list.push(
+                batched_logits
+                    .i(i)
+                    .map_err(|e| candle_to_ocr_inference("MinerU2.5", "select logits", e))?,
+            );
         }
 
         let mut generated: Vec<Vec<u32>> = vec![Vec::new(); batch_size];
@@ -555,11 +577,10 @@ impl MinerU {
         // Current KV cache length (grows during generation)
         let mut kv_len = max_seq_len;
 
-        for _ in 0..max_new_tokens {
+        for step in 0..max_new_tokens {
             if finished.iter().all(|&f| f) {
                 break;
             }
-
             let sampling_params = self.sampling_params();
             let mut next_tokens: Vec<u32> = Vec::with_capacity(batch_size);
             for (i, logits) in logits_list.iter().enumerate() {
@@ -580,6 +601,9 @@ impl MinerU {
             if finished.iter().all(|&f| f) {
                 break;
             }
+            if step + 1 == max_new_tokens {
+                break;
+            }
 
             let tokens = Tensor::new(next_tokens, &self.device)
                 .and_then(|t| t.reshape((batch_size, 1)))
@@ -595,25 +619,35 @@ impl MinerU {
             // - Query position can attend to all non-padding positions in KV cache
             // - Padding positions (first pad_len tokens) should be masked
             kv_len += 1;
-            let gen_mask = create_generation_mask(&pad_lens, kv_len, self.dtype, &self.device)
-                .map_err(|e| candle_to_ocr_inference("MinerU2.5", "create gen mask", e))?;
-
-            let hs = self.text.forward(&embeds, &pos, Some(&gen_mask))?;
+            let gen_mask = if batch_size == 1 {
+                None
+            } else {
+                Some(
+                    create_generation_mask(&pad_lens, kv_len, self.dtype, &self.device)
+                        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "create gen mask", e))?,
+                )
+            };
 
             logits_list.clear();
-            for i in 0..batch_size {
-                let h = hs
-                    .i((i, 0, ..))
-                    .and_then(|t| t.unsqueeze(0))
-                    .map_err(|e| candle_to_ocr_inference("MinerU2.5", "get hs", e))?;
-                let logits = self
+            if batch_size == 1 {
+                logits_list.push(self.text.forward_decode_logits(
+                    &embeds,
+                    &pos,
+                    gen_mask.as_ref(),
+                    &self.lm_head,
+                )?);
+            } else {
+                let hs = self.text.forward(&embeds, &pos, gen_mask.as_ref())?;
+                let batched_logits = self
                     .lm_head
-                    .forward(&h)
+                    .forward(&hs)
+                    .and_then(|t| t.squeeze(1))
                     .map_err(|e| candle_to_ocr_inference("MinerU2.5", "lm_head step", e))?;
-                let logits = logits
-                    .squeeze(0)
-                    .map_err(|e| candle_to_ocr_inference("MinerU2.5", "lm_head squeeze", e))?;
-                logits_list.push(logits);
+                for i in 0..batch_size {
+                    logits_list.push(batched_logits.i(i).map_err(|e| {
+                        candle_to_ocr_inference("MinerU2.5", "select step logits", e)
+                    })?);
+                }
             }
 
             for (i, p) in positions.iter_mut().enumerate() {
@@ -651,6 +685,8 @@ impl MinerU {
             temperature: self.temperature,
             top_p: self.top_p,
             top_k: self.top_k,
+            #[cfg(feature = "cuda")]
+            gpu_greedy_sampling: self.gpu_greedy_sampling,
         }
     }
 
@@ -692,6 +728,8 @@ struct SamplingParams {
     temperature: f32,
     top_p: f32,
     top_k: usize,
+    #[cfg(feature = "cuda")]
+    gpu_greedy_sampling: bool,
 }
 
 fn select_next_token(
@@ -699,6 +737,21 @@ fn select_next_token(
     history: &[u32],
     params: &SamplingParams,
 ) -> Result<u32, OCRError> {
+    // The official MinerU generation config uses top_k=1 and
+    // repetition_penalty=1, so decoding is greedy even though do_sample=true.
+    // Keep the full vocabulary on-device for that common path. The custom
+    // reduction preserves the CPU loop's lowest-index tie break, and the
+    // sparse mask retains no-repeat-ngram semantics exactly.
+    #[cfg(feature = "cuda")]
+    if params.gpu_greedy_sampling
+        && logits.device().is_cuda()
+        && (!params.do_sample || params.top_k == 1)
+        && params.repetition_penalty <= 1.0
+        && matches!(logits.dtype(), DType::BF16 | DType::F32)
+    {
+        return select_greedy_token_cuda(logits, history, params.no_repeat_ngram_size);
+    }
+
     let logits = logits
         .to_dtype(DType::F32)
         .map_err(|e| candle_to_ocr_inference("MinerU2.5", "logits cast", e))?
@@ -720,6 +773,41 @@ fn select_next_token(
     } else {
         Ok(argmax_token(&logits_vec))
     }
+}
+
+#[cfg(feature = "cuda")]
+fn select_greedy_token_cuda(
+    logits: &Tensor,
+    history: &[u32],
+    no_repeat_ngram_size: usize,
+) -> Result<u32, OCRError> {
+    let vocab_size = logits.elem_count();
+    let logits = logits
+        .reshape((1, vocab_size))
+        .and_then(|logits| logits.contiguous())
+        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "reshape GPU logits", e))?;
+    let banned = no_repeat_ngram_banned_tokens(history, no_repeat_ngram_size);
+    if !banned.is_empty() {
+        let banned = Tensor::new(banned, logits.device())
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "upload banned token ids", e))?;
+        logits.inplace_op2(&banned, &MaskTokenIds).map_err(|e| {
+            candle_to_ocr_inference("MinerU2.5", "apply GPU no-repeat-ngram mask", e)
+        })?;
+    }
+    let tokens = match logits.dtype() {
+        DType::BF16 => logits.apply_op1_no_bwd(&ArgmaxFirstBf16),
+        DType::F32 => logits.apply_op1_no_bwd(&ArgmaxFirstF32),
+        dtype => {
+            return Err(OCRError::ConfigError {
+                message: format!("MinerU2.5: unsupported GPU greedy logits dtype {dtype:?}"),
+            });
+        }
+    }
+    .map_err(|e| candle_to_ocr_inference("MinerU2.5", "stable GPU argmax", e))?;
+    tokens
+        .i(0)
+        .and_then(|token| token.to_scalar::<u32>())
+        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "copy selected token", e))
 }
 
 fn apply_sampling_processors(logits: &mut [f32], history: &[u32], params: &SamplingParams) {
@@ -861,8 +949,17 @@ fn sample_from_probs(probs: &[f32]) -> Option<usize> {
 }
 
 fn apply_no_repeat_ngram(logits: &mut [f32], history: &[u32], ngram_size: usize) {
+    for token in no_repeat_ngram_banned_tokens(history, ngram_size) {
+        let idx = token as usize;
+        if idx < logits.len() {
+            logits[idx] = f32::NEG_INFINITY;
+        }
+    }
+}
+
+fn no_repeat_ngram_banned_tokens(history: &[u32], ngram_size: usize) -> Vec<u32> {
     if ngram_size <= 1 || history.len() < ngram_size {
-        return;
+        return Vec::new();
     }
     let prefix_len = ngram_size - 1;
     let prefix_start = history.len() - prefix_len;
@@ -873,12 +970,9 @@ fn apply_no_repeat_ngram(logits: &mut [f32], history: &[u32], ngram_size: usize)
             banned.insert(history[i + prefix_len]);
         }
     }
-    for token in banned {
-        let idx = token as usize;
-        if idx < logits.len() {
-            logits[idx] = f32::NEG_INFINITY;
-        }
-    }
+    let mut banned: Vec<u32> = banned.into_iter().collect();
+    banned.sort_unstable();
+    banned
 }
 
 fn expand_image_tokens(
@@ -1026,6 +1120,43 @@ fn get_rope_index(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_repeat_ngram_collects_all_matching_continuations() {
+        assert_eq!(
+            no_repeat_ngram_banned_tokens(&[1, 2, 3, 1, 2, 4, 1, 2], 3),
+            vec![3, 4]
+        );
+        assert!(no_repeat_ngram_banned_tokens(&[1, 2], 3).is_empty());
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn mineru_cuda_greedy_matches_cpu_ties_and_no_repeat_ngram() -> candle_core::Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let mut values = vec![0.0f32; 1030];
+        values[1] = 10.0;
+        values[1024] = 10.0;
+        let gpu_logits = Tensor::from_vec(values, 1030, &device)?.to_dtype(DType::BF16)?;
+        let cpu_logits = gpu_logits.to_device(&Device::Cpu)?;
+        let params = SamplingParams {
+            repetition_penalty: 1.0,
+            no_repeat_ngram_size: 3,
+            do_sample: true,
+            temperature: 0.01,
+            top_p: 0.001,
+            top_k: 1,
+            gpu_greedy_sampling: true,
+        };
+        let history = [4, 5, 1, 8, 4, 5];
+        let cpu = select_next_token(&cpu_logits, &history, &params).unwrap();
+        let gpu = select_next_token(&gpu_logits, &history, &params).unwrap();
+        assert_eq!(cpu, 1024);
+        assert_eq!(gpu, cpu);
+        Ok(())
+    }
 
     #[test]
     fn mineru_task_prompt_text_recognition_matches_official() {

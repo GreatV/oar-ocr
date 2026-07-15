@@ -29,6 +29,7 @@ use tracing::{error, info};
 use oar_ocr_core::utils::load_image;
 use oar_ocr_vl::HunyuanOcr;
 use oar_ocr_vl::utils::parse_device;
+use utils::token_fingerprint;
 
 #[derive(Parser)]
 #[command(name = "hunyuanocr")]
@@ -68,12 +69,6 @@ struct Args {
     /// Suppress generated text and print aggregate timing/token statistics
     #[arg(long)]
     benchmark: bool,
-}
-
-fn token_fingerprint(tokens: &[u32]) -> u64 {
-    tokens.iter().fold(0xcbf29ce484222325_u64, |hash, token| {
-        (hash ^ u64::from(*token)).wrapping_mul(0x100000001b3)
-    })
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
