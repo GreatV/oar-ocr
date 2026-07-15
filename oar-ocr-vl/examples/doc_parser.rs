@@ -3,29 +3,36 @@
 //! This example demonstrates the unified DocParser API for external
 //! layout-first document parsing (layout detection + region recognition).
 //!
-//! HunyuanOCR and MinerU2.5 are intentionally not exposed here:
-//! their reference-quality usage is full-page prompt-driven parsing or a
-//! model-native two-step pipeline, not forced external layout crops.
+//! HunyuanOCR and the MinerU models are intentionally not exposed here: their
+//! reference-quality usage is full-page prompt-driven parsing or a model-native
+//! two-step pipeline, not forced external layout crops.
 //!
 //! # Usage
 //!
 //! ```bash
 //! # Using PaddleOCR-VL model
-//! cargo run -p oar-ocr-vl --example doc_parser -- \
+//! cargo run -p oar-ocr-vl --features download-binaries --example doc_parser -- \
 //!     --model-name paddleocr-vl \
 //!     --model-dir PaddleOCR-VL \
 //!     --layout-model models/pp-doclayoutv3.onnx \
 //!     document.jpg
 //!
-//! # Using PaddleOCR-VL-1.5 model (next-gen, more accurate)
-//! cargo run -p oar-ocr-vl --example doc_parser -- \
+//! # Using PaddleOCR-VL-1.5 model
+//! cargo run -p oar-ocr-vl --features download-binaries --example doc_parser -- \
 //!     --model-name paddleocr-vl-1.5 \
 //!     --model-dir PaddleOCR-VL-1.5 \
 //!     --layout-model models/pp-doclayoutv3.onnx \
 //!     document.jpg
 //!
+//! # Using PaddleOCR-VL-1.6 model
+//! cargo run -p oar-ocr-vl --features download-binaries --example doc_parser -- \
+//!     --model-name paddleocr-vl-1.6 \
+//!     --model-dir PaddleOCR-VL-1.6 \
+//!     --layout-model models/pp-doclayoutv3.onnx \
+//!     document.jpg
+//!
 //! # Using GLM-OCR model
-//! cargo run -p oar-ocr-vl --example doc_parser -- \
+//! cargo run -p oar-ocr-vl --features download-binaries --example doc_parser -- \
 //!     --model-name glmocr \
 //!     --model-dir models/GLM-OCR \
 //!     --layout-model models/pp-doclayoutv3.onnx \
@@ -52,10 +59,10 @@ enum ModelName {
     /// PaddleOCR-VL 0.9B: VLM with task prompts
     #[value(name = "paddleocr-vl")]
     PaddleOcrVl,
-    /// PaddleOCR-VL 1.5: Next-gen VLM with spotting and seal recognition
+    /// PaddleOCR-VL 1.5 (0.9B): spotting and seal recognition
     #[value(name = "paddleocr-vl-1.5")]
     PaddleOcrVl15,
-    /// PaddleOCR-VL 1.6: Latest VLM with enhanced recognition
+    /// PaddleOCR-VL 1.6 (0.9B): region-aware enhanced recognition
     #[value(name = "paddleocr-vl-1.6")]
     PaddleOcrVl16,
     /// GLM-OCR: OCR expert VLM (GLM-V)
@@ -67,7 +74,7 @@ enum ModelName {
 #[derive(Parser)]
 #[command(name = "doc_parser")]
 #[command(
-    about = "Unified external-layout DocParser - supports PaddleOCR-VL, PaddleOCR-VL-1.5, and GLM-OCR"
+    about = "Unified external-layout DocParser - supports PaddleOCR-VL, PaddleOCR-VL-1.5/1.6, and GLM-OCR"
 )]
 struct Args {
     /// Recognition model to use

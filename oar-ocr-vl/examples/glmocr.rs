@@ -5,13 +5,13 @@
 //! # Usage
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --example glmocr -- [OPTIONS] <IMAGES>...
+//! cargo run -p oar-ocr-vl --features download-binaries --example glmocr -- [OPTIONS] <IMAGES>...
 //! ```
 //!
 //! # Examples
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --example glmocr -- \
+//! cargo run -p oar-ocr-vl --features download-binaries --example glmocr -- \
 //!     --model-dir models/GLM-OCR \
 //!     --prompt "Text Recognition:" \
 //!     document.jpg

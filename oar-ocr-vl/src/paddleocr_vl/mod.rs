@@ -1,12 +1,14 @@
 //! PaddleOCR-VL (Vision-Language) model.
 //!
-//! A ~2B parameter VLM for document understanding tasks including:
+//! Native Rust inference for the 0.9B PaddleOCR-VL, PaddleOCR-VL-1.5, and
+//! PaddleOCR-VL-1.6 checkpoints. All three use [`PaddleOcrVl::from_dir`].
+//! Supported tasks include:
 //! - OCR (text recognition)
 //! - Table recognition (outputs HTML)
 //! - Formula recognition (outputs LaTeX)
 //! - Chart recognition
-//! - Text spotting
-//! - Seal recognition
+//! - Text spotting (1.5 and 1.6)
+//! - Seal recognition (1.5 and 1.6)
 
 mod config;
 mod ernie;

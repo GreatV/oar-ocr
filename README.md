@@ -5,7 +5,14 @@
 [![dependency status](https://deps.rs/repo/github/GreatV/oar-ocr/status.svg)](https://deps.rs/repo/github/GreatV/oar-ocr)
 ![GitHub License](https://img.shields.io/github/license/GreatV/oar-ocr)
 
-An Optical Character Recognition (OCR) and Document Layout Analysis library written in Rust.
+A native Rust toolkit for OCR, document layout analysis, and vision-language document understanding.
+
+## Highlights
+
+- End-to-end text detection and recognition with PP-OCR models, including PP-OCRv6.
+- Document structure analysis for layout, tables, formulas, seals, orientation, and rectification.
+- Native Candle inference for compact document VLMs through the `oar-ocr-vl` crate.
+- CPU and GPU execution, model auto-download, and in-memory ONNX model loading.
 
 ## Quick Start
 
@@ -15,81 +22,38 @@ An Optical Character Recognition (OCR) and Document Layout Analysis library writ
 cargo add oar-ocr
 ```
 
-With GPU support:
+The default build enables ONNX Runtime binary downloads and SIMD acceleration. Add only the optional capabilities needed by your application. For example:
 
 ```bash
-cargo add oar-ocr --features cuda
+cargo add oar-ocr --features cuda,auto-download
 ```
 
-With auto-download of model files from ModelScope:
+This keeps the default `download-binaries` and `simd` features enabled, makes the ONNX Runtime CUDA execution provider available for selection, and downloads missing registered model files from ModelScope into `$OAR_HOME` when they are first used.
 
-```bash
-cargo add oar-ocr --features auto-download
-```
+See the [Cargo feature guide](docs/features.md) for all available features and the [model guide](docs/models.md#auto-download-via-the-auto-download-feature) for model download and cache behavior.
 
-Bare file names passed to the builders are then fetched from [ModelScope](https://www.modelscope.cn/models/greatv/oar-ocr) into `$OAR_HOME` (default `~/.oar`) and verified against their expected SHA-256. See [docs/models.md](docs/models.md#auto-download-via-the-auto-download-feature) for the exact path resolution rules.
+Builders also accept raw ONNX bytes such as `include_bytes!`, allowing models to be embedded in a single binary. See [Loading Models from Memory](docs/usage.md#loading-models-from-memory).
 
-Everywhere a builder accepts a model path it also accepts raw ONNX bytes (e.g. `include_bytes!`), so models can be embedded into a single binary — see [Loading Models from Memory](docs/usage.md#loading-models-from-memory).
+### OCR Pipeline
 
-### Basic Usage
+With `auto-download`, pass registered model names directly. Otherwise, replace them with local paths.
 
 ```rust
-use oar_ocr::prelude::*;
-use std::path::Path;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize the OCR pipeline
-    let ocr = OAROCRBuilder::new(
-        "pp-ocrv5_mobile_det.onnx",
-        "pp-ocrv5_mobile_rec.onnx",
-        "ppocrv5_dict.txt",
-    )
-    .build()?;
-
-    // Load an image
-    let image = load_image(Path::new("document.jpg"))?;
-    
-    // Run prediction
-    let results = ocr.predict(vec![image])?;
-
-    // Process results
-    for text_region in &results[0].text_regions {
-        if let Some((text, confidence)) = text_region.text_with_confidence() {
-            println!("Text: {} ({:.2})", text, confidence);
-        }
-    }
-
-    Ok(())
-}
-```
-
-### PP-OCRv6
-
-PP-OCRv6 ships in three sizes. Pass the bare file names below and enable the `auto-download` feature to fetch them automatically or point to local paths:
-
-Size | Detection | Recognition | Dictionary
------|-----|-----|-----
-tiny | `pp-ocrv6_tiny_det.onnx` | `pp-ocrv6_tiny_rec.onnx` | `ppocrv6_tiny_dict.txt`
-small | `pp-ocrv6_small_det.onnx` | `pp-ocrv6_small_rec.onnx` | `ppocrv6_dict.txt`
-medium | `pp-ocrv6_medium_det.onnx` | `pp-ocrv6_medium_rec.onnx` | `ppocrv6_dict.txt`
-
-```rust
-use oar_ocr::prelude::*;
 use oar_ocr::domain::tasks::TextDetectionConfig;
+use oar_ocr::prelude::*;
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // PP-OCRv6 "tiny" — swap in small/medium (with ppocrv6_dict.txt) for higher accuracy.
     let ocr = OAROCRBuilder::new(
         "pp-ocrv6_tiny_det.onnx",
         "pp-ocrv6_tiny_rec.onnx",
         "ppocrv6_tiny_dict.txt",
     )
-    // Official PP-OCRv6 detection defaults.
     .text_detection_config(TextDetectionConfig {
         score_threshold: 0.2,
         box_threshold: 0.45,
         unclip_ratio: 1.4,
+        max_candidates: 3000,
         ..Default::default()
     })
     .build()?;
@@ -99,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for region in &results[0].text_regions {
         if let Some((text, confidence)) = region.text_with_confidence() {
-            println!("{text}  ({confidence:.2})");
+            println!("{text} ({confidence:.2})");
         }
     }
 
@@ -111,59 +75,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```rust
 use oar_ocr::prelude::*;
-use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize structure analysis pipeline
     let structure = OARStructureBuilder::new("pp-doclayout_plus-l.onnx")
         .with_table_classification("pp-lcnet_x1_0_table_cls.onnx")
         .with_table_structure_recognition("slanet_plus.onnx", "wireless")
         .table_structure_dict_path("table_structure_dict_ch.txt")
         .with_ocr(
-            "pp-ocrv5_mobile_det.onnx", 
-            "pp-ocrv5_mobile_rec.onnx", 
-            "ppocrv5_dict.txt"
+            "pp-ocrv5_mobile_det.onnx",
+            "pp-ocrv5_mobile_rec.onnx",
+            "ppocrv5_dict.txt",
         )
         .build()?;
-        
-    // Analyze document
+
     let result = structure.predict("document.jpg")?;
-    
-    // Output Markdown
     println!("{}", result.to_markdown());
-    
+
     Ok(())
 }
 ```
 
-## Vision-Language Models (VLM)
+## Supported Models
 
-For advanced document understanding using Vision-Language Models (like PaddleOCR-VL, PaddleOCR-VL-1.5, **PaddleOCR-VL-1.6**, GLM-OCR, HunyuanOCR, and MinerU2.5), check out the [`oar-ocr-vl`](oar-ocr-vl/README.md) crate.
+The classic pipeline runs ONNX models through ONNX Runtime and supports the following model families. See the [pre-trained model guide](docs/models.md) for exact checkpoints, dictionaries, download links, and auto-download names.
+
+### Classic ONNX Models
+
+| Task | Supported model families |
+|---|---|
+| Text detection | PP-OCRv4, PP-OCRv5, and PP-OCRv6 DB detectors |
+| Text recognition | PP-OCRv3, PP-OCRv4, PP-OCRv5, PP-OCRv6, SVTRv2, and RepSVTR CTC recognizers |
+| Document preprocessing | PP-LCNet document orientation, PP-LCNet text-line orientation, and UVDoc rectification |
+| Layout detection | PicoDet, RT-DETR-H, PP-DocLayout S/M/L, PP-DocLayout Plus-L, PP-DocLayoutV2/V3, and PP-DocBlockLayout |
+| Table analysis | PP-LCNet table classification, RT-DETR-L cell detection, and SLANet, SLANet+, and SLANeXt structure recognition |
+| Formula recognition | PP-FormulaNet, PP-FormulaNet Plus, and UniMERNet |
+| Seal text detection | PP-OCRv4 mobile and server seal detectors |
+
+Available text-recognition checkpoints cover Chinese, Traditional Chinese, English, Arabic, Cyrillic, Devanagari, Greek, Eastern Slavic, Japanese, Georgian, Korean, Latin, Tamil, Telugu, and Thai scripts or languages.
+
+### Vision-Language Models (VLM)
+
+The [`oar-ocr-vl`](oar-ocr-vl/README.md) crate provides native [Candle](https://github.com/huggingface/candle) inference for compact document VLMs on CPU, CUDA, and Metal.
+
+| Model | Parameters | Capabilities |
+|---|---:|---|
+| [PaddleOCR-VL](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) | 0.9B | Page parsing, text, table, formula, and chart recognition |
+| [PaddleOCR-VL-1.5](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5) | 0.9B | PaddleOCR-VL tasks plus text spotting and seal recognition |
+| [PaddleOCR-VL-1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) | 0.9B | Region-aware page parsing and task-specific recognition |
+| [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) | 0.9B | Page parsing, text, table, and formula recognition |
+| [HunyuanOCR 1.5 / 1.0](https://huggingface.co/tencent/HunyuanOCR) | 1B | Prompt-driven full-page parsing, text spotting, table, formula, and chart recognition, with optional DFlash decoding for 1.5 |
+| [MinerU2.5-2509](https://huggingface.co/opendatalab/MinerU2.5-2509-1.2B) | 1.2B | Model-native two-step layout detection and content extraction |
+| [MinerU2.5-Pro-2605](https://huggingface.co/opendatalab/MinerU2.5-Pro-2605-1.2B) | 1.2B | Newer MinerU2.5 checkpoint using the same two-step pipeline |
+| [MinerU-Diffusion-V1-0320](https://huggingface.co/opendatalab/MinerU-Diffusion-V1-0320-2.5B) | 2.5B | Block-diffusion OCR with structured two-step extraction or single-pass text recognition |
+
+PaddleOCR-VL variants and GLM-OCR integrate with the external-layout [`DocParser`](oar-ocr-vl/README.md#document-parsing-pipeline). HunyuanOCR and the MinerU models use their model-native parsing pipelines.
+
+See the [`oar-ocr-vl` guide](oar-ocr-vl/README.md) for setup and [`oar-ocr-vl/examples`](oar-ocr-vl/examples) for runnable examples.
 
 ## Documentation
 
-- [**Usage Guide**](docs/usage.md) - Detailed API usage, builder patterns, GPU configuration
-- [**Pre-trained Models**](docs/models.md) - Model download links and recommended configurations
-- [**Environment Variables**](docs/environment-variables.md) - Runtime configuration via `OAR_*` variables
-- [**FAQ**](docs/FAQ.md) - Common build and runtime questions
+- [Usage guide](docs/usage.md) — APIs, builder patterns, accelerators, and model loading
+- [Cargo features](docs/features.md) — defaults, execution providers, and feature combinations
+- [Pre-trained models](docs/models.md) — model files, dictionaries, and auto-download behavior
+- [Environment variables](docs/environment-variables.md) — runtime and performance overrides
+- [FAQ](docs/FAQ.md) — common build and runtime issues
 
 ## Examples
 
-The `examples/` directory contains complete examples for various tasks:
-
-```bash
-# General OCR
-cargo run --example ocr -- --help
-
-# Document Structure Analysis
-cargo run --example structure -- --help
-
-# Layout Detection
-cargo run --example layout_detection -- --help
-
-# Table Structure Recognition
-cargo run --example table_structure_recognition -- --help
-```
+See the [usage guide](docs/usage.md) for other pipeline configurations and APIs. Complete classic-pipeline examples live in [`examples`](examples), while VLM examples live in [`oar-ocr-vl/examples`](oar-ocr-vl/examples).
 
 ## Acknowledgments
 

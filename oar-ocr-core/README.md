@@ -24,14 +24,17 @@ cargo add oar-ocr-core
 
 | Feature | Description |
 | :--- | :--- |
+| `simd` | Accelerate CPU image normalization and CTC argmax decoding (default) |
 | `cuda` | Enable NVIDIA CUDA execution provider |
 | `tensorrt` | Enable NVIDIA TensorRT execution provider |
 | `directml` | Enable DirectML execution provider (Windows) |
 | `coreml` | Enable Core ML execution provider (macOS/iOS) |
+| `webgpu` | Enable WebGPU execution provider on supported ONNX Runtime targets |
 | `openvino` | Enable Intel OpenVINO execution provider |
-| `webgpu` | Enable WebGPU execution provider |
-| `visualization` | Enable drawing utilities for debugging |
 | `download-binaries` | Automatically download ONNX Runtime binaries (default) |
+| `auto-download` | Download registered OCR model files from ModelScope at runtime |
+
+The root `oar-ocr` crate forwards the same feature names. See the [Cargo feature guide](https://github.com/GreatV/oar-ocr/blob/main/docs/features.md) for provider selection, system requirements, default behavior, and recommended combinations.
 
 ## Quick Start
 
@@ -106,10 +109,12 @@ for element in &results.elements[0] {
 | :--- | :--- |
 | `TextDetectionPredictor` | Locates text regions (polygons) in images. |
 | `TextRecognitionPredictor` | Converts text regions into strings. |
+| `TextLineOrientationPredictor` | Classifies the orientation of individual text lines. |
 | `LayoutDetectionPredictor` | Identifies semantic elements (Title, Table, Figure). |
-| `TableStructureRecognitionPredictor` | Extracts HTML/Markdown structure from tables. |
+| `TableClassificationPredictor` | Classifies tables as wired or wireless. |
+| `TableStructureRecognitionPredictor` | Produces HTML structure tokens and cell bounding boxes. |
 | `TableCellDetectionPredictor` | Locates individual cells within a table. |
 | `FormulaRecognitionPredictor` | Converts math formulas to LaTeX. |
-| `DocumentOrientationPredictor` | Detects and corrects document rotation. |
+| `DocumentOrientationPredictor` | Classifies document rotation. |
 | `DocumentRectificationPredictor` | Unwarps perspective or curved document images. |
 | `SealTextDetectionPredictor` | Specialized detection for curved official stamps. |

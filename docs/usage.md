@@ -143,7 +143,7 @@ let structure = OARStructureBuilder::new("picodet-l_layout_17cls.onnx")
     .with_table_cell_detection("rt-detr-l_wired_table_cell_det.onnx", "wired")
     .with_table_structure_recognition("slanext_wired.onnx", "wired")
     .table_structure_dict_path("table_structure_dict_ch.txt")
-    .with_formula_recognition("pp-formulanet-l.onnx", "unimernet_tokenizer.json", "pp_formulanet")
+    .with_formula_recognition("pp-formulanet-l.onnx", "pp-formulanet-tokenizer.json", "pp_formulanet")
     .build()?;
 
 // Structure analysis with integrated OCR
@@ -165,7 +165,7 @@ let structure = OARStructureBuilder::new("picodet-l_layout_17cls.onnx")
 | `.formula_recognition_config(config)` | Set formula score threshold, max length, and batch size |
 | `.formula_ort_session(config)` | Apply ONNX Runtime configuration only to formula recognition |
 | `.with_ocr(det, rec, dict)` | Add integrated OCR pipeline |
-| `.with_seal_detection(path)` | Add seal/stamp text detection |
+| `.with_seal_text_detection(path)` | Add seal/stamp text detection |
 | `.image_batch_size(n)` | Set batch size for image processing |
 | `.region_batch_size(n)` | Set batch size for region processing |
 | `.ort_session(config)` | Apply ONNX Runtime configuration |
@@ -222,14 +222,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 OAROCR supports multiple execution providers via feature flags:
 
+See the [Cargo feature guide](features.md) for the root-crate features, default behavior, platform requirements, and recommended combinations.
+
 | Feature | Provider | Platform |
 |---------|----------|----------|
 | `cuda` | NVIDIA CUDA | Linux, Windows |
 | `tensorrt` | NVIDIA TensorRT | Linux, Windows |
 | `directml` | DirectML | Windows |
 | `coreml` | Core ML | macOS, iOS |
+| `webgpu` | WebGPU | Supported ONNX Runtime targets |
 | `openvino` | Intel OpenVINO | Linux, Windows |
-| `webgpu` | WebGPU | Cross-platform |
 
 Example with TensorRT:
 
@@ -241,6 +243,13 @@ let ort_config = OrtSessionConfig::new()
             max_workspace_size: None,
             min_subgraph_size: None,
             fp16_enable: None,
+            timing_cache: None,
+            timing_cache_path: None,
+            force_timing_cache: None,
+            engine_cache: None,
+            engine_cache_path: None,
+            dump_ep_context_model: None,
+            ep_context_file_path: None,
         },
         OrtExecutionProvider::CUDA {
             device_id: Some(0),
@@ -255,27 +264,31 @@ let ort_config = OrtSessionConfig::new()
 
 ## PaddleOCR-VL (Vision-Language)
 
-[PaddleOCR-VL](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) is an ultra-compact (0.9B parameters) Vision-Language Model for document parsing, released by Baidu's PaddlePaddle team. It supports **109 languages** and excels in recognizing complex elements including text, tables, formulas, and 11 chart types. The model achieves SOTA performance in both page-level document parsing and element-level recognition while maintaining minimal resource consumption.
+[PaddleOCR-VL](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) is a 0.9B document Vision-Language Model from the PaddlePaddle team. It supports 109 languages and task-specific recognition for text, tables, formulas, and charts.
 
 This functionality is available in the separate `oar-ocr-vl` crate, using [Candle](https://github.com/huggingface/candle) for native Rust inference.
 
-PaddleOCR-VL-1.5 is also supported as a drop-in replacement via `PaddleOcrVl::from_dir`, and adds **text spotting** and **seal recognition** tasks.
+PaddleOCR-VL-1.5 and PaddleOCR-VL-1.6 are drop-in replacements via `PaddleOcrVl::from_dir`. Both add **text spotting** and **seal recognition** to the original model's task set.
 
 ### Installation
 
-Add the VL crate to your `Cargo.toml`:
+Add the VL crate and the core crate used by the snippets below to your `Cargo.toml`. `download-binaries` supplies ONNX Runtime for the core helpers unless you link a system installation with `ORT_LIB_PATH` or `ORT_LIB_LOCATION`.
 
 ```toml
 [dependencies]
-oar-ocr-vl = "0.7"
+oar-ocr-core = { version = "0.8", default-features = false }
+oar-ocr-vl = { version = "0.8", features = ["download-binaries"] }
 ```
 
 For GPU acceleration, enable CUDA:
 
 ```toml
 [dependencies]
-oar-ocr-vl = { version = "0.7", features = ["cuda"] }
+oar-ocr-core = { version = "0.8", default-features = false }
+oar-ocr-vl = { version = "0.8", features = ["cuda", "download-binaries"] }
 ```
+
+On macOS, use the `metal` feature instead.
 
 ### Downloading the Model
 
@@ -289,9 +302,13 @@ git clone https://huggingface.co/PaddlePaddle/PaddleOCR-VL
 # PaddleOCR-VL-1.5
 git clone https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5
 
+# PaddleOCR-VL-1.6
+git clone https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6
+
 # Or using hf
 hf download PaddlePaddle/PaddleOCR-VL --local-dir PaddleOCR-VL
 hf download PaddlePaddle/PaddleOCR-VL-1.5 --local-dir PaddleOCR-VL-1.5
+hf download PaddlePaddle/PaddleOCR-VL-1.6 --local-dir PaddleOCR-VL-1.6
 ```
 
 ### Basic Usage
@@ -304,7 +321,7 @@ use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = load_image(Path::new("document.png"))?;
-    let device = parse_device("cpu")?;  // or "cuda", "cuda:0"
+    let device = parse_device("cpu")?; // or "cuda", "cuda:0", "metal"
     let vl = PaddleOcrVl::from_dir("PaddleOCR-VL", device)?;
 
     // Element-level OCR. The API is batch-oriented, so pass one task per image.
@@ -319,7 +336,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-PaddleOCR-VL-1.5 uses the same API:
+PaddleOCR-VL-1.5 and PaddleOCR-VL-1.6 use the same API:
 
 ```rust,no_run
 use oar_ocr_core::utils::load_image;
@@ -330,7 +347,8 @@ use std::path::Path;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = load_image(Path::new("seal.png"))?;
     let device = parse_device("cpu")?;
-    let vl = PaddleOcrVl::from_dir("PaddleOCR-VL-1.5", device)?;
+    // Use "PaddleOCR-VL-1.5" here to load the 1.5 checkpoint instead.
+    let vl = PaddleOcrVl::from_dir("PaddleOCR-VL-1.6", device)?;
 
     let result = vl
         .generate(&[image], &[PaddleOcrVlTask::Seal], 256)
@@ -346,11 +364,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Running the Example
 
 ```bash
-cargo run -p oar-ocr-vl --features cuda --example paddleocr_vl -- \
+cargo run -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
     -m PaddleOCR-VL --device cuda --task ocr document.jpg
 
-cargo run -p oar-ocr-vl --features cuda --example paddleocr_vl -- \
+cargo run -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
     -m PaddleOCR-VL-1.5 --device cuda --task spotting spotting.jpg
+
+cargo run -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
+    -m PaddleOCR-VL-1.6 --device cuda --task seal seal.jpg
 ```
 
 ### Supported Tasks
@@ -368,7 +389,7 @@ cargo run -p oar-ocr-vl --features cuda --example paddleocr_vl -- \
 
 [HunyuanOCR 1.5](https://huggingface.co/tencent/HunyuanOCR) is a lightweight OCR expert VLM. It is available in the `oar-ocr-vl` crate and supports prompt-driven image-to-text OCR. `HunyuanOcr::from_dir` automatically detects 1.5 at the model repository root and remains compatible with archived 1.0 weights under `v1.0/`.
 
-HunyuanOCR 1.5 inputs use the checkpoint's 16M-pixel budget (up to a 4K square input). The 2048 value in `vision_config.max_image_size` describes the learned positional-embedding base grid; larger input grids are interpolated, as in the official implementation.
+HunyuanOCR 1.5 inputs use the checkpoint's 16M-pixel budget (up to a 4K square input). The 2048 value in `vision_config.max_image_size` describes the learned positional-embedding base grid. Larger input grids are interpolated, as in the official implementation.
 
 ### Downloading the Model
 
@@ -380,7 +401,7 @@ git clone https://huggingface.co/tencent/HunyuanOCR
 hf download tencent/HunyuanOCR --local-dir HunyuanOCR
 ```
 
-The download places 1.5 weights directly in `HunyuanOCR/`. To use 1.0 instead, pass `HunyuanOCR/v1.0` as the model directory.
+The download places 1.5 weights directly in `HunyuanOCR/` and its optional DFlash draft in `HunyuanOCR/dflash/`. To use 1.0 instead, pass `HunyuanOCR/v1.0` as the model directory.
 
 ### Basic Usage
 
@@ -391,7 +412,7 @@ use oar_ocr_vl::utils::parse_device;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = load_image("document.jpg")?;
-    let device = parse_device("cpu")?; // or "cuda", "cuda:0"
+    let device = parse_device("cpu")?; // or "cuda", "cuda:0", "metal"
 
     // Repository root = HunyuanOCR 1.5; `HunyuanOCR/v1.0` also works.
     let model = HunyuanOcr::from_dir("HunyuanOCR", device)?;
@@ -408,11 +429,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+HunyuanOCR 1.5 can load the official DFlash draft for speculative decoding:
+
+```rust,no_run
+use oar_ocr_vl::HunyuanOcr;
+use oar_ocr_vl::utils::parse_device;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model = HunyuanOcr::from_dir_with_dflash(
+        "HunyuanOCR",
+        parse_device("cuda:0")?,
+    )?;
+    assert!(model.dflash_enabled());
+    Ok(())
+}
+```
+
 ### Running the Example
 
 ```bash
-cargo run -p oar-ocr-vl --features cuda --example hunyuanocr -- \
+cargo run -p oar-ocr-vl --features cuda,download-binaries --example hunyuanocr -- \
     --model-dir HunyuanOCR \
+    --dflash-dir HunyuanOCR/dflash \
     --device cuda \
     --prompt "Detect and recognize text in the image, and output the text coordinates in a formatted manner." \
     document.jpg
@@ -452,7 +490,7 @@ use oar_ocr_vl::utils::parse_device;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = load_image("document.jpg")?;
-    let device = parse_device("cpu")?; // or "cuda", "cuda:0"
+    let device = parse_device("cpu")?; // or "cuda", "cuda:0", "metal"
 
     let model = GlmOcr::from_dir("GLM-OCR", device)?;
     let prompt = "Text Recognition:";
@@ -470,25 +508,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Running the Example
 
 ```bash
-cargo run -p oar-ocr-vl --features cuda --example glmocr -- \
+cargo run -p oar-ocr-vl --features cuda,download-binaries --example glmocr -- \
     --model-dir GLM-OCR \
     --device cuda \
     --prompt "Text Recognition:" \
     document.jpg
 ```
 
-## MinerU2.5
+## MinerU2.5 and MinerU2.5-Pro
 
-[MinerU2.5](https://huggingface.co/opendatalab/MinerU2.5-2509-1.2B) is a document parsing VLM supported by `oar-ocr-vl`. For full-page documents, use its model-native two-step pipeline rather than forcing it through `DocParser`.
+[MinerU2.5](https://huggingface.co/opendatalab/MinerU2.5-2509-1.2B) and [MinerU2.5-Pro](https://huggingface.co/opendatalab/MinerU2.5-Pro-2605-1.2B) are document parsing VLMs supported by the same `MinerU` loader. For full-page documents, use their model-native two-step pipeline rather than forcing them through `DocParser`.
 
 ### Downloading the Model
 
 ```bash
 git lfs install
 git clone https://huggingface.co/opendatalab/MinerU2.5-2509-1.2B
+git clone https://huggingface.co/opendatalab/MinerU2.5-Pro-2605-1.2B
 
 # Or using hf
 hf download opendatalab/MinerU2.5-2509-1.2B --local-dir MinerU2.5-2509-1.2B
+hf download opendatalab/MinerU2.5-Pro-2605-1.2B --local-dir MinerU2.5-Pro-2605-1.2B
 ```
 
 ### Basic Usage
@@ -500,8 +540,9 @@ use oar_ocr_vl::utils::parse_device;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = load_image("document.jpg")?;
-    let device = parse_device("cpu")?; // or "cuda", "cuda:0"
+    let device = parse_device("cpu")?; // or "cuda", "cuda:0", "metal"
 
+    // MinerU2.5-Pro-2605-1.2B is loaded through the same API.
     let model = MinerU::from_dir("MinerU2.5-2509-1.2B", device)?;
     let prompt = "\nText Recognition:";
     let text = model
@@ -518,17 +559,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Running the Example
 
 ```bash
-cargo run -p oar-ocr-vl --features cuda --example mineru -- \
+cargo run -p oar-ocr-vl --features cuda,download-binaries --example mineru -- \
     --model-dir MinerU2.5-2509-1.2B \
     --device cuda \
+    document.jpg
+
+cargo run -p oar-ocr-vl --features cuda,download-binaries --example mineru -- \
+    --model-dir MinerU2.5-Pro-2605-1.2B \
+    --device cuda \
+    document.jpg
+```
+
+## MinerU-Diffusion-V1
+
+[MinerU-Diffusion-V1](https://huggingface.co/opendatalab/MinerU-Diffusion-V1-0320-2.5B) replaces autoregressive text generation with block-diffusion decoding. The `mineru_diffusion` example defaults to MinerU-style two-step structured extraction and also provides `--single-pass` for flat full-page text recognition.
+
+### Downloading the Model
+
+```bash
+git lfs install
+git clone https://huggingface.co/opendatalab/MinerU-Diffusion-V1-0320-2.5B
+
+# Or using hf
+hf download opendatalab/MinerU-Diffusion-V1-0320-2.5B \
+    --local-dir MinerU-Diffusion-V1-0320-2.5B
+```
+
+### Basic Usage
+
+```rust,no_run
+use oar_ocr_core::utils::load_image;
+use oar_ocr_vl::mineru_diffusion::DEFAULT_PROMPT;
+use oar_ocr_vl::utils::parse_device;
+use oar_ocr_vl::{DiffusionGenerationConfig, MinerUDiffusion};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let image = load_image("document.jpg")?;
+    let model = MinerUDiffusion::from_dir(
+        "MinerU-Diffusion-V1-0320-2.5B",
+        parse_device("cuda:0")?,
+    )?;
+    let text = model.generate(
+        &image,
+        DEFAULT_PROMPT,
+        &DiffusionGenerationConfig::default(),
+    )?;
+    println!("{text}");
+    Ok(())
+}
+```
+
+### Running the Example
+
+```bash
+cargo run -p oar-ocr-vl --features cuda,download-binaries \
+    --example mineru_diffusion -- \
+    --model-dir MinerU-Diffusion-V1-0320-2.5B \
+    --device cuda:0 \
     document.jpg
 ```
 
 ## DocParser
 
-DocParser provides a unified API for external layout-first document parsing with VL-based recognition. It supports PaddleOCR-VL, PaddleOCR-VL-1.5, and GLM-OCR as recognition backends.
+DocParser provides a unified API for external layout-first document parsing with VL-based recognition. The `doc_parser` example supports PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, and GLM-OCR.
 
-Use `parse(&layout, image)` with an ONNX layout detector. HunyuanOCR and MinerU2.5 are not exposed by the `doc_parser` example because their reference-quality paths are prompt-driven full-page parsing and model-native two-step extraction, respectively.
+Use `parse(&layout, image)` with an ONNX layout detector. The library also implements `RecognitionBackend` for HunyuanOCR and MinerU2.5/Pro, but they are intentionally not exposed by the CLI example because their reference-quality paths are prompt-driven full-page parsing and model-native two-step extraction, respectively. MinerU-Diffusion uses its dedicated example.
 
 ### Basic Usage
 
@@ -556,13 +651,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = parser.parse(&layout, image.clone())?;
     println!("{}", result.to_markdown());
 
-    // Option 2: Using PaddleOCR-VL-1.5 (next-gen, more accurate)
+    // Option 2: Using PaddleOCR-VL-1.5
     let paddleocr_vl_15 = PaddleOcrVl::from_dir("PaddleOCR-VL-1.5", device.clone())?;
     let parser = DocParser::new(&paddleocr_vl_15);
     let result = parser.parse(&layout, image.clone())?;
     println!("{}", result.to_markdown());
 
-    // Option 3: Using GLM-OCR with external layout
+    // Option 3: Using PaddleOCR-VL-1.6
+    let paddleocr_vl_16 = PaddleOcrVl::from_dir("PaddleOCR-VL-1.6", device.clone())?;
+    let parser = DocParser::new(&paddleocr_vl_16);
+    let result = parser.parse(&layout, image.clone())?;
+    println!("{}", result.to_markdown());
+
+    // Option 4: Using GLM-OCR with external layout
     let glmocr = GlmOcr::from_dir("GLM-OCR", device)?;
     let parser = DocParser::new(&glmocr);
     let result = parser.parse(&layout, image)?;
@@ -576,23 +677,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```bash
 # Using PaddleOCR-VL
-cargo run -p oar-ocr-vl --features cuda --example doc_parser -- \
+cargo run -p oar-ocr-vl --features cuda,download-binaries --example doc_parser -- \
     --model-name paddleocr-vl \
     --model-dir PaddleOCR-VL \
     --layout-model models/pp-doclayoutv3.onnx \
     --device cuda \
     document.jpg
 
-# Using PaddleOCR-VL-1.5 (next-gen, more accurate)
-cargo run -p oar-ocr-vl --features cuda --example doc_parser -- \
+# Using PaddleOCR-VL-1.5
+cargo run -p oar-ocr-vl --features cuda,download-binaries --example doc_parser -- \
     --model-name paddleocr-vl-1.5 \
     --model-dir PaddleOCR-VL-1.5 \
     --layout-model models/pp-doclayoutv3.onnx \
     --device cuda \
     document.jpg
 
+# Using PaddleOCR-VL-1.6
+cargo run -p oar-ocr-vl --features cuda,download-binaries --example doc_parser -- \
+    --model-name paddleocr-vl-1.6 \
+    --model-dir PaddleOCR-VL-1.6 \
+    --layout-model models/pp-doclayoutv3.onnx \
+    --device cuda \
+    document.jpg
+
 # Using GLM-OCR with layout
-cargo run -p oar-ocr-vl --features cuda --example doc_parser -- \
+cargo run -p oar-ocr-vl --features cuda,download-binaries --example doc_parser -- \
     --model-name glmocr \
     --model-dir GLM-OCR \
     --layout-model models/pp-doclayoutv3.onnx \

@@ -4,11 +4,14 @@
 //!
 //! ## Modules
 //!
-//! - `paddleocr_vl` - PaddleOCR-VL for OCR, table, formula, chart, spotting, and seal recognition
+//! - `paddleocr_vl` - PaddleOCR-VL, 1.5, and 1.6 for OCR, table, formula,
+//!   chart, spotting, and seal recognition
 //! - `hunyuanocr` - HunyuanOCR 1.5 / 1.0 OCR expert VLM
 //! - `glmocr` - GLM-OCR OCR expert VLM
-//! - `mineru` - MinerU2.5 document parsing VLM (Qwen2-VL backbone)
-//! - `mineru_diffusion` - MinerU-Diffusion-V1 block-diffusion document OCR (Qwen2-VL vision + SDAR decoder)
+//! - `mineru` - MinerU2.5 and MinerU2.5-Pro document parsing VLMs (Qwen2-VL
+//!   backbone)
+//! - `mineru_diffusion` - MinerU-Diffusion-V1 block-diffusion document OCR
+//!   (Qwen2-VL vision + SDAR decoder)
 //! - `doc_parser` - Unified document parsing with pluggable recognition backends
 //! - `utils` - Device parsing, candle helpers, markdown, OTSL conversion
 //! - `attention` - Unified attention shared by all models

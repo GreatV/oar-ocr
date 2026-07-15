@@ -1,6 +1,7 @@
-//! Unified attention and rotary embedding shared by all VLM models
-//! (PaddleOCR-VL, HunyuanOCR, GLM-OCR, MinerU2.5), for consistent mask handling,
-//! KV-cache logic, and multi-axis RoPE (MRoPE, XDRoPE).
+//! Unified attention and rotary embedding shared by the VLM backends
+//! (PaddleOCR-VL, HunyuanOCR, GLM-OCR, MinerU2.5/Pro, and MinerU-Diffusion),
+//! for consistent mask handling, KV-cache logic, and multi-axis RoPE
+//! (MRoPE, XDRoPE).
 //!
 //! ## Usage
 //!
