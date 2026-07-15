@@ -6,7 +6,7 @@
 //! 3. Direction-aware XY-cut sorting
 //! 4. Overlapping box shrinking before projection
 //! 5. Weighted distance insertion for special blocks
-//! 6. Child block association (vision titles → vision parents)
+//! 6. Child block association between vision titles and vision parents
 
 use crate::domain::structure::LayoutElementType;
 use crate::processors::sorting::calculate_overlap_ratio;
@@ -274,8 +274,8 @@ fn sort_main_blocks(mut blocks: Vec<SortableBlock>, page_width: f32) -> Vec<Sort
 
 /// Direction-aware XY-cut sorting (PaddleX xycut_enhanced lines 539-584).
 ///
-/// If single column or all blocks have 1 line → use secondary direction (xy_cut).
-/// If multi-column → use primary direction (yx_cut).
+/// If the page has a single column or every block has one line, use the secondary direction (xy_cut).
+/// If the page has multiple columns, use the primary direction (yx_cut).
 fn direction_aware_xycut_sort(blocks: &mut [SortableBlock]) -> Vec<SortableBlock> {
     let bboxes: Vec<BoundingBox> = blocks.iter().map(|b| b.bbox.clone()).collect();
     let max_text_lines = blocks.iter().map(|b| b.num_lines).max().unwrap_or(1);

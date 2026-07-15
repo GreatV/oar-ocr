@@ -1458,7 +1458,7 @@ fn dehyphenate(text: &str) -> String {
             }
 
             // Only dehyphenate when hyphen is followed by newline (line-break hyphenation).
-            // Pattern: "word-\nletter" → "wordletter"
+            // Pattern: "word-\nletter" becomes "wordletter".
             let is_artifact = if i + 1 < len && chars[i + 1] == '\n' {
                 // Hyphen followed by newline — check if next line starts with lowercase
                 if i + 2 < len {

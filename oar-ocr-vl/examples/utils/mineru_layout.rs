@@ -1,5 +1,5 @@
 //! Shared MinerU two-step layout parsing helpers for the `mineru` and
-//! `mineru_diffusion` examples. Both run the same `Layout Detection` →
+//! `mineru_diffusion` examples. Both run the same `Layout Detection`, followed by
 //! per-region recognition flow and only differ in the model's generate API,
 //! so the layout-output parsing and crop preparation live here.
 

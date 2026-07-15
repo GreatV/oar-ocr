@@ -25,7 +25,7 @@ pub use oar_ocr_core::domain::TextRegion;
 /// - Bounding boxes have been **automatically transformed back** to the original coordinate system
 /// - You can safely overlay boxes on `input_img` for visualization
 ///
-/// ## Rectification (Document Unwarping)
+/// ## Document Rectification
 /// - If `rectified_img` is set, neural network-based rectification (UVDoc) was applied
 /// - **Limitation**: UVDoc doesn't provide inverse transformations from rectified to distorted coordinates
 /// - Bounding boxes are in the **rectified image's coordinate system**, not the original distorted image

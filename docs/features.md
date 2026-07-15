@@ -159,7 +159,7 @@ If an execution provider feature is enabled, the supplied ONNX Runtime build mus
 cargo add oar-ocr --features auto-download
 ```
 
-Existing files and explicit paths remain under caller control. In-memory ONNX sources also bypass the download resolver. See the [model guide](models.md#auto-download-via-the-auto-download-feature) for the complete path-resolution and cache rules.
+Existing files and explicit paths remain under caller control. In-memory ONNX sources also bypass the download resolver. See the [model guide](models.md#auto-download) for the complete path-resolution and cache rules.
 
 `auto-download` supplies model files at runtime. It does not install ONNX Runtime or any accelerator dependencies.
 

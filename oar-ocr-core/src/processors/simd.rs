@@ -230,7 +230,7 @@ fn reduce_max_simd(row: &[f32]) -> f32 {
 
 // CRNN recognition normalize: `(v / 255.0 - 0.5) / 0.5` in BGR order.
 
-/// BGR source-channel order for the CRNN tensor (dst channel 0 ← src B, etc.).
+/// BGR source-channel order for the CRNN tensor (destination channel 0 uses source B, etc.).
 const CRNN_SRC: [usize; 3] = [2, 1, 0];
 
 /// Fills a CRNN CHW input tensor from a resized RGB crop.

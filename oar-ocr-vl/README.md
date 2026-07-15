@@ -170,7 +170,7 @@ cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example do
 
 HunyuanOCR and the MinerU models are intentionally not exposed by this example because their reference-quality paths are prompt-driven full-page parsing and model-native two-step extraction, respectively.
 
-### PaddleOCR-VL (Direct Inference)
+### PaddleOCR-VL Direct Inference
 
 Run the PaddleOCR-VL model directly on an image with a specific task prompt.
 
@@ -189,14 +189,14 @@ cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example pa
     --task table \
     table.jpg
 
-# Text spotting (PaddleOCR-VL-1.5 or 1.6)
+# Text spotting with PaddleOCR-VL-1.5 or 1.6
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
     --model-dir models/PaddleOCR-VL-1.5 \
     --device cuda \
     --task spotting \
     spotting.jpg
 
-# Seal recognition (PaddleOCR-VL-1.5 or 1.6)
+# Seal recognition with PaddleOCR-VL-1.5 or 1.6
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
     --model-dir models/PaddleOCR-VL-1.6 \
     --device cuda \
@@ -204,7 +204,7 @@ cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example pa
     seal.jpg
 ```
 
-### HunyuanOCR 1.5 (Direct Inference)
+### HunyuanOCR 1.5 Direct Inference
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example hunyuanocr -- \
@@ -217,7 +217,7 @@ cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example hu
 
 The model repository root contains HunyuanOCR 1.5. The loader detects it automatically. Use `--model-dir models/HunyuanOCR/v1.0` for the archived 1.0 checkpoint. `--dflash-dir` enables the official 15-token parallel draft path for 1.5. Omit it for ordinary autoregressive decoding. Library callers can use `HunyuanOcr::from_dirs(target_dir, dflash_dir, device)` or `HunyuanOcr::from_dir_with_dflash(model_dir, device)` when the draft is stored in the official `dflash/` subdirectory.
 
-### GLM-OCR (Direct Inference)
+### GLM-OCR Direct Inference
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example glmocr -- \
@@ -227,7 +227,7 @@ cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example gl
     document.jpg
 ```
 
-### MinerU2.5 / MinerU2.5-Pro (Direct Inference)
+### MinerU2.5 and MinerU2.5-Pro Direct Inference
 
 Model-native two-step document extraction (layout prompt + content extraction):
 
@@ -247,7 +247,7 @@ cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example mi
     document.jpg
 ```
 
-### MinerU-Diffusion-V1 (Direct Inference)
+### MinerU-Diffusion-V1 Direct Inference
 
 The default mode performs two-step structured extraction with block-diffusion decoding. Add `--single-pass` for flat full-page text recognition.
 

@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("OAR cache: {}", oar_ocr::download::cache_dir().display());
 
-    // Bare file names → resolved through the registry on `build()`.
+    // Bare file names are resolved through the registry on `build()`.
     // The first run downloads to ~/.oar (or $OAR_HOME); subsequent runs reuse
     // the cached copies after verifying their SHA-256.
     let ocr = OAROCRBuilder::new(

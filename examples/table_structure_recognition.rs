@@ -28,7 +28,7 @@
 //! cargo run --example table_structure_recognition -- \
 //!     --model-path path/to/model.onnx \
 //!     --dict-path path/to/dict.txt \
-//!     --image-path path/to/image.jpg
+//!     path/to/image.jpg
 //! ```
 //!
 //! With custom dictionary:
@@ -37,7 +37,7 @@
 //! cargo run --example table_structure_recognition -- \
 //!     --model-path path/to/model.onnx \
 //!     --dict-path path/to/table_structure_dict_ch.txt \
-//!     --image-path path/to/image.jpg
+//!     path/to/image.jpg
 //! ```
 //!
 //! With wireless table model (requires different dictionary):
@@ -47,7 +47,7 @@
 //!     --model-path path/to/model.onnx \
 //!     --dict-path path/to/table_structure_dict.txt \
 //!     --model-name SLANet_plus \
-//!     --image-path path/to/image.jpg
+//!     path/to/image.jpg
 //! ```
 
 mod utils;

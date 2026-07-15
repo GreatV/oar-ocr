@@ -290,7 +290,7 @@ mod tests {
         assert!(!m.same_category);
     }
 
-    /// Table → table candidate at relaxed threshold (the candidate set
+    /// A table target matches a table candidate at a relaxed threshold (the candidate set
     /// is already type-restricted, so a low IoU floor is safe).
     #[test]
     fn table_target_uses_relaxed_threshold() {
@@ -305,7 +305,7 @@ mod tests {
         assert!(m.same_category);
     }
 
-    /// Formula → formula candidate at relaxed threshold.
+    /// A formula target matches a formula candidate at a relaxed threshold.
     #[test]
     fn formula_target_uses_relaxed_threshold() {
         let mut r = empty_result();

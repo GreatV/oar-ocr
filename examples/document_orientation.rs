@@ -22,7 +22,7 @@
 //!
 //! ```bash
 //! cargo run --example document_orientation -- \
-//!     -m models/pplcnet_x1_0_doc_ori.onnx \
+//!     -m models/pp-lcnet_x1_0_doc_ori.onnx \
 //!     -o output/ --vis \
 //!     document1.jpg document2.jpg
 //! ```

@@ -22,7 +22,7 @@
 //!
 //! ```bash
 //! cargo run --example text_line_orientation -- \
-//!     -m models/pplcnet_x1_0_textline_ori.onnx \
+//!     -m models/pp-lcnet_x1_0_textline_ori.onnx \
 //!     -o output/ --vis \
 //!     text_line1.jpg text_line2.jpg
 //! ```

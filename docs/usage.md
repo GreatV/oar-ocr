@@ -105,9 +105,7 @@ let ocr = OAROCRBuilder::new(
 
 #### Loading Models from Memory
 
-Everywhere a builder accepts a model path it also accepts raw ONNX bytes
-(`Vec<u8>`, `&'static [u8]`, or `Arc<[u8]>`), so models can be embedded into
-the binary or decrypted at runtime without touching the filesystem:
+Everywhere a builder accepts a model path it also accepts raw ONNX bytes (`Vec<u8>`, `&'static [u8]`, or `Arc<[u8]>`), so models can be embedded into the binary or decrypted at runtime without touching the filesystem:
 
 ```rust
 use oar_ocr::oarocr::OAROCRBuilder;
@@ -121,10 +119,7 @@ let ocr = OAROCRBuilder::new(DET_MODEL, REC_MODEL, "")
     .build()?;
 ```
 
-In-memory sources skip auto-download resolution, and models that reference
-external-data sidecar files cannot be loaded this way. The same applies to
-the per-task predictors (`TextDetectionPredictorBuilder::build(...)` etc.),
-`OARStructureBuilder` model setters, and `AdapterBuilder::build(...)`.
+In-memory sources skip auto-download resolution, and models that reference external-data sidecar files cannot be loaded this way. The same applies to the per-task predictors (`TextDetectionPredictorBuilder::build(...)` etc.), `OARStructureBuilder` model setters, and `AdapterBuilder::build(...)`.
 
 ### OARStructureBuilder - Document Structure Analysis
 
@@ -262,7 +257,7 @@ let ort_config = OrtSessionConfig::new()
     ]);
 ```
 
-## PaddleOCR-VL (Vision-Language)
+## PaddleOCR-VL
 
 [PaddleOCR-VL](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) is a 0.9B document Vision-Language Model from the PaddlePaddle team. It supports 109 languages and task-specific recognition for text, tables, formulas, and charts.
 
@@ -295,7 +290,7 @@ On macOS, use the `metal` feature instead.
 Download the PaddleOCR-VL model from Hugging Face:
 
 ```bash
-# Using git (recommended)
+# Recommended git download
 git lfs install
 git clone https://huggingface.co/PaddlePaddle/PaddleOCR-VL
 

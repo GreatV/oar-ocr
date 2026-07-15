@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn resolve_bare_name_unknown_does_not_consult_network() {
         let _guard = lock_env();
-        // No registry hit, no existing file → returned as-is.
+        // A path with no registry hit and no existing file is returned as-is.
         let p = PathBuf::from("not-in-registry.onnx");
         let resolved = resolve_path(&p).unwrap();
         assert_eq!(resolved, p);
@@ -540,18 +540,18 @@ mod tests {
             size: 6,
         };
 
-        // Missing file → no match (no network needed).
+        // A missing file does not match, and no network access is needed.
         assert!(!cached_file_matches(&path, &entry).unwrap());
 
-        // Correct contents → match.
+        // Correct contents produce a match.
         std::fs::write(&path, b"hello\n").unwrap();
         assert!(cached_file_matches(&path, &entry).unwrap());
 
-        // Same hash but wrong size when we lie about expected size → no match.
+        // The same hash with a deliberately incorrect expected size does not match.
         let mismatched_size = Entry { size: 99, ..entry };
         assert!(!cached_file_matches(&path, &mismatched_size).unwrap());
 
-        // Wrong contents → no match (hash differs). Clear any sidecar left
+        // Wrong contents do not match because the hash differs. Clear any sidecar left
         // behind by the earlier matches so the rehash actually runs.
         let sidecar = sidecar_path(&path).unwrap();
         let _ = std::fs::remove_file(&sidecar);

@@ -40,8 +40,8 @@ pub struct FormulaPreprocessParams {
     pub normalize_std: [f32; 3],
 }
 
-/// Formula recognition preprocessor: margin crop → resize-and-pad →
-/// normalize-and-grayscale → 4D tensor formatting.
+/// Formula recognition preprocessor with margin cropping, resize-and-pad,
+/// normalization and grayscale conversion, followed by 4D tensor formatting.
 #[derive(Debug, Clone)]
 pub struct FormulaPreprocessor {
     params: FormulaPreprocessParams,
