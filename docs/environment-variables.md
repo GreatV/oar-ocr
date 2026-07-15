@@ -36,7 +36,7 @@ OAR_HOME=/data/oar-models cargo run --release --example ocr -- doc.jpg
 
 ## `OAR_VL_DTYPE`
 
-Overrides the automatic weight/compute dtype selection for Vision-Language models (PaddleOCR-VL, GLM-OCR, HunyuanOCR, MinerU2.5/Pro, and MinerU-Diffusion).
+Overrides the automatic weight/compute dtype selection for Vision-Language models (PaddleOCR-VL, GLM-OCR, OvisOCR2, HunyuanOCR, MinerU2.5/Pro, and MinerU-Diffusion).
 
 Accepted values (case-insensitive):
 
@@ -81,9 +81,11 @@ The following presence-based switches select portable fallbacks or disable optio
 
 These switches are primarily useful for compatibility checks, debugging, and numerical comparisons. The accelerated paths remain enabled by default when the active device and dtype support them.
 
+OvisOCR2 uses the shared dtype, FlashAttention, and grouped-query-attention controls. It has no model-specific runtime environment override.
+
 ## CUDA Build Overrides
 
-With the `cuda` feature enabled, `oar-ocr-vl` compiles its custom kernels to PTX. `CUDA_COMPUTE_CAP` overrides automatic GPU detection and accepts values such as `89`, `8.9`, `sm_89`, or `compute_89`. Compute capability 8.0 or newer is required. `NVCC` overrides the CUDA compiler executable.
+With the `cuda` feature enabled, `oar-ocr-vl` compiles its custom kernels, including OvisOCR2 Gated DeltaNet, to PTX. `CUDA_COMPUTE_CAP` overrides automatic GPU detection and accepts values such as `89`, `8.9`, `sm_89`, or `compute_89`. Compute capability 8.0 or newer is required. `NVCC` overrides the CUDA compiler executable.
 
 ```bash
 CUDA_COMPUTE_CAP=89 NVCC=/usr/local/cuda/bin/nvcc \

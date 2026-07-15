@@ -12,6 +12,7 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 | [PaddleOCR-VL-1.5](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5) | 0.9B | PaddleOCR-VL tasks plus text spotting and seal recognition |
 | [PaddleOCR-VL-1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) | 0.9B | Region-aware refinement, drop-in compatible with the 1.5 loader |
 | [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) | 0.9B | External-layout page parsing, text, table, and formula recognition |
+| [OvisOCR2](https://huggingface.co/ATH-MaaS/OvisOCR2) | 0.8B | Model-native full-page document-to-Markdown parsing |
 | [HunyuanOCR 1.5 / 1.0](https://huggingface.co/tencent/HunyuanOCR) | 1B | Model-native prompt-driven parsing with optional DFlash decoding for 1.5 |
 | [MinerU2.5-2509](https://huggingface.co/opendatalab/MinerU2.5-2509-1.2B) | 1.2B | Model-native two-step layout detection and content extraction |
 | [MinerU2.5-Pro-2605](https://huggingface.co/opendatalab/MinerU2.5-Pro-2605-1.2B) | 1.2B | Newer compatible checkpoint using the MinerU2.5 two-step pipeline |
@@ -26,7 +27,7 @@ See [`examples`](examples) for runnable examples.
 1. **Layout detection** (ONNX models like PP-DocLayoutV3) to identify document regions
 2. **VL-based recognition** to extract content from each region
 
-Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, and GLM-OCR. HunyuanOCR should be used with its model-native full-page prompts. MinerU2.5, MinerU2.5-Pro, and MinerU-Diffusion should use their model-native two-step extraction examples.
+Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, and GLM-OCR. OvisOCR2 is an end-to-end full-page parser and deliberately does not use DocParser. HunyuanOCR should be used with its model-native full-page prompts. MinerU2.5, MinerU2.5-Pro, and MinerU-Diffusion should use their model-native two-step extraction examples.
 
 ## Installation
 
@@ -102,6 +103,28 @@ let result = model
 println!("Result: {}", result);
 ```
 
+### OvisOCR2
+
+OvisOCR2 performs model-native full-page parsing without an external layout detector. `parse` applies the official prompt, image resizing, and post-processing and returns one Markdown document per page.
+
+```rust
+use oar_ocr_core::utils::load_image;
+use oar_ocr_vl::ovisocr2::DEFAULT_MAX_NEW_TOKENS;
+use oar_ocr_vl::utils::parse_device;
+use oar_ocr_vl::OvisOcr2;
+
+let image = load_image("document.png")?;
+let model = OvisOcr2::from_dir("models/OvisOCR2", parse_device("cpu")?)?;
+let markdown = model
+    .parse(&[image], DEFAULT_MAX_NEW_TOKENS)
+    .into_iter()
+    .next()
+    .expect("one result")?;
+println!("{markdown}");
+```
+
+The official runtime resizes RGB input with bicubic antialiasing to a 32-pixel-aligned area between `448²` and `2880²` pixels. Its fixed prompt requests reading-order Markdown, LaTeX formulas, HTML tables, and bounding-box `<img>` tags for visual regions. `parse` removes those visual-region blocks by default before applying truncated-repeat cleanup; call `parse_with_image_tags(..., true)` or `generate` to retain the references. The library does not create the referenced bounding-box crop files.
+
 ### DocParser
 
 Parse an entire page into Markdown with a layout predictor. This path is intended for external layout-first backends such as PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, and GLM-OCR.
@@ -168,7 +191,7 @@ cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example do
     document.jpg
 ```
 
-HunyuanOCR and the MinerU models are intentionally not exposed by this example because their reference-quality paths are prompt-driven full-page parsing and model-native two-step extraction, respectively.
+OvisOCR2, HunyuanOCR, and the MinerU models are intentionally not exposed by this example because their reference-quality paths are model-native full-page parsing, prompt-driven full-page parsing, and model-native two-step extraction, respectively.
 
 ### PaddleOCR-VL Direct Inference
 
@@ -225,6 +248,17 @@ cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example gl
     --device cuda \
     --prompt "Text Recognition:" \
     document.jpg
+```
+
+### OvisOCR2 Full-Page Parsing
+
+The example accepts multiple page images. It uses the official prompt and defaults to 16,384 generated tokens per page. Add `--keep-image-tags` to retain the model's visual-region `<img>` blocks.
+
+```bash
+cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example ovisocr2 -- \
+    --model-dir models/OvisOCR2 \
+    --device cuda:0 \
+    document-1.jpg document-2.jpg
 ```
 
 ### MinerU2.5 and MinerU2.5-Pro Direct Inference

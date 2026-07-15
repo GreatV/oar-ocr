@@ -114,6 +114,42 @@ pub fn scaled_dot_product_attention(
     attn_weights.matmul(v)
 }
 
+/// Sequence length above which vision backends use query-chunked attention to
+/// cap the size of the temporary attention-score matrix.
+pub(crate) const VISION_CHUNKED_ATTN_SEQ_THRESHOLD: usize = 1024;
+/// Query chunk size used by the shared eager vision-attention fallback.
+pub(crate) const VISION_CHUNKED_ATTN_CHUNK_SIZE: usize = 256;
+
+/// Non-causal scaled dot-product attention computed in query chunks. This has
+/// the same result as one eager attention call while reducing peak memory.
+pub(crate) fn chunked_vision_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    scale: f64,
+    chunk_size: usize,
+) -> Result<Tensor> {
+    if chunk_size == 0 {
+        candle_core::bail!("vision attention chunk size must be non-zero")
+    }
+    let seq_len = q.dim(2)?;
+    if seq_len == 0 {
+        return scaled_dot_product_attention(q, k, v, None, scale, false);
+    }
+    let mut chunks = Vec::with_capacity(seq_len.div_ceil(chunk_size));
+    let mut start = 0usize;
+    while start < seq_len {
+        let len = (seq_len - start).min(chunk_size);
+        let q_chunk = q.narrow(2, start, len)?;
+        chunks.push(scaled_dot_product_attention(
+            &q_chunk, k, v, None, scale, false,
+        )?);
+        start += len;
+    }
+    let chunks = chunks.iter().collect::<Vec<_>>();
+    Tensor::cat(&chunks, 2)
+}
+
 /// Scaled dot-product attention for grouped-query attention without expanding
 /// K/V heads. Query heads that share one KV head are folded into the matrix row
 /// dimension, preserving the usual head order in the returned tensor.
@@ -734,6 +770,26 @@ mod tests {
         let out = scaled_dot_product_attention(&q, &k, &v, None, scale, true)?;
         assert_eq!(out.dims(), &[1, 4, 8, 64]);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_chunked_vision_attention_matches_eager() -> Result<()> {
+        let device = Device::Cpu;
+        let q = Tensor::randn(0f32, 1., (1, 2, 7, 8), &device)?;
+        let k = Tensor::randn(0f32, 1., (1, 2, 5, 8), &device)?;
+        let v = Tensor::randn(0f32, 1., (1, 2, 5, 8), &device)?;
+        let scale = 1.0 / 8f64.sqrt();
+        let eager = scaled_dot_product_attention(&q, &k, &v, None, scale, false)?;
+        let chunked = chunked_vision_attention(&q, &k, &v, scale, 3)?;
+        let eager = eager.flatten_all()?.to_vec1::<f32>()?;
+        let chunked = chunked.flatten_all()?.to_vec1::<f32>()?;
+        assert!(
+            eager
+                .iter()
+                .zip(chunked)
+                .all(|(left, right)| (left - right).abs() < 1e-6)
+        );
         Ok(())
     }
 

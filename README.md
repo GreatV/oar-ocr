@@ -123,12 +123,13 @@ The [`oar-ocr-vl`](oar-ocr-vl/README.md) crate provides native [Candle](https://
 | [PaddleOCR-VL-1.5](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5) | 0.9B | PaddleOCR-VL tasks plus text spotting and seal recognition |
 | [PaddleOCR-VL-1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) | 0.9B | Region-aware page parsing and task-specific recognition |
 | [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) | 0.9B | Page parsing, text, table, and formula recognition |
+| [OvisOCR2](https://huggingface.co/ATH-MaaS/OvisOCR2) | 0.8B | Model-native full-page document-to-Markdown parsing |
 | [HunyuanOCR 1.5 / 1.0](https://huggingface.co/tencent/HunyuanOCR) | 1B | Prompt-driven full-page parsing, text spotting, table, formula, and chart recognition, with optional DFlash decoding for 1.5 |
 | [MinerU2.5-2509](https://huggingface.co/opendatalab/MinerU2.5-2509-1.2B) | 1.2B | Model-native two-step layout detection and content extraction |
 | [MinerU2.5-Pro-2605](https://huggingface.co/opendatalab/MinerU2.5-Pro-2605-1.2B) | 1.2B | Newer MinerU2.5 checkpoint using the same two-step pipeline |
 | [MinerU-Diffusion-V1-0320](https://huggingface.co/opendatalab/MinerU-Diffusion-V1-0320-2.5B) | 2.5B | Block-diffusion OCR with structured two-step extraction or single-pass text recognition |
 
-PaddleOCR-VL variants and GLM-OCR integrate with the external-layout [`DocParser`](oar-ocr-vl/README.md#document-parsing-pipeline). HunyuanOCR and the MinerU models use their model-native parsing pipelines.
+PaddleOCR-VL variants and GLM-OCR integrate with the external-layout [`DocParser`](oar-ocr-vl/README.md#document-parsing-pipeline). OvisOCR2 is instead a model-native full-page parser: its dedicated example applies the official fixed prompt, pixel preprocessing, and output cleanup and does not use DocParser. HunyuanOCR and the MinerU models also use their model-native parsing pipelines.
 
 See the [`oar-ocr-vl` guide](oar-ocr-vl/README.md) for setup and [`oar-ocr-vl/examples`](oar-ocr-vl/examples) for runnable examples.
 
