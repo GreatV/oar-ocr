@@ -1,12 +1,14 @@
 //! PaddleOCR-VL Recognition Example (Candle-based)
 //!
-//! This example demonstrates how to use PaddleOCR-VL for task-specific recognition
-//! of text, formulas, tables, and charts using the Candle ML framework.
+//! This example runs PaddleOCR-VL, PaddleOCR-VL-1.5, or PaddleOCR-VL-1.6 for
+//! task-specific recognition using the Candle ML framework. All variants
+//! support text, formula, table, and chart recognition. Versions 1.5 and 1.6
+//! also support text spotting and seal recognition.
 //!
 //! # Usage
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --example paddleocr_vl -- [OPTIONS] <IMAGES>...
+//! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- [OPTIONS] <IMAGES>...
 //! ```
 //!
 //! # Arguments
@@ -21,31 +23,31 @@
 //!
 //! ```bash
 //! # OCR (text recognition)
-//! cargo run -p oar-ocr-vl --example paddleocr_vl -- \
+//! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
 //!     -m PaddleOCR-VL --task ocr document.jpg
 //!
 //! # Table recognition
-//! cargo run -p oar-ocr-vl --example paddleocr_vl -- \
+//! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
 //!     -m PaddleOCR-VL --task table table.jpg
 //!
 //! # Formula recognition
-//! cargo run -p oar-ocr-vl --example paddleocr_vl -- \
+//! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
 //!     -m PaddleOCR-VL --task formula formula.jpg
 //!
 //! # Chart recognition
-//! cargo run -p oar-ocr-vl --example paddleocr_vl -- \
+//! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
 //!     -m PaddleOCR-VL --task chart chart.jpg
 //!
-//! # Text spotting (PaddleOCR-VL-1.5)
-//! cargo run -p oar-ocr-vl --example paddleocr_vl -- \
+//! # Text spotting (PaddleOCR-VL-1.5 or 1.6)
+//! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
 //!     -m PaddleOCR-VL-1.5 --task spotting spotting.jpg
 //!
-//! # Seal recognition (PaddleOCR-VL-1.5)
-//! cargo run -p oar-ocr-vl --example paddleocr_vl -- \
-//!     -m PaddleOCR-VL-1.5 --task seal seal.jpg
+//! # Seal recognition (PaddleOCR-VL-1.5 or 1.6)
+//! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
+//!     -m PaddleOCR-VL-1.6 --task seal seal.jpg
 //!
 //! # Run on CUDA GPU
-//! cargo run -p oar-ocr-vl --features cuda --example paddleocr_vl -- \
+//! cargo run -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
 //!     -m PaddleOCR-VL -d cuda --task ocr document.jpg
 //! ```
 

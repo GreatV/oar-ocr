@@ -3,10 +3,14 @@
 //! backend into structured results.
 //!
 //! Supported backends:
-//! - `PaddleOcrVl` - VLM with task-specific prompts
-//! - `HunyuanOcr` - OCR expert VLM (HunYuanVL)
-//! - `GlmOcr` - GLM-OCR OCR expert VLM
-//! - `MinerU` - MinerU2.5 document parsing VLM (Qwen2-VL backbone)
+//! - [`PaddleOcrVl`] - PaddleOCR-VL, 1.5, and 1.6 with task-specific prompts
+//! - [`HunyuanOcr`] - HunyuanOCR 1.5 / 1.0 (HunYuanVL)
+//! - [`GlmOcr`] - GLM-OCR
+//! - [`MinerU`] - MinerU2.5 and MinerU2.5-Pro (Qwen2-VL backbone)
+//!
+//! The `doc_parser` example exposes the layout-first PaddleOCR-VL and GLM-OCR
+//! paths. For reference-quality full-page parsing, prefer HunyuanOCR's native
+//! page prompt and the MinerU models' native two-step extraction pipeline.
 
 use super::utils::{
     DetectedBox, calculate_overlap_ratio, calculate_projection_overlap_ratio, convert_otsl_to_html,

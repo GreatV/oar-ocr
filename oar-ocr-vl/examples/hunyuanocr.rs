@@ -6,13 +6,13 @@
 //! # Usage
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --example hunyuanocr -- [OPTIONS] <IMAGES>...
+//! cargo run -p oar-ocr-vl --features download-binaries --example hunyuanocr -- [OPTIONS] <IMAGES>...
 //! ```
 //!
 //! # Examples
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --example hunyuanocr -- \\
+//! cargo run -p oar-ocr-vl --features download-binaries --example hunyuanocr -- \\
 //!     --model-dir models/HunyuanOCR \\
 //!     --prompt "Detect and recognize text in the image, and output the text coordinates in a formatted manner." \\
 //!     document.jpg

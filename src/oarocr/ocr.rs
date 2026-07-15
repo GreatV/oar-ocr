@@ -139,7 +139,7 @@ impl OAROCRBuilder {
 
     /// Sets the text detection model configuration.
     ///
-    /// The configuration should be a JSON value containing model-specific settings.
+    /// Controls text detection preprocessing and postprocessing.
     pub fn text_detection_config(mut self, config: TextDetectionConfig) -> Self {
         self.text_detection_config = Some(config);
         self
@@ -147,7 +147,7 @@ impl OAROCRBuilder {
 
     /// Sets the text recognition model configuration.
     ///
-    /// The configuration should be a JSON value containing model-specific settings.
+    /// Controls text recognition preprocessing and postprocessing.
     pub fn text_recognition_config(mut self, config: TextRecognitionConfig) -> Self {
         self.text_recognition_config = Some(config);
         self

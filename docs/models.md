@@ -11,10 +11,10 @@ Choose between mobile and server variants based on your needs:
 
 | Version  | Category | Model File | Size | Description |
 |----------|----------|------------|------|-------------|
-| PP-OCRv4 | Mobile | [`pp-ocrv4_mobile_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv4_mobile_det.onnx) | 4.6MB | Mobile variant for real-time applications |
-| PP-OCRv4 | Server | [`pp-ocrv4_server_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv4_server_det.onnx) | 108.2MB | Server variant for high-precision |
-| PP-OCRv5 | Mobile | [`pp-ocrv5_mobile_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv5_mobile_det.onnx) | 4.6MB | Mobile variant for real-time applications |
-| PP-OCRv5 | Server | [`pp-ocrv5_server_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv5_server_det.onnx) | 84.0MB | Server variant for high-precision |
+| PP-OCRv4 | Mobile | [`pp-ocrv4_mobile_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv4_mobile_det.onnx) | 4.6 MiB | Mobile variant for real-time applications |
+| PP-OCRv4 | Server | [`pp-ocrv4_server_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv4_server_det.onnx) | 108.2 MiB | Server variant for high-precision |
+| PP-OCRv5 | Mobile | [`pp-ocrv5_mobile_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv5_mobile_det.onnx) | 4.6 MiB | Mobile variant for real-time applications |
+| PP-OCRv5 | Server | [`pp-ocrv5_server_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv5_server_det.onnx) | 84.0 MiB | Server variant for high-precision |
 
 ## Text Recognition Models
 
@@ -22,42 +22,42 @@ Choose between mobile and server variants based on your needs:
 
 | Version  | Category | Model File | Size | Description |
 |----------|----------|------------|------|-------------|
-| PP-OCRv3 | Mobile | [`pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv3_mobile_rec.onnx) | 10.2MB | Legacy mobile variant |
-| PP-OCRv4 | Mobile | [`pp-ocrv4_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv4_mobile_rec.onnx) | 10.4MB | Mobile variant |
-| PP-OCRv4 | Server | [`pp-ocrv4_server_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv4_server_rec.onnx) | 86.3MB | Server variant |
-| PP-OCRv4 | Document | [`pp-ocrv4_server_rec_doc.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv4_server_rec_doc.onnx) | 90.5MB | Optimized for documents |
-| PP-OCRv5 | Mobile | [`pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv5_mobile_rec.onnx) | 15.8MB | Mobile variant |
-| PP-OCRv5 | Server | [`pp-ocrv5_server_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv5_server_rec.onnx) | 80.6MB | Server variant |
-| SVTRv2 | Server | [`ch_svtrv2_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ch_svtrv2_rec.onnx) | 80.3MB | High accuracy variant |
-| RepSVTR | Server | [`ch_repsvtr_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ch_repsvtr_rec.onnx) | 24.2MB | Balanced accuracy/speed |
+| PP-OCRv3 | Mobile | [`pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv3_mobile_rec.onnx) | 10.2 MiB | Legacy mobile variant |
+| PP-OCRv4 | Mobile | [`pp-ocrv4_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv4_mobile_rec.onnx) | 10.4 MiB | Mobile variant |
+| PP-OCRv4 | Server | [`pp-ocrv4_server_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv4_server_rec.onnx) | 86.3 MiB | Server variant |
+| PP-OCRv4 | Document | [`pp-ocrv4_server_rec_doc.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv4_server_rec_doc.onnx) | 90.5 MiB | Optimized for documents |
+| PP-OCRv5 | Mobile | [`pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv5_mobile_rec.onnx) | 15.8 MiB | Mobile variant |
+| PP-OCRv5 | Server | [`pp-ocrv5_server_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv5_server_rec.onnx) | 80.6 MiB | Server variant |
+| SVTRv2 | Server | [`ch_svtrv2_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ch_svtrv2_rec.onnx) | 80.3 MiB | High accuracy variant |
+| RepSVTR | Server | [`ch_repsvtr_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ch_repsvtr_rec.onnx) | 24.2 MiB | Balanced accuracy/speed |
 
 ### Language-Specific Models
 
 | Version  | Language | Model File | Size | Description |
 |----------|----------|------------|------|-------------|
-| PP-OCRv3 | Arabic | [`arabic_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/arabic_pp-ocrv3_mobile_rec.onnx) | 8.6MB | Arabic text recognition |
-| PP-OCRv5 | Arabic | [`arabic_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/arabic_pp-ocrv5_mobile_rec.onnx) | 7.7MB | Arabic text recognition |
-| PP-OCRv3 | Chinese Traditional | [`chinese_cht_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/chinese_cht_pp-ocrv3_mobile_rec.onnx) | 10.6MB | Traditional Chinese text recognition |
-| PP-OCRv3 | Cyrillic | [`cyrillic_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/cyrillic_pp-ocrv3_mobile_rec.onnx) | 8.6MB | Cyrillic script recognition |
-| PP-OCRv5 | Cyrillic | [`cyrillic_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/cyrillic_pp-ocrv5_mobile_rec.onnx) | 7.7MB | Cyrillic script recognition |
-| PP-OCRv3 | Devanagari | [`devanagari_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/devanagari_pp-ocrv3_mobile_rec.onnx) | 8.6MB | Devanagari script recognition |
-| PP-OCRv5 | Devanagari | [`devanagari_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/devanagari_pp-ocrv5_mobile_rec.onnx) | 7.6MB | Devanagari script recognition |
-| PP-OCRv5 | Greek | [`el_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/el_pp-ocrv5_mobile_rec.onnx) | 7.5MB | Greek text recognition |
-| PP-OCRv3 | English | [`en_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/en_pp-ocrv3_mobile_rec.onnx) | 8.6MB | English text recognition |
-| PP-OCRv4 | English | [`en_pp-ocrv4_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/en_pp-ocrv4_mobile_rec.onnx) | 7.4MB | English text recognition |
-| PP-OCRv5 | English | [`en_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/en_pp-ocrv5_mobile_rec.onnx) | 7.5MB | English text recognition |
-| PP-OCRv5 | Eastern Slavic | [`eslav_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/eslav_pp-ocrv5_mobile_rec.onnx) | 7.5MB | Eastern Slavic languages |
-| PP-OCRv3 | Japanese | [`japan_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/japan_pp-ocrv3_mobile_rec.onnx) | 9.6MB | Japanese text recognition |
-| PP-OCRv3 | Georgian | [`ka_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ka_pp-ocrv3_mobile_rec.onnx) | 8.6MB | Georgian text recognition |
-| PP-OCRv3 | Korean | [`korean_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/korean_pp-ocrv3_mobile_rec.onnx) | 9.5MB | Korean text recognition |
-| PP-OCRv5 | Korean | [`korean_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/korean_pp-ocrv5_mobile_rec.onnx) | 12.8MB | Korean text recognition |
-| PP-OCRv3 | Latin | [`latin_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/latin_pp-ocrv3_mobile_rec.onnx) | 8.6MB | Latin script recognition |
-| PP-OCRv5 | Latin | [`latin_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/latin_pp-ocrv5_mobile_rec.onnx) | 7.7MB | Latin script recognition |
-| PP-OCRv3 | Tamil | [`ta_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ta_pp-ocrv3_mobile_rec.onnx) | 8.6MB | Tamil text recognition |
-| PP-OCRv5 | Tamil | [`ta_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ta_pp-ocrv5_mobile_rec.onnx) | 7.5MB | Tamil text recognition |
-| PP-OCRv3 | Telugu | [`te_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/te_pp-ocrv3_mobile_rec.onnx) | 8.6MB | Telugu text recognition |
-| PP-OCRv5 | Telugu | [`te_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/te_pp-ocrv5_mobile_rec.onnx) | 7.6MB | Telugu text recognition |
-| PP-OCRv5 | Thai | [`th_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/th_pp-ocrv5_mobile_rec.onnx) | 7.6MB | Thai text recognition |
+| PP-OCRv3 | Arabic | [`arabic_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/arabic_pp-ocrv3_mobile_rec.onnx) | 8.6 MiB | Arabic text recognition |
+| PP-OCRv5 | Arabic | [`arabic_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/arabic_pp-ocrv5_mobile_rec.onnx) | 7.7 MiB | Arabic text recognition |
+| PP-OCRv3 | Chinese Traditional | [`chinese_cht_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/chinese_cht_pp-ocrv3_mobile_rec.onnx) | 10.6 MiB | Traditional Chinese text recognition |
+| PP-OCRv3 | Cyrillic | [`cyrillic_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/cyrillic_pp-ocrv3_mobile_rec.onnx) | 8.6 MiB | Cyrillic script recognition |
+| PP-OCRv5 | Cyrillic | [`cyrillic_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/cyrillic_pp-ocrv5_mobile_rec.onnx) | 7.7 MiB | Cyrillic script recognition |
+| PP-OCRv3 | Devanagari | [`devanagari_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/devanagari_pp-ocrv3_mobile_rec.onnx) | 8.6 MiB | Devanagari script recognition |
+| PP-OCRv5 | Devanagari | [`devanagari_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/devanagari_pp-ocrv5_mobile_rec.onnx) | 7.6 MiB | Devanagari script recognition |
+| PP-OCRv5 | Greek | [`el_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/el_pp-ocrv5_mobile_rec.onnx) | 7.5 MiB | Greek text recognition |
+| PP-OCRv3 | English | [`en_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/en_pp-ocrv3_mobile_rec.onnx) | 8.6 MiB | English text recognition |
+| PP-OCRv4 | English | [`en_pp-ocrv4_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/en_pp-ocrv4_mobile_rec.onnx) | 7.4 MiB | English text recognition |
+| PP-OCRv5 | English | [`en_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/en_pp-ocrv5_mobile_rec.onnx) | 7.5 MiB | English text recognition |
+| PP-OCRv5 | Eastern Slavic | [`eslav_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/eslav_pp-ocrv5_mobile_rec.onnx) | 7.5 MiB | Eastern Slavic languages |
+| PP-OCRv3 | Japanese | [`japan_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/japan_pp-ocrv3_mobile_rec.onnx) | 9.6 MiB | Japanese text recognition |
+| PP-OCRv3 | Georgian | [`ka_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ka_pp-ocrv3_mobile_rec.onnx) | 8.6 MiB | Georgian text recognition |
+| PP-OCRv3 | Korean | [`korean_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/korean_pp-ocrv3_mobile_rec.onnx) | 9.5 MiB | Korean text recognition |
+| PP-OCRv5 | Korean | [`korean_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/korean_pp-ocrv5_mobile_rec.onnx) | 12.8 MiB | Korean text recognition |
+| PP-OCRv3 | Latin | [`latin_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/latin_pp-ocrv3_mobile_rec.onnx) | 8.6 MiB | Latin script recognition |
+| PP-OCRv5 | Latin | [`latin_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/latin_pp-ocrv5_mobile_rec.onnx) | 7.7 MiB | Latin script recognition |
+| PP-OCRv3 | Tamil | [`ta_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ta_pp-ocrv3_mobile_rec.onnx) | 8.6 MiB | Tamil text recognition |
+| PP-OCRv5 | Tamil | [`ta_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ta_pp-ocrv5_mobile_rec.onnx) | 7.5 MiB | Tamil text recognition |
+| PP-OCRv3 | Telugu | [`te_pp-ocrv3_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/te_pp-ocrv3_mobile_rec.onnx) | 8.6 MiB | Telugu text recognition |
+| PP-OCRv5 | Telugu | [`te_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/te_pp-ocrv5_mobile_rec.onnx) | 7.6 MiB | Telugu text recognition |
+| PP-OCRv5 | Thai | [`th_pp-ocrv5_mobile_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/th_pp-ocrv5_mobile_rec.onnx) | 7.6 MiB | Thai text recognition |
 
 ## PP-OCRv6
 
@@ -67,20 +67,19 @@ PP-OCRv6 is the newest PP-OCR generation. Unlike the older models mirrored on th
 
 ### Detection
 
-| Size | ONNX | BOS |
-|------|------|--------------|
-| tiny | 1.7MB | [`PP-OCRv6_tiny_det_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_det_onnx_infer.tar) |
-| small | 9.4MB | [`PP-OCRv6_small_det_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_det_onnx_infer.tar) |
-| medium | 59.2MB | [`PP-OCRv6_medium_det_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_medium_det_onnx_infer.tar) |
+| Size | Auto-download ONNX | File size | Official bundle |
+|------|--------------------|-----------|-----------------|
+| tiny | `pp-ocrv6_tiny_det.onnx` | 1.7 MiB | [`PP-OCRv6_tiny_det_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_det_onnx_infer.tar) |
+| small | `pp-ocrv6_small_det.onnx` | 9.4 MiB | [`PP-OCRv6_small_det_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_det_onnx_infer.tar) |
+| medium | `pp-ocrv6_medium_det.onnx` | 59.2 MiB | [`PP-OCRv6_medium_det_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_medium_det_onnx_infer.tar) |
 
 ### Recognition
 
-| Size | ONNX | Dict size | BOS |
-|------|------|-----------|--------------|
-| tiny | 4.3MB | 6904 chars | [`PP-OCRv6_tiny_rec_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_rec_onnx_infer.tar) |
-| small | 20.2MB | 18708 chars | [`PP-OCRv6_small_rec_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_rec_onnx_infer.tar) |
-| medium | 73.0MB | 18708 chars | [`PP-OCRv6_medium_rec_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_medium_rec_onnx_infer.tar) |
-
+| Size | Auto-download ONNX | Dictionary | File size | Official bundle |
+|------|--------------------|------------|-----------|-----------------|
+| tiny | `pp-ocrv6_tiny_rec.onnx` | `ppocrv6_tiny_dict.txt` (6904 characters) | 4.3 MiB | [`PP-OCRv6_tiny_rec_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_rec_onnx_infer.tar) |
+| small | `pp-ocrv6_small_rec.onnx` | `ppocrv6_dict.txt` (18708 characters) | 20.2 MiB | [`PP-OCRv6_small_rec_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_rec_onnx_infer.tar) |
+| medium | `pp-ocrv6_medium_rec.onnx` | `ppocrv6_dict.txt` (18708 characters) | 73.0 MiB | [`PP-OCRv6_medium_rec_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_medium_rec_onnx_infer.tar) |
 
 ## Character Dictionaries
 
@@ -92,9 +91,11 @@ Character dictionaries are required for text recognition. Choose the appropriate
 |---------|------|-------------|
 | PP-OCRv4 Document | [`ppocrv4_doc_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ppocrv4_doc_dict.txt) | For PP-OCRv4 document models |
 | PP-OCRv5 | [`ppocrv5_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ppocrv5_dict.txt) | For PP-OCRv5 models |
-| PP-OCR Keys v1 | [`ppocr_keys_v1.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ppocr_keys_v1.txt) | For older PP-OCR models |
+| PP-OCRv6 Tiny | `ppocrv6_tiny_dict.txt` | For PP-OCRv6 tiny recognition |
+| PP-OCRv6 Small/Medium | `ppocrv6_dict.txt` | For PP-OCRv6 small and medium recognition |
+| PP-OCR Keys v1 | [`ppocr_keys_v1.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ppocr_keys_v1.txt) | For PP-OCRv3 general and PP-OCRv4 general models |
 
-### Language-Specific Dictionaries
+### PP-OCRv5 Language-Specific Dictionaries
 
 | Language | File | Model Compatibility |
 |----------|------|---------------------|
@@ -110,16 +111,35 @@ Character dictionaries are required for text recognition. Choose the appropriate
 | Telugu | [`ppocrv5_te_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ppocrv5_te_dict.txt) | PP-OCRv5 Telugu |
 | Thai | [`ppocrv5_th_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ppocrv5_th_dict.txt) | PP-OCRv5 Thai |
 
+### PP-OCRv3 and PP-OCRv4 Language-Specific Dictionaries
+
+The language-specific PP-OCRv3 dictionaries are different from the PP-OCRv5 dictionaries and are not part of the auto-download registry. Download them from PaddleOCR and pass the local path to the recognition builder. The PP-OCRv4 English checkpoint uses the same `en_dict.txt` file as PP-OCRv3 English.
+
+| Language | Official dictionary | Model compatibility |
+|----------|---------------------|---------------------|
+| Arabic | [`arabic_dict.txt`](https://github.com/PaddlePaddle/PaddleOCR/blob/main/ppocr/utils/dict/arabic_dict.txt) | PP-OCRv3 Arabic |
+| Traditional Chinese | [`chinese_cht_dict.txt`](https://github.com/PaddlePaddle/PaddleOCR/blob/main/ppocr/utils/dict/chinese_cht_dict.txt) | PP-OCRv3 Traditional Chinese |
+| Cyrillic | [`cyrillic_dict.txt`](https://github.com/PaddlePaddle/PaddleOCR/blob/main/ppocr/utils/dict/cyrillic_dict.txt) | PP-OCRv3 Cyrillic |
+| Devanagari | [`devanagari_dict.txt`](https://github.com/PaddlePaddle/PaddleOCR/blob/main/ppocr/utils/dict/devanagari_dict.txt) | PP-OCRv3 Devanagari |
+| English | [`en_dict.txt`](https://github.com/PaddlePaddle/PaddleOCR/blob/main/ppocr/utils/dict/en_dict.txt) | PP-OCRv3 and PP-OCRv4 English |
+| Japanese | [`japan_dict.txt`](https://github.com/PaddlePaddle/PaddleOCR/blob/main/ppocr/utils/dict/japan_dict.txt) | PP-OCRv3 Japanese |
+| Georgian | [`ka_dict.txt`](https://github.com/PaddlePaddle/PaddleOCR/blob/main/ppocr/utils/dict/ka_dict.txt) | PP-OCRv3 Georgian |
+| Korean | [`korean_dict.txt`](https://github.com/PaddlePaddle/PaddleOCR/blob/main/ppocr/utils/dict/korean_dict.txt) | PP-OCRv3 Korean |
+| Latin | [`latin_dict.txt`](https://github.com/PaddlePaddle/PaddleOCR/blob/main/ppocr/utils/dict/latin_dict.txt) | PP-OCRv3 Latin script |
+| Tamil | [`ta_dict.txt`](https://github.com/PaddlePaddle/PaddleOCR/blob/main/ppocr/utils/dict/ta_dict.txt) | PP-OCRv3 Tamil |
+| Telugu | [`te_dict.txt`](https://github.com/PaddlePaddle/PaddleOCR/blob/main/ppocr/utils/dict/te_dict.txt) | PP-OCRv3 Telugu |
+
 ## Preprocessing Models
 
 Models for document preprocessing and orientation detection:
 
 | Type | Model File | Size | Description |
 |------|------------|------|-------------|
-| Document Orientation | [`pp-lcnet_x1_0_doc_ori.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-lcnet_x1_0_doc_ori.onnx) | 6.5MB | Detect document rotation |
-| Text Line Orientation (Light) | [`pp-lcnet_x0_25_textline_ori.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-lcnet_x0_25_textline_ori.onnx) | 995KB | Fast text line orientation |
-| Text Line Orientation | [`pp-lcnet_x1_0_textline_ori.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-lcnet_x1_0_textline_ori.onnx) | 6.5MB | Accurate text line orientation |
-| Document Rectification | [`uvdoc.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/uvdoc.onnx) | 30.2MB | Fix perspective distortion |
+| Document Orientation | [`pp-lcnet_x1_0_doc_ori.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-lcnet_x1_0_doc_ori.onnx) | 6.5 MiB | Detect document rotation |
+| Text Line Orientation (Light) | [`pp-lcnet_x0_25_textline_ori.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-lcnet_x0_25_textline_ori.onnx) | 995 KiB | Fast text line orientation |
+| Text Line Orientation (Paddle2ONNX) | `p2o_pp-lcnet_x0_25_textline_ori.onnx` | 977 KiB | Compatibility export available through auto-download |
+| Text Line Orientation | [`pp-lcnet_x1_0_textline_ori.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-lcnet_x1_0_textline_ori.onnx) | 6.5 MiB | Accurate text line orientation |
+| Document Rectification | [`uvdoc.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/uvdoc.onnx) | 30.2 MiB | Fix perspective distortion |
 
 ## Document Structure Models
 
@@ -129,54 +149,64 @@ Models for document structure analysis with `OARStructureBuilder`:
 
 | Model | Model File | Size | Description |
 |-------|------------|------|-------------|
-| PicoDet-L 17cls | [`picodet-l_layout_17cls.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/picodet-l_layout_17cls.onnx) | 22.4MB | 17-class layout detection |
-| PicoDet-L 3cls | [`picodet-l_layout_3cls.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/picodet-l_layout_3cls.onnx) | 22.4MB | 3-class layout detection |
-| PicoDet-S 17cls | [`picodet-s_layout_17cls.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/picodet-s_layout_17cls.onnx) | 4.7MB | Fast 17-class layout |
-| PicoDet-S 3cls | [`picodet-s_layout_3cls.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/picodet-s_layout_3cls.onnx) | 4.7MB | Fast 3-class layout |
-| PicoDet 1x | [`picodet_layout_1x.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/picodet_layout_1x.onnx) | 7.2MB | Legacy layout model |
-| PicoDet 1x Table | [`picodet_layout_1x_table.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/picodet_layout_1x_table.onnx) | 7.2MB | Table-focused layout |
-| PP-DocLayout-S | [`pp-doclayout-s.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-doclayout-s.onnx) | 4.7MB | Small variant |
-| PP-DocLayout-M | [`pp-doclayout-m.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-doclayout-m.onnx) | 22.4MB | Medium variant |
-| PP-DocLayout-L | [`pp-doclayout-l.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-doclayout-l.onnx) | 123.4MB | Large variant |
-| PP-DocLayout_plus-L | [`pp-doclayout_plus-l.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-doclayout_plus-l.onnx) | 123.7MB | Enhanced large variant |
-| PP-DocLayoutV2 | [`pp-doclayoutv2.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-doclayoutv2.onnx) | 204.0MB | V2 with reading order (col, row) |
-| PP-DocLayoutV3 | [`pp-doclayoutv3.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.6.0/pp-doclayoutv3.onnx) | 124.0MB | V3 with single order key |
-| PP-DocBlockLayout | [`pp-docblocklayout.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-docblocklayout.onnx) | 123.4MB | Hierarchical ordering |
-| RT-DETR-H 17cls | [`rt-detr-h_layout_17cls.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/rt-detr-h_layout_17cls.onnx) | 469.2MB | High accuracy 17-class |
-| RT-DETR-H 3cls | [`rt-detr-h_layout_3cls.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/rt-detr-h_layout_3cls.onnx) | 469.2MB | High accuracy 3-class |
+| PicoDet-L 17cls | [`picodet-l_layout_17cls.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/picodet-l_layout_17cls.onnx) | 22.4 MiB | 17-class layout detection |
+| PicoDet-L 3cls | [`picodet-l_layout_3cls.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/picodet-l_layout_3cls.onnx) | 22.4 MiB | 3-class layout detection |
+| PicoDet-S 17cls | [`picodet-s_layout_17cls.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/picodet-s_layout_17cls.onnx) | 4.7 MiB | Fast 17-class layout |
+| PicoDet-S 3cls | [`picodet-s_layout_3cls.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/picodet-s_layout_3cls.onnx) | 4.7 MiB | Fast 3-class layout |
+| PicoDet 1x | [`picodet_layout_1x.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/picodet_layout_1x.onnx) | 7.2 MiB | Legacy layout model |
+| PicoDet 1x Table | [`picodet_layout_1x_table.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/picodet_layout_1x_table.onnx) | 7.2 MiB | Table-focused layout |
+| PP-DocLayout-S | [`pp-doclayout-s.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-doclayout-s.onnx) | 4.7 MiB | Small variant |
+| PP-DocLayout-M | [`pp-doclayout-m.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-doclayout-m.onnx) | 22.4 MiB | Medium variant |
+| PP-DocLayout-L | [`pp-doclayout-l.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-doclayout-l.onnx) | 123.4 MiB | Large variant |
+| PP-DocLayout_plus-L | [`pp-doclayout_plus-l.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-doclayout_plus-l.onnx) | 123.7 MiB | Enhanced large variant |
+| PP-DocLayoutV2 | [`pp-doclayoutv2.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-doclayoutv2.onnx) | 204.1 MiB | V2 with reading order (col, row) |
+| PP-DocLayoutV3 | [`pp-doclayoutv3.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.6.0/pp-doclayoutv3.onnx) | 123.9 MiB | V3 with single order key |
+| PP-DocBlockLayout | [`pp-docblocklayout.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-docblocklayout.onnx) | 123.3 MiB | Hierarchical ordering |
+| RT-DETR-H 17cls | [`rt-detr-h_layout_17cls.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/rt-detr-h_layout_17cls.onnx) | 469.3 MiB | High accuracy 17-class |
+| RT-DETR-H 3cls | [`rt-detr-h_layout_3cls.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/rt-detr-h_layout_3cls.onnx) | 469.2 MiB | High accuracy 3-class |
 
 ### Table Recognition
 
 | Component | Model File | Size | Description |
 |-----------|------------|------|-------------|
-| Table Classification | [`pp-lcnet_x1_0_table_cls.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-lcnet_x1_0_table_cls.onnx) | 6.5MB | Wired vs wireless |
-| Cell Detection (Wired) | [`rt-detr-l_wired_table_cell_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/rt-detr-l_wired_table_cell_det.onnx) | 123.4MB | RT-DETR for wired tables |
-| Cell Detection (Wireless) | [`rt-detr-l_wireless_table_cell_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/rt-detr-l_wireless_table_cell_det.onnx) | 123.4MB | RT-DETR for wireless tables |
-| Structure (SLANet) | [`slanet.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/slanet.onnx) | 7.4MB | Basic structure recognition |
-| Structure (SLANet+) | [`slanet_plus.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/slanet_plus.onnx) | 7.4MB | Wireless table structure |
-| Structure (SLANeXt Wired) | [`slanext_wired.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/slanext_wired.onnx) | 350.7MB | High accuracy wired structure |
-| Structure (SLANeXt Wireless) | [`slanext_wireless.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/slanext_wireless.onnx) | 350.7MB | High accuracy wireless structure |
+| Table Classification | [`pp-lcnet_x1_0_table_cls.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-lcnet_x1_0_table_cls.onnx) | 6.5 MiB | Wired vs wireless |
+| Cell Detection (Wired) | [`rt-detr-l_wired_table_cell_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/rt-detr-l_wired_table_cell_det.onnx) | 123.3 MiB | RT-DETR for wired tables |
+| Cell Detection (Wireless) | [`rt-detr-l_wireless_table_cell_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/rt-detr-l_wireless_table_cell_det.onnx) | 123.3 MiB | RT-DETR for wireless tables |
+| Structure (SLANet) | [`slanet.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/slanet.onnx) | 7.4 MiB | Basic structure recognition |
+| Structure (SLANet+) | [`slanet_plus.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/slanet_plus.onnx) | 7.4 MiB | Wireless table structure |
+| Structure (SLANet+ V2) | `slanet_plus_v2.onnx` | 7.4 MiB | Newer compatibility export available through auto-download |
+| Structure (SLANeXt Wired) | [`slanext_wired.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/slanext_wired.onnx) | 350.7 MiB | High accuracy wired structure |
+| Structure (SLANeXt Wireless) | [`slanext_wireless.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/slanext_wireless.onnx) | 350.7 MiB | High accuracy wireless structure |
 | Structure Dictionary | [`table_structure_dict_ch.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/table_structure_dict_ch.txt) | - | Required for structure recognition |
 
 ### Formula Recognition
 
 | Model | Model File | Size | Description |
 |-------|------------|------|-------------|
-| PP-FormulaNet-S | [`pp-formulanet-s.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-formulanet-s.onnx) | 221.1MB | Small variant |
-| PP-FormulaNet-L | [`pp-formulanet-l.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-formulanet-l.onnx) | 696.7MB | Large variant |
-| PP-FormulaNet_plus-S | [`pp-formulanet_plus-s.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-formulanet_plus-s.onnx) | 221.1MB | Enhanced small variant |
-| PP-FormulaNet_plus-M | [`pp-formulanet_plus-m.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-formulanet_plus-m.onnx) | 565.0MB | Enhanced medium variant |
-| PP-FormulaNet_plus-L | [`pp-formulanet_plus-l.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-formulanet_plus-l.onnx) | 699.7MB | Enhanced large variant |
-| UniMERNet | [`unimernet.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/unimernet.onnx) | 1.7GB | Unified Math Expression Recognition |
-| UniMERNet Tokenizer | [`unimernet_tokenizer.json`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/unimernet_tokenizer.json) | 2.0MB | Required for UniMERNet |
-| LaTeX OCR | [`latex_ocr_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/latex_ocr_rec.onnx) | 97.8MB | LaTeX formula recognition |
+| PP-FormulaNet-S | [`pp-formulanet-s.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-formulanet-s.onnx) | 221.1 MiB | Small variant |
+| PP-FormulaNet-L | [`pp-formulanet-l.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-formulanet-l.onnx) | 696.5 MiB | Large variant |
+| PP-FormulaNet_plus-S | [`pp-formulanet_plus-s.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-formulanet_plus-s.onnx) | 221.1 MiB | Enhanced small variant |
+| PP-FormulaNet_plus-M | [`pp-formulanet_plus-m.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-formulanet_plus-m.onnx) | 564.9 MiB | Enhanced medium variant |
+| PP-FormulaNet_plus-L | [`pp-formulanet_plus-l.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-formulanet_plus-l.onnx) | 699.5 MiB | Enhanced large variant |
+| PP-FormulaNet Tokenizer | `pp-formulanet-tokenizer.json` | 2.0 MiB | Required for PP-FormulaNet variants |
+| UniMERNet | [`unimernet.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/unimernet.onnx) | 1.7 GiB | Unified Math Expression Recognition |
+| UniMERNet Tokenizer | [`unimernet_tokenizer.json`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/unimernet_tokenizer.json) | 2.0 MiB | Required for UniMERNet |
+
+The current formula predictor supports PP-FormulaNet and UniMERNet. `latex_ocr_rec.onnx` remains registered as a legacy download artifact, but it is not wired into `FormulaRecognitionPredictor` and its tokenizer is not mirrored by this project.
+
+### Auxiliary and Legacy Registered Assets
+
+| Asset | Size | Status |
+|-------|------|--------|
+| [`latex_ocr_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/latex_ocr_rec.onnx) | 97.8 MiB | Legacy checkpoint, not supported by the current formula predictor |
+| `unimernet_tokenizer_config.json` | 4.4 KiB | Optional tokenizer metadata retained for compatibility |
 
 ### Seal Text Detection
 
 | Model | Model File | Size | Description |
 |-------|------------|------|-------------|
-| Seal Detection (Mobile) | [`pp-ocrv4_mobile_seal_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv4_mobile_seal_det.onnx) | 4.6MB | Fast seal detection |
-| Seal Detection (Server) | [`pp-ocrv4_server_seal_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv4_server_seal_det.onnx) | 108.2MB | Accurate seal detection |
+| Seal Detection (Mobile) | [`pp-ocrv4_mobile_seal_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv4_mobile_seal_det.onnx) | 4.6 MiB | Fast seal detection |
+| Seal Detection (Server) | [`pp-ocrv4_server_seal_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv4_server_seal_det.onnx) | 108.2 MiB | Accurate seal detection |
 
 ## Auto-download (via the `auto-download` feature)
 

@@ -1,19 +1,26 @@
-//! MinerU2.5 Two-Step Document Extraction Example (Candle-based)
+//! MinerU2.5 / MinerU2.5-Pro Two-Step Document Extraction Example (Candle-based)
 //!
-//! This example demonstrates how to run `opendatalab/MinerU2.5-2509-1.2B` in Rust
-//! using the two-step extraction pipeline: layout detection followed by content extraction.
+//! This example runs `opendatalab/MinerU2.5-2509-1.2B` or
+//! `opendatalab/MinerU2.5-Pro-2605-1.2B` in Rust using the same two-step
+//! extraction pipeline: layout detection followed by content extraction.
 //!
 //! # Usage
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --example mineru -- [OPTIONS] <IMAGES>...
+//! cargo run -p oar-ocr-vl --features download-binaries --example mineru -- [OPTIONS] <IMAGES>...
 //! ```
 //!
 //! # Example
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --example mineru -- \
+//! cargo run -p oar-ocr-vl --features cuda,download-binaries --example mineru -- \
 //!     --model-dir models/MinerU2.5-2509-1.2B \
+//!     --device cuda:0 \
+//!     document.jpg
+//!
+//! # MinerU2.5-Pro uses the same loader and pipeline
+//! cargo run -p oar-ocr-vl --features cuda,download-binaries --example mineru -- \
+//!     --model-dir models/MinerU2.5-Pro-2605-1.2B \
 //!     --device cuda:0 \
 //!     document.jpg
 //! ```
@@ -38,9 +45,11 @@ use utils::token_fingerprint;
 
 #[derive(Parser)]
 #[command(name = "mineru")]
-#[command(about = "MinerU2.5 Two-Step Document Extraction - layout detection + content extraction")]
+#[command(
+    about = "MinerU2.5 / MinerU2.5-Pro two-step extraction - layout detection + content extraction"
+)]
 struct Args {
-    /// Path to the MinerU2.5 model directory
+    /// Path to a MinerU2.5 or MinerU2.5-Pro model directory
     #[arg(short, long)]
     model_dir: PathBuf,
 
@@ -97,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = parse_device(&args.device)?;
     info!("Using device: {:?}", device);
 
-    info!("Loading MinerU2.5 model from: {}", args.model_dir.display());
+    info!("Loading MinerU model from: {}", args.model_dir.display());
     let load_start = Instant::now();
     let model = MinerU::from_dir(&args.model_dir, device)?;
     info!(

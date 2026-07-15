@@ -6,14 +6,18 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 
 ## Supported Models
 
-| Model | Parameters | Description |
-|-------|------------|-------------|
-| [PaddleOCR-VL](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) | 0.9B | SOTA document parsing VLM supporting 109 languages, text, tables, formulas, and 11 chart types |
-| [PaddleOCR-VL-1.5](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5) | 0.9B | Next-gen PaddleOCR-VL with 94.5% on OmniDocBench v1.5, adds text spotting and seal recognition |
-| [PaddleOCR-VL-1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) | 1.0B | Region-aware refinement on top of PaddleOCR-VL-1.5; 96.33% on OmniDocBench v1.6 (SOTA), drop-in compatible with the 1.5 loader |
-| [HunyuanOCR 1.5](https://huggingface.co/tencent/HunyuanOCR) | 1.0B | End-to-end OCR VLM for multilingual document parsing, text spotting, and information extraction (archived 1.0 weights also supported) |
-| [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) | 0.9B | #1 on OmniDocBench v1.5 (94.62), optimized for real-world scenarios with MTP loss and RL training |
-| [MinerU2.5](https://huggingface.co/opendatalab/MinerU2.5-2509-1.2B) | 1.2B | Decoupled document parsing VLM with strong text, formula, and table recognition |
+| Model | Parameters | Inference path |
+|---|---:|---|
+| [PaddleOCR-VL](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) | 0.9B | External-layout page parsing, text, table, formula, and chart recognition |
+| [PaddleOCR-VL-1.5](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5) | 0.9B | PaddleOCR-VL tasks plus text spotting and seal recognition |
+| [PaddleOCR-VL-1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) | 0.9B | Region-aware refinement, drop-in compatible with the 1.5 loader |
+| [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) | 0.9B | External-layout page parsing, text, table, and formula recognition |
+| [HunyuanOCR 1.5 / 1.0](https://huggingface.co/tencent/HunyuanOCR) | 1B | Model-native prompt-driven parsing with optional DFlash decoding for 1.5 |
+| [MinerU2.5-2509](https://huggingface.co/opendatalab/MinerU2.5-2509-1.2B) | 1.2B | Model-native two-step layout detection and content extraction |
+| [MinerU2.5-Pro-2605](https://huggingface.co/opendatalab/MinerU2.5-Pro-2605-1.2B) | 1.2B | Newer compatible checkpoint using the MinerU2.5 two-step pipeline |
+| [MinerU-Diffusion-V1-0320](https://huggingface.co/opendatalab/MinerU-Diffusion-V1-0320-2.5B) | 2.5B | Block-diffusion OCR with two-step structured extraction or single-pass recognition |
+
+See [`examples`](examples) for runnable examples.
 
 ## Document Parsing Pipeline
 
@@ -22,33 +26,37 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 1. **Layout detection** (ONNX models like PP-DocLayoutV3) to identify document regions
 2. **VL-based recognition** to extract content from each region
 
-Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, and GLM-OCR. HunyuanOCR should be used with its model-native full-page prompts, and MinerU2.5 should use its model-native two-step extraction example.
+Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, and GLM-OCR. HunyuanOCR should be used with its model-native full-page prompts. MinerU2.5, MinerU2.5-Pro, and MinerU-Diffusion should use their model-native two-step extraction examples.
 
 ## Installation
 
-Add `oar-ocr-vl` to your project:
-
-```bash
-cargo add oar-ocr-vl
-```
-
-If you use ONNX-based helpers from `oar-ocr-core` and want ORT binaries to be fetched automatically during build, enable `download-binaries` explicitly:
+Add `oar-ocr-vl` with bundled ONNX Runtime binaries. The snippets below also import image-loading and layout helpers from `oar-ocr-core`, so declare it as a direct dependency:
 
 ```bash
 cargo add oar-ocr-vl --features download-binaries
+cargo add oar-ocr-core --no-default-features
+```
+
+The VL crate has no default features and depends on `oar-ocr-core`, which links ONNX Runtime. You may omit `download-binaries` only when a system ONNX Runtime installation is available through `ORT_LIB_PATH` or `ORT_LIB_LOCATION`.
+
+```bash
+cargo add oar-ocr-vl
+cargo add oar-ocr-core --no-default-features
 ```
 
 To enable GPU acceleration (CUDA), add the feature flag:
 
 ```bash
-cargo add oar-ocr-vl --features cuda
+cargo add oar-ocr-vl --features cuda,download-binaries
 ```
 
-HunyuanOCR's custom CUDA kernels compile PTX for the oldest GPU detected by
-`nvidia-smi` at build time. For headless, container, or cross-machine builds,
-set the target explicitly, for example
-`CUDA_COMPUTE_CAP=89 cargo build --features cuda`. The DFlash kernels require
-compute capability 8.0 or newer.
+On macOS, enable Metal instead:
+
+```bash
+cargo add oar-ocr-vl --features metal,download-binaries
+```
+
+The crate's custom CUDA kernels compile to PTX for the oldest GPU detected by `nvidia-smi` at build time. For headless, container, or cross-machine builds, set the target explicitly, for example `CUDA_COMPUTE_CAP=89 cargo build -p oar-ocr-vl --features cuda,download-binaries`. These kernels require compute capability 8.0 or newer.
 
 ## Usage
 
@@ -59,9 +67,10 @@ Use PaddleOCR-VL to recognize a specific aspect of an image (e.g., just the tabl
 ```rust
 use oar_ocr_core::utils::load_image;
 use oar_ocr_vl::{PaddleOcrVl, PaddleOcrVlTask};
+use oar_ocr_vl::utils::parse_device;
 
 let image = load_image("document.png")?;
-let device = candle_core::Device::Cpu; // Or Device::new_cuda(0)?
+let device = parse_device("cpu")?; // Or "cuda", "cuda:0", or "metal"
 
 // Initialize model
 let model = PaddleOcrVl::from_dir("PaddleOCR-VL", device)?;
@@ -80,9 +89,10 @@ PaddleOCR-VL-1.5 and PaddleOCR-VL-1.6 are loaded the same way, with additional t
 ```rust
 use oar_ocr_core::utils::load_image;
 use oar_ocr_vl::{PaddleOcrVl, PaddleOcrVlTask};
+use oar_ocr_vl::utils::parse_device;
 
 let image = load_image("seal.png")?;
-let device = candle_core::Device::Cpu;
+let device = parse_device("cpu")?;
 let model = PaddleOcrVl::from_dir("PaddleOCR-VL-1.5", device)?;
 let result = model
     .generate(&[image], &[PaddleOcrVlTask::Seal], 256)
@@ -100,8 +110,9 @@ Parse an entire page into Markdown with a layout predictor. This path is intende
 use oar_ocr_core::utils::load_image;
 use oar_ocr_core::predictors::LayoutDetectionPredictor;
 use oar_ocr_vl::{DocParser, PaddleOcrVl};
+use oar_ocr_vl::utils::parse_device;
 
-let device = candle_core::Device::Cpu;
+let device = parse_device("cpu")?;
 
 // 1. Setup Layout Detector
 let layout_predictor = LayoutDetectionPredictor::builder()
@@ -120,14 +131,15 @@ let result = parser.parse(&layout_predictor, image)?;
 println!("{}", result.to_markdown());
 ```
 
-### MinerU2.5
+### MinerU2.5 / MinerU2.5-Pro
 
 ```rust
 use oar_ocr_core::utils::load_image;
 use oar_ocr_vl::MinerU;
+use oar_ocr_vl::utils::parse_device;
 
 let image = load_image("document.png")?;
-let device = candle_core::Device::Cpu;
+let device = parse_device("cpu")?;
 let model = MinerU::from_dir("models/MinerU2.5-2509-1.2B", device)?;
 // For full documents, prefer the `mineru` example, which follows the
 // model-native two-step pipeline: layout detection, then crop recognition.
@@ -148,7 +160,7 @@ The `oar-ocr-vl` crate includes several examples demonstrating its capabilities.
 This example combines layout detection (ONNX) with a VLM for recognition. It supports PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, and GLM-OCR.
 
 ```bash
-cargo run --release --features cuda --example doc_parser -- \
+cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example doc_parser -- \
     --model-name paddleocr-vl-1.5 \
     --model-dir models/PaddleOCR-VL-1.5 \
     --layout-model models/pp-doclayoutv3.onnx \
@@ -156,7 +168,7 @@ cargo run --release --features cuda --example doc_parser -- \
     document.jpg
 ```
 
-HunyuanOCR and MinerU2.5 are intentionally not exposed by this example because their reference-quality paths are prompt-driven full-page parsing and model-native two-step extraction, respectively.
+HunyuanOCR and the MinerU models are intentionally not exposed by this example because their reference-quality paths are prompt-driven full-page parsing and model-native two-step extraction, respectively.
 
 ### PaddleOCR-VL (Direct Inference)
 
@@ -164,29 +176,29 @@ Run the PaddleOCR-VL model directly on an image with a specific task prompt.
 
 ```bash
 # OCR task
-cargo run --release --features cuda --example paddleocr_vl -- \
+cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
     --model-dir models/PaddleOCR-VL \
     --device cuda \
     --task ocr \
     document.jpg
 
 # Table task
-cargo run --release --features cuda --example paddleocr_vl -- \
+cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
     --model-dir models/PaddleOCR-VL \
     --device cuda \
     --task table \
     table.jpg
 
-# Text spotting (PaddleOCR-VL-1.5)
-cargo run --release --features cuda --example paddleocr_vl -- \
+# Text spotting (PaddleOCR-VL-1.5 or 1.6)
+cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
     --model-dir models/PaddleOCR-VL-1.5 \
     --device cuda \
     --task spotting \
     spotting.jpg
 
-# Seal recognition (PaddleOCR-VL-1.5)
-cargo run --release --features cuda --example paddleocr_vl -- \
-    --model-dir models/PaddleOCR-VL-1.5 \
+# Seal recognition (PaddleOCR-VL-1.5 or 1.6)
+cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
+    --model-dir models/PaddleOCR-VL-1.6 \
     --device cuda \
     --task seal \
     seal.jpg
@@ -195,7 +207,7 @@ cargo run --release --features cuda --example paddleocr_vl -- \
 ### HunyuanOCR 1.5 (Direct Inference)
 
 ```bash
-cargo run --release --features cuda --example hunyuanocr -- \
+cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example hunyuanocr -- \
     --model-dir models/HunyuanOCR \
     --dflash-dir models/HunyuanOCR/dflash \
     --device cuda \
@@ -203,25 +215,45 @@ cargo run --release --features cuda --example hunyuanocr -- \
     document.jpg
 ```
 
-The model repository root contains HunyuanOCR 1.5. The loader detects it automatically; use `--model-dir models/HunyuanOCR/v1.0` for the archived 1.0 checkpoint. `--dflash-dir` enables the official 15-token parallel draft path for 1.5; omit it for ordinary autoregressive decoding. Library callers can use `HunyuanOcr::from_dirs(target_dir, dflash_dir, device)` or `HunyuanOcr::from_dir_with_dflash(model_dir, device)` when the draft is stored in the official `dflash/` subdirectory.
+The model repository root contains HunyuanOCR 1.5. The loader detects it automatically. Use `--model-dir models/HunyuanOCR/v1.0` for the archived 1.0 checkpoint. `--dflash-dir` enables the official 15-token parallel draft path for 1.5. Omit it for ordinary autoregressive decoding. Library callers can use `HunyuanOcr::from_dirs(target_dir, dflash_dir, device)` or `HunyuanOcr::from_dir_with_dflash(model_dir, device)` when the draft is stored in the official `dflash/` subdirectory.
 
 ### GLM-OCR (Direct Inference)
 
 ```bash
-cargo run --release --features cuda --example glmocr -- \
+cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example glmocr -- \
     --model-dir models/GLM-OCR \
     --device cuda \
     --prompt "Text Recognition:" \
     document.jpg
 ```
 
-### MinerU2.5 (Direct Inference)
+### MinerU2.5 / MinerU2.5-Pro (Direct Inference)
 
 Model-native two-step document extraction (layout prompt + content extraction):
 
 ```bash
-cargo run --release --features cuda --example mineru -- \
+cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example mineru -- \
     --model-dir models/MinerU2.5-2509-1.2B \
+    --device cuda:0 \
+    document.jpg
+```
+
+`MinerU2.5-Pro-2605` uses the same loader and example:
+
+```bash
+cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example mineru -- \
+    --model-dir models/MinerU2.5-Pro-2605-1.2B \
+    --device cuda:0 \
+    document.jpg
+```
+
+### MinerU-Diffusion-V1 (Direct Inference)
+
+The default mode performs two-step structured extraction with block-diffusion decoding. Add `--single-pass` for flat full-page text recognition.
+
+```bash
+cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example mineru_diffusion -- \
+    --model-dir models/MinerU-Diffusion-V1-0320-2.5B \
     --device cuda:0 \
     document.jpg
 ```
