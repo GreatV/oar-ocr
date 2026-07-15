@@ -13,6 +13,8 @@
 use super::config::MinerUDiffusionConfig;
 use super::projector::VisionAbstractor;
 use super::text::{SdarKvCache, SdarModel};
+#[cfg(feature = "cuda")]
+use crate::cuda_kernels::SampleWithConfidence;
 use crate::mineru::MinerUImageProcessorConfig;
 use crate::mineru::processing::preprocess_images;
 use crate::mineru::vision::MinerUVisionModel;
@@ -490,6 +492,16 @@ fn sample_tokens_and_conf(
     top_p: f32,
     rng: &mut StdRng,
 ) -> Result<(Vec<u32>, Vec<f32>), OCRError> {
+    #[cfg(feature = "cuda")]
+    if matches!(logits.device(), Device::Cuda(_))
+        && matches!(logits.dtype(), DType::BF16 | DType::F32)
+        && top_k == 0
+        && top_p >= 1.0
+        && std::env::var_os("OAR_MINERU_DIFFUSION_DISABLE_GPU_SAMPLING").is_none()
+    {
+        return sample_tokens_and_conf_cuda(logits, temperature, rng);
+    }
+
     // logits: (1, block, vocab) -> rows of (vocab,)
     let logits = logits
         .squeeze(0)
@@ -533,6 +545,52 @@ fn sample_tokens_and_conf(
         };
         tokens.push(idx as u32);
         confs.push(probs[idx]);
+    }
+    Ok((tokens, confs))
+}
+
+/// Fast path for the reference/default sampling configuration. The model's
+/// logits remain on the GPU; only two F32 values per block position (token id
+/// and selected probability) cross to the host. The CPU fallback above stays
+/// available for top-k/top-p filters and as a numerical/debugging oracle via
+/// `OAR_MINERU_DIFFUSION_DISABLE_GPU_SAMPLING=1`.
+#[cfg(feature = "cuda")]
+fn sample_tokens_and_conf_cuda(
+    logits: &Tensor,
+    temperature: f32,
+    rng: &mut StdRng,
+) -> Result<(Vec<u32>, Vec<f32>), OCRError> {
+    let logits = logits
+        .squeeze(0)
+        .and_then(|t| t.contiguous())
+        .map_err(|e| proc_err("CUDA sampling logits", e))?;
+    let rows = logits
+        .dim(0)
+        .map_err(|e| proc_err("CUDA sampling rows", e))?;
+    let greedy = temperature <= 0.0;
+    let uniforms = if greedy {
+        vec![0.0f32; rows]
+    } else {
+        (0..rows).map(|_| rng.random::<f32>()).collect()
+    };
+    let uniforms = Tensor::from_vec(uniforms, rows, logits.device())
+        .map_err(|e| proc_err("CUDA sampling uniforms", e))?;
+    let sampled = logits
+        .apply_op2_no_bwd(
+            &uniforms,
+            &SampleWithConfidence {
+                temperature,
+                greedy,
+            },
+        )
+        .and_then(|t| t.to_vec2::<f32>())
+        .map_err(|e| proc_err("CUDA sample-with-confidence", e))?;
+
+    let mut tokens = Vec::with_capacity(rows);
+    let mut confs = Vec::with_capacity(rows);
+    for row in sampled {
+        tokens.push(row[0] as u32);
+        confs.push(row[1]);
     }
     Ok((tokens, confs))
 }

@@ -449,32 +449,51 @@ impl PaddleOcrVl {
             .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "stack pos", e))?;
 
         // 6. Create attention mask
-        let causal = create_causal_mask(max_seq_len, max_seq_len, self.dtype, &self.device)
-            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create causal", e))?;
-        let padding = create_left_padding_mask(&seq_lens, max_seq_len, self.dtype, &self.device)
-            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create padding", e))?;
-        let mask = combine_masks(&causal, &padding)
-            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "combine masks", e))?;
+        let mask = if batch_size == 1 {
+            None
+        } else {
+            let causal = create_causal_mask(max_seq_len, max_seq_len, self.dtype, &self.device)
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create causal", e))?;
+            let padding =
+                create_left_padding_mask(&seq_lens, max_seq_len, self.dtype, &self.device)
+                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create padding", e))?;
+            Some(
+                combine_masks(&causal, &padding)
+                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "combine masks", e))?,
+            )
+        };
 
         // 7. Prefill
         self.llm.clear_kv_cache();
+        if batch_size == 1 {
+            self.llm
+                .prepare_ar_cuda_graph(max_seq_len, max_new_tokens, &self.lm_head)?;
+        } else {
+            // A batch-shaped prefill reallocates the per-layer KV storage. Drop
+            // a batch-1 graph before that happens because it owns raw pointers
+            // into the previous fixed storage.
+            self.llm.invalidate_ar_cuda_graph();
+        }
         let hidden = self
             .llm
-            .forward(&inputs_embeds, &position_ids, Some(&mask))?;
+            .forward(&inputs_embeds, &position_ids, mask.as_ref())?;
 
         // 8. Get initial logits
+        let last_hidden = hidden
+            .i((.., max_seq_len - 1, ..))
+            .and_then(|hidden| hidden.contiguous())
+            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "get last hidden", e))?;
+        let batched_logits = self
+            .lm_head
+            .forward(&last_hidden)
+            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "lm_head", e))?;
         let mut logits_list: Vec<Tensor> = Vec::with_capacity(batch_size);
         for i in 0..batch_size {
-            let last = hidden
-                .i((i, max_seq_len - 1, ..))
-                .and_then(|t| t.unsqueeze(0))
-                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "get last hidden", e))?;
-            let logits = self
-                .lm_head
-                .forward(&last)
-                .and_then(|t| t.squeeze(0))
-                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "lm_head", e))?;
-            logits_list.push(logits);
+            logits_list.push(
+                batched_logits
+                    .i(i)
+                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "select logits", e))?,
+            );
         }
 
         // 9. Autoregressive decode
@@ -492,11 +511,10 @@ impl PaddleOcrVl {
         let pad_lens: Vec<usize> = seq_lens.iter().map(|&len| max_seq_len - len).collect();
         let mut kv_len = max_seq_len;
 
-        for _ in 0..max_new_tokens {
+        for step in 0..max_new_tokens {
             if finished.iter().all(|&f| f) {
                 break;
             }
-
             let mut next_tokens: Vec<u32> = Vec::with_capacity(batch_size);
             for (i, logits) in logits_list.iter().enumerate() {
                 if finished[i] {
@@ -519,6 +537,9 @@ impl PaddleOcrVl {
             if finished.iter().all(|&f| f) {
                 break;
             }
+            if step + 1 == max_new_tokens {
+                break;
+            }
 
             // Batch forward
             let tokens = Tensor::new(next_tokens, &self.device)
@@ -533,23 +554,36 @@ impl PaddleOcrVl {
 
             // Mask out left-padding positions in the KV cache for this step.
             kv_len += 1;
-            let gen_mask = create_generation_mask(&pad_lens, kv_len, self.dtype, &self.device)
-                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create gen mask", e))?;
-
-            let hs = self.llm.forward(&embeds, &pos, Some(&gen_mask))?;
+            let gen_mask = if batch_size == 1 {
+                None
+            } else {
+                Some(
+                    create_generation_mask(&pad_lens, kv_len, self.dtype, &self.device).map_err(
+                        |e| candle_to_ocr_inference("PaddleOCR-VL", "create gen mask", e),
+                    )?,
+                )
+            };
 
             logits_list.clear();
-            for i in 0..batch_size {
-                let h = hs
-                    .i((i, 0, ..))
-                    .and_then(|t| t.unsqueeze(0))
-                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "get hs", e))?;
-                let logits = self
+            if batch_size == 1 {
+                logits_list.push(self.llm.forward_decode_logits(
+                    &embeds,
+                    &pos,
+                    gen_mask.as_ref(),
+                    &self.lm_head,
+                )?);
+            } else {
+                let hs = self.llm.forward(&embeds, &pos, gen_mask.as_ref())?;
+                let batched_logits = self
                     .lm_head
-                    .forward(&h)
-                    .and_then(|t| t.squeeze(0))
+                    .forward(&hs)
+                    .and_then(|t| t.squeeze(1))
                     .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "lm_head step", e))?;
-                logits_list.push(logits);
+                for i in 0..batch_size {
+                    logits_list.push(batched_logits.i(i).map_err(|e| {
+                        candle_to_ocr_inference("PaddleOCR-VL", "select step logits", e)
+                    })?);
+                }
             }
 
             for (i, p) in positions.iter_mut().enumerate() {

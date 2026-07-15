@@ -21,6 +21,18 @@
 use crate::utils::candle_to_ocr_processing;
 use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use oar_ocr_core::core::errors::OCRError;
+use std::sync::OnceLock;
+
+fn grouped_query_attention_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| std::env::var_os("OAR_VL_DISABLE_GQA").is_some())
+}
+
+#[cfg(feature = "cuda")]
+fn flash_attention_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| std::env::var_os("OAR_VL_DISABLE_FLASH_ATTN").is_some())
+}
 
 /// Helper function to handle Metal device computation.
 ///
@@ -116,6 +128,11 @@ pub fn scaled_dot_product_attention_gqa(
     if num_kv_groups == 1 {
         return scaled_dot_product_attention(q, k, v, mask, scale, is_causal);
     }
+    if grouped_query_attention_disabled() {
+        let k = repeat_kv(k, num_kv_groups)?;
+        let v = repeat_kv(v, num_kv_groups)?;
+        return scaled_dot_product_attention(q, &k, &v, mask, scale, is_causal);
+    }
 
     let (batch, num_heads, query_len, head_dim) = q.dims4()?;
     let (k_batch, num_kv_heads, kv_len, k_head_dim) = k.dims4()?;
@@ -181,7 +198,8 @@ pub fn flash_attention(
     causal: bool,
 ) -> Result<Option<Tensor>> {
     #[cfg(feature = "cuda")]
-    if q.device().is_cuda()
+    if !flash_attention_disabled()
+        && q.device().is_cuda()
         && flash_attention_dtype_supported(q.dtype())
         && k.dtype() == q.dtype()
         && v.dtype() == q.dtype()

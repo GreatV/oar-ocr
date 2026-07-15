@@ -7,7 +7,7 @@
 mod config;
 mod dflash;
 #[cfg(feature = "cuda")]
-mod dynamic_kv;
+pub(crate) mod dynamic_kv;
 mod llm;
 mod model;
 mod processing;

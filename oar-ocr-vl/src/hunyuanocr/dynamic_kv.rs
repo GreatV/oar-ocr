@@ -1,12 +1,13 @@
+use crate::cuda_kernels::CUDA_KERNEL_MODULE;
 use candle_core::backend::BackendStorage;
 use candle_core::{
-    CpuStorage, CustomOp1, CustomOp2, CustomOp3, InplaceOp2, InplaceOp3, Layout, Result, Shape,
+    CpuStorage, CustomOp2, CustomOp3, InplaceOp2, InplaceOp3, Layout, Result, Shape,
 };
 
-const PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/hunyuan_dynamic_kv.ptx"));
+const PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/oar_vl_kernels.ptx"));
 const PARTITIONS_PER_ROW: usize = 8;
 
-pub(super) struct DynamicKvAppend {
+pub(crate) struct DynamicKvAppend {
     pub query_len: usize,
     pub cache_len: usize,
 }
@@ -56,10 +57,6 @@ pub(super) struct RepetitionPenaltyF32 {
     pub penalty: f32,
 }
 
-pub(super) struct ArgmaxFirstF32;
-
-pub(super) struct ArgmaxFirstBf16;
-
 pub(super) struct MarkRepetitionHistoryU8;
 
 pub(super) struct DFlashRepetitionArgmaxBf16 {
@@ -68,134 +65,6 @@ pub(super) struct DFlashRepetitionArgmaxBf16 {
 
 pub(super) struct RepetitionArgmaxBf16 {
     pub penalty: f32,
-}
-
-impl CustomOp1 for ArgmaxFirstF32 {
-    fn name(&self) -> &'static str {
-        "hunyuan-argmax-first-f32"
-    }
-
-    fn cpu_fwd(&self, _storage: &CpuStorage, _layout: &Layout) -> Result<(CpuStorage, Shape)> {
-        candle_core::bail!("deterministic argmax is CUDA-only")
-    }
-
-    fn cuda_fwd(
-        &self,
-        storage: &candle_core::CudaStorage,
-        layout: &Layout,
-    ) -> Result<(candle_core::CudaStorage, Shape)> {
-        use candle_core::cuda_backend::WrapErr;
-        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
-
-        if !layout.is_contiguous() || storage.dtype() != candle_core::DType::F32 {
-            candle_core::bail!("deterministic argmax requires contiguous F32 logits")
-        }
-        let (rows, vocab_size) = layout.shape().dims2()?;
-        if vocab_size == 0 {
-            candle_core::bail!("deterministic argmax does not support an empty vocabulary")
-        }
-        let device = storage.device().clone();
-        let logits = storage.as_cuda_slice::<f32>()?;
-        let logits = logits.slice(layout.start_offset()..);
-        let output = unsafe { device.alloc::<u32>(rows) }?;
-        let function =
-            device.get_or_load_custom_func("argmax_first_f32", "hunyuan_dynamic_kv", PTX)?;
-        let mut builder = function.builder();
-        builder.arg(&logits);
-        builder.arg(&output);
-        candle_core::builder_arg!(builder, rows as u32, vocab_size as u32);
-        unsafe {
-            builder.launch(LaunchConfig {
-                grid_dim: (rows as u32, 1, 1),
-                block_dim: (256, 1, 1),
-                shared_mem_bytes: 0,
-            })
-        }
-        .w()?;
-        Ok((
-            candle_core::CudaStorage::wrap_cuda_slice(output, device),
-            Shape::from_dims(&[rows]),
-        ))
-    }
-}
-
-impl CustomOp1 for ArgmaxFirstBf16 {
-    fn name(&self) -> &'static str {
-        "hunyuan-argmax-first-bf16"
-    }
-
-    fn cpu_fwd(&self, _storage: &CpuStorage, _layout: &Layout) -> Result<(CpuStorage, Shape)> {
-        candle_core::bail!("deterministic BF16 argmax is CUDA-only")
-    }
-
-    fn cuda_fwd(
-        &self,
-        storage: &candle_core::CudaStorage,
-        layout: &Layout,
-    ) -> Result<(candle_core::CudaStorage, Shape)> {
-        use candle_core::cuda_backend::WrapErr;
-        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
-
-        if !layout.is_contiguous() || storage.dtype() != candle_core::DType::BF16 {
-            candle_core::bail!("deterministic BF16 argmax requires contiguous logits")
-        }
-        let (rows, vocab_size) = layout.shape().dims2()?;
-        if vocab_size == 0 {
-            candle_core::bail!("deterministic BF16 argmax does not support an empty vocabulary")
-        }
-        let device = storage.device().clone();
-        let logits = storage.as_cuda_slice::<half::bf16>()?;
-        let logits = logits.slice(layout.start_offset()..);
-        let partial_count = rows * PARTITIONS_PER_ROW;
-        let partial_values = unsafe { device.alloc::<f32>(partial_count) }?;
-        let partial_indices = unsafe { device.alloc::<u32>(partial_count) }?;
-        let output = unsafe { device.alloc::<u32>(rows) }?;
-        let stage1 = device.get_or_load_custom_func(
-            "argmax_first_bf16_stage1",
-            "hunyuan_dynamic_kv",
-            PTX,
-        )?;
-        let mut builder = stage1.builder();
-        builder.arg(&logits);
-        builder.arg(&partial_values);
-        builder.arg(&partial_indices);
-        candle_core::builder_arg!(
-            builder,
-            rows as u32,
-            vocab_size as u32,
-            PARTITIONS_PER_ROW as u32
-        );
-        unsafe {
-            builder.launch(LaunchConfig {
-                grid_dim: (partial_count as u32, 1, 1),
-                block_dim: (256, 1, 1),
-                shared_mem_bytes: 0,
-            })
-        }
-        .w()?;
-        let stage2 = device.get_or_load_custom_func(
-            "dflash_repetition_argmax_stage2",
-            "hunyuan_dynamic_kv",
-            PTX,
-        )?;
-        let mut builder = stage2.builder();
-        builder.arg(&partial_values);
-        builder.arg(&partial_indices);
-        builder.arg(&output);
-        candle_core::builder_arg!(builder, PARTITIONS_PER_ROW as u32, rows as u32);
-        unsafe {
-            builder.launch(LaunchConfig {
-                grid_dim: (rows as u32, 1, 1),
-                block_dim: (32, 1, 1),
-                shared_mem_bytes: 0,
-            })
-        }
-        .w()?;
-        Ok((
-            candle_core::CudaStorage::wrap_cuda_slice(output, device),
-            Shape::from_dims(&[rows]),
-        ))
-    }
 }
 
 impl InplaceOp2 for MarkRepetitionHistoryU8 {
@@ -244,7 +113,7 @@ impl InplaceOp2 for MarkRepetitionHistoryU8 {
         let token_ids = token_ids.slice(token_ids_layout.start_offset()..);
         let function = device.get_or_load_custom_func(
             "mark_repetition_history_u8",
-            "hunyuan_dynamic_kv",
+            CUDA_KERNEL_MODULE,
             PTX,
         )?;
         let mut builder = function.builder();
@@ -312,7 +181,7 @@ impl CustomOp2 for RepetitionArgmaxBf16 {
         let output = unsafe { device.alloc::<u32>(rows) }?;
         let stage1 = device.get_or_load_custom_func(
             "repetition_argmax_bf16_stage1",
-            "hunyuan_dynamic_kv",
+            CUDA_KERNEL_MODULE,
             PTX,
         )?;
         let mut builder = stage1.builder();
@@ -337,7 +206,7 @@ impl CustomOp2 for RepetitionArgmaxBf16 {
         .w()?;
         let stage2 = device.get_or_load_custom_func(
             "dflash_repetition_argmax_stage2",
-            "hunyuan_dynamic_kv",
+            CUDA_KERNEL_MODULE,
             PTX,
         )?;
         let mut builder = stage2.builder();
@@ -431,7 +300,7 @@ impl CustomOp3 for DFlashRepetitionArgmaxBf16 {
         let output = unsafe { device.alloc::<u32>(rows) }?;
         let stage1 = device.get_or_load_custom_func(
             "dflash_repetition_argmax_bf16_stage1",
-            "hunyuan_dynamic_kv",
+            CUDA_KERNEL_MODULE,
             PTX,
         )?;
         let mut builder = stage1.builder();
@@ -458,7 +327,7 @@ impl CustomOp3 for DFlashRepetitionArgmaxBf16 {
         .w()?;
         let stage2 = device.get_or_load_custom_func(
             "dflash_repetition_argmax_stage2",
-            "hunyuan_dynamic_kv",
+            CUDA_KERNEL_MODULE,
             PTX,
         )?;
         let mut builder = stage2.builder();
@@ -537,7 +406,7 @@ impl InplaceOp2 for RepetitionPenaltyF32 {
         let token_ids = token_ids.slice(token_ids_layout.start_offset()..);
         let count = rows * token_stride;
         let function =
-            device.get_or_load_custom_func("repetition_penalty_f32", "hunyuan_dynamic_kv", PTX)?;
+            device.get_or_load_custom_func("repetition_penalty_f32", CUDA_KERNEL_MODULE, PTX)?;
         let mut builder = function.builder();
         builder.arg(&mut logits);
         builder.arg(&token_ids);
@@ -630,8 +499,7 @@ impl CustomOp2 for FusedSiluMulBf16 {
         let up = up.slice(up_layout.start_offset()..);
         let count = gate_layout.shape().elem_count();
         let output = unsafe { device.alloc::<half::bf16>(count) }?;
-        let function =
-            device.get_or_load_custom_func("silu_mul_bf16", "hunyuan_dynamic_kv", PTX)?;
+        let function = device.get_or_load_custom_func("silu_mul_bf16", CUDA_KERNEL_MODULE, PTX)?;
         let mut builder = function.builder();
         builder.arg(&gate);
         builder.arg(&up);
@@ -715,7 +583,7 @@ impl CustomOp3 for FusedXdRopeRmsNormF16 {
         let output_count = if self.include_v { 2 * count } else { count };
         let output = unsafe { device.alloc::<half::f16>(output_count) }?;
         let function =
-            device.get_or_load_custom_func("xdrope_rmsnorm_f16", "hunyuan_dynamic_kv", PTX)?;
+            device.get_or_load_custom_func("xdrope_rmsnorm_f16", CUDA_KERNEL_MODULE, PTX)?;
         let mut builder = function.builder();
         builder.arg(&qkv);
         builder.arg(&cos_sin);
@@ -815,7 +683,7 @@ impl CustomOp3 for FusedRmsNormRopeBf16 {
         let output_count = if self.include_v { 2 * count } else { count };
         let output = unsafe { device.alloc::<half::bf16>(output_count) }?;
         let function =
-            device.get_or_load_custom_func("rmsnorm_rope_bf16", "hunyuan_dynamic_kv", PTX)?;
+            device.get_or_load_custom_func("rmsnorm_rope_bf16", CUDA_KERNEL_MODULE, PTX)?;
         let mut builder = function.builder();
         builder.arg(&qkv);
         builder.arg(&cos_sin);
@@ -909,7 +777,7 @@ impl CustomOp3 for FusedAddRmsNormBf16 {
         let weight = weight.slice(weight_layout.start_offset()..);
         let output = unsafe { device.alloc::<half::bf16>(2 * element_count) }?;
         let function =
-            device.get_or_load_custom_func("add_rmsnorm_bf16", "hunyuan_dynamic_kv", PTX)?;
+            device.get_or_load_custom_func("add_rmsnorm_bf16", CUDA_KERNEL_MODULE, PTX)?;
         let mut builder = function.builder();
         builder.arg(&input);
         builder.arg(&delta);
@@ -988,7 +856,7 @@ impl InplaceOp3 for FusedRopeBf16 {
         let input = input.slice(input_layout.start_offset()..);
         let cos_sin = cos_sin.slice(cos_sin_layout.start_offset()..);
         let count = heads * query_len * head_dim;
-        let function = device.get_or_load_custom_func("rope_bf16", "hunyuan_dynamic_kv", PTX)?;
+        let function = device.get_or_load_custom_func("rope_bf16", CUDA_KERNEL_MODULE, PTX)?;
         let mut builder = function.builder();
         builder.arg(&mut output);
         builder.arg(&input);
@@ -1059,7 +927,7 @@ impl InplaceOp3 for FusedXdRope {
         let qkv = qkv.slice(qkv_layout.start_offset()..);
         let cos_sin = cos_sin.slice(cos_sin_layout.start_offset()..);
         let count = heads * query_len * head_dim;
-        let function = device.get_or_load_custom_func("xdrope_bf16", "hunyuan_dynamic_kv", PTX)?;
+        let function = device.get_or_load_custom_func("xdrope_bf16", CUDA_KERNEL_MODULE, PTX)?;
         let mut builder = function.builder();
         builder.arg(&mut output);
         builder.arg(&qkv);
@@ -1133,7 +1001,7 @@ impl InplaceOp3 for DynamicKvAppend {
                 let mut cache = cache.slice_mut(cache_layout.start_offset()..);
                 let source = source.slice(source_layout.start_offset()..);
                 let function =
-                    device.get_or_load_custom_func($function, "hunyuan_dynamic_kv", PTX)?;
+                    device.get_or_load_custom_func($function, CUDA_KERNEL_MODULE, PTX)?;
                 let mut builder = function.builder();
                 builder.arg(&mut cache);
                 builder.arg(&source);
@@ -1214,7 +1082,7 @@ impl InplaceOp3 for DynamicPagedKvAppend {
         let lengths = lengths.slice(lengths_layout.start_offset()..);
         let count = num_heads * query_len * head_dim;
         let function =
-            device.get_or_load_custom_func("append_paged_kv_bf16", "hunyuan_dynamic_kv", PTX)?;
+            device.get_or_load_custom_func("append_paged_kv_bf16", CUDA_KERNEL_MODULE, PTX)?;
         let mut builder = function.builder();
         builder.arg(&mut cache);
         builder.arg(&source);
@@ -1234,6 +1102,7 @@ impl InplaceOp3 for DynamicPagedKvAppend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cuda_kernels::ArgmaxFirstBf16;
     use candle_core::{DType, Device, Tensor};
 
     #[cfg(feature = "cuda")]

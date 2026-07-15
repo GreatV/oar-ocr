@@ -2,6 +2,8 @@
 
 mod config;
 mod model;
+#[cfg(feature = "cuda")]
+mod mtp;
 mod processing;
 mod text;
 mod vision;

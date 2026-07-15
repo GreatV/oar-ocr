@@ -4,8 +4,7 @@ use super::config::{HunyuanOcrConfig, HunyuanOcrImageProcessorConfig, HunyuanOcr
 use super::dflash::DFlashModel;
 #[cfg(feature = "cuda")]
 use super::dynamic_kv::{
-    ArgmaxFirstF32, DFlashRepetitionArgmaxBf16, MarkRepetitionHistoryU8, RepetitionArgmaxBf16,
-    RepetitionPenaltyF32,
+    DFlashRepetitionArgmaxBf16, MarkRepetitionHistoryU8, RepetitionArgmaxBf16, RepetitionPenaltyF32,
 };
 use super::llm::HunyuanLlm;
 use super::processing::{HunyuanOcrImageInputs, preprocess_image};
@@ -13,6 +12,8 @@ use super::vision::HunyuanVisionModel;
 use crate::attention::{
     combine_masks, create_causal_mask, create_generation_mask, create_left_padding_mask,
 };
+#[cfg(feature = "cuda")]
+use crate::cuda_kernels::ArgmaxFirstF32;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use image::RgbImage;

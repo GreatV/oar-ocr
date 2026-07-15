@@ -34,6 +34,7 @@ use oar_ocr_vl::utils::{convert_otsl_to_html, truncate_repetitive_content};
 use utils::mineru_layout::{
     ContentBlock, LAYOUT_IMAGE_SIZE, LAYOUT_PROMPT, parse_layout_output, prepare_for_extract,
 };
+use utils::token_fingerprint;
 
 #[derive(Parser)]
 #[command(name = "mineru")]
@@ -156,11 +157,17 @@ fn two_step_extract(
         LAYOUT_IMAGE_SIZE,
         imageops::FilterType::CatmullRom,
     );
-    let layout = model
-        .generate(&[layout_image], &[LAYOUT_PROMPT], max_tokens)
+    let layout_tokens = model
+        .generate_tokens(&[layout_image], &[LAYOUT_PROMPT], max_tokens)
         .into_iter()
         .next()
         .ok_or("Layout detection returned no result")??;
+    info!(
+        "  Layout tokens: {}, fingerprint: {:016x}",
+        layout_tokens.len(),
+        token_fingerprint(&layout_tokens)
+    );
+    let layout = model.decode_tokens(&layout_tokens)?;
 
     if dump_layout {
         info!("Layout raw output:\n{}", layout);
@@ -181,11 +188,18 @@ fn two_step_extract(
     for (i, (block_image, prompt)) in block_images.into_iter().zip(prompts.iter()).enumerate() {
         let idx = indices[i];
         let output = model
-            .generate(&[block_image], &[prompt], max_tokens)
+            .generate_tokens(&[block_image], &[prompt], max_tokens)
             .into_iter()
             .next();
         match output {
-            Some(Ok(content)) => {
+            Some(Ok(tokens)) => {
+                info!(
+                    "  Block {} tokens: {}, fingerprint: {:016x}",
+                    idx,
+                    tokens.len(),
+                    token_fingerprint(&tokens)
+                );
+                let content = model.decode_tokens(&tokens)?;
                 let cleaned = truncate_repetitive_content(&content, 10, 10, 10);
                 let content = if blocks[idx].block_type == "table" {
                     convert_otsl_to_html(&cleaned)
