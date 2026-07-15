@@ -30,7 +30,7 @@ cargo add oar-ocr --features cuda,auto-download
 
 This keeps the default `download-binaries` and `simd` features enabled, makes the ONNX Runtime CUDA execution provider available for selection, and downloads missing registered model files from ModelScope into `$OAR_HOME` when they are first used.
 
-See the [Cargo feature guide](docs/features.md) for all available features and the [model guide](docs/models.md#auto-download-via-the-auto-download-feature) for model download and cache behavior.
+See the [Cargo feature guide](docs/features.md) for all available features and the [model guide](docs/models.md#auto-download) for model download and cache behavior.
 
 Builders also accept raw ONNX bytes such as `include_bytes!`, allowing models to be embedded in a single binary. See [Loading Models from Memory](docs/usage.md#loading-models-from-memory).
 
@@ -113,7 +113,7 @@ The classic pipeline runs ONNX models through ONNX Runtime and supports the foll
 
 Available text-recognition checkpoints cover Chinese, Traditional Chinese, English, Arabic, Cyrillic, Devanagari, Greek, Eastern Slavic, Japanese, Georgian, Korean, Latin, Tamil, Telugu, and Thai scripts or languages.
 
-### Vision-Language Models (VLM)
+### Vision-Language Models
 
 The [`oar-ocr-vl`](oar-ocr-vl/README.md) crate provides native [Candle](https://github.com/huggingface/candle) inference for compact document VLMs on CPU, CUDA, and Metal.
 

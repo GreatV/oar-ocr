@@ -34,8 +34,8 @@
 //!
 //! ```bash
 //! cargo run --example ocr -- \
-//!   --det-model models/ppocrv4_mobile_det.onnx \
-//!   --rec-model models/ppocrv4_mobile_rec.onnx \
+//!   --det-model models/pp-ocrv4_mobile_det.onnx \
+//!   --rec-model models/pp-ocrv4_mobile_rec.onnx \
 //!   --dict-path models/ppocr_keys_v1.txt \
 //!   document1.jpg document2.jpg
 //! ```

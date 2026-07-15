@@ -1,6 +1,6 @@
 # Pre-trained Models
 
-OAROCR provides pre-trained models for OCR and document understanding tasks. Download them manually from the [GitHub Releases](https://github.com/GreatV/oar-ocr/releases) page (linked in the tables below), or have the library fetch them on demand from ModelScope — see [Auto-download](#auto-download-via-the-auto-download-feature) at the bottom.
+OAROCR provides pre-trained models for OCR and document understanding tasks. Download them manually from the [GitHub Releases](https://github.com/GreatV/oar-ocr/releases) page (linked in the tables below), or have the library fetch them on demand from ModelScope. See [Auto-download](#auto-download) at the bottom.
 
 ## Text Detection Models
 
@@ -61,7 +61,7 @@ Choose between mobile and server variants based on your needs:
 
 ## PP-OCRv6
 
-PP-OCRv6 is the newest PP-OCR generation. Unlike the older models mirrored on this project's GitHub Releases, the v6 ONNX models are referenced **directly from PaddlePaddle's official channels**.
+PP-OCRv6 is the newest PP-OCR generation. The flat ONNX files and dictionaries are published in this project's [`v0.7.0` release](https://github.com/GreatV/oar-ocr/releases/tag/v0.7.0) and on ModelScope. The tables also link the original PaddlePaddle inference bundles.
 
 > **Source / attribution.** Published by PaddlePaddle under the [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) project (Apache-2.0).
 
@@ -69,17 +69,17 @@ PP-OCRv6 is the newest PP-OCR generation. Unlike the older models mirrored on th
 
 | Size | Auto-download ONNX | File size | Official bundle |
 |------|--------------------|-----------|-----------------|
-| tiny | `pp-ocrv6_tiny_det.onnx` | 1.7 MiB | [`PP-OCRv6_tiny_det_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_det_onnx_infer.tar) |
-| small | `pp-ocrv6_small_det.onnx` | 9.4 MiB | [`PP-OCRv6_small_det_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_det_onnx_infer.tar) |
-| medium | `pp-ocrv6_medium_det.onnx` | 59.2 MiB | [`PP-OCRv6_medium_det_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_medium_det_onnx_infer.tar) |
+| tiny | [`pp-ocrv6_tiny_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.7.0/pp-ocrv6_tiny_det.onnx) | 1.7 MiB | [`PP-OCRv6_tiny_det_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_det_onnx_infer.tar) |
+| small | [`pp-ocrv6_small_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.7.0/pp-ocrv6_small_det.onnx) | 9.4 MiB | [`PP-OCRv6_small_det_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_det_onnx_infer.tar) |
+| medium | [`pp-ocrv6_medium_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.7.0/pp-ocrv6_medium_det.onnx) | 59.2 MiB | [`PP-OCRv6_medium_det_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_medium_det_onnx_infer.tar) |
 
 ### Recognition
 
 | Size | Auto-download ONNX | Dictionary | File size | Official bundle |
 |------|--------------------|------------|-----------|-----------------|
-| tiny | `pp-ocrv6_tiny_rec.onnx` | `ppocrv6_tiny_dict.txt` (6904 characters) | 4.3 MiB | [`PP-OCRv6_tiny_rec_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_rec_onnx_infer.tar) |
-| small | `pp-ocrv6_small_rec.onnx` | `ppocrv6_dict.txt` (18708 characters) | 20.2 MiB | [`PP-OCRv6_small_rec_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_rec_onnx_infer.tar) |
-| medium | `pp-ocrv6_medium_rec.onnx` | `ppocrv6_dict.txt` (18708 characters) | 73.0 MiB | [`PP-OCRv6_medium_rec_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_medium_rec_onnx_infer.tar) |
+| tiny | [`pp-ocrv6_tiny_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.7.0/pp-ocrv6_tiny_rec.onnx) | [`ppocrv6_tiny_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.7.0/ppocrv6_tiny_dict.txt) (6904 characters) | 4.3 MiB | [`PP-OCRv6_tiny_rec_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_rec_onnx_infer.tar) |
+| small | [`pp-ocrv6_small_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.7.0/pp-ocrv6_small_rec.onnx) | [`ppocrv6_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.7.0/ppocrv6_dict.txt) (18708 characters) | 20.2 MiB | [`PP-OCRv6_small_rec_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_rec_onnx_infer.tar) |
+| medium | [`pp-ocrv6_medium_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.7.0/pp-ocrv6_medium_rec.onnx) | [`ppocrv6_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.7.0/ppocrv6_dict.txt) (18708 characters) | 73.0 MiB | [`PP-OCRv6_medium_rec_onnx_infer.tar`](https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_medium_rec_onnx_infer.tar) |
 
 ## Character Dictionaries
 
@@ -91,8 +91,8 @@ Character dictionaries are required for text recognition. Choose the appropriate
 |---------|------|-------------|
 | PP-OCRv4 Document | [`ppocrv4_doc_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ppocrv4_doc_dict.txt) | For PP-OCRv4 document models |
 | PP-OCRv5 | [`ppocrv5_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ppocrv5_dict.txt) | For PP-OCRv5 models |
-| PP-OCRv6 Tiny | `ppocrv6_tiny_dict.txt` | For PP-OCRv6 tiny recognition |
-| PP-OCRv6 Small/Medium | `ppocrv6_dict.txt` | For PP-OCRv6 small and medium recognition |
+| PP-OCRv6 Tiny | [`ppocrv6_tiny_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.7.0/ppocrv6_tiny_dict.txt) | For PP-OCRv6 tiny recognition |
+| PP-OCRv6 Small/Medium | [`ppocrv6_dict.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.7.0/ppocrv6_dict.txt) | For PP-OCRv6 small and medium recognition |
 | PP-OCR Keys v1 | [`ppocr_keys_v1.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/ppocr_keys_v1.txt) | For PP-OCRv3 general and PP-OCRv4 general models |
 
 ### PP-OCRv5 Language-Specific Dictionaries
@@ -137,7 +137,6 @@ Models for document preprocessing and orientation detection:
 |------|------------|------|-------------|
 | Document Orientation | [`pp-lcnet_x1_0_doc_ori.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-lcnet_x1_0_doc_ori.onnx) | 6.5 MiB | Detect document rotation |
 | Text Line Orientation (Light) | [`pp-lcnet_x0_25_textline_ori.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-lcnet_x0_25_textline_ori.onnx) | 995 KiB | Fast text line orientation |
-| Text Line Orientation (Paddle2ONNX) | `p2o_pp-lcnet_x0_25_textline_ori.onnx` | 977 KiB | Compatibility export available through auto-download |
 | Text Line Orientation | [`pp-lcnet_x1_0_textline_ori.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-lcnet_x1_0_textline_ori.onnx) | 6.5 MiB | Accurate text line orientation |
 | Document Rectification | [`uvdoc.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/uvdoc.onnx) | 30.2 MiB | Fix perspective distortion |
 
@@ -174,7 +173,6 @@ Models for document structure analysis with `OARStructureBuilder`:
 | Cell Detection (Wireless) | [`rt-detr-l_wireless_table_cell_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/rt-detr-l_wireless_table_cell_det.onnx) | 123.3 MiB | RT-DETR for wireless tables |
 | Structure (SLANet) | [`slanet.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/slanet.onnx) | 7.4 MiB | Basic structure recognition |
 | Structure (SLANet+) | [`slanet_plus.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/slanet_plus.onnx) | 7.4 MiB | Wireless table structure |
-| Structure (SLANet+ V2) | `slanet_plus_v2.onnx` | 7.4 MiB | Newer compatibility export available through auto-download |
 | Structure (SLANeXt Wired) | [`slanext_wired.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/slanext_wired.onnx) | 350.7 MiB | High accuracy wired structure |
 | Structure (SLANeXt Wireless) | [`slanext_wireless.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/slanext_wireless.onnx) | 350.7 MiB | High accuracy wireless structure |
 | Structure Dictionary | [`table_structure_dict_ch.txt`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/table_structure_dict_ch.txt) | - | Required for structure recognition |
@@ -188,18 +186,9 @@ Models for document structure analysis with `OARStructureBuilder`:
 | PP-FormulaNet_plus-S | [`pp-formulanet_plus-s.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-formulanet_plus-s.onnx) | 221.1 MiB | Enhanced small variant |
 | PP-FormulaNet_plus-M | [`pp-formulanet_plus-m.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-formulanet_plus-m.onnx) | 564.9 MiB | Enhanced medium variant |
 | PP-FormulaNet_plus-L | [`pp-formulanet_plus-l.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-formulanet_plus-l.onnx) | 699.5 MiB | Enhanced large variant |
-| PP-FormulaNet Tokenizer | `pp-formulanet-tokenizer.json` | 2.0 MiB | Required for PP-FormulaNet variants |
+| PP-FormulaNet Tokenizer | [`pp-formulanet-tokenizer.json`](https://www.modelscope.cn/models/greatv/oar-ocr/file/view/master/pp-formulanet-tokenizer.json) | 2.0 MiB | Required for PP-FormulaNet variants |
 | UniMERNet | [`unimernet.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/unimernet.onnx) | 1.7 GiB | Unified Math Expression Recognition |
 | UniMERNet Tokenizer | [`unimernet_tokenizer.json`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/unimernet_tokenizer.json) | 2.0 MiB | Required for UniMERNet |
-
-The current formula predictor supports PP-FormulaNet and UniMERNet. `latex_ocr_rec.onnx` remains registered as a legacy download artifact, but it is not wired into `FormulaRecognitionPredictor` and its tokenizer is not mirrored by this project.
-
-### Auxiliary and Legacy Registered Assets
-
-| Asset | Size | Status |
-|-------|------|--------|
-| [`latex_ocr_rec.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/latex_ocr_rec.onnx) | 97.8 MiB | Legacy checkpoint, not supported by the current formula predictor |
-| `unimernet_tokenizer_config.json` | 4.4 KiB | Optional tokenizer metadata retained for compatibility |
 
 ### Seal Text Detection
 
@@ -208,7 +197,7 @@ The current formula predictor supports PP-FormulaNet and UniMERNet. `latex_ocr_r
 | Seal Detection (Mobile) | [`pp-ocrv4_mobile_seal_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv4_mobile_seal_det.onnx) | 4.6 MiB | Fast seal detection |
 | Seal Detection (Server) | [`pp-ocrv4_server_seal_det.onnx`](https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-ocrv4_server_seal_det.onnx) | 108.2 MiB | Accurate seal detection |
 
-## Auto-download (via the `auto-download` feature)
+## Auto-download
 
 ```bash
 cargo add oar-ocr --features auto-download
@@ -217,7 +206,7 @@ cargo add oar-ocr --features auto-download
 ```rust,no_run
 use oar_ocr::prelude::*;
 let ocr = OAROCRBuilder::new(
-    "pp-ocrv5_mobile_det.onnx",   // bare name → resolved via registry
+    "pp-ocrv5_mobile_det.onnx",   // bare name resolved through the registry
     "pp-ocrv5_mobile_rec.onnx",
     "ppocrv5_dict.txt",
 ).build()?;
@@ -228,32 +217,30 @@ When the feature is enabled, registered file names are fetched from [`greatv/oar
 
 ### Path resolution rules
 
-These rules apply to *path* sources only; models passed as in-memory bytes
-(see [Loading Models from Memory](usage.md#loading-models-from-memory)) bypass
-path resolution entirely.
+These rules apply only to *path* sources. Models passed as in-memory bytes (see [Loading Models from Memory](usage.md#loading-models-from-memory)) bypass path resolution entirely.
 
 For each model path argument the builder applies these checks in order:
 
 1. **Existing file wins.** If the path refers to a real file on disk it is used as-is — no registry lookup, no hash check, no network. A `./pp-ocrv5_mobile_det.onnx` next to the binary always shadows the registry.
 2. **Only bare names or `$OAR_HOME`-rooted paths are eligible for auto-download.** A path is considered for registry resolution only when it has no parent component (e.g. `"pp-ocrv5_mobile_det.onnx"`) or when its parent equals the cache directory. Explicit paths like `./models/foo.onnx` or `/data/foo.onnx` are returned verbatim even if their file name is registered — the library never silently overrides an explicit path.
-3. **Registry hit → cache or download.** If the file name appears in `REGISTRY`:
-   - `$OAR_HOME/<name>` exists with matching size + SHA-256 → cached copy is used (no network).
-   - Cached copy is missing or its hash mismatches → download from ModelScope, verify SHA-256, atomically replace.
-4. **Unregistered + missing → returned verbatim** so the builder produces its normal "model not found" error.
+3. **Registry hit: cache or download.** If the file name appears in `REGISTRY`:
+   - The cached copy is used without network access when `$OAR_HOME/<name>` exists with the expected size and SHA-256.
+   - Otherwise, the file is downloaded from ModelScope, verified with SHA-256, and atomically replaced.
+4. **Unregistered and missing.** The path is returned verbatim so the builder produces its normal "model not found" error.
 
 | Input | On disk | Behaviour |
 |---|---|---|
 | `"pp-ocrv5_mobile_det.onnx"` | `./pp-ocrv5_mobile_det.onnx` exists | Use the local CWD file |
 | `"pp-ocrv5_mobile_det.onnx"` | `$OAR_HOME/...` exists, hash OK | Use cached copy, no network |
 | `"pp-ocrv5_mobile_det.onnx"` | absent or hash mismatch | Download to `$OAR_HOME`, verify, use |
-| `"./models/det.onnx"` | absent | Returned as-is → "model not found" |
-| `"$OAR_HOME/pp-ocrv5_mobile_det.onnx"` (absolute) | (any) | Parent equals the cache dir → same as bare name |
+| `"./models/det.onnx"` | absent | Returned as-is, resulting in "model not found" |
+| `"$OAR_HOME/pp-ocrv5_mobile_det.onnx"` (absolute) | (any) | Handled like a bare name because its parent is the cache directory |
 
 Note: the resolver compares paths verbatim — `~` is not expanded. Pass a bare filename, an absolute path under `$OAR_HOME`, or let your shell expand `~` for you.
 
 ### Cache layout
 
-- Override the cache root with the `OAR_HOME` environment variable. Defaults to `~/.oar` (resolved via the platform home directory; the literal `~` is not expanded by the library).
+- Override the cache root with the `OAR_HOME` environment variable. Defaults to `~/.oar` (resolved via the platform home directory, while the literal `~` is not expanded by the library).
 - Files land at `$OAR_HOME/<name>`, flat (no per-revision subdirectories).
 - Downloads stream into a unique `$OAR_HOME/.<name>.<pid>.<n>.part` and are renamed atomically once the SHA-256 matches, so a crash mid-download won't poison the cache and concurrent processes don't clobber each other.
-- After verification a `$OAR_HOME/.<name>.sha256` sidecar records the verified hash. Future loads with a matching cache file + sidecar skip the multi-second rehash; deleting the sidecar forces a fresh hash check.
+- After verification a `$OAR_HOME/.<name>.sha256` sidecar records the verified hash. Future loads with a matching cache file + sidecar skip the multi-second rehash. Deleting the sidecar forces a fresh hash check.

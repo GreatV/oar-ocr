@@ -129,7 +129,7 @@ impl PdfDocument {
         };
 
         // Create render settings (hayro defaults bg_color to TRANSPARENT;
-        // we need WHITE so the RGBA→RGB conversion produces a white background)
+        // we need WHITE so the RGBA-to-RGB conversion produces a white background)
         let settings = RenderSettings {
             x_scale: scale,
             y_scale: scale,

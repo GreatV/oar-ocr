@@ -24,11 +24,11 @@ use std::collections::HashSet;
 ///
 /// # Supported formats
 ///
-/// - `"cpu"` → CPU device
-/// - `"cuda"` or `"gpu"` → CUDA device 0
-/// - `"cuda:N"` → CUDA device N (e.g., `"cuda:1"`)
-/// - `"metal"` → Metal device 0 (Apple GPU)
-/// - `"metal:N"` → Metal device N (e.g., `"metal:1"` for Mac Pro with multiple GPUs)
+/// - `"cpu"` selects the CPU device
+/// - `"cuda"` or `"gpu"` selects CUDA device 0
+/// - `"cuda:N"` selects CUDA device N (e.g., `"cuda:1"`)
+/// - `"metal"` selects Metal device 0 (Apple GPU)
+/// - `"metal:N"` selects Metal device N (e.g., `"metal:1"` for Mac Pro with multiple GPUs)
 ///
 /// # Errors
 ///

@@ -37,8 +37,8 @@
 //! Basic usage:
 //! ```bash
 //! cargo run --example formula_recognition -- \
-//!     -m models/PP-FormulaNet_plus-M/inference.onnx \
-//!     -t models/PP-FormulaNet_plus-M/tokenizer.json \
+//!     -m models/pp-formulanet_plus-m.onnx \
+//!     -t models/pp-formulanet-tokenizer.json \
 //!     --model-name "PP-FormulaNet_plus-M" \
 //!     formula1.jpg formula2.jpg
 //! ```

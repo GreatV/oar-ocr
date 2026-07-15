@@ -22,7 +22,7 @@
 //! # Examples
 //!
 //! ```bash
-//! # OCR (text recognition)
+//! # OCR text recognition
 //! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
 //!     -m PaddleOCR-VL --task ocr document.jpg
 //!
@@ -38,11 +38,11 @@
 //! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
 //!     -m PaddleOCR-VL --task chart chart.jpg
 //!
-//! # Text spotting (PaddleOCR-VL-1.5 or 1.6)
+//! # Text spotting with PaddleOCR-VL-1.5 or 1.6
 //! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
 //!     -m PaddleOCR-VL-1.5 --task spotting spotting.jpg
 //!
-//! # Seal recognition (PaddleOCR-VL-1.5 or 1.6)
+//! # Seal recognition with PaddleOCR-VL-1.5 or 1.6
 //! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
 //!     -m PaddleOCR-VL-1.6 --task seal seal.jpg
 //!

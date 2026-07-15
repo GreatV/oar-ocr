@@ -62,8 +62,8 @@ impl MinerUTaskPrompt {
 
     /// Map an OAR `LayoutElementType` to the MinerU element prompt that best
     /// matches its content kind. Mirrors the mapping the official `mineru_vl_utils`
-    /// client uses when picking a per-block prompt (text-like → `[default]`,
-    /// table → `table`, equation → `equation`, image/chart → `image`).
+    /// client uses when picking a per-block prompt (`[default]` for text-like blocks,
+    /// `table` for tables, `equation` for equations, and `image` for images and charts).
     pub fn for_layout(t: LayoutElementType) -> Self {
         use LayoutElementType::*;
         match t {

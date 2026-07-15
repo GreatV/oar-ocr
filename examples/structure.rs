@@ -64,12 +64,12 @@
 //!
 //! # Examples
 //!
-//! ## Minimal (Layout Detection Only)
+//! ## Minimal Layout Detection
 //!
 //! ```bash
 //! cargo run --release --features cuda --example structure -- \
-//!   --layout-model models/PP-DocLayout_plus-L.onnx \
-//!   --region-model models/PP-DocBlockLayout.onnx \
+//!   --layout-model models/pp-doclayout_plus-l.onnx \
+//!   --region-model models/pp-docblocklayout.onnx \
 //!   document.jpg
 //! ```
 //!
@@ -77,10 +77,10 @@
 //!
 //! ```bash
 //! cargo run --release --features cuda --example structure -- \
-//!   --layout-model models/PP-DocLayout_plus-L.onnx \
-//!   --region-model models/PP-DocBlockLayout.onnx \
-//!   --text-det-model models/PP-OCRv5_server_det.onnx \
-//!   --text-rec-model models/PP-OCRv5_server_rec.onnx \
+//!   --layout-model models/pp-doclayout_plus-l.onnx \
+//!   --region-model models/pp-docblocklayout.onnx \
+//!   --text-det-model models/pp-ocrv5_server_det.onnx \
+//!   --text-rec-model models/pp-ocrv5_server_rec.onnx \
 //!   --text-dict-path models/ppocrv5_dict.txt \
 //!   document.jpg
 //! ```
@@ -89,7 +89,7 @@
 //!
 //! ```bash
 //! cargo run --release --features cuda --example structure -- \
-//!   --layout-model models/PicoDet-L_layout_17cls.onnx \
+//!   --layout-model models/picodet-l_layout_17cls.onnx \
 //!   --layout-model-name PicoDet-L_layout_17cls \
 //!   document.jpg
 //! ```
@@ -98,29 +98,29 @@
 //!
 //! ```bash
 //! cargo run --release --features cuda --example structure -- \
-//!   --layout-model models/PP-DocLayout_plus-L.onnx \
-//!   --region-model models/PP-DocBlockLayout.onnx \
-//!   --orientation-model models/PP-LCNet_x1_0_doc_ori.onnx \
-//!   --rectification-model models/UVDoc.onnx \
-//!   --table-cls-model models/PP-LCNet_x1_0_table_cls.onnx \
-//!   --wired-structure-model models/SLANeXt_wired.onnx \
-//!   --wireless-structure-model models/SLANet_plus.onnx \
-//!   --wired-cell-model models/RT-DETR-L_wired_table_cell_det.onnx \
-//!   --wireless-cell-model models/RT-DETR-L_wireless_table_cell_det.onnx \
+//!   --layout-model models/pp-doclayout_plus-l.onnx \
+//!   --region-model models/pp-docblocklayout.onnx \
+//!   --orientation-model models/pp-lcnet_x1_0_doc_ori.onnx \
+//!   --rectification-model models/uvdoc.onnx \
+//!   --table-cls-model models/pp-lcnet_x1_0_table_cls.onnx \
+//!   --wired-structure-model models/slanext_wired.onnx \
+//!   --wireless-structure-model models/slanet_plus.onnx \
+//!   --wired-cell-model models/rt-detr-l_wired_table_cell_det.onnx \
+//!   --wireless-cell-model models/rt-detr-l_wireless_table_cell_det.onnx \
 //!   --table-structure-dict models/table_structure_dict_ch.txt \
-//!   --formula-model models/PP-FormulaNet_plus-L.onnx \
-//!   --formula-tokenizer models/pp_formulanet_tokenizer.json \
+//!   --formula-model models/pp-formulanet_plus-l.onnx \
+//!   --formula-tokenizer models/pp-formulanet-tokenizer.json \
 //!   --formula-type pp_formulanet \
-//!   --seal-model models/PP-OCRv4_server_seal_det.onnx \
-//!   --text-det-model models/PP-OCRv5_server_det.onnx \
-//!   --text-rec-model models/PP-OCRv5_server_rec.onnx \
+//!   --seal-model models/pp-ocrv4_server_seal_det.onnx \
+//!   --text-det-model models/pp-ocrv5_server_det.onnx \
+//!   --text-rec-model models/pp-ocrv5_server_rec.onnx \
 //!   --text-dict-path models/ppocrv5_dict.txt \
 //!   --to-json --to-markdown \
 //!   -o output/structure \
 //!   document.jpg
 //! ```
 //!
-//! # Model Reference (PP-StructureV3 Defaults)
+//! # PP-StructureV3 Default Model Reference
 //!
 //! | Component | Model Name | Model Path Arg | Model Name Arg |
 //! |-----------|------------|----------------|----------------|

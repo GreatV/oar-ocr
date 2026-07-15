@@ -28,7 +28,7 @@ Runtime environment variables read by the oar-ocr crates. Project-specific varia
 
 ## `OAR_HOME`
 
-Directory where the `auto-download` feature caches model files (default `~/.oar`). Bare model file names passed to the builders are downloaded here and verified against their expected SHA-256. See [models.md](models.md#auto-download-via-the-auto-download-feature) for the exact path resolution rules.
+Directory where the `auto-download` feature caches model files (default `~/.oar`). Bare model file names passed to the builders are downloaded here and verified against their expected SHA-256. See [models.md](models.md#auto-download) for the exact path resolution rules.
 
 ```bash
 OAR_HOME=/data/oar-models cargo run --release --example ocr -- doc.jpg

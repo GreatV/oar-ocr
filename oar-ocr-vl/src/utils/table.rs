@@ -20,7 +20,7 @@ const OTSL_XCEL: &str = "<xcel>";
 /// (`<fcel>`, `<lcel>`, `<ucel>`, `<xcel>`, `<ecel>`, `<nl>`) which the
 /// model's post-process then translates into HTML. To feed an HTML-shaped
 /// table (e.g. from a layout pipeline) back into PaddleOCR-VL's token form we
-/// need the inverse: HTML → OTSL.
+/// need the inverse conversion from HTML to OTSL.
 ///
 /// The parser is intentionally tolerant — it uses regex-based extraction
 /// rather than a full HTML parser and mirrors `clean_html_table`'s repair of
@@ -630,7 +630,7 @@ mod tests {
 
     #[test]
     fn convert_html_to_otsl_colspan_emits_lcel() {
-        // Row 1: <td colspan="2">A</td> → <fcel>A<lcel>
+        // Row 1 converts <td colspan="2">A</td> to <fcel>A<lcel>.
         let html = "<table><tr><td colspan=\"2\">A</td></tr><tr><td>x</td><td>y</td></tr></table>";
         let otsl = convert_html_to_otsl(html).expect("conversion");
         assert_eq!(otsl, "<fcel>A<lcel><nl><fcel>x<fcel>y<nl>");
@@ -701,7 +701,7 @@ mod tests {
 
     #[test]
     fn convert_html_to_otsl_roundtrips_through_otsl_to_html() {
-        // OTSL → HTML → OTSL should reconstruct the same OTSL for a simple
+        // An OTSL-to-HTML-to-OTSL round trip should reconstruct the same OTSL for a simple
         // grid (modulo whitespace handling). This guards against drift between
         // the two converters.
         let otsl_in = "<fcel>a<fcel>b<nl><fcel>c<fcel>d<nl>";

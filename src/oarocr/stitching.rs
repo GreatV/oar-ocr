@@ -962,7 +962,7 @@ impl ResultStitcher {
 
         // --- Sort cells into rows ---
         // Sort structure cells — their bboxes drive both IoA matching and the
-        // td→cell text-assignment step.  Detected-cell bboxes (cell_bboxes_override)
+        // td-to-cell text-assignment step. Detected-cell bboxes (cell_bboxes_override)
         // are intentionally NOT used for IoA because the detected model can produce
         // a different cell count per row than the structure tokens, causing local_idx
         // to diverge from td_index and corrupting OCR-to-cell assignments.
@@ -983,7 +983,7 @@ impl ResultStitcher {
         }
 
         // Align structure-cell row flags with structure-token row boundaries.
-        // cell_aligned is used both for IoA matching (correct space) and td→cell mapping.
+        // cell_aligned is used both for IoA matching (correct space) and td-to-cell mapping.
         let mut cell_aligned = Self::map_and_get_max(&cell_row_flags, &row_start_index);
         cell_aligned.push(cell_sorted_indices.len());
         row_start_index.push(
@@ -993,7 +993,7 @@ impl ResultStitcher {
                 .count(),
         );
 
-        // --- Per-row matching: cell → OCR (PaddleX style) ---
+        // --- Per-row matching between cells and OCR results (PaddleX style) ---
         // For each cell in the row, collect ALL OCR boxes with IoA > 0.7.
         // When using detected cell bboxes (cell_bboxes_override is Some), apply
         // cross-row deduplication: an OCR box already claimed by an earlier row is
@@ -1912,10 +1912,10 @@ impl ResultStitcher {
                         if !ends_with_non_break_punct
                             && right_gap > container_width * paragraph_gap_ratio
                         {
-                            // Previous line ended far from the right edge → paragraph break.
+                            // A previous line ending far from the right edge starts a paragraph break.
                             add_newline = true;
                         } else {
-                            // Previous line extends close to the right edge → line wrap.
+                            // A previous line extending close to the right edge indicates a line wrap.
                             is_line_wrap = true;
                         }
                     }
@@ -1928,7 +1928,7 @@ impl ResultStitcher {
                     // at line-wrap boundaries.
                     let prev_ends_hyphen = result.ends_with('-');
                     if prev_ends_hyphen && is_line_wrap {
-                        // Line wraps at hyphen → word-break hyphen, remove it
+                        // Remove a word-break hyphen when the line wraps at that hyphen.
                         result.pop();
                         // Don't add any separator - words should be joined
                     } else if add_newline {

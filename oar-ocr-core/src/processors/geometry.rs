@@ -860,19 +860,19 @@ impl BoundingBox {
                 90 => {
                     // Image was rotated 270° counter-clockwise (or 90° clockwise) to correct
                     // Inverse: rotate box 90° clockwise
-                    // (x, y) in rotated → (rotated_height - y, x) in original
+                    // Map (x, y) in the rotated image to (rotated_height - y, x) in the original.
                     Point::new(rotated_height as f32 - p.y, p.x)
                 }
                 180 => {
                     // Image was rotated 180° to correct
                     // Inverse: rotate box 180°
-                    // (x, y) in rotated → (rotated_width - x, rotated_height - y) in original
+                    // Map (x, y) in the rotated image to (rotated_width - x, rotated_height - y) in the original.
                     Point::new(rotated_width as f32 - p.x, rotated_height as f32 - p.y)
                 }
                 270 => {
                     // Image was rotated 90° counter-clockwise (or 270° clockwise) to correct
                     // Inverse: rotate box 270° clockwise (or 90° counter-clockwise)
-                    // (x, y) in rotated → (y, rotated_width - x) in original
+                    // Map (x, y) in the rotated image to (y, rotated_width - x) in the original.
                     Point::new(p.y, rotated_width as f32 - p.x)
                 }
                 _ => {

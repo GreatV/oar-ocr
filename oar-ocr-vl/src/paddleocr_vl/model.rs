@@ -605,7 +605,7 @@ impl PaddleOcrVl {
     }
 
     /// Decode tokens **without** applying PaddleOCR-VL's task-specific
-    /// post-process (OTSL→HTML for tables, `$$..$$` stripping for formulas).
+    /// post-process (OTSL-to-HTML for tables, `$$..$$` stripping for formulas).
     /// This is the raw pre-postprocess string the model actually emitted —
     /// use this when feeding PaddleOCR-VL output as a draft for another
     /// target VLM. DSV matches at token granularity, so any post-process on
