@@ -14,6 +14,7 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 | [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) | 0.9B | External-layout page parsing, text, table, and formula recognition |
 | [OvisOCR2](https://huggingface.co/ATH-MaaS/OvisOCR2) | 0.8B | Model-native full-page document-to-Markdown parsing |
 | [MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) | 0.6B | Model-native layout, end-to-end parsing, text, formula, and OTSL-table recognition |
+| [MonkeyOCRv2-B-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-B-Parsing) | 0.7B | Higher-capacity ViT-B variant with the same parsing and recognition tasks |
 | [HunyuanOCR 1.5 / 1.0](https://huggingface.co/tencent/HunyuanOCR) | 1B | Model-native prompt-driven parsing with optional DFlash decoding for 1.5 |
 | [MinerU2.5-2509](https://huggingface.co/opendatalab/MinerU2.5-2509-1.2B) | 1.2B | Model-native two-step layout detection and content extraction |
 | [MinerU2.5-Pro-2605](https://huggingface.co/opendatalab/MinerU2.5-Pro-2605-1.2B) | 1.2B | Newer compatible checkpoint using the MinerU2.5 two-step pipeline |
@@ -126,9 +127,9 @@ println!("{markdown}");
 
 The official runtime resizes RGB input with bicubic antialiasing to a 32-pixel-aligned area between `448²` and `2880²` pixels. Its fixed prompt requests reading-order Markdown, LaTeX formulas, HTML tables, and bounding-box `<img>` tags for visual regions. `parse` removes those visual-region blocks by default before applying truncated-repeat cleanup; call `parse_with_image_tags(..., true)` or `generate` to retain the references. The library does not create the referenced bounding-box crop files.
 
-### MonkeyOCRv2-S-Parsing
+### MonkeyOCRv2-S/B-Parsing
 
-MonkeyOCRv2-S-Parsing uses its native Monkey ViT-S encoder and Qwen3-0.6B decoder. The API exposes the official full-page layout and end-to-end prompts as well as cropped text, formula, and OTSL-table recognition.
+MonkeyOCRv2-S-Parsing and MonkeyOCRv2-B-Parsing use native Monkey ViT-S and ViT-B encoders, respectively, with the same Qwen3-0.6B decoder. The API reads either checkpoint's dimensions from its configuration and exposes the official full-page layout and end-to-end prompts as well as cropped text, formula, and OTSL-table recognition.
 
 ```rust
 use oar_ocr_core::utils::load_image;
@@ -286,7 +287,7 @@ cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example ov
     document-1.jpg document-2.jpg
 ```
 
-### MonkeyOCRv2-S-Parsing Direct Inference
+### MonkeyOCRv2-S/B-Parsing Direct Inference
 
 Run the official end-to-end prompt over a complete page:
 
@@ -298,7 +299,7 @@ cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example mo
     document.jpg
 ```
 
-Other task values are `layout`, `text`, `formula`, and `table`. Use `--prompt` to supply a custom instruction.
+Pass `MonkeyOCRv2-B-Parsing` to `--model-dir` to use the ViT-B checkpoint. Other task values are `layout`, `text`, `formula`, and `table`. Use `--prompt` to supply a custom instruction.
 
 ### MinerU2.5 and MinerU2.5-Pro Direct Inference
 

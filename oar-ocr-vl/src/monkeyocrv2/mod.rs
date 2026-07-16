@@ -1,8 +1,8 @@
-//! MonkeyOCRv2-S-Parsing document VLM.
+//! MonkeyOCRv2-S/B-Parsing document VLM.
 //!
-//! The checkpoint combines a MonkeyOCRv2 ViT-S encoder with a Qwen3-0.6B
-//! causal decoder. This module provides native Candle inference for the
-//! official layout, end-to-end, text, formula, and OTSL-table prompts.
+//! The checkpoints combine MonkeyOCRv2 ViT-S or ViT-B encoders with a
+//! Qwen3-0.6B causal decoder. This module provides native Candle inference
+//! for the official layout, end-to-end, text, formula, and OTSL-table prompts.
 
 mod config;
 mod model;

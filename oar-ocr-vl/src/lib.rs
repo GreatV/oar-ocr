@@ -12,7 +12,7 @@
 //!   backbone)
 //! - `mineru_diffusion` - MinerU-Diffusion-V1 block-diffusion document OCR
 //!   (Qwen2-VL vision + SDAR decoder)
-//! - `monkeyocrv2` - MonkeyOCRv2-S-Parsing full-page and region parsing
+//! - `monkeyocrv2` - MonkeyOCRv2-S/B-Parsing full-page and region parsing
 //! - `ovisocr2` - OvisOCR2 end-to-end page-to-Markdown parser (Qwen3.5)
 //! - `doc_parser` - Unified document parsing with pluggable recognition backends
 //! - `utils` - Device parsing, candle helpers, markdown, OTSL conversion

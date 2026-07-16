@@ -276,4 +276,29 @@ mod tests {
         assert_eq!(config.text_config.head_dim().unwrap(), 128);
         assert_eq!(config.vision_config.head_dim().unwrap(), 64);
     }
+
+    #[test]
+    fn parses_shipped_b_config_shape() {
+        let config: MonkeyOcrV2Config = serde_json::from_str(
+            r#"{
+              "model_type":"monkeyocrv2","vocab_size":151936,"hidden_size":1024,
+              "intermediate_size":3072,"num_hidden_layers":28,"num_attention_heads":16,
+              "num_key_value_heads":8,"head_dim":128,"max_position_embeddings":40960,
+              "attention_bias":false,"tie_word_embeddings":true,"rope_theta":1000000,
+              "rms_norm_eps":0.000001,"hidden_act":"silu","image_token_id":151655,
+              "video_token_id":151656,
+              "vision_config":{"embed_dim":768,"hidden_size":1024,
+                "intermediate_size":3072,"num_hidden_layers":12,"num_attention_heads":12,
+                "num_channels":3,"patch_size":14,"spatial_merge_size":2,
+                "temporal_patch_size":1,"rms_norm_eps":0.00001,"use_bias":false,
+                "post_norm":true}
+            }"#,
+        )
+        .unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.text_config.head_dim().unwrap(), 128);
+        assert_eq!(config.vision_config.embed_dim, 768);
+        assert_eq!(config.vision_config.num_attention_heads, 12);
+        assert_eq!(config.vision_config.head_dim().unwrap(), 64);
+    }
 }

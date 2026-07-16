@@ -441,9 +441,9 @@ cargo run -p oar-ocr-vl --features cuda,download-binaries --example ovisocr2 -- 
 
 Add `--keep-image-tags` to retain visual-region image-tag references, or use `--max-tokens` to override the 16,384-token default. The example does not create the referenced bounding-box crop files.
 
-## MonkeyOCRv2-S-Parsing
+## MonkeyOCRv2-S/B-Parsing
 
-[MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) is a 0.6B document parser with a Monkey ViT-S vision encoder and Qwen3-0.6B decoder. The native Candle implementation supports the checkpoint's five official tasks: `Layout`, `EndToEnd`, `Text`, `Formula`, and `Table`.
+[MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) and [MonkeyOCRv2-B-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-B-Parsing) are 0.6B and 0.7B document parsers. They pair Monkey ViT-S and ViT-B vision encoders, respectively, with the same Qwen3-0.6B decoder. The native Candle implementation reads either checkpoint's dimensions from its configuration and supports the five official tasks: `Layout`, `EndToEnd`, `Text`, `Formula`, and `Table`.
 
 ### Downloading the Model
 
@@ -453,6 +453,9 @@ git clone https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing
 
 # Or using hf
 hf download zenosai/MonkeyOCRv2-S-Parsing --local-dir MonkeyOCRv2-S-Parsing
+
+# Use MonkeyOCRv2-B-Parsing instead for the ViT-B variant
+hf download zenosai/MonkeyOCRv2-B-Parsing --local-dir MonkeyOCRv2-B-Parsing
 ```
 
 ### Basic Usage
@@ -491,6 +494,8 @@ cargo run -p oar-ocr-vl --features cuda,download-binaries --example monkeyocrv2 
 ```
 
 The other `--task` values are `layout`, `text`, `formula`, and `table`. The model also implements `RecognitionBackend` for external-layout crop recognition, although its native tasks are the preferred full-page path.
+
+The same API and example accept `MonkeyOCRv2-B-Parsing`; select it by changing `--model-dir` to that checkpoint directory.
 
 ## HunyuanOCR 1.5
 

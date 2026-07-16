@@ -17,7 +17,7 @@ const MODEL_NAME: &str = "MonkeyOCRv2";
 pub const DEFAULT_MAX_NEW_TOKENS: usize = 10_000;
 pub const LAYOUT_MIN_PIXELS: u32 = 1_003_520;
 
-/// Official MonkeyOCRv2-S-Parsing inference tasks and prompts.
+/// Official MonkeyOCRv2-S/B-Parsing inference tasks and prompts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MonkeyOcrV2Task {
     /// Detect document elements in reading order, returning normalized boxes and labels.
@@ -52,7 +52,7 @@ impl MonkeyOcrV2Task {
     }
 }
 
-/// Candle-native MonkeyOCRv2-S-Parsing model (Monkey ViT-S + Qwen3-0.6B).
+/// Candle-native MonkeyOCRv2-S/B-Parsing model (Monkey ViT-S/B + Qwen3-0.6B).
 pub struct MonkeyOcrV2 {
     device: Device,
     dtype: DType,

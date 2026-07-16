@@ -1,4 +1,4 @@
-//! MonkeyOCRv2-S-Parsing inference example (Candle-based).
+//! MonkeyOCRv2-S/B-Parsing inference example (Candle-based).
 //!
 //! ```bash
 //! cargo run --release -p oar-ocr-vl --features cuda,download-binaries \
@@ -41,9 +41,9 @@ impl From<Task> for MonkeyOcrV2Task {
 
 #[derive(Parser)]
 #[command(name = "monkeyocrv2")]
-#[command(about = "MonkeyOCRv2-S-Parsing native Candle inference")]
+#[command(about = "MonkeyOCRv2-S/B-Parsing native Candle inference")]
 struct Args {
-    /// Path to the MonkeyOCRv2-S-Parsing model directory
+    /// Path to a MonkeyOCRv2-S-Parsing or MonkeyOCRv2-B-Parsing model directory
     #[arg(short, long)]
     model_dir: PathBuf,
 
