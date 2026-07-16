@@ -98,13 +98,16 @@ __device__ __forceinline__ void ovis_gated_delta_rule_body(
     }
     __syncthreads();
 
-    for (uint64_t index = lane; index < state_size; index += blockDim.x) {
-      const uint32_t key_dim = static_cast<uint32_t>(index / head_dim);
-      const uint32_t value_dim = static_cast<uint32_t>(index -
-                                                        static_cast<uint64_t>(key_dim) * head_dim);
+    // Traverse the state matrix directly instead of recovering its row and
+    // column with integer division for every element.
+    for (uint32_t key_dim = 0; key_dim < head_dim; ++key_dim) {
       const float key =
           ovis_gd_to_float(qkv[qkv_offset + head_dim + key_dim]) * k_inv_norm;
-      state[index] += key * delta[value_dim];
+      for (uint32_t value_dim = lane; value_dim < head_dim;
+           value_dim += blockDim.x) {
+        const uint64_t index = static_cast<uint64_t>(key_dim) * head_dim + value_dim;
+        state[index] += key * delta[value_dim];
+      }
     }
     __syncthreads();
 
