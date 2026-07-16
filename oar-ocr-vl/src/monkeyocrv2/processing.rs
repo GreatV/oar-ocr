@@ -28,7 +28,7 @@ pub fn preprocess_image(
 
     let factor = (cfg.patch_size * cfg.merge_size) as u32;
     let (height, width) = (image.height(), image.width());
-    if cfg.do_resize && (height < factor || width < factor) {
+    if height < factor || width < factor {
         return Err(OCRError::InvalidInput {
             message: format!(
                 "MonkeyOCRv2 image dimensions must be at least {factor}x{factor}, got {width}x{height}"
@@ -44,10 +44,12 @@ pub fn preprocess_image(
         .resample
         .and_then(pil_resample_to_filter_type)
         .unwrap_or(FilterType::CatmullRom);
+    let resized_holder;
     let resized = if resized_height != height || resized_width != width {
-        image::imageops::resize(image, resized_width, resized_height, filter)
+        resized_holder = image::imageops::resize(image, resized_width, resized_height, filter);
+        &resized_holder
     } else {
-        image.clone()
+        image
     };
 
     let default_mean = [0.0_f32; 3];
@@ -63,7 +65,7 @@ pub fn preprocess_image(
         &default_std
     };
     let rescale = cfg.do_rescale.then_some(cfg.rescale_factor);
-    let frame = image_to_chw(&resized, mean, std, rescale);
+    let frame = image_to_chw(resized, mean, std, rescale);
     let frames: Vec<&[f32]> =
         std::iter::repeat_n(frame.as_slice(), cfg.temporal_patch_size).collect();
 
@@ -143,5 +145,19 @@ mod tests {
         assert_eq!(inputs.grid_thw, (1, 4, 6));
         assert_eq!(inputs.num_image_tokens, 6);
         assert_eq!(inputs.pixel_values.dims(), &[24, 588]);
+    }
+
+    #[test]
+    fn rejects_too_small_image_when_resize_is_disabled() {
+        let image = RgbImage::new(27, 28);
+        let mut cfg = config();
+        cfg.do_resize = false;
+
+        let error = preprocess_image(&image, &cfg, &Device::Cpu, DType::F32).unwrap_err();
+        assert!(matches!(
+            error,
+            OCRError::InvalidInput { message }
+                if message.contains("at least 28x28, got 27x28")
+        ));
     }
 }

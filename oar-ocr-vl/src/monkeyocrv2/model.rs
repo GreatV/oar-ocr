@@ -237,7 +237,7 @@ impl MonkeyOcrV2 {
             if step + 1 == max_new_tokens {
                 break;
             }
-            let token_ids = Tensor::from_vec(vec![token], (1, 1), &self.device)
+            let token_ids = Tensor::new(&[[token]], &self.device)
                 .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create decode token", e))?;
             let token_embed = self.text.embed(&token_ids)?;
             let hidden = self.text.forward_causal(
@@ -261,7 +261,8 @@ impl MonkeyOcrV2 {
         image_inputs: &MonkeyOcrV2ImageInputs,
     ) -> Result<Tensor, OCRError> {
         let seq_len = input_ids.len();
-        let token_ids = Tensor::from_vec(input_ids.to_vec(), (1, seq_len), &self.device)
+        let token_ids = Tensor::new(input_ids, &self.device)
+            .and_then(|tensor| tensor.unsqueeze(0))
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create prompt token ids", e))?;
         let token_embeds = self.text.embed(&token_ids)?;
         let image_embeds = self
