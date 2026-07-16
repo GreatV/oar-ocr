@@ -13,6 +13,8 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 | [PaddleOCR-VL-1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) | 0.9B | Region-aware refinement, drop-in compatible with the 1.5 loader |
 | [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) | 0.9B | External-layout page parsing, text, table, and formula recognition |
 | [OvisOCR2](https://huggingface.co/ATH-MaaS/OvisOCR2) | 0.8B | Model-native full-page document-to-Markdown parsing |
+| [MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) | 0.6B | Model-native layout, end-to-end parsing, text, formula, and OTSL-table recognition |
+| [MonkeyOCRv2-B-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-B-Parsing) | 0.7B | Higher-capacity ViT-B variant with the same parsing and recognition tasks |
 | [HunyuanOCR 1.5 / 1.0](https://huggingface.co/tencent/HunyuanOCR) | 1B | Model-native prompt-driven parsing with optional DFlash decoding for 1.5 |
 | [MinerU2.5-2509](https://huggingface.co/opendatalab/MinerU2.5-2509-1.2B) | 1.2B | Model-native two-step layout detection and content extraction |
 | [MinerU2.5-Pro-2605](https://huggingface.co/opendatalab/MinerU2.5-Pro-2605-1.2B) | 1.2B | Newer compatible checkpoint using the MinerU2.5 two-step pipeline |
@@ -27,7 +29,7 @@ See [`examples`](examples) for runnable examples.
 1. **Layout detection** (ONNX models like PP-DocLayoutV3) to identify document regions
 2. **VL-based recognition** to extract content from each region
 
-Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, and GLM-OCR. OvisOCR2 is an end-to-end full-page parser and deliberately does not use DocParser. HunyuanOCR should be used with its model-native full-page prompts. MinerU2.5, MinerU2.5-Pro, and MinerU-Diffusion should use their model-native two-step extraction examples.
+Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, and optionally MonkeyOCRv2 for externally detected crops. MonkeyOCRv2's native `Layout` and `EndToEnd` tasks are preferable for complete pages. OvisOCR2 is an end-to-end full-page parser and deliberately does not use DocParser. HunyuanOCR should be used with its model-native full-page prompts. MinerU2.5, MinerU2.5-Pro, and MinerU-Diffusion should use their model-native two-step extraction examples.
 
 ## Installation
 
@@ -125,6 +127,30 @@ println!("{markdown}");
 
 The official runtime resizes RGB input with bicubic antialiasing to a 32-pixel-aligned area between `448²` and `2880²` pixels. Its fixed prompt requests reading-order Markdown, LaTeX formulas, HTML tables, and bounding-box `<img>` tags for visual regions. `parse` removes those visual-region blocks by default before applying truncated-repeat cleanup; call `parse_with_image_tags(..., true)` or `generate` to retain the references. The library does not create the referenced bounding-box crop files.
 
+### MonkeyOCRv2-S/B-Parsing
+
+MonkeyOCRv2-S-Parsing and MonkeyOCRv2-B-Parsing use native Monkey ViT-S and ViT-B encoders, respectively, with the same Qwen3-0.6B decoder. The API reads either checkpoint's dimensions from its configuration and exposes the official full-page layout and end-to-end prompts as well as cropped text, formula, and OTSL-table recognition.
+
+```rust
+use oar_ocr_core::utils::load_image;
+use oar_ocr_vl::utils::parse_device;
+use oar_ocr_vl::{MonkeyOcrV2, MonkeyOcrV2Task};
+
+let image = load_image("document.png")?;
+let model = MonkeyOcrV2::from_dir(
+    "MonkeyOCRv2-S-Parsing",
+    parse_device("cuda:0")?,
+)?;
+let parsed = model
+    .generate(&[image], &[MonkeyOcrV2Task::EndToEnd], 10_000)
+    .into_iter()
+    .next()
+    .expect("one result")?;
+println!("{parsed}");
+```
+
+`EndToEnd` emits a reading-order list whose items contain normalized `bbox`, `label`, and `content` fields. `Layout` emits `bbox` and `label`; its preprocessing follows the official one-megapixel minimum used by the reference layout pass. `Text`, `Formula`, and `Table` can be used directly or through `RecognitionBackend`; table output is OTSL and is converted by `DocParser`.
+
 ### DocParser
 
 Parse an entire page into Markdown with a layout predictor. This path is intended for external layout-first backends such as PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, and GLM-OCR.
@@ -191,7 +217,7 @@ cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example do
     document.jpg
 ```
 
-OvisOCR2, HunyuanOCR, and the MinerU models are intentionally not exposed by this example because their reference-quality paths are model-native full-page parsing, prompt-driven full-page parsing, and model-native two-step extraction, respectively.
+OvisOCR2, HunyuanOCR, and the MinerU models are intentionally not exposed by this example because their reference-quality paths are model-native full-page parsing, prompt-driven full-page parsing, and model-native two-step extraction, respectively. MonkeyOCRv2 implements `RecognitionBackend`, but its dedicated example is the preferred complete-page path.
 
 ### PaddleOCR-VL Direct Inference
 
@@ -260,6 +286,20 @@ cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example ov
     --device cuda:0 \
     document-1.jpg document-2.jpg
 ```
+
+### MonkeyOCRv2-S/B-Parsing Direct Inference
+
+Run the official end-to-end prompt over a complete page:
+
+```bash
+cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example monkeyocrv2 -- \
+    --model-dir MonkeyOCRv2-S-Parsing \
+    --device cuda:0 \
+    --task end-to-end \
+    document.jpg
+```
+
+Pass `MonkeyOCRv2-B-Parsing` to `--model-dir` to use the ViT-B checkpoint. Other task values are `layout`, `text`, `formula`, and `table`. Use `--prompt` to supply a custom instruction.
 
 ### MinerU2.5 and MinerU2.5-Pro Direct Inference
 
