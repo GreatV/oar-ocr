@@ -28,7 +28,7 @@ pub fn preprocess_image(
 
     let factor = (cfg.patch_size * cfg.merge_size) as u32;
     let (height, width) = (image.height(), image.width());
-    if height < factor || width < factor {
+    if !cfg.do_resize && (height < factor || width < factor) {
         return Err(OCRError::InvalidInput {
             message: format!(
                 "MonkeyOCRv2 image dimensions must be at least {factor}x{factor}, got {width}x{height}"
@@ -152,6 +152,15 @@ mod tests {
         assert_eq!(inputs.grid_thw, (1, 4, 6));
         assert_eq!(inputs.num_image_tokens, 6);
         assert_eq!(inputs.pixel_values.dims(), &[24, 588]);
+    }
+
+    #[test]
+    fn upscales_small_crop_when_resize_is_enabled() {
+        let image = RgbImage::new(84, 20);
+        let inputs = preprocess_image(&image, &config(), &Device::Cpu, DType::F32).unwrap();
+        assert_eq!(inputs.grid_thw, (1, 2, 6));
+        assert_eq!(inputs.num_image_tokens, 3);
+        assert_eq!(inputs.pixel_values.dims(), &[12, 588]);
     }
 
     #[test]
