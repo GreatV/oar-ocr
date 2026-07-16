@@ -35,6 +35,13 @@ pub fn preprocess_image(
             ),
         });
     }
+    if !cfg.do_resize && (!height.is_multiple_of(factor) || !width.is_multiple_of(factor)) {
+        return Err(OCRError::InvalidInput {
+            message: format!(
+                "MonkeyOCRv2 image dimensions must be divisible by {factor} when resizing is disabled, got {width}x{height}"
+            ),
+        });
+    }
     let (resized_height, resized_width) = if cfg.do_resize {
         smart_resize(height, width, factor, cfg.min_pixels, cfg.max_pixels)?
     } else {
@@ -158,6 +165,20 @@ mod tests {
             error,
             OCRError::InvalidInput { message }
                 if message.contains("at least 28x28, got 27x28")
+        ));
+    }
+
+    #[test]
+    fn rejects_unaligned_image_when_resize_is_disabled() {
+        let image = RgbImage::new(85, 56);
+        let mut cfg = config();
+        cfg.do_resize = false;
+
+        let error = preprocess_image(&image, &cfg, &Device::Cpu, DType::F32).unwrap_err();
+        assert!(matches!(
+            error,
+            OCRError::InvalidInput { message }
+                if message.contains("divisible by 28") && message.contains("85x56")
         ));
     }
 }

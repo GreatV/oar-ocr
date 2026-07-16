@@ -16,6 +16,7 @@
 
 use super::config::SdarConfig;
 use crate::attention::{RotaryEmbedding, flash_attention, scaled_dot_product_attention_gqa};
+use crate::kv_trim::TrimmableKvCache;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{
@@ -33,10 +34,37 @@ fn proc_err(msg: &'static str, e: candle_core::Error) -> OCRError {
 
 /// Per-layer committed KV (rope already applied to keys).
 /// Shape `(batch=1, num_kv_heads, len, head_dim)`.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 struct LayerKvCache {
-    k: Option<Tensor>,
-    v: Option<Tensor>,
+    committed: TrimmableKvCache,
+}
+
+impl LayerKvCache {
+    fn new() -> Self {
+        Self {
+            // Grow organically so diffusion inference does not reserve the
+            // checkpoint's full context length for every layer up front.
+            committed: TrimmableKvCache::new(2, 0),
+        }
+    }
+
+    fn full_kv(
+        &mut self,
+        k: &Tensor,
+        v: &Tensor,
+        store_kv: bool,
+    ) -> candle_core::Result<(Tensor, Tensor)> {
+        if store_kv {
+            return self.committed.append(k, v);
+        }
+        match (self.committed.k(), self.committed.v()) {
+            (Some(committed_k), Some(committed_v)) => Ok((
+                Tensor::cat(&[committed_k, k], 2)?,
+                Tensor::cat(&[committed_v, v], 2)?,
+            )),
+            _ => Ok((k.clone(), v.clone())),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -54,7 +82,7 @@ pub struct SdarKvCache {
 impl SdarKvCache {
     pub fn new(num_layers: usize) -> Self {
         Self {
-            layers: vec![LayerKvCache::default(); num_layers],
+            layers: (0..num_layers).map(|_| LayerKvCache::new()).collect(),
         }
     }
 }
@@ -169,20 +197,12 @@ impl SdarAttention {
         let q = apply_rope(&q, cos, sin)?;
         let k = apply_rope(&k, cos, sin)?;
 
-        // Concatenate the committed cache (already rope-applied) with the
-        // current segment's KV. Only persist when committing the block.
-        let (full_k, full_v) = match (&cache.k, &cache.v) {
-            (Some(ck), Some(cv)) => {
-                let fk = Tensor::cat(&[ck, &k], 2).map_err(|e| proc_err("SDAR kv cat k", e))?;
-                let fv = Tensor::cat(&[cv, &v], 2).map_err(|e| proc_err("SDAR kv cat v", e))?;
-                (fk, fv)
-            }
-            _ => (k, v),
-        };
-        if mode.store_kv {
-            cache.k = Some(full_k.clone());
-            cache.v = Some(full_v.clone());
-        }
+        // Committed causal/decode KV uses appendable backing storage. SDAR's
+        // in-flight denoising block remains transient and is concatenated only
+        // for that attention pass.
+        let (full_k, full_v) = cache
+            .full_kv(&k, &v, mode.store_kv)
+            .map_err(|e| proc_err("SDAR kv cache update", e))?;
 
         let n_rep = self.num_heads / self.num_kv_heads;
         let flash = if mask.is_none() {
@@ -426,5 +446,36 @@ impl SdarModel {
         self.lm_head
             .forward(hidden)
             .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "lm_head", e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn committed_cache_appends_in_place_between_growths() -> candle_core::Result<()> {
+        let device = Device::Cpu;
+        let mut cache = LayerKvCache::new();
+        let prompt = Tensor::zeros((1, 2, 3, 4), DType::F32, &device)?;
+        let token = Tensor::ones((1, 2, 1, 4), DType::F32, &device)?;
+
+        let (prompt_k, _) = cache.full_kv(&prompt, &prompt, true)?;
+        assert_eq!(prompt_k.dims(), &[1, 2, 3, 4]);
+        assert_eq!(cache.committed.storage_capacity(), 3);
+
+        let (first_decode_k, _) = cache.full_kv(&token, &token, true)?;
+        assert_eq!(first_decode_k.dims(), &[1, 2, 4, 4]);
+        assert_eq!(cache.committed.storage_capacity(), 6);
+
+        let (second_decode_k, _) = cache.full_kv(&token, &token, true)?;
+        assert_eq!(second_decode_k.dims(), &[1, 2, 5, 4]);
+        assert_eq!(cache.committed.storage_capacity(), 6);
+
+        let transient = Tensor::zeros((1, 2, 2, 4), DType::F32, &device)?;
+        let (transient_k, _) = cache.full_kv(&transient, &transient, false)?;
+        assert_eq!(transient_k.dims(), &[1, 2, 7, 4]);
+        assert_eq!(cache.committed.current_seq_len(), 5);
+        Ok(())
     }
 }

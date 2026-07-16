@@ -465,4 +465,27 @@ mod tests {
         let first = cos.i((0, 0, ..)).unwrap().to_vec1::<f32>().unwrap();
         assert!(first.iter().all(|value| (*value - 1.0).abs() < 1e-6));
     }
+
+    #[test]
+    fn rope_interleaves_axes_before_rotate_half_duplication() {
+        let like = Tensor::zeros((4, 588), DType::F32, &candle_core::Device::Cpu).unwrap();
+        let (cos, _) = build_vision_rope((1, 2, 2), 1, 8, &like).unwrap();
+        let bottom_right = cos.i((3, 0, ..)).unwrap().to_vec1::<f32>().unwrap();
+        let expected = [
+            1.0_f32.cos(),
+            1.0_f32.cos(),
+            0.01_f32.cos(),
+            0.01_f32.cos(),
+            1.0_f32.cos(),
+            1.0_f32.cos(),
+            0.01_f32.cos(),
+            0.01_f32.cos(),
+        ];
+        assert!(
+            bottom_right
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| (*actual - expected).abs() < 1e-6)
+        );
+    }
 }
