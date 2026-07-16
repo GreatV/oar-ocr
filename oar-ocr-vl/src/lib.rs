@@ -12,6 +12,7 @@
 //!   backbone)
 //! - `mineru_diffusion` - MinerU-Diffusion-V1 block-diffusion document OCR
 //!   (Qwen2-VL vision + SDAR decoder)
+//! - `ovisocr2` - OvisOCR2 end-to-end page-to-Markdown parser (Qwen3.5)
 //! - `doc_parser` - Unified document parsing with pluggable recognition backends
 //! - `utils` - Device parsing, candle helpers, markdown, OTSL conversion
 //! - `attention` - Unified attention shared by all models
@@ -35,6 +36,7 @@ pub mod glmocr;
 pub mod hunyuanocr;
 pub mod mineru;
 pub mod mineru_diffusion;
+pub mod ovisocr2;
 pub mod paddleocr_vl;
 pub mod utils;
 
@@ -63,5 +65,6 @@ pub use glmocr::GlmOcr;
 pub use hunyuanocr::{DFlashConfig, DFlashTargetConfig, HunyuanOcr, HunyuanOcrVersion};
 pub use mineru::MinerU;
 pub use mineru_diffusion::{DiffusionGenerationConfig, MinerUDiffusion};
+pub use ovisocr2::OvisOcr2;
 
 pub use doc_parser::{DocParser, DocParserConfig, RecognitionBackend, RecognitionTask};

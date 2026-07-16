@@ -1,14 +1,12 @@
 use super::config::MinerUVisionConfig;
-use crate::attention::{on_compute_device, scaled_dot_product_attention};
+use crate::attention::{
+    VISION_CHUNKED_ATTN_CHUNK_SIZE, VISION_CHUNKED_ATTN_SEQ_THRESHOLD, chunked_vision_attention,
+    on_compute_device, scaled_dot_product_attention,
+};
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{LayerNorm, LayerNormConfig, Linear, Module, VarBuilder, layer_norm, linear};
 use oar_ocr_core::core::OCRError;
-
-/// Sequence length threshold above which chunked attention is used to reduce peak memory.
-const CHUNKED_ATTN_SEQ_THRESHOLD: usize = 1024;
-/// Chunk size for chunked attention when processing large images.
-const CHUNKED_ATTN_CHUNK_SIZE: usize = 256;
 
 fn quick_gelu(xs: &Tensor) -> Result<Tensor, OCRError> {
     let scaled = (xs * 1.702).map_err(|e| {
@@ -377,25 +375,9 @@ impl VisionAttention {
         let seq_len = q
             .dim(2)
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "vision q dim", e))?;
-        let attn = if seq_len > CHUNKED_ATTN_SEQ_THRESHOLD {
-            // Chunked attention to reduce peak memory for large images.
-            let chunk_size = CHUNKED_ATTN_CHUNK_SIZE;
-            let mut chunks: Vec<Tensor> = Vec::new();
-            let mut start = 0usize;
-            while start < seq_len {
-                let len = (seq_len - start).min(chunk_size);
-                let q_chunk = q
-                    .narrow(2, start, len)
-                    .map_err(|e| candle_to_ocr_inference("MinerU2.5", "vision q narrow", e))?;
-                let out =
-                    scaled_dot_product_attention(&q_chunk, &k, &v, None, self.scale, false)
-                        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "vision attention", e))?;
-                chunks.push(out);
-                start += len;
-            }
-            let refs: Vec<&Tensor> = chunks.iter().collect();
-            Tensor::cat(&refs, 2)
-                .map_err(|e| candle_to_ocr_inference("MinerU2.5", "vision attn cat", e))?
+        let attn = if seq_len > VISION_CHUNKED_ATTN_SEQ_THRESHOLD {
+            chunked_vision_attention(&q, &k, &v, self.scale, VISION_CHUNKED_ATTN_CHUNK_SIZE)
+                .map_err(|e| candle_to_ocr_inference("MinerU2.5", "vision attention", e))?
         } else {
             scaled_dot_product_attention(&q, &k, &v, None, self.scale, false)
                 .map_err(|e| candle_to_ocr_inference("MinerU2.5", "vision attention", e))?

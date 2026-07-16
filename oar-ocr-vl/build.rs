@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::{fs, path::Path, process::Command};
 
 const MIN_CUDA_COMPUTE_CAP: u32 = 80;
 
@@ -71,8 +71,48 @@ fn cuda_compute_arch() -> String {
     }
 }
 
+fn collect_cuda_sources(dir: &Path, sources: &mut Vec<std::path::PathBuf>) {
+    for entry in fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("failed to scan CUDA source directory {dir:?}: {error}"))
+    {
+        let path = entry.expect("failed to read CUDA source entry").path();
+        if path.is_dir() {
+            collect_cuda_sources(&path, sources);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("cu") {
+            sources.push(path);
+        }
+    }
+}
+
+fn validate_cuda_aggregator(sources: &[std::path::PathBuf]) {
+    let aggregator_path = Path::new("src/cuda_kernels.cu");
+    let aggregator = fs::read_to_string(aggregator_path)
+        .unwrap_or_else(|error| panic!("failed to read {aggregator_path:?}: {error}"));
+    for source in sources {
+        if source == aggregator_path {
+            continue;
+        }
+        let relative = source
+            .strip_prefix("src")
+            .expect("CUDA sources are collected under src")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let include = format!("#include \"{relative}\"");
+        assert!(
+            aggregator.lines().any(|line| line.trim() == include),
+            "{aggregator_path:?} must include CUDA source {source:?} as {include:?}"
+        );
+    }
+}
+
 fn main() {
-    println!("cargo:rerun-if-changed=src/hunyuanocr/dynamic_kv.cu");
+    let mut cuda_sources = Vec::new();
+    collect_cuda_sources(Path::new("src"), &mut cuda_sources);
+    cuda_sources.sort();
+    for source in &cuda_sources {
+        println!("cargo:rerun-if-changed={}", source.display());
+    }
+    validate_cuda_aggregator(&cuda_sources);
     println!("cargo:rerun-if-env-changed=CUDA_COMPUTE_CAP");
     println!("cargo:rerun-if-env-changed=NVCC");
     let metal_enabled = std::env::var_os("CARGO_FEATURE_METAL").is_some();
@@ -94,7 +134,7 @@ fn main() {
             .arg(format!("--gpu-architecture={cuda_arch}"))
             .arg("-o")
             .arg(out_dir.join("oar_vl_kernels.ptx"))
-            .arg("src/hunyuanocr/dynamic_kv.cu")
+            .arg("src/cuda_kernels.cu")
             .output()
             .unwrap_or_else(|error| {
                 panic!(

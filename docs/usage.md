@@ -380,6 +380,67 @@ cargo run -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl
 | `PaddleOcrVlTask::Spotting` | Text spotting (localization + recognition) | Structured text |
 | `PaddleOcrVlTask::Seal` | Seal recognition | Plain text |
 
+## OvisOCR2
+
+[OvisOCR2](https://huggingface.co/ATH-MaaS/OvisOCR2) is a 0.8B end-to-end page parser in the `oar-ocr-vl` crate. It turns each complete page into one Markdown document using its model-native path. It does not use an external layout detector and is not a `DocParser` backend.
+
+### Downloading the Model
+
+```bash
+git lfs install
+git clone https://huggingface.co/ATH-MaaS/OvisOCR2
+
+# Or using hf
+hf download ATH-MaaS/OvisOCR2 --local-dir OvisOCR2
+```
+
+### Official Input and Output Contract
+
+The library uses the official prompt internally; callers do not need to provide it. The leading newline below is part of the prompt:
+
+```text
+
+Extract all readable content from the image in natural human reading order and output the result as a single Markdown document. For charts or images, represent them using an HTML image tag: <img src="images/bbox_{left}_{top}_{right}_{bottom}.jpg" />, where left, top, right, bottom are bounding box coordinates scaled to [0, 1000). Format formulas as LaTeX. Format tables as HTML: <table>...</table>. Transcribe all other text as standard Markdown. Preserve the original text without translation or paraphrasing.
+```
+
+Input pages are converted to RGB, resized with bicubic antialiasing, and aligned to the model's 32-pixel factor. The official runtime constrains image area to `448²` through `2880²` pixels. Output is reading-order Markdown with LaTeX formulas and HTML tables. Visual regions may be emitted as `<img src="images/bbox_left_top_right_bottom.jpg" />`, with coordinates scaled to `[0, 1000)`.
+
+`OvisOcr2::parse` applies truncated-repeat cleanup and removes standalone visual-region image-tag blocks, matching the default official post-processing. Use `parse_with_image_tags(..., true)` or `generate` when those tags must be retained.
+
+### Basic Usage
+
+```rust,no_run
+use oar_ocr_core::utils::load_image;
+use oar_ocr_vl::ovisocr2::DEFAULT_MAX_NEW_TOKENS;
+use oar_ocr_vl::utils::parse_device;
+use oar_ocr_vl::OvisOcr2;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let image = load_image("document.jpg")?;
+    let model = OvisOcr2::from_dir("OvisOCR2", parse_device("cpu")?)?;
+    let markdown = model
+        .parse(&[image], DEFAULT_MAX_NEW_TOKENS)
+        .into_iter()
+        .next()
+        .expect("one result")?;
+    println!("{markdown}");
+    Ok(())
+}
+```
+
+The API is batch-oriented: pass multiple page images to `parse` and receive one result per page in the same order. The upstream generation limit, exported as `DEFAULT_MAX_NEW_TOKENS`, is 16,384.
+
+### Running the Example
+
+```bash
+cargo run -p oar-ocr-vl --features cuda,download-binaries --example ovisocr2 -- \
+    --model-dir OvisOCR2 \
+    --device cuda:0 \
+    document-1.jpg document-2.jpg
+```
+
+Add `--keep-image-tags` to retain visual-region image-tag references, or use `--max-tokens` to override the 16,384-token default. The example does not create the referenced bounding-box crop files.
+
 ## HunyuanOCR 1.5
 
 [HunyuanOCR 1.5](https://huggingface.co/tencent/HunyuanOCR) is a lightweight OCR expert VLM. It is available in the `oar-ocr-vl` crate and supports prompt-driven image-to-text OCR. `HunyuanOcr::from_dir` automatically detects 1.5 at the model repository root and remains compatible with archived 1.0 weights under `v1.0/`.
@@ -618,7 +679,7 @@ cargo run -p oar-ocr-vl --features cuda,download-binaries \
 
 DocParser provides a unified API for external layout-first document parsing with VL-based recognition. The `doc_parser` example supports PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, and GLM-OCR.
 
-Use `parse(&layout, image)` with an ONNX layout detector. The library also implements `RecognitionBackend` for HunyuanOCR and MinerU2.5/Pro, but they are intentionally not exposed by the CLI example because their reference-quality paths are prompt-driven full-page parsing and model-native two-step extraction, respectively. MinerU-Diffusion uses its dedicated example.
+Use `parse(&layout, image)` with an ONNX layout detector. OvisOCR2 deliberately does not implement `RecognitionBackend`; use its full-page `OvisOcr2::parse` API instead. The library also implements `RecognitionBackend` for HunyuanOCR and MinerU2.5/Pro, but they are intentionally not exposed by the CLI example because their reference-quality paths are prompt-driven full-page parsing and model-native two-step extraction, respectively. MinerU-Diffusion uses its dedicated example.
 
 ### Basic Usage
 
