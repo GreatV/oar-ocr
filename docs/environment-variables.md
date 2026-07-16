@@ -36,7 +36,7 @@ OAR_HOME=/data/oar-models cargo run --release --example ocr -- doc.jpg
 
 ## `OAR_VL_DTYPE`
 
-Overrides the automatic weight/compute dtype selection for Vision-Language models (PaddleOCR-VL, GLM-OCR, OvisOCR2, HunyuanOCR, MinerU2.5/Pro, and MinerU-Diffusion).
+Overrides the automatic weight/compute dtype selection for Vision-Language models (PaddleOCR-VL, GLM-OCR, OvisOCR2, MonkeyOCRv2, HunyuanOCR, MinerU2.5/Pro, and MinerU-Diffusion).
 
 Accepted values (case-insensitive):
 

@@ -441,6 +441,57 @@ cargo run -p oar-ocr-vl --features cuda,download-binaries --example ovisocr2 -- 
 
 Add `--keep-image-tags` to retain visual-region image-tag references, or use `--max-tokens` to override the 16,384-token default. The example does not create the referenced bounding-box crop files.
 
+## MonkeyOCRv2-S-Parsing
+
+[MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) is a 0.6B document parser with a Monkey ViT-S vision encoder and Qwen3-0.6B decoder. The native Candle implementation supports the checkpoint's five official tasks: `Layout`, `EndToEnd`, `Text`, `Formula`, and `Table`.
+
+### Downloading the Model
+
+```bash
+git lfs install
+git clone https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing
+
+# Or using hf
+hf download zenosai/MonkeyOCRv2-S-Parsing --local-dir MonkeyOCRv2-S-Parsing
+```
+
+### Basic Usage
+
+```rust,no_run
+use oar_ocr_core::utils::load_image;
+use oar_ocr_vl::utils::parse_device;
+use oar_ocr_vl::{MonkeyOcrV2, MonkeyOcrV2Task};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let image = load_image("document.jpg")?;
+    let model = MonkeyOcrV2::from_dir(
+        "MonkeyOCRv2-S-Parsing",
+        parse_device("cuda:0")?,
+    )?;
+    let output = model
+        .generate(&[image], &[MonkeyOcrV2Task::EndToEnd], 10_000)
+        .into_iter()
+        .next()
+        .expect("one result")?;
+    println!("{output}");
+    Ok(())
+}
+```
+
+`EndToEnd` returns a Python/JSON-like reading-order list of `{bbox, label, content}` items; box coordinates are normalized to `[0, 1000]`. `Layout` returns `{bbox, label}` items and applies the official layout-pass minimum area of 1,003,520 pixels. `Table` emits OTSL, while `Formula` emits LaTeX. `generate_with_prompts` is available for custom instructions.
+
+### Running the Example
+
+```bash
+cargo run -p oar-ocr-vl --features cuda,download-binaries --example monkeyocrv2 -- \
+    --model-dir MonkeyOCRv2-S-Parsing \
+    --device cuda:0 \
+    --task end-to-end \
+    document.jpg
+```
+
+The other `--task` values are `layout`, `text`, `formula`, and `table`. The model also implements `RecognitionBackend` for external-layout crop recognition, although its native tasks are the preferred full-page path.
+
 ## HunyuanOCR 1.5
 
 [HunyuanOCR 1.5](https://huggingface.co/tencent/HunyuanOCR) is a lightweight OCR expert VLM. It is available in the `oar-ocr-vl` crate and supports prompt-driven image-to-text OCR. `HunyuanOcr::from_dir` automatically detects 1.5 at the model repository root and remains compatible with archived 1.0 weights under `v1.0/`.
@@ -677,9 +728,9 @@ cargo run -p oar-ocr-vl --features cuda,download-binaries \
 
 ## DocParser
 
-DocParser provides a unified API for external layout-first document parsing with VL-based recognition. The `doc_parser` example supports PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, and GLM-OCR.
+DocParser provides a unified API for external layout-first document parsing with VL-based recognition. The `doc_parser` example supports PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, and GLM-OCR. MonkeyOCRv2 also implements `RecognitionBackend`, but uses its dedicated model-native example for complete pages.
 
-Use `parse(&layout, image)` with an ONNX layout detector. OvisOCR2 deliberately does not implement `RecognitionBackend`; use its full-page `OvisOcr2::parse` API instead. The library also implements `RecognitionBackend` for HunyuanOCR and MinerU2.5/Pro, but they are intentionally not exposed by the CLI example because their reference-quality paths are prompt-driven full-page parsing and model-native two-step extraction, respectively. MinerU-Diffusion uses its dedicated example.
+Use `parse(&layout, image)` with an ONNX layout detector. OvisOCR2 deliberately does not implement `RecognitionBackend`; use its full-page `OvisOcr2::parse` API instead. The library also implements `RecognitionBackend` for MonkeyOCRv2, HunyuanOCR, and MinerU2.5/Pro, but they are intentionally not exposed by the CLI example because their reference-quality paths are model-native parsing. MinerU-Diffusion uses its dedicated example.
 
 ### Basic Usage
 

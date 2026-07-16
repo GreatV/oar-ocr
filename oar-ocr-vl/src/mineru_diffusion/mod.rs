@@ -12,7 +12,7 @@
 mod config;
 mod model;
 mod projector;
-mod text;
+pub(crate) mod text;
 
 pub use config::{MinerUDiffusionConfig, SdarConfig};
 pub use model::{DEFAULT_PROMPT, DiffusionGenerationConfig, MinerUDiffusion};

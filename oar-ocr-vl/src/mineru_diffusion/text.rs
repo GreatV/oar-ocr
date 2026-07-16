@@ -39,6 +39,12 @@ struct LayerKvCache {
     v: Option<Tensor>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AttentionMode {
+    store_kv: bool,
+    is_causal: bool,
+}
+
 /// Committed KV cache across all decoder layers.
 #[derive(Debug, Clone)]
 pub struct SdarKvCache {
@@ -130,7 +136,7 @@ impl SdarAttention {
         sin: &Tensor,
         mask: Option<&Tensor>,
         cache: &mut LayerKvCache,
-        store_kv: bool,
+        mode: AttentionMode,
     ) -> Result<Tensor, OCRError> {
         let (b, s, _) = hidden
             .dims3()
@@ -173,14 +179,14 @@ impl SdarAttention {
             }
             _ => (k, v),
         };
-        if store_kv {
+        if mode.store_kv {
             cache.k = Some(full_k.clone());
             cache.v = Some(full_v.clone());
         }
 
         let n_rep = self.num_heads / self.num_kv_heads;
         let flash = if mask.is_none() {
-            flash_attention(&q, &full_k, &full_v, self.scale, false)
+            flash_attention(&q, &full_k, &full_v, self.scale, mode.is_causal)
                 .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "flash attention", e))?
         } else {
             None
@@ -188,7 +194,13 @@ impl SdarAttention {
         let attn = match flash {
             Some(attn) => attn,
             None => scaled_dot_product_attention_gqa(
-                &q, &full_k, &full_v, mask, self.scale, false, n_rep,
+                &q,
+                &full_k,
+                &full_v,
+                mask,
+                self.scale,
+                mode.is_causal,
+                n_rep,
             )
             .map_err(|e| {
                 candle_to_ocr_inference("MinerU-Diffusion", "grouped-query attention", e)
@@ -275,7 +287,7 @@ impl SdarLayer {
         sin: &Tensor,
         mask: Option<&Tensor>,
         cache: &mut LayerKvCache,
-        store_kv: bool,
+        mode: AttentionMode,
     ) -> Result<Tensor, OCRError> {
         let normed = self
             .input_layernorm
@@ -283,7 +295,7 @@ impl SdarLayer {
             .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "input_layernorm", e))?;
         let attn = self
             .self_attn
-            .forward(&normed, cos, sin, mask, cache, store_kv)?;
+            .forward(&normed, cos, sin, mask, cache, mode)?;
         let hidden = (hidden + attn).map_err(|e| proc_err("SDAR attn residual", e))?;
         let normed = self
             .post_attention_layernorm
@@ -367,10 +379,42 @@ impl SdarModel {
         cache: &mut SdarKvCache,
         store_kv: bool,
     ) -> Result<Tensor, OCRError> {
+        self.forward_inner(inputs_embeds, positions, mask, cache, store_kv, false)
+    }
+
+    /// Run the same Qwen3 decoder in ordinary autoregressive causal mode.
+    ///
+    /// SDAR itself uses block-level masks and therefore calls [`Self::forward`]
+    /// with non-causal attention. Multimodal models that share its Qwen3 +
+    /// QK-norm backbone can use this path for flash-attention prefill and
+    /// token-by-token decoding without duplicating the decoder stack.
+    pub(crate) fn forward_causal(
+        &self,
+        inputs_embeds: &Tensor,
+        positions: &[i64],
+        cache: &mut SdarKvCache,
+        store_kv: bool,
+    ) -> Result<Tensor, OCRError> {
+        self.forward_inner(inputs_embeds, positions, None, cache, store_kv, true)
+    }
+
+    fn forward_inner(
+        &self,
+        inputs_embeds: &Tensor,
+        positions: &[i64],
+        mask: Option<&Tensor>,
+        cache: &mut SdarKvCache,
+        store_kv: bool,
+        is_causal: bool,
+    ) -> Result<Tensor, OCRError> {
         let (cos, sin) = self.rope_for(positions)?;
         let mut hidden = inputs_embeds.clone();
+        let mode = AttentionMode {
+            store_kv,
+            is_causal,
+        };
         for (layer, layer_cache) in self.layers.iter().zip(cache.layers.iter_mut()) {
-            hidden = layer.forward(&hidden, &cos, &sin, mask, layer_cache, store_kv)?;
+            hidden = layer.forward(&hidden, &cos, &sin, mask, layer_cache, mode)?;
         }
         self.norm
             .forward(&hidden)
