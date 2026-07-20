@@ -153,8 +153,9 @@ use oar_ocr::oarocr::OARStructureBuilder;
 use oar_ocr::processors::LimitType;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{error, info, warn};
-use utils::device_config::parse_device_config;
+use utils::device_config::{apply_ort_overrides, parse_device_config};
 use utils::pdf::{PdfDocument, is_pdf_file};
 
 /// Command-line arguments for the structure analysis example
@@ -330,6 +331,22 @@ struct Args {
     /// Number of cropped regions to process per recognition batch
     #[arg(long = "region-batch-size")]
     region_batch_size: Option<usize>,
+
+    /// Repeat inference to expose warm-up and steady-state latency.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+    repeat: u32,
+
+    /// ONNX Runtime intra-op worker threads (explicit tuning experiment).
+    #[arg(long)]
+    ort_intra_threads: Option<usize>,
+
+    /// ONNX Runtime inter-op worker threads (only useful with parallel execution).
+    #[arg(long)]
+    ort_inter_threads: Option<usize>,
+
+    /// Enable ONNX Runtime parallel graph execution.
+    #[arg(long)]
+    ort_parallel_execution: bool,
 
     /// Layout detection score threshold (varies by class, 0.3-0.5)
     #[arg(long, default_value = "0.5")]
@@ -614,6 +631,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with_intra_threads(threads),
         );
     }
+    let ort_config = apply_ort_overrides(
+        ort_config,
+        args.ort_intra_threads,
+        args.ort_inter_threads,
+        args.ort_parallel_execution,
+    )?;
     if let Some(config) = ort_config {
         builder = builder.ort_session(config);
     }
@@ -715,7 +738,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .text_recognition_config(text_rec_config);
     }
 
+    let build_start = Instant::now();
     let analyzer = builder.build()?;
+    info!(
+        "Structure pipeline built in {:.2}ms",
+        build_start.elapsed().as_secs_f64() * 1000.0
+    );
 
     // Collect all results for potential concatenation
     let mut all_results: Vec<oar_ocr::domain::structure::StructureResult> = Vec::new();
@@ -762,7 +790,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Batch processing {} image(s) with configured batching",
         images.len()
     );
+    // Only the warm-up runs need a cloned image set; the final (or only) run
+    // can move `images` directly, so `--repeat 1` (the default) never pays a
+    // clone.
+    for iteration in 1..args.repeat {
+        let predict_start = Instant::now();
+        analyzer.predict_images(images.clone());
+        info!(
+            "Structure inference completed (run {}/{}) in {:.2}ms",
+            iteration,
+            args.repeat,
+            predict_start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+    let predict_start = Instant::now();
     let batch_results = analyzer.predict_images(images);
+    info!(
+        "Structure inference completed (run {}/{}) in {:.2}ms",
+        args.repeat,
+        args.repeat,
+        predict_start.elapsed().as_secs_f64() * 1000.0
+    );
 
     // Process each result: assign metadata, save, visualize, log
     for (idx, (page_result, (source_path, source_stem))) in

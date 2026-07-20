@@ -732,6 +732,12 @@ struct SamplingParams {
     gpu_greedy_sampling: bool,
 }
 
+impl SamplingParams {
+    fn is_greedy(&self) -> bool {
+        !self.do_sample || self.top_k == 1
+    }
+}
+
 fn select_next_token(
     logits: &Tensor,
     history: &[u32],
@@ -745,11 +751,34 @@ fn select_next_token(
     #[cfg(feature = "cuda")]
     if params.gpu_greedy_sampling
         && logits.device().is_cuda()
-        && (!params.do_sample || params.top_k == 1)
+        && params.is_greedy()
         && params.repetition_penalty <= 1.0
         && matches!(logits.dtype(), DType::BF16 | DType::F32)
     {
         return select_greedy_token_cuda(logits, history, params.no_repeat_ngram_size);
+    }
+
+    // Metal's generic argmax returns a scalar token without downloading and
+    // allocating the full vocabulary on the host. Preserve the CPU processor
+    // path whenever repetition or no-repeat-ngram would modify the logits.
+    if logits.device().is_metal()
+        && params.is_greedy()
+        && params.repetition_penalty <= 1.0
+        && matches!(logits.dtype(), DType::F16 | DType::BF16 | DType::F32)
+        && no_repeat_ngram_banned_tokens(history, params.no_repeat_ngram_size).is_empty()
+    {
+        let not_nan = logits
+            .eq(logits)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "Metal NaN mask", e))?;
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, logits.device())
+            .and_then(|value| value.to_dtype(logits.dtype()))
+            .and_then(|value| value.broadcast_as(logits.dims()))
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "Metal NaN replacement", e))?;
+        return not_nan
+            .where_cond(logits, &neg_inf)
+            .and_then(|logits| logits.argmax(candle_core::D::Minus1))
+            .and_then(|token| token.to_scalar::<u32>())
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "Metal greedy argmax", e));
     }
 
     let logits = logits
@@ -763,7 +792,7 @@ fn select_next_token(
 
     apply_sampling_processors(&mut logits_vec, history, params);
 
-    if !params.do_sample || params.top_k == 1 {
+    if params.is_greedy() {
         return Ok(argmax_token(&logits_vec));
     }
 
@@ -814,7 +843,7 @@ fn apply_sampling_processors(logits: &mut [f32], history: &[u32], params: &Sampl
     apply_repetition_penalty(logits, history, params.repetition_penalty);
     apply_no_repeat_ngram(logits, history, params.no_repeat_ngram_size);
 
-    if !params.do_sample || params.top_k == 1 {
+    if params.is_greedy() {
         return;
     }
 
@@ -1155,6 +1184,44 @@ mod tests {
         let gpu = select_next_token(&gpu_logits, &history, &params).unwrap();
         assert_eq!(cpu, 1024);
         assert_eq!(gpu, cpu);
+        Ok(())
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn mineru_metal_greedy_matches_cpu_and_preserves_first_tie() -> candle_core::Result<()> {
+        let Ok(device) = Device::new_metal(0) else {
+            return Ok(());
+        };
+        let mut values = vec![0.0f32; 151_936];
+        values[0] = f32::NAN;
+        values[1] = 10.0;
+        values[1024] = 10.0;
+        let metal_logits = Tensor::from_vec(values, 151_936, &device)?.to_dtype(DType::F16)?;
+        let cpu_logits = metal_logits.to_device(&Device::Cpu)?;
+        let params = SamplingParams {
+            repetition_penalty: 1.0,
+            no_repeat_ngram_size: 3,
+            do_sample: true,
+            temperature: 0.01,
+            top_p: 0.001,
+            top_k: 1,
+            #[cfg(feature = "cuda")]
+            gpu_greedy_sampling: false,
+        };
+
+        let cpu = select_next_token(&cpu_logits, &[], &params).unwrap();
+        let metal = select_next_token(&metal_logits, &[], &params).unwrap();
+        assert_eq!(cpu, 1);
+        assert_eq!(metal, cpu);
+
+        // The current bigram [4, 5] bans token 1, forcing the exact CPU
+        // processor fallback and selecting the other tied token.
+        let history = [4, 5, 1, 8, 4, 5];
+        assert_eq!(
+            select_next_token(&metal_logits, &history, &params).unwrap(),
+            1024
+        );
         Ok(())
     }
 

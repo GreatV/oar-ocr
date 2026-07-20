@@ -29,6 +29,110 @@ fn grouped_query_attention_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var_os("OAR_VL_DISABLE_GQA").is_some())
 }
 
+/// Native half-precision eager softmax is opt-in on Metal. Fused SDPA has its
+/// own softmax implementation and is unaffected by these switches.
+fn metal_native_softmax_enabled(dtype: DType) -> bool {
+    static FORCE_NATIVE: OnceLock<bool> = OnceLock::new();
+    static FORCE_F32: OnceLock<bool> = OnceLock::new();
+    let force_native =
+        *FORCE_NATIVE.get_or_init(|| std::env::var_os("OAR_VL_METAL_NATIVE_SOFTMAX").is_some());
+    let force_f32 =
+        *FORCE_F32.get_or_init(|| std::env::var_os("OAR_VL_METAL_F32_SOFTMAX").is_some());
+    !force_f32 && force_native && matches!(dtype, DType::F16 | DType::BF16)
+}
+
+fn metal_sdpa_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| std::env::var_os("OAR_VL_DISABLE_METAL_SDPA").is_some())
+}
+
+fn try_metal_sdpa(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    mask: Option<&Tensor>,
+    scale: f64,
+    is_causal: bool,
+    allow_vector_kernel: bool,
+) -> Result<Option<Tensor>> {
+    if metal_sdpa_disabled() || !q.device().is_metal() {
+        return Ok(None);
+    }
+    let Ok((batch, num_heads, query_len, head_dim)) = q.dims4() else {
+        return Ok(None);
+    };
+    let Ok((k_batch, num_kv_heads, kv_len, k_head_dim)) = k.dims4() else {
+        return Ok(None);
+    };
+    let Ok((v_batch, v_heads, v_len, v_head_dim)) = v.dims4() else {
+        return Ok(None);
+    };
+    // Mirror the shape consistency scaled_dot_product_attention_gqa enforces
+    // before it ever reaches this function, so the non-GQA caller (which has
+    // no equivalent upstream check) can't hand a fused Metal kernel batch,
+    // head, length, or head_dim mismatches it isn't guaranteed to validate.
+    // `allow_vector_kernel` is only ever `true` for the GQA caller, which has
+    // already validated `num_heads == num_kv_heads * num_kv_groups`; the
+    // plain (non-GQA) caller documents equal head counts, so require an exact
+    // match there instead of merely a multiple, or a head-count mismatch
+    // would silently get grouped-query semantics on Metal only.
+    let heads_match = if allow_vector_kernel {
+        num_heads.is_multiple_of(num_kv_heads)
+    } else {
+        num_heads == num_kv_heads
+    };
+    if num_kv_heads == 0
+        || batch != k_batch
+        || batch != v_batch
+        || num_kv_heads != v_heads
+        || kv_len != v_len
+        || head_dim != k_head_dim
+        || head_dim != v_head_dim
+        || !heads_match
+    {
+        return Ok(None);
+    }
+    // Candle's q_len == 1 vector kernel ignores both explicit masks and their
+    // strides. Keep masked decode on the eager path until the kernel supports
+    // masks. Standard attention also keeps decode eager by design.
+    //
+    // Candle's causal kernel derives its diagonal offset as `kv_len - query_len`
+    // in unsigned arithmetic; when query_len > kv_len that underflows and every
+    // row ends up fully masked (a 0/0 softmax), unlike the eager causal mask
+    // (`create_causal_mask`), which saturates that offset to 0 and still lets
+    // early rows attend the first key. No cache in this crate currently grows
+    // query_len past kv_len, but keep this on the eager path rather than rely
+    // on that invariant holding forever.
+    if query_len == 0
+        || (query_len == 1 && (!allow_vector_kernel || mask.is_some()))
+        || (is_causal && mask.is_none() && query_len > kv_len)
+    {
+        return Ok(None);
+    }
+
+    let expanded_mask = match mask {
+        Some(mask) if mask.dims() == [batch, num_heads, query_len, kv_len] => Some(mask.clone()),
+        Some(mask) => Some(mask.broadcast_as((batch, num_heads, query_len, kv_len))?),
+        None => None,
+    };
+    // The eager implementation treats an explicit mask as authoritative and
+    // only synthesizes a causal mask when no mask was supplied.
+    let do_causal = is_causal && expanded_mask.is_none();
+    let fused = candle_nn::ops::sdpa(
+        q,
+        k,
+        v,
+        expanded_mask.as_ref(),
+        do_causal,
+        scale as f32,
+        1.0,
+    );
+    // Candle's Metal support matrix is private and may change between patch
+    // releases. An unsupported fused shape is an optimization miss, not an
+    // inference failure, so let the caller continue through the eager path.
+    Ok(fused.ok())
+}
+
 #[cfg(feature = "cuda")]
 fn flash_attention_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
@@ -85,6 +189,10 @@ pub fn scaled_dot_product_attention(
     scale: f64,
     is_causal: bool,
 ) -> Result<Tensor> {
+    if let Some(output) = try_metal_sdpa(q, k, v, mask, scale, is_causal, false)? {
+        return Ok(output);
+    }
+
     // Q @ K^T
     let attn_weights = q.matmul(&k.transpose(2, 3)?)?;
 
@@ -104,11 +212,19 @@ pub fn scaled_dot_product_attention(
         None => attn_weights,
     };
 
-    // Softmax: cast to F32 for numerical stability, then cast back
+    // Softmax: cast to F32 for numerical stability, then cast back. Metal can
+    // opt into its native half-precision kernel to avoid two conversions.
     let input_dtype = attn_weights.dtype();
-    let attn_weights = attn_weights.to_dtype(DType::F32)?;
-    let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
-    let attn_weights = attn_weights.to_dtype(input_dtype)?;
+    let use_native_metal_softmax = q.device().is_metal()
+        && input_dtype != DType::F32
+        && metal_native_softmax_enabled(input_dtype);
+    let attn_weights = if use_native_metal_softmax {
+        candle_nn::ops::softmax_last_dim(&attn_weights)?
+    } else {
+        let attn_weights = attn_weights.to_dtype(DType::F32)?;
+        let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
+        attn_weights.to_dtype(input_dtype)?
+    };
 
     // Attention @ V
     attn_weights.matmul(v)
@@ -190,6 +306,10 @@ pub fn scaled_dot_product_attention_gqa(
         )
     }
 
+    if let Some(output) = try_metal_sdpa(q, k, v, mask, scale, is_causal, true)? {
+        return Ok(output);
+    }
+
     let grouped_batch = batch * num_kv_heads;
     let grouped_queries = num_kv_groups * query_len;
     let grouped_q = q.reshape((grouped_batch, grouped_queries, head_dim))?;
@@ -209,9 +329,15 @@ pub fn scaled_dot_product_attention_gqa(
     };
 
     let weight_dtype = weights.dtype();
-    let weights = candle_nn::ops::softmax_last_dim(&weights.to_dtype(DType::F32)?)?
-        .to_dtype(weight_dtype)?
-        .reshape((grouped_batch, grouped_queries, kv_len))?;
+    let use_native_metal_softmax = q.device().is_metal()
+        && weight_dtype != DType::F32
+        && metal_native_softmax_enabled(weight_dtype);
+    let weights = if use_native_metal_softmax {
+        candle_nn::ops::softmax_last_dim(&weights)?
+    } else {
+        candle_nn::ops::softmax_last_dim(&weights.to_dtype(DType::F32)?)?.to_dtype(weight_dtype)?
+    }
+    .reshape((grouped_batch, grouped_queries, kv_len))?;
     let grouped_v = v.reshape((grouped_batch, kv_len, head_dim))?;
     weights
         .matmul(&grouped_v)?
@@ -818,6 +944,142 @@ mod tests {
                 .iter()
                 .zip(grouped)
                 .all(|(left, right)| (left - right).abs() < 1e-5)
+        );
+        Ok(())
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn test_metal_fused_gqa_matches_repeated_kv() -> Result<()> {
+        let Ok(device) = Device::new_metal(0) else {
+            return Ok(());
+        };
+        let q = Tensor::randn(0f32, 1f32, (1, 4, 16, 64), &device)?.to_dtype(DType::F16)?;
+        let k = Tensor::randn(0f32, 1f32, (1, 2, 16, 64), &device)?.to_dtype(DType::F16)?;
+        let v = Tensor::randn(0f32, 1f32, (1, 2, 16, 64), &device)?.to_dtype(DType::F16)?;
+        let mask = create_causal_mask(16, 16, DType::F16, &device)?;
+        let fused = scaled_dot_product_attention_gqa(&q, &k, &v, Some(&mask), 0.125, false, 2)?;
+        let repeated = scaled_dot_product_attention(
+            &q,
+            &repeat_kv(&k, 2)?.contiguous()?,
+            &repeat_kv(&v, 2)?.contiguous()?,
+            Some(&mask),
+            0.125,
+            false,
+        )?;
+        let max_prefill_error = (fused.to_dtype(DType::F32)? - repeated.to_dtype(DType::F32)?)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        assert!(
+            max_prefill_error <= 0.01,
+            "prefill error {max_prefill_error}"
+        );
+
+        let q = Tensor::randn(0f32, 1f32, (1, 4, 1, 64), &device)?.to_dtype(DType::F16)?;
+        let k = Tensor::randn(0f32, 1f32, (1, 2, 32, 64), &device)?.to_dtype(DType::F16)?;
+        let v = Tensor::randn(0f32, 1f32, (1, 2, 32, 64), &device)?.to_dtype(DType::F16)?;
+        let fused = scaled_dot_product_attention_gqa(&q, &k, &v, None, 0.125, false, 2)?;
+        let repeated = scaled_dot_product_attention(
+            &q,
+            &repeat_kv(&k, 2)?.contiguous()?,
+            &repeat_kv(&v, 2)?.contiguous()?,
+            None,
+            0.125,
+            false,
+        )?;
+        let max_decode_error = (fused.to_dtype(DType::F32)? - repeated.to_dtype(DType::F32)?)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        assert!(max_decode_error <= 0.01, "decode error {max_decode_error}");
+
+        let mut mask_values = vec![0f32; 32];
+        mask_values[16..].fill(f32::NEG_INFINITY);
+        let decode_mask =
+            Tensor::from_vec(mask_values, (1, 1, 1, 32), &device)?.to_dtype(DType::F16)?;
+        assert!(
+            try_metal_sdpa(&q, &k, &v, Some(&decode_mask), 0.125, false, true)?.is_none(),
+            "masked single-token decode must not use Candle's mask-blind vector kernel"
+        );
+        let masked =
+            scaled_dot_product_attention_gqa(&q, &k, &v, Some(&decode_mask), 0.125, false, 2)?;
+        let repeated_masked = scaled_dot_product_attention(
+            &q,
+            &repeat_kv(&k, 2)?.contiguous()?,
+            &repeat_kv(&v, 2)?.contiguous()?,
+            Some(&decode_mask),
+            0.125,
+            false,
+        )?;
+        let max_masked_error = (masked.to_dtype(DType::F32)?
+            - repeated_masked.to_dtype(DType::F32)?)?
+        .abs()?
+        .max_all()?
+        .to_scalar::<f32>()?;
+        assert!(
+            max_masked_error <= 0.01,
+            "masked decode error {max_masked_error}"
+        );
+
+        let q = Tensor::randn(0f32, 1f32, (1, 4, 3, 48), &device)?.to_dtype(DType::F16)?;
+        let k = Tensor::randn(0f32, 1f32, (1, 2, 3, 48), &device)?.to_dtype(DType::F16)?;
+        let v = Tensor::randn(0f32, 1f32, (1, 2, 3, 48), &device)?.to_dtype(DType::F16)?;
+        assert!(
+            try_metal_sdpa(&q, &k, &v, None, 0.125, false, true)?.is_none(),
+            "unsupported fused shapes must fall back instead of failing"
+        );
+        scaled_dot_product_attention_gqa(&q, &k, &v, None, 0.125, false, 2)?;
+        Ok(())
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn test_metal_plain_sdpa_rejects_head_count_mismatch() -> Result<()> {
+        let Ok(device) = Device::new_metal(0) else {
+            return Ok(());
+        };
+        // scaled_dot_product_attention is the non-GQA entry point; unlike the
+        // GQA wrapper it never validates num_heads against num_kv_heads
+        // upstream, so try_metal_sdpa must reject a multiple-but-unequal head
+        // count itself instead of silently getting GQA semantics from
+        // Candle's fused kernel.
+        let q = Tensor::randn(0f32, 1f32, (1, 4, 8, 64), &device)?.to_dtype(DType::F16)?;
+        let k = Tensor::randn(0f32, 1f32, (1, 2, 8, 64), &device)?.to_dtype(DType::F16)?;
+        let v = Tensor::randn(0f32, 1f32, (1, 2, 8, 64), &device)?.to_dtype(DType::F16)?;
+        assert!(
+            try_metal_sdpa(&q, &k, &v, None, 0.125, false, false)?.is_none(),
+            "plain scaled_dot_product_attention must not dispatch mismatched head counts to the fused kernel"
+        );
+        assert!(scaled_dot_product_attention(&q, &k, &v, None, 0.125, false).is_err());
+        Ok(())
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn test_metal_causal_query_longer_than_kv_matches_eager() -> Result<()> {
+        let Ok(device) = Device::new_metal(0) else {
+            return Ok(());
+        };
+        // query_len > kv_len with is_causal=true and no explicit mask: Candle's
+        // Metal causal kernel underflows its diagonal offset for this shape, so
+        // try_metal_sdpa must fall back to the eager path instead of dispatching.
+        let q = Tensor::randn(0f32, 1f32, (1, 2, 8, 64), &device)?.to_dtype(DType::F16)?;
+        let k = Tensor::randn(0f32, 1f32, (1, 2, 3, 64), &device)?.to_dtype(DType::F16)?;
+        let v = Tensor::randn(0f32, 1f32, (1, 2, 3, 64), &device)?.to_dtype(DType::F16)?;
+        assert!(
+            try_metal_sdpa(&q, &k, &v, None, 0.125, true, false)?.is_none(),
+            "causal query_len > kv_len must fall back to the eager path on Metal"
+        );
+        let out = scaled_dot_product_attention(&q, &k, &v, None, 0.125, true)?;
+        assert_eq!(out.dims(), &[1, 2, 8, 64]);
+        assert!(
+            out.to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?
+                .iter()
+                .all(|value| value.is_finite()),
+            "eager fallback must not produce NaN/inf for this shape"
         );
         Ok(())
     }

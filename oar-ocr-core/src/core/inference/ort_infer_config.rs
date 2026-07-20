@@ -1,6 +1,7 @@
 use super::*;
 use crate::core::config::{
-    OrtExecutionProvider, OrtGraphOptimizationLevel as OG, OrtSessionConfig,
+    COREML_CONFIG_ENTRY, OrtCoreMLConfig, OrtExecutionProvider, OrtGraphOptimizationLevel as OG,
+    OrtSessionConfig,
 };
 use ort::ep::ExecutionProviderDispatch;
 use ort::logging::LogLevel;
@@ -53,11 +54,17 @@ impl OrtInfer {
         }
         if let Some(entries) = &cfg.session_config_entries {
             for (key, value) in entries {
+                if key == COREML_CONFIG_ENTRY {
+                    continue;
+                }
                 builder = builder.with_config_entry(key, value)?;
             }
         }
         if let Some(eps) = &cfg.execution_providers {
-            let providers = Self::build_execution_providers(eps)?;
+            let coreml_config = cfg.coreml_config().map_err(|error| {
+                ort::Error::new(format!("invalid CoreML session configuration: {error}"))
+            })?;
+            let providers = Self::build_execution_providers(eps, coreml_config.as_ref())?;
             if !providers.is_empty() {
                 builder = builder.with_execution_providers(providers)?;
             }
@@ -67,6 +74,7 @@ impl OrtInfer {
 
     fn build_execution_providers(
         eps: &[OrtExecutionProvider],
+        _coreml_config: Option<&OrtCoreMLConfig>,
     ) -> Result<Vec<ExecutionProviderDispatch>, ort::Error> {
         use crate::core::config::OrtExecutionProvider as EP;
         let mut providers = Vec::new();
@@ -197,15 +205,72 @@ impl OrtInfer {
                     ane_only,
                     subgraphs,
                 } => {
-                    use ort::execution_providers::coreml::ComputeUnits;
+                    use crate::core::config::{
+                        OrtCoreMLComputeUnits, OrtCoreMLModelFormat,
+                        OrtCoreMLSpecializationStrategy,
+                    };
+                    use ort::execution_providers::coreml::{
+                        ComputeUnits, ModelFormat, SpecializationStrategy,
+                    };
                     let mut coreml_provider =
                         ort::execution_providers::CoreMLExecutionProvider::default();
-                    if let Some(true) = ane_only {
+                    if let Some(units) = _coreml_config.and_then(|config| config.compute_units) {
+                        let units = match units {
+                            OrtCoreMLComputeUnits::All => ComputeUnits::All,
+                            OrtCoreMLComputeUnits::CPUAndGPU => ComputeUnits::CPUAndGPU,
+                            OrtCoreMLComputeUnits::CPUAndNeuralEngine => {
+                                ComputeUnits::CPUAndNeuralEngine
+                            }
+                            OrtCoreMLComputeUnits::CPUOnly => ComputeUnits::CPUOnly,
+                        };
+                        coreml_provider = coreml_provider.with_compute_units(units);
+                    } else if let Some(true) = ane_only {
                         coreml_provider =
                             coreml_provider.with_compute_units(ComputeUnits::CPUAndNeuralEngine);
                     }
                     if let Some(sub) = subgraphs {
                         coreml_provider = coreml_provider.with_subgraphs(*sub);
+                    }
+                    if let Some(format) = _coreml_config.and_then(|config| config.model_format) {
+                        let format = match format {
+                            OrtCoreMLModelFormat::MLProgram => ModelFormat::MLProgram,
+                            OrtCoreMLModelFormat::NeuralNetwork => ModelFormat::NeuralNetwork,
+                        };
+                        coreml_provider = coreml_provider.with_model_format(format);
+                    }
+                    if let Some(enable) =
+                        _coreml_config.and_then(|config| config.static_input_shapes)
+                    {
+                        coreml_provider = coreml_provider.with_static_input_shapes(enable);
+                    }
+                    if let Some(strategy) =
+                        _coreml_config.and_then(|config| config.specialization_strategy)
+                    {
+                        let strategy = match strategy {
+                            OrtCoreMLSpecializationStrategy::Default => {
+                                SpecializationStrategy::Default
+                            }
+                            OrtCoreMLSpecializationStrategy::FastPrediction => {
+                                SpecializationStrategy::FastPrediction
+                            }
+                        };
+                        coreml_provider = coreml_provider.with_specialization_strategy(strategy);
+                    }
+                    if let Some(enable) = _coreml_config
+                        .and_then(|config| config.allow_low_precision_accumulation_on_gpu)
+                    {
+                        coreml_provider =
+                            coreml_provider.with_low_precision_accumulation_on_gpu(enable);
+                    }
+                    if let Some(enable) =
+                        _coreml_config.and_then(|config| config.profile_compute_plan)
+                    {
+                        coreml_provider = coreml_provider.with_profile_compute_plan(enable);
+                    }
+                    if let Some(path) =
+                        _coreml_config.and_then(|config| config.model_cache_dir.as_ref())
+                    {
+                        coreml_provider = coreml_provider.with_model_cache_dir(path);
                     }
                     providers.push(coreml_provider.build());
                 }

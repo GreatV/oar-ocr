@@ -1,6 +1,6 @@
 use super::config::PaddleOcrVlConfig;
 use crate::attention::{
-    RotaryEmbedding, flash_attention, repeat_kv, scaled_dot_product_attention, select_rope_sections,
+    RotaryEmbedding, flash_attention, scaled_dot_product_attention_gqa, select_rope_sections,
 };
 #[cfg(feature = "cuda")]
 use crate::decoder_graph::decoder_cache_capacity;
@@ -294,29 +294,16 @@ impl Ernie4_5Attention {
         let is_causal = causal_mask.is_none();
         let attn_output = match flash {
             Some(attn) => attn,
-            None => {
-                let key_states = repeat_kv(&k_all, self.num_kv_groups)
-                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "repeat_kv key", e))?;
-                let value_states = repeat_kv(&v_all, self.num_kv_groups)
-                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "repeat_kv value", e))?;
-                let key_states = key_states.contiguous().map_err(|e| {
-                    candle_to_ocr_inference("PaddleOCR-VL", "attn key_states contiguous", e)
-                })?;
-                let value_states = value_states.contiguous().map_err(|e| {
-                    candle_to_ocr_inference("PaddleOCR-VL", "attn value_states contiguous", e)
-                })?;
-                scaled_dot_product_attention(
-                    &q,
-                    &key_states,
-                    &value_states,
-                    causal_mask,
-                    self.scaling,
-                    is_causal,
-                )
-                .map_err(|e| {
-                    candle_to_ocr_inference("PaddleOCR-VL", "scaled_dot_product_attention", e)
-                })?
-            }
+            None => scaled_dot_product_attention_gqa(
+                &q,
+                &k_all,
+                &v_all,
+                causal_mask,
+                self.scaling,
+                is_causal,
+                self.num_kv_groups,
+            )
+            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "grouped-query attention", e))?,
         };
 
         self.project_attention_output(&attn_output, b, seq_len)
