@@ -144,6 +144,7 @@ mod utils;
 
 use clap::Parser;
 use image::RgbImage;
+use oar_ocr::core::OrtGlobalThreadPoolOptions;
 use oar_ocr::domain::structure::TableType;
 use oar_ocr::domain::tasks::{
     FormulaRecognitionConfig, LayoutDetectionConfig, TextDetectionConfig, TextRecognitionConfig,
@@ -310,9 +311,17 @@ struct Args {
     textline_orientation_model: Option<PathBuf>,
 
     /// Device to use for inference (default: cuda)
-    /// Supported: cpu, cuda, cuda:0, cuda:1, etc.
+    /// Supported with matching features: cpu, cuda:N, directml:N.
     #[arg(long, default_value = "cuda")]
     device: String,
+
+    /// ONNX Runtime intra-op thread count (defaults to the runtime's CPU policy)
+    #[arg(long)]
+    intra_threads: Option<usize>,
+
+    /// Share one ONNX Runtime thread pool across all configured models
+    #[arg(long, default_value_t = false)]
+    global_thread_pool: bool,
 
     /// Number of pages/images to process per image-level batch
     #[arg(long = "image-batch-size")]
@@ -577,6 +586,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         score_threshold: args.rec_score_thresh,
     };
 
+    if args.global_thread_pool {
+        let mut pool = OrtGlobalThreadPoolOptions::new();
+        if let Some(threads) = args.intra_threads {
+            pool = pool.with_intra_threads(threads);
+        }
+        if !pool.commit()? {
+            return Err("ONNX Runtime was initialized before the global thread pool".into());
+        }
+    }
+
     // Build structure pipeline
     let mut builder =
         OARStructureBuilder::new(&args.layout_model).layout_detection_config(layout_config);
@@ -584,7 +603,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Always set layout model name (has default value)
     builder = builder.layout_model_name(&args.layout_model_name);
 
-    if let Some(config) = parse_device_config(&args.device)? {
+    let mut ort_config = parse_device_config(&args.device)?;
+    if let Some(threads) = args.intra_threads
+        && !args.global_thread_pool
+    {
+        ort_config = Some(
+            ort_config
+                .take()
+                .unwrap_or_default()
+                .with_intra_threads(threads),
+        );
+    }
+    if let Some(config) = ort_config {
         builder = builder.ort_session(config);
     }
 

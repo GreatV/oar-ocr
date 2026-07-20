@@ -4,7 +4,10 @@
 //! It simplifies the process of configuring text detection, recognition, and optional
 //! preprocessing components.
 
-use super::builder_utils::{build_optional_adapter, resolve_model_path, resolve_model_source};
+use super::builder_utils::{
+    build_optional_adapter, default_cpu_region_batch_size, resolve_device_batch_sizes,
+    resolve_model_path, resolve_model_source,
+};
 use oar_ocr_core::core::ModelSource;
 use oar_ocr_core::core::config::OrtSessionConfig;
 use oar_ocr_core::core::constants::DEFAULT_REC_IMAGE_SHAPE;
@@ -158,7 +161,8 @@ impl OAROCRBuilder {
     /// This controls how many images are sent to the text detection adapter per call.
     /// If a detector cannot batch the provided images (e.g., mismatched sizes), the
     /// pipeline falls back to per-image detection. Values are validated in `build()`
-    /// and must be within `1..=MAX_BATCH_SIZE`.
+    /// and must be within `1..=MAX_BATCH_SIZE`. When unset, CPU execution uses `1`;
+    /// explicitly configured accelerators use the adapter's throughput default.
     pub fn image_batch_size(mut self, size: usize) -> Self {
         self.image_batch_size = Some(size);
         self
@@ -167,8 +171,10 @@ impl OAROCRBuilder {
     /// Sets the batch size for processing detected text regions.
     ///
     /// Controls memory usage during text recognition. Smaller values use less memory.
-    /// Recommended: 32 for medium VRAM, 16 for low VRAM/CPU. Values are validated
-    /// in `build()` and must be within `1..=MAX_BATCH_SIZE`.
+    /// When unset, CPU execution uses `16` for PP-OCRv6 Tiny and `4` for other
+    /// models; explicitly configured accelerators use the adapter's throughput
+    /// default (`64`). Values are validated in `build()` and must be within
+    /// `1..=MAX_BATCH_SIZE`.
     pub fn region_batch_size(mut self, size: usize) -> Self {
         self.region_batch_size = Some(size);
         self
@@ -252,6 +258,20 @@ impl OAROCRBuilder {
         // the feature is enabled. With the feature off these are no-ops.
         let text_detection_model = resolve_model_source(&self.text_detection_model)?;
         let text_recognition_model = resolve_model_source(&self.text_recognition_model)?;
+
+        // CPU operators already fan work out across ORT's intra-op pool. Tiny's
+        // much cheaper recognizer benefits from a wider batch, while larger
+        // models regress beyond four on Windows. Accelerators retain their
+        // throughput-oriented adapter defaults (8 detection / 64 recognition).
+        let cpu_region_batch_size =
+            default_cpu_region_batch_size(Some(&text_recognition_model), None);
+        let (image_batch_size, region_batch_size) = resolve_device_batch_sizes(
+            self.ort_session_config.as_ref(),
+            self.image_batch_size,
+            self.region_batch_size,
+            1,
+            cpu_region_batch_size,
+        );
 
         // Load character dictionary for text recognition
         let char_dict = match &self.character_dict_content {
@@ -391,8 +411,8 @@ impl OAROCRBuilder {
             pipeline,
             text_type: self.text_type,
             return_word_box: self.return_word_box,
-            image_batch_size: self.image_batch_size,
-            region_batch_size: self.region_batch_size,
+            image_batch_size,
+            region_batch_size,
         })
     }
 
@@ -422,7 +442,8 @@ pub struct OAROCR {
     /// Text detection batch size for `predict(images)`.
     ///
     /// This controls how many preprocessed images are sent to the text detection adapter in a
-    /// single call. If `None`, the adapter's `recommended_batch_size()` is used.
+    /// single call. CPU builders resolve this to `1`; accelerator builders leave it as `None`
+    /// so the adapter's `recommended_batch_size()` is used.
     image_batch_size: Option<usize>,
     /// Batch size for text region recognition
     region_batch_size: Option<usize>,

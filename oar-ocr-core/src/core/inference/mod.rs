@@ -10,6 +10,7 @@ use std::sync::Mutex;
 mod model_source;
 pub mod session;
 mod tensor_output;
+mod thread_pool;
 
 // OrtInfer implementation modules
 #[path = "ort_infer_builders.rs"]
@@ -24,6 +25,7 @@ pub use ort_infer_builders::ensure_cuda_launch_blocking;
 pub use ort_infer_execution::TensorInput;
 pub use session::load_session;
 pub use tensor_output::TensorOutput;
+pub use thread_pool::OrtGlobalThreadPoolOptions;
 
 /// Core ONNX Runtime inference engine with support for pooling and configurable sessions.
 pub struct OrtInfer {

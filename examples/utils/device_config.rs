@@ -3,7 +3,7 @@
 //! This module provides utilities for parsing device strings and creating
 //! ONNX Runtime session configurations with appropriate execution providers.
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "directml"))]
 use oar_ocr::core::config::OrtExecutionProvider;
 use oar_ocr::core::config::OrtSessionConfig;
 
@@ -13,6 +13,7 @@ use oar_ocr::core::config::OrtSessionConfig;
 ///
 /// - `"cpu"` -> CPU execution provider (returns None as CPU is default)
 /// - `"cuda"` or `"cuda:0"` -> CUDA execution provider with device ID
+/// - `"directml"`, `"directml:0"`, or `"dml:0"` -> DirectML execution provider
 ///
 /// # Arguments
 ///
@@ -94,14 +95,97 @@ pub fn parse_device_config(
         }
     }
 
-    Err(format!(
-        "Unsupported device: {}. Supported devices: cpu{}",
-        device,
-        if cfg!(feature = "cuda") {
-            ", cuda, cuda:N"
-        } else {
-            ""
+    #[cfg(feature = "directml")]
+    {
+        if device_lower == "directml"
+            || device_lower == "dml"
+            || device_lower.starts_with("directml:")
+            || device_lower.starts_with("dml:")
+        {
+            let id_str = device_lower
+                .strip_prefix("directml:")
+                .or_else(|| device_lower.strip_prefix("dml:"));
+            let device_id = id_str
+                .map(|id| {
+                    id.parse::<i32>().map_err(|_| {
+                        format!(
+                            "Invalid DirectML device ID: {device}. Expected 'directml', 'directml:N', or 'dml:N'"
+                        )
+                    })
+                })
+                .transpose()?
+                .unwrap_or(0);
+
+            return Ok(Some(OrtSessionConfig::new().with_execution_providers(
+                vec![
+                    OrtExecutionProvider::DirectML {
+                        device_id: Some(device_id),
+                    },
+                    OrtExecutionProvider::CPU,
+                ],
+            )));
         }
+    }
+
+    #[cfg(not(feature = "directml"))]
+    {
+        if device_lower == "directml"
+            || device_lower == "dml"
+            || device_lower.starts_with("directml:")
+            || device_lower.starts_with("dml:")
+        {
+            return Err(format!(
+                "DirectML device '{device}' requested but the DirectML feature is not enabled. \
+                 Rebuild with --features=directml to enable DirectML support."
+            )
+            .into());
+        }
+    }
+
+    let mut supported = vec!["cpu"];
+    if cfg!(feature = "cuda") {
+        supported.push("cuda");
+        supported.push("cuda:N");
+    }
+    if cfg!(feature = "directml") {
+        supported.push("directml");
+        supported.push("directml:N");
+    }
+    Err(format!(
+        "Unsupported device: {device}. Supported devices: {}",
+        supported.join(", ")
     )
     .into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_needs_no_explicit_session_config() {
+        assert!(parse_device_config("cpu").unwrap().is_none());
+    }
+
+    #[cfg(feature = "directml")]
+    #[test]
+    fn parses_directml_alias_and_device_id() {
+        for name in ["directml:2", "dml:2"] {
+            let config = parse_device_config(name).unwrap().unwrap();
+            assert_eq!(
+                config.execution_providers,
+                Some(vec![
+                    OrtExecutionProvider::DirectML { device_id: Some(2) },
+                    OrtExecutionProvider::CPU,
+                ])
+            );
+        }
+    }
+
+    #[cfg(not(feature = "directml"))]
+    #[test]
+    fn directml_request_explains_required_feature() {
+        let error = parse_device_config("directml").unwrap_err().to_string();
+        assert!(error.contains("--features=directml"));
+    }
 }

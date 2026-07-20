@@ -69,11 +69,13 @@ impl ModelAdapter for TableClassificationAdapter {
         // Update postprocess config with task-specific topk
         let mut postprocess_config = self.postprocess_config.clone();
         postprocess_config.topk = effective_config.topk;
+        let image_refs: Vec<_> = input.images.iter().map(AsRef::as_ref).collect();
 
-        // Use model to get predictions with error context
+        // The resized classifier inputs are newly allocated, so keep the source
+        // table images borrowed and avoid an otherwise redundant full-size copy.
         let model_output = self
             .model
-            .forward(input.into_owned_images(), &postprocess_config)
+            .forward_refs(&image_refs, &postprocess_config)
             .map_err(|e| {
                 OCRError::adapter_execution_error(
                     "TableClassificationAdapter",

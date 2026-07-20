@@ -893,26 +893,41 @@ impl LayoutDetectionAdapter {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let mut selected = Vec::new();
-        while !indices.is_empty() {
-            let current = indices[0];
+        // Keep the score-sorted candidate list immutable and mark suppressed
+        // positions in place. Rebuilding a filtered `Vec` after every selected
+        // box copies the entire surviving tail repeatedly (O(n^2) extra moves)
+        // on dense layout outputs. NMS still performs the required pairwise IoU
+        // checks, but now uses one allocation and no candidate-list compaction.
+        let mut suppressed = vec![false; indices.len()];
+        let mut selected = Vec::with_capacity(indices.len());
+        for pos in 0..indices.len() {
+            if suppressed[pos] {
+                continue;
+            }
+
+            let current = indices[pos];
             let current_class = classes[current];
             let current_box = &boxes[current];
             selected.push(current);
 
-            let mut filtered = Vec::new();
-            for &idx in indices.iter().skip(1) {
+            for next_pos in (pos + 1)..indices.len() {
+                if suppressed[next_pos] {
+                    continue;
+                }
+                let idx = indices[next_pos];
                 let threshold = if classes[idx] == current_class {
                     0.6
                 } else {
                     0.98
                 };
                 let iou = Self::paddlex_iou(current_box, &boxes[idx]);
-                if iou < threshold {
-                    filtered.push(idx);
+                // Match the previous `iou < threshold` filter exactly: invalid
+                // (NaN) IoUs are discarded instead of leaking into later NMS
+                // iterations.
+                if iou >= threshold || iou.is_nan() {
+                    suppressed[next_pos] = true;
                 }
             }
-            indices = filtered;
         }
         selected
     }
@@ -1642,5 +1657,69 @@ impl AdapterBuilder for PPDocLayoutAdapterBuilder {
 
     fn adapter_type(&self) -> &str {
         "PPDocLayout"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn compacting_nms_reference(
+        boxes: &[crate::processors::BoundingBox],
+        classes: &[usize],
+        scores: &[f32],
+    ) -> Vec<usize> {
+        let mut indices: Vec<usize> = (0..boxes.len()).collect();
+        indices.sort_by(|&a, &b| {
+            scores[b]
+                .partial_cmp(&scores[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut selected = Vec::new();
+        while let Some(&current) = indices.first() {
+            let current_class = classes[current];
+            selected.push(current);
+            indices = indices
+                .into_iter()
+                .skip(1)
+                .filter(|&idx| {
+                    let threshold = if classes[idx] == current_class {
+                        0.6
+                    } else {
+                        0.98
+                    };
+                    LayoutDetectionAdapter::paddlex_iou(&boxes[current], &boxes[idx]) < threshold
+                })
+                .collect();
+        }
+        selected
+    }
+
+    #[test]
+    fn paddlex_layout_nms_matches_compacting_reference_on_dense_input() {
+        let mut boxes: Vec<_> = (0..256)
+            .map(|i| {
+                let x = ((i * 37) % 80) as f32;
+                let y = ((i * 53) % 80) as f32;
+                let size = 18.0 + (i % 11) as f32;
+                crate::processors::BoundingBox::from_coords(x, y, x + size, y + size)
+            })
+            .collect();
+        boxes.push(crate::processors::BoundingBox::from_coords(
+            f32::NAN,
+            0.0,
+            10.0,
+            10.0,
+        ));
+        let classes: Vec<_> = (0..boxes.len()).map(|i| i % 7).collect();
+        let scores: Vec<_> = (0..boxes.len())
+            .map(|i| ((i * 97) % 1_000) as f32 / 1_000.0)
+            .collect();
+
+        let expected = compacting_nms_reference(&boxes, &classes, &scores);
+        let actual = LayoutDetectionAdapter::paddlex_layout_nms(&boxes, &classes, &scores);
+
+        assert_eq!(actual, expected);
     }
 }

@@ -75,11 +75,13 @@ impl ModelAdapter for DocumentOrientationAdapter {
         // Update postprocess config with task-specific topk
         let mut postprocess_config = self.postprocess_config.clone();
         postprocess_config.topk = effective_config.topk;
+        let image_refs: Vec<_> = input.images.iter().map(AsRef::as_ref).collect();
 
-        // Use model to get predictions with error context
+        // Resizing only reads source pixels; borrow shared pipeline images instead
+        // of copying full document buffers before creating the 224x224 inputs.
         let model_output = self
             .model
-            .forward(input.into_owned_images(), &postprocess_config)
+            .forward_refs(&image_refs, &postprocess_config)
             .map_err(|e| {
                 OCRError::adapter_execution_error(
                     "DocumentOrientationAdapter",

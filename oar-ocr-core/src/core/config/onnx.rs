@@ -218,6 +218,20 @@ impl OrtSessionConfig {
             .clone()
             .unwrap_or_else(|| vec![OrtExecutionProvider::CPU])
     }
+
+    /// Returns whether an explicitly configured hardware accelerator is present.
+    ///
+    /// No provider configuration, an empty provider list, and a CPU-only list
+    /// all use CPU-oriented pipeline defaults. A CPU fallback after CUDA,
+    /// TensorRT, DirectML, OpenVINO, CoreML, or WebGPU still counts as an
+    /// accelerated configuration.
+    pub fn has_accelerator_provider(&self) -> bool {
+        self.execution_providers.as_ref().is_some_and(|providers| {
+            providers
+                .iter()
+                .any(|provider| !matches!(provider, OrtExecutionProvider::CPU))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -256,5 +270,23 @@ mod tests {
             config.get_optimization_level(),
             OrtGraphOptimizationLevel::All
         ));
+    }
+
+    #[test]
+    fn test_accelerator_provider_detection() {
+        assert!(!OrtSessionConfig::new().has_accelerator_provider());
+        assert!(
+            !OrtSessionConfig::new()
+                .with_execution_providers(vec![OrtExecutionProvider::CPU])
+                .has_accelerator_provider()
+        );
+        assert!(
+            OrtSessionConfig::new()
+                .with_execution_providers(vec![
+                    OrtExecutionProvider::DirectML { device_id: Some(0) },
+                    OrtExecutionProvider::CPU,
+                ])
+                .has_accelerator_provider()
+        );
     }
 }

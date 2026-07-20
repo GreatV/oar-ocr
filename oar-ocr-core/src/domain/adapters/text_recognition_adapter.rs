@@ -39,11 +39,14 @@ impl ModelAdapter for TextRecognitionAdapter {
     ) -> Result<<Self::Task as Task>::Output, OCRError> {
         let effective_config = config.unwrap_or(&self.config);
         let batch_len = input.images.len();
+        let image_refs: Vec<_> = input.images.iter().map(AsRef::as_ref).collect();
 
-        // Use the CRNN model to recognize text
+        // Preprocessing only reads source pixels. Keep the adapter's shared images
+        // borrowed so callers can retain crop metadata without forcing
+        // `Arc::try_unwrap` to clone every crop before recognition.
         let model_output = self
             .model
-            .forward(input.into_owned_images(), self.return_word_box)
+            .forward_refs(&image_refs, self.return_word_box)
             .map_err(|e| {
                 OCRError::adapter_execution_error(
                     "TextRecognitionAdapter",

@@ -4,7 +4,10 @@
 //! analysis pipelines that can detect layout elements, recognize tables, extract formulas,
 //! and optionally integrate OCR for text extraction.
 
-use super::builder_utils::{build_optional_adapter, resolve_model_path, resolve_model_source};
+use super::builder_utils::{
+    build_optional_adapter, default_cpu_region_batch_size, resolve_device_batch_sizes,
+    resolve_model_path, resolve_model_source,
+};
 use oar_ocr_core::core::config::OrtSessionConfig;
 use oar_ocr_core::core::traits::OrtConfigurable;
 use oar_ocr_core::core::traits::adapter::{AdapterBuilder, ModelAdapter};
@@ -350,7 +353,8 @@ impl OARStructureBuilder {
     /// Sets the batch size for image-level processing.
     ///
     /// Controls how many pages are processed together by image-level stages such as
-    /// layout detection, region detection, and OCR text detection.
+    /// layout detection, region detection, and OCR text detection. When unset, CPU
+    /// execution uses `1`; explicitly configured accelerators retain adapter defaults.
     pub fn image_batch_size(mut self, size: usize) -> Self {
         self.image_batch_size = Some(size);
         self
@@ -359,7 +363,9 @@ impl OARStructureBuilder {
     /// Sets the batch size for region-level processing (text recognition).
     ///
     /// Controls how many text regions are processed together during OCR recognition.
-    /// Larger values improve throughput but use more memory.
+    /// When unset, CPU execution uses `16` for PP-OCRv6 Tiny and `4` for other
+    /// recognizers; explicitly configured accelerators retain their larger
+    /// throughput-oriented default.
     pub fn region_batch_size(mut self, size: usize) -> Self {
         self.region_batch_size = Some(size);
         self
@@ -730,6 +736,18 @@ impl OARStructureBuilder {
         resolve_opt_source(&mut self.text_line_orientation_model)?;
         resolve_opt_source(&mut self.text_recognition_model)?;
         resolve_opt_path(&mut self.character_dict_path)?;
+
+        let cpu_region_batch_size = default_cpu_region_batch_size(
+            self.text_recognition_model.as_ref(),
+            self.text_recognition_model_name.as_deref(),
+        );
+        (self.image_batch_size, self.region_batch_size) = resolve_device_batch_sizes(
+            self.ort_session_config.as_ref(),
+            self.image_batch_size,
+            self.region_batch_size,
+            1,
+            cpu_region_batch_size,
+        );
 
         // Load character dictionary if OCR is enabled
         let char_dict = if let Some(ref dict_path) = self.character_dict_path {
@@ -1946,12 +1964,12 @@ impl OARStructure {
         let crop_count = bboxes.len();
         let mut formula_results = Vec::with_capacity(crop_count);
         let mut score_results = Vec::with_capacity(crop_count);
-        let mut remaining_crops = crops;
-        while !remaining_crops.is_empty() {
-            let chunk_len = batch_size.min(remaining_crops.len());
-            let rest = remaining_crops.split_off(chunk_len);
-            let chunk_vec = remaining_crops;
-            remaining_crops = rest;
+        let mut remaining_crops = crops.into_iter();
+        loop {
+            let chunk_vec: Vec<_> = remaining_crops.by_ref().take(batch_size).collect();
+            if chunk_vec.is_empty() {
+                break;
+            }
 
             let output = formula_adapter.execute(ImageTaskInput::new(chunk_vec), None)?;
             formula_results.extend(output.formulas);
@@ -2387,10 +2405,12 @@ impl OARStructure {
                 let mut rec_batches = 0usize;
                 let t_text_rec = Instant::now();
 
-                while !items.is_empty() {
-                    let take_n = batch_size.min(items.len());
-                    let batch_items: Vec<(usize, f32, image::RgbImage)> =
-                        items.drain(0..take_n).collect();
+                let mut remaining_items = items.into_iter();
+                loop {
+                    let batch_items: Vec<_> = remaining_items.by_ref().take(batch_size).collect();
+                    if batch_items.is_empty() {
+                        break;
+                    }
 
                     let mut det_indices: Vec<usize> = Vec::with_capacity(batch_items.len());
                     let mut rec_imgs: Vec<image::RgbImage> = Vec::with_capacity(batch_items.len());
@@ -2838,7 +2858,7 @@ impl OARStructure {
             page_idx: usize,
             det_idx: usize,
             wh_ratio: f32,
-            image: image::RgbImage,
+            image: Arc<image::RgbImage>,
         }
 
         let mut page_states: Vec<Option<PageOcrState>> =
@@ -2873,10 +2893,13 @@ impl OARStructure {
             det_images.push(ocr_image);
         }
 
-        while !det_images.is_empty() {
-            let take_n = image_batch_size.min(det_images.len());
-            let batch_images: Vec<_> = det_images.drain(0..take_n).collect();
-            let batch_page_indices: Vec<_> = det_page_indices.drain(0..take_n).collect();
+        let mut remaining_pages = det_page_indices.into_iter().zip(det_images);
+        loop {
+            let batch: Vec<_> = remaining_pages.by_ref().take(image_batch_size).collect();
+            if batch.is_empty() {
+                break;
+            }
+            let (batch_page_indices, batch_images): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
             match text_detection_adapter.execute(ImageTaskInput::new(batch_images), None) {
                 Ok(det_result) => {
                     for (offset, detections) in det_result.detections.into_iter().enumerate() {
@@ -3043,13 +3066,12 @@ impl OARStructure {
                             let Some(img) = crop_result else {
                                 continue;
                             };
-                            let image = (*img).clone();
-                            let wh_ratio = image.width() as f32 / image.height().max(1) as f32;
+                            let wh_ratio = img.width() as f32 / img.height().max(1) as f32;
                             rec_items.push(RecItem {
                                 page_idx,
                                 det_idx,
                                 wh_ratio,
-                                image,
+                                image: img,
                             });
                         }
                     }
@@ -3069,8 +3091,12 @@ impl OARStructure {
         if !rec_items.is_empty() {
             if let Some(ref tlo_adapter) = self.pipeline.text_line_orientation_adapter {
                 let t_tlo = Instant::now();
-                let input =
-                    ImageTaskInput::new(rec_items.iter().map(|item| item.image.clone()).collect());
+                let input = ImageTaskInput::from_arc_images(
+                    rec_items
+                        .iter()
+                        .map(|item| Arc::clone(&item.image))
+                        .collect(),
+                );
                 match tlo_adapter.execute(input, None) {
                     Ok(tlo_result) => {
                         for (item, classifications) in
@@ -3079,7 +3105,7 @@ impl OARStructure {
                             if let Some(top_cls) = classifications.first()
                                 && top_cls.class_id == 1
                             {
-                                item.image = image::imageops::rotate180(&item.image);
+                                item.image = Arc::new(image::imageops::rotate180(&*item.image));
                             }
                         }
                     }
@@ -3110,8 +3136,9 @@ impl OARStructure {
             while start < rec_items.len() {
                 let end = (start + batch_size).min(rec_items.len());
                 let chunk = &rec_items[start..end];
-                let rec_input =
-                    ImageTaskInput::new(chunk.iter().map(|item| item.image.clone()).collect());
+                let rec_input = ImageTaskInput::from_arc_images(
+                    chunk.iter().map(|item| Arc::clone(&item.image)).collect(),
+                );
                 match text_recognition_adapter.execute(rec_input, None) {
                     Ok(rec_result) => {
                         for (i, item) in chunk.iter().enumerate() {
@@ -3388,14 +3415,15 @@ impl OARStructure {
 
             if !all_crops.is_empty() {
                 let batch_size = formula_adapter.recommended_batch_size().max(1);
-                let mut remaining_crops = all_crops;
+                let mut remaining_crops = all_crops.into_iter();
                 let mut meta_offset = 0;
 
-                while !remaining_crops.is_empty() {
-                    let chunk_len = batch_size.min(remaining_crops.len());
-                    let rest = remaining_crops.split_off(chunk_len);
-                    let chunk_vec = remaining_crops;
-                    remaining_crops = rest;
+                loop {
+                    let chunk_vec: Vec<_> = remaining_crops.by_ref().take(batch_size).collect();
+                    let chunk_len = chunk_vec.len();
+                    if chunk_len == 0 {
+                        break;
+                    }
 
                     let chunk_meta = &crop_meta[meta_offset..meta_offset + chunk_len];
                     match formula_adapter.execute(ImageTaskInput::new(chunk_vec), None) {
