@@ -21,6 +21,65 @@ pub enum OrtGraphOptimizationLevel {
     All,
 }
 
+/// CoreML hardware selection used by the ONNX Runtime CoreML execution provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum OrtCoreMLComputeUnits {
+    /// Let CoreML select from CPU, GPU, and Neural Engine.
+    #[default]
+    All,
+    /// Restrict CoreML to CPU and GPU.
+    CPUAndGPU,
+    /// Restrict CoreML to CPU and Neural Engine.
+    CPUAndNeuralEngine,
+    /// Restrict CoreML to CPU.
+    CPUOnly,
+}
+
+/// CoreML model representation created by ONNX Runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum OrtCoreMLModelFormat {
+    /// The modern CoreML representation (macOS 12+), with broader operator support.
+    #[default]
+    MLProgram,
+    /// The legacy CoreML neural-network representation.
+    NeuralNetwork,
+}
+
+/// CoreML graph-specialization policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum OrtCoreMLSpecializationStrategy {
+    /// CoreML's balanced default.
+    #[default]
+    Default,
+    /// Prefer steady-state prediction latency over specialization time and size.
+    FastPrediction,
+}
+
+/// Advanced CoreML execution-provider options.
+///
+/// These options live on [`OrtSessionConfig`] instead of adding fields to
+/// [`OrtExecutionProvider::CoreML`], preserving source compatibility for code
+/// that constructs or exhaustively matches the provider variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct OrtCoreMLConfig {
+    /// Hardware units available to CoreML.
+    pub compute_units: Option<OrtCoreMLComputeUnits>,
+    /// CoreML model representation.
+    pub model_format: Option<OrtCoreMLModelFormat>,
+    /// Only claim nodes whose model inputs have static shapes.
+    pub static_input_shapes: Option<bool>,
+    /// CoreML graph-specialization policy.
+    pub specialization_strategy: Option<OrtCoreMLSpecializationStrategy>,
+    /// Permit FP16 accumulation on the GPU.
+    pub allow_low_precision_accumulation_on_gpu: Option<bool>,
+    /// Log CoreML's hardware assignment and estimated cost.
+    pub profile_compute_plan: Option<bool>,
+    /// Directory used to cache compiled CoreML models.
+    pub model_cache_dir: Option<String>,
+}
+
+pub(crate) const COREML_CONFIG_ENTRY: &str = "oar.internal.coreml_config";
+
 /// Execution providers for ONNX Runtime.
 ///
 /// This enum represents the different execution providers that can be used
@@ -82,7 +141,8 @@ pub enum OrtExecutionProvider {
     },
     /// CoreML execution provider (macOS/iOS only)
     CoreML {
-        /// Use Apple Neural Engine only
+        /// Use CPU and Apple Neural Engine compute units. Despite the
+        /// historical name, unsupported nodes may still execute on CPU.
         ane_only: Option<bool>,
         /// Enable subgraphs
         subgraphs: Option<bool>,
@@ -193,6 +253,24 @@ impl OrtSessionConfig {
         self
     }
 
+    /// Sets advanced options for any CoreML execution provider in this session.
+    pub fn with_coreml_config(mut self, config: OrtCoreMLConfig) -> Self {
+        let value =
+            serde_json::to_string(&config).expect("serializing OrtCoreMLConfig cannot fail");
+        self.session_config_entries
+            .get_or_insert_with(Default::default)
+            .insert(COREML_CONFIG_ENTRY.to_owned(), value);
+        self
+    }
+
+    pub(crate) fn coreml_config(&self) -> Result<Option<OrtCoreMLConfig>, serde_json::Error> {
+        self.session_config_entries
+            .as_ref()
+            .and_then(|entries| entries.get(COREML_CONFIG_ENTRY))
+            .map(|value| serde_json::from_str(value))
+            .transpose()
+    }
+
     /// Effective intra-op thread count, defaulting to available parallelism.
     pub fn get_intra_threads(&self) -> usize {
         self.intra_threads.unwrap_or_else(|| {
@@ -256,5 +334,37 @@ mod tests {
             config.get_optimization_level(),
             OrtGraphOptimizationLevel::All
         ));
+    }
+
+    #[test]
+    fn coreml_provider_keeps_legacy_variant_shape() {
+        let provider = OrtExecutionProvider::CoreML {
+            ane_only: Some(true),
+            subgraphs: Some(false),
+        };
+        let OrtExecutionProvider::CoreML {
+            ane_only,
+            subgraphs,
+        } = provider
+        else {
+            unreachable!()
+        };
+        assert_eq!(ane_only, Some(true));
+        assert_eq!(subgraphs, Some(false));
+    }
+
+    #[test]
+    fn coreml_advanced_config_round_trips_through_session_config() {
+        let expected = OrtCoreMLConfig {
+            compute_units: Some(OrtCoreMLComputeUnits::CPUAndGPU),
+            model_format: Some(OrtCoreMLModelFormat::MLProgram),
+            static_input_shapes: Some(true),
+            specialization_strategy: Some(OrtCoreMLSpecializationStrategy::FastPrediction),
+            allow_low_precision_accumulation_on_gpu: Some(true),
+            profile_compute_plan: None,
+            model_cache_dir: Some("cache".to_owned()),
+        };
+        let config = OrtSessionConfig::new().with_coreml_config(expected.clone());
+        assert_eq!(config.coreml_config().unwrap(), Some(expected));
     }
 }

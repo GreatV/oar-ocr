@@ -116,6 +116,21 @@ cargo add oar-ocr --features coreml
 
 This feature controls the ONNX Runtime Core ML provider used by the classic pipeline. The `metal` feature in `oar-ocr-vl` is separate.
 
+`OrtExecutionProvider::CoreML` retains its original `ane_only` and `subgraphs`
+fields. `OrtSessionConfig::with_coreml_config` adds compute-unit selection,
+MLProgram versus legacy NeuralNetwork format, static-input filtering,
+specialization strategy, low-precision GPU accumulation, profiling, and a
+compiled-model cache path without changing that provider variant's shape.
+The OCR example accepts `coreml[:gpu|ane|cpu]`, `coreml-nn[:...]`, and
+`coreml-static[:...]`.
+
+`static_input_shapes` only controls which graphs Core ML will claim. It does
+not turn a dynamic ONNX model into a fixed-shape model: the ONNX input itself
+must contain concrete dimensions, and preprocessing must produce that exact
+shape. Static Core ML is most useful for larger models processing repeated,
+fixed-size pages; compilation and provider handoff can outweigh the benefit
+for small mobile models or one-off requests.
+
 ### `webgpu`
 
 Enables the ONNX Runtime WebGPU execution provider. Target and binary support depends on the ONNX Runtime distribution used for the build.

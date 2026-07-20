@@ -59,6 +59,13 @@ On macOS, enable Metal instead:
 cargo add oar-ocr-vl --features metal,download-binaries
 ```
 
+Metal inference uses Candle's fused SDPA kernels for supported attention
+shapes, including GQA without expanding K/V heads. For the best measured Apple
+Silicon throughput, explicitly set `OAR_VL_DTYPE=f16`. Use
+`OAR_VL_DISABLE_METAL_SDPA=1` for compatibility comparisons. The optional
+`OAR_VL_METAL_NATIVE_SOFTMAX=1` switch only changes the eager fallback; eager
+attention otherwise preserves the F32 softmax round trip.
+
 The crate's custom CUDA kernels compile to PTX for the oldest GPU detected by `nvidia-smi` at build time. For headless, container, or cross-machine builds, set the target explicitly, for example `CUDA_COMPUTE_CAP=89 cargo build -p oar-ocr-vl --features cuda,download-binaries`. These kernels require compute capability 8.0 or newer.
 
 ## Usage
