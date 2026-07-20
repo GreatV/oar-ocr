@@ -71,6 +71,16 @@ fn try_metal_sdpa(
     // before it ever reaches this function, so the non-GQA caller (which has
     // no equivalent upstream check) can't hand a fused Metal kernel batch,
     // head, length, or head_dim mismatches it isn't guaranteed to validate.
+    // `allow_vector_kernel` is only ever `true` for the GQA caller, which has
+    // already validated `num_heads == num_kv_heads * num_kv_groups`; the
+    // plain (non-GQA) caller documents equal head counts, so require an exact
+    // match there instead of merely a multiple, or a head-count mismatch
+    // would silently get grouped-query semantics on Metal only.
+    let heads_match = if allow_vector_kernel {
+        num_heads.is_multiple_of(num_kv_heads)
+    } else {
+        num_heads == num_kv_heads
+    };
     if num_kv_heads == 0
         || batch != k_batch
         || batch != v_batch
@@ -78,14 +88,25 @@ fn try_metal_sdpa(
         || kv_len != v_len
         || head_dim != k_head_dim
         || head_dim != v_head_dim
-        || !num_heads.is_multiple_of(num_kv_heads)
+        || !heads_match
     {
         return Ok(None);
     }
     // Candle's q_len == 1 vector kernel ignores both explicit masks and their
     // strides. Keep masked decode on the eager path until the kernel supports
     // masks. Standard attention also keeps decode eager by design.
-    if query_len == 0 || (query_len == 1 && (!allow_vector_kernel || mask.is_some())) {
+    //
+    // Candle's causal kernel derives its diagonal offset as `kv_len - query_len`
+    // in unsigned arithmetic; when query_len > kv_len that underflows and every
+    // row ends up fully masked (a 0/0 softmax), unlike the eager causal mask
+    // (`create_causal_mask`), which saturates that offset to 0 and still lets
+    // early rows attend the first key. No cache in this crate currently grows
+    // query_len past kv_len, but keep this on the eager path rather than rely
+    // on that invariant holding forever.
+    if query_len == 0
+        || (query_len == 1 && (!allow_vector_kernel || mask.is_some()))
+        || (is_causal && mask.is_none() && query_len > kv_len)
+    {
         return Ok(None);
     }
 
@@ -1009,6 +1030,57 @@ mod tests {
             "unsupported fused shapes must fall back instead of failing"
         );
         scaled_dot_product_attention_gqa(&q, &k, &v, None, 0.125, false, 2)?;
+        Ok(())
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn test_metal_plain_sdpa_rejects_head_count_mismatch() -> Result<()> {
+        let Ok(device) = Device::new_metal(0) else {
+            return Ok(());
+        };
+        // scaled_dot_product_attention is the non-GQA entry point; unlike the
+        // GQA wrapper it never validates num_heads against num_kv_heads
+        // upstream, so try_metal_sdpa must reject a multiple-but-unequal head
+        // count itself instead of silently getting GQA semantics from
+        // Candle's fused kernel.
+        let q = Tensor::randn(0f32, 1f32, (1, 4, 8, 64), &device)?.to_dtype(DType::F16)?;
+        let k = Tensor::randn(0f32, 1f32, (1, 2, 8, 64), &device)?.to_dtype(DType::F16)?;
+        let v = Tensor::randn(0f32, 1f32, (1, 2, 8, 64), &device)?.to_dtype(DType::F16)?;
+        assert!(
+            try_metal_sdpa(&q, &k, &v, None, 0.125, false, false)?.is_none(),
+            "plain scaled_dot_product_attention must not dispatch mismatched head counts to the fused kernel"
+        );
+        assert!(scaled_dot_product_attention(&q, &k, &v, None, 0.125, false).is_err());
+        Ok(())
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn test_metal_causal_query_longer_than_kv_matches_eager() -> Result<()> {
+        let Ok(device) = Device::new_metal(0) else {
+            return Ok(());
+        };
+        // query_len > kv_len with is_causal=true and no explicit mask: Candle's
+        // Metal causal kernel underflows its diagonal offset for this shape, so
+        // try_metal_sdpa must fall back to the eager path instead of dispatching.
+        let q = Tensor::randn(0f32, 1f32, (1, 2, 8, 64), &device)?.to_dtype(DType::F16)?;
+        let k = Tensor::randn(0f32, 1f32, (1, 2, 3, 64), &device)?.to_dtype(DType::F16)?;
+        let v = Tensor::randn(0f32, 1f32, (1, 2, 3, 64), &device)?.to_dtype(DType::F16)?;
+        assert!(
+            try_metal_sdpa(&q, &k, &v, None, 0.125, true, false)?.is_none(),
+            "causal query_len > kv_len must fall back to the eager path on Metal"
+        );
+        let out = scaled_dot_product_attention(&q, &k, &v, None, 0.125, true)?;
+        assert_eq!(out.dims(), &[1, 2, 8, 64]);
+        assert!(
+            out.to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?
+                .iter()
+                .all(|value| value.is_finite()),
+            "eager fallback must not produce NaN/inf for this shape"
+        );
         Ok(())
     }
 
