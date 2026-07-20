@@ -299,16 +299,21 @@ impl OrtSessionConfig {
 
     /// Returns whether an explicitly configured hardware accelerator is present.
     ///
-    /// No provider configuration, an empty provider list, and a CPU-only list
-    /// all use CPU-oriented pipeline defaults. A CPU fallback after CUDA,
-    /// TensorRT, DirectML, OpenVINO, CoreML, or WebGPU still counts as an
-    /// accelerated configuration.
+    /// `execution_providers` is a preference-ordered list: ONNX Runtime lets
+    /// each provider claim graph nodes in list order, and CPU can claim
+    /// almost any node, so a CPU entry listed first effectively runs the
+    /// session on CPU regardless of what accelerators follow it. Only the
+    /// first provider therefore determines whether this is an accelerated
+    /// configuration. No provider configuration, an empty provider list, and
+    /// a CPU-first list (including CPU alone) all use CPU-oriented pipeline
+    /// defaults; an accelerator listed first with a CPU fallback after it
+    /// (CUDA, TensorRT, DirectML, OpenVINO, CoreML, or WebGPU) counts as
+    /// accelerated.
     pub fn has_accelerator_provider(&self) -> bool {
-        self.execution_providers.as_ref().is_some_and(|providers| {
-            providers
-                .iter()
-                .any(|provider| !matches!(provider, OrtExecutionProvider::CPU))
-        })
+        self.execution_providers
+            .as_ref()
+            .and_then(|providers| providers.first())
+            .is_some_and(|provider| !matches!(provider, OrtExecutionProvider::CPU))
     }
 }
 
@@ -363,6 +368,17 @@ mod tests {
                 .with_execution_providers(vec![
                     OrtExecutionProvider::DirectML { device_id: Some(0) },
                     OrtExecutionProvider::CPU,
+                ])
+                .has_accelerator_provider()
+        );
+        // CPU listed first claims nearly every node before the accelerator
+        // gets a chance to, so this is a CPU-preferred configuration despite
+        // the accelerator appearing later in the list.
+        assert!(
+            !OrtSessionConfig::new()
+                .with_execution_providers(vec![
+                    OrtExecutionProvider::CPU,
+                    OrtExecutionProvider::DirectML { device_id: Some(0) },
                 ])
                 .has_accelerator_provider()
         );
