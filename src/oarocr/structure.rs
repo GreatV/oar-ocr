@@ -2895,11 +2895,15 @@ impl OARStructure {
 
         let mut remaining_pages = det_page_indices.into_iter().zip(det_images);
         loop {
-            let batch: Vec<_> = remaining_pages.by_ref().take(image_batch_size).collect();
-            if batch.is_empty() {
+            let mut batch_page_indices = Vec::with_capacity(image_batch_size);
+            let mut batch_images = Vec::with_capacity(image_batch_size);
+            for (page_idx, image) in remaining_pages.by_ref().take(image_batch_size) {
+                batch_page_indices.push(page_idx);
+                batch_images.push(image);
+            }
+            if batch_page_indices.is_empty() {
                 break;
             }
-            let (batch_page_indices, batch_images): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
             match text_detection_adapter.execute(ImageTaskInput::new(batch_images), None) {
                 Ok(det_result) => {
                     for (offset, detections) in det_result.detections.into_iter().enumerate() {

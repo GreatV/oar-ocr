@@ -116,14 +116,20 @@ pub fn parse_device_config(
                 .transpose()?
                 .unwrap_or(0);
 
-            return Ok(Some(OrtSessionConfig::new().with_execution_providers(
-                vec![
-                    OrtExecutionProvider::DirectML {
-                        device_id: Some(device_id),
-                    },
-                    OrtExecutionProvider::CPU,
-                ],
-            )));
+            // The DirectML execution provider requires memory pattern
+            // optimization to be disabled; leaving it at ONNX Runtime's
+            // default (enabled) can fail session creation before any
+            // inference runs.
+            return Ok(Some(
+                OrtSessionConfig::new()
+                    .with_execution_providers(vec![
+                        OrtExecutionProvider::DirectML {
+                            device_id: Some(device_id),
+                        },
+                        OrtExecutionProvider::CPU,
+                    ])
+                    .with_memory_pattern(false),
+            ));
         }
     }
 
@@ -178,6 +184,11 @@ mod tests {
                     OrtExecutionProvider::DirectML { device_id: Some(2) },
                     OrtExecutionProvider::CPU,
                 ])
+            );
+            assert_eq!(
+                config.enable_mem_pattern,
+                Some(false),
+                "DirectML requires memory pattern optimization to be disabled"
             );
         }
     }
