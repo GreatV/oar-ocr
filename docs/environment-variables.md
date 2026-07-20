@@ -11,6 +11,9 @@ Runtime environment variables read by the oar-ocr crates. Project-specific varia
 | [`OAR_VL_ATTN_FULL_SEQ_THRESHOLD`](#oar_vl_attn_full_seq_threshold) | `oar-ocr-vl` | `8192` | PaddleOCR-VL vision attention path selection |
 | [`OAR_VL_DISABLE_FLASH_ATTN`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Disable CUDA FlashAttention |
 | [`OAR_VL_DISABLE_GQA`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Use expanded-K/V GQA fallback |
+| [`OAR_VL_METAL_NATIVE_SOFTMAX`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Use native F16/BF16 softmax on Metal eager attention |
+| [`OAR_VL_METAL_F32_SOFTMAX`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Keep F32 softmax on Metal eager attention |
+| [`OAR_VL_DISABLE_METAL_SDPA`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Disable fused Metal grouped-query attention |
 | [`OAR_VL_DISABLE_CUDA_GRAPH`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Disable shared decoder CUDA graphs |
 | [`OAR_VL_DISABLE_SPECULATIVE`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Disable GLM-OCR speculative decoding |
 | [`OAR_PADDLEOCR_VL_DISABLE_CUDA_GRAPH`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Disable PaddleOCR-VL CUDA graphs |
@@ -68,6 +71,9 @@ The following presence-based switches select portable fallbacks or disable optio
 |---|---|---|
 | `OAR_VL_DISABLE_FLASH_ATTN` | All CUDA VLM backends | Use the eager attention fallback instead of FlashAttention |
 | `OAR_VL_DISABLE_GQA` | Backends using grouped-query attention | Expand K/V heads before eager attention instead of using the grouped implementation |
+| `OAR_VL_METAL_NATIVE_SOFTMAX` | Metal VLM backends | Keep F16/BF16 eager-attention softmax in its input dtype instead of converting to F32 |
+| `OAR_VL_METAL_F32_SOFTMAX` | Metal VLM backends | Keep the default F32 round trip for eager attention; this takes precedence over `OAR_VL_METAL_NATIVE_SOFTMAX` |
+| `OAR_VL_DISABLE_METAL_SDPA` | Metal VLM backends | Disable fused Metal SDPA and use the portable grouped-query attention path |
 | `OAR_VL_DISABLE_CUDA_GRAPH` | PaddleOCR-VL, GLM-OCR, MinerU2.5/Pro | Disable decoder CUDA graph capture and replay |
 | `OAR_VL_DISABLE_SPECULATIVE` | GLM-OCR | Disable MTP speculative decoding |
 | `OAR_PADDLEOCR_VL_DISABLE_CUDA_GRAPH` | PaddleOCR-VL variants | Disable decoder CUDA graphs only for PaddleOCR-VL |

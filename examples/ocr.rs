@@ -50,7 +50,7 @@ use oar_ocr::utils::load_image;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
-use utils::device_config::parse_device_config;
+use utils::device_config::{apply_ort_overrides, parse_device_config};
 use utils::visualization::{VisualizationConfig, create_ocr_visualization};
 
 /// Command-line arguments for the OCR pipeline example
@@ -90,7 +90,7 @@ struct Args {
     #[arg(long, default_value_t = false)]
     return_word_box: bool,
 
-    /// Device to use for inference (cpu, cuda, cuda:0, etc.)
+    /// Device (cpu, cuda:N, coreml[:gpu|ane|cpu], coreml-nn[:...])
     #[arg(long, default_value = "cpu")]
     device: String,
 
@@ -133,6 +133,22 @@ struct Args {
     /// Recognition session pool size (batching cropped regions)
     #[arg(long)]
     region_batch_size: Option<usize>,
+
+    /// Repeat inference to expose warm-up and steady-state latency.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+    repeat: u32,
+
+    /// ONNX Runtime intra-op worker threads (CPU tuning experiment).
+    #[arg(long)]
+    ort_intra_threads: Option<usize>,
+
+    /// ONNX Runtime inter-op worker threads (only useful with parallel execution).
+    #[arg(long)]
+    ort_inter_threads: Option<usize>,
+
+    /// Enable ONNX Runtime parallel graph execution.
+    #[arg(long)]
+    ort_parallel_execution: bool,
 
     /// Directory to save output results (visualizations, etc.)
     #[arg(short = 'o', long = "output-dir")]
@@ -189,8 +205,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Build device/ORT configuration
-    let ort_config = parse_device_config(&args.device)?;
-
+    let ort_config = apply_ort_overrides(
+        parse_device_config(&args.device)?,
+        args.ort_intra_threads,
+        args.ort_inter_threads,
+        args.ort_parallel_execution,
+    )?;
     // Prepare model configs
     let det_config = TextDetectionConfig {
         score_threshold: args.det_score_thresh,
@@ -227,7 +247,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(config) = ort_config.clone() {
         builder = builder.ort_session(config);
     }
-
     if let Some(size) = args.image_batch_size {
         builder = builder.image_batch_size(size);
     }
@@ -264,13 +283,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No images could be loaded".into());
     }
 
-    // Run inference
-    let start = Instant::now();
-    let results = ocr.predict(images)?;
-    info!(
-        "OCR completed in {:.2}ms",
-        start.elapsed().as_secs_f64() * 1000.0
-    );
+    // Run inference. Repetition is useful when CoreML compiles or specializes
+    // graph partitions lazily on the first prediction.
+    let mut results = None;
+    for iteration in 1..=args.repeat {
+        let iteration_images = images.clone();
+        let start = Instant::now();
+        let iteration_results = ocr.predict(iteration_images)?;
+        info!(
+            "OCR completed (run {}/{}) in {:.2}ms",
+            iteration,
+            args.repeat,
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+        results = Some(iteration_results);
+    }
+    let results = results.expect("repeat is validated as at least one");
 
     // Report results
     info!("\n=== OCR Results ===");

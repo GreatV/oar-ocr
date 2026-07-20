@@ -4,7 +4,7 @@ use super::dynamic_kv::{
     DynamicKvAppend, FusedAddRmsNormBf16, FusedSiluMulBf16, FusedXdRope, FusedXdRopeRmsNormF16,
 };
 use crate::attention::{
-    RotaryEmbedding, flash_attention, repeat_kv, scaled_dot_product_attention, select_rope_sections,
+    RotaryEmbedding, flash_attention, scaled_dot_product_attention_gqa, select_rope_sections,
 };
 #[cfg(feature = "cuda")]
 use crate::decoder_graph::{
@@ -514,29 +514,16 @@ impl HunyuanAttention {
         };
         let attn_output = match flash_output {
             Some(output) => output,
-            None => {
-                let key_states = repeat_kv(&k_all, self.num_kv_groups)
-                    .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "repeat_kv key", e))?
-                    .contiguous()
-                    .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn key contiguous", e))?;
-                let value_states = repeat_kv(&v_all, self.num_kv_groups)
-                    .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "repeat_kv value", e))?
-                    .contiguous()
-                    .map_err(|e| {
-                        candle_to_ocr_inference("HunyuanOCR", "attn value contiguous", e)
-                    })?;
-                scaled_dot_product_attention(
-                    q,
-                    &key_states,
-                    &value_states,
-                    causal_mask,
-                    self.scaling,
-                    seq_len > 1,
-                )
-                .map_err(|e| {
-                    candle_to_ocr_inference("HunyuanOCR", "scaled dot-product attention", e)
-                })?
-            }
+            None => scaled_dot_product_attention_gqa(
+                q,
+                &k_all,
+                &v_all,
+                causal_mask,
+                self.scaling,
+                seq_len > 1,
+                self.num_kv_groups,
+            )
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "grouped-query attention", e))?,
         };
         self.project_attention_output(&attn_output, model_dtype, b, seq_len)
     }

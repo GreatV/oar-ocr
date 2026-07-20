@@ -88,6 +88,10 @@ struct Args {
     /// Maximum number of tokens to generate (default: 512)
     #[arg(long, default_value = "512")]
     max_tokens: usize,
+
+    /// Repeat inference to expose Metal warm-up and steady-state latency.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+    repeat: u32,
 }
 
 fn parse_task(task_str: &str) -> Result<PaddleOcrVlTask, Box<dyn std::error::Error>> {
@@ -164,36 +168,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for image_path in &existing_images {
         info!("\nProcessing: {}", image_path.display());
-
-        // Load image
         let rgb_img = match load_image(image_path) {
-            Ok(img) => img,
+            Ok(image) => image,
             Err(e) => {
                 error!("  Failed to load image: {}", e);
                 continue;
             }
         };
 
-        // Run inference
-        let infer_start = Instant::now();
-        match model
-            .generate_tokens(&[rgb_img], &[task], args.max_tokens)
-            .pop()
-            .unwrap()
-        {
-            Ok(tokens) => {
-                let infer_duration = infer_start.elapsed();
-                info!(
-                    "  Inference time: {:.2}ms, tokens: {}, fingerprint: {:016x}",
-                    infer_duration.as_secs_f64() * 1000.0,
-                    tokens.len(),
-                    token_fingerprint(&tokens)
-                );
-                println!("{}", model.decode_tokens(&tokens, task)?.1);
+        let mut last_tokens = None;
+        for iteration in 1..=args.repeat {
+            let infer_start = Instant::now();
+            let result = model
+                .generate_tokens(std::slice::from_ref(&rgb_img), &[task], args.max_tokens)
+                .pop()
+                .expect("single-image request returns one result");
+            let infer_duration = infer_start.elapsed();
+            match result {
+                Ok(tokens) => {
+                    info!(
+                        "  Inference time (run {}/{}): {:.2}ms, tokens: {}, {:.2} tokens/s, fingerprint: {:016x}",
+                        iteration,
+                        args.repeat,
+                        infer_duration.as_secs_f64() * 1000.0,
+                        tokens.len(),
+                        tokens.len() as f64 / infer_duration.as_secs_f64(),
+                        token_fingerprint(&tokens)
+                    );
+                    last_tokens = Some(tokens);
+                }
+                Err(e) => {
+                    error!("  Inference failed: {}", e);
+                    break;
+                }
             }
-            Err(e) => {
-                error!("  Inference failed: {}", e);
-            }
+        }
+        if let Some(tokens) = last_tokens {
+            println!("{}", model.decode_tokens(&tokens, task)?.1);
         }
     }
     Ok(())
