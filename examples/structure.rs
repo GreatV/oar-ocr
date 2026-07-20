@@ -760,20 +760,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Batch processing {} image(s) with configured batching",
         images.len()
     );
-    let mut batch_results = None;
-    for iteration in 1..=args.repeat {
-        let iteration_images = images.clone();
+    // Only the warm-up runs need a cloned image set; the final (or only) run
+    // can move `images` directly, so `--repeat 1` (the default) never pays a
+    // clone.
+    for iteration in 1..args.repeat {
         let predict_start = Instant::now();
-        let results = analyzer.predict_images(iteration_images);
+        analyzer.predict_images(images.clone());
         info!(
             "Structure inference completed (run {}/{}) in {:.2}ms",
             iteration,
             args.repeat,
             predict_start.elapsed().as_secs_f64() * 1000.0
         );
-        batch_results = Some(results);
     }
-    let batch_results = batch_results.expect("repeat is validated as at least one");
+    let predict_start = Instant::now();
+    let batch_results = analyzer.predict_images(images);
+    info!(
+        "Structure inference completed (run {}/{}) in {:.2}ms",
+        args.repeat,
+        args.repeat,
+        predict_start.elapsed().as_secs_f64() * 1000.0
+    );
 
     // Process each result: assign metadata, save, visualize, log
     for (idx, (page_result, (source_path, source_stem))) in

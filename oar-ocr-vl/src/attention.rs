@@ -58,22 +58,34 @@ fn try_metal_sdpa(
     if metal_sdpa_disabled() || !q.device().is_metal() {
         return Ok(None);
     }
-    let Ok((batch, num_heads, query_len, _)) = q.dims4() else {
+    let Ok((batch, num_heads, query_len, head_dim)) = q.dims4() else {
         return Ok(None);
     };
-    let Ok((_, num_kv_heads, kv_len, _)) = k.dims4() else {
+    let Ok((k_batch, num_kv_heads, kv_len, k_head_dim)) = k.dims4() else {
         return Ok(None);
     };
-    if v.rank() != 4 || num_kv_heads == 0 {
+    let Ok((v_batch, v_heads, v_len, v_head_dim)) = v.dims4() else {
+        return Ok(None);
+    };
+    // Mirror the shape consistency scaled_dot_product_attention_gqa enforces
+    // before it ever reaches this function, so the non-GQA caller (which has
+    // no equivalent upstream check) can't hand a fused Metal kernel batch,
+    // head, length, or head_dim mismatches it isn't guaranteed to validate.
+    if num_kv_heads == 0
+        || batch != k_batch
+        || batch != v_batch
+        || num_kv_heads != v_heads
+        || kv_len != v_len
+        || head_dim != k_head_dim
+        || head_dim != v_head_dim
+        || !num_heads.is_multiple_of(num_kv_heads)
+    {
         return Ok(None);
     }
     // Candle's q_len == 1 vector kernel ignores both explicit masks and their
     // strides. Keep masked decode on the eager path until the kernel supports
     // masks. Standard attention also keeps decode eager by design.
-    if query_len == 0
-        || (query_len == 1 && (!allow_vector_kernel || mask.is_some()))
-        || num_heads % num_kv_heads != 0
-    {
+    if query_len == 0 || (query_len == 1 && (!allow_vector_kernel || mask.is_some())) {
         return Ok(None);
     }
 

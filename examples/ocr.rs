@@ -284,21 +284,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Run inference. Repetition is useful when CoreML compiles or specializes
-    // graph partitions lazily on the first prediction.
-    let mut results = None;
-    for iteration in 1..=args.repeat {
-        let iteration_images = images.clone();
+    // graph partitions lazily on the first prediction. Only the warm-up runs
+    // need a cloned image set; the final (or only) run can move `images`
+    // directly, so `--repeat 1` (the default) never pays a clone.
+    for iteration in 1..args.repeat {
         let start = Instant::now();
-        let iteration_results = ocr.predict(iteration_images)?;
+        ocr.predict(images.clone())?;
         info!(
             "OCR completed (run {}/{}) in {:.2}ms",
             iteration,
             args.repeat,
             start.elapsed().as_secs_f64() * 1000.0
         );
-        results = Some(iteration_results);
     }
-    let results = results.expect("repeat is validated as at least one");
+    let start = Instant::now();
+    let results = ocr.predict(images)?;
+    info!(
+        "OCR completed (run {}/{}) in {:.2}ms",
+        args.repeat,
+        args.repeat,
+        start.elapsed().as_secs_f64() * 1000.0
+    );
 
     // Report results
     info!("\n=== OCR Results ===");
