@@ -21,7 +21,8 @@
 //! * `--rectification-model` - Optional document rectification model
 //! * `--text-type` - Text type hint (`seal` for curved seal text)
 //! * `--return-word-box` - Enable word-level boxes from recognition output
-//! * `--device` - Device to use (`cpu`, `cuda`, `cuda:0`, etc.)
+//! * `--device` - Device to use (`cpu`, `cuda:0`, `directml:0`, etc.)
+//! * CPU tuning: `--intra-threads`, `--global-thread-pool`, `--dynamic-block-base`
 //! * Detection config: `--det-score-thresh`, `--det-box-thresh`, `--det-unclip`, `--det-max-candidates`
 //! * Recognition config: `--rec-score-thresh`, `--rec-max-text-length`
 //! * Batch sizes: `--image-batch-size` (detection sessions), `--region-batch-size` (recognition)
@@ -43,6 +44,7 @@
 mod utils;
 
 use clap::Parser;
+use oar_ocr::core::OrtGlobalThreadPoolOptions;
 use oar_ocr::domain::tasks::{TextDetectionConfig, TextRecognitionConfig};
 use oar_ocr::oarocr::OAROCRBuilder;
 use oar_ocr::processors::LimitType;
@@ -90,9 +92,29 @@ struct Args {
     #[arg(long, default_value_t = false)]
     return_word_box: bool,
 
-    /// Device (cpu, cuda:N, coreml[:gpu|ane|cpu], coreml-nn[:...])
+    /// Device (cpu, cuda:N, directml:N, coreml[:gpu|ane|cpu], coreml-nn[:...])
     #[arg(long, default_value = "cpu")]
     device: String,
+
+    /// ONNX Runtime intra-op thread count (defaults to the runtime's CPU policy)
+    #[arg(long)]
+    intra_threads: Option<usize>,
+
+    /// ONNX Runtime inter-op thread count (only useful with parallel execution)
+    #[arg(long)]
+    inter_threads: Option<usize>,
+
+    /// Share one ONNX Runtime thread pool across the detector and recognizer
+    #[arg(long, default_value_t = false)]
+    global_thread_pool: bool,
+
+    /// Let ONNX Runtime execute independent graph branches in parallel
+    #[arg(long, default_value_t = false)]
+    parallel_execution: bool,
+
+    /// Enable ONNX Runtime's dynamic thread-block scheduling with this base value
+    #[arg(long)]
+    dynamic_block_base: Option<u32>,
 
     /// Text detection score threshold (default: 0.3)
     #[arg(long, default_value_t = 0.3)]
@@ -205,12 +227,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Build device/ORT configuration
+    if args.global_thread_pool {
+        let mut pool = OrtGlobalThreadPoolOptions::new();
+        if let Some(threads) = args.intra_threads {
+            pool = pool.with_intra_threads(threads);
+        }
+        if let Some(threads) = args.inter_threads {
+            pool = pool.with_inter_threads(threads);
+        }
+        if !pool.commit()? {
+            return Err("ONNX Runtime was initialized before the global thread pool".into());
+        }
+    }
+
+    let mut ort_config = parse_device_config(&args.device)?;
+    if args.intra_threads.is_some()
+        || args.inter_threads.is_some()
+        || args.parallel_execution
+        || args.dynamic_block_base.is_some()
+    {
+        let mut config = ort_config.take().unwrap_or_default();
+        if !args.global_thread_pool {
+            if let Some(threads) = args.intra_threads {
+                config = config.with_intra_threads(threads);
+            }
+            if let Some(threads) = args.inter_threads {
+                config = config.with_inter_threads(threads);
+            }
+        }
+        if args.parallel_execution {
+            config = config.with_parallel_execution(true);
+        }
+        if let Some(base) = args.dynamic_block_base {
+            config = config.add_config_entry("session.dynamic_block_base", base.to_string());
+        }
+        ort_config = Some(config);
+    }
     let ort_config = apply_ort_overrides(
-        parse_device_config(&args.device)?,
+        ort_config,
         args.ort_intra_threads,
         args.ort_inter_threads,
         args.ort_parallel_execution,
     )?;
+
     // Prepare model configs
     let det_config = TextDetectionConfig {
         score_threshold: args.det_score_thresh,
@@ -243,6 +302,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .text_detection_config(det_config)
         .text_recognition_config(rec_config)
         .return_word_box(args.return_word_box);
+
+    if let Some(model) = &args.document_image_orientation_model {
+        builder = builder.with_document_image_orientation_classification(model);
+    }
+    if let Some(model) = &args.text_line_orientation_model {
+        builder = builder.with_text_line_orientation_classification(model);
+    }
+    if let Some(model) = &args.rectification_model {
+        builder = builder.with_document_image_rectification(model);
+    }
 
     if let Some(config) = ort_config.clone() {
         builder = builder.ort_session(config);

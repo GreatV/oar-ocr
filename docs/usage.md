@@ -837,6 +837,54 @@ let config = OrtSessionConfig::new()
     .with_inter_threads(2);
 ```
 
+Thread-count tuning is workload and CPU dependent. The OCR example exposes the
+relevant controls so Windows users can measure several values without changing
+code:
+
+```powershell
+cargo run --release --example ocr -- --intra-threads 8 <OPTIONS> <IMAGES>...
+cargo run --release --example ocr -- --intra-threads 12 <OPTIONS> <IMAGES>...
+cargo run --release --example ocr -- --intra-threads 16 <OPTIONS> <IMAGES>...
+```
+
+Pipelines with several ONNX models can share one process-wide worker pool instead
+of creating a pool for every session. Commit it before building any predictor:
+
+```rust
+use oar_ocr::core::OrtGlobalThreadPoolOptions;
+
+OrtGlobalThreadPoolOptions::new()
+    .with_intra_threads(12)
+    .commit()?;
+
+// Build OAROCR/OARStructure only after the global environment is committed.
+```
+
+The `ocr` and `structure` examples expose this as `--global-thread-pool`. Do not
+also set session-local thread counts when a global pool is active. Sharing mainly
+reduces worker creation and contention in multi-model pipelines; benchmark it for
+your workload rather than assuming it lowers single-request latency. See ONNX
+Runtime's [thread management guide](https://onnxruntime.ai/docs/performance/tune-performance/threading.html)
+for the underlying process-wide pool behavior.
+
+On Windows, examples built with `--features directml` also accept
+`--device directml`, `--device directml:N`, and the shorter `--device dml:N`.
+The selected DirectML provider keeps the accelerator-oriented batch defaults.
+
+### Device-aware batching
+
+The high-level OCR and Structure builders choose different defaults for CPU and
+accelerator execution. CPU operators already parallelize through ONNX Runtime's
+intra-op pool, so outer image batches default to `1` and text-recognition batches
+default to `4`, except PP-OCRv6 Tiny recognition uses `16` to better amortize its
+much smaller per-item workload. Explicitly configured accelerators retain the
+larger adapter defaults (`8` images for OCR detection, `4` pages for layout
+detection, and `64` text regions for recognition).
+
+Explicit `.image_batch_size(...)` and `.region_batch_size(...)` values always
+take precedence. Model size and CPU topology still matter, so applications with
+fixed workloads should benchmark nearby values.
+
 ### Task-Specific Configs
 
 Each task has its own configuration struct that can be customized:

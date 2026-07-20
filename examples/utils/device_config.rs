@@ -3,13 +3,50 @@
 //! This module provides utilities for parsing device strings and creating
 //! ONNX Runtime session configurations with appropriate execution providers.
 
-#[cfg(any(feature = "cuda", feature = "coreml"))]
+#[cfg(any(feature = "cuda", feature = "directml", feature = "coreml"))]
 use oar_ocr::core::config::OrtExecutionProvider;
 use oar_ocr::core::config::OrtSessionConfig;
 #[cfg(feature = "coreml")]
 use oar_ocr::core::config::{
     OrtCoreMLComputeUnits, OrtCoreMLConfig, OrtCoreMLModelFormat, OrtCoreMLSpecializationStrategy,
 };
+
+/// DirectML requires ONNX Runtime's sequential execution mode; enabling
+/// parallel execution alongside it fails session creation instead of
+/// running inference. This is checked here, the single point both the
+/// `--parallel-execution`/`--intra-threads` (device-config) and
+/// `--ort-parallel-execution` (this function's own override) code paths
+/// funnel their final `OrtSessionConfig` through, regardless of which one
+/// set `parallel_execution`.
+/// <https://onnxruntime.ai/docs/execution-providers/DirectML-ExecutionProvider.html#configuration-options>
+#[cfg(feature = "directml")]
+fn reject_directml_parallel_execution(
+    config: &Option<OrtSessionConfig>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let uses_directml = config
+        .execution_providers
+        .iter()
+        .flatten()
+        .any(|provider| matches!(provider, OrtExecutionProvider::DirectML { .. }));
+    if uses_directml && config.parallel_execution == Some(true) {
+        return Err(
+            "DirectML requires ONNX Runtime's sequential execution mode; remove \
+             --parallel-execution / --ort-parallel-execution when using a directml device."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "directml"))]
+fn reject_directml_parallel_execution(
+    _config: &Option<OrtSessionConfig>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
 
 /// Applies optional ONNX Runtime thread and execution-mode overrides.
 ///
@@ -26,6 +63,7 @@ pub fn apply_ort_overrides(
         return Err("ONNX Runtime thread counts must be at least one".into());
     }
     if intra_threads.is_none() && inter_threads.is_none() && !parallel_execution {
+        reject_directml_parallel_execution(&config)?;
         return Ok(config);
     }
 
@@ -39,7 +77,9 @@ pub fn apply_ort_overrides(
     if parallel_execution {
         configured = configured.with_parallel_execution(true);
     }
-    Ok(Some(configured))
+    let configured = Some(configured);
+    reject_directml_parallel_execution(&configured)?;
+    Ok(configured)
 }
 
 /// Parses device string and creates OrtSessionConfig with appropriate execution providers.
@@ -48,6 +88,7 @@ pub fn apply_ort_overrides(
 ///
 /// - `"cpu"` -> CPU execution provider (returns None as CPU is default)
 /// - `"cuda"` or `"cuda:0"` -> CUDA execution provider with device ID
+/// - `"directml"`, `"directml:0"`, or `"dml:0"` -> DirectML execution provider
 /// - `"coreml"`, `"coreml:gpu"`, or `"coreml:ane"` -> CoreML MLProgram provider
 /// - `"coreml-nn"` variants -> legacy CoreML NeuralNetwork representation
 /// - `"coreml-static"` variants -> only offload models with static input shapes
@@ -191,19 +232,148 @@ pub fn parse_device_config(
         }
     }
 
-    Err(format!(
-        "Unsupported device: {}. Supported devices: cpu{}{}",
-        device,
-        if cfg!(feature = "cuda") {
-            ", cuda, cuda:N"
-        } else {
-            ""
-        },
-        if cfg!(feature = "coreml") {
-            ", coreml[:gpu|ane|cpu], coreml-nn[:gpu|ane|cpu], coreml-static[:gpu|ane|cpu]"
-        } else {
-            ""
+    #[cfg(feature = "directml")]
+    {
+        if device_lower == "directml"
+            || device_lower == "dml"
+            || device_lower.starts_with("directml:")
+            || device_lower.starts_with("dml:")
+        {
+            let id_str = device_lower
+                .strip_prefix("directml:")
+                .or_else(|| device_lower.strip_prefix("dml:"));
+            let device_id = id_str
+                .map(|id| {
+                    id.parse::<i32>()
+                        .ok()
+                        .filter(|id| *id >= 0)
+                        .ok_or_else(|| {
+                            format!(
+                                "Invalid DirectML device ID: {device}. Expected 'directml', 'directml:N', or 'dml:N' with N >= 0"
+                            )
+                        })
+                })
+                .transpose()?
+                .unwrap_or(0);
+
+            // The DirectML execution provider requires memory pattern
+            // optimization to be disabled; leaving it at ONNX Runtime's
+            // default (enabled) can fail session creation before any
+            // inference runs.
+            return Ok(Some(
+                OrtSessionConfig::new()
+                    .with_execution_providers(vec![
+                        OrtExecutionProvider::DirectML {
+                            device_id: Some(device_id),
+                        },
+                        OrtExecutionProvider::CPU,
+                    ])
+                    .with_memory_pattern(false),
+            ));
         }
+    }
+
+    #[cfg(not(feature = "directml"))]
+    {
+        if device_lower == "directml"
+            || device_lower == "dml"
+            || device_lower.starts_with("directml:")
+            || device_lower.starts_with("dml:")
+        {
+            return Err(format!(
+                "DirectML device '{device}' requested but the DirectML feature is not enabled. \
+                 Rebuild with --features=directml to enable DirectML support."
+            )
+            .into());
+        }
+    }
+
+    let mut supported = vec!["cpu"];
+    if cfg!(feature = "cuda") {
+        supported.push("cuda");
+        supported.push("cuda:N");
+    }
+    if cfg!(feature = "directml") {
+        supported.push("directml");
+        supported.push("directml:N");
+    }
+    if cfg!(feature = "coreml") {
+        supported.push("coreml[:gpu|ane|cpu]");
+        supported.push("coreml-nn[:gpu|ane|cpu]");
+        supported.push("coreml-static[:gpu|ane|cpu]");
+    }
+    Err(format!(
+        "Unsupported device: {device}. Supported devices: {}",
+        supported.join(", ")
     )
     .into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_needs_no_explicit_session_config() {
+        assert!(parse_device_config("cpu").unwrap().is_none());
+    }
+
+    #[cfg(feature = "directml")]
+    #[test]
+    fn parses_directml_alias_and_device_id() {
+        for name in ["directml:2", "dml:2"] {
+            let config = parse_device_config(name).unwrap().unwrap();
+            assert_eq!(
+                config.execution_providers,
+                Some(vec![
+                    OrtExecutionProvider::DirectML { device_id: Some(2) },
+                    OrtExecutionProvider::CPU,
+                ])
+            );
+            assert_eq!(
+                config.enable_mem_pattern,
+                Some(false),
+                "DirectML requires memory pattern optimization to be disabled"
+            );
+        }
+    }
+
+    #[cfg(not(feature = "directml"))]
+    #[test]
+    fn directml_request_explains_required_feature() {
+        let error = parse_device_config("directml").unwrap_err().to_string();
+        assert!(error.contains("--features=directml"));
+    }
+
+    #[cfg(feature = "directml")]
+    #[test]
+    fn rejects_negative_directml_device_id() {
+        let error = parse_device_config("directml:-1").unwrap_err().to_string();
+        assert!(error.contains("Invalid DirectML device ID"));
+    }
+
+    #[cfg(feature = "directml")]
+    #[test]
+    fn rejects_directml_with_parallel_execution() {
+        let config = parse_device_config("directml").unwrap();
+        let error = apply_ort_overrides(config, None, None, true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("sequential execution"));
+    }
+
+    #[cfg(feature = "directml")]
+    #[test]
+    fn rejects_directml_with_parallel_execution_already_set() {
+        // The device-config layer (--parallel-execution) can set
+        // parallel_execution before apply_ort_overrides's own
+        // --ort-parallel-execution ever runs; the check must still catch it.
+        let config = parse_device_config("directml")
+            .unwrap()
+            .map(|c| c.with_parallel_execution(true));
+        let error = apply_ort_overrides(config, Some(4), None, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("sequential execution"));
+    }
 }

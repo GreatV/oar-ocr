@@ -131,6 +131,12 @@ impl PPLCNetModel {
     ///
     /// Preprocessed batch tensor
     pub fn preprocess(&self, images: Vec<RgbImage>) -> Result<ndarray::Array4<f32>, OCRError> {
+        let image_refs: Vec<&RgbImage> = images.iter().collect();
+        self.preprocess_refs(&image_refs)
+    }
+
+    /// Preprocesses borrowed images without cloning their source pixel buffers.
+    pub fn preprocess_refs(&self, images: &[&RgbImage]) -> Result<ndarray::Array4<f32>, OCRError> {
         let (crop_h, crop_w) = self.input_shape;
 
         let resized_rgb: Vec<RgbImage> = if let Some(resize_short) = self.resize_short {
@@ -141,8 +147,8 @@ impl PPLCNetModel {
             // This matches `ResizeImage(resize_short=256)` + `CropImage(size=224)` used by
             // models like `PP-LCNet_x1_0_doc_ori` / `PP-LCNet_x1_0_table_cls`.
             images
-                .into_iter()
-                .filter_map(|img| {
+                .iter()
+                .filter_map(|&img| {
                     let (w, h) = (img.width(), img.height());
                     if w == 0 || h == 0 {
                         return None;
@@ -153,7 +159,7 @@ impl PPLCNetModel {
                     let new_w = ((w as f32) * scale).round().max(crop_w as f32) as u32;
                     let new_h = ((h as f32) * scale).round().max(crop_h as f32) as u32;
 
-                    let resized = image::imageops::resize(&img, new_w, new_h, self.resize_filter);
+                    let resized = image::imageops::resize(img, new_w, new_h, self.resize_filter);
 
                     // Center crop to (crop_w, crop_h)
                     let x1 = (new_w.saturating_sub(crop_w)) / 2;
@@ -168,14 +174,14 @@ impl PPLCNetModel {
             // This matches `ResizeImage(size=[w,h])` used by
             // `PP-LCNet_x1_0_textline_ori` (80x160).
             images
-                .into_iter()
-                .filter_map(|img| {
+                .iter()
+                .filter_map(|&img| {
                     let (w, h) = (img.width(), img.height());
                     if w == 0 || h == 0 {
                         return None;
                     }
                     Some(image::imageops::resize(
-                        &img,
+                        img,
                         crop_w,
                         crop_h,
                         self.resize_filter,
@@ -308,7 +314,17 @@ impl PPLCNetModel {
         images: Vec<RgbImage>,
         config: &PPLCNetPostprocessConfig,
     ) -> Result<PPLCNetModelOutput, OCRError> {
-        let batch_tensor = self.preprocess(images)?;
+        let image_refs: Vec<&RgbImage> = images.iter().collect();
+        self.forward_refs(&image_refs, config)
+    }
+
+    /// Performs a complete forward pass from borrowed images.
+    pub fn forward_refs(
+        &self,
+        images: &[&RgbImage],
+        config: &PPLCNetPostprocessConfig,
+    ) -> Result<PPLCNetModelOutput, OCRError> {
+        let batch_tensor = self.preprocess_refs(images)?;
         let predictions = self.infer(&batch_tensor)?;
         self.postprocess(&predictions, config)
     }

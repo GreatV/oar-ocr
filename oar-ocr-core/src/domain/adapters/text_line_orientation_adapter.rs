@@ -70,11 +70,13 @@ impl ModelAdapter for TextLineOrientationAdapter {
         // Update postprocess config with task-specific topk
         let mut postprocess_config = self.postprocess_config.clone();
         postprocess_config.topk = effective_config.topk;
+        let image_refs: Vec<_> = input.images.iter().map(AsRef::as_ref).collect();
 
-        // Use model to get predictions with error context
+        // The fixed-size resize owns its output, so borrowing crop pixels avoids
+        // copying every text line while the OCR pipeline retains crop metadata.
         let model_output = self
             .model
-            .forward(input.into_owned_images(), &postprocess_config)
+            .forward_refs(&image_refs, &postprocess_config)
             .map_err(|e| {
                 OCRError::adapter_execution_error(
                     "TextLineOrientationAdapter",
