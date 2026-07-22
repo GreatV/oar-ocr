@@ -3,7 +3,7 @@
 //! ```bash
 //! cargo run --release -p oar-ocr-vl --features cuda,download-binaries \
 //!   --example monkeyocrv2 -- \
-//!   --model-dir "$MONKEYOCR_MODEL_DIR" \
+//!   --model-dir zenosai/MonkeyOCRv2-S-Parsing \
 //!   --device cuda:0 --task end-to-end document.jpg
 //! ```
 

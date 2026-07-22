@@ -114,7 +114,7 @@ pub fn resolve_path(input: impl AsRef<Path>) -> Result<PathBuf, OCRError> {
 
     // Only match when the user gave just a filename (no parent component) or
     // when the parent is the configured cache directory. This avoids quietly
-    // overriding a user's explicit path like `./models/pp-ocrv4_mobile_det.onnx`.
+    // overriding any explicit path supplied by the user.
     let parent_is_bare = input.parent().is_none_or(|p| p.as_os_str().is_empty());
     let cache = cache_dir();
     let parent_is_cache = input.parent() == Some(cache.as_path());

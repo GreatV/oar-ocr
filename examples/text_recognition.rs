@@ -23,8 +23,8 @@
 //!
 //! ```bash
 //! cargo run --example text_recognition -- \
-//!     -m models/pp-ocrv4_mobile_rec.onnx \
-//!     -d models/ppocr_keys_v1.txt \
+//!     -m pp-ocrv4_mobile_rec.onnx \
+//!     -d ppocr_keys_v1.txt \
 //!     -o output/ --vis \
 //!     text1.jpg text2.jpg
 //! ```

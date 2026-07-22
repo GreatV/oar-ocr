@@ -3,7 +3,7 @@
 //! ```bash
 //! cargo run --release -p oar-ocr-vl --features cuda,download-binaries \
 //!   --example hpd_parsing -- \
-//!   --model-dir "$HPD_MODEL_DIR" --device cuda:0 document.jpg
+//!   --model-dir PaddlePaddle/HPD-Parsing --device cuda:0 document.jpg
 //! ```
 
 mod utils;

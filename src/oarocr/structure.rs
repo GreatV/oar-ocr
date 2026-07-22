@@ -107,13 +107,13 @@ struct StructurePipeline {
 /// use oar_ocr::oarocr::structure::OARStructureBuilder;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let structure = OARStructureBuilder::new("models/layout.onnx")
-///     .with_table_classification("models/table_cls.onnx")
-///     .with_table_cell_detection("models/table_cell.onnx", "wired")
-///     .with_table_structure_recognition("models/table_struct.onnx", "wired")
+/// let structure = OARStructureBuilder::new("layout.onnx")
+///     .with_table_classification("table_cls.onnx")
+///     .with_table_cell_detection("table_cell.onnx", "wired")
+///     .with_table_structure_recognition("table_struct.onnx", "wired")
 ///     .with_formula_recognition(
-///         "models/formula.onnx",
-///         "models/tokenizer.json",
+///         "formula.onnx",
+///         "tokenizer.json",
 ///         "pp_formulanet"
 ///     )
 ///     .build()?;
@@ -3460,10 +3460,10 @@ mod tests {
 
     #[test]
     fn test_structure_builder_new() {
-        let builder = OARStructureBuilder::new("models/layout.onnx");
+        let builder = OARStructureBuilder::new("layout.onnx");
         assert_eq!(
             builder.layout_detection_model.as_path(),
-            Some(std::path::Path::new("models/layout.onnx"))
+            Some(std::path::Path::new("layout.onnx"))
         );
         assert!(builder.table_classification_model.is_none());
         assert!(builder.formula_recognition_model.is_none());
@@ -3471,11 +3471,11 @@ mod tests {
 
     #[test]
     fn test_structure_builder_with_table_components() {
-        let builder = OARStructureBuilder::new("models/layout.onnx")
-            .with_table_classification("models/table_cls.onnx")
-            .with_table_cell_detection("models/table_cell.onnx", "wired")
-            .with_table_structure_recognition("models/table_struct.onnx", "wired")
-            .table_structure_dict_path("models/table_structure_dict.txt");
+        let builder = OARStructureBuilder::new("layout.onnx")
+            .with_table_classification("table_cls.onnx")
+            .with_table_cell_detection("table_cell.onnx", "wired")
+            .with_table_structure_recognition("table_struct.onnx", "wired")
+            .table_structure_dict_path("table_structure_dict.txt");
 
         assert!(builder.table_classification_model.is_some());
         assert!(builder.table_cell_detection_model.is_some());
@@ -3487,15 +3487,15 @@ mod tests {
         );
         assert_eq!(
             builder.table_structure_dict_path,
-            Some(PathBuf::from("models/table_structure_dict.txt"))
+            Some(PathBuf::from("table_structure_dict.txt"))
         );
     }
 
     #[test]
     fn test_structure_builder_with_formula() {
-        let builder = OARStructureBuilder::new("models/layout.onnx").with_formula_recognition(
-            "models/formula.onnx",
-            "models/tokenizer.json",
+        let builder = OARStructureBuilder::new("layout.onnx").with_formula_recognition(
+            "formula.onnx",
+            "tokenizer.json",
             "pp_formulanet",
         );
 
@@ -3509,11 +3509,8 @@ mod tests {
 
     #[test]
     fn test_structure_builder_with_ocr() {
-        let builder = OARStructureBuilder::new("models/layout.onnx").with_ocr(
-            "models/det.onnx",
-            "models/rec.onnx",
-            "models/dict.txt",
-        );
+        let builder =
+            OARStructureBuilder::new("layout.onnx").with_ocr("det.onnx", "rec.onnx", "dict.txt");
 
         assert!(builder.text_detection_model.is_some());
         assert!(builder.text_recognition_model.is_some());
@@ -3528,7 +3525,7 @@ mod tests {
             ..Default::default()
         };
 
-        let builder = OARStructureBuilder::new("models/layout.onnx")
+        let builder = OARStructureBuilder::new("layout.onnx")
             .layout_detection_config(layout_config.clone())
             .image_batch_size(4)
             .region_batch_size(64);

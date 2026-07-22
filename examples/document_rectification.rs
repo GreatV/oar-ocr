@@ -22,7 +22,7 @@
 //!
 //! ```bash
 //! cargo run --example document_rectification -- \
-//!     -m models/uvdoc.onnx \
+//!     -m uvdoc.onnx \
 //!     -o output/ --vis \
 //!     distorted_doc1.jpg distorted_doc2.jpg
 //! ```

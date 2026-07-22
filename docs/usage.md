@@ -110,9 +110,9 @@ Everywhere a builder accepts a model path it also accepts raw ONNX bytes (`Vec<u
 ```rust
 use oar_ocr::oarocr::OAROCRBuilder;
 
-static DET_MODEL: &[u8] = include_bytes!("../models/pp-ocrv6_tiny_det.onnx");
-static REC_MODEL: &[u8] = include_bytes!("../models/pp-ocrv6_tiny_rec.onnx");
-static DICT: &str = include_str!("../models/ppocrv6_tiny_dict.txt");
+static DET_MODEL: &[u8] = include_bytes!("pp-ocrv6_tiny_det.onnx");
+static REC_MODEL: &[u8] = include_bytes!("pp-ocrv6_tiny_rec.onnx");
+static DICT: &str = include_str!("ppocrv6_tiny_dict.txt");
 
 let ocr = OAROCRBuilder::new(DET_MODEL, REC_MODEL, "")
     .character_dict_content(DICT)
@@ -317,7 +317,7 @@ use std::path::Path;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = load_image(Path::new("document.png"))?;
     let device = parse_device("cpu")?; // or "cuda", "cuda:0", "metal"
-    let vl = PaddleOcrVl::from_dir("PaddleOCR-VL", device)?;
+    let vl = PaddleOcrVl::from_dir("PaddlePaddle/PaddleOCR-VL", device)?;
 
     // Element-level OCR. The API is batch-oriented, so pass one task per image.
     let result = vl
@@ -342,8 +342,8 @@ use std::path::Path;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = load_image(Path::new("seal.png"))?;
     let device = parse_device("cpu")?;
-    // Use "PaddleOCR-VL-1.5" here to load the 1.5 checkpoint instead.
-    let vl = PaddleOcrVl::from_dir("PaddleOCR-VL-1.6", device)?;
+    // Use "PaddlePaddle/PaddleOCR-VL-1.5" here to load the 1.5 checkpoint instead.
+    let vl = PaddleOcrVl::from_dir("PaddlePaddle/PaddleOCR-VL-1.6", device)?;
 
     let result = vl
         .generate(&[image], &[PaddleOcrVlTask::Seal], 256)
@@ -360,13 +360,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```bash
 cargo run -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
-    -m PaddleOCR-VL --device cuda --task ocr document.jpg
+    -m PaddlePaddle/PaddleOCR-VL --device cuda --task ocr document.jpg
 
 cargo run -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
-    -m PaddleOCR-VL-1.5 --device cuda --task spotting spotting.jpg
+    -m PaddlePaddle/PaddleOCR-VL-1.5 --device cuda --task spotting spotting.jpg
 
 cargo run -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
-    -m PaddleOCR-VL-1.6 --device cuda --task seal seal.jpg
+    -m PaddlePaddle/PaddleOCR-VL-1.6 --device cuda --task seal seal.jpg
 ```
 
 ### Supported Tasks
@@ -417,7 +417,7 @@ use oar_ocr_vl::OvisOcr2;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = load_image("document.jpg")?;
-    let model = OvisOcr2::from_dir("OvisOCR2", parse_device("cpu")?)?;
+    let model = OvisOcr2::from_dir("ATH-MaaS/OvisOCR2", parse_device("cpu")?)?;
     let markdown = model
         .parse(&[image], DEFAULT_MAX_NEW_TOKENS)
         .into_iter()
@@ -434,7 +434,7 @@ The API is batch-oriented: pass multiple page images to `parse` and receive one 
 
 ```bash
 cargo run -p oar-ocr-vl --features cuda,download-binaries --example ovisocr2 -- \
-    --model-dir OvisOCR2 \
+    --model-dir ATH-MaaS/OvisOCR2 \
     --device cuda:0 \
     document-1.jpg document-2.jpg
 ```
@@ -468,7 +468,7 @@ use oar_ocr_vl::{MonkeyOcrV2, MonkeyOcrV2Task};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = load_image("document.jpg")?;
     let model = MonkeyOcrV2::from_dir(
-        "MonkeyOCRv2-S-Parsing",
+        "zenosai/MonkeyOCRv2-S-Parsing",
         parse_device("cuda:0")?,
     )?;
     let output = model
@@ -487,7 +487,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```bash
 cargo run -p oar-ocr-vl --features cuda,download-binaries --example monkeyocrv2 -- \
-    --model-dir MonkeyOCRv2-S-Parsing \
+    --model-dir zenosai/MonkeyOCRv2-S-Parsing \
     --device cuda:0 \
     --task end-to-end \
     document.jpg
@@ -527,7 +527,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = parse_device("cpu")?; // or "cuda", "cuda:0", "metal"
 
     // Repository root = HunyuanOCR 1.5; `HunyuanOCR/v1.0` also works.
-    let model = HunyuanOcr::from_dir("HunyuanOCR", device)?;
+    let model = HunyuanOcr::from_dir("tencent/HunyuanOCR", device)?;
 
     let prompt = "Detect and recognize text in the image, and output the text coordinates in a formatted manner.";
     let text = model
@@ -549,7 +549,7 @@ use oar_ocr_vl::utils::parse_device;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = HunyuanOcr::from_dir_with_dflash(
-        "HunyuanOCR",
+        "tencent/HunyuanOCR",
         parse_device("cuda:0")?,
     )?;
     assert!(model.dflash_enabled());
@@ -561,8 +561,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```bash
 cargo run -p oar-ocr-vl --features cuda,download-binaries --example hunyuanocr -- \
-    --model-dir HunyuanOCR \
-    --dflash-dir HunyuanOCR/dflash \
+    --model-dir tencent/HunyuanOCR \
+    --dflash-dir tencent/HunyuanOCR/dflash \
     --device cuda \
     --prompt "Detect and recognize text in the image, and output the text coordinates in a formatted manner." \
     document.jpg
@@ -604,7 +604,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = load_image("document.jpg")?;
     let device = parse_device("cpu")?; // or "cuda", "cuda:0", "metal"
 
-    let model = GlmOcr::from_dir("GLM-OCR", device)?;
+    let model = GlmOcr::from_dir("zai-org/GLM-OCR", device)?;
     let prompt = "Text Recognition:";
     let text = model
         .generate(&[image], &[prompt], 1024)
@@ -621,7 +621,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```bash
 cargo run -p oar-ocr-vl --features cuda,download-binaries --example glmocr -- \
-    --model-dir GLM-OCR \
+    --model-dir zai-org/GLM-OCR \
     --device cuda \
     --prompt "Text Recognition:" \
     document.jpg
@@ -655,7 +655,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = parse_device("cpu")?; // or "cuda", "cuda:0", "metal"
 
     // MinerU2.5-Pro-2605-1.2B is loaded through the same API.
-    let model = MinerU::from_dir("MinerU2.5-2509-1.2B", device)?;
+    let model = MinerU::from_dir("opendatalab/MinerU2.5-2509-1.2B", device)?;
     let prompt = "\nText Recognition:";
     let text = model
         .generate(&[image], &[prompt], 1024)
@@ -672,12 +672,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```bash
 cargo run -p oar-ocr-vl --features cuda,download-binaries --example mineru -- \
-    --model-dir MinerU2.5-2509-1.2B \
+    --model-dir opendatalab/MinerU2.5-2509-1.2B \
     --device cuda \
     document.jpg
 
 cargo run -p oar-ocr-vl --features cuda,download-binaries --example mineru -- \
-    --model-dir MinerU2.5-Pro-2605-1.2B \
+    --model-dir opendatalab/MinerU2.5-Pro-2605-1.2B \
     --device cuda \
     document.jpg
 ```
@@ -708,7 +708,7 @@ use oar_ocr_vl::{DiffusionGenerationConfig, MinerUDiffusion};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = load_image("document.jpg")?;
     let model = MinerUDiffusion::from_dir(
-        "MinerU-Diffusion-V1-0320-2.5B",
+        "opendatalab/MinerU-Diffusion-V1-0320-2.5B",
         parse_device("cuda:0")?,
     )?;
     let text = model.generate(
@@ -726,7 +726,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```bash
 cargo run -p oar-ocr-vl --features cuda,download-binaries \
     --example mineru_diffusion -- \
-    --model-dir MinerU-Diffusion-V1-0320-2.5B \
+    --model-dir opendatalab/MinerU-Diffusion-V1-0320-2.5B \
     --device cuda:0 \
     document.jpg
 ```
@@ -758,25 +758,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = load_image(Path::new("document.jpg"))?;
 
     // Option 1: Using PaddleOCR-VL
-    let paddleocr_vl = PaddleOcrVl::from_dir("PaddleOCR-VL", device.clone())?;
+    let paddleocr_vl = PaddleOcrVl::from_dir("PaddlePaddle/PaddleOCR-VL", device.clone())?;
     let parser = DocParser::new(&paddleocr_vl);
     let result = parser.parse(&layout, image.clone())?;
     println!("{}", result.to_markdown());
 
     // Option 2: Using PaddleOCR-VL-1.5
-    let paddleocr_vl_15 = PaddleOcrVl::from_dir("PaddleOCR-VL-1.5", device.clone())?;
+    let paddleocr_vl_15 =
+        PaddleOcrVl::from_dir("PaddlePaddle/PaddleOCR-VL-1.5", device.clone())?;
     let parser = DocParser::new(&paddleocr_vl_15);
     let result = parser.parse(&layout, image.clone())?;
     println!("{}", result.to_markdown());
 
     // Option 3: Using PaddleOCR-VL-1.6
-    let paddleocr_vl_16 = PaddleOcrVl::from_dir("PaddleOCR-VL-1.6", device.clone())?;
+    let paddleocr_vl_16 =
+        PaddleOcrVl::from_dir("PaddlePaddle/PaddleOCR-VL-1.6", device.clone())?;
     let parser = DocParser::new(&paddleocr_vl_16);
     let result = parser.parse(&layout, image.clone())?;
     println!("{}", result.to_markdown());
 
     // Option 4: Using GLM-OCR with external layout
-    let glmocr = GlmOcr::from_dir("GLM-OCR", device)?;
+    let glmocr = GlmOcr::from_dir("zai-org/GLM-OCR", device)?;
     let parser = DocParser::new(&glmocr);
     let result = parser.parse(&layout, image)?;
     println!("{}", result.to_markdown());
@@ -791,32 +793,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 # Using PaddleOCR-VL
 cargo run -p oar-ocr-vl --features cuda,download-binaries --example doc_parser -- \
     --model-name paddleocr-vl \
-    --model-dir PaddleOCR-VL \
-    --layout-model models/pp-doclayoutv3.onnx \
+    --model-dir PaddlePaddle/PaddleOCR-VL \
+    --layout-model pp-doclayoutv3.onnx \
     --device cuda \
     document.jpg
 
 # Using PaddleOCR-VL-1.5
 cargo run -p oar-ocr-vl --features cuda,download-binaries --example doc_parser -- \
     --model-name paddleocr-vl-1.5 \
-    --model-dir PaddleOCR-VL-1.5 \
-    --layout-model models/pp-doclayoutv3.onnx \
+    --model-dir PaddlePaddle/PaddleOCR-VL-1.5 \
+    --layout-model pp-doclayoutv3.onnx \
     --device cuda \
     document.jpg
 
 # Using PaddleOCR-VL-1.6
 cargo run -p oar-ocr-vl --features cuda,download-binaries --example doc_parser -- \
     --model-name paddleocr-vl-1.6 \
-    --model-dir PaddleOCR-VL-1.6 \
-    --layout-model models/pp-doclayoutv3.onnx \
+    --model-dir PaddlePaddle/PaddleOCR-VL-1.6 \
+    --layout-model pp-doclayoutv3.onnx \
     --device cuda \
     document.jpg
 
 # Using GLM-OCR with layout
 cargo run -p oar-ocr-vl --features cuda,download-binaries --example doc_parser -- \
     --model-name glmocr \
-    --model-dir GLM-OCR \
-    --layout-model models/pp-doclayoutv3.onnx \
+    --model-dir zai-org/GLM-OCR \
+    --layout-model pp-doclayoutv3.onnx \
     --device cuda \
     document.jpg
 

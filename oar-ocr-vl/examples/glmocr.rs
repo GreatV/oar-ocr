@@ -12,7 +12,7 @@
 //!
 //! ```bash
 //! cargo run -p oar-ocr-vl --features download-binaries --example glmocr -- \
-//!     --model-dir "$GLMOCR_MODEL_DIR" \
+//!     --model-dir zai-org/GLM-OCR \
 //!     --prompt "Text Recognition:" \
 //!     document.jpg
 //! ```

@@ -64,8 +64,8 @@ The crate's custom CUDA kernels compile to PTX for the oldest GPU detected by `n
 
 ## Usage
 
-The snippets below read checkpoint locations from environment variables. Choose any local
-directory layout and pass those paths explicitly; the library does not assume a model root.
+The snippets below use canonical model repository IDs for VLM checkpoints and
+registered bare file names for ONNX models.
 
 ### PaddleOCR-VL
 
@@ -78,10 +78,9 @@ use oar_ocr_vl::utils::parse_device;
 
 let image = load_image("document.png")?;
 let device = parse_device("cpu")?; // Or "cuda", "cuda:0", or "metal"
-let model_dir = std::env::var("PADDLEOCR_VL_MODEL_DIR")?;
 
 // Initialize model
-let model = PaddleOcrVl::from_dir(model_dir, device)?;
+let model = PaddleOcrVl::from_dir("PaddlePaddle/PaddleOCR-VL", device)?;
 
 // Perform OCR. The API is batch-oriented, so pass one task per image.
 let result = model
@@ -101,8 +100,7 @@ use oar_ocr_vl::utils::parse_device;
 
 let image = load_image("seal.png")?;
 let device = parse_device("cpu")?;
-let model_dir = std::env::var("PADDLEOCR_VL15_MODEL_DIR")?;
-let model = PaddleOcrVl::from_dir(model_dir, device)?;
+let model = PaddleOcrVl::from_dir("PaddlePaddle/PaddleOCR-VL-1.5", device)?;
 let result = model
     .generate(&[image], &[PaddleOcrVlTask::Seal], 256)
     .into_iter()
@@ -122,8 +120,7 @@ use oar_ocr_vl::utils::parse_device;
 use oar_ocr_vl::OvisOcr2;
 
 let image = load_image("document.png")?;
-let model_dir = std::env::var("OVISOCR2_MODEL_DIR")?;
-let model = OvisOcr2::from_dir(model_dir, parse_device("cpu")?)?;
+let model = OvisOcr2::from_dir("ATH-MaaS/OvisOCR2", parse_device("cpu")?)?;
 let parsed = model
     .parse(&[image], DEFAULT_MAX_NEW_TOKENS)
     .into_iter()
@@ -144,9 +141,8 @@ use oar_ocr_vl::utils::parse_device;
 use oar_ocr_vl::{MonkeyOcrV2, MonkeyOcrV2Task};
 
 let image = load_image("document.png")?;
-let model_dir = std::env::var("MONKEYOCR_MODEL_DIR")?;
 let model = MonkeyOcrV2::from_dir(
-    model_dir,
+    "zenosai/MonkeyOCRv2-S-Parsing",
     parse_device("cuda:0")?,
 )?;
 let parsed = model
@@ -171,9 +167,8 @@ use oar_ocr_vl::utils::parse_device;
 use oar_ocr_vl::{HpdGenerationConfig, HpdParsing};
 
 let image = load_image("document.png")?;
-let model_dir = std::env::var("HPD_MODEL_DIR")?;
 let model = HpdParsing::from_dir(
-    model_dir,
+    "PaddlePaddle/HPD-Parsing",
     parse_device("cuda:0")?,
 )?;
 let parsed = model
@@ -197,16 +192,14 @@ use oar_ocr_vl::{DocParser, PaddleOcrVl};
 use oar_ocr_vl::utils::parse_device;
 
 let device = parse_device("cpu")?;
-let model_dir = std::env::var("PADDLEOCR_VL15_MODEL_DIR")?;
-let layout_model = std::env::var("LAYOUT_MODEL_PATH")?;
 
 // 1. Setup Layout Detector
 let layout_predictor = LayoutDetectionPredictor::builder()
     .model_name("pp-doclayoutv3")
-    .build(layout_model)?;
+    .build("pp-doclayoutv3.onnx")?;
 
 // 2. Setup a layout-first recognition backend
-let vl = PaddleOcrVl::from_dir(model_dir, device.clone())?;
+let vl = PaddleOcrVl::from_dir("PaddlePaddle/PaddleOCR-VL-1.5", device.clone())?;
 let parser = DocParser::new(&vl);
 
 // 3. Parse Document
@@ -226,8 +219,7 @@ use oar_ocr_vl::utils::parse_device;
 
 let image = load_image("document.png")?;
 let device = parse_device("cpu")?;
-let model_dir = std::env::var("MINERU_MODEL_DIR")?;
-let model = MinerU::from_dir(model_dir, device)?;
+let model = MinerU::from_dir("opendatalab/MinerU2.5-2509-1.2B", device)?;
 // For full documents, prefer the `mineru` example, which follows the
 // model-native two-step pipeline: layout detection, then crop recognition.
 let result = model
@@ -249,8 +241,8 @@ This example combines layout detection (ONNX) with a VLM for recognition. It sup
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example doc_parser -- \
     --model-name paddleocr-vl-1.5 \
-    --model-dir "$PADDLEOCR_VL15_MODEL_DIR" \
-    --layout-model "$LAYOUT_MODEL_PATH" \
+    --model-dir PaddlePaddle/PaddleOCR-VL-1.5 \
+    --layout-model pp-doclayoutv3.onnx \
     --device cuda \
     document.jpg
 ```
@@ -264,28 +256,28 @@ Run the PaddleOCR-VL model directly on an image with a specific task prompt.
 ```bash
 # OCR task
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
-    --model-dir "$PADDLEOCR_VL_MODEL_DIR" \
+    --model-dir PaddlePaddle/PaddleOCR-VL \
     --device cuda \
     --task ocr \
     document.jpg
 
 # Table task
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
-    --model-dir "$PADDLEOCR_VL_MODEL_DIR" \
+    --model-dir PaddlePaddle/PaddleOCR-VL \
     --device cuda \
     --task table \
     table.jpg
 
 # Text spotting with PaddleOCR-VL-1.5 or 1.6
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
-    --model-dir "$PADDLEOCR_VL15_MODEL_DIR" \
+    --model-dir PaddlePaddle/PaddleOCR-VL-1.5 \
     --device cuda \
     --task spotting \
     spotting.jpg
 
 # Seal recognition with PaddleOCR-VL-1.5 or 1.6
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
-    --model-dir "$PADDLEOCR_VL16_MODEL_DIR" \
+    --model-dir PaddlePaddle/PaddleOCR-VL-1.6 \
     --device cuda \
     --task seal \
     seal.jpg
@@ -295,8 +287,8 @@ cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example pa
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example hunyuanocr -- \
-    --model-dir "$HUNYUAN_MODEL_DIR" \
-    --dflash-dir "$HUNYUAN_DFLASH_DIR" \
+    --model-dir tencent/HunyuanOCR \
+    --dflash-dir tencent/HunyuanOCR/dflash \
     --device cuda \
     --prompt "Detect and recognize text in the image, and output the text coordinates in a formatted manner." \
     document.jpg
@@ -308,7 +300,7 @@ The model repository root contains HunyuanOCR 1.5, which the loader detects auto
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example glmocr -- \
-    --model-dir "$GLMOCR_MODEL_DIR" \
+    --model-dir zai-org/GLM-OCR \
     --device cuda \
     --prompt "Text Recognition:" \
     document.jpg
@@ -320,7 +312,7 @@ The example accepts multiple page images. It uses the official prompt and defaul
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example ovisocr2 -- \
-    --model-dir "$OVISOCR2_MODEL_DIR" \
+    --model-dir ATH-MaaS/OvisOCR2 \
     --device cuda:0 \
     document-1.jpg document-2.jpg
 ```
@@ -331,7 +323,7 @@ Run the official end-to-end prompt over a complete page:
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example monkeyocrv2 -- \
-    --model-dir "$MONKEYOCR_MODEL_DIR" \
+    --model-dir zenosai/MonkeyOCRv2-S-Parsing \
     --device cuda:0 \
     --task end-to-end \
     document.jpg
@@ -343,7 +335,7 @@ Pass the ViT-B checkpoint directory to `--model-dir` to use that variant. Other 
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example hpd_parsing -- \
-    --model-dir "$HPD_MODEL_DIR" \
+    --model-dir PaddlePaddle/HPD-Parsing \
     --device cuda:0 \
     document.jpg
 ```
@@ -356,7 +348,7 @@ Model-native two-step document extraction (layout prompt + content extraction):
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example mineru -- \
-    --model-dir "$MINERU_MODEL_DIR" \
+    --model-dir opendatalab/MinerU2.5-2509-1.2B \
     --device cuda:0 \
     document.jpg
 ```
@@ -365,7 +357,7 @@ cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example mi
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example mineru -- \
-    --model-dir "$MINERU_PRO_MODEL_DIR" \
+    --model-dir opendatalab/MinerU2.5-Pro-2605-1.2B \
     --device cuda:0 \
     document.jpg
 ```
@@ -376,7 +368,7 @@ The default mode performs two-step structured extraction with block-diffusion de
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example mineru_diffusion -- \
-    --model-dir "$MINERU_DIFFUSION_MODEL_DIR" \
+    --model-dir opendatalab/MinerU-Diffusion-V1-0320-2.5B \
     --device cuda:0 \
     document.jpg
 ```
