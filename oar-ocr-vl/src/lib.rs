@@ -7,6 +7,7 @@
 //! - `paddleocr_vl` - PaddleOCR-VL, 1.5, and 1.6 for OCR, table, formula,
 //!   chart, spotting, and seal recognition
 //! - `hunyuanocr` - HunyuanOCR 1.5 / 1.0 OCR expert VLM
+//! - `hpd_parsing` - HPD-Parsing hierarchical parallel document parser
 //! - `glmocr` - GLM-OCR OCR expert VLM
 //! - `mineru` - MinerU2.5 and MinerU2.5-Pro document parsing VLMs (Qwen2-VL
 //!   backbone)
@@ -34,6 +35,7 @@
 // Core model modules
 pub mod doc_parser;
 pub mod glmocr;
+pub mod hpd_parsing;
 pub mod hunyuanocr;
 pub mod mineru;
 pub mod mineru_diffusion;
@@ -64,6 +66,7 @@ pub use paddleocr_vl::{
 };
 
 pub use glmocr::GlmOcr;
+pub use hpd_parsing::{HpdGenerationConfig, HpdOutput, HpdParsing, HpdRuntimeStats};
 pub use hunyuanocr::{DFlashConfig, DFlashTargetConfig, HunyuanOcr, HunyuanOcrVersion};
 pub use mineru::MinerU;
 pub use mineru_diffusion::{DiffusionGenerationConfig, MinerUDiffusion};

@@ -7,7 +7,7 @@
 //!
 //! ```bash
 //! cargo run -p oar-ocr-vl --features download-binaries --example ovisocr2 -- \
-//!     --model-dir models/OvisOCR2 \
+//!     --model-dir "$OVISOCR2_MODEL_DIR" \
 //!     --device cpu \
 //!     document-1.jpg document-2.png
 //! ```

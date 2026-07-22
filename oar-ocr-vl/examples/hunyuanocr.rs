@@ -13,7 +13,7 @@
 //!
 //! ```bash
 //! cargo run -p oar-ocr-vl --features download-binaries --example hunyuanocr -- \\
-//!     --model-dir models/HunyuanOCR \\
+//!     --model-dir "$HUNYUAN_MODEL_DIR" \\
 //!     --prompt "Detect and recognize text in the image, and output the text coordinates in a formatted manner." \\
 //!     document.jpg
 //! ```

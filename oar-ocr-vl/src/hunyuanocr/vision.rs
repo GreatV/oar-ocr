@@ -553,7 +553,7 @@ impl VisionPerceive {
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "load perceive image_end", e))?;
         // `image_sep` exists in the trained weights but is *never* used by
         // upstream's `HunYuanVisionPatchMerger.forward` — see
-        // `transformers/models/hunyuan_vl/modeling_hunyuan_vl.py:189-206`. We
+        // the upstream Transformers Hunyuan-VL implementation, lines 189-206. We
         // skip loading it.
         let image_newline = vb
             .get(4608usize, "image_newline")
