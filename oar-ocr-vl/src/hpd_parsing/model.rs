@@ -474,6 +474,9 @@ impl HpdParsing {
         let mut parent_tokens = None;
         let mut children = Vec::<Vec<u32>>::new();
         let mut stats = HpdRuntimeStats::default();
+        let child_ids = Tensor::new(&[[self.child_token_id]], &self.device)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create child token", e))?;
+        let child_embedding = self.text.embed(&child_ids)?;
 
         while !active.is_empty() || !waiting.is_empty() {
             while active.len() < generation.max_active_branches {
@@ -493,9 +496,6 @@ impl HpdParsing {
             // Fork immediately from the post-verification cache at the exact
             // boundary before <FORK>. The parent stays live and continues in
             // the same scheduler; children are admitted with priority.
-            let child_ids = Tensor::new(&[[self.child_token_id]], &self.device)
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create child token", e))?;
-            let child_embedding = self.text.embed(&child_ids)?;
             let mut spawned = Vec::with_capacity(events.len());
             for event in events {
                 let parent_branch = &active[event.branch_index];
@@ -734,8 +734,7 @@ impl HpdParsing {
     }
 
     pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
-        self.tokenizer
-            .decode(tokens, true)
+        decode_protocol_tokens(&self.tokenizer, tokens, &self.stop_token_ids)
             .map(|text| text.trim().to_string())
             .map_err(|e| OCRError::InvalidInput {
                 message: format!("HPD-Parsing tokenizer decode failed: {e}"),
@@ -819,6 +818,30 @@ fn last_hidden(hidden: &Tensor) -> Result<Tensor, OCRError> {
 }
 
 fn greedy_batch_rows(logits: &Tensor) -> Result<Vec<Vec<u32>>, OCRError> {
+    let (batch, seq_len, vocab) = logits
+        .dims3()
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read batched logits shape", e))?;
+    #[cfg(feature = "cuda")]
+    if logits.device().is_cuda() && matches!(logits.dtype(), DType::BF16 | DType::F32) {
+        let rows = batch
+            .checked_mul(seq_len)
+            .ok_or_else(|| OCRError::InvalidInput {
+                message: "HPD batched logits row count overflows usize".to_string(),
+            })?;
+        let logits = logits
+            .reshape((rows, vocab))
+            .and_then(|x| x.contiguous())
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "reshape batched GPU logits", e))?;
+        let ids = match logits.dtype() {
+            DType::BF16 => logits.apply_op1_no_bwd(&ArgmaxFirstBf16),
+            DType::F32 => logits.apply_op1_no_bwd(&ArgmaxFirstF32),
+            _ => unreachable!(),
+        }
+        .and_then(|ids| ids.to_vec1::<u32>())
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "batched GPU argmax", e))?;
+        return Ok(ids.chunks_exact(seq_len).map(<[u32]>::to_vec).collect());
+    }
+    let _ = (batch, seq_len, vocab);
     logits
         .argmax(D::Minus1)
         .and_then(|ids| ids.to_vec2::<u32>())
@@ -829,6 +852,22 @@ fn greedy_batch_rows(logits: &Tensor) -> Result<Vec<Vec<u32>>, OCRError> {
                 e,
             )
         })
+}
+
+fn decode_protocol_tokens(
+    tokenizer: &Tokenizer,
+    tokens: &[u32],
+    stop_token_ids: &[u32],
+) -> tokenizers::Result<String> {
+    let visible = tokens
+        .iter()
+        .copied()
+        .filter(|token| !stop_token_ids.contains(token))
+        .collect::<Vec<_>>();
+    // HPD's <BLOCK>/<FORK>/<CHILD> markers are output protocol, not chat
+    // framing. Decode all remaining IDs explicitly so checkpoint metadata
+    // cannot accidentally hide structural markers.
+    tokenizer.decode(&visible, false)
 }
 
 fn greedy_batch_last(logits: &Tensor) -> Result<Vec<u32>, OCRError> {
@@ -882,6 +921,7 @@ fn select_last_greedy(logits: &Tensor) -> Result<u32, OCRError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokenizers::{AddedToken, models::wordlevel::WordLevel};
 
     #[test]
     fn prompt_matches_internvl_2_5_template() {
@@ -906,5 +946,48 @@ mod tests {
             ..HpdGenerationConfig::default()
         };
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn protocol_decode_keeps_structure_and_removes_terminators() {
+        let mut tokenizer = Tokenizer::new(WordLevel::default());
+        tokenizer
+            .add_special_tokens([
+                AddedToken::from("<BLOCK>", true),
+                AddedToken::from("<CHILD>", true),
+                AddedToken::from("<|im_end|>", true),
+            ])
+            .unwrap();
+        let block = tokenizer.token_to_id("<BLOCK>").unwrap();
+        let child = tokenizer.token_to_id("<CHILD>").unwrap();
+        let end = tokenizer.token_to_id("<|im_end|>").unwrap();
+
+        let decoded = decode_protocol_tokens(&tokenizer, &[block, child, end], &[end]).unwrap();
+        assert!(decoded.contains("<BLOCK>"));
+        assert!(decoded.contains("<CHILD>"));
+        assert!(!decoded.contains("<|im_end|>"));
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn batched_cuda_argmax_keeps_first_tie_for_every_sequence_row() {
+        let Ok(device) = Device::new_cuda(0) else {
+            return;
+        };
+        let logits = Tensor::from_vec(
+            vec![
+                0.0f32, 5.0, 5.0, 1.0, 7.0, 7.0, 2.0, 0.0, 3.0, 1.0, 3.0, 0.0, 4.0, 2.0, 4.0, 1.0,
+            ],
+            (2, 2, 4),
+            &device,
+        )
+        .unwrap()
+        .to_dtype(DType::BF16)
+        .unwrap();
+
+        assert_eq!(
+            greedy_batch_rows(&logits).unwrap(),
+            vec![vec![1, 0], vec![0, 0]]
+        );
     }
 }
