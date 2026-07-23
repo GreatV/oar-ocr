@@ -251,15 +251,15 @@ mod tests {
     #[test]
     fn test_model_family_detect_from_path() {
         assert_eq!(
-            TableStructureModelFamily::detect_from_path(Path::new("models/slanet_plus.onnx")),
+            TableStructureModelFamily::detect_from_path(Path::new("slanet_plus.onnx")),
             Some(TableStructureModelFamily::Wireless)
         );
         assert_eq!(
-            TableStructureModelFamily::detect_from_path(Path::new("models/slanext_wired.onnx")),
+            TableStructureModelFamily::detect_from_path(Path::new("slanext_wired.onnx")),
             Some(TableStructureModelFamily::Wired)
         );
         assert_eq!(
-            TableStructureModelFamily::detect_from_path(Path::new("models/custom.onnx")),
+            TableStructureModelFamily::detect_from_path(Path::new("custom.onnx")),
             None
         );
     }

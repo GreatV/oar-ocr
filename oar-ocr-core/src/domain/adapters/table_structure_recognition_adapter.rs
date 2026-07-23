@@ -381,7 +381,7 @@ mod tests {
     fn test_builder_fluent_api() {
         let builder = SLANetWiredAdapterBuilder::new()
             .input_shape((640, 640))
-            .dict_path("models/table_structure_dict_ch.txt");
+            .dict_path("table_structure_dict_ch.txt");
 
         assert_eq!(builder.input_shape, Some((640, 640)));
     }

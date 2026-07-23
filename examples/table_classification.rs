@@ -22,7 +22,7 @@
 //!
 //! ```bash
 //! cargo run --example table_classification -- \
-//!     -m models/pp-lcnet_x1_0_table_cls.onnx \
+//!     -m pp-lcnet_x1_0_table_cls.onnx \
 //!     -o output/ --vis \
 //!     images/table_recognition.jpg
 //! ```

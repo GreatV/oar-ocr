@@ -24,31 +24,31 @@
 //! ```bash
 //! # OCR text recognition
 //! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
-//!     -m PaddleOCR-VL --task ocr document.jpg
+//!     -m PaddlePaddle/PaddleOCR-VL --task ocr document.jpg
 //!
 //! # Table recognition
 //! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
-//!     -m PaddleOCR-VL --task table table.jpg
+//!     -m PaddlePaddle/PaddleOCR-VL --task table table.jpg
 //!
 //! # Formula recognition
 //! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
-//!     -m PaddleOCR-VL --task formula formula.jpg
+//!     -m PaddlePaddle/PaddleOCR-VL --task formula formula.jpg
 //!
 //! # Chart recognition
 //! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
-//!     -m PaddleOCR-VL --task chart chart.jpg
+//!     -m PaddlePaddle/PaddleOCR-VL --task chart chart.jpg
 //!
 //! # Text spotting with PaddleOCR-VL-1.5 or 1.6
 //! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
-//!     -m PaddleOCR-VL-1.5 --task spotting spotting.jpg
+//!     -m PaddlePaddle/PaddleOCR-VL-1.5 --task spotting spotting.jpg
 //!
 //! # Seal recognition with PaddleOCR-VL-1.5 or 1.6
 //! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
-//!     -m PaddleOCR-VL-1.6 --task seal seal.jpg
+//!     -m PaddlePaddle/PaddleOCR-VL-1.6 --task seal seal.jpg
 //!
 //! # Run on CUDA GPU
 //! cargo run -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
-//!     -m PaddleOCR-VL -d cuda --task ocr document.jpg
+//!     -m PaddlePaddle/PaddleOCR-VL -d cuda --task ocr document.jpg
 //! ```
 
 mod utils;
@@ -70,7 +70,7 @@ use utils::token_fingerprint;
 #[command(about = "PaddleOCR-VL Recognition Example - task-specific recognition using Candle")]
 struct Args {
     /// Path to the PaddleOCR-VL model directory
-    #[arg(short, long, default_value = "PaddleOCR-VL")]
+    #[arg(short, long, default_value = "PaddlePaddle/PaddleOCR-VL")]
     model_dir: PathBuf,
 
     /// Paths to input images to process

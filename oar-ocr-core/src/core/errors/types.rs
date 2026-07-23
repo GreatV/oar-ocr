@@ -299,7 +299,7 @@ impl OCRError {
     /// # use oar_ocr_core::core::errors::OCRError;
     /// let err = OCRError::config_error_with_suggestion(
     ///     "model loading",
-    ///     "model file not found at 'models/detection.onnx'",
+    ///     "model file not found at 'detection.onnx'",
     ///     "ensure the model has been downloaded and the path is correct"
     /// );
     /// assert!(matches!(err, OCRError::ConfigError { .. }));

@@ -37,8 +37,8 @@
 //! Basic usage:
 //! ```bash
 //! cargo run --example formula_recognition -- \
-//!     -m models/pp-formulanet_plus-m.onnx \
-//!     -t models/pp-formulanet-tokenizer.json \
+//!     -m pp-formulanet_plus-m.onnx \
+//!     -t pp-formulanet-tokenizer.json \
 //!     --model-name "PP-FormulaNet_plus-M" \
 //!     formula1.jpg formula2.jpg
 //! ```
@@ -46,8 +46,8 @@
 //! With visualization:
 //! ```bash
 //! cargo run --release --example formula_recognition -- \
-//!     -m models/unimernet.onnx \
-//!     -t models/unimernet_tokenizer.json \
+//!     -m unimernet.onnx \
+//!     -t unimernet_tokenizer.json \
 //!     --model-name UniMERNet \
 //!     -o output/ --vis \
 //!     formula1.jpg formula2.jpg

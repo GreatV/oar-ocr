@@ -1480,7 +1480,7 @@ fn build_position_ids(
 ) -> Result<Tensor, OCRError> {
     let seq_len = input_ids.len();
     // 4-axis XDRoPE position ids matching the upstream HF processor exactly:
-    //   transformers/models/hunyuan_vl/processing_hunyuan_vl.py:74-94.
+    //   the upstream Transformers Hunyuan-VL processor, lines 74-94.
     //
     // Axis order is `[seq, w, h, t]` (the order `select_rope_sections`
     // expects for `xdrope_section`). For non-image tokens all four axes hold

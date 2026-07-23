@@ -12,7 +12,7 @@ use std::sync::Arc;
 /// ```
 /// use oar_ocr_core::core::ModelSource;
 ///
-/// let from_path: ModelSource = "models/det.onnx".into();
+/// let from_path: ModelSource = "det.onnx".into();
 /// let from_bytes: ModelSource = vec![0u8; 4].into();
 /// assert!(from_path.as_path().is_some());
 /// assert!(from_bytes.as_path().is_none());

@@ -344,6 +344,119 @@ pub fn scaled_dot_product_attention_gqa(
         .reshape((batch, num_heads, query_len, head_dim))
 }
 
+/// Grouped-query attention over multiple logical KV segments.
+///
+/// This is the eager equivalent of paged attention for forked requests: the
+/// shared prefix and the branch-private tail remain separate Tensor views. We
+/// concatenate only the score matrix, never the (much larger) K/V tensors.
+/// It is exact and keeps forked prefixes zero-copy. When `is_causal` is true,
+/// queries must represent the final `query_len` positions of the concatenated
+/// segments (right-aligned causal masking). A supplied mask's last dimension
+/// must cover every segment, including both the shared prefix and private tail.
+pub fn segmented_scaled_dot_product_attention_gqa(
+    q: &Tensor,
+    segments: &[(&Tensor, &Tensor)],
+    mask: Option<&Tensor>,
+    scale: f64,
+    is_causal: bool,
+    num_kv_groups: usize,
+) -> Result<Tensor> {
+    if segments.is_empty() {
+        candle_core::bail!("segmented attention requires at least one KV segment")
+    }
+    if segments.len() == 1 {
+        return scaled_dot_product_attention_gqa(
+            q,
+            segments[0].0,
+            segments[0].1,
+            mask,
+            scale,
+            is_causal,
+            num_kv_groups,
+        );
+    }
+
+    let (batch, num_heads, query_len, head_dim) = q.dims4()?;
+    let (_, num_kv_heads, _, _) = segments[0].0.dims4()?;
+    if num_heads != num_kv_heads * num_kv_groups {
+        candle_core::bail!(
+            "invalid segmented GQA heads q={} kv={} groups={num_kv_groups}",
+            num_heads,
+            num_kv_heads
+        )
+    }
+    let grouped_batch = batch * num_kv_heads;
+    let grouped_queries = num_kv_groups * query_len;
+    let grouped_q = q.reshape((grouped_batch, grouped_queries, head_dim))?;
+    let mut score_segments = Vec::with_capacity(segments.len());
+    let mut lengths = Vec::with_capacity(segments.len());
+    for &(k, v) in segments {
+        let (k_batch, k_heads, len, k_dim) = k.dims4()?;
+        let (v_batch, v_heads, v_len, v_dim) = v.dims4()?;
+        if k_batch != batch
+            || v_batch != batch
+            || k_heads != num_kv_heads
+            || v_heads != num_kv_heads
+            || v_len != len
+            || k_dim != head_dim
+            || v_dim != head_dim
+        {
+            candle_core::bail!(
+                "invalid segmented GQA shapes q={:?}, k={:?}, v={:?}",
+                q.dims(),
+                k.dims(),
+                v.dims()
+            )
+        }
+        let grouped_k = k.reshape((grouped_batch, len, head_dim))?.transpose(1, 2)?;
+        score_segments.push(
+            (grouped_q.matmul(&grouped_k)? * scale)?.reshape((batch, num_heads, query_len, len))?,
+        );
+        lengths.push(len);
+    }
+    let score_refs = score_segments.iter().collect::<Vec<_>>();
+    let mut weights = Tensor::cat(&score_refs, 3)?;
+    let kv_len = lengths.iter().sum();
+    if let Some(mask) = mask {
+        let mask_kv_len = mask.dim(D::Minus1)?;
+        if mask_kv_len != kv_len {
+            candle_core::bail!(
+                "segmented GQA mask covers {mask_kv_len} KV positions, expected {kv_len} across all segments"
+            )
+        }
+    }
+    weights = match mask {
+        Some(mask) => weights.broadcast_add(mask)?,
+        None if is_causal => {
+            let causal = create_causal_mask(query_len, kv_len, weights.dtype(), q.device())?;
+            weights.broadcast_add(&causal)?
+        }
+        None => weights,
+    };
+    let weight_dtype = weights.dtype();
+    let weights =
+        candle_nn::ops::softmax_last_dim(&weights.to_dtype(DType::F32)?)?.to_dtype(weight_dtype)?;
+
+    let mut offset = 0;
+    let mut output: Option<Tensor> = None;
+    for ((_, v), len) in segments.iter().zip(lengths) {
+        let segment_weights =
+            weights
+                .narrow(3, offset, len)?
+                .reshape((grouped_batch, grouped_queries, len))?;
+        let grouped_v = v.reshape((grouped_batch, len, head_dim))?;
+        let segment_output = segment_weights.matmul(&grouped_v)?;
+        output = Some(match output {
+            Some(acc) => (acc + segment_output)?,
+            None => segment_output,
+        });
+        offset += len;
+    }
+    output
+        .expect("segments are non-empty")
+        .reshape((batch, num_heads, query_len, head_dim))
+}
+
 #[cfg(any(feature = "cuda", test))]
 fn flash_attention_dtype_supported(dtype: DType) -> bool {
     matches!(dtype, DType::F16 | DType::BF16)
@@ -382,7 +495,9 @@ pub fn flash_attention(
 
 /// Create a causal (lower-triangular) attention mask.
 ///
-/// Returns a mask where position i can only attend to positions <= i.
+/// Queries are right-aligned with the KV sequence: query row `i` represents KV
+/// position `kv_len - seq_len + i` and can attend through that position. This
+/// requires `kv_len >= seq_len`.
 /// The mask contains 0 for allowed positions and -inf for masked positions.
 ///
 /// # Arguments
@@ -399,12 +514,17 @@ pub fn create_causal_mask(
     dtype: DType,
     device: &Device,
 ) -> Result<Tensor> {
+    if kv_len < seq_len {
+        candle_core::bail!(
+            "causal mask requires right-aligned queries with kv_len ({kv_len}) >= seq_len ({seq_len})"
+        )
+    }
     on_compute_device(device, |compute_device| {
         let row_idx =
             Tensor::arange(0u32, seq_len as u32, compute_device)?.reshape((seq_len, 1))?;
         let col_idx = Tensor::arange(0u32, kv_len as u32, compute_device)?.reshape((1, kv_len))?;
 
-        let offset = kv_len.saturating_sub(seq_len) as u32;
+        let offset = (kv_len - seq_len) as u32;
         // Condition: col <= row + offset
         // Keep this comparison in integer space. BF16 cannot distinguish
         // adjacent absolute positions once a document context grows beyond
@@ -1085,6 +1205,58 @@ mod tests {
     }
 
     #[test]
+    fn segmented_gqa_matches_contiguous_cache() -> Result<()> {
+        let device = Device::Cpu;
+        let q = Tensor::randn(0f32, 1., (1, 4, 3, 8), &device)?;
+        let prefix_k = Tensor::randn(0f32, 1., (1, 2, 5, 8), &device)?;
+        let prefix_v = Tensor::randn(0f32, 1., (1, 2, 5, 8), &device)?;
+        let tail_k = Tensor::randn(0f32, 1., (1, 2, 3, 8), &device)?;
+        let tail_v = Tensor::randn(0f32, 1., (1, 2, 3, 8), &device)?;
+        let full_k = Tensor::cat(&[&prefix_k, &tail_k], 2)?;
+        let full_v = Tensor::cat(&[&prefix_v, &tail_v], 2)?;
+        let scale = 1.0 / 8f64.sqrt();
+        let contiguous =
+            scaled_dot_product_attention_gqa(&q, &full_k, &full_v, None, scale, true, 2)?;
+        let segmented = segmented_scaled_dot_product_attention_gqa(
+            &q,
+            &[(&prefix_k, &prefix_v), (&tail_k, &tail_v)],
+            None,
+            scale,
+            true,
+            2,
+        )?;
+        let contiguous = contiguous.flatten_all()?.to_vec1::<f32>()?;
+        let segmented = segmented.flatten_all()?.to_vec1::<f32>()?;
+        assert!(
+            contiguous
+                .iter()
+                .zip(segmented)
+                .all(|(left, right)| (left - right).abs() < 1e-5)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn segmented_gqa_rejects_mask_that_omits_a_segment() -> Result<()> {
+        let device = Device::Cpu;
+        let q = Tensor::zeros((1, 4, 3, 8), DType::F32, &device)?;
+        let prefix = Tensor::zeros((1, 2, 5, 8), DType::F32, &device)?;
+        let tail = Tensor::zeros((1, 2, 3, 8), DType::F32, &device)?;
+        let incomplete_mask = Tensor::zeros((1, 1, 3, 3), DType::F32, &device)?;
+        let error = segmented_scaled_dot_product_attention_gqa(
+            &q,
+            &[(&prefix, &prefix), (&tail, &tail)],
+            Some(&incomplete_mask),
+            1.0 / 8f64.sqrt(),
+            false,
+            2,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("expected 8 across all segments"));
+        Ok(())
+    }
+
+    #[test]
     fn test_causal_mask() -> Result<()> {
         let device = Device::Cpu;
         let mask = create_causal_mask(4, 4, DType::F32, &device)?;
@@ -1122,6 +1294,12 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn causal_mask_rejects_queries_longer_than_kv() {
+        let error = create_causal_mask(3, 2, DType::F32, &Device::Cpu).unwrap_err();
+        assert!(error.to_string().contains("kv_len (2) >= seq_len (3)"));
     }
 
     #[test]

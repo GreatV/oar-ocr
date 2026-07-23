@@ -45,12 +45,12 @@
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create OCR pipeline with required components
 //! let ocr = OAROCRBuilder::new(
-//!     "models/text_detection.onnx",
-//!     "models/text_recognition.onnx",
-//!     "models/character_dict.txt"
+//!     "text_detection.onnx",
+//!     "text_recognition.onnx",
+//!     "character_dict.txt"
 //! )
-//! .with_document_image_orientation_classification("models/doc_orient.onnx")
-//! .with_text_line_orientation_classification("models/line_orient.onnx")
+//! .with_document_image_orientation_classification("doc_orient.onnx")
+//! .with_text_line_orientation_classification("line_orient.onnx")
 //! .image_batch_size(4)
 //! .region_batch_size(32)
 //! .build()?;
@@ -78,14 +78,14 @@
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create structure analysis pipeline
-//! let structure = OARStructureBuilder::new("models/layout_detection.onnx")
-//!     .with_table_classification("models/table_classification.onnx")
-//!     .with_table_cell_detection("models/table_cell_detection.onnx", "wired")
-//!     .with_table_structure_recognition("models/table_structure.onnx", "wired")
-//!     .table_structure_dict_path("models/table_structure_dict.txt")
+//! let structure = OARStructureBuilder::new("layout_detection.onnx")
+//!     .with_table_classification("table_classification.onnx")
+//!     .with_table_cell_detection("table_cell_detection.onnx", "wired")
+//!     .with_table_structure_recognition("table_structure.onnx", "wired")
+//!     .table_structure_dict_path("table_structure_dict.txt")
 //!     .with_formula_recognition(
-//!         "models/formula_recognition.onnx",
-//!         "models/tokenizer.json",
+//!         "formula_recognition.onnx",
+//!         "tokenizer.json",
 //!         "pp_formulanet"
 //!     )
 //!     .build()?;

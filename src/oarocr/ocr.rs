@@ -497,9 +497,9 @@ impl OAROCR {
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let ocr = OAROCRBuilder::new(
-    ///     "models/det.onnx",
-    ///     "models/rec.onnx",
-    ///     "models/dict.txt",
+    ///     "det.onnx",
+    ///     "rec.onnx",
+    ///     "dict.txt",
     /// ).build()?;
     ///
     /// let image = load_image(Path::new("document.jpg"))?;
@@ -1088,20 +1088,17 @@ mod tests {
 
     #[test]
     fn test_oarocr_builder_new() {
-        let builder = OAROCRBuilder::new("models/det.onnx", "models/rec.onnx", "models/dict.txt");
+        let builder = OAROCRBuilder::new("det.onnx", "rec.onnx", "dict.txt");
 
         assert_eq!(
             builder.text_detection_model.as_path(),
-            Some(std::path::Path::new("models/det.onnx"))
+            Some(std::path::Path::new("det.onnx"))
         );
         assert_eq!(
             builder.text_recognition_model.as_path(),
-            Some(std::path::Path::new("models/rec.onnx"))
+            Some(std::path::Path::new("rec.onnx"))
         );
-        assert_eq!(
-            builder.character_dict_path,
-            PathBuf::from("models/dict.txt")
-        );
+        assert_eq!(builder.character_dict_path, PathBuf::from("dict.txt"));
         assert!(builder.document_orientation_model.is_none());
         assert!(builder.text_line_orientation_model.is_none());
         assert!(builder.document_rectification_model.is_none());
@@ -1109,32 +1106,29 @@ mod tests {
 
     #[test]
     fn test_oarocr_builder_with_optional_components() {
-        let builder = OAROCRBuilder::new("models/det.onnx", "models/rec.onnx", "models/dict.txt")
-            .with_document_image_orientation_classification("models/doc_orient.onnx")
-            .with_text_line_orientation_classification("models/line_orient.onnx")
-            .with_document_image_rectification("models/rectify.onnx");
+        let builder = OAROCRBuilder::new("det.onnx", "rec.onnx", "dict.txt")
+            .with_document_image_orientation_classification("doc_orient.onnx")
+            .with_text_line_orientation_classification("line_orient.onnx")
+            .with_document_image_rectification("rectify.onnx");
 
         let Some(source) = builder.document_orientation_model.as_ref() else {
             panic!("expected document_orientation_model to be Some");
         };
         assert_eq!(
             source.as_path(),
-            Some(std::path::Path::new("models/doc_orient.onnx"))
+            Some(std::path::Path::new("doc_orient.onnx"))
         );
         let Some(source) = builder.text_line_orientation_model.as_ref() else {
             panic!("expected text_line_orientation_model to be Some");
         };
         assert_eq!(
             source.as_path(),
-            Some(std::path::Path::new("models/line_orient.onnx"))
+            Some(std::path::Path::new("line_orient.onnx"))
         );
         let Some(source) = builder.document_rectification_model.as_ref() else {
             panic!("expected document_rectification_model to be Some");
         };
-        assert_eq!(
-            source.as_path(),
-            Some(std::path::Path::new("models/rectify.onnx"))
-        );
+        assert_eq!(source.as_path(), Some(std::path::Path::new("rectify.onnx")));
     }
 
     #[test]
@@ -1153,7 +1147,7 @@ mod tests {
             score_threshold: 0.7,
         };
 
-        let builder = OAROCRBuilder::new("models/det.onnx", "models/rec.onnx", "models/dict.txt")
+        let builder = OAROCRBuilder::new("det.onnx", "rec.onnx", "dict.txt")
             .text_detection_config(det_config.clone())
             .text_recognition_config(rec_config.clone());
 
@@ -1163,7 +1157,7 @@ mod tests {
 
     #[test]
     fn test_oarocr_builder_with_batch_sizes() {
-        let builder = OAROCRBuilder::new("models/det.onnx", "models/rec.onnx", "models/dict.txt")
+        let builder = OAROCRBuilder::new("det.onnx", "rec.onnx", "dict.txt")
             .image_batch_size(4)
             .region_batch_size(64);
 

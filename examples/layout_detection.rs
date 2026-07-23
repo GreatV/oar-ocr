@@ -24,7 +24,7 @@
 //!
 //! ```bash
 //! cargo run --example layout_detection -- \
-//!     -m models/pp-doclayout_plus-l.onnx \
+//!     -m pp-doclayout_plus-l.onnx \
 //!     -o output/ --vis \
 //!     document1.jpg document2.jpg
 //! ```

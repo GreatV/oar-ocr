@@ -809,7 +809,7 @@ mod tests {
     fn test_argmax() -> Result<(), OCRError> {
         use ndarray::Array3;
 
-        let dict_path = Path::new("models/table_structure_dict.txt");
+        let dict_path = Path::new("table_structure_dict.txt");
         if !dict_path.exists() {
             return Ok(()); // Skip if dict not available
         }

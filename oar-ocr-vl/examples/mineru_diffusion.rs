@@ -20,7 +20,7 @@
 //!
 //! ```bash
 //! cargo run -p oar-ocr-vl --features cuda,download-binaries --example mineru_diffusion -- \
-//!     --model-dir /path/to/MinerU-Diffusion-V1-0320-2.5B \
+//!     --model-dir opendatalab/MinerU-Diffusion-V1-0320-2.5B \
 //!     --device cuda:0 \
 //!     document.jpg
 //! ```

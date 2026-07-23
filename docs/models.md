@@ -222,7 +222,7 @@ These rules apply only to *path* sources. Models passed as in-memory bytes (see 
 For each model path argument the builder applies these checks in order:
 
 1. **Existing file wins.** If the path refers to a real file on disk it is used as-is — no registry lookup, no hash check, no network. A `./pp-ocrv5_mobile_det.onnx` next to the binary always shadows the registry.
-2. **Only bare names or `$OAR_HOME`-rooted paths are eligible for auto-download.** A path is considered for registry resolution only when it has no parent component (e.g. `"pp-ocrv5_mobile_det.onnx"`) or when its parent equals the cache directory. Explicit paths like `./models/foo.onnx` or `/data/foo.onnx` are returned verbatim even if their file name is registered — the library never silently overrides an explicit path.
+2. **Only bare names or `$OAR_HOME`-rooted paths are eligible for auto-download.** A path is considered for registry resolution only when it has no parent component (e.g. `"pp-ocrv5_mobile_det.onnx"`) or when its parent equals the cache directory. Explicit paths with another parent component are returned verbatim even if their file name is registered — the library never silently overrides an explicit path.
 3. **Registry hit: cache or download.** If the file name appears in `REGISTRY`:
    - The cached copy is used without network access when `$OAR_HOME/<name>` exists with the expected size and SHA-256.
    - Otherwise, the file is downloaded from ModelScope, verified with SHA-256, and atomically replaced.
@@ -233,7 +233,7 @@ For each model path argument the builder applies these checks in order:
 | `"pp-ocrv5_mobile_det.onnx"` | `./pp-ocrv5_mobile_det.onnx` exists | Use the local CWD file |
 | `"pp-ocrv5_mobile_det.onnx"` | `$OAR_HOME/...` exists, hash OK | Use cached copy, no network |
 | `"pp-ocrv5_mobile_det.onnx"` | absent or hash mismatch | Download to `$OAR_HOME`, verify, use |
-| `"./models/det.onnx"` | absent | Returned as-is, resulting in "model not found" |
+| `"custom/det.onnx"` | absent | Returned as-is, resulting in "model not found" |
 | `"$OAR_HOME/pp-ocrv5_mobile_det.onnx"` (absolute) | (any) | Handled like a bare name because its parent is the cache directory |
 
 Note: the resolver compares paths verbatim — `~` is not expanded. Pass a bare filename, an absolute path under `$OAR_HOME`, or let your shell expand `~` for you.

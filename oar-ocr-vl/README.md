@@ -15,6 +15,7 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 | [OvisOCR2](https://huggingface.co/ATH-MaaS/OvisOCR2) | 0.8B | Model-native full-page document-to-Markdown parsing |
 | [MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) | 0.6B | Model-native layout, end-to-end parsing, text, formula, and OTSL-table recognition |
 | [MonkeyOCRv2-B-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-B-Parsing) | 0.7B | Higher-capacity ViT-B variant with the same parsing and recognition tasks |
+| [HPD-Parsing](https://huggingface.co/PaddlePaddle/HPD-Parsing) | 1B | Model-native hierarchical full-page parsing with forked KV-prefix reuse and optional P-MTP |
 | [HunyuanOCR 1.5 / 1.0](https://huggingface.co/tencent/HunyuanOCR) | 1B | Model-native prompt-driven parsing with optional DFlash decoding for 1.5 |
 | [MinerU2.5-2509](https://huggingface.co/opendatalab/MinerU2.5-2509-1.2B) | 1.2B | Model-native two-step layout detection and content extraction |
 | [MinerU2.5-Pro-2605](https://huggingface.co/opendatalab/MinerU2.5-Pro-2605-1.2B) | 1.2B | Newer compatible checkpoint using the MinerU2.5 two-step pipeline |
@@ -29,7 +30,7 @@ See [`examples`](examples) for runnable examples.
 1. **Layout detection** (ONNX models like PP-DocLayoutV3) to identify document regions
 2. **VL-based recognition** to extract content from each region
 
-Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, and optionally MonkeyOCRv2 for externally detected crops. MonkeyOCRv2's native `Layout` and `EndToEnd` tasks are preferable for complete pages. OvisOCR2 is an end-to-end full-page parser and deliberately does not use DocParser. HunyuanOCR should be used with its model-native full-page prompts. MinerU2.5, MinerU2.5-Pro, and MinerU-Diffusion should use their model-native two-step extraction examples.
+Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, and optionally MonkeyOCRv2 for externally detected crops. MonkeyOCRv2's native `Layout` and `EndToEnd` tasks are preferable for complete pages. OvisOCR2 and HPD-Parsing are end-to-end full-page parsers and deliberately do not use DocParser. HunyuanOCR should be used with its model-native full-page prompts. MinerU2.5, MinerU2.5-Pro, and MinerU-Diffusion should use their model-native two-step extraction examples.
 
 ## Installation
 
@@ -70,6 +71,9 @@ The crate's custom CUDA kernels compile to PTX for the oldest GPU detected by `n
 
 ## Usage
 
+The snippets below use canonical model repository IDs for VLM checkpoints and
+registered bare file names for ONNX models.
+
 ### PaddleOCR-VL
 
 Use PaddleOCR-VL to recognize a specific aspect of an image (e.g., just the table or text).
@@ -83,7 +87,7 @@ let image = load_image("document.png")?;
 let device = parse_device("cpu")?; // Or "cuda", "cuda:0", or "metal"
 
 // Initialize model
-let model = PaddleOcrVl::from_dir("PaddleOCR-VL", device)?;
+let model = PaddleOcrVl::from_dir("PaddlePaddle/PaddleOCR-VL", device)?;
 
 // Perform OCR. The API is batch-oriented, so pass one task per image.
 let result = model
@@ -94,7 +98,7 @@ let result = model
 println!("Result: {}", result);
 ```
 
-PaddleOCR-VL-1.5 and PaddleOCR-VL-1.6 are loaded the same way, with additional tasks. PaddleOCR-VL-1.6 is plug-compatible with the 1.5 loader (`PaddleOcrVl::from_dir("PaddleOCR-VL-1.6", device)`):
+PaddleOCR-VL-1.5 and PaddleOCR-VL-1.6 are loaded the same way, with additional tasks. PaddleOCR-VL-1.6 is plug-compatible with the 1.5 loader; point the same API at its checkpoint directory.
 
 ```rust
 use oar_ocr_core::utils::load_image;
@@ -103,7 +107,7 @@ use oar_ocr_vl::utils::parse_device;
 
 let image = load_image("seal.png")?;
 let device = parse_device("cpu")?;
-let model = PaddleOcrVl::from_dir("PaddleOCR-VL-1.5", device)?;
+let model = PaddleOcrVl::from_dir("PaddlePaddle/PaddleOCR-VL-1.5", device)?;
 let result = model
     .generate(&[image], &[PaddleOcrVlTask::Seal], 256)
     .into_iter()
@@ -123,8 +127,8 @@ use oar_ocr_vl::utils::parse_device;
 use oar_ocr_vl::OvisOcr2;
 
 let image = load_image("document.png")?;
-let model = OvisOcr2::from_dir("models/OvisOCR2", parse_device("cpu")?)?;
-let markdown = model
+let model = OvisOcr2::from_dir("ATH-MaaS/OvisOCR2", parse_device("cpu")?)?;
+let parsed = model
     .parse(&[image], DEFAULT_MAX_NEW_TOKENS)
     .into_iter()
     .next()
@@ -145,7 +149,7 @@ use oar_ocr_vl::{MonkeyOcrV2, MonkeyOcrV2Task};
 
 let image = load_image("document.png")?;
 let model = MonkeyOcrV2::from_dir(
-    "MonkeyOCRv2-S-Parsing",
+    "zenosai/MonkeyOCRv2-S-Parsing",
     parse_device("cuda:0")?,
 )?;
 let parsed = model
@@ -157,6 +161,32 @@ println!("{parsed}");
 ```
 
 `EndToEnd` emits a reading-order list whose items contain normalized `bbox`, `label`, and `content` fields. `Layout` emits `bbox` and `label`; its preprocessing follows the official one-megapixel minimum used by the reference layout pass. `Text`, `Formula`, and `Table` can be used directly or through `RecognitionBackend`; table output is OTSL and is converted by `DocParser`.
+
+### HPD-Parsing
+
+HPD-Parsing performs full-page parsing with the official dynamic 448-pixel InternVL tiling path. Its parent branch emits layout and `<FORK>` markers; every marker immediately starts a content child from the matching parent KV prefix, and the child result is spliced back as `<CHILD>...`. The runtime advances all admitted parent/child requests as a continuous batch. Forked caches retain reference-counted, read-only prefix views and private writable tails; segmented attention consumes those views without copying the prefix K/V. P-MTP is enabled by default and drafts and verifies six future tokens in every active branch.
+
+This is a model/runtime contract, not a training-free switch for arbitrary VLM checkpoints. A compatible model must have been trained to emit the `<FORK>`/`<CHILD>` protocol and must provide the matching P-MTP head. The decoder batching and fork-safe cache machinery is shared with the Qwen3-family text implementation, but other OCR VLMs do not acquire hierarchical outputs merely by loading HPD's head.
+
+```rust
+use oar_ocr_core::utils::load_image;
+use oar_ocr_vl::utils::parse_device;
+use oar_ocr_vl::{HpdGenerationConfig, HpdParsing};
+
+let image = load_image("document.png")?;
+let model = HpdParsing::from_dir(
+    "PaddlePaddle/HPD-Parsing",
+    parse_device("cuda:0")?,
+)?;
+let parsed = model
+    .parse(&[image], &HpdGenerationConfig::default())
+    .into_iter()
+    .next()
+    .expect("one result")?;
+println!("{parsed}");
+```
+
+The returned text is the model-native reading-order `<BLOCK>type [bbox]<CHILD>content` stream. Set `use_mtp: false` in `HpdGenerationConfig` for ordinary greedy decoding. The native path uses the P-MTP weights embedded in the main checkpoint; the duplicate `P-MTP/model.safetensors` bundle is not required.
 
 ### DocParser
 
@@ -176,7 +206,7 @@ let layout_predictor = LayoutDetectionPredictor::builder()
     .build("pp-doclayoutv3.onnx")?;
 
 // 2. Setup a layout-first recognition backend
-let vl = PaddleOcrVl::from_dir("models/PaddleOCR-VL-1.5", device.clone())?;
+let vl = PaddleOcrVl::from_dir("PaddlePaddle/PaddleOCR-VL-1.5", device.clone())?;
 let parser = DocParser::new(&vl);
 
 // 3. Parse Document
@@ -196,7 +226,7 @@ use oar_ocr_vl::utils::parse_device;
 
 let image = load_image("document.png")?;
 let device = parse_device("cpu")?;
-let model = MinerU::from_dir("models/MinerU2.5-2509-1.2B", device)?;
+let model = MinerU::from_dir("opendatalab/MinerU2.5-2509-1.2B", device)?;
 // For full documents, prefer the `mineru` example, which follows the
 // model-native two-step pipeline: layout detection, then crop recognition.
 let result = model
@@ -218,8 +248,8 @@ This example combines layout detection (ONNX) with a VLM for recognition. It sup
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example doc_parser -- \
     --model-name paddleocr-vl-1.5 \
-    --model-dir models/PaddleOCR-VL-1.5 \
-    --layout-model models/pp-doclayoutv3.onnx \
+    --model-dir PaddlePaddle/PaddleOCR-VL-1.5 \
+    --layout-model pp-doclayoutv3.onnx \
     --device cuda \
     document.jpg
 ```
@@ -233,28 +263,28 @@ Run the PaddleOCR-VL model directly on an image with a specific task prompt.
 ```bash
 # OCR task
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
-    --model-dir models/PaddleOCR-VL \
+    --model-dir PaddlePaddle/PaddleOCR-VL \
     --device cuda \
     --task ocr \
     document.jpg
 
 # Table task
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
-    --model-dir models/PaddleOCR-VL \
+    --model-dir PaddlePaddle/PaddleOCR-VL \
     --device cuda \
     --task table \
     table.jpg
 
 # Text spotting with PaddleOCR-VL-1.5 or 1.6
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
-    --model-dir models/PaddleOCR-VL-1.5 \
+    --model-dir PaddlePaddle/PaddleOCR-VL-1.5 \
     --device cuda \
     --task spotting \
     spotting.jpg
 
 # Seal recognition with PaddleOCR-VL-1.5 or 1.6
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
-    --model-dir models/PaddleOCR-VL-1.6 \
+    --model-dir PaddlePaddle/PaddleOCR-VL-1.6 \
     --device cuda \
     --task seal \
     seal.jpg
@@ -264,20 +294,20 @@ cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example pa
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example hunyuanocr -- \
-    --model-dir models/HunyuanOCR \
-    --dflash-dir models/HunyuanOCR/dflash \
+    --model-dir tencent/HunyuanOCR \
+    --dflash-dir tencent/HunyuanOCR/dflash \
     --device cuda \
     --prompt "Detect and recognize text in the image, and output the text coordinates in a formatted manner." \
     document.jpg
 ```
 
-The model repository root contains HunyuanOCR 1.5. The loader detects it automatically. Use `--model-dir models/HunyuanOCR/v1.0` for the archived 1.0 checkpoint. `--dflash-dir` enables the official 15-token parallel draft path for 1.5. Omit it for ordinary autoregressive decoding. Library callers can use `HunyuanOcr::from_dirs(target_dir, dflash_dir, device)` or `HunyuanOcr::from_dir_with_dflash(model_dir, device)` when the draft is stored in the official `dflash/` subdirectory.
+The model repository root contains HunyuanOCR 1.5, which the loader detects automatically. To use the archived 1.0 checkpoint, pass its directory to `--model-dir`. `--dflash-dir` enables the official 15-token parallel draft path for 1.5. Omit it for ordinary autoregressive decoding. Library callers can use `HunyuanOcr::from_dirs(target_dir, dflash_dir, device)` or `HunyuanOcr::from_dir_with_dflash(model_dir, device)` when the draft is stored in the official `dflash/` subdirectory.
 
 ### GLM-OCR Direct Inference
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example glmocr -- \
-    --model-dir models/GLM-OCR \
+    --model-dir zai-org/GLM-OCR \
     --device cuda \
     --prompt "Text Recognition:" \
     document.jpg
@@ -289,7 +319,7 @@ The example accepts multiple page images. It uses the official prompt and defaul
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example ovisocr2 -- \
-    --model-dir models/OvisOCR2 \
+    --model-dir ATH-MaaS/OvisOCR2 \
     --device cuda:0 \
     document-1.jpg document-2.jpg
 ```
@@ -300,13 +330,24 @@ Run the official end-to-end prompt over a complete page:
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example monkeyocrv2 -- \
-    --model-dir MonkeyOCRv2-S-Parsing \
+    --model-dir zenosai/MonkeyOCRv2-S-Parsing \
     --device cuda:0 \
     --task end-to-end \
     document.jpg
 ```
 
-Pass `MonkeyOCRv2-B-Parsing` to `--model-dir` to use the ViT-B checkpoint. Other task values are `layout`, `text`, `formula`, and `table`. Use `--prompt` to supply a custom instruction.
+Pass the ViT-B checkpoint directory to `--model-dir` to use that variant. Other task values are `layout`, `text`, `formula`, and `table`. Use `--prompt` to supply a custom instruction.
+
+### HPD-Parsing Direct Inference
+
+```bash
+cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example hpd_parsing -- \
+    --model-dir PaddlePaddle/HPD-Parsing \
+    --device cuda:0 \
+    document.jpg
+```
+
+Use `--no-mtp` to compare with ordinary greedy decoding, `--speculative-tokens` to change the P-MTP draft length, `--max-active-branches` to bound the continuous batch, and `--prompt` to override `document parsing with fork.`. `--verbose` reports scheduler rounds, peak active branches, shared-prefix tokens, and P-MTP acceptance.
 
 ### MinerU2.5 and MinerU2.5-Pro Direct Inference
 
@@ -314,7 +355,7 @@ Model-native two-step document extraction (layout prompt + content extraction):
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example mineru -- \
-    --model-dir models/MinerU2.5-2509-1.2B \
+    --model-dir opendatalab/MinerU2.5-2509-1.2B \
     --device cuda:0 \
     document.jpg
 ```
@@ -323,7 +364,7 @@ cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example mi
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example mineru -- \
-    --model-dir models/MinerU2.5-Pro-2605-1.2B \
+    --model-dir opendatalab/MinerU2.5-Pro-2605-1.2B \
     --device cuda:0 \
     document.jpg
 ```
@@ -334,7 +375,7 @@ The default mode performs two-step structured extraction with block-diffusion de
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda,download-binaries --example mineru_diffusion -- \
-    --model-dir models/MinerU-Diffusion-V1-0320-2.5B \
+    --model-dir opendatalab/MinerU-Diffusion-V1-0320-2.5B \
     --device cuda:0 \
     document.jpg
 ```

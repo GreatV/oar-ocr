@@ -13,29 +13,29 @@
 //! # Using PaddleOCR-VL model
 //! cargo run -p oar-ocr-vl --features download-binaries --example doc_parser -- \
 //!     --model-name paddleocr-vl \
-//!     --model-dir PaddleOCR-VL \
-//!     --layout-model models/pp-doclayoutv3.onnx \
+//!     --model-dir PaddlePaddle/PaddleOCR-VL \
+//!     --layout-model pp-doclayoutv3.onnx \
 //!     document.jpg
 //!
 //! # Using PaddleOCR-VL-1.5 model
 //! cargo run -p oar-ocr-vl --features download-binaries --example doc_parser -- \
 //!     --model-name paddleocr-vl-1.5 \
-//!     --model-dir PaddleOCR-VL-1.5 \
-//!     --layout-model models/pp-doclayoutv3.onnx \
+//!     --model-dir PaddlePaddle/PaddleOCR-VL-1.5 \
+//!     --layout-model pp-doclayoutv3.onnx \
 //!     document.jpg
 //!
 //! # Using PaddleOCR-VL-1.6 model
 //! cargo run -p oar-ocr-vl --features download-binaries --example doc_parser -- \
 //!     --model-name paddleocr-vl-1.6 \
-//!     --model-dir PaddleOCR-VL-1.6 \
-//!     --layout-model models/pp-doclayoutv3.onnx \
+//!     --model-dir PaddlePaddle/PaddleOCR-VL-1.6 \
+//!     --layout-model pp-doclayoutv3.onnx \
 //!     document.jpg
 //!
 //! # Using GLM-OCR model
 //! cargo run -p oar-ocr-vl --features download-binaries --example doc_parser -- \
 //!     --model-name glmocr \
-//!     --model-dir models/GLM-OCR \
-//!     --layout-model models/pp-doclayoutv3.onnx \
+//!     --model-dir zai-org/GLM-OCR \
+//!     --layout-model pp-doclayoutv3.onnx \
 //!     document.jpg
 //! ```
 
