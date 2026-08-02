@@ -59,7 +59,7 @@ use std::time::Instant;
 
 use tracing::{error, info};
 
-use oar_ocr_core::utils::load_image;
+use oar_ocr_vl::utils::image::load_image;
 use oar_ocr_vl::utils::parse_device;
 use oar_ocr_vl::{PaddleOcrVl, PaddleOcrVlTask};
 use utils::token_fingerprint;

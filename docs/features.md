@@ -178,6 +178,17 @@ Existing files and explicit paths remain under caller control. In-memory ONNX so
 
 `auto-download` supplies model files at runtime. It does not install ONNX Runtime or any accelerator dependencies.
 
+## `oar-ocr-vl` needs none of this
+
+`oar-ocr-vl` is a separate, self-contained crate. It runs every model on Candle — including layout detection, through `oar_ocr_vl::PpDocLayout`, a native port of PP-DocLayoutV2/V3 — so it depends on neither `oar-ocr-core` nor ONNX Runtime, and none of the features above apply to it. It has two of its own, both off by default:
+
+| Feature | Purpose |
+|---|---|
+| `cuda` | Candle CUDA backend |
+| `metal` | Candle Metal backend |
+
+To source layout from somewhere else, implement `oar_ocr_vl::LayoutSource` and pass it to `DocParser::parse`.
+
 ## Recommended Combinations
 
 | Use case | Features |
@@ -201,7 +212,7 @@ Features listed in this table are added to the two default features unless `--no
 - Execution provider order matters. ONNX Runtime tries providers in the order supplied to `OrtSessionConfig`.
 - Feature flags compile provider support but do not install GPU drivers, TensorRT, DirectML, Core ML, OpenVINO, or other system runtimes.
 - Avoid `--all-features` for normal builds. Several providers are platform-specific and some provider combinations have no matching prebuilt ONNX Runtime distribution.
-- The `oar-ocr-vl` crate has its own `cuda`, `metal`, and `download-binaries` features. They are independent of the root-crate features documented here.
+- The `oar-ocr-vl` crate is independent of everything documented here; see [`oar-ocr-vl` needs none of this](#oar-ocr-vl-needs-none-of-this).
 
 Inspect the resolved feature graph with:
 

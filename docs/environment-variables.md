@@ -50,7 +50,7 @@ Accepted values (case-insensitive):
 Without the override, devices that advertise BF16 support use it after a runtime kernel probe. If the probe fails (for example on pre-Ampere CUDA GPUs), inference falls back to F16. CPU and devices without advertised BF16 support use F32.
 
 ```bash
-OAR_VL_DTYPE=f16 cargo run --release --features cuda,download-binaries -p oar-ocr-vl --example paddleocr_vl -- ...
+OAR_VL_DTYPE=f16 cargo run --release --features cuda -p oar-ocr-vl --example paddleocr_vl -- ...
 ```
 
 ## `OAR_VL_ATTN_FULL_SEQ_THRESHOLD`
@@ -60,7 +60,7 @@ Maximum sequence length (in vision patches) for which PaddleOCR-VL's vision atte
 Independently of this threshold, the full path is skipped automatically whenever its softmax scratch would not fit in the free device memory, so low-VRAM GPUs normally don't need this variable.
 
 ```bash
-OAR_VL_ATTN_FULL_SEQ_THRESHOLD=0 cargo run --release --features cuda,download-binaries -p oar-ocr-vl --example paddleocr_vl -- ...
+OAR_VL_ATTN_FULL_SEQ_THRESHOLD=0 cargo run --release --features cuda -p oar-ocr-vl --example paddleocr_vl -- ...
 ```
 
 ## VL Performance and Debug Overrides
@@ -95,7 +95,7 @@ With the `cuda` feature enabled, `oar-ocr-vl` compiles its custom kernels, inclu
 
 ```bash
 CUDA_COMPUTE_CAP=89 NVCC=/usr/local/cuda/bin/nvcc \
-    cargo build -p oar-ocr-vl --features cuda,download-binaries
+    cargo build -p oar-ocr-vl --features cuda
 ```
 
 ## `CUDA_LAUNCH_BLOCKING`

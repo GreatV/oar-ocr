@@ -7,6 +7,7 @@ use crate::decoder_graph::{
     CudaGraphKvLengths, SingleTokenDecoderCudaGraph, cuda_graph_error, decoder_attention_is_causal,
     sync_graph_tensor,
 };
+use crate::error::Error;
 #[cfg(feature = "cuda")]
 use crate::hunyuanocr::dynamic_kv::DynamicKvAppend;
 use crate::kv_trim::TrimmableKvCache;
@@ -15,7 +16,6 @@ use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::{
     Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, linear_no_bias, rms_norm,
 };
-use oar_ocr_core::core::OCRError;
 use std::cell::RefCell;
 
 #[cfg(any(feature = "cuda", test))]
@@ -26,58 +26,58 @@ fn ar_cuda_graph_capacity(prompt_len: usize, max_new_tokens: usize) -> Option<us
     decoder_cache_capacity(prompt_len, max_new_tokens, GLM_DECODE_CACHE_LEN)
 }
 
-fn rotate_half_interleaved(x: &Tensor) -> Result<Tensor, OCRError> {
+fn rotate_half_interleaved(x: &Tensor) -> Result<Tensor, Error> {
     let (b, h, s, d) = x.dims4().map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: rotate_half dims4",
             e,
         )
     })?;
     if d % 2 != 0 {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!("GLM-OCR: head_dim must be even, got {d}"),
         });
     }
     let half = d / 2;
     let x = x.reshape((b, h, s, half, 2)).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: rotate_half reshape",
             e,
         )
     })?;
     let x_even = x.i((.., .., .., .., 0)).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: rotate_half even slice",
             e,
         )
     })?;
     let x_odd = x.i((.., .., .., .., 1)).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: rotate_half odd slice",
             e,
         )
     })?;
     let x_odd = x_odd.neg().map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: rotate_half neg",
             e,
         )
     })?;
     let stacked = Tensor::stack(&[&x_odd, &x_even], D::Minus1).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: rotate_half stack",
             e,
         )
     })?;
     stacked.flatten_from(D::Minus2).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: rotate_half flatten",
             e,
         )
@@ -89,17 +89,17 @@ pub(super) fn apply_rotary_pos_emb(
     k: &Tensor,
     cos: &Tensor,
     sin: &Tensor,
-) -> Result<(Tensor, Tensor), OCRError> {
+) -> Result<(Tensor, Tensor), Error> {
     let cos = cos.unsqueeze(1).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: cos unsqueeze",
             e,
         )
     })?;
     let sin = sin.unsqueeze(1).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: sin unsqueeze",
             e,
         )
@@ -107,7 +107,7 @@ pub(super) fn apply_rotary_pos_emb(
 
     let (b, h, s, rot_dim) = cos.dims4().map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: cos dims4",
             e,
         )
@@ -115,14 +115,14 @@ pub(super) fn apply_rotary_pos_emb(
     let half = rot_dim / 2;
     let cos_half = cos.narrow(D::Minus1, 0, half).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: cos narrow",
             e,
         )
     })?;
     let sin_half = sin.narrow(D::Minus1, 0, half).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: sin narrow",
             e,
         )
@@ -130,7 +130,7 @@ pub(super) fn apply_rotary_pos_emb(
     let cos = Tensor::stack(&[&cos_half, &cos_half], D::Minus1)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: cos stack",
                 e,
             )
@@ -138,7 +138,7 @@ pub(super) fn apply_rotary_pos_emb(
         .reshape((b, h, s, rot_dim))
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: cos reshape",
                 e,
             )
@@ -146,7 +146,7 @@ pub(super) fn apply_rotary_pos_emb(
     let sin = Tensor::stack(&[&sin_half, &sin_half], D::Minus1)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: sin stack",
                 e,
             )
@@ -154,7 +154,7 @@ pub(super) fn apply_rotary_pos_emb(
         .reshape((b, h, s, rot_dim))
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: sin reshape",
                 e,
             )
@@ -162,7 +162,7 @@ pub(super) fn apply_rotary_pos_emb(
 
     let head_dim = q.dim(D::Minus1).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: q head_dim",
             e,
         )
@@ -170,14 +170,14 @@ pub(super) fn apply_rotary_pos_emb(
 
     let q_rot = q.narrow(D::Minus1, 0, rot_dim).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: q narrow",
             e,
         )
     })?;
     let k_rot = k.narrow(D::Minus1, 0, rot_dim).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: k narrow",
             e,
         )
@@ -188,21 +188,21 @@ pub(super) fn apply_rotary_pos_emb(
 
     let q_mul = q_rot.broadcast_mul(&cos).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: q*cos",
             e,
         )
     })?;
     let q_rot_mul = q_rotated.broadcast_mul(&sin).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: rotate_half(q)*sin",
             e,
         )
     })?;
     let mut q_out = (&q_mul + &q_rot_mul).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: q apply rope",
             e,
         )
@@ -210,21 +210,21 @@ pub(super) fn apply_rotary_pos_emb(
 
     let k_mul = k_rot.broadcast_mul(&cos).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: k*cos",
             e,
         )
     })?;
     let k_rot_mul = k_rotated.broadcast_mul(&sin).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: rotate_half(k)*sin",
             e,
         )
     })?;
     let mut k_out = (&k_mul + &k_rot_mul).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: k apply rope",
             e,
         )
@@ -235,7 +235,7 @@ pub(super) fn apply_rotary_pos_emb(
             .narrow(D::Minus1, rot_dim, head_dim - rot_dim)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: q pass narrow",
                     e,
                 )
@@ -244,21 +244,21 @@ pub(super) fn apply_rotary_pos_emb(
             .narrow(D::Minus1, rot_dim, head_dim - rot_dim)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: k pass narrow",
                     e,
                 )
             })?;
         q_out = Tensor::cat(&[&q_out, &q_pass], D::Minus1).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: q cat pass",
                 e,
             )
         })?;
         k_out = Tensor::cat(&[&k_out, &k_pass], D::Minus1).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: k cat pass",
                 e,
             )
@@ -268,15 +268,15 @@ pub(super) fn apply_rotary_pos_emb(
     Ok((q_out, k_out))
 }
 
-fn apply_mrope(freqs: &Tensor, mrope_section: &[usize]) -> Result<Tensor, OCRError> {
+fn apply_mrope(freqs: &Tensor, mrope_section: &[usize]) -> Result<Tensor, Error> {
     if mrope_section.is_empty() {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: "GLM-OCR: mrope_section is empty".to_string(),
         });
     }
     let dims = freqs.dims();
     if dims.len() != 4 || dims[0] != 3 {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!("GLM-OCR: freqs dims mismatch, got {:?}", dims),
         });
     }
@@ -285,14 +285,14 @@ fn apply_mrope(freqs: &Tensor, mrope_section: &[usize]) -> Result<Tensor, OCRErr
     for (i, &sec) in mrope_section.iter().enumerate() {
         let seg = freqs.narrow(D::Minus1, offset, sec).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: mrope narrow",
                 e,
             )
         })?;
         let picked = seg.i((i % 3, .., .., ..)).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: mrope pick",
                 e,
             )
@@ -303,7 +303,7 @@ fn apply_mrope(freqs: &Tensor, mrope_section: &[usize]) -> Result<Tensor, OCRErr
     let refs: Vec<&Tensor> = chunks.iter().collect();
     Tensor::cat(&refs, D::Minus1).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: mrope cat",
             e,
         )
@@ -317,9 +317,9 @@ pub(super) struct GlmOcrTextRotaryEmbedding {
 }
 
 impl GlmOcrTextRotaryEmbedding {
-    pub(super) fn new(cfg: &GlmOcrTextConfig, device: &Device) -> Result<Self, OCRError> {
+    pub(super) fn new(cfg: &GlmOcrTextConfig, device: &Device) -> Result<Self, Error> {
         if cfg.rope_parameters.rope_type != "default" {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "GLM-OCR: unsupported rope_type '{}'",
                     cfg.rope_parameters.rope_type
@@ -333,7 +333,7 @@ impl GlmOcrTextRotaryEmbedding {
         };
         let dim = (head_dim as f64 * cfg.rope_parameters.partial_rotary_factor).floor() as usize;
         if !dim.is_multiple_of(2) {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!("GLM-OCR: rotary dim must be even, got {dim}"),
             });
         }
@@ -344,7 +344,7 @@ impl GlmOcrTextRotaryEmbedding {
             .collect();
         let inv_freq = Tensor::from_vec(inv_freq, (dim / 2,), device).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: create inv_freq",
                 e,
             )
@@ -352,7 +352,7 @@ impl GlmOcrTextRotaryEmbedding {
 
         let section_sum: usize = cfg.rope_parameters.mrope_section.iter().sum();
         if section_sum != dim / 2 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "GLM-OCR: mrope_section sum ({section_sum}) != dim/2 ({})",
                     dim / 2
@@ -370,18 +370,18 @@ impl GlmOcrTextRotaryEmbedding {
         &self,
         x: &Tensor,
         position_ids: &Tensor,
-    ) -> Result<(Tensor, Tensor), OCRError> {
+    ) -> Result<(Tensor, Tensor), Error> {
         let dtype = x.dtype();
         let dims = position_ids.dims();
         if dims.len() != 3 || dims[0] != 3 {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!("GLM-OCR: position_ids must be (3, B, S), got {:?}", dims),
             });
         }
 
         let position_ids = position_ids.to_dtype(DType::F32).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: position_ids cast",
                 e,
             )
@@ -389,14 +389,14 @@ impl GlmOcrTextRotaryEmbedding {
 
         let inv_len = self.inv_freq.dims1().map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: inv_freq dims1",
                 e,
             )
         })?;
         let inv = self.inv_freq.reshape((1, 1, 1, inv_len)).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: inv_freq reshape",
                 e,
             )
@@ -405,7 +405,7 @@ impl GlmOcrTextRotaryEmbedding {
             .unsqueeze(3)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: position_ids unsqueeze",
                     e,
                 )
@@ -413,7 +413,7 @@ impl GlmOcrTextRotaryEmbedding {
             .broadcast_mul(&inv)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: freqs multiply",
                     e,
                 )
@@ -422,21 +422,21 @@ impl GlmOcrTextRotaryEmbedding {
         let freqs = apply_mrope(&freqs, &self.mrope_section)?;
         let emb = Tensor::cat(&[&freqs, &freqs], D::Minus1).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: freqs cat",
                 e,
             )
         })?;
         let cos = emb.cos().map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: cos",
                 e,
             )
         })?;
         let sin = emb.sin().map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: sin",
                 e,
             )
@@ -444,14 +444,14 @@ impl GlmOcrTextRotaryEmbedding {
 
         let cos = cos.to_dtype(dtype).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: cos cast",
                 e,
             )
         })?;
         let sin = sin.to_dtype(dtype).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: sin cast",
                 e,
             )
@@ -468,7 +468,7 @@ struct GlmOcrTextMLP {
 }
 
 impl GlmOcrTextMLP {
-    fn load(cfg: &GlmOcrTextConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &GlmOcrTextConfig, vb: VarBuilder) -> Result<Self, Error> {
         let gate_up_proj = linear_no_bias(
             cfg.hidden_size,
             cfg.intermediate_size * 2,
@@ -488,20 +488,20 @@ impl GlmOcrTextMLP {
         })
     }
 
-    fn forward(&self, hidden_states: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden_states: &Tensor) -> Result<Tensor, Error> {
         let up_states = self
             .gate_up_proj
             .forward(hidden_states)
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "text gate_up_proj forward", e))?;
         let mut parts = up_states.chunk(2, D::Minus1).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: gate_up_proj chunk",
                 e,
             )
         })?;
         if parts.len() != 2 {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "GLM-OCR: expected 2 chunks from gate_up_proj, got {}",
                     parts.len()
@@ -536,12 +536,12 @@ struct GlmOcrTextAttention {
 }
 
 impl GlmOcrTextAttention {
-    fn load(cfg: &GlmOcrTextConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &GlmOcrTextConfig, vb: VarBuilder) -> Result<Self, Error> {
         if !cfg
             .num_attention_heads
             .is_multiple_of(cfg.num_key_value_heads)
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "GLM-OCR: num_attention_heads ({}) must be divisible by num_key_value_heads ({})",
                     cfg.num_attention_heads, cfg.num_key_value_heads
@@ -597,10 +597,10 @@ impl GlmOcrTextAttention {
         hidden_states: &Tensor,
         cos: &Tensor,
         sin: &Tensor,
-    ) -> Result<(Tensor, Tensor, Tensor), OCRError> {
+    ) -> Result<(Tensor, Tensor, Tensor), Error> {
         let (b, seq_len, _) = hidden_states.dims3().map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: attn hidden dims3",
                 e,
             )
@@ -623,7 +623,7 @@ impl GlmOcrTextAttention {
             .reshape((b, seq_len, self.num_heads, self.head_dim))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: q reshape",
                     e,
                 )
@@ -631,7 +631,7 @@ impl GlmOcrTextAttention {
             .transpose(1, 2)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: q transpose",
                     e,
                 )
@@ -639,7 +639,7 @@ impl GlmOcrTextAttention {
             .contiguous()
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: q contiguous",
                     e,
                 )
@@ -648,7 +648,7 @@ impl GlmOcrTextAttention {
             .reshape((b, seq_len, self.num_kv_heads, self.head_dim))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: k reshape",
                     e,
                 )
@@ -656,7 +656,7 @@ impl GlmOcrTextAttention {
             .transpose(1, 2)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: k transpose",
                     e,
                 )
@@ -664,7 +664,7 @@ impl GlmOcrTextAttention {
             .contiguous()
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: k contiguous",
                     e,
                 )
@@ -673,7 +673,7 @@ impl GlmOcrTextAttention {
             .reshape((b, seq_len, self.num_kv_heads, self.head_dim))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: v reshape",
                     e,
                 )
@@ -681,7 +681,7 @@ impl GlmOcrTextAttention {
             .transpose(1, 2)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: v transpose",
                     e,
                 )
@@ -689,7 +689,7 @@ impl GlmOcrTextAttention {
             .contiguous()
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: v contiguous",
                     e,
                 )
@@ -698,14 +698,14 @@ impl GlmOcrTextAttention {
         (q, k) = apply_rotary_pos_emb(&q, &k, cos, sin)?;
         q = q.contiguous().map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: q contiguous post-rope",
                 e,
             )
         })?;
         k = k.contiguous().map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: k contiguous post-rope",
                 e,
             )
@@ -720,10 +720,10 @@ impl GlmOcrTextAttention {
         cos: &Tensor,
         sin: &Tensor,
         attention_mask: Option<&Tensor>,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let (b, seq_len, _) = hidden_states.dims3().map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: attn hidden dims3",
                 e,
             )
@@ -732,7 +732,7 @@ impl GlmOcrTextAttention {
 
         let (k, v) = self.kv_cache.borrow_mut().append(&k, &v).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: kv_cache append",
                 e,
             )
@@ -765,12 +765,12 @@ impl GlmOcrTextAttention {
         attn: &Tensor,
         batch: usize,
         seq_len: usize,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let attn = attn
             .transpose(1, 2)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: attn transpose",
                     e,
                 )
@@ -778,7 +778,7 @@ impl GlmOcrTextAttention {
             .reshape((batch, seq_len, self.num_heads * self.head_dim))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: attn reshape",
                     e,
                 )
@@ -790,7 +790,7 @@ impl GlmOcrTextAttention {
     }
 
     #[cfg(feature = "cuda")]
-    fn prepare_dynamic_cache(&self, query_len: usize, cache_len: usize) -> Result<(), OCRError> {
+    fn prepare_dynamic_cache(&self, query_len: usize, cache_len: usize) -> Result<(), Error> {
         let template = Tensor::zeros(
             (1, self.num_kv_heads, query_len, self.head_dim),
             self.k_proj.weight().dtype(),
@@ -811,19 +811,19 @@ impl GlmOcrTextAttention {
         sin: &Tensor,
         query_lengths: &Tensor,
         kv_lengths: &Tensor,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let (batch, query_len, _) = hidden_states
             .dims3()
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "dynamic attention hidden shape", e))?;
         if batch != 1 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "GLM-OCR CUDA-graph attention requires batch size 1".to_string(),
             });
         }
         let (q, k, v) = self.project_qkv(hidden_states, cos, sin)?;
         let cache = self.kv_cache.borrow();
         let cache_len = cache.storage_capacity();
-        let (cache_k, cache_v) = cache.storage().ok_or_else(|| OCRError::ConfigError {
+        let (cache_k, cache_v) = cache.storage().ok_or_else(|| Error::Config {
             message: "GLM-OCR dynamic KV storage is not initialized".to_string(),
         })?;
         drop(cache);
@@ -878,7 +878,7 @@ impl GlmOcrTextAttention {
     }
 
     #[cfg(feature = "cuda")]
-    fn set_kv_cache_len(&self, len: usize) -> Result<(), OCRError> {
+    fn set_kv_cache_len(&self, len: usize) -> Result<(), Error> {
         self.kv_cache
             .borrow_mut()
             .set_current_len(len)
@@ -897,7 +897,7 @@ pub(super) struct GlmOcrTextDecoderLayer {
 }
 
 impl GlmOcrTextDecoderLayer {
-    pub(super) fn load(cfg: &GlmOcrTextConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    pub(super) fn load(cfg: &GlmOcrTextConfig, vb: VarBuilder) -> Result<Self, Error> {
         let self_attn = GlmOcrTextAttention::load(cfg, vb.clone())?;
         let mlp = GlmOcrTextMLP::load(cfg, vb.clone())?;
         let input_layernorm = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))
@@ -936,7 +936,7 @@ impl GlmOcrTextDecoderLayer {
         cos: &Tensor,
         sin: &Tensor,
         attention_mask: Option<&Tensor>,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let residual = hidden_states.clone();
         let hidden = self
             .input_layernorm
@@ -951,7 +951,7 @@ impl GlmOcrTextDecoderLayer {
             })?;
         let hidden = (&residual + &hidden).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: text residual add",
                 e,
             )
@@ -970,7 +970,7 @@ impl GlmOcrTextDecoderLayer {
         })?;
         (&residual + &hidden).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: text residual add mlp",
                 e,
             )
@@ -985,7 +985,7 @@ impl GlmOcrTextDecoderLayer {
         sin: &Tensor,
         query_lengths: &Tensor,
         kv_lengths: &Tensor,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let residual = hidden_states.clone();
         let hidden = self
             .input_layernorm
@@ -1002,7 +1002,7 @@ impl GlmOcrTextDecoderLayer {
             })?;
         let hidden = (&residual + &hidden).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: text residual add",
                 e,
             )
@@ -1021,7 +1021,7 @@ impl GlmOcrTextDecoderLayer {
         })?;
         (&residual + &hidden).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: text residual add mlp",
                 e,
             )
@@ -1033,7 +1033,7 @@ impl GlmOcrTextDecoderLayer {
     }
 
     #[cfg(feature = "cuda")]
-    pub(super) fn trim_kv_cache(&self, len: usize) -> Result<(), OCRError> {
+    pub(super) fn trim_kv_cache(&self, len: usize) -> Result<(), Error> {
         self.self_attn
             .kv_cache
             .borrow_mut()
@@ -1046,7 +1046,7 @@ impl GlmOcrTextDecoderLayer {
         &self,
         query_len: usize,
         cache_len: usize,
-    ) -> Result<(), OCRError> {
+    ) -> Result<(), Error> {
         self.self_attn.prepare_dynamic_cache(query_len, cache_len)
     }
 
@@ -1056,7 +1056,7 @@ impl GlmOcrTextDecoderLayer {
     }
 
     #[cfg(feature = "cuda")]
-    pub(super) fn set_kv_cache_len(&self, len: usize) -> Result<(), OCRError> {
+    pub(super) fn set_kv_cache_len(&self, len: usize) -> Result<(), Error> {
         self.self_attn.set_kv_cache_len(len)
     }
 }
@@ -1098,7 +1098,7 @@ pub struct GlmOcrTextModel {
 }
 
 impl GlmOcrTextModel {
-    pub fn load(cfg: &GlmOcrTextConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    pub fn load(cfg: &GlmOcrTextConfig, vb: VarBuilder) -> Result<Self, Error> {
         let embed_tokens = embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("embed_tokens"))
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "text embed_tokens", e))?;
         let rotary_emb = GlmOcrTextRotaryEmbedding::new(cfg, vb.device())?;
@@ -1123,7 +1123,7 @@ impl GlmOcrTextModel {
         })
     }
 
-    pub fn embed(&self, input_ids: &Tensor) -> Result<Tensor, OCRError> {
+    pub fn embed(&self, input_ids: &Tensor) -> Result<Tensor, Error> {
         self.embed_tokens
             .forward(input_ids)
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "text embed forward", e))
@@ -1138,7 +1138,7 @@ impl GlmOcrTextModel {
         inputs_embeds: &Tensor,
         position_ids: &Tensor,
         attention_mask: Option<&Tensor>,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let (cos, sin) = self.rotary_emb.forward(inputs_embeds, position_ids)?;
         self.forward_prepared(inputs_embeds, &cos, &sin, attention_mask)
     }
@@ -1149,7 +1149,7 @@ impl GlmOcrTextModel {
         cos: &Tensor,
         sin: &Tensor,
         attention_mask: Option<&Tensor>,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let mut hidden_states = inputs_embeds.clone();
         for layer in &self.layers {
             hidden_states = layer.forward(&hidden_states, cos, sin, attention_mask)?;
@@ -1159,7 +1159,7 @@ impl GlmOcrTextModel {
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "text norm forward", e))
     }
 
-    fn project_logits(&self, hidden_states: &Tensor, lm_head: &Linear) -> Result<Tensor, OCRError> {
+    fn project_logits(&self, hidden_states: &Tensor, lm_head: &Linear) -> Result<Tensor, Error> {
         lm_head
             .forward(hidden_states)
             .and_then(|logits| logits.i((0, 0, ..)))
@@ -1171,7 +1171,7 @@ impl GlmOcrTextModel {
         &self,
         hidden_states: &Tensor,
         lm_head: &Linear,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         lm_head
             .forward(hidden_states)
             .and_then(|logits| logits.squeeze(0))
@@ -1183,7 +1183,7 @@ impl GlmOcrTextModel {
         inputs_embeds: &Tensor,
         position_ids: &Tensor,
         lm_head: &Linear,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         #[cfg(feature = "cuda")]
         {
             let kv_len = self.kv_cache_len().saturating_add(1);
@@ -1205,7 +1205,7 @@ impl GlmOcrTextModel {
         inputs_embeds: &Tensor,
         position_ids: &Tensor,
         lm_head: &Linear,
-    ) -> Result<(Tensor, Tensor), OCRError> {
+    ) -> Result<(Tensor, Tensor), Error> {
         let query_len = inputs_embeds
             .dim(1)
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "verification query length", e))?;
@@ -1231,7 +1231,7 @@ impl GlmOcrTextModel {
         position_ids: &Tensor,
         query_lengths: &Tensor,
         kv_lengths: &Tensor,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let (cos, sin) = self.rotary_emb.forward(inputs_embeds, position_ids)?;
         let mut hidden_states = inputs_embeds.clone();
         for layer in &self.layers {
@@ -1248,7 +1248,7 @@ impl GlmOcrTextModel {
         prompt_len: usize,
         max_new_tokens: usize,
         lm_head: &Linear,
-    ) -> Result<(), OCRError> {
+    ) -> Result<(), Error> {
         if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
             || std::env::var_os("OAR_GLMOCR_DISABLE_CUDA_GRAPH").is_some()
         {
@@ -1295,7 +1295,7 @@ impl GlmOcrTextModel {
         max_new_tokens: usize,
         query_len: usize,
         lm_head: &Linear,
-    ) -> Result<Option<usize>, OCRError> {
+    ) -> Result<Option<usize>, Error> {
         if query_len == 0
             || std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
             || std::env::var_os("OAR_GLMOCR_DISABLE_CUDA_GRAPH").is_some()
@@ -1344,7 +1344,7 @@ impl GlmOcrTextModel {
     }
 
     #[cfg(feature = "cuda")]
-    fn capture_cuda_graph(&self, cache_len: usize, lm_head: &Linear) -> Result<(), OCRError> {
+    fn capture_cuda_graph(&self, cache_len: usize, lm_head: &Linear) -> Result<(), Error> {
         use candle_core::cuda_backend::cudarc::driver::sys::{
             CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
         };
@@ -1417,7 +1417,7 @@ impl GlmOcrTextModel {
                 CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
             )
             .map_err(|e| cuda_graph_error("GLM-OCR", "end decoder CUDA graph capture", e))?
-            .ok_or_else(|| OCRError::ConfigError {
+            .ok_or_else(|| Error::Config {
                 message: "GLM-OCR decoder capture returned no graph".to_string(),
             })?;
         graph
@@ -1443,7 +1443,7 @@ impl GlmOcrTextModel {
         cache_len: usize,
         query_len: usize,
         lm_head: &Linear,
-    ) -> Result<(), OCRError> {
+    ) -> Result<(), Error> {
         use candle_core::cuda_backend::cudarc::driver::sys::{
             CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
         };
@@ -1503,7 +1503,7 @@ impl GlmOcrTextModel {
                 .map_err(|e| {
                     candle_to_ocr_inference("GLM-OCR", "captured verification argmax", e)
                 })?;
-            Ok::<_, OCRError>((hidden, tokens))
+            Ok::<_, Error>((hidden, tokens))
         })();
         let (hidden_output, token_output) = match captured_output {
             Ok(output) => output,
@@ -1519,7 +1519,7 @@ impl GlmOcrTextModel {
                 CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
             )
             .map_err(|e| cuda_graph_error("GLM-OCR", "end verification graph capture", e))?
-            .ok_or_else(|| OCRError::ConfigError {
+            .ok_or_else(|| Error::Config {
                 message: "GLM-OCR verification capture returned no graph".to_string(),
             })?;
         graph
@@ -1547,7 +1547,7 @@ impl GlmOcrTextModel {
         inputs_embeds: &Tensor,
         position_ids: &Tensor,
         kv_len: usize,
-    ) -> Result<Option<Tensor>, OCRError> {
+    ) -> Result<Option<Tensor>, Error> {
         let captured_ref = self.decode_graph.borrow();
         let Some(captured) = captured_ref.as_ref() else {
             return Ok(None);
@@ -1590,7 +1590,7 @@ impl GlmOcrTextModel {
         inputs_embeds: &Tensor,
         position_ids: &Tensor,
         kv_len: usize,
-    ) -> Result<Option<(Tensor, Tensor)>, OCRError> {
+    ) -> Result<Option<(Tensor, Tensor)>, Error> {
         let captured_ref = self.verification_graph.borrow();
         let Some(captured) = captured_ref.as_ref() else {
             return Ok(None);
@@ -1650,7 +1650,7 @@ impl GlmOcrTextModel {
     }
 
     #[cfg(feature = "cuda")]
-    pub(crate) fn trim_kv_cache(&self, len: usize) -> Result<(), OCRError> {
+    pub(crate) fn trim_kv_cache(&self, len: usize) -> Result<(), Error> {
         for layer in &self.layers {
             layer.trim_kv_cache(len)?;
         }

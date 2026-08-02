@@ -1,9 +1,9 @@
 use super::config::{HunyuanOcrVersion, HunyuanOcrVisionConfig};
 use crate::attention::flash_attention;
+use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::{Conv2d, Conv2dConfig, LayerNorm, LayerNormConfig, Linear, Module};
-use oar_ocr_core::core::OCRError;
 use rayon::prelude::*;
 use std::sync::Arc;
 
@@ -28,7 +28,7 @@ impl VisionEmbeddings {
         cfg: &HunyuanOcrVisionConfig,
         version: HunyuanOcrVersion,
         vb: candle_nn::VarBuilder,
-    ) -> Result<Self, OCRError> {
+    ) -> Result<Self, Error> {
         let conv_cfg = Conv2dConfig {
             stride: cfg.patch_size,
             padding: 0,
@@ -60,7 +60,7 @@ impl VisionEmbeddings {
         // the 2048px learned positional base (16,384 patches + cls slot).
         // The input grid is interpolated from this base, matching upstream.
         if cfg.patch_size == 0 || !cfg.max_image_size.is_multiple_of(cfg.patch_size) {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "HunyuanOCR: max_image_size {} must be divisible by patch_size {}",
                     cfg.max_image_size, cfg.patch_size
@@ -71,7 +71,7 @@ impl VisionEmbeddings {
         let num_positions = position_edge
             .checked_mul(position_edge)
             .and_then(|positions| positions.checked_add(cfg.cat_extra_token))
-            .ok_or_else(|| OCRError::ConfigError {
+            .ok_or_else(|| Error::Config {
                 message: "HunyuanOCR: position embedding size overflow".to_string(),
             })?;
         let position_embedding =
@@ -82,13 +82,13 @@ impl VisionEmbeddings {
         let pos_w = position_embedding.embeddings();
         let (loaded_positions, position_dim) = pos_w.dims2().map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: vit position_embedding dims2 failed",
                 e,
             )
         })?;
         if loaded_positions < 2 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "HunyuanOCR: vit position_embedding is too small: {loaded_positions}"
                 ),
@@ -97,7 +97,7 @@ impl VisionEmbeddings {
         let num_patch_positions = loaded_positions - 1;
         let position_grid = (num_patch_positions as f64).sqrt() as usize;
         if position_grid * position_grid != num_patch_positions {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "HunyuanOCR: vit patch position grid is not square: num={num_patch_positions}"
                 ),
@@ -113,7 +113,7 @@ impl VisionEmbeddings {
             .and_then(|x| x.to_vec1::<f32>())
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "HunyuanOCR: cache vit patch position embedding failed",
                     e,
                 )
@@ -135,9 +135,9 @@ impl VisionEmbeddings {
         width: usize,
         device: &Device,
         dtype: DType,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         if height == 0 || width == 0 {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "HunyuanOCR: vit interpolate_patch_pos requires height/width > 0, got {height}x{width}"
                 ),
@@ -156,7 +156,7 @@ impl VisionEmbeddings {
         Tensor::from_vec(out, (height * width, self.position_dim), device)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "HunyuanOCR: vit interpolated patch pos tensor failed",
                     e,
                 )
@@ -164,7 +164,7 @@ impl VisionEmbeddings {
             .to_dtype(dtype)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "HunyuanOCR: vit interpolated patch pos cast failed",
                     e,
                 )
@@ -191,9 +191,9 @@ impl VisionAttention {
         cfg: &HunyuanOcrVisionConfig,
         layer_idx: usize,
         vb: candle_nn::VarBuilder,
-    ) -> Result<Self, OCRError> {
+    ) -> Result<Self, Error> {
         if !cfg.hidden_size.is_multiple_of(cfg.num_attention_heads) {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "HunyuanOCR: vit hidden_size {} not divisible by num_attention_heads {}",
                     cfg.hidden_size, cfg.num_attention_heads
@@ -222,10 +222,10 @@ impl VisionAttention {
         })
     }
 
-    fn forward(&self, hidden_states: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden_states: &Tensor) -> Result<Tensor, Error> {
         let (b, seq_len, _) = hidden_states.dims3().map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: vit attn hidden_states dims3 failed",
                 e,
             )
@@ -318,7 +318,7 @@ impl VisionAttention {
             (kt, v.clone())
         };
 
-        let attend_chunk = |q_in: &Tensor| -> Result<Tensor, OCRError> {
+        let attend_chunk = |q_in: &Tensor| -> Result<Tensor, Error> {
             let q_use = if use_f32 {
                 q_in.to_dtype(DType::F32)
                     .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "vit attn q to f32", e))?
@@ -392,7 +392,7 @@ struct VisionMlp {
 }
 
 impl VisionMlp {
-    fn load(cfg: &HunyuanOcrVisionConfig, vb: candle_nn::VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &HunyuanOcrVisionConfig, vb: candle_nn::VarBuilder) -> Result<Self, Error> {
         let fc1 = candle_nn::linear(
             cfg.hidden_size,
             cfg.intermediate_size,
@@ -408,7 +408,7 @@ impl VisionMlp {
         Ok(Self { fc1, fc2 })
     }
 
-    fn forward(&self, xs: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor, Error> {
         let hidden = self
             .fc1
             .forward(xs)
@@ -442,7 +442,7 @@ impl VisionEncoderLayer {
         cfg: &HunyuanOcrVisionConfig,
         layer_idx: usize,
         vb: candle_nn::VarBuilder,
-    ) -> Result<Self, OCRError> {
+    ) -> Result<Self, Error> {
         let self_attn = VisionAttention::load(cfg, layer_idx, vb.pp("self_attn"))?;
         let mlp = VisionMlp::load(cfg, vb.pp("mlp"))?;
 
@@ -469,7 +469,7 @@ impl VisionEncoderLayer {
         })
     }
 
-    fn forward(&self, xs: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor, Error> {
         let residual = xs;
         let hidden = self
             .input_layernorm
@@ -506,7 +506,7 @@ struct VisionPerceive {
 }
 
 impl VisionPerceive {
-    fn load(cfg: &HunyuanOcrVisionConfig, vb: candle_nn::VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &HunyuanOcrVisionConfig, vb: candle_nn::VarBuilder) -> Result<Self, Error> {
         let before_rms =
             candle_nn::rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("before_rms")).map_err(
                 |e| candle_to_ocr_inference("HunyuanOCR", "load perceive before_rms", e),
@@ -572,7 +572,7 @@ impl VisionPerceive {
         })
     }
 
-    fn forward(&self, patch_tokens: &Tensor, h: usize, w: usize) -> Result<Tensor, OCRError> {
+    fn forward(&self, patch_tokens: &Tensor, h: usize, w: usize) -> Result<Tensor, Error> {
         let patch_tokens = self
             .before_rms
             .forward(patch_tokens)
@@ -580,13 +580,13 @@ impl VisionPerceive {
 
         let d = patch_tokens.dim(D::Minus1).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: perceive patch_tokens dim failed",
                 e,
             )
         })?;
         if d != self.hidden_size {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "HunyuanOCR: unexpected vit hidden dim {d}, expected {}",
                     self.hidden_size
@@ -598,7 +598,7 @@ impl VisionPerceive {
             .reshape((h, w, d))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "HunyuanOCR: perceive reshape hwd failed",
                     e,
                 )
@@ -606,7 +606,7 @@ impl VisionPerceive {
             .permute((2, 0, 1))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "HunyuanOCR: perceive permute to chw failed",
                     e,
                 )
@@ -614,7 +614,7 @@ impl VisionPerceive {
             .unsqueeze(0)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "HunyuanOCR: perceive add batch dim failed",
                     e,
                 )
@@ -636,13 +636,13 @@ impl VisionPerceive {
 
         let (_b, c, h2, w2) = feat.dims4().map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: perceive feat dims4 failed",
                 e,
             )
         })?;
         if c != 4608 {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!("HunyuanOCR: unexpected perceive channel dim {c}, expected 4608"),
             });
         }
@@ -653,7 +653,7 @@ impl VisionPerceive {
             .reshape((1usize, 4608usize, 1usize, 1usize))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "HunyuanOCR: reshape image_newline failed",
                     e,
                 )
@@ -661,14 +661,14 @@ impl VisionPerceive {
             .expand((1usize, 4608usize, h2, 1usize))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "HunyuanOCR: expand image_newline column failed",
                     e,
                 )
             })?;
         let feat = Tensor::cat(&[&feat, &newline], 3).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: concat newline column failed",
                 e,
             )
@@ -679,7 +679,7 @@ impl VisionPerceive {
             .permute((0, 2, 3, 1))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "HunyuanOCR: permute perceive tokens failed",
                     e,
                 )
@@ -687,7 +687,7 @@ impl VisionPerceive {
             .reshape((h2 * (w2 + 1), 4608usize))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "HunyuanOCR: reshape perceive tokens failed",
                     e,
                 )
@@ -712,14 +712,14 @@ impl VisionPerceive {
         // the upstream weights but is never used in the forward path.
         let begin = self.image_begin.reshape((1usize, 1024usize)).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: reshape image_begin failed",
                 e,
             )
         })?;
         let end = self.image_end.reshape((1usize, 1024usize)).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: reshape image_end failed",
                 e,
             )
@@ -732,7 +732,7 @@ impl VisionPerceive {
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "perceive image_end to dtype", e))?;
         let cat = Tensor::cat(&[&begin, &tokens, &end], 0).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: concat begin/tokens/end failed",
                 e,
             )
@@ -756,7 +756,7 @@ impl HunyuanVisionModel {
         cfg: &HunyuanOcrVisionConfig,
         version: HunyuanOcrVersion,
         vb: candle_nn::VarBuilder,
-    ) -> Result<Self, OCRError> {
+    ) -> Result<Self, Error> {
         let embeddings = VisionEmbeddings::load(cfg, version, vb.pp("embeddings"))?;
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         for i in 0..cfg.num_hidden_layers {
@@ -778,16 +778,16 @@ impl HunyuanVisionModel {
     /// Produce image token embeddings suitable for replacing the image-token span in the LLM input.
     ///
     /// Returned shape: (1 + Hm*(Wm+1) + 1, out_hidden=1024) where Hm/Wm are merged-grid sizes.
-    pub fn forward(&self, pixel_values: &Tensor) -> Result<(Tensor, (usize, usize)), OCRError> {
+    pub fn forward(&self, pixel_values: &Tensor) -> Result<(Tensor, (usize, usize)), Error> {
         let (_b, _c, rh, rw) = pixel_values.dims4().map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: pixel_values dims4 failed",
                 e,
             )
         })?;
         if rh % self.cfg.patch_size != 0 || rw % self.cfg.patch_size != 0 {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "HunyuanOCR: pixel_values {rw}x{rh} not divisible by patch_size={}",
                     self.cfg.patch_size
@@ -808,13 +808,13 @@ impl HunyuanVisionModel {
             })?;
         let (_b2, _c2, ph, pw) = patches.dims4().map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: vit patches dims4 failed",
                 e,
             )
         })?;
         if ph != h || pw != w {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "HunyuanOCR: vit patch grid mismatch: expected {h}x{w} got {ph}x{pw}"
                 ),
@@ -823,7 +823,7 @@ impl HunyuanVisionModel {
 
         let patches = patches.squeeze(0).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: squeeze batch from vit patch embeddings failed",
                 e,
             )
@@ -833,7 +833,7 @@ impl HunyuanVisionModel {
             .permute((1, 2, 0))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "HunyuanOCR: permute patches to hwd failed",
                     e,
                 )
@@ -841,7 +841,7 @@ impl HunyuanVisionModel {
             .reshape((h * w, self.cfg.hidden_size))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "HunyuanOCR: reshape patches to seq failed",
                     e,
                 )
@@ -852,7 +852,7 @@ impl HunyuanVisionModel {
                 .interpolate_patch_pos(h, w, pixel_values.device(), patches.dtype())?;
         let patch_tokens = patches.broadcast_add(&patch_pos).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: add vit patch pos embedding failed",
                 e,
             )
@@ -865,7 +865,7 @@ impl HunyuanVisionModel {
         // propagated. Prepending one adds attention noise across all layers.
         let hidden = patch_tokens.unsqueeze(0).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: add batch dim to vit tokens failed",
                 e,
             )
@@ -875,7 +875,7 @@ impl HunyuanVisionModel {
         for (i, layer) in self.layers.iter().enumerate() {
             hidden_states = layer
                 .forward(&hidden_states)
-                .map_err(|e| OCRError::Inference {
+                .map_err(|e| Error::Inference {
                     model_name: "HunyuanOCR".to_string(),
                     context: format!("vit encoder layer {i} forward failed"),
                     source: Box::new(e),
@@ -885,7 +885,7 @@ impl HunyuanVisionModel {
         // No extra token to drop now (see above). Just unbatch.
         let patch_out = hidden_states.squeeze(0).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: squeeze vit patch outputs failed",
                 e,
             )
@@ -894,7 +894,7 @@ impl HunyuanVisionModel {
         if !h.is_multiple_of(self.cfg.spatial_merge_size)
             || !w.is_multiple_of(self.cfg.spatial_merge_size)
         {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "HunyuanOCR: vit grid {h}x{w} not divisible by spatial_merge_size={}",
                     self.cfg.spatial_merge_size

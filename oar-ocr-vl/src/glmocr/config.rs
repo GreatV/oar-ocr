@@ -1,5 +1,5 @@
+use crate::error::Error;
 use candle_nn::Activation;
-use oar_ocr_core::core::OCRError;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -110,7 +110,7 @@ pub struct GlmOcrConfig {
 }
 
 impl GlmOcrConfig {
-    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
         crate::utils::load_json_config(path, "GLM-OCR", "config.json")
     }
 }
@@ -147,34 +147,34 @@ pub struct GlmOcrImageProcessorConfig {
 }
 
 impl GlmOcrImageProcessorConfig {
-    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
         crate::utils::load_json_config(path, "GLM-OCR", "preprocessor_config.json")
     }
 
-    pub fn validate(&self) -> Result<(), OCRError> {
+    pub fn validate(&self) -> Result<(), Error> {
         crate::utils::validate_image_mean_std("GLM-OCR", &self.image_mean, &self.image_std)?;
         if self.image_std.contains(&0.0) {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "GLM-OCR image_std values must be non-zero (used as divisor)".to_string(),
             });
         }
         if self.patch_size == 0 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "GLM-OCR patch_size must be > 0".to_string(),
             });
         }
         if self.merge_size == 0 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "GLM-OCR merge_size must be > 0".to_string(),
             });
         }
         if self.temporal_patch_size == 0 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "GLM-OCR temporal_patch_size must be > 0".to_string(),
             });
         }
         if self.size.shortest_edge == 0 || self.size.longest_edge == 0 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "GLM-OCR size.shortest_edge/longest_edge must be > 0".to_string(),
             });
         }

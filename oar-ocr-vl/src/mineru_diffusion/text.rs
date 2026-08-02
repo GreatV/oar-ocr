@@ -19,20 +19,16 @@ use crate::attention::{
     RotaryEmbedding, flash_attention, scaled_dot_product_attention_gqa,
     segmented_scaled_dot_product_attention_gqa,
 };
+use crate::error::Error;
 use crate::kv_trim::TrimmableKvCache;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{
     Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, linear, linear_no_bias, rms_norm,
 };
-use oar_ocr_core::core::OCRError;
 
-fn proc_err(msg: &'static str, e: candle_core::Error) -> OCRError {
-    candle_to_ocr_processing(
-        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-        msg,
-        e,
-    )
+fn proc_err(msg: &'static str, e: candle_core::Error) -> Error {
+    candle_to_ocr_processing(crate::error::ProcessingStage::TensorOperation, msg, e)
 }
 
 /// Per-layer committed KV (rope already applied to keys).
@@ -225,7 +221,7 @@ impl SdarKvCache {
     /// appending to either branch cannot corrupt the other. Recursively forking
     /// past an inherited prefix materializes that prefix plus the selected
     /// private tail because this cache currently stores only one shared segment.
-    pub(crate) fn fork_at(&self, len: usize) -> Result<Self, OCRError> {
+    pub(crate) fn fork_at(&self, len: usize) -> Result<Self, Error> {
         let layers = self
             .layers
             .iter()
@@ -244,7 +240,7 @@ impl SdarKvCache {
     /// Roll every layer back to a shared prefix. This is used by models with
     /// speculative or forked decoding to discard unaccepted/tail tokens while
     /// retaining the already-computed prefix KV.
-    pub(crate) fn trim_to(&mut self, len: usize) -> Result<(), OCRError> {
+    pub(crate) fn trim_to(&mut self, len: usize) -> Result<(), Error> {
         for layer in &mut self.layers {
             layer
                 .trim_to(len)
@@ -254,7 +250,7 @@ impl SdarKvCache {
     }
 }
 
-fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, OCRError> {
+fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
     let a = x
         .broadcast_mul(cos)
         .map_err(|e| proc_err("SDAR rope x*cos", e))?;
@@ -279,12 +275,12 @@ struct SdarAttention {
 }
 
 impl SdarAttention {
-    fn load(cfg: &SdarConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &SdarConfig, vb: VarBuilder) -> Result<Self, Error> {
         if !cfg
             .num_attention_heads
             .is_multiple_of(cfg.num_key_value_heads)
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MinerU-Diffusion: num_attention_heads ({}) must be divisible by num_key_value_heads ({})",
                     cfg.num_attention_heads, cfg.num_key_value_heads
@@ -294,7 +290,7 @@ impl SdarAttention {
         let head_dim = cfg.head_dim()?;
         let q_dim = cfg.num_attention_heads * head_dim;
         let kv_dim = cfg.num_key_value_heads * head_dim;
-        let mk = |i: usize, o: usize, name: &str, vb: VarBuilder| -> Result<Linear, OCRError> {
+        let mk = |i: usize, o: usize, name: &str, vb: VarBuilder| -> Result<Linear, Error> {
             if cfg.attention_bias {
                 linear(i, o, vb)
             } else {
@@ -332,13 +328,13 @@ impl SdarAttention {
         mask: Option<&Tensor>,
         cache: &mut LayerKvCache,
         mode: AttentionMode,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let (b, s, _) = hidden
             .dims3()
             .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "attn dims", e))?;
 
         let project =
-            |proj: &Linear, heads: usize, norm: Option<&RmsNorm>| -> Result<Tensor, OCRError> {
+            |proj: &Linear, heads: usize, norm: Option<&RmsNorm>| -> Result<Tensor, Error> {
                 let x = proj
                     .forward(hidden)
                     .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "attn proj", e))?;
@@ -428,12 +424,12 @@ impl SdarAttention {
         sin: &Tensor,
         caches: &mut [&mut LayerKvCache],
         mode: AttentionMode,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let (b, s, _) = hidden
             .dims3()
             .map_err(|e| candle_to_ocr_inference("Qwen3", "batched attn dims", e))?;
         if b != caches.len() {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "Qwen3 batched attention has {b} rows but {} caches",
                     caches.len()
@@ -441,7 +437,7 @@ impl SdarAttention {
             });
         }
         let project =
-            |proj: &Linear, heads: usize, norm: Option<&RmsNorm>| -> Result<Tensor, OCRError> {
+            |proj: &Linear, heads: usize, norm: Option<&RmsNorm>| -> Result<Tensor, Error> {
                 let x = proj
                     .forward(hidden)
                     .map_err(|e| candle_to_ocr_inference("Qwen3", "batched attn proj", e))?;
@@ -523,7 +519,7 @@ struct SdarMlp {
 }
 
 impl SdarMlp {
-    fn load(cfg: &SdarConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &SdarConfig, vb: VarBuilder) -> Result<Self, Error> {
         let gate = linear_no_bias(cfg.hidden_size, cfg.intermediate_size, vb.pp("gate_proj"))
             .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "load gate_proj", e))?;
         let up = linear_no_bias(cfg.hidden_size, cfg.intermediate_size, vb.pp("up_proj"))
@@ -533,7 +529,7 @@ impl SdarMlp {
         Ok(Self { gate, up, down })
     }
 
-    fn forward(&self, x: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, x: &Tensor) -> Result<Tensor, Error> {
         let gate = self
             .gate
             .forward(x)
@@ -559,7 +555,7 @@ struct SdarLayer {
 }
 
 impl SdarLayer {
-    fn load(cfg: &SdarConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &SdarConfig, vb: VarBuilder) -> Result<Self, Error> {
         let input_layernorm = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))
             .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "load input_layernorm", e))?;
         let post_attention_layernorm = rms_norm(
@@ -586,7 +582,7 @@ impl SdarLayer {
         mask: Option<&Tensor>,
         cache: &mut LayerKvCache,
         mode: AttentionMode,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let normed = self
             .input_layernorm
             .forward(hidden)
@@ -610,7 +606,7 @@ impl SdarLayer {
         sin: &Tensor,
         caches: &mut [&mut LayerKvCache],
         mode: AttentionMode,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let normed = self
             .input_layernorm
             .forward(hidden)
@@ -642,7 +638,7 @@ pub struct SdarModel {
 impl SdarModel {
     /// `vb` should point at `language_model` (so `vb.pp("model")` is the
     /// decoder and `vb.pp("lm_head")` the output projection).
-    pub fn load(cfg: &SdarConfig, vb: VarBuilder, dtype: DType) -> Result<Self, OCRError> {
+    pub fn load(cfg: &SdarConfig, vb: VarBuilder, dtype: DType) -> Result<Self, Error> {
         let model_vb = vb.pp("model");
         let embed_tokens = embedding(cfg.vocab_size, cfg.hidden_size, model_vb.pp("embed_tokens"))
             .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "load embed_tokens", e))?;
@@ -676,24 +672,24 @@ impl SdarModel {
     }
 
     /// Embed token ids `(1, S)` into `(1, S, hidden)`.
-    pub fn embed(&self, input_ids: &Tensor) -> Result<Tensor, OCRError> {
+    pub fn embed(&self, input_ids: &Tensor) -> Result<Tensor, Error> {
         self.embed_tokens
             .forward(input_ids)
             .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "embed", e))
     }
 
-    fn rope_for(&self, positions: &[i64]) -> Result<(Tensor, Tensor), OCRError> {
+    fn rope_for(&self, positions: &[i64]) -> Result<(Tensor, Tensor), Error> {
         let s = positions.len();
         let pos = Tensor::from_vec(positions.to_vec(), (1, 1, s), &self.device)
             .map_err(|e| proc_err("SDAR position_ids tensor", e))?;
         self.rotary.forward_multi_axis(&pos, self.dtype)
     }
 
-    fn rope_for_batch(&self, positions: &[Vec<i64>]) -> Result<(Tensor, Tensor), OCRError> {
+    fn rope_for_batch(&self, positions: &[Vec<i64>]) -> Result<(Tensor, Tensor), Error> {
         let batch = positions.len();
         let seq = positions.first().map_or(0, Vec::len);
         if batch == 0 || seq == 0 || positions.iter().any(|row| row.len() != seq) {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: "Qwen3 batched positions must be a non-empty rectangle".to_string(),
             });
         }
@@ -716,7 +712,7 @@ impl SdarModel {
         mask: Option<&Tensor>,
         cache: &mut SdarKvCache,
         store_kv: bool,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         self.forward_inner(inputs_embeds, positions, mask, cache, store_kv, false)
     }
 
@@ -732,7 +728,7 @@ impl SdarModel {
         positions: &[i64],
         cache: &mut SdarKvCache,
         store_kv: bool,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         self.forward_inner(inputs_embeds, positions, None, cache, store_kv, true)
     }
 
@@ -745,7 +741,7 @@ impl SdarModel {
         inputs_embeds: &Tensor,
         positions: &[Vec<i64>],
         caches: &mut [&mut SdarKvCache],
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let (batch, seq, _) = inputs_embeds
             .dims3()
             .map_err(|e| candle_to_ocr_inference("Qwen3", "batched input shape", e))?;
@@ -753,7 +749,7 @@ impl SdarModel {
             || batch != caches.len()
             || positions.iter().any(|p| p.len() != seq)
         {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "Qwen3 batch mismatch: embeddings={batch}x{seq}, positions={}, caches={}",
                     positions.len(),
@@ -787,7 +783,7 @@ impl SdarModel {
         cache: &mut SdarKvCache,
         store_kv: bool,
         is_causal: bool,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let (cos, sin) = self.rope_for(positions)?;
         let mut hidden = inputs_embeds.clone();
         let mode = AttentionMode {
@@ -803,7 +799,7 @@ impl SdarModel {
     }
 
     /// Project hidden states `(1, S, hidden)` to logits `(1, S, vocab)`.
-    pub fn lm_logits(&self, hidden: &Tensor) -> Result<Tensor, OCRError> {
+    pub fn lm_logits(&self, hidden: &Tensor) -> Result<Tensor, Error> {
         self.lm_head
             .forward(hidden)
             .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "lm_head", e))
@@ -841,7 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn forked_cache_shares_prefix_and_owns_its_tail() -> Result<(), OCRError> {
+    fn forked_cache_shares_prefix_and_owns_its_tail() -> Result<(), Error> {
         let device = Device::Cpu;
         let mut parent = SdarKvCache::with_capacity(2, 8);
         for layer in &mut parent.layers {

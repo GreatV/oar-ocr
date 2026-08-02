@@ -21,8 +21,8 @@
 //! `"other"`, the same-category pass is skipped (the category carries no
 //! useful signal) and we go straight to the cross-category fallback.
 
-use oar_ocr_core::domain::structure::{LayoutElement, LayoutElementType, StructureResult};
-use oar_ocr_core::processors::BoundingBox;
+use oar_ocr_vl::geometry::BoundingBox;
+use oar_ocr_vl::structure::{LayoutElement, LayoutElementType, StructureResult};
 
 #[derive(Debug, Clone, Copy)]
 pub struct MatchThresholds {
@@ -191,10 +191,10 @@ fn best_formula(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oar_ocr_core::domain::structure::{
+    use oar_ocr_vl::geometry::BoundingBox;
+    use oar_ocr_vl::structure::{
         FormulaResult, LayoutElement, LayoutElementType, StructureResult, TableResult, TableType,
     };
-    use oar_ocr_core::processors::BoundingBox;
 
     fn bb(x1: f32, y1: f32, x2: f32, y2: f32) -> BoundingBox {
         BoundingBox::from_coords(x1, y1, x2, y2)

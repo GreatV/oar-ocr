@@ -10,13 +10,13 @@ use crate::attention::{
 use crate::decoder_graph::{
     CudaGraphKvLengths, cuda_graph_error, decoder_attention_is_causal, sync_graph_tensor,
 };
+use crate::error::Error;
 use crate::kv_trim::TrimmableKvCache;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 #[cfg(feature = "cuda")]
 use candle_core::Device;
 use candle_core::{D, Tensor};
 use candle_nn::Module;
-use oar_ocr_core::core::OCRError;
 use std::cell::RefCell;
 
 const DECODE_ROPE_CACHE_LEN: usize = 16_384;
@@ -54,7 +54,7 @@ fn apply_xdrope_rotary_pos_emb(
     k: &Tensor,
     cos: &Tensor,
     sin: &Tensor,
-) -> Result<(Tensor, Tensor), OCRError> {
+) -> Result<(Tensor, Tensor), Error> {
     // Match upstream HF (`apply_rotary_pos_emb_xdrope`): apply the rotary
     // mix in F32, then cast q/k back to the original dtype.
     use candle_core::DType;
@@ -68,7 +68,7 @@ fn apply_xdrope_rotary_pos_emb(
 
     let q_mul = q_f32.broadcast_mul(cos).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "HunyuanOCR: xdrope q*cos failed",
             e,
         )
@@ -76,7 +76,7 @@ fn apply_xdrope_rotary_pos_emb(
     let q_half = rotate_half(&q_f32)?;
     let q_half_mul = q_half.broadcast_mul(sin).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "HunyuanOCR: xdrope rotate_half(q)*sin failed",
             e,
         )
@@ -84,7 +84,7 @@ fn apply_xdrope_rotary_pos_emb(
     let q_rot = (&q_mul + &q_half_mul)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: xdrope apply on q failed",
                 e,
             )
@@ -94,7 +94,7 @@ fn apply_xdrope_rotary_pos_emb(
 
     let k_mul = k_f32.broadcast_mul(cos).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "HunyuanOCR: xdrope k*cos failed",
             e,
         )
@@ -102,7 +102,7 @@ fn apply_xdrope_rotary_pos_emb(
     let k_half = rotate_half(&k_f32)?;
     let k_half_mul = k_half.broadcast_mul(sin).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "HunyuanOCR: xdrope rotate_half(k)*sin failed",
             e,
         )
@@ -110,7 +110,7 @@ fn apply_xdrope_rotary_pos_emb(
     let k_rot = (&k_mul + &k_half_mul)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: xdrope apply on k failed",
                 e,
             )
@@ -128,7 +128,7 @@ struct HunyuanMlp {
 }
 
 impl HunyuanMlp {
-    fn load(cfg: &HunyuanOcrConfig, vb: candle_nn::VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &HunyuanOcrConfig, vb: candle_nn::VarBuilder) -> Result<Self, Error> {
         let gate_proj =
             candle_nn::linear_no_bias(cfg.hidden_size, cfg.intermediate_size, vb.pp("gate_proj"))
                 .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "load gate_proj", e))?;
@@ -148,7 +148,7 @@ impl HunyuanMlp {
         })
     }
 
-    fn forward(&self, xs: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor, Error> {
         let gate_up = self
             .gate_up_proj
             .forward(xs)
@@ -195,12 +195,12 @@ struct HunyuanAttention {
 }
 
 impl HunyuanAttention {
-    fn load(cfg: &HunyuanOcrConfig, vb: candle_nn::VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &HunyuanOcrConfig, vb: candle_nn::VarBuilder) -> Result<Self, Error> {
         if !cfg
             .num_attention_heads
             .is_multiple_of(cfg.num_key_value_heads)
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "HunyuanOCR: num_attention_heads ({}) must be divisible by num_key_value_heads ({})",
                     cfg.num_attention_heads, cfg.num_key_value_heads
@@ -276,7 +276,7 @@ impl HunyuanAttention {
         cos: &Tensor,
         sin: &Tensor,
         cos_sin: Option<&Tensor>,
-    ) -> Result<(Tensor, Tensor, Tensor), OCRError> {
+    ) -> Result<(Tensor, Tensor, Tensor), Error> {
         #[cfg(not(feature = "cuda"))]
         let _ = cos_sin;
         let (b, seq_len, _) = hidden_states
@@ -492,7 +492,7 @@ impl HunyuanAttention {
         v: &Tensor,
         model_dtype: candle_core::DType,
         causal_mask: Option<&Tensor>,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let (b, _, seq_len, _) = q
             .dims4()
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "projected Q dims", e))?;
@@ -534,7 +534,7 @@ impl HunyuanAttention {
         model_dtype: candle_core::DType,
         batch: usize,
         seq_len: usize,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let attn_output = attn_output
             .to_dtype(model_dtype)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn output model dtype", e))?
@@ -549,7 +549,7 @@ impl HunyuanAttention {
     }
 
     #[cfg(feature = "cuda")]
-    fn prepare_dynamic_cache(&self, query_len: usize, cache_len: usize) -> Result<(), OCRError> {
+    fn prepare_dynamic_cache(&self, query_len: usize, cache_len: usize) -> Result<(), Error> {
         let device = self.qkv_proj.weight().device();
         let template = Tensor::zeros(
             (1, self.num_kv_heads, query_len, self.head_dim),
@@ -572,19 +572,19 @@ impl HunyuanAttention {
         query_lengths: &Tensor,
         kv_lengths: &Tensor,
         model_dtype: candle_core::DType,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let (batch, _, query_len, _) = q
             .dims4()
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "dynamic Q dims", e))?;
         if batch != 1 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "HunyuanOCR dynamic CUDA-graph attention requires batch size 1"
                     .to_string(),
             });
         }
         let cache = self.kv_cache.borrow();
         let cache_len = cache.storage_capacity();
-        let (cache_k, cache_v) = cache.storage().ok_or_else(|| OCRError::ConfigError {
+        let (cache_k, cache_v) = cache.storage().ok_or_else(|| Error::Config {
             message: "HunyuanOCR dynamic KV storage is not initialized".to_string(),
         })?;
         drop(cache);
@@ -633,7 +633,7 @@ impl HunyuanAttention {
         self.kv_cache.borrow_mut().reset();
     }
 
-    fn trim_kv_cache(&self, len: usize) -> Result<(), OCRError> {
+    fn trim_kv_cache(&self, len: usize) -> Result<(), Error> {
         self.kv_cache
             .borrow_mut()
             .trim_to(len)
@@ -645,7 +645,7 @@ impl HunyuanAttention {
     }
 
     #[cfg(feature = "cuda")]
-    fn set_kv_cache_len(&self, len: usize) -> Result<(), OCRError> {
+    fn set_kv_cache_len(&self, len: usize) -> Result<(), Error> {
         self.kv_cache
             .borrow_mut()
             .set_current_len(len)
@@ -690,7 +690,7 @@ struct HunyuanDecoderLayer {
 }
 
 impl HunyuanDecoderLayer {
-    fn load(cfg: &HunyuanOcrConfig, vb: candle_nn::VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &HunyuanOcrConfig, vb: candle_nn::VarBuilder) -> Result<Self, Error> {
         let self_attn = HunyuanAttention::load(cfg, vb.pp("self_attn"))?;
         let mlp = HunyuanMlp::load(cfg, vb.pp("mlp"))?;
         let input_layernorm =
@@ -717,7 +717,7 @@ impl HunyuanDecoderLayer {
         sin: &Tensor,
         cos_sin: Option<&Tensor>,
         causal_mask: Option<&Tensor>,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let normalized = self
             .input_layernorm
             .forward(hidden_states)
@@ -738,7 +738,7 @@ impl HunyuanDecoderLayer {
         cos_sin: Option<&Tensor>,
         query_lengths: &Tensor,
         kv_lengths: &Tensor,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let normalized = self
             .input_layernorm
             .forward(hidden_states)
@@ -759,7 +759,7 @@ impl HunyuanDecoderLayer {
         &self,
         hidden_states: &Tensor,
         attention: &Tensor,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         #[cfg(feature = "cuda")]
         if hidden_states.device().is_cuda()
             && hidden_states.dtype() == candle_core::DType::BF16
@@ -805,7 +805,7 @@ impl HunyuanDecoderLayer {
         self.self_attn.clear_kv_cache();
     }
 
-    fn trim_kv_cache(&self, len: usize) -> Result<(), OCRError> {
+    fn trim_kv_cache(&self, len: usize) -> Result<(), Error> {
         self.self_attn.trim_kv_cache(len)
     }
 
@@ -814,7 +814,7 @@ impl HunyuanDecoderLayer {
     }
 
     #[cfg(feature = "cuda")]
-    fn set_kv_cache_len(&self, len: usize) -> Result<(), OCRError> {
+    fn set_kv_cache_len(&self, len: usize) -> Result<(), Error> {
         self.self_attn.set_kv_cache_len(len)
     }
 }
@@ -849,7 +849,7 @@ pub struct HunyuanLlm {
 }
 
 impl HunyuanLlm {
-    pub fn load(cfg: &HunyuanOcrConfig, vb: candle_nn::VarBuilder) -> Result<Self, OCRError> {
+    pub fn load(cfg: &HunyuanOcrConfig, vb: candle_nn::VarBuilder) -> Result<Self, Error> {
         let embed_tokens =
             candle_nn::embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("embed_tokens"))
                 .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "load embed_tokens", e))?;
@@ -899,7 +899,7 @@ impl HunyuanLlm {
         })
     }
 
-    pub fn embed(&self, input_ids: &Tensor) -> Result<Tensor, OCRError> {
+    pub fn embed(&self, input_ids: &Tensor) -> Result<Tensor, Error> {
         self.embed_tokens
             .forward(input_ids)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "embed tokens", e))
@@ -914,7 +914,7 @@ impl HunyuanLlm {
         inputs_embeds: &Tensor,
         position_ids: &Tensor,
         causal_mask: Option<&Tensor>,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         Ok(self
             .forward_with_aux(inputs_embeds, position_ids, causal_mask, &[])?
             .hidden_states)
@@ -931,7 +931,7 @@ impl HunyuanLlm {
         position_ids: &Tensor,
         causal_mask: Option<&Tensor>,
         aux_layer_ids: &[usize],
-    ) -> Result<HunyuanLlmOutput, OCRError> {
+    ) -> Result<HunyuanLlmOutput, Error> {
         use candle_core::DType;
 
         let (cos, sin) = self
@@ -959,7 +959,7 @@ impl HunyuanLlm {
         start: usize,
         causal_mask: Option<&Tensor>,
         aux_layer_ids: &[usize],
-    ) -> Result<HunyuanLlmOutput, OCRError> {
+    ) -> Result<HunyuanLlmOutput, Error> {
         let len = inputs_embeds
             .dim(1)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "decode sequence length", e))?;
@@ -1001,7 +1001,7 @@ impl HunyuanLlm {
         sin: &Tensor,
         kv_len: usize,
         aux_layer_ids: &[usize],
-    ) -> Result<Option<HunyuanLlmOutput>, OCRError> {
+    ) -> Result<Option<HunyuanLlmOutput>, Error> {
         let captured_ref = self.decode_graph.borrow();
         let Some(captured) = captured_ref.as_ref() else {
             return Ok(None);
@@ -1054,7 +1054,7 @@ impl HunyuanLlm {
         sin: &Tensor,
         causal_mask: Option<&Tensor>,
         aux_layer_ids: &[usize],
-    ) -> Result<HunyuanLlmOutput, OCRError> {
+    ) -> Result<HunyuanLlmOutput, Error> {
         #[cfg(feature = "cuda")]
         {
             let incoming_len = inputs_embeds.dim(1).map_err(|e| {
@@ -1083,7 +1083,7 @@ impl HunyuanLlm {
             .iter()
             .any(|&id| id == 0 || id > self.layers.len())
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "HunyuanOCR: DFlash target layer ids must be in 1..={}, got {:?}",
                     self.layers.len(),
@@ -1140,7 +1140,7 @@ impl HunyuanLlm {
         query_lengths: &Tensor,
         kv_lengths: &Tensor,
         aux_layer_ids: &[usize],
-    ) -> Result<HunyuanLlmOutput, OCRError> {
+    ) -> Result<HunyuanLlmOutput, Error> {
         let mut hidden_states = inputs_embeds.clone();
         let cos_sin = if inputs_embeds.dtype() == candle_core::DType::BF16 {
             Some(Tensor::cat(&[cos, sin], 0).map_err(|e| {
@@ -1183,7 +1183,7 @@ impl HunyuanLlm {
     }
 
     #[cfg(feature = "cuda")]
-    fn project_logits(&self, hidden_states: &Tensor) -> Result<Tensor, OCRError> {
+    fn project_logits(&self, hidden_states: &Tensor) -> Result<Tensor, Error> {
         let (batch_size, sequence_length, hidden_size) = hidden_states
             .dims3()
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "graph hidden shape", e))?;
@@ -1213,7 +1213,7 @@ impl HunyuanLlm {
         &self,
         query_len: usize,
         aux_layer_ids: &[usize],
-    ) -> Result<(), OCRError> {
+    ) -> Result<(), Error> {
         if std::env::var_os("OAR_HUNYUAN_DISABLE_CUDA_GRAPH").is_some() {
             #[cfg(feature = "cuda")]
             self.invalidate_cuda_graph();
@@ -1256,7 +1256,7 @@ impl HunyuanLlm {
         &self,
         prompt_len: usize,
         max_new_tokens: usize,
-    ) -> Result<(), OCRError> {
+    ) -> Result<(), Error> {
         if std::env::var_os("OAR_HUNYUAN_DISABLE_CUDA_GRAPH").is_some()
             || std::env::var_os("OAR_HUNYUAN_DISABLE_AR_CUDA_GRAPH").is_some()
         {
@@ -1308,7 +1308,7 @@ impl HunyuanLlm {
         cos_template: &Tensor,
         sin_template: &Tensor,
         aux_layer_ids: &[usize],
-    ) -> Result<(), OCRError> {
+    ) -> Result<(), Error> {
         use candle_core::cuda_backend::cudarc::driver::sys::{
             CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
         };
@@ -1380,7 +1380,7 @@ impl HunyuanLlm {
                 aux_layer_ids,
             )?;
             let logits = self.project_logits(&output.hidden_states)?;
-            Ok::<_, OCRError>((output, logits))
+            Ok::<_, Error>((output, logits))
         })();
         let (output, logits_output) = match captured_output {
             Ok(output) => output,
@@ -1398,7 +1398,7 @@ impl HunyuanLlm {
             .map_err(|e| {
                 cuda_graph_error("HunyuanOCR", "end full target decoder graph capture", e)
             })?
-            .ok_or_else(|| OCRError::ConfigError {
+            .ok_or_else(|| Error::Config {
                 message: "HunyuanOCR full target decoder capture returned no graph".to_string(),
             })?;
         let aux_output = output.aux_hidden_states;
@@ -1448,7 +1448,7 @@ impl HunyuanLlm {
         self.invalidate_cuda_graph();
     }
 
-    pub(crate) fn trim_kv_cache(&self, len: usize) -> Result<(), OCRError> {
+    pub(crate) fn trim_kv_cache(&self, len: usize) -> Result<(), Error> {
         for layer in &self.layers {
             layer.trim_kv_cache(len)?;
         }

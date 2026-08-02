@@ -10,8 +10,8 @@
 mod utils;
 
 use clap::{Parser, ValueEnum};
-use oar_ocr_core::utils::load_image;
 use oar_ocr_vl::monkeyocrv2::DEFAULT_MAX_NEW_TOKENS;
+use oar_ocr_vl::utils::image::load_image;
 use oar_ocr_vl::utils::parse_device;
 use oar_ocr_vl::{MonkeyOcrV2, MonkeyOcrV2Task};
 use std::path::PathBuf;

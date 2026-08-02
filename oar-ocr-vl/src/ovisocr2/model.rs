@@ -6,11 +6,11 @@ use super::text::OvisOcr2TextModel;
 use super::vision::OvisOcr2VisionModel;
 #[cfg(feature = "cuda")]
 use crate::cuda_kernels::{ArgmaxFirstBf16, ArgmaxFirstF32};
+use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};
 use image::RgbImage;
-use oar_ocr_core::core::OCRError;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
@@ -46,17 +46,16 @@ impl Drop for TextCacheGuard<'_> {
 
 impl OvisOcr2 {
     /// Load an OvisOCR2 Hugging Face model directory.
-    pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, OCRError> {
+    pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         let model_dir = model_dir.as_ref();
         let cfg = OvisOcr2Config::from_path(model_dir.join("config.json"))?;
         let image_cfg =
             OvisOcr2ImageProcessorConfig::from_path(model_dir.join("preprocessor_config.json"))?;
         validate_processor_vision_compatibility(&image_cfg, &cfg.vision_config)?;
-        let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| {
-            OCRError::ConfigError {
+        let tokenizer =
+            Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| Error::Config {
                 message: format!("failed to load OvisOCR2 tokenizer.json: {e}"),
-            }
-        })?;
+            })?;
         require_token_id(&tokenizer, "<|image_pad|>", Some(cfg.image_token_id))?;
         require_token_id(
             &tokenizer,
@@ -102,7 +101,7 @@ impl OvisOcr2 {
         &self,
         images: &[RgbImage],
         max_new_tokens: usize,
-    ) -> Vec<Result<String, OCRError>> {
+    ) -> Vec<Result<String, Error>> {
         self.generate_tokens(images, max_new_tokens)
             .into_iter()
             .map(|result| result.and_then(|tokens| self.decode_tokens(&tokens)))
@@ -111,11 +110,7 @@ impl OvisOcr2 {
 
     /// Parse pages using the official post-processing, which removes visual
     /// region `<img ...>` blocks by default.
-    pub fn parse(
-        &self,
-        images: &[RgbImage],
-        max_new_tokens: usize,
-    ) -> Vec<Result<String, OCRError>> {
+    pub fn parse(&self, images: &[RgbImage], max_new_tokens: usize) -> Vec<Result<String, Error>> {
         self.parse_with_image_tags(images, max_new_tokens, false)
     }
 
@@ -125,7 +120,7 @@ impl OvisOcr2 {
         images: &[RgbImage],
         max_new_tokens: usize,
         keep_image_tags: bool,
-    ) -> Vec<Result<String, OCRError>> {
+    ) -> Vec<Result<String, Error>> {
         self.generate_tokens(images, max_new_tokens)
             .into_iter()
             .map(|result| {
@@ -147,21 +142,21 @@ impl OvisOcr2 {
         &self,
         images: &[RgbImage],
         max_new_tokens: usize,
-    ) -> Vec<Result<Vec<u32>, OCRError>> {
+    ) -> Vec<Result<Vec<u32>, Error>> {
         images
             .iter()
             .map(|image| self.generate_one(image, max_new_tokens))
             .collect()
     }
 
-    fn generate_one(&self, image: &RgbImage, max_new_tokens: usize) -> Result<Vec<u32>, OCRError> {
+    fn generate_one(&self, image: &RgbImage, max_new_tokens: usize) -> Result<Vec<u32>, Error> {
         self.text.clear_cache();
         let _cache_guard = TextCacheGuard(&self.text);
         if max_new_tokens == 0 {
             return Ok(Vec::new());
         }
         if max_new_tokens > self.cfg.text_config.max_position_embeddings {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "OvisOCR2 max_new_tokens {max_new_tokens} exceeds context limit {}",
                     self.cfg.text_config.max_position_embeddings
@@ -176,15 +171,15 @@ impl OvisOcr2 {
             self.dtype,
         )?;
         let prompt = build_prompt(image_inputs.num_image_tokens);
-        let encoding =
-            self.tokenizer
-                .encode(prompt, false)
-                .map_err(|e| OCRError::InvalidInput {
-                    message: format!("OvisOCR2: tokenizer encode failed: {e}"),
-                })?;
+        let encoding = self
+            .tokenizer
+            .encode(prompt, false)
+            .map_err(|e| Error::InvalidInput {
+                message: format!("OvisOCR2: tokenizer encode failed: {e}"),
+            })?;
         let input_ids = encoding.get_ids().to_vec();
         if input_ids.is_empty() {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: "OvisOCR2: prompt tokenization produced no tokens".to_string(),
             });
         }
@@ -211,7 +206,7 @@ impl OvisOcr2 {
         let mut generated = Vec::new();
         generated
             .try_reserve_exact(max_new_tokens)
-            .map_err(|e| OCRError::InvalidInput {
+            .map_err(|e| Error::InvalidInput {
                 message: format!("OvisOCR2 cannot reserve output for {max_new_tokens} tokens: {e}"),
             })?;
 
@@ -227,7 +222,7 @@ impl OvisOcr2 {
 
             let token_ids = Tensor::from_vec(vec![token], (1, 1), &self.device).map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "OvisOCR2: create decode token",
                     e,
                 )
@@ -248,7 +243,7 @@ impl OvisOcr2 {
         &self,
         input_ids: &[u32],
         image_inputs: &OvisOcr2ImageInputs,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let seq_len = input_ids.len();
         let token_ids = Tensor::from_vec(input_ids.to_vec(), (1, seq_len), &self.device)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create prompt token ids", e))?;
@@ -268,7 +263,7 @@ impl OvisOcr2 {
             .dim(0)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "image embedding length", e))?;
         if image_positions.len() != image_len || image_positions.is_empty() {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "OvisOCR2: image placeholder count ({}) != image embedding count ({image_len})",
                     image_positions.len()
@@ -281,7 +276,7 @@ impl OvisOcr2 {
             .enumerate()
             .any(|(offset, &position)| position != start + offset)
         {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: "OvisOCR2: image placeholder tokens must be contiguous".to_string(),
             });
         }
@@ -308,7 +303,7 @@ impl OvisOcr2 {
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "merge multimodal embeddings", e))
     }
 
-    fn logits_from_hidden(&self, hidden: &Tensor) -> Result<Tensor, OCRError> {
+    fn logits_from_hidden(&self, hidden: &Tensor) -> Result<Tensor, Error> {
         self.lm_head
             .forward(
                 &hidden
@@ -320,16 +315,16 @@ impl OvisOcr2 {
     }
 
     /// Decode generated token ids and apply the official truncated-repeat cleanup.
-    pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
+    pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, Error> {
         Ok(clean_truncated_repeats(&self.decode_tokens_raw(tokens)?))
     }
 
     /// Decode token ids without OvisOCR2 post-processing.
-    pub fn decode_tokens_raw(&self, tokens: &[u32]) -> Result<String, OCRError> {
+    pub fn decode_tokens_raw(&self, tokens: &[u32]) -> Result<String, Error> {
         self.tokenizer
             .decode(tokens, true)
             .map(|text| text.trim().to_string())
-            .map_err(|e| OCRError::InvalidInput {
+            .map_err(|e| Error::InvalidInput {
                 message: format!("OvisOCR2: tokenizer decode failed: {e}"),
             })
     }
@@ -351,16 +346,14 @@ fn require_token_id(
     tokenizer: &Tokenizer,
     token: &str,
     expected: Option<u32>,
-) -> Result<u32, OCRError> {
-    let token_id = tokenizer
-        .token_to_id(token)
-        .ok_or_else(|| OCRError::ConfigError {
-            message: format!("OvisOCR2 tokenizer is missing required token {token:?}"),
-        })?;
+) -> Result<u32, Error> {
+    let token_id = tokenizer.token_to_id(token).ok_or_else(|| Error::Config {
+        message: format!("OvisOCR2 tokenizer is missing required token {token:?}"),
+    })?;
     if let Some(expected) = expected
         && token_id != expected
     {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "OvisOCR2 token {token:?} id mismatch: tokenizer {token_id} != config {expected}"
             ),
@@ -380,15 +373,14 @@ fn validate_generation_length(
     prompt_len: usize,
     max_new_tokens: usize,
     context_limit: usize,
-) -> Result<(), OCRError> {
-    let requested =
-        prompt_len
-            .checked_add(max_new_tokens)
-            .ok_or_else(|| OCRError::InvalidInput {
-                message: "OvisOCR2 requested sequence length overflows usize".to_string(),
-            })?;
+) -> Result<(), Error> {
+    let requested = prompt_len
+        .checked_add(max_new_tokens)
+        .ok_or_else(|| Error::InvalidInput {
+            message: "OvisOCR2 requested sequence length overflows usize".to_string(),
+        })?;
     if requested > context_limit {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "OvisOCR2 prompt ({prompt_len}) plus max_new_tokens ({max_new_tokens}) exceeds context limit {context_limit}"
             ),
@@ -415,11 +407,11 @@ fn build_position_ids(
     spatial_merge_size: usize,
     image_token_id: u32,
     device: &Device,
-) -> Result<(Tensor, i64), OCRError> {
+) -> Result<(Tensor, i64), Error> {
     let image_start = input_ids
         .iter()
         .position(|&token| token == image_token_id)
-        .ok_or_else(|| OCRError::InvalidInput {
+        .ok_or_else(|| Error::InvalidInput {
             message: "OvisOCR2: image token missing from prompt".to_string(),
         })?;
     let image_len = input_ids
@@ -428,7 +420,7 @@ fn build_position_ids(
         .take_while(|&&token| token == image_token_id)
         .count();
     if input_ids[image_start + image_len..].contains(&image_token_id) {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: "OvisOCR2: non-contiguous image token span".to_string(),
         });
     }
@@ -437,7 +429,7 @@ fn build_position_ids(
         || !grid_h.is_multiple_of(spatial_merge_size)
         || !grid_w.is_multiple_of(spatial_merge_size)
     {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "OvisOCR2: invalid image grid {grid_thw:?} for merge size {spatial_merge_size}"
             ),
@@ -446,7 +438,7 @@ fn build_position_ids(
     let llm_h = grid_h / spatial_merge_size;
     let llm_w = grid_w / spatial_merge_size;
     if image_len != grid_t * llm_h * llm_w {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "OvisOCR2: image token count {image_len} != merged grid token count {}",
                 grid_t * llm_h * llm_w
@@ -492,7 +484,7 @@ fn build_position_ids(
     let data: Vec<i64> = axes.into_iter().flatten().collect();
     let tensor = Tensor::from_vec(data, (3, 1, seq_len), device).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "OvisOCR2: create multimodal position ids",
             e,
         )
@@ -500,17 +492,17 @@ fn build_position_ids(
     Ok((tensor, rope_delta))
 }
 
-fn text_position_ids(position: i64, device: &Device) -> Result<Tensor, OCRError> {
+fn text_position_ids(position: i64, device: &Device) -> Result<Tensor, Error> {
     Tensor::from_vec(vec![position; 3], (3, 1, 1), device).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "OvisOCR2: create decode position ids",
             e,
         )
     })
 }
 
-fn select_greedy_token(logits: &Tensor) -> Result<u32, OCRError> {
+fn select_greedy_token(logits: &Tensor) -> Result<u32, Error> {
     #[cfg(feature = "cuda")]
     if logits.device().is_cuda() && matches!(logits.dtype(), DType::BF16 | DType::F32) {
         let vocab_size = logits.elem_count();
@@ -535,7 +527,7 @@ fn select_greedy_token(logits: &Tensor) -> Result<u32, OCRError> {
         .and_then(|token| token.to_scalar::<u32>())
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "OvisOCR2: greedy argmax",
                 e,
             )

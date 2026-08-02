@@ -15,13 +15,13 @@ use super::projector::VisionAbstractor;
 use super::text::{SdarKvCache, SdarModel};
 #[cfg(feature = "cuda")]
 use crate::cuda_kernels::SampleWithConfidence;
+use crate::error::Error;
 use crate::mineru::MinerUImageProcessorConfig;
 use crate::mineru::processing::preprocess_images;
 use crate::mineru::vision::MinerUVisionModel;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{DType, Device, Tensor};
 use image::RgbImage;
-use oar_ocr_core::core::OCRError;
 use rand::SeedableRng;
 use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
@@ -75,12 +75,8 @@ impl Default for DiffusionGenerationConfig {
     }
 }
 
-fn proc_err(msg: &'static str, e: candle_core::Error) -> OCRError {
-    candle_to_ocr_processing(
-        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-        msg,
-        e,
-    )
+fn proc_err(msg: &'static str, e: candle_core::Error) -> Error {
+    candle_to_ocr_processing(crate::error::ProcessingStage::TensorOperation, msg, e)
 }
 
 pub struct MinerUDiffusion {
@@ -99,7 +95,7 @@ pub struct MinerUDiffusion {
 }
 
 impl MinerUDiffusion {
-    pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, OCRError> {
+    pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         let model_dir = model_dir.as_ref();
         let cfg = MinerUDiffusionConfig::from_path(model_dir.join("config.json"))?;
         let mut image_cfg =
@@ -114,16 +110,15 @@ impl MinerUDiffusion {
         }
         image_cfg.validate()?;
 
-        let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| {
-            OCRError::ConfigError {
+        let tokenizer =
+            Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| Error::Config {
                 message: format!("failed to load MinerU-Diffusion tokenizer.json: {e}"),
-            }
-        })?;
+            })?;
 
         if let Some(tok_image_id) = tokenizer.token_to_id("<|image_pad|>")
             && tok_image_id != cfg.image_token_id
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MinerU-Diffusion image_token_id mismatch: tokenizer {tok_image_id} != config {}",
                     cfg.image_token_id
@@ -190,7 +185,7 @@ impl MinerUDiffusion {
         image: &RgbImage,
         instruction: &str,
         gen_cfg: &DiffusionGenerationConfig,
-    ) -> Result<String, OCRError> {
+    ) -> Result<String, Error> {
         let tokens = self.generate_token_ids(image, instruction, gen_cfg)?;
         self.decode_tokens(&tokens, true)
     }
@@ -204,7 +199,7 @@ impl MinerUDiffusion {
         image: &RgbImage,
         instruction: &str,
         gen_cfg: &DiffusionGenerationConfig,
-    ) -> Result<String, OCRError> {
+    ) -> Result<String, Error> {
         let tokens = self.generate_token_ids(image, instruction, gen_cfg)?;
         self.decode_tokens(&tokens, false)
     }
@@ -216,9 +211,9 @@ impl MinerUDiffusion {
         image: &RgbImage,
         instruction: &str,
         gen_cfg: &DiffusionGenerationConfig,
-    ) -> Result<Vec<u32>, OCRError> {
+    ) -> Result<Vec<u32>, Error> {
         if gen_cfg.block_length == 0 || !gen_cfg.gen_length.is_multiple_of(gen_cfg.block_length) {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "MinerU-Diffusion: gen_length ({}) must be a positive multiple of block_length ({})",
                     gen_cfg.gen_length, gen_cfg.block_length
@@ -246,7 +241,7 @@ impl MinerUDiffusion {
         let enc = self
             .tokenizer
             .encode(prompt, false)
-            .map_err(|e| OCRError::InvalidInput {
+            .map_err(|e| Error::InvalidInput {
                 message: format!("MinerU-Diffusion: tokenizer encode failed: {e}"),
             })?;
         let input_ids = expand_image_tokens(enc.get_ids(), self.image_token_id, num_image_tokens)?;
@@ -267,10 +262,10 @@ impl MinerUDiffusion {
         Ok(generated[..cut].to_vec())
     }
 
-    fn decode_tokens(&self, tokens: &[u32], skip_special: bool) -> Result<String, OCRError> {
+    fn decode_tokens(&self, tokens: &[u32], skip_special: bool) -> Result<String, Error> {
         self.tokenizer
             .decode(tokens, skip_special)
-            .map_err(|e| OCRError::InvalidInput {
+            .map_err(|e| Error::InvalidInput {
                 message: format!("MinerU-Diffusion: tokenizer decode failed: {e}"),
             })
     }
@@ -280,7 +275,7 @@ impl MinerUDiffusion {
         input_ids: &[u32],
         image_features: &Tensor,
         num_image_tokens: usize,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let seq_len = input_ids.len();
         let input_ids_t = Tensor::new(input_ids.to_vec(), &self.device)
             .and_then(|t| t.reshape((1, seq_len)))
@@ -290,7 +285,7 @@ impl MinerUDiffusion {
         if let Some(first_pos) = input_ids.iter().position(|&id| id == self.image_token_id) {
             let image_end = first_pos + num_image_tokens;
             if image_end > seq_len {
-                return Err(OCRError::InvalidInput {
+                return Err(Error::InvalidInput {
                     message: format!(
                         "MinerU-Diffusion: image token span out of range: {image_end} > {seq_len}"
                     ),
@@ -331,7 +326,7 @@ impl MinerUDiffusion {
         prompt_len: usize,
         gen_cfg: &DiffusionGenerationConfig,
         rng: &mut StdRng,
-    ) -> Result<Vec<u32>, OCRError> {
+    ) -> Result<Vec<u32>, Error> {
         let block = gen_cfg.block_length;
         let gen_blocks = gen_cfg.gen_length / block;
         let mut cache = SdarKvCache::new(self.text.num_layers());
@@ -415,7 +410,7 @@ impl MinerUDiffusion {
         Ok(generated)
     }
 
-    fn embed_tokens_block(&self, tokens: &[u32]) -> Result<Tensor, OCRError> {
+    fn embed_tokens_block(&self, tokens: &[u32]) -> Result<Tensor, Error> {
         let t = Tensor::new(tokens.to_vec(), &self.device)
             .and_then(|t| t.reshape((1, tokens.len())))
             .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "block tokens tensor", e))?;
@@ -425,7 +420,7 @@ impl MinerUDiffusion {
     /// Additive block-causal mask `(1, 1, P, P)`: blocks of `block` tokens are
     /// causal at block granularity (full attention within/earlier blocks),
     /// aligned to the END of the prompt — matching the reference construction.
-    fn block_causal_mask(&self, prompt_len: usize, block: usize) -> Result<Tensor, OCRError> {
+    fn block_causal_mask(&self, prompt_len: usize, block: usize) -> Result<Tensor, Error> {
         let data = block_causal_mask_data(prompt_len, block);
         Tensor::from_vec(data, (1, 1, prompt_len, prompt_len), &self.device)
             .and_then(|t| t.to_dtype(self.dtype))
@@ -448,10 +443,10 @@ fn build_prompt(instruction: &str) -> String {
     )
 }
 
-fn expand_image_tokens(ids: &[u32], image_token: u32, n: usize) -> Result<Vec<u32>, OCRError> {
+fn expand_image_tokens(ids: &[u32], image_token: u32, n: usize) -> Result<Vec<u32>, Error> {
     let count = ids.iter().filter(|&&id| id == image_token).count();
     if count != 1 {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "MinerU-Diffusion: expected exactly one image placeholder token, found {count}"
             ),
@@ -491,7 +486,7 @@ fn sample_tokens_and_conf(
     top_k: usize,
     top_p: f32,
     rng: &mut StdRng,
-) -> Result<(Vec<u32>, Vec<f32>), OCRError> {
+) -> Result<(Vec<u32>, Vec<f32>), Error> {
     #[cfg(feature = "cuda")]
     if matches!(logits.device(), Device::Cuda(_))
         && matches!(logits.dtype(), DType::BF16 | DType::F32)
@@ -559,7 +554,7 @@ fn sample_tokens_and_conf_cuda(
     logits: &Tensor,
     temperature: f32,
     rng: &mut StdRng,
-) -> Result<(Vec<u32>, Vec<f32>), OCRError> {
+) -> Result<(Vec<u32>, Vec<f32>), Error> {
     let logits = logits
         .squeeze(0)
         .and_then(|t| t.contiguous())

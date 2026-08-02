@@ -14,10 +14,10 @@ use crate::attention::{
 };
 #[cfg(feature = "cuda")]
 use crate::cuda_kernels::ArgmaxFirstF32;
+use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use image::RgbImage;
-use oar_ocr_core::core::OCRError;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
@@ -70,7 +70,7 @@ fn argmax_with_repetition_penalty_cpu(
     logits: &Tensor,
     seen: &[u32],
     penalty: f32,
-) -> Result<u32, OCRError> {
+) -> Result<u32, Error> {
     let mut vec = logits
         .to_dtype(DType::F32)
         .and_then(|t| t.to_vec1::<f32>())
@@ -144,13 +144,13 @@ fn batched_argmax_with_unique_repetition_parts(
     common: &[u32],
     row_extras: &[&[u32]],
     penalty: f32,
-) -> Result<Vec<u32>, OCRError> {
+) -> Result<Vec<u32>, Error> {
     let vocab_size = logits
         .dim(D::Minus1)
         .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "repetition penalty vocab", e))?;
     let rows = logits.elem_count() / vocab_size;
     if row_extras.len() != rows {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "HunyuanOCR: repetition penalty got {} suffix rows for {rows} logits rows",
                 row_extras.len()
@@ -239,7 +239,7 @@ fn dflash_argmax_with_host_proposals(
     repetition_history: &RepetitionHistory,
     proposals: &[u32],
     penalty: f32,
-) -> Result<Vec<u32>, OCRError> {
+) -> Result<Vec<u32>, Error> {
     let mut row_extras = Vec::with_capacity(proposals.len() + 1);
     let mut proposal_prefix = Vec::with_capacity(proposals.len());
     for prefix_len in 0..=proposals.len() {
@@ -266,7 +266,7 @@ fn dflash_argmax_with_repetition_penalty(
     history: &Tensor,
     proposals: &Tensor,
     penalty: f32,
-) -> Result<Vec<u32>, OCRError> {
+) -> Result<Vec<u32>, Error> {
     let vocab_size = logits
         .dim(D::Minus1)
         .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "penalty vocab", e))?;
@@ -275,7 +275,7 @@ fn dflash_argmax_with_repetition_penalty(
         .dims1()
         .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "proposal count", e))?;
     if rows != proposal_count + 1 {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "HunyuanOCR DFlash: {rows} target rows do not match {proposal_count} proposals"
             ),
@@ -291,7 +291,7 @@ fn dflash_argmax_with_repetition_penalty(
 }
 
 #[cfg(feature = "cuda")]
-fn mark_repetition_history(history: &Tensor, token_ids: &[u32]) -> Result<(), OCRError> {
+fn mark_repetition_history(history: &Tensor, token_ids: &[u32]) -> Result<(), Error> {
     if token_ids.is_empty() {
         return Ok(());
     }
@@ -307,7 +307,7 @@ fn argmax_with_device_repetition_history(
     logits: &Tensor,
     history: &Tensor,
     penalty: f32,
-) -> Result<u32, OCRError> {
+) -> Result<u32, Error> {
     let vocab_size = logits
         .dim(D::Minus1)
         .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "device penalty vocab", e))?;
@@ -328,13 +328,13 @@ fn batched_argmax_with_repetition_penalty(
     logits: &Tensor,
     seen_rows: &[&[u32]],
     penalty: f32,
-) -> Result<Vec<u32>, OCRError> {
+) -> Result<Vec<u32>, Error> {
     let vocab_size = logits
         .dim(D::Minus1)
         .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "repetition penalty vocab", e))?;
     let rows = logits.elem_count() / vocab_size;
     if seen_rows.len() != rows {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "HunyuanOCR: repetition penalty got {} history rows for {rows} logits rows",
                 seen_rows.len()
@@ -360,7 +360,7 @@ fn argmax_with_unique_repetition_penalty(
     logits: &Tensor,
     seen: &[u32],
     penalty: f32,
-) -> Result<u32, OCRError> {
+) -> Result<u32, Error> {
     batched_argmax_with_unique_repetition_parts(logits, seen, &[&[]], penalty)
         .map(|tokens| tokens[0])
 }
@@ -386,7 +386,7 @@ pub struct HunyuanOcr {
 }
 
 impl HunyuanOcr {
-    pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, OCRError> {
+    pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         let model_dir = model_dir.as_ref();
 
         let cfg = HunyuanOcrConfig::from_path(model_dir.join("config.json"))?;
@@ -394,11 +394,10 @@ impl HunyuanOcr {
         let image_cfg =
             HunyuanOcrImageProcessorConfig::from_path(model_dir.join("preprocessor_config.json"))?;
 
-        let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| {
-            OCRError::ConfigError {
+        let tokenizer =
+            Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| Error::Config {
                 message: format!("failed to load HunyuanOCR tokenizer.json: {e}"),
-            }
-        })?;
+            })?;
 
         let mut stop_token_ids = Vec::new();
         stop_token_ids.push(cfg.eod_token_id);
@@ -459,10 +458,10 @@ impl HunyuanOcr {
         model_dir: impl AsRef<Path>,
         dflash_dir: impl AsRef<Path>,
         device: Device,
-    ) -> Result<Self, OCRError> {
+    ) -> Result<Self, Error> {
         let mut model = Self::from_dir(model_dir, device)?;
         if model.version != HunyuanOcrVersion::V1_5 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "HunyuanOCR: DFlash requires the 1.5 checkpoint".to_string(),
             });
         }
@@ -475,7 +474,7 @@ impl HunyuanOcr {
         if dflash.config().hidden_size != model.cfg.hidden_size
             || dflash.config().vocab_size != model.cfg.vocab_size
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "HunyuanOCR: DFlash target mismatch (hidden/vocab draft={}/{}, target={}/{})",
                     dflash.config().hidden_size,
@@ -492,7 +491,7 @@ impl HunyuanOcr {
             .iter()
             .any(|&id| id >= model.cfg.num_hidden_layers)
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "HunyuanOCR: invalid DFlash target layers {:?} for {}-layer target",
                     dflash.config().dflash_config.target_layer_ids,
@@ -518,7 +517,7 @@ impl HunyuanOcr {
     pub fn from_dir_with_dflash(
         model_dir: impl AsRef<Path>,
         device: Device,
-    ) -> Result<Self, OCRError> {
+    ) -> Result<Self, Error> {
         let model_dir = model_dir.as_ref();
         Self::from_dirs(model_dir, model_dir.join("dflash"), device)
     }
@@ -530,9 +529,9 @@ impl HunyuanOcr {
     /// Override the checkpoint/reference repetition penalty used by greedy
     /// decoding. A value of `1.0` disables the processor, matching the
     /// official DFlash speed-benchmark configuration.
-    pub fn set_repetition_penalty(&mut self, penalty: f64) -> Result<(), OCRError> {
+    pub fn set_repetition_penalty(&mut self, penalty: f64) -> Result<(), Error> {
         if !penalty.is_finite() || penalty < 1.0 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "HunyuanOCR: repetition penalty must be finite and >= 1.0, got {penalty}"
                 ),
@@ -575,12 +574,12 @@ impl HunyuanOcr {
         images: &[RgbImage],
         instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Vec<Result<String, OCRError>> {
+    ) -> Vec<Result<String, Error>> {
         if images.is_empty() {
             return Vec::new();
         }
         if images.len() != instructions.len() {
-            return vec![Err(OCRError::InvalidInput {
+            return vec![Err(Error::InvalidInput {
                 message: format!(
                     "HunyuanOCR: images count ({}) != instructions count ({})",
                     images.len(),
@@ -598,7 +597,7 @@ impl HunyuanOcr {
                 let msg = crate::utils::error_chain_message("generation failed", &e);
                 (0..images.len())
                     .map(|_| {
-                        Err(OCRError::InvalidInput {
+                        Err(Error::InvalidInput {
                             message: msg.clone(),
                         })
                     })
@@ -615,12 +614,12 @@ impl HunyuanOcr {
         images: &[RgbImage],
         instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Vec<Result<Vec<u32>, OCRError>> {
+    ) -> Vec<Result<Vec<u32>, Error>> {
         if images.is_empty() {
             return Vec::new();
         }
         if images.len() != instructions.len() {
-            return vec![Err(OCRError::InvalidInput {
+            return vec![Err(Error::InvalidInput {
                 message: format!(
                     "HunyuanOCR: images count ({}) != instructions count ({})",
                     images.len(),
@@ -635,7 +634,7 @@ impl HunyuanOcr {
                 let msg = crate::utils::error_chain_message("generation failed", &e);
                 (0..images.len())
                     .map(|_| {
-                        Err(OCRError::InvalidInput {
+                        Err(Error::InvalidInput {
                             message: msg.clone(),
                         })
                     })
@@ -650,7 +649,7 @@ impl HunyuanOcr {
         images: &[RgbImage],
         instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Result<Vec<Vec<u32>>, OCRError> {
+    ) -> Result<Vec<Vec<u32>>, Error> {
         let batch_size = images.len();
 
         // 1. Preprocess all images and build prompts
@@ -672,7 +671,7 @@ impl HunyuanOcr {
             let enc = self
                 .tokenizer
                 .encode(prompt, false)
-                .map_err(|e| OCRError::InvalidInput {
+                .map_err(|e| Error::InvalidInput {
                     message: format!("HunyuanOCR: tokenizer encode failed: {e}"),
                 })?;
 
@@ -708,7 +707,7 @@ impl HunyuanOcr {
                     image_inputs.grid_thw_merged.2,
                 )
             {
-                return Err(OCRError::InvalidInput {
+                return Err(Error::InvalidInput {
                     message: format!(
                         "HunyuanOCR: merged grid mismatch: vision={:?} preprocessor={:?}",
                         merged_hw, image_inputs.grid_thw_merged
@@ -723,7 +722,7 @@ impl HunyuanOcr {
                 .dims2()
                 .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "image_embeds dims2", e))?;
             if inner_len != img_len {
-                return Err(OCRError::InvalidInput {
+                return Err(Error::InvalidInput {
                     message: format!(
                         "HunyuanOCR: image-token run length mismatch: tokens={inner_len} embeds={img_len}"
                     ),
@@ -858,12 +857,10 @@ impl HunyuanOcr {
                 mask.as_ref(),
                 &aux_layer_ids,
             )?;
-            let aux = output
-                .aux_hidden_states
-                .ok_or_else(|| OCRError::ConfigError {
-                    message: "HunyuanOCR DFlash: target did not return auxiliary hidden states"
-                        .to_string(),
-                })?;
+            let aux = output.aux_hidden_states.ok_or_else(|| Error::Config {
+                message: "HunyuanOCR DFlash: target did not return auxiliary hidden states"
+                    .to_string(),
+            })?;
             dflash.reset_context(&aux)?;
             output.hidden_states
         } else {
@@ -884,7 +881,7 @@ impl HunyuanOcr {
         // DFlash currently targets the latency-sensitive single-document path.
         // Multi-image calls retain the existing true-batch autoregressive path.
         if let Some(dflash) = active_dflash {
-            let initial_logits = logits_list.pop().ok_or_else(|| OCRError::ConfigError {
+            let initial_logits = logits_list.pop().ok_or_else(|| Error::Config {
                 message: "HunyuanOCR DFlash: missing target prefill logits".to_string(),
             })?;
             let tokens =
@@ -1057,7 +1054,7 @@ impl HunyuanOcr {
         initial_logits: Tensor,
         prompt_len: usize,
         max_new_tokens: usize,
-    ) -> Result<Vec<u32>, OCRError> {
+    ) -> Result<Vec<u32>, Error> {
         if max_new_tokens == 0 {
             self.llm.clear_kv_cache();
             dflash.clear_context();
@@ -1076,7 +1073,7 @@ impl HunyuanOcr {
 
         let num_spec = dflash.config().block_size.saturating_sub(1);
         if num_spec == 0 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "HunyuanOCR DFlash: block_size must include at least one mask position"
                     .to_string(),
             });
@@ -1167,13 +1164,10 @@ impl HunyuanOcr {
                 verify_mask.as_ref(),
                 &target_layers,
             )?;
-            let aux = output
-                .aux_hidden_states
-                .ok_or_else(|| OCRError::ConfigError {
-                    message:
-                        "HunyuanOCR DFlash: target verification did not return auxiliary states"
-                            .to_string(),
-                })?;
+            let aux = output.aux_hidden_states.ok_or_else(|| Error::Config {
+                message: "HunyuanOCR DFlash: target verification did not return auxiliary states"
+                    .to_string(),
+            })?;
             let target_logits = if let Some(logits) = output.logits.as_ref() {
                 logits.squeeze(0).map_err(|e| {
                     candle_to_ocr_inference("HunyuanOCR DFlash", "graph target logits", e)
@@ -1209,12 +1203,12 @@ impl HunyuanOcr {
                     if self.device.is_cuda() && self.dtype == DType::BF16 {
                         dflash_argmax_with_repetition_penalty(
                             &target_logits,
-                            repetition_history_device.as_ref().ok_or_else(|| {
-                                OCRError::ConfigError {
+                            repetition_history_device
+                                .as_ref()
+                                .ok_or_else(|| Error::Config {
                                     message: "HunyuanOCR DFlash: missing CUDA repetition history"
                                         .to_string(),
-                                }
-                            })?,
+                                })?,
                             &proposals,
                             self.repetition_penalty as f32,
                         )?
@@ -1336,7 +1330,7 @@ impl HunyuanOcr {
         Ok(generated)
     }
 
-    pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
+    pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, Error> {
         self.decode_generated_tokens(tokens)
     }
 
@@ -1344,10 +1338,10 @@ impl HunyuanOcr {
     /// `decode_tokens` only applies `trim()` post-process, so this is
     /// effectively an alias provided for API symmetry with backends that do
     /// have non-trivial post-process (PaddleOCR-VL / GLM-OCR).
-    pub fn decode_tokens_raw(&self, tokens: &[u32]) -> Result<String, OCRError> {
+    pub fn decode_tokens_raw(&self, tokens: &[u32]) -> Result<String, Error> {
         self.tokenizer
             .decode(tokens, true)
-            .map_err(|e| OCRError::InvalidInput {
+            .map_err(|e| Error::InvalidInput {
                 message: format!("HunyuanOCR: tokenizer decode failed: {e}"),
             })
     }
@@ -1356,14 +1350,14 @@ impl HunyuanOcr {
         &self.tokenizer
     }
 
-    fn decode_generated_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
+    fn decode_generated_tokens(&self, tokens: &[u32]) -> Result<String, Error> {
         Ok(self.decode_tokens_raw(tokens)?.trim().to_string())
     }
 
-    fn logits_from_hidden(&self, hidden: &Tensor) -> Result<Tensor, OCRError> {
+    fn logits_from_hidden(&self, hidden: &Tensor) -> Result<Tensor, Error> {
         let hidden = hidden.unsqueeze(0).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: unsqueeze hidden failed",
                 e,
             )
@@ -1371,7 +1365,7 @@ impl HunyuanOcr {
         let w = self.llm.token_embedding_weight();
         let wt = w.transpose(0, 1).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: transpose embedding weight failed",
                 e,
             )
@@ -1383,11 +1377,11 @@ impl HunyuanOcr {
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "squeeze logits", e))
     }
 
-    fn logits_from_hidden_batch(&self, hidden: &Tensor) -> Result<Tensor, OCRError> {
+    fn logits_from_hidden_batch(&self, hidden: &Tensor) -> Result<Tensor, Error> {
         let w = self.llm.token_embedding_weight();
         let wt = w.transpose(0, 1).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: transpose embedding weight failed",
                 e,
             )
@@ -1417,7 +1411,7 @@ fn expand_image_tokens_in_place(
     input_ids: &mut Vec<u32>,
     cfg: &HunyuanOcrConfig,
     image_inputs: &HunyuanOcrImageInputs,
-) -> Result<(), OCRError> {
+) -> Result<(), Error> {
     let (_, hm, wm) = image_inputs.grid_thw_merged;
     // Upstream processor: num_image_tokens = patch_h * (patch_w + 1) + 2
     // (processing_hunyuan_vl.py:62). The `+ 2` covers the perceive step's
@@ -1426,7 +1420,7 @@ fn expand_image_tokens_in_place(
     // no `image_newline_token_id` interleaving.
     let expected_tokens = hm.saturating_mul(wm.saturating_add(1)).saturating_add(2);
     if expected_tokens == 0 {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: "HunyuanOCR: empty merged grid".to_string(),
         });
     }
@@ -1442,7 +1436,7 @@ fn expand_image_tokens_in_place(
         }
     }
     let Some(pos) = placeholder else {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: "HunyuanOCR: prompt is missing image placeholder tokens".to_string(),
         });
     };
@@ -1455,18 +1449,18 @@ fn expand_image_tokens_in_place(
     Ok(())
 }
 
-fn find_image_span(input_ids: &[u32], cfg: &HunyuanOcrConfig) -> Result<(usize, usize), OCRError> {
+fn find_image_span(input_ids: &[u32], cfg: &HunyuanOcrConfig) -> Result<(usize, usize), Error> {
     let start_pos = input_ids
         .iter()
         .position(|&id| id == cfg.image_start_token_id)
-        .ok_or_else(|| OCRError::InvalidInput {
+        .ok_or_else(|| Error::InvalidInput {
             message: "HunyuanOCR: image_start_token_id not found in input_ids".to_string(),
         })?;
     let end_pos = input_ids[start_pos + 1..]
         .iter()
         .position(|&id| id == cfg.image_end_token_id)
         .map(|p| start_pos + 1 + p)
-        .ok_or_else(|| OCRError::InvalidInput {
+        .ok_or_else(|| Error::InvalidInput {
             message: "HunyuanOCR: image_end_token_id not found after image_start_token_id"
                 .to_string(),
         })?;
@@ -1477,7 +1471,7 @@ fn build_position_ids(
     input_ids: &[u32],
     cfg: &HunyuanOcrConfig,
     image_inputs: &HunyuanOcrImageInputs,
-) -> Result<Tensor, OCRError> {
+) -> Result<Tensor, Error> {
     let seq_len = input_ids.len();
     // 4-axis XDRoPE position ids matching the upstream HF processor exactly:
     //   the upstream Transformers Hunyuan-VL processor, lines 74-94.
@@ -1509,7 +1503,7 @@ fn build_position_ids(
         let start = first + 1;
         let replace_num = (wm + 1) * hm;
         if start + replace_num > seq_len {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "HunyuanOCR: image span ({} positions starting at {}) exceeds input length {}",
                     replace_num, start, seq_len
@@ -1533,7 +1527,7 @@ fn build_position_ids(
     )
     .map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "HunyuanOCR: build position_ids tensor failed",
             e,
         )

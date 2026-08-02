@@ -3,12 +3,12 @@ use crate::attention::{
     VISION_CHUNKED_ATTN_CHUNK_SIZE, VISION_CHUNKED_ATTN_SEQ_THRESHOLD, chunked_vision_attention,
     flash_attention, on_compute_device, scaled_dot_product_attention,
 };
+use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{
     Activation, LayerNorm, LayerNormConfig, Linear, Module, VarBuilder, layer_norm, linear,
 };
-use oar_ocr_core::core::OCRError;
 
 #[derive(Debug, Clone)]
 struct VisionPatchEmbed {
@@ -17,7 +17,7 @@ struct VisionPatchEmbed {
 }
 
 impl VisionPatchEmbed {
-    fn load(cfg: &OvisOcr2VisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &OvisOcr2VisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let vb = vb.pp("patch_embed").pp("proj");
         let patch_dim = cfg.in_channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size;
         let weight = vb
@@ -40,7 +40,7 @@ impl VisionPatchEmbed {
         Ok(Self { weight, bias })
     }
 
-    fn forward(&self, patches: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, patches: &Tensor) -> Result<Tensor, Error> {
         let patches = patches
             .to_dtype(self.weight.dtype())
             .map_err(|e| candle_to_ocr_inference("OvisOCR2", "cast vision patches", e))?;
@@ -61,12 +61,12 @@ struct VisionRotaryEmbedding {
 }
 
 impl VisionRotaryEmbedding {
-    fn new(dim: usize, device: &Device) -> Result<Self, OCRError> {
+    fn new(dim: usize, device: &Device) -> Result<Self, Error> {
         let inv_freq = crate::utils::vision_inv_freq(dim, 10_000.0, "OvisOCR2", device)?;
         Ok(Self { inv_freq })
     }
 
-    fn forward(&self, sequence_length: usize) -> Result<Tensor, OCRError> {
+    fn forward(&self, sequence_length: usize) -> Result<Tensor, Error> {
         let device = self.inv_freq.device();
         on_compute_device(device, |compute_device| {
             let positions = Tensor::arange(0u32, sequence_length as u32, compute_device)?
@@ -79,7 +79,7 @@ impl VisionRotaryEmbedding {
         })
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "OvisOCR2: build vision rotary frequency table",
                 e,
             )
@@ -92,7 +92,7 @@ fn apply_rotary_pos_emb_vision(
     k: &Tensor,
     cos: &Tensor,
     sin: &Tensor,
-) -> Result<(Tensor, Tensor), OCRError> {
+) -> Result<(Tensor, Tensor), Error> {
     let q_dtype = q.dtype();
     let k_dtype = k.dtype();
     let q = q
@@ -135,7 +135,7 @@ struct VisionAttention {
 }
 
 impl VisionAttention {
-    fn load(cfg: &OvisOcr2VisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &OvisOcr2VisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let head_dim = cfg.head_dim()?;
         let qkv = linear(
             cfg.hidden_size,
@@ -154,12 +154,7 @@ impl VisionAttention {
         })
     }
 
-    fn forward(
-        &self,
-        hidden_states: &Tensor,
-        cos: &Tensor,
-        sin: &Tensor,
-    ) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden_states: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
         let sequence_length = hidden_states
             .dim(0)
             .map_err(|e| candle_to_ocr_inference("OvisOCR2", "vision sequence length", e))?;
@@ -226,7 +221,7 @@ struct VisionMlp {
 }
 
 impl VisionMlp {
-    fn load(cfg: &OvisOcr2VisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &OvisOcr2VisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let linear_fc1 = linear(
             cfg.hidden_size,
             cfg.intermediate_size,
@@ -246,7 +241,7 @@ impl VisionMlp {
         })
     }
 
-    fn forward(&self, hidden_states: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden_states: &Tensor) -> Result<Tensor, Error> {
         let hidden_states = self
             .linear_fc1
             .forward(hidden_states)
@@ -267,7 +262,7 @@ struct VisionBlock {
 }
 
 impl VisionBlock {
-    fn load(cfg: &OvisOcr2VisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &OvisOcr2VisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let norm_cfg = LayerNormConfig {
             eps: 1e-6,
             ..Default::default()
@@ -286,12 +281,7 @@ impl VisionBlock {
         })
     }
 
-    fn forward(
-        &self,
-        hidden_states: &Tensor,
-        cos: &Tensor,
-        sin: &Tensor,
-    ) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden_states: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
         let normed = self
             .norm1
             .forward(hidden_states)
@@ -299,7 +289,7 @@ impl VisionBlock {
         let attention = self.attention.forward(&normed, cos, sin)?;
         let hidden_states = (hidden_states + attention).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "OvisOCR2: vision attention residual",
                 e,
             )
@@ -311,7 +301,7 @@ impl VisionBlock {
         let mlp = self.mlp.forward(&normed)?;
         (hidden_states + mlp).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "OvisOCR2: vision MLP residual",
                 e,
             )
@@ -329,7 +319,7 @@ struct VisionPatchMerger {
 }
 
 impl VisionPatchMerger {
-    fn load(cfg: &OvisOcr2VisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &OvisOcr2VisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let vb = vb.pp("merger");
         let norm_cfg = LayerNormConfig {
             eps: 1e-6,
@@ -352,12 +342,12 @@ impl VisionPatchMerger {
         })
     }
 
-    fn forward(&self, hidden_states: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden_states: &Tensor) -> Result<Tensor, Error> {
         let num_patches = hidden_states
             .dim(0)
             .map_err(|e| candle_to_ocr_inference("OvisOCR2", "vision merger patch count", e))?;
         if !num_patches.is_multiple_of(self.merge_group) {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "OvisOCR2 vision merger expected patch count divisible by {}, got {num_patches}",
                     self.merge_group
@@ -393,7 +383,7 @@ pub struct OvisOcr2VisionModel {
 }
 
 impl OvisOcr2VisionModel {
-    pub fn load(cfg: &OvisOcr2VisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    pub fn load(cfg: &OvisOcr2VisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         cfg.validate()?;
         let patch_embed = VisionPatchEmbed::load(cfg, vb.clone())?;
         let position_embedding = vb
@@ -426,17 +416,17 @@ impl OvisOcr2VisionModel {
         &self,
         pixel_values: &Tensor,
         grid_thw: (usize, usize, usize),
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let (grid_t, grid_h, grid_w) = grid_thw;
         if grid_t == 0 || grid_h == 0 || grid_w == 0 {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!("OvisOCR2 vision grid must be non-zero, got {grid_thw:?}"),
             });
         }
         if !grid_h.is_multiple_of(self.spatial_merge_size)
             || !grid_w.is_multiple_of(self.spatial_merge_size)
         {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "OvisOCR2 vision grid {grid_h}x{grid_w} must be divisible by merge_size {}",
                     self.spatial_merge_size
@@ -446,14 +436,14 @@ impl OvisOcr2VisionModel {
         let num_patches = grid_t
             .checked_mul(grid_h)
             .and_then(|value| value.checked_mul(grid_w))
-            .ok_or_else(|| OCRError::InvalidInput {
+            .ok_or_else(|| Error::InvalidInput {
                 message: "OvisOCR2 vision patch count overflow".to_string(),
             })?;
         if pixel_values.dim(0).map_err(|e| {
             candle_to_ocr_inference("OvisOCR2", "read vision pixel_values length", e)
         })? != num_patches
         {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "OvisOCR2 pixel_values patch count ({}) does not match grid {grid_thw:?} ({num_patches})",
                     pixel_values.dims().first().copied().unwrap_or(0)
@@ -488,7 +478,7 @@ impl OvisOcr2VisionModel {
 fn merge_grouped_spatial_coordinates(
     grid_thw: (usize, usize, usize),
     merge_size: usize,
-) -> Result<Vec<(usize, usize)>, OCRError> {
+) -> Result<Vec<(usize, usize)>, Error> {
     let (grid_t, grid_h, grid_w) = grid_thw;
     if grid_t == 0
         || grid_h == 0
@@ -497,7 +487,7 @@ fn merge_grouped_spatial_coordinates(
         || !grid_h.is_multiple_of(merge_size)
         || !grid_w.is_multiple_of(merge_size)
     {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "OvisOCR2 invalid merge-grouped grid: grid={grid_thw:?}, merge={merge_size}"
             ),
@@ -506,7 +496,7 @@ fn merge_grouped_spatial_coordinates(
     let num_patches = grid_t
         .checked_mul(grid_h)
         .and_then(|value| value.checked_mul(grid_w))
-        .ok_or_else(|| OCRError::InvalidInput {
+        .ok_or_else(|| Error::InvalidInput {
             message: "OvisOCR2 merge-grouped patch count overflow".to_string(),
         })?;
     let mut coordinates = Vec::with_capacity(num_patches);
@@ -532,10 +522,10 @@ fn interpolate_position_embedding(
     base_grid_size: usize,
     grid_thw: (usize, usize, usize),
     merge_size: usize,
-) -> Result<Tensor, OCRError> {
+) -> Result<Tensor, Error> {
     let (_, grid_h, grid_w) = grid_thw;
     if base_grid_size == 0 {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "OvisOCR2 invalid learned-position grid: base={base_grid_size}, grid={grid_thw:?}, merge={merge_size}"
             ),
@@ -545,7 +535,7 @@ fn interpolate_position_embedding(
         .dims2()
         .map_err(|e| candle_to_ocr_inference("OvisOCR2", "position embedding shape", e))?;
     if num_positions != base_grid_size * base_grid_size {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "OvisOCR2 position embedding rows ({num_positions}) do not match base grid {base_grid_size}x{base_grid_size}"
             ),
@@ -591,7 +581,7 @@ fn interpolate_position_embedding(
         weight11.push(dh * dw);
     }
 
-    let weighted = |indices: Vec<u32>, weights: Vec<f32>| -> Result<Tensor, OCRError> {
+    let weighted = |indices: Vec<u32>, weights: Vec<f32>| -> Result<Tensor, Error> {
         let indices =
             Tensor::from_vec(indices, num_patches, position_embedding.device()).map_err(|e| {
                 candle_to_ocr_inference("OvisOCR2", "position interpolation indices", e)
@@ -623,7 +613,7 @@ fn build_vision_rotary_embeddings(
     grid_thw: (usize, usize, usize),
     merge_size: usize,
     device: &Device,
-) -> Result<(Tensor, Tensor), OCRError> {
+) -> Result<(Tensor, Tensor), Error> {
     let (_, grid_h, grid_w) = grid_thw;
     let coordinates = merge_grouped_spatial_coordinates(grid_thw, merge_size)?;
     let max_grid = grid_h.max(grid_w);
@@ -662,7 +652,7 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn learned_position_interpolation_matches_bilinear_reference() -> Result<(), OCRError> {
+    fn learned_position_interpolation_matches_bilinear_reference() -> Result<(), Error> {
         let weights = Tensor::from_vec(vec![0.0f32, 1.0, 2.0, 3.0], (4, 1), &Device::Cpu)
             .map_err(|e| candle_to_ocr_inference("OvisOCR2", "test position tensor", e))?;
         let output = interpolate_position_embedding(&weights, 2, (1, 3, 3), 1)?;
@@ -678,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn learned_positions_follow_spatial_merge_group_order() -> Result<(), OCRError> {
+    fn learned_positions_follow_spatial_merge_group_order() -> Result<(), Error> {
         let weights = Tensor::from_vec(
             (0..16).map(|value| value as f32).collect::<Vec<_>>(),
             (16, 1),
@@ -701,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn loads_qwen35_weight_names_and_forwards_tiny_tower() -> Result<(), OCRError> {
+    fn loads_qwen35_weight_names_and_forwards_tiny_tower() -> Result<(), Error> {
         let cfg = OvisOcr2VisionConfig {
             model_type: "qwen3_5".to_string(),
             depth: 0,

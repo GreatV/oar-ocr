@@ -7,12 +7,12 @@ use crate::attention::{
 };
 #[cfg(feature = "cuda")]
 use crate::cuda_kernels::{ArgmaxFirstBf16, ArgmaxFirstF32, MaskTokenIds};
+use crate::error::Error;
+use crate::structure::LayoutElementType;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
 use image::RgbImage;
-use oar_ocr_core::core::OCRError;
-use oar_ocr_core::domain::structure::LayoutElementType;
 use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
 use serde::Deserialize;
@@ -128,14 +128,14 @@ struct MinerUGenerationConfig {
 }
 
 impl MinerU {
-    pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, OCRError> {
+    pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         let model_dir = model_dir.as_ref();
         let cfg = MinerUConfig::from_path(model_dir.join("config.json"))?;
         let image_cfg =
             MinerUImageProcessorConfig::from_path(model_dir.join("preprocessor_config.json"))?;
 
         if image_cfg.merge_size != cfg.vision_config.spatial_merge_size {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MinerU2.5 merge_size mismatch: preprocessor {} != vision {}",
                     image_cfg.merge_size, cfg.vision_config.spatial_merge_size
@@ -143,7 +143,7 @@ impl MinerU {
             });
         }
         if image_cfg.patch_size != cfg.vision_config.patch_size {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MinerU2.5 patch_size mismatch: preprocessor {} != vision {}",
                     image_cfg.patch_size, cfg.vision_config.patch_size
@@ -151,11 +151,10 @@ impl MinerU {
             });
         }
 
-        let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| {
-            OCRError::ConfigError {
+        let tokenizer =
+            Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| Error::Config {
                 message: format!("failed to load MinerU2.5 tokenizer.json: {e}"),
-            }
-        })?;
+            })?;
 
         let gen_cfg = load_generation_config(model_dir.join("generation_config.json"));
         let repetition_penalty = gen_cfg
@@ -188,7 +187,7 @@ impl MinerU {
         if let Some(tok_image_id) = tokenizer.token_to_id("<|image_pad|>")
             && tok_image_id != cfg.image_token_id
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MinerU2.5 image_token_id mismatch: tokenizer {tok_image_id} != config {}",
                     cfg.image_token_id
@@ -291,12 +290,12 @@ impl MinerU {
         images: &[RgbImage],
         instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Vec<Result<String, OCRError>> {
+    ) -> Vec<Result<String, Error>> {
         if images.is_empty() {
             return Vec::new();
         }
         if images.len() != instructions.len() {
-            return vec![Err(OCRError::InvalidInput {
+            return vec![Err(Error::InvalidInput {
                 message: format!(
                     "MinerU2.5: images count ({}) != instructions count ({})",
                     images.len(),
@@ -314,7 +313,7 @@ impl MinerU {
                 let msg = crate::utils::error_chain_message("generation failed", &e);
                 (0..images.len())
                     .map(|_| {
-                        Err(OCRError::InvalidInput {
+                        Err(Error::InvalidInput {
                             message: msg.clone(),
                         })
                     })
@@ -331,12 +330,12 @@ impl MinerU {
         images: &[RgbImage],
         instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Vec<Result<Vec<u32>, OCRError>> {
+    ) -> Vec<Result<Vec<u32>, Error>> {
         if images.is_empty() {
             return Vec::new();
         }
         if images.len() != instructions.len() {
-            return vec![Err(OCRError::InvalidInput {
+            return vec![Err(Error::InvalidInput {
                 message: format!(
                     "MinerU2.5: images count ({}) != instructions count ({})",
                     images.len(),
@@ -351,7 +350,7 @@ impl MinerU {
                 let msg = crate::utils::error_chain_message("generation failed", &e);
                 (0..images.len())
                     .map(|_| {
-                        Err(OCRError::InvalidInput {
+                        Err(Error::InvalidInput {
                             message: msg.clone(),
                         })
                     })
@@ -365,7 +364,7 @@ impl MinerU {
         images: &[RgbImage],
         instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Result<Vec<Vec<u32>>, OCRError> {
+    ) -> Result<Vec<Vec<u32>>, Error> {
         let batch_size = images.len();
 
         let image_inputs = preprocess_images(images, &self.image_cfg, &self.device, self.dtype)?;
@@ -386,7 +385,7 @@ impl MinerU {
             let enc = self
                 .tokenizer
                 .encode(prompt, false)
-                .map_err(|e| OCRError::InvalidInput {
+                .map_err(|e| Error::InvalidInput {
                     message: format!("MinerU2.5: tokenizer encode failed: {e}"),
                 })?;
 
@@ -403,7 +402,7 @@ impl MinerU {
             .dim(0)
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "image_embeds dim", e))?;
         if actual_embeds != expected_embeds {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "MinerU2.5: image embeds count mismatch: got {actual_embeds}, expected {expected_embeds}"
                 ),
@@ -412,7 +411,7 @@ impl MinerU {
 
         let seq_lens: Vec<usize> = all_input_ids.iter().map(|ids| ids.len()).collect();
         let Some(&max_seq_len) = seq_lens.iter().max() else {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: "MinerU2.5: empty batch is not supported".to_string(),
             });
         };
@@ -442,7 +441,7 @@ impl MinerU {
             if let Some(first_pos) = first_img_pos {
                 let image_end = first_pos + image_token_count;
                 if image_end > seq_len {
-                    return Err(OCRError::InvalidInput {
+                    return Err(Error::InvalidInput {
                         message: format!(
                             "MinerU2.5: image token span out of range: {image_end} > {seq_len}"
                         ),
@@ -660,7 +659,7 @@ impl MinerU {
         Ok(generated)
     }
 
-    pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
+    pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, Error> {
         self.decode_generated_tokens(tokens)
     }
 
@@ -669,7 +668,7 @@ impl MinerU {
     /// there is no markdown / wrapping / layout post-process at this layer
     /// (layout-aware reordering happens in `two_step_extract`, not here).
     /// This alias exists for API symmetry with PaddleOCR-VL / GLM-OCR.
-    pub fn decode_tokens_raw(&self, tokens: &[u32]) -> Result<String, OCRError> {
+    pub fn decode_tokens_raw(&self, tokens: &[u32]) -> Result<String, Error> {
         self.decode_generated_tokens(tokens)
     }
 
@@ -690,7 +689,7 @@ impl MinerU {
         }
     }
 
-    fn decode_generated_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
+    fn decode_generated_tokens(&self, tokens: &[u32]) -> Result<String, Error> {
         // Filter out bos/eos/pad tokens before decoding (matching official implementation).
         let filtered: Vec<u32> = tokens
             .iter()
@@ -699,7 +698,7 @@ impl MinerU {
             .collect();
         self.tokenizer
             .decode(&filtered, false) // skip_special_tokens=false to preserve special tokens
-            .map_err(|e| OCRError::InvalidInput {
+            .map_err(|e| Error::InvalidInput {
                 message: format!("decode failed: {e}"),
             })
     }
@@ -742,7 +741,7 @@ fn select_next_token(
     logits: &Tensor,
     history: &[u32],
     params: &SamplingParams,
-) -> Result<u32, OCRError> {
+) -> Result<u32, Error> {
     // The official MinerU generation config uses top_k=1 and
     // repetition_penalty=1, so decoding is greedy even though do_sample=true.
     // Keep the full vocabulary on-device for that common path. The custom
@@ -809,7 +808,7 @@ fn select_greedy_token_cuda(
     logits: &Tensor,
     history: &[u32],
     no_repeat_ngram_size: usize,
-) -> Result<u32, OCRError> {
+) -> Result<u32, Error> {
     let vocab_size = logits.elem_count();
     let logits = logits
         .reshape((1, vocab_size))
@@ -827,7 +826,7 @@ fn select_greedy_token_cuda(
         DType::BF16 => logits.apply_op1_no_bwd(&ArgmaxFirstBf16),
         DType::F32 => logits.apply_op1_no_bwd(&ArgmaxFirstF32),
         dtype => {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!("MinerU2.5: unsupported GPU greedy logits dtype {dtype:?}"),
             });
         }
@@ -1008,14 +1007,14 @@ fn expand_image_tokens(
     input_ids: &[u32],
     image_token_id: u32,
     image_token_counts: &[usize],
-) -> Result<Vec<u32>, OCRError> {
+) -> Result<Vec<u32>, Error> {
     let mut out: Vec<u32> = Vec::new();
     let mut idx = 0usize;
     for &id in input_ids {
         if id == image_token_id {
             let count = image_token_counts
                 .get(idx)
-                .ok_or_else(|| OCRError::InvalidInput {
+                .ok_or_else(|| Error::InvalidInput {
                     message: "MinerU2.5: image token count mismatch".to_string(),
                 })?;
             out.extend(std::iter::repeat_n(image_token_id, *count));
@@ -1025,7 +1024,7 @@ fn expand_image_tokens(
         }
     }
     if idx != image_token_counts.len() {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: "MinerU2.5: image token count mismatch".to_string(),
         });
     }
@@ -1040,7 +1039,7 @@ fn get_rope_index(
     video_token_id: u32,
     spatial_merge_size: usize,
     device: &Device,
-) -> Result<(Tensor, i64), OCRError> {
+) -> Result<(Tensor, i64), Error> {
     // Qwen2-VL multimodal RoPE has three position axes: temporal, height, width.
     const NUM_ROPE_AXES: usize = 3;
     let image_token_id = cfg.image_token_id;
@@ -1050,13 +1049,13 @@ fn get_rope_index(
             image_count += 1;
         }
         if input_ids[i] == vision_start_token_id && input_ids[i + 1] == video_token_id {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: "MinerU2.5: video inputs are not supported".to_string(),
             });
         }
     }
     if image_count != image_grid_thw.len() {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "MinerU2.5: image count mismatch between prompt ({image_count}) and image_grid_thw ({})",
                 image_grid_thw.len()
@@ -1073,7 +1072,7 @@ fn get_rope_index(
             .iter()
             .position(|&id| id == image_token_id)
             .map(|p| st + p)
-            .ok_or_else(|| OCRError::InvalidInput {
+            .ok_or_else(|| Error::InvalidInput {
                 message: format!(
                     "MinerU2.5: expected image token for image[{image_index}] but none found"
                 ),
@@ -1115,7 +1114,7 @@ fn get_rope_index(
     }
 
     if positions.len() != input_ids.len() {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "MinerU2.5: rope position ids length mismatch: got {}, expected {}",
                 positions.len(),
@@ -1137,7 +1136,7 @@ fn get_rope_index(
     let position_ids = Tensor::from_vec(pos_ids, (NUM_ROPE_AXES, 1usize, input_ids.len()), device)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MinerU2.5: build position_ids tensor failed",
                 e,
             )

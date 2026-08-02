@@ -26,8 +26,8 @@ use std::time::Duration;
 use std::time::Instant;
 use tracing::{error, info};
 
-use oar_ocr_core::utils::load_image;
 use oar_ocr_vl::HunyuanOcr;
+use oar_ocr_vl::utils::image::load_image;
 use oar_ocr_vl::utils::parse_device;
 use utils::token_fingerprint;
 

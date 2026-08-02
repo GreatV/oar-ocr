@@ -1,5 +1,5 @@
+use crate::error::Error;
 use crate::mineru_diffusion::SdarConfig;
-use oar_ocr_core::core::OCRError;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -27,10 +27,10 @@ fn default_num_channels() -> usize {
 }
 
 impl MonkeyOcrV2VisionConfig {
-    pub fn head_dim(&self) -> Result<usize, OCRError> {
+    pub fn head_dim(&self) -> Result<usize, Error> {
         if self.num_attention_heads == 0 || !self.embed_dim.is_multiple_of(self.num_attention_heads)
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MonkeyOCRv2 vision embed_dim {} must be divisible by num_attention_heads {}",
                     self.embed_dim, self.num_attention_heads
@@ -40,7 +40,7 @@ impl MonkeyOcrV2VisionConfig {
         Ok(self.embed_dim / self.num_attention_heads)
     }
 
-    pub fn validate(&self) -> Result<(), OCRError> {
+    pub fn validate(&self) -> Result<(), Error> {
         if self.embed_dim == 0
             || self.hidden_size == 0
             || self.intermediate_size == 0
@@ -49,12 +49,12 @@ impl MonkeyOcrV2VisionConfig {
             || self.spatial_merge_size == 0
             || self.temporal_patch_size == 0
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "MonkeyOCRv2 vision dimensions must be non-zero".to_string(),
             });
         }
         if self.num_channels != 3 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MonkeyOCRv2 currently supports RGB checkpoints, got num_channels={}",
                     self.num_channels
@@ -62,7 +62,7 @@ impl MonkeyOcrV2VisionConfig {
             });
         }
         if self.temporal_patch_size != 1 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MonkeyOCRv2 image checkpoints require temporal_patch_size=1, got {}",
                     self.temporal_patch_size
@@ -70,20 +70,20 @@ impl MonkeyOcrV2VisionConfig {
             });
         }
         if self.use_bias {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "MonkeyOCRv2 vision transformer use_bias=true is unsupported".to_string(),
             });
         }
         let head_dim = self.head_dim()?;
         if !head_dim.is_multiple_of(4) {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MonkeyOCRv2 vision head_dim {head_dim} must be divisible by 4 for 2D RoPE"
                 ),
             });
         }
         if !self.rms_norm_eps.is_finite() || self.rms_norm_eps <= 0.0 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MonkeyOCRv2 vision rms_norm_eps must be positive, got {}",
                     self.rms_norm_eps
@@ -105,15 +105,15 @@ pub struct MonkeyOcrV2Config {
 }
 
 impl MonkeyOcrV2Config {
-    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
         let config: Self = crate::utils::load_json_config(path, "MonkeyOCRv2", "config.json")?;
         config.validate()?;
         Ok(config)
     }
 
-    pub fn validate(&self) -> Result<(), OCRError> {
+    pub fn validate(&self) -> Result<(), Error> {
         if self.model_type != "monkeyocrv2" {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MonkeyOCRv2 expected model_type 'monkeyocrv2', got '{}'",
                     self.model_type
@@ -121,7 +121,7 @@ impl MonkeyOcrV2Config {
             });
         }
         if self.text_config.hidden_act != "silu" {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MonkeyOCRv2 supports Qwen3 hidden_act 'silu', got '{}'",
                     self.text_config.hidden_act
@@ -129,7 +129,7 @@ impl MonkeyOcrV2Config {
             });
         }
         if self.text_config.attention_bias {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "MonkeyOCRv2 attention_bias=true is unsupported".to_string(),
             });
         }
@@ -140,12 +140,12 @@ impl MonkeyOcrV2Config {
             || self.text_config.num_key_value_heads == 0
             || self.text_config.max_position_embeddings == 0
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "MonkeyOCRv2 text dimensions must be non-zero".to_string(),
             });
         }
         if self.text_config.head_dim()? == 0 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "MonkeyOCRv2 text head_dim must be non-zero".to_string(),
             });
         }
@@ -154,12 +154,12 @@ impl MonkeyOcrV2Config {
             .num_attention_heads
             .is_multiple_of(self.text_config.num_key_value_heads)
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "MonkeyOCRv2 attention heads must be divisible by KV heads".to_string(),
             });
         }
         if self.text_config.hidden_size != self.vision_config.hidden_size {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MonkeyOCRv2 vision merger output {} != text hidden size {}",
                     self.vision_config.hidden_size, self.text_config.hidden_size
@@ -192,14 +192,14 @@ pub struct MonkeyOcrV2ImageProcessorConfig {
 }
 
 impl MonkeyOcrV2ImageProcessorConfig {
-    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
         let config: Self =
             crate::utils::load_json_config(path, "MonkeyOCRv2", "preprocessor_config.json")?;
         config.validate()?;
         Ok(config)
     }
 
-    pub fn validate(&self) -> Result<(), OCRError> {
+    pub fn validate(&self) -> Result<(), Error> {
         crate::utils::validate_patch_merge_temporal(
             "MonkeyOCRv2",
             self.patch_size,
@@ -207,7 +207,7 @@ impl MonkeyOcrV2ImageProcessorConfig {
             self.temporal_patch_size,
         )?;
         if self.min_pixels == 0 || self.max_pixels == 0 || self.min_pixels > self.max_pixels {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MonkeyOCRv2 invalid pixel bounds: {}..{}",
                     self.min_pixels, self.max_pixels
@@ -221,7 +221,7 @@ impl MonkeyOcrV2ImageProcessorConfig {
                 &self.image_std,
             )?;
             if self.image_std.contains(&0.0) {
-                return Err(OCRError::ConfigError {
+                return Err(Error::Config {
                     message: "MonkeyOCRv2 image_std values must be non-zero".to_string(),
                 });
             }
@@ -229,12 +229,12 @@ impl MonkeyOcrV2ImageProcessorConfig {
         Ok(())
     }
 
-    pub fn validate_vision(&self, vision: &MonkeyOcrV2VisionConfig) -> Result<(), OCRError> {
+    pub fn validate_vision(&self, vision: &MonkeyOcrV2VisionConfig) -> Result<(), Error> {
         if self.patch_size != vision.patch_size
             || self.temporal_patch_size != vision.temporal_patch_size
             || self.merge_size != vision.spatial_merge_size
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MonkeyOCRv2 processor/vision mismatch: patch {}/{}, temporal {}/{}, merge {}/{}",
                     self.patch_size,

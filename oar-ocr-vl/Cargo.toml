@@ -20,14 +20,14 @@ categories = ["computer-vision", "science"]
 
 [features]
 default = []
-download-binaries = ["oar-ocr-core/download-binaries"]
+# This crate is Candle-only: layout detection runs through `pp_doclayout`, so
+# there is no ONNX Runtime anywhere in the tree and no feature to turn it on.
 # When enabled, turns on Candle's CUDA backend for GPU acceleration.
 cuda = [
     "candle-core/cuda",
     "dep:candle-flash-attn",
     "candle-nn/cuda",
     "candle-transformers/cuda",
-    "oar-ocr-core/cuda",
 ]
 # When enabled, turns on Candle's Metal backend for GPU acceleration on Apple devices.
 # Cargo features cannot be target-scoped directly, so Linux `--all-features`
@@ -46,13 +46,13 @@ candle-transformers = "0.11.0"
 html-escape = "0.2"
 half = "2"
 image.workspace = true
-oar-ocr-core.workspace = true
 once_cell = "1.19"
 rand = "0.10"
 rayon.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror = "2.0"
 tokenizers.workspace = true
 tracing.workspace = true
 
@@ -60,5 +60,4 @@ tracing.workspace = true
 clap.workspace = true
 criterion = { version = "0.8", features = ["html_reports"] }
 hayro.workspace = true
-oar-ocr = { path = "..", default-features = false }
 tracing-subscriber.workspace = true

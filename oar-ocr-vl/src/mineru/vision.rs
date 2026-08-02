@@ -3,29 +3,29 @@ use crate::attention::{
     VISION_CHUNKED_ATTN_CHUNK_SIZE, VISION_CHUNKED_ATTN_SEQ_THRESHOLD, chunked_vision_attention,
     on_compute_device, scaled_dot_product_attention,
 };
+use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{LayerNorm, LayerNormConfig, Linear, Module, VarBuilder, layer_norm, linear};
-use oar_ocr_core::core::OCRError;
 
-fn quick_gelu(xs: &Tensor) -> Result<Tensor, OCRError> {
+fn quick_gelu(xs: &Tensor) -> Result<Tensor, Error> {
     let scaled = (xs * 1.702).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "MinerU2.5: quick_gelu scale failed",
             e,
         )
     })?;
     let sig = candle_nn::ops::sigmoid(&scaled).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "MinerU2.5: quick_gelu sigmoid failed",
             e,
         )
     })?;
     (xs * sig).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "MinerU2.5: quick_gelu multiply failed",
             e,
         )
@@ -40,30 +40,30 @@ enum VisionAct {
 }
 
 impl VisionAct {
-    fn from_str(name: &str) -> Result<Self, OCRError> {
+    fn from_str(name: &str) -> Result<Self, Error> {
         match name {
             "quick_gelu" => Ok(Self::QuickGelu),
             "gelu" | "gelu_new" | "gelu_pytorch_tanh" => Ok(Self::Gelu),
             "silu" => Ok(Self::Silu),
-            _ => Err(OCRError::ConfigError {
+            _ => Err(Error::Config {
                 message: format!("MinerU2.5: unsupported vision hidden_act '{name}'"),
             }),
         }
     }
 
-    fn forward(self, xs: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(self, xs: &Tensor) -> Result<Tensor, Error> {
         match self {
             Self::QuickGelu => quick_gelu(xs),
             Self::Gelu => xs.gelu_erf().map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "MinerU2.5: vision gelu failed",
                     e,
                 )
             }),
             Self::Silu => candle_nn::ops::silu(xs).map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "MinerU2.5: vision silu failed",
                     e,
                 )
@@ -77,19 +77,19 @@ fn apply_rotary_pos_emb_vision(
     k: &Tensor,
     cos: &Tensor,
     sin: &Tensor,
-) -> Result<(Tensor, Tensor), OCRError> {
+) -> Result<(Tensor, Tensor), Error> {
     let orig_q_dtype = q.dtype();
     let orig_k_dtype = k.dtype();
     let q = q.to_dtype(DType::F32).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "MinerU2.5: vision q cast failed",
             e,
         )
     })?;
     let k = k.to_dtype(DType::F32).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "MinerU2.5: vision k cast failed",
             e,
         )
@@ -99,7 +99,7 @@ fn apply_rotary_pos_emb_vision(
         .unsqueeze(1)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MinerU2.5: vision cos unsqueeze failed",
                 e,
             )
@@ -107,7 +107,7 @@ fn apply_rotary_pos_emb_vision(
         .to_dtype(DType::F32)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MinerU2.5: vision cos cast failed",
                 e,
             )
@@ -116,7 +116,7 @@ fn apply_rotary_pos_emb_vision(
         .unsqueeze(1)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MinerU2.5: vision sin unsqueeze failed",
                 e,
             )
@@ -124,7 +124,7 @@ fn apply_rotary_pos_emb_vision(
         .to_dtype(DType::F32)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MinerU2.5: vision sin cast failed",
                 e,
             )
@@ -135,21 +135,21 @@ fn apply_rotary_pos_emb_vision(
         .broadcast_mul(&cos)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MinerU2.5: vision q*cos failed",
                 e,
             )
         })?
         .broadcast_add(&q_rot.broadcast_mul(&sin).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MinerU2.5: vision rotate_half(q)*sin failed",
                 e,
             )
         })?)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MinerU2.5: vision q rope add failed",
                 e,
             )
@@ -160,21 +160,21 @@ fn apply_rotary_pos_emb_vision(
         .broadcast_mul(&cos)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MinerU2.5: vision k*cos failed",
                 e,
             )
         })?
         .broadcast_add(&k_rot.broadcast_mul(&sin).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MinerU2.5: vision rotate_half(k)*sin failed",
                 e,
             )
         })?)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MinerU2.5: vision k rope add failed",
                 e,
             )
@@ -182,14 +182,14 @@ fn apply_rotary_pos_emb_vision(
 
     let q_embed = q_embed.to_dtype(orig_q_dtype).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "MinerU2.5: vision q_embed cast back failed",
             e,
         )
     })?;
     let k_embed = k_embed.to_dtype(orig_k_dtype).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "MinerU2.5: vision k_embed cast back failed",
             e,
         )
@@ -205,12 +205,12 @@ struct VisionRotaryEmbedding {
 }
 
 impl VisionRotaryEmbedding {
-    fn new(dim: usize, theta: f64, device: &Device) -> Result<Self, OCRError> {
+    fn new(dim: usize, theta: f64, device: &Device) -> Result<Self, Error> {
         let inv_freq = crate::utils::vision_inv_freq(dim, theta, "MinerU2.5", device)?;
         Ok(Self { inv_freq, dim })
     }
 
-    fn forward(&self, seqlen: usize, device: &Device) -> Result<Tensor, OCRError> {
+    fn forward(&self, seqlen: usize, device: &Device) -> Result<Tensor, Error> {
         // Use on_compute_device to handle Metal's lack of support for arange
         on_compute_device(device, |compute_device| {
             let seq = Tensor::arange(0u32, seqlen as u32, compute_device)?.to_dtype(DType::F32)?;
@@ -222,7 +222,7 @@ impl VisionRotaryEmbedding {
         })
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MinerU2.5: vision rope forward failed",
                 e,
             )
@@ -240,7 +240,7 @@ struct PatchEmbed {
 }
 
 impl PatchEmbed {
-    fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let patch_dim =
             cfg.in_channels() * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size;
         let weight = match vb.get((cfg.embed_dim, patch_dim), "patch_embed.proj.weight") {
@@ -266,17 +266,17 @@ impl PatchEmbed {
         Ok(Self { weight })
     }
 
-    fn forward(&self, patches: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, patches: &Tensor) -> Result<Tensor, Error> {
         let weight_t = self.weight.transpose(0, 1).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MinerU2.5: patch_embed weight transpose failed",
                 e,
             )
         })?;
         let patches = patches.to_dtype(self.weight.dtype()).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MinerU2.5: patch_embed input cast failed",
                 e,
             )
@@ -297,14 +297,14 @@ struct VisionAttention {
 }
 
 impl VisionAttention {
-    fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let qkv = linear(cfg.embed_dim, cfg.embed_dim * 3, vb.pp("attn.qkv"))
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "load vision qkv", e))?;
         let proj = linear(cfg.embed_dim, cfg.embed_dim, vb.pp("attn.proj"))
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "load vision proj", e))?;
 
         if !cfg.embed_dim.is_multiple_of(cfg.num_heads) {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MinerU2.5: vision embed_dim {} not divisible by num_heads {}",
                     cfg.embed_dim, cfg.num_heads
@@ -322,12 +322,7 @@ impl VisionAttention {
         })
     }
 
-    fn forward(
-        &self,
-        hidden_states: &Tensor,
-        cos: &Tensor,
-        sin: &Tensor,
-    ) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden_states: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
         let seq_len = hidden_states
             .dim(0)
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "vision hidden_states dim", e))?;
@@ -401,7 +396,7 @@ struct VisionMlp {
 }
 
 impl VisionMlp {
-    fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let hidden_dim = cfg.mlp_hidden_dim();
         let fc1 = linear(cfg.embed_dim, hidden_dim, vb.pp("mlp.fc1"))
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "load vision fc1", e))?;
@@ -411,7 +406,7 @@ impl VisionMlp {
         Ok(Self { fc1, fc2, act })
     }
 
-    fn forward(&self, xs: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor, Error> {
         let x = self
             .fc1
             .forward(xs)
@@ -432,7 +427,7 @@ struct VisionBlock {
 }
 
 impl VisionBlock {
-    fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let norm_cfg = LayerNormConfig {
             eps: 1e-6,
             ..Default::default()
@@ -451,12 +446,7 @@ impl VisionBlock {
         })
     }
 
-    fn forward(
-        &self,
-        hidden_states: &Tensor,
-        cos: &Tensor,
-        sin: &Tensor,
-    ) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden_states: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
         let normed = self
             .norm1
             .forward(hidden_states)
@@ -464,7 +454,7 @@ impl VisionBlock {
         let attn_out = self.attn.forward(&normed, cos, sin)?;
         let hidden_states = (hidden_states + attn_out).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MinerU2.5: vision attn residual failed",
                 e,
             )
@@ -477,7 +467,7 @@ impl VisionBlock {
         let mlp_out = self.mlp.forward(&normed)?;
         (hidden_states + mlp_out).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MinerU2.5: vision mlp residual failed",
                 e,
             )
@@ -495,7 +485,7 @@ struct PatchMerger {
 }
 
 impl PatchMerger {
-    fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let norm_cfg = LayerNormConfig {
             eps: 1e-6,
             ..Default::default()
@@ -516,13 +506,13 @@ impl PatchMerger {
         })
     }
 
-    fn forward(&self, x: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, x: &Tensor) -> Result<Tensor, Error> {
         let num_patches = x
             .dim(0)
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "merger dim", e))?;
         let group = self.merge_size * self.merge_size;
         if num_patches % group != 0 {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "MinerU2.5: merger expects num_patches divisible by {}, got {}",
                     group, num_patches
@@ -542,7 +532,7 @@ impl PatchMerger {
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "merger mlp1", e))?;
         let x = x.gelu_erf().map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MinerU2.5: merger gelu failed",
                 e,
             )
@@ -562,7 +552,7 @@ pub struct MinerUVisionModel {
 }
 
 impl MinerUVisionModel {
-    pub fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    pub fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         Self::load_inner(cfg, vb, true)
     }
 
@@ -572,10 +562,7 @@ impl MinerUVisionModel {
     /// with an external abstractor instead. Pair with [`forward_tokens`].
     ///
     /// [`forward_tokens`]: MinerUVisionModel::forward_tokens
-    pub(crate) fn load_backbone(
-        cfg: &MinerUVisionConfig,
-        vb: VarBuilder,
-    ) -> Result<Self, OCRError> {
+    pub(crate) fn load_backbone(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         Self::load_inner(cfg, vb, false)
     }
 
@@ -583,7 +570,7 @@ impl MinerUVisionModel {
         cfg: &MinerUVisionConfig,
         vb: VarBuilder,
         with_merger: bool,
-    ) -> Result<Self, OCRError> {
+    ) -> Result<Self, Error> {
         let patch_embed = PatchEmbed::load(cfg, vb.clone())?;
         let mut blocks = Vec::with_capacity(cfg.depth);
         for i in 0..cfg.depth {
@@ -597,7 +584,7 @@ impl MinerUVisionModel {
         };
         let head_dim = cfg.embed_dim / cfg.num_heads;
         if !head_dim.is_multiple_of(2) {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MinerU2.5: head_dim {} must be even for rotary embeddings",
                     head_dim
@@ -621,7 +608,7 @@ impl MinerUVisionModel {
         &self,
         pixel_values: &Tensor,
         grid_thw: &[(usize, usize, usize)],
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let max_grid = grid_thw
             .iter()
             .map(|(_, h, w)| (*h).max(*w))
@@ -666,8 +653,8 @@ impl MinerUVisionModel {
         &self,
         pixel_values: &Tensor,
         grid_thw: &[(usize, usize, usize)],
-    ) -> Result<Tensor, OCRError> {
-        let merger = self.merger.as_ref().ok_or_else(|| OCRError::ConfigError {
+    ) -> Result<Tensor, Error> {
+        let merger = self.merger.as_ref().ok_or_else(|| Error::Config {
             message: "MinerU2.5: vision merger not loaded (backbone-only model)".to_string(),
         })?;
         let mut outputs: Vec<Tensor> = Vec::with_capacity(grid_thw.len());
@@ -724,7 +711,7 @@ fn build_vision_pos_emb(
     w: usize,
     merge_size: usize,
     device: &Device,
-) -> Result<(Tensor, Tensor), OCRError> {
+) -> Result<(Tensor, Tensor), Error> {
     let mut hpos: Vec<i64> = Vec::with_capacity(t * h * w);
     let mut wpos: Vec<i64> = Vec::with_capacity(t * h * w);
     for _ in 0..t {
@@ -743,42 +730,42 @@ fn build_vision_pos_emb(
     let num_patches = hpos.len();
     let hpos = Tensor::from_vec(hpos, (num_patches, 1usize), device).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "MinerU2.5: vision hpos tensor failed",
             e,
         )
     })?;
     let wpos = Tensor::from_vec(wpos, (num_patches, 1usize), device).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "MinerU2.5: vision wpos tensor failed",
             e,
         )
     })?;
     let hpos = hpos.broadcast_as((num_patches, freq_dim)).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "MinerU2.5: vision hpos broadcast failed",
             e,
         )
     })?;
     let hpos = hpos.contiguous().map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "MinerU2.5: vision hpos contiguous failed",
             e,
         )
     })?;
     let wpos = wpos.broadcast_as((num_patches, freq_dim)).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "MinerU2.5: vision wpos broadcast failed",
             e,
         )
     })?;
     let wpos = wpos.contiguous().map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "MinerU2.5: vision wpos contiguous failed",
             e,
         )
@@ -796,14 +783,14 @@ fn build_vision_pos_emb(
         .map_err(|e| candle_to_ocr_inference("MinerU2.5", "vision emb cat", e))?;
     let cos = emb.cos().map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "MinerU2.5: vision cos failed",
             e,
         )
     })?;
     let sin = emb.sin().map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "MinerU2.5: vision sin failed",
             e,
         )

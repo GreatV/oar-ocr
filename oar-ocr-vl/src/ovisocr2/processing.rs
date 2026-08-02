@@ -1,11 +1,11 @@
 use super::config::{OvisOcr2ImageProcessorConfig, OvisOcr2VisionConfig};
+use crate::error::Error;
 use crate::utils::{
     candle_to_ocr_processing,
     image::{image_to_chw, patchify_merge_grouped, pil_resample_to_filter_type, smart_resize},
 };
 use candle_core::{DType, Device, Tensor};
 use image::{RgbImage, imageops::FilterType};
-use oar_ocr_core::core::OCRError;
 
 #[derive(Debug, Clone)]
 pub struct OvisOcr2ImageInputs {
@@ -17,9 +17,9 @@ pub struct OvisOcr2ImageInputs {
 pub(crate) fn validate_processor_vision_compatibility(
     cfg: &OvisOcr2ImageProcessorConfig,
     vision_cfg: &OvisOcr2VisionConfig,
-) -> Result<(), OCRError> {
+) -> Result<(), Error> {
     if cfg.patch_size != vision_cfg.patch_size {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "OvisOCR2 patch_size mismatch: processor {} != vision {}",
                 cfg.patch_size, vision_cfg.patch_size
@@ -27,7 +27,7 @@ pub(crate) fn validate_processor_vision_compatibility(
         });
     }
     if cfg.temporal_patch_size != vision_cfg.temporal_patch_size {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "OvisOCR2 temporal_patch_size mismatch: processor {} != vision {}",
                 cfg.temporal_patch_size, vision_cfg.temporal_patch_size
@@ -35,7 +35,7 @@ pub(crate) fn validate_processor_vision_compatibility(
         });
     }
     if cfg.merge_size != vision_cfg.spatial_merge_size {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "OvisOCR2 merge_size mismatch: processor {} != vision {}",
                 cfg.merge_size, vision_cfg.spatial_merge_size
@@ -43,7 +43,7 @@ pub(crate) fn validate_processor_vision_compatibility(
         });
     }
     if vision_cfg.in_channels != 3 {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "OvisOCR2 image preprocessing supports three RGB channels, got {}",
                 vision_cfg.in_channels
@@ -59,7 +59,7 @@ pub fn preprocess_image(
     vision_cfg: &OvisOcr2VisionConfig,
     device: &Device,
     dtype: DType,
-) -> Result<OvisOcr2ImageInputs, OCRError> {
+) -> Result<OvisOcr2ImageInputs, Error> {
     cfg.validate()?;
     vision_cfg.validate()?;
     validate_processor_vision_compatibility(cfg, vision_cfg)?;
@@ -68,13 +68,13 @@ pub fn preprocess_image(
         .patch_size
         .checked_mul(cfg.merge_size)
         .and_then(|factor| u32::try_from(factor).ok())
-        .ok_or_else(|| OCRError::ConfigError {
+        .ok_or_else(|| Error::Config {
             message: "OvisOCR2 patch/merge factor overflow".to_string(),
         })?;
     let (min_pixels, max_pixels) = cfg.runtime_pixel_bounds();
     let (height, width) = (image.height(), image.width());
     if height == 0 || width == 0 {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!("OvisOCR2 input image must be non-empty, got {width}x{height}"),
         });
     }
@@ -85,7 +85,7 @@ pub fn preprocess_image(
     };
 
     if resized_height % factor != 0 || resized_width % factor != 0 {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "OvisOCR2 preprocessed dimensions {resized_height}x{resized_width} must be divisible by {factor}"
             ),
@@ -127,7 +127,7 @@ pub fn preprocess_image(
     let grid_h = resized_height as usize / cfg.patch_size;
     let grid_w = resized_width as usize / cfg.patch_size;
     if !grid_h.is_multiple_of(cfg.merge_size) || !grid_w.is_multiple_of(cfg.merge_size) {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "OvisOCR2 patch grid {grid_h}x{grid_w} must be divisible by merge_size {}",
                 cfg.merge_size
@@ -151,7 +151,7 @@ pub fn preprocess_image(
         vision_cfg.in_channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size;
     let num_patches = grid_t * grid_h * grid_w;
     if flat.len() != num_patches * patch_dim {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "OvisOCR2 patch extraction produced {} values, expected {}",
                 flat.len(),
@@ -163,7 +163,7 @@ pub fn preprocess_image(
     let pixel_values = Tensor::from_vec(flat, (num_patches, patch_dim), device)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "OvisOCR2: create pixel_values",
                 e,
             )
@@ -171,7 +171,7 @@ pub fn preprocess_image(
         .to_dtype(dtype)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "OvisOCR2: cast pixel_values",
                 e,
             )

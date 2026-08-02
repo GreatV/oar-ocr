@@ -8,6 +8,7 @@
 use super::config::OvisOcr2TextConfig;
 use super::gated_delta::gated_delta_rule;
 use crate::attention::{RotaryEmbedding, flash_attention, scaled_dot_product_attention_gqa};
+use crate::error::Error;
 use crate::kv_trim::TrimmableKvCache;
 use crate::utils::{candle_to_ocr_inference, rotate_half};
 use candle_core::{D, DType, Device, Tensor};
@@ -15,7 +16,6 @@ use candle_nn::{
     Conv1d, Conv1dConfig, Embedding, Linear, Module, RmsNorm, VarBuilder, embedding,
     linear_no_bias, rms_norm,
 };
-use oar_ocr_core::core::OCRError;
 use std::cell::RefCell;
 
 const MODEL_NAME: &str = "OvisOCR2";
@@ -27,7 +27,7 @@ struct AdditiveRmsNorm {
 }
 
 impl AdditiveRmsNorm {
-    fn load(dim: usize, eps: f64, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(dim: usize, eps: f64, vb: VarBuilder) -> Result<Self, Error> {
         let weight = vb
             .get(dim, "weight")
             .and_then(|weight| weight.to_dtype(DType::F32))
@@ -35,7 +35,7 @@ impl AdditiveRmsNorm {
         Ok(Self { weight, eps })
     }
 
-    fn forward(&self, xs: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor, Error> {
         let dtype = xs.dtype();
         let xs = xs
             .to_dtype(DType::F32)
@@ -68,7 +68,7 @@ struct OvisMlp {
 }
 
 impl OvisMlp {
-    fn load(cfg: &OvisOcr2TextConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &OvisOcr2TextConfig, vb: VarBuilder) -> Result<Self, Error> {
         let gate_proj = linear_no_bias(cfg.hidden_size, cfg.intermediate_size, vb.pp("gate_proj"))
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load MLP gate_proj", e))?;
         let up_proj = linear_no_bias(cfg.hidden_size, cfg.intermediate_size, vb.pp("up_proj"))
@@ -82,7 +82,7 @@ impl OvisMlp {
         })
     }
 
-    fn forward(&self, xs: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor, Error> {
         let gate = self
             .gate_proj
             .forward(xs)
@@ -142,7 +142,7 @@ fn cached_depthwise_conv_step(
 }
 
 impl GatedDeltaNet {
-    fn load(cfg: &OvisOcr2TextConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &OvisOcr2TextConfig, vb: VarBuilder) -> Result<Self, Error> {
         let key_dim = cfg.linear_num_key_heads * cfg.linear_key_head_dim;
         let value_dim = cfg.linear_num_value_heads * cfg.linear_value_head_dim;
         let conv_dim = key_dim * 2 + value_dim;
@@ -150,7 +150,7 @@ impl GatedDeltaNet {
             .linear_num_value_heads
             .is_multiple_of(cfg.linear_num_key_heads)
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2: linear_num_value_heads ({}) must be divisible by linear_num_key_heads ({})",
                     cfg.linear_num_value_heads, cfg.linear_num_key_heads
@@ -158,7 +158,7 @@ impl GatedDeltaNet {
             });
         }
         if cfg.linear_key_head_dim != cfg.linear_value_head_dim {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 currently requires equal Gated DeltaNet key/value head dims, got {}/{}",
                     cfg.linear_key_head_dim, cfg.linear_value_head_dim
@@ -238,7 +238,7 @@ impl GatedDeltaNet {
         })
     }
 
-    fn causal_conv(&self, mixed: &Tensor) -> Result<Tensor, OCRError> {
+    fn causal_conv(&self, mixed: &Tensor) -> Result<Tensor, Error> {
         let (batch, channels, seq_len) = mixed
             .dims3()
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN convolution input", e))?;
@@ -316,7 +316,7 @@ impl GatedDeltaNet {
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN convolution SiLU", e))
     }
 
-    fn forward(&self, hidden_states: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden_states: &Tensor) -> Result<Tensor, Error> {
         let (batch, seq_len, _) = hidden_states
             .dims3()
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN input shape", e))?;
@@ -464,12 +464,12 @@ struct FullAttention {
 }
 
 impl FullAttention {
-    fn load(cfg: &OvisOcr2TextConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &OvisOcr2TextConfig, vb: VarBuilder) -> Result<Self, Error> {
         if !cfg
             .num_attention_heads
             .is_multiple_of(cfg.num_key_value_heads)
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2: num_attention_heads ({}) must be divisible by num_key_value_heads ({})",
                     cfg.num_attention_heads, cfg.num_key_value_heads
@@ -518,7 +518,7 @@ impl FullAttention {
         })
     }
 
-    fn apply_rope(&self, tensor: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, OCRError> {
+    fn apply_rope(&self, tensor: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
         let rotary_dim = cos
             .dim(D::Minus1)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention rotary dimension", e))?;
@@ -543,12 +543,7 @@ impl FullAttention {
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention RoPE output", e))
     }
 
-    fn forward(
-        &self,
-        hidden_states: &Tensor,
-        cos: &Tensor,
-        sin: &Tensor,
-    ) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden_states: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
         let (batch, seq_len, _) = hidden_states
             .dims3()
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention input", e))?;
@@ -652,14 +647,14 @@ struct DecoderLayer {
 }
 
 impl DecoderLayer {
-    fn load(cfg: &OvisOcr2TextConfig, layer_type: &str, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &OvisOcr2TextConfig, layer_type: &str, vb: VarBuilder) -> Result<Self, Error> {
         let mixer = match layer_type {
             "linear_attention" => {
                 TokenMixer::Linear(GatedDeltaNet::load(cfg, vb.pp("linear_attn"))?)
             }
             "full_attention" => TokenMixer::Full(FullAttention::load(cfg, vb.pp("self_attn"))?),
             other => {
-                return Err(OCRError::ConfigError {
+                return Err(Error::Config {
                     message: format!("OvisOCR2: unsupported decoder layer type '{other}'"),
                 });
             }
@@ -680,12 +675,7 @@ impl DecoderLayer {
         })
     }
 
-    fn forward(
-        &self,
-        hidden_states: &Tensor,
-        cos: &Tensor,
-        sin: &Tensor,
-    ) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden_states: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
         let residual = hidden_states.clone();
         let normalized = self.input_layernorm.forward(hidden_states)?;
         let mixed = match &self.mixer {
@@ -716,16 +706,16 @@ struct TextRotaryEmbedding {
 }
 
 impl TextRotaryEmbedding {
-    fn new(cfg: &OvisOcr2TextConfig, device: &Device) -> Result<Self, OCRError> {
+    fn new(cfg: &OvisOcr2TextConfig, device: &Device) -> Result<Self, Error> {
         let rotary_dim = (cfg.head_dim as f64 * cfg.rope_parameters.partial_rotary_factor) as usize;
         if rotary_dim == 0 || !rotary_dim.is_multiple_of(2) {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!("OvisOCR2: invalid rotary dimension {rotary_dim}"),
             });
         }
         let half = rotary_dim / 2;
         if cfg.rope_parameters.mrope_section.iter().sum::<usize>() != half {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2: mrope_section {:?} must sum to rotary_dim/2 ({half})",
                     cfg.rope_parameters.mrope_section
@@ -743,12 +733,12 @@ impl TextRotaryEmbedding {
         Ok(Self { rotary, axis_ids })
     }
 
-    fn forward(&self, position_ids: &Tensor, dtype: DType) -> Result<(Tensor, Tensor), OCRError> {
+    fn forward(&self, position_ids: &Tensor, dtype: DType) -> Result<(Tensor, Tensor), Error> {
         let (cos, sin) = self.rotary.forward_multi_axis(position_ids, dtype)?;
         Ok((self.select_axes(&cos)?, self.select_axes(&sin)?))
     }
 
-    fn select_axes(&self, values: &Tensor) -> Result<Tensor, OCRError> {
+    fn select_axes(&self, values: &Tensor) -> Result<Tensor, Error> {
         let (_, batch, seq_len, rotary_dim) = values
             .dims4()
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "mRoPE tensor shape", e))?;
@@ -794,9 +784,9 @@ pub(crate) struct OvisOcr2TextModel {
 }
 
 impl OvisOcr2TextModel {
-    pub(crate) fn load(cfg: &OvisOcr2TextConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    pub(crate) fn load(cfg: &OvisOcr2TextConfig, vb: VarBuilder) -> Result<Self, Error> {
         if cfg.layer_types.len() != cfg.num_hidden_layers {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2: layer_types has {} entries, expected {}",
                     cfg.layer_types.len(),
@@ -824,7 +814,7 @@ impl OvisOcr2TextModel {
         })
     }
 
-    pub(crate) fn embed(&self, input_ids: &Tensor) -> Result<Tensor, OCRError> {
+    pub(crate) fn embed(&self, input_ids: &Tensor) -> Result<Tensor, Error> {
         self.embed_tokens
             .forward(input_ids)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "token embedding", e))
@@ -838,7 +828,7 @@ impl OvisOcr2TextModel {
         &self,
         inputs_embeds: &Tensor,
         position_ids: &Tensor,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let (cos, sin) = self
             .rotary_emb
             .forward(position_ids, inputs_embeds.dtype())?;

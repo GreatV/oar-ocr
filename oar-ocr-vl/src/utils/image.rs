@@ -1,6 +1,6 @@
+use crate::error::Error;
 use image::RgbImage;
 use image::imageops::FilterType;
-use oar_ocr_core::core::OCRError;
 use rayon::prelude::*;
 
 /// Convert an RGB image to a CHW tensor buffer with normalization and parallel processing.
@@ -180,9 +180,9 @@ pub fn smart_resize(
     factor: u32,
     min_pixels: u32,
     max_pixels: u32,
-) -> Result<(u32, u32), OCRError> {
+) -> Result<(u32, u32), Error> {
     if factor == 0 {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: "smart_resize: factor must be > 0".to_string(),
         });
     }
@@ -194,7 +194,7 @@ pub fn smart_resize(
     let max_dim = height.max(width);
     let min_dim = height.min(width);
     if min_dim > 0.0 && (max_dim / min_dim) > 200.0 {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "smart_resize: absolute aspect ratio must be <= 200, got {:.3}",
                 max_dim / min_dim
@@ -218,7 +218,7 @@ pub fn smart_resize(
         }
         // After scaling down, ensure we don't violate min_pixels due to quantization
         if (h_bar * w_bar) < min_pixels as f64 {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "smart_resize: cannot satisfy both min_pixels={} and max_pixels={} constraints after quantization",
                     min_pixels, max_pixels
@@ -238,7 +238,7 @@ pub fn smart_resize(
         }
         // After scaling up, ensure we don't violate max_pixels due to quantization
         if (h_bar * w_bar) > max_pixels as f64 {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "smart_resize: cannot satisfy both min_pixels={} and max_pixels={} constraints after quantization",
                     min_pixels, max_pixels
@@ -258,22 +258,22 @@ pub fn clamp_to_max_image_size(
     width: u32,
     factor: u32,
     max_image_size: usize,
-) -> Result<(u32, u32), OCRError> {
+) -> Result<(u32, u32), Error> {
     if factor == 0 {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: "clamp_to_max_image_size: factor must be > 0".to_string(),
         });
     }
-    let max_image_size = u32::try_from(max_image_size).map_err(|_| OCRError::ConfigError {
+    let max_image_size = u32::try_from(max_image_size).map_err(|_| Error::Config {
         message: format!("max_image_size too large: {max_image_size}"),
     })?;
     if max_image_size == 0 {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: "max_image_size must be > 0".to_string(),
         });
     }
     if max_image_size < factor {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!("max_image_size {max_image_size} must be >= factor={factor}"),
         });
     }
@@ -349,6 +349,16 @@ pub fn resize_for_mineru(image: &RgbImage, min_edge: u32, max_aspect_ratio: f32)
     out.into_owned()
 }
 
+/// Loads an image from disk and converts it to RGB.
+pub fn load_image(path: impl AsRef<std::path::Path>) -> Result<RgbImage, crate::Error> {
+    Ok(image::open(path.as_ref())?.to_rgb8())
+}
+
+/// Decodes an image from memory and converts it to RGB.
+pub fn load_image_from_memory(bytes: &[u8]) -> Result<RgbImage, crate::Error> {
+    Ok(image::load_from_memory(bytes)?.to_rgb8())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn test_smart_resize_factor_divisibility() -> Result<(), OCRError> {
+    fn test_smart_resize_factor_divisibility() -> Result<(), Error> {
         let (h, w) = smart_resize(100, 200, 28, 147_384, 2_822_400)?;
         assert_eq!(h % 28, 0);
         assert_eq!(w % 28, 0);
@@ -430,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn test_clamp_to_max_image_size_keeps_factor_divisible() -> Result<(), OCRError> {
+    fn test_clamp_to_max_image_size_keeps_factor_divisible() -> Result<(), Error> {
         let factor = 32;
         let (h, w) = clamp_to_max_image_size(3008, 512, factor, 2048)?;
         assert!(h <= 2048);

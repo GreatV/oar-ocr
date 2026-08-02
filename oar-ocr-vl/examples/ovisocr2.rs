@@ -19,9 +19,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info};
 
-use oar_ocr_core::utils::load_image;
 use oar_ocr_vl::OvisOcr2;
 use oar_ocr_vl::ovisocr2::DEFAULT_MAX_NEW_TOKENS;
+use oar_ocr_vl::utils::image::load_image;
 use oar_ocr_vl::utils::parse_device;
 
 #[derive(Parser)]

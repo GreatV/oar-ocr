@@ -11,11 +11,11 @@ pub mod image;
 pub mod table;
 pub mod text;
 
+use crate::error::Error;
+use crate::geometry::BoundingBox;
+use crate::structure::{LayoutElement, LayoutElementType};
 use ::image::{GrayImage, RgbImage};
 use candle_core::{DType, Device, Tensor};
-use oar_ocr_core::core::OCRError;
-use oar_ocr_core::domain::structure::{LayoutElement, LayoutElementType};
-use oar_ocr_core::processors::BoundingBox;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashSet;
@@ -44,7 +44,7 @@ use std::collections::HashSet;
 /// use oar_ocr_vl::utils::parse_device;
 ///
 /// # #[allow(unused_variables)]
-/// # fn main() -> Result<(), oar_ocr_core::core::OCRError> {
+/// # fn main() -> Result<(), oar_ocr_vl::Error> {
 /// // CPU is always available
 /// let cpu = parse_device("cpu")?;
 ///
@@ -63,15 +63,15 @@ use std::collections::HashSet;
 /// # }
 /// ```
 #[cfg(not(feature = "cuda"))]
-fn cuda_not_enabled() -> OCRError {
-    OCRError::ConfigError {
+fn cuda_not_enabled() -> Error {
+    Error::Config {
         message: "CUDA support not enabled. Compile with --features cuda".to_string(),
     }
 }
 
 #[cfg(not(all(feature = "metal", target_os = "macos")))]
-fn metal_not_enabled() -> OCRError {
-    OCRError::ConfigError {
+fn metal_not_enabled() -> Error {
+    Error::Config {
         message: "Metal support not enabled. Compile on macOS with --features metal".to_string(),
     }
 }
@@ -83,28 +83,26 @@ fn parse_device_with_ordinal(
     prefix: &str,
     device_name: &str,
     creator: impl Fn(usize) -> candle_core::Result<Device>,
-) -> Result<Device, OCRError> {
-    let ordinal_str = s
-        .strip_prefix(prefix)
-        .ok_or_else(|| OCRError::ConfigError {
-            message: format!("Invalid {} device string '{}'", device_name, s),
-        })?;
-    let ordinal: usize = ordinal_str.parse().map_err(|_| OCRError::ConfigError {
+) -> Result<Device, Error> {
+    let ordinal_str = s.strip_prefix(prefix).ok_or_else(|| Error::Config {
+        message: format!("Invalid {} device string '{}'", device_name, s),
+    })?;
+    let ordinal: usize = ordinal_str.parse().map_err(|_| Error::Config {
         message: format!("Invalid {} device ordinal in '{}'", device_name, s),
     })?;
-    creator(ordinal).map_err(|e| OCRError::ConfigError {
+    creator(ordinal).map_err(|e| Error::Config {
         message: format!("Failed to create {} device {}: {}", device_name, ordinal, e),
     })
 }
 
-pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
+pub fn parse_device(device_str: &str) -> Result<Device, Error> {
     let device_str = device_str.to_lowercase();
     match device_str.as_str() {
         "cpu" => Ok(Device::Cpu),
         "cuda" | "gpu" => {
             #[cfg(feature = "cuda")]
             {
-                Device::new_cuda(0).map_err(|e| OCRError::ConfigError {
+                Device::new_cuda(0).map_err(|e| Error::Config {
                     message: format!("Failed to create CUDA device: {}", e),
                 })
             }
@@ -116,7 +114,7 @@ pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
         "metal" => {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             {
-                Device::new_metal(0).map_err(|e| OCRError::ConfigError {
+                Device::new_metal(0).map_err(|e| Error::Config {
                     message: format!("Failed to create Metal device: {}", e),
                 })
             }
@@ -145,7 +143,7 @@ pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
                 Err(metal_not_enabled())
             }
         }
-        _ => Err(OCRError::ConfigError {
+        _ => Err(Error::Config {
             message: format!(
                 "Unknown device: '{}'. Use 'cpu', 'cuda', 'cuda:N', 'metal', or 'metal:N'",
                 device_str
@@ -224,13 +222,13 @@ fn bf16_works(device: &Device) -> bool {
     }
 }
 
-/// Convert Candle error to OCRError for inference operations.
+/// Convert Candle error to Error for inference operations.
 pub fn candle_to_ocr_inference(
     model_name: &str,
     context: impl Into<String>,
     err: candle_core::Error,
-) -> OCRError {
-    OCRError::Inference {
+) -> Error {
+    Error::Inference {
         model_name: model_name.to_string(),
         context: context.into(),
         source: Box::new(err),
@@ -267,13 +265,13 @@ pub fn error_chain_message(prefix: &str, e: &(dyn std::error::Error + 'static)) 
     chain
 }
 
-/// Convert Candle error to OCRError for processing operations.
+/// Convert Candle error to Error for processing operations.
 pub fn candle_to_ocr_processing(
-    kind: oar_ocr_core::core::errors::ProcessingStage,
+    kind: crate::error::ProcessingStage,
     context: impl Into<String>,
     err: candle_core::Error,
-) -> OCRError {
-    OCRError::Processing {
+) -> Error {
+    Error::Processing {
         kind,
         context: context.into(),
         source: Box::new(err),
@@ -291,13 +289,13 @@ pub fn candle_to_ocr_processing(
 pub fn collect_safetensors(
     model_dir: &std::path::Path,
     model_name: &str,
-) -> Result<Vec<std::path::PathBuf>, OCRError> {
+) -> Result<Vec<std::path::PathBuf>, Error> {
     let single = model_dir.join("model.safetensors");
     if single.exists() {
         return Ok(vec![single]);
     }
 
-    let read_dir = std::fs::read_dir(model_dir).map_err(|e| OCRError::ConfigError {
+    let read_dir = std::fs::read_dir(model_dir).map_err(|e| Error::Config {
         message: format!(
             "{model_name}: cannot read model dir {}: {e}",
             model_dir.display()
@@ -308,7 +306,7 @@ pub fn collect_safetensors(
         // Propagate per-entry I/O errors instead of silently dropping them, so a
         // partially-failed directory scan can't masquerade as "no shards found".
         let path = entry
-            .map_err(|e| OCRError::ConfigError {
+            .map_err(|e| Error::Config {
                 message: format!(
                     "{model_name}: error reading entry in model dir {}: {e}",
                     model_dir.display()
@@ -325,7 +323,7 @@ pub fn collect_safetensors(
     }
     shards.sort();
     if shards.is_empty() {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "{model_name}: no model.safetensors or model-*.safetensors found in {}",
                 model_dir.display()
@@ -344,9 +342,9 @@ pub fn load_json_config<T: serde::de::DeserializeOwned>(
     path: impl AsRef<std::path::Path>,
     model_name: &str,
     file_name: &str,
-) -> Result<T, OCRError> {
+) -> Result<T, Error> {
     let contents = std::fs::read_to_string(path)?;
-    serde_json::from_str(&contents).map_err(|e| OCRError::ConfigError {
+    serde_json::from_str(&contents).map_err(|e| Error::Config {
         message: format!("failed to parse {model_name} {file_name}: {e}"),
     })
 }
@@ -367,9 +365,9 @@ pub fn validate_image_mean_std(
     model_name: &str,
     image_mean: &[f32],
     image_std: &[f32],
-) -> Result<(), OCRError> {
+) -> Result<(), Error> {
     if image_mean.len() != 3 || image_std.len() != 3 {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "{model_name} image_mean/std must have length 3, got mean={} std={}",
                 image_mean.len(),
@@ -387,9 +385,9 @@ pub fn validate_patch_merge_temporal(
     patch_size: usize,
     merge_size: usize,
     temporal_patch_size: usize,
-) -> Result<(), OCRError> {
+) -> Result<(), Error> {
     if patch_size == 0 || merge_size == 0 || temporal_patch_size == 0 {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!("{model_name} patch_size/merge_size/temporal_patch_size must be > 0"),
         });
     }
@@ -405,7 +403,7 @@ pub fn vision_inv_freq(
     theta: f64,
     model_name: &str,
     device: &Device,
-) -> Result<Tensor, OCRError> {
+) -> Result<Tensor, Error> {
     let mut inv_freq = Vec::with_capacity(dim / 2);
     for i in (0..dim).step_by(2) {
         let v = 1f64 / theta.powf(i as f64 / dim as f64);
@@ -413,7 +411,7 @@ pub fn vision_inv_freq(
     }
     Tensor::from_vec(inv_freq, (dim / 2,), device).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             format!("{model_name}: vision inv_freq tensor failed"),
             e,
         )
@@ -425,10 +423,10 @@ pub fn vision_inv_freq(
 /// Operates on the final axis only, so it is rank-agnostic — both the 4D
 /// text-attention tensors `(batch, heads, seq, head_dim)` and the 3D
 /// vision-attention tensors `(seq, heads, head_dim)` share this path.
-pub fn rotate_half(x: &Tensor) -> Result<Tensor, OCRError> {
+pub fn rotate_half(x: &Tensor) -> Result<Tensor, Error> {
     let d = x.dim(candle_core::D::Minus1).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "rotate_half dim failed",
             e,
         )
@@ -436,7 +434,7 @@ pub fn rotate_half(x: &Tensor) -> Result<Tensor, OCRError> {
     let half = d / 2;
     let x1 = x.narrow(candle_core::D::Minus1, 0, half).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "rotate_half slice x1 failed",
             e,
         )
@@ -445,21 +443,21 @@ pub fn rotate_half(x: &Tensor) -> Result<Tensor, OCRError> {
         .narrow(candle_core::D::Minus1, half, d - half)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "rotate_half slice x2 failed",
                 e,
             )
         })?;
     let nx2 = x2.neg().map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "rotate_half neg failed",
             e,
         )
     })?;
     Tensor::cat(&[&nx2, &x1], candle_core::D::Minus1).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "rotate_half cat failed",
             e,
         )
@@ -948,7 +946,7 @@ mod tests {
     #[test]
     fn test_error_chain_message_includes_sources() {
         let root = std::io::Error::other("CUDA_ERROR_OUT_OF_MEMORY");
-        let err = OCRError::Inference {
+        let err = Error::Inference {
             model_name: "PaddleOCR-VL".to_string(),
             context: "vision attn softmax".to_string(),
             source: Box::new(root),
@@ -991,7 +989,7 @@ mod tests {
     fn test_parse_device_invalid() {
         let result = parse_device("invalid");
         assert!(result.is_err());
-        if let Err(OCRError::ConfigError { message }) = result {
+        if let Err(Error::Config { message }) = result {
             assert!(message.contains("Unknown device"));
         }
     }
@@ -1012,7 +1010,7 @@ mod tests {
     fn test_parse_device_metal_invalid_ordinal() {
         let result = parse_device("metal:abc");
         assert!(result.is_err());
-        if let Err(OCRError::ConfigError { message }) = result {
+        if let Err(Error::Config { message }) = result {
             assert!(message.contains("Invalid Metal device ordinal"));
         }
     }
@@ -1022,13 +1020,13 @@ mod tests {
     fn test_parse_device_metal_not_enabled() {
         let result = parse_device("metal");
         assert!(result.is_err());
-        if let Err(OCRError::ConfigError { message }) = result {
+        if let Err(Error::Config { message }) = result {
             assert!(message.contains("Metal support not enabled"));
         }
 
         let result = parse_device("metal:0");
         assert!(result.is_err());
-        if let Err(OCRError::ConfigError { message }) = result {
+        if let Err(Error::Config { message }) = result {
             assert!(message.contains("Metal support not enabled"));
         }
     }

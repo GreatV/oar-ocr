@@ -1,4 +1,4 @@
-use oar_ocr_core::core::OCRError;
+use crate::error::Error;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -95,7 +95,7 @@ pub struct HunyuanOcrConfig {
 }
 
 impl HunyuanOcrConfig {
-    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
         crate::utils::load_json_config(path, "HunyuanOCR", "config.json")
     }
 
@@ -127,11 +127,11 @@ pub struct HunyuanOcrImageProcessorConfig {
 }
 
 impl HunyuanOcrImageProcessorConfig {
-    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
         crate::utils::load_json_config(path, "HunyuanOCR", "preprocessor_config.json")
     }
 
-    pub fn validate(&self) -> Result<(), OCRError> {
+    pub fn validate(&self) -> Result<(), Error> {
         crate::utils::validate_image_mean_std("HunyuanOCR", &self.image_mean, &self.image_std)?;
         crate::utils::validate_patch_merge_temporal(
             "HunyuanOCR",

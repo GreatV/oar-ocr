@@ -1,8 +1,8 @@
 use super::config::HpdParsingConfig;
+use crate::error::Error;
 use crate::utils::image::{image_to_chw, patchify_merge_grouped};
 use candle_core::{DType, Device, Tensor};
 use image::{RgbImage, imageops::FilterType};
-use oar_ocr_core::core::OCRError;
 
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
@@ -19,9 +19,9 @@ pub fn preprocess_image(
     cfg: &HpdParsingConfig,
     device: &Device,
     dtype: DType,
-) -> Result<HpdImageInputs, OCRError> {
+) -> Result<HpdImageInputs, Error> {
     if image.width() == 0 || image.height() == 0 {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: "HPD-Parsing cannot process an empty image".to_string(),
         });
     }

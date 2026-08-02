@@ -1,10 +1,10 @@
 use super::config::MinerUImageProcessorConfig;
+use crate::error::Error;
 use crate::utils::image::{
     image_to_chw, patchify_merge_grouped, pil_resample_to_filter_type, smart_resize,
 };
 use candle_core::{DType, Device, Tensor};
 use image::{RgbImage, imageops::FilterType};
-use oar_ocr_core::core::OCRError;
 
 #[derive(Debug, Clone)]
 pub struct MinerUImageInputs {
@@ -17,10 +17,10 @@ pub fn preprocess_images(
     cfg: &MinerUImageProcessorConfig,
     device: &Device,
     dtype: DType,
-) -> Result<MinerUImageInputs, OCRError> {
+) -> Result<MinerUImageInputs, Error> {
     cfg.validate()?;
     if images.is_empty() {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: "MinerU2.5: no images provided".to_string(),
         });
     }
@@ -61,7 +61,7 @@ pub fn preprocess_images(
     for img in images {
         let (h, w) = (img.height(), img.width());
         if cfg.do_resize && (h < factor || w < factor) {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!("MinerU2.5: height/width must be >= factor {factor}, got {h}x{w}"),
             });
         }
@@ -78,7 +78,7 @@ pub fn preprocess_images(
         };
 
         if rh % patch != 0 || rw % patch != 0 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MinerU2.5 preprocess produced non-divisible dims: {rh}x{rw} not divisible by patch_size={patch}"
                 ),
@@ -88,7 +88,7 @@ pub fn preprocess_images(
         let grid_h = (rh / patch) as usize;
         let grid_w = (rw / patch) as usize;
         if !grid_h.is_multiple_of(merge) || !grid_w.is_multiple_of(merge) {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MinerU2.5 preprocess produced grid not divisible by merge_size={merge}: {grid_h}x{grid_w}"
                 ),
@@ -125,8 +125,8 @@ pub fn preprocess_images(
         );
 
         if flat_patches.len() != num_patches * patch_dim {
-            return Err(OCRError::Processing {
-                kind: oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            return Err(Error::Processing {
+                kind: crate::error::ProcessingStage::TensorOperation,
                 context: format!(
                     "MinerU2.5: patch extraction mismatch, got {} expected {}",
                     flat_patches.len(),
@@ -147,14 +147,14 @@ pub fn preprocess_images(
     let total_patches = all_patches.len() / patch_dim;
 
     let pixel_values = Tensor::from_vec(all_patches, (total_patches, patch_dim), device)
-        .map_err(|e| OCRError::Processing {
-            kind: oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+        .map_err(|e| Error::Processing {
+            kind: crate::error::ProcessingStage::TensorOperation,
             context: "MinerU2.5: failed to create pixel_values tensor".to_string(),
             source: Box::new(e),
         })?
         .to_dtype(dtype)
-        .map_err(|e| OCRError::Processing {
-            kind: oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+        .map_err(|e| Error::Processing {
+            kind: crate::error::ProcessingStage::TensorOperation,
             context: "MinerU2.5: failed to convert pixel_values to target dtype".to_string(),
             source: Box::new(e),
         })?;

@@ -6,8 +6,8 @@
 //! multimodal token ids, the mask token used by the diffusion denoiser, and
 //! the vision projector type.
 
+use crate::error::Error;
 use crate::mineru::MinerUVisionConfig;
-use oar_ocr_core::core::OCRError;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -58,12 +58,12 @@ pub struct SdarConfig {
 
 impl SdarConfig {
     /// Resolve the per-head dimension, honouring the explicit `head_dim`.
-    pub fn head_dim(&self) -> Result<usize, OCRError> {
+    pub fn head_dim(&self) -> Result<usize, Error> {
         if let Some(hd) = self.head_dim {
             return Ok(hd);
         }
         if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MinerU-Diffusion: hidden_size {} not divisible by num_attention_heads {}",
                     self.hidden_size, self.num_attention_heads
@@ -98,14 +98,14 @@ pub struct MinerUDiffusionConfig {
 }
 
 impl MinerUDiffusionConfig {
-    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
         crate::utils::load_json_config(path, "MinerU-Diffusion", "config.json")
     }
 
     /// Spatial merge factor encoded in `vision_projector_type`
     /// (`patch_merger2x` / `pm2x` -> 2). Falls back to the vision tower's
     /// `spatial_merge_size` when the type carries no explicit factor.
-    pub fn projector_merge_size(&self) -> Result<usize, OCRError> {
+    pub fn projector_merge_size(&self) -> Result<usize, Error> {
         parse_merge_size(
             &self.vision_projector_type,
             self.vision_config.spatial_merge_size,
@@ -116,7 +116,7 @@ impl MinerUDiffusionConfig {
 /// Parse the spatial merge factor out of a `vision_projector_type` string
 /// (`patch_merger2x` / `pm2x` -> 2). Returns `fallback` when the type carries
 /// no explicit factor; errors on a malformed factor.
-fn parse_merge_size(projector_type: &str, fallback: usize) -> Result<usize, OCRError> {
+fn parse_merge_size(projector_type: &str, fallback: usize) -> Result<usize, Error> {
     let digits: String = projector_type
         .trim()
         .trim_start_matches("patch_merger")
@@ -128,7 +128,7 @@ fn parse_merge_size(projector_type: &str, fallback: usize) -> Result<usize, OCRE
     if digits.is_empty() {
         return Ok(fallback);
     }
-    digits.parse::<usize>().map_err(|_| OCRError::ConfigError {
+    digits.parse::<usize>().map_err(|_| Error::Config {
         message: format!("MinerU-Diffusion: unsupported vision_projector_type '{projector_type}'"),
     })
 }

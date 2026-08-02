@@ -34,8 +34,8 @@ use clap::Parser;
 use image::{RgbImage, imageops};
 use tracing::{error, info};
 
-use oar_ocr_core::utils::load_image;
 use oar_ocr_vl::mineru_diffusion::DEFAULT_PROMPT;
+use oar_ocr_vl::utils::image::load_image;
 use oar_ocr_vl::utils::parse_device;
 use oar_ocr_vl::utils::{convert_otsl_to_html, truncate_repetitive_content};
 use oar_ocr_vl::{DiffusionGenerationConfig, MinerUDiffusion};

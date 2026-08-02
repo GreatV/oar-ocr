@@ -1,11 +1,11 @@
 use super::config::{GlmOcrImageProcessorConfig, GlmOcrVisionConfig};
+use crate::error::Error;
 use crate::utils::{
     candle_to_ocr_processing,
     image::{image_to_chw, patchify_merge_grouped, pil_resample_to_filter_type},
 };
 use candle_core::{DType, Device, Tensor};
 use image::{RgbImage, imageops::FilterType};
-use oar_ocr_core::core::OCRError;
 
 #[derive(Debug, Clone)]
 pub struct GlmOcrImageInputs {
@@ -22,16 +22,16 @@ fn smart_resize_glm(
     factor: u32,
     min_pixels: u32,
     max_pixels: u32,
-) -> Result<(u32, u32), OCRError> {
+) -> Result<(u32, u32), Error> {
     if num_frames < temporal_factor {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "GLM-OCR smart_resize: num_frames ({num_frames}) < temporal_factor ({temporal_factor})"
             ),
         });
     }
     if factor == 0 {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: "GLM-OCR smart_resize: factor must be > 0".to_string(),
         });
     }
@@ -52,7 +52,7 @@ fn smart_resize_glm(
     let max_dim = height.max(width);
     let min_dim = height.min(width);
     if min_dim > 0.0 && (max_dim / min_dim) > 200.0 {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "GLM-OCR smart_resize: absolute aspect ratio must be <= 200, got {:.3}",
                 max_dim / min_dim
@@ -90,10 +90,10 @@ pub fn preprocess_image(
     vision_cfg: &GlmOcrVisionConfig,
     device: &Device,
     dtype: DType,
-) -> Result<GlmOcrImageInputs, OCRError> {
+) -> Result<GlmOcrImageInputs, Error> {
     cfg.validate()?;
     if cfg.patch_size != vision_cfg.patch_size {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "GLM-OCR patch_size mismatch: preprocessor {} != vision_config {}",
                 cfg.patch_size, vision_cfg.patch_size
@@ -101,7 +101,7 @@ pub fn preprocess_image(
         });
     }
     if cfg.temporal_patch_size != vision_cfg.temporal_patch_size {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "GLM-OCR temporal_patch_size mismatch: preprocessor {} != vision_config {}",
                 cfg.temporal_patch_size, vision_cfg.temporal_patch_size
@@ -109,7 +109,7 @@ pub fn preprocess_image(
         });
     }
     if cfg.merge_size != vision_cfg.spatial_merge_size {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "GLM-OCR merge_size mismatch: preprocessor {} != vision_config {}",
                 cfg.merge_size, vision_cfg.spatial_merge_size
@@ -145,7 +145,7 @@ pub fn preprocess_image(
     };
 
     if rh % factor != 0 || rw % factor != 0 {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "GLM-OCR preprocess produced non-divisible dims: {rh}x{rw} not divisible by factor={factor}"
             ),
@@ -187,7 +187,7 @@ pub fn preprocess_image(
     let grid_w = width / patch_size;
 
     if !grid_h.is_multiple_of(merge_size) || !grid_w.is_multiple_of(merge_size) {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "GLM-OCR preprocess produced non-divisible grid: grid_h={grid_h}, grid_w={grid_w}, merge_size={merge_size}"
             ),
@@ -214,7 +214,7 @@ pub fn preprocess_image(
     let pixel_values = Tensor::from_vec(flat, (num_patches, patch_dim), device)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: failed to create pixel_values tensor",
                 e,
             )
@@ -222,7 +222,7 @@ pub fn preprocess_image(
         .to_dtype(dtype)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: failed to cast pixel_values dtype",
                 e,
             )
