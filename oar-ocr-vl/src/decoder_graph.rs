@@ -31,11 +31,11 @@ pub(crate) const fn decoder_attention_is_causal(query_len: usize) -> bool {
 }
 
 #[cfg(feature = "cuda")]
+use crate::error::Error;
+#[cfg(feature = "cuda")]
 use crate::utils::candle_to_ocr_inference;
 #[cfg(feature = "cuda")]
 use candle_core::{CpuStorage, DType, Device, InplaceOp1, Layout, Tensor};
-#[cfg(feature = "cuda")]
-use oar_ocr_core::core::OCRError;
 #[cfg(feature = "cuda")]
 use std::cell::RefCell;
 
@@ -44,8 +44,8 @@ pub(crate) fn cuda_graph_error(
     model_name: &str,
     context: impl Into<String>,
     source: impl std::error::Error + Send + Sync + 'static,
-) -> OCRError {
-    OCRError::Inference {
+) -> Error {
+    Error::Inference {
         model_name: model_name.to_string(),
         context: context.into(),
         source: Box::new(source),
@@ -57,7 +57,7 @@ pub(crate) fn sync_graph_tensor(
     model_name: &str,
     tensor: &Tensor,
     operation: &'static str,
-) -> Result<(), OCRError> {
+) -> Result<(), Error> {
     tensor
         .flatten_all()
         .and_then(|x| x.narrow(0, 0, 1))

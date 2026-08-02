@@ -1,5 +1,5 @@
+use crate::error::Error;
 use candle_nn::Activation;
-use oar_ocr_core::core::OCRError;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -84,7 +84,7 @@ pub struct OvisOcr2TextConfig {
 }
 
 impl OvisOcr2TextConfig {
-    pub fn validate(&self) -> Result<(), OCRError> {
+    pub fn validate(&self) -> Result<(), Error> {
         if self.hidden_size == 0
             || self.intermediate_size == 0
             || self.vocab_size == 0
@@ -94,12 +94,12 @@ impl OvisOcr2TextConfig {
             || self.head_dim == 0
             || self.max_position_embeddings == 0
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "OvisOCR2 text dimensions must be non-zero".to_string(),
             });
         }
         if self.model_type != "qwen3_5_text" {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 expected text model_type 'qwen3_5_text', got '{}'",
                     self.model_type
@@ -107,7 +107,7 @@ impl OvisOcr2TextConfig {
             });
         }
         if self.hidden_act != Activation::Silu {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 text decoder supports hidden_act 'silu', got {:?}",
                     self.hidden_act
@@ -115,17 +115,17 @@ impl OvisOcr2TextConfig {
             });
         }
         if self.attention_bias {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "OvisOCR2 attention_bias=true is not supported".to_string(),
             });
         }
         if !self.attn_output_gate {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "OvisOCR2 requires attn_output_gate=true".to_string(),
             });
         }
         if !self.rms_norm_eps.is_finite() || self.rms_norm_eps <= 0.0 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 rms_norm_eps must be finite and positive, got {}",
                     self.rms_norm_eps
@@ -133,7 +133,7 @@ impl OvisOcr2TextConfig {
             });
         }
         if self.eos_token_id as usize >= self.vocab_size {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 eos_token_id {} is outside vocab_size {}",
                     self.eos_token_id, self.vocab_size
@@ -144,7 +144,7 @@ impl OvisOcr2TextConfig {
             .num_attention_heads
             .is_multiple_of(self.num_key_value_heads)
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 num_attention_heads ({}) must be divisible by num_key_value_heads ({})",
                     self.num_attention_heads, self.num_key_value_heads
@@ -152,7 +152,7 @@ impl OvisOcr2TextConfig {
             });
         }
         if self.layer_types.len() != self.num_hidden_layers {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 layer_types length ({}) must equal num_hidden_layers ({})",
                     self.layer_types.len(),
@@ -165,7 +165,7 @@ impl OvisOcr2TextConfig {
             .iter()
             .any(|kind| kind != "linear_attention" && kind != "full_attention")
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "OvisOCR2 layer_types contains an unsupported layer type".to_string(),
             });
         }
@@ -175,12 +175,12 @@ impl OvisOcr2TextConfig {
             || self.linear_num_key_heads == 0
             || self.linear_num_value_heads == 0
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "OvisOCR2 linear-attention dimensions must be non-zero".to_string(),
             });
         }
         if self.linear_key_head_dim != self.linear_value_head_dim {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 requires equal linear key/value head dims, got {}/{}",
                     self.linear_key_head_dim, self.linear_value_head_dim
@@ -191,7 +191,7 @@ impl OvisOcr2TextConfig {
             .linear_num_value_heads
             .is_multiple_of(self.linear_num_key_heads)
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 linear_num_value_heads ({}) must be divisible by linear_num_key_heads ({})",
                     self.linear_num_value_heads, self.linear_num_key_heads
@@ -199,7 +199,7 @@ impl OvisOcr2TextConfig {
             });
         }
         if self.rope_parameters.rope_type != "default" {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 unsupported rope_type '{}'",
                     self.rope_parameters.rope_type
@@ -207,19 +207,19 @@ impl OvisOcr2TextConfig {
             });
         }
         if !self.rope_parameters.mrope_interleaved {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "OvisOCR2 requires interleaved MRoPE".to_string(),
             });
         }
         if self.rope_parameters.mrope_section.len() != 3
             || self.rope_parameters.mrope_section.contains(&0)
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "OvisOCR2 mrope_section must contain three non-zero entries".to_string(),
             });
         }
         if !self.rope_parameters.rope_theta.is_finite() || self.rope_parameters.rope_theta <= 0.0 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 rope_theta must be finite and positive, got {}",
                     self.rope_parameters.rope_theta
@@ -228,7 +228,7 @@ impl OvisOcr2TextConfig {
         }
         let partial = self.rope_parameters.partial_rotary_factor;
         if !partial.is_finite() || !(0.0..=1.0).contains(&partial) || partial == 0.0 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!("OvisOCR2 partial_rotary_factor must be in (0, 1], got {partial}"),
             });
         }
@@ -238,11 +238,11 @@ impl OvisOcr2TextConfig {
             .mrope_section
             .iter()
             .try_fold(0usize, |sum, &value| sum.checked_add(value))
-            .ok_or_else(|| OCRError::ConfigError {
+            .ok_or_else(|| Error::Config {
                 message: "OvisOCR2 mrope_section sum overflow".to_string(),
             })?;
         if rotary_dim == 0 || !rotary_dim.is_multiple_of(2) || section_sum != rotary_dim / 2 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 mrope_section {:?} must sum to rotary_dim/2 ({})",
                     self.rope_parameters.mrope_section,
@@ -275,9 +275,9 @@ pub struct OvisOcr2VisionConfig {
 }
 
 impl OvisOcr2VisionConfig {
-    pub fn head_dim(&self) -> Result<usize, OCRError> {
+    pub fn head_dim(&self) -> Result<usize, Error> {
         if self.num_heads == 0 || !self.hidden_size.is_multiple_of(self.num_heads) {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 vision hidden_size {} must be divisible by num_heads {}",
                     self.hidden_size, self.num_heads
@@ -287,10 +287,10 @@ impl OvisOcr2VisionConfig {
         Ok(self.hidden_size / self.num_heads)
     }
 
-    pub fn position_grid_size(&self) -> Result<usize, OCRError> {
+    pub fn position_grid_size(&self) -> Result<usize, Error> {
         let side = (self.num_position_embeddings as f64).sqrt() as usize;
         if side == 0 || side * side != self.num_position_embeddings {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 num_position_embeddings must be a non-zero square, got {}",
                     self.num_position_embeddings
@@ -300,9 +300,9 @@ impl OvisOcr2VisionConfig {
         Ok(side)
     }
 
-    pub fn validate(&self) -> Result<(), OCRError> {
+    pub fn validate(&self) -> Result<(), Error> {
         if self.model_type != "qwen3_5" {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 expected vision model_type 'qwen3_5', got '{}'",
                     self.model_type
@@ -317,13 +317,13 @@ impl OvisOcr2VisionConfig {
             || self.temporal_patch_size == 0
             || self.out_hidden_size == 0
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "OvisOCR2 vision dimensions must be non-zero".to_string(),
             });
         }
         let head_dim = self.head_dim()?;
         if !head_dim.is_multiple_of(4) {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 vision head_dim must be divisible by 4 for 2D RoPE, got {head_dim}"
                 ),
@@ -331,7 +331,7 @@ impl OvisOcr2VisionConfig {
         }
         self.position_grid_size()?;
         if !self.deepstack_visual_indexes.is_empty() {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "OvisOCR2 deepstack vision features are not supported".to_string(),
             });
         }
@@ -356,7 +356,7 @@ pub struct OvisOcr2Config {
 }
 
 impl OvisOcr2Config {
-    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
         let cfg: Self = crate::utils::load_json_config(path, "OvisOCR2", "config.json")?;
         cfg.validate()?;
         Ok(cfg)
@@ -366,9 +366,9 @@ impl OvisOcr2Config {
         self.tie_word_embeddings || self.text_config.tie_word_embeddings
     }
 
-    pub fn validate(&self) -> Result<(), OCRError> {
+    pub fn validate(&self) -> Result<(), Error> {
         if self.model_type != "qwen3_5" {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 expected model_type 'qwen3_5', got '{}'",
                     self.model_type
@@ -378,7 +378,7 @@ impl OvisOcr2Config {
         self.text_config.validate()?;
         self.vision_config.validate()?;
         if !self.tie_word_embeddings() {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "OvisOCR2 requires tied token embeddings".to_string(),
             });
         }
@@ -389,7 +389,7 @@ impl OvisOcr2Config {
             ("vision_end_token_id", self.vision_end_token_id),
         ] {
             if token_id as usize >= self.text_config.vocab_size {
-                return Err(OCRError::ConfigError {
+                return Err(Error::Config {
                     message: format!(
                         "OvisOCR2 {name} {token_id} is outside vocab_size {}",
                         self.text_config.vocab_size
@@ -398,7 +398,7 @@ impl OvisOcr2Config {
             }
         }
         if self.vision_config.out_hidden_size != self.text_config.hidden_size {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 vision out_hidden_size ({}) must equal text hidden_size ({})",
                     self.vision_config.out_hidden_size, self.text_config.hidden_size
@@ -442,7 +442,7 @@ pub struct OvisOcr2ImageProcessorConfig {
 }
 
 impl OvisOcr2ImageProcessorConfig {
-    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
         let cfg: Self =
             crate::utils::load_json_config(path, "OvisOCR2", "preprocessor_config.json")?;
         cfg.validate()?;
@@ -458,7 +458,7 @@ impl OvisOcr2ImageProcessorConfig {
         (OVIS_OCR2_MIN_PIXELS, OVIS_OCR2_MAX_PIXELS)
     }
 
-    pub fn validate(&self) -> Result<(), OCRError> {
+    pub fn validate(&self) -> Result<(), Error> {
         crate::utils::validate_image_mean_std("OvisOCR2", &self.image_mean, &self.image_std)?;
         if self
             .image_mean
@@ -466,17 +466,17 @@ impl OvisOcr2ImageProcessorConfig {
             .chain(&self.image_std)
             .any(|value| !value.is_finite())
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "OvisOCR2 image_mean/std values must be finite".to_string(),
             });
         }
         if self.do_normalize && self.image_std.iter().any(|&value| value <= 0.0) {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "OvisOCR2 image_std values must be positive".to_string(),
             });
         }
         if self.do_rescale && !self.rescale_factor.is_finite() {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 rescale_factor must be finite, got {}",
                     self.rescale_factor
@@ -490,12 +490,12 @@ impl OvisOcr2ImageProcessorConfig {
             self.temporal_patch_size,
         )?;
         if self.size.shortest_edge == 0 || self.size.longest_edge == 0 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "OvisOCR2 processor size bounds must be non-zero".to_string(),
             });
         }
         if self.size.shortest_edge > self.size.longest_edge {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "OvisOCR2 shortest_edge {} exceeds longest_edge {}",
                     self.size.shortest_edge, self.size.longest_edge
@@ -505,7 +505,7 @@ impl OvisOcr2ImageProcessorConfig {
         if let Some(resample) = self.resample
             && resample > 5
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!("OvisOCR2 unsupported PIL resample value {resample}"),
             });
         }

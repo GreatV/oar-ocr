@@ -4,11 +4,11 @@ use super::mtp::GlmOcrMtpModel;
 use super::processing::{GlmOcrImageInputs, preprocess_image};
 use super::text::GlmOcrTextModel;
 use super::vision::GlmOcrVisionModel;
+use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
 use image::RgbImage;
-use oar_ocr_core::core::OCRError;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
@@ -36,22 +36,21 @@ pub struct GlmOcr {
 }
 
 impl GlmOcr {
-    pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, OCRError> {
+    pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         let model_dir = model_dir.as_ref();
         let cfg = GlmOcrConfig::from_path(model_dir.join("config.json"))?;
         let image_cfg =
             GlmOcrImageProcessorConfig::from_path(model_dir.join("preprocessor_config.json"))?;
 
-        let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| {
-            OCRError::ConfigError {
+        let tokenizer =
+            Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| Error::Config {
                 message: format!("failed to load GLM-OCR tokenizer.json: {e}"),
-            }
-        })?;
+            })?;
 
         if let Some(tok_image_id) = tokenizer.token_to_id("<|image|>")
             && tok_image_id != cfg.image_token_id
         {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "GLM-OCR image_token_id mismatch: tokenizer {tok_image_id} != config {}",
                     cfg.image_token_id
@@ -132,12 +131,12 @@ impl GlmOcr {
         images: &[RgbImage],
         instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Vec<Result<String, OCRError>> {
+    ) -> Vec<Result<String, Error>> {
         if images.is_empty() {
             return Vec::new();
         }
         if images.len() != instructions.len() {
-            return vec![Err(OCRError::InvalidInput {
+            return vec![Err(Error::InvalidInput {
                 message: format!(
                     "GLM-OCR: images count ({}) != instructions count ({})",
                     images.len(),
@@ -155,7 +154,7 @@ impl GlmOcr {
                 let msg = crate::utils::error_chain_message("generation failed", &e);
                 (0..images.len())
                     .map(|_| {
-                        Err(OCRError::InvalidInput {
+                        Err(Error::InvalidInput {
                             message: msg.clone(),
                         })
                     })
@@ -172,12 +171,12 @@ impl GlmOcr {
         images: &[RgbImage],
         instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Vec<Result<Vec<u32>, OCRError>> {
+    ) -> Vec<Result<Vec<u32>, Error>> {
         if images.is_empty() {
             return Vec::new();
         }
         if images.len() != instructions.len() {
-            return vec![Err(OCRError::InvalidInput {
+            return vec![Err(Error::InvalidInput {
                 message: format!(
                     "GLM-OCR: images count ({}) != instructions count ({})",
                     images.len(),
@@ -192,7 +191,7 @@ impl GlmOcr {
                 let msg = crate::utils::error_chain_message("generation failed", &e);
                 (0..images.len())
                     .map(|_| {
-                        Err(OCRError::InvalidInput {
+                        Err(Error::InvalidInput {
                             message: msg.clone(),
                         })
                     })
@@ -206,7 +205,7 @@ impl GlmOcr {
         images: &[RgbImage],
         instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Result<Vec<Vec<u32>>, OCRError> {
+    ) -> Result<Vec<Vec<u32>>, Error> {
         let mut results = Vec::with_capacity(images.len());
 
         for (image, instruction) in images.iter().zip(instructions.iter()) {
@@ -224,12 +223,12 @@ impl GlmOcr {
             let enc = self
                 .tokenizer
                 .encode(prompt, false)
-                .map_err(|e| OCRError::InvalidInput {
+                .map_err(|e| Error::InvalidInput {
                     message: format!("GLM-OCR: tokenizer encode failed: {e}"),
                 })?;
             let input_ids = enc.get_ids().to_vec();
             if input_ids.is_empty() {
-                return Err(OCRError::InvalidInput {
+                return Err(Error::InvalidInput {
                     message: "GLM-OCR: empty prompt after tokenization".to_string(),
                 });
             }
@@ -307,10 +306,10 @@ impl GlmOcr {
         seq_len: usize,
         rope_delta: i64,
         max_new_tokens: usize,
-    ) -> Result<Vec<u32>, OCRError> {
+    ) -> Result<Vec<u32>, Error> {
         let last = prompt_hidden.i((0, seq_len - 1, ..)).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: get last hidden",
                 e,
             )
@@ -324,7 +323,7 @@ impl GlmOcr {
                 .and_then(|t| t.to_scalar::<u32>())
                 .map_err(|e| {
                     candle_to_ocr_processing(
-                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                        crate::error::ProcessingStage::TensorOperation,
                         "GLM-OCR: argmax",
                         e,
                     )
@@ -356,11 +355,11 @@ impl GlmOcr {
         rope_delta: i64,
         max_new_tokens: usize,
         mtp: &GlmOcrMtpModel,
-    ) -> Result<Vec<u32>, OCRError> {
+    ) -> Result<Vec<u32>, Error> {
         let prompt_len = prompt_ids.len();
         let last = prompt_hidden.i((0, prompt_len - 1, ..)).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: get MTP target hidden",
                 e,
             )
@@ -371,7 +370,7 @@ impl GlmOcr {
             .and_then(|token| token.to_scalar::<u32>())
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: initial MTP target argmax",
                     e,
                 )
@@ -427,7 +426,7 @@ impl GlmOcr {
                 candle_to_ocr_inference("GLM-OCR", "copy MTP verification tokens", e)
             })?;
             if target_tokens.len() != GLM_MTP_QUERY_LEN {
-                return Err(OCRError::InvalidInput {
+                return Err(Error::InvalidInput {
                     message: format!(
                         "GLM-OCR: verification returned {} tokens, expected {}",
                         target_tokens.len(),
@@ -509,7 +508,7 @@ impl GlmOcr {
         first_hidden: &Tensor,
         first_tokens: &Tensor,
         target_position: i64,
-    ) -> Result<Vec<u32>, OCRError> {
+    ) -> Result<Vec<u32>, Error> {
         let seq_len = first_hidden
             .dim(1)
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP result length", e))?;
@@ -557,7 +556,7 @@ impl GlmOcr {
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "copy MTP proposals", e))
     }
 
-    pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
+    pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, Error> {
         self.decode_generated_tokens(tokens)
     }
 
@@ -565,11 +564,11 @@ impl GlmOcr {
     /// post-process. Use this when the raw token sequence is needed before
     /// any post-processing — for example when feeding output to another
     /// model that operates at token granularity.
-    pub fn decode_tokens_raw(&self, tokens: &[u32]) -> Result<String, OCRError> {
+    pub fn decode_tokens_raw(&self, tokens: &[u32]) -> Result<String, Error> {
         let decoded = self
             .tokenizer
             .decode(tokens, true)
-            .map_err(|e| OCRError::InvalidInput {
+            .map_err(|e| Error::InvalidInput {
                 message: format!("GLM-OCR: tokenizer decode failed: {e}"),
             })?;
         Ok(decoded.trim().to_string())
@@ -579,7 +578,7 @@ impl GlmOcr {
         &self.tokenizer
     }
 
-    fn decode_generated_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
+    fn decode_generated_tokens(&self, tokens: &[u32]) -> Result<String, Error> {
         // No Rust-specific truncation heuristic — match official GLM-OCR behavior.
         // The official implementation relies on EOS-based stopping only.
         self.decode_tokens_raw(tokens)
@@ -589,12 +588,12 @@ impl GlmOcr {
         &self,
         input_ids: &[u32],
         image_inputs: &GlmOcrImageInputs,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let seq_len = input_ids.len();
         let token_ids =
             Tensor::from_vec(input_ids.to_vec(), (1, seq_len), &self.device).map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: create input_ids tensor",
                     e,
                 )
@@ -606,7 +605,7 @@ impl GlmOcr {
             .forward(&image_inputs.pixel_values, image_inputs.grid_thw)?;
         let image_embeds = image_embeds.to_dtype(self.dtype).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: cast image_embeds",
                 e,
             )
@@ -625,13 +624,13 @@ impl GlmOcr {
             .collect();
         let image_embeds_len = image_embeds.dim(0).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: image_embeds dim",
                 e,
             )
         })?;
         if indices.len() != image_embeds_len {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "GLM-OCR: image token count ({}) != image embeds ({})",
                     indices.len(),
@@ -640,21 +639,21 @@ impl GlmOcr {
             });
         }
         if indices.is_empty() {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: "GLM-OCR: no image tokens found in prompt".to_string(),
             });
         }
         let start = indices[0];
         let end = *indices.last().unwrap();
         if end + 1 - start != indices.len() {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: "GLM-OCR: image tokens are not contiguous in prompt".to_string(),
             });
         }
 
         let hidden_size = embeds.dim(2).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: embed hidden_size",
                 e,
             )
@@ -663,7 +662,7 @@ impl GlmOcr {
         let prefix = if start > 0 {
             embeds.narrow(1, 0, start).map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: embed prefix narrow",
                     e,
                 )
@@ -671,7 +670,7 @@ impl GlmOcr {
         } else {
             Tensor::zeros((1, 0, hidden_size), embeds.dtype(), embeds.device()).map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: embed prefix zeros",
                     e,
                 )
@@ -684,7 +683,7 @@ impl GlmOcr {
                 .narrow(1, suffix_start, seq_len - suffix_start)
                 .map_err(|e| {
                     candle_to_ocr_processing(
-                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                        crate::error::ProcessingStage::TensorOperation,
                         "GLM-OCR: embed suffix narrow",
                         e,
                     )
@@ -692,7 +691,7 @@ impl GlmOcr {
         } else {
             Tensor::zeros((1, 0, hidden_size), embeds.dtype(), embeds.device()).map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: embed suffix zeros",
                     e,
                 )
@@ -701,14 +700,14 @@ impl GlmOcr {
 
         let image_embeds = image_embeds.unsqueeze(0).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: image embeds unsqueeze",
                 e,
             )
         })?;
         embeds = Tensor::cat(&[&prefix, &image_embeds, &suffix], 1).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: embed cat",
                 e,
             )
@@ -717,10 +716,10 @@ impl GlmOcr {
         Ok(embeds)
     }
 
-    fn logits_from_hidden(&self, hidden: &Tensor) -> Result<Tensor, OCRError> {
+    fn logits_from_hidden(&self, hidden: &Tensor) -> Result<Tensor, Error> {
         let hidden = hidden.unsqueeze(0).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: logits unsqueeze",
                 e,
             )
@@ -731,7 +730,7 @@ impl GlmOcr {
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "lm_head forward", e))?;
         logits.squeeze(0).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: logits squeeze",
                 e,
             )
@@ -739,19 +738,19 @@ impl GlmOcr {
     }
 }
 
-fn token_tensor(token: u32, device: &Device) -> Result<Tensor, OCRError> {
+fn token_tensor(token: u32, device: &Device) -> Result<Tensor, Error> {
     Tensor::new(&[token], device)
         .and_then(|token| token.reshape((1, 1)))
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: create token tensor",
                 e,
             )
         })
 }
 
-fn text_position_ids(start: i64, len: usize, device: &Device) -> Result<Tensor, OCRError> {
+fn text_position_ids(start: i64, len: usize, device: &Device) -> Result<Tensor, Error> {
     let positions: Vec<i64> = (0..len).map(|offset| start + offset as i64).collect();
     let mut data = Vec::with_capacity(3 * len);
     data.extend_from_slice(&positions);
@@ -759,7 +758,7 @@ fn text_position_ids(start: i64, len: usize, device: &Device) -> Result<Tensor, 
     data.extend_from_slice(&positions);
     Tensor::from_vec(data, (3, 1, len), device).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: create text position ids",
             e,
         )
@@ -772,14 +771,14 @@ fn build_prompt(instruction: &str) -> String {
     )
 }
 
-fn expand_image_tokens(prompt: &str, num_image_tokens: usize) -> Result<String, OCRError> {
+fn expand_image_tokens(prompt: &str, num_image_tokens: usize) -> Result<String, Error> {
     if num_image_tokens == 0 {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: "GLM-OCR: num_image_tokens is zero".to_string(),
         });
     }
     if !prompt.contains("<|image|>") {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: "GLM-OCR: prompt missing <|image|> token".to_string(),
         });
     }
@@ -798,7 +797,7 @@ fn build_position_ids(
     merge_size: usize,
     image_token_id: u32,
     device: &Device,
-) -> Result<(Tensor, i64), OCRError> {
+) -> Result<(Tensor, i64), Error> {
     let (mut pos_t, mut pos_h, mut pos_w) = (Vec::new(), Vec::new(), Vec::new());
     let mut max_pos: i64 = -1;
 
@@ -830,7 +829,7 @@ fn build_position_ids(
         let st_idx = max_pos + 1;
         if is_image {
             if seen_image {
-                return Err(OCRError::InvalidInput {
+                return Err(Error::InvalidInput {
                     message: "GLM-OCR: multiple image groups in prompt are not supported"
                         .to_string(),
                 });
@@ -838,7 +837,7 @@ fn build_position_ids(
             seen_image = true;
             let group_len = e - s;
             if group_len != expected_image_tokens {
-                return Err(OCRError::InvalidInput {
+                return Err(Error::InvalidInput {
                     message: format!(
                         "GLM-OCR: image token count ({group_len}) != expected ({expected_image_tokens})"
                     ),
@@ -869,7 +868,7 @@ fn build_position_ids(
 
     let seq_len = input_ids.len();
     if pos_t.len() != seq_len {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "GLM-OCR: position_ids length mismatch: {} vs {}",
                 pos_t.len(),
@@ -885,7 +884,7 @@ fn build_position_ids(
 
     let position_ids = Tensor::from_vec(data, (3, 1, seq_len), device).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: position_ids tensor",
             e,
         )

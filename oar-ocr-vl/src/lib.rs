@@ -16,8 +16,19 @@
 //! - `monkeyocrv2` - MonkeyOCRv2-S/B-Parsing full-page and region parsing
 //! - `ovisocr2` - OvisOCR2 end-to-end page-to-Markdown parser (Qwen3.5)
 //! - `doc_parser` - Unified document parsing with pluggable recognition backends
+//! - `pp_doclayout` - Native PP-DocLayoutV2/V3 layout detection and reading
+//!   order
+//! - `layout` - Backend-agnostic [`LayoutSource`] trait feeding `doc_parser`
 //! - `utils` - Device parsing, candle helpers, markdown, OTSL conversion
 //! - `attention` - Unified attention shared by all models
+//!
+//! [`LayoutSource`]: layout::LayoutSource
+//!
+//! ## Candle only
+//!
+//! Everything here runs on Candle, including layout detection via
+//! [`PpDocLayout`], so `ort` never enters the dependency tree. To source layout
+//! from somewhere else, implement [`LayoutSource`].
 //!
 //! GPU acceleration is gated behind the `cuda` feature. Parse device strings
 //! with [`utils::parse_device`]:
@@ -33,15 +44,21 @@
 //! ```
 
 // Core model modules
+pub mod crop;
 pub mod doc_parser;
+pub mod error;
+pub mod geometry;
 pub mod glmocr;
 pub mod hpd_parsing;
 pub mod hunyuanocr;
+pub mod layout;
 pub mod mineru;
 pub mod mineru_diffusion;
 pub mod monkeyocrv2;
 pub mod ovisocr2;
 pub mod paddleocr_vl;
+pub mod pp_doclayout;
+pub mod structure;
 pub mod utils;
 
 // Shared attention implementation
@@ -74,3 +91,8 @@ pub use monkeyocrv2::{MonkeyOcrV2, MonkeyOcrV2Task};
 pub use ovisocr2::OvisOcr2;
 
 pub use doc_parser::{DocParser, DocParserConfig, RecognitionBackend, RecognitionTask};
+pub use error::{Error, ProcessingStage, Result};
+pub use geometry::{BoundingBox, Point};
+pub use layout::{LayoutDetectionElement, LayoutDetections, LayoutSource, StaticLayout};
+pub use pp_doclayout::{PpDocLayout, PpDocLayoutVersion};
+pub use structure::{LayoutElement, LayoutElementType, StructureResult, TableResult, TableType};

@@ -1,4 +1,4 @@
-use oar_ocr_core::core::OCRError;
+use crate::error::Error;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -119,13 +119,13 @@ impl MinerUConfig {
         self.tie_word_embeddings || self.text_config.tie_word_embeddings
     }
 
-    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
         crate::utils::load_json_config(path, "MinerU2.5", "config.json")
     }
 
-    pub fn head_dim(&self) -> Result<usize, OCRError> {
+    pub fn head_dim(&self) -> Result<usize, Error> {
         if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "MinerU2.5: hidden_size {} not divisible by num_attention_heads {}",
                     self.hidden_size, self.num_attention_heads
@@ -170,14 +170,14 @@ pub struct MinerUImageSize {
 }
 
 impl MinerUImageProcessorConfig {
-    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OCRError> {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
         crate::utils::load_json_config(path, "MinerU2.5", "preprocessor_config.json")
     }
 
-    pub fn pixel_bounds(&self) -> Result<(u32, u32), OCRError> {
+    pub fn pixel_bounds(&self) -> Result<(u32, u32), Error> {
         if let Some(size) = &self.size {
             if size.shortest_edge == 0 || size.longest_edge == 0 {
-                return Err(OCRError::ConfigError {
+                return Err(Error::Config {
                     message: "MinerU2.5 size.shortest_edge/longest_edge must be > 0".to_string(),
                 });
             }
@@ -186,17 +186,17 @@ impl MinerUImageProcessorConfig {
 
         match (self.min_pixels, self.max_pixels) {
             (Some(min_pixels), Some(max_pixels)) => Ok((min_pixels, max_pixels)),
-            _ => Err(OCRError::ConfigError {
+            _ => Err(Error::Config {
                 message: "MinerU2.5 preprocessor_config missing size or min/max pixels".to_string(),
             }),
         }
     }
 
-    pub fn validate(&self) -> Result<(), OCRError> {
+    pub fn validate(&self) -> Result<(), Error> {
         if self.do_normalize {
             crate::utils::validate_image_mean_std("MinerU2.5", &self.image_mean, &self.image_std)?;
             if self.image_std.contains(&0.0) {
-                return Err(OCRError::ConfigError {
+                return Err(Error::Config {
                     message: "MinerU2.5 image_std values must be non-zero".to_string(),
                 });
             }
@@ -210,12 +210,12 @@ impl MinerUImageProcessorConfig {
         if self.do_resize {
             let (min_pixels, max_pixels) = self.pixel_bounds()?;
             if min_pixels == 0 || max_pixels == 0 {
-                return Err(OCRError::ConfigError {
+                return Err(Error::Config {
                     message: "MinerU2.5 min/max pixels must be > 0".to_string(),
                 });
             }
             if min_pixels > max_pixels {
-                return Err(OCRError::ConfigError {
+                return Err(Error::Config {
                     message: format!(
                         "MinerU2.5 min_pixels ({min_pixels}) must be <= max_pixels ({max_pixels})"
                     ),
@@ -223,7 +223,7 @@ impl MinerUImageProcessorConfig {
             }
         }
         if self.do_rescale && self.rescale_factor <= 0.0 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "MinerU2.5 rescale_factor must be > 0".to_string(),
             });
         }

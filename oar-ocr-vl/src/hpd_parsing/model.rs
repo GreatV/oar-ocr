@@ -3,12 +3,12 @@ use super::processing::{HpdImageInputs, preprocess_image};
 use super::vision::HpdVisionModel;
 #[cfg(feature = "cuda")]
 use crate::cuda_kernels::{ArgmaxFirstBf16, ArgmaxFirstF32};
+use crate::error::Error;
 use crate::mineru_diffusion::text::{SdarKvCache, SdarModel};
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::{Linear, Module, RmsNorm, VarBuilder, linear_no_bias, rms_norm};
 use image::RgbImage;
-use oar_ocr_core::core::OCRError;
 use std::collections::VecDeque;
 use std::path::Path;
 use tokenizers::Tokenizer;
@@ -41,16 +41,16 @@ impl Default for HpdGenerationConfig {
 }
 
 impl HpdGenerationConfig {
-    fn validate(&self) -> Result<(), OCRError> {
+    fn validate(&self) -> Result<(), Error> {
         if self.use_mtp && self.num_speculative_tokens == 0 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message:
                     "HPD-Parsing num_speculative_tokens must be non-zero when P-MTP is enabled"
                         .to_string(),
             });
         }
         if self.max_active_branches == 0 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: "HPD-Parsing max_active_branches must be non-zero".to_string(),
             });
         }
@@ -91,7 +91,7 @@ struct MtpHead {
 }
 
 impl MtpHead {
-    fn load(cfg: &crate::mineru_diffusion::SdarConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &crate::mineru_diffusion::SdarConfig, vb: VarBuilder) -> Result<Self, Error> {
         let load_linear = |input, output, vb, name| {
             linear_no_bias(input, output, vb)
                 .map_err(|e| candle_to_ocr_inference(MODEL_NAME, name, e))
@@ -138,7 +138,7 @@ impl MtpHead {
         })
     }
 
-    fn step(&self, hidden: &Tensor, previous_embedding: &Tensor) -> Result<Tensor, OCRError> {
+    fn step(&self, hidden: &Tensor, previous_embedding: &Tensor) -> Result<Tensor, Error> {
         let hidden = self
             .pre_fc_norm_hidden
             .forward(hidden)
@@ -165,7 +165,7 @@ impl MtpHead {
         self.norm
             .forward(&(fused + mlp).map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "HPD P-MTP residual",
                     e,
                 )
@@ -219,14 +219,13 @@ pub struct HpdParsing {
 }
 
 impl HpdParsing {
-    pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, OCRError> {
+    pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         let model_dir = model_dir.as_ref();
         let cfg = HpdParsingConfig::from_path(model_dir.join("config.json"))?;
-        let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| {
-            OCRError::ConfigError {
+        let tokenizer =
+            Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| Error::Config {
                 message: format!("HPD-Parsing failed to load tokenizer.json: {e}"),
-            }
-        })?;
+            })?;
         let image_context_token_id = require_token(&tokenizer, IMAGE_CONTEXT_TOKEN, Some(151671))?;
         require_token(&tokenizer, "<img>", Some(151669))?;
         require_token(&tokenizer, "</img>", Some(151670))?;
@@ -270,7 +269,7 @@ impl HpdParsing {
         &self,
         images: &[RgbImage],
         generation: &HpdGenerationConfig,
-    ) -> Vec<Result<String, OCRError>> {
+    ) -> Vec<Result<String, Error>> {
         images
             .iter()
             .map(|image| {
@@ -286,9 +285,9 @@ impl HpdParsing {
         images: &[RgbImage],
         prompts: &[impl AsRef<str>],
         generation: &HpdGenerationConfig,
-    ) -> Vec<Result<String, OCRError>> {
+    ) -> Vec<Result<String, Error>> {
         if images.len() != prompts.len() {
-            return vec![Err(OCRError::InvalidInput {
+            return vec![Err(Error::InvalidInput {
                 message: format!(
                     "HPD-Parsing image count {} != prompt count {}",
                     images.len(),
@@ -312,7 +311,7 @@ impl HpdParsing {
         image: &RgbImage,
         instruction: &str,
         generation: &HpdGenerationConfig,
-    ) -> Result<HpdOutput, OCRError> {
+    ) -> Result<HpdOutput, Error> {
         generation.validate()?;
         if generation.max_new_tokens == 0 {
             return Ok(HpdOutput {
@@ -326,12 +325,12 @@ impl HpdParsing {
         let image_inputs = preprocess_image(image, &self.cfg, &self.device, self.dtype)?;
         let image_tokens = self.cfg.image_tokens_per_tile()? * image_inputs.num_tiles;
         let prompt = build_prompt(instruction, image_tokens);
-        let encoding =
-            self.tokenizer
-                .encode(prompt, false)
-                .map_err(|e| OCRError::InvalidInput {
-                    message: format!("HPD-Parsing tokenizer encode failed: {e}"),
-                })?;
+        let encoding = self
+            .tokenizer
+            .encode(prompt, false)
+            .map_err(|e| Error::InvalidInput {
+                message: format!("HPD-Parsing tokenizer encode failed: {e}"),
+            })?;
         let prompt_ids = encoding.get_ids();
         validate_generation_length(
             prompt_ids.len(),
@@ -385,7 +384,7 @@ impl HpdParsing {
         &self,
         input_ids: &[u32],
         image_inputs: &HpdImageInputs,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let token_tensor = Tensor::new(input_ids, &self.device)
             .and_then(|x| x.unsqueeze(0))
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create prompt IDs", e))?;
@@ -404,7 +403,7 @@ impl HpdParsing {
             .dim(0)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read image token count", e))?;
         if positions.len() != image_len || positions.is_empty() {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "HPD-Parsing image placeholder count {} != image embedding count {image_len}",
                     positions.len()
@@ -417,7 +416,7 @@ impl HpdParsing {
             .enumerate()
             .any(|(offset, &position)| position != start + offset)
         {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: "HPD-Parsing image placeholders must be contiguous".to_string(),
             });
         }
@@ -442,14 +441,14 @@ impl HpdParsing {
         max_new_tokens: usize,
         kind: BranchKind,
         allow_fork: bool,
-    ) -> Result<BranchState, OCRError> {
+    ) -> Result<BranchState, Error> {
         let hidden = self.lm_forward(first_embeddings, &mut cache)?;
         let producer_hidden = last_hidden(&hidden)?;
         let pending_token = select_last_greedy(&self.text.lm_logits(&hidden)?)?;
         let mut tokens = Vec::new();
         tokens
             .try_reserve_exact(max_new_tokens)
-            .map_err(|e| OCRError::InvalidInput {
+            .map_err(|e| Error::InvalidInput {
                 message: format!("HPD-Parsing cannot reserve generated tokens: {e}"),
             })?;
         Ok(BranchState {
@@ -468,7 +467,7 @@ impl HpdParsing {
         &self,
         parent: BranchState,
         generation: &HpdGenerationConfig,
-    ) -> Result<SchedulerOutput, OCRError> {
+    ) -> Result<SchedulerOutput, Error> {
         let mut active = vec![parent];
         let mut waiting = VecDeque::new();
         let mut parent_tokens = None;
@@ -506,7 +505,7 @@ impl HpdParsing {
                     .max_position_embeddings
                     .saturating_sub(event.prefix_len + 1);
                 if remaining == 0 {
-                    return Err(OCRError::InvalidInput {
+                    return Err(Error::InvalidInput {
                         message: format!(
                             "HPD-Parsing child at KV position {} has no context capacity",
                             event.prefix_len
@@ -555,7 +554,7 @@ impl HpdParsing {
             }
         }
 
-        let parent_tokens = parent_tokens.ok_or_else(|| OCRError::InvalidInput {
+        let parent_tokens = parent_tokens.ok_or_else(|| Error::InvalidInput {
             message: "HPD scheduler terminated without a parent result".to_string(),
         })?;
         Ok(SchedulerOutput {
@@ -565,10 +564,7 @@ impl HpdParsing {
         })
     }
 
-    fn advance_greedy_batch(
-        &self,
-        branches: &mut [BranchState],
-    ) -> Result<Vec<ForkEvent>, OCRError> {
+    fn advance_greedy_batch(&self, branches: &mut [BranchState]) -> Result<Vec<ForkEvent>, Error> {
         let ids = branches.iter().map(|b| b.pending_token).collect::<Vec<_>>();
         let input = Tensor::from_vec(ids, (branches.len(), 1), &self.device)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create greedy batch", e))?;
@@ -607,7 +603,7 @@ impl HpdParsing {
         branches: &mut [BranchState],
         generation: &HpdGenerationConfig,
         stats: &mut HpdRuntimeStats,
-    ) -> Result<Vec<ForkEvent>, OCRError> {
+    ) -> Result<Vec<ForkEvent>, Error> {
         let batch = branches.len();
         let k = branches
             .iter()
@@ -723,7 +719,7 @@ impl HpdParsing {
             self.stop_token_ids.contains(&token) || branch.tokens.len() >= branch.max_new_tokens;
     }
 
-    fn lm_forward(&self, embeddings: &Tensor, cache: &mut SdarKvCache) -> Result<Tensor, OCRError> {
+    fn lm_forward(&self, embeddings: &Tensor, cache: &mut SdarKvCache) -> Result<Tensor, Error> {
         let seq_len = embeddings
             .dim(1)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read decoder input length", e))?;
@@ -733,10 +729,10 @@ impl HpdParsing {
             .forward_causal(embeddings, &positions, cache, true)
     }
 
-    pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
+    pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, Error> {
         decode_protocol_tokens(&self.tokenizer, tokens, &self.stop_token_ids)
             .map(|text| text.trim().to_string())
-            .map_err(|e| OCRError::InvalidInput {
+            .map_err(|e| Error::InvalidInput {
                 message: format!("HPD-Parsing tokenizer decode failed: {e}"),
             })
     }
@@ -765,20 +761,14 @@ fn build_prompt(instruction: &str, image_tokens: usize) -> String {
     prompt
 }
 
-fn require_token(
-    tokenizer: &Tokenizer,
-    token: &str,
-    expected: Option<u32>,
-) -> Result<u32, OCRError> {
-    let id = tokenizer
-        .token_to_id(token)
-        .ok_or_else(|| OCRError::ConfigError {
-            message: format!("HPD-Parsing tokenizer is missing {token:?}"),
-        })?;
+fn require_token(tokenizer: &Tokenizer, token: &str, expected: Option<u32>) -> Result<u32, Error> {
+    let id = tokenizer.token_to_id(token).ok_or_else(|| Error::Config {
+        message: format!("HPD-Parsing tokenizer is missing {token:?}"),
+    })?;
     if let Some(expected) = expected
         && id != expected
     {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "HPD-Parsing token {token:?} id mismatch: tokenizer {id} != config {expected}"
             ),
@@ -791,15 +781,14 @@ fn validate_generation_length(
     prompt_len: usize,
     max_new_tokens: usize,
     context_limit: usize,
-) -> Result<(), OCRError> {
-    let requested =
-        prompt_len
-            .checked_add(max_new_tokens)
-            .ok_or_else(|| OCRError::InvalidInput {
-                message: "HPD-Parsing requested sequence length overflows usize".to_string(),
-            })?;
+) -> Result<(), Error> {
+    let requested = prompt_len
+        .checked_add(max_new_tokens)
+        .ok_or_else(|| Error::InvalidInput {
+            message: "HPD-Parsing requested sequence length overflows usize".to_string(),
+        })?;
     if requested > context_limit {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "HPD-Parsing prompt ({prompt_len}) plus max_new_tokens ({max_new_tokens}) exceeds context limit {context_limit}"
             ),
@@ -808,7 +797,7 @@ fn validate_generation_length(
     Ok(())
 }
 
-fn last_hidden(hidden: &Tensor) -> Result<Tensor, OCRError> {
+fn last_hidden(hidden: &Tensor) -> Result<Tensor, Error> {
     let len = hidden
         .dim(1)
         .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read hidden length", e))?;
@@ -817,7 +806,7 @@ fn last_hidden(hidden: &Tensor) -> Result<Tensor, OCRError> {
         .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "select last hidden", e))
 }
 
-fn greedy_batch_rows(logits: &Tensor) -> Result<Vec<Vec<u32>>, OCRError> {
+fn greedy_batch_rows(logits: &Tensor) -> Result<Vec<Vec<u32>>, Error> {
     let (batch, seq_len, vocab) = logits
         .dims3()
         .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read batched logits shape", e))?;
@@ -825,7 +814,7 @@ fn greedy_batch_rows(logits: &Tensor) -> Result<Vec<Vec<u32>>, OCRError> {
     if logits.device().is_cuda() && matches!(logits.dtype(), DType::BF16 | DType::F32) {
         let rows = batch
             .checked_mul(seq_len)
-            .ok_or_else(|| OCRError::InvalidInput {
+            .ok_or_else(|| Error::InvalidInput {
                 message: "HPD batched logits row count overflows usize".to_string(),
             })?;
         let logits = logits
@@ -847,7 +836,7 @@ fn greedy_batch_rows(logits: &Tensor) -> Result<Vec<Vec<u32>>, OCRError> {
         .and_then(|ids| ids.to_vec2::<u32>())
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HPD batched verification argmax",
                 e,
             )
@@ -870,18 +859,18 @@ fn decode_protocol_tokens(
     tokenizer.decode(&visible, false)
 }
 
-fn greedy_batch_last(logits: &Tensor) -> Result<Vec<u32>, OCRError> {
+fn greedy_batch_last(logits: &Tensor) -> Result<Vec<u32>, Error> {
     let rows = greedy_batch_rows(logits)?;
     rows.into_iter()
         .map(|row| {
-            row.last().copied().ok_or_else(|| OCRError::InvalidInput {
+            row.last().copied().ok_or_else(|| Error::InvalidInput {
                 message: "HPD received an empty logits row".to_string(),
             })
         })
         .collect()
 }
 
-fn select_last_greedy(logits: &Tensor) -> Result<u32, OCRError> {
+fn select_last_greedy(logits: &Tensor) -> Result<u32, Error> {
     let (_, seq_len, vocab) = logits
         .dims3()
         .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read logits shape", e))?;
@@ -911,7 +900,7 @@ fn select_last_greedy(logits: &Tensor) -> Result<u32, OCRError> {
         .and_then(|id| id.to_scalar::<u32>())
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HPD greedy argmax",
                 e,
             )

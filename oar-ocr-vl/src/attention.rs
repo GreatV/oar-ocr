@@ -19,9 +19,9 @@
 //! let (cos, sin) = rope.forward_multi_axis(&position_ids, dtype)?;
 //! ```
 
+use crate::error::Error;
 use crate::utils::candle_to_ocr_processing;
 use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
-use oar_ocr_core::core::errors::OCRError;
 use std::sync::OnceLock;
 
 fn grouped_query_attention_disabled() -> bool {
@@ -717,7 +717,7 @@ impl RotaryEmbedding {
         head_dim: usize,
         rope_theta: f64,
         device: &Device,
-    ) -> std::result::Result<Self, OCRError> {
+    ) -> std::result::Result<Self, Error> {
         Self::new_multi_axis(head_dim, rope_theta, 1, device)
     }
 
@@ -730,9 +730,9 @@ impl RotaryEmbedding {
         rope_theta: f64,
         num_dims: usize,
         device: &Device,
-    ) -> std::result::Result<Self, OCRError> {
+    ) -> std::result::Result<Self, Error> {
         if !head_dim.is_multiple_of(2) {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!("RotaryEmbedding: head_dim must be even, got {head_dim}"),
             });
         }
@@ -744,7 +744,7 @@ impl RotaryEmbedding {
         }
         let inv_freq = Tensor::from_vec(inv_freq, (half,), device).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "RotaryEmbedding: failed to create inv_freq tensor",
                 e,
             )
@@ -767,12 +767,12 @@ impl RotaryEmbedding {
         &self,
         position_ids: &Tensor,
         dtype: DType,
-    ) -> std::result::Result<(Tensor, Tensor), OCRError> {
+    ) -> std::result::Result<(Tensor, Tensor), Error> {
         match self {
             Self::Dynamic { inv_freq, num_dims } => {
                 let dims = position_ids.dims();
                 if dims.len() != 3 || dims[0] != *num_dims {
-                    return Err(OCRError::InvalidInput {
+                    return Err(Error::InvalidInput {
                         message: format!(
                             "RotaryEmbedding: expected position_ids shape ({}, B, S), got {:?}",
                             num_dims, dims
@@ -782,7 +782,7 @@ impl RotaryEmbedding {
 
                 let position_ids = position_ids.to_dtype(DType::F32).map_err(|e| {
                     candle_to_ocr_processing(
-                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                        crate::error::ProcessingStage::TensorOperation,
                         "RotaryEmbedding: position_ids cast to f32 failed",
                         e,
                     )
@@ -790,7 +790,7 @@ impl RotaryEmbedding {
 
                 let inv_len = inv_freq.dims1().map_err(|e| {
                     candle_to_ocr_processing(
-                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                        crate::error::ProcessingStage::TensorOperation,
                         "RotaryEmbedding: inv_freq dims1 failed",
                         e,
                     )
@@ -799,7 +799,7 @@ impl RotaryEmbedding {
                     .reshape((1usize, 1usize, 1usize, inv_len))
                     .map_err(|e| {
                         candle_to_ocr_processing(
-                            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                            crate::error::ProcessingStage::TensorOperation,
                             "RotaryEmbedding: inv_freq reshape failed",
                             e,
                         )
@@ -809,7 +809,7 @@ impl RotaryEmbedding {
                     .unsqueeze(3)
                     .map_err(|e| {
                         candle_to_ocr_processing(
-                            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                            crate::error::ProcessingStage::TensorOperation,
                             "RotaryEmbedding: position_ids unsqueeze failed",
                             e,
                         )
@@ -817,7 +817,7 @@ impl RotaryEmbedding {
                     .broadcast_mul(&inv)
                     .map_err(|e| {
                         candle_to_ocr_processing(
-                            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                            crate::error::ProcessingStage::TensorOperation,
                             "RotaryEmbedding: rotary freqs multiply failed",
                             e,
                         )
@@ -825,7 +825,7 @@ impl RotaryEmbedding {
 
                 let emb = Tensor::cat(&[&freqs, &freqs], D::Minus1).map_err(|e| {
                     candle_to_ocr_processing(
-                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                        crate::error::ProcessingStage::TensorOperation,
                         "RotaryEmbedding: rotary emb cat failed",
                         e,
                     )
@@ -835,7 +835,7 @@ impl RotaryEmbedding {
                     .cos()
                     .map_err(|e| {
                         candle_to_ocr_processing(
-                            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                            crate::error::ProcessingStage::TensorOperation,
                             "RotaryEmbedding: rotary cos failed",
                             e,
                         )
@@ -843,7 +843,7 @@ impl RotaryEmbedding {
                     .to_dtype(dtype)
                     .map_err(|e| {
                         candle_to_ocr_processing(
-                            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                            crate::error::ProcessingStage::TensorOperation,
                             "RotaryEmbedding: rotary cos cast failed",
                             e,
                         )
@@ -853,7 +853,7 @@ impl RotaryEmbedding {
                     .sin()
                     .map_err(|e| {
                         candle_to_ocr_processing(
-                            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                            crate::error::ProcessingStage::TensorOperation,
                             "RotaryEmbedding: rotary sin failed",
                             e,
                         )
@@ -861,7 +861,7 @@ impl RotaryEmbedding {
                     .to_dtype(dtype)
                     .map_err(|e| {
                         candle_to_ocr_processing(
-                            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                            crate::error::ProcessingStage::TensorOperation,
                             "RotaryEmbedding: rotary sin cast failed",
                             e,
                         )
@@ -907,9 +907,9 @@ pub fn select_rope_sections(
     cos_or_sin: &Tensor,
     rope_section: &[usize],
     num_dims: usize,
-) -> std::result::Result<Tensor, OCRError> {
+) -> std::result::Result<Tensor, Error> {
     if rope_section.is_empty() {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: "rope_section is empty".to_string(),
         });
     }
@@ -918,7 +918,7 @@ pub fn select_rope_sections(
     let head_dim = dims.get(3).copied().unwrap_or(0);
     let section_sum: usize = rope_section.iter().sum();
     if section_sum * 2 != head_dim {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "rope_section sum ({}) * 2 != head_dim ({})",
                 section_sum, head_dim
@@ -928,7 +928,7 @@ pub fn select_rope_sections(
 
     let actual_dims = dims.first().copied().unwrap_or(0);
     if actual_dims != num_dims {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "rope tensor has {} dims, expected {}",
                 actual_dims, num_dims
@@ -949,7 +949,7 @@ pub fn select_rope_sections(
         let next = offset + sec;
         let seg = cos_or_sin.i((.., .., .., offset..next)).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 format!(
                     "rope slice failed at chunk {} (offset {}..{})",
                     i, offset, next
@@ -959,7 +959,7 @@ pub fn select_rope_sections(
         })?;
         let picked = seg.i((i % num_dims, .., .., ..)).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 format!("rope pick failed at chunk {} (dim {})", i, i % num_dims),
                 e,
             )
@@ -971,14 +971,14 @@ pub fn select_rope_sections(
     let refs: Vec<&Tensor> = chunks.iter().collect();
     let cat = Tensor::cat(&refs, D::Minus1).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "rope cat failed",
             e,
         )
     })?;
     cat.unsqueeze(1).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "rope unsqueeze failed",
             e,
         )
@@ -1407,7 +1407,7 @@ mod tests {
     // RoPE Tests
 
     #[test]
-    fn test_rotary_embedding_dynamic_single_axis() -> std::result::Result<(), OCRError> {
+    fn test_rotary_embedding_dynamic_single_axis() -> std::result::Result<(), Error> {
         let device = Device::Cpu;
         let rope = RotaryEmbedding::new_dynamic(64, 10000.0, &device)?;
 
@@ -1415,7 +1415,7 @@ mod tests {
         let position_ids = Tensor::arange(0u32, 8u32, &device)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "Failed to create position_ids",
                     e,
                 )
@@ -1423,7 +1423,7 @@ mod tests {
             .reshape((1, 1, 8))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "Failed to reshape position_ids",
                     e,
                 )
@@ -1437,14 +1437,14 @@ mod tests {
     }
 
     #[test]
-    fn test_rotary_embedding_multi_axis() -> std::result::Result<(), OCRError> {
+    fn test_rotary_embedding_multi_axis() -> std::result::Result<(), Error> {
         let device = Device::Cpu;
         let rope = RotaryEmbedding::new_multi_axis(128, 10000.0, 3, &device)?;
 
         // Create 3-axis position IDs: (3, batch, seq)
         let position_ids = Tensor::zeros((3, 2, 16), DType::U32, &device).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "Failed to create position_ids",
                 e,
             )
@@ -1464,7 +1464,7 @@ mod tests {
         // Odd head_dim should fail
         let result = RotaryEmbedding::new_multi_axis(63, 10000.0, 1, &device);
         assert!(result.is_err());
-        if let Err(OCRError::ConfigError { message }) = result {
+        if let Err(Error::Config { message }) = result {
             assert!(message.contains("must be even"));
         } else {
             panic!("Expected ConfigError");
@@ -1472,14 +1472,14 @@ mod tests {
     }
 
     #[test]
-    fn test_rotary_embedding_wrong_position_ids_shape() -> std::result::Result<(), OCRError> {
+    fn test_rotary_embedding_wrong_position_ids_shape() -> std::result::Result<(), Error> {
         let device = Device::Cpu;
         let rope = RotaryEmbedding::new_multi_axis(64, 10000.0, 3, &device)?;
 
         // Wrong shape: (2, batch, seq) instead of (3, batch, seq)
         let position_ids = Tensor::zeros((2, 2, 16), DType::U32, &device).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "Failed to create position_ids",
                 e,
             )
@@ -1487,7 +1487,7 @@ mod tests {
 
         let result = rope.forward_multi_axis(&position_ids, DType::F32);
         assert!(result.is_err());
-        if let Err(OCRError::InvalidInput { message }) = result {
+        if let Err(Error::InvalidInput { message }) = result {
             assert!(message.contains("expected position_ids shape (3"));
         } else {
             panic!("Expected InvalidInput error");

@@ -3,21 +3,17 @@ use crate::attention::{
     VISION_CHUNKED_ATTN_CHUNK_SIZE, VISION_CHUNKED_ATTN_SEQ_THRESHOLD, chunked_vision_attention,
     flash_attention, scaled_dot_product_attention,
 };
+use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{IndexOp, Tensor};
 use candle_nn::{
     LayerNorm, LayerNormConfig, Linear, Module, VarBuilder, layer_norm, linear, linear_no_bias,
 };
-use oar_ocr_core::core::OCRError;
 
 const MODEL_NAME: &str = "HPD-Parsing";
 
-fn proc_err(stage: &'static str, error: candle_core::Error) -> OCRError {
-    candle_to_ocr_processing(
-        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
-        stage,
-        error,
-    )
+fn proc_err(stage: &'static str, error: candle_core::Error) -> Error {
+    candle_to_ocr_processing(crate::error::ProcessingStage::TensorOperation, stage, error)
 }
 
 #[derive(Debug, Clone)]
@@ -30,7 +26,7 @@ struct InternAttention {
 }
 
 impl InternAttention {
-    fn load(cfg: &HpdVisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &HpdVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let qkv = if cfg.qkv_bias {
             linear(cfg.hidden_size, cfg.hidden_size * 3, vb.pp("qkv"))
         } else {
@@ -51,7 +47,7 @@ impl InternAttention {
         })
     }
 
-    fn forward(&self, hidden: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden: &Tensor) -> Result<Tensor, Error> {
         let (batch, seq_len, _) = hidden
             .dims3()
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read vision attention shape", e))?;
@@ -60,7 +56,7 @@ impl InternAttention {
             .forward(hidden)
             .and_then(|x| x.reshape((batch, seq_len, 3, self.num_heads, self.head_dim)))
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "project vision qkv", e))?;
-        let prepare = |index| -> Result<Tensor, OCRError> {
+        let prepare = |index| -> Result<Tensor, Error> {
             qkv.i((.., .., index, .., ..))
                 .and_then(|x| x.transpose(1, 2))
                 .and_then(|x| x.contiguous())
@@ -99,7 +95,7 @@ struct InternMlp {
 }
 
 impl InternMlp {
-    fn load(cfg: &HpdVisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &HpdVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         Ok(Self {
             fc1: linear(cfg.hidden_size, cfg.intermediate_size, vb.pp("fc1"))
                 .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load vision MLP fc1", e))?,
@@ -108,7 +104,7 @@ impl InternMlp {
         })
     }
 
-    fn forward(&self, hidden: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden: &Tensor) -> Result<Tensor, Error> {
         let hidden = self
             .fc1
             .forward(hidden)
@@ -131,7 +127,7 @@ struct InternBlock {
 }
 
 impl InternBlock {
-    fn load(cfg: &HpdVisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &HpdVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let norm_cfg = LayerNormConfig {
             eps: cfg.layer_norm_eps,
             ..Default::default()
@@ -152,7 +148,7 @@ impl InternBlock {
         })
     }
 
-    fn forward(&self, hidden: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden: &Tensor) -> Result<Tensor, Error> {
         let attention = self
             .norm1
             .forward(hidden)
@@ -189,7 +185,7 @@ pub struct HpdVisionModel {
 }
 
 impl HpdVisionModel {
-    pub fn load(cfg: &HpdParsingConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    pub fn load(cfg: &HpdParsingConfig, vb: VarBuilder) -> Result<Self, Error> {
         let vision = &cfg.vision_config;
         let patch_dim = vision.num_channels * vision.patch_size * vision.patch_size;
         let patch_weight = vb
@@ -267,12 +263,12 @@ impl HpdVisionModel {
     }
 
     /// Encode `(tiles, grid², patch_dim)` to `(tiles * image_tokens, llm_hidden)`.
-    pub fn forward(&self, patches: &Tensor) -> Result<Tensor, OCRError> {
+    pub fn forward(&self, patches: &Tensor) -> Result<Tensor, Error> {
         let (tiles, patch_count, patch_width) = patches
             .dims3()
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read image patch shape", e))?;
         if patch_count != self.grid * self.grid {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "HPD-Parsing received {patch_count} patches per tile, expected {}",
                     self.grid * self.grid
@@ -359,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn qkv_bias_config_controls_only_qkv_projection() -> Result<(), OCRError> {
+    fn qkv_bias_config_controls_only_qkv_projection() -> Result<(), Error> {
         for qkv_bias in [false, true] {
             let variables = VarMap::new();
             let vb = VarBuilder::from_varmap(&variables, DType::F32, &Device::Cpu);

@@ -6,13 +6,13 @@
 //! # Usage
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --features download-binaries --example hunyuanocr -- [OPTIONS] <IMAGES>...
+//! cargo run -p oar-ocr-vl --example hunyuanocr -- [OPTIONS] <IMAGES>...
 //! ```
 //!
 //! # Examples
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --features download-binaries --example hunyuanocr -- \\
+//! cargo run -p oar-ocr-vl --example hunyuanocr -- \\
 //!     --model-dir tencent/HunyuanOCR \\
 //!     --prompt "Detect and recognize text in the image, and output the text coordinates in a formatted manner." \\
 //!     document.jpg
@@ -26,8 +26,8 @@ use std::time::Duration;
 use std::time::Instant;
 use tracing::{error, info};
 
-use oar_ocr_core::utils::load_image;
 use oar_ocr_vl::HunyuanOcr;
+use oar_ocr_vl::utils::image::load_image;
 use oar_ocr_vl::utils::parse_device;
 use utils::token_fingerprint;
 

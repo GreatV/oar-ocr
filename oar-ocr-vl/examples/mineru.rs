@@ -7,19 +7,19 @@
 //! # Usage
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --features download-binaries --example mineru -- [OPTIONS] <IMAGES>...
+//! cargo run -p oar-ocr-vl --example mineru -- [OPTIONS] <IMAGES>...
 //! ```
 //!
 //! # Example
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --features cuda,download-binaries --example mineru -- \
+//! cargo run -p oar-ocr-vl --features cuda --example mineru -- \
 //!     --model-dir opendatalab/MinerU2.5-2509-1.2B \
 //!     --device cuda:0 \
 //!     document.jpg
 //!
 //! # MinerU2.5-Pro uses the same loader and pipeline
-//! cargo run -p oar-ocr-vl --features cuda,download-binaries --example mineru -- \
+//! cargo run -p oar-ocr-vl --features cuda --example mineru -- \
 //!     --model-dir opendatalab/MinerU2.5-Pro-2605-1.2B \
 //!     --device cuda:0 \
 //!     document.jpg
@@ -33,8 +33,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info};
 
-use oar_ocr_core::utils::load_image;
 use oar_ocr_vl::MinerU;
+use oar_ocr_vl::utils::image::load_image;
 use oar_ocr_vl::utils::parse_device;
 use oar_ocr_vl::utils::{convert_otsl_to_html, truncate_repetitive_content};
 

@@ -3,13 +3,13 @@ use crate::attention::{
     VISION_CHUNKED_ATTN_CHUNK_SIZE, VISION_CHUNKED_ATTN_SEQ_THRESHOLD, chunked_vision_attention,
     flash_attention, scaled_dot_product_attention,
 };
+use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::{
     LayerNorm, LayerNormConfig, Linear, Module, RmsNorm, VarBuilder, layer_norm, linear,
     linear_no_bias, rms_norm,
 };
-use oar_ocr_core::core::OCRError;
 
 const MODEL_NAME: &str = "MonkeyOCRv2";
 
@@ -21,7 +21,7 @@ struct PatchEmbed {
 }
 
 impl PatchEmbed {
-    fn load(cfg: &MonkeyOcrV2VisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &MonkeyOcrV2VisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let patch_dim = cfg.num_channels * cfg.patch_size * cfg.patch_size;
         let vb = vb.pp("patch_embed").pp("patchifier");
         let weight = vb
@@ -44,7 +44,7 @@ impl PatchEmbed {
         Ok(Self { weight, bias, norm })
     }
 
-    fn forward(&self, patches: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, patches: &Tensor) -> Result<Tensor, Error> {
         let patches = patches
             .to_dtype(self.weight.dtype())
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "cast image patches", e))?;
@@ -71,7 +71,7 @@ struct VisionAttention {
 }
 
 impl VisionAttention {
-    fn load(cfg: &MonkeyOcrV2VisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &MonkeyOcrV2VisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let qkv = linear_no_bias(cfg.embed_dim, cfg.embed_dim * 3, vb.pp("attn").pp("qkv"))
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load vision QKV", e))?;
         let proj = linear_no_bias(cfg.embed_dim, cfg.embed_dim, vb.pp("attn").pp("proj"))
@@ -86,7 +86,7 @@ impl VisionAttention {
         })
     }
 
-    fn forward(&self, hidden: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
         let seq_len = hidden
             .dim(0)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read vision sequence length", e))?;
@@ -149,7 +149,7 @@ fn apply_vision_rope(
     k: &Tensor,
     cos: &Tensor,
     sin: &Tensor,
-) -> Result<(Tensor, Tensor), OCRError> {
+) -> Result<(Tensor, Tensor), Error> {
     let q_dtype = q.dtype();
     let k_dtype = k.dtype();
     let q = q
@@ -187,7 +187,7 @@ struct VisionMlp {
 }
 
 impl VisionMlp {
-    fn load(cfg: &MonkeyOcrV2VisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &MonkeyOcrV2VisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let vb = vb.pp("mlp");
         let fc1 = linear_no_bias(cfg.embed_dim, cfg.intermediate_size, vb.pp("fc1"))
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load vision MLP fc1", e))?;
@@ -198,7 +198,7 @@ impl VisionMlp {
         Ok(Self { fc1, fc2, fc3 })
     }
 
-    fn forward(&self, hidden: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden: &Tensor) -> Result<Tensor, Error> {
         let gate = self
             .fc1
             .forward(hidden)
@@ -225,7 +225,7 @@ struct VisionBlock {
 }
 
 impl VisionBlock {
-    fn load(cfg: &MonkeyOcrV2VisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &MonkeyOcrV2VisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let norm1 = rms_norm(cfg.embed_dim, cfg.rms_norm_eps, vb.pp("norm1"))
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load vision norm1", e))?;
         let norm2 = rms_norm(cfg.embed_dim, cfg.rms_norm_eps, vb.pp("norm2"))
@@ -240,7 +240,7 @@ impl VisionBlock {
         })
     }
 
-    fn forward(&self, hidden: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
         let normed = self
             .norm1
             .forward(hidden)
@@ -248,7 +248,7 @@ impl VisionBlock {
         let attention = self.attention.forward(&normed, cos, sin)?;
         let hidden = (hidden + attention).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MonkeyOCRv2 vision attention residual",
                 e,
             )
@@ -260,7 +260,7 @@ impl VisionBlock {
         let mlp = self.mlp.forward(&normed)?;
         (hidden + mlp).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MonkeyOCRv2 vision MLP residual",
                 e,
             )
@@ -278,7 +278,7 @@ struct PatchMerger {
 }
 
 impl PatchMerger {
-    fn load(cfg: &MonkeyOcrV2VisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &MonkeyOcrV2VisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let vb = vb.pp("merger");
         let norm = layer_norm(
             cfg.embed_dim,
@@ -304,12 +304,12 @@ impl PatchMerger {
         })
     }
 
-    fn forward(&self, hidden: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden: &Tensor) -> Result<Tensor, Error> {
         let num_patches = hidden
             .dim(0)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read merger patch count", e))?;
         if !num_patches.is_multiple_of(self.merge_group) {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "MonkeyOCRv2 merger patch count {num_patches} is not divisible by {}",
                     self.merge_group
@@ -342,7 +342,7 @@ pub struct MonkeyOcrV2VisionModel {
 }
 
 impl MonkeyOcrV2VisionModel {
-    pub fn load(cfg: &MonkeyOcrV2VisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    pub fn load(cfg: &MonkeyOcrV2VisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         cfg.validate()?;
         let patch_embed = PatchEmbed::load(cfg, vb.clone())?;
         let mut blocks = Vec::with_capacity(cfg.num_hidden_layers);
@@ -369,7 +369,7 @@ impl MonkeyOcrV2VisionModel {
         &self,
         pixel_values: &Tensor,
         grid_thw: (usize, usize, usize),
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let (grid_t, grid_h, grid_w) = grid_thw;
         if grid_t != 1
             || grid_h == 0
@@ -377,7 +377,7 @@ impl MonkeyOcrV2VisionModel {
             || !grid_h.is_multiple_of(self.merge_size)
             || !grid_w.is_multiple_of(self.merge_size)
         {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "MonkeyOCRv2 invalid image grid {grid_thw:?} for merge_size {}",
                     self.merge_size
@@ -389,7 +389,7 @@ impl MonkeyOcrV2VisionModel {
             .dim(0)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read pixel patch count", e))?;
         if actual != expected {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "MonkeyOCRv2 pixel patch count {actual} does not match grid {grid_thw:?} ({expected})"
                 ),
@@ -414,7 +414,7 @@ fn build_vision_rope(
     merge_size: usize,
     head_dim: usize,
     like: &Tensor,
-) -> Result<(Tensor, Tensor), OCRError> {
+) -> Result<(Tensor, Tensor), Error> {
     let (grid_t, grid_h, grid_w) = grid_thw;
     let mut frequencies = Vec::with_capacity(grid_t * grid_h * grid_w * head_dim);
     for _ in 0..grid_t {

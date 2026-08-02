@@ -11,11 +11,11 @@ pub mod image;
 pub mod table;
 pub mod text;
 
+use crate::error::Error;
+use crate::geometry::BoundingBox;
+use crate::structure::{LayoutElement, LayoutElementType};
 use ::image::{GrayImage, RgbImage};
 use candle_core::{DType, Device, Tensor};
-use oar_ocr_core::core::OCRError;
-use oar_ocr_core::domain::structure::{LayoutElement, LayoutElementType};
-use oar_ocr_core::processors::BoundingBox;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashSet;
@@ -44,7 +44,7 @@ use std::collections::HashSet;
 /// use oar_ocr_vl::utils::parse_device;
 ///
 /// # #[allow(unused_variables)]
-/// # fn main() -> Result<(), oar_ocr_core::core::OCRError> {
+/// # fn main() -> Result<(), oar_ocr_vl::Error> {
 /// // CPU is always available
 /// let cpu = parse_device("cpu")?;
 ///
@@ -63,15 +63,15 @@ use std::collections::HashSet;
 /// # }
 /// ```
 #[cfg(not(feature = "cuda"))]
-fn cuda_not_enabled() -> OCRError {
-    OCRError::ConfigError {
+fn cuda_not_enabled() -> Error {
+    Error::Config {
         message: "CUDA support not enabled. Compile with --features cuda".to_string(),
     }
 }
 
 #[cfg(not(all(feature = "metal", target_os = "macos")))]
-fn metal_not_enabled() -> OCRError {
-    OCRError::ConfigError {
+fn metal_not_enabled() -> Error {
+    Error::Config {
         message: "Metal support not enabled. Compile on macOS with --features metal".to_string(),
     }
 }
@@ -83,28 +83,26 @@ fn parse_device_with_ordinal(
     prefix: &str,
     device_name: &str,
     creator: impl Fn(usize) -> candle_core::Result<Device>,
-) -> Result<Device, OCRError> {
-    let ordinal_str = s
-        .strip_prefix(prefix)
-        .ok_or_else(|| OCRError::ConfigError {
-            message: format!("Invalid {} device string '{}'", device_name, s),
-        })?;
-    let ordinal: usize = ordinal_str.parse().map_err(|_| OCRError::ConfigError {
+) -> Result<Device, Error> {
+    let ordinal_str = s.strip_prefix(prefix).ok_or_else(|| Error::Config {
+        message: format!("Invalid {} device string '{}'", device_name, s),
+    })?;
+    let ordinal: usize = ordinal_str.parse().map_err(|_| Error::Config {
         message: format!("Invalid {} device ordinal in '{}'", device_name, s),
     })?;
-    creator(ordinal).map_err(|e| OCRError::ConfigError {
+    creator(ordinal).map_err(|e| Error::Config {
         message: format!("Failed to create {} device {}: {}", device_name, ordinal, e),
     })
 }
 
-pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
+pub fn parse_device(device_str: &str) -> Result<Device, Error> {
     let device_str = device_str.to_lowercase();
     match device_str.as_str() {
         "cpu" => Ok(Device::Cpu),
         "cuda" | "gpu" => {
             #[cfg(feature = "cuda")]
             {
-                Device::new_cuda(0).map_err(|e| OCRError::ConfigError {
+                Device::new_cuda(0).map_err(|e| Error::Config {
                     message: format!("Failed to create CUDA device: {}", e),
                 })
             }
@@ -116,7 +114,7 @@ pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
         "metal" => {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             {
-                Device::new_metal(0).map_err(|e| OCRError::ConfigError {
+                Device::new_metal(0).map_err(|e| Error::Config {
                     message: format!("Failed to create Metal device: {}", e),
                 })
             }
@@ -145,7 +143,7 @@ pub fn parse_device(device_str: &str) -> Result<Device, OCRError> {
                 Err(metal_not_enabled())
             }
         }
-        _ => Err(OCRError::ConfigError {
+        _ => Err(Error::Config {
             message: format!(
                 "Unknown device: '{}'. Use 'cpu', 'cuda', 'cuda:N', 'metal', or 'metal:N'",
                 device_str
@@ -224,13 +222,13 @@ fn bf16_works(device: &Device) -> bool {
     }
 }
 
-/// Convert Candle error to OCRError for inference operations.
+/// Convert Candle error to Error for inference operations.
 pub fn candle_to_ocr_inference(
     model_name: &str,
     context: impl Into<String>,
     err: candle_core::Error,
-) -> OCRError {
-    OCRError::Inference {
+) -> Error {
+    Error::Inference {
         model_name: model_name.to_string(),
         context: context.into(),
         source: Box::new(err),
@@ -267,13 +265,13 @@ pub fn error_chain_message(prefix: &str, e: &(dyn std::error::Error + 'static)) 
     chain
 }
 
-/// Convert Candle error to OCRError for processing operations.
+/// Convert Candle error to Error for processing operations.
 pub fn candle_to_ocr_processing(
-    kind: oar_ocr_core::core::errors::ProcessingStage,
+    kind: crate::error::ProcessingStage,
     context: impl Into<String>,
     err: candle_core::Error,
-) -> OCRError {
-    OCRError::Processing {
+) -> Error {
+    Error::Processing {
         kind,
         context: context.into(),
         source: Box::new(err),
@@ -291,13 +289,13 @@ pub fn candle_to_ocr_processing(
 pub fn collect_safetensors(
     model_dir: &std::path::Path,
     model_name: &str,
-) -> Result<Vec<std::path::PathBuf>, OCRError> {
+) -> Result<Vec<std::path::PathBuf>, Error> {
     let single = model_dir.join("model.safetensors");
     if single.exists() {
         return Ok(vec![single]);
     }
 
-    let read_dir = std::fs::read_dir(model_dir).map_err(|e| OCRError::ConfigError {
+    let read_dir = std::fs::read_dir(model_dir).map_err(|e| Error::Config {
         message: format!(
             "{model_name}: cannot read model dir {}: {e}",
             model_dir.display()
@@ -308,7 +306,7 @@ pub fn collect_safetensors(
         // Propagate per-entry I/O errors instead of silently dropping them, so a
         // partially-failed directory scan can't masquerade as "no shards found".
         let path = entry
-            .map_err(|e| OCRError::ConfigError {
+            .map_err(|e| Error::Config {
                 message: format!(
                     "{model_name}: error reading entry in model dir {}: {e}",
                     model_dir.display()
@@ -325,7 +323,7 @@ pub fn collect_safetensors(
     }
     shards.sort();
     if shards.is_empty() {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "{model_name}: no model.safetensors or model-*.safetensors found in {}",
                 model_dir.display()
@@ -344,9 +342,9 @@ pub fn load_json_config<T: serde::de::DeserializeOwned>(
     path: impl AsRef<std::path::Path>,
     model_name: &str,
     file_name: &str,
-) -> Result<T, OCRError> {
+) -> Result<T, Error> {
     let contents = std::fs::read_to_string(path)?;
-    serde_json::from_str(&contents).map_err(|e| OCRError::ConfigError {
+    serde_json::from_str(&contents).map_err(|e| Error::Config {
         message: format!("failed to parse {model_name} {file_name}: {e}"),
     })
 }
@@ -367,9 +365,9 @@ pub fn validate_image_mean_std(
     model_name: &str,
     image_mean: &[f32],
     image_std: &[f32],
-) -> Result<(), OCRError> {
+) -> Result<(), Error> {
     if image_mean.len() != 3 || image_std.len() != 3 {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "{model_name} image_mean/std must have length 3, got mean={} std={}",
                 image_mean.len(),
@@ -387,9 +385,9 @@ pub fn validate_patch_merge_temporal(
     patch_size: usize,
     merge_size: usize,
     temporal_patch_size: usize,
-) -> Result<(), OCRError> {
+) -> Result<(), Error> {
     if patch_size == 0 || merge_size == 0 || temporal_patch_size == 0 {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!("{model_name} patch_size/merge_size/temporal_patch_size must be > 0"),
         });
     }
@@ -405,7 +403,7 @@ pub fn vision_inv_freq(
     theta: f64,
     model_name: &str,
     device: &Device,
-) -> Result<Tensor, OCRError> {
+) -> Result<Tensor, Error> {
     let mut inv_freq = Vec::with_capacity(dim / 2);
     for i in (0..dim).step_by(2) {
         let v = 1f64 / theta.powf(i as f64 / dim as f64);
@@ -413,7 +411,7 @@ pub fn vision_inv_freq(
     }
     Tensor::from_vec(inv_freq, (dim / 2,), device).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             format!("{model_name}: vision inv_freq tensor failed"),
             e,
         )
@@ -425,10 +423,10 @@ pub fn vision_inv_freq(
 /// Operates on the final axis only, so it is rank-agnostic — both the 4D
 /// text-attention tensors `(batch, heads, seq, head_dim)` and the 3D
 /// vision-attention tensors `(seq, heads, head_dim)` share this path.
-pub fn rotate_half(x: &Tensor) -> Result<Tensor, OCRError> {
+pub fn rotate_half(x: &Tensor) -> Result<Tensor, Error> {
     let d = x.dim(candle_core::D::Minus1).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "rotate_half dim failed",
             e,
         )
@@ -436,7 +434,7 @@ pub fn rotate_half(x: &Tensor) -> Result<Tensor, OCRError> {
     let half = d / 2;
     let x1 = x.narrow(candle_core::D::Minus1, 0, half).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "rotate_half slice x1 failed",
             e,
         )
@@ -445,67 +443,50 @@ pub fn rotate_half(x: &Tensor) -> Result<Tensor, OCRError> {
         .narrow(candle_core::D::Minus1, half, d - half)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "rotate_half slice x2 failed",
                 e,
             )
         })?;
     let nx2 = x2.neg().map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "rotate_half neg failed",
             e,
         )
     })?;
     Tensor::cat(&[&nx2, &x1], candle_core::D::Minus1).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "rotate_half cat failed",
             e,
         )
     })
 }
 
-/// Convert layout elements to Markdown format.
+/// Labels PP-StructureV3 leaves out of Markdown: running heads, page
+/// furniture and marginalia.
 ///
-/// # Arguments
-/// * `elements` - Layout elements with recognized text
-/// * `ignore_labels` - Labels to skip in markdown output
-pub fn to_markdown(elements: &[LayoutElement], ignore_labels: &[String]) -> String {
-    let mut markdown = String::new();
+/// `formula_number` is here because PaddleOCR-VL drops it too, unless it was
+/// merged into the preceding formula.
+pub const DEFAULT_MARKDOWN_IGNORE_LABELS: [&str; 8] = [
+    "number",
+    "footnote",
+    "header",
+    "header_image",
+    "footer",
+    "footer_image",
+    "aside_text",
+    "formula_number",
+];
 
-    for (i, element) in elements.iter().enumerate() {
-        let text = match &element.text {
-            Some(t) if !t.trim().is_empty() => t.trim(),
-            _ => continue,
-        };
-
-        if let Some(label) = &element.label
-            && ignore_labels.iter().any(|l| l == label)
-        {
-            continue;
-        }
-
-        let content = match element.element_type {
-            LayoutElementType::DocTitle => format_heading(text, 1),
-            LayoutElementType::ParagraphTitle => format_heading(text, 2),
-            LayoutElementType::Table => text::format_table(text),
-            LayoutElementType::Formula => text::format_formula(text),
-            LayoutElementType::Image | LayoutElementType::Chart | LayoutElementType::Seal => {
-                format_figure(text, i)
-            }
-            LayoutElementType::List => format_list(text),
-            LayoutElementType::Algorithm => format_code(text),
-            _ => text::format_text(text),
-        };
-
-        if !content.is_empty() {
-            markdown.push_str(&content);
-            markdown.push_str("\n\n");
-        }
-    }
-
-    markdown.trim().to_string()
+/// [`DEFAULT_MARKDOWN_IGNORE_LABELS`] as owned strings, for the `ignore_labels`
+/// arguments below.
+pub fn default_markdown_ignore_labels() -> Vec<String> {
+    DEFAULT_MARKDOWN_IGNORE_LABELS
+        .iter()
+        .map(|label| (*label).to_string())
+        .collect()
 }
 
 // --- OpenOCR / PaddleX markdown compatibility ---
@@ -595,14 +576,20 @@ fn openocr_format_first_line(
     parts.join(splitter)
 }
 
-/// Convert layout elements to OpenOCR (PaddleX) markdown format.
+/// Renders layout elements as Markdown.
 ///
-/// This matches `PaddleOCRVLResult._to_markdown(pretty=...)` when labels come from PP-DocLayoutV2/V3.
-pub fn to_markdown_openocr(
-    elements: &[LayoutElement],
-    ignore_labels: &[String],
-    pretty: bool,
-) -> String {
+/// Matches `PaddleOCRVLResult._to_markdown(pretty=...)` when labels come from
+/// PP-DocLayoutV2/V3: headings take their level from the section numbering
+/// (`1.2 Foo` becomes `### 1.2 Foo`), and `abstract`, `reference` and
+/// `content` blocks get their own handling.
+///
+/// # Arguments
+/// * `elements` - Layout elements with recognized text, in reading order
+/// * `ignore_labels` - Labels to leave out, usually
+///   [`default_markdown_ignore_labels`]
+/// * `pretty` - Centre captions and tables with inline HTML, as the reference
+///   does. With `false` they stay plain text and table markup is unwrapped.
+pub fn to_markdown(elements: &[LayoutElement], ignore_labels: &[String], pretty: bool) -> String {
     let mut markdown = String::new();
 
     for element in elements {
@@ -697,66 +684,6 @@ pub fn to_markdown_openocr(
     }
 
     markdown
-}
-
-fn format_heading(text: &str, level: usize) -> String {
-    let prefix = "#".repeat(level.min(6));
-    let cleaned = remove_newlines_in_heading(text);
-    let processed = text::process_text(cleaned.trim());
-    format!("{} {}", prefix, processed)
-}
-
-fn format_figure(text: &str, index: usize) -> String {
-    if text.starts_with("![") {
-        return text.to_string();
-    }
-    if text.starts_with("figures/") || text.starts_with("imgs/") {
-        return format!("![Figure {}]({})", index + 1, text);
-    }
-    if text.starts_with("data:image/") {
-        return format!("![Figure {}]({})", index + 1, text);
-    }
-    format!("*Figure {}: {}*", index + 1, text)
-}
-
-fn format_list(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut result = String::new();
-    for line in lines {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            if trimmed.starts_with('-')
-                || trimmed.starts_with('*')
-                || trimmed
-                    .chars()
-                    .next()
-                    .map(|c| c.is_ascii_digit())
-                    .unwrap_or(false)
-            {
-                result.push_str(trimmed);
-            } else {
-                result.push_str("- ");
-                result.push_str(trimmed);
-            }
-            result.push('\n');
-        }
-    }
-    result.trim_end().to_string()
-}
-
-fn format_code(text: &str) -> String {
-    format!("```\n{}\n```", text.trim())
-}
-
-fn remove_newlines_in_heading(text: &str) -> String {
-    fn is_chinese(c: char) -> bool {
-        ('\u{4e00}'..='\u{9fff}').contains(&c)
-    }
-    if text.chars().any(is_chinese) {
-        text.replace('\n', "")
-    } else {
-        text.replace('\n', " ")
-    }
 }
 
 pub use self::table::convert_otsl_to_html;
@@ -939,6 +866,50 @@ pub fn crop_margin(img: &RgbImage) -> RgbImage {
 mod tests {
     use super::*;
 
+    fn titled(label: &str, text: &str) -> LayoutElement {
+        LayoutElement::new(
+            BoundingBox::from_coords(0.0, 0.0, 10.0, 10.0),
+            LayoutElementType::from_label(label),
+            0.9,
+        )
+        .with_label(label)
+        .with_text(text)
+    }
+
+    /// The single renderer keeps the reference behaviour that the removed
+    /// lightweight one lacked: heading depth follows the section numbering
+    /// rather than being a flat `##`.
+    #[test]
+    fn headings_take_their_level_from_the_numbering() {
+        let elements = vec![
+            titled("doc_title", "A Paper"),
+            titled("paragraph_title", "1 Introduction"),
+            titled("paragraph_title", "1.2 Background"),
+            titled("paragraph_title", "1.2.3 Details"),
+        ];
+        let markdown = to_markdown(&elements, &default_markdown_ignore_labels(), true);
+        let headings: Vec<&str> = markdown.lines().filter(|l| l.starts_with('#')).collect();
+        assert_eq!(
+            headings,
+            vec![
+                "# A Paper",
+                "## 1 Introduction",
+                "### 1.2 Background",
+                "#### 1.2.3 Details",
+            ]
+        );
+    }
+
+    /// `pretty` is the only knob left; it decides whether captions are centred
+    /// with inline HTML.
+    #[test]
+    fn pretty_controls_caption_centring() {
+        let elements = vec![titled("figure_title", "Figure 1: a plot")];
+        let ignore = default_markdown_ignore_labels();
+        assert!(to_markdown(&elements, &ignore, true).contains("text-align: center"));
+        assert!(!to_markdown(&elements, &ignore, false).contains("text-align: center"));
+    }
+
     #[test]
     fn test_parse_device_cpu() {
         let device = parse_device("cpu").unwrap();
@@ -948,7 +919,7 @@ mod tests {
     #[test]
     fn test_error_chain_message_includes_sources() {
         let root = std::io::Error::other("CUDA_ERROR_OUT_OF_MEMORY");
-        let err = OCRError::Inference {
+        let err = Error::Inference {
             model_name: "PaddleOCR-VL".to_string(),
             context: "vision attn softmax".to_string(),
             source: Box::new(root),
@@ -991,7 +962,7 @@ mod tests {
     fn test_parse_device_invalid() {
         let result = parse_device("invalid");
         assert!(result.is_err());
-        if let Err(OCRError::ConfigError { message }) = result {
+        if let Err(Error::Config { message }) = result {
             assert!(message.contains("Unknown device"));
         }
     }
@@ -1012,7 +983,7 @@ mod tests {
     fn test_parse_device_metal_invalid_ordinal() {
         let result = parse_device("metal:abc");
         assert!(result.is_err());
-        if let Err(OCRError::ConfigError { message }) = result {
+        if let Err(Error::Config { message }) = result {
             assert!(message.contains("Invalid Metal device ordinal"));
         }
     }
@@ -1022,13 +993,13 @@ mod tests {
     fn test_parse_device_metal_not_enabled() {
         let result = parse_device("metal");
         assert!(result.is_err());
-        if let Err(OCRError::ConfigError { message }) = result {
+        if let Err(Error::Config { message }) = result {
             assert!(message.contains("Metal support not enabled"));
         }
 
         let result = parse_device("metal:0");
         assert!(result.is_err());
-        if let Err(OCRError::ConfigError { message }) = result {
+        if let Err(Error::Config { message }) = result {
             assert!(message.contains("Metal support not enabled"));
         }
     }

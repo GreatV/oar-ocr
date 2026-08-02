@@ -5,13 +5,13 @@
 //! # Usage
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --features download-binaries --example glmocr -- [OPTIONS] <IMAGES>...
+//! cargo run -p oar-ocr-vl --example glmocr -- [OPTIONS] <IMAGES>...
 //! ```
 //!
 //! # Examples
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --features download-binaries --example glmocr -- \
+//! cargo run -p oar-ocr-vl --example glmocr -- \
 //!     --model-dir zai-org/GLM-OCR \
 //!     --prompt "Text Recognition:" \
 //!     document.jpg
@@ -24,8 +24,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info};
 
-use oar_ocr_core::utils::load_image;
 use oar_ocr_vl::GlmOcr;
+use oar_ocr_vl::utils::image::load_image;
 use oar_ocr_vl::utils::parse_device;
 use utils::token_fingerprint;
 

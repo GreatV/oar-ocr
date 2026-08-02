@@ -1,10 +1,10 @@
 use super::config::MonkeyOcrV2ImageProcessorConfig;
+use crate::error::Error;
 use crate::utils::image::{
     image_to_chw, patchify_merge_grouped, pil_resample_to_filter_type, smart_resize,
 };
 use candle_core::{DType, Device, Tensor};
 use image::{RgbImage, imageops::FilterType};
-use oar_ocr_core::core::OCRError;
 
 #[derive(Debug, Clone)]
 pub struct MonkeyOcrV2ImageInputs {
@@ -18,10 +18,10 @@ pub fn preprocess_image(
     cfg: &MonkeyOcrV2ImageProcessorConfig,
     device: &Device,
     dtype: DType,
-) -> Result<MonkeyOcrV2ImageInputs, OCRError> {
+) -> Result<MonkeyOcrV2ImageInputs, Error> {
     cfg.validate()?;
     if image.width() == 0 || image.height() == 0 {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: "MonkeyOCRv2 cannot process an empty image".to_string(),
         });
     }
@@ -29,14 +29,14 @@ pub fn preprocess_image(
     let factor = (cfg.patch_size * cfg.merge_size) as u32;
     let (height, width) = (image.height(), image.width());
     if !cfg.do_resize && (height < factor || width < factor) {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "MonkeyOCRv2 image dimensions must be at least {factor}x{factor}, got {width}x{height}"
             ),
         });
     }
     if !cfg.do_resize && (!height.is_multiple_of(factor) || !width.is_multiple_of(factor)) {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "MonkeyOCRv2 image dimensions must be divisible by {factor} when resizing is disabled, got {width}x{height}"
             ),
@@ -80,7 +80,7 @@ pub fn preprocess_image(
     let grid_h = resized_height as usize / cfg.patch_size;
     let grid_w = resized_width as usize / cfg.patch_size;
     if !grid_h.is_multiple_of(cfg.merge_size) || !grid_w.is_multiple_of(cfg.merge_size) {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "MonkeyOCRv2 resized grid {grid_h}x{grid_w} is not divisible by merge_size {}",
                 cfg.merge_size
@@ -103,7 +103,7 @@ pub fn preprocess_image(
     let patch_dim = 3 * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size;
     let num_patches = grid_t * grid_h * grid_w;
     if patches.len() != num_patches * patch_dim {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "MonkeyOCRv2 patch extraction produced {} values, expected {}",
                 patches.len(),
@@ -172,7 +172,7 @@ mod tests {
         let error = preprocess_image(&image, &cfg, &Device::Cpu, DType::F32).unwrap_err();
         assert!(matches!(
             error,
-            OCRError::InvalidInput { message }
+            Error::InvalidInput { message }
                 if message.contains("at least 28x28, got 27x28")
         ));
     }
@@ -186,7 +186,7 @@ mod tests {
         let error = preprocess_image(&image, &cfg, &Device::Cpu, DType::F32).unwrap_err();
         assert!(matches!(
             error,
-            OCRError::InvalidInput { message }
+            Error::InvalidInput { message }
                 if message.contains("divisible by 28") && message.contains("85x56")
         ));
     }

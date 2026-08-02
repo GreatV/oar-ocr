@@ -7,12 +7,12 @@
 use super::config::GlmOcrTextConfig;
 use super::text::{GlmOcrTextDecoderLayer, GlmOcrTextRotaryEmbedding};
 use crate::decoder_graph::{CudaGraphKvLengths, cuda_graph_error, sync_graph_tensor};
+use crate::error::Error;
 use crate::utils::candle_to_ocr_inference;
 use candle_core::{D, DType, Device, Tensor};
 use candle_nn::{
     Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, linear_no_bias, rms_norm,
 };
-use oar_ocr_core::core::OCRError;
 use std::cell::RefCell;
 
 struct GlmMtpCudaGraph {
@@ -54,7 +54,7 @@ impl GlmOcrMtpModel {
         cfg: &GlmOcrTextConfig,
         layer_index: usize,
         vb_language_model: VarBuilder,
-    ) -> Result<Self, OCRError> {
+    ) -> Result<Self, Error> {
         let vb = vb_language_model.pp("layers").pp(layer_index);
         let embed_tokens = embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("embed_tokens"))
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "load MTP embeddings", e))?;
@@ -97,7 +97,7 @@ impl GlmOcrMtpModel {
         input_ids: &Tensor,
         previous_hidden_states: &Tensor,
         mask_first_position: bool,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let mut inputs_embeds = self
             .embed_tokens
             .forward(input_ids)
@@ -141,7 +141,7 @@ impl GlmOcrMtpModel {
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP fusion projection", e))
     }
 
-    fn tokens_from_hidden(&self, hidden_states: &Tensor) -> Result<Tensor, OCRError> {
+    fn tokens_from_hidden(&self, hidden_states: &Tensor) -> Result<Tensor, Error> {
         let hidden_states = self
             .shared_norm
             .forward(hidden_states)
@@ -159,7 +159,7 @@ impl GlmOcrMtpModel {
         previous_hidden_states: &Tensor,
         position_ids: &Tensor,
         mask_first_position: bool,
-    ) -> Result<(Tensor, Tensor), OCRError> {
+    ) -> Result<(Tensor, Tensor), Error> {
         let hidden_states =
             self.fuse_inputs(input_ids, previous_hidden_states, mask_first_position)?;
         let (cos, sin) = self.rotary_emb.forward(&hidden_states, position_ids)?;
@@ -175,7 +175,7 @@ impl GlmOcrMtpModel {
         position_ids: &Tensor,
         query_lengths: &Tensor,
         kv_lengths: &Tensor,
-    ) -> Result<(Tensor, Tensor), OCRError> {
+    ) -> Result<(Tensor, Tensor), Error> {
         let hidden_states = self.fuse_inputs(input_ids, previous_hidden_states, false)?;
         let (cos, sin) = self.rotary_emb.forward(&hidden_states, position_ids)?;
         let hidden_states =
@@ -192,7 +192,7 @@ impl GlmOcrMtpModel {
         target_hidden_states: &Tensor,
         position_ids: &Tensor,
         mask_first_position: bool,
-    ) -> Result<(Tensor, Tensor), OCRError> {
+    ) -> Result<(Tensor, Tensor), Error> {
         self.forward_tokens(
             shifted_input_ids,
             target_hidden_states,
@@ -207,7 +207,7 @@ impl GlmOcrMtpModel {
         input_id: &Tensor,
         previous_hidden_state: &Tensor,
         position_ids: &Tensor,
-    ) -> Result<(Tensor, Tensor), OCRError> {
+    ) -> Result<(Tensor, Tensor), Error> {
         let kv_len = self.kv_cache_len().saturating_add(1);
         if let Some(output) =
             self.replay_cuda_graph(input_id, previous_hidden_state, position_ids, kv_len)?
@@ -217,7 +217,7 @@ impl GlmOcrMtpModel {
         self.forward_tokens(input_id, previous_hidden_state, position_ids, false)
     }
 
-    pub(super) fn prepare_cuda_graph(&self, cache_len: usize) -> Result<(), OCRError> {
+    pub(super) fn prepare_cuda_graph(&self, cache_len: usize) -> Result<(), Error> {
         if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
             || std::env::var_os("OAR_GLMOCR_DISABLE_CUDA_GRAPH").is_some()
         {
@@ -245,7 +245,7 @@ impl GlmOcrMtpModel {
         self.capture_cuda_graph(cache_len)
     }
 
-    fn capture_cuda_graph(&self, cache_len: usize) -> Result<(), OCRError> {
+    fn capture_cuda_graph(&self, cache_len: usize) -> Result<(), Error> {
         use candle_core::cuda_backend::cudarc::driver::sys::{
             CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
         };
@@ -311,7 +311,7 @@ impl GlmOcrMtpModel {
                 CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
             )
             .map_err(|e| cuda_graph_error("GLM-OCR", "end MTP CUDA graph capture", e))?
-            .ok_or_else(|| OCRError::ConfigError {
+            .ok_or_else(|| Error::Config {
                 message: "GLM-OCR MTP capture returned no graph".to_string(),
             })?;
         graph
@@ -339,7 +339,7 @@ impl GlmOcrMtpModel {
         previous_hidden_state: &Tensor,
         position_ids: &Tensor,
         kv_len: usize,
-    ) -> Result<Option<(Tensor, Tensor)>, OCRError> {
+    ) -> Result<Option<(Tensor, Tensor)>, Error> {
         let captured_ref = self.graph.borrow();
         let Some(captured) = captured_ref.as_ref() else {
             return Ok(None);
@@ -390,7 +390,7 @@ impl GlmOcrMtpModel {
         self.invalidate_cuda_graph();
     }
 
-    pub(super) fn trim_kv_cache(&self, len: usize) -> Result<(), OCRError> {
+    pub(super) fn trim_kv_cache(&self, len: usize) -> Result<(), Error> {
         self.layer.trim_kv_cache(len)
     }
 

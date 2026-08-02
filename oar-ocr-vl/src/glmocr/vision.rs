@@ -1,11 +1,11 @@
 use super::config::GlmOcrVisionConfig;
 use crate::attention::on_compute_device;
+use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::{
     Conv2d, Conv2dConfig, Linear, Module, RmsNorm, VarBuilder, linear_no_bias, rms_norm,
 };
-use oar_ocr_core::core::OCRError;
 
 #[derive(Debug, Clone)]
 struct GlmOcrVisionPatchEmbed {
@@ -14,7 +14,7 @@ struct GlmOcrVisionPatchEmbed {
 }
 
 impl GlmOcrVisionPatchEmbed {
-    fn load(cfg: &GlmOcrVisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &GlmOcrVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let vb = vb.pp("patch_embed").pp("proj");
         let weight = vb
             .get(
@@ -38,7 +38,7 @@ impl GlmOcrVisionPatchEmbed {
             .reshape((cfg.hidden_size, in_features))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: reshape patch_embed weight",
                     e,
                 )
@@ -47,24 +47,24 @@ impl GlmOcrVisionPatchEmbed {
         Ok(Self { weight, bias })
     }
 
-    fn forward(&self, hidden_states: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden_states: &Tensor) -> Result<Tensor, Error> {
         let w_t = self.weight.transpose(0, 1).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: patch_embed weight transpose",
                 e,
             )
         })?;
         let out = hidden_states.matmul(&w_t).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: patch_embed matmul",
                 e,
             )
         })?;
         out.broadcast_add(&self.bias).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: patch_embed bias add",
                 e,
             )
@@ -78,7 +78,7 @@ struct GlmOcrVisionRotaryEmbedding {
 }
 
 impl GlmOcrVisionRotaryEmbedding {
-    fn new(dim: usize, device: &Device, dtype: DType) -> Result<Self, OCRError> {
+    fn new(dim: usize, device: &Device, dtype: DType) -> Result<Self, Error> {
         // Shared with MinerU2.5 / PaddleOCR-VL: `1 / theta^(i/dim)` computed in
         // f64 then narrowed to f32 (theta = 10000). The subsequent dtype cast
         // dominates any f64-vs-f32 difference at the model's working precision.
@@ -86,7 +86,7 @@ impl GlmOcrVisionRotaryEmbedding {
             .to_dtype(dtype)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: cast vision inv_freq",
                     e,
                 )
@@ -94,13 +94,13 @@ impl GlmOcrVisionRotaryEmbedding {
         Ok(Self { inv_freq })
     }
 
-    fn forward(&self, seqlen: usize) -> Result<Tensor, OCRError> {
+    fn forward(&self, seqlen: usize) -> Result<Tensor, Error> {
         let device = self.inv_freq.device();
         let dtype = self.inv_freq.dtype();
 
         let inv_len = self.inv_freq.dims1().map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: vision inv_freq dims1",
                 e,
             )
@@ -121,7 +121,7 @@ impl GlmOcrVisionRotaryEmbedding {
         })
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: vision rope forward failed",
                 e,
             )
@@ -134,17 +134,17 @@ fn apply_rotary_pos_emb_vision(
     k: &Tensor,
     cos: &Tensor,
     sin: &Tensor,
-) -> Result<(Tensor, Tensor), OCRError> {
+) -> Result<(Tensor, Tensor), Error> {
     let cos = cos.unsqueeze(D::Minus2).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: vision cos unsqueeze",
             e,
         )
     })?;
     let sin = sin.unsqueeze(D::Minus2).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: vision sin unsqueeze",
             e,
         )
@@ -155,21 +155,21 @@ fn apply_rotary_pos_emb_vision(
 
     let q_mul = q.broadcast_mul(&cos).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: vision q*cos",
             e,
         )
     })?;
     let q_rot_mul = q_rot.broadcast_mul(&sin).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: vision rotate_half(q)*sin",
             e,
         )
     })?;
     let q_out = (&q_mul + &q_rot_mul).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: vision q apply rope",
             e,
         )
@@ -177,21 +177,21 @@ fn apply_rotary_pos_emb_vision(
 
     let k_mul = k.broadcast_mul(&cos).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: vision k*cos",
             e,
         )
     })?;
     let k_rot_mul = k_rot.broadcast_mul(&sin).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: vision rotate_half(k)*sin",
             e,
         )
     })?;
     let k_out = (&k_mul + &k_rot_mul).map_err(|e| {
         candle_to_ocr_processing(
-            oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+            crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: vision k apply rope",
             e,
         )
@@ -211,7 +211,7 @@ struct GlmOcrVisionAttention {
 }
 
 impl GlmOcrVisionAttention {
-    fn load(cfg: &GlmOcrVisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &GlmOcrVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let qkv = candle_nn::linear_b(
             cfg.hidden_size,
             cfg.hidden_size * 3,
@@ -244,15 +244,10 @@ impl GlmOcrVisionAttention {
         })
     }
 
-    fn forward(
-        &self,
-        hidden_states: &Tensor,
-        cos: &Tensor,
-        sin: &Tensor,
-    ) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden_states: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
         let seq_len = hidden_states.dim(0).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: vision attention seq_len",
                 e,
             )
@@ -265,7 +260,7 @@ impl GlmOcrVisionAttention {
             .reshape((seq_len, 3, self.num_heads, self.head_dim))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: vision qkv reshape",
                     e,
                 )
@@ -273,21 +268,21 @@ impl GlmOcrVisionAttention {
 
         let q = qkv.i((.., 0, .., ..)).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: vision q slice",
                 e,
             )
         })?;
         let k = qkv.i((.., 1, .., ..)).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: vision k slice",
                 e,
             )
         })?;
         let v = qkv.i((.., 2, .., ..)).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: vision v slice",
                 e,
             )
@@ -308,7 +303,7 @@ impl GlmOcrVisionAttention {
             .transpose(0, 1)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: vision q transpose",
                     e,
                 )
@@ -316,7 +311,7 @@ impl GlmOcrVisionAttention {
             .contiguous()
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: vision q contiguous",
                     e,
                 )
@@ -325,7 +320,7 @@ impl GlmOcrVisionAttention {
             .transpose(0, 1)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: vision k transpose",
                     e,
                 )
@@ -333,7 +328,7 @@ impl GlmOcrVisionAttention {
             .contiguous()
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: vision k contiguous",
                     e,
                 )
@@ -342,7 +337,7 @@ impl GlmOcrVisionAttention {
             .transpose(0, 1)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: vision v transpose",
                     e,
                 )
@@ -350,7 +345,7 @@ impl GlmOcrVisionAttention {
             .contiguous()
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: vision v contiguous",
                     e,
                 )
@@ -358,21 +353,21 @@ impl GlmOcrVisionAttention {
 
         let q = q.unsqueeze(0).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: vision q unsqueeze",
                 e,
             )
         })?;
         let k = k.unsqueeze(0).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: vision k unsqueeze",
                 e,
             )
         })?;
         let v = v.unsqueeze(0).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: vision v unsqueeze",
                 e,
             )
@@ -385,7 +380,7 @@ impl GlmOcrVisionAttention {
             .transpose(1, 2)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: vision attn transpose",
                     e,
                 )
@@ -393,7 +388,7 @@ impl GlmOcrVisionAttention {
             .reshape((seq_len, self.num_heads * self.head_dim))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: vision attn reshape",
                     e,
                 )
@@ -414,7 +409,7 @@ struct GlmOcrVisionMlp {
 }
 
 impl GlmOcrVisionMlp {
-    fn load(cfg: &GlmOcrVisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &GlmOcrVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let gate_proj = candle_nn::linear_b(
             cfg.hidden_size,
             cfg.intermediate_size,
@@ -445,7 +440,7 @@ impl GlmOcrVisionMlp {
         })
     }
 
-    fn forward(&self, xs: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor, Error> {
         let gate = self
             .gate_proj
             .forward(xs)
@@ -474,7 +469,7 @@ struct GlmOcrVisionBlock {
 }
 
 impl GlmOcrVisionBlock {
-    fn load_block(cfg: &GlmOcrVisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load_block(cfg: &GlmOcrVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let norm1 = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("norm1"))
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "vision norm1", e))?;
         let norm2 = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("norm2"))
@@ -489,12 +484,7 @@ impl GlmOcrVisionBlock {
         })
     }
 
-    fn forward(
-        &self,
-        hidden_states: &Tensor,
-        cos: &Tensor,
-        sin: &Tensor,
-    ) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden_states: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
         let normed = self
             .norm1
             .forward(hidden_states)
@@ -502,7 +492,7 @@ impl GlmOcrVisionBlock {
         let attn_out = self.attn.forward(&normed, cos, sin)?;
         let hidden_states = (hidden_states + attn_out).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: vision residual add",
                 e,
             )
@@ -514,7 +504,7 @@ impl GlmOcrVisionBlock {
         let mlp_out = self.mlp.forward(&normed)?;
         (hidden_states + mlp_out).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: vision residual add mlp",
                 e,
             )
@@ -533,7 +523,7 @@ struct GlmOcrVisionPatchMerger {
 }
 
 impl GlmOcrVisionPatchMerger {
-    fn load(cfg: &GlmOcrVisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    fn load(cfg: &GlmOcrVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let proj = linear_no_bias(cfg.out_hidden_size, cfg.out_hidden_size, vb.pp("proj"))
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "vision merger proj", e))?;
         let ln_cfg = candle_nn::LayerNormConfig {
@@ -565,7 +555,7 @@ impl GlmOcrVisionPatchMerger {
         })
     }
 
-    fn forward(&self, hidden_state: &Tensor) -> Result<Tensor, OCRError> {
+    fn forward(&self, hidden_state: &Tensor) -> Result<Tensor, Error> {
         let hidden_state = self
             .proj
             .forward(hidden_state)
@@ -610,7 +600,7 @@ pub struct GlmOcrVisionModel {
 }
 
 impl GlmOcrVisionModel {
-    pub fn load(cfg: &GlmOcrVisionConfig, vb: VarBuilder) -> Result<Self, OCRError> {
+    pub fn load(cfg: &GlmOcrVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let patch_embed = GlmOcrVisionPatchEmbed::load(cfg, vb.clone())?;
 
         let head_dim = cfg.hidden_size / cfg.num_heads;
@@ -657,7 +647,7 @@ impl GlmOcrVisionModel {
         })
     }
 
-    fn rot_pos_emb(&self, grid_thw: (usize, usize, usize)) -> Result<Tensor, OCRError> {
+    fn rot_pos_emb(&self, grid_thw: (usize, usize, usize)) -> Result<Tensor, Error> {
         let (_t, h, w) = grid_thw;
         let merge = self.cfg.spatial_merge_size;
         let device = self.patch_embed.weight.device();
@@ -673,7 +663,7 @@ impl GlmOcrVisionModel {
         })
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: vision hpos computation failed",
                 e,
             )
@@ -689,7 +679,7 @@ impl GlmOcrVisionModel {
         })
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: vision wpos computation failed",
                 e,
             )
@@ -697,7 +687,7 @@ impl GlmOcrVisionModel {
 
         let pos_ids = Tensor::stack(&[&hpos, &wpos], D::Minus1).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: vision pos_ids stack",
                 e,
             )
@@ -707,7 +697,7 @@ impl GlmOcrVisionModel {
         let rotary_full = self.rotary_pos_emb.forward(max_grid)?;
         let pos_ids_flat = pos_ids.flatten(0, 1).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: vision pos_ids flatten",
                 e,
             )
@@ -716,7 +706,7 @@ impl GlmOcrVisionModel {
             .index_select(&pos_ids_flat, 0)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: vision rotary index_select",
                     e,
                 )
@@ -724,21 +714,21 @@ impl GlmOcrVisionModel {
             .reshape((
                 pos_ids.dim(0).map_err(|e| {
                     candle_to_ocr_processing(
-                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                        crate::error::ProcessingStage::TensorOperation,
                         "GLM-OCR: vision pos_ids dim0",
                         e,
                     )
                 })?,
                 pos_ids.dim(1).map_err(|e| {
                     candle_to_ocr_processing(
-                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                        crate::error::ProcessingStage::TensorOperation,
                         "GLM-OCR: vision pos_ids dim1",
                         e,
                     )
                 })?,
                 rotary_full.dim(1).map_err(|e| {
                     candle_to_ocr_processing(
-                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                        crate::error::ProcessingStage::TensorOperation,
                         "GLM-OCR: vision rotary dim1",
                         e,
                     )
@@ -746,7 +736,7 @@ impl GlmOcrVisionModel {
             ))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: vision rotary reshape",
                     e,
                 )
@@ -754,7 +744,7 @@ impl GlmOcrVisionModel {
             .flatten(1, 2)
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: vision rotary flatten",
                     e,
                 )
@@ -767,27 +757,27 @@ impl GlmOcrVisionModel {
         &self,
         pixel_values: &Tensor,
         grid_thw: (usize, usize, usize),
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let mut hidden_states = self.patch_embed.forward(pixel_values)?;
 
         let rotary_pos_emb = self.rot_pos_emb(grid_thw)?;
         let emb = Tensor::cat(&[&rotary_pos_emb, &rotary_pos_emb], D::Minus1).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: vision rotary cat",
                 e,
             )
         })?;
         let cos = emb.cos().map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: vision cos",
                 e,
             )
         })?;
         let sin = emb.sin().map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: vision sin",
                 e,
             )
@@ -805,7 +795,7 @@ impl GlmOcrVisionModel {
         let merge = self.cfg.spatial_merge_size;
         let seq_len = hidden_states.dim(0).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "GLM-OCR: vision seq_len",
                 e,
             )
@@ -819,7 +809,7 @@ impl GlmOcrVisionModel {
             ))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: vision merge reshape",
                     e,
                 )
@@ -827,7 +817,7 @@ impl GlmOcrVisionModel {
             .permute((0, 3, 1, 2))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: vision merge permute",
                     e,
                 )
@@ -841,7 +831,7 @@ impl GlmOcrVisionModel {
             .reshape((
                 hidden.dim(0).map_err(|e| {
                     candle_to_ocr_processing(
-                        oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                        crate::error::ProcessingStage::TensorOperation,
                         "GLM-OCR: vision downsample dim0",
                         e,
                     )
@@ -850,7 +840,7 @@ impl GlmOcrVisionModel {
             ))
             .map_err(|e| {
                 candle_to_ocr_processing(
-                    oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                    crate::error::ProcessingStage::TensorOperation,
                     "GLM-OCR: vision downsample reshape",
                     e,
                 )

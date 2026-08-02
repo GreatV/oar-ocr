@@ -46,7 +46,11 @@ multiversion = { version = "0.8", optional = true }
 nalgebra = "0.35"
 ndarray = "0.17"
 oar-ocr-derive.workspace = true
-ort = { version = "2.0.0-rc.12", default-features = false, features = [ "std", "ndarray", "tracing", "copy-dylibs" ] }
+# Pinned exactly: `ort` is pre-release, so a caret requirement lets Cargo pick
+# up the next release candidate on a fresh resolve. rc.13 renames every
+# execution-provider type (`CPUExecutionProvider` -> `CPU`, ...), which breaks
+# the build without any change on our side. Unpin together with that migration.
+ort = { version = "=2.0.0-rc.12", default-features = false, features = [ "std", "ndarray", "tracing", "copy-dylibs" ] }
 rayon.workspace = true
 regex.workspace = true
 serde.workspace = true

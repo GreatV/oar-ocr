@@ -4,11 +4,11 @@ use super::vision::MonkeyOcrV2VisionModel;
 #[cfg(feature = "cuda")]
 use crate::cuda_kernels::{ArgmaxFirstBf16, ArgmaxFirstF32};
 use crate::doc_parser::{RecognitionBackend, RecognitionTask};
+use crate::error::Error;
 use crate::mineru_diffusion::text::{SdarKvCache, SdarModel};
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use image::RgbImage;
-use oar_ocr_core::core::OCRError;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
@@ -66,17 +66,16 @@ pub struct MonkeyOcrV2 {
 }
 
 impl MonkeyOcrV2 {
-    pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, OCRError> {
+    pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         let model_dir = model_dir.as_ref();
         let cfg = MonkeyOcrV2Config::from_path(model_dir.join("config.json"))?;
         let image_cfg =
             MonkeyOcrV2ImageProcessorConfig::from_path(model_dir.join("preprocessor_config.json"))?;
         image_cfg.validate_vision(&cfg.vision_config)?;
-        let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| {
-            OCRError::ConfigError {
+        let tokenizer =
+            Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| Error::Config {
                 message: format!("MonkeyOCRv2 failed to load tokenizer.json: {e}"),
-            }
-        })?;
+            })?;
         require_token(&tokenizer, "<|image_pad|>", Some(cfg.image_token_id))?;
         require_token(&tokenizer, "<|vision_start|>", None)?;
         require_token(&tokenizer, "<|vision_end|>", None)?;
@@ -122,7 +121,7 @@ impl MonkeyOcrV2 {
         images: &[RgbImage],
         tasks: &[MonkeyOcrV2Task],
         max_new_tokens: usize,
-    ) -> Vec<Result<String, OCRError>> {
+    ) -> Vec<Result<String, Error>> {
         self.generate_tokens(images, tasks, max_new_tokens)
             .into_iter()
             .map(|result| result.and_then(|tokens| self.decode_tokens(&tokens)))
@@ -135,7 +134,7 @@ impl MonkeyOcrV2 {
         images: &[RgbImage],
         prompts: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Vec<Result<String, OCRError>> {
+    ) -> Vec<Result<String, Error>> {
         if images.len() != prompts.len() {
             return vec![Err(length_mismatch(images.len(), prompts.len()))];
         }
@@ -155,7 +154,7 @@ impl MonkeyOcrV2 {
         images: &[RgbImage],
         tasks: &[MonkeyOcrV2Task],
         max_new_tokens: usize,
-    ) -> Vec<Result<Vec<u32>, OCRError>> {
+    ) -> Vec<Result<Vec<u32>, Error>> {
         if images.len() != tasks.len() {
             return vec![Err(length_mismatch(images.len(), tasks.len()))];
         }
@@ -175,7 +174,7 @@ impl MonkeyOcrV2 {
         instruction: &str,
         max_new_tokens: usize,
         min_pixels_override: Option<u32>,
-    ) -> Result<Vec<u32>, OCRError> {
+    ) -> Result<Vec<u32>, Error> {
         if max_new_tokens == 0 {
             return Ok(Vec::new());
         }
@@ -186,15 +185,15 @@ impl MonkeyOcrV2 {
         }
         let image_inputs = preprocess_image(image, &image_cfg, &self.device, self.dtype)?;
         let prompt = build_prompt(instruction, image_inputs.num_image_tokens);
-        let encoding =
-            self.tokenizer
-                .encode(prompt, false)
-                .map_err(|e| OCRError::InvalidInput {
-                    message: format!("MonkeyOCRv2 tokenizer encode failed: {e}"),
-                })?;
+        let encoding = self
+            .tokenizer
+            .encode(prompt, false)
+            .map_err(|e| Error::InvalidInput {
+                message: format!("MonkeyOCRv2 tokenizer encode failed: {e}"),
+            })?;
         let input_ids = encoding.get_ids();
         if input_ids.is_empty() {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: "MonkeyOCRv2 prompt tokenization produced no tokens".to_string(),
             });
         }
@@ -223,7 +222,7 @@ impl MonkeyOcrV2 {
         let mut generated = Vec::new();
         generated
             .try_reserve_exact(max_new_tokens)
-            .map_err(|e| OCRError::InvalidInput {
+            .map_err(|e| Error::InvalidInput {
                 message: format!(
                     "MonkeyOCRv2 cannot reserve output for {max_new_tokens} tokens: {e}"
                 ),
@@ -259,7 +258,7 @@ impl MonkeyOcrV2 {
         &self,
         input_ids: &[u32],
         image_inputs: &MonkeyOcrV2ImageInputs,
-    ) -> Result<Tensor, OCRError> {
+    ) -> Result<Tensor, Error> {
         let seq_len = input_ids.len();
         let token_ids = Tensor::new(input_ids, &self.device)
             .and_then(|tensor| tensor.unsqueeze(0))
@@ -279,7 +278,7 @@ impl MonkeyOcrV2 {
             .dim(0)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read image embedding count", e))?;
         if positions.len() != image_len || positions.is_empty() {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "MonkeyOCRv2 image placeholder count {} != image embedding count {image_len}",
                     positions.len()
@@ -292,7 +291,7 @@ impl MonkeyOcrV2 {
             .enumerate()
             .any(|(offset, &position)| position != start + offset)
         {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: "MonkeyOCRv2 image placeholders must be contiguous".to_string(),
             });
         }
@@ -310,11 +309,11 @@ impl MonkeyOcrV2 {
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "merge multimodal embeddings", e))
     }
 
-    pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, OCRError> {
+    pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, Error> {
         self.tokenizer
             .decode(tokens, true)
             .map(|text| text.trim().to_string())
-            .map_err(|e| OCRError::InvalidInput {
+            .map_err(|e| Error::InvalidInput {
                 message: format!("MonkeyOCRv2 tokenizer decode failed: {e}"),
             })
     }
@@ -338,7 +337,7 @@ impl RecognitionBackend for MonkeyOcrV2 {
         image: RgbImage,
         task: RecognitionTask,
         max_tokens: usize,
-    ) -> Result<String, OCRError> {
+    ) -> Result<String, Error> {
         let monkey_task = match task {
             RecognitionTask::Ocr | RecognitionTask::Chart => MonkeyOcrV2Task::Text,
             RecognitionTask::Table => MonkeyOcrV2Task::Table,
@@ -371,20 +370,14 @@ fn build_prompt(instruction: &str, num_image_tokens: usize) -> String {
     prompt
 }
 
-fn require_token(
-    tokenizer: &Tokenizer,
-    token: &str,
-    expected: Option<u32>,
-) -> Result<u32, OCRError> {
-    let id = tokenizer
-        .token_to_id(token)
-        .ok_or_else(|| OCRError::ConfigError {
-            message: format!("MonkeyOCRv2 tokenizer is missing {token:?}"),
-        })?;
+fn require_token(tokenizer: &Tokenizer, token: &str, expected: Option<u32>) -> Result<u32, Error> {
+    let id = tokenizer.token_to_id(token).ok_or_else(|| Error::Config {
+        message: format!("MonkeyOCRv2 tokenizer is missing {token:?}"),
+    })?;
     if let Some(expected) = expected
         && id != expected
     {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "MonkeyOCRv2 token {token:?} id mismatch: tokenizer {id} != config {expected}"
             ),
@@ -393,8 +386,8 @@ fn require_token(
     Ok(id)
 }
 
-fn length_mismatch(images: usize, tasks: usize) -> OCRError {
-    OCRError::InvalidInput {
+fn length_mismatch(images: usize, tasks: usize) -> Error {
+    Error::InvalidInput {
         message: format!("MonkeyOCRv2 image count {images} != task/prompt count {tasks}"),
     }
 }
@@ -403,15 +396,14 @@ fn validate_generation_length(
     prompt_len: usize,
     max_new_tokens: usize,
     context_limit: usize,
-) -> Result<(), OCRError> {
-    let requested =
-        prompt_len
-            .checked_add(max_new_tokens)
-            .ok_or_else(|| OCRError::InvalidInput {
-                message: "MonkeyOCRv2 requested sequence length overflows usize".to_string(),
-            })?;
+) -> Result<(), Error> {
+    let requested = prompt_len
+        .checked_add(max_new_tokens)
+        .ok_or_else(|| Error::InvalidInput {
+            message: "MonkeyOCRv2 requested sequence length overflows usize".to_string(),
+        })?;
     if requested > context_limit {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "MonkeyOCRv2 prompt ({prompt_len}) plus max_new_tokens ({max_new_tokens}) exceeds context limit {context_limit}"
             ),
@@ -420,7 +412,7 @@ fn validate_generation_length(
     Ok(())
 }
 
-fn select_greedy_token(logits: &Tensor) -> Result<u32, OCRError> {
+fn select_greedy_token(logits: &Tensor) -> Result<u32, Error> {
     #[cfg(feature = "cuda")]
     if logits.device().is_cuda() && matches!(logits.dtype(), DType::BF16 | DType::F32) {
         let vocab_size = logits.elem_count();
@@ -445,7 +437,7 @@ fn select_greedy_token(logits: &Tensor) -> Result<u32, OCRError> {
         .and_then(|token| token.to_scalar::<u32>())
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MonkeyOCRv2 greedy argmax",
                 e,
             )

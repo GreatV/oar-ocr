@@ -7,10 +7,10 @@
 //! With `merge_size = 2` it consumes 4 vision patches per produced token,
 //! matching the image-token budget (`prod(grid_thw) / merge_size²`).
 
+use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::Tensor;
 use candle_nn::{LayerNorm, LayerNormConfig, Linear, Module, VarBuilder, layer_norm, linear};
-use oar_ocr_core::core::OCRError;
 
 #[derive(Debug)]
 pub struct VisionAbstractor {
@@ -32,7 +32,7 @@ impl VisionAbstractor {
         context_dim: usize,
         out_dim: usize,
         merge_size: usize,
-    ) -> Result<Self, OCRError> {
+    ) -> Result<Self, Error> {
         let norm_cfg = LayerNormConfig {
             eps: 1e-6,
             ..Default::default()
@@ -54,7 +54,7 @@ impl VisionAbstractor {
 
     /// `x`: per-patch hidden states `(num_patches, context_dim)`.
     /// Returns `(num_patches / merge_size², out_dim)`.
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor, OCRError> {
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor, Error> {
         let num_patches = x
             .dim(0)
             .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "abstractor dim", e))?;
@@ -68,7 +68,7 @@ impl VisionAbstractor {
             * x.dim(1)
                 .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "abstractor dim1", e))?;
         if !total.is_multiple_of(self.merged_dim) {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "MinerU-Diffusion: abstractor element count {total} not divisible by merged_dim {}",
                     self.merged_dim
@@ -78,7 +78,7 @@ impl VisionAbstractor {
         let rows = total / self.merged_dim;
         let x = x.reshape((rows, self.merged_dim)).map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MinerU-Diffusion: abstractor reshape failed",
                 e,
             )
@@ -89,7 +89,7 @@ impl VisionAbstractor {
             .map_err(|e| candle_to_ocr_inference("MinerU-Diffusion", "abstractor mlp.0", e))?;
         let x = x.gelu_erf().map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "MinerU-Diffusion: abstractor gelu failed",
                 e,
             )

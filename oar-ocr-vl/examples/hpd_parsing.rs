@@ -1,7 +1,7 @@
 //! HPD-Parsing native Candle inference.
 //!
 //! ```bash
-//! cargo run --release -p oar-ocr-vl --features cuda,download-binaries \
+//! cargo run --release -p oar-ocr-vl --features cuda \
 //!   --example hpd_parsing -- \
 //!   --model-dir PaddlePaddle/HPD-Parsing --device cuda:0 document.jpg
 //! ```
@@ -9,11 +9,11 @@
 mod utils;
 
 use clap::Parser;
-use oar_ocr_core::utils::load_image;
 use oar_ocr_vl::HpdParsing;
 use oar_ocr_vl::hpd_parsing::{
     DEFAULT_MAX_NEW_TOKENS, DEFAULT_PROMPT, DEFAULT_SPECULATIVE_TOKENS, HpdGenerationConfig,
 };
+use oar_ocr_vl::utils::image::load_image;
 use oar_ocr_vl::utils::parse_device;
 use std::path::PathBuf;
 use std::time::Instant;

@@ -1,6 +1,6 @@
 //! Unified layout-first document parser: detect layout (PP-DocLayout v2/v3),
-//! sort by reading order, then crop and recognize each region with a pluggable
-//! backend into structured results.
+//! then crop and recognize each region with a pluggable backend into structured
+//! results. The layout source supplies the regions in reading order.
 //!
 //! Supported backends:
 //! - [`PaddleOcrVl`] - PaddleOCR-VL, 1.5, and 1.6 with task-specific prompts
@@ -16,16 +16,13 @@ use super::utils::{
     DetectedBox, calculate_overlap_ratio, calculate_projection_overlap_ratio, convert_otsl_to_html,
     crop_margin, filter_overlap_boxes, image::resize_for_mineru, text, truncate_repetitive_content,
 };
+use crate::crop::crop_bounding_box;
+use crate::error::Error;
+use crate::geometry::BoundingBox;
+use crate::layout::LayoutSource;
+use crate::structure::{LayoutElement, LayoutElementType, StructureResult, TableResult, TableType};
 use image::RgbImage;
 use image::{Rgb, imageops};
-use oar_ocr_core::core::{OCRError, OpaqueError};
-use oar_ocr_core::domain::structure::{
-    LayoutElement, LayoutElementType, StructureResult, TableResult, TableType,
-};
-use oar_ocr_core::predictors::LayoutDetectionPredictor;
-use oar_ocr_core::processors::BoundingBox;
-use oar_ocr_core::processors::layout_sorting::{SortableElement, sort_layout_enhanced};
-use oar_ocr_core::utils::BBoxCrop;
 use std::sync::Arc;
 
 /// Recognition task for a layout element.
@@ -54,7 +51,7 @@ pub trait RecognitionBackend {
         image: RgbImage,
         task: RecognitionTask,
         max_tokens: usize,
-    ) -> Result<String, OCRError>;
+    ) -> Result<String, Error>;
 
     /// Whether this backend requires post-processing for table output.
     /// Some backends emit OTSL and need conversion; PaddleOCR-VL outputs HTML directly.
@@ -86,6 +83,9 @@ pub struct DocParserConfig {
     pub skip_region_blocks: bool,
     /// Labels to ignore when converting to markdown.
     pub markdown_ignore_labels: Vec<String>,
+    /// Centre captions and tables with inline HTML in markdown output, as the
+    /// PaddleOCR-VL reference does.
+    pub markdown_pretty: bool,
 }
 
 impl Default for DocParserConfig {
@@ -96,18 +96,8 @@ impl Default for DocParserConfig {
             max_tokens: 4096,
             skip_auxiliary_regions: true,
             skip_region_blocks: true,
-            markdown_ignore_labels: vec![
-                "number".to_string(),
-                "footnote".to_string(),
-                "header".to_string(),
-                "header_image".to_string(),
-                "footer".to_string(),
-                "footer_image".to_string(),
-                "aside_text".to_string(),
-                // PaddleOCR-VL markdown output skips `formula_number` blocks by default (unless explicitly
-                // merged into the preceding formula), so ignore it for OpenOCR/PaddleX parity.
-                "formula_number".to_string(),
-            ],
+            markdown_ignore_labels: super::utils::default_markdown_ignore_labels(),
+            markdown_pretty: true,
         }
     }
 }
@@ -138,48 +128,40 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
     }
 
     /// Parse a document image using layout-first pipeline.
-    pub fn parse(
+    ///
+    /// `layout` is any [`LayoutSource`]: [`PpDocLayout`](crate::PpDocLayout),
+    /// which runs on Candle like the rest of this crate, or a detector of your
+    /// own. Its regions are used in the order returned.
+    pub fn parse<L: LayoutSource + ?Sized>(
         &self,
-        layout_predictor: &LayoutDetectionPredictor,
+        layout: &L,
         image: RgbImage,
-    ) -> Result<StructureResult, OCRError> {
-        self.parse_with_path(layout_predictor, "<memory>", 0, image)
+    ) -> Result<StructureResult, Error> {
+        self.parse_with_path(layout, "<memory>", 0, image)
     }
 
     /// Parse a document image without layout detection (single full-image OCR).
     ///
     /// Use this for end-to-end models that handle layout internally.
     /// For models requiring separate layout detection, use [`parse`](Self::parse) instead.
-    pub fn parse_without_layout(&self, image: RgbImage) -> Result<StructureResult, OCRError> {
+    pub fn parse_without_layout(&self, image: RgbImage) -> Result<StructureResult, Error> {
         self.recognize_full_image("<memory>".into(), 0, image)
     }
 
     /// Parse a document image with source path information.
-    pub fn parse_with_path(
+    pub fn parse_with_path<L: LayoutSource + ?Sized>(
         &self,
-        layout_predictor: &LayoutDetectionPredictor,
+        layout: &L,
         input_path: impl Into<Arc<str>>,
         index: usize,
         image: RgbImage,
-    ) -> Result<StructureResult, OCRError> {
+    ) -> Result<StructureResult, Error> {
         let input_path: Arc<str> = input_path.into();
         let (page_w, page_h) = (image.width() as f32, image.height() as f32);
 
         // Step 1: Layout detection
-        let layout_result =
-            layout_predictor
-                .predict(vec![image.clone()])
-                .map_err(|e| OCRError::Inference {
-                    model_name: "layout_detection".to_string(),
-                    context: "DocParser: layout prediction failed".to_string(),
-                    source: Box::new(OpaqueError::from_display(e)),
-                })?;
-
-        let detected = layout_result
-            .elements
-            .into_iter()
-            .next()
-            .unwrap_or_default();
+        let layout_result = layout.detect(&image)?;
+        let detected = layout_result.elements;
 
         // OpenOCR applies an additional overlap filter (overlap_ratio > 0.7, mode=small)
         // after PP-DocLayout (v2/v3) to remove redundant boxes.
@@ -219,25 +201,9 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
             return self.recognize_full_image(input_path, index, image);
         }
 
-        // Step 3: Sort by reading order
-        let mut sorted_elements: Vec<LayoutElement> = if layout_result.is_reading_order_sorted {
-            elements
-        } else {
-            let sortable: Vec<SortableElement> = elements
-                .iter()
-                .map(|e| SortableElement {
-                    bbox: e.bbox.clone(),
-                    element_type: e.element_type,
-                    num_lines: e.num_lines,
-                })
-                .collect();
-            let sorted_indices = sort_layout_enhanced(&sortable, page_w, page_h);
-            sorted_indices
-                .into_iter()
-                .filter_map(|idx| elements.get(idx).cloned())
-                .collect()
-        };
-
+        // Step 3: Number the elements. A `LayoutSource` hands them over in
+        // reading order, so there is nothing to sort here.
+        let mut sorted_elements = elements;
         assign_order_indices(&mut sorted_elements);
 
         // Step 4: Recognize each element (with OpenOCR-style block merging)
@@ -293,7 +259,7 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
                     } else {
                         bbox.clone()
                     };
-                    let crop = match BBoxCrop::crop_bounding_box(&image, &crop_bbox) {
+                    let crop = match crop_bounding_box(&image, &crop_bbox) {
                         Ok(crop) => crop,
                         Err(_) => continue,
                     };
@@ -318,7 +284,7 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
                     } else {
                         element.bbox.clone()
                     };
-                    match BBoxCrop::crop_bounding_box(&image, &crop_bbox) {
+                    match crop_bounding_box(&image, &crop_bbox) {
                         Ok(crop) => crop,
                         Err(_) => continue,
                     }
@@ -332,7 +298,7 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
                 } else {
                     element.bbox.clone()
                 };
-                match BBoxCrop::crop_bounding_box(&image, &crop_bbox) {
+                match crop_bounding_box(&image, &crop_bbox) {
                     Ok(cropped) => cropped,
                     Err(_) => continue,
                 }
@@ -388,29 +354,19 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
     }
 
     /// Parse a document and convert to markdown.
-    pub fn parse_to_markdown(
+    ///
+    /// Uses [`DocParserConfig::markdown_ignore_labels`] and
+    /// [`DocParserConfig::markdown_pretty`].
+    pub fn parse_to_markdown<L: LayoutSource + ?Sized>(
         &self,
-        layout_predictor: &LayoutDetectionPredictor,
+        layout: &L,
         image: RgbImage,
-    ) -> Result<String, OCRError> {
-        let result = self.parse(layout_predictor, image)?;
+    ) -> Result<String, Error> {
+        let result = self.parse(layout, image)?;
         Ok(super::utils::to_markdown(
             &result.layout_elements,
             &self.config.markdown_ignore_labels,
-        ))
-    }
-
-    /// Parse a document and convert to OpenOCR/PaddleX-compatible markdown (pretty HTML mode).
-    pub fn parse_to_markdown_openocr(
-        &self,
-        layout_predictor: &LayoutDetectionPredictor,
-        image: RgbImage,
-    ) -> Result<String, OCRError> {
-        let result = self.parse(layout_predictor, image)?;
-        Ok(super::utils::to_markdown_openocr(
-            &result.layout_elements,
-            &self.config.markdown_ignore_labels,
-            true,
+            self.config.markdown_pretty,
         ))
     }
 
@@ -419,7 +375,7 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
         input_path: Arc<str>,
         index: usize,
         image: RgbImage,
-    ) -> Result<StructureResult, OCRError> {
+    ) -> Result<StructureResult, Error> {
         let (page_w, page_h) = (image.width() as f32, image.height() as f32);
         let text = self
             .backend
@@ -446,7 +402,7 @@ impl RecognitionBackend for PaddleOcrVl {
         image: RgbImage,
         task: RecognitionTask,
         max_tokens: usize,
-    ) -> Result<String, OCRError> {
+    ) -> Result<String, Error> {
         let vl_task = match task {
             RecognitionTask::Ocr => PaddleOcrVlTask::Ocr,
             RecognitionTask::Table => PaddleOcrVlTask::Table,
@@ -457,7 +413,7 @@ impl RecognitionBackend for PaddleOcrVl {
         // PaddleOCR-VL's reference pipeline truncates repetitive tails on the *raw* model output,
         // before per-task postprocessing (e.g., table-token conversion).
         let results = self.generate_with_raw(&[image], &[vl_task], max_tokens);
-        let (raw, _) = results.into_iter().next().ok_or(OCRError::InvalidInput {
+        let (raw, _) = results.into_iter().next().ok_or(Error::InvalidInput {
             message: "PaddleOCR-VL: no result returned".to_string(),
         })??;
         let raw = truncate_repetitive_content(&raw, 10, 10, 10);
@@ -483,7 +439,7 @@ impl RecognitionBackend for HunyuanOcr {
         image: RgbImage,
         task: RecognitionTask,
         max_tokens: usize,
-    ) -> Result<String, OCRError> {
+    ) -> Result<String, Error> {
         let prompt = match task {
             RecognitionTask::Ocr => {
                 "Detect and recognize text in the image, and output the text coordinates in a formatted manner."
@@ -501,7 +457,7 @@ impl RecognitionBackend for HunyuanOcr {
             .into_iter()
             .next()
             .unwrap_or_else(|| {
-                Err(OCRError::InvalidInput {
+                Err(Error::InvalidInput {
                     message: "HunyuanOCR: no result returned".to_string(),
                 })
             })?;
@@ -529,7 +485,7 @@ impl RecognitionBackend for GlmOcr {
         image: RgbImage,
         task: RecognitionTask,
         max_tokens: usize,
-    ) -> Result<String, OCRError> {
+    ) -> Result<String, Error> {
         let prompt = match task {
             RecognitionTask::Ocr => "Text Recognition:",
             RecognitionTask::Table => "Table Recognition:",
@@ -541,7 +497,7 @@ impl RecognitionBackend for GlmOcr {
             .into_iter()
             .next()
             .unwrap_or_else(|| {
-                Err(OCRError::InvalidInput {
+                Err(Error::InvalidInput {
                     message: "GLM-OCR: no result returned".to_string(),
                 })
             })?;
@@ -569,7 +525,7 @@ impl RecognitionBackend for MinerU {
         image: RgbImage,
         task: RecognitionTask,
         max_tokens: usize,
-    ) -> Result<String, OCRError> {
+    ) -> Result<String, Error> {
         let prompt = match task {
             RecognitionTask::Ocr => "\nText Recognition:",
             RecognitionTask::Table => "\nTable Recognition:",
@@ -584,7 +540,7 @@ impl RecognitionBackend for MinerU {
             .into_iter()
             .next()
             .unwrap_or_else(|| {
-                Err(OCRError::InvalidInput {
+                Err(Error::InvalidInput {
                     message: "MinerU2.5: no result returned".to_string(),
                 })
             })?;
@@ -879,4 +835,117 @@ fn compute_openocr_merge_groups(elements: &[LayoutElement]) -> Vec<MergeGroup> {
         .into_iter()
         .filter(|g| g.indices.len() > 1 && g.aligns.len() + 1 == g.indices.len())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::LayoutDetectionElement;
+    use crate::layout::StaticLayout;
+    use std::cell::RefCell;
+
+    /// Records the crops it is handed and echoes back a per-call marker.
+    struct RecordingBackend {
+        crops: RefCell<Vec<(u32, u32)>>,
+    }
+
+    impl RecognitionBackend for RecordingBackend {
+        fn recognize(
+            &self,
+            image: RgbImage,
+            _task: RecognitionTask,
+            _max_tokens: usize,
+        ) -> Result<String, Error> {
+            let mut crops = self.crops.borrow_mut();
+            crops.push((image.width(), image.height()));
+            Ok(format!("region {}", crops.len()))
+        }
+    }
+
+    fn element(label: &str, x1: f32, y1: f32, x2: f32, y2: f32) -> LayoutDetectionElement {
+        LayoutDetectionElement {
+            bbox: BoundingBox::from_coords(x1, y1, x2, y2),
+            element_type: label.to_string(),
+            score: 0.9,
+        }
+    }
+
+    /// The parser must run end to end on a caller-supplied `LayoutSource`,
+    /// which is the path that needs no ONNX Runtime.
+    #[test]
+    fn parses_with_a_static_layout_source() {
+        let backend = RecordingBackend {
+            crops: RefCell::new(Vec::new()),
+        };
+        let parser = DocParser::new(&backend);
+        let layout = StaticLayout::new(vec![
+            element("doc_title", 10.0, 10.0, 190.0, 40.0),
+            element("text", 10.0, 60.0, 190.0, 140.0),
+        ]);
+
+        let result = parser
+            .parse(&layout, RgbImage::new(200, 200))
+            .expect("parse succeeds");
+
+        assert_eq!(result.layout_elements.len(), 2);
+        assert_eq!(backend.crops.borrow().len(), 2);
+        assert_eq!(
+            result.layout_elements[0].element_type,
+            LayoutElementType::DocTitle
+        );
+    }
+
+    /// An empty detection list falls back to whole-page recognition.
+    #[test]
+    fn falls_back_to_full_image_when_layout_is_empty() {
+        let backend = RecordingBackend {
+            crops: RefCell::new(Vec::new()),
+        };
+        let parser = DocParser::new(&backend);
+
+        let result = parser
+            .parse(&StaticLayout::new(Vec::new()), RgbImage::new(120, 80))
+            .expect("parse succeeds");
+
+        assert_eq!(result.layout_elements.len(), 1);
+        assert_eq!(*backend.crops.borrow(), vec![(120, 80)]);
+    }
+
+    /// `parse_to_markdown` and `StructureResult::to_markdown` must drop the
+    /// same labels; they used to disagree, so a page header reached the prose
+    /// through one path but not the other.
+    #[test]
+    fn both_markdown_entry_points_skip_the_same_labels() {
+        let backend = RecordingBackend {
+            crops: RefCell::new(Vec::new()),
+        };
+        let config = DocParserConfig {
+            // Keep the auxiliary regions so they reach the renderer at all.
+            skip_auxiliary_regions: false,
+            ..DocParserConfig::default()
+        };
+        let parser = DocParser::with_config(&backend, config);
+        let layout = StaticLayout::new(vec![
+            element("header", 10.0, 5.0, 190.0, 20.0),
+            element("text", 10.0, 60.0, 190.0, 140.0),
+        ]);
+
+        let result = parser
+            .parse(&layout, RgbImage::new(200, 200))
+            .expect("parse succeeds");
+        assert!(
+            result
+                .layout_elements
+                .iter()
+                .any(|e| e.element_type == LayoutElementType::Header),
+            "the header must survive parsing for this test to mean anything"
+        );
+
+        let from_config = super::super::utils::to_markdown(
+            &result.layout_elements,
+            &parser.config().markdown_ignore_labels,
+            parser.config().markdown_pretty,
+        );
+        assert_eq!(result.to_markdown(), from_config);
+    }
 }

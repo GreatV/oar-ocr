@@ -1,11 +1,11 @@
 use super::config::PaddleOcrVlImageProcessorConfig;
+use crate::error::Error;
 use crate::utils::image::pil_resample_to_filter_type;
 pub use crate::utils::image::smart_resize;
 use crate::utils::table::{convert_otsl_to_html, looks_like_table_tokens};
 pub use crate::utils::text::strip_math_wrappers;
 use candle_core::{DType, Device, Tensor};
 use image::{RgbImage, imageops::FilterType};
-use oar_ocr_core::core::OCRError;
 use rayon::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -27,7 +27,7 @@ pub fn preprocess_images(
     cfg: &PaddleOcrVlImageProcessorConfig,
     device: &Device,
     dtype: DType,
-) -> Result<PaddleOcrVlImageInputs, OCRError> {
+) -> Result<PaddleOcrVlImageInputs, Error> {
     preprocess_images_with_max_pixels(images, cfg, device, dtype, cfg.max_pixels)
 }
 
@@ -37,10 +37,10 @@ pub(crate) fn preprocess_images_with_max_pixels(
     device: &Device,
     dtype: DType,
     max_pixels: u32,
-) -> Result<PaddleOcrVlImageInputs, OCRError> {
+) -> Result<PaddleOcrVlImageInputs, Error> {
     cfg.validate()?;
     if images.is_empty() {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: "PaddleOCR-VL: no images provided".to_string(),
         });
     }
@@ -70,7 +70,7 @@ pub(crate) fn preprocess_images_with_max_pixels(
         };
 
         if rh % patch != 0 || rw % patch != 0 {
-            return Err(OCRError::ConfigError {
+            return Err(Error::Config {
                 message: format!(
                     "PaddleOCR-VL preprocess produced non-divisible dims: {rh}x{rw} not divisible by patch_size={patch}"
                 ),
@@ -127,8 +127,8 @@ pub(crate) fn preprocess_images_with_max_pixels(
             (num_patches, 3usize, cfg.patch_size, cfg.patch_size),
             device,
         )
-        .map_err(|e| OCRError::Processing {
-            kind: oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+        .map_err(|e| Error::Processing {
+            kind: crate::error::ProcessingStage::TensorOperation,
             context: "PaddleOCR-VL: failed to create pixel_values tensor".to_string(),
             source: Box::new(e),
         })?;
@@ -137,8 +137,8 @@ pub(crate) fn preprocess_images_with_max_pixels(
         grids.push((grid_t, grid_h, grid_w));
     }
 
-    let pixel_values = Tensor::cat(&all_patches, 0).map_err(|e| OCRError::Processing {
-        kind: oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+    let pixel_values = Tensor::cat(&all_patches, 0).map_err(|e| Error::Processing {
+        kind: crate::error::ProcessingStage::TensorOperation,
         context: "PaddleOCR-VL: failed to concatenate pixel_values tensors".to_string(),
         source: Box::new(e),
     })?;
@@ -146,8 +146,8 @@ pub(crate) fn preprocess_images_with_max_pixels(
     // Convert to the target dtype (e.g., BF16 for model inference)
     let pixel_values = pixel_values
         .to_dtype(dtype)
-        .map_err(|e| OCRError::Processing {
-            kind: oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+        .map_err(|e| Error::Processing {
+            kind: crate::error::ProcessingStage::TensorOperation,
             context: "PaddleOCR-VL: failed to convert pixel_values to target dtype".to_string(),
             source: Box::new(e),
         })?;
@@ -165,7 +165,7 @@ mod tests {
     use image::{Rgb, RgbImage};
 
     #[test]
-    fn test_preprocess_outputs_expected_shapes() -> Result<(), OCRError> {
+    fn test_preprocess_outputs_expected_shapes() -> Result<(), Error> {
         let cfg = PaddleOcrVlImageProcessorConfig {
             do_resize: true,
             do_rescale: true,

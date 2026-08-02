@@ -1,11 +1,11 @@
 use super::config::{HunyuanOcrImageProcessorConfig, HunyuanOcrVersion, HunyuanOcrVisionConfig};
+use crate::error::Error;
 use crate::utils::{
     candle_to_ocr_processing,
     image::{clamp_to_max_image_size, image_to_chw, smart_resize},
 };
 use candle_core::{DType, Device, Tensor};
 use image::{RgbImage, imageops::FilterType};
-use oar_ocr_core::core::OCRError;
 
 #[derive(Debug, Clone)]
 pub struct HunyuanOcrImageInputs {
@@ -20,9 +20,9 @@ pub fn smart_resize_token_limited(
     min_pixels: u32,
     max_pixels: u32,
     max_tokens: usize,
-) -> Result<(u32, u32), OCRError> {
+) -> Result<(u32, u32), Error> {
     if factor == 0 {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: "HunyuanOCR smart_resize_token_limited: factor must be > 0".to_string(),
         });
     }
@@ -41,7 +41,7 @@ pub fn smart_resize_token_limited(
         // Reduce the larger axis (in merged-grid units) first to keep aspect ratio roughly intact.
         if wm >= hm {
             if rw <= factor {
-                return Err(OCRError::InvalidInput {
+                return Err(Error::InvalidInput {
                     message: "HunyuanOCR smart_resize_token_limited: cannot satisfy max_tokens"
                         .to_string(),
                 });
@@ -49,7 +49,7 @@ pub fn smart_resize_token_limited(
             rw -= factor;
         } else {
             if rh <= factor {
-                return Err(OCRError::InvalidInput {
+                return Err(Error::InvalidInput {
                     message: "HunyuanOCR smart_resize_token_limited: cannot satisfy max_tokens"
                         .to_string(),
                 });
@@ -68,10 +68,10 @@ pub fn preprocess_image(
     version: HunyuanOcrVersion,
     device: &Device,
     dtype: DType,
-) -> Result<HunyuanOcrImageInputs, OCRError> {
+) -> Result<HunyuanOcrImageInputs, Error> {
     cfg.validate()?;
     if vision_cfg.patch_size != cfg.patch_size {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "HunyuanOCR patch_size mismatch: preprocessor {} != vision_config {}",
                 cfg.patch_size, vision_cfg.patch_size
@@ -79,7 +79,7 @@ pub fn preprocess_image(
         });
     }
     if vision_cfg.spatial_merge_size != cfg.merge_size {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "HunyuanOCR merge_size mismatch: preprocessor {} != vision_config.spatial_merge_size {}",
                 cfg.merge_size, vision_cfg.spatial_merge_size
@@ -120,7 +120,7 @@ pub fn preprocess_image(
     };
 
     if rh % factor != 0 || rw % factor != 0 {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: format!(
                 "HunyuanOCR preprocess produced non-divisible dims: {rh}x{rw} not divisible by factor={factor}"
             ),
@@ -138,7 +138,7 @@ pub fn preprocess_image(
     let pixel_values = Tensor::from_vec(data, (1usize, 3usize, rh as usize, rw as usize), device)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: failed to create pixel_values tensor",
                 e,
             )
@@ -146,7 +146,7 @@ pub fn preprocess_image(
         .to_dtype(dtype)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "HunyuanOCR: failed to cast pixel_values dtype",
                 e,
             )

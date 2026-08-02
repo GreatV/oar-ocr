@@ -1,7 +1,7 @@
 //! MonkeyOCRv2-S/B-Parsing inference example (Candle-based).
 //!
 //! ```bash
-//! cargo run --release -p oar-ocr-vl --features cuda,download-binaries \
+//! cargo run --release -p oar-ocr-vl --features cuda \
 //!   --example monkeyocrv2 -- \
 //!   --model-dir zenosai/MonkeyOCRv2-S-Parsing \
 //!   --device cuda:0 --task end-to-end document.jpg
@@ -10,8 +10,8 @@
 mod utils;
 
 use clap::{Parser, ValueEnum};
-use oar_ocr_core::utils::load_image;
 use oar_ocr_vl::monkeyocrv2::DEFAULT_MAX_NEW_TOKENS;
+use oar_ocr_vl::utils::image::load_image;
 use oar_ocr_vl::utils::parse_device;
 use oar_ocr_vl::{MonkeyOcrV2, MonkeyOcrV2Task};
 use std::path::PathBuf;

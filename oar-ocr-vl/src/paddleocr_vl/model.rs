@@ -8,11 +8,11 @@ use super::vision::VisionModel;
 use crate::attention::{
     combine_masks, create_causal_mask, create_generation_mask, create_left_padding_mask,
 };
+use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::Module;
 use image::{RgbImage, imageops::FilterType};
-use oar_ocr_core::core::OCRError;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
@@ -74,23 +74,20 @@ pub struct PaddleOcrVl {
 }
 
 impl PaddleOcrVl {
-    pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, OCRError> {
+    pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         let model_dir = model_dir.as_ref();
         let cfg = PaddleOcrVlConfig::from_path(model_dir.join("config.json"))?;
         let image_cfg =
             PaddleOcrVlImageProcessorConfig::from_path(model_dir.join("preprocessor_config.json"))?;
 
-        let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| {
-            OCRError::ConfigError {
+        let tokenizer =
+            Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| Error::Config {
                 message: format!("failed to load PaddleOCR-VL tokenizer.json: {e}"),
-            }
-        })?;
-
-        let eos_token_id = tokenizer
-            .token_to_id("</s>")
-            .ok_or_else(|| OCRError::ConfigError {
-                message: "PaddleOCR-VL: tokenizer is missing </s> token".to_string(),
             })?;
+
+        let eos_token_id = tokenizer.token_to_id("</s>").ok_or_else(|| Error::Config {
+            message: "PaddleOCR-VL: tokenizer is missing </s> token".to_string(),
+        })?;
         let sep_token_id = tokenizer.token_to_id("<|end_of_sentence|>");
 
         let assistant_prefix = if std::fs::read_to_string(model_dir.join("chat_template.jinja"))
@@ -105,7 +102,7 @@ impl PaddleOcrVl {
         // Pre-tokenize image placeholder to avoid repeated string allocation
         let image_placeholder_token_id = tokenizer
             .token_to_id("<|IMAGE_PLACEHOLDER|>")
-            .ok_or_else(|| OCRError::ConfigError {
+            .ok_or_else(|| Error::Config {
                 message: "PaddleOCR-VL: tokenizer is missing <|IMAGE_PLACEHOLDER|> token"
                     .to_string(),
             })?;
@@ -159,7 +156,7 @@ impl PaddleOcrVl {
         images: &[RgbImage],
         tasks: &[PaddleOcrVlTask],
         max_new_tokens: usize,
-    ) -> Vec<Result<String, OCRError>> {
+    ) -> Vec<Result<String, Error>> {
         self.generate_with_raw(images, tasks, max_new_tokens)
             .into_iter()
             .map(|r| r.map(|(_, processed)| processed))
@@ -172,12 +169,12 @@ impl PaddleOcrVl {
         images: &[RgbImage],
         tasks: &[PaddleOcrVlTask],
         max_new_tokens: usize,
-    ) -> Vec<Result<(String, String), OCRError>> {
+    ) -> Vec<Result<(String, String), Error>> {
         if images.is_empty() {
             return Vec::new();
         }
         if images.len() != tasks.len() {
-            return vec![Err(OCRError::InvalidInput {
+            return vec![Err(Error::InvalidInput {
                 message: format!(
                     "PaddleOCR-VL: images count ({}) != tasks count ({})",
                     images.len(),
@@ -196,7 +193,7 @@ impl PaddleOcrVl {
                 let msg = crate::utils::error_chain_message("generation failed", &e);
                 (0..images.len())
                     .map(|_| {
-                        Err(OCRError::InvalidInput {
+                        Err(Error::InvalidInput {
                             message: msg.clone(),
                         })
                     })
@@ -214,12 +211,12 @@ impl PaddleOcrVl {
         images: &[RgbImage],
         tasks: &[PaddleOcrVlTask],
         max_new_tokens: usize,
-    ) -> Vec<Result<Vec<u32>, OCRError>> {
+    ) -> Vec<Result<Vec<u32>, Error>> {
         if images.is_empty() {
             return Vec::new();
         }
         if images.len() != tasks.len() {
-            return vec![Err(OCRError::InvalidInput {
+            return vec![Err(Error::InvalidInput {
                 message: format!(
                     "PaddleOCR-VL: images count ({}) != tasks count ({})",
                     images.len(),
@@ -234,7 +231,7 @@ impl PaddleOcrVl {
                 let msg = crate::utils::error_chain_message("generation failed", &e);
                 (0..images.len())
                     .map(|_| {
-                        Err(OCRError::InvalidInput {
+                        Err(Error::InvalidInput {
                             message: msg.clone(),
                         })
                     })
@@ -249,7 +246,7 @@ impl PaddleOcrVl {
         images: &[RgbImage],
         tasks: &[PaddleOcrVlTask],
         max_new_tokens: usize,
-    ) -> Result<Vec<Vec<u32>>, OCRError> {
+    ) -> Result<Vec<Vec<u32>>, Error> {
         let batch_size = images.len();
 
         // 1. Preprocess all images
@@ -315,14 +312,15 @@ impl PaddleOcrVl {
             let prefix_enc =
                 self.tokenizer
                     .encode(prefix, false)
-                    .map_err(|e| OCRError::InvalidInput {
+                    .map_err(|e| Error::InvalidInput {
                         message: format!("tokenizer encode failed: {e}"),
                     })?;
-            let suffix_enc = self.tokenizer.encode(suffix.as_str(), false).map_err(|e| {
-                OCRError::InvalidInput {
-                    message: format!("tokenizer encode failed: {e}"),
-                }
-            })?;
+            let suffix_enc =
+                self.tokenizer
+                    .encode(suffix.as_str(), false)
+                    .map_err(|e| Error::InvalidInput {
+                        message: format!("tokenizer encode failed: {e}"),
+                    })?;
 
             let mut input_ids =
                 Vec::with_capacity(prefix_enc.len() + image_token_count + suffix_enc.len());
@@ -346,7 +344,7 @@ impl PaddleOcrVl {
         // 4. Build embeddings per sample
         let seq_lens: Vec<usize> = all_input_ids.iter().map(|ids| ids.len()).collect();
         let Some(&max_seq_len) = seq_lens.iter().max() else {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: "PaddleOCR-VL: empty batch is not supported".to_string(),
             });
         };
@@ -600,7 +598,7 @@ impl PaddleOcrVl {
         &self,
         tokens: &[u32],
         task: PaddleOcrVlTask,
-    ) -> Result<(String, String), OCRError> {
+    ) -> Result<(String, String), Error> {
         self.decode_generated_tokens(tokens, task)
     }
 
@@ -610,10 +608,10 @@ impl PaddleOcrVl {
     /// use this when feeding PaddleOCR-VL output as a draft for another
     /// target VLM. DSV matches at token granularity, so any post-process on
     /// the source side will byte-mismatch the target's natural output.
-    pub fn decode_tokens_raw(&self, tokens: &[u32]) -> Result<String, OCRError> {
+    pub fn decode_tokens_raw(&self, tokens: &[u32]) -> Result<String, Error> {
         self.tokenizer
             .decode(tokens, true)
-            .map_err(|e| OCRError::InvalidInput {
+            .map_err(|e| Error::InvalidInput {
                 message: format!("decode failed: {e}"),
             })
     }
@@ -626,7 +624,7 @@ impl PaddleOcrVl {
         &self,
         tokens: &[u32],
         task: PaddleOcrVlTask,
-    ) -> Result<(String, String), OCRError> {
+    ) -> Result<(String, String), Error> {
         let decoded = self.decode_tokens_raw(tokens)?;
         let processed = task.postprocess(decoded.clone());
         Ok((decoded, processed))
@@ -638,10 +636,10 @@ fn get_rope_index(
     input_ids: &[u32],
     image_grid_thw: &[(usize, usize, usize)],
     device: &Device,
-) -> Result<(Tensor, i64), OCRError> {
+) -> Result<(Tensor, i64), Error> {
     let spatial_merge_size = cfg.vision_config.spatial_merge_size;
     if spatial_merge_size == 0 {
-        return Err(OCRError::ConfigError {
+        return Err(Error::Config {
             message: "PaddleOCR-VL: vision_config.spatial_merge_size must be > 0".to_string(),
         });
     }
@@ -652,13 +650,13 @@ fn get_rope_index(
             image_count += 1;
         }
         if input_ids[i] == cfg.vision_start_token_id && input_ids[i + 1] == cfg.video_token_id {
-            return Err(OCRError::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: "PaddleOCR-VL: video inputs are not supported".to_string(),
             });
         }
     }
     if image_count != image_grid_thw.len() {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "PaddleOCR-VL: image count mismatch between prompt ({image_count}) and image_grid_thw ({})",
                 image_grid_thw.len()
@@ -675,7 +673,7 @@ fn get_rope_index(
             .iter()
             .position(|&id| id == cfg.image_token_id)
             .map(|p| st + p)
-            .ok_or_else(|| OCRError::InvalidInput {
+            .ok_or_else(|| Error::InvalidInput {
                 message: format!(
                     "PaddleOCR-VL: expected image token for image[{image_idx}] but none found"
                 ),
@@ -717,7 +715,7 @@ fn get_rope_index(
     }
 
     if positions.len() != input_ids.len() {
-        return Err(OCRError::InvalidInput {
+        return Err(Error::InvalidInput {
             message: format!(
                 "PaddleOCR-VL: rope position ids length mismatch: got {}, expected {}",
                 positions.len(),
@@ -739,7 +737,7 @@ fn get_rope_index(
     let position_ids = Tensor::from_vec(pos_ids, (3usize, 1usize, input_ids.len()), device)
         .map_err(|e| {
             candle_to_ocr_processing(
-                oar_ocr_core::core::errors::ProcessingStage::TensorOperation,
+                crate::error::ProcessingStage::TensorOperation,
                 "PaddleOCR-VL: build position_ids tensor failed",
                 e,
             )
