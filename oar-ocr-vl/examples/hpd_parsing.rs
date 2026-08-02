@@ -1,7 +1,7 @@
 //! HPD-Parsing native Candle inference.
 //!
 //! ```bash
-//! cargo run --release -p oar-ocr-vl --features cuda,download-binaries \
+//! cargo run --release -p oar-ocr-vl --features cuda \
 //!   --example hpd_parsing -- \
 //!   --model-dir PaddlePaddle/HPD-Parsing --device cuda:0 document.jpg
 //! ```

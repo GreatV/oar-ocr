@@ -8,7 +8,7 @@
 //! # Usage
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- [OPTIONS] <IMAGES>...
+//! cargo run -p oar-ocr-vl --example paddleocr_vl -- [OPTIONS] <IMAGES>...
 //! ```
 //!
 //! # Arguments
@@ -23,31 +23,31 @@
 //!
 //! ```bash
 //! # OCR text recognition
-//! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
+//! cargo run -p oar-ocr-vl --example paddleocr_vl -- \
 //!     -m PaddlePaddle/PaddleOCR-VL --task ocr document.jpg
 //!
 //! # Table recognition
-//! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
+//! cargo run -p oar-ocr-vl --example paddleocr_vl -- \
 //!     -m PaddlePaddle/PaddleOCR-VL --task table table.jpg
 //!
 //! # Formula recognition
-//! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
+//! cargo run -p oar-ocr-vl --example paddleocr_vl -- \
 //!     -m PaddlePaddle/PaddleOCR-VL --task formula formula.jpg
 //!
 //! # Chart recognition
-//! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
+//! cargo run -p oar-ocr-vl --example paddleocr_vl -- \
 //!     -m PaddlePaddle/PaddleOCR-VL --task chart chart.jpg
 //!
 //! # Text spotting with PaddleOCR-VL-1.5 or 1.6
-//! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
+//! cargo run -p oar-ocr-vl --example paddleocr_vl -- \
 //!     -m PaddlePaddle/PaddleOCR-VL-1.5 --task spotting spotting.jpg
 //!
 //! # Seal recognition with PaddleOCR-VL-1.5 or 1.6
-//! cargo run -p oar-ocr-vl --features download-binaries --example paddleocr_vl -- \
+//! cargo run -p oar-ocr-vl --example paddleocr_vl -- \
 //!     -m PaddlePaddle/PaddleOCR-VL-1.6 --task seal seal.jpg
 //!
 //! # Run on CUDA GPU
-//! cargo run -p oar-ocr-vl --features cuda,download-binaries --example paddleocr_vl -- \
+//! cargo run -p oar-ocr-vl --features cuda --example paddleocr_vl -- \
 //!     -m PaddlePaddle/PaddleOCR-VL -d cuda --task ocr document.jpg
 //! ```
 

@@ -7,19 +7,19 @@
 //! # Usage
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --features download-binaries --example mineru -- [OPTIONS] <IMAGES>...
+//! cargo run -p oar-ocr-vl --example mineru -- [OPTIONS] <IMAGES>...
 //! ```
 //!
 //! # Example
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --features cuda,download-binaries --example mineru -- \
+//! cargo run -p oar-ocr-vl --features cuda --example mineru -- \
 //!     --model-dir opendatalab/MinerU2.5-2509-1.2B \
 //!     --device cuda:0 \
 //!     document.jpg
 //!
 //! # MinerU2.5-Pro uses the same loader and pipeline
-//! cargo run -p oar-ocr-vl --features cuda,download-binaries --example mineru -- \
+//! cargo run -p oar-ocr-vl --features cuda --example mineru -- \
 //!     --model-dir opendatalab/MinerU2.5-Pro-2605-1.2B \
 //!     --device cuda:0 \
 //!     document.jpg

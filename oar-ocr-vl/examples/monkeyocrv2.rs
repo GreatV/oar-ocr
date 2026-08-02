@@ -1,7 +1,7 @@
 //! MonkeyOCRv2-S/B-Parsing inference example (Candle-based).
 //!
 //! ```bash
-//! cargo run --release -p oar-ocr-vl --features cuda,download-binaries \
+//! cargo run --release -p oar-ocr-vl --features cuda \
 //!   --example monkeyocrv2 -- \
 //!   --model-dir zenosai/MonkeyOCRv2-S-Parsing \
 //!   --device cuda:0 --task end-to-end document.jpg
