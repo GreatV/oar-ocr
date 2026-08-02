@@ -49,9 +49,25 @@ impl StructureResult {
         self
     }
 
-    /// Renders the page as Markdown.
+    /// Renders the page as Markdown, skipping
+    /// [`DEFAULT_MARKDOWN_IGNORE_LABELS`] so running heads and page furniture
+    /// stay out of the prose — the same labels
+    /// [`DocParser::parse_to_markdown`] drops.
+    ///
+    /// This is the crate's lightweight renderer: every paragraph title becomes
+    /// `##`. For output that mirrors PaddleOCR-VL, including heading levels
+    /// derived from numbering (`1.2` becomes `###`), use
+    /// [`DocParser::parse_to_markdown_openocr`] or
+    /// [`to_markdown_openocr`](crate::utils::to_markdown_openocr).
+    ///
+    /// [`DEFAULT_MARKDOWN_IGNORE_LABELS`]: crate::utils::DEFAULT_MARKDOWN_IGNORE_LABELS
+    /// [`DocParser::parse_to_markdown`]: crate::DocParser::parse_to_markdown
+    /// [`DocParser::parse_to_markdown_openocr`]: crate::DocParser::parse_to_markdown_openocr
     pub fn to_markdown(&self) -> String {
-        crate::utils::to_markdown(&self.layout_elements, &[])
+        crate::utils::to_markdown(
+            &self.layout_elements,
+            &crate::utils::default_markdown_ignore_labels(),
+        )
     }
 }
 

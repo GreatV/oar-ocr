@@ -464,11 +464,41 @@ pub fn rotate_half(x: &Tensor) -> Result<Tensor, Error> {
     })
 }
 
+/// Labels PP-StructureV3 leaves out of Markdown: running heads, page
+/// furniture and marginalia.
+///
+/// `formula_number` is here because PaddleOCR-VL drops it too, unless it was
+/// merged into the preceding formula.
+pub const DEFAULT_MARKDOWN_IGNORE_LABELS: [&str; 8] = [
+    "number",
+    "footnote",
+    "header",
+    "header_image",
+    "footer",
+    "footer_image",
+    "aside_text",
+    "formula_number",
+];
+
+/// [`DEFAULT_MARKDOWN_IGNORE_LABELS`] as owned strings, for the `ignore_labels`
+/// arguments below.
+pub fn default_markdown_ignore_labels() -> Vec<String> {
+    DEFAULT_MARKDOWN_IGNORE_LABELS
+        .iter()
+        .map(|label| (*label).to_string())
+        .collect()
+}
+
 /// Convert layout elements to Markdown format.
+///
+/// Every paragraph title becomes `##`. For PaddleOCR-VL-faithful output,
+/// including heading levels derived from numbering, use
+/// [`to_markdown_openocr`].
 ///
 /// # Arguments
 /// * `elements` - Layout elements with recognized text
-/// * `ignore_labels` - Labels to skip in markdown output
+/// * `ignore_labels` - Labels to skip in markdown output, usually
+///   [`default_markdown_ignore_labels`]
 pub fn to_markdown(elements: &[LayoutElement], ignore_labels: &[String]) -> String {
     let mut markdown = String::new();
 

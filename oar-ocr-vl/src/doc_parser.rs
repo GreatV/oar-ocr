@@ -93,18 +93,7 @@ impl Default for DocParserConfig {
             max_tokens: 4096,
             skip_auxiliary_regions: true,
             skip_region_blocks: true,
-            markdown_ignore_labels: vec![
-                "number".to_string(),
-                "footnote".to_string(),
-                "header".to_string(),
-                "header_image".to_string(),
-                "footer".to_string(),
-                "footer_image".to_string(),
-                "aside_text".to_string(),
-                // PaddleOCR-VL markdown output skips `formula_number` blocks by default (unless explicitly
-                // merged into the preceding formula), so ignore it for OpenOCR/PaddleX parity.
-                "formula_number".to_string(),
-            ],
+            markdown_ignore_labels: super::utils::default_markdown_ignore_labels(),
         }
     }
 }
@@ -926,5 +915,42 @@ mod tests {
 
         assert_eq!(result.layout_elements.len(), 1);
         assert_eq!(*backend.crops.borrow(), vec![(120, 80)]);
+    }
+
+    /// `parse_to_markdown` and `StructureResult::to_markdown` must drop the
+    /// same labels; they used to disagree, so a page header reached the prose
+    /// through one path but not the other.
+    #[test]
+    fn both_markdown_entry_points_skip_the_same_labels() {
+        let backend = RecordingBackend {
+            crops: RefCell::new(Vec::new()),
+        };
+        let config = DocParserConfig {
+            // Keep the auxiliary regions so they reach the renderer at all.
+            skip_auxiliary_regions: false,
+            ..DocParserConfig::default()
+        };
+        let parser = DocParser::with_config(&backend, config);
+        let layout = StaticLayout::new(vec![
+            element("header", 10.0, 5.0, 190.0, 20.0),
+            element("text", 10.0, 60.0, 190.0, 140.0),
+        ]);
+
+        let result = parser
+            .parse(&layout, RgbImage::new(200, 200))
+            .expect("parse succeeds");
+        assert!(
+            result
+                .layout_elements
+                .iter()
+                .any(|e| e.element_type == LayoutElementType::Header),
+            "the header must survive parsing for this test to mean anything"
+        );
+
+        let from_config = super::super::utils::to_markdown(
+            &result.layout_elements,
+            &parser.config().markdown_ignore_labels,
+        );
+        assert_eq!(result.to_markdown(), from_config);
     }
 }
