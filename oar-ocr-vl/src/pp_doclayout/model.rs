@@ -219,8 +219,15 @@ pub struct PpDocLayout {
 }
 
 impl PpDocLayout {
-    /// Default score threshold for checkpoints without per-class thresholds.
-    pub const DEFAULT_SCORE_THRESHOLD: f32 = 0.5;
+    /// Default score threshold for checkpoints without per-class thresholds,
+    /// which in practice means PP-DocLayoutV3.
+    ///
+    /// `0.3` is what `oar-ocr-core`'s ONNX path uses for V3
+    /// (`LayoutDetectionConfig::with_pp_doclayoutv3_defaults`), so swapping in
+    /// this detector keeps the same regions. It is deliberately lower than the
+    /// `0.5` that `transformers`' `post_process_object_detection` defaults to;
+    /// V3 scores conservatively and 0.5 drops real regions.
+    pub const DEFAULT_SCORE_THRESHOLD: f32 = 0.3;
 
     /// Loads a checkpoint directory containing `config.json` and
     /// `model.safetensors`.

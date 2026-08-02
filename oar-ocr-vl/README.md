@@ -192,7 +192,7 @@ use oar_ocr_vl::{DocParser, PaddleOcrVl, PpDocLayout};
 
 let device = parse_device("cpu")?;
 
-let layout = PpDocLayout::from_dir("PaddlePaddle/PP-DocLayoutV3", device.clone())?;
+let layout = PpDocLayout::from_dir("PaddlePaddle/PP-DocLayoutV3_safetensors", device.clone())?;
 let vl = PaddleOcrVl::from_dir("PaddlePaddle/PaddleOCR-VL-1.5", device)?;
 let parser = DocParser::new(&vl);
 
@@ -232,7 +232,7 @@ This example combines layout detection with a VLM for recognition. It supports P
 cargo run --release -p oar-ocr-vl --features cuda --example doc_parser -- \
     --model-name paddleocr-vl-1.5 \
     --model-dir PaddlePaddle/PaddleOCR-VL-1.5 \
-    --layout-dir PaddlePaddle/PP-DocLayoutV3 \
+    --layout-dir PaddlePaddle/PP-DocLayoutV3_safetensors \
     --device cuda \
     document.jpg
 ```

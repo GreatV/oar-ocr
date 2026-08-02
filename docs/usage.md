@@ -283,7 +283,16 @@ oar-ocr-vl = { version = "0.9", features = ["cuda"] }
 
 On macOS, use the `metal` feature instead.
 
-Layout-first parsing with `DocParser` uses `PpDocLayout`, a native Candle port of PP-DocLayoutV2/V3, so nothing further is required. To source layout from somewhere else, implement `oar_ocr_vl::LayoutSource` and pass it to `DocParser::parse`.
+Layout-first parsing with `DocParser` uses `PpDocLayout`, a native Candle port of PP-DocLayoutV2/V3, so no extra dependency is required — only the checkpoint. `PpDocLayout::from_dir` reads `config.json` and `model.safetensors`, which are published in the `_safetensors` repositories:
+
+```bash
+git lfs install
+git clone https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_safetensors
+# or the V2 checkpoint, which predicts reading order with a pointer network
+git clone https://huggingface.co/PaddlePaddle/PP-DocLayoutV2_safetensors
+```
+
+The unsuffixed `PaddlePaddle/PP-DocLayoutV3` repository ships Paddle inference weights instead and cannot be loaded here. To source layout from somewhere else, implement `oar_ocr_vl::LayoutSource` and pass it to `DocParser::parse`.
 
 ### Downloading the Model
 
@@ -748,7 +757,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = parse_device("cpu")?;
 
     // Initialize layout detector
-    let layout = PpDocLayout::from_dir("PaddlePaddle/PP-DocLayoutV3", device.clone())?;
+    let layout = PpDocLayout::from_dir("PaddlePaddle/PP-DocLayoutV3_safetensors", device.clone())?;
 
     // Load document image
     let image = load_image("document.jpg")?;
@@ -790,7 +799,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 cargo run -p oar-ocr-vl --features cuda --example doc_parser -- \
     --model-name paddleocr-vl \
     --model-dir PaddlePaddle/PaddleOCR-VL \
-    --layout-dir PaddlePaddle/PP-DocLayoutV3 \
+    --layout-dir PaddlePaddle/PP-DocLayoutV3_safetensors \
     --device cuda \
     document.jpg
 
@@ -798,7 +807,7 @@ cargo run -p oar-ocr-vl --features cuda --example doc_parser -- \
 cargo run -p oar-ocr-vl --features cuda --example doc_parser -- \
     --model-name paddleocr-vl-1.5 \
     --model-dir PaddlePaddle/PaddleOCR-VL-1.5 \
-    --layout-dir PaddlePaddle/PP-DocLayoutV3 \
+    --layout-dir PaddlePaddle/PP-DocLayoutV3_safetensors \
     --device cuda \
     document.jpg
 
@@ -806,7 +815,7 @@ cargo run -p oar-ocr-vl --features cuda --example doc_parser -- \
 cargo run -p oar-ocr-vl --features cuda --example doc_parser -- \
     --model-name paddleocr-vl-1.6 \
     --model-dir PaddlePaddle/PaddleOCR-VL-1.6 \
-    --layout-dir PaddlePaddle/PP-DocLayoutV3 \
+    --layout-dir PaddlePaddle/PP-DocLayoutV3_safetensors \
     --device cuda \
     document.jpg
 
@@ -814,7 +823,7 @@ cargo run -p oar-ocr-vl --features cuda --example doc_parser -- \
 cargo run -p oar-ocr-vl --features cuda --example doc_parser -- \
     --model-name glmocr \
     --model-dir zai-org/GLM-OCR \
-    --layout-dir PaddlePaddle/PP-DocLayoutV3 \
+    --layout-dir PaddlePaddle/PP-DocLayoutV3_safetensors \
     --device cuda \
     document.jpg
 

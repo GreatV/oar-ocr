@@ -16,7 +16,7 @@
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let layout = PpDocLayout::from_dir(
-//!     "PaddlePaddle/PP-DocLayoutV2",
+//!     "PaddlePaddle/PP-DocLayoutV2_safetensors",
 //!     parse_device("cpu")?,
 //! )?;
 //! # let _ = layout;

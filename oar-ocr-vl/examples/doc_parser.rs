@@ -14,28 +14,28 @@
 //! cargo run -p oar-ocr-vl --example doc_parser -- \
 //!     --model-name paddleocr-vl \
 //!     --model-dir PaddlePaddle/PaddleOCR-VL \
-//!     --layout-dir PaddlePaddle/PP-DocLayoutV3 \
+//!     --layout-dir PaddlePaddle/PP-DocLayoutV3_safetensors \
 //!     document.jpg
 //!
 //! # Using PaddleOCR-VL-1.5 model
 //! cargo run -p oar-ocr-vl --example doc_parser -- \
 //!     --model-name paddleocr-vl-1.5 \
 //!     --model-dir PaddlePaddle/PaddleOCR-VL-1.5 \
-//!     --layout-dir PaddlePaddle/PP-DocLayoutV3 \
+//!     --layout-dir PaddlePaddle/PP-DocLayoutV3_safetensors \
 //!     document.jpg
 //!
 //! # Using PaddleOCR-VL-1.6 model
 //! cargo run -p oar-ocr-vl --example doc_parser -- \
 //!     --model-name paddleocr-vl-1.6 \
 //!     --model-dir PaddlePaddle/PaddleOCR-VL-1.6 \
-//!     --layout-dir PaddlePaddle/PP-DocLayoutV3 \
+//!     --layout-dir PaddlePaddle/PP-DocLayoutV3_safetensors \
 //!     document.jpg
 //!
 //! # Using GLM-OCR model
 //! cargo run -p oar-ocr-vl --example doc_parser -- \
 //!     --model-name glmocr \
 //!     --model-dir zai-org/GLM-OCR \
-//!     --layout-dir PaddlePaddle/PP-DocLayoutV3 \
+//!     --layout-dir PaddlePaddle/PP-DocLayoutV3_safetensors \
 //!     document.jpg
 //! ```
 
