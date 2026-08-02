@@ -216,9 +216,18 @@ pub struct PpDocLayout {
     device: Device,
     dtype: DType,
     score_threshold: f32,
+    max_elements: usize,
 }
 
 impl PpDocLayout {
+    /// Default cap on returned regions, matching `max_elements` in
+    /// `oar-ocr-core`'s layout configuration.
+    ///
+    /// A checkpoint has 300 queries, and `DocParser` runs the VL recognizer
+    /// once per region, so an unbounded detector turns a pathological page
+    /// into hundreds of generation calls.
+    pub const DEFAULT_MAX_ELEMENTS: usize = 100;
+
     /// Default score threshold for checkpoints without per-class thresholds,
     /// which in practice means PP-DocLayoutV3.
     ///
@@ -274,6 +283,7 @@ impl PpDocLayout {
             device,
             dtype,
             score_threshold: Self::DEFAULT_SCORE_THRESHOLD,
+            max_elements: Self::DEFAULT_MAX_ELEMENTS,
         })
     }
 
@@ -281,6 +291,16 @@ impl PpDocLayout {
     /// thresholds (PP-DocLayoutV3).
     pub fn with_score_threshold(mut self, threshold: f32) -> Self {
         self.score_threshold = threshold;
+        self
+    }
+
+    /// Caps how many regions [`detect`](Self::detect) returns.
+    ///
+    /// When more regions clear their threshold, the lowest-scoring ones are
+    /// dropped; the survivors keep their reading order. `usize::MAX` disables
+    /// the cap.
+    pub fn with_max_elements(mut self, max_elements: usize) -> Self {
+        self.max_elements = max_elements;
         self
     }
 
@@ -507,14 +527,35 @@ impl PpDocLayout {
         let mut kept = Vec::with_capacity(num_queries);
         for q in 0..num_queries {
             let row = &logits[q * num_labels..(q + 1) * num_labels];
-            let (class_id, &best) = row
+            let passes = |class_id: usize, logit: f32| {
+                sigmoid(logit) >= thresholds.map_or(self.score_threshold, |t| t[class_id])
+            };
+            // Thresholds are per class for V2, so the highest-scoring class is
+            // not necessarily the one that qualifies: a 0.49 class gated at
+            // 0.5 loses to a 0.48 class gated at 0.4. Upstream keeps the
+            // latter because it ranks every (query, class) pair, so pick the
+            // best class among those that clear their own threshold and only
+            // fall back to the plain argmax when none does.
+            let eligible = row
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.total_cmp(b))
-                .expect("class logits are never empty");
-            best_class.push(class_id);
-            let threshold = thresholds.map_or(self.score_threshold, |t| t[class_id]);
-            kept.push(sigmoid(best) >= threshold);
+                .filter(|&(class_id, &logit)| passes(class_id, logit))
+                .max_by(|(_, a), (_, b)| a.total_cmp(b));
+            match eligible {
+                Some((class_id, _)) => {
+                    best_class.push(class_id);
+                    kept.push(true);
+                }
+                None => {
+                    let (class_id, _) = row
+                        .iter()
+                        .enumerate()
+                        .max_by(|(_, a), (_, b)| a.total_cmp(b))
+                        .expect("class logits are never empty");
+                    best_class.push(class_id);
+                    kept.push(false);
+                }
+            }
         }
 
         // Surviving queries move to the front, keeping their relative order.
@@ -662,6 +703,12 @@ impl PpDocLayout {
                     score,
                 },
             ));
+        }
+        // Over the cap, drop the least confident regions rather than an
+        // arbitrary tail, then restore reading order among the survivors.
+        if detections.len() > self.max_elements {
+            detections.sort_by(|(_, a), (_, b)| b.score.total_cmp(&a.score));
+            detections.truncate(self.max_elements);
         }
         detections.sort_by_key(|(rank, _)| *rank);
         Ok(detections.into_iter().map(|(_, d)| d).collect())

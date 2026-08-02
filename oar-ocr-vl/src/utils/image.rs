@@ -350,8 +350,16 @@ pub fn resize_for_mineru(image: &RgbImage, min_edge: u32, max_aspect_ratio: f32)
 }
 
 /// Loads an image from disk and converts it to RGB.
+///
+/// The format comes from the file's contents, not its name, so extensionless
+/// and mislabelled files load. `image::open` would pick the decoder from the
+/// path suffix and reject both.
 pub fn load_image(path: impl AsRef<std::path::Path>) -> Result<RgbImage, crate::Error> {
-    Ok(image::open(path.as_ref())?.to_rgb8())
+    let file = std::io::BufReader::new(std::fs::File::open(path.as_ref())?);
+    let decoded = image::ImageReader::new(file)
+        .with_guessed_format()?
+        .decode()?;
+    Ok(decoded.to_rgb8())
 }
 
 /// Decodes an image from memory and converts it to RGB.
@@ -362,6 +370,26 @@ pub fn load_image_from_memory(bytes: &[u8]) -> Result<RgbImage, crate::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Callers pass paths straight from a CLI, where an extensionless or
+    /// mislabelled file is ordinary. The format must come from the bytes.
+    #[test]
+    fn loads_images_whose_name_does_not_match_their_format() {
+        let dir = std::env::temp_dir().join("oar_vl_load_image_by_content");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let mut png = Vec::new();
+        RgbImage::from_pixel(3, 2, ::image::Rgb([1, 2, 3]))
+            .write_with_encoder(::image::codecs::png::PngEncoder::new(&mut png))
+            .expect("encode png");
+
+        for name in ["no_extension", "actually_a_png.jpg"] {
+            let path = dir.join(name);
+            std::fs::write(&path, &png).expect("write fixture");
+            let loaded = load_image(&path).expect("load by content");
+            assert_eq!(loaded.dimensions(), (3, 2));
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 
     #[test]
     fn test_patchify_merge_grouped_ordering() {
