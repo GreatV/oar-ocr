@@ -489,53 +489,6 @@ pub fn default_markdown_ignore_labels() -> Vec<String> {
         .collect()
 }
 
-/// Convert layout elements to Markdown format.
-///
-/// Every paragraph title becomes `##`. For PaddleOCR-VL-faithful output,
-/// including heading levels derived from numbering, use
-/// [`to_markdown_openocr`].
-///
-/// # Arguments
-/// * `elements` - Layout elements with recognized text
-/// * `ignore_labels` - Labels to skip in markdown output, usually
-///   [`default_markdown_ignore_labels`]
-pub fn to_markdown(elements: &[LayoutElement], ignore_labels: &[String]) -> String {
-    let mut markdown = String::new();
-
-    for (i, element) in elements.iter().enumerate() {
-        let text = match &element.text {
-            Some(t) if !t.trim().is_empty() => t.trim(),
-            _ => continue,
-        };
-
-        if let Some(label) = &element.label
-            && ignore_labels.iter().any(|l| l == label)
-        {
-            continue;
-        }
-
-        let content = match element.element_type {
-            LayoutElementType::DocTitle => format_heading(text, 1),
-            LayoutElementType::ParagraphTitle => format_heading(text, 2),
-            LayoutElementType::Table => text::format_table(text),
-            LayoutElementType::Formula => text::format_formula(text),
-            LayoutElementType::Image | LayoutElementType::Chart | LayoutElementType::Seal => {
-                format_figure(text, i)
-            }
-            LayoutElementType::List => format_list(text),
-            LayoutElementType::Algorithm => format_code(text),
-            _ => text::format_text(text),
-        };
-
-        if !content.is_empty() {
-            markdown.push_str(&content);
-            markdown.push_str("\n\n");
-        }
-    }
-
-    markdown.trim().to_string()
-}
-
 // --- OpenOCR / PaddleX markdown compatibility ---
 
 // Matches PaddleX `compile_title_pattern()` in:
@@ -623,14 +576,20 @@ fn openocr_format_first_line(
     parts.join(splitter)
 }
 
-/// Convert layout elements to OpenOCR (PaddleX) markdown format.
+/// Renders layout elements as Markdown.
 ///
-/// This matches `PaddleOCRVLResult._to_markdown(pretty=...)` when labels come from PP-DocLayoutV2/V3.
-pub fn to_markdown_openocr(
-    elements: &[LayoutElement],
-    ignore_labels: &[String],
-    pretty: bool,
-) -> String {
+/// Matches `PaddleOCRVLResult._to_markdown(pretty=...)` when labels come from
+/// PP-DocLayoutV2/V3: headings take their level from the section numbering
+/// (`1.2 Foo` becomes `### 1.2 Foo`), and `abstract`, `reference` and
+/// `content` blocks get their own handling.
+///
+/// # Arguments
+/// * `elements` - Layout elements with recognized text, in reading order
+/// * `ignore_labels` - Labels to leave out, usually
+///   [`default_markdown_ignore_labels`]
+/// * `pretty` - Centre captions and tables with inline HTML, as the reference
+///   does. With `false` they stay plain text and table markup is unwrapped.
+pub fn to_markdown(elements: &[LayoutElement], ignore_labels: &[String], pretty: bool) -> String {
     let mut markdown = String::new();
 
     for element in elements {
@@ -725,66 +684,6 @@ pub fn to_markdown_openocr(
     }
 
     markdown
-}
-
-fn format_heading(text: &str, level: usize) -> String {
-    let prefix = "#".repeat(level.min(6));
-    let cleaned = remove_newlines_in_heading(text);
-    let processed = text::process_text(cleaned.trim());
-    format!("{} {}", prefix, processed)
-}
-
-fn format_figure(text: &str, index: usize) -> String {
-    if text.starts_with("![") {
-        return text.to_string();
-    }
-    if text.starts_with("figures/") || text.starts_with("imgs/") {
-        return format!("![Figure {}]({})", index + 1, text);
-    }
-    if text.starts_with("data:image/") {
-        return format!("![Figure {}]({})", index + 1, text);
-    }
-    format!("*Figure {}: {}*", index + 1, text)
-}
-
-fn format_list(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut result = String::new();
-    for line in lines {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            if trimmed.starts_with('-')
-                || trimmed.starts_with('*')
-                || trimmed
-                    .chars()
-                    .next()
-                    .map(|c| c.is_ascii_digit())
-                    .unwrap_or(false)
-            {
-                result.push_str(trimmed);
-            } else {
-                result.push_str("- ");
-                result.push_str(trimmed);
-            }
-            result.push('\n');
-        }
-    }
-    result.trim_end().to_string()
-}
-
-fn format_code(text: &str) -> String {
-    format!("```\n{}\n```", text.trim())
-}
-
-fn remove_newlines_in_heading(text: &str) -> String {
-    fn is_chinese(c: char) -> bool {
-        ('\u{4e00}'..='\u{9fff}').contains(&c)
-    }
-    if text.chars().any(is_chinese) {
-        text.replace('\n', "")
-    } else {
-        text.replace('\n', " ")
-    }
 }
 
 pub use self::table::convert_otsl_to_html;
@@ -966,6 +865,50 @@ pub fn crop_margin(img: &RgbImage) -> RgbImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn titled(label: &str, text: &str) -> LayoutElement {
+        LayoutElement::new(
+            BoundingBox::from_coords(0.0, 0.0, 10.0, 10.0),
+            LayoutElementType::from_label(label),
+            0.9,
+        )
+        .with_label(label)
+        .with_text(text)
+    }
+
+    /// The single renderer keeps the reference behaviour that the removed
+    /// lightweight one lacked: heading depth follows the section numbering
+    /// rather than being a flat `##`.
+    #[test]
+    fn headings_take_their_level_from_the_numbering() {
+        let elements = vec![
+            titled("doc_title", "A Paper"),
+            titled("paragraph_title", "1 Introduction"),
+            titled("paragraph_title", "1.2 Background"),
+            titled("paragraph_title", "1.2.3 Details"),
+        ];
+        let markdown = to_markdown(&elements, &default_markdown_ignore_labels(), true);
+        let headings: Vec<&str> = markdown.lines().filter(|l| l.starts_with('#')).collect();
+        assert_eq!(
+            headings,
+            vec![
+                "# A Paper",
+                "## 1 Introduction",
+                "### 1.2 Background",
+                "#### 1.2.3 Details",
+            ]
+        );
+    }
+
+    /// `pretty` is the only knob left; it decides whether captions are centred
+    /// with inline HTML.
+    #[test]
+    fn pretty_controls_caption_centring() {
+        let elements = vec![titled("figure_title", "Figure 1: a plot")];
+        let ignore = default_markdown_ignore_labels();
+        assert!(to_markdown(&elements, &ignore, true).contains("text-align: center"));
+        assert!(!to_markdown(&elements, &ignore, false).contains("text-align: center"));
+    }
 
     #[test]
     fn test_parse_device_cpu() {

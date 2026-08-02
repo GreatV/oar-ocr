@@ -83,6 +83,9 @@ pub struct DocParserConfig {
     pub skip_region_blocks: bool,
     /// Labels to ignore when converting to markdown.
     pub markdown_ignore_labels: Vec<String>,
+    /// Centre captions and tables with inline HTML in markdown output, as the
+    /// PaddleOCR-VL reference does.
+    pub markdown_pretty: bool,
 }
 
 impl Default for DocParserConfig {
@@ -94,6 +97,7 @@ impl Default for DocParserConfig {
             skip_auxiliary_regions: true,
             skip_region_blocks: true,
             markdown_ignore_labels: super::utils::default_markdown_ignore_labels(),
+            markdown_pretty: true,
         }
     }
 }
@@ -350,6 +354,9 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
     }
 
     /// Parse a document and convert to markdown.
+    ///
+    /// Uses [`DocParserConfig::markdown_ignore_labels`] and
+    /// [`DocParserConfig::markdown_pretty`].
     pub fn parse_to_markdown<L: LayoutSource + ?Sized>(
         &self,
         layout: &L,
@@ -359,20 +366,7 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
         Ok(super::utils::to_markdown(
             &result.layout_elements,
             &self.config.markdown_ignore_labels,
-        ))
-    }
-
-    /// Parse a document and convert to OpenOCR/PaddleX-compatible markdown (pretty HTML mode).
-    pub fn parse_to_markdown_openocr<L: LayoutSource + ?Sized>(
-        &self,
-        layout: &L,
-        image: RgbImage,
-    ) -> Result<String, Error> {
-        let result = self.parse(layout, image)?;
-        Ok(super::utils::to_markdown_openocr(
-            &result.layout_elements,
-            &self.config.markdown_ignore_labels,
-            true,
+            self.config.markdown_pretty,
         ))
     }
 
@@ -950,6 +944,7 @@ mod tests {
         let from_config = super::super::utils::to_markdown(
             &result.layout_elements,
             &parser.config().markdown_ignore_labels,
+            parser.config().markdown_pretty,
         );
         assert_eq!(result.to_markdown(), from_config);
     }

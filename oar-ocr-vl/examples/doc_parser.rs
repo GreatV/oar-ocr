@@ -219,12 +219,9 @@ fn process_images<B: oar_ocr_vl::RecognitionBackend>(
                 info!("  Parsed in {:.2}s", start.elapsed().as_secs_f64());
                 info!("  Elements: {}", result.layout_elements.len());
 
-                // Get markdown (OpenOCR-compatible) from the parsed result.
-                let markdown = oar_ocr_vl::utils::to_markdown_openocr(
-                    &result.layout_elements,
-                    ignore_labels,
-                    true,
-                );
+                // Get markdown from the parsed result.
+                let markdown =
+                    oar_ocr_vl::utils::to_markdown(&result.layout_elements, ignore_labels, true);
 
                 // Save or print
                 if let Some(ref dir) = args.output_dir {
