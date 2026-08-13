@@ -403,8 +403,12 @@ impl VisionAttention {
 
         // Metal's fused SDPA supports head_dim 72 and replaces the materialized
         // `[b, heads, seq, seq]` scores and their F32 softmax with one dispatch.
-        // Metal-only: the eager path stays byte-stable for CUDA.
+        // Metal-only: the eager path stays byte-stable for CUDA. Still gated on
+        // the threshold so `OAR_VL_ATTN_FULL_SEQ_THRESHOLD` keeps forcing the
+        // chunked path as documented, even though the fused kernel is the
+        // leanest of the three.
         if hidden_states.device().is_metal()
+            && seq <= attn_full_seq_threshold()
             && let Some(fused) =
                 crate::attention::try_fused_sdpa(&q, &k, &v, None, self.scale, false)
                     .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision fused sdpa", e))?

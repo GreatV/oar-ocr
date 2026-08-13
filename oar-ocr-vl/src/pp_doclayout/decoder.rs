@@ -860,12 +860,14 @@ mod tests {
             "folded rank-3 reduction should match CPU, diverged by {folded}"
         );
 
-        if broken < 1e-4 {
-            eprintln!(
-                "note: candle's Metal rank-5 strided reduce now matches CPU; \
-                 the fold in DeformableAttention::forward can be simplified"
-            );
-        }
+        // Asserted, not just logged: cargo swallows output from passing tests,
+        // so a note here would never reach anyone. Failing is the point — when
+        // candle fixes the kernel this test says so and the fold can go.
+        assert!(
+            broken >= 1e-4,
+            "candle's Metal rank-5 strided reduce now matches CPU (max diff {broken}); \
+             the fold in DeformableAttention::forward can be simplified"
+        );
         Ok(())
     }
 }

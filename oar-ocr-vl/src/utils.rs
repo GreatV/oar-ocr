@@ -241,6 +241,11 @@ pub fn candle_to_ocr_inference(
 /// On Metal this is the headroom in the GPU's recommended working set —
 /// exceeding it makes the driver page resources every dispatch. Reporting it
 /// lets memory-aware fallbacks (chunked vision attention) engage there.
+///
+/// The Metal figure is conservative: `currentAllocatedSize` counts candle's
+/// pooled buffers, which it only releases on `wait_until_completed`, so free
+/// memory reads lower as the pool warms up. Callers should treat it as a lower
+/// bound rather than a stable measure of what is available.
 pub fn free_device_memory(device: &Device) -> Option<usize> {
     #[cfg(feature = "cuda")]
     if let Device::Cuda(dev) = device {

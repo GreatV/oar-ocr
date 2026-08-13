@@ -624,6 +624,17 @@ pub fn combine_masks(causal_mask: &Tensor, padding_mask: &Tensor) -> Result<Tens
     causal_mask.broadcast_add(padding_mask)
 }
 
+/// Flattens per-row decode positions into the buffer a `(axes, batch, 1)` MRoPE
+/// position tensor expects.
+///
+/// The buffer is axis-major: every row's position for axis 0, then axis 1, and
+/// so on. Writing it batch-major (`[p0, p0, p0, p1, ...]`) transposes the tensor
+/// and hands each row another row's positions. The two layouts coincide at
+/// `batch_size == 1`, so the mistake stays invisible until a real batch.
+pub(crate) fn decode_position_buffer(positions: &[i64], axes: usize) -> Vec<i64> {
+    (0..axes).flat_map(|_| positions.iter().copied()).collect()
+}
+
 /// Additive "cannot attend" fill: very negative, but finite in `dtype` with room
 /// left to absorb attention logits before the softmax.
 ///
@@ -1440,6 +1451,43 @@ mod tests {
         assert_eq!(mask_data[13], 0.0);
         assert_eq!(mask_data[14], 0.0);
 
+        Ok(())
+    }
+
+    /// `decode_position_buffer` must lay positions out axis-major.
+    ///
+    /// Batch-major transposes the `(axes, batch, 1)` tensor and gives each row
+    /// another row's positions — invisible at batch_size 1, where the two
+    /// layouts coincide, and wrong for every larger batch. Covers the 3-axis
+    /// (PaddleOCR-VL, MinerU2.5) and 4-axis (HunyuanOCR) users.
+    #[test]
+    fn decode_positions_are_axis_major() -> Result<()> {
+        let positions: Vec<i64> = vec![10, 20, 30];
+        let batch = positions.len();
+
+        for axes in [3usize, 4] {
+            let pos = Tensor::new(decode_position_buffer(&positions, axes), &Device::Cpu)?
+                .reshape((axes, batch, 1))?;
+            for axis in 0..axes {
+                let row: Vec<i64> = pos.i(axis)?.flatten_all()?.to_vec1()?;
+                assert_eq!(
+                    row, positions,
+                    "axes={axes}: axis {axis} has wrong positions"
+                );
+            }
+
+            // The batch-major layout this replaced is a different tensor.
+            let wrong: Vec<i64> = positions
+                .iter()
+                .flat_map(|&p| std::iter::repeat_n(p, axes))
+                .collect();
+            let wrong = Tensor::new(wrong, &Device::Cpu)?.reshape((axes, batch, 1))?;
+            assert_ne!(
+                wrong.i(0)?.flatten_all()?.to_vec1::<i64>()?,
+                positions,
+                "axes={axes}: batch-major should not accidentally be correct"
+            );
+        }
         Ok(())
     }
 
