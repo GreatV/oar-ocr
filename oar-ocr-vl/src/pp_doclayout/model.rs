@@ -796,6 +796,56 @@ mod tests {
     use super::*;
     use candle_core::safetensors;
 
+    /// Checks that Metal detections match CPU.
+    ///
+    /// Ignored by default: it needs a local checkpoint and a page image. Run it
+    /// with
+    ///
+    /// ```text
+    /// OAR_PP_DOCLAYOUT_DIR=$PWD/models/PP-DocLayoutV3_safetensors \
+    /// OAR_PP_DOCLAYOUT_IMAGE=$PWD/page.png \
+    ///     cargo test --release -p oar-ocr-vl --features metal -- --ignored metal_matches_cpu
+    /// ```
+    ///
+    /// Guards issue #177, where a wrong Metal reduction left every box garbage.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    #[ignore = "requires a local checkpoint, a page image and a Metal device"]
+    fn metal_matches_cpu() {
+        let dir = std::env::var("OAR_PP_DOCLAYOUT_DIR")
+            .expect("set OAR_PP_DOCLAYOUT_DIR to a PP-DocLayout checkpoint directory");
+        let image_path = std::env::var("OAR_PP_DOCLAYOUT_IMAGE")
+            .expect("set OAR_PP_DOCLAYOUT_IMAGE to a page image");
+        let image = image::open(&image_path).expect("open image").to_rgb8();
+
+        let cpu = PpDocLayout::from_dir(&dir, Device::Cpu).expect("load on cpu");
+        let metal = PpDocLayout::from_dir(&dir, Device::new_metal(0).expect("metal device"))
+            .expect("load on metal");
+        let expected = cpu.detect(&image).expect("cpu detect");
+        let actual = metal.detect(&image).expect("metal detect");
+
+        assert_eq!(
+            expected.len(),
+            actual.len(),
+            "detection count differs between CPU and Metal"
+        );
+        let mut worst_box = 0f32;
+        let mut worst_score = 0f32;
+        for (i, (want, got)) in expected.iter().zip(&actual).enumerate() {
+            assert_eq!(want.class_id, got.class_id, "class differs at index {i}");
+            for axis in 0..4 {
+                worst_box = worst_box.max((want.bbox[axis] - got.bbox[axis]).abs());
+            }
+            worst_score = worst_score.max((want.score - got.score).abs());
+        }
+        println!(
+            "{} detections; worst |dbox| = {worst_box:.4} px, worst |dscore| = {worst_score:.6}",
+            expected.len()
+        );
+        assert!(worst_box < 1.0, "boxes diverge by {worst_box} px");
+        assert!(worst_score < 0.01, "scores diverge by {worst_score}");
+    }
+
     /// Compares the ported model against a PyTorch reference dump.
     ///
     /// Ignored by default: it needs a local checkpoint plus a reference file
