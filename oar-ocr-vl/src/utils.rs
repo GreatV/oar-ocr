@@ -242,7 +242,7 @@ pub fn candle_to_ocr_inference(
 /// exceeding it makes the driver page resources every dispatch. Reporting it
 /// lets memory-aware fallbacks (chunked vision attention) engage there.
 ///
-/// The Metal figure is conservative: `currentAllocatedSize` counts candle's
+/// The Metal figure is conservative: candle's `current_allocated_size` counts
 /// pooled buffers, which it only releases on `wait_until_completed`, so free
 /// memory reads lower as the pool warms up. Callers should treat it as a lower
 /// bound rather than a stable measure of what is available.
@@ -259,10 +259,9 @@ pub fn free_device_memory(device: &Device) -> Option<usize> {
     }
     #[cfg(all(feature = "metal", target_os = "macos"))]
     if let Device::Metal(dev) = device {
-        use objc2_metal::MTLDevice;
-        let raw = dev.metal_device().as_ref();
-        let budget = raw.recommendedMaxWorkingSetSize() as usize;
-        let allocated = raw.currentAllocatedSize();
+        let raw = dev.metal_device();
+        let budget = raw.recommended_max_working_set_size();
+        let allocated = raw.current_allocated_size();
         // A zero budget means the driver declined to report one; unknown, not
         // "nothing free".
         return (budget > 0).then(|| budget.saturating_sub(allocated));
