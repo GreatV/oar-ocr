@@ -680,7 +680,7 @@ pub fn create_left_padding_mask(
             .reshape((1, 1, 1, max_len))?
             .to_dtype(dtype)?;
 
-        // Mask: pos < pad_len -> -inf, else 0
+        // Mask: pos < pad_len -> suppressed, else 0
         let mask_cond = pos_tensor.broadcast_lt(&pad_len)?;
 
         let zero = Tensor::new(0f32, compute_device)?

@@ -303,12 +303,10 @@ impl DeformableAttention {
                 ))
             })
             .map_err(|e| infer_err("deformable weight permute", e))?;
-        // Weight the sampled corners, then sum the (levels, points) axes away
-        // on a rank-3 view rather than as `sum(4).sum(3)` over the rank-6
-        // product: candle's Metal strided reduce only specializes indices up to
-        // rank 4 and its fallback is wrong, so reducing a non-final axis of a
-        // rank>=5 tensor reads the wrong elements (issue #177). Folding the two
-        // axes keeps the maths identical.
+        // Fold (levels, points) into one axis and reduce a rank-3 view. The
+        // natural `sum(4).sum(3)` over the rank-6 product is wrong on Metal:
+        // candle's strided reduce mis-indexes any non-final axis of a rank>=5
+        // tensor (issue #177).
         let blended = sampled
             .broadcast_mul(&weights)
             .and_then(|t| t.contiguous())
@@ -787,9 +785,8 @@ pub(super) fn inverse_sigmoid(x: &Tensor) -> Result<Tensor, Error> {
 mod tests {
     use candle_core::{Device, Tensor};
 
-    /// Pins the workaround in `DeformableAttention::forward`: the folded
-    /// rank-3 reduction must equal the rank-6 `sum(4).sum(3)` it replaced,
-    /// which candle's Metal reduce gets wrong (issue #177).
+    /// The folded rank-3 reduction must equal the rank-6 `sum(4).sum(3)` form
+    /// it stands in for.
     #[test]
     fn folded_blend_matches_rank6_reduction() -> candle_core::Result<()> {
         let device = Device::Cpu;
@@ -826,9 +823,8 @@ mod tests {
         Ok(())
     }
 
-    /// Documents why the fold exists: on Metal a rank>=5 non-final-axis reduce
-    /// is wrong while the folded rank-3 one is correct. When candle fixes the
-    /// kernel this test says so, and the workaround can go.
+    /// Fails once candle's Metal rank>=5 reduce agrees with CPU, which is the
+    /// signal to drop the fold in `DeformableAttention::forward`.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     #[test]
     fn metal_rank5_strided_reduce_is_still_broken() -> candle_core::Result<()> {
