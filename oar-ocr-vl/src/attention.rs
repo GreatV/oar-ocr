@@ -624,12 +624,25 @@ pub fn combine_masks(causal_mask: &Tensor, padding_mask: &Tensor) -> Result<Tens
     causal_mask.broadcast_add(padding_mask)
 }
 
+/// Additive "cannot attend" fill: very negative, but finite in `dtype` with room
+/// left to absorb attention logits before the softmax.
+///
+/// F16 tops out at 65504, so the value used for wider dtypes saturates to -inf
+/// there — which is exactly the all-masked-row NaN a finite fill exists to
+/// avoid. Staying well inside the range also keeps `score + fill` finite.
+fn masked_score(dtype: DType) -> f64 {
+    match dtype {
+        DType::F16 => -1e4,
+        _ => -1e9,
+    }
+}
+
 /// Create a left-padding mask for batched sequences (right-aligned, standard for
 /// autoregressive generation).
 ///
 /// Returns a `(batch, 1, 1, max_len)` mask where left-padded positions
-/// (`j < max_len - seq_len`) are `-inf` and valid positions are `0`. With
-/// `seq_lens = [3, 5]` and `max_len = 5`, item 0 is `[-inf, -inf, 0, 0, 0]`.
+/// (`j < max_len - seq_len`) are strongly negative and valid positions are `0`.
+/// With `seq_lens = [3, 5]` and `max_len = 5`, item 0 is `[m, m, 0, 0, 0]`.
 pub fn create_left_padding_mask(
     seq_lens: &[usize],
     max_len: usize,
@@ -664,9 +677,8 @@ pub fn create_left_padding_mask(
             .broadcast_as(mask_cond.shape())?;
         // Finite, not -inf: with the causal mask a query inside the padding
         // region reaches only padding keys, so -inf makes the row all -inf and
-        // its softmax NaN, which `0 * NaN` then spreads everywhere. Matches
-        // `create_generation_mask`.
-        let masked = Tensor::new(-1e9f32, compute_device)?
+        // its softmax NaN, which `0 * NaN` then spreads everywhere.
+        let masked = Tensor::new(masked_score(dtype) as f32, compute_device)?
             .to_dtype(dtype)?
             .broadcast_as(mask_cond.shape())?;
 
@@ -707,9 +719,13 @@ pub fn create_generation_mask(
         let mask_cond = pos_tensor.broadcast_lt(&pad_lens_tensor)?;
 
         let zero = Tensor::zeros(mask_cond.shape(), dtype, compute_device)?;
-        // Use large negative value instead of -inf to avoid potential numerical issues
-        let mask_value =
-            Tensor::full(-1e9_f32, mask_cond.shape(), compute_device)?.to_dtype(dtype)?;
+        // Large negative rather than -inf, and finite in every dtype.
+        let mask_value = Tensor::full(
+            masked_score(dtype) as f32,
+            mask_cond.shape(),
+            compute_device,
+        )?
+        .to_dtype(dtype)?;
 
         mask_cond.where_cond(&mask_value, &zero)
     })
@@ -1424,6 +1440,38 @@ mod tests {
         assert_eq!(mask_data[13], 0.0);
         assert_eq!(mask_data[14], 0.0);
 
+        Ok(())
+    }
+
+    /// The padding fill must stay finite in every dtype a model may run in.
+    ///
+    /// F16 caps at 65504, so a fill chosen for wider dtypes saturates to -inf
+    /// there and reintroduces the all-masked-row NaN. F16 is reachable via
+    /// `OAR_VL_DTYPE=f16` and via `select_dtype`'s fallback on CUDA devices
+    /// without BF16 kernels.
+    #[test]
+    fn padding_mask_is_finite_in_every_dtype() -> Result<()> {
+        let device = Device::Cpu;
+        for dtype in [DType::F32, DType::BF16, DType::F16] {
+            let causal = create_causal_mask(6, 6, dtype, &device)?;
+            let padding = create_left_padding_mask(&[6, 4], 6, dtype, &device)?;
+            let combined = combine_masks(&causal, &padding)?;
+
+            // Row 1 is padded by 2, so its query 0 can only reach padding keys.
+            // That row must keep at least one finite entry or its softmax is NaN.
+            let row: Vec<f32> = combined.i((1, 0, 0))?.to_dtype(DType::F32)?.to_vec1()?;
+            assert!(
+                row.iter().any(|value| value.is_finite()),
+                "{dtype:?}: padding-region row is entirely non-finite: {row:?}"
+            );
+
+            let probs = candle_nn::ops::softmax_last_dim(&combined.to_dtype(DType::F32)?)?;
+            let values: Vec<f32> = probs.flatten_all()?.to_vec1()?;
+            assert!(
+                values.iter().all(|value| value.is_finite()),
+                "{dtype:?}: softmax over the combined mask produced non-finite values"
+            );
+        }
         Ok(())
     }
 
