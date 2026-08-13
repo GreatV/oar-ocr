@@ -1005,7 +1005,7 @@ impl HunyuanOcr {
                 (output.hidden_states, output.logits)
             } else {
                 // Build 4-axis position IDs for the true-batch decode path.
-                let pos_data: Vec<i64> = positions.iter().flat_map(|&p| [p, p, p, p]).collect();
+                let pos_data = crate::attention::decode_position_buffer(&positions, 4);
                 let pos = Tensor::new(pos_data, &self.device)
                     .and_then(|t| t.reshape((4, batch_size, 1)))
                     .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "create pos", e))?;

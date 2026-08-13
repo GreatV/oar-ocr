@@ -46,6 +46,19 @@ fn metal_sdpa_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var_os("OAR_VL_DISABLE_METAL_SDPA").is_some())
 }
 
+/// Fused Metal SDPA attempt; `Ok(None)` when unavailable or declined, so
+/// callers keep their own eager fallback.
+pub(crate) fn try_fused_sdpa(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    mask: Option<&Tensor>,
+    scale: f64,
+    is_causal: bool,
+) -> Result<Option<Tensor>> {
+    try_metal_sdpa(q, k, v, mask, scale, is_causal, false)
+}
+
 fn try_metal_sdpa(
     q: &Tensor,
     k: &Tensor,
@@ -97,12 +110,9 @@ fn try_metal_sdpa(
     // masks. Standard attention also keeps decode eager by design.
     //
     // Candle's causal kernel derives its diagonal offset as `kv_len - query_len`
-    // in unsigned arithmetic; when query_len > kv_len that underflows and every
-    // row ends up fully masked (a 0/0 softmax), unlike the eager causal mask
-    // (`create_causal_mask`), which saturates that offset to 0 and still lets
-    // early rows attend the first key. No cache in this crate currently grows
-    // query_len past kv_len, but keep this on the eager path rather than rely
-    // on that invariant holding forever.
+    // in unsigned arithmetic, so query_len > kv_len underflows and masks every
+    // row. `create_causal_mask` rejects that shape, so staying eager makes Metal
+    // report the same error instead of returning NaNs.
     if query_len == 0
         || (query_len == 1 && (!allow_vector_kernel || mask.is_some()))
         || (is_causal && mask.is_none() && query_len > kv_len)
@@ -130,6 +140,16 @@ fn try_metal_sdpa(
     // Candle's Metal support matrix is private and may change between patch
     // releases. An unsupported fused shape is an optimization miss, not an
     // inference failure, so let the caller continue through the eager path.
+    // Log it: the eager fallback needs more memory, so a rejection that is
+    // really an allocation failure would otherwise vanish.
+    if let Err(ref err) = fused {
+        tracing::debug!(
+            "Metal fused SDPA declined for q {:?}, k {:?}, v {:?}; using eager attention: {err}",
+            q.dims(),
+            k.dims(),
+            v.dims(),
+        );
+    }
     Ok(fused.ok())
 }
 
@@ -604,12 +624,36 @@ pub fn combine_masks(causal_mask: &Tensor, padding_mask: &Tensor) -> Result<Tens
     causal_mask.broadcast_add(padding_mask)
 }
 
+/// Flattens per-row decode positions into the buffer a `(axes, batch, 1)` MRoPE
+/// position tensor expects.
+///
+/// The buffer is axis-major: every row's position for axis 0, then axis 1, and
+/// so on. Writing it batch-major (`[p0, p0, p0, p1, ...]`) transposes the tensor
+/// and hands each row another row's positions. The two layouts coincide at
+/// `batch_size == 1`, so the mistake stays invisible until a real batch.
+pub(crate) fn decode_position_buffer(positions: &[i64], axes: usize) -> Vec<i64> {
+    (0..axes).flat_map(|_| positions.iter().copied()).collect()
+}
+
+/// Additive "cannot attend" fill: very negative, but finite in `dtype` with room
+/// left to absorb attention logits before the softmax.
+///
+/// F16 tops out at 65504, so the value used for wider dtypes saturates to -inf
+/// there — which is exactly the all-masked-row NaN a finite fill exists to
+/// avoid. Staying well inside the range also keeps `score + fill` finite.
+fn masked_score(dtype: DType) -> f64 {
+    match dtype {
+        DType::F16 => -1e4,
+        _ => -1e9,
+    }
+}
+
 /// Create a left-padding mask for batched sequences (right-aligned, standard for
 /// autoregressive generation).
 ///
 /// Returns a `(batch, 1, 1, max_len)` mask where left-padded positions
-/// (`j < max_len - seq_len`) are `-inf` and valid positions are `0`. With
-/// `seq_lens = [3, 5]` and `max_len = 5`, item 0 is `[-inf, -inf, 0, 0, 0]`.
+/// (`j < max_len - seq_len`) are strongly negative and valid positions are `0`.
+/// With `seq_lens = [3, 5]` and `max_len = 5`, item 0 is `[m, m, 0, 0, 0]`.
 pub fn create_left_padding_mask(
     seq_lens: &[usize],
     max_len: usize,
@@ -636,18 +680,21 @@ pub fn create_left_padding_mask(
             .reshape((1, 1, 1, max_len))?
             .to_dtype(dtype)?;
 
-        // Mask: pos < pad_len -> -inf, else 0
+        // Mask: pos < pad_len -> suppressed, else 0
         let mask_cond = pos_tensor.broadcast_lt(&pad_len)?;
 
         let zero = Tensor::new(0f32, compute_device)?
             .to_dtype(dtype)?
             .broadcast_as(mask_cond.shape())?;
-        let neg_inf = Tensor::new(f32::NEG_INFINITY, compute_device)?
+        // Finite, not -inf: with the causal mask a query inside the padding
+        // region reaches only padding keys, so -inf makes the row all -inf and
+        // its softmax NaN, which `0 * NaN` then spreads everywhere.
+        let masked = Tensor::new(masked_score(dtype) as f32, compute_device)?
             .to_dtype(dtype)?
             .broadcast_as(mask_cond.shape())?;
 
-        // if pos < pad_len (padded region), return -inf
-        mask_cond.where_cond(&neg_inf, &zero)
+        // if pos < pad_len (padded region), suppress
+        mask_cond.where_cond(&masked, &zero)
     })
 }
 
@@ -683,9 +730,13 @@ pub fn create_generation_mask(
         let mask_cond = pos_tensor.broadcast_lt(&pad_lens_tensor)?;
 
         let zero = Tensor::zeros(mask_cond.shape(), dtype, compute_device)?;
-        // Use large negative value instead of -inf to avoid potential numerical issues
-        let mask_value =
-            Tensor::full(-1e9_f32, mask_cond.shape(), compute_device)?.to_dtype(dtype)?;
+        // Large negative rather than -inf, and finite in every dtype.
+        let mask_value = Tensor::full(
+            masked_score(dtype) as f32,
+            mask_cond.shape(),
+            compute_device,
+        )?
+        .to_dtype(dtype)?;
 
         mask_cond.where_cond(&mask_value, &zero)
     })
@@ -1191,15 +1242,13 @@ mod tests {
             try_metal_sdpa(&q, &k, &v, None, 0.125, true, false)?.is_none(),
             "causal query_len > kv_len must fall back to the eager path on Metal"
         );
-        let out = scaled_dot_product_attention(&q, &k, &v, None, 0.125, true)?;
-        assert_eq!(out.dims(), &[1, 2, 8, 64]);
+        // The eager path then rejects the shape (`create_causal_mask` requires
+        // right-aligned queries), so Metal refuses just like CPU.
+        let err = scaled_dot_product_attention(&q, &k, &v, None, 0.125, true)
+            .expect_err("causal query_len > kv_len is not a supported shape");
         assert!(
-            out.to_dtype(DType::F32)?
-                .flatten_all()?
-                .to_vec1::<f32>()?
-                .iter()
-                .all(|value| value.is_finite()),
-            "eager fallback must not produce NaN/inf for this shape"
+            err.to_string().contains("right-aligned queries"),
+            "expected the causal-mask shape error, got: {err}"
         );
         Ok(())
     }
@@ -1380,9 +1429,10 @@ mod tests {
 
         let mask_data: Vec<f32> = mask.flatten_all()?.to_vec1()?;
 
-        // Batch 0: len=3, left-padded by 2 -> positions 0-1 masked, 2-4 valid
-        assert!(mask_data[0].is_infinite());
-        assert!(mask_data[1].is_infinite());
+        // Batch 0: len=3, left-padded by 2. Masked entries stay finite; see
+        // `padded_row_prefill_stays_finite`.
+        assert!(mask_data[0] < -1e8 && mask_data[0].is_finite());
+        assert!(mask_data[1] < -1e8 && mask_data[1].is_finite());
         assert_eq!(mask_data[2], 0.0);
         assert_eq!(mask_data[3], 0.0);
         assert_eq!(mask_data[4], 0.0);
@@ -1395,12 +1445,111 @@ mod tests {
         assert_eq!(mask_data[9], 0.0);
 
         // Batch 2: len=2, left-padded by 3 -> positions 0-2 masked, 3-4 valid
-        assert!(mask_data[10].is_infinite());
-        assert!(mask_data[11].is_infinite());
-        assert!(mask_data[12].is_infinite());
+        assert!(mask_data[10] < -1e8 && mask_data[10].is_finite());
+        assert!(mask_data[11] < -1e8 && mask_data[11].is_finite());
+        assert!(mask_data[12] < -1e8 && mask_data[12].is_finite());
         assert_eq!(mask_data[13], 0.0);
         assert_eq!(mask_data[14], 0.0);
 
+        Ok(())
+    }
+
+    /// `decode_position_buffer` must lay positions out axis-major.
+    ///
+    /// Batch-major transposes the `(axes, batch, 1)` tensor and gives each row
+    /// another row's positions — invisible at batch_size 1, where the two
+    /// layouts coincide, and wrong for every larger batch. Covers the 3-axis
+    /// (PaddleOCR-VL, MinerU2.5) and 4-axis (HunyuanOCR) users.
+    #[test]
+    fn decode_positions_are_axis_major() -> Result<()> {
+        let positions: Vec<i64> = vec![10, 20, 30];
+        let batch = positions.len();
+
+        for axes in [3usize, 4] {
+            let pos = Tensor::new(decode_position_buffer(&positions, axes), &Device::Cpu)?
+                .reshape((axes, batch, 1))?;
+            for axis in 0..axes {
+                let row: Vec<i64> = pos.i(axis)?.flatten_all()?.to_vec1()?;
+                assert_eq!(
+                    row, positions,
+                    "axes={axes}: axis {axis} has wrong positions"
+                );
+            }
+
+            // The batch-major layout this replaced is a different tensor.
+            let wrong: Vec<i64> = positions
+                .iter()
+                .flat_map(|&p| std::iter::repeat_n(p, axes))
+                .collect();
+            let wrong = Tensor::new(wrong, &Device::Cpu)?.reshape((axes, batch, 1))?;
+            assert_ne!(
+                wrong.i(0)?.flatten_all()?.to_vec1::<i64>()?,
+                positions,
+                "axes={axes}: batch-major should not accidentally be correct"
+            );
+        }
+        Ok(())
+    }
+
+    /// The padding fill must stay finite in every dtype a model may run in.
+    ///
+    /// F16 caps at 65504, so a fill chosen for wider dtypes saturates to -inf
+    /// there and reintroduces the all-masked-row NaN. F16 is reachable via
+    /// `OAR_VL_DTYPE=f16` and via `select_dtype`'s fallback on CUDA devices
+    /// without BF16 kernels.
+    #[test]
+    fn padding_mask_is_finite_in_every_dtype() -> Result<()> {
+        let device = Device::Cpu;
+        for dtype in [DType::F32, DType::BF16, DType::F16] {
+            let causal = create_causal_mask(6, 6, dtype, &device)?;
+            let padding = create_left_padding_mask(&[6, 4], 6, dtype, &device)?;
+            let combined = combine_masks(&causal, &padding)?;
+
+            // Row 1 is padded by 2, so its query 0 can only reach padding keys.
+            // That row must keep at least one finite entry or its softmax is NaN.
+            let row: Vec<f32> = combined.i((1, 0, 0))?.to_dtype(DType::F32)?.to_vec1()?;
+            assert!(
+                row.iter().any(|value| value.is_finite()),
+                "{dtype:?}: padding-region row is entirely non-finite: {row:?}"
+            );
+
+            let probs = candle_nn::ops::softmax_last_dim(&combined.to_dtype(DType::F32)?)?;
+            let values: Vec<f32> = probs.flatten_all()?.to_vec1()?;
+            assert!(
+                values.iter().all(|value| value.is_finite()),
+                "{dtype:?}: softmax over the combined mask produced non-finite values"
+            );
+        }
+        Ok(())
+    }
+
+    /// A left-padded row must survive prefill with finite values: an -inf
+    /// padding fill makes padding-region queries all -inf, their softmax NaN,
+    /// and `0 * NaN` smears it across the row. That made batched recognition
+    /// decode garbage and never emit EOS.
+    #[test]
+    fn padded_row_prefill_stays_finite() -> Result<()> {
+        let device = Device::Cpu;
+        let (seq_lens, max_len) = (vec![6usize, 4], 6usize);
+        let (batch, heads, head_dim) = (2usize, 2usize, 8usize);
+
+        let causal = create_causal_mask(max_len, max_len, DType::F32, &device)?;
+        let padding = create_left_padding_mask(&seq_lens, max_len, DType::F32, &device)?;
+        let mask = combine_masks(&causal, &padding)?;
+
+        let q = Tensor::randn(0f32, 1f32, (batch, heads, max_len, head_dim), &device)?;
+        let k = Tensor::randn(0f32, 1f32, (batch, heads, max_len, head_dim), &device)?;
+        let v = Tensor::randn(0f32, 1f32, (batch, heads, max_len, head_dim), &device)?;
+
+        let out = scaled_dot_product_attention(&q, &k, &v, Some(&mask), 0.35, false)?;
+        let values: Vec<f32> = out.flatten_all()?.to_vec1()?;
+        let non_finite = values.iter().filter(|value| !value.is_finite()).count();
+        assert_eq!(
+            non_finite,
+            0,
+            "{non_finite}/{} attention outputs were non-finite for a left-padded batch",
+            values.len()
+        );
         Ok(())
     }
 

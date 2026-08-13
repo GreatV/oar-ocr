@@ -545,7 +545,7 @@ impl PaddleOcrVl {
                 .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create tokens", e))?;
             let embeds = self.llm.embed(&tokens)?;
 
-            let pos_data: Vec<i64> = positions.iter().flat_map(|&p| [p, p, p]).collect();
+            let pos_data = crate::attention::decode_position_buffer(&positions, 3);
             let pos = Tensor::new(pos_data, &self.device)
                 .and_then(|t| t.reshape((3, batch_size, 1)))
                 .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create pos", e))?;
