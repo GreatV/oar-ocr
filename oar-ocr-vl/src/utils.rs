@@ -236,7 +236,11 @@ pub fn candle_to_ocr_inference(
 }
 
 /// Free device memory in bytes; `None` when it can't be queried
-/// (CPU, Metal, or a CUDA `cuMemGetInfo` failure).
+/// (CPU, or a CUDA `cuMemGetInfo` failure).
+///
+/// On Metal this is the headroom in the GPU's recommended working set —
+/// exceeding it makes the driver page resources every dispatch. Reporting it
+/// lets memory-aware fallbacks (chunked vision attention) engage there.
 pub fn free_device_memory(device: &Device) -> Option<usize> {
     #[cfg(feature = "cuda")]
     if let Device::Cuda(dev) = device {
@@ -247,6 +251,16 @@ pub fn free_device_memory(device: &Device) -> Option<usize> {
                 None
             }
         };
+    }
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    if let Device::Metal(dev) = device {
+        use objc2_metal::MTLDevice;
+        let raw = dev.metal_device().as_ref();
+        let budget = raw.recommendedMaxWorkingSetSize() as usize;
+        let allocated = raw.currentAllocatedSize();
+        // A zero budget means the driver declined to report one; unknown, not
+        // "nothing free".
+        return (budget > 0).then(|| budget.saturating_sub(allocated));
     }
     let _ = device;
     None

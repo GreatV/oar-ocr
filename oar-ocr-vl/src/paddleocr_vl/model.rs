@@ -545,7 +545,10 @@ impl PaddleOcrVl {
                 .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create tokens", e))?;
             let embeds = self.llm.embed(&tokens)?;
 
-            let pos_data: Vec<i64> = positions.iter().flat_map(|&p| [p, p, p]).collect();
+            // `(axis, batch, 1)` needs an axis-major buffer. Batch-major
+            // (`[p0, p0, p0, p1, ...]`) transposes it and gives each row another
+            // row's positions; the two coincide only at batch_size 1.
+            let pos_data: Vec<i64> = (0..3).flat_map(|_| positions.iter().copied()).collect();
             let pos = Tensor::new(pos_data, &self.device)
                 .and_then(|t| t.reshape((3, batch_size, 1)))
                 .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create pos", e))?;
@@ -744,4 +747,37 @@ fn get_rope_index(
         })?;
 
     Ok((position_ids, rope_deltas))
+}
+
+#[cfg(test)]
+mod tests {
+    use candle_core::{Device, IndexOp, Tensor};
+
+    /// The decode-step MRoPE position tensor is `(axis, batch, 1)` and so needs
+    /// an axis-major buffer. Batch-major transposes it — invisible at
+    /// batch_size 1, wrong for every larger batch.
+    #[test]
+    fn decode_position_ids_are_axis_major() -> candle_core::Result<()> {
+        let positions: Vec<i64> = vec![10, 20, 30];
+        let batch_size = positions.len();
+
+        let pos_data: Vec<i64> = (0..3).flat_map(|_| positions.iter().copied()).collect();
+        let pos = Tensor::new(pos_data, &Device::Cpu)?.reshape((3, batch_size, 1))?;
+
+        // Every axis must carry the same per-row positions.
+        for axis in 0..3 {
+            let row: Vec<i64> = pos.i(axis)?.flatten_all()?.to_vec1()?;
+            assert_eq!(row, positions, "axis {axis} carries the wrong positions");
+        }
+
+        // The batch-major layout this replaced is a different tensor.
+        let wrong: Vec<i64> = positions.iter().flat_map(|&p| [p, p, p]).collect();
+        let wrong = Tensor::new(wrong, &Device::Cpu)?.reshape((3, batch_size, 1))?;
+        assert_ne!(
+            wrong.i(0)?.flatten_all()?.to_vec1::<i64>()?,
+            positions,
+            "batch-major layout should not accidentally be correct"
+        );
+        Ok(())
+    }
 }

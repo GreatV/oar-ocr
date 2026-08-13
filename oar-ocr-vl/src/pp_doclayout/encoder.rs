@@ -255,8 +255,12 @@ fn sine_position_embedding(
         }
     }
 
-    Tensor::from_vec(data, (1, height * width, embed_dim), device)
+    // Build and downcast on CPU: Metal has no F64, so materializing the f64
+    // table on the target device fails there. Casting before upload keeps the
+    // values identical on every backend.
+    Tensor::from_vec(data, (1, height * width, embed_dim), &Device::Cpu)
         .and_then(|t| t.to_dtype(dtype))
+        .and_then(|t| t.to_device(device))
         .map_err(|e| infer_err("build position embedding", e))
 }
 

@@ -303,12 +303,25 @@ impl DeformableAttention {
                 ))
             })
             .map_err(|e| infer_err("deformable weight permute", e))?;
+        // Weight the sampled corners, then sum the (levels, points) axes away
+        // on a rank-3 view rather than as `sum(4).sum(3)` over the rank-6
+        // product: candle's Metal strided reduce only specializes indices up to
+        // rank 4 and its fallback is wrong, so reducing a non-final axis of a
+        // rank>=5 tensor reads the wrong elements (issue #177). Folding the two
+        // axes keeps the maths identical.
         let blended = sampled
             .broadcast_mul(&weights)
-            .map_err(|e| infer_err("deformable blend", e))?
-            .sum(4)
-            .and_then(|t| t.sum(3))
-            .map_err(|e| infer_err("deformable reduce", e))?;
+            .and_then(|t| t.contiguous())
+            .and_then(|t| {
+                t.reshape((
+                    batch * self.num_heads * num_queries,
+                    self.num_levels * self.num_points,
+                    head_dim,
+                ))
+            })
+            .and_then(|t| t.sum(1))
+            .and_then(|t| t.reshape((batch, self.num_heads, num_queries, head_dim)))
+            .map_err(|e| infer_err("deformable blend", e))?;
 
         let output = blended
             .permute((0, 2, 1, 3))
@@ -768,4 +781,91 @@ pub(super) fn inverse_sigmoid(x: &Tensor) -> Result<Tensor, Error> {
     (numerator / denominator)
         .and_then(|t| t.log())
         .map_err(|e| infer_err("inverse sigmoid log", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use candle_core::{Device, Tensor};
+
+    /// Pins the workaround in `DeformableAttention::forward`: the folded
+    /// rank-3 reduction must equal the rank-6 `sum(4).sum(3)` it replaced,
+    /// which candle's Metal reduce gets wrong (issue #177).
+    #[test]
+    fn folded_blend_matches_rank6_reduction() -> candle_core::Result<()> {
+        let device = Device::Cpu;
+        let (batch, heads, queries, levels, points, head_dim) = (1, 8, 12, 3, 4, 32);
+
+        let sampled = Tensor::randn(
+            0f32,
+            1f32,
+            (batch, heads, queries, levels, points, head_dim),
+            &device,
+        )?;
+        let weights = Tensor::randn(
+            0f32,
+            1f32,
+            (batch, heads, queries, levels, points, 1),
+            &device,
+        )?;
+
+        let want = sampled.broadcast_mul(&weights)?.sum(4)?.sum(3)?;
+        let got = sampled
+            .broadcast_mul(&weights)?
+            .contiguous()?
+            .reshape((batch * heads * queries, levels * points, head_dim))?
+            .sum(1)?
+            .reshape((batch, heads, queries, head_dim))?;
+
+        assert_eq!(want.dims(), got.dims());
+        let diff = (want - got)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        assert!(diff < 1e-4, "folded blend diverged by {diff}");
+        Ok(())
+    }
+
+    /// Documents why the fold exists: on Metal a rank>=5 non-final-axis reduce
+    /// is wrong while the folded rank-3 one is correct. When candle fixes the
+    /// kernel this test says so, and the workaround can go.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn metal_rank5_strided_reduce_is_still_broken() -> candle_core::Result<()> {
+        let Ok(metal) = Device::new_metal(0) else {
+            return Ok(());
+        };
+        let dims = (2, 3, 4, 5, 6);
+        let cpu_t = Tensor::randn(0f32, 1f32, dims, &Device::Cpu)?;
+        let metal_t = cpu_t.to_device(&metal)?;
+
+        let max_diff = |a: &Tensor, b: &Tensor| -> candle_core::Result<f32> {
+            (a - b.to_device(&Device::Cpu)?)?
+                .abs()?
+                .flatten_all()?
+                .max(0)?
+                .to_scalar::<f32>()
+        };
+
+        // Reducing axis 3 of a rank-5 tensor: still broken upstream.
+        let broken = max_diff(&cpu_t.sum(3)?, &metal_t.sum(3)?)?;
+
+        // The folded rank-3 equivalent agrees with CPU.
+        let fold = |t: &Tensor| -> candle_core::Result<Tensor> {
+            t.contiguous()?.reshape((2 * 3 * 4, 5, 6))?.sum(1)
+        };
+        let folded = max_diff(&fold(&cpu_t)?, &fold(&metal_t)?)?;
+        assert!(
+            folded < 1e-4,
+            "folded rank-3 reduction should match CPU, diverged by {folded}"
+        );
+
+        if broken < 1e-4 {
+            eprintln!(
+                "note: candle's Metal rank-5 strided reduce now matches CPU; \
+                 the fold in DeformableAttention::forward can be simplified"
+            );
+        }
+        Ok(())
+    }
 }

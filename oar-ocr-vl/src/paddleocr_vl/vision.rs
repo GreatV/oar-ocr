@@ -53,8 +53,8 @@ fn eager_attn_scratch_bytes(b: usize, heads: usize, seq: usize, dtype: DType) ->
 }
 
 /// Whether the full-matrix path fits in free device memory. Unknown free
-/// memory (CPU, Metal, query failure) keeps the full path; an overflowed
-/// scratch estimate (`None`) never fits.
+/// memory (CPU, query failure) keeps the full path; an overflowed scratch
+/// estimate (`None`) never fits.
 fn eager_attn_fits(device: &Device, scratch_bytes: Option<usize>) -> bool {
     let Some(scratch_bytes) = scratch_bytes else {
         return false;
@@ -401,6 +401,25 @@ impl VisionAttention {
             )
         };
 
+        // Metal's fused SDPA supports head_dim 72 and replaces the materialized
+        // `[b, heads, seq, seq]` scores and their F32 softmax with one dispatch.
+        // Metal-only: the eager path stays byte-stable for CUDA.
+        if hidden_states.device().is_metal()
+            && let Some(fused) =
+                crate::attention::try_fused_sdpa(&q, &k, &v, None, self.scale, false)
+                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision fused sdpa", e))?
+        {
+            let attn_output = fused
+                .transpose(1, 2)
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision out transpose", e))?
+                .reshape((b, seq, embed_dim))
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision out reshape", e))?;
+            return self
+                .out_proj
+                .forward(&attn_output)
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision out_proj", e));
+        }
+
         let kt = k
             .transpose(2, 3)
             .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision k t23", e))?
@@ -409,7 +428,8 @@ impl VisionAttention {
 
         // Full-matrix path only when seq is below the threshold AND its softmax
         // scratch fits in free device memory — large images otherwise OOM on
-        // small-VRAM GPUs (issue #147). The chunked fallback is numerically
+        // small-VRAM GPUs (issue #147) and thrash the unified-memory working set
+        // on small Macs (issue #177). The chunked fallback is numerically
         // equivalent (mirrors PyTorch SDPA's memory profile).
         let attn_output = if seq <= attn_full_seq_threshold()
             && eager_attn_fits(
@@ -745,6 +765,30 @@ impl VisionModel {
         pixel_values: &Tensor,
         image_grid_thw: &[(usize, usize, usize)],
     ) -> Result<Vec<Tensor>, Error> {
+        // One image at a time: the body below packs all patches into a single
+        // unmasked sequence, so with several images every patch of one attends
+        // to the others and the features blend (upstream separates them with a
+        // block-diagonal `cu_seqlens` mask). Per-image encoding computes the
+        // same thing and leaves the single-image path byte-identical.
+        if image_grid_thw.len() > 1 {
+            let mut outputs = Vec::with_capacity(image_grid_thw.len());
+            let mut start = 0usize;
+            for &grid in image_grid_thw {
+                let (t, h, w) = grid;
+                let len = t * h * w;
+                let patches = pixel_values.narrow(0, start, len).map_err(|e| {
+                    candle_to_ocr_processing(
+                        crate::error::ProcessingStage::TensorOperation,
+                        "PaddleOCR-VL: vision slice pixel_values per image failed",
+                        e,
+                    )
+                })?;
+                outputs.extend(self.forward(&patches, std::slice::from_ref(&grid))?);
+                start += len;
+            }
+            return Ok(outputs);
+        }
+
         let device = pixel_values.device();
 
         // Compute height/width position IDs for 2D rope
