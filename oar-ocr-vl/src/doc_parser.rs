@@ -3,7 +3,7 @@
 //! results. The layout source supplies the regions in reading order.
 //!
 //! Supported backends include PaddleOCR-VL, HunyuanOCR, GLM-OCR, MinerU2.5,
-//! MonkeyOCRv2, OvisOCR2, HPD-Parsing, and MinerU-Diffusion.
+//! MonkeyOCRv2, OvisOCR2, and MinerU-Diffusion.
 //!
 //! The `doc_parser` example exposes the layout-first PaddleOCR-VL and GLM-OCR
 //! paths. For reference-quality full-page parsing, prefer HunyuanOCR's native
@@ -166,12 +166,11 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
     /// backend at once. A value of zero is treated as one.
     ///
     /// The default is one so existing callers retain their memory use and
-    /// output behavior. PaddleOCR-VL, HunyuanOCR, GLM-OCR, and MinerU override
-    /// the backend hook with native batches; the other backends use a correct
-    /// sequential fallback. PaddleOCR-VL and HunyuanOCR additionally group
-    /// equal image-token counts, which keeps the common Metal decode path
-    /// padding-free. Any fallback padded batch remains correct but uses the
-    /// slower masked attention path.
+    /// output behavior. PaddleOCR-VL, HunyuanOCR, and MinerU perform native
+    /// batched inference; the other backends use a correct sequential path.
+    /// PaddleOCR-VL and HunyuanOCR additionally group equal image-token counts,
+    /// which keeps the common Metal decode path padding-free. Any padded native
+    /// batch remains correct but uses the slower masked attention path.
     pub fn with_region_batch_size(mut self, size: usize) -> Self {
         self.region_batch_size = size.max(1);
         self
