@@ -482,7 +482,11 @@ impl RecognitionBackend for MinerUDiffusion {
             .ok_or_else(|| Error::InvalidInput {
                 message: format!("MinerU-Diffusion max_tokens {max_tokens} is too large"),
             })?;
-        self.generate_one(&image, prompt, &generation)
+        let mut tokens = self.generate_token_ids(&image, prompt, &generation)?;
+        // Diffusion generates whole blocks, but the backend contract exposes a
+        // hard token limit to DocParser callers.
+        tokens.truncate(max_tokens);
+        self.decode_tokens(&tokens, true)
     }
 
     fn needs_table_postprocess(&self) -> bool {

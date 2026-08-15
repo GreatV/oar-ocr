@@ -135,7 +135,7 @@ impl FormulaRecognitionPredictorBuilder {
                 max_length: 1536,
                 batch_size: 8,
             }),
-            model_name: "FormulaRecognition".to_string(),
+            model_name: "UniMERNet".to_string(),
             tokenizer_path: None,
             target_size: None,
             model_kind: None,
@@ -264,10 +264,21 @@ impl Default for FormulaRecognitionPredictorBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::FormulaModelKind;
+    use super::{FormulaModelKind, FormulaRecognitionPredictorBuilder};
+
+    #[test]
+    fn formula_builder_defaults_to_unimernet() {
+        let builder = FormulaRecognitionPredictorBuilder::new();
+        assert_eq!(builder.model_name, "UniMERNet");
+        assert_eq!(builder.model_kind, None);
+    }
 
     #[test]
     fn formula_model_kind_inference_rejects_unknown_names() {
+        assert_eq!(
+            FormulaModelKind::from_model_name("UniMERNet"),
+            Some(FormulaModelKind::UniMERNet)
+        );
         assert_eq!(
             FormulaModelKind::from_model_name("PP-FormulaNet_plus-L"),
             Some(FormulaModelKind::PPFormulaNet)
