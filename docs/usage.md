@@ -138,7 +138,11 @@ let structure = OARStructureBuilder::new("picodet-l_layout_17cls.onnx")
     .with_table_cell_detection("rt-detr-l_wired_table_cell_det.onnx", "wired")
     .with_table_structure_recognition("slanext_wired.onnx", "wired")
     .table_structure_dict_path("table_structure_dict_ch.txt")
-    .with_formula_recognition("pp-formulanet-l.onnx", "pp-formulanet-tokenizer.json", "pp_formulanet")
+    .with_formula_recognition(
+        "pp-formulanet-l.onnx",
+        "pp-formulanet-tokenizer.json",
+        "pp_formulanet",
+    )
     .build()?;
 
 // Structure analysis with integrated OCR

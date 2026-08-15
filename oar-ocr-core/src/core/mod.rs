@@ -47,8 +47,8 @@ pub use inference::{
     ModelSource, OrtGlobalThreadPoolOptions, OrtInfer, TensorInput, TensorOutput, load_session,
 };
 pub use traits::{
-    AdapterBuilder, AdapterInfo, AdapterTask, GranularImageReader, ImageReader, ImageTaskInput,
-    ModelAdapter, Postprocessor, Preprocessor, Sampler, Task, TaskRunner, TaskSchema, TaskType,
+    AdapterBuilder, AdapterInfo, GranularImageReader, ImageReader, ImageTaskInput, ModelAdapter,
+    Postprocessor, Preprocessor, Sampler, Task, TaskType,
 };
 
 pub use validation::{

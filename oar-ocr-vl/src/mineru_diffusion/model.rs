@@ -15,6 +15,7 @@ use super::projector::VisionAbstractor;
 use super::text::{SdarKvCache, SdarModel};
 #[cfg(feature = "cuda")]
 use crate::cuda_kernels::SampleWithConfidence;
+use crate::doc_parser::{RecognitionBackend, RecognitionTask};
 use crate::error::Error;
 use crate::mineru::MinerUImageProcessorConfig;
 use crate::mineru::processing::preprocess_images;
@@ -180,7 +181,7 @@ impl MinerUDiffusion {
     /// stripped — suitable for element-level recognition (`Text`/`Table`/
     /// `Formula Recognition:`) where OTSL markers (`<fcel>`, `<nl>`) survive
     /// because they are ordinary vocab tokens, not special tokens.
-    pub fn generate(
+    pub fn generate_one(
         &self,
         image: &RgbImage,
         instruction: &str,
@@ -190,7 +191,30 @@ impl MinerUDiffusion {
         self.decode_tokens(&tokens, true)
     }
 
-    /// Same as [`Self::generate`] but preserves special tokens in the decoded
+    /// Generate decoded text for a batch of image/instruction pairs.
+    pub fn generate(
+        &self,
+        images: &[RgbImage],
+        instructions: &[impl AsRef<str>],
+        gen_cfg: &DiffusionGenerationConfig,
+    ) -> crate::error::BatchResult<String> {
+        if images.len() != instructions.len() {
+            return Err(Error::InvalidInput {
+                message: format!(
+                    "MinerU-Diffusion: images count ({}) != instructions count ({})",
+                    images.len(),
+                    instructions.len()
+                ),
+            });
+        }
+        Ok(images
+            .iter()
+            .zip(instructions)
+            .map(|(image, instruction)| self.generate_one(image, instruction.as_ref(), gen_cfg))
+            .collect())
+    }
+
+    /// Same as [`Self::generate_one`] but preserves special tokens in the decoded
     /// string. Required for the `\nLayout Detection:` pass, whose output frames
     /// each region with `<|box_start|>`/`<|box_end|>`/`<|ref_start|>`/
     /// `<|ref_end|>` special tokens that the layout parser keys on.
@@ -433,6 +457,40 @@ impl MinerUDiffusion {
 
     pub fn config(&self) -> &MinerUDiffusionConfig {
         &self.cfg
+    }
+}
+
+impl RecognitionBackend for MinerUDiffusion {
+    fn recognize(
+        &self,
+        image: RgbImage,
+        task: RecognitionTask,
+        max_tokens: usize,
+    ) -> Result<String, Error> {
+        if max_tokens == 0 {
+            return Ok(String::new());
+        }
+        let prompt = match task {
+            RecognitionTask::Ocr => "\nText Recognition:",
+            RecognitionTask::Table => "\nTable Recognition:",
+            RecognitionTask::Formula => "\nFormula Recognition:",
+            RecognitionTask::Chart => "\nDocument Parsing:",
+        };
+        let mut generation = DiffusionGenerationConfig::default();
+        generation.gen_length = max_tokens
+            .checked_next_multiple_of(generation.block_length)
+            .ok_or_else(|| Error::InvalidInput {
+                message: format!("MinerU-Diffusion max_tokens {max_tokens} is too large"),
+            })?;
+        self.generate_one(&image, prompt, &generation)
+    }
+
+    fn needs_table_postprocess(&self) -> bool {
+        true
+    }
+
+    fn needs_repetition_truncation(&self) -> bool {
+        true
     }
 }
 

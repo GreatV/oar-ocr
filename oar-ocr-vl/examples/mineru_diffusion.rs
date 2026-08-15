@@ -164,7 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if args.single_pass {
             let prompt = args.prompt.as_deref().unwrap_or(DEFAULT_PROMPT);
-            match model.generate(&image, prompt, &gen_cfg) {
+            match model.generate_one(&image, prompt, &gen_cfg) {
                 Ok(text) => {
                     info!("Done in {:.2?}", start.elapsed());
                     println!("===== {} =====", image_path.display());
@@ -231,7 +231,7 @@ fn two_step_extract(
 
     for (i, (block_image, prompt)) in block_images.into_iter().zip(prompts.iter()).enumerate() {
         let idx = indices[i];
-        match model.generate(&block_image, prompt, gen_cfg) {
+        match model.generate_one(&block_image, prompt, gen_cfg) {
             Ok(content) => {
                 let cleaned = truncate_repetitive_content(&content, 10, 10, 10);
                 let content = if blocks[idx].block_type == "table" {

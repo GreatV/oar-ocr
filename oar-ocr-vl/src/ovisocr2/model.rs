@@ -6,6 +6,7 @@ use super::text::OvisOcr2TextModel;
 use super::vision::OvisOcr2VisionModel;
 #[cfg(feature = "cuda")]
 use crate::cuda_kernels::{ArgmaxFirstBf16, ArgmaxFirstF32};
+use crate::doc_parser::{RecognitionBackend, RecognitionTask};
 use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{DType, Device, IndexOp, Tensor};
@@ -101,16 +102,21 @@ impl OvisOcr2 {
         &self,
         images: &[RgbImage],
         max_new_tokens: usize,
-    ) -> Vec<Result<String, Error>> {
-        self.generate_tokens(images, max_new_tokens)
+    ) -> crate::error::BatchResult<String> {
+        Ok(self
+            .generate_tokens(images, max_new_tokens)?
             .into_iter()
             .map(|result| result.and_then(|tokens| self.decode_tokens(&tokens)))
-            .collect()
+            .collect())
     }
 
     /// Parse pages using the official post-processing, which removes visual
     /// region `<img ...>` blocks by default.
-    pub fn parse(&self, images: &[RgbImage], max_new_tokens: usize) -> Vec<Result<String, Error>> {
+    pub fn parse(
+        &self,
+        images: &[RgbImage],
+        max_new_tokens: usize,
+    ) -> crate::error::BatchResult<String> {
         self.parse_with_image_tags(images, max_new_tokens, false)
     }
 
@@ -120,8 +126,9 @@ impl OvisOcr2 {
         images: &[RgbImage],
         max_new_tokens: usize,
         keep_image_tags: bool,
-    ) -> Vec<Result<String, Error>> {
-        self.generate_tokens(images, max_new_tokens)
+    ) -> crate::error::BatchResult<String> {
+        Ok(self
+            .generate_tokens(images, max_new_tokens)?
             .into_iter()
             .map(|result| {
                 result.and_then(|tokens| {
@@ -134,7 +141,7 @@ impl OvisOcr2 {
                     Ok(clean_truncated_repeats(&text))
                 })
             })
-            .collect()
+            .collect())
     }
 
     /// Generate raw token ids for each input page.
@@ -142,11 +149,11 @@ impl OvisOcr2 {
         &self,
         images: &[RgbImage],
         max_new_tokens: usize,
-    ) -> Vec<Result<Vec<u32>, Error>> {
-        images
+    ) -> crate::error::BatchResult<Vec<u32>> {
+        Ok(images
             .iter()
             .map(|image| self.generate_one(image, max_new_tokens))
-            .collect()
+            .collect())
     }
 
     fn generate_one(&self, image: &RgbImage, max_new_tokens: usize) -> Result<Vec<u32>, Error> {
@@ -339,6 +346,39 @@ impl OvisOcr2 {
 
     pub fn image_processor_config(&self) -> &OvisOcr2ImageProcessorConfig {
         &self.image_cfg
+    }
+}
+
+impl RecognitionBackend for OvisOcr2 {
+    fn recognize(
+        &self,
+        image: RgbImage,
+        _task: RecognitionTask,
+        max_tokens: usize,
+    ) -> Result<String, Error> {
+        self.parse(&[image], max_tokens)?
+            .pop()
+            .ok_or_else(|| Error::InvalidInput {
+                message: "OvisOCR2: no recognition result returned".to_string(),
+            })?
+    }
+
+    fn recognize_batch(
+        &self,
+        images: Vec<RgbImage>,
+        tasks: &[RecognitionTask],
+        max_tokens: usize,
+    ) -> crate::error::BatchResult<String> {
+        if images.len() != tasks.len() {
+            return Err(Error::InvalidInput {
+                message: format!(
+                    "OvisOCR2: images count ({}) != tasks count ({})",
+                    images.len(),
+                    tasks.len()
+                ),
+            });
+        }
+        self.parse(&images, max_tokens)
     }
 }
 

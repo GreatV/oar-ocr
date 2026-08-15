@@ -48,14 +48,6 @@ pub enum ConfigError {
     /// Error indicating that a resource limit has been exceeded.
     #[error("resource limit exceeded: {message}")]
     ResourceLimitExceeded { message: String },
-
-    /// Error indicating a dependency issue in the task graph.
-    #[error("dependency error: {message}")]
-    DependencyError { message: String },
-
-    /// Error indicating a type mismatch in the task graph.
-    #[error("type mismatch: {message}")]
-    TypeMismatch { message: String },
 }
 
 /// A trait for configuration types that can provide recommended defaults.

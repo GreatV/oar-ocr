@@ -270,8 +270,8 @@ impl OCRError {
     /// ```rust,no_run
     /// # use oar_ocr_core::core::errors::OCRError;
     /// let err = OCRError::config_error_detailed(
-    ///     "task graph validation",
-    ///     "task 'recognition' depends on 'detection' which does not exist"
+    ///     "model configuration",
+    ///     "recognition dictionary is missing"
     /// );
     /// assert!(matches!(err, OCRError::ConfigError { .. }));
     /// ```
@@ -361,58 +361,6 @@ impl OCRError {
                 field.into(),
                 expected.into(),
                 actual.into()
-            ),
-        }
-    }
-
-    /// Creates a configuration error for type mismatches in task graphs.
-    ///
-    /// # Arguments
-    ///
-    /// * `task_id` - The ID of the task with the mismatch
-    /// * `expected` - The expected type
-    /// * `actual` - The actual type
-    ///
-    /// # Returns
-    ///
-    /// A new ConfigError for type mismatches
-    pub fn type_mismatch(
-        task_id: impl Into<String>,
-        expected: impl Into<String>,
-        actual: impl Into<String>,
-    ) -> Self {
-        Self::ConfigError {
-            message: format!(
-                "type mismatch in task '{}': expected {}, got {}",
-                task_id.into(),
-                expected.into(),
-                actual.into()
-            ),
-        }
-    }
-
-    /// Creates a configuration error for dependency issues.
-    ///
-    /// # Arguments
-    ///
-    /// * `dependent` - The task that has a dependency
-    /// * `dependency` - The missing or invalid dependency
-    /// * `issue` - Description of the issue
-    ///
-    /// # Returns
-    ///
-    /// A new ConfigError for dependency issues
-    pub fn dependency_error(
-        dependent: impl Into<String>,
-        dependency: impl Into<String>,
-        issue: impl Into<String>,
-    ) -> Self {
-        Self::ConfigError {
-            message: format!(
-                "dependency error: task '{}' depends on '{}' which {}",
-                dependent.into(),
-                dependency.into(),
-                issue.into()
             ),
         }
     }

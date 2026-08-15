@@ -6,7 +6,7 @@ use super::validation::ensure_non_empty_images;
 use crate::ConfigValidator;
 use crate::core::OCRError;
 use crate::core::traits::TaskDefinition;
-use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
+use crate::core::traits::task::{ImageTaskInput, Task, TaskType};
 use crate::processors::{BoundingBox, LimitType};
 use crate::utils::ScoreValidator;
 use serde::{Deserialize, Serialize};
@@ -120,14 +120,6 @@ impl Task for TextDetectionTask {
         TaskType::TextDetection
     }
 
-    fn schema(&self) -> TaskSchema {
-        TaskSchema::new(
-            TaskType::TextDetection,
-            vec!["image".to_string()],
-            vec!["text_boxes".to_string(), "scores".to_string()],
-        )
-    }
-
     fn validate_input(&self, input: &Self::Input) -> Result<(), OCRError> {
         ensure_non_empty_images(&input.images, "No images provided for text detection")?;
 
@@ -207,14 +199,5 @@ mod tests {
             detections: vec![vec![detection2]],
         };
         assert!(task.validate_output(&bad_output).is_err());
-    }
-
-    #[test]
-    fn test_schema() {
-        let task = TextDetectionTask::default();
-        let schema = task.schema();
-        assert_eq!(schema.task_type, TaskType::TextDetection);
-        assert!(schema.input_types.contains(&"image".to_string()));
-        assert!(schema.output_types.contains(&"text_boxes".to_string()));
     }
 }

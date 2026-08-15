@@ -7,6 +7,7 @@ use crate::core::OCRError;
 use crate::core::inference::{OrtInfer, TensorInput};
 use crate::processors::{NormalizeImage, TensorLayout, UVDocPostProcess};
 use image::{DynamicImage, RgbImage, imageops::FilterType};
+use std::borrow::Cow;
 
 type PreprocessResult = Result<(ndarray::Array4<f32>, Vec<(u32, u32)>), OCRError>;
 
@@ -73,6 +74,12 @@ impl UVDocModel {
     ///
     /// A tuple of (batch_tensor, original_sizes)
     pub fn preprocess(&self, images: Vec<RgbImage>) -> PreprocessResult {
+        let image_refs: Vec<_> = images.iter().collect();
+        self.preprocess_refs(&image_refs)
+    }
+
+    /// Preprocesses borrowed images without cloning full-resolution source pages.
+    pub fn preprocess_refs(&self, images: &[&RgbImage]) -> PreprocessResult {
         let mut original_sizes = Vec::with_capacity(images.len());
         let mut processed_images = Vec::with_capacity(images.len());
 
@@ -80,25 +87,23 @@ impl UVDocModel {
         let target_width = self.rec_image_shape[2] as u32;
         let should_resize = target_height > 0 && target_width > 0;
 
-        for img in images {
+        for &img in images {
             let original_size = (img.width(), img.height());
             original_sizes.push(original_size);
 
             if should_resize && (img.width() != target_width || img.height() != target_height) {
                 // Use cv2.INTER_LINEAR for UVDoc resize.
-                let resized = DynamicImage::ImageRgb8(img).resize_exact(
-                    target_width,
-                    target_height,
-                    FilterType::Triangle,
-                );
-                processed_images.push(resized);
+                let resized =
+                    image::imageops::resize(img, target_width, target_height, FilterType::Triangle);
+                processed_images.push(Cow::Owned(resized));
             } else {
-                processed_images.push(DynamicImage::ImageRgb8(img));
+                processed_images.push(Cow::Borrowed(img));
             }
         }
 
         // Normalize and convert to tensor
-        let batch_tensor = self.normalizer.normalize_batch_to(processed_images)?;
+        let processed_refs: Vec<_> = processed_images.iter().map(Cow::as_ref).collect();
+        let batch_tensor = self.normalizer.normalize_batch_refs(&processed_refs)?;
 
         Ok((batch_tensor, original_sizes))
     }
@@ -211,7 +216,13 @@ impl UVDocModel {
     ///
     /// UVDocModelOutput containing rectified images
     pub fn forward(&self, images: Vec<RgbImage>) -> Result<UVDocModelOutput, OCRError> {
-        let (batch_tensor, original_sizes) = self.preprocess(images)?;
+        let image_refs: Vec<_> = images.iter().collect();
+        self.forward_refs(&image_refs)
+    }
+
+    /// Runs rectification on borrowed images without cloning shared page buffers.
+    pub fn forward_refs(&self, images: &[&RgbImage]) -> Result<UVDocModelOutput, OCRError> {
+        let (batch_tensor, original_sizes) = self.preprocess_refs(images)?;
         let predictions = self.infer(&batch_tensor)?;
         let rectified_images = self.postprocess(&predictions, &original_sizes)?;
 

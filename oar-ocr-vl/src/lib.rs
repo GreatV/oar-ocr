@@ -91,7 +91,7 @@ pub use monkeyocrv2::{MonkeyOcrV2, MonkeyOcrV2Task};
 pub use ovisocr2::OvisOcr2;
 
 pub use doc_parser::{DocParser, DocParserConfig, RecognitionBackend, RecognitionTask};
-pub use error::{Error, ProcessingStage, Result};
+pub use error::{BatchResult, Error, ProcessingStage, Result};
 pub use geometry::{BoundingBox, Point};
 pub use layout::{LayoutDetectionElement, LayoutDetections, LayoutSource, StaticLayout};
 pub use pp_doclayout::{PpDocLayout, PpDocLayoutVersion};

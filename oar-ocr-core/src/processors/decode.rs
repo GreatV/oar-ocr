@@ -19,6 +19,19 @@ pub type PositionedDecodeResult = (
     Vec<usize>,
 );
 
+/// Compact result of reducing CTC logits over the vocabulary dimension.
+///
+/// Unlike the original `(batch, time, vocab)` logits, this only retains one
+/// token index and confidence per timestep, so it is cheap to move beyond the
+/// lifetime of an ONNX Runtime output buffer.
+#[derive(Debug, PartialEq)]
+pub(crate) struct CTCArgmaxOutput {
+    batch_size: usize,
+    sequence_length: usize,
+    indices: Vec<usize>,
+    probabilities: Vec<f32>,
+}
+
 static ALPHANUMERIC_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[a-zA-Z0-9 :*./%+-]").expect("static regex: alphanumeric decoder pattern")
 });
@@ -433,6 +446,173 @@ impl CTCLabelDecode {
         self.base.character.len()
     }
 
+    /// Reduces `(batch, time, vocab)` logits to one token and confidence per
+    /// timestep. This is the only part of CTC decoding that must inspect the
+    /// large logits buffer.
+    pub(crate) fn argmax_predictions<S>(
+        &self,
+        pred: &ndarray::ArrayBase<S, ndarray::Ix3>,
+    ) -> CTCArgmaxOutput
+    where
+        S: ndarray::Data<Elem = f32> + Sync,
+    {
+        let [batch_size, sequence_length, vocab_size] = pred
+            .shape()
+            .try_into()
+            .expect("CTC predictions always have three dimensions");
+        let row_count = batch_size * sequence_length;
+
+        // Preserve the public decoder's historical empty-tensor behavior: no
+        // batch entries are returned when any dimension is zero.
+        if pred.is_empty() {
+            return CTCArgmaxOutput {
+                batch_size: 0,
+                sequence_length: 0,
+                indices: Vec::new(),
+                probabilities: Vec::new(),
+            };
+        }
+
+        // ORT outputs are contiguous, so the hot path can fan all timesteps out
+        // across rayon, including batch-size 1. Keep a non-contiguous fallback
+        // for callers of the public ndarray-based decoder methods.
+        let (indices, probabilities): (Vec<usize>, Vec<f32>) = if let Some(data) = pred.as_slice() {
+            data.par_chunks_exact(vocab_size)
+                .map(|row| crate::processors::simd::argmax(row).unwrap_or((self.blank_index, 0.0)))
+                .unzip()
+        } else {
+            (0..row_count)
+                .into_par_iter()
+                .map(|row_idx| {
+                    let batch_idx = row_idx / sequence_length;
+                    let time_idx = row_idx % sequence_length;
+                    argmax_row(pred.slice(ndarray::s![batch_idx, time_idx, ..]))
+                        .unwrap_or((self.blank_index, 0.0))
+                })
+                .unzip()
+        };
+
+        CTCArgmaxOutput {
+            batch_size,
+            sequence_length,
+            indices,
+            probabilities,
+        }
+    }
+
+    /// Performs CTC collapse and text construction from compact argmax data.
+    /// This no longer needs access to the logits or the inference session.
+    pub(crate) fn decode_argmax(&self, argmax: &CTCArgmaxOutput) -> (Vec<String>, Vec<f32>) {
+        let (all_texts, all_scores): (Vec<String>, Vec<f32>) = (0..argmax.batch_size)
+            .into_par_iter()
+            .map(|batch_idx| {
+                let start = batch_idx * argmax.sequence_length;
+                let end = start + argmax.sequence_length;
+                let sequence_idx = &argmax.indices[start..end];
+                let sequence_prob = &argmax.probabilities[start..end];
+
+                let mut filtered_prob = Vec::with_capacity(argmax.sequence_length);
+                let mut text = String::with_capacity(argmax.sequence_length);
+                let mut prev_idx = self.blank_index;
+                for (i, &idx) in sequence_idx.iter().enumerate() {
+                    if idx != self.blank_index
+                        && idx != prev_idx
+                        && let Some(&ch) = self.base.character.get(idx)
+                    {
+                        text.push(ch);
+                        filtered_prob.push(sequence_prob[i]);
+                    }
+                    prev_idx = idx;
+                }
+
+                let mean_conf = if filtered_prob.is_empty() {
+                    0.0
+                } else {
+                    filtered_prob.iter().sum::<f32>() / filtered_prob.len() as f32
+                };
+
+                (text, mean_conf)
+            })
+            .unzip();
+
+        (all_texts, all_scores)
+    }
+
+    /// Performs CTC collapse while retaining character timestep positions.
+    /// This no longer needs access to the logits or the inference session.
+    pub(crate) fn decode_argmax_with_positions(
+        &self,
+        argmax: &CTCArgmaxOutput,
+    ) -> PositionedDecodeResult {
+        type PerItem = (String, f32, Vec<f32>, Vec<usize>, usize);
+        let per: Vec<PerItem> = (0..argmax.batch_size)
+            .into_par_iter()
+            .map(|batch_idx| {
+                let start = batch_idx * argmax.sequence_length;
+                let end = start + argmax.sequence_length;
+                let sequence_idx = &argmax.indices[start..end];
+                let sequence_prob = &argmax.probabilities[start..end];
+
+                let mut filtered_prob = Vec::with_capacity(argmax.sequence_length);
+                let mut filtered_timesteps = Vec::with_capacity(argmax.sequence_length);
+                let mut char_list = Vec::with_capacity(argmax.sequence_length);
+                let mut prev_idx = self.blank_index;
+                for (i, &idx) in sequence_idx.iter().enumerate() {
+                    if idx != self.blank_index
+                        && idx != prev_idx
+                        && let Some(&ch) = self.base.character.get(idx)
+                    {
+                        char_list.push(ch);
+                        filtered_prob.push(sequence_prob[i]);
+                        filtered_timesteps.push(i);
+                    }
+                    prev_idx = idx;
+                }
+
+                let mean_conf = if filtered_prob.is_empty() {
+                    0.0
+                } else {
+                    filtered_prob.iter().sum::<f32>() / filtered_prob.len() as f32
+                };
+                let seq_len = argmax.sequence_length as f32;
+                let char_positions = filtered_timesteps
+                    .iter()
+                    .map(|&timestep| timestep as f32 / seq_len)
+                    .collect();
+                let text = char_list.iter().collect();
+
+                (
+                    text,
+                    mean_conf,
+                    char_positions,
+                    filtered_timesteps,
+                    argmax.sequence_length,
+                )
+            })
+            .collect();
+
+        let mut all_texts = Vec::with_capacity(argmax.batch_size);
+        let mut all_scores = Vec::with_capacity(argmax.batch_size);
+        let mut all_positions = Vec::with_capacity(argmax.batch_size);
+        let mut all_col_indices = Vec::with_capacity(argmax.batch_size);
+        let mut all_seq_lengths = Vec::with_capacity(argmax.batch_size);
+        for (text, score, pos, cols, seq_len) in per {
+            all_texts.push(text);
+            all_scores.push(score);
+            all_positions.push(pos);
+            all_col_indices.push(cols);
+            all_seq_lengths.push(seq_len);
+        }
+
+        (
+            all_texts,
+            all_scores,
+            all_positions,
+            all_col_indices,
+            all_seq_lengths,
+        )
+    }
+
     /// Applies the CTC decoder to a tensor of model predictions with character position tracking.
     ///
     /// This method handles the special requirements of CTC decoding and additionally tracks
@@ -459,96 +639,8 @@ impl CTCLabelDecode {
         if pred.is_empty() {
             return (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         }
-
-        let batch_size = pred.shape()[0];
-
-        type PerItem = (String, f32, Vec<f32>, Vec<usize>, usize);
-        let per: Vec<PerItem> = (0..batch_size)
-            .into_par_iter()
-            .map(|batch_idx| {
-                let preds = pred.index_axis(ndarray::Axis(0), batch_idx);
-                let seq_len_usize = preds.shape()[0];
-                let seq_len = seq_len_usize as f32;
-
-                let mut sequence_idx = Vec::with_capacity(seq_len_usize);
-                let mut sequence_prob = Vec::with_capacity(seq_len_usize);
-
-                for row in preds.outer_iter() {
-                    if let Some((idx, prob)) = argmax_row(row) {
-                        sequence_idx.push(idx);
-                        sequence_prob.push(prob);
-                    } else {
-                        sequence_idx.push(self.blank_index);
-                        sequence_prob.push(0.0);
-                    }
-                }
-
-                // Single CTC collapse pass (timestep == sequence position): drop
-                // blanks and consecutive duplicates and map to glyphs in one go,
-                // avoiding the `selection` scratch vector and two extra passes.
-                // `prev_idx` is updated on every step (blanks included), so dedup
-                // runs on the raw indices exactly as before. Pushing char/prob/
-                // timestep together keeps an out-of-vocab index from desyncing
-                // `char_list` from `char_positions` and corrupting word boxes.
-                let mut filtered_prob = Vec::with_capacity(sequence_idx.len());
-                let mut filtered_timesteps = Vec::with_capacity(sequence_idx.len());
-                let mut char_list: Vec<char> = Vec::with_capacity(sequence_idx.len());
-                let mut prev_idx = self.blank_index;
-                for (i, &idx) in sequence_idx.iter().enumerate() {
-                    if idx != self.blank_index
-                        && idx != prev_idx
-                        && let Some(&ch) = self.base.character.get(idx)
-                    {
-                        char_list.push(ch);
-                        filtered_prob.push(sequence_prob[i]);
-                        filtered_timesteps.push(i);
-                    }
-                    prev_idx = idx;
-                }
-
-                let mean_conf = if filtered_prob.is_empty() {
-                    0.0
-                } else {
-                    filtered_prob.iter().sum::<f32>() / filtered_prob.len() as f32
-                };
-
-                // Calculate normalized character positions (0.0 to 1.0)
-                let char_positions: Vec<f32> = filtered_timesteps
-                    .iter()
-                    .map(|&timestep| timestep as f32 / seq_len)
-                    .collect();
-
-                let text: String = char_list.iter().collect();
-                (
-                    text,
-                    mean_conf,
-                    char_positions,
-                    filtered_timesteps,
-                    seq_len_usize,
-                )
-            })
-            .collect();
-
-        let mut all_texts = Vec::with_capacity(batch_size);
-        let mut all_scores = Vec::with_capacity(batch_size);
-        let mut all_positions = Vec::with_capacity(batch_size);
-        let mut all_col_indices = Vec::with_capacity(batch_size);
-        let mut all_seq_lengths = Vec::with_capacity(batch_size);
-        for (text, score, pos, cols, seq_len) in per {
-            all_texts.push(text);
-            all_scores.push(score);
-            all_positions.push(pos);
-            all_col_indices.push(cols);
-            all_seq_lengths.push(seq_len);
-        }
-
-        (
-            all_texts,
-            all_scores,
-            all_positions,
-            all_col_indices,
-            all_seq_lengths,
-        )
+        let argmax = self.argmax_predictions(pred);
+        self.decode_argmax_with_positions(&argmax)
     }
 
     /// Applies the CTC decoder to a tensor of model predictions.
@@ -574,62 +666,94 @@ impl CTCLabelDecode {
         if pred.is_empty() {
             return (Vec::new(), Vec::new());
         }
+        let argmax = self.argmax_predictions(pred);
+        self.decode_argmax(&argmax)
+    }
+}
 
-        let batch_size = pred.shape()[0];
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::Array3;
 
-        // Decode each sequence in the batch independently. The argmax over the
-        // (large) vocab dimension for every timestep dominates this work, so we
-        // fan the per-sequence loop out across rayon — order is preserved by
-        // collecting into an indexed Vec.
-        let (all_texts, all_scores): (Vec<String>, Vec<f32>) = (0..batch_size)
-            .into_par_iter()
-            .map(|batch_idx| {
-                let preds = pred.index_axis(ndarray::Axis(0), batch_idx);
-                let seq_len_usize = preds.shape()[0];
+    fn logits_with_winners(winners: &[&[(usize, f32)]], vocab_size: usize) -> Array3<f32> {
+        let batch_size = winners.len();
+        let sequence_length = winners.first().map_or(0, |sequence| sequence.len());
+        let mut logits = Array3::from_elem((batch_size, sequence_length, vocab_size), -10.0);
+        for (batch_idx, sequence) in winners.iter().enumerate() {
+            assert_eq!(sequence.len(), sequence_length);
+            for (time_idx, &(token_idx, probability)) in sequence.iter().enumerate() {
+                logits[[batch_idx, time_idx, token_idx]] = probability;
+            }
+        }
+        logits
+    }
 
-                let mut sequence_idx = Vec::with_capacity(seq_len_usize);
-                let mut sequence_prob = Vec::with_capacity(seq_len_usize);
+    #[test]
+    fn compact_argmax_preserves_ctc_text_scores_and_positions() {
+        let characters = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let decoder = CTCLabelDecode::from_string_list(Some(&characters), false, false);
+        // Vocabulary slot 4 is deliberately out of the decoder's dictionary.
+        let logits = logits_with_winners(
+            &[
+                &[
+                    (0, 0.9),
+                    (1, 0.8),
+                    (1, 0.7),
+                    (0, 0.6),
+                    (1, 0.5),
+                    (2, 0.4),
+                    (2, 0.3),
+                ],
+                &[
+                    (3, 0.95),
+                    (3, 0.85),
+                    (4, 0.75),
+                    (3, 0.65),
+                    (0, 0.55),
+                    (2, 0.45),
+                    (0, 0.35),
+                ],
+            ],
+            5,
+        );
 
-                for row in preds.outer_iter() {
-                    if let Some((idx, prob)) = argmax_row(row) {
-                        sequence_idx.push(idx);
-                        sequence_prob.push(prob);
-                    } else {
-                        sequence_idx.push(self.blank_index);
-                        sequence_prob.push(0.0);
-                    }
-                }
+        let argmax = decoder.argmax_predictions(&logits);
+        assert_eq!(argmax.batch_size, 2);
+        assert_eq!(argmax.sequence_length, 7);
+        assert_eq!(argmax.indices.len(), 14);
+        assert_eq!(argmax.probabilities.len(), 14);
 
-                // Single CTC collapse pass: drop blanks and consecutive duplicates
-                // and map to glyphs in one go, avoiding the `selection` scratch
-                // vector and two extra passes. `prev_idx` is updated on every step
-                // (blanks included), so dedup runs on the raw indices exactly as
-                // before. Only count a prob when its glyph lands in `text`, else an
-                // out-of-vocab index would inflate `mean_conf`.
-                let mut filtered_prob = Vec::with_capacity(sequence_idx.len());
-                let mut text = String::with_capacity(sequence_idx.len());
-                let mut prev_idx = self.blank_index;
-                for (i, &idx) in sequence_idx.iter().enumerate() {
-                    if idx != self.blank_index
-                        && idx != prev_idx
-                        && let Some(&ch) = self.base.character.get(idx)
-                    {
-                        text.push(ch);
-                        filtered_prob.push(sequence_prob[i]);
-                    }
-                    prev_idx = idx;
-                }
+        let (texts, scores) = decoder.decode_argmax(&argmax);
+        assert_eq!(texts, ["aab", "ccb"]);
+        assert_eq!(
+            scores,
+            [(0.8 + 0.5 + 0.4) / 3.0, (0.95 + 0.65 + 0.45) / 3.0]
+        );
 
-                let mean_conf = if filtered_prob.is_empty() {
-                    0.0
-                } else {
-                    filtered_prob.iter().sum::<f32>() / filtered_prob.len() as f32
-                };
+        let (texts, scores, positions, columns, lengths) =
+            decoder.decode_argmax_with_positions(&argmax);
+        assert_eq!(texts, ["aab", "ccb"]);
+        assert_eq!(
+            scores,
+            [(0.8 + 0.5 + 0.4) / 3.0, (0.95 + 0.65 + 0.45) / 3.0]
+        );
+        assert_eq!(columns, [vec![1, 4, 5], vec![0, 3, 5]]);
+        assert_eq!(positions[0], [1.0 / 7.0, 4.0 / 7.0, 5.0 / 7.0]);
+        assert_eq!(positions[1], [0.0, 3.0 / 7.0, 5.0 / 7.0]);
+        assert_eq!(lengths, [7, 7]);
+    }
 
-                (text, mean_conf)
-            })
-            .unzip();
+    #[test]
+    fn compact_argmax_preserves_empty_tensor_behavior() {
+        let decoder = CTCLabelDecode::new(None, false);
+        let logits = Array3::<f32>::zeros((2, 0, decoder.get_character_count()));
+        let argmax = decoder.argmax_predictions(&logits);
 
-        (all_texts, all_scores)
+        assert_eq!(decoder.decode_argmax(&argmax), (Vec::new(), Vec::new()));
+        assert_eq!(
+            decoder.decode_argmax_with_positions(&argmax),
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        );
     }
 }

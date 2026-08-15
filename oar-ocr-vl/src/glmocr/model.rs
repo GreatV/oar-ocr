@@ -131,36 +131,25 @@ impl GlmOcr {
         images: &[RgbImage],
         instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Vec<Result<String, Error>> {
+    ) -> crate::error::BatchResult<String> {
         if images.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if images.len() != instructions.len() {
-            return vec![Err(Error::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "GLM-OCR: images count ({}) != instructions count ({})",
                     images.len(),
                     instructions.len()
                 ),
-            })];
+            });
         }
 
-        match self.generate_tokens_internal(images, instructions, max_new_tokens) {
-            Ok(results) => results
-                .into_iter()
-                .map(|tokens| self.decode_generated_tokens(&tokens))
-                .collect(),
-            Err(e) => {
-                let msg = crate::utils::error_chain_message("generation failed", &e);
-                (0..images.len())
-                    .map(|_| {
-                        Err(Error::InvalidInput {
-                            message: msg.clone(),
-                        })
-                    })
-                    .collect()
-            }
-        }
+        let results = self.generate_tokens_internal(images, instructions, max_new_tokens)?;
+        Ok(results
+            .into_iter()
+            .map(|tokens| self.decode_generated_tokens(&tokens))
+            .collect())
     }
 
     /// Generate raw token ids without post-processing. Tokens are exactly the
@@ -171,33 +160,20 @@ impl GlmOcr {
         images: &[RgbImage],
         instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Vec<Result<Vec<u32>, Error>> {
+    ) -> Result<Vec<Vec<u32>>, Error> {
         if images.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if images.len() != instructions.len() {
-            return vec![Err(Error::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "GLM-OCR: images count ({}) != instructions count ({})",
                     images.len(),
                     instructions.len()
                 ),
-            })];
+            });
         }
-
-        match self.generate_tokens_internal(images, instructions, max_new_tokens) {
-            Ok(results) => results.into_iter().map(Ok).collect(),
-            Err(e) => {
-                let msg = crate::utils::error_chain_message("generation failed", &e);
-                (0..images.len())
-                    .map(|_| {
-                        Err(Error::InvalidInput {
-                            message: msg.clone(),
-                        })
-                    })
-                    .collect()
-            }
-        }
+        self.generate_tokens_internal(images, instructions, max_new_tokens)
     }
 
     fn generate_tokens_internal(

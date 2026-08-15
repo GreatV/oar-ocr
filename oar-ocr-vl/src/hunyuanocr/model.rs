@@ -10,7 +10,7 @@ use super::llm::HunyuanLlm;
 use super::processing::{HunyuanOcrImageInputs, preprocess_image};
 use super::vision::HunyuanVisionModel;
 use crate::attention::{
-    combine_masks, create_causal_mask, create_generation_mask, create_left_padding_mask,
+    combine_masks, create_causal_mask, create_generation_mask_if_needed, create_left_padding_mask,
 };
 #[cfg(feature = "cuda")]
 use crate::cuda_kernels::ArgmaxFirstF32;
@@ -450,6 +450,25 @@ impl HunyuanOcr {
         })
     }
 
+    /// Expanded image-token count used to form padding-free parser batches.
+    pub(crate) fn recognition_batch_key(&self, image: &RgbImage) -> Option<u64> {
+        let (height, width) = super::processing::resized_dimensions(
+            image.height(),
+            image.width(),
+            &self.image_cfg,
+            &self.cfg.vision_config,
+            self.version,
+        )
+        .ok()?;
+        let factor = (self.image_cfg.patch_size * self.image_cfg.merge_size) as u32;
+        let merged_h = height.checked_div(factor)? as usize;
+        let merged_w = width.checked_div(factor)? as usize;
+        merged_h
+            .checked_mul(merged_w.checked_add(1)?)?
+            .checked_add(2)
+            .map(|tokens| tokens as u64)
+    }
+
     /// Load HunyuanOCR together with an explicitly located DFlash draft.
     ///
     /// DFlash is supported by HunyuanOCR 1.5 only. The official checkpoint
@@ -574,36 +593,25 @@ impl HunyuanOcr {
         images: &[RgbImage],
         instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Vec<Result<String, Error>> {
+    ) -> crate::error::BatchResult<String> {
         if images.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if images.len() != instructions.len() {
-            return vec![Err(Error::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "HunyuanOCR: images count ({}) != instructions count ({})",
                     images.len(),
                     instructions.len()
                 ),
-            })];
+            });
         }
 
-        match self.generate_tokens_internal(images, instructions, max_new_tokens) {
-            Ok(results) => results
-                .into_iter()
-                .map(|tokens| self.decode_generated_tokens(&tokens))
-                .collect(),
-            Err(e) => {
-                let msg = crate::utils::error_chain_message("generation failed", &e);
-                (0..images.len())
-                    .map(|_| {
-                        Err(Error::InvalidInput {
-                            message: msg.clone(),
-                        })
-                    })
-                    .collect()
-            }
-        }
+        let results = self.generate_tokens_internal(images, instructions, max_new_tokens)?;
+        Ok(results
+            .into_iter()
+            .map(|tokens| self.decode_generated_tokens(&tokens))
+            .collect())
     }
 
     /// Generate raw baseline tokens for oracle-draft / tokenizer round-trip
@@ -614,33 +622,20 @@ impl HunyuanOcr {
         images: &[RgbImage],
         instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Vec<Result<Vec<u32>, Error>> {
+    ) -> Result<Vec<Vec<u32>>, Error> {
         if images.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if images.len() != instructions.len() {
-            return vec![Err(Error::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "HunyuanOCR: images count ({}) != instructions count ({})",
                     images.len(),
                     instructions.len()
                 ),
-            })];
+            });
         }
-
-        match self.generate_tokens_internal(images, instructions, max_new_tokens) {
-            Ok(results) => results.into_iter().map(Ok).collect(),
-            Err(e) => {
-                let msg = crate::utils::error_chain_message("generation failed", &e);
-                (0..images.len())
-                    .map(|_| {
-                        Err(Error::InvalidInput {
-                            message: msg.clone(),
-                        })
-                    })
-                    .collect()
-            }
-        }
+        self.generate_tokens_internal(images, instructions, max_new_tokens)
     }
 
     /// Internal generation implementation supporting batched inference.
@@ -1012,9 +1007,10 @@ impl HunyuanOcr {
 
                 // Mask out left-padding positions in the KV cache for this
                 // step when prompt lengths differ across the batch.
-                let gen_mask = create_generation_mask(&pad_lens, kv_len, self.dtype, &self.device)
-                    .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "create gen mask", e))?;
-                (self.llm.forward(&embeds, &pos, Some(&gen_mask))?, None)
+                let gen_mask =
+                    create_generation_mask_if_needed(&pad_lens, kv_len, self.dtype, &self.device)
+                        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "create gen mask", e))?;
+                (self.llm.forward(&embeds, &pos, gen_mask.as_ref())?, None)
             };
 
             logits_list.clear();

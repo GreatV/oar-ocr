@@ -6,6 +6,12 @@ use thiserror::Error;
 /// Convenience alias for results produced by this crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Result of a batch operation with both batch-level and item-level failures.
+///
+/// The outer [`Result`] reports failures that prevented the batch from running;
+/// each inner result reports decoding or post-processing failure for one item.
+pub type BatchResult<T> = Result<Vec<Result<T>>>;
+
 /// Boxed source error carried by [`Error::Processing`] and [`Error::Inference`].
 pub type Source = Box<dyn std::error::Error + Send + Sync>;
 

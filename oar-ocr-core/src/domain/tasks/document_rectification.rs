@@ -6,7 +6,7 @@ use super::validation::{ensure_images_with, ensure_non_empty_images};
 use crate::core::OCRError;
 use crate::core::config::{ConfigError, ConfigValidator};
 use crate::core::traits::TaskDefinition;
-use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
+use crate::core::traits::task::{ImageTaskInput, Task, TaskType};
 use image::RgbImage;
 use serde::{Deserialize, Serialize};
 
@@ -104,14 +104,6 @@ impl Task for DocumentRectificationTask {
         TaskType::DocumentRectification
     }
 
-    fn schema(&self) -> TaskSchema {
-        TaskSchema::new(
-            TaskType::DocumentRectification,
-            vec!["image".to_string()],
-            vec!["rectified_image".to_string()],
-        )
-    }
-
     fn validate_input(&self, input: &Self::Input) -> Result<(), OCRError> {
         ensure_non_empty_images(
             &input.images,
@@ -177,14 +169,5 @@ mod tests {
         // Empty output should fail
         let empty_output = DocumentRectificationOutput::empty();
         assert!(task.validate_output(&empty_output).is_err());
-    }
-
-    #[test]
-    fn test_schema() {
-        let task = DocumentRectificationTask::default();
-        let schema = task.schema();
-        assert_eq!(schema.task_type, TaskType::DocumentRectification);
-        assert!(schema.input_types.contains(&"image".to_string()));
-        assert!(schema.output_types.contains(&"rectified_image".to_string()));
     }
 }

@@ -3,6 +3,7 @@ use super::processing::{HpdImageInputs, preprocess_image};
 use super::vision::HpdVisionModel;
 #[cfg(feature = "cuda")]
 use crate::cuda_kernels::{ArgmaxFirstBf16, ArgmaxFirstF32};
+use crate::doc_parser::{RecognitionBackend, RecognitionTask};
 use crate::error::Error;
 use crate::mineru_diffusion::text::{SdarKvCache, SdarModel};
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
@@ -269,40 +270,40 @@ impl HpdParsing {
         &self,
         images: &[RgbImage],
         generation: &HpdGenerationConfig,
-    ) -> Vec<Result<String, Error>> {
-        images
+    ) -> crate::error::BatchResult<String> {
+        Ok(images
             .iter()
             .map(|image| {
                 self.generate_one(image, DEFAULT_PROMPT, generation)
                     .map(|x| x.text)
             })
-            .collect()
+            .collect())
     }
 
     /// Generate with one caller-provided instruction per image.
-    pub fn generate_with_prompts(
+    pub fn generate(
         &self,
         images: &[RgbImage],
         prompts: &[impl AsRef<str>],
         generation: &HpdGenerationConfig,
-    ) -> Vec<Result<String, Error>> {
+    ) -> crate::error::BatchResult<String> {
         if images.len() != prompts.len() {
-            return vec![Err(Error::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "HPD-Parsing image count {} != prompt count {}",
                     images.len(),
                     prompts.len()
                 ),
-            })];
+            });
         }
-        images
+        Ok(images
             .iter()
             .zip(prompts)
             .map(|(image, prompt)| {
                 self.generate_one(image, prompt.as_ref(), generation)
                     .map(|x| x.text)
             })
-            .collect()
+            .collect())
     }
 
     /// Generate a single page and retain raw IDs plus parent/child statistics.
@@ -743,6 +744,62 @@ impl HpdParsing {
 
     pub fn config(&self) -> &HpdParsingConfig {
         &self.cfg
+    }
+}
+
+impl RecognitionBackend for HpdParsing {
+    fn recognize(
+        &self,
+        image: RgbImage,
+        task: RecognitionTask,
+        max_tokens: usize,
+    ) -> Result<String, Error> {
+        let prompt = hpd_prompt(task);
+        let generation = HpdGenerationConfig {
+            max_new_tokens: max_tokens,
+            ..HpdGenerationConfig::default()
+        };
+        Ok(self.generate_one(&image, prompt, &generation)?.text)
+    }
+
+    fn recognize_batch(
+        &self,
+        images: Vec<RgbImage>,
+        tasks: &[RecognitionTask],
+        max_tokens: usize,
+    ) -> crate::error::BatchResult<String> {
+        if images.len() != tasks.len() {
+            return Err(Error::InvalidInput {
+                message: format!(
+                    "HPD-Parsing: images count ({}) != tasks count ({})",
+                    images.len(),
+                    tasks.len()
+                ),
+            });
+        }
+        let prompts: Vec<&str> = tasks.iter().copied().map(hpd_prompt).collect();
+        let generation = HpdGenerationConfig {
+            max_new_tokens: max_tokens,
+            ..HpdGenerationConfig::default()
+        };
+        self.generate(&images, &prompts, &generation)
+    }
+
+    fn needs_table_postprocess(&self) -> bool {
+        true
+    }
+
+    fn needs_repetition_truncation(&self) -> bool {
+        true
+    }
+}
+
+fn hpd_prompt(task: RecognitionTask) -> &'static str {
+    match task {
+        RecognitionTask::Ocr => "\nText Recognition:",
+        RecognitionTask::Table => "\nTable Recognition:",
+        RecognitionTask::Formula => "\nFormula Recognition:",
+        RecognitionTask::Chart => DEFAULT_PROMPT,
     }
 }
 

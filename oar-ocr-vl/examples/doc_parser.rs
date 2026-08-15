@@ -103,6 +103,12 @@ struct Args {
     #[arg(long, default_value = "4096")]
     max_tokens: usize,
 
+    /// Maximum same-task crops per region batch. Increase cautiously;
+    /// VLM batches trade more memory for throughput; equal-token batches also
+    /// enable Metal's fused decode path.
+    #[arg(long, default_value = "1")]
+    region_batch_size: usize,
+
     /// Enable verbose output
     #[arg(short, long)]
     verbose: bool,
@@ -168,7 +174,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
 
-            let parser = DocParser::with_config(&vl, config);
+            let parser =
+                DocParser::with_config(&vl, config).with_region_batch_size(args.region_batch_size);
             process_images(&parser, &layout, &existing_images, &args)?;
         }
         ModelName::GlmOcr => {
@@ -180,7 +187,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
 
-            let parser = DocParser::with_config(&model, config);
+            let parser = DocParser::with_config(&model, config)
+                .with_region_batch_size(args.region_batch_size);
             process_images(&parser, &layout, &existing_images, &args)?;
         }
     }

@@ -24,6 +24,32 @@ fn distance(p1: &Point, p2: &Point) -> f32 {
     (p1.x - p2.x).hypot(p1.y - p2.y)
 }
 
+fn is_exact_axis_aligned(ordered: &[Point; 4], width: u32, height: u32) -> bool {
+    let width = width as f32;
+    let height = height as f32;
+    ordered[0].x == 0.0
+        && ordered[0].y == 0.0
+        && ordered[1].x == width
+        && ordered[1].y == 0.0
+        && ordered[2].x == width
+        && ordered[2].y == height
+        && ordered[3].x == 0.0
+        && ordered[3].y == height
+}
+
+fn orient_vertical_crop(image: RgbImage) -> RgbImage {
+    if image.height() as f32 >= image.width() as f32 * 1.5 {
+        debug!(
+            "Rotating image due to aspect ratio: {}x{}",
+            image.width(),
+            image.height()
+        );
+        imageops::rotate270(&image)
+    } else {
+        image
+    }
+}
+
 /// Extracts a rotated and cropped image from a source image based on bounding box points.
 ///
 /// This function takes a source image and a set of four points that define a quadrilateral
@@ -116,6 +142,15 @@ pub fn get_rotate_crop_image(
         sorted[index_d],
     ];
 
+    // DB commonly returns exact axis-aligned integer rectangles. Their crop is
+    // already rectified, so avoid solving a homography and bicubic-resampling
+    // every output pixel. Keep the predicate deliberately strict: fractional,
+    // clipped, or even slightly skewed boxes retain the established perspective
+    // path. The shared orientation helper preserves vertical-text rotation.
+    if is_exact_axis_aligned(&ordered, crop_width, crop_height) {
+        return Ok(orient_vertical_crop(img_crop));
+    }
+
     // Calculate target image dimensions based on the max opposite-edge lengths
     let width1 = distance(&ordered[0], &ordered[1]);
     let width2 = distance(&ordered[2], &ordered[3]);
@@ -151,18 +186,8 @@ pub fn get_rotate_crop_image(
         img_crop_height,
     )?;
 
-    // Automatically rotate if the aspect ratio suggests the text is vertical
-    if dst_img.height() as f32 >= dst_img.width() as f32 * 1.5 {
-        debug!(
-            "Rotating image due to aspect ratio: {}x{}",
-            dst_img.width(),
-            dst_img.height()
-        );
-
-        Ok(imageops::rotate270(&dst_img))
-    } else {
-        Ok(dst_img)
-    }
+    // Automatically rotate if the aspect ratio suggests the text is vertical.
+    Ok(orient_vertical_crop(dst_img))
 }
 
 /// Calculates the perspective transformation matrix that maps source points to destination points.
@@ -672,6 +697,25 @@ mod tests {
     }
 
     #[test]
+    fn exact_axis_aligned_fast_path_is_deliberately_strict() {
+        let exact = [
+            Point::new(0.0, 0.0),
+            Point::new(50.0, 0.0),
+            Point::new(50.0, 30.0),
+            Point::new(0.0, 30.0),
+        ];
+        assert!(is_exact_axis_aligned(&exact, 50, 30));
+
+        let mut skewed = exact;
+        skewed[1].y = 0.001;
+        assert!(!is_exact_axis_aligned(&skewed, 50, 30));
+
+        let mut fractional = exact;
+        fractional[0].x = 0.5;
+        assert!(!is_exact_axis_aligned(&fractional, 50, 30));
+    }
+
+    #[test]
     fn test_warp_perspective_invalid_matrix() {
         // Create a simple 2x2 image
         let image = RgbImage::new(2, 2);
@@ -700,5 +744,35 @@ mod tests {
         assert_eq!(pixel.0[0], 128);
         assert_eq!(pixel.0[1], 128);
         assert_eq!(pixel.0[2], 64);
+    }
+
+    #[test]
+    #[ignore = "manual release-mode microbenchmark"]
+    fn benchmark_axis_aligned_rotate_crop() -> Result<(), OCRError> {
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+
+        fn median(mut samples: Vec<Duration>) -> Duration {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        let image = RgbImage::from_fn(1200, 800, |x, y| {
+            Rgb([(x % 251) as u8, (y % 241) as u8, ((x + y) % 239) as u8])
+        });
+        let points = [
+            Point::new(100.0, 200.0),
+            Point::new(1100.0, 200.0),
+            Point::new(1100.0, 320.0),
+            Point::new(100.0, 320.0),
+        ];
+        let mut samples = Vec::new();
+        for _ in 0..15 {
+            let started = Instant::now();
+            black_box(get_rotate_crop_image(&image, &points)?);
+            samples.push(started.elapsed());
+        }
+        eprintln!("1000x120 axis crop median: {:?}", median(samples));
+        Ok(())
     }
 }

@@ -65,6 +65,10 @@ struct Args {
     #[arg(long, default_value = "4096")]
     max_tokens: usize,
 
+    /// Number of cropped regions per content-extraction batch
+    #[arg(long, default_value = "2")]
+    region_batch_size: usize,
+
     /// Minimum edge length for cropped blocks
     #[arg(long, default_value = "28")]
     min_image_edge: u32,
@@ -130,6 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &model,
             &rgb_img,
             args.max_tokens,
+            args.region_batch_size,
             args.min_image_edge,
             args.max_image_edge_ratio,
             args.dump_layout,
@@ -155,6 +160,7 @@ fn two_step_extract(
     model: &MinerU,
     image: &RgbImage,
     max_tokens: usize,
+    region_batch_size: usize,
     min_image_edge: u32,
     max_image_edge_ratio: f32,
     dump_layout: bool,
@@ -167,10 +173,10 @@ fn two_step_extract(
         imageops::FilterType::CatmullRom,
     );
     let layout_tokens = model
-        .generate_tokens(&[layout_image], &[LAYOUT_PROMPT], max_tokens)
+        .generate_tokens(&[layout_image], &[LAYOUT_PROMPT], max_tokens)?
         .into_iter()
         .next()
-        .ok_or("Layout detection returned no result")??;
+        .ok_or("Layout detection returned no result")?;
     info!(
         "  Layout tokens: {}, fingerprint: {:016x}",
         layout_tokens.len(),
@@ -186,43 +192,44 @@ fn two_step_extract(
         return Ok(blocks);
     }
 
-    // Step 2: Content extraction on cropped blocks
-    // Note: Processing one at a time due to batched inference issues with different padding
+    // Step 2: Content extraction on cropped blocks. MinerU masks the leading
+    // padding KV for unequal prompt lengths, so differently sized crops can be
+    // decoded in one batch.
     let (block_images, prompts, indices) =
         prepare_for_extract(image, &blocks, min_image_edge, max_image_edge_ratio);
     if block_images.is_empty() {
         return Ok(blocks);
     }
 
-    for (i, (block_image, prompt)) in block_images.into_iter().zip(prompts.iter()).enumerate() {
-        let idx = indices[i];
-        let output = model
-            .generate_tokens(&[block_image], &[prompt], max_tokens)
-            .into_iter()
-            .next();
-        match output {
-            Some(Ok(tokens)) => {
-                info!(
-                    "  Block {} tokens: {}, fingerprint: {:016x}",
-                    idx,
-                    tokens.len(),
-                    token_fingerprint(&tokens)
-                );
-                let content = model.decode_tokens(&tokens)?;
-                let cleaned = truncate_repetitive_content(&content, 10, 10, 10);
-                let content = if blocks[idx].block_type == "table" {
-                    convert_otsl_to_html(&cleaned)
-                } else {
-                    cleaned.trim().to_string()
-                };
-                blocks[idx].content = Some(content);
-            }
-            Some(Err(e)) => {
-                error!("  Block inference failed (idx={}): {}", idx, e);
-            }
-            None => {
-                error!("  Block inference returned no result (idx={})", idx);
-            }
+    let region_batch_size = region_batch_size.max(1);
+    for start in (0..block_images.len()).step_by(region_batch_size) {
+        let end = (start + region_batch_size).min(block_images.len());
+        let generated =
+            model.generate_tokens(&block_images[start..end], &prompts[start..end], max_tokens)?;
+        if generated.len() != end - start {
+            return Err(format!(
+                "Content extraction returned {} results for {} blocks",
+                generated.len(),
+                end - start
+            )
+            .into());
+        }
+
+        for (&idx, tokens) in indices[start..end].iter().zip(generated) {
+            info!(
+                "  Block {} tokens: {}, fingerprint: {:016x}",
+                idx,
+                tokens.len(),
+                token_fingerprint(&tokens)
+            );
+            let content = model.decode_tokens(&tokens)?;
+            let cleaned = truncate_repetitive_content(&content, 10, 10, 10);
+            let content = if blocks[idx].block_type == "table" {
+                convert_otsl_to_html(&cleaned)
+            } else {
+                cleaned.trim().to_string()
+            };
+            blocks[idx].content = Some(content);
         }
     }
 

@@ -7,7 +7,7 @@ use super::validation::ensure_non_empty_images;
 use crate::ConfigValidator;
 use crate::core::OCRError;
 use crate::core::traits::TaskDefinition;
-use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
+use crate::core::traits::task::{ImageTaskInput, Task, TaskType};
 use crate::utils::{ScoreValidator, validate_length_match};
 use serde::{Deserialize, Serialize};
 
@@ -94,14 +94,6 @@ impl Task for FormulaRecognitionTask {
         TaskType::FormulaRecognition
     }
 
-    fn schema(&self) -> TaskSchema {
-        TaskSchema::new(
-            TaskType::FormulaRecognition,
-            vec!["image".to_string()],
-            vec!["latex_formula".to_string(), "confidence".to_string()],
-        )
-    }
-
     fn validate_input(&self, input: &Self::Input) -> Result<(), OCRError> {
         ensure_non_empty_images(&input.images, "No images provided for formula recognition")?;
 
@@ -174,14 +166,5 @@ mod tests {
             scores: vec![Some(0.95), Some(0.90)],
         };
         assert!(task.validate_output(&bad_output).is_err());
-    }
-
-    #[test]
-    fn test_schema() {
-        let task = FormulaRecognitionTask::default();
-        let schema = task.schema();
-        assert_eq!(schema.task_type, TaskType::FormulaRecognition);
-        assert!(schema.input_types.contains(&"image".to_string()));
-        assert!(schema.output_types.contains(&"latex_formula".to_string()));
     }
 }

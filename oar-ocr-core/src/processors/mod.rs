@@ -41,6 +41,7 @@ pub mod uvdoc_postprocess;
 pub use crate::utils::{Crop, Topk, TopkResult};
 pub use aspect_ratio_bucketing::*;
 pub use db_postprocess::*;
+pub(crate) use decode::CTCArgmaxOutput;
 pub use decode::*;
 pub use formula_preprocess::{FormulaPreprocessParams, FormulaPreprocessor, normalize_latex};
 pub use geometry::*;

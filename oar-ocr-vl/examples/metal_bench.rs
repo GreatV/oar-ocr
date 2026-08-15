@@ -209,6 +209,50 @@ fn bench_gqa(device: &Device, dtype: DType, q_len: usize, kv_len: usize) -> Resu
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
+fn bench_masked_batched_gqa_decode(
+    device: &Device,
+    dtype: DType,
+    batch: usize,
+    kv_len: usize,
+) -> Result<()> {
+    let q = Tensor::randn(0f32, 1f32, (batch, 16, 1, 128), device)?.to_dtype(dtype)?;
+    let k = Tensor::randn(0f32, 1f32, (batch, 2, kv_len, 128), device)?.to_dtype(dtype)?;
+    let v = Tensor::randn(0f32, 1f32, (batch, 2, kv_len, 128), device)?.to_dtype(dtype)?;
+    let mut mask = vec![0f32; batch * kv_len];
+    for row in 0..batch {
+        let pad_len = kv_len * (row + 1) / (batch + 2);
+        let start = row * kv_len;
+        mask[start..start + pad_len].fill(f32::NEG_INFINITY);
+    }
+    let mask = Tensor::from_vec(mask, (batch, 1, 1, kv_len), device)?.to_dtype(dtype)?;
+
+    measure(
+        &format!("gqa/masked-b{batch} q=1 kv={kv_len} {dtype:?}"),
+        2,
+        7,
+        || scaled_dot_product_attention_gqa(&q, &k, &v, Some(&mask), 0.08838835, false, 8),
+    )
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn bench_maskless_batched_gqa_decode(
+    device: &Device,
+    dtype: DType,
+    batch: usize,
+    kv_len: usize,
+) -> Result<()> {
+    let q = Tensor::randn(0f32, 1f32, (batch, 16, 1, 128), device)?.to_dtype(dtype)?;
+    let k = Tensor::randn(0f32, 1f32, (batch, 2, kv_len, 128), device)?.to_dtype(dtype)?;
+    let v = Tensor::randn(0f32, 1f32, (batch, 2, kv_len, 128), device)?.to_dtype(dtype)?;
+    measure(
+        &format!("gqa/maskless-b{batch} q=1 kv={kv_len} {dtype:?}"),
+        2,
+        7,
+        || scaled_dot_product_attention_gqa(&q, &k, &v, None, 0.08838835, false, 8),
+    )
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn report_softmax_accuracy(device: &Device, dtype: DType, score_stddev: f32) -> Result<()> {
     let scores = (Tensor::randn(0f32, 1f32, (8, 512, 512), device)? * score_stddev as f64)?
         .to_dtype(dtype)?;
@@ -270,6 +314,10 @@ fn main() -> Result<()> {
             bench_attention(&device, dtype, 1, 1024)?;
             bench_gqa(&device, dtype, 512, 512)?;
             bench_gqa(&device, dtype, 1, 1024)?;
+            for batch in [2, 3, 4, 8] {
+                bench_masked_batched_gqa_decode(&device, dtype, batch, 1024)?;
+                bench_maskless_batched_gqa_decode(&device, dtype, batch, 1024)?;
+            }
             bench_sampling(&device, dtype)?;
             Ok(())
         })();

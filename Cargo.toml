@@ -78,7 +78,6 @@ rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [dev-dependencies]
 ab_glyph = "0.2"
@@ -87,3 +86,4 @@ fontdb = "0.23"
 hayro.workspace = true
 regex.workspace = true
 tempfile.workspace = true
+tracing-subscriber.workspace = true

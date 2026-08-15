@@ -96,7 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let page_count = images.len();
     info!("Processing {page_count} page(s)");
     let infer_start = Instant::now();
-    let results = model.parse_with_image_tags(&images, args.max_tokens, args.keep_image_tags);
+    let results = model.parse_with_image_tags(&images, args.max_tokens, args.keep_image_tags)?;
     let infer_ms = infer_start.elapsed().as_secs_f64() * 1000.0;
     info!(
         "Inference completed for {page_count} page(s) in {infer_ms:.2}ms ({:.2}ms/page)",

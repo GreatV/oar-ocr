@@ -13,6 +13,32 @@ pub struct HunyuanOcrImageInputs {
     pub grid_thw_merged: (usize, usize, usize),
 }
 
+pub(crate) fn resized_dimensions(
+    height: u32,
+    width: u32,
+    cfg: &HunyuanOcrImageProcessorConfig,
+    vision_cfg: &HunyuanOcrVisionConfig,
+    version: HunyuanOcrVersion,
+) -> Result<(u32, u32), Error> {
+    let factor = (cfg.patch_size * cfg.merge_size) as u32;
+    match version {
+        HunyuanOcrVersion::V1 => {
+            let (rh, rw) = smart_resize_token_limited(
+                height,
+                width,
+                factor,
+                cfg.min_pixels,
+                cfg.max_pixels,
+                vision_cfg.img_max_token_num,
+            )?;
+            clamp_to_max_image_size(rh, rw, factor, vision_cfg.max_image_size)
+        }
+        HunyuanOcrVersion::V1_5 => {
+            smart_resize(height, width, factor, cfg.min_pixels, cfg.max_pixels)
+        }
+    }
+}
+
 pub fn smart_resize_token_limited(
     height: u32,
     width: u32,
@@ -95,23 +121,10 @@ pub fn preprocess_image(
 
     let (h, w) = (image.height(), image.width());
     let factor = (cfg.patch_size * cfg.merge_size) as u32;
-    let (rh, rw) = match version {
-        HunyuanOcrVersion::V1 => {
-            let (rh, rw) = smart_resize_token_limited(
-                h,
-                w,
-                factor,
-                cfg.min_pixels,
-                cfg.max_pixels,
-                vision_cfg.img_max_token_num,
-            )?;
-            clamp_to_max_image_size(rh, rw, factor, vision_cfg.max_image_size)?
-        }
-        // V1.5 raises the processor budget to 16M pixels (4K square).
-        // `max_image_size` is the learned positional-embedding base grid, not
-        // an input side-length cap; the official processor only smart-resizes.
-        HunyuanOcrVersion::V1_5 => smart_resize(h, w, factor, cfg.min_pixels, cfg.max_pixels)?,
-    };
+    // V1.5 raises the processor budget to 16M pixels (4K square).
+    // `max_image_size` is the learned positional-embedding base grid, not an
+    // input side-length cap; the official processor only smart-resizes.
+    let (rh, rw) = resized_dimensions(h, w, cfg, vision_cfg, version)?;
 
     let resized = if rh != h || rw != w {
         image::imageops::resize(image, rw, rh, resize_filter)

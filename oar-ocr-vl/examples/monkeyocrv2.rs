@@ -103,10 +103,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let started = Instant::now();
     let results = if let Some(prompt) = args.prompt {
         let prompts = vec![prompt; images.len()];
-        model.generate_with_prompts(&images, &prompts, args.max_tokens)
+        model.generate_with_prompts(&images, &prompts, args.max_tokens)?
     } else {
         let tasks = vec![MonkeyOcrV2Task::from(args.task); images.len()];
-        model.generate(&images, &tasks, args.max_tokens)
+        model.generate(&images, &tasks, args.max_tokens)?
     };
     info!(
         "Processed {} image(s) in {:.2}s",

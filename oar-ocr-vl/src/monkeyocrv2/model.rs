@@ -121,11 +121,12 @@ impl MonkeyOcrV2 {
         images: &[RgbImage],
         tasks: &[MonkeyOcrV2Task],
         max_new_tokens: usize,
-    ) -> Vec<Result<String, Error>> {
-        self.generate_tokens(images, tasks, max_new_tokens)
+    ) -> crate::error::BatchResult<String> {
+        Ok(self
+            .generate_tokens(images, tasks, max_new_tokens)?
             .into_iter()
             .map(|result| result.and_then(|tokens| self.decode_tokens(&tokens)))
-            .collect()
+            .collect())
     }
 
     /// Run the model with caller-provided instructions.
@@ -134,18 +135,18 @@ impl MonkeyOcrV2 {
         images: &[RgbImage],
         prompts: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Vec<Result<String, Error>> {
+    ) -> crate::error::BatchResult<String> {
         if images.len() != prompts.len() {
-            return vec![Err(length_mismatch(images.len(), prompts.len()))];
+            return Err(length_mismatch(images.len(), prompts.len()));
         }
-        images
+        Ok(images
             .iter()
             .zip(prompts)
             .map(|(image, prompt)| {
                 self.generate_one(image, prompt.as_ref(), max_new_tokens, None)
                     .and_then(|tokens| self.decode_tokens(&tokens))
             })
-            .collect()
+            .collect())
     }
 
     /// Generate raw token ids with official task prompts.
@@ -154,18 +155,18 @@ impl MonkeyOcrV2 {
         images: &[RgbImage],
         tasks: &[MonkeyOcrV2Task],
         max_new_tokens: usize,
-    ) -> Vec<Result<Vec<u32>, Error>> {
+    ) -> crate::error::BatchResult<Vec<u32>> {
         if images.len() != tasks.len() {
-            return vec![Err(length_mismatch(images.len(), tasks.len()))];
+            return Err(length_mismatch(images.len(), tasks.len()));
         }
-        images
+        Ok(images
             .iter()
             .zip(tasks)
             .map(|(image, &task)| {
                 let min_pixels = (task == MonkeyOcrV2Task::Layout).then_some(LAYOUT_MIN_PIXELS);
                 self.generate_one(image, task.prompt(), max_new_tokens, min_pixels)
             })
-            .collect()
+            .collect())
     }
 
     fn generate_one(
@@ -343,9 +344,28 @@ impl RecognitionBackend for MonkeyOcrV2 {
             RecognitionTask::Table => MonkeyOcrV2Task::Table,
             RecognitionTask::Formula => MonkeyOcrV2Task::Formula,
         };
-        self.generate(&[image], &[monkey_task], max_tokens)
+        self.generate(&[image], &[monkey_task], max_tokens)?
             .pop()
-            .expect("one MonkeyOCRv2 recognition result")
+            .ok_or_else(|| Error::InvalidInput {
+                message: "MonkeyOCRv2: no recognition result returned".to_string(),
+            })?
+    }
+
+    fn recognize_batch(
+        &self,
+        images: Vec<RgbImage>,
+        tasks: &[RecognitionTask],
+        max_tokens: usize,
+    ) -> crate::error::BatchResult<String> {
+        let monkey_tasks: Vec<MonkeyOcrV2Task> = tasks
+            .iter()
+            .map(|task| match task {
+                RecognitionTask::Ocr | RecognitionTask::Chart => MonkeyOcrV2Task::Text,
+                RecognitionTask::Table => MonkeyOcrV2Task::Table,
+                RecognitionTask::Formula => MonkeyOcrV2Task::Formula,
+            })
+            .collect();
+        self.generate(&images, &monkey_tasks, max_tokens)
     }
 
     fn needs_table_postprocess(&self) -> bool {

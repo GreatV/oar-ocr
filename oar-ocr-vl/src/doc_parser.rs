@@ -2,11 +2,8 @@
 //! then crop and recognize each region with a pluggable backend into structured
 //! results. The layout source supplies the regions in reading order.
 //!
-//! Supported backends:
-//! - [`PaddleOcrVl`] - PaddleOCR-VL, 1.5, and 1.6 with task-specific prompts
-//! - [`HunyuanOcr`] - HunyuanOCR 1.5 / 1.0 (HunYuanVL)
-//! - [`GlmOcr`] - GLM-OCR
-//! - [`MinerU`] - MinerU2.5 and MinerU2.5-Pro (Qwen2-VL backbone)
+//! Supported backends include PaddleOCR-VL, HunyuanOCR, GLM-OCR, MinerU2.5,
+//! MonkeyOCRv2, OvisOCR2, HPD-Parsing, and MinerU-Diffusion.
 //!
 //! The `doc_parser` example exposes the layout-first PaddleOCR-VL and GLM-OCR
 //! paths. For reference-quality full-page parsing, prefer HunyuanOCR's native
@@ -52,6 +49,43 @@ pub trait RecognitionBackend {
         task: RecognitionTask,
         max_tokens: usize,
     ) -> Result<String, Error>;
+
+    /// Generate content for multiple cropped regions.
+    ///
+    /// Backends with native batching override this method. The outer result is
+    /// for a batch-level failure; inner results retain per-item decode errors.
+    /// The default processes requests individually.
+    fn recognize_batch(
+        &self,
+        images: Vec<RgbImage>,
+        tasks: &[RecognitionTask],
+        max_tokens: usize,
+    ) -> crate::error::BatchResult<String> {
+        if images.len() != tasks.len() {
+            return Err(Error::InvalidInput {
+                message: format!(
+                    "region batch: images count ({}) != tasks count ({})",
+                    images.len(),
+                    tasks.len()
+                ),
+            });
+        }
+        Ok(images
+            .into_iter()
+            .zip(tasks.iter().copied())
+            .map(|(image, task)| self.recognize(image, task, max_tokens))
+            .collect())
+    }
+
+    /// Stable key for requests whose prepared prompt lengths are equal.
+    ///
+    /// The default does not subdivide a recognition task, so backends must
+    /// still handle padding correctly. Backends whose image-token count depends
+    /// on resized geometry can override this so batches need no left padding
+    /// and single-token decode can use maskless fused kernels.
+    fn recognition_batch_key(&self, _image: &RgbImage, _task: RecognitionTask) -> u64 {
+        0
+    }
 
     /// Whether this backend requires post-processing for table output.
     /// Some backends emit OTSL and need conversion; PaddleOCR-VL outputs HTML directly.
@@ -106,6 +140,7 @@ impl Default for DocParserConfig {
 pub struct DocParser<'a, B: RecognitionBackend> {
     backend: &'a B,
     config: DocParserConfig,
+    region_batch_size: usize,
 }
 
 impl<'a, B: RecognitionBackend> DocParser<'a, B> {
@@ -114,12 +149,37 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
         Self {
             backend,
             config: DocParserConfig::default(),
+            region_batch_size: 1,
         }
     }
 
     /// Create a new document parser with custom configuration.
     pub fn with_config(backend: &'a B, config: DocParserConfig) -> Self {
-        Self { backend, config }
+        Self {
+            backend,
+            config,
+            region_batch_size: 1,
+        }
+    }
+
+    /// Set the maximum number of same-task regions sent to the recognition
+    /// backend at once. A value of zero is treated as one.
+    ///
+    /// The default is one so existing callers retain their memory use and
+    /// output behavior. PaddleOCR-VL, HunyuanOCR, GLM-OCR, and MinerU override
+    /// the backend hook with native batches; the other backends use a correct
+    /// sequential fallback. PaddleOCR-VL and HunyuanOCR additionally group
+    /// equal image-token counts, which keeps the common Metal decode path
+    /// padding-free. Any fallback padded batch remains correct but uses the
+    /// slower masked attention path.
+    pub fn with_region_batch_size(mut self, size: usize) -> Self {
+        self.region_batch_size = size.max(1);
+        self
+    }
+
+    /// Return the configured cropped-region batch size.
+    pub fn region_batch_size(&self) -> usize {
+        self.region_batch_size
     }
 
     /// Returns a reference to the parser's configuration.
@@ -227,7 +287,46 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
         let element_bboxes: Vec<BoundingBox> =
             sorted_elements.iter().map(|el| el.bbox.clone()).collect();
 
-        let mut tables: Vec<TableResult> = Vec::new();
+        struct RecognitionJob {
+            element_index: usize,
+            image: RgbImage,
+            task: RecognitionTask,
+        }
+
+        let mut jobs_by_batch: std::collections::BTreeMap<(usize, u64), Vec<RecognitionJob>> =
+            std::collections::BTreeMap::new();
+        let max_pending_jobs = self.region_batch_size.saturating_mul(8).max(8);
+        let mut pending_jobs = 0usize;
+        let mut tasks_by_element = vec![None; sorted_elements.len()];
+        let mut generated_by_element: Vec<Option<Result<String, Error>>> =
+            std::iter::repeat_with(|| None)
+                .take(sorted_elements.len())
+                .collect();
+        let flush_batch = |jobs: &mut Vec<RecognitionJob>,
+                           generated: &mut [Option<Result<String, Error>>]|
+         -> Result<(), Error> {
+            let batch = std::mem::take(jobs);
+            let element_indices: Vec<usize> = batch.iter().map(|job| job.element_index).collect();
+            let tasks: Vec<RecognitionTask> = batch.iter().map(|job| job.task).collect();
+            let images: Vec<RgbImage> = batch.into_iter().map(|job| job.image).collect();
+            let results = self
+                .backend
+                .recognize_batch(images, &tasks, self.config.max_tokens)?;
+            if results.len() != element_indices.len() {
+                return Err(Error::InvalidInput {
+                    message: format!(
+                        "recognition backend returned {} results for {} inputs",
+                        results.len(),
+                        element_indices.len()
+                    ),
+                });
+            }
+
+            for (element_index, result) in element_indices.into_iter().zip(results) {
+                generated[element_index] = Some(result);
+            }
+            Ok(())
+        };
         let mut merged_by_first: std::collections::HashMap<usize, bool> =
             std::collections::HashMap::new();
         for (idx, element) in sorted_elements.iter_mut().enumerate() {
@@ -309,10 +408,62 @@ impl<'a, B: RecognitionBackend> DocParser<'a, B> {
                 cropped = crop_margin(&cropped);
             }
 
-            // Generate text
-            let mut generated = self
-                .backend
-                .recognize(cropped, task, self.config.max_tokens)?;
+            tasks_by_element[idx] = Some(task);
+            let batch_key = (
+                recognition_task_index(task),
+                self.backend.recognition_batch_key(&cropped, task),
+            );
+            {
+                let jobs = jobs_by_batch.entry(batch_key).or_default();
+                jobs.push(RecognitionJob {
+                    element_index: idx,
+                    image: cropped,
+                    task,
+                });
+                pending_jobs += 1;
+                if jobs.len() == self.region_batch_size {
+                    flush_batch(jobs, &mut generated_by_element)?;
+                    pending_jobs -= self.region_batch_size;
+                }
+            }
+
+            // Exact token-count bucketing can produce many sparse queues on a
+            // page with varied region sizes. Bound retained crop memory and
+            // flush the fullest queue when the cap is reached.
+            if pending_jobs >= max_pending_jobs
+                && let Some(key) = jobs_by_batch
+                    .iter()
+                    .filter(|(_, jobs)| !jobs.is_empty())
+                    .max_by_key(|(_, jobs)| jobs.len())
+                    .map(|(key, _)| *key)
+            {
+                let jobs = jobs_by_batch
+                    .get_mut(&key)
+                    .expect("selected recognition queue must exist");
+                pending_jobs -= jobs.len();
+                flush_batch(jobs, &mut generated_by_element)?;
+            }
+        }
+
+        // Native VLM batches are most efficient when prompts/tasks are
+        // homogeneous. Full queues and the global pending-job cap keep retained
+        // crop memory bounded rather than proportional to all page regions.
+        for jobs in jobs_by_batch.values_mut() {
+            if !jobs.is_empty() {
+                flush_batch(jobs, &mut generated_by_element)?;
+            }
+        }
+
+        let mut tables: Vec<TableResult> = Vec::new();
+        for (idx, generated) in generated_by_element.into_iter().enumerate() {
+            let Some(generated) = generated else {
+                continue;
+            };
+            let Some(task) = tasks_by_element[idx] else {
+                continue;
+            };
+            let element = &mut sorted_elements[idx];
+            let mut generated = generated?;
             if generated.trim().is_empty() {
                 continue;
             }
@@ -412,12 +563,45 @@ impl RecognitionBackend for PaddleOcrVl {
 
         // PaddleOCR-VL's reference pipeline truncates repetitive tails on the *raw* model output,
         // before per-task postprocessing (e.g., table-token conversion).
-        let results = self.generate_with_raw(&[image], &[vl_task], max_tokens);
+        let results = self.generate_with_raw(&[image], &[vl_task], max_tokens)?;
         let (raw, _) = results.into_iter().next().ok_or(Error::InvalidInput {
             message: "PaddleOCR-VL: no result returned".to_string(),
         })??;
         let raw = truncate_repetitive_content(&raw, 10, 10, 10);
         Ok(vl_task.postprocess(raw))
+    }
+
+    fn recognize_batch(
+        &self,
+        images: Vec<RgbImage>,
+        tasks: &[RecognitionTask],
+        max_tokens: usize,
+    ) -> crate::error::BatchResult<String> {
+        let vl_tasks: Vec<PaddleOcrVlTask> = tasks
+            .iter()
+            .map(|task| match task {
+                RecognitionTask::Ocr => PaddleOcrVlTask::Ocr,
+                RecognitionTask::Table => PaddleOcrVlTask::Table,
+                RecognitionTask::Formula => PaddleOcrVlTask::Formula,
+                RecognitionTask::Chart => PaddleOcrVlTask::Chart,
+            })
+            .collect();
+
+        Ok(self
+            .generate_with_raw(&images, &vl_tasks, max_tokens)?
+            .into_iter()
+            .zip(vl_tasks)
+            .map(|(result, task)| {
+                result.map(|(raw, _)| {
+                    let raw = truncate_repetitive_content(&raw, 10, 10, 10);
+                    task.postprocess(raw)
+                })
+            })
+            .collect())
+    }
+
+    fn recognition_batch_key(&self, image: &RgbImage, _task: RecognitionTask) -> u64 {
+        PaddleOcrVl::recognition_batch_key(self, image).unwrap_or(0)
     }
 
     fn needs_table_postprocess(&self) -> bool {
@@ -453,7 +637,7 @@ impl RecognitionBackend for HunyuanOcr {
             }
         };
         let out = self
-            .generate(&[image], &[prompt], max_tokens)
+            .generate(&[image], &[prompt], max_tokens)?
             .into_iter()
             .next()
             .unwrap_or_else(|| {
@@ -464,6 +648,45 @@ impl RecognitionBackend for HunyuanOcr {
         Ok(truncate_repetitive_content(&out, 10, 10, 10)
             .trim()
             .to_string())
+    }
+
+    fn recognize_batch(
+        &self,
+        images: Vec<RgbImage>,
+        tasks: &[RecognitionTask],
+        max_tokens: usize,
+    ) -> crate::error::BatchResult<String> {
+        let prompts: Vec<&str> = tasks
+            .iter()
+            .map(|task| match task {
+                RecognitionTask::Ocr => {
+                    "Detect and recognize text in the image, and output the text coordinates in a formatted manner."
+                }
+                RecognitionTask::Table => "Parse the table in the image into HTML.",
+                RecognitionTask::Formula => {
+                    "Identify the formula in the image and represent it using LaTeX format."
+                }
+                RecognitionTask::Chart => {
+                    "Parse the chart in the image; use Mermaid format for flowcharts and Markdown for other charts."
+                }
+            })
+            .collect();
+
+        Ok(self
+            .generate(&images, &prompts, max_tokens)?
+            .into_iter()
+            .map(|result| {
+                result.map(|out| {
+                    truncate_repetitive_content(&out, 10, 10, 10)
+                        .trim()
+                        .to_string()
+                })
+            })
+            .collect())
+    }
+
+    fn recognition_batch_key(&self, image: &RgbImage, _task: RecognitionTask) -> u64 {
+        HunyuanOcr::recognition_batch_key(self, image).unwrap_or(0)
     }
 
     fn needs_table_postprocess(&self) -> bool {
@@ -493,7 +716,7 @@ impl RecognitionBackend for GlmOcr {
             RecognitionTask::Chart => "Text Recognition:",
         };
         let out = self
-            .generate(&[image], &[prompt], max_tokens)
+            .generate(&[image], &[prompt], max_tokens)?
             .into_iter()
             .next()
             .unwrap_or_else(|| {
@@ -504,6 +727,35 @@ impl RecognitionBackend for GlmOcr {
         Ok(truncate_repetitive_content(&out, 10, 10, 10)
             .trim()
             .to_string())
+    }
+
+    fn recognize_batch(
+        &self,
+        images: Vec<RgbImage>,
+        tasks: &[RecognitionTask],
+        max_tokens: usize,
+    ) -> crate::error::BatchResult<String> {
+        let prompts: Vec<&str> = tasks
+            .iter()
+            .map(|task| match task {
+                RecognitionTask::Ocr => "Text Recognition:",
+                RecognitionTask::Table => "Table Recognition:",
+                RecognitionTask::Formula => "Formula Recognition:",
+                RecognitionTask::Chart => "Text Recognition:",
+            })
+            .collect();
+
+        Ok(self
+            .generate(&images, &prompts, max_tokens)?
+            .into_iter()
+            .map(|result| {
+                result.map(|out| {
+                    truncate_repetitive_content(&out, 10, 10, 10)
+                        .trim()
+                        .to_string()
+                })
+            })
+            .collect())
     }
 
     fn needs_table_postprocess(&self) -> bool {
@@ -536,7 +788,7 @@ impl RecognitionBackend for MinerU {
         // Preprocess small or extremely aspect-ratioed images
         let processed = resize_for_mineru(&image, 28, 50.0);
         let out = self
-            .generate(&[processed], &[prompt], max_tokens)
+            .generate(&[processed], &[prompt], max_tokens)?
             .into_iter()
             .next()
             .unwrap_or_else(|| {
@@ -547,6 +799,39 @@ impl RecognitionBackend for MinerU {
         Ok(truncate_repetitive_content(&out, 10, 10, 10)
             .trim()
             .to_string())
+    }
+
+    fn recognize_batch(
+        &self,
+        images: Vec<RgbImage>,
+        tasks: &[RecognitionTask],
+        max_tokens: usize,
+    ) -> crate::error::BatchResult<String> {
+        let processed: Vec<RgbImage> = images
+            .iter()
+            .map(|image| resize_for_mineru(image, 28, 50.0))
+            .collect();
+        let prompts: Vec<&str> = tasks
+            .iter()
+            .map(|task| match task {
+                RecognitionTask::Ocr => "\nText Recognition:",
+                RecognitionTask::Table => "\nTable Recognition:",
+                RecognitionTask::Formula => "\nFormula Recognition:",
+                RecognitionTask::Chart => "\nDocument Parsing:",
+            })
+            .collect();
+
+        Ok(self
+            .generate(&processed, &prompts, max_tokens)?
+            .into_iter()
+            .map(|result| {
+                result.map(|out| {
+                    truncate_repetitive_content(&out, 10, 10, 10)
+                        .trim()
+                        .to_string()
+                })
+            })
+            .collect())
     }
 
     fn needs_table_postprocess(&self) -> bool {
@@ -573,6 +858,15 @@ fn is_auxiliary_element(element_type: LayoutElementType) -> bool {
             | LayoutElementType::FooterImage
             | LayoutElementType::AsideText
     )
+}
+
+const fn recognition_task_index(task: RecognitionTask) -> usize {
+    match task {
+        RecognitionTask::Ocr => 0,
+        RecognitionTask::Table => 1,
+        RecognitionTask::Formula => 2,
+        RecognitionTask::Chart => 3,
+    }
 }
 
 fn task_for_element_type(element_type: LayoutElementType) -> Option<RecognitionTask> {
@@ -842,7 +1136,7 @@ mod tests {
     use super::*;
     use crate::layout::LayoutDetectionElement;
     use crate::layout::StaticLayout;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     /// Records the crops it is handed and echoes back a per-call marker.
     struct RecordingBackend {
@@ -859,6 +1153,100 @@ mod tests {
             let mut crops = self.crops.borrow_mut();
             crops.push((image.width(), image.height()));
             Ok(format!("region {}", crops.len()))
+        }
+    }
+
+    struct BatchRecordingBackend {
+        batch_sizes: RefCell<Vec<usize>>,
+    }
+
+    impl RecognitionBackend for BatchRecordingBackend {
+        fn recognize(
+            &self,
+            _image: RgbImage,
+            _task: RecognitionTask,
+            _max_tokens: usize,
+        ) -> Result<String, Error> {
+            panic!("native batch hook should be used")
+        }
+
+        fn recognize_batch(
+            &self,
+            images: Vec<RgbImage>,
+            tasks: &[RecognitionTask],
+            _max_tokens: usize,
+        ) -> crate::error::BatchResult<String> {
+            assert_eq!(images.len(), tasks.len());
+            self.batch_sizes.borrow_mut().push(images.len());
+            Ok(images
+                .into_iter()
+                .map(|_| Ok("batched region".to_string()))
+                .collect())
+        }
+
+        fn recognition_batch_key(&self, image: &RgbImage, _task: RecognitionTask) -> u64 {
+            image.width() as u64
+        }
+    }
+
+    struct SparseBatchKeyBackend {
+        keys_seen: Cell<usize>,
+        first_flush_at: Cell<Option<usize>>,
+    }
+
+    struct FailingBatchBackend;
+
+    impl RecognitionBackend for FailingBatchBackend {
+        fn recognize(
+            &self,
+            _image: RgbImage,
+            _task: RecognitionTask,
+            _max_tokens: usize,
+        ) -> Result<String, Error> {
+            panic!("native batch hook should be used")
+        }
+
+        fn recognize_batch(
+            &self,
+            _images: Vec<RgbImage>,
+            _tasks: &[RecognitionTask],
+            _max_tokens: usize,
+        ) -> crate::error::BatchResult<String> {
+            Err(Error::Config {
+                message: "native batch failed".to_string(),
+            })
+        }
+    }
+
+    impl RecognitionBackend for SparseBatchKeyBackend {
+        fn recognize(
+            &self,
+            _image: RgbImage,
+            _task: RecognitionTask,
+            _max_tokens: usize,
+        ) -> Result<String, Error> {
+            panic!("native batch hook should be used")
+        }
+
+        fn recognize_batch(
+            &self,
+            images: Vec<RgbImage>,
+            tasks: &[RecognitionTask],
+            _max_tokens: usize,
+        ) -> crate::error::BatchResult<String> {
+            assert_eq!(images.len(), tasks.len());
+            if self.first_flush_at.get().is_none() {
+                self.first_flush_at.set(Some(self.keys_seen.get()));
+            }
+            Ok(images
+                .into_iter()
+                .map(|_| Ok("bounded region".to_string()))
+                .collect())
+        }
+
+        fn recognition_batch_key(&self, image: &RgbImage, _task: RecognitionTask) -> u64 {
+            self.keys_seen.set(self.keys_seen.get() + 1);
+            image.width() as u64
         }
     }
 
@@ -893,6 +1281,97 @@ mod tests {
             result.layout_elements[0].element_type,
             LayoutElementType::DocTitle
         );
+    }
+
+    #[test]
+    fn batches_same_task_regions_and_preserves_element_results() {
+        let backend = BatchRecordingBackend {
+            batch_sizes: RefCell::new(Vec::new()),
+        };
+        let parser = DocParser::new(&backend).with_region_batch_size(2);
+        let layout = StaticLayout::new(vec![
+            element("doc_title", 10.0, 0.0, 190.0, 20.0),
+            element("paragraph_title", 10.0, 30.0, 190.0, 50.0),
+            element("content", 10.0, 60.0, 190.0, 80.0),
+            element("abstract", 10.0, 90.0, 190.0, 110.0),
+            element("list", 10.0, 120.0, 190.0, 140.0),
+        ]);
+
+        let result = parser
+            .parse(&layout, RgbImage::new(200, 160))
+            .expect("parse succeeds");
+
+        assert_eq!(*backend.batch_sizes.borrow(), vec![2, 2, 1]);
+        assert_eq!(result.layout_elements.len(), 5);
+        assert!(
+            result
+                .layout_elements
+                .iter()
+                .all(|element| element.text.as_deref() == Some("batched region"))
+        );
+    }
+
+    #[test]
+    fn separates_same_task_regions_with_different_batch_keys() {
+        let backend = BatchRecordingBackend {
+            batch_sizes: RefCell::new(Vec::new()),
+        };
+        let parser = DocParser::new(&backend).with_region_batch_size(2);
+        let layout = StaticLayout::new(vec![
+            element("doc_title", 0.0, 0.0, 100.0, 20.0),
+            element("paragraph_title", 0.0, 30.0, 120.0, 50.0),
+            element("content", 0.0, 60.0, 100.0, 80.0),
+            element("abstract", 0.0, 90.0, 120.0, 110.0),
+        ]);
+
+        let result = parser
+            .parse(&layout, RgbImage::new(140, 120))
+            .expect("parse succeeds");
+
+        assert_eq!(*backend.batch_sizes.borrow(), vec![2, 2]);
+        assert_eq!(result.layout_elements.len(), 4);
+    }
+
+    #[test]
+    fn sparse_batch_keys_flush_before_retaining_the_whole_page() {
+        let backend = SparseBatchKeyBackend {
+            keys_seen: Cell::new(0),
+            first_flush_at: Cell::new(None),
+        };
+        let parser = DocParser::new(&backend).with_region_batch_size(2);
+        let layout = StaticLayout::new(
+            (0..20)
+                .map(|index| {
+                    let width = 20.0 + index as f32;
+                    let top = index as f32 * 3.0;
+                    element("content", 0.0, top, width, top + 2.0)
+                })
+                .collect(),
+        );
+
+        let result = parser
+            .parse(&layout, RgbImage::new(64, 64))
+            .expect("parse succeeds");
+
+        assert_eq!(result.layout_elements.len(), 20);
+        assert_eq!(backend.first_flush_at.get(), Some(16));
+    }
+
+    #[test]
+    fn propagates_one_batch_error_without_rewriting_it_per_item() {
+        let parser = DocParser::new(&FailingBatchBackend).with_region_batch_size(2);
+        let layout = StaticLayout::new(vec![
+            element("text", 0.0, 0.0, 50.0, 20.0),
+            element("text", 0.0, 30.0, 50.0, 50.0),
+        ]);
+
+        let error = parser
+            .parse(&layout, RgbImage::new(64, 64))
+            .expect_err("batch error must fail parsing");
+        assert!(matches!(
+            error,
+            Error::Config { message } if message == "native batch failed"
+        ));
     }
 
     /// An empty detection list falls back to whole-page recognition.

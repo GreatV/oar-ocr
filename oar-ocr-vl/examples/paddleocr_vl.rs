@@ -180,28 +180,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for iteration in 1..=args.repeat {
             let infer_start = Instant::now();
             let result = model
-                .generate_tokens(std::slice::from_ref(&rgb_img), &[task], args.max_tokens)
+                .generate_tokens(std::slice::from_ref(&rgb_img), &[task], args.max_tokens)?
                 .pop()
-                .expect("single-image request returns one result");
+                .ok_or("single-image request returned no result")?;
             let infer_duration = infer_start.elapsed();
-            match result {
-                Ok(tokens) => {
-                    info!(
-                        "  Inference time (run {}/{}): {:.2}ms, tokens: {}, {:.2} tokens/s, fingerprint: {:016x}",
-                        iteration,
-                        args.repeat,
-                        infer_duration.as_secs_f64() * 1000.0,
-                        tokens.len(),
-                        tokens.len() as f64 / infer_duration.as_secs_f64(),
-                        token_fingerprint(&tokens)
-                    );
-                    last_tokens = Some(tokens);
-                }
-                Err(e) => {
-                    error!("  Inference failed: {}", e);
-                    break;
-                }
-            }
+            info!(
+                "  Inference time (run {}/{}): {:.2}ms, tokens: {}, {:.2} tokens/s, fingerprint: {:016x}",
+                iteration,
+                args.repeat,
+                infer_duration.as_secs_f64() * 1000.0,
+                result.len(),
+                result.len() as f64 / infer_duration.as_secs_f64(),
+                token_fingerprint(&result)
+            );
+            last_tokens = Some(result);
         }
         if let Some(tokens) = last_tokens {
             println!("{}", model.decode_tokens(&tokens, task)?.1);

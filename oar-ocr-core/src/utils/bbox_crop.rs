@@ -342,7 +342,23 @@ mod tests {
             Ok(cropped_fast) => cropped_fast,
             Err(err) => panic!("expected rotated crop to succeed: {err}"),
         };
-        assert_eq!(cropped_fast.dimensions(), (50, 30));
+        let expected = imageops::crop_imm(&img, 10, 20, 50, 30).to_image();
+        assert_eq!(cropped_fast, expected);
+    }
+
+    #[test]
+    fn test_get_rotate_crop_image_axis_aligned_shuffled_points() {
+        let img = create_test_image(100, 100);
+        let points = [
+            Point { x: 60.0, y: 50.0 },
+            Point { x: 10.0, y: 20.0 },
+            Point { x: 10.0, y: 50.0 },
+            Point { x: 60.0, y: 20.0 },
+        ];
+
+        let cropped = get_rotate_crop_image(&img, &points).expect("axis crop should succeed");
+        let expected = imageops::crop_imm(&img, 10, 20, 50, 30).to_image();
+        assert_eq!(cropped, expected);
     }
 
     #[test]
@@ -361,7 +377,8 @@ mod tests {
             Ok(cropped) => cropped,
             Err(err) => panic!("expected rotated crop to succeed: {err}"),
         };
-        assert_eq!(cropped.dimensions(), (60, 20));
+        let raw = imageops::crop_imm(&img, 10, 20, 20, 60).to_image();
+        assert_eq!(cropped, imageops::rotate270(&raw));
     }
 
     #[test]
