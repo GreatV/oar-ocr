@@ -133,12 +133,7 @@ impl OvisOcr2 {
             .map(|result| {
                 result.and_then(|tokens| {
                     let text = self.decode_tokens_raw(&tokens)?;
-                    let text = if keep_image_tags {
-                        text
-                    } else {
-                        filter_visual_image_tags(&text)
-                    };
-                    Ok(clean_truncated_repeats(&text))
+                    Ok(postprocess_text(text, keep_image_tags))
                 })
             })
             .collect())
@@ -353,14 +348,17 @@ impl RecognitionBackend for OvisOcr2 {
     fn recognize(
         &self,
         image: RgbImage,
-        _task: RecognitionTask,
+        task: RecognitionTask,
         max_tokens: usize,
     ) -> Result<String, Error> {
-        self.parse(&[image], max_tokens)?
+        let tokens = self
+            .generate_tokens(&[image], max_tokens)?
             .pop()
             .ok_or_else(|| Error::InvalidInput {
                 message: "OvisOCR2: no recognition result returned".to_string(),
-            })?
+            })??;
+        let text = self.decode_tokens_raw(&tokens)?;
+        Ok(postprocess_recognition_text(text, task))
     }
 
     fn recognize_batch(
@@ -378,7 +376,17 @@ impl RecognitionBackend for OvisOcr2 {
                 ),
             });
         }
-        self.parse(&images, max_tokens)
+        Ok(self
+            .generate_tokens(&images, max_tokens)?
+            .into_iter()
+            .zip(tasks.iter().copied())
+            .map(|(result, task)| {
+                result.and_then(|tokens| {
+                    let text = self.decode_tokens_raw(&tokens)?;
+                    Ok(postprocess_recognition_text(text, task))
+                })
+            })
+            .collect())
     }
 }
 
@@ -582,6 +590,19 @@ pub fn filter_visual_image_tags(text: &str) -> String {
         .join("\n\n")
 }
 
+fn postprocess_text(text: String, keep_image_tags: bool) -> String {
+    let text = if keep_image_tags {
+        text
+    } else {
+        filter_visual_image_tags(&text)
+    };
+    clean_truncated_repeats(&text)
+}
+
+fn postprocess_recognition_text(text: String, task: RecognitionTask) -> String {
+    postprocess_text(text, task == RecognitionTask::Chart)
+}
+
 /// Clean a truncated repetitive tail using the official OvisOCR2 heuristic.
 pub fn clean_truncated_repeats(text: &str) -> String {
     const MIN_TEXT_LEN: usize = 8_000;
@@ -681,6 +702,29 @@ mod tests {
     fn visual_image_tag_blocks_are_removed() {
         let text = "before\n\n<img src=\"images/bbox_1_2_3_4.jpg\" />\n\nafter";
         assert_eq!(filter_visual_image_tags(text), "before\n\nafter");
+    }
+
+    #[test]
+    fn chart_recognition_keeps_visual_image_tags() {
+        let text = "<img src=\"images/bbox_1_2_3_4.jpg\" />";
+        assert_eq!(
+            postprocess_recognition_text(text.to_string(), RecognitionTask::Chart),
+            text
+        );
+    }
+
+    #[test]
+    fn mixed_recognition_tasks_filter_only_non_charts() {
+        let text = "<img src=\"images/bbox_1_2_3_4.jpg\" />";
+        let tasks = [
+            RecognitionTask::Ocr,
+            RecognitionTask::Chart,
+            RecognitionTask::Table,
+            RecognitionTask::Formula,
+        ];
+        let outputs = tasks.map(|task| postprocess_recognition_text(text.to_string(), task));
+
+        assert_eq!(outputs, ["", text, "", ""]);
     }
 
     #[test]
