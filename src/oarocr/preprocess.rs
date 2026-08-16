@@ -73,12 +73,11 @@ impl<'a> DocumentPreprocessor<'a> {
         let mut rectified_img: Option<Arc<image::RgbImage>> = None;
 
         if let Some(rectification_adapter) = self.rectification_adapter {
-            // Adapter boundary: must clone to transfer ownership
-            let input = ImageTaskInput::new(vec![(*current_image).clone()]);
+            let input = ImageTaskInput::from_arc_images(vec![Arc::clone(&current_image)]);
             let rect_output = rectification_adapter.execute(input, None)?;
 
-            if let Some(rectified) = rect_output.rectified_images.first() {
-                current_image = Arc::new(rectified.clone());
+            if let Some(rectified) = rect_output.rectified_images.into_iter().next() {
+                current_image = Arc::new(rectified);
                 rectified_img = Some(Arc::clone(&current_image));
             }
         }
@@ -150,8 +149,7 @@ pub(crate) fn correct_image_orientation(
     image: Arc<image::RgbImage>,
     orientation_adapter: &DocumentOrientationAdapter,
 ) -> Result<(Arc<image::RgbImage>, Option<OrientationCorrection>), OCRError> {
-    // Adapter boundary: must clone to transfer ownership
-    let input = ImageTaskInput::new(vec![(*image).clone()]);
+    let input = ImageTaskInput::from_arc_images(vec![Arc::clone(&image)]);
     let output = orientation_adapter.execute(input, None)?;
 
     let class_id = output

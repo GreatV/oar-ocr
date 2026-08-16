@@ -61,7 +61,7 @@ pub mod text_recognition;
 
 pub use document_orientation::DocumentOrientationPredictor;
 pub use document_rectification::DocumentRectificationPredictor;
-pub use formula_recognition::FormulaRecognitionPredictor;
+pub use formula_recognition::{FormulaModelKind, FormulaRecognitionPredictor};
 pub use layout_detection::LayoutDetectionPredictor;
 pub use seal_text_detection::SealTextDetectionPredictor;
 pub use table_cell_detection::{TableCellDetectionPredictor, TableCellModelVariant};

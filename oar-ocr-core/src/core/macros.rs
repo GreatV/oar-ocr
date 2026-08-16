@@ -181,50 +181,6 @@ macro_rules! with_nested {
     };
 }
 
-/// Macro to create pre-populated StageMetrics with common patterns.
-///
-/// This macro reduces duplication in metrics construction across stages.
-///
-/// # Usage
-///
-/// ```text
-/// // Instead of:
-/// // StageMetrics::new(success_count, failure_count)
-/// //     .with_processing_time(start_time.elapsed())
-/// //     .with_info("stage", "cropping")
-/// //     .with_info("batch_size", batch_size.to_string())
-/// //     .with_info("parallel", parallel.to_string())
-///
-/// // Use:
-/// // metrics!(success_count, failure_count, start_time; stage = "cropping", batch_size = batch_size, parallel = parallel)
-/// // Or without timing:
-/// // metrics!(success_count, failure_count; stage = "cropping", batch_size = batch_size)
-/// ```
-#[macro_export]
-macro_rules! metrics {
-    // With timing
-    ($success:expr, $failure:expr, $start_time:expr; $($key:ident = $value:expr),*) => {
-        {
-            let mut metrics = $crate::pipeline::stages::StageMetrics::new($success, $failure);
-            metrics = metrics.with_processing_time($start_time.elapsed());
-            $(
-                metrics = metrics.with_info(stringify!($key), $value.to_string());
-            )*
-            metrics
-        }
-    };
-    // Without timing
-    ($success:expr, $failure:expr; $($key:ident = $value:expr),*) => {
-        {
-            let mut metrics = $crate::pipeline::stages::StageMetrics::new($success, $failure);
-            $(
-                metrics = metrics.with_info(stringify!($key), $value.to_string());
-            )*
-            metrics
-        }
-    };
-}
-
 /// Comprehensive builder macro for generating common builder method patterns.
 ///
 /// This macro generates multiple types of builder methods to reduce code duplication:

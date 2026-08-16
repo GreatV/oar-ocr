@@ -142,11 +142,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let infer_start = Instant::now();
-        match model
-            .generate_tokens(&[rgb_img], &[args.prompt.as_str()], args.max_tokens)
-            .pop()
-        {
-            Some(Ok(tokens)) => {
+        match model.generate_tokens(&[rgb_img], &[args.prompt.as_str()], args.max_tokens) {
+            Ok(mut results) if !results.is_empty() => {
+                let tokens = results.remove(0);
                 let elapsed = infer_start.elapsed();
                 total_inference += elapsed;
                 total_tokens += tokens.len();
@@ -161,8 +159,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("{}", model.decode_tokens(&tokens)?);
                 }
             }
-            Some(Err(e)) => error!("  Inference failed: {}", e),
-            None => error!("  No result returned from model"),
+            Ok(_) => error!("  No result returned from model"),
+            Err(e) => error!("  Inference failed: {}", e),
         }
     }
 

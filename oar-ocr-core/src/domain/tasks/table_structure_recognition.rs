@@ -7,7 +7,7 @@ use super::validation::ensure_non_empty_images;
 use crate::ConfigValidator;
 use crate::core::OCRError;
 use crate::core::traits::TaskDefinition;
-use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
+use crate::core::traits::task::{ImageTaskInput, Task, TaskType};
 use crate::utils::{ScoreValidator, validate_max_value};
 use serde::{Deserialize, Serialize};
 
@@ -92,18 +92,6 @@ impl Task for TableStructureRecognitionTask {
 
     fn task_type(&self) -> TaskType {
         TaskType::TableStructureRecognition
-    }
-
-    fn schema(&self) -> TaskSchema {
-        TaskSchema::new(
-            TaskType::TableStructureRecognition,
-            vec!["image".to_string()],
-            vec![
-                "structure".to_string(),
-                "bbox".to_string(),
-                "structure_score".to_string(),
-            ],
-        )
     }
 
     fn validate_input(&self, input: &Self::Input) -> Result<(), OCRError> {
@@ -225,15 +213,5 @@ mod tests {
             structure_scores: vec![0.95, 0.90], // Extra score
         };
         assert!(task.validate_output(&mismatched_output).is_err());
-    }
-
-    #[test]
-    fn test_schema() {
-        let task = TableStructureRecognitionTask::default();
-        let schema = task.schema();
-        assert_eq!(schema.task_type, TaskType::TableStructureRecognition);
-        assert!(schema.input_types.contains(&"image".to_string()));
-        assert!(schema.output_types.contains(&"structure".to_string()));
-        assert!(schema.output_types.contains(&"bbox".to_string()));
     }
 }

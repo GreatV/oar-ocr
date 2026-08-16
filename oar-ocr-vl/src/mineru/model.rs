@@ -3,7 +3,7 @@ use super::processing::preprocess_images;
 use super::text::MinerUTextModel;
 use super::vision::MinerUVisionModel;
 use crate::attention::{
-    combine_masks, create_causal_mask, create_generation_mask, create_left_padding_mask,
+    combine_masks, create_causal_mask, create_generation_mask_if_needed, create_left_padding_mask,
 };
 #[cfg(feature = "cuda")]
 use crate::cuda_kernels::{ArgmaxFirstBf16, ArgmaxFirstF32, MaskTokenIds};
@@ -278,48 +278,33 @@ impl MinerU {
     /// # Returns
     /// Vector of results, one for each input image-instruction pair
     ///
-    /// # Limitations
-    /// * Batched inference with different sequence lengths has known issues due to
-    ///   variable left-padding causing incorrect attention mask computation during
-    ///   incremental generation. For reliable results, process samples one at a time
-    ///   when sequences have significantly different lengths.
-    /// * The current implementation works correctly when all sequences in the batch
-    ///   have similar lengths (minimal padding differences).
+    /// Unequal prompt lengths are left-padded. Both prefill and incremental
+    /// decode mask those padding KV positions, so mixed image sizes remain
+    /// correct in the same batch.
     pub fn generate(
         &self,
         images: &[RgbImage],
         instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Vec<Result<String, Error>> {
+    ) -> crate::error::BatchResult<String> {
         if images.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if images.len() != instructions.len() {
-            return vec![Err(Error::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "MinerU2.5: images count ({}) != instructions count ({})",
                     images.len(),
                     instructions.len()
                 ),
-            })];
+            });
         }
 
-        match self.generate_tokens_internal(images, instructions, max_new_tokens) {
-            Ok(results) => results
-                .into_iter()
-                .map(|tokens| self.decode_generated_tokens(&tokens))
-                .collect(),
-            Err(e) => {
-                let msg = crate::utils::error_chain_message("generation failed", &e);
-                (0..images.len())
-                    .map(|_| {
-                        Err(Error::InvalidInput {
-                            message: msg.clone(),
-                        })
-                    })
-                    .collect()
-            }
-        }
+        let results = self.generate_tokens_internal(images, instructions, max_new_tokens)?;
+        Ok(results
+            .into_iter()
+            .map(|tokens| self.decode_generated_tokens(&tokens))
+            .collect())
     }
 
     /// Generate raw baseline tokens for oracle-draft / tokenizer round-trip
@@ -330,33 +315,20 @@ impl MinerU {
         images: &[RgbImage],
         instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
-    ) -> Vec<Result<Vec<u32>, Error>> {
+    ) -> Result<Vec<Vec<u32>>, Error> {
         if images.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if images.len() != instructions.len() {
-            return vec![Err(Error::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "MinerU2.5: images count ({}) != instructions count ({})",
                     images.len(),
                     instructions.len()
                 ),
-            })];
+            });
         }
-
-        match self.generate_tokens_internal(images, instructions, max_new_tokens) {
-            Ok(results) => results.into_iter().map(Ok).collect(),
-            Err(e) => {
-                let msg = crate::utils::error_chain_message("generation failed", &e);
-                (0..images.len())
-                    .map(|_| {
-                        Err(Error::InvalidInput {
-                            message: msg.clone(),
-                        })
-                    })
-                    .collect()
-            }
-        }
+        self.generate_tokens_internal(images, instructions, max_new_tokens)
     }
 
     fn generate_tokens_internal(
@@ -569,9 +541,8 @@ impl MinerU {
             .map(|(&len, &d)| (len as i64) + d)
             .collect();
 
-        // Track padding lengths for each sample (for masking during generation)
-        // TODO: Batched inference with different padding lengths has issues.
-        // Current workaround: process samples one at a time in the example.
+        // Track padding lengths so incremental decode cannot attend to the
+        // leading padding KV of shorter prompts.
         let pad_lens: Vec<usize> = seq_lens.iter().map(|&len| max_seq_len - len).collect();
         // Current KV cache length (grows during generation)
         let mut kv_len = max_seq_len;
@@ -621,10 +592,8 @@ impl MinerU {
             let gen_mask = if batch_size == 1 {
                 None
             } else {
-                Some(
-                    create_generation_mask(&pad_lens, kv_len, self.dtype, &self.device)
-                        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "create gen mask", e))?,
-                )
+                create_generation_mask_if_needed(&pad_lens, kv_len, self.dtype, &self.device)
+                    .map_err(|e| candle_to_ocr_inference("MinerU2.5", "create gen mask", e))?
             };
 
             logits_list.clear();

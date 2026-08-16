@@ -269,40 +269,40 @@ impl HpdParsing {
         &self,
         images: &[RgbImage],
         generation: &HpdGenerationConfig,
-    ) -> Vec<Result<String, Error>> {
-        images
+    ) -> crate::error::BatchResult<String> {
+        Ok(images
             .iter()
             .map(|image| {
                 self.generate_one(image, DEFAULT_PROMPT, generation)
                     .map(|x| x.text)
             })
-            .collect()
+            .collect())
     }
 
     /// Generate with one caller-provided instruction per image.
-    pub fn generate_with_prompts(
+    pub fn generate(
         &self,
         images: &[RgbImage],
         prompts: &[impl AsRef<str>],
         generation: &HpdGenerationConfig,
-    ) -> Vec<Result<String, Error>> {
+    ) -> crate::error::BatchResult<String> {
         if images.len() != prompts.len() {
-            return vec![Err(Error::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "HPD-Parsing image count {} != prompt count {}",
                     images.len(),
                     prompts.len()
                 ),
-            })];
+            });
         }
-        images
+        Ok(images
             .iter()
             .zip(prompts)
             .map(|(image, prompt)| {
                 self.generate_one(image, prompt.as_ref(), generation)
                     .map(|x| x.text)
             })
-            .collect()
+            .collect())
     }
 
     /// Generate a single page and retain raw IDs plus parent/child statistics.

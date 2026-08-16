@@ -226,8 +226,9 @@ impl OrtInfer {
     /// ruinous: the `(batch, time, vocab)` logits tensor can total **gigabytes**
     /// per pipeline run (vocab is 6.9k–18.7k), and the copy alone can exceed the
     /// inference time. This variant keeps the ONNX Runtime output alive and lets
-    /// the caller (e.g. the CTC decoder) read straight from it under the lock,
-    /// eliminating that copy and the intermediate `Array4`/`Array3`.
+    /// the caller reduce it straight from the borrowed buffer under the lock.
+    /// Callers should return a compact owned result from `f` so heavier
+    /// postprocessing can proceed after the session lock is released.
     ///
     /// `f` receives `(shape, data)` where `data` is row-major contiguous.
     pub fn infer_first_output_f32<R>(

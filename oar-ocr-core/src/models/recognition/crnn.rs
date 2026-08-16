@@ -5,7 +5,7 @@
 
 use crate::core::OCRError;
 use crate::core::inference::{OrtInfer, TensorInput};
-use crate::processors::{CTCLabelDecode, OCRResize};
+use crate::processors::{CTCArgmaxOutput, CTCLabelDecode, OCRResize};
 use image::RgbImage;
 use rayon::prelude::*;
 
@@ -187,10 +187,23 @@ impl CRNNModel {
     where
         S: ndarray::Data<Elem = f32> + Sync,
     {
+        let argmax = self.decoder.argmax_predictions(predictions);
+        self.postprocess_argmax(&argmax, return_positions)
+    }
+
+    /// Finishes CTC decoding from compact per-timestep argmax results.
+    ///
+    /// This phase does not need the logits buffer and can run after the ONNX
+    /// Runtime session lock has been released.
+    fn postprocess_argmax(
+        &self,
+        argmax: &CTCArgmaxOutput,
+        return_positions: bool,
+    ) -> CRNNModelOutput {
         if return_positions {
             // Decode CTC predictions with character positions and column indices
             let (texts, scores, char_positions, char_col_indices, sequence_lengths) =
-                self.decoder.apply_with_positions(predictions);
+                self.decoder.decode_argmax_with_positions(argmax);
             CRNNModelOutput {
                 texts,
                 scores,
@@ -200,7 +213,7 @@ impl CRNNModel {
             }
         } else {
             // Decode CTC predictions without positions
-            let (texts, scores) = self.decoder.apply(predictions);
+            let (texts, scores) = self.decoder.decode_argmax(argmax);
             CRNNModelOutput {
                 texts,
                 scores,
@@ -247,10 +260,11 @@ impl CRNNModel {
         let batch_tensor = self.preprocess_refs(images)?;
         tracing::debug!("CRNN preprocess output shape: {:?}", batch_tensor.shape());
 
-        // Decode straight from ONNX Runtime's output buffer. Building an owned
+        // Reduce straight from ONNX Runtime's output buffer. Building an owned
         // `Array3` here would force a multi-hundred-MB (often multi-GB) copy of
-        // the `(batch, time, vocab)` logits per call; instead we wrap the
-        // borrowed slice in a zero-copy `ArrayView3` and run CTC decode on it.
+        // the `(batch, time, vocab)` logits per call. Only argmax must run while
+        // that borrowed buffer (and therefore the session lock) is alive; CTC
+        // collapse and string construction happen after this call returns.
         let input_name = self.inference.input_name();
         let inputs = vec![(input_name, TensorInput::Array4(&batch_tensor))];
         let output = self
@@ -267,8 +281,9 @@ impl CRNNModel {
                     .map_err(|e| OCRError::InvalidInput {
                         message: format!("CRNN: failed to view output as 3D array: {e}"),
                     })?;
-                Ok(self.postprocess(&view, return_positions))
+                Ok(self.decoder.argmax_predictions(&view))
             })?;
+        let output = self.postprocess_argmax(&output, return_positions);
         tracing::debug!(
             "CRNN postprocess: {} texts, first 3: {:?}",
             output.texts.len(),

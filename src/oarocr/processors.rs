@@ -1,4 +1,4 @@
-//! Data processors for task graph edges.
+//! Data processors used between OCR pipeline stages.
 //!
 //! This module provides processors that transform data between task nodes in the graph.
 //! For example, cropping and perspective transformation between detection and recognition.
@@ -8,6 +8,7 @@ use imageproc::geometric_transformations::{Border, Interpolation, rotate_about_c
 use oar_ocr_core::core::OCRError;
 use oar_ocr_core::processors::BoundingBox;
 use oar_ocr_core::utils::{BBoxCrop, get_rotate_crop_image};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -27,7 +28,7 @@ pub trait EdgeProcessor: Debug + Send + Sync {
     fn name(&self) -> &str;
 }
 
-/// Configuration for edge processors in the task graph.
+/// Configuration for processors between pipeline stages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum EdgeProcessorConfig {
@@ -81,6 +82,10 @@ pub struct TextCroppingProcessor {
     pub(crate) handle_rotation: bool,
 }
 
+// Avoid paying Rayon scheduling overhead on the common small-page case. Pages
+// with many detections have enough independent crop work to amortize it.
+const PARALLEL_CROP_MIN_REGIONS: usize = 16;
+
 impl TextCroppingProcessor {
     pub fn new(handle_rotation: bool) -> Self {
         Self { handle_rotation }
@@ -95,6 +100,10 @@ impl TextCroppingProcessor {
             BBoxCrop::crop_bounding_box(image, bbox)
         }
     }
+
+    fn crop_optional(&self, image: &RgbImage, bbox: &BoundingBox) -> Option<Arc<RgbImage>> {
+        self.crop_single(image, bbox).ok().map(Arc::new)
+    }
 }
 
 impl EdgeProcessor for TextCroppingProcessor {
@@ -104,17 +113,19 @@ impl EdgeProcessor for TextCroppingProcessor {
     fn process(&self, input: Self::Input) -> Result<Self::Output, OCRError> {
         let (image, bboxes) = input;
 
-        let cropped_images: Vec<Option<Arc<RgbImage>>> = bboxes
-            .iter()
-            .map(|bbox| {
-                self.crop_single(&image, bbox)
-                    .map(|img| Some(Arc::new(img)))
-                    .unwrap_or_else(|_e| {
-                        // Failed to crop, return None
-                        None
-                    })
-            })
-            .collect();
+        let cropped_images = if bboxes.len() >= PARALLEL_CROP_MIN_REGIONS {
+            // Indexed parallel iterators preserve the input order on collect,
+            // which keeps crops aligned with their detection boxes.
+            bboxes
+                .par_iter()
+                .map(|bbox| self.crop_optional(&image, bbox))
+                .collect()
+        } else {
+            bboxes
+                .iter()
+                .map(|bbox| self.crop_optional(&image, bbox))
+                .collect()
+        };
 
         Ok(cropped_images)
     }
@@ -266,6 +277,28 @@ mod tests {
     fn test_text_cropping_processor_creation() {
         let processor = TextCroppingProcessor::new(true);
         assert_eq!(processor.name(), "TextCropping");
+    }
+
+    #[test]
+    fn test_parallel_text_cropping_preserves_detection_order() -> Result<(), OCRError> {
+        let processor = TextCroppingProcessor::new(true);
+        let image = Arc::new(RgbImage::from_fn(64, 4, |x, _| Rgb([(x / 4) as u8, 0, 0])));
+        let bboxes = (0..PARALLEL_CROP_MIN_REGIONS)
+            .map(|index| {
+                let x = (index * 4) as f32;
+                BoundingBox::from_coords(x, 0.0, x + 4.0, 4.0)
+            })
+            .collect();
+
+        let crops = processor.process((image, bboxes))?;
+
+        assert_eq!(crops.len(), PARALLEL_CROP_MIN_REGIONS);
+        for (index, crop) in crops.iter().enumerate() {
+            let crop = crop.as_ref().expect("crop should succeed");
+            assert_eq!(crop.dimensions(), (4, 4));
+            assert_eq!(crop.get_pixel(0, 0), &Rgb([index as u8, 0, 0]));
+        }
+        Ok(())
     }
 
     #[test]

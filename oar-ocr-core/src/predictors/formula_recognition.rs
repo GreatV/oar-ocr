@@ -15,7 +15,7 @@ use image::RgbImage;
 use std::path::{Path, PathBuf};
 
 /// Formula recognition model type
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FormulaModelKind {
     /// UniMERNet formula recognition model
     UniMERNet,
@@ -24,29 +24,58 @@ pub enum FormulaModelKind {
 }
 
 impl FormulaModelKind {
-    /// Infer model kind from model name
-    pub fn from_model_name(name: &str) -> Self {
+    /// Stable configuration spelling for this model family.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UniMERNet => "unimernet",
+            Self::PPFormulaNet => "pp_formulanet",
+        }
+    }
+
+    /// Infer model kind from a known model name or naming pattern.
+    ///
+    /// Returns `None` rather than silently selecting an incompatible decoder
+    /// when the name does not identify either supported model family.
+    pub fn from_model_name(name: &str) -> Option<Self> {
         match name {
-            "UniMERNet" => FormulaModelKind::UniMERNet,
+            "UniMERNet" => Some(FormulaModelKind::UniMERNet),
             "PP-FormulaNet-S"
             | "PP-FormulaNet-L"
             | "PP-FormulaNet_plus-S"
             | "PP-FormulaNet_plus-M"
-            | "PP-FormulaNet_plus-L" => FormulaModelKind::PPFormulaNet,
+            | "PP-FormulaNet_plus-L" => Some(FormulaModelKind::PPFormulaNet),
             _ => {
-                // Fallback: try to infer from name pattern
-                let name_lower = name.to_lowercase();
+                let name_lower = name.to_lowercase().replace('_', "-");
                 if name_lower.contains("unimernet") {
-                    FormulaModelKind::UniMERNet
+                    Some(FormulaModelKind::UniMERNet)
                 } else if name_lower.contains("pp-formulanet")
                     || name_lower.contains("ppformulanet")
                 {
-                    FormulaModelKind::PPFormulaNet
+                    Some(FormulaModelKind::PPFormulaNet)
                 } else {
-                    // Default to UniMERNet
-                    FormulaModelKind::UniMERNet
+                    None
                 }
             }
+        }
+    }
+}
+
+impl AsRef<str> for FormulaModelKind {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::str::FromStr for FormulaModelKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "pp_formulanet" => Ok(Self::PPFormulaNet),
+            "unimernet" => Ok(Self::UniMERNet),
+            _ => Err(format!(
+                "unknown formula model kind {value:?}; expected 'pp_formulanet' or 'unimernet'"
+            )),
         }
     }
 }
@@ -106,7 +135,7 @@ impl FormulaRecognitionPredictorBuilder {
                 max_length: 1536,
                 batch_size: 8,
             }),
-            model_name: "FormulaRecognition".to_string(),
+            model_name: "UniMERNet".to_string(),
             tokenizer_path: None,
             target_size: None,
             model_kind: None,
@@ -170,8 +199,17 @@ impl FormulaRecognitionPredictorBuilder {
         let tokenizer_path = super::resolve_asset_path(&tokenizer_path)?;
 
         // Determine model kind
-        let model_kind =
-            model_kind.unwrap_or_else(|| FormulaModelKind::from_model_name(&model_name));
+        let model_kind = match model_kind {
+            Some(kind) => kind,
+            None => FormulaModelKind::from_model_name(&model_name).ok_or_else(|| {
+                OCRError::config_error_detailed(
+                    "formula_recognition",
+                    format!(
+                        "Cannot infer formula model kind from '{model_name}'; call model_kind() with FormulaModelKind::PPFormulaNet or FormulaModelKind::UniMERNet"
+                    ),
+                )
+            })?,
+        };
 
         let adapter = match model_kind {
             FormulaModelKind::UniMERNet => {
@@ -221,5 +259,46 @@ impl FormulaRecognitionPredictorBuilder {
 impl Default for FormulaRecognitionPredictorBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FormulaModelKind, FormulaRecognitionPredictorBuilder};
+
+    #[test]
+    fn formula_builder_defaults_to_unimernet() {
+        let builder = FormulaRecognitionPredictorBuilder::new();
+        assert_eq!(builder.model_name, "UniMERNet");
+        assert_eq!(builder.model_kind, None);
+    }
+
+    #[test]
+    fn formula_model_kind_inference_rejects_unknown_names() {
+        assert_eq!(
+            FormulaModelKind::from_model_name("UniMERNet"),
+            Some(FormulaModelKind::UniMERNet)
+        );
+        assert_eq!(
+            FormulaModelKind::from_model_name("PP-FormulaNet_plus-L"),
+            Some(FormulaModelKind::PPFormulaNet)
+        );
+        assert_eq!(
+            FormulaModelKind::from_model_name("pp_formulanet"),
+            Some(FormulaModelKind::PPFormulaNet)
+        );
+        assert_eq!(
+            FormulaModelKind::from_model_name("custom_unimernet_export"),
+            Some(FormulaModelKind::UniMERNet)
+        );
+        assert_eq!(FormulaModelKind::from_model_name("formula.onnx"), None);
+        assert_eq!("pp_formulanet".parse(), Ok(FormulaModelKind::PPFormulaNet));
+        assert_eq!("PP-FormulaNet".parse(), Ok(FormulaModelKind::PPFormulaNet));
+        assert!(
+            "custom_unimernet_export"
+                .parse::<FormulaModelKind>()
+                .is_err()
+        );
+        assert!("mystery".parse::<FormulaModelKind>().is_err());
     }
 }

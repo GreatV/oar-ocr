@@ -6,7 +6,7 @@ use super::processing;
 use super::projector::Projector;
 use super::vision::VisionModel;
 use crate::attention::{
-    combine_masks, create_causal_mask, create_generation_mask, create_left_padding_mask,
+    combine_masks, create_causal_mask, create_generation_mask_if_needed, create_left_padding_mask,
 };
 use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
@@ -140,6 +140,31 @@ impl PaddleOcrVl {
         })
     }
 
+    /// Image-token count used to form padding-free document-parser batches.
+    pub(crate) fn recognition_batch_key(&self, image: &RgbImage) -> Option<u64> {
+        let patch = self.image_cfg.patch_size as u32;
+        let merge = self.image_cfg.merge_size;
+        let factor = patch.checked_mul(merge as u32)?;
+        let (height, width) = if self.image_cfg.do_resize {
+            processing::smart_resize(
+                image.height(),
+                image.width(),
+                factor,
+                self.image_cfg.min_pixels,
+                self.image_cfg.max_pixels,
+            )
+            .ok()?
+        } else {
+            (image.height(), image.width())
+        };
+        let grid_h = height.checked_div(patch)? as usize;
+        let grid_w = width.checked_div(patch)? as usize;
+        grid_h
+            .checked_mul(grid_w)?
+            .checked_div(merge.checked_mul(merge)?)
+            .map(|tokens| tokens as u64)
+    }
+
     /// Generate OCR output for one or more images.
     ///
     /// Supports true GPU batching when multiple images are provided.
@@ -156,11 +181,12 @@ impl PaddleOcrVl {
         images: &[RgbImage],
         tasks: &[PaddleOcrVlTask],
         max_new_tokens: usize,
-    ) -> Vec<Result<String, Error>> {
-        self.generate_with_raw(images, tasks, max_new_tokens)
+    ) -> crate::error::BatchResult<String> {
+        Ok(self
+            .generate_with_raw(images, tasks, max_new_tokens)?
             .into_iter()
             .map(|r| r.map(|(_, processed)| processed))
-            .collect()
+            .collect())
     }
 
     /// Generate with both raw and postprocessed output.
@@ -169,37 +195,26 @@ impl PaddleOcrVl {
         images: &[RgbImage],
         tasks: &[PaddleOcrVlTask],
         max_new_tokens: usize,
-    ) -> Vec<Result<(String, String), Error>> {
+    ) -> crate::error::BatchResult<(String, String)> {
         if images.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if images.len() != tasks.len() {
-            return vec![Err(Error::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "PaddleOCR-VL: images count ({}) != tasks count ({})",
                     images.len(),
                     tasks.len()
                 ),
-            })];
+            });
         }
 
-        match self.generate_tokens_internal(images, tasks, max_new_tokens) {
-            Ok(results) => results
-                .into_iter()
-                .enumerate()
-                .map(|(i, tokens)| self.decode_generated_tokens(&tokens, tasks[i]))
-                .collect(),
-            Err(e) => {
-                let msg = crate::utils::error_chain_message("generation failed", &e);
-                (0..images.len())
-                    .map(|_| {
-                        Err(Error::InvalidInput {
-                            message: msg.clone(),
-                        })
-                    })
-                    .collect()
-            }
-        }
+        let results = self.generate_tokens_internal(images, tasks, max_new_tokens)?;
+        Ok(results
+            .into_iter()
+            .enumerate()
+            .map(|(i, tokens)| self.decode_generated_tokens(&tokens, tasks[i]))
+            .collect())
     }
 
     /// Generate raw baseline tokens for oracle-draft / tokenizer round-trip
@@ -211,33 +226,20 @@ impl PaddleOcrVl {
         images: &[RgbImage],
         tasks: &[PaddleOcrVlTask],
         max_new_tokens: usize,
-    ) -> Vec<Result<Vec<u32>, Error>> {
+    ) -> Result<Vec<Vec<u32>>, Error> {
         if images.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if images.len() != tasks.len() {
-            return vec![Err(Error::InvalidInput {
+            return Err(Error::InvalidInput {
                 message: format!(
                     "PaddleOCR-VL: images count ({}) != tasks count ({})",
                     images.len(),
                     tasks.len()
                 ),
-            })];
+            });
         }
-
-        match self.generate_tokens_internal(images, tasks, max_new_tokens) {
-            Ok(results) => results.into_iter().map(Ok).collect(),
-            Err(e) => {
-                let msg = crate::utils::error_chain_message("generation failed", &e);
-                (0..images.len())
-                    .map(|_| {
-                        Err(Error::InvalidInput {
-                            message: msg.clone(),
-                        })
-                    })
-                    .collect()
-            }
-        }
+        self.generate_tokens_internal(images, tasks, max_new_tokens)
     }
 
     /// Internal generation implementation supporting batched inference.
@@ -555,11 +557,8 @@ impl PaddleOcrVl {
             let gen_mask = if batch_size == 1 {
                 None
             } else {
-                Some(
-                    create_generation_mask(&pad_lens, kv_len, self.dtype, &self.device).map_err(
-                        |e| candle_to_ocr_inference("PaddleOCR-VL", "create gen mask", e),
-                    )?,
-                )
+                create_generation_mask_if_needed(&pad_lens, kv_len, self.dtype, &self.device)
+                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create gen mask", e))?
             };
 
             logits_list.clear();

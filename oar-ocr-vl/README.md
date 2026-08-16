@@ -31,7 +31,7 @@ See [`examples`](examples) for runnable examples.
 1. **Layout detection** to identify document regions and their reading order. `PpDocLayout` is a native Candle port of PP-DocLayoutV2/V3; any other detector can be plugged in through the `LayoutSource` trait.
 2. **VL-based recognition** to extract content from each region
 
-Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, and optionally MonkeyOCRv2 for externally detected crops. MonkeyOCRv2's native `Layout` and `EndToEnd` tasks are preferable for complete pages. OvisOCR2 and HPD-Parsing are end-to-end full-page parsers and deliberately do not use DocParser. HunyuanOCR should be used with its model-native full-page prompts. MinerU2.5, MinerU2.5-Pro, and MinerU-Diffusion should use their model-native two-step extraction examples.
+Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, MonkeyOCRv2, OvisOCR2, HunyuanOCR, MinerU2.5/Pro, or MinerU-Diffusion for externally detected crops. HPD-Parsing currently supports only its model-native full-page protocol. For complete pages, prefer each model's native path where available: MonkeyOCRv2 `Layout`/`EndToEnd`, OvisOCR2 and HPD-Parsing full-page parsing, HunyuanOCR full-page prompts, and the MinerU two-step extraction examples.
 
 ## Installation
 
@@ -78,7 +78,7 @@ let model = PaddleOcrVl::from_dir("PaddlePaddle/PaddleOCR-VL", device)?;
 
 // Perform OCR. The API is batch-oriented, so pass one task per image.
 let result = model
-    .generate(&[image], &[PaddleOcrVlTask::Ocr], 256)
+    .generate(&[image], &[PaddleOcrVlTask::Ocr], 256)?
     .into_iter()
     .next()
     .expect("one result")?;
@@ -96,7 +96,7 @@ let image = load_image("seal.png")?;
 let device = parse_device("cpu")?;
 let model = PaddleOcrVl::from_dir("PaddlePaddle/PaddleOCR-VL-1.5", device)?;
 let result = model
-    .generate(&[image], &[PaddleOcrVlTask::Seal], 256)
+    .generate(&[image], &[PaddleOcrVlTask::Seal], 256)?
     .into_iter()
     .next()
     .expect("one result")?;
@@ -121,8 +121,8 @@ use oar_ocr_vl::OvisOcr2;
 
 let image = load_image("document.png")?;
 let model = OvisOcr2::from_dir("ATH-MaaS/OvisOCR2", parse_device("cpu")?)?;
-let parsed = model
-    .parse(&[image], DEFAULT_MAX_NEW_TOKENS)
+let markdown = model
+    .parse(&[image], DEFAULT_MAX_NEW_TOKENS)?
     .into_iter()
     .next()
     .expect("one result")?;
@@ -146,7 +146,7 @@ let model = MonkeyOcrV2::from_dir(
     parse_device("cuda:0")?,
 )?;
 let parsed = model
-    .generate(&[image], &[MonkeyOcrV2Task::EndToEnd], 10_000)
+    .generate(&[image], &[MonkeyOcrV2Task::EndToEnd], 10_000)?
     .into_iter()
     .next()
     .expect("one result")?;
@@ -172,7 +172,7 @@ let model = HpdParsing::from_dir(
     parse_device("cuda:0")?,
 )?;
 let parsed = model
-    .parse(&[image], &HpdGenerationConfig::default())
+    .parse(&[image], &HpdGenerationConfig::default())?
     .into_iter()
     .next()
     .expect("one result")?;
@@ -213,7 +213,7 @@ let model = MinerU::from_dir("opendatalab/MinerU2.5-2509-1.2B", device)?;
 // For full documents, prefer the `mineru` example, which follows the
 // model-native two-step pipeline: layout detection, then crop recognition.
 let result = model
-    .generate(&[image], &["\nText Recognition:"], 4096)
+    .generate(&[image], &["\nText Recognition:"], 4096)?
     .into_iter()
     .next()
     .expect("one result")?;
@@ -237,7 +237,7 @@ cargo run --release -p oar-ocr-vl --features cuda --example doc_parser -- \
     document.jpg
 ```
 
-OvisOCR2, HunyuanOCR, and the MinerU models are intentionally not exposed by this example because their reference-quality paths are model-native full-page parsing, prompt-driven full-page parsing, and model-native two-step extraction, respectively. MonkeyOCRv2 implements `RecognitionBackend`, but its dedicated example is the preferred complete-page path.
+The CLI example exposes the layout-first PaddleOCR-VL and GLM-OCR paths. MonkeyOCRv2, OvisOCR2, HunyuanOCR, and the MinerU models also implement `RecognitionBackend`; their dedicated examples remain the preferred complete-page paths. HPD-Parsing uses its model-native full-page protocol instead of `RecognitionBackend`.
 
 ### PaddleOCR-VL Direct Inference
 

@@ -18,8 +18,8 @@ pub mod standard;
 pub mod task;
 pub mod task_def;
 
-pub use adapter::{AdapterBuilder, AdapterInfo, AdapterTask, ModelAdapter, OrtConfigurable};
+pub use adapter::{AdapterBuilder, AdapterInfo, ModelAdapter, OrtConfigurable};
 pub use granular::{ImageReader as GranularImageReader, Postprocessor, Preprocessor};
 pub use standard::{ImageReader, Sampler};
-pub use task::{ImageTaskInput, Task, TaskRunner, TaskSchema, TaskType};
+pub use task::{ImageTaskInput, Task, TaskType};
 pub use task_def::TaskDefinition;

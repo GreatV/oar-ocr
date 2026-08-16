@@ -106,8 +106,8 @@ fn try_metal_sdpa(
         return Ok(None);
     }
     // Candle's q_len == 1 vector kernel ignores both explicit masks and their
-    // strides. Keep masked decode on the eager path until the kernel supports
-    // masks. Standard attention also keeps decode eager by design.
+    // strides. Keep masked decode on the eager path. Standard attention also
+    // keeps decode eager by design.
     //
     // Candle's causal kernel derives its diagonal offset as `kv_len - query_len`
     // in unsigned arithmetic, so query_len > kv_len underflows and masks every
@@ -742,6 +742,22 @@ pub fn create_generation_mask(
     })
 }
 
+/// Avoid materializing an all-zero decode mask when every prompt in a batch
+/// has the same length. Besides saving an allocation, `None` lets Metal select
+/// its fused single-token GQA kernel.
+pub(crate) fn create_generation_mask_if_needed(
+    pad_lens: &[usize],
+    kv_len: usize,
+    dtype: DType,
+    device: &Device,
+) -> Result<Option<Tensor>> {
+    if pad_lens.iter().all(|&len| len == 0) {
+        Ok(None)
+    } else {
+        create_generation_mask(pad_lens, kv_len, dtype, device).map(Some)
+    }
+}
+
 // Rotary Positional Embedding (RoPE)
 
 /// Unified Rotary Positional Embedding supporting single-axis RoPE, MRoPE
@@ -1165,20 +1181,69 @@ mod tests {
             .to_scalar::<f32>()?;
         assert!(max_decode_error <= 0.01, "decode error {max_decode_error}");
 
-        let mut mask_values = vec![0f32; 32];
-        mask_values[16..].fill(f32::NEG_INFINITY);
-        let decode_mask =
-            Tensor::from_vec(mask_values, (1, 1, 1, 32), &device)?.to_dtype(DType::F16)?;
+        let q_batched = Tensor::randn(0f32, 1f32, (2, 4, 1, 64), &device)?.to_dtype(DType::F16)?;
+        let k_batched = Tensor::randn(0f32, 1f32, (2, 2, 32, 64), &device)?.to_dtype(DType::F16)?;
+        let v_batched = Tensor::randn(0f32, 1f32, (2, 2, 32, 64), &device)?.to_dtype(DType::F16)?;
         assert!(
-            try_metal_sdpa(&q, &k, &v, Some(&decode_mask), 0.125, false, true)?.is_none(),
-            "masked single-token decode must not use Candle's mask-blind vector kernel"
+            try_metal_sdpa(&q_batched, &k_batched, &v_batched, None, 0.125, false, true,)?
+                .is_some(),
+            "maskless batched decode should use Metal's fused vector kernel"
         );
-        let masked =
-            scaled_dot_product_attention_gqa(&q, &k, &v, Some(&decode_mask), 0.125, false, 2)?;
+        let fused_batched = scaled_dot_product_attention_gqa(
+            &q_batched, &k_batched, &v_batched, None, 0.125, false, 2,
+        )?;
+        let repeated_batched = scaled_dot_product_attention(
+            &q_batched,
+            &repeat_kv(&k_batched, 2)?.contiguous()?,
+            &repeat_kv(&v_batched, 2)?.contiguous()?,
+            None,
+            0.125,
+            false,
+        )?;
+        let max_batched_decode_error = (fused_batched.to_dtype(DType::F32)?
+            - repeated_batched.to_dtype(DType::F32)?)?
+        .abs()?
+        .max_all()?
+        .to_scalar::<f32>()?;
+        assert!(
+            max_batched_decode_error <= 0.01,
+            "batched decode error {max_batched_decode_error}"
+        );
+
+        let q_masked = Tensor::randn(0f32, 1f32, (2, 4, 1, 64), &device)?.to_dtype(DType::F16)?;
+        let k_masked = Tensor::randn(0f32, 1f32, (2, 2, 32, 64), &device)?.to_dtype(DType::F16)?;
+        let v_masked = Tensor::randn(0f32, 1f32, (2, 2, 32, 64), &device)?.to_dtype(DType::F16)?;
+        let mut mask_values = vec![0f32; 64];
+        mask_values[..16].fill(f32::NEG_INFINITY);
+        mask_values[32..40].fill(f32::NEG_INFINITY);
+        let decode_mask =
+            Tensor::from_vec(mask_values, (2, 1, 1, 32), &device)?.to_dtype(DType::F16)?;
+        assert!(
+            try_metal_sdpa(
+                &q_masked,
+                &k_masked,
+                &v_masked,
+                Some(&decode_mask),
+                0.125,
+                false,
+                true,
+            )?
+            .is_none(),
+            "masked batched decode must not use Candle's mask-blind vector kernel"
+        );
+        let masked = scaled_dot_product_attention_gqa(
+            &q_masked,
+            &k_masked,
+            &v_masked,
+            Some(&decode_mask),
+            0.125,
+            false,
+            2,
+        )?;
         let repeated_masked = scaled_dot_product_attention(
-            &q,
-            &repeat_kv(&k, 2)?.contiguous()?,
-            &repeat_kv(&v, 2)?.contiguous()?,
+            &q_masked,
+            &repeat_kv(&k_masked, 2)?.contiguous()?,
+            &repeat_kv(&v_masked, 2)?.contiguous()?,
             Some(&decode_mask),
             0.125,
             false,
@@ -1451,6 +1516,17 @@ mod tests {
         assert_eq!(mask_data[13], 0.0);
         assert_eq!(mask_data[14], 0.0);
 
+        Ok(())
+    }
+
+    #[test]
+    fn generation_mask_is_omitted_for_equal_length_batch() -> Result<()> {
+        let device = Device::Cpu;
+        assert!(create_generation_mask_if_needed(&[0, 0, 0], 32, DType::F32, &device)?.is_none());
+
+        let mask = create_generation_mask_if_needed(&[3, 0, 1], 32, DType::F32, &device)?
+            .expect("unequal prompts need a padding mask");
+        assert_eq!(mask.dims(), &[3, 1, 1, 32]);
         Ok(())
     }
 

@@ -416,14 +416,26 @@ impl NormalizeImage {
         &self,
         imgs: Vec<DynamicImage>,
     ) -> Result<ndarray::Array4<f32>, OCRError> {
+        let rgb_imgs: Vec<_> = imgs.into_iter().map(into_rgb8_no_copy).collect();
+        let refs: Vec<_> = rgb_imgs.iter().collect();
+        self.normalize_batch_refs(&refs)
+    }
+
+    /// Normalizes a batch of borrowed RGB images into a 4D tensor.
+    ///
+    /// This is equivalent to [`Self::normalize_batch_to`] but lets model
+    /// preprocessors keep shared page images borrowed when resizing is not
+    /// required. Only the output tensor is allocated.
+    pub fn normalize_batch_refs(
+        &self,
+        imgs: &[&RgbImage],
+    ) -> Result<ndarray::Array4<f32>, OCRError> {
         if imgs.is_empty() {
             return Ok(ndarray::Array4::zeros((0, 0, 0, 0)));
         }
 
         let batch_size = imgs.len();
-
-        let rgb_imgs: Vec<_> = imgs.into_iter().map(into_rgb8_no_copy).collect();
-        let dimensions: Vec<_> = rgb_imgs.iter().map(|img| img.dimensions()).collect();
+        let dimensions: Vec<_> = imgs.iter().map(|img| img.dimensions()).collect();
 
         let (first_width, first_height) = dimensions.first().copied().unwrap_or((0, 0));
         for (i, &(width, height)) in dimensions.iter().enumerate() {
@@ -448,13 +460,13 @@ impl NormalizeImage {
         let use_parallel =
             Self::should_parallelize(batch_size, result.len() * std::mem::size_of::<f32>());
         if !use_parallel {
-            for (rgb_img, batch_slice) in rgb_imgs.iter().zip(result.chunks_mut(img_size)) {
+            for (rgb_img, batch_slice) in imgs.iter().zip(result.chunks_mut(img_size)) {
                 self.normalize_rgb_into(rgb_img, batch_slice);
             }
         } else {
             result
                 .par_chunks_mut(img_size)
-                .zip(rgb_imgs.par_iter())
+                .zip(imgs.par_iter())
                 .for_each(|(batch_slice, rgb_img)| {
                     self.normalize_rgb_into(rgb_img, batch_slice);
                 });
@@ -667,6 +679,32 @@ mod tests {
             ]
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn normalize_batch_refs_matches_owned_path_bit_exact() -> Result<(), OCRError> {
+        let normalizer = NormalizeImage::with_color_order(
+            Some(1.0 / 255.0),
+            Some(vec![0.485, 0.456, 0.406]),
+            Some(vec![0.229, 0.224, 0.225]),
+            Some(TensorLayout::CHW),
+            Some(ColorOrder::BGR),
+        )?;
+        let images = [
+            RgbImage::from_fn(96, 64, |x, y| {
+                Rgb([(x % 251) as u8, (y % 241) as u8, ((x + y) % 239) as u8])
+            }),
+            RgbImage::from_fn(96, 64, |x, y| {
+                Rgb([(y % 233) as u8, ((x * 3) % 229) as u8, 17])
+            }),
+        ];
+        let refs: Vec<_> = images.iter().collect();
+        let borrowed = normalizer.normalize_batch_refs(&refs)?;
+        let owned = normalizer
+            .normalize_batch_to(images.into_iter().map(DynamicImage::ImageRgb8).collect())?;
+
+        assert_eq!(borrowed, owned);
         Ok(())
     }
 }

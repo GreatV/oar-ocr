@@ -102,12 +102,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let infer_start = Instant::now();
-        match model
-            .generate_tokens(&[rgb_img], &[args.prompt.as_str()], args.max_tokens)
-            .into_iter()
-            .next()
-        {
-            Some(Ok(tokens)) => {
+        match model.generate_tokens(&[rgb_img], &[args.prompt.as_str()], args.max_tokens) {
+            Ok(mut results) if !results.is_empty() => {
+                let tokens = results.remove(0);
                 info!(
                     "  Inference time: {:.2}ms, tokens: {}, fingerprint: {:016x}",
                     infer_start.elapsed().as_secs_f64() * 1000.0,
@@ -116,8 +113,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 println!("{}", model.decode_tokens(&tokens)?);
             }
-            Some(Err(e)) => error!("  Inference failed: {}", e),
-            None => error!("  No result returned from model"),
+            Ok(_) => error!("  No result returned from model"),
+            Err(e) => error!("  Inference failed: {}", e),
         }
     }
 

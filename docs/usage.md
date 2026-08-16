@@ -138,7 +138,11 @@ let structure = OARStructureBuilder::new("picodet-l_layout_17cls.onnx")
     .with_table_cell_detection("rt-detr-l_wired_table_cell_det.onnx", "wired")
     .with_table_structure_recognition("slanext_wired.onnx", "wired")
     .table_structure_dict_path("table_structure_dict_ch.txt")
-    .with_formula_recognition("pp-formulanet-l.onnx", "pp-formulanet-tokenizer.json", "pp_formulanet")
+    .with_formula_recognition(
+        "pp-formulanet-l.onnx",
+        "pp-formulanet-tokenizer.json",
+        "pp_formulanet",
+    )
     .build()?;
 
 // Structure analysis with integrated OCR
@@ -330,7 +334,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Element-level OCR. The API is batch-oriented, so pass one task per image.
     let result = vl
-        .generate(&[image], &[PaddleOcrVlTask::Ocr], 256)
+        .generate(&[image], &[PaddleOcrVlTask::Ocr], 256)?
         .into_iter()
         .next()
         .expect("one result")?;
@@ -355,7 +359,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vl = PaddleOcrVl::from_dir("PaddlePaddle/PaddleOCR-VL-1.6", device)?;
 
     let result = vl
-        .generate(&[image], &[PaddleOcrVlTask::Seal], 256)
+        .generate(&[image], &[PaddleOcrVlTask::Seal], 256)?
         .into_iter()
         .next()
         .expect("one result")?;
@@ -391,7 +395,7 @@ cargo run -p oar-ocr-vl --features cuda --example paddleocr_vl -- \
 
 ## OvisOCR2
 
-[OvisOCR2](https://huggingface.co/ATH-MaaS/OvisOCR2) is a 0.8B end-to-end page parser in the `oar-ocr-vl` crate. It turns each complete page into one Markdown document using its model-native path. It does not use an external layout detector and is not a `DocParser` backend.
+[OvisOCR2](https://huggingface.co/ATH-MaaS/OvisOCR2) is a 0.8B end-to-end page parser in the `oar-ocr-vl` crate. It turns each complete page into one Markdown document using its model-native path. It also implements `RecognitionBackend` for externally detected `DocParser` crops, although the native full-page path is preferred for complete pages.
 
 ### Downloading the Model
 
@@ -428,7 +432,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = load_image("document.jpg")?;
     let model = OvisOcr2::from_dir("ATH-MaaS/OvisOCR2", parse_device("cpu")?)?;
     let markdown = model
-        .parse(&[image], DEFAULT_MAX_NEW_TOKENS)
+        .parse(&[image], DEFAULT_MAX_NEW_TOKENS)?
         .into_iter()
         .next()
         .expect("one result")?;
@@ -481,7 +485,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         parse_device("cuda:0")?,
     )?;
     let output = model
-        .generate(&[image], &[MonkeyOcrV2Task::EndToEnd], 10_000)
+        .generate(&[image], &[MonkeyOcrV2Task::EndToEnd], 10_000)?
         .into_iter()
         .next()
         .expect("one result")?;
@@ -540,7 +544,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let prompt = "Detect and recognize text in the image, and output the text coordinates in a formatted manner.";
     let text = model
-        .generate(&[image], &[prompt], 1024)
+        .generate(&[image], &[prompt], 1024)?
         .into_iter()
         .next()
         .expect("one result")?;
@@ -616,7 +620,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = GlmOcr::from_dir("zai-org/GLM-OCR", device)?;
     let prompt = "Text Recognition:";
     let text = model
-        .generate(&[image], &[prompt], 1024)
+        .generate(&[image], &[prompt], 1024)?
         .into_iter()
         .next()
         .expect("one result")?;
@@ -667,7 +671,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = MinerU::from_dir("opendatalab/MinerU2.5-2509-1.2B", device)?;
     let prompt = "\nText Recognition:";
     let text = model
-        .generate(&[image], &[prompt], 1024)
+        .generate(&[image], &[prompt], 1024)?
         .into_iter()
         .next()
         .expect("one result")?;
@@ -720,7 +724,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "opendatalab/MinerU-Diffusion-V1-0320-2.5B",
         parse_device("cuda:0")?,
     )?;
-    let text = model.generate(
+    let text = model.generate_one(
         &image,
         DEFAULT_PROMPT,
         &DiffusionGenerationConfig::default(),
@@ -742,9 +746,9 @@ cargo run -p oar-ocr-vl --features cuda \
 
 ## DocParser
 
-DocParser provides a unified API for external layout-first document parsing with VL-based recognition. The `doc_parser` example supports PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, and GLM-OCR. MonkeyOCRv2 also implements `RecognitionBackend`, but uses its dedicated model-native example for complete pages.
+DocParser provides a unified API for external layout-first document parsing with VL-based recognition. PaddleOCR-VL, GLM-OCR, MonkeyOCRv2, OvisOCR2, HunyuanOCR, MinerU2.5/Pro, and MinerU-Diffusion implement `RecognitionBackend`. The `doc_parser` CLI example exposes the PaddleOCR-VL and GLM-OCR paths; use the other backends through the library API. HPD-Parsing currently supports only its model-native full-page protocol.
 
-Use `parse(&layout, image)` with any `LayoutSource` — `PpDocLayout` is the built-in one and runs on Candle, so no ONNX Runtime is involved. The regions are recognized in the order the layout source returns them. OvisOCR2 deliberately does not implement `RecognitionBackend`; use its full-page `OvisOcr2::parse` API instead. The library also implements `RecognitionBackend` for MonkeyOCRv2, HunyuanOCR, and MinerU2.5/Pro, but they are intentionally not exposed by the CLI example because their reference-quality paths are model-native parsing. MinerU-Diffusion uses its dedicated example.
+Use `parse(&layout, image)` with any `LayoutSource` — `PpDocLayout` is the built-in one and runs on Candle, so no ONNX Runtime is involved. Regions are recognized in layout order and may be grouped into bounded recognition batches. For complete pages, prefer the model-native paths for MonkeyOCRv2, OvisOCR2, HPD-Parsing, HunyuanOCR, and the MinerU family. Except for HPD-Parsing, their `RecognitionBackend` implementations are intended for externally detected crops.
 
 ### Basic Usage
 

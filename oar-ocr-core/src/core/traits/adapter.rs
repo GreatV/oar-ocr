@@ -4,7 +4,7 @@
 //! various model implementations to conform to task interfaces. Adapters handle
 //! preprocessing, inference, and postprocessing for specific models.
 
-use super::task::{Task, TaskSchema, TaskType};
+use super::task::{Task, TaskType};
 use crate::core::OCRError;
 use std::fmt::Debug;
 
@@ -38,22 +38,13 @@ impl AdapterInfo {
 ///
 /// Adapters bridge the gap between task interfaces and concrete model implementations.
 /// They handle model-specific preprocessing, inference, and postprocessing while
-/// conforming to the task's input/output schema.
+/// conforming to the task's typed input/output contract.
 pub trait ModelAdapter: Send + Sync + Debug {
     /// The task type this adapter executes
     type Task: Task;
 
     /// Returns information about this adapter.
     fn info(&self) -> AdapterInfo;
-
-    /// Returns the schema that this adapter conforms to.
-    fn schema(&self) -> TaskSchema {
-        TaskSchema::new(
-            self.info().task_type,
-            vec!["image".to_string()], // Most adapters work with images
-            vec!["result".to_string()],
-        )
-    }
 
     /// Executes the model on the given input.
     ///
@@ -77,28 +68,6 @@ pub trait ModelAdapter: Send + Sync + Debug {
         input: <Self::Task as Task>::Input,
         config: Option<&<Self::Task as Task>::Config>,
     ) -> Result<<Self::Task as Task>::Output, OCRError>;
-
-    /// Validates that this adapter is compatible with the given task schema.
-    ///
-    /// # Arguments
-    ///
-    /// * `schema` - The schema to check compatibility with
-    ///
-    /// # Returns
-    ///
-    /// Result indicating success or incompatibility error
-    fn validate_compatibility(&self, schema: &TaskSchema) -> Result<(), OCRError> {
-        let adapter_schema = self.schema();
-        if adapter_schema.task_type != schema.task_type {
-            return Err(OCRError::ConfigError {
-                message: format!(
-                    "Adapter task type {:?} does not match required task type {:?}",
-                    adapter_schema.task_type, schema.task_type
-                ),
-            });
-        }
-        Ok(())
-    }
 
     /// Returns whether this adapter can handle batched inputs efficiently.
     fn supports_batching(&self) -> bool {
@@ -159,26 +128,6 @@ pub trait OrtConfigurable: Sized {
     fn with_ort_config(self, config: crate::core::config::OrtSessionConfig) -> Self;
 }
 
-/// A wrapper that implements Task for an adapter's task type.
-///
-/// This allows adapters to be used polymorphically through the Task trait.
-#[derive(Debug)]
-pub struct AdapterTask<A: ModelAdapter> {
-    adapter: A,
-}
-
-impl<A: ModelAdapter> AdapterTask<A> {
-    /// Creates a new adapter task.
-    pub fn new(adapter: A) -> Self {
-        Self { adapter }
-    }
-
-    /// Returns a reference to the adapter.
-    pub fn adapter(&self) -> &A {
-        &self.adapter
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,18 +142,5 @@ mod tests {
 
         assert_eq!(info.model_name, "DB");
         assert_eq!(info.task_type, TaskType::TextDetection);
-    }
-
-    #[test]
-    fn test_schema_validation() {
-        // This is a conceptual test - actual validation would be done with real adapters
-        let schema = TaskSchema::new(
-            TaskType::TextDetection,
-            vec!["image".to_string()],
-            vec!["text_boxes".to_string()],
-        );
-
-        assert_eq!(schema.task_type, TaskType::TextDetection);
-        assert_eq!(schema.input_types, vec!["image".to_string()]);
     }
 }

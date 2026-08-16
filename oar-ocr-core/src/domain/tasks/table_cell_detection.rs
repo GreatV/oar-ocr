@@ -7,7 +7,7 @@ use super::validation::ensure_non_empty_images;
 use crate::ConfigValidator;
 use crate::core::OCRError;
 use crate::core::traits::TaskDefinition;
-use crate::core::traits::task::{ImageTaskInput, Task, TaskSchema, TaskType};
+use crate::core::traits::task::{ImageTaskInput, Task, TaskType};
 use crate::processors::BoundingBox;
 use crate::utils::{ScoreValidator, validate_max_value};
 use serde::{Deserialize, Serialize};
@@ -99,14 +99,6 @@ impl Task for TableCellDetectionTask {
         TaskType::TableCellDetection
     }
 
-    fn schema(&self) -> TaskSchema {
-        TaskSchema::new(
-            TaskType::TableCellDetection,
-            vec!["image".to_string()],
-            vec!["table_cells".to_string()],
-        )
-    }
-
     fn validate_input(&self, input: &Self::Input) -> Result<(), OCRError> {
         ensure_non_empty_images(&input.images, "No images provided for table cell detection")?;
 
@@ -180,14 +172,5 @@ mod tests {
             cells: vec![vec![cell]],
         };
         assert!(task.validate_output(&output).is_ok());
-    }
-
-    #[test]
-    fn test_schema() {
-        let task = TableCellDetectionTask::default();
-        let schema = task.schema();
-        assert_eq!(schema.task_type, TaskType::TableCellDetection);
-        assert!(schema.input_types.contains(&"image".to_string()));
-        assert!(schema.output_types.contains(&"table_cells".to_string()));
     }
 }

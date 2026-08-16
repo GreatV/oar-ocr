@@ -111,7 +111,7 @@ struct Args {
 
     /// Model name to explicitly specify the model type (required for correct model detection).
     /// Supported: UniMERNet, PP-FormulaNet-S, PP-FormulaNet-L, PP-FormulaNet_plus-S, PP-FormulaNet_plus-M, PP-FormulaNet_plus-L
-    #[arg(long, default_value = "FormulaRecognition")]
+    #[arg(long, default_value = "UniMERNet")]
     model_name: String,
 
     /// Enable verbose output

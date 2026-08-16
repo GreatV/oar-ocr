@@ -6,6 +6,7 @@ use super::text::OvisOcr2TextModel;
 use super::vision::OvisOcr2VisionModel;
 #[cfg(feature = "cuda")]
 use crate::cuda_kernels::{ArgmaxFirstBf16, ArgmaxFirstF32};
+use crate::doc_parser::{RecognitionBackend, RecognitionTask};
 use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{DType, Device, IndexOp, Tensor};
@@ -101,16 +102,21 @@ impl OvisOcr2 {
         &self,
         images: &[RgbImage],
         max_new_tokens: usize,
-    ) -> Vec<Result<String, Error>> {
-        self.generate_tokens(images, max_new_tokens)
+    ) -> crate::error::BatchResult<String> {
+        Ok(self
+            .generate_tokens(images, max_new_tokens)?
             .into_iter()
             .map(|result| result.and_then(|tokens| self.decode_tokens(&tokens)))
-            .collect()
+            .collect())
     }
 
     /// Parse pages using the official post-processing, which removes visual
     /// region `<img ...>` blocks by default.
-    pub fn parse(&self, images: &[RgbImage], max_new_tokens: usize) -> Vec<Result<String, Error>> {
+    pub fn parse(
+        &self,
+        images: &[RgbImage],
+        max_new_tokens: usize,
+    ) -> crate::error::BatchResult<String> {
         self.parse_with_image_tags(images, max_new_tokens, false)
     }
 
@@ -120,21 +126,17 @@ impl OvisOcr2 {
         images: &[RgbImage],
         max_new_tokens: usize,
         keep_image_tags: bool,
-    ) -> Vec<Result<String, Error>> {
-        self.generate_tokens(images, max_new_tokens)
+    ) -> crate::error::BatchResult<String> {
+        Ok(self
+            .generate_tokens(images, max_new_tokens)?
             .into_iter()
             .map(|result| {
                 result.and_then(|tokens| {
                     let text = self.decode_tokens_raw(&tokens)?;
-                    let text = if keep_image_tags {
-                        text
-                    } else {
-                        filter_visual_image_tags(&text)
-                    };
-                    Ok(clean_truncated_repeats(&text))
+                    Ok(postprocess_text(text, keep_image_tags))
                 })
             })
-            .collect()
+            .collect())
     }
 
     /// Generate raw token ids for each input page.
@@ -142,11 +144,11 @@ impl OvisOcr2 {
         &self,
         images: &[RgbImage],
         max_new_tokens: usize,
-    ) -> Vec<Result<Vec<u32>, Error>> {
-        images
+    ) -> crate::error::BatchResult<Vec<u32>> {
+        Ok(images
             .iter()
             .map(|image| self.generate_one(image, max_new_tokens))
-            .collect()
+            .collect())
     }
 
     fn generate_one(&self, image: &RgbImage, max_new_tokens: usize) -> Result<Vec<u32>, Error> {
@@ -339,6 +341,52 @@ impl OvisOcr2 {
 
     pub fn image_processor_config(&self) -> &OvisOcr2ImageProcessorConfig {
         &self.image_cfg
+    }
+}
+
+impl RecognitionBackend for OvisOcr2 {
+    fn recognize(
+        &self,
+        image: RgbImage,
+        task: RecognitionTask,
+        max_tokens: usize,
+    ) -> Result<String, Error> {
+        let tokens = self
+            .generate_tokens(&[image], max_tokens)?
+            .pop()
+            .ok_or_else(|| Error::InvalidInput {
+                message: "OvisOCR2: no recognition result returned".to_string(),
+            })??;
+        let text = self.decode_tokens_raw(&tokens)?;
+        Ok(postprocess_recognition_text(text, task))
+    }
+
+    fn recognize_batch(
+        &self,
+        images: Vec<RgbImage>,
+        tasks: &[RecognitionTask],
+        max_tokens: usize,
+    ) -> crate::error::BatchResult<String> {
+        if images.len() != tasks.len() {
+            return Err(Error::InvalidInput {
+                message: format!(
+                    "OvisOCR2: images count ({}) != tasks count ({})",
+                    images.len(),
+                    tasks.len()
+                ),
+            });
+        }
+        Ok(self
+            .generate_tokens(&images, max_tokens)?
+            .into_iter()
+            .zip(tasks.iter().copied())
+            .map(|(result, task)| {
+                result.and_then(|tokens| {
+                    let text = self.decode_tokens_raw(&tokens)?;
+                    Ok(postprocess_recognition_text(text, task))
+                })
+            })
+            .collect())
     }
 }
 
@@ -542,6 +590,19 @@ pub fn filter_visual_image_tags(text: &str) -> String {
         .join("\n\n")
 }
 
+fn postprocess_text(text: String, keep_image_tags: bool) -> String {
+    let text = if keep_image_tags {
+        text
+    } else {
+        filter_visual_image_tags(&text)
+    };
+    clean_truncated_repeats(&text)
+}
+
+fn postprocess_recognition_text(text: String, task: RecognitionTask) -> String {
+    postprocess_text(text, task == RecognitionTask::Chart)
+}
+
 /// Clean a truncated repetitive tail using the official OvisOCR2 heuristic.
 pub fn clean_truncated_repeats(text: &str) -> String {
     const MIN_TEXT_LEN: usize = 8_000;
@@ -641,6 +702,29 @@ mod tests {
     fn visual_image_tag_blocks_are_removed() {
         let text = "before\n\n<img src=\"images/bbox_1_2_3_4.jpg\" />\n\nafter";
         assert_eq!(filter_visual_image_tags(text), "before\n\nafter");
+    }
+
+    #[test]
+    fn chart_recognition_keeps_visual_image_tags() {
+        let text = "<img src=\"images/bbox_1_2_3_4.jpg\" />";
+        assert_eq!(
+            postprocess_recognition_text(text.to_string(), RecognitionTask::Chart),
+            text
+        );
+    }
+
+    #[test]
+    fn mixed_recognition_tasks_filter_only_non_charts() {
+        let text = "<img src=\"images/bbox_1_2_3_4.jpg\" />";
+        let tasks = [
+            RecognitionTask::Ocr,
+            RecognitionTask::Chart,
+            RecognitionTask::Table,
+            RecognitionTask::Formula,
+        ];
+        let outputs = tasks.map(|task| postprocess_recognition_text(text.to_string(), task));
+
+        assert_eq!(outputs, ["", text, "", ""]);
     }
 
     #[test]

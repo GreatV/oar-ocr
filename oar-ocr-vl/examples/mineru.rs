@@ -33,10 +33,10 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info};
 
-use oar_ocr_vl::MinerU;
 use oar_ocr_vl::utils::image::load_image;
 use oar_ocr_vl::utils::parse_device;
 use oar_ocr_vl::utils::{convert_otsl_to_html, truncate_repetitive_content};
+use oar_ocr_vl::{Error as OarError, MinerU};
 
 use utils::mineru_layout::{
     ContentBlock, LAYOUT_IMAGE_SIZE, LAYOUT_PROMPT, parse_layout_output, prepare_for_extract,
@@ -64,6 +64,10 @@ struct Args {
     /// Maximum number of tokens to generate (default: 4096)
     #[arg(long, default_value = "4096")]
     max_tokens: usize,
+
+    /// Number of cropped regions per content-extraction batch
+    #[arg(long, default_value = "2")]
+    region_batch_size: usize,
 
     /// Minimum edge length for cropped blocks
     #[arg(long, default_value = "28")]
@@ -130,6 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &model,
             &rgb_img,
             args.max_tokens,
+            args.region_batch_size,
             args.min_image_edge,
             args.max_image_edge_ratio,
             args.dump_layout,
@@ -155,6 +160,7 @@ fn two_step_extract(
     model: &MinerU,
     image: &RgbImage,
     max_tokens: usize,
+    region_batch_size: usize,
     min_image_edge: u32,
     max_image_edge_ratio: f32,
     dump_layout: bool,
@@ -167,10 +173,10 @@ fn two_step_extract(
         imageops::FilterType::CatmullRom,
     );
     let layout_tokens = model
-        .generate_tokens(&[layout_image], &[LAYOUT_PROMPT], max_tokens)
+        .generate_tokens(&[layout_image], &[LAYOUT_PROMPT], max_tokens)?
         .into_iter()
         .next()
-        .ok_or("Layout detection returned no result")??;
+        .ok_or("Layout detection returned no result")?;
     info!(
         "  Layout tokens: {}, fingerprint: {:016x}",
         layout_tokens.len(),
@@ -186,45 +192,155 @@ fn two_step_extract(
         return Ok(blocks);
     }
 
-    // Step 2: Content extraction on cropped blocks
-    // Note: Processing one at a time due to batched inference issues with different padding
+    // Step 2: Content extraction on cropped blocks. MinerU masks the leading
+    // padding KV for unequal prompt lengths, so differently sized crops can be
+    // decoded in one batch.
     let (block_images, prompts, indices) =
         prepare_for_extract(image, &blocks, min_image_edge, max_image_edge_ratio);
     if block_images.is_empty() {
         return Ok(blocks);
     }
 
-    for (i, (block_image, prompt)) in block_images.into_iter().zip(prompts.iter()).enumerate() {
-        let idx = indices[i];
-        let output = model
-            .generate_tokens(&[block_image], &[prompt], max_tokens)
-            .into_iter()
-            .next();
-        match output {
-            Some(Ok(tokens)) => {
-                info!(
-                    "  Block {} tokens: {}, fingerprint: {:016x}",
-                    idx,
-                    tokens.len(),
-                    token_fingerprint(&tokens)
-                );
-                let content = model.decode_tokens(&tokens)?;
-                let cleaned = truncate_repetitive_content(&content, 10, 10, 10);
-                let content = if blocks[idx].block_type == "table" {
-                    convert_otsl_to_html(&cleaned)
-                } else {
-                    cleaned.trim().to_string()
-                };
-                blocks[idx].content = Some(content);
-            }
-            Some(Err(e)) => {
-                error!("  Block inference failed (idx={}): {}", idx, e);
-            }
-            None => {
-                error!("  Block inference returned no result (idx={})", idx);
+    let region_batch_size = region_batch_size.max(1);
+    for start in (0..block_images.len()).step_by(region_batch_size) {
+        let end = (start + region_batch_size).min(block_images.len());
+        let expected = end - start;
+        let (fallback_reason, generated) = recover_batch_results(
+            expected,
+            model.generate_tokens(&block_images[start..end], &prompts[start..end], max_tokens),
+            |offset| {
+                let position = start + offset;
+                let mut tokens = model.generate_tokens(
+                    std::slice::from_ref(&block_images[position]),
+                    std::slice::from_ref(&prompts[position]),
+                    max_tokens,
+                )?;
+                if tokens.len() != 1 {
+                    return Err(OarError::InvalidInput {
+                        message: format!(
+                            "Content extraction returned {} results for block {}",
+                            tokens.len(),
+                            indices[position]
+                        ),
+                    });
+                }
+                Ok(tokens.pop().expect("single result length was checked"))
+            },
+        );
+        if let Some(reason) = fallback_reason {
+            error!(
+                "  Batch inference failed for blocks {:?}: {}; retrying individually",
+                &indices[start..end],
+                reason
+            );
+        }
+
+        for (&idx, result) in indices[start..end].iter().zip(generated) {
+            match result {
+                Ok(tokens) => {
+                    info!(
+                        "  Block {} tokens: {}, fingerprint: {:016x}",
+                        idx,
+                        tokens.len(),
+                        token_fingerprint(&tokens)
+                    );
+                    let content = model.decode_tokens(&tokens)?;
+                    let cleaned = truncate_repetitive_content(&content, 10, 10, 10);
+                    let content = if blocks[idx].block_type == "table" {
+                        convert_otsl_to_html(&cleaned)
+                    } else {
+                        cleaned.trim().to_string()
+                    };
+                    blocks[idx].content = Some(content);
+                }
+                Err(error) => error!("  Block inference failed (idx={}): {}", idx, error),
             }
         }
     }
 
     Ok(blocks)
+}
+
+fn recover_batch_results<T, E>(
+    expected: usize,
+    batch: Result<Vec<T>, E>,
+    mut retry_one: impl FnMut(usize) -> Result<T, E>,
+) -> (Option<String>, Vec<Result<T, E>>)
+where
+    E: std::fmt::Display,
+{
+    match batch {
+        Ok(results) if results.len() == expected => (None, results.into_iter().map(Ok).collect()),
+        Ok(results) => {
+            let reason = format!(
+                "content extraction returned {} results for {expected} blocks",
+                results.len()
+            );
+            (Some(reason), (0..expected).map(&mut retry_one).collect())
+        }
+        Err(error) if expected == 1 => (None, vec![Err(error)]),
+        Err(error) => {
+            let reason = error.to_string();
+            (Some(reason), (0..expected).map(&mut retry_one).collect())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::recover_batch_results;
+    use std::cell::Cell;
+
+    #[test]
+    fn successful_batch_does_not_retry_items() {
+        let retries = Cell::new(0);
+        let (reason, results) = recover_batch_results::<_, String>(2, Ok(vec![10, 20]), |_| {
+            retries.set(retries.get() + 1);
+            Ok(0)
+        });
+
+        assert!(reason.is_none());
+        assert_eq!(retries.get(), 0);
+        assert_eq!(
+            results.into_iter().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![10, 20])
+        );
+    }
+
+    #[test]
+    fn failed_batch_retries_each_item_and_preserves_item_errors() {
+        let (reason, results) =
+            recover_batch_results(3, Err("batch failed"), |index| match index {
+                1 => Err("bad crop"),
+                _ => Ok(index),
+            });
+
+        assert_eq!(reason.as_deref(), Some("batch failed"));
+        assert_eq!(results, vec![Ok(0), Err("bad crop"), Ok(2)]);
+    }
+
+    #[test]
+    fn single_item_failure_is_not_retried() {
+        let retries = Cell::new(0);
+        let (reason, results) = recover_batch_results(1, Err("bad crop"), |_| {
+            retries.set(retries.get() + 1);
+            Ok(0)
+        });
+
+        assert!(reason.is_none());
+        assert_eq!(retries.get(), 0);
+        assert_eq!(results, vec![Err("bad crop")]);
+    }
+
+    #[test]
+    fn wrong_batch_result_count_retries_each_item() {
+        let (reason, results) =
+            recover_batch_results::<_, String>(2, Ok(vec![10]), |index| Ok(index + 20));
+
+        assert_eq!(
+            reason.as_deref(),
+            Some("content extraction returned 1 results for 2 blocks")
+        );
+        assert_eq!(results, vec![Ok(20), Ok(21)]);
+    }
 }
