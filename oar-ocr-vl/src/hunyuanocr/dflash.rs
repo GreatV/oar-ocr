@@ -14,7 +14,10 @@ use crate::attention::{RotaryEmbedding, flash_attention, scaled_dot_product_atte
 #[cfg(feature = "cuda")]
 use crate::cuda_kernels::ArgmaxFirstBf16;
 #[cfg(feature = "cuda")]
-use crate::decoder_graph::{CudaGraphKvLengths, cuda_graph_error, sync_graph_tensor};
+use crate::decoder_graph::{
+    CudaGraphDrainGuard, CudaGraphKvLengths, cuda_graph_error, drop_and_drain,
+    report_stashed_cuda_error, sync_graph_tensor,
+};
 use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 use candle_core::{D, DType, Device, Tensor};
@@ -846,6 +849,8 @@ impl DFlashLayer {
 
 #[cfg(feature = "cuda")]
 struct DFlashCudaGraph {
+    // Dispose via `dispose` so capture-touched buffers are never returned to
+    // the stream-ordered allocator (see SingleTokenDecoderCudaGraph::dispose).
     graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
     query_input: Tensor,
     cos_input: Tensor,
@@ -854,6 +859,32 @@ struct DFlashCudaGraph {
     kv_lengths: CudaGraphKvLengths,
     hidden_output: Tensor,
     proposals_output: Tensor,
+}
+
+#[cfg(feature = "cuda")]
+impl DFlashCudaGraph {
+    fn dispose(self) {
+        let Self {
+            graph,
+            query_input,
+            cos_input,
+            sin_input,
+            _query_lengths,
+            kv_lengths,
+            hidden_output,
+            proposals_output,
+        } = self;
+        let device = query_input.device().clone();
+        report_stashed_cuda_error(&device, "CUDA graph disposal");
+        drop_and_drain(graph, &device);
+        drop_and_drain(proposals_output, &device);
+        drop_and_drain(hidden_output, &device);
+        drop_and_drain(kv_lengths, &device);
+        drop_and_drain(_query_lengths, &device);
+        drop_and_drain(sin_input, &device);
+        drop_and_drain(cos_input, &device);
+        drop_and_drain(query_input, &device);
+    }
 }
 
 #[cfg(feature = "cuda")]
@@ -884,6 +915,10 @@ pub(crate) struct DFlashModel {
     caches: RefCell<Vec<ContextKv>>,
     dtype: DType,
     device: Device,
+    // Must stay the last field: it drops last and drains CUDA errors the
+    // other fields' frees may stash (see CudaGraphDrainGuard).
+    #[cfg(feature = "cuda")]
+    _drain_guard: CudaGraphDrainGuard,
 }
 
 impl DFlashModel {
@@ -965,6 +1000,8 @@ impl DFlashModel {
             caches: RefCell::new(caches),
             dtype,
             device: device.clone(),
+            #[cfg(feature = "cuda")]
+            _drain_guard: CudaGraphDrainGuard::new(device),
         };
         model.prepare_cuda_graph()?;
         Ok(model)
@@ -1011,7 +1048,9 @@ impl DFlashModel {
         // A captured graph owns raw pointers into the fixed-size cache. Once
         // that cache must grow, the graph cannot safely be reused, including
         // after a later page-level reset.
-        self.decode_graph.borrow_mut().take();
+        if let Some(graph) = self.decode_graph.borrow_mut().take() {
+            graph.dispose();
+        }
     }
 
     fn rope(&self, start: usize, len: usize) -> Result<(Tensor, Tensor), Error> {
@@ -1241,13 +1280,27 @@ impl DFlashModel {
             &warm_proposals,
             "warm full draft graph",
         )?;
+        // Allocate the output buffers before capture so they belong to the
+        // regular stream-ordered pool; a capture-time allocation lives in the
+        // graph's private pool and can never be returned to the allocator
+        // safely. Prime the copies so the captured run sees warm kernels.
+        let hidden_output = Tensor::zeros_like(&warm)
+            .map_err(|e| tensor_err("HunyuanOCR DFlash: full graph hidden output", e))?;
+        let proposals_output = Tensor::zeros_like(&warm_proposals)
+            .map_err(|e| tensor_err("HunyuanOCR DFlash: full graph proposals output", e))?;
+        hidden_output
+            .slice_set(&warm, 0, 0)
+            .map_err(|e| tensor_err("HunyuanOCR DFlash: prime full hidden copy", e))?;
+        proposals_output
+            .slice_set(&warm_proposals, 0, 0)
+            .map_err(|e| tensor_err("HunyuanOCR DFlash: prime full proposals copy", e))?;
 
         stream
             .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
             .map_err(|e| {
                 cuda_graph_error("HunyuanOCR DFlash", "begin full draft graph capture", e)
             })?;
-        let captured_output = (|| {
+        let captured_output: Result<(), Error> = (|| {
             let hidden = self.forward_queries_dynamic(
                 &query_input,
                 &cos_input,
@@ -1256,17 +1309,19 @@ impl DFlashModel {
                 kv_lengths.tensor(),
             )?;
             let proposals = self.proposals_from_hidden(&hidden)?;
-            Ok::<_, Error>((hidden, proposals))
+            hidden_output
+                .slice_set(&hidden, 0, 0)
+                .map_err(|e| tensor_err("HunyuanOCR DFlash: record full hidden copy", e))?;
+            proposals_output
+                .slice_set(&proposals, 0, 0)
+                .map_err(|e| tensor_err("HunyuanOCR DFlash: record full proposals copy", e))
         })();
-        let (hidden_output, proposals_output) = match captured_output {
-            Ok(output) => output,
-            Err(error) => {
-                let _ = stream.end_capture(
-                    CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-                );
-                return Err(error);
-            }
-        };
+        if let Err(error) = captured_output {
+            let _ = stream.end_capture(
+                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            );
+            return Err(error);
+        }
         let graph = stream
             .end_capture(
                 CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
@@ -1389,6 +1444,15 @@ impl DFlashModel {
         for cache in self.caches.borrow_mut().iter_mut() {
             cache.reset();
         }
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl Drop for DFlashModel {
+    fn drop(&mut self) {
+        // A cached graph must go through dispose: plainly dropping it returns
+        // graph-bound buffers to the allocator and poisons it.
+        self.invalidate_cuda_graph();
     }
 }
 

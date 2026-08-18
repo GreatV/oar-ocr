@@ -52,6 +52,78 @@ pub(crate) fn cuda_graph_error(
     }
 }
 
+/// Surface a CUDA error that drop glue stashed on the context *before* graph
+/// teardown runs, so preexisting failures are reported rather than silently
+/// overwritten or cleared by the teardown drain below.
+#[cfg(feature = "cuda")]
+pub(crate) fn report_stashed_cuda_error(device: &Device, context: &'static str) {
+    let Device::Cuda(cuda) = device else {
+        return;
+    };
+    if let Err(error) = cuda.cuda_stream().context().check_err() {
+        tracing::warn!("stashed CUDA error before {context}: {error}");
+    }
+}
+
+/// Drain a CudaContext by `check_err`ing until it comes back clean. cudarc
+/// may record several errors in a row, so a single drain would drop all but
+/// the last one. The expected graph-bound free failure (stashed as
+/// CUDA_ERROR_INVALID_VALUE) is suppressed; anything else is reported.
+#[cfg(feature = "cuda")]
+pub(crate) fn drain_cuda_context_errors(device: &Device) {
+    use candle_core::cuda_backend::cudarc::driver::{result::DriverError, sys::CUresult};
+
+    let Device::Cuda(cuda) = device else {
+        return;
+    };
+    let stream = cuda.cuda_stream();
+    let context = stream.context().clone();
+    loop {
+        match context.check_err() {
+            Ok(()) => break,
+            Err(DriverError(CUresult::CUDA_ERROR_INVALID_VALUE)) => {}
+            Err(error) => {
+                tracing::warn!("stashed CUDA error during CUDA graph teardown: {error}");
+            }
+        }
+    }
+}
+
+/// Drop one graph-bound value and immediately drain whatever its destructor
+/// stashed. cudarc records at most one error on the context, so draining
+/// after every drop keeps teardown failures from overwriting each other.
+#[cfg(feature = "cuda")]
+pub(crate) fn drop_and_drain<T>(value: T, device: &Device) {
+    drop(value);
+    drain_cuda_context_errors(device);
+}
+
+/// Last-field guard for graph-owning model structs: the model's `Drop`
+/// disposes cached graphs, but Rust frees the remaining fields (KV caches,
+/// weights, embeddings) only afterwards, and those frees can also stash
+/// errors. Declared last so it drops last and drains whatever they left.
+#[cfg(feature = "cuda")]
+#[derive(Debug)]
+pub(crate) struct CudaGraphDrainGuard {
+    device: Device,
+}
+
+#[cfg(feature = "cuda")]
+impl CudaGraphDrainGuard {
+    pub(crate) fn new(device: &Device) -> Self {
+        Self {
+            device: device.clone(),
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl Drop for CudaGraphDrainGuard {
+    fn drop(&mut self) {
+        drain_cuda_context_errors(&self.device);
+    }
+}
+
 #[cfg(feature = "cuda")]
 pub(crate) fn sync_graph_tensor(
     model_name: &str,
@@ -170,8 +242,13 @@ impl std::fmt::Debug for CudaGraphKvLengths {
 /// Captured storage for a batch-1, query-length-1 decoder graph.
 ///
 /// The graph owns raw pointers into every tensor below, the model's fixed KV
-/// storage, its weights, and the external LM head. Keep `graph` first so it is
-/// destroyed before the tensors when this value is dropped.
+/// storage, its weights, and the external LM head. Dispose through
+/// [`Self::dispose`] rather than a plain drop: freeing buffers that are bound
+/// to a CUDA graph fails inside cudarc's drop glue, which *stashes* the error
+/// on the context; the next unrelated fallible CUDA call would then return
+/// that stale CUDA_ERROR_INVALID_VALUE. `dispose` drops everything and then
+/// drains the stashed error so nothing leaks and no context state is kept
+/// alive by forgotten tensors.
 #[cfg(feature = "cuda")]
 pub(crate) struct SingleTokenDecoderCudaGraph {
     pub(crate) graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
@@ -181,6 +258,29 @@ pub(crate) struct SingleTokenDecoderCudaGraph {
     pub(crate) kv_lengths: CudaGraphKvLengths,
     pub(crate) logits_output: Tensor,
     pub(crate) cache_len: usize,
+}
+
+#[cfg(feature = "cuda")]
+impl SingleTokenDecoderCudaGraph {
+    pub(crate) fn dispose(self) {
+        let Self {
+            graph,
+            hidden_input,
+            position_input,
+            _query_lengths,
+            kv_lengths,
+            logits_output,
+            cache_len: _,
+        } = self;
+        let device = hidden_input.device().clone();
+        report_stashed_cuda_error(&device, "decoder CUDA graph disposal");
+        drop_and_drain(graph, &device);
+        drop_and_drain(logits_output, &device);
+        drop_and_drain(kv_lengths, &device);
+        drop_and_drain(_query_lengths, &device);
+        drop_and_drain(position_input, &device);
+        drop_and_drain(hidden_input, &device);
+    }
 }
 
 #[cfg(feature = "cuda")]

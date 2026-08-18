@@ -8,6 +8,8 @@ use super::vision::VisionModel;
 use crate::attention::{
     combine_masks, create_causal_mask, create_generation_mask_if_needed, create_left_padding_mask,
 };
+#[cfg(feature = "cuda")]
+use crate::decoder_graph::CudaGraphDrainGuard;
 use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
@@ -71,6 +73,11 @@ pub struct PaddleOcrVl {
     image_placeholder_token_id: u32,
     /// Assistant prefix derived from chat template (e.g., "Assistant: " vs "Assistant:\n")
     assistant_prefix: String,
+    // Must stay the last field: the captured decoder graphs read the LM head
+    // owned here, so this guard drops last and drains CUDA errors the head's
+    // free may stash (see CudaGraphDrainGuard).
+    #[cfg(feature = "cuda")]
+    _drain_guard: CudaGraphDrainGuard,
 }
 
 impl PaddleOcrVl {
@@ -123,6 +130,8 @@ impl PaddleOcrVl {
         let vision = VisionModel::load(&cfg.vision_config, vb.pp("visual").pp("vision_model"))?;
         let projector = Projector::load(&cfg, &cfg.vision_config, vb.pp("mlp_AR"))?;
 
+        #[cfg(feature = "cuda")]
+        let _drain_guard = CudaGraphDrainGuard::new(&device);
         Ok(Self {
             device,
             dtype,
@@ -137,6 +146,8 @@ impl PaddleOcrVl {
             sep_token_id,
             image_placeholder_token_id,
             assistant_prefix,
+            #[cfg(feature = "cuda")]
+            _drain_guard,
         })
     }
 

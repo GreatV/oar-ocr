@@ -105,6 +105,22 @@ fn validate_cuda_aggregator(sources: &[std::path::PathBuf]) {
     }
 }
 
+fn nvcc_major_version(nvcc: &std::ffi::OsStr) -> Option<u32> {
+    let output = Command::new(nvcc).arg("--version").output().ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The last line reads "Cuda compilation tools, release 13.2, V13.2.78".
+    let release = stdout
+        .lines()
+        .find_map(|line| line.split("release ").nth(1).map(str::to_owned))?;
+    release
+        .split([',', ' '])
+        .next()?
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
+
 fn main() {
     let mut cuda_sources = Vec::new();
     collect_cuda_sources(Path::new("src"), &mut cuda_sources);
@@ -118,6 +134,11 @@ fn main() {
     let metal_enabled = std::env::var_os("CARGO_FEATURE_METAL").is_some();
     let cuda_enabled = std::env::var_os("CARGO_FEATURE_CUDA").is_some();
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    // The build host triple (e.g. x86_64-pc-windows-msvc): -Xcompiler options
+    // go to the *host* compiler, so gate MSVC-only flags on HOST, not target.
+    let host_is_msvc = std::env::var("HOST")
+        .map(|host| host.ends_with("-msvc"))
+        .unwrap_or_default();
 
     if metal_enabled && target_os != "macos" {
         panic!("oar-ocr-vl feature `metal` is only supported on macOS targets");
@@ -129,9 +150,16 @@ fn main() {
         let out_dir = std::path::PathBuf::from(
             std::env::var_os("OUT_DIR").expect("Cargo always sets OUT_DIR"),
         );
-        let output = Command::new(&nvcc)
+        let mut command = Command::new(&nvcc);
+        command
             .args(["--ptx", "--std=c++17", "-O3"])
-            .arg(format!("--gpu-architecture={cuda_arch}"))
+            .arg(format!("--gpu-architecture={cuda_arch}"));
+        // CUDA 13 CCCL headers fatal out (MSVC C1189) under cl.exe's
+        // traditional preprocessor; request the conforming one.
+        if host_is_msvc && nvcc_major_version(&nvcc).is_some_and(|major| major >= 13) {
+            command.arg("-Xcompiler").arg("/Zc:preprocessor");
+        }
+        let output = command
             .arg("-o")
             .arg(out_dir.join("oar_vl_kernels.ptx"))
             .arg("src/cuda_kernels.cu")
