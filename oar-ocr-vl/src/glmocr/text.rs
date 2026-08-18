@@ -1091,12 +1091,14 @@ impl GlmVerificationCudaGraph {
             cache_len: _,
             query_len: _,
         } = self;
-        std::mem::forget(token_output);
-        std::mem::forget(hidden_output);
+        // Leak the two small length buffers; the rest was allocated outside
+        // the capture (see SingleTokenDecoderCudaGraph::dispose).
         std::mem::forget(kv_lengths);
         std::mem::forget(_query_lengths);
-        std::mem::forget(position_input);
-        std::mem::forget(hidden_input);
+        drop(token_output);
+        drop(hidden_output);
+        drop(position_input);
+        drop(hidden_input);
         drop(graph);
     }
 }
@@ -1416,28 +1418,37 @@ impl GlmOcrTextModel {
         )?;
         let warm_logits = self.project_logits(&warm, lm_head)?;
         sync_graph_tensor("GLM-OCR", &warm_logits, "warm decoder CUDA graph")?;
+        // Allocate the output buffer before capture so it belongs to the
+        // regular stream-ordered pool; a capture-time allocation lives in the
+        // graph's private pool and can never be returned to the allocator
+        // safely. Prime the copy so the captured run sees a warm kernel.
+        let logits_output = Tensor::zeros_like(&warm_logits)
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "graph logits output", e))?;
+        logits_output
+            .slice_set(&warm_logits, 0, 0)
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "prime graph logits copy", e))?;
 
         stream
             .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
             .map_err(|e| cuda_graph_error("GLM-OCR", "begin decoder CUDA graph capture", e))?;
-        let captured_output = (|| {
+        let captured_output: Result<(), Error> = (|| {
             let hidden = self.forward_dynamic(
                 &hidden_input,
                 &position_input,
                 &query_lengths,
                 kv_lengths.tensor(),
             )?;
-            self.project_logits(&hidden, lm_head)
+            let logits = self.project_logits(&hidden, lm_head)?;
+            logits_output
+                .slice_set(&logits, 0, 0)
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "record graph logits copy", e))
         })();
-        let logits_output = match captured_output {
-            Ok(output) => output,
-            Err(error) => {
-                let _ = stream.end_capture(
-                    CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-                );
-                return Err(error);
-            }
-        };
+        if let Err(error) = captured_output {
+            let _ = stream.end_capture(
+                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            );
+            return Err(error);
+        }
         let graph = stream
             .end_capture(
                 CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
@@ -1512,11 +1523,25 @@ impl GlmOcrTextModel {
             .argmax(D::Minus1)
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "warm verification argmax", e))?;
         sync_graph_tensor("GLM-OCR", &warm_tokens, "warm verification CUDA graph")?;
+        // Allocate the output buffers before capture so they belong to the
+        // regular stream-ordered pool; a capture-time allocation lives in the
+        // graph's private pool and can never be returned to the allocator
+        // safely. Prime the copies so the captured run sees warm kernels.
+        let hidden_output = Tensor::zeros_like(&warm)
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "verification hidden output", e))?;
+        let token_output = Tensor::zeros_like(&warm_tokens)
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "verification token output", e))?;
+        hidden_output
+            .slice_set(&warm, 0, 0)
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "prime verification hidden copy", e))?;
+        token_output
+            .slice_set(&warm_tokens, 0, 0)
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "prime verification token copy", e))?;
 
         stream
             .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
             .map_err(|e| cuda_graph_error("GLM-OCR", "begin verification graph capture", e))?;
-        let captured_output = (|| {
+        let captured_output: Result<(), Error> = (|| {
             let hidden = self.forward_dynamic(
                 &hidden_input,
                 &position_input,
@@ -1529,17 +1554,19 @@ impl GlmOcrTextModel {
                 .map_err(|e| {
                     candle_to_ocr_inference("GLM-OCR", "captured verification argmax", e)
                 })?;
-            Ok::<_, Error>((hidden, tokens))
+            hidden_output.slice_set(&hidden, 0, 0).map_err(|e| {
+                candle_to_ocr_inference("GLM-OCR", "record verification hidden copy", e)
+            })?;
+            token_output.slice_set(&tokens, 0, 0).map_err(|e| {
+                candle_to_ocr_inference("GLM-OCR", "record verification token copy", e)
+            })
         })();
-        let (hidden_output, token_output) = match captured_output {
-            Ok(output) => output,
-            Err(error) => {
-                let _ = stream.end_capture(
-                    CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-                );
-                return Err(error);
-            }
-        };
+        if let Err(error) = captured_output {
+            let _ = stream.end_capture(
+                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            );
+            return Err(error);
+        }
         let graph = stream
             .end_capture(
                 CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
@@ -1685,6 +1712,15 @@ impl GlmOcrTextModel {
             layer.trim_kv_cache(len)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl Drop for GlmOcrTextModel {
+    fn drop(&mut self) {
+        // A cached graph must go through dispose: plainly dropping it returns
+        // graph-bound buffers to the allocator and poisons it.
+        self.invalidate_cuda_graph();
     }
 }
 

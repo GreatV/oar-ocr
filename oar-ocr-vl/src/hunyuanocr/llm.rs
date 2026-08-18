@@ -688,16 +688,16 @@ impl TargetDecoderCudaGraph {
             aux_layer_ids: _,
             cache_len: _,
         } = self;
-        if let Some(aux_output) = aux_output {
-            std::mem::forget(aux_output);
-        }
-        std::mem::forget(logits_output);
-        std::mem::forget(hidden_output);
+        // Leak the two small length buffers; the rest was allocated outside
+        // the capture (see SingleTokenDecoderCudaGraph::dispose).
         std::mem::forget(kv_lengths);
         std::mem::forget(_query_lengths);
-        std::mem::forget(sin_input);
-        std::mem::forget(cos_input);
-        std::mem::forget(hidden_input);
+        drop(aux_output);
+        drop(logits_output);
+        drop(hidden_output);
+        drop(sin_input);
+        drop(cos_input);
+        drop(hidden_input);
         drop(graph);
     }
 }
@@ -1396,13 +1396,38 @@ impl HunyuanLlm {
         )?;
         let warm_logits = self.project_logits(&warm.hidden_states)?;
         sync_graph_tensor("HunyuanOCR", &warm_logits, "warm full target decoder graph")?;
+        // Allocate the output buffers before capture so they belong to the
+        // regular stream-ordered pool; a capture-time allocation lives in the
+        // graph's private pool and can never be returned to the allocator
+        // safely. Prime the copies so the captured run sees warm kernels.
+        let hidden_output = Tensor::zeros_like(&warm.hidden_states)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph hidden output", e))?;
+        let logits_output = Tensor::zeros_like(&warm_logits)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph logits output", e))?;
+        let aux_output = warm
+            .aux_hidden_states
+            .as_ref()
+            .map(Tensor::zeros_like)
+            .transpose()
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph aux output", e))?;
+        hidden_output
+            .slice_set(&warm.hidden_states, 0, 0)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "prime full hidden copy", e))?;
+        logits_output
+            .slice_set(&warm_logits, 0, 0)
+            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "prime full logits copy", e))?;
+        if let (Some(buffer), Some(source)) = (&aux_output, &warm.aux_hidden_states) {
+            buffer
+                .slice_set(source, 0, 0)
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "prime full aux copy", e))?;
+        }
 
         stream
             .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
             .map_err(|e| {
                 cuda_graph_error("HunyuanOCR", "begin full target decoder graph capture", e)
             })?;
-        let captured_output = (|| {
+        let captured_output: Result<(), Error> = (|| {
             let output = self.forward_with_aux_dynamic(
                 &hidden_input,
                 &cos_input,
@@ -1412,17 +1437,25 @@ impl HunyuanLlm {
                 aux_layer_ids,
             )?;
             let logits = self.project_logits(&output.hidden_states)?;
-            Ok::<_, Error>((output, logits))
-        })();
-        let (output, logits_output) = match captured_output {
-            Ok(output) => output,
-            Err(error) => {
-                let _ = stream.end_capture(
-                    CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-                );
-                return Err(error);
+            hidden_output
+                .slice_set(&output.hidden_states, 0, 0)
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "record full hidden copy", e))?;
+            logits_output
+                .slice_set(&logits, 0, 0)
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "record full logits copy", e))?;
+            if let (Some(buffer), Some(source)) = (&aux_output, &output.aux_hidden_states) {
+                buffer.slice_set(source, 0, 0).map_err(|e| {
+                    candle_to_ocr_inference("HunyuanOCR", "record full aux copy", e)
+                })?;
             }
-        };
+            Ok(())
+        })();
+        if let Err(error) = captured_output {
+            let _ = stream.end_capture(
+                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            );
+            return Err(error);
+        }
         let graph = stream
             .end_capture(
                 CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
@@ -1433,7 +1466,6 @@ impl HunyuanLlm {
             .ok_or_else(|| Error::Config {
                 message: "HunyuanOCR full target decoder capture returned no graph".to_string(),
             })?;
-        let aux_output = output.aux_hidden_states;
         graph
             .launch()
             .map_err(|e| cuda_graph_error("HunyuanOCR", "warm full target decoder graph", e))?;
@@ -1450,7 +1482,7 @@ impl HunyuanLlm {
             sin_input,
             _query_lengths: query_lengths,
             kv_lengths,
-            hidden_output: output.hidden_states,
+            hidden_output,
             logits_output,
             aux_output,
             aux_layer_ids: aux_layer_ids.to_vec(),
@@ -1493,6 +1525,15 @@ impl HunyuanLlm {
         self.layers
             .first()
             .map_or(0, HunyuanDecoderLayer::kv_cache_len)
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl Drop for HunyuanLlm {
+    fn drop(&mut self) {
+        // A cached graph must go through dispose: plainly dropping it returns
+        // graph-bound buffers to the allocator and poisons it.
+        self.invalidate_cuda_graph();
     }
 }
 

@@ -871,13 +871,15 @@ impl DFlashCudaGraph {
             hidden_output,
             proposals_output,
         } = self;
-        std::mem::forget(proposals_output);
-        std::mem::forget(hidden_output);
+        // Leak the two small length buffers; the rest was allocated outside
+        // the capture (see SingleTokenDecoderCudaGraph::dispose).
         std::mem::forget(kv_lengths);
         std::mem::forget(_query_lengths);
-        std::mem::forget(sin_input);
-        std::mem::forget(cos_input);
-        std::mem::forget(query_input);
+        drop(proposals_output);
+        drop(hidden_output);
+        drop(sin_input);
+        drop(cos_input);
+        drop(query_input);
         drop(graph);
     }
 }
@@ -1269,13 +1271,27 @@ impl DFlashModel {
             &warm_proposals,
             "warm full draft graph",
         )?;
+        // Allocate the output buffers before capture so they belong to the
+        // regular stream-ordered pool; a capture-time allocation lives in the
+        // graph's private pool and can never be returned to the allocator
+        // safely. Prime the copies so the captured run sees warm kernels.
+        let hidden_output = Tensor::zeros_like(&warm)
+            .map_err(|e| tensor_err("HunyuanOCR DFlash: full graph hidden output", e))?;
+        let proposals_output = Tensor::zeros_like(&warm_proposals)
+            .map_err(|e| tensor_err("HunyuanOCR DFlash: full graph proposals output", e))?;
+        hidden_output
+            .slice_set(&warm, 0, 0)
+            .map_err(|e| tensor_err("HunyuanOCR DFlash: prime full hidden copy", e))?;
+        proposals_output
+            .slice_set(&warm_proposals, 0, 0)
+            .map_err(|e| tensor_err("HunyuanOCR DFlash: prime full proposals copy", e))?;
 
         stream
             .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
             .map_err(|e| {
                 cuda_graph_error("HunyuanOCR DFlash", "begin full draft graph capture", e)
             })?;
-        let captured_output = (|| {
+        let captured_output: Result<(), Error> = (|| {
             let hidden = self.forward_queries_dynamic(
                 &query_input,
                 &cos_input,
@@ -1284,17 +1300,19 @@ impl DFlashModel {
                 kv_lengths.tensor(),
             )?;
             let proposals = self.proposals_from_hidden(&hidden)?;
-            Ok::<_, Error>((hidden, proposals))
+            hidden_output
+                .slice_set(&hidden, 0, 0)
+                .map_err(|e| tensor_err("HunyuanOCR DFlash: record full hidden copy", e))?;
+            proposals_output
+                .slice_set(&proposals, 0, 0)
+                .map_err(|e| tensor_err("HunyuanOCR DFlash: record full proposals copy", e))
         })();
-        let (hidden_output, proposals_output) = match captured_output {
-            Ok(output) => output,
-            Err(error) => {
-                let _ = stream.end_capture(
-                    CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-                );
-                return Err(error);
-            }
-        };
+        if let Err(error) = captured_output {
+            let _ = stream.end_capture(
+                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            );
+            return Err(error);
+        }
         let graph = stream
             .end_capture(
                 CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
@@ -1417,6 +1435,15 @@ impl DFlashModel {
         for cache in self.caches.borrow_mut().iter_mut() {
             cache.reset();
         }
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl Drop for DFlashModel {
+    fn drop(&mut self) {
+        // A cached graph must go through dispose: plainly dropping it returns
+        // graph-bound buffers to the allocator and poisons it.
+        self.invalidate_cuda_graph();
     }
 }
 

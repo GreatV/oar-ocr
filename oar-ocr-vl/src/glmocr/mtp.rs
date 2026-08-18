@@ -43,13 +43,15 @@ impl GlmMtpCudaGraph {
             token_output,
             cache_len: _,
         } = self;
-        std::mem::forget(token_output);
-        std::mem::forget(hidden_output);
+        // Leak the two small length buffers; the rest was allocated outside
+        // the capture (see SingleTokenDecoderCudaGraph::dispose).
         std::mem::forget(kv_lengths);
         std::mem::forget(_query_lengths);
-        std::mem::forget(position_input);
-        std::mem::forget(previous_hidden_input);
-        std::mem::forget(token_input);
+        drop(token_output);
+        drop(hidden_output);
+        drop(position_input);
+        drop(previous_hidden_input);
+        drop(token_input);
         drop(graph);
     }
 }
@@ -304,7 +306,7 @@ impl GlmOcrMtpModel {
         let stream = cuda.cuda_stream();
         let _htod_cache = cuda.enable_cuda_graph_htod_cache();
 
-        let (_, warm_token) = self.forward_dynamic(
+        let (warm_hidden, warm_token) = self.forward_dynamic(
             &token_input,
             &previous_hidden_input,
             &position_input,
@@ -312,26 +314,45 @@ impl GlmOcrMtpModel {
             kv_lengths.tensor(),
         )?;
         sync_graph_tensor("GLM-OCR", &warm_token, "warm MTP CUDA graph")?;
+        // Allocate the output buffers before capture so they belong to the
+        // regular stream-ordered pool; a capture-time allocation lives in the
+        // graph's private pool and can never be returned to the allocator
+        // safely. Prime the copies so the captured run sees warm kernels.
+        let hidden_output = Tensor::zeros_like(&warm_hidden)
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP hidden output", e))?;
+        let token_output = Tensor::zeros_like(&warm_token)
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP token output", e))?;
+        hidden_output
+            .slice_set(&warm_hidden, 0, 0)
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "prime MTP hidden copy", e))?;
+        token_output
+            .slice_set(&warm_token, 0, 0)
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "prime MTP token copy", e))?;
 
         stream
             .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
             .map_err(|e| cuda_graph_error("GLM-OCR", "begin MTP CUDA graph capture", e))?;
-        let captured_output = self.forward_dynamic(
-            &token_input,
-            &previous_hidden_input,
-            &position_input,
-            &query_lengths,
-            kv_lengths.tensor(),
-        );
-        let (hidden_output, token_output) = match captured_output {
-            Ok(output) => output,
-            Err(error) => {
-                let _ = stream.end_capture(
-                    CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-                );
-                return Err(error);
-            }
-        };
+        let captured_output: Result<(), Error> = (|| {
+            let (hidden, token) = self.forward_dynamic(
+                &token_input,
+                &previous_hidden_input,
+                &position_input,
+                &query_lengths,
+                kv_lengths.tensor(),
+            )?;
+            hidden_output
+                .slice_set(&hidden, 0, 0)
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "record MTP hidden copy", e))?;
+            token_output
+                .slice_set(&token, 0, 0)
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "record MTP token copy", e))
+        })();
+        if let Err(error) = captured_output {
+            let _ = stream.end_capture(
+                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            );
+            return Err(error);
+        }
         let graph = stream
             .end_capture(
                 CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
@@ -428,5 +449,13 @@ impl GlmOcrMtpModel {
 
     pub(super) fn kv_cache_len(&self) -> usize {
         self.layer.kv_cache_len()
+    }
+}
+
+impl Drop for GlmOcrMtpModel {
+    fn drop(&mut self) {
+        // A cached graph must go through dispose: plainly dropping it returns
+        // graph-bound buffers to the allocator and poisons it.
+        self.invalidate_cuda_graph();
     }
 }

@@ -738,28 +738,37 @@ impl Ernie4_5Model {
         )?;
         let warm_logits = self.project_logits(&warm, lm_head)?;
         sync_graph_tensor("PaddleOCR-VL", &warm_logits, "warm decoder CUDA graph")?;
+        // Allocate the output buffer before capture so it belongs to the
+        // regular stream-ordered pool; a capture-time allocation lives in the
+        // graph's private pool and can never be returned to the allocator
+        // safely. Prime the copy so the captured run sees a warm kernel.
+        let logits_output = Tensor::zeros_like(&warm_logits)
+            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "graph logits output", e))?;
+        logits_output
+            .slice_set(&warm_logits, 0, 0)
+            .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "prime graph logits copy", e))?;
 
         stream
             .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
             .map_err(|e| cuda_graph_error("PaddleOCR-VL", "begin decoder CUDA graph capture", e))?;
-        let captured_output = (|| {
+        let captured_output: Result<(), Error> = (|| {
             let hidden = self.forward_dynamic(
                 &hidden_input,
                 &position_input,
                 &query_lengths,
                 kv_lengths.tensor(),
             )?;
-            self.project_logits(&hidden, lm_head)
+            let logits = self.project_logits(&hidden, lm_head)?;
+            logits_output
+                .slice_set(&logits, 0, 0)
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "record graph logits copy", e))
         })();
-        let logits_output = match captured_output {
-            Ok(output) => output,
-            Err(error) => {
-                let _ = stream.end_capture(
-                    CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-                );
-                return Err(error);
-            }
-        };
+        if let Err(error) = captured_output {
+            let _ = stream.end_capture(
+                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            );
+            return Err(error);
+        }
         let graph = stream
             .end_capture(
                 CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
@@ -851,5 +860,14 @@ impl Ernie4_5Model {
         for layer in &self.layers {
             layer.clear_kv_cache();
         }
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl Drop for Ernie4_5Model {
+    fn drop(&mut self) {
+        // A cached graph must go through dispose: plainly dropping it returns
+        // graph-bound buffers to the allocator and poisons it.
+        self.invalidate_cuda_graph();
     }
 }
