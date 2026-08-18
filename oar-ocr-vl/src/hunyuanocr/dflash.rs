@@ -14,7 +14,10 @@ use crate::attention::{RotaryEmbedding, flash_attention, scaled_dot_product_atte
 #[cfg(feature = "cuda")]
 use crate::cuda_kernels::ArgmaxFirstBf16;
 #[cfg(feature = "cuda")]
-use crate::decoder_graph::{CudaGraphKvLengths, cuda_graph_error, sync_graph_tensor};
+use crate::decoder_graph::{
+    CudaGraphKvLengths, cuda_graph_error, drain_cuda_graph_drop_errors, report_stashed_cuda_error,
+    sync_graph_tensor,
+};
 use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 use candle_core::{D, DType, Device, Tensor};
@@ -872,6 +875,7 @@ impl DFlashCudaGraph {
             proposals_output,
         } = self;
         let device = query_input.device().clone();
+        report_stashed_cuda_error(&device, "CUDA graph disposal");
         drop(graph);
         drop(proposals_output);
         drop(hidden_output);
@@ -880,12 +884,7 @@ impl DFlashCudaGraph {
         drop(sin_input);
         drop(cos_input);
         drop(query_input);
-        // Drops above may stash errors on the context; drain them so they
-        // cannot poison the next CUDA call (see
-        // SingleTokenDecoderCudaGraph::dispose).
-        if let Device::Cuda(cuda) = device {
-            let _ = cuda.cuda_stream().context().check_err();
-        }
+        drain_cuda_graph_drop_errors(&device);
     }
 }
 

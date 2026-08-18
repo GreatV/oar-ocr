@@ -52,6 +52,38 @@ pub(crate) fn cuda_graph_error(
     }
 }
 
+/// Surface a CUDA error that drop glue stashed on the context *before* graph
+/// teardown runs, so preexisting failures are reported rather than silently
+/// overwritten or cleared by the teardown drain below.
+#[cfg(feature = "cuda")]
+pub(crate) fn report_stashed_cuda_error(device: &Device, context: &'static str) {
+    let Device::Cuda(cuda) = device else {
+        return;
+    };
+    if let Err(error) = cuda.cuda_stream().context().check_err() {
+        tracing::warn!("stashed CUDA error before {context}: {error}");
+    }
+}
+
+/// Drain errors that dropping graph-bound buffers stashed on the context.
+/// Freeing memory owned by a destroyed graph fails with
+/// CUDA_ERROR_INVALID_VALUE inside cudarc's drop glue; that one is expected
+/// here. Anything else is a real failure and must still be reported.
+#[cfg(feature = "cuda")]
+pub(crate) fn drain_cuda_graph_drop_errors(device: &Device) {
+    use candle_core::cuda_backend::cudarc::driver::{result::DriverError, sys::CUresult};
+
+    let Device::Cuda(cuda) = device else {
+        return;
+    };
+    match cuda.cuda_stream().context().check_err() {
+        Ok(()) | Err(DriverError(CUresult::CUDA_ERROR_INVALID_VALUE)) => {}
+        Err(error) => {
+            tracing::warn!("unexpected CUDA error stashed during CUDA graph disposal: {error}");
+        }
+    }
+}
+
 #[cfg(feature = "cuda")]
 pub(crate) fn sync_graph_tensor(
     model_name: &str,
@@ -201,18 +233,14 @@ impl SingleTokenDecoderCudaGraph {
             cache_len: _,
         } = self;
         let device = hidden_input.device().clone();
+        report_stashed_cuda_error(&device, "decoder CUDA graph disposal");
         drop(graph);
         drop(logits_output);
         drop(kv_lengths);
         drop(_query_lengths);
         drop(position_input);
         drop(hidden_input);
-        // Drops above may have stashed errors on the context (freeing
-        // graph-bound memory fails inside cudarc's drop glue). Surface and
-        // clear them here so they cannot poison the next CUDA call.
-        if let Device::Cuda(cuda) = device {
-            let _ = cuda.cuda_stream().context().check_err();
-        }
+        drain_cuda_graph_drop_errors(&device);
     }
 }
 

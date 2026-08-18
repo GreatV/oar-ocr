@@ -8,7 +8,8 @@ use crate::attention::{
 };
 #[cfg(feature = "cuda")]
 use crate::decoder_graph::{
-    CudaGraphKvLengths, cuda_graph_error, decoder_attention_is_causal, sync_graph_tensor,
+    CudaGraphKvLengths, cuda_graph_error, decoder_attention_is_causal,
+    drain_cuda_graph_drop_errors, report_stashed_cuda_error, sync_graph_tensor,
 };
 use crate::error::Error;
 use crate::kv_trim::TrimmableKvCache;
@@ -689,6 +690,7 @@ impl TargetDecoderCudaGraph {
             cache_len: _,
         } = self;
         let device = hidden_input.device().clone();
+        report_stashed_cuda_error(&device, "CUDA graph disposal");
         drop(graph);
         drop(aux_output);
         drop(logits_output);
@@ -698,12 +700,7 @@ impl TargetDecoderCudaGraph {
         drop(sin_input);
         drop(cos_input);
         drop(hidden_input);
-        // Drops above may stash errors on the context; drain them so they
-        // cannot poison the next CUDA call (see
-        // SingleTokenDecoderCudaGraph::dispose).
-        if let Device::Cuda(cuda) = device {
-            let _ = cuda.cuda_stream().context().check_err();
-        }
+        drain_cuda_graph_drop_errors(&device);
     }
 }
 

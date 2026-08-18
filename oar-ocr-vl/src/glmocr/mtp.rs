@@ -6,7 +6,10 @@
 
 use super::config::GlmOcrTextConfig;
 use super::text::{GlmOcrTextDecoderLayer, GlmOcrTextRotaryEmbedding};
-use crate::decoder_graph::{CudaGraphKvLengths, cuda_graph_error, sync_graph_tensor};
+use crate::decoder_graph::{
+    CudaGraphKvLengths, cuda_graph_error, drain_cuda_graph_drop_errors, report_stashed_cuda_error,
+    sync_graph_tensor,
+};
 use crate::error::Error;
 use crate::utils::candle_to_ocr_inference;
 use candle_core::{D, DType, Device, Tensor};
@@ -44,6 +47,7 @@ impl GlmMtpCudaGraph {
             cache_len: _,
         } = self;
         let device = token_input.device().clone();
+        report_stashed_cuda_error(&device, "CUDA graph disposal");
         drop(graph);
         drop(token_output);
         drop(hidden_output);
@@ -52,12 +56,7 @@ impl GlmMtpCudaGraph {
         drop(position_input);
         drop(previous_hidden_input);
         drop(token_input);
-        // Drops above may stash errors on the context; drain them so they
-        // cannot poison the next CUDA call (see
-        // SingleTokenDecoderCudaGraph::dispose).
-        if let Device::Cuda(cuda) = device {
-            let _ = cuda.cuda_stream().context().check_err();
-        }
+        drain_cuda_graph_drop_errors(&device);
     }
 }
 
