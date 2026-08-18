@@ -879,6 +879,10 @@ pub struct HunyuanLlm {
     /// per `forward` to section-mix the rotary `cos`/`sin` tensors before they
     /// fan out to every layer — see [`apply_xdrope_rotary_pos_emb`].
     xdrope_section: Vec<usize>,
+    // Must stay the last field: it drops last and drains CUDA errors the
+    // other fields' frees may stash (see CudaGraphDrainGuard).
+    #[cfg(feature = "cuda")]
+    _drain_guard: CudaGraphDrainGuard,
 }
 
 impl HunyuanLlm {
@@ -919,6 +923,8 @@ impl HunyuanLlm {
             .to_dtype(candle_core::DType::F32)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "decode rope sin f32", e))?;
 
+        #[cfg(feature = "cuda")]
+        let _drain_guard = CudaGraphDrainGuard::new(vb.device());
         Ok(Self {
             #[cfg(feature = "cuda")]
             decode_graph: RefCell::new(None),
@@ -929,6 +935,8 @@ impl HunyuanLlm {
             decode_cos,
             decode_sin,
             xdrope_section: cfg.rope_scaling.xdrope_section.clone(),
+            #[cfg(feature = "cuda")]
+            _drain_guard,
         })
     }
 
