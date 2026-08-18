@@ -105,6 +105,22 @@ fn validate_cuda_aggregator(sources: &[std::path::PathBuf]) {
     }
 }
 
+fn nvcc_major_version(nvcc: &std::ffi::OsStr) -> Option<u32> {
+    let output = Command::new(nvcc).arg("--version").output().ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The last line reads "Cuda compilation tools, release 13.2, V13.2.78".
+    let release = stdout
+        .lines()
+        .find_map(|line| line.split("release ").nth(1).map(str::to_owned))?;
+    release
+        .split([',', ' '])
+        .next()?
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
+
 fn main() {
     let mut cuda_sources = Vec::new();
     collect_cuda_sources(Path::new("src"), &mut cuda_sources);
@@ -129,9 +145,16 @@ fn main() {
         let out_dir = std::path::PathBuf::from(
             std::env::var_os("OUT_DIR").expect("Cargo always sets OUT_DIR"),
         );
-        let output = Command::new(&nvcc)
+        let mut command = Command::new(&nvcc);
+        command
             .args(["--ptx", "--std=c++17", "-O3"])
-            .arg(format!("--gpu-architecture={cuda_arch}"))
+            .arg(format!("--gpu-architecture={cuda_arch}"));
+        // CUDA 13 CCCL headers fatal out (MSVC C1189) under cl.exe's
+        // traditional preprocessor; request the conforming one.
+        if target_os == "windows" && nvcc_major_version(&nvcc).is_some_and(|major| major >= 13) {
+            command.arg("-Xcompiler").arg("/Zc:preprocessor");
+        }
+        let output = command
             .arg("-o")
             .arg(out_dir.join("oar_vl_kernels.ptx"))
             .arg("src/cuda_kernels.cu")
