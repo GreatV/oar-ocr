@@ -171,11 +171,12 @@ impl std::fmt::Debug for CudaGraphKvLengths {
 ///
 /// The graph owns raw pointers into every tensor below, the model's fixed KV
 /// storage, its weights, and the external LM head. Dispose through
-/// [`Self::dispose`] rather than a plain drop: the length buffers service the
-/// graph's HtoD updates, and handing them (or any capture-time allocation)
-/// back to the stream-ordered allocator poisons it, making later, unrelated
-/// allocations fail with CUDA_ERROR_INVALID_VALUE. The input/output tensors
-/// are allocated outside the capture and may be dropped normally.
+/// [`Self::dispose`] rather than a plain drop: freeing buffers that are bound
+/// to a CUDA graph fails inside cudarc's drop glue, which *stashes* the error
+/// on the context; the next unrelated fallible CUDA call would then return
+/// that stale CUDA_ERROR_INVALID_VALUE. `dispose` drops everything and then
+/// drains the stashed error so nothing leaks and no context state is kept
+/// alive by forgotten tensors.
 #[cfg(feature = "cuda")]
 pub(crate) struct SingleTokenDecoderCudaGraph {
     pub(crate) graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
@@ -199,14 +200,19 @@ impl SingleTokenDecoderCudaGraph {
             logits_output,
             cache_len: _,
         } = self;
-        // Leak the two small length buffers (a few dozen bytes per captured
-        // graph); everything sizable was allocated outside the capture.
-        std::mem::forget(kv_lengths);
-        std::mem::forget(_query_lengths);
+        let device = hidden_input.device().clone();
+        drop(graph);
         drop(logits_output);
+        drop(kv_lengths);
+        drop(_query_lengths);
         drop(position_input);
         drop(hidden_input);
-        drop(graph);
+        // Drops above may have stashed errors on the context (freeing
+        // graph-bound memory fails inside cudarc's drop glue). Surface and
+        // clear them here so they cannot poison the next CUDA call.
+        if let Device::Cuda(cuda) = device {
+            let _ = cuda.cuda_stream().context().check_err();
+        }
     }
 }
 

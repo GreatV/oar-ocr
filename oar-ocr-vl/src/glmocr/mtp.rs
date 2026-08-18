@@ -43,16 +43,21 @@ impl GlmMtpCudaGraph {
             token_output,
             cache_len: _,
         } = self;
-        // Leak the two small length buffers; the rest was allocated outside
-        // the capture (see SingleTokenDecoderCudaGraph::dispose).
-        std::mem::forget(kv_lengths);
-        std::mem::forget(_query_lengths);
+        let device = token_input.device().clone();
+        drop(graph);
         drop(token_output);
         drop(hidden_output);
+        drop(kv_lengths);
+        drop(_query_lengths);
         drop(position_input);
         drop(previous_hidden_input);
         drop(token_input);
-        drop(graph);
+        // Drops above may stash errors on the context; drain them so they
+        // cannot poison the next CUDA call (see
+        // SingleTokenDecoderCudaGraph::dispose).
+        if let Device::Cuda(cuda) = device {
+            let _ = cuda.cuda_stream().context().check_err();
+        }
     }
 }
 

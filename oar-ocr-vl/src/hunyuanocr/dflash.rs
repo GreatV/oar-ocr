@@ -871,16 +871,21 @@ impl DFlashCudaGraph {
             hidden_output,
             proposals_output,
         } = self;
-        // Leak the two small length buffers; the rest was allocated outside
-        // the capture (see SingleTokenDecoderCudaGraph::dispose).
-        std::mem::forget(kv_lengths);
-        std::mem::forget(_query_lengths);
+        let device = query_input.device().clone();
+        drop(graph);
         drop(proposals_output);
         drop(hidden_output);
+        drop(kv_lengths);
+        drop(_query_lengths);
         drop(sin_input);
         drop(cos_input);
         drop(query_input);
-        drop(graph);
+        // Drops above may stash errors on the context; drain them so they
+        // cannot poison the next CUDA call (see
+        // SingleTokenDecoderCudaGraph::dispose).
+        if let Device::Cuda(cuda) = device {
+            let _ = cuda.cuda_stream().context().check_err();
+        }
     }
 }
 
