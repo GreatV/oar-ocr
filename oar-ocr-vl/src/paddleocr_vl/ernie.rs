@@ -6,8 +6,8 @@ use crate::attention::{
 use crate::decoder_graph::decoder_cache_capacity;
 #[cfg(feature = "cuda")]
 use crate::decoder_graph::{
-    CudaGraphKvLengths, SingleTokenDecoderCudaGraph, cuda_graph_error, decoder_attention_is_causal,
-    sync_graph_tensor,
+    CudaGraphDrainGuard, CudaGraphKvLengths, SingleTokenDecoderCudaGraph, cuda_graph_error,
+    decoder_attention_is_causal, sync_graph_tensor,
 };
 use crate::error::Error;
 #[cfg(feature = "cuda")]
@@ -537,6 +537,10 @@ pub struct Ernie4_5Model {
     layers: Vec<Ernie4_5DecoderLayer>,
     norm: candle_nn::RmsNorm,
     rotary: RotaryEmbedding,
+    // Must stay the last field: it drops last and drains CUDA errors the
+    // other fields' frees may stash (see CudaGraphDrainGuard).
+    #[cfg(feature = "cuda")]
+    _drain_guard: CudaGraphDrainGuard,
 }
 
 impl Ernie4_5Model {
@@ -554,6 +558,8 @@ impl Ernie4_5Model {
         let norm = candle_nn::rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("norm"))
             .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "load final norm", e))?;
         let rotary = RotaryEmbedding::new_multi_axis(cfg.head_dim, cfg.rope_theta, 3, vb.device())?;
+        #[cfg(feature = "cuda")]
+        let _drain_guard = CudaGraphDrainGuard::new(vb.device());
         Ok(Self {
             #[cfg(feature = "cuda")]
             decode_graph: RefCell::new(None),
@@ -561,6 +567,8 @@ impl Ernie4_5Model {
             layers,
             norm,
             rotary,
+            #[cfg(feature = "cuda")]
+            _drain_guard,
         })
     }
 

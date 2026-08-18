@@ -15,8 +15,8 @@ use crate::attention::{RotaryEmbedding, flash_attention, scaled_dot_product_atte
 use crate::cuda_kernels::ArgmaxFirstBf16;
 #[cfg(feature = "cuda")]
 use crate::decoder_graph::{
-    CudaGraphKvLengths, cuda_graph_error, drain_cuda_graph_drop_errors, report_stashed_cuda_error,
-    sync_graph_tensor,
+    CudaGraphDrainGuard, CudaGraphKvLengths, cuda_graph_error, drop_and_drain,
+    report_stashed_cuda_error, sync_graph_tensor,
 };
 use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
@@ -876,15 +876,14 @@ impl DFlashCudaGraph {
         } = self;
         let device = query_input.device().clone();
         report_stashed_cuda_error(&device, "CUDA graph disposal");
-        drop(graph);
-        drop(proposals_output);
-        drop(hidden_output);
-        drop(kv_lengths);
-        drop(_query_lengths);
-        drop(sin_input);
-        drop(cos_input);
-        drop(query_input);
-        drain_cuda_graph_drop_errors(&device);
+        drop_and_drain(graph, &device);
+        drop_and_drain(proposals_output, &device);
+        drop_and_drain(hidden_output, &device);
+        drop_and_drain(kv_lengths, &device);
+        drop_and_drain(_query_lengths, &device);
+        drop_and_drain(sin_input, &device);
+        drop_and_drain(cos_input, &device);
+        drop_and_drain(query_input, &device);
     }
 }
 
@@ -916,6 +915,10 @@ pub(crate) struct DFlashModel {
     caches: RefCell<Vec<ContextKv>>,
     dtype: DType,
     device: Device,
+    // Must stay the last field: it drops last and drains CUDA errors the
+    // other fields' frees may stash (see CudaGraphDrainGuard).
+    #[cfg(feature = "cuda")]
+    _drain_guard: CudaGraphDrainGuard,
 }
 
 impl DFlashModel {
@@ -997,6 +1000,8 @@ impl DFlashModel {
             caches: RefCell::new(caches),
             dtype,
             device: device.clone(),
+            #[cfg(feature = "cuda")]
+            _drain_guard: CudaGraphDrainGuard::new(device),
         };
         model.prepare_cuda_graph()?;
         Ok(model)

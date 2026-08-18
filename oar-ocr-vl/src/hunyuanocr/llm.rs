@@ -8,8 +8,8 @@ use crate::attention::{
 };
 #[cfg(feature = "cuda")]
 use crate::decoder_graph::{
-    CudaGraphKvLengths, cuda_graph_error, decoder_attention_is_causal,
-    drain_cuda_graph_drop_errors, report_stashed_cuda_error, sync_graph_tensor,
+    CudaGraphDrainGuard, CudaGraphKvLengths, cuda_graph_error, decoder_attention_is_causal,
+    drop_and_drain, report_stashed_cuda_error, sync_graph_tensor,
 };
 use crate::error::Error;
 use crate::kv_trim::TrimmableKvCache;
@@ -691,16 +691,15 @@ impl TargetDecoderCudaGraph {
         } = self;
         let device = hidden_input.device().clone();
         report_stashed_cuda_error(&device, "CUDA graph disposal");
-        drop(graph);
-        drop(aux_output);
-        drop(logits_output);
-        drop(hidden_output);
-        drop(kv_lengths);
-        drop(_query_lengths);
-        drop(sin_input);
-        drop(cos_input);
-        drop(hidden_input);
-        drain_cuda_graph_drop_errors(&device);
+        drop_and_drain(graph, &device);
+        drop_and_drain(aux_output, &device);
+        drop_and_drain(logits_output, &device);
+        drop_and_drain(hidden_output, &device);
+        drop_and_drain(kv_lengths, &device);
+        drop_and_drain(_query_lengths, &device);
+        drop_and_drain(sin_input, &device);
+        drop_and_drain(cos_input, &device);
+        drop_and_drain(hidden_input, &device);
     }
 }
 

@@ -4,8 +4,8 @@ use crate::attention::{flash_attention, scaled_dot_product_attention_gqa};
 use crate::decoder_graph::decoder_cache_capacity;
 #[cfg(feature = "cuda")]
 use crate::decoder_graph::{
-    CudaGraphKvLengths, SingleTokenDecoderCudaGraph, cuda_graph_error, decoder_attention_is_causal,
-    drain_cuda_graph_drop_errors, report_stashed_cuda_error, sync_graph_tensor,
+    CudaGraphDrainGuard, CudaGraphKvLengths, SingleTokenDecoderCudaGraph, cuda_graph_error,
+    decoder_attention_is_causal, drop_and_drain, report_stashed_cuda_error, sync_graph_tensor,
 };
 use crate::error::Error;
 #[cfg(feature = "cuda")]
@@ -1093,14 +1093,13 @@ impl GlmVerificationCudaGraph {
         } = self;
         let device = hidden_input.device().clone();
         report_stashed_cuda_error(&device, "CUDA graph disposal");
-        drop(graph);
-        drop(token_output);
-        drop(hidden_output);
-        drop(kv_lengths);
-        drop(_query_lengths);
-        drop(position_input);
-        drop(hidden_input);
-        drain_cuda_graph_drop_errors(&device);
+        drop_and_drain(graph, &device);
+        drop_and_drain(token_output, &device);
+        drop_and_drain(hidden_output, &device);
+        drop_and_drain(kv_lengths, &device);
+        drop_and_drain(_query_lengths, &device);
+        drop_and_drain(position_input, &device);
+        drop_and_drain(hidden_input, &device);
     }
 }
 
@@ -1124,6 +1123,10 @@ pub struct GlmOcrTextModel {
     layers: Vec<GlmOcrTextDecoderLayer>,
     norm: RmsNorm,
     rotary_emb: GlmOcrTextRotaryEmbedding,
+    // Must stay the last field: it drops last and drains CUDA errors the
+    // other fields' frees may stash (see CudaGraphDrainGuard).
+    #[cfg(feature = "cuda")]
+    _drain_guard: CudaGraphDrainGuard,
 }
 
 impl GlmOcrTextModel {
@@ -1140,6 +1143,8 @@ impl GlmOcrTextModel {
         let norm = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("norm"))
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "text norm", e))?;
 
+        #[cfg(feature = "cuda")]
+        let _drain_guard = CudaGraphDrainGuard::new(vb.device());
         Ok(Self {
             #[cfg(feature = "cuda")]
             decode_graph: RefCell::new(None),
@@ -1149,6 +1154,8 @@ impl GlmOcrTextModel {
             layers,
             norm,
             rotary_emb,
+            #[cfg(feature = "cuda")]
+            _drain_guard,
         })
     }
 

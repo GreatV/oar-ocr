@@ -7,8 +7,8 @@
 use super::config::GlmOcrTextConfig;
 use super::text::{GlmOcrTextDecoderLayer, GlmOcrTextRotaryEmbedding};
 use crate::decoder_graph::{
-    CudaGraphKvLengths, cuda_graph_error, drain_cuda_graph_drop_errors, report_stashed_cuda_error,
-    sync_graph_tensor,
+    CudaGraphDrainGuard, CudaGraphKvLengths, cuda_graph_error, drop_and_drain,
+    report_stashed_cuda_error, sync_graph_tensor,
 };
 use crate::error::Error;
 use crate::utils::candle_to_ocr_inference;
@@ -48,15 +48,14 @@ impl GlmMtpCudaGraph {
         } = self;
         let device = token_input.device().clone();
         report_stashed_cuda_error(&device, "CUDA graph disposal");
-        drop(graph);
-        drop(token_output);
-        drop(hidden_output);
-        drop(kv_lengths);
-        drop(_query_lengths);
-        drop(position_input);
-        drop(previous_hidden_input);
-        drop(token_input);
-        drain_cuda_graph_drop_errors(&device);
+        drop_and_drain(graph, &device);
+        drop_and_drain(token_output, &device);
+        drop_and_drain(hidden_output, &device);
+        drop_and_drain(kv_lengths, &device);
+        drop_and_drain(_query_lengths, &device);
+        drop_and_drain(position_input, &device);
+        drop_and_drain(previous_hidden_input, &device);
+        drop_and_drain(token_input, &device);
     }
 }
 
@@ -79,6 +78,9 @@ pub(super) struct GlmOcrMtpModel {
     shared_norm: RmsNorm,
     shared_head: Linear,
     rotary_emb: GlmOcrTextRotaryEmbedding,
+    // Must stay the last field: it drops last and drains CUDA errors the
+    // other fields' frees may stash (see CudaGraphDrainGuard).
+    _drain_guard: CudaGraphDrainGuard,
 }
 
 impl GlmOcrMtpModel {
@@ -111,6 +113,7 @@ impl GlmOcrMtpModel {
         .map_err(|e| candle_to_ocr_inference("GLM-OCR", "load MTP shared head", e))?;
         let rotary_emb = GlmOcrTextRotaryEmbedding::new(cfg, vb.device())?;
 
+        let _drain_guard = CudaGraphDrainGuard::new(vb_language_model.device());
         Ok(Self {
             graph: RefCell::new(None),
             embed_tokens,
@@ -121,6 +124,7 @@ impl GlmOcrMtpModel {
             shared_norm,
             shared_head,
             rotary_emb,
+            _drain_guard,
         })
     }
 

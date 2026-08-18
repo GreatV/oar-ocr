@@ -6,8 +6,8 @@ use crate::attention::{
 use crate::decoder_graph::decoder_cache_capacity;
 #[cfg(feature = "cuda")]
 use crate::decoder_graph::{
-    CudaGraphKvLengths, SingleTokenDecoderCudaGraph, cuda_graph_error, decoder_attention_is_causal,
-    sync_graph_tensor,
+    CudaGraphDrainGuard, CudaGraphKvLengths, SingleTokenDecoderCudaGraph, cuda_graph_error,
+    decoder_attention_is_causal, sync_graph_tensor,
 };
 use crate::error::Error;
 #[cfg(feature = "cuda")]
@@ -535,6 +535,10 @@ pub struct MinerUTextModel {
     layers: Vec<MinerUDecoderLayer>,
     norm: candle_nn::RmsNorm,
     rotary_emb: Arc<RotaryEmbedding>,
+    // Must stay the last field: it drops last and drains CUDA errors the
+    // other fields' frees may stash (see CudaGraphDrainGuard).
+    #[cfg(feature = "cuda")]
+    _drain_guard: CudaGraphDrainGuard,
 }
 
 impl MinerUTextModel {
@@ -558,6 +562,8 @@ impl MinerUTextModel {
             vb.device(),
         )?);
 
+        #[cfg(feature = "cuda")]
+        let _drain_guard = CudaGraphDrainGuard::new(vb.device());
         Ok(Self {
             #[cfg(feature = "cuda")]
             decode_graph: RefCell::new(None),
@@ -565,6 +571,8 @@ impl MinerUTextModel {
             layers,
             norm,
             rotary_emb,
+            #[cfg(feature = "cuda")]
+            _drain_guard,
         })
     }
 

@@ -84,6 +84,41 @@ pub(crate) fn drain_cuda_graph_drop_errors(device: &Device) {
     }
 }
 
+/// Drop one graph-bound value and immediately drain whatever its destructor
+/// stashed. cudarc records at most one error on the context, so draining
+/// after every drop keeps teardown failures from overwriting each other.
+#[cfg(feature = "cuda")]
+pub(crate) fn drop_and_drain<T>(value: T, device: &Device) {
+    drop(value);
+    drain_cuda_graph_drop_errors(device);
+}
+
+/// Last-field guard for graph-owning model structs: the model's `Drop`
+/// disposes cached graphs, but Rust frees the remaining fields (KV caches,
+/// weights, embeddings) only afterwards, and those frees can also stash
+/// errors. Declared last so it drops last and drains whatever they left.
+#[cfg(feature = "cuda")]
+#[derive(Debug)]
+pub(crate) struct CudaGraphDrainGuard {
+    device: Device,
+}
+
+#[cfg(feature = "cuda")]
+impl CudaGraphDrainGuard {
+    pub(crate) fn new(device: &Device) -> Self {
+        Self {
+            device: device.clone(),
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl Drop for CudaGraphDrainGuard {
+    fn drop(&mut self) {
+        drain_cuda_graph_drop_errors(&self.device);
+    }
+}
+
 #[cfg(feature = "cuda")]
 pub(crate) fn sync_graph_tensor(
     model_name: &str,
@@ -234,13 +269,12 @@ impl SingleTokenDecoderCudaGraph {
         } = self;
         let device = hidden_input.device().clone();
         report_stashed_cuda_error(&device, "decoder CUDA graph disposal");
-        drop(graph);
-        drop(logits_output);
-        drop(kv_lengths);
-        drop(_query_lengths);
-        drop(position_input);
-        drop(hidden_input);
-        drain_cuda_graph_drop_errors(&device);
+        drop_and_drain(graph, &device);
+        drop_and_drain(logits_output, &device);
+        drop_and_drain(kv_lengths, &device);
+        drop_and_drain(_query_lengths, &device);
+        drop_and_drain(position_input, &device);
+        drop_and_drain(hidden_input, &device);
     }
 }
 
