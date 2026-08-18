@@ -65,21 +65,20 @@ pub(crate) fn report_stashed_cuda_error(device: &Device, context: &'static str) 
     }
 }
 
-/// Drain errors that dropping graph-bound buffers stashed on the context.
-/// Freeing memory owned by a destroyed graph fails with
-/// CUDA_ERROR_INVALID_VALUE inside cudarc's drop glue; that one is expected
-/// here. Anything else is a real failure and must still be reported.
+/// Drain a CudaContext by `check_err`ing until it comes back clean. cudarc
+/// may record several errors in a row, so a single drain would drop all but
+/// the last one.
 #[cfg(feature = "cuda")]
-pub(crate) fn drain_cuda_graph_drop_errors(device: &Device) {
-    use candle_core::cuda_backend::cudarc::driver::{result::DriverError, sys::CUresult};
-
+pub(crate) fn drain_cuda_context_errors(device: &Device) {
     let Device::Cuda(cuda) = device else {
         return;
     };
-    match cuda.cuda_stream().context().check_err() {
-        Ok(()) | Err(DriverError(CUresult::CUDA_ERROR_INVALID_VALUE)) => {}
-        Err(error) => {
-            tracing::warn!("unexpected CUDA error stashed during CUDA graph disposal: {error}");
+    let stream = cuda.cuda_stream();
+    let context = stream.context().clone();
+    loop {
+        match context.check_err() {
+            Ok(()) => break,
+            Err(error) => tracing::warn!("stashed CUDA error during CUDA graph teardown: {error}"),
         }
     }
 }
@@ -90,7 +89,7 @@ pub(crate) fn drain_cuda_graph_drop_errors(device: &Device) {
 #[cfg(feature = "cuda")]
 pub(crate) fn drop_and_drain<T>(value: T, device: &Device) {
     drop(value);
-    drain_cuda_graph_drop_errors(device);
+    drain_cuda_context_errors(device);
 }
 
 /// Last-field guard for graph-owning model structs: the model's `Drop`
@@ -115,7 +114,7 @@ impl CudaGraphDrainGuard {
 #[cfg(feature = "cuda")]
 impl Drop for CudaGraphDrainGuard {
     fn drop(&mut self) {
-        drain_cuda_graph_drop_errors(&self.device);
+        drain_cuda_context_errors(&self.device);
     }
 }
 
