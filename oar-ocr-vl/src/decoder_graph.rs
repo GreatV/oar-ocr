@@ -67,9 +67,12 @@ pub(crate) fn report_stashed_cuda_error(device: &Device, context: &'static str) 
 
 /// Drain a CudaContext by `check_err`ing until it comes back clean. cudarc
 /// may record several errors in a row, so a single drain would drop all but
-/// the last one.
+/// the last one. The expected graph-bound free failure (stashed as
+/// CUDA_ERROR_INVALID_VALUE) is suppressed; anything else is reported.
 #[cfg(feature = "cuda")]
 pub(crate) fn drain_cuda_context_errors(device: &Device) {
+    use candle_core::cuda_backend::cudarc::driver::{result::DriverError, sys::CUresult};
+
     let Device::Cuda(cuda) = device else {
         return;
     };
@@ -78,7 +81,10 @@ pub(crate) fn drain_cuda_context_errors(device: &Device) {
     loop {
         match context.check_err() {
             Ok(()) => break,
-            Err(error) => tracing::warn!("stashed CUDA error during CUDA graph teardown: {error}"),
+            Err(DriverError(CUresult::CUDA_ERROR_INVALID_VALUE)) => {}
+            Err(error) => {
+                tracing::warn!("stashed CUDA error during CUDA graph teardown: {error}");
+            }
         }
     }
 }
