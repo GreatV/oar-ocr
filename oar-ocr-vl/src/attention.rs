@@ -850,9 +850,7 @@ impl RotaryEmbedding {
                 let position_ids = position_ids.to_dtype(DType::F32).map_err(|e| {
                     candle_to_ocr_processing(
                         crate::error::ProcessingStage::TensorOperation,
-                        format!(
-                            "RotaryEmbedding: position_ids cast to f32 failed (dims {dims:?})"
-                        ),
+                        format!("RotaryEmbedding: position_ids cast to f32 failed (dims {dims:?})"),
                         e,
                     )
                 })?;
