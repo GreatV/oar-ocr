@@ -1063,7 +1063,9 @@ impl GlmOcrTextDecoderLayer {
 
 #[cfg(feature = "cuda")]
 struct GlmVerificationCudaGraph {
-    // The graph owns device pointers into all tensors below. Drop it first.
+    // The graph owns device pointers into all tensors below; dispose via
+    // `dispose` so capture-touched buffers are never returned to the
+    // stream-ordered allocator (see SingleTokenDecoderCudaGraph::dispose).
     graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
     hidden_input: Tensor,
     position_input: Tensor,
@@ -1073,6 +1075,30 @@ struct GlmVerificationCudaGraph {
     token_output: Tensor,
     cache_len: usize,
     query_len: usize,
+}
+
+#[cfg(feature = "cuda")]
+impl GlmVerificationCudaGraph {
+    fn dispose(self) {
+        let Self {
+            graph,
+            hidden_input,
+            position_input,
+            _query_lengths,
+            kv_lengths,
+            hidden_output,
+            token_output,
+            cache_len: _,
+            query_len: _,
+        } = self;
+        std::mem::forget(token_output);
+        std::mem::forget(hidden_output);
+        std::mem::forget(kv_lengths);
+        std::mem::forget(_query_lengths);
+        std::mem::forget(position_input);
+        std::mem::forget(hidden_input);
+        drop(graph);
+    }
 }
 
 #[cfg(feature = "cuda")]
@@ -1632,8 +1658,12 @@ impl GlmOcrTextModel {
 
     #[cfg(feature = "cuda")]
     fn invalidate_cuda_graph(&self) {
-        self.decode_graph.borrow_mut().take();
-        self.verification_graph.borrow_mut().take();
+        if let Some(graph) = self.decode_graph.borrow_mut().take() {
+            graph.dispose();
+        }
+        if let Some(graph) = self.verification_graph.borrow_mut().take() {
+            graph.dispose();
+        }
     }
 
     #[cfg(feature = "cuda")]

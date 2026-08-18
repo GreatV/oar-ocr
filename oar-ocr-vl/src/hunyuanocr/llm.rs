@@ -656,7 +656,9 @@ impl HunyuanAttention {
 #[cfg(feature = "cuda")]
 struct TargetDecoderCudaGraph {
     // The executable graph owns raw pointers into every tensor below and into
-    // the decoder weights, so it must be dropped first.
+    // the decoder weights; dispose via `dispose` so capture-touched buffers
+    // are never returned to the stream-ordered allocator (see
+    // SingleTokenDecoderCudaGraph::dispose).
     graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
     hidden_input: Tensor,
     cos_input: Tensor,
@@ -668,6 +670,36 @@ struct TargetDecoderCudaGraph {
     aux_output: Option<Tensor>,
     aux_layer_ids: Vec<usize>,
     cache_len: usize,
+}
+
+#[cfg(feature = "cuda")]
+impl TargetDecoderCudaGraph {
+    fn dispose(self) {
+        let Self {
+            graph,
+            hidden_input,
+            cos_input,
+            sin_input,
+            _query_lengths,
+            kv_lengths,
+            hidden_output,
+            logits_output,
+            aux_output,
+            aux_layer_ids: _,
+            cache_len: _,
+        } = self;
+        if let Some(aux_output) = aux_output {
+            std::mem::forget(aux_output);
+        }
+        std::mem::forget(logits_output);
+        std::mem::forget(hidden_output);
+        std::mem::forget(kv_lengths);
+        std::mem::forget(_query_lengths);
+        std::mem::forget(sin_input);
+        std::mem::forget(cos_input);
+        std::mem::forget(hidden_input);
+        drop(graph);
+    }
 }
 
 #[cfg(feature = "cuda")]
@@ -1432,7 +1464,9 @@ impl HunyuanLlm {
         // Eager cache growth reallocates the storage whose raw pointers were
         // captured by the graph. Dropping it before growth also prevents a
         // stale replay after the logical cache is reset for another document.
-        self.decode_graph.borrow_mut().take();
+        if let Some(graph) = self.decode_graph.borrow_mut().take() {
+            graph.dispose();
+        }
     }
 
     /// Drop any captured target-decoder CUDA graph.

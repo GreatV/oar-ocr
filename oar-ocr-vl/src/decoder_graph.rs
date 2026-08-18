@@ -170,8 +170,12 @@ impl std::fmt::Debug for CudaGraphKvLengths {
 /// Captured storage for a batch-1, query-length-1 decoder graph.
 ///
 /// The graph owns raw pointers into every tensor below, the model's fixed KV
-/// storage, its weights, and the external LM head. Keep `graph` first so it is
-/// destroyed before the tensors when this value is dropped.
+/// storage, its weights, and the external LM head. Dispose through
+/// [`Self::dispose`] rather than a plain drop: tensors that were allocated
+/// while the stream was capturing (or whose events/addresses were baked into
+/// graph nodes) must not be handed back to the stream-ordered allocator after
+/// the exec is destroyed — doing so poisons the allocator and makes later,
+/// unrelated allocations fail with CUDA_ERROR_INVALID_VALUE.
 #[cfg(feature = "cuda")]
 pub(crate) struct SingleTokenDecoderCudaGraph {
     pub(crate) graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
@@ -181,6 +185,30 @@ pub(crate) struct SingleTokenDecoderCudaGraph {
     pub(crate) kv_lengths: CudaGraphKvLengths,
     pub(crate) logits_output: Tensor,
     pub(crate) cache_len: usize,
+}
+
+#[cfg(feature = "cuda")]
+impl SingleTokenDecoderCudaGraph {
+    pub(crate) fn dispose(self) {
+        let Self {
+            graph,
+            hidden_input,
+            position_input,
+            _query_lengths,
+            kv_lengths,
+            logits_output,
+            cache_len: _,
+        } = self;
+        // Leak every buffer the capture touched; their storage (a few hundred
+        // KB per bucket) is reclaimed at process exit. Only the exec itself is
+        // destroyed.
+        std::mem::forget(logits_output);
+        std::mem::forget(kv_lengths);
+        std::mem::forget(_query_lengths);
+        std::mem::forget(position_input);
+        std::mem::forget(hidden_input);
+        drop(graph);
+    }
 }
 
 #[cfg(feature = "cuda")]

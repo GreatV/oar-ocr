@@ -846,6 +846,8 @@ impl DFlashLayer {
 
 #[cfg(feature = "cuda")]
 struct DFlashCudaGraph {
+    // Dispose via `dispose` so capture-touched buffers are never returned to
+    // the stream-ordered allocator (see SingleTokenDecoderCudaGraph::dispose).
     graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
     query_input: Tensor,
     cos_input: Tensor,
@@ -854,6 +856,30 @@ struct DFlashCudaGraph {
     kv_lengths: CudaGraphKvLengths,
     hidden_output: Tensor,
     proposals_output: Tensor,
+}
+
+#[cfg(feature = "cuda")]
+impl DFlashCudaGraph {
+    fn dispose(self) {
+        let Self {
+            graph,
+            query_input,
+            cos_input,
+            sin_input,
+            _query_lengths,
+            kv_lengths,
+            hidden_output,
+            proposals_output,
+        } = self;
+        std::mem::forget(proposals_output);
+        std::mem::forget(hidden_output);
+        std::mem::forget(kv_lengths);
+        std::mem::forget(_query_lengths);
+        std::mem::forget(sin_input);
+        std::mem::forget(cos_input);
+        std::mem::forget(query_input);
+        drop(graph);
+    }
 }
 
 #[cfg(feature = "cuda")]
@@ -1011,7 +1037,9 @@ impl DFlashModel {
         // A captured graph owns raw pointers into the fixed-size cache. Once
         // that cache must grow, the graph cannot safely be reused, including
         // after a later page-level reset.
-        self.decode_graph.borrow_mut().take();
+        if let Some(graph) = self.decode_graph.borrow_mut().take() {
+            graph.dispose();
+        }
     }
 
     fn rope(&self, start: usize, len: usize) -> Result<(Tensor, Tensor), Error> {

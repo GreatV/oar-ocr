@@ -830,7 +830,9 @@ impl Ernie4_5Model {
 
     #[cfg(feature = "cuda")]
     fn invalidate_cuda_graph(&self) {
-        self.decode_graph.borrow_mut().take();
+        if let Some(graph) = self.decode_graph.borrow_mut().take() {
+            graph.dispose();
+        }
     }
 
     pub(crate) fn invalidate_ar_cuda_graph(&self) {
