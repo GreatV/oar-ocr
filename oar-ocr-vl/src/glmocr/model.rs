@@ -4,6 +4,8 @@ use super::mtp::GlmOcrMtpModel;
 use super::processing::{GlmOcrImageInputs, preprocess_image};
 use super::text::GlmOcrTextModel;
 use super::vision::GlmOcrVisionModel;
+#[cfg(feature = "cuda")]
+use crate::decoder_graph::CudaGraphDrainGuard;
 use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
@@ -33,6 +35,11 @@ pub struct GlmOcr {
     lm_head: Linear,
     eos_token_ids: Vec<u32>,
     image_token_id: u32,
+    // Must stay the last field: the captured decoder graphs read the LM head
+    // owned here, so this guard drops last and drains CUDA errors the head's
+    // free may stash (see CudaGraphDrainGuard).
+    #[cfg(feature = "cuda")]
+    _drain_guard: CudaGraphDrainGuard,
 }
 
 impl GlmOcr {
@@ -101,6 +108,8 @@ impl GlmOcr {
             EosTokenId::Multiple(v) => v.clone(),
         };
 
+        #[cfg(feature = "cuda")]
+        let _drain_guard = CudaGraphDrainGuard::new(&device);
         Ok(Self {
             device,
             dtype,
@@ -114,6 +123,8 @@ impl GlmOcr {
             lm_head,
             eos_token_ids,
             image_token_id,
+            #[cfg(feature = "cuda")]
+            _drain_guard,
         })
     }
 

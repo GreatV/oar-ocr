@@ -7,6 +7,8 @@ use crate::attention::{
 };
 #[cfg(feature = "cuda")]
 use crate::cuda_kernels::{ArgmaxFirstBf16, ArgmaxFirstF32, MaskTokenIds};
+#[cfg(feature = "cuda")]
+use crate::decoder_graph::CudaGraphDrainGuard;
 use crate::error::Error;
 use crate::structure::LayoutElementType;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
@@ -98,6 +100,11 @@ pub struct MinerU {
     top_k: usize,
     #[cfg(feature = "cuda")]
     gpu_greedy_sampling: bool,
+    // Must stay the last field: the captured decoder graphs read the LM head
+    // owned here, so this guard drops last and drains CUDA errors the head's
+    // free may stash (see CudaGraphDrainGuard).
+    #[cfg(feature = "cuda")]
+    _drain_guard: CudaGraphDrainGuard,
 }
 
 #[derive(Debug, Deserialize)]
@@ -242,6 +249,8 @@ impl MinerU {
                 .map_err(|e| candle_to_ocr_inference("MinerU2.5", "load lm_head", e))?
         };
 
+        #[cfg(feature = "cuda")]
+        let _drain_guard = CudaGraphDrainGuard::new(&device);
         Ok(Self {
             device,
             dtype,
@@ -265,6 +274,8 @@ impl MinerU {
             top_k,
             #[cfg(feature = "cuda")]
             gpu_greedy_sampling: std::env::var_os("OAR_MINERU_DISABLE_GPU_SAMPLING").is_none(),
+            #[cfg(feature = "cuda")]
+            _drain_guard,
         })
     }
 
