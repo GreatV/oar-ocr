@@ -14,6 +14,8 @@
 //! - `mineru_diffusion` - MinerU-Diffusion-V1 block-diffusion document OCR
 //!   (Qwen2-VL vision + SDAR decoder)
 //! - `monkeyocrv2` - MonkeyOCRv2-S/B-Parsing full-page and region parsing
+//! - `navidc_ocr` - NaviDC-OCR document parsing VLM (Qwen2.5-VL backbone
+//!   with a windowed vision tower)
 //! - `ovisocr2` - OvisOCR2 end-to-end page-to-Markdown parser (Qwen3.5)
 //! - `doc_parser` - Unified document parsing with pluggable recognition backends
 //! - `pp_doclayout` - Native PP-DocLayoutV2/V3 layout detection and reading
@@ -55,6 +57,7 @@ pub mod layout;
 pub mod mineru;
 pub mod mineru_diffusion;
 pub mod monkeyocrv2;
+pub mod navidc_ocr;
 pub mod ovisocr2;
 pub mod paddleocr_vl;
 pub mod pp_doclayout;
@@ -88,6 +91,7 @@ pub use hunyuanocr::{DFlashConfig, DFlashTargetConfig, HunyuanOcr, HunyuanOcrVer
 pub use mineru::MinerU;
 pub use mineru_diffusion::{DiffusionGenerationConfig, MinerUDiffusion};
 pub use monkeyocrv2::{MonkeyOcrV2, MonkeyOcrV2Task};
+pub use navidc_ocr::{NaviDcOcr, NaviDcTask};
 pub use ovisocr2::OvisOcr2;
 
 pub use doc_parser::{DocParser, DocParserConfig, RecognitionBackend, RecognitionTask};
