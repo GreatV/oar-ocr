@@ -9,6 +9,7 @@ mod config;
 mod model;
 pub(crate) mod processing;
 mod text;
+#[path = "../qwen2_vl/vision.rs"]
 pub(crate) mod vision;
 
 pub use config::{

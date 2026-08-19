@@ -12,6 +12,7 @@
 mod config;
 mod model;
 mod projector;
+#[path = "../sdar/model.rs"]
 pub(crate) mod text;
 
 pub use config::{MinerUDiffusionConfig, SdarConfig};

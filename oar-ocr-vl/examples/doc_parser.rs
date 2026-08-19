@@ -37,6 +37,13 @@
 //!     --model-dir zai-org/GLM-OCR \
 //!     --layout-dir PaddlePaddle/PP-DocLayoutV3_safetensors \
 //!     document.jpg
+//!
+//! # Using NaviDC-OCR model
+//! cargo run -p oar-ocr-vl --example doc_parser -- \
+//!     --model-name navidc \
+//!     --model-dir StarDoc-AI/NaviDC-OCR \
+//!     --layout-dir PaddlePaddle/PP-DocLayoutV3_safetensors \
+//!     document.jpg
 //! ```
 
 mod utils;
@@ -66,13 +73,16 @@ enum ModelName {
     /// GLM-OCR: OCR expert VLM (GLM-V)
     #[value(name = "glmocr")]
     GlmOcr,
+    /// NaviDC-OCR: document parsing VLM (Qwen2.5-VL backbone)
+    #[value(name = "navidc")]
+    NaviDc,
 }
 
 /// Command-line arguments
 #[derive(Parser)]
 #[command(name = "doc_parser")]
 #[command(
-    about = "Unified external-layout DocParser - supports PaddleOCR-VL, PaddleOCR-VL-1.5/1.6, and GLM-OCR"
+    about = "Unified external-layout DocParser - supports PaddleOCR-VL, PaddleOCR-VL-1.5/1.6, GLM-OCR, and NaviDC-OCR"
 )]
 struct Args {
     /// Recognition model to use
@@ -115,7 +125,7 @@ struct Args {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use oar_ocr_vl::{GlmOcr, PaddleOcrVl};
+    use oar_ocr_vl::{GlmOcr, NaviDcOcr, PaddleOcrVl};
 
     utils::init_tracing();
     let args = Args::parse();
@@ -184,6 +194,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let model = GlmOcr::from_dir(&args.model_dir, device)?;
             info!(
                 "GLM-OCR loaded in {:.2}ms",
+                load_start.elapsed().as_secs_f64() * 1000.0
+            );
+
+            let parser = DocParser::with_config(&model, config)
+                .with_region_batch_size(args.region_batch_size);
+            process_images(&parser, &layout, &existing_images, &args)?;
+        }
+        ModelName::NaviDc => {
+            info!("Loading NaviDC-OCR model...");
+            let load_start = Instant::now();
+            let model = NaviDcOcr::from_dir(&args.model_dir, device)?;
+            info!(
+                "NaviDC-OCR loaded in {:.2}ms",
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
 
