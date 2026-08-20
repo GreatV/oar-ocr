@@ -8,6 +8,19 @@ use crate::pipeline::doc_parser::{DocParser, DocParserConfig};
 use crate::pipeline::layout::LayoutSource;
 use image::RgbImage;
 
+fn normalize_bbox(
+    bbox: &crate::document::geometry::BoundingBox,
+    width: f32,
+    height: f32,
+) -> [f32; 4] {
+    [
+        (bbox.x_min() / width).clamp(0.0, 1.0),
+        (bbox.y_min() / height).clamp(0.0, 1.0),
+        (bbox.x_max() / width).clamp(0.0, 1.0),
+        (bbox.y_max() / height).clamp(0.0, 1.0),
+    ]
+}
+
 /// A complete-page parser composed from a layout source and region recognizer.
 pub struct LayoutFirstPageParser<'a, L: LayoutSource + ?Sized, B: RecognitionBackend + ?Sized> {
     layout: &'a L,
@@ -60,12 +73,7 @@ impl<L: LayoutSource + ?Sized, B: RecognitionBackend + ?Sized> PageParser
                 block_type: element
                     .label
                     .unwrap_or_else(|| element.element_type.as_str().to_string()),
-                bbox: [
-                    element.bbox.x_min() / width,
-                    element.bbox.y_min() / height,
-                    element.bbox.x_max() / width,
-                    element.bbox.y_max() / height,
-                ],
+                bbox: normalize_bbox(&element.bbox, width, height),
                 angle: None,
                 content: element.text,
             })
@@ -75,5 +83,18 @@ impl<L: LayoutSource + ?Sized, B: RecognitionBackend + ?Sized> PageParser
             markdown: Some(markdown),
             ..PageDocument::default()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_bbox;
+    use crate::document::geometry::BoundingBox;
+
+    #[test]
+    fn normalized_bbox_clamps_custom_layout_coordinates_to_the_page() {
+        let bbox = BoundingBox::from_coords(-20.0, -10.0, 120.0, 110.0);
+
+        assert_eq!(normalize_bbox(&bbox, 100.0, 100.0), [0.0, 0.0, 1.0, 1.0]);
     }
 }

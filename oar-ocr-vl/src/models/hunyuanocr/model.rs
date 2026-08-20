@@ -128,6 +128,14 @@ impl RepetitionHistory {
         }
     }
 
+    fn from_tokens(vocab_size: usize, tokens: &[u32]) -> Self {
+        let mut history = Self::new(vocab_size);
+        for &token in tokens {
+            history.insert(token);
+        }
+        history
+    }
+
     fn insert(&mut self, token: u32) {
         let index = token as usize;
         if index < self.present.len() && !self.present[index] {
@@ -914,15 +922,20 @@ impl HunyuanOcr {
             let initial_logits = logits_list.pop().ok_or_else(|| Error::Config {
                 message: "HunyuanOCR DFlash: missing target prefill logits".to_string(),
             })?;
-            let tokens =
-                self.generate_dflash_tokens(dflash, initial_logits, seq_lens[0], max_new_tokens)?;
+            let tokens = self.generate_dflash_tokens(
+                dflash,
+                initial_logits,
+                &all_input_ids[0],
+                max_new_tokens,
+            )?;
             return Ok(vec![tokens]);
         }
 
         // 7. Autoregressive decode
         let mut generated: Vec<Vec<u32>> = vec![Vec::new(); batch_size];
-        let mut repetition_histories: Vec<RepetitionHistory> = (0..batch_size)
-            .map(|_| RepetitionHistory::new(self.cfg.vocab_size))
+        let mut repetition_histories: Vec<RepetitionHistory> = all_input_ids
+            .iter()
+            .map(|tokens| RepetitionHistory::from_tokens(self.cfg.vocab_size, tokens))
             .collect();
         #[cfg(feature = "cuda")]
         let repetition_history_device = if batch_size == 1
@@ -930,11 +943,12 @@ impl HunyuanOcr {
             && self.dtype == DType::BF16
             && self.repetition_penalty > 1.0
         {
-            Some(
-                Tensor::zeros((1, self.cfg.vocab_size), DType::U8, &self.device).map_err(|e| {
+            let history = Tensor::zeros((1, self.cfg.vocab_size), DType::U8, &self.device)
+                .map_err(|e| {
                     candle_to_ocr_inference("HunyuanOCR", "allocate AR repetition history", e)
-                })?,
-            )
+                })?;
+            mark_repetition_history(&history, &all_input_ids[0])?;
+            Some(history)
         } else {
             None
         };
@@ -1083,7 +1097,7 @@ impl HunyuanOcr {
         &self,
         dflash: &DFlashModel,
         initial_logits: Tensor,
-        prompt_len: usize,
+        prompt_tokens: &[u32],
         max_new_tokens: usize,
     ) -> Result<Vec<u32>, Error> {
         if max_new_tokens == 0 {
@@ -1092,10 +1106,54 @@ impl HunyuanOcr {
             return Ok(Vec::new());
         }
 
-        let first = initial_logits
-            .argmax(D::Minus1)
-            .and_then(|token| token.to_scalar::<u32>())
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "initial argmax", e))?;
+        let prompt_len = prompt_tokens.len();
+        let mut repetition_history =
+            RepetitionHistory::from_tokens(self.cfg.vocab_size, prompt_tokens);
+        #[cfg(feature = "cuda")]
+        let repetition_history_device = if self.device.is_cuda()
+            && self.dtype == DType::BF16
+            && self.repetition_penalty > 1.0
+        {
+            let history =
+                Tensor::zeros((self.cfg.vocab_size,), DType::U8, &self.device).map_err(|e| {
+                    candle_to_ocr_inference("HunyuanOCR DFlash", "allocate repetition history", e)
+                })?;
+            mark_repetition_history(&history, prompt_tokens)?;
+            Some(history)
+        } else {
+            None
+        };
+        let first = if self.repetition_penalty > 1.0 && !repetition_history.is_empty() {
+            #[cfg(feature = "cuda")]
+            {
+                if let Some(history) = repetition_history_device.as_ref() {
+                    argmax_with_device_repetition_history(
+                        &initial_logits,
+                        history,
+                        self.repetition_penalty as f32,
+                    )?
+                } else {
+                    argmax_with_unique_repetition_penalty(
+                        &initial_logits,
+                        repetition_history.ids(),
+                        self.repetition_penalty as f32,
+                    )?
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                argmax_with_unique_repetition_penalty(
+                    &initial_logits,
+                    repetition_history.ids(),
+                    self.repetition_penalty as f32,
+                )?
+            }
+        } else {
+            initial_logits
+                .argmax(D::Minus1)
+                .and_then(|token| token.to_scalar::<u32>())
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR DFlash", "initial argmax", e))?
+        };
         if self.stop_token_ids.contains(&first) {
             self.llm.clear_kv_cache();
             dflash.clear_context();
@@ -1118,22 +1176,11 @@ impl HunyuanOcr {
             .map(|id| id + 1)
             .collect();
         let mut generated = vec![first];
-        let mut repetition_history = RepetitionHistory::new(self.cfg.vocab_size);
         repetition_history.insert(first);
         #[cfg(feature = "cuda")]
-        let repetition_history_device = if self.device.is_cuda()
-            && self.dtype == DType::BF16
-            && self.repetition_penalty > 1.0
-        {
-            let history =
-                Tensor::zeros((self.cfg.vocab_size,), DType::U8, &self.device).map_err(|e| {
-                    candle_to_ocr_inference("HunyuanOCR DFlash", "allocate repetition history", e)
-                })?;
-            mark_repetition_history(&history, &[first])?;
-            Some(history)
-        } else {
-            None
-        };
+        if let Some(history) = repetition_history_device.as_ref() {
+            mark_repetition_history(history, &[first])?;
+        }
         let mut draft_rounds = 0usize;
         let mut accepted_draft_tokens = 0usize;
 
@@ -1591,6 +1638,16 @@ mod tests {
     #[test]
     fn repetition_penalty_cpu_matches_huggingface_semantics() {
         assert_repetition_penalty_tokens(&Device::Cpu);
+    }
+
+    #[test]
+    fn prompt_tokens_seed_initial_repetition_penalty() {
+        let history = RepetitionHistory::from_tokens(4, &[0, 0, 99]);
+        assert_eq!(history.ids(), &[0]);
+
+        let logits = Tensor::new(&[10.0f32, 9.0, 0.0, 0.0], &Device::Cpu).unwrap();
+        let token = argmax_with_unique_repetition_penalty(&logits, history.ids(), 2.0).unwrap();
+        assert_eq!(token, 1);
     }
 
     #[cfg(feature = "cuda")]

@@ -30,7 +30,9 @@ fn collect_rust_sources(dir: &Path, sources: &mut Vec<std::path::PathBuf>) {
 fn validate_architecture() {
     let mut sources = Vec::new();
     collect_rust_sources(Path::new("src"), &mut sources);
+    sources.sort();
     for path in sources {
+        println!("cargo:rerun-if-changed={}", path.display());
         let relative = path.strip_prefix("src").expect("source is under src");
         let components: Vec<_> = relative
             .components()
