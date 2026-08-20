@@ -205,7 +205,7 @@ println!("{}", result.to_markdown());
 
 ```rust
 use oar_ocr_vl::utils::image::load_image;
-use oar_ocr_vl::MinerU;
+use oar_ocr_vl::{MinerU, MinerUParseOptions, PageParser};
 use oar_ocr_vl::utils::parse_device;
 
 let image = load_image("document.png")?;
@@ -213,12 +213,8 @@ let device = parse_device("cpu")?;
 let model = MinerU::from_dir("opendatalab/MinerU2.5-2509-1.2B", device)?;
 // For full documents, prefer the `mineru` example, which follows the
 // model-native two-step pipeline: layout detection, then crop recognition.
-let result = model
-    .generate(&[image], &["\nText Recognition:"], 4096)?
-    .into_iter()
-    .next()
-    .expect("one result")?;
-println!("Result: {}", result);
+let document = model.parse_page(&image, &MinerUParseOptions::default())?;
+println!("{:#?}", document.blocks);
 ```
 
 ### NaviDC-OCR
