@@ -1,6 +1,76 @@
 use std::{fs, path::Path, process::Command};
 
 const MIN_CUDA_COMPUTE_CAP: u32 = 80;
+const MODEL_MODULES: &[&str] = &[
+    "glmocr",
+    "hpd_parsing",
+    "hunyuanocr",
+    "mineru",
+    "mineru_diffusion",
+    "monkeyocrv2",
+    "navidc_ocr",
+    "ovisocr2",
+    "paddleocr_vl",
+    "pp_doclayout",
+];
+
+fn collect_rust_sources(dir: &Path, sources: &mut Vec<std::path::PathBuf>) {
+    for entry in fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("failed to scan Rust source directory {dir:?}: {error}"))
+    {
+        let path = entry.expect("failed to read Rust source entry").path();
+        if path.is_dir() {
+            collect_rust_sources(&path, sources);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+            sources.push(path);
+        }
+    }
+}
+
+fn validate_architecture() {
+    let mut sources = Vec::new();
+    collect_rust_sources(Path::new("src"), &mut sources);
+    sources.sort();
+    for path in sources {
+        println!("cargo:rerun-if-changed={}", path.display());
+        let relative = path.strip_prefix("src").expect("source is under src");
+        let components: Vec<_> = relative
+            .components()
+            .filter_map(|component| component.as_os_str().to_str())
+            .collect();
+        let owner = components.first().copied().unwrap_or_default();
+        let guarded_layer = matches!(owner, "backbones" | "pipeline" | "runtime");
+        let model_owner = if owner == "models" {
+            components
+                .get(1)
+                .copied()
+                .filter(|module| MODEL_MODULES.contains(module))
+        } else {
+            MODEL_MODULES.contains(&owner).then_some(owner)
+        };
+        if !guarded_layer && model_owner.is_none() {
+            continue;
+        }
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {path:?}: {error}"));
+        if guarded_layer {
+            assert!(
+                !source.contains("crate::utils"),
+                "architecture violation: {path:?} depends on the compatibility utils facade; import the owning runtime, pipeline, or render layer directly"
+            );
+        }
+        for model in MODEL_MODULES {
+            if model_owner == Some(*model) {
+                continue;
+            }
+            let dependency = format!("crate::{model}::");
+            assert!(
+                !source.contains(&dependency),
+                "architecture violation: {path:?} depends on concrete model module {model:?}; move shared code to runtime/backbones or add an API adapter"
+            );
+        }
+    }
+}
 
 fn parse_compute_cap(value: &str) -> Option<(String, u32)> {
     let value = value.trim().to_ascii_lowercase();
@@ -122,6 +192,7 @@ fn nvcc_major_version(nvcc: &std::ffi::OsStr) -> Option<u32> {
 }
 
 fn main() {
+    validate_architecture();
     let mut cuda_sources = Vec::new();
     collect_cuda_sources(Path::new("src"), &mut cuda_sources);
     cuda_sources.sort();

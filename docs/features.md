@@ -180,7 +180,7 @@ Existing files and explicit paths remain under caller control. In-memory ONNX so
 
 ## `oar-ocr-vl` needs none of this
 
-`oar-ocr-vl` is a separate, self-contained crate. It runs every model on Candle — including layout detection, through `oar_ocr_vl::PpDocLayout`, a native port of PP-DocLayoutV2/V3 — so it depends on neither `oar-ocr-core` nor ONNX Runtime, and none of the features above apply to it. It has two of its own, both off by default:
+`oar-ocr-vl` is a separate, self-contained crate. It runs every model on Candle — including layout detection, through `oar_ocr_vl::PpDocLayout`, a native port of PP-DocLayoutV2/V3 — so it depends on neither `oar-ocr-core` nor ONNX Runtime, and none of the features above apply to it. All model implementations are always available; only its accelerator features are optional and both are off by default.
 
 | Feature | Purpose |
 |---|---|

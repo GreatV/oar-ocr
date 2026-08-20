@@ -660,7 +660,7 @@ hf download opendatalab/MinerU2.5-Pro-2605-1.2B --local-dir MinerU2.5-Pro-2605-1
 
 ```rust,no_run
 use oar_ocr_vl::utils::image::load_image;
-use oar_ocr_vl::MinerU;
+use oar_ocr_vl::{MinerU, MinerUParseOptions, PageParser};
 use oar_ocr_vl::utils::parse_device;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -669,13 +669,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // MinerU2.5-Pro-2605-1.2B is loaded through the same API.
     let model = MinerU::from_dir("opendatalab/MinerU2.5-2509-1.2B", device)?;
-    let prompt = "\nText Recognition:";
-    let text = model
-        .generate(&[image], &[prompt], 1024)?
-        .into_iter()
-        .next()
-        .expect("one result")?;
-    println!("{text}");
+    let document = model.parse_page(&image, &MinerUParseOptions::default())?;
+    println!("{:#?}", document.blocks);
 
     Ok(())
 }

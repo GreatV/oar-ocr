@@ -3,9 +3,6 @@
 #[allow(dead_code)]
 pub mod structure_match;
 
-#[allow(dead_code)]
-pub mod mineru_layout;
-
 /// Initializes the tracing subscriber for logging in examples.
 #[allow(dead_code)]
 pub fn init_tracing() {
