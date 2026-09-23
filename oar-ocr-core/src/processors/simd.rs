@@ -163,9 +163,9 @@ fn normalize_plane_simd(rgb: &[u8], sc: usize, a: f32, b: f32, dst: &mut [f32]) 
 
     let va = f32x8::splat(a);
     let vb = f32x8::splat(b);
-    let mut chunks = dst.chunks_exact_mut(8);
+    let (chunks, remainder) = dst.as_chunks_mut::<8>();
     let mut p = 0usize;
-    for chunk in &mut chunks {
+    for chunk in chunks {
         let gathered = [
             rgb[p * 3 + sc] as f32,
             rgb[(p + 1) * 3 + sc] as f32,
@@ -177,10 +177,10 @@ fn normalize_plane_simd(rgb: &[u8], sc: usize, a: f32, b: f32, dst: &mut [f32]) 
             rgb[(p + 7) * 3 + sc] as f32,
         ];
         let v = f32x8::new(gathered) * va + vb;
-        chunk.copy_from_slice(&v.to_array());
+        *chunk = v.to_array();
         p += 8;
     }
-    for d in chunks.into_remainder() {
+    for d in remainder {
         *d = rgb[p * 3 + sc] as f32 * a + b;
         p += 1;
     }
@@ -210,19 +210,16 @@ fn reduce_max_simd(row: &[f32]) -> f32 {
     use wide::f32x8;
 
     let mut acc = f32x8::splat(f32::NEG_INFINITY);
-    let mut chunks = row.chunks_exact(8);
-    for chunk in &mut chunks {
-        // chunk has exactly 8 elements.
-        let v = f32x8::new([
-            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-        ]);
+    let (chunks, remainder) = row.as_chunks::<8>();
+    for chunk in chunks {
+        let v = f32x8::new(*chunk);
         acc = acc.max(v);
     }
     let mut best = f32::NEG_INFINITY;
     for lane in acc.to_array() {
         best = best.max(lane);
     }
-    for &v in chunks.remainder() {
+    for &v in remainder {
         best = best.max(v);
     }
     best
@@ -283,9 +280,9 @@ fn crnn_row_scalar(src_row: &[u8], sc: usize, dst_row: &mut [f32]) {
 fn crnn_row_simd(src_row: &[u8], sc: usize, dst_row: &mut [f32]) {
     use wide::f32x8;
 
-    let mut chunks = dst_row.chunks_exact_mut(8);
+    let (chunks, remainder) = dst_row.as_chunks_mut::<8>();
     let mut x = 0usize;
-    for chunk in &mut chunks {
+    for chunk in chunks {
         let g = [
             src_row[x * 3 + sc] as f32,
             src_row[(x + 1) * 3 + sc] as f32,
@@ -298,10 +295,10 @@ fn crnn_row_simd(src_row: &[u8], sc: usize, dst_row: &mut [f32]) {
         ];
         // Exact `(v / 255.0 - 0.5) / 0.5`, lane-wise.
         let v = (f32x8::new(g) / 255.0 - 0.5) / 0.5;
-        chunk.copy_from_slice(&v.to_array());
+        *chunk = v.to_array();
         x += 8;
     }
-    for d in chunks.into_remainder() {
+    for d in remainder {
         *d = (src_row[x * 3 + sc] as f32 / 255.0 - 0.5) / 0.5;
         x += 1;
     }
@@ -319,7 +316,7 @@ fn crnn_row_simd(src_row: &[u8], sc: usize, dst_row: &mut [f32]) {
 /// This is intentionally a tight contiguous scalar loop, *not* a hand-vectorized
 /// kernel: the output is an interleaved (strided) RGB scatter, which an explicit
 /// `wide` gather/scatter measured ~1.8x *slower* than letting the autovectorizer
-/// handle this `chunks_exact_mut(3)` form. The win over the previous
+/// handle this `as_chunks_mut::<3>()` form. The win over the previous
 /// `put_pixel` + 4-D strided `ndarray` indexing comes from the contiguous
 /// plane access alone (~1.8x faster than the old loop). Kept here next to the
 /// other post-processing kernels for cohesion.
@@ -331,7 +328,8 @@ pub fn scale_clamp_bgr_planes_to_rgb(
     scale: f32,
     out: &mut [u8],
 ) {
-    for (p, px) in out.chunks_exact_mut(3).enumerate() {
+    let (pixels, _) = out.as_chunks_mut::<3>();
+    for (p, px) in pixels.iter_mut().enumerate() {
         px[0] = to_u8(c2[p], scale);
         px[1] = to_u8(c1[p], scale);
         px[2] = to_u8(c0[p], scale);
