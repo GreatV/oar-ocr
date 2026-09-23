@@ -164,15 +164,25 @@ impl WeVisDoc {
     ) -> crate::error::BatchResult<Vec<u32>> {
         Ok(images
             .iter()
-            .map(|image| self.generate_one(image, max_new_tokens))
+            .map(|image| {
+                self.generate_one(image, max_new_tokens)
+                    .map(|(tokens, _)| tokens)
+            })
             .collect())
     }
 
-    fn generate_one(&self, image: &RgbImage, max_new_tokens: usize) -> Result<Vec<u32>, Error> {
+    /// Generate one page's tokens plus whether decoding stopped on an EOS
+    /// token. `false` means the token budget ran out first — the official
+    /// `wevisdoc/local.py` treats that as a truncation error.
+    pub(crate) fn generate_one(
+        &self,
+        image: &RgbImage,
+        max_new_tokens: usize,
+    ) -> Result<(Vec<u32>, bool), Error> {
         self.text.clear_cache();
         let _cache_guard = TextCacheGuard(&self.text);
         if max_new_tokens == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         }
         let context_limit = self.cfg.text_config.max_position_embeddings;
         let image_inputs = preprocess_image(
@@ -224,7 +234,7 @@ impl WeVisDoc {
         for step in 0..max_new_tokens {
             let token = select_greedy_token(&logits)?;
             if self.stop_token_ids.contains(&token) {
-                break;
+                return Ok((generated, true));
             }
             generated.push(token);
             if step + 1 == max_new_tokens {
@@ -247,7 +257,7 @@ impl WeVisDoc {
                     candle_to_ocr_inference(MODEL_NAME, "select decode hidden", e)
                 })?)?;
         }
-        Ok(generated)
+        Ok((generated, false))
     }
 
     /// Embed the token ids and splice in the vision embeddings, returning the
@@ -402,12 +412,8 @@ fn validate_generation_length(
 /// system turn, user turn with `<|vision_start|>` pads `<|vision_end|>` and
 /// the instruction, then the assistant generation prompt.
 pub fn build_prompt(num_image_tokens: usize, system_prompt: &str) -> String {
-    let mut prompt = String::with_capacity(
-        DEFAULT_SYSTEM_PROMPT.len()
-            + system_prompt.len()
-            + num_image_tokens * "<|image_pad|>".len()
-            + 128,
-    );
+    let mut prompt =
+        String::with_capacity(system_prompt.len() + num_image_tokens * "<|image_pad|>".len() + 128);
     if !system_prompt.is_empty() {
         prompt.push_str("<|im_start|>system\n");
         prompt.push_str(system_prompt);
