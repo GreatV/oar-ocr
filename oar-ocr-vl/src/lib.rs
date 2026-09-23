@@ -17,6 +17,8 @@
 //! - `navidc_ocr` - NaviDC-OCR document parsing VLM (Qwen2.5-VL backbone
 //!   with a windowed vision tower)
 //! - `ovisocr2` - OvisOCR2 end-to-end page-to-Markdown parser (Qwen3.5)
+//! - `wevisdoc` - WeVisDoc end-to-end page-to-Markdown parser (Qwen3-VL
+//!   backbone with DeepStack)
 //! - `doc_parser` - Unified document parsing with pluggable recognition backends
 //! - `pp_doclayout` - Native PP-DocLayoutV2/V3 layout detection and reading
 //!   order
@@ -84,6 +86,8 @@ pub mod paddleocr_vl;
 pub mod pp_doclayout;
 pub mod structure;
 pub mod utils;
+#[path = "models/wevisdoc/mod.rs"]
+pub mod wevisdoc;
 
 // Backwards-compatible shared attention path.
 pub mod attention;
@@ -105,6 +109,7 @@ pub use mineru_diffusion::{
 pub use monkeyocrv2::{MonkeyOcrV2, MonkeyOcrV2ParseOptions, MonkeyOcrV2Task};
 pub use navidc_ocr::{NaviDcOcr, NaviDcTask};
 pub use ovisocr2::{OvisOcr2, OvisOcr2ParseOptions};
+pub use wevisdoc::{WeVisDoc, WeVisDocParseOptions};
 
 pub use api::generation::GenerationOptions;
 pub use api::page_parser::PageParser;

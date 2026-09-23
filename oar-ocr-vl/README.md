@@ -13,6 +13,7 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 | [PaddleOCR-VL-1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) | 0.9B | Region-aware refinement, drop-in compatible with the 1.5 loader |
 | [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) | 0.9B | External-layout page parsing, text, table, and formula recognition |
 | [OvisOCR2](https://huggingface.co/ATH-MaaS/OvisOCR2) | 0.8B | Model-native full-page document-to-Markdown parsing |
+| [WeVisDoc-2B/4B](https://huggingface.co/tencent/WeVisDoc-2B) | 2B | Model-native full-page document-to-Markdown parsing (Qwen3-VL with DeepStack) |
 | [MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) | 0.6B | Model-native layout, end-to-end parsing, text, formula, and OTSL-table recognition |
 | [MonkeyOCRv2-B-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-B-Parsing) | 0.7B | Higher-capacity ViT-B variant with the same parsing and recognition tasks |
 | [HPD-Parsing](https://huggingface.co/PaddlePaddle/HPD-Parsing) | 1B | Model-native hierarchical full-page parsing with forked KV-prefix reuse and optional P-MTP |
@@ -32,7 +33,7 @@ See [`examples`](examples) for runnable examples.
 1. **Layout detection** to identify document regions and their reading order. `PpDocLayout` is a native Candle port of PP-DocLayoutV2/V3; any other detector can be plugged in through the `LayoutSource` trait.
 2. **VL-based recognition** to extract content from each region
 
-Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, NaviDC-OCR, MonkeyOCRv2, OvisOCR2, HunyuanOCR, MinerU2.5/Pro, or MinerU-Diffusion for externally detected crops. HPD-Parsing currently supports only its model-native full-page protocol. For complete pages, prefer each model's native path where available: MonkeyOCRv2 `Layout`/`EndToEnd`, OvisOCR2 and HPD-Parsing full-page parsing, HunyuanOCR full-page prompts, and the MinerU two-step extraction examples.
+Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, NaviDC-OCR, MonkeyOCRv2, OvisOCR2, WeVisDoc, HunyuanOCR, MinerU2.5/Pro, or MinerU-Diffusion for externally detected crops. HPD-Parsing currently supports only its model-native full-page protocol. For complete pages, prefer each model's native path where available: MonkeyOCRv2 `Layout`/`EndToEnd`, OvisOCR2, WeVisDoc, and HPD-Parsing full-page parsing, HunyuanOCR full-page prompts, and the MinerU two-step extraction examples.
 
 ## Installation
 
@@ -131,6 +132,28 @@ println!("{markdown}");
 ```
 
 The official runtime resizes RGB input with bicubic antialiasing to a 32-pixel-aligned area between `448²` and `2880²` pixels. Its fixed prompt requests reading-order Markdown, LaTeX formulas, HTML tables, and bounding-box `<img>` tags for visual regions. `parse` removes those visual-region blocks by default before applying truncated-repeat cleanup; call `parse_with_image_tags(..., true)` or `generate` to retain the references. The library does not create the referenced bounding-box crop files.
+
+### WeVisDoc
+
+WeVisDoc (2B/4B) performs model-native full-page parsing on a Qwen3-VL backbone: the vision tower's intermediate features are injected into the decoder's first layers (DeepStack), and generation follows the official `wevisdoc/local.py` recipe — greedy decoding with the WeDocKit system prompt and a plain "Convert this document image to Markdown." instruction.
+
+```rust
+use oar_ocr_vl::utils::image::load_image;
+use oar_ocr_vl::utils::parse_device;
+use oar_ocr_vl::wevisdoc::DEFAULT_MAX_NEW_TOKENS;
+use oar_ocr_vl::WeVisDoc;
+
+let image = load_image("document.png")?;
+let model = WeVisDoc::from_dir("Tencent/WeVisDoc-2B", parse_device("cpu")?)?;
+let markdown = model
+    .generate(&[image], DEFAULT_MAX_NEW_TOKENS)?
+    .into_iter()
+    .next()
+    .expect("one result")?;
+println!("{markdown}");
+```
+
+Pages are resized with the Qwen2-VL smart-resize rule to a 32-pixel-aligned area between `256²` and `4096²` pixels. Output is Markdown with LaTeX (`\\(...\\)`, `\\[...\\]`) formulas and HTML tables; the same `generate` path serves `DocParser` region crops.
 
 ### MonkeyOCRv2-S/B-Parsing
 

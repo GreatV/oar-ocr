@@ -44,6 +44,13 @@
 //!     --model-dir StarDoc-AI/NaviDC-OCR \
 //!     --layout-dir PaddlePaddle/PP-DocLayoutV3_safetensors \
 //!     document.jpg
+//!
+//! # Using WeVisDoc model
+//! cargo run -p oar-ocr-vl --example doc_parser -- \
+//!     --model-name wevisdoc \
+//!     --model-dir Tencent/WeVisDoc-2B \
+//!     --layout-dir PaddlePaddle/PP-DocLayoutV3_safetensors \
+//!     document.jpg
 //! ```
 
 mod utils;
@@ -76,13 +83,16 @@ enum ModelName {
     /// NaviDC-OCR: document parsing VLM (Qwen2.5-VL backbone)
     #[value(name = "navidc")]
     NaviDc,
+    /// WeVisDoc: document parsing VLM (Qwen3-VL backbone)
+    #[value(name = "wevisdoc")]
+    WeVisDoc,
 }
 
 /// Command-line arguments
 #[derive(Parser)]
 #[command(name = "doc_parser")]
 #[command(
-    about = "Unified external-layout DocParser - supports PaddleOCR-VL, PaddleOCR-VL-1.5/1.6, GLM-OCR, and NaviDC-OCR"
+    about = "Unified external-layout DocParser - supports PaddleOCR-VL, PaddleOCR-VL-1.5/1.6, GLM-OCR, NaviDC-OCR, and WeVisDoc"
 )]
 struct Args {
     /// Recognition model to use
@@ -125,7 +135,7 @@ struct Args {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use oar_ocr_vl::{GlmOcr, NaviDcOcr, PaddleOcrVl};
+    use oar_ocr_vl::{GlmOcr, NaviDcOcr, PaddleOcrVl, WeVisDoc};
 
     utils::init_tracing();
     let args = Args::parse();
@@ -207,6 +217,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let model = NaviDcOcr::from_dir(&args.model_dir, device)?;
             info!(
                 "NaviDC-OCR loaded in {:.2}ms",
+                load_start.elapsed().as_secs_f64() * 1000.0
+            );
+
+            let parser = DocParser::with_config(&model, config)
+                .with_region_batch_size(args.region_batch_size);
+            process_images(&parser, &layout, &existing_images, &args)?;
+        }
+        ModelName::WeVisDoc => {
+            info!("Loading WeVisDoc model...");
+            let load_start = Instant::now();
+            let model = WeVisDoc::from_dir(&args.model_dir, device)?;
+            info!(
+                "WeVisDoc loaded in {:.2}ms",
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
 
