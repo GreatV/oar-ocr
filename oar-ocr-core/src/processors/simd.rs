@@ -316,7 +316,7 @@ fn crnn_row_simd(src_row: &[u8], sc: usize, dst_row: &mut [f32]) {
 /// This is intentionally a tight contiguous scalar loop, *not* a hand-vectorized
 /// kernel: the output is an interleaved (strided) RGB scatter, which an explicit
 /// `wide` gather/scatter measured ~1.8x *slower* than letting the autovectorizer
-/// handle this `chunks_exact_mut(3)` form. The win over the previous
+/// handle this `as_chunks_mut::<3>()` form. The win over the previous
 /// `put_pixel` + 4-D strided `ndarray` indexing comes from the contiguous
 /// plane access alone (~1.8x faster than the old loop). Kept here next to the
 /// other post-processing kernels for cohesion.
