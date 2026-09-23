@@ -42,7 +42,7 @@ dirs = { version = "7.0", optional = true }
 image.workspace = true
 imageproc.workspace = true
 itertools = "0.15"
-multiversion = { version = "0.8", optional = true }
+multiversion = { version = "0.9", optional = true }
 nalgebra = "0.35"
 ndarray = "0.17"
 oar-ocr-derive.workspace = true
