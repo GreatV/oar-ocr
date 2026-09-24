@@ -1517,132 +1517,188 @@ mod tests {
             cfg.num_hidden_layers = 28;
             cfg.vocab_size = 32768;
             // The decode graph is bf16/f16-gated: build in bf16 so the
-            // test really exercises capture and replay.
-            let vb = random_varbuilder_typed(&cfg, &device, DType::BF16);
-            let model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
+            // test really exercises capture and replay. Both instances
+            // share the weight tensors, so the audit scenarios stay
+            // within one allocation of model memory.
+            let tensors = random_var_map(&cfg, &device, DType::BF16);
+            let make_vb = || VarBuilder::from_tensors(tensors.clone(), DType::BF16, &device);
+            let model = Qwen3VlTextModel::load(&cfg, make_vb().pp("model")).unwrap();
             let lm_head = Linear::new(
-                vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
+                make_vb()
+                    .get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
                     .unwrap(),
                 None,
             );
 
             // A prompt over 4096 tokens forces the 8192 capacity bucket —
-            // the size class the real model decodes from.
-            let ids: Vec<u32> = (0..4200).map(|i| 10 + i % 60).collect();
-            let seq_len = ids.len();
-            let token_ids = Tensor::from_vec(ids.clone(), (1, seq_len), &device).unwrap();
-            let embeds = model.embed(&token_ids).unwrap();
-            let positions = {
-                let base = Tensor::arange(0i64, seq_len as i64, &device)
-                    .unwrap()
-                    .reshape((1, 1, seq_len))
-                    .unwrap();
-                let mut data = Vec::with_capacity(3 * seq_len);
-                for _ in 0..3 {
-                    data.extend(base.flatten_all().unwrap().to_vec1::<i64>().unwrap());
-                }
-                Tensor::from_vec(data, (3, 1, seq_len), &device).unwrap()
-            };
+            // the size class the real model decodes from. The short prompt
+            // lands in the 1024 bucket.
+            let long: Vec<u32> = (0..4200).map(|i| 10 + i % 60).collect();
+            let short: Vec<u32> = (0..600).map(|i| 10 + i % 60).collect();
 
-            // Eager baseline: greedy decode without the graph.
-            model.clear_cache();
-            let hidden = model
-                .forward(&embeds, &positions, None, None, None)
-                .unwrap();
-            let mut logits = lm_head
-                .forward(
-                    &hidden
-                        .i((0, seq_len - 1, ..))
-                        .unwrap()
-                        .unsqueeze(0)
-                        .unwrap(),
-                )
-                .unwrap()
-                .squeeze(0)
-                .unwrap();
-            let mut eager = Vec::new();
-            for step in 0..12 {
-                let scores = logits
-                    .to_dtype(DType::F32)
-                    .unwrap()
-                    .to_vec1::<f32>()
-                    .unwrap();
-                let mut best = 0usize;
-                let mut best_value = f32::NEG_INFINITY;
-                for (i, &v) in scores.iter().enumerate() {
-                    if v > best_value {
-                        best_value = v;
-                        best = i;
-                    }
-                }
-                if best as u32 == cfg.eos_token_id {
-                    break;
-                }
-                eager.push(best as u32);
-                let token = Tensor::from_vec(vec![best as u32], (1, 1), &device).unwrap();
-                let embed = model.embed(&token).unwrap();
-                let pos =
-                    Tensor::from_vec(vec![(seq_len + step) as i64; 3], (3, 1, 1), &device).unwrap();
-                logits = model
-                    .forward_decode_logits(&embed, &pos, None, &lm_head)
-                    .unwrap();
-            }
-
-            // Graph path: capture, assert it happened, replay the same steps.
-            model.clear_cache();
-            model.prepare_ar_cuda_graph(seq_len, 12, &lm_head).unwrap();
-            assert!(
-                model.decode_graph_captured(),
-                "decode graph did not capture (dtype gate?)"
-            );
-            let hidden = model
-                .forward(&embeds, &positions, None, None, None)
-                .unwrap();
-            let mut logits = lm_head
-                .forward(
-                    &hidden
-                        .i((0, seq_len - 1, ..))
-                        .unwrap()
-                        .unsqueeze(0)
-                        .unwrap(),
-                )
-                .unwrap()
-                .squeeze(0)
-                .unwrap();
-            let mut graphed = Vec::new();
-            for step in 0..12 {
-                let scores = logits
-                    .to_dtype(DType::F32)
-                    .unwrap()
-                    .to_vec1::<f32>()
-                    .unwrap();
-                let mut best = 0usize;
-                let mut best_value = f32::NEG_INFINITY;
-                for (i, &v) in scores.iter().enumerate() {
-                    if v > best_value {
-                        best_value = v;
-                        best = i;
-                    }
-                }
-                if best as u32 == cfg.eos_token_id {
-                    break;
-                }
-                graphed.push(best as u32);
-                let token = Tensor::from_vec(vec![best as u32], (1, 1), &device).unwrap();
-                let embed = model.embed(&token).unwrap();
-                let pos =
-                    Tensor::from_vec(vec![(seq_len + step) as i64; 3], (3, 1, 1), &device).unwrap();
-                logits = model
-                    .forward_decode_logits(&embed, &pos, None, &lm_head)
-                    .unwrap();
-            }
+            // First capture at the small bucket.
             assert_eq!(
-                graphed, eager,
-                "graph-replayed decoding must match eager decoding"
+                greedy_eager(&model, &lm_head, &short, 8),
+                greedy_graphed(&model, &lm_head, &short, 8),
+                "small-bucket graph decode must match eager"
+            );
+            assert!(model.decode_graph_captured());
+
+            // Growing past the captured capacity forces a re-capture in the
+            // same process — the dangling-read bug reproduced here.
+            assert_eq!(
+                greedy_eager(&model, &lm_head, &long, 8),
+                greedy_graphed(&model, &lm_head, &long, 8),
+                "re-captured graph decode must match eager"
+            );
+
+            // The larger graph now covers the small prompt again (reuse).
+            assert_eq!(
+                greedy_eager(&model, &lm_head, &short, 8),
+                greedy_graphed(&model, &lm_head, &short, 8),
+                "reused graph decode must match eager"
+            );
+
+            // A second instance capturing while the first graph is alive —
+            // the other reproduction of the dangling-read bug.
+            let second = Qwen3VlTextModel::load(&cfg, make_vb().pp("model")).unwrap();
+            assert_eq!(
+                greedy_eager(&second, &lm_head, &long, 8),
+                greedy_graphed(&second, &lm_head, &long, 8),
+                "second-instance graph decode must match eager"
             );
         }
         #[cfg(not(feature = "cuda"))]
         eprintln!("skipping: built without the cuda feature");
+    }
+
+    /// Greedy decode driven by plain `forward` calls: never captures or
+    /// replays the decode graph, so it is the eager reference.
+    #[cfg(feature = "cuda")]
+    fn greedy_eager(
+        model: &Qwen3VlTextModel,
+        lm_head: &candle_nn::Linear,
+        ids: &[u32],
+        steps: usize,
+    ) -> Vec<u32> {
+        let device = model.embed_tokens.embeddings().device();
+        let seq_len = ids.len();
+        let token_ids = Tensor::from_vec(ids.to_vec(), (1, seq_len), device).unwrap();
+        let embeds = model.embed(&token_ids).unwrap();
+        let positions = text_position_ids_range(seq_len, device);
+        model.clear_cache();
+        let hidden = model
+            .forward(&embeds, &positions, None, None, None)
+            .unwrap();
+        let mut logits = lm_head
+            .forward(
+                &hidden
+                    .i((0, seq_len - 1, ..))
+                    .unwrap()
+                    .unsqueeze(0)
+                    .unwrap(),
+            )
+            .unwrap()
+            .squeeze(0)
+            .unwrap();
+        let mut out = Vec::new();
+        for step in 0..steps {
+            let best = argmax_of(&logits);
+            out.push(best as u32);
+            let token = Tensor::from_vec(vec![best as u32], (1, 1), device).unwrap();
+            let embed = model.embed(&token).unwrap();
+            let pos =
+                Tensor::from_vec(vec![(seq_len + step) as i64; 3], (3, 1, 1), device).unwrap();
+            let next = model.forward(&embed, &pos, None, None, None).unwrap();
+            logits = lm_head
+                .forward(&next.i((0, 0, ..)).unwrap().unsqueeze(0).unwrap())
+                .unwrap()
+                .squeeze(0)
+                .unwrap();
+        }
+        out
+    }
+
+    /// Greedy decode through `prepare_ar_cuda_graph` + `forward_decode_logits`,
+    /// i.e. exactly the production graph path.
+    #[cfg(feature = "cuda")]
+    fn greedy_graphed(
+        model: &Qwen3VlTextModel,
+        lm_head: &candle_nn::Linear,
+        ids: &[u32],
+        steps: usize,
+    ) -> Vec<u32> {
+        let device = model.embed_tokens.embeddings().device();
+        let seq_len = ids.len();
+        let token_ids = Tensor::from_vec(ids.to_vec(), (1, seq_len), device).unwrap();
+        let embeds = model.embed(&token_ids).unwrap();
+        let positions = text_position_ids_range(seq_len, device);
+        model.clear_cache();
+        model
+            .prepare_ar_cuda_graph(seq_len, steps, lm_head)
+            .unwrap();
+        assert!(
+            model.decode_graph_captured(),
+            "decode graph did not capture (dtype gate?)"
+        );
+        let hidden = model
+            .forward(&embeds, &positions, None, None, None)
+            .unwrap();
+        let mut logits = lm_head
+            .forward(
+                &hidden
+                    .i((0, seq_len - 1, ..))
+                    .unwrap()
+                    .unsqueeze(0)
+                    .unwrap(),
+            )
+            .unwrap()
+            .squeeze(0)
+            .unwrap();
+        let mut out = Vec::new();
+        for step in 0..steps {
+            let best = argmax_of(&logits);
+            out.push(best as u32);
+            let token = Tensor::from_vec(vec![best as u32], (1, 1), device).unwrap();
+            let embed = model.embed(&token).unwrap();
+            let pos =
+                Tensor::from_vec(vec![(seq_len + step) as i64; 3], (3, 1, 1), device).unwrap();
+            logits = model
+                .forward_decode_logits(&embed, &pos, None, lm_head)
+                .unwrap();
+        }
+        out
+    }
+
+    #[cfg(feature = "cuda")]
+    fn text_position_ids_range(seq_len: usize, device: &Device) -> Tensor {
+        let base = Tensor::arange(0i64, seq_len as i64, device)
+            .unwrap()
+            .reshape((1, 1, seq_len))
+            .unwrap();
+        let mut data = Vec::with_capacity(3 * seq_len);
+        for _ in 0..3 {
+            data.extend(base.flatten_all().unwrap().to_vec1::<i64>().unwrap());
+        }
+        Tensor::from_vec(data, (3, 1, seq_len), device).unwrap()
+    }
+
+    #[cfg(feature = "cuda")]
+    fn argmax_of(logits: &Tensor) -> usize {
+        let scores = logits
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let mut best = 0usize;
+        let mut best_value = f32::NEG_INFINITY;
+        for (i, &v) in scores.iter().enumerate() {
+            if v > best_value {
+                best_value = v;
+                best = i;
+            }
+        }
+        best
     }
 
     fn random_varbuilder(cfg: &Qwen3VlTextConfig, device: &Device) -> VarBuilder<'static> {
@@ -1654,6 +1710,15 @@ mod tests {
         device: &Device,
         dtype: DType,
     ) -> VarBuilder<'static> {
+        let tensors = random_var_map(cfg, device, dtype);
+        VarBuilder::from_tensors(tensors, dtype, device)
+    }
+
+    fn random_var_map(
+        cfg: &Qwen3VlTextConfig,
+        device: &Device,
+        dtype: DType,
+    ) -> std::collections::HashMap<String, Tensor> {
         use candle_nn::VarBuilder;
         let mut tensors = std::collections::HashMap::new();
         let h = cfg.hidden_size;
@@ -1726,7 +1791,7 @@ mod tests {
                 vec![h, cfg.intermediate_size],
             );
         }
-        VarBuilder::from_tensors(tensors, dtype, device)
+        tensors
     }
 
     fn valid_tiny_config() -> Qwen3VlTextConfig {
