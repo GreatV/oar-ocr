@@ -1,0 +1,1417 @@
+//! jina-ocr-v1 (DeepSeek-OCR) model implementation.
+//!
+//! Native Rust inference for the Jina jina-ocr-v1 checkpoint (SAM ViT-B +
+//! CLIP-L encoder over a 12-layer DeepSeek-V2 MoE decoder). Generation follows
+//! the official `example.py` transformers recipe: greedy decoding with a
+//! sliding-window no-repeat-ngram guard (35-grams within a 1024-token window,
+//! `<td>`/`</td>` whitelisted). On CUDA the decode step runs inside a CUDA
+//! graph, and the trained FastMTP draft head (`mtp_module`) proposes
+//! three-token blocks whose greedy verification preserves the plain-greedy
+//! sequence; the n-gram ban is applied to the verification logits host-side
+//! so speculation cannot change the official recipe.
+
+use super::config::JinaOcrConfig;
+use super::mtp::JinaOcrMtp;
+use super::processing::{
+    DEFAULT_OCR_PROMPT, JinaOcrImageInputs, JinaOcrProcessorConfig, image_tokens, preprocess_image,
+};
+use crate::backbones::deep_encoder::DeepEncoder;
+use crate::backbones::deepseek_v2::DeepSeekV2TextModel;
+use crate::error::Error;
+use crate::runtime::attention::{
+    combine_masks, create_causal_mask, create_generation_mask_if_needed, create_left_padding_mask,
+};
+use crate::runtime::checkpoint::collect_safetensors;
+use crate::runtime::errors::{candle_to_ocr_inference, candle_to_ocr_processing};
+use candle_core::{DType, Device, IndexOp, Tensor};
+use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
+use image::RgbImage;
+use std::path::Path;
+use tokenizers::Tokenizer;
+
+const MODEL_NAME: &str = "JinaOCR";
+
+/// Official `--max-new-tokens` default in `example.py`.
+pub const DEFAULT_MAX_NEW_TOKENS: usize = 4_096;
+
+/// `SlidingWindowNoRepeatNgramProcessor` defaults from the reference
+/// `generate()` override.
+const NGRAM_SIZE: usize = 35;
+const NGRAM_WINDOW: usize = 1024;
+/// `<td>` / `</td>` are exempt from the n-gram ban.
+const NGRAM_WHITELIST: [u32; 2] = [128_821, 128_822];
+
+/// `mtp_num_speculative_steps`: FastMTP draft tokens per verification block.
+const MTP_DRAFT_TOKENS: usize = 3;
+const MTP_QUERY_LEN: usize = MTP_DRAFT_TOKENS + 1;
+/// Below this budget speculation costs more than plain decoding.
+const MTP_MIN_NEW_TOKENS: usize = 8;
+/// Upper bound for the draft head's fixed-capacity KV bucket.
+#[cfg(feature = "cuda")]
+const DECODE_CACHE_LEN: usize = 16_384;
+
+struct TextCacheGuard<'a>(&'a DeepSeekV2TextModel);
+
+impl Drop for TextCacheGuard<'_> {
+    fn drop(&mut self) {
+        self.0.clear_kv_cache();
+    }
+}
+
+/// Greedy-generation result with per-step numerical evidence (see
+/// [`JinaOcr::generate_traced`]).
+#[derive(Debug)]
+pub struct GenerationTrace {
+    /// Generated token ids, without the closing EOS.
+    pub tokens: Vec<u32>,
+    /// Whether decoding stopped on EOS (`false` = the budget ran out).
+    pub hit_eos: bool,
+    /// Raw top-3 `(token, logit)` pairs (pre-ngram-ban) per decoding step,
+    /// including the step that produced the EOS. Only filled by
+    /// [`JinaOcr::generate_traced`].
+    pub step_top: Vec<[(u32, f32); 3]>,
+}
+
+/// End-to-end jina-ocr-v1 page parser.
+pub struct JinaOcr {
+    device: Device,
+    dtype: DType,
+    cfg: JinaOcrConfig,
+    processor_cfg: JinaOcrProcessorConfig,
+    tokenizer: Tokenizer,
+    text: DeepSeekV2TextModel,
+    vision: DeepEncoder,
+    mtp: Option<JinaOcrMtp>,
+    lm_head: Linear,
+    image_newline: Tensor,
+    view_separator: Tensor,
+    image_token_id: u32,
+    eos_token_ids: Vec<u32>,
+}
+
+impl JinaOcr {
+    /// Load a jina-ocr-v1 Hugging Face model directory.
+    pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
+        Self::from_dir_with_runtime(model_dir, crate::RuntimeConfig::new(device))
+    }
+
+    pub fn from_dir_with_runtime(
+        model_dir: impl AsRef<Path>,
+        runtime: crate::RuntimeConfig,
+    ) -> Result<Self, Error> {
+        let (device, dtype) = runtime.resolve();
+        let model_dir = model_dir.as_ref();
+        let cfg = JinaOcrConfig::from_path(model_dir.join("config.json"))?;
+        let processor_cfg =
+            JinaOcrProcessorConfig::from_path(model_dir.join("processor_config.json"))?;
+        let tokenizer =
+            Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| Error::Config {
+                message: format!("failed to load JinaOCR tokenizer.json: {e}"),
+            })?;
+        let image_token_id = require_token_id(&tokenizer, "<image>", Some(cfg.image_token_index))?;
+        let eos_string = "<｜end▁of▁sentence｜>";
+        let tokenizer_eos = require_token_id(&tokenizer, eos_string, Some(cfg.text.eos_token_id))?;
+        let eos_token_ids = vec![cfg.text.eos_token_id, tokenizer_eos];
+
+        let weight_files = collect_safetensors(model_dir, MODEL_NAME)?;
+        // SAFETY: The model files must remain unchanged while their mmap is in use.
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&weight_files, dtype, &device)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load safetensors", e))?
+        };
+        let (sam_cfg, clip_cfg) = cfg.vision_configs()?;
+        let vision = DeepEncoder::load(&sam_cfg, &clip_cfg, cfg.text.hidden_size, vb.pp("model"))?;
+        let text = DeepSeekV2TextModel::load(&cfg.text, vb.pp("model"))?;
+        let lm_head = linear_no_bias(cfg.text.hidden_size, cfg.text.vocab_size, vb.pp("lm_head"))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load lm_head", e))?;
+        let image_newline = vb
+            .pp("model")
+            .get(cfg.text.hidden_size, "image_newline")
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load image_newline", e))?;
+        let view_separator = vb
+            .pp("model")
+            .get(cfg.text.hidden_size, "view_seperator")
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load view_seperator", e))?;
+        let mtp = if cfg.num_nextn_predict_layers.unwrap_or(0) >= 1
+            && std::env::var_os("OAR_JINAOCR_DISABLE_MTP").is_none()
+        {
+            Some(JinaOcrMtp::load(
+                &cfg.text,
+                text.token_embedding_weight(),
+                text.final_norm_weight(),
+                lm_head.weight().clone(),
+                vb,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            device,
+            dtype,
+            cfg,
+            processor_cfg,
+            tokenizer,
+            text,
+            vision,
+            mtp,
+            lm_head,
+            image_newline,
+            view_separator,
+            image_token_id,
+            eos_token_ids,
+        })
+    }
+
+    /// Generate model-native Markdown for each page.
+    pub fn generate(
+        &self,
+        images: &[RgbImage],
+        max_new_tokens: usize,
+    ) -> crate::error::BatchResult<String> {
+        Ok(self
+            .generate_tokens(images, max_new_tokens)?
+            .into_iter()
+            .map(|result| result.and_then(|tokens| self.decode_tokens(&tokens)))
+            .collect())
+    }
+
+    /// Generate raw token ids for each input page. A single page runs through
+    /// the MTP/graph fast path; larger batches run a padded batch prefill and
+    /// decode (speculation and decode graphs are single-sequence only).
+    pub fn generate_tokens(
+        &self,
+        images: &[RgbImage],
+        max_new_tokens: usize,
+    ) -> crate::error::BatchResult<Vec<u32>> {
+        if images.len() <= 1 {
+            return Ok(images
+                .iter()
+                .map(|image| {
+                    self.generate_one(image, max_new_tokens)
+                        .map(|(tokens, _)| tokens)
+                })
+                .collect());
+        }
+        let results = self.generate_batch_tokens(images, max_new_tokens)?;
+        Ok(results.into_iter().map(Ok).collect())
+    }
+
+    /// Generate one page's tokens plus whether decoding stopped on EOS
+    /// (`false` = the budget ran out first, the official n-gram-bounded
+    /// truncation signal).
+    pub(crate) fn generate_one(
+        &self,
+        image: &RgbImage,
+        max_new_tokens: usize,
+    ) -> Result<(Vec<u32>, bool), Error> {
+        let prompt = self.prepare_prompt(image, max_new_tokens)?;
+        self.text.clear_kv_cache();
+        let _cache_guard = TextCacheGuard(&self.text);
+        if self.mtp_enabled(max_new_tokens) {
+            let mtp = self.mtp.as_ref().expect("MTP availability checked");
+            mtp.clear_kv_cache();
+            self.prepare_mtp_graphs(prompt.input_ids.len(), max_new_tokens);
+            let hidden = self
+                .text
+                .forward(&prompt.inputs_embeds, &prompt.position_ids, None)?;
+            let (tokens, hit_eos) =
+                self.engine()
+                    .mtp_tokens(&prompt.input_ids, &hidden, max_new_tokens)?;
+            Ok((tokens, hit_eos))
+        } else {
+            let hidden = self
+                .text
+                .forward(&prompt.inputs_embeds, &prompt.position_ids, None)?;
+            let trace =
+                self.engine()
+                    .ar_tokens(&prompt.input_ids, &hidden, max_new_tokens, false)?;
+            Ok((trace.tokens, trace.hit_eos))
+        }
+    }
+
+    /// Same greedy generation with the raw (pre-ngram-ban) top-3 `(token,
+    /// logit)` pairs of every decoding step attached — the
+    /// numerical-alignment evidence compared against the transformers
+    /// reference by the environment-gated alignment test. Always plain
+    /// autoregressive decoding, never speculative.
+    #[doc(hidden)]
+    pub fn generate_traced(
+        &self,
+        image: &RgbImage,
+        max_new_tokens: usize,
+    ) -> Result<GenerationTrace, Error> {
+        let prompt = self.prepare_prompt(image, max_new_tokens)?;
+        self.text.clear_kv_cache();
+        let _cache_guard = TextCacheGuard(&self.text);
+        let hidden = self
+            .text
+            .forward(&prompt.inputs_embeds, &prompt.position_ids, None)?;
+        self.engine()
+            .ar_tokens(&prompt.input_ids, &hidden, max_new_tokens, true)
+    }
+
+    /// Padded batch generation: the same tokens as per-image generation, with
+    /// one prefill and one decode step for the whole batch. Unequal prompt
+    /// lengths are left-padded; prefill and decode masks hide the padded KV
+    /// positions, and each sequence stops at its own EOS.
+    fn generate_batch_tokens(
+        &self,
+        images: &[RgbImage],
+        max_new_tokens: usize,
+    ) -> Result<Vec<Vec<u32>>, Error> {
+        let batch_size = images.len();
+        let mut prompts: Vec<PreparedPrompt> = Vec::with_capacity(batch_size);
+        for image in images {
+            prompts.push(self.prepare_prompt(image, max_new_tokens)?);
+        }
+        let seq_lens: Vec<usize> = prompts.iter().map(|p| p.input_ids.len()).collect();
+        let Some(&max_seq_len) = seq_lens.iter().max() else {
+            return Err(Error::InvalidInput {
+                message: "JinaOCR: empty batch is not supported".to_string(),
+            });
+        };
+
+        // Left-pad every sequence to the batch maximum.
+        let mut embeds_rows = Vec::with_capacity(batch_size);
+        let mut position_rows = Vec::with_capacity(batch_size);
+        for (prompt, &seq_len) in prompts.iter().zip(&seq_lens) {
+            let pad_len = max_seq_len - seq_len;
+            let embeds = if pad_len > 0 {
+                let pad = Tensor::zeros(
+                    (1, pad_len, self.cfg.text.hidden_size),
+                    prompt.inputs_embeds.dtype(),
+                    &self.device,
+                )
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create pad", e))?;
+                Tensor::cat(&[&pad, &prompt.inputs_embeds], 1)
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "cat pad", e))?
+            } else {
+                prompt.inputs_embeds.clone()
+            };
+            embeds_rows.push(embeds);
+            let mut positions =
+                Tensor::arange(0u32, seq_len as u32, &self.device)?.reshape((1, 1, seq_len))?;
+            if pad_len > 0 {
+                let pad = Tensor::zeros((1, 1, pad_len), DType::U32, &self.device)?;
+                positions = Tensor::cat(&[&pad, &positions], 2)?;
+            }
+            position_rows.push(positions);
+        }
+        let embeds_refs: Vec<&Tensor> = embeds_rows.iter().collect();
+        let inputs_embeds = Tensor::cat(&embeds_refs, 0)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "stack embeds", e))?;
+        let position_refs: Vec<&Tensor> = position_rows.iter().collect();
+        let position_ids = Tensor::cat(&position_refs, 1)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "stack positions", e))?;
+        let mask = if batch_size > 1 {
+            let causal = create_causal_mask(max_seq_len, max_seq_len, self.dtype, &self.device)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create causal mask", e))?;
+            let padding =
+                create_left_padding_mask(&seq_lens, max_seq_len, self.dtype, &self.device)
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create padding mask", e))?;
+            Some(
+                combine_masks(&causal, &padding)
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "combine masks", e))?,
+            )
+        } else {
+            None
+        };
+
+        self.text.clear_kv_cache();
+        let hidden = self
+            .text
+            .forward(&inputs_embeds, &position_ids, mask.as_ref())?;
+        let last_hidden = hidden
+            .i((.., max_seq_len - 1, ..))
+            .and_then(|h| h.contiguous())
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "get last hidden", e))?;
+        let mut logits_rows = self
+            .lm_head
+            .forward(&last_hidden)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "batch lm_head", e))?
+            .to_dtype(DType::F32)?
+            .to_vec2::<f32>()
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read batch logits", e))?;
+
+        let mut generated: Vec<Vec<u32>> = vec![Vec::new(); batch_size];
+        let mut finished = vec![false; batch_size];
+        let mut positions: Vec<u32> = seq_lens.iter().map(|&len| len as u32).collect();
+        let pad_lens: Vec<usize> = seq_lens.iter().map(|&len| max_seq_len - len).collect();
+        let mut kv_len = max_seq_len;
+
+        for step in 0..max_new_tokens {
+            if finished.iter().all(|&f| f) {
+                break;
+            }
+            let mut next_tokens: Vec<u32> = Vec::with_capacity(batch_size);
+            for row in 0..batch_size {
+                if finished[row] {
+                    next_tokens.push(0);
+                    continue;
+                }
+                let prompt_ids = &prompts[row].input_ids;
+                let mut scores = std::mem::take(&mut logits_rows[row]);
+                let mut history = Vec::with_capacity(prompt_ids.len() + generated[row].len());
+                history.extend_from_slice(prompt_ids);
+                history.extend_from_slice(&generated[row]);
+                apply_no_repeat_ngram(&history, &mut scores);
+                let token = argmax(&scores)?;
+                if self.eos_token_ids.contains(&token) {
+                    finished[row] = true;
+                } else {
+                    generated[row].push(token);
+                }
+                next_tokens.push(token);
+                logits_rows[row] = scores;
+            }
+            if finished.iter().all(|&f| f) {
+                break;
+            }
+            if step + 1 == max_new_tokens {
+                break;
+            }
+
+            let tokens = Tensor::from_vec(next_tokens, (batch_size, 1), &self.device)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create decode tokens", e))?;
+            let embeds = self.text.embed(&tokens)?;
+            let pos = Tensor::from_vec(positions.clone(), (1, batch_size, 1), &self.device)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create decode positions", e))?;
+            kv_len += 1;
+            let gen_mask =
+                create_generation_mask_if_needed(&pad_lens, kv_len, self.dtype, &self.device)
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create decode mask", e))?;
+            let hidden = self.text.forward(&embeds, &pos, gen_mask.as_ref())?;
+            logits_rows = self
+                .lm_head
+                .forward(&hidden)
+                .and_then(|l| l.squeeze(1))
+                .and_then(|l| l.to_dtype(DType::F32))
+                .and_then(|l| l.to_vec2::<f32>())
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "batch decode lm_head", e))?;
+            for (row, position) in positions.iter_mut().enumerate() {
+                if !finished[row] {
+                    *position += 1;
+                }
+            }
+        }
+        Ok(generated)
+    }
+
+    fn engine(&self) -> GreedyEngine<'_> {
+        GreedyEngine {
+            model_name: MODEL_NAME,
+            text: &self.text,
+            lm_head: &self.lm_head,
+            mtp: self.mtp.as_ref(),
+            eos_token_ids: &self.eos_token_ids,
+            device: &self.device,
+        }
+    }
+
+    /// FastMTP speculation is off by default: it stays token-identical to
+    /// plain greedy decoding, but the MoE router's host round-trips
+    /// serialize the target forward, so speculation is not yet a net win
+    /// (a device-side MoE router would unlock it). Opt in explicitly with
+    /// `OAR_JINAOCR_ENABLE_MTP`.
+    fn mtp_enabled(&self, max_new_tokens: usize) -> bool {
+        self.mtp.is_some()
+            && max_new_tokens >= MTP_MIN_NEW_TOKENS
+            && std::env::var_os("OAR_VL_DISABLE_SPECULATIVE").is_none()
+            && std::env::var_os("OAR_JINAOCR_ENABLE_MTP").is_some()
+    }
+
+    /// Capture the FastMTP draft graph over a fixed-capacity KV bucket. The
+    /// dense draft block stays fully on-device, so it is the one piece of the
+    /// speculative loop that graph capture can accelerate (the target's MoE
+    /// layers route through the host and must stay eager).
+    #[cfg(feature = "cuda")]
+    fn prepare_mtp_graphs(&self, prompt_len: usize, max_new_tokens: usize) {
+        use crate::runtime::decoder_graph::decoder_cache_capacity;
+        let mtp = self.mtp.as_ref().expect("MTP availability checked");
+        let draft_budget = max_new_tokens + MTP_QUERY_LEN + MTP_DRAFT_TOKENS;
+        match decoder_cache_capacity(prompt_len, draft_budget, DECODE_CACHE_LEN) {
+            Some(cache_len) => {
+                if let Err(error) = mtp.prepare_cuda_graph(cache_len) {
+                    tracing::warn!("JinaOCR MTP graph capture failed: {error}");
+                    mtp.disable_cuda_graph();
+                }
+            }
+            None => mtp.disable_cuda_graph(),
+        }
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    fn prepare_mtp_graphs(&self, _prompt_len: usize, _max_new_tokens: usize) {}
+
+    /// Tokenize the fixed OCR prompt for one page and splice the visual
+    /// features into the image placeholder positions.
+    fn prepare_prompt(
+        &self,
+        image: &RgbImage,
+        max_new_tokens: usize,
+    ) -> Result<PreparedPrompt, Error> {
+        let image_inputs = preprocess_image(image, &self.processor_cfg, &self.device, self.dtype)?;
+        // JINA_OCR_CHAT_TEMPLATE for one user turn: "<|User|>:\n" + image +
+        // "\n" + instruction, then "\n<|Assistant|>:\n" as the generation
+        // prompt. No BOS: the processor encodes without special tokens.
+        let prompt = format!("<|User|>:\n<image>\n{DEFAULT_OCR_PROMPT}\n<|Assistant|>:\n");
+        let encoding = self
+            .tokenizer
+            .encode(prompt, false)
+            .map_err(|e| Error::InvalidInput {
+                message: format!("JinaOCR: tokenizer encode failed: {e}"),
+            })?;
+        let encoded = encoding.get_ids().to_vec();
+        let image_count = encoded
+            .iter()
+            .filter(|&&t| t == self.image_token_id)
+            .count();
+        if image_count != 1 {
+            return Err(Error::InvalidInput {
+                message: format!(
+                    "JinaOCR: prompt must contain exactly one <image> placeholder, found {image_count}"
+                ),
+            });
+        }
+        let tokens_layout = image_tokens(self.image_token_id, &image_inputs);
+        let mut input_ids = Vec::with_capacity(encoded.len() - 1 + tokens_layout.len());
+        for &token in &encoded {
+            if token == self.image_token_id {
+                input_ids.extend_from_slice(&tokens_layout);
+            } else {
+                input_ids.push(token);
+            }
+        }
+        if input_ids.len() + max_new_tokens > self.cfg.text.max_position_embeddings {
+            return Err(Error::InvalidInput {
+                message: format!(
+                    "JinaOCR prompt ({}) plus max_new_tokens ({max_new_tokens}) exceeds context limit {}",
+                    input_ids.len(),
+                    self.cfg.text.max_position_embeddings
+                ),
+            });
+        }
+        let inputs_embeds = self.prepare_inputs(&input_ids, &image_inputs)?;
+        let seq_len = input_ids.len();
+        let position_ids =
+            Tensor::arange(0u32, seq_len as u32, &self.device)?.reshape((1, 1, seq_len))?;
+        Ok(PreparedPrompt {
+            input_ids,
+            inputs_embeds,
+            position_ids,
+        })
+    }
+
+    /// Embed the token ids and splice `[local tiles | global | separator]`
+    /// visual features into the placeholder positions (`compute_inputs_embeds`
+    /// with `tile_tag="2D"`).
+    fn prepare_inputs(
+        &self,
+        input_ids: &[u32],
+        image_inputs: &JinaOcrImageInputs,
+    ) -> Result<Tensor, Error> {
+        let seq_len = input_ids.len();
+        let token_ids = Tensor::from_vec(input_ids.to_vec(), (1, seq_len), &self.device)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create prompt token ids", e))?;
+        let embeds = self.text.embed(&token_ids)?;
+
+        let visual = self.assemble_visual_features(image_inputs)?;
+        let visual_len = visual.dim(0)?;
+        let placeholder_positions: Vec<usize> = input_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &token)| (token == self.image_token_id).then_some(index))
+            .collect();
+        if placeholder_positions.len() != visual_len {
+            return Err(Error::InvalidInput {
+                message: format!(
+                    "JinaOCR: visual token mismatch — encoder produced {visual_len}, mask has {} positions",
+                    placeholder_positions.len()
+                ),
+            });
+        }
+        let embeds = embeds.squeeze(0)?;
+        for (row, &position) in placeholder_positions.iter().enumerate() {
+            let feature = visual.i(row..row + 1)?;
+            embeds.slice_set(&feature, 0, position)?;
+        }
+        embeds
+            .unsqueeze(0)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "merge visual features", e))
+    }
+
+    /// `[local | global | view separator]` features for one image,
+    /// `(tokens, hidden)`.
+    fn assemble_visual_features(&self, inputs: &JinaOcrImageInputs) -> Result<Tensor, Error> {
+        let global = self.vision.forward(&inputs.global_view)?.squeeze(0)?;
+        let (global_tokens, dim) = global.dims2()?;
+        let grid_side = global_tokens.isqrt();
+        let global_grid = global.reshape((grid_side, grid_side, dim))?;
+        let newline = self.image_newline.reshape((1, 1, dim))?;
+        let global_rows = Tensor::cat(
+            &[&global_grid, &newline.broadcast_as((grid_side, 1, dim))?],
+            1,
+        )?
+        .reshape((grid_side * (grid_side + 1), dim))?;
+
+        let (width_tiles, height_tiles) = inputs.tile_grid;
+        let has_tiles = width_tiles > 1 || height_tiles > 1;
+        let local_rows = if has_tiles {
+            let tiles = self.vision.forward(&inputs.tiles)?;
+            let (tile_count, tokens_per_tile, _) = tiles.dims3()?;
+            let tile_side = tokens_per_tile.isqrt();
+            debug_assert_eq!(tile_count, width_tiles * height_tiles);
+            let tiles = tiles.reshape((height_tiles, width_tiles, tile_side, tile_side, dim))?;
+            // (H, q, W, q, D) -> (H*q, W*q, D): height-major patch rows.
+            let mosaic = tiles.permute((0, 2, 1, 3, 4))?.contiguous()?;
+            let rows = height_tiles * tile_side;
+            let cols = width_tiles * tile_side;
+            let mosaic = mosaic.reshape((rows, cols, dim))?;
+            Tensor::cat(&[&mosaic, &newline.broadcast_as((rows, 1, dim))?], 1)?
+                .reshape((rows * (cols + 1), dim))?
+        } else {
+            Tensor::zeros((0usize, dim), global.dtype(), global.device())?
+        };
+
+        let separator = self.view_separator.unsqueeze(0)?;
+        Tensor::cat(&[&local_rows, &global_rows, &separator], 0)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "visual features cat", e))
+    }
+
+    /// Decode generated ids the way `decode_ocr` does: keep special tokens in
+    /// the decode, then strip the known special strings.
+    pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, Error> {
+        let text = self
+            .tokenizer
+            .decode(tokens, false)
+            .map_err(|e| Error::InvalidInput {
+                message: format!("JinaOCR: tokenizer decode failed: {e}"),
+            })?;
+        let mut text = text;
+        for special in [
+            "<｜end▁of▁sentence｜>",
+            "<｜▁pad▁｜>",
+            "<｜begin▁of▁sentence｜>",
+            "<image>",
+        ] {
+            text = text.replace(special, "");
+        }
+        Ok(text.trim().to_string())
+    }
+
+    pub fn tokenizer(&self) -> &Tokenizer {
+        &self.tokenizer
+    }
+
+    pub fn config(&self) -> &JinaOcrConfig {
+        &self.cfg
+    }
+
+    pub fn processor_config(&self) -> &JinaOcrProcessorConfig {
+        &self.processor_cfg
+    }
+}
+
+/// Everything [`JinaOcr::prepare_prompt`] produces for one page.
+pub(crate) struct PreparedPrompt {
+    pub(crate) input_ids: Vec<u32>,
+    pub(crate) inputs_embeds: Tensor,
+    pub(crate) position_ids: Tensor,
+}
+
+/// The greedy engine shared by the autoregressive, traced, and speculative
+/// paths. Held separately from [`JinaOcr`] so random-weight unit tests can
+/// drive it without a vision tower or tokenizer.
+pub(crate) struct GreedyEngine<'a> {
+    pub(crate) model_name: &'static str,
+    pub(crate) text: &'a DeepSeekV2TextModel,
+    pub(crate) lm_head: &'a Linear,
+    pub(crate) mtp: Option<&'a JinaOcrMtp>,
+    pub(crate) eos_token_ids: &'a [u32],
+    pub(crate) device: &'a Device,
+}
+
+impl GreedyEngine<'_> {
+    /// Plain autoregressive greedy decoding over a prefilled prompt;
+    /// `want_trace` attaches the raw top-3 logits of every step.
+    pub(crate) fn ar_tokens(
+        &self,
+        prompt_ids: &[u32],
+        prompt_hidden: &Tensor,
+        max_new_tokens: usize,
+        want_trace: bool,
+    ) -> Result<GenerationTrace, Error> {
+        let prompt_len = prompt_ids.len();
+        let last_hidden = prompt_hidden
+            .i((0, prompt_len - 1, ..))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "select prompt hidden", e))?;
+        let mut logits = self
+            .lm_head
+            .forward(&last_hidden.unsqueeze(0)?)
+            .and_then(|l| l.squeeze(0))
+            .map_err(|e| {
+                candle_to_ocr_inference(self.model_name, "prompt language model head", e)
+            })?;
+        let mut trace = GenerationTrace {
+            tokens: Vec::with_capacity(max_new_tokens),
+            hit_eos: false,
+            step_top: Vec::with_capacity(if want_trace { max_new_tokens } else { 0 }),
+        };
+        let mut history = prompt_ids.to_vec();
+
+        for step in 0..max_new_tokens {
+            let mut scores = logits
+                .to_dtype(DType::F32)
+                .and_then(|l| l.to_vec1::<f32>())
+                .map_err(|e| candle_to_ocr_inference(self.model_name, "read decode scores", e))?;
+            if want_trace {
+                trace.step_top.push(top3(&scores));
+            }
+            apply_no_repeat_ngram(&history, &mut scores);
+            let token = argmax(&scores)?;
+            if self.eos_token_ids.contains(&token) {
+                trace.hit_eos = true;
+                return Ok(trace);
+            }
+            trace.tokens.push(token);
+            history.push(token);
+            if step + 1 == max_new_tokens {
+                break;
+            }
+
+            let token_ids = Tensor::from_vec(vec![token], (1, 1), self.device).map_err(|e| {
+                candle_to_ocr_processing(
+                    crate::error::ProcessingStage::TensorOperation,
+                    format!("{}: create decode token", self.model_name),
+                    e,
+                )
+            })?;
+            let embeds = self.text.embed(&token_ids)?;
+            let position = Tensor::arange(
+                (prompt_len + step) as u32,
+                (prompt_len + step + 1) as u32,
+                self.device,
+            )?
+            .reshape((1, 1, 1))?;
+            logits = self
+                .text
+                .forward_decode_logits(&embeds, &position, None, self.lm_head)?;
+        }
+        Ok(trace)
+    }
+
+    /// Speculative greedy decoding with the FastMTP draft head. Greedy
+    /// verification accepts only the token-equality prefix, so the emitted
+    /// sequence matches [`Self::ar_tokens`] exactly; the n-gram ban is
+    /// applied to the verification logits host-side, sequentially over the
+    /// accepted block (positions past a rejection are computed over the
+    /// wrong prefix and discarded by the accept loop).
+    pub(crate) fn mtp_tokens(
+        &self,
+        prompt_ids: &[u32],
+        prompt_hidden: &Tensor,
+        max_new_tokens: usize,
+    ) -> Result<(Vec<u32>, bool), Error> {
+        let mtp = self.mtp.ok_or_else(|| Error::Config {
+            message: format!("{}: MTP draft head is not loaded", self.model_name),
+        })?;
+        let prompt_len = prompt_ids.len();
+        let name = self.model_name;
+
+        // Initial certain token: the greedy pick over the prompt's last
+        // position, n-gram ban included.
+        let last_hidden = prompt_hidden
+            .i((0, prompt_len - 1, ..))
+            .map_err(|e| candle_to_ocr_inference(name, "MTP prompt hidden", e))?;
+        let mut scores = self
+            .lm_head
+            .forward(&last_hidden.unsqueeze(0)?)
+            .and_then(|l| l.squeeze(0).and_then(|l| l.to_dtype(DType::F32)))
+            .and_then(|l| l.to_vec1::<f32>())
+            .map_err(|e| candle_to_ocr_inference(name, "MTP prompt logits", e))?;
+        apply_no_repeat_ngram(prompt_ids, &mut scores);
+        let mut current = argmax(&scores)?;
+        if self.eos_token_ids.contains(&current) {
+            return Ok((Vec::new(), true));
+        }
+
+        // Initial draft: sync the FastMTP layer over the whole prompt.
+        mtp.clear_kv_cache();
+        let mut shifted_ids = Vec::with_capacity(prompt_len);
+        shifted_ids.extend_from_slice(&prompt_ids[1..]);
+        shifted_ids.push(current);
+        let shifted = Tensor::from_vec(shifted_ids, (1, prompt_len), self.device)
+            .map_err(|e| candle_to_ocr_inference(name, "MTP shifted prompt ids", e))?;
+        let positions =
+            Tensor::arange(0u32, prompt_len as u32, self.device)?.reshape((1, 1, prompt_len))?;
+        let (span_hidden, span_tokens) =
+            mtp.sync_target_span(&shifted, prompt_hidden, &positions, true)?;
+        let mut drafts =
+            self.complete_mtp_drafts(mtp, &span_hidden, &span_tokens, prompt_len as u32)?;
+
+        let mut generated: Vec<u32> = Vec::with_capacity(max_new_tokens);
+        let mut history = prompt_ids.to_vec();
+        let mut base = prompt_len;
+        let mut position = prompt_len as u32;
+        let mut hit_eos = false;
+        let mut rounds = 0usize;
+        let mut accepted_drafts = 0usize;
+        let mut accepted_by_position = [0usize; MTP_DRAFT_TOKENS];
+
+        loop {
+            if self.eos_token_ids.contains(&current) {
+                hit_eos = true;
+                break;
+            }
+            generated.push(current);
+            history.push(current);
+            if generated.len() == max_new_tokens {
+                break;
+            }
+
+            // Verify [current, drafts..] in one causal target pass.
+            let mut query_ids = Vec::with_capacity(MTP_QUERY_LEN);
+            query_ids.push(current);
+            query_ids.extend_from_slice(&drafts);
+            let query = Tensor::from_vec(query_ids.clone(), (1, MTP_QUERY_LEN), self.device)
+                .map_err(|e| candle_to_ocr_inference(name, "MTP verification ids", e))?;
+            let embeds = self.text.embed(&query)?;
+            let query_positions =
+                Tensor::arange(position, position + MTP_QUERY_LEN as u32, self.device)?
+                    .reshape((1, 1, MTP_QUERY_LEN))?;
+            let (block_hidden, block_logits) =
+                self.text
+                    .forward_verification_tokens(&embeds, &query_positions, self.lm_head)?;
+            let block_scores = block_logits
+                .to_dtype(DType::F32)
+                .and_then(|l| l.to_vec2::<f32>())
+                .map_err(|e| candle_to_ocr_inference(name, "MTP verification logits", e))?;
+
+            // Greedy verification, ban applied sequentially over the block.
+            let mut block_tokens = [0u32; MTP_QUERY_LEN];
+            let mut block_history = history.clone();
+            for (slot, mut scores) in block_scores.into_iter().enumerate() {
+                apply_no_repeat_ngram(&block_history, &mut scores);
+                block_tokens[slot] = argmax(&scores)?;
+                block_history.push(query_ids[slot]);
+            }
+
+            let mut accepted = 0usize;
+            let mut stop = false;
+            rounds += 1;
+            while accepted < MTP_DRAFT_TOKENS && drafts[accepted] == block_tokens[accepted] {
+                let token = drafts[accepted];
+                accepted += 1;
+                accepted_drafts += 1;
+                accepted_by_position[accepted - 1] += 1;
+                if self.eos_token_ids.contains(&token) {
+                    hit_eos = true;
+                    stop = true;
+                    break;
+                }
+                generated.push(token);
+                history.push(token);
+                if generated.len() == max_new_tokens {
+                    stop = true;
+                    break;
+                }
+            }
+            if stop {
+                break;
+            }
+
+            let next_token = block_tokens[accepted];
+            let keep = accepted + 1;
+
+            // The verification block wrote MTP_QUERY_LEN KV entries; keep
+            // only the certain current token plus its accepted draft prefix,
+            // and roll the recurrent MTP tail back to the same base.
+            self.text.trim_kv_cache(base + keep)?;
+            mtp.trim_kv_cache(base)?;
+            base += keep;
+            position += keep as u32;
+            current = next_token;
+
+            // Re-sync the draft with the accepted target span.
+            let mut sync_ids = query_ids[1..keep].to_vec();
+            sync_ids.push(current);
+            let sync = Tensor::from_vec(sync_ids, (1, keep), self.device)
+                .map_err(|e| candle_to_ocr_inference(name, "MTP sync ids", e))?;
+            let sync_hidden = block_hidden
+                .narrow(1, 0, keep)
+                .map_err(|e| candle_to_ocr_inference(name, "MTP sync target hidden", e))?;
+            let sync_positions = Tensor::arange(position - keep as u32, position, self.device)?
+                .reshape((1, 1, keep))?;
+            let (span_hidden, span_tokens) =
+                mtp.sync_target_span(&sync, &sync_hidden, &sync_positions, false)?;
+            drafts = self.complete_mtp_drafts(mtp, &span_hidden, &span_tokens, position)?;
+        }
+        if rounds > 0 {
+            tracing::debug!(
+                rounds,
+                accepted_drafts,
+                ?accepted_by_position,
+                mean_acceptance_length = 1.0 + accepted_drafts as f64 / rounds as f64,
+                "JinaOCR MTP acceptance"
+            );
+        }
+        Ok((generated, hit_eos))
+    }
+
+    /// Recurrently complete the draft block from a synchronized span: the
+    /// span's last proposal is the first draft, each further draft re-feeds
+    /// the preceding MTP hidden state.
+    fn complete_mtp_drafts(
+        &self,
+        mtp: &JinaOcrMtp,
+        first_hidden: &Tensor,
+        first_tokens: &Tensor,
+        position_after_span: u32,
+    ) -> Result<Vec<u32>, Error> {
+        let name = self.model_name;
+        let seq_len = first_hidden
+            .dim(1)
+            .map_err(|e| candle_to_ocr_inference(name, "MTP span length", e))?;
+        let mut hidden = first_hidden
+            .narrow(1, seq_len - 1, 1)
+            .map_err(|e| candle_to_ocr_inference(name, "MTP final hidden state", e))?;
+        let token_count = first_tokens
+            .dim(0)
+            .map_err(|e| candle_to_ocr_inference(name, "MTP proposal count", e))?;
+        let mut token = first_tokens
+            .narrow(0, token_count - 1, 1)
+            .and_then(|token| token.reshape((1, 1)))
+            .map_err(|e| candle_to_ocr_inference(name, "MTP first proposal", e))?;
+        let mut draft_tensors = Vec::with_capacity(MTP_DRAFT_TOKENS);
+
+        while draft_tensors.len() < MTP_DRAFT_TOKENS {
+            // CUDA-graph replay overwrites its captured output storage. Keep
+            // each proposal in independent storage before launching the next
+            // recurrent step, otherwise earlier draft handles would silently
+            // observe the newest token.
+            draft_tensors.push(
+                token
+                    .copy()
+                    .map_err(|e| candle_to_ocr_inference(name, "save MTP proposal", e))?,
+            );
+            if draft_tensors.len() == MTP_DRAFT_TOKENS {
+                break;
+            }
+            let position = Tensor::arange(
+                position_after_span + draft_tensors.len() as u32 - 1,
+                position_after_span + draft_tensors.len() as u32,
+                self.device,
+            )?
+            .reshape((1, 1, 1))?;
+            let (next_hidden, next_token) = mtp.predict_single(&token, &hidden, &position)?;
+            hidden = next_hidden;
+            token = next_token
+                .reshape((1, 1))
+                .map_err(|e| candle_to_ocr_inference(name, "MTP proposal shape", e))?;
+        }
+
+        let refs: Vec<&Tensor> = draft_tensors.iter().collect();
+        Tensor::cat(&refs, 1)
+            .and_then(|drafts| drafts.flatten_all())
+            .and_then(|drafts| drafts.to_vec1::<u32>())
+            .map_err(|e| candle_to_ocr_inference(name, "copy MTP proposals", e))
+    }
+}
+
+fn require_token_id(
+    tokenizer: &Tokenizer,
+    token: &str,
+    expected: Option<u32>,
+) -> Result<u32, Error> {
+    let token_id = tokenizer.token_to_id(token).ok_or_else(|| Error::Config {
+        message: format!("JinaOCR tokenizer is missing required token {token:?}"),
+    })?;
+    if let Some(expected) = expected
+        && token_id != expected
+    {
+        return Err(Error::Config {
+            message: format!(
+                "JinaOCR token {token:?} id mismatch: tokenizer {token_id} != config {expected}"
+            ),
+        });
+    }
+    Ok(token_id)
+}
+
+/// `SlidingWindowNoRepeatNgramProcessor`: ban the tokens that would complete
+/// an n-gram seen within the last `NGRAM_WINDOW` tokens of the running
+/// sequence, minus the whitelist.
+fn apply_no_repeat_ngram(sequence: &[u32], scores: &mut [f32]) {
+    if NGRAM_SIZE == 0 {
+        return;
+    }
+    let len = sequence.len();
+    if len < NGRAM_SIZE {
+        return;
+    }
+    let search_start = len.saturating_sub(NGRAM_WINDOW);
+    let search_end = len - NGRAM_SIZE + 1;
+    if search_end <= search_start {
+        return;
+    }
+    let prefix = &sequence[len - NGRAM_SIZE + 1..];
+    for start in search_start..search_end {
+        if sequence[start..start + NGRAM_SIZE - 1] == *prefix {
+            let next = sequence[start + NGRAM_SIZE - 1];
+            if !NGRAM_WHITELIST.contains(&next) {
+                scores[next as usize] = f32::NEG_INFINITY;
+            }
+        }
+    }
+}
+
+fn argmax(scores: &[f32]) -> Result<u32, Error> {
+    let mut best = 0usize;
+    let mut best_value = f32::NEG_INFINITY;
+    for (index, &value) in scores.iter().enumerate() {
+        if value > best_value {
+            best_value = value;
+            best = index;
+        }
+    }
+    Ok(best as u32)
+}
+
+/// Top-3 `(token, logit)` pairs of a raw score row, ties toward the lower
+/// token id like `argmax`.
+fn top3(scores: &[f32]) -> [(u32, f32); 3] {
+    let mut best: [(usize, f32); 3] = [(0, f32::NEG_INFINITY); 3];
+    for (index, &value) in scores.iter().enumerate() {
+        if value > best[2].1 {
+            if value > best[1].1 {
+                if value > best[0].1 {
+                    best[2] = best[1];
+                    best[1] = best[0];
+                    best[0] = (index, value);
+                } else {
+                    best[2] = best[1];
+                    best[1] = (index, value);
+                }
+            } else {
+                best[2] = (index, value);
+            }
+        }
+    }
+    best.map(|(index, value)| (index as u32, value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ngram_ban_blocks_repeats_inside_the_window() {
+        let sequence = [10u32; 40];
+        let mut scores = vec![1f32; 1000];
+        apply_no_repeat_ngram(&sequence, &mut scores);
+        assert_eq!(scores[10], f32::NEG_INFINITY);
+        // Unrelated tokens stay intact.
+        assert_eq!(scores[8], 1.0);
+    }
+
+    #[test]
+    fn ngram_ban_whitelists_table_tags() {
+        // 34 sevens then a <td> token: the next 7 would complete a 35-gram.
+        let mut sequence = vec![7u32; 34];
+        sequence.push(128_821);
+        let mut scores = vec![1f32; 200_000];
+        apply_no_repeat_ngram(&sequence, &mut scores);
+        assert_eq!(scores[7], 1.0);
+    }
+
+    #[test]
+    fn ngram_ban_ignores_short_sequences() {
+        let mut scores = vec![1f32; 1000];
+        apply_no_repeat_ngram(&[10u32; 20], &mut scores);
+        assert_eq!(scores[7], 1.0);
+    }
+
+    #[test]
+    fn ngram_window_limits_the_search() {
+        // A repeat outside the last `NGRAM_WINDOW` tokens must not be banned.
+        let mut sequence = vec![9u32; 40];
+        sequence.extend(std::iter::repeat_n(8u32, NGRAM_WINDOW));
+        sequence.extend(std::iter::repeat_n(7u32, 40));
+        let mut scores = vec![1f32; 1000];
+        apply_no_repeat_ngram(&sequence, &mut scores);
+        assert_eq!(scores[8], 1.0);
+    }
+
+    #[test]
+    fn greedy_argmax_prefers_the_first_tied_token() {
+        assert_eq!(argmax(&[1.0, 3.0, 3.0, 2.0]).unwrap(), 1);
+    }
+
+    #[test]
+    fn top3_orders_desc_and_breaks_ties_downward() {
+        let top = top3(&[1.0, 5.0, 2.0, 5.0, 4.0]);
+        assert_eq!(top[0], (1, 5.0));
+        // The tied 5.0 keeps arrival order; token 4 fills rank two.
+        assert_eq!(top[1], (3, 5.0));
+        assert_eq!(top[2], (4, 4.0));
+    }
+
+    #[test]
+    fn top3_handles_short_rows() {
+        let top = top3(&[7.0]);
+        assert_eq!(top[0], (0, 7.0));
+        assert_eq!(top[1], (0, f32::NEG_INFINITY));
+    }
+
+    // Random-weight equivalence tests for the batch and speculative paths.
+    mod engine_tests {
+        use super::super::*;
+        use crate::backbones::deepseek_v2::DeepSeekV2TextConfig;
+        use candle_core::{DType, Device};
+        use candle_nn::VarBuilder;
+        use std::collections::HashMap;
+
+        fn tiny_config() -> DeepSeekV2TextConfig {
+            DeepSeekV2TextConfig {
+                vocab_size: 64,
+                hidden_size: 32,
+                intermediate_size: 48,
+                num_hidden_layers: 2,
+                num_attention_heads: 4,
+                num_key_value_heads: 4,
+                rms_norm_eps: 1e-5,
+                rope_theta: 10_000.0,
+                max_position_embeddings: 512,
+                eos_token_id: 3,
+                bos_token_id: 0,
+                pad_token_id: 2,
+                first_k_dense_replace: 1,
+                moe_layer_freq: 1,
+                n_routed_experts: 4,
+                n_shared_experts: 1,
+                num_experts_per_tok: 2,
+                moe_intermediate_size: 16,
+                scoring_func: "softmax".to_string(),
+                topk_method: "greedy".to_string(),
+                norm_topk_prob: false,
+                routed_scaling_factor: 1.0,
+                n_group: 1,
+                topk_group: 1,
+                use_mla: false,
+                tie_word_embeddings: false,
+                attention_bias: false,
+            }
+        }
+
+        fn random_varbuilder(
+            cfg: &DeepSeekV2TextConfig,
+            device: &Device,
+            with_mtp: bool,
+        ) -> VarBuilder<'static> {
+            use candle_core::DType;
+            let mut tensors: HashMap<String, Tensor> = HashMap::new();
+            let h = cfg.hidden_size;
+            let put = |tensors: &mut HashMap<String, Tensor>, name: String, shape: Vec<usize>| {
+                let len: usize = shape.iter().product();
+                let data: Vec<f32> = (0..len)
+                    .map(|i| {
+                        // Deterministic pseudo-random in [-0.05, 0.05].
+                        let x = (i as u32).wrapping_mul(2_654_435_761) % 10_001;
+                        (x as f32 / 10_000.0 - 0.5) * 0.1
+                    })
+                    .collect();
+                let tensor = Tensor::from_vec(data, shape, device)
+                    .unwrap()
+                    .to_dtype(DType::F32)
+                    .unwrap();
+                tensors.insert(name, tensor);
+            };
+            put(
+                &mut tensors,
+                "model.embed_tokens.weight".into(),
+                vec![cfg.vocab_size, h],
+            );
+            put(&mut tensors, "model.norm.weight".into(), vec![h]);
+            put(
+                &mut tensors,
+                "lm_head.weight".into(),
+                vec![cfg.vocab_size, h],
+            );
+            for layer in 0..cfg.num_hidden_layers {
+                let prefix = format!("model.layers.{layer}");
+                for proj in ["q_proj", "k_proj", "v_proj", "o_proj"] {
+                    put(
+                        &mut tensors,
+                        format!("{prefix}.self_attn.{proj}.weight"),
+                        vec![h, h],
+                    );
+                }
+                put(
+                    &mut tensors,
+                    format!("{prefix}.input_layernorm.weight"),
+                    vec![h],
+                );
+                put(
+                    &mut tensors,
+                    format!("{prefix}.post_attention_layernorm.weight"),
+                    vec![h],
+                );
+                if layer < cfg.first_k_dense_replace {
+                    for proj in ["gate_proj", "up_proj"] {
+                        put(
+                            &mut tensors,
+                            format!("{prefix}.mlp.{proj}.weight"),
+                            vec![cfg.intermediate_size, h],
+                        );
+                    }
+                    put(
+                        &mut tensors,
+                        format!("{prefix}.mlp.down_proj.weight"),
+                        vec![h, cfg.intermediate_size],
+                    );
+                } else {
+                    put(
+                        &mut tensors,
+                        format!("{prefix}.mlp.gate.weight"),
+                        vec![cfg.n_routed_experts, h],
+                    );
+                    for expert in 0..cfg.n_routed_experts {
+                        for proj in ["gate_proj", "up_proj"] {
+                            put(
+                                &mut tensors,
+                                format!("{prefix}.mlp.experts.{expert}.{proj}.weight"),
+                                vec![cfg.moe_intermediate_size, h],
+                            );
+                        }
+                        put(
+                            &mut tensors,
+                            format!("{prefix}.mlp.experts.{expert}.down_proj.weight"),
+                            vec![h, cfg.moe_intermediate_size],
+                        );
+                    }
+                    for proj in ["gate_proj", "up_proj"] {
+                        put(
+                            &mut tensors,
+                            format!("{prefix}.mlp.shared_experts.{proj}.weight"),
+                            vec![cfg.moe_intermediate_size * cfg.n_shared_experts, h],
+                        );
+                    }
+                    put(
+                        &mut tensors,
+                        format!("{prefix}.mlp.shared_experts.down_proj.weight"),
+                        vec![h, cfg.moe_intermediate_size * cfg.n_shared_experts],
+                    );
+                }
+            }
+            if with_mtp {
+                let prefix = "mtp_module.heads.0";
+                put(&mut tensors, format!("{prefix}.enorm.weight"), vec![h]);
+                put(&mut tensors, format!("{prefix}.hnorm.weight"), vec![h]);
+                put(
+                    &mut tensors,
+                    format!("{prefix}.eh_proj.weight"),
+                    vec![h, h * 2],
+                );
+                for norm in ["input_layernorm", "post_attention_layernorm"] {
+                    put(
+                        &mut tensors,
+                        format!("{prefix}.mtp_block.{norm}.weight"),
+                        vec![h],
+                    );
+                }
+                for proj in ["q_proj", "k_proj", "v_proj", "o_proj"] {
+                    put(
+                        &mut tensors,
+                        format!("{prefix}.mtp_block.self_attn.{proj}.weight"),
+                        vec![h, h],
+                    );
+                }
+                for proj in ["gate_proj", "up_proj"] {
+                    put(
+                        &mut tensors,
+                        format!("{prefix}.mtp_block.mlp.{proj}.weight"),
+                        vec![cfg.intermediate_size, h],
+                    );
+                }
+                put(
+                    &mut tensors,
+                    format!("{prefix}.mtp_block.mlp.down_proj.weight"),
+                    vec![h, cfg.intermediate_size],
+                );
+            }
+            VarBuilder::from_tensors(tensors, DType::F32, device)
+        }
+
+        struct TinyModel {
+            text: DeepSeekV2TextModel,
+            mtp: Option<JinaOcrMtp>,
+            lm_head: Linear,
+            eos: Vec<u32>,
+        }
+
+        fn build_tiny(with_mtp: bool) -> (TinyModel, Device) {
+            let device = Device::Cpu;
+            let cfg = tiny_config();
+            let vb = random_varbuilder(&cfg, &device, with_mtp);
+            let text = DeepSeekV2TextModel::load(&cfg, vb.pp("model")).unwrap();
+            let lm_head = Linear::new(
+                vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
+                    .unwrap(),
+                None,
+            );
+            let mtp = if with_mtp {
+                Some(
+                    JinaOcrMtp::load(
+                        &cfg,
+                        text.token_embedding_weight(),
+                        text.final_norm_weight(),
+                        lm_head.weight().clone(),
+                        vb.clone(),
+                    )
+                    .unwrap(),
+                )
+            } else {
+                None
+            };
+            (
+                TinyModel {
+                    text,
+                    mtp,
+                    lm_head,
+                    eos: vec![3],
+                },
+                device,
+            )
+        }
+
+        fn prepared_prompt(model: &TinyModel, device: &Device, ids: &[u32]) -> PreparedPrompt {
+            let token_ids = Tensor::from_vec(ids.to_vec(), (1, ids.len()), device).unwrap();
+            let inputs_embeds = model.text.embed(&token_ids).unwrap();
+            let position_ids = Tensor::arange(0u32, ids.len() as u32, device)
+                .unwrap()
+                .reshape((1, 1, ids.len()))
+                .unwrap();
+            PreparedPrompt {
+                input_ids: ids.to_vec(),
+                inputs_embeds,
+                position_ids,
+            }
+        }
+
+        fn engine<'a>(model: &'a TinyModel, device: &'a Device) -> GreedyEngine<'a> {
+            GreedyEngine {
+                model_name: "JinaOCR-test",
+                text: &model.text,
+                lm_head: &model.lm_head,
+                mtp: model.mtp.as_ref(),
+                eos_token_ids: &model.eos,
+                device,
+            }
+        }
+
+        #[test]
+        fn mtp_matches_plain_greedy_token_for_token() {
+            let (model, device) = build_tiny(true);
+            let ids: Vec<u32> = (4..40).map(|i| 8 + i % 50).collect();
+            let prompt = prepared_prompt(&model, &device, &ids);
+            let max_new_tokens = 48;
+
+            model.text.clear_kv_cache();
+            let hidden = model
+                .text
+                .forward(&prompt.inputs_embeds, &prompt.position_ids, None)
+                .unwrap();
+            let plain = engine(&model, &device)
+                .ar_tokens(&prompt.input_ids, &hidden, max_new_tokens, false)
+                .unwrap();
+
+            model.text.clear_kv_cache();
+            if let Some(mtp) = model.mtp.as_ref() {
+                mtp.clear_kv_cache();
+            }
+            let hidden = model
+                .text
+                .forward(&prompt.inputs_embeds, &prompt.position_ids, None)
+                .unwrap();
+            let (speculative, hit_eos) = engine(&model, &device)
+                .mtp_tokens(&prompt.input_ids, &hidden, max_new_tokens)
+                .unwrap();
+
+            assert_eq!(speculative, plain.tokens, "MTP output must match greedy");
+            assert_eq!(hit_eos, plain.hit_eos);
+        }
+
+        #[test]
+        fn batched_forward_matches_single_sequences() {
+            let (model, device) = build_tiny(false);
+            let seq_a: Vec<u32> = (4..24).map(|i| 8 + i % 50).collect();
+            let seq_b: Vec<u32> = (4..16).map(|i| 20 + i % 40).collect();
+            let lens = [seq_a.len(), seq_b.len()];
+            let max_len = *lens.iter().max().unwrap();
+
+            // Batched, left-padded prefill with combined mask.
+            let mut embeds_rows = Vec::new();
+            let mut position_rows = Vec::new();
+            for seq in [&seq_a, &seq_b] {
+                let prompt = prepared_prompt(&model, &device, seq);
+                let pad_len = max_len - seq.len();
+                let pad = Tensor::zeros((1, pad_len, 32), DType::F32, &device).unwrap();
+                let embeds = Tensor::cat(&[&pad, &prompt.inputs_embeds], 1).unwrap();
+                let pad_pos = Tensor::zeros((1, 1, pad_len), DType::U32, &device).unwrap();
+                let positions = Tensor::cat(&[&pad_pos, &prompt.position_ids], 2).unwrap();
+                embeds_rows.push(embeds);
+                position_rows.push(positions);
+            }
+            let embeds = Tensor::cat(&embeds_rows.iter().collect::<Vec<_>>(), 0).unwrap();
+            let positions = Tensor::cat(&position_rows.iter().collect::<Vec<_>>(), 1).unwrap();
+            let causal = create_causal_mask(max_len, max_len, DType::F32, &device).unwrap();
+            let padding = create_left_padding_mask(&lens, max_len, DType::F32, &device).unwrap();
+            let mask = combine_masks(&causal, &padding).unwrap();
+
+            model.text.clear_kv_cache();
+            let batched = model
+                .text
+                .forward(&embeds, &positions, Some(&mask))
+                .unwrap();
+            let batched_logits = model
+                .lm_head
+                .forward(
+                    &batched
+                        .i((.., max_len - 1, ..))
+                        .unwrap()
+                        .contiguous()
+                        .unwrap(),
+                )
+                .unwrap();
+
+            // Each row alone, no padding and no mask.
+            for (row, seq) in [&seq_a, &seq_b].iter().enumerate() {
+                let prompt = prepared_prompt(&model, &device, seq);
+                model.text.clear_kv_cache();
+                let single = model
+                    .text
+                    .forward(&prompt.inputs_embeds, &prompt.position_ids, None)
+                    .unwrap();
+                let single_logits = model
+                    .lm_head
+                    .forward(
+                        &single
+                            .i((0, seq.len() - 1, ..))
+                            .unwrap()
+                            .unsqueeze(0)
+                            .unwrap(),
+                    )
+                    .unwrap();
+                let a = batched_logits.i(row).unwrap();
+                let b = single_logits.i(0).unwrap();
+                let diff = (&a - &b).unwrap().abs().unwrap().max_all().unwrap();
+                let diff = diff.to_scalar::<f32>().unwrap();
+                assert!(
+                    diff < 1e-4,
+                    "row {row}: batched vs single logit delta {diff}"
+                );
+            }
+        }
+    }
+}

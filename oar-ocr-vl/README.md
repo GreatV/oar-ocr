@@ -21,6 +21,7 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 | [MinerU2.5-Pro-2605](https://huggingface.co/opendatalab/MinerU2.5-Pro-2605-1.2B) | 1.2B | Newer compatible checkpoint using the MinerU2.5 two-step pipeline |
 | [MinerU-Diffusion-V1-0320](https://huggingface.co/opendatalab/MinerU-Diffusion-V1-0320-2.5B) | 2.5B | Block-diffusion OCR with two-step structured extraction or single-pass recognition |
 | [NaviDC-OCR](https://huggingface.co/StarDoc-AI/NaviDC-OCR) | 1.2B | Qwen2.5-VL document parser with text, table (OTSL), formula, code, and layout tasks |
+| [jina-ocr-v1](https://huggingface.co/jinaai/jina-ocr-v1) | 3B (570M active) | End-to-end page-to-Markdown parsing (SAM+CLIP DeepEncoder over a DeepSeek-V2 MoE decoder) |
 | [PP-DocLayoutV2](https://huggingface.co/PaddlePaddle/PP-DocLayoutV2_safetensors) / [V3](https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_safetensors) | 54M / 33M | Layout detection and reading-order prediction, feeding `DocParser` |
 
 See [`examples`](examples) for runnable examples.
@@ -32,7 +33,7 @@ See [`examples`](examples) for runnable examples.
 1. **Layout detection** to identify document regions and their reading order. `PpDocLayout` is a native Candle port of PP-DocLayoutV2/V3; any other detector can be plugged in through the `LayoutSource` trait.
 2. **VL-based recognition** to extract content from each region
 
-Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, NaviDC-OCR, MonkeyOCRv2, OvisOCR2, HunyuanOCR, MinerU2.5/Pro, or MinerU-Diffusion for externally detected crops. HPD-Parsing currently supports only its model-native full-page protocol. For complete pages, prefer each model's native path where available: MonkeyOCRv2 `Layout`/`EndToEnd`, OvisOCR2 and HPD-Parsing full-page parsing, HunyuanOCR full-page prompts, and the MinerU two-step extraction examples.
+Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, NaviDC-OCR, jina-ocr-v1, MonkeyOCRv2, OvisOCR2, HunyuanOCR, MinerU2.5/Pro, or MinerU-Diffusion for externally detected crops. HPD-Parsing currently supports only its model-native full-page protocol. For complete pages, prefer each model's native path where available: MonkeyOCRv2 `Layout`/`EndToEnd`, OvisOCR2, jina-ocr-v1, and HPD-Parsing full-page parsing, HunyuanOCR full-page prompts, and the MinerU two-step extraction examples.
 
 ## Installation
 
@@ -237,13 +238,35 @@ let raw = model
 println!("{}", convert_otsl_to_html(raw.trim()));
 ```
 
+### jina-ocr-v1
+
+jina-ocr-v1 performs end-to-end page-to-Markdown parsing on a DeepSeek-OCR backbone: a SAM ViT-B + CLIP-L DeepEncoder produces visual tokens for a padded 1024px global view plus up to nine 640px dynamic tiles, and a 12-layer DeepSeek-V2 MoE decoder (64 routed + 2 shared experts, top-6, ~570M active parameters) generates greedily under the official sliding-window no-repeat-ngram guard.
+
+```rust
+use oar_ocr_vl::utils::image::load_image;
+use oar_ocr_vl::utils::parse_device;
+use oar_ocr_vl::jina_ocr::DEFAULT_MAX_NEW_TOKENS;
+use oar_ocr_vl::JinaOcr;
+
+let image = load_image("document.png")?;
+let model = JinaOcr::from_dir("jinaai/jina-ocr-v1", parse_device("cpu")?)?;
+let markdown = model
+    .generate(&[image], DEFAULT_MAX_NEW_TOKENS)?
+    .into_iter()
+    .next()
+    .expect("one result")?;
+println!("{markdown}");
+```
+
+Output is Markdown with LaTeX formulas and HTML tables; the same `generate` path serves `DocParser` region crops. The checkpoint's FastMTP head is implemented as lossless speculative decoding (greedy verification plus the host-side no-repeat-ngram guard keep the output token-identical to plain autoregressive decoding) and its dense draft step is CUDA-graph captured, but it is disabled by default: the MoE router's host round-trips serialize the target forward, so speculation is not a net win until a device-side router lands. Opt in with `OAR_JINAOCR_ENABLE_MTP`. Multi-image calls use a padded batch prefill and decode.
+
 ## Running Examples
 
 The `oar-ocr-vl` crate includes several examples demonstrating its capabilities.
 
 ### DocParser
 
-This example combines layout detection with a VLM for recognition. It supports PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, and NaviDC-OCR.
+This example combines layout detection with a VLM for recognition. It supports PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, NaviDC-OCR, and jina-ocr-v1.
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda --example doc_parser -- \
@@ -254,7 +277,7 @@ cargo run --release -p oar-ocr-vl --features cuda --example doc_parser -- \
     document.jpg
 ```
 
-The CLI example exposes the layout-first PaddleOCR-VL, GLM-OCR, and NaviDC-OCR paths. MonkeyOCRv2, OvisOCR2, HunyuanOCR, and the MinerU models also implement `RecognitionBackend`; their dedicated examples remain the preferred complete-page paths. HPD-Parsing uses its model-native full-page protocol instead of `RecognitionBackend`.
+The CLI example exposes the layout-first PaddleOCR-VL, GLM-OCR, NaviDC-OCR, and jina-ocr-v1 paths. MonkeyOCRv2, OvisOCR2, HunyuanOCR, and the MinerU models also implement `RecognitionBackend`; their dedicated examples remain the preferred complete-page paths. HPD-Parsing uses its model-native full-page protocol instead of `RecognitionBackend`.
 
 ### PaddleOCR-VL Direct Inference
 

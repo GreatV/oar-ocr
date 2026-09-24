@@ -14,6 +14,8 @@
 //! - `mineru_diffusion` - MinerU-Diffusion-V1 block-diffusion document OCR
 //!   (Qwen2-VL vision + SDAR decoder)
 //! - `monkeyocrv2` - MonkeyOCRv2-S/B-Parsing full-page and region parsing
+//! - `jina_ocr` - jina-ocr-v1 end-to-end page-to-Markdown parser (SAM+CLIP
+//!   DeepEncoder over a DeepSeek-V2 MoE decoder)
 //! - `navidc_ocr` - NaviDC-OCR document parsing VLM (Qwen2.5-VL backbone
 //!   with a windowed vision tower)
 //! - `ovisocr2` - OvisOCR2 end-to-end page-to-Markdown parser (Qwen3.5)
@@ -67,6 +69,8 @@ pub mod glmocr;
 pub mod hpd_parsing;
 #[path = "models/hunyuanocr/mod.rs"]
 pub mod hunyuanocr;
+#[path = "models/jina_ocr/mod.rs"]
+pub mod jina_ocr;
 pub mod layout;
 #[path = "models/mineru/mod.rs"]
 pub mod mineru;
@@ -98,6 +102,7 @@ pub use hpd_parsing::{HpdGenerationConfig, HpdOutput, HpdParsing, HpdRuntimeStat
 pub use hunyuanocr::{
     DFlashConfig, DFlashTargetConfig, HunyuanOcr, HunyuanOcrParseOptions, HunyuanOcrVersion,
 };
+pub use jina_ocr::{JinaOcr, JinaOcrParseOptions};
 pub use mineru::{MinerU, MinerUParseOptions};
 pub use mineru_diffusion::{
     DiffusionGenerationConfig, MinerUDiffusion, MinerUDiffusionParseOptions,
