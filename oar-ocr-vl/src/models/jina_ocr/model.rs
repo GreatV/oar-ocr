@@ -212,9 +212,12 @@ impl JinaOcr {
             let hidden = self
                 .text
                 .forward(&prompt.inputs_embeds, &prompt.position_ids, None)?;
-            let (tokens, hit_eos) =
-                self.engine()
-                    .mtp_tokens(&prompt.input_ids, &hidden, max_new_tokens)?;
+            let (tokens, hit_eos) = self.engine().mtp_tokens(
+                &prompt.input_ids,
+                &hidden,
+                max_new_tokens,
+                &AdaptiveSpec::default(),
+            )?;
             Ok((tokens, hit_eos))
         } else {
             let hidden = self
@@ -630,6 +633,37 @@ pub(crate) struct PreparedPrompt {
     pub(crate) position_ids: Tensor,
 }
 
+/// Tuning for the adaptive speculation controller. Speculation is paused
+/// when a page's recent acceptance sits below the break-even point and
+/// probed again periodically; the switch is pure scheduling — MTP and plain
+/// greedy decoding are token-identical, so pausing never changes the output.
+#[derive(Debug, Clone)]
+pub(crate) struct AdaptiveSpec {
+    /// Verification rounds in the sliding acceptance window.
+    pub window_rounds: usize,
+    /// Mean committed tokens per round below which speculation pauses.
+    /// Measured on RTX 4090 (bf16, 1024-token pages): acceptance ~1.5 ran
+    /// 3-11% behind plain decoding, ~1.96 was break-even to +3%, and 2.4+
+    /// won 10%+. The conservative crossing for staying within ~2% of plain
+    /// decoding therefore sits at 1.7.
+    pub break_even: f64,
+    /// Plain-decode tokens between speculation probes. A probe rebuilds the
+    /// draft state with one dense-layer pass over the committed prefix
+    /// (~tens of milliseconds), so a wide interval keeps the amortized cost
+    /// around a percent.
+    pub probe_interval: usize,
+}
+
+impl Default for AdaptiveSpec {
+    fn default() -> Self {
+        Self {
+            window_rounds: 16,
+            break_even: 1.7,
+            probe_interval: 256,
+        }
+    }
+}
+
 /// The greedy engine shared by the autoregressive, traced, and speculative
 /// paths. Held separately from [`JinaOcr`] so random-weight unit tests can
 /// drive it without a vision tower or tokenizer.
@@ -726,6 +760,7 @@ impl GreedyEngine<'_> {
         prompt_ids: &[u32],
         prompt_hidden: &Tensor,
         max_new_tokens: usize,
+        adaptive: &AdaptiveSpec,
     ) -> Result<(Vec<u32>, bool), Error> {
         let mtp = self.mtp.ok_or_else(|| Error::Config {
             message: format!("{}: MTP draft head is not loaded", self.model_name),
@@ -770,6 +805,16 @@ impl GreedyEngine<'_> {
         let mut rounds = 0usize;
         let mut accepted_drafts = 0usize;
         let mut accepted_by_position = [0usize; MTP_DRAFT_TOKENS];
+        // Hidden states of the committed generated tokens (positions
+        // `prompt_len..base`), kept so a speculation probe can rebuild the
+        // draft state after a pause.
+        let mut committed_hiddens: Vec<Tensor> = Vec::with_capacity(max_new_tokens);
+        // Adaptive controller: speculate while the recent acceptance window
+        // holds up, fall back to plain decoding when it does not, and probe
+        // again every `probe_interval` committed tokens.
+        let mut window: std::collections::VecDeque<usize> =
+            std::collections::VecDeque::with_capacity(adaptive.window_rounds.max(1));
+        let mut cooldown_remaining = 0usize;
 
         loop {
             if self.eos_token_ids.contains(&current) {
@@ -780,6 +825,38 @@ impl GreedyEngine<'_> {
             history.push(current);
             if generated.len() == max_new_tokens {
                 break;
+            }
+
+            if cooldown_remaining > 0 {
+                // Plain greedy step (target KV is exactly the committed
+                // prefix). The hidden state is kept for the next probe.
+                let token_ids = Tensor::from_vec(vec![current], (1, 1), self.device)
+                    .map_err(|e| candle_to_ocr_inference(name, "cooldown decode token", e))?;
+                let embeds = self.text.embed(&token_ids)?;
+                let pos =
+                    Tensor::arange(position, position + 1, self.device)?.reshape((1, 1, 1))?;
+                let (logits, hidden) =
+                    self.text
+                        .forward_decode_logits_and_hidden(&embeds, &pos, self.lm_head)?;
+                committed_hiddens.push(hidden.unsqueeze(0)?.unsqueeze(0)?);
+                current = select_greedy_token(&logits, &history)?;
+                base += 1;
+                position += 1;
+                cooldown_remaining -= 1;
+                if cooldown_remaining == 0 {
+                    // Probe: rebuild the draft state over the whole committed
+                    // prefix and resume speculation.
+                    drafts = self.rebuild_drafts(
+                        mtp,
+                        prompt_hidden,
+                        &history,
+                        current,
+                        &committed_hiddens,
+                        base,
+                    )?;
+                    window.clear();
+                }
+                continue;
             }
 
             // Verify [current, drafts..] in one causal target pass.
@@ -836,9 +913,28 @@ impl GreedyEngine<'_> {
             // and roll the recurrent MTP tail back to the same base.
             self.text.trim_kv_cache(base + keep)?;
             mtp.trim_kv_cache(base)?;
+            let round_hiddens = block_hidden
+                .narrow(1, 0, keep)
+                .map_err(|e| candle_to_ocr_inference(name, "MTP committed hiddens", e))?;
+            for row in 0..keep {
+                committed_hiddens.push(round_hiddens.i((0, row))?.unsqueeze(0)?.unsqueeze(0)?);
+            }
             base += keep;
             position += keep as u32;
             current = next_token;
+
+            window.push_back(keep);
+            if window.len() > adaptive.window_rounds {
+                window.pop_front();
+            }
+            if window.len() == adaptive.window_rounds {
+                let mean: f64 =
+                    window.iter().map(|&keep| keep as f64).sum::<f64>() / window.len() as f64;
+                if mean < adaptive.break_even {
+                    cooldown_remaining = adaptive.probe_interval;
+                    window.clear();
+                }
+            }
 
             // Re-sync the draft with the accepted target span.
             let mut sync_ids = query_ids[1..keep].to_vec();
@@ -858,12 +954,50 @@ impl GreedyEngine<'_> {
             tracing::debug!(
                 rounds,
                 accepted_drafts,
+                plain_decode_tokens = generated.len().saturating_sub(accepted_drafts + rounds),
                 ?accepted_by_position,
                 mean_acceptance_length = 1.0 + accepted_drafts as f64 / rounds as f64,
                 "JinaOCR MTP acceptance"
             );
         }
         Ok((generated, hit_eos))
+    }
+
+    /// Rebuild the draft state over the whole committed prefix — the same
+    /// synchronization the initial pass does, fed with the prompt hidden
+    /// states plus the committed generated hidden states saved along the way.
+    fn rebuild_drafts(
+        &self,
+        mtp: &JinaOcrMtp,
+        prompt_hidden: &Tensor,
+        history: &[u32],
+        current: u32,
+        committed_hiddens: &[Tensor],
+        base: usize,
+    ) -> Result<Vec<u32>, Error> {
+        let name = self.model_name;
+        let prompt_len = prompt_hidden
+            .dim(1)
+            .map_err(|e| candle_to_ocr_inference(name, "MTP rebuild prompt length", e))?;
+        debug_assert_eq!(committed_hiddens.len(), base - prompt_len);
+        mtp.clear_kv_cache();
+        let hidden_full = Tensor::cat(
+            &{
+                let mut parts: Vec<&Tensor> = vec![prompt_hidden];
+                parts.extend(committed_hiddens.iter().map(|t| t as &Tensor));
+                parts
+            },
+            1,
+        )?;
+        let mut shifted_ids = history[1..].to_vec();
+        shifted_ids.push(current);
+        debug_assert_eq!(shifted_ids.len(), base);
+        let shifted = Tensor::from_vec(shifted_ids, (1, base), self.device)
+            .map_err(|e| candle_to_ocr_inference(name, "MTP rebuild ids", e))?;
+        let positions = Tensor::arange(0u32, base as u32, self.device)?.reshape((1, 1, base))?;
+        let (span_hidden, span_tokens) =
+            mtp.sync_target_span(&shifted, &hidden_full, &positions, true)?;
+        self.complete_mtp_drafts(mtp, &span_hidden, &span_tokens, base as u32)
     }
 
     /// Recurrently complete the draft block from a synchronized span: the
@@ -1403,10 +1537,58 @@ mod tests {
                 .forward(&prompt.inputs_embeds, &prompt.position_ids, None)
                 .unwrap();
             let (speculative, hit_eos) = engine(&model, &device)
-                .mtp_tokens(&prompt.input_ids, &hidden, max_new_tokens)
+                .mtp_tokens(
+                    &prompt.input_ids,
+                    &hidden,
+                    max_new_tokens,
+                    &AdaptiveSpec::default(),
+                )
                 .unwrap();
 
             assert_eq!(speculative, plain.tokens, "MTP output must match greedy");
+            assert_eq!(hit_eos, plain.hit_eos);
+        }
+
+        #[test]
+        fn adaptive_fallback_and_reprobe_match_plain_greedy() {
+            let (model, device) = build_tiny(true);
+            let ids: Vec<u32> = (4..40).map(|i| 8 + i % 50).collect();
+            let prompt = prepared_prompt(&model, &device, &ids);
+            let max_new_tokens = 40;
+
+            model.text.clear_kv_cache();
+            let hidden = model
+                .text
+                .forward(&prompt.inputs_embeds, &prompt.position_ids, None)
+                .unwrap();
+            let plain = engine(&model, &device)
+                .ar_tokens(&prompt.input_ids, &hidden, max_new_tokens, false)
+                .unwrap();
+
+            // Random weights accept almost nothing, so the controller must
+            // fall back after two rounds, cool down for three tokens, probe,
+            // fall back again — several full cycles across the page.
+            let adaptive = AdaptiveSpec {
+                window_rounds: 2,
+                break_even: 10.0,
+                probe_interval: 3,
+            };
+            model.text.clear_kv_cache();
+            if let Some(mtp) = model.mtp.as_ref() {
+                mtp.clear_kv_cache();
+            }
+            let hidden = model
+                .text
+                .forward(&prompt.inputs_embeds, &prompt.position_ids, None)
+                .unwrap();
+            let (speculative, hit_eos) = engine(&model, &device)
+                .mtp_tokens(&prompt.input_ids, &hidden, max_new_tokens, &adaptive)
+                .unwrap();
+
+            assert_eq!(
+                speculative, plain.tokens,
+                "adaptive switching output must match greedy"
+            );
             assert_eq!(hit_eos, plain.hit_eos);
         }
 

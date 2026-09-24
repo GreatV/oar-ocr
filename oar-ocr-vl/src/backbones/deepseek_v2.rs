@@ -40,6 +40,13 @@ use candle_core::Device;
 
 const MODEL_NAME: &str = "DeepSeek-V2";
 
+/// Upper bound on `(tokens, top-k)` pairs routed through the fused `moe_gemm`
+/// kernels on the eager path: their token sort is a shared-memory bitonic
+/// sort, which stops fitting past a few thousand pairs (measured: 5400 pairs
+/// = 32KB fits, 10800 pairs = 64KB exceeds the 48KB default limit).
+#[cfg(feature = "cuda")]
+const FUSED_MOE_MAX_PAIRS: usize = 4096;
+
 /// Upper bound for graph-backed decode KV buckets, mirroring the context the
 /// checkpoints are actually used with.
 #[cfg(feature = "cuda")]
@@ -48,6 +55,58 @@ const DECODE_CACHE_LEN: usize = 16_384;
 fn graphs_disabled() -> bool {
     std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
         || std::env::var_os("OAR_DEEPSEEK_V2_DISABLE_CUDA_GRAPH").is_some()
+}
+
+/// Captured single-token decode step that exports both the logits and the
+/// fed token's hidden state, so adaptive speculation can collect the states
+/// it needs for a later re-sync without leaving graph replay.
+#[cfg(feature = "cuda")]
+struct DecodeCudaGraph {
+    // The graph owns device pointers into all tensors below; dispose via
+    // `dispose` so capture-touched buffers are never returned to the
+    // stream-ordered allocator (see SingleTokenDecoderCudaGraph::dispose).
+    graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
+    hidden_input: Tensor,
+    position_input: Tensor,
+    _query_lengths: Tensor,
+    kv_lengths: CudaGraphKvLengths,
+    logits_output: Tensor,
+    hidden_output: Tensor,
+    cache_len: usize,
+}
+
+#[cfg(feature = "cuda")]
+impl DecodeCudaGraph {
+    fn dispose(self) {
+        let Self {
+            graph,
+            hidden_input,
+            position_input,
+            _query_lengths,
+            kv_lengths,
+            logits_output,
+            hidden_output,
+            cache_len: _,
+        } = self;
+        let device = hidden_input.device().clone();
+        report_stashed_cuda_error(&device, "decoder CUDA graph disposal");
+        drop_and_drain(graph, &device);
+        drop_and_drain(hidden_output, &device);
+        drop_and_drain(logits_output, &device);
+        drop_and_drain(kv_lengths, &device);
+        drop_and_drain(_query_lengths, &device);
+        drop_and_drain(position_input, &device);
+        drop_and_drain(hidden_input, &device);
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl std::fmt::Debug for DecodeCudaGraph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecodeCudaGraph")
+            .field("cache_len", &self.cache_len)
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(feature = "cuda")]
@@ -801,6 +860,21 @@ impl MoeFeedForward {
             .reshape((tokens, hidden))
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE flatten", e))?;
         let (topk_ids, topk_weights) = self.route(&flat)?;
+        // Small CUDA half-precision batches (a decode step or a short batch
+        // step) take the fused kernels — no host round-trip per layer. The
+        // token-sort inside `moe_gemm` needs shared memory that stops
+        // fitting past a few thousand (token, slot) pairs, so prefill-scale
+        // inputs stay on the indexed path.
+        #[cfg(feature = "cuda")]
+        let routed = if flat.device().is_cuda()
+            && matches!(flat.dtype(), DType::BF16 | DType::F16)
+            && tokens * self.top_k <= FUSED_MOE_MAX_PAIRS
+        {
+            self.forward_fused(&flat, &topk_ids, &topk_weights, false)?
+        } else {
+            self.forward_indexed(&flat, &topk_ids, &topk_weights)?
+        };
+        #[cfg(not(feature = "cuda"))]
         let routed = self.forward_indexed(&flat, &topk_ids, &topk_weights)?;
 
         let shared = self.shared_experts.forward(&flat)?;
@@ -936,7 +1010,7 @@ impl DecoderLayer {
 
 pub(crate) struct DeepSeekV2TextModel {
     #[cfg(feature = "cuda")]
-    decode_graph: RefCell<Option<SingleTokenDecoderCudaGraph>>,
+    decode_graph: RefCell<Option<DecodeCudaGraph>>,
     #[cfg(feature = "cuda")]
     verification_graph: RefCell<Option<VerificationCudaGraph>>,
     embed_tokens: Embedding,
@@ -1053,12 +1127,38 @@ impl DeepSeekV2TextModel {
         #[cfg(feature = "cuda")]
         if attention_mask.is_none() {
             let kv_len = self.kv_cache_len().saturating_add(1);
-            if let Some(logits) = self.replay_cuda_graph(inputs_embeds, position_ids, kv_len)? {
+            if let Some((logits, _)) =
+                self.replay_cuda_graph(inputs_embeds, position_ids, kv_len)?
+            {
                 return Ok(logits);
             }
         }
         let hidden = self.forward(inputs_embeds, position_ids, attention_mask)?;
         self.project_logits(&hidden, lm_head)
+    }
+
+    /// Decode step that also returns the fed token's post-final-norm hidden
+    /// state — the state a speculative draft head needs to re-sync after a
+    /// pause. Graph replay exports both when available.
+    pub(crate) fn forward_decode_logits_and_hidden(
+        &self,
+        inputs_embeds: &Tensor,
+        position_ids: &Tensor,
+        lm_head: &Linear,
+    ) -> Result<(Tensor, Tensor), Error> {
+        #[cfg(feature = "cuda")]
+        {
+            let kv_len = self.kv_cache_len().saturating_add(1);
+            if let Some(output) = self.replay_cuda_graph(inputs_embeds, position_ids, kv_len)? {
+                return Ok(output);
+            }
+        }
+        let hidden = self.forward(inputs_embeds, position_ids, None)?;
+        let logits = self.project_logits(&hidden, lm_head)?;
+        let token_hidden = hidden
+            .i((0, 0, ..))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "decode hidden", e))?;
+        Ok((logits, token_hidden))
     }
 
     /// Verify a fixed block of speculative tokens in one causal target pass.
@@ -1255,15 +1355,23 @@ impl DeepSeekV2TextModel {
         )?;
         let warm_logits = self.project_logits(&warm, lm_head)?;
         sync_graph_tensor(MODEL_NAME, &warm_logits, "warm decoder CUDA graph")?;
-        // Allocate the output buffer before capture so it belongs to the
+        // Allocate the output buffers before capture so they belong to the
         // regular stream-ordered pool; a capture-time allocation lives in the
         // graph's private pool and can never be returned to the allocator
-        // safely. Prime the copy so the captured run sees a warm kernel.
+        // safely. Prime the copies so the captured run sees warm kernels.
         let logits_output = Tensor::zeros_like(&warm_logits)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph logits output", e))?;
         logits_output
             .slice_set(&warm_logits, 0, 0)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "prime graph logits copy", e))?;
+        let warm_hidden = warm
+            .i((0, 0, ..))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "warm decoder hidden", e))?;
+        let hidden_output = Tensor::zeros_like(&warm_hidden)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph hidden output", e))?;
+        hidden_output
+            .slice_set(&warm_hidden, 0, 0)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "prime graph hidden copy", e))?;
 
         stream
             .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
@@ -1275,10 +1383,16 @@ impl DeepSeekV2TextModel {
                 &query_lengths,
                 kv_lengths.tensor(),
             )?;
+            let token_hidden = hidden
+                .i((0, 0, ..))
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph hidden slice", e))?;
             let logits = self.project_logits(&hidden, lm_head)?;
             logits_output
                 .slice_set(&logits, 0, 0)
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "record graph logits copy", e))
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "record graph logits copy", e))?;
+            hidden_output
+                .slice_set(&token_hidden, 0, 0)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "record graph hidden copy", e))
         })();
         if let Err(error) = captured_output {
             let _ = stream.end_capture(
@@ -1299,13 +1413,14 @@ impl DeepSeekV2TextModel {
             .map_err(|e| cuda_graph_error(MODEL_NAME, "warm decoder CUDA graph", e))?;
         sync_graph_tensor(MODEL_NAME, &logits_output, "sync decoder CUDA graph")?;
         self.clear_kv_cache();
-        *self.decode_graph.borrow_mut() = Some(SingleTokenDecoderCudaGraph {
+        *self.decode_graph.borrow_mut() = Some(DecodeCudaGraph {
             graph,
             hidden_input,
             position_input,
             _query_lengths: query_lengths,
             kv_lengths,
             logits_output,
+            hidden_output,
             cache_len,
         });
         Ok(())
@@ -1429,7 +1544,7 @@ impl DeepSeekV2TextModel {
         inputs_embeds: &Tensor,
         position_ids: &Tensor,
         kv_len: usize,
-    ) -> Result<Option<Tensor>, Error> {
+    ) -> Result<Option<(Tensor, Tensor)>, Error> {
         let captured_ref = self.decode_graph.borrow();
         let Some(captured) = captured_ref.as_ref() else {
             return Ok(None);
@@ -1463,7 +1578,10 @@ impl DeepSeekV2TextModel {
         for layer in &self.layers {
             layer.set_kv_cache_len(kv_len)?;
         }
-        Ok(Some(captured.logits_output.clone()))
+        Ok(Some((
+            captured.logits_output.clone(),
+            captured.hidden_output.clone(),
+        )))
     }
 
     #[cfg(feature = "cuda")]
