@@ -155,6 +155,81 @@ struct CopyPinnedKvLengths<'a> {
     source: &'a candle_core::cuda_backend::cudarc::driver::PinnedHostSlice<u32>,
 }
 
+/// Per-row write offsets for a batched decode graph: one u32 per row,
+/// refreshed from pinned memory before each replay.
+#[cfg(feature = "cuda")]
+pub(crate) struct CudaGraphRowStarts {
+    tensor: Tensor,
+    host: RefCell<candle_core::cuda_backend::cudarc::driver::PinnedHostSlice<u32>>,
+}
+
+#[cfg(feature = "cuda")]
+impl CudaGraphRowStarts {
+    pub(crate) fn new(batch: usize, device: &Device) -> candle_core::Result<Self> {
+        use candle_core::cuda_backend::WrapErr;
+
+        let Device::Cuda(cuda) = device else {
+            candle_core::bail!("CUDA-graph row starts require a CUDA device")
+        };
+        let values = vec![0u32; batch];
+        let tensor = Tensor::new(values.as_slice(), device)?;
+        let stream = cuda.cuda_stream();
+        // SAFETY: the slice is initialized immediately below before the
+        // page-locked allocation can be read or copied.
+        let mut host = unsafe { stream.context().alloc_pinned::<u32>(batch) }.w()?;
+        let host_ptr = host.as_mut_ptr().w()?;
+        // SAFETY: `host` owns `batch` properly aligned u32 slots.
+        unsafe {
+            for (slot, value) in
+                std::iter::zip(std::slice::from_raw_parts_mut(host_ptr, batch), &values)
+            {
+                *slot = *value;
+            }
+        }
+        Ok(Self {
+            tensor,
+            host: RefCell::new(host),
+        })
+    }
+
+    pub(crate) fn tensor(&self) -> &Tensor {
+        &self.tensor
+    }
+
+    pub(crate) fn update(&self, starts: &[u32]) -> candle_core::Result<()> {
+        use candle_core::cuda_backend::WrapErr;
+
+        if starts.len() != self.tensor.elem_count() {
+            candle_core::bail!(
+                "CUDA-graph row starts need {} values, got {}",
+                self.tensor.elem_count(),
+                starts.len()
+            );
+        }
+        let mut host = self.host.borrow_mut();
+        let host_ptr = host.as_mut_ptr().w()?;
+        // SAFETY: waiting in `as_mut_ptr` makes the previous asynchronous
+        // copy safe to overwrite; the slice spans exactly the owned slots.
+        unsafe {
+            for (slot, value) in std::iter::zip(
+                std::slice::from_raw_parts_mut(host_ptr, starts.len()),
+                starts,
+            ) {
+                *slot = *value;
+            }
+        }
+        self.tensor
+            .inplace_op1(&CopyPinnedKvLengths { source: &host })
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl std::fmt::Debug for CudaGraphRowStarts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CudaGraphRowStarts").finish_non_exhaustive()
+    }
+}
+
 #[cfg(feature = "cuda")]
 impl InplaceOp1 for CopyPinnedKvLengths<'_> {
     fn name(&self) -> &'static str {
@@ -173,8 +248,12 @@ impl InplaceOp1 for CopyPinnedKvLengths<'_> {
         let Some((start, end)) = layout.contiguous_offsets() else {
             candle_core::bail!("CUDA-graph KV lengths must be contiguous")
         };
-        if end.saturating_sub(start) != 2 {
-            candle_core::bail!("CUDA-graph KV lengths must contain two u32 values")
+        if end.saturating_sub(start) != self.source.len() {
+            candle_core::bail!(
+                "CUDA-graph KV lengths destination has {} slots for {} values",
+                end.saturating_sub(start),
+                self.source.len()
+            )
         }
         let device = storage.device.clone();
         let destination = storage.as_cuda_slice_mut::<u32>()?;
@@ -288,6 +367,59 @@ impl SingleTokenDecoderCudaGraph {
         for tensor in retained_inputs {
             drop_and_drain(tensor, &device);
         }
+    }
+}
+
+/// Captured storage for a batch-of-rows decode graph. Every row writes at
+/// its own device-side offset and attends only to its own live span.
+#[cfg(feature = "cuda")]
+pub(crate) struct BatchDecoderCudaGraph {
+    pub(crate) graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
+    pub(crate) hidden_input: Tensor,
+    pub(crate) position_input: Tensor,
+    pub(crate) row_starts: CudaGraphRowStarts,
+    pub(crate) logits_output: Tensor,
+    /// Device tensors the captured graph reads that no model field owns:
+    /// the constant kv index row and the baked per-row padding bounds.
+    pub(crate) retained_inputs: Vec<Tensor>,
+    pub(crate) batch: usize,
+    pub(crate) cache_len: usize,
+}
+
+#[cfg(feature = "cuda")]
+impl BatchDecoderCudaGraph {
+    pub(crate) fn dispose(self) {
+        let Self {
+            graph,
+            hidden_input,
+            position_input,
+            row_starts,
+            logits_output,
+            retained_inputs,
+            batch: _,
+            cache_len: _,
+        } = self;
+        let device = hidden_input.device().clone();
+        report_stashed_cuda_error(&device, "batch decoder CUDA graph disposal");
+        drop_and_drain(graph, &device);
+        drop_and_drain(logits_output, &device);
+        let tensor = row_starts.tensor.clone();
+        drop_and_drain(tensor, &device);
+        drop_and_drain(position_input, &device);
+        drop_and_drain(hidden_input, &device);
+        for tensor in retained_inputs {
+            drop_and_drain(tensor, &device);
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl std::fmt::Debug for BatchDecoderCudaGraph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BatchDecoderCudaGraph")
+            .field("batch", &self.batch)
+            .field("cache_len", &self.cache_len)
+            .finish_non_exhaustive()
     }
 }
 

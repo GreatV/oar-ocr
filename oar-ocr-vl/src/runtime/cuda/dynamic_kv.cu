@@ -897,3 +897,57 @@ extern "C" __global__ void sample_with_confidence_bf16(
                               inv_temperature, greedy, scratch_values,
                               scratch_indices);
 }
+
+// Batched variant of the decode append: every row owns a slice of the
+// (batch, heads, cache_len, head_dim) storage and writes its new tokens at
+// its own per-row offset, read from a device tensor so replaying the node
+// inside a CUDA graph needs no host-side patching.
+extern "C" __global__ void append_kv_batch_bf16(
+    __nv_bfloat16* cache,
+    const __nv_bfloat16* source,
+    const uint32_t* row_starts,
+    uint32_t query_len,
+    uint32_t batch,
+    uint32_t num_heads,
+    uint32_t head_dim,
+    uint32_t cache_len) {
+  const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  const uint32_t count = batch * num_heads * query_len * head_dim;
+  if (index >= count) {
+    return;
+  }
+
+  const uint32_t head_stride = query_len * head_dim;
+  const uint32_t flat_head = index / head_stride;
+  const uint32_t within_head = index - flat_head * head_stride;
+  const uint32_t token = within_head / head_dim;
+  const uint32_t lane = within_head - token * head_dim;
+  const uint32_t start = row_starts[flat_head / num_heads];
+  cache[(flat_head * cache_len + start + token) * head_dim + lane] =
+      source[index];
+}
+
+extern "C" __global__ void append_kv_batch_f16(
+    half* cache,
+    const half* source,
+    const uint32_t* row_starts,
+    uint32_t query_len,
+    uint32_t batch,
+    uint32_t num_heads,
+    uint32_t head_dim,
+    uint32_t cache_len) {
+  const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  const uint32_t count = batch * num_heads * query_len * head_dim;
+  if (index >= count) {
+    return;
+  }
+
+  const uint32_t head_stride = query_len * head_dim;
+  const uint32_t flat_head = index / head_stride;
+  const uint32_t within_head = index - flat_head * head_stride;
+  const uint32_t token = within_head / head_dim;
+  const uint32_t lane = within_head - token * head_dim;
+  const uint32_t start = row_starts[flat_head / num_heads];
+  cache[(flat_head * cache_len + start + token) * head_dim + lane] =
+      source[index];
+}

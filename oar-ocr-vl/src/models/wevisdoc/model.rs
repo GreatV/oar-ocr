@@ -416,9 +416,24 @@ impl WeVisDoc {
             .collect();
 
         self.text.clear_cache();
-        // Batch prefill replaces the batch-1 KV backing storage; drop any
-        // captured graph before those raw pointers become stale.
+        // Any single-row graph points at (1, H, C, D) storage; the batched
+        // capture below re-initializes (batch, H, C, D) storage, so drop it
+        // first, then capture the batched decode graph so the prefill writes
+        // straight into its fixed-capacity storage.
         self.text.invalidate_ar_cuda_graph();
+        #[cfg(feature = "cuda")]
+        {
+            let pads: Vec<usize> = (0..batch_size)
+                .map(|row| max_seq_len - seq_lens[row])
+                .collect();
+            self.text.prepare_batch_ar_cuda_graph(
+                batch_size,
+                max_seq_len,
+                max_new_tokens,
+                &pads,
+                &self.lm_head,
+            )?;
+        }
         let hidden = self.text.forward(
             &inputs_embeds,
             &position_ids,
@@ -430,13 +445,14 @@ impl WeVisDoc {
             .i((.., max_seq_len - 1, ..))
             .and_then(|h| h.contiguous())
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "select last hidden", e))?;
-        let mut logits_rows = self
+        let mut logits = self
             .lm_head
             .forward(&last_hidden)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "batch lm_head", e))?
-            .to_dtype(DType::F32)?
-            .to_vec2::<f32>()
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read batch logits", e))?;
+            .and_then(|l| l.squeeze(1))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "batch lm_head", e))?;
+        // Per-row greedy pick on the device: only the chosen token ids
+        // cross back to the host each step, never the vocab-wide logits.
+        let mut tokens = argmax_rows(&logits)?;
 
         let mut generated: Vec<Vec<u32>> = vec![Vec::new(); batch_size];
         let mut finished = vec![false; batch_size];
@@ -458,7 +474,7 @@ impl WeVisDoc {
                     next_tokens.push(0);
                     continue;
                 }
-                let token = argmax_token(&logits_rows[row])?;
+                let token = tokens[row];
                 if self.stop_token_ids.contains(&token) {
                     finished[row] = true;
                 } else {
@@ -473,26 +489,41 @@ impl WeVisDoc {
                 break;
             }
 
-            let tokens = Tensor::from_vec(next_tokens, (batch_size, 1), &self.device)
+            let decode_ids = Tensor::from_vec(next_tokens, (batch_size, 1), &self.device)
                 .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create decode tokens", e))?;
-            let embeds = self.text.embed(&tokens)?;
+            let embeds = self.text.embed(&decode_ids)?;
             let pos_data = decode_position_buffer(&positions, 3);
             let pos = Tensor::from_vec(pos_data, (3, batch_size, 1), &self.device)
                 .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create decode positions", e))?;
             kv_len += 1;
+            // The padded prefill filled [0, max_seq) for every row, so each
+            // new token lands at the same storage offset in its own row.
+            #[cfg(feature = "cuda")]
+            let row_starts = vec![(kv_len - 1) as u32; batch_size];
             let gen_mask =
                 create_generation_mask_if_needed(&pad_lens, kv_len, self.dtype, &self.device)
                     .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create decode mask", e))?;
-            let hidden = self
-                .text
-                .forward(&embeds, &pos, None, gen_mask.as_ref(), None)?;
-            logits_rows = self
-                .lm_head
-                .forward(&hidden)
-                .and_then(|l| l.squeeze(1))
-                .and_then(|l| l.to_dtype(DType::F32))
-                .and_then(|l| l.to_vec2::<f32>())
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "batch decode lm_head", e))?;
+            #[cfg(feature = "cuda")]
+            let next_logits = self.text.forward_decode_logits_batch(
+                &embeds,
+                &pos,
+                &row_starts,
+                kv_len,
+                gen_mask.as_ref(),
+                &self.lm_head,
+            )?;
+            #[cfg(not(feature = "cuda"))]
+            let next_logits = {
+                let hidden = self
+                    .text
+                    .forward(&embeds, &pos, None, gen_mask.as_ref(), None)?;
+                self.lm_head
+                    .forward(&hidden)
+                    .and_then(|l| l.squeeze(1))
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "batch decode lm_head", e))?
+            };
+            logits = next_logits;
+            tokens = argmax_rows(&logits)?;
             for (row, position) in positions.iter_mut().enumerate() {
                 if !finished[row] {
                     *position += 1;
@@ -620,16 +651,43 @@ struct BatchPrompt {
 }
 
 /// Greedy argmax over a host score row (first index wins ties).
-fn argmax_token(scores: &[f32]) -> Result<u32, Error> {
-    let mut best = 0usize;
-    let mut best_value = f32::NEG_INFINITY;
-    for (index, &value) in scores.iter().enumerate() {
-        if value > best_value {
-            best_value = value;
-            best = index;
+/// Greedy token per row, computed on the device: one `batch`-wide readback
+/// instead of transferring the full logits matrix to the host every step.
+fn argmax_rows(logits: &Tensor) -> Result<Vec<u32>, Error> {
+    #[cfg(feature = "cuda")]
+    if logits.device().is_cuda() && matches!(logits.dtype(), DType::BF16 | DType::F32) {
+        let flat = logits
+            .reshape((logits.dim(0)?, logits.dim(1)?))
+            .and_then(|l| l.contiguous())
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "reshape batch logits", e))?;
+        let picked = match flat.dtype() {
+            DType::BF16 => flat.apply_op1_no_bwd(&ArgmaxFirstBf16),
+            DType::F32 => flat.apply_op1_no_bwd(&ArgmaxFirstF32),
+            _ => unreachable!("dtype checked above"),
         }
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "batch GPU argmax", e))?;
+        return picked
+            .to_vec1::<u32>()
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read batch tokens", e));
     }
-    Ok(best as u32)
+    let scores = logits
+        .to_dtype(DType::F32)
+        .and_then(|l| l.to_vec2::<f32>())
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read batch logits", e))?;
+    scores
+        .iter()
+        .map(|row| {
+            let mut best = 0usize;
+            let mut best_value = f32::NEG_INFINITY;
+            for (i, &v) in row.iter().enumerate() {
+                if v > best_value {
+                    best_value = v;
+                    best = i;
+                }
+            }
+            Ok(best as u32)
+        })
+        .collect()
 }
 
 fn require_token_id(
