@@ -19,9 +19,8 @@ use crate::runtime::cuda::dynamic_kv::DynamicKvAppend;
 use crate::runtime::decoder_graph::decoder_cache_capacity;
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
-    CapturedInputs, CudaGraphDrainGuard, CudaGraphInputs, CudaGraphKvLengths,
-    SingleTokenDecoderCudaGraph, capture_decoder_graph, cuda_graph_error,
-    decoder_attention_is_causal, sync_graph_tensor,
+    CapturedInputs, CudaGraphDrainGuard, CudaGraphInputs, CudaGraphKvLengths, DecoderCudaGraph,
+    capture_decoder_graph, cuda_graph_error, decoder_attention_is_causal, sync_graph_tensor,
 };
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 #[cfg(feature = "cuda")]
@@ -558,7 +557,7 @@ impl NaviDcDecoderLayer {
 
 pub struct NaviDcTextModel {
     #[cfg(feature = "cuda")]
-    decode_graph: RefCell<Option<SingleTokenDecoderCudaGraph>>,
+    decode_graph: RefCell<Option<DecoderCudaGraph<CudaGraphInputs>>>,
     embed_tokens: Embedding,
     layers: Vec<NaviDcDecoderLayer>,
     norm: candle_nn::RmsNorm,
@@ -758,13 +757,13 @@ impl NaviDcTextModel {
                 .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "graph query lengths", e))?,
             kv_lengths: CudaGraphKvLengths::new(query_len, device)
                 .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "graph KV lengths", e))?,
+            lm_head: lm_head.clone(),
             extra: Vec::new(),
         };
         let graph = capture_decoder_graph(
             cuda,
             "NaviDC-OCR",
             self,
-            lm_head,
             inputs,
             Self::decode_graph_body,
             cache_len,
@@ -777,18 +776,15 @@ impl NaviDcTextModel {
     /// The captured decode step: a bare `fn` so the captured region can
     /// only read model-owned weights and the registered inputs.
     #[cfg(feature = "cuda")]
-    fn decode_graph_body(
-        this: &Self,
-        lm_head: &Linear,
-        inputs: &CapturedInputs<'_>,
-    ) -> Result<Tensor, Error> {
+    fn decode_graph_body(this: &Self, inputs: &CudaGraphInputs) -> Result<Vec<Tensor>, Error> {
         let hidden = this.forward_dynamic(
-            inputs.hidden,
-            inputs.positions,
-            inputs.query_lengths,
-            inputs.kv_lengths,
+            &inputs.hidden,
+            &inputs.positions,
+            &inputs.query_lengths,
+            inputs.kv_lengths.tensor(),
         )?;
-        this.project_logits(&hidden, lm_head)
+        let logits = this.project_logits(&hidden, &inputs.lm_head)?;
+        Ok(vec![logits])
     }
 
     #[cfg(feature = "cuda")]
@@ -807,20 +803,23 @@ impl NaviDcTextModel {
             self.invalidate_cuda_graph();
             return Ok(None);
         }
-        if inputs_embeds.shape() != captured.hidden_input.shape()
-            || position_ids.shape() != captured.position_input.shape()
+        if inputs_embeds.shape() != captured.inputs.hidden.shape()
+            || position_ids.shape() != captured.inputs.positions.shape()
         {
             return Ok(None);
         }
         captured
-            .hidden_input
+            .inputs
+            .hidden
             .slice_set(inputs_embeds, 0, 0)
             .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "copy graph hidden", e))?;
         captured
-            .position_input
+            .inputs
+            .positions
             .slice_set(position_ids, 0, 0)
             .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "copy graph positions", e))?;
         captured
+            .inputs
             .kv_lengths
             .update(kv_len)
             .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "update graph KV lengths", e))?;
@@ -831,7 +830,7 @@ impl NaviDcTextModel {
         for layer in &self.layers {
             layer.set_kv_cache_len(kv_len)?;
         }
-        Ok(Some(captured.logits_output.clone()))
+        Ok(Some(captured.outputs[0].clone()))
     }
 
     #[cfg(feature = "cuda")]
