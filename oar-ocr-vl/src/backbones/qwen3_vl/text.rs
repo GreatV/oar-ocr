@@ -403,11 +403,13 @@ impl Qwen3Attention {
             .dims4()
             .map(|(batch, _, seq_len, _)| (batch, seq_len))
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention shape", e))?;
-        // Single-token decoding keeps to the eager gemm kernels: FA2 tiles
-        // q into 128-row blocks, so a one-query step lights up only
-        // `heads` blocks (12% of the SMs here) and reads the KV cache at
-        // a fraction of the achievable bandwidth.
-        let flash = if batch == 1 && seq_len > 1 {
+        // Single-row sequences stay on flash, matching the eager reference
+        // implementation's numerics exactly: FA2's accumulation order
+        // differs from the gemm kernels, and swapping them mid-family
+        // flips near-tie argmax decisions on format-heavy pages. The
+        // captured decode graph is unaffected (it runs its own masked
+        // kernel over the fixed-capacity storage).
+        let flash = if batch == 1 {
             flash_attention(q, k, v, self.scaling, seq_len > 1)
                 .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "flash attention", e))?
         } else {
