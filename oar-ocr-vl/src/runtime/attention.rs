@@ -668,22 +668,24 @@ pub fn create_left_padding_mask(
     let batch_size = seq_lens.len();
 
     on_compute_device(device, |compute_device| {
-        // pad_len = max_len - len
-        // lens: (B, 1, 1, 1)
-        let lens_tensor = Tensor::from_vec(
-            seq_lens.iter().map(|&x| x as u32).collect::<Vec<_>>(),
+        // Keep the comparison in integer space, like the causal mask: BF16
+        // cannot represent ~1500-scale lengths exactly (8-bit mantissa), so
+        // computing `max_len - len` in the mask dtype rounds pad lengths by
+        // up to ±16 positions and spuriously masks real prefix tokens of
+        // unequal-length batches.
+        // pad_len: (B, 1, 1, 1), already the difference in u32.
+        let pad_len = Tensor::from_vec(
+            seq_lens
+                .iter()
+                .map(|&len| (max_len - len) as u32)
+                .collect::<Vec<_>>(),
             (batch_size, 1, 1, 1),
             compute_device,
-        )?
-        .to_dtype(dtype)?;
-
-        let max_len_t = Tensor::new(max_len as u32, compute_device)?.to_dtype(dtype)?;
-        let pad_len = max_len_t.broadcast_sub(&lens_tensor)?; // (B, 1, 1, 1)
+        )?;
 
         // pos: (1, 1, 1, max_len)
-        let pos_tensor = Tensor::arange(0u32, max_len as u32, compute_device)?
-            .reshape((1, 1, 1, max_len))?
-            .to_dtype(dtype)?;
+        let pos_tensor =
+            Tensor::arange(0u32, max_len as u32, compute_device)?.reshape((1, 1, 1, max_len))?;
 
         // Mask: pos < pad_len -> suppressed, else 0
         let mask_cond = pos_tensor.broadcast_lt(&pad_len)?;
@@ -718,18 +720,18 @@ pub fn create_generation_mask(
     let batch_size = pad_lens.len();
 
     on_compute_device(device, |compute_device| {
+        // Integer-space comparison, matching `create_left_padding_mask`:
+        // float dtypes round kv-scale positions and shift the mask.
         // pad_lens as tensor: (batch, 1, 1, 1)
         let pad_lens_tensor = Tensor::from_vec(
             pad_lens.iter().map(|&x| x as u32).collect::<Vec<_>>(),
             (batch_size, 1, 1, 1),
             compute_device,
-        )?
-        .to_dtype(dtype)?;
+        )?;
 
         // Position indices: (1, 1, 1, kv_len)
-        let pos_tensor = Tensor::arange(0u32, kv_len as u32, compute_device)?
-            .reshape((1, 1, 1, kv_len))?
-            .to_dtype(dtype)?;
+        let pos_tensor =
+            Tensor::arange(0u32, kv_len as u32, compute_device)?.reshape((1, 1, 1, kv_len))?;
 
         // Mask condition: pos < pad_len -> masked (large negative value)
         let mask_cond = pos_tensor.broadcast_lt(&pad_lens_tensor)?;
@@ -1061,6 +1063,55 @@ pub fn select_rope_sections(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn padding_masks_mark_exactly_the_padded_prefix_in_bf16() -> Result<()> {
+        // Regression: computing `max_len - len` in the mask dtype rounds
+        // ~1500-scale lengths in BF16 by up to ±16 positions and masks real
+        // prefix tokens. The comparison must stay in integer space.
+        let device = Device::Cpu;
+        let seq_lens = [1493usize, 1417, 1325];
+        let max_len = *seq_lens.iter().max().unwrap();
+
+        let padding = create_left_padding_mask(&seq_lens, max_len, DType::BF16, &device)?;
+        let values = padding
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert_eq!(values.len(), seq_lens.len() * max_len);
+        for (row, &len) in seq_lens.iter().enumerate() {
+            let pad_len = max_len - len;
+            let row_values = &values[row * max_len..(row + 1) * max_len];
+            for (position, &value) in row_values.iter().enumerate() {
+                let masked = value < 0.0;
+                assert_eq!(
+                    masked,
+                    position < pad_len,
+                    "row {row} position {position} (pad_len {pad_len})"
+                );
+            }
+        }
+
+        let decode_pad_lens: Vec<usize> = seq_lens.iter().map(|&len| max_len - len).collect();
+        let decode = create_generation_mask(&decode_pad_lens, max_len + 64, DType::BF16, &device)?;
+        let decode_values = decode
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        for (row, &len) in seq_lens.iter().enumerate() {
+            let pad_len = max_len - len;
+            let row_values = &decode_values[row * (max_len + 64)..(row + 1) * (max_len + 64)];
+            for (position, &value) in row_values.iter().enumerate() {
+                let masked = value < 0.0;
+                assert_eq!(
+                    masked,
+                    position < pad_len,
+                    "decode row {row} position {position} (pad_len {pad_len})"
+                );
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn flash_attention_rejects_unsupported_dtypes() {
