@@ -14,15 +14,28 @@ use crate::runtime::attention::{
     RotaryEmbedding, flash_attention, scaled_dot_product_attention_gqa,
 };
 use crate::runtime::cache::TrimmableKvCache;
+#[cfg(feature = "cuda")]
+use crate::runtime::cuda::dynamic_kv::DynamicKvAppend;
+#[cfg(feature = "cuda")]
+use crate::runtime::decoder_graph::{
+    CudaGraphDrainGuard, CudaGraphKvLengths, SingleTokenDecoderCudaGraph, cuda_graph_error,
+    decoder_attention_is_causal, decoder_cache_capacity, sync_graph_tensor,
+};
 use crate::runtime::errors::candle_to_ocr_inference;
 use crate::runtime::tensor::rotate_half;
-use candle_core::{D, DType, Device, Tensor};
+use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::{
     Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, linear_no_bias, rms_norm,
 };
 use std::cell::RefCell;
 
 const MODEL_NAME: &str = "Qwen3-VL";
+
+/// Upper bound for graph-backed decode KV buckets. The graph's masked
+/// attention scans the whole bucket every step, so this trades generation
+/// headroom before falling back to eager decoding against per-step scan cost.
+#[cfg(feature = "cuda")]
+const WEVISDOC_DECODE_CACHE_LEN: usize = 8_192;
 
 fn default_rms_norm_eps() -> f64 {
     1e-6
@@ -293,7 +306,32 @@ impl Qwen3Attention {
         }
     }
 
-    fn forward(&self, hidden_states: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
+    fn forward(
+        &self,
+        hidden_states: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        attention_mask: Option<&Tensor>,
+    ) -> Result<Tensor, Error> {
+        let (batch, seq_len, _) = hidden_states
+            .dims3()
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention input", e))?;
+        let (q, k, v) = self.project_qkv(hidden_states, cos, sin)?;
+        let (k, v) = self
+            .kv_cache
+            .borrow_mut()
+            .append(&k, &v)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "KV cache", e))?;
+        let output = self.attend(&q, &k, &v, batch, seq_len, attention_mask)?;
+        self.project_output(&output, batch, seq_len)
+    }
+
+    fn project_qkv(
+        &self,
+        hidden_states: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+    ) -> Result<(Tensor, Tensor, Tensor), Error> {
         let (batch, seq_len, _) = hidden_states
             .dims3()
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention input", e))?;
@@ -334,27 +372,84 @@ impl Qwen3Attention {
         let v = v
             .contiguous()
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "value contiguous", e))?;
-        let (k, v) = self
-            .kv_cache
-            .borrow_mut()
-            .append(&k, &v)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "KV cache", e))?;
+        Ok((q, k, v))
+    }
 
-        let output = match flash_attention(&q, &k, &v, self.scaling, seq_len > 1)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "flash attention", e))?
-        {
-            Some(output) => output,
-            None => scaled_dot_product_attention_gqa(
-                &q,
-                &k,
-                &v,
-                None,
-                self.scaling,
-                true,
-                self.num_kv_groups,
-            )
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "grouped-query attention", e))?,
+    fn attend(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        batch: usize,
+        seq_len: usize,
+        attention_mask: Option<&Tensor>,
+    ) -> Result<Tensor, Error> {
+        // Single-token decoding keeps to the eager gemm kernels: FA2 tiles
+        // q into 128-row blocks, so a one-query step lights up only
+        // `heads` blocks (12% of the SMs here) and reads the KV cache at
+        // a fraction of the achievable bandwidth.
+        let flash = if batch == 1 && seq_len > 1 {
+            flash_attention(q, k, v, self.scaling, seq_len > 1)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "flash attention", e))?
+        } else {
+            None
         };
+        match flash {
+            Some(output) => Ok(output),
+            None => {
+                // Masked batch attention materializes (B, heads, q, kv)
+                // scores eagerly; page-scale prefills chunk the query axis so
+                // the transient stays bounded.
+                const MASKED_ATTN_CHUNK: usize = 1024;
+                if attention_mask.is_some() && seq_len > MASKED_ATTN_CHUNK {
+                    let mut chunks = Vec::with_capacity(seq_len.div_ceil(MASKED_ATTN_CHUNK));
+                    let mut start = 0usize;
+                    while start < seq_len {
+                        let len = (seq_len - start).min(MASKED_ATTN_CHUNK);
+                        let q_chunk = q.narrow(2, start, len)?;
+                        let mask_chunk = attention_mask
+                            .map(|mask| mask.narrow(2, start, len))
+                            .transpose()?;
+                        chunks.push(
+                            scaled_dot_product_attention_gqa(
+                                &q_chunk,
+                                k,
+                                v,
+                                mask_chunk.as_ref(),
+                                self.scaling,
+                                false,
+                                self.num_kv_groups,
+                            )
+                            .map_err(|e| {
+                                candle_to_ocr_inference(MODEL_NAME, "grouped-query attention", e)
+                            })?,
+                        );
+                        start += len;
+                    }
+                    let refs: Vec<&Tensor> = chunks.iter().collect();
+                    return Tensor::cat(&refs, 2)
+                        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention chunks", e));
+                }
+                scaled_dot_product_attention_gqa(
+                    q,
+                    k,
+                    v,
+                    attention_mask,
+                    self.scaling,
+                    attention_mask.is_none(),
+                    self.num_kv_groups,
+                )
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "grouped-query attention", e))
+            }
+        }
+    }
+
+    fn project_output(
+        &self,
+        output: &Tensor,
+        batch: usize,
+        seq_len: usize,
+    ) -> Result<Tensor, Error> {
         let output = output
             .transpose(1, 2)
             .and_then(|x| x.reshape((batch, seq_len, self.num_heads * self.head_dim)))
@@ -362,6 +457,107 @@ impl Qwen3Attention {
         self.o_proj
             .forward(&output)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "output projection", e))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn prepare_dynamic_cache(&self, query_len: usize, cache_len: usize) -> Result<(), Error> {
+        let template = Tensor::zeros(
+            (1, self.num_kv_heads, query_len, self.head_dim),
+            self.q_proj.weight().dtype(),
+            self.q_proj.weight().device(),
+        )
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "dynamic KV template", e))?;
+        self.kv_cache
+            .borrow_mut()
+            .initialize_storage_with_capacity(&template, cache_len)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "initialize dynamic KV", e))
+    }
+
+    /// CUDA-graph decode step: appends into fixed-capacity storage and runs
+    /// masked attention over `[0, kv_len]`. `kv_positions` is the constant
+    /// `(1, 1, cache_len)` index row (built before capture — `arange`
+    /// uploads from host, which capture forbids).
+    #[cfg(feature = "cuda")]
+    fn forward_dynamic(
+        &self,
+        hidden_states: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        query_lengths: &Tensor,
+        kv_lengths: &Tensor,
+        kv_positions: &Tensor,
+    ) -> Result<Tensor, Error> {
+        let (batch, query_len, _) = hidden_states
+            .dims3()
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "dynamic attention input", e))?;
+        if batch != 1 {
+            return Err(Error::Config {
+                message: format!(
+                    "{MODEL_NAME} CUDA-graph attention requires batch size 1, got {batch}"
+                ),
+            });
+        }
+        let (q, k, v) = self.project_qkv(hidden_states, cos, sin)?;
+        let cache = self.kv_cache.borrow();
+        let cache_len = cache.storage_capacity();
+        let (cache_k, cache_v) = cache.storage().ok_or_else(|| Error::Config {
+            message: format!("{MODEL_NAME} dynamic KV storage is not initialized"),
+        })?;
+        drop(cache);
+        let append = DynamicKvAppend {
+            query_len,
+            cache_len,
+        };
+        cache_k
+            .inplace_op3(&k, kv_lengths, &append)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "dynamic key cache append", e))?;
+        cache_v
+            .inplace_op3(&v, kv_lengths, &append)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "dynamic value cache append", e))?;
+
+        // Attention over the fixed-capacity storage with a device-side
+        // additive mask derived from `kv_lengths`: FA2's varlen kernel runs
+        // one 128-row query block per head on this shape (a handful of the
+        // GPU's SMs) and reads the cache far below bandwidth, while the
+        // eager gemm kernels stay fast. Masked positions get a very negative
+        // score, so stale storage beyond the live length contributes exactly
+        // zero after the softmax — identical math to the narrowed eager path.
+        let kv_bound = kv_lengths
+            .i(1..)
+            .and_then(|bound| bound.reshape((1, 1, 1)))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "dynamic KV bound", e))?;
+        let live = kv_positions.broadcast_lt(&kv_bound)?;
+        // live -> 0, dead -> -1e9 via a scalar affine (host scalars ride
+        // as kernel parameters, so nothing uploads during graph capture).
+        let mask = live
+            .to_dtype(hidden_states.dtype())?
+            .affine(1e9, -1e9)?
+            .unsqueeze(1)?;
+        let attn = scaled_dot_product_attention_gqa(
+            &q,
+            &cache_k,
+            &cache_v,
+            Some(&mask),
+            self.scaling,
+            false,
+            self.num_kv_groups,
+        )
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "dynamic masked attention", e))?;
+        let _ = query_lengths;
+        self.project_output(&attn, batch, query_len)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn kv_cache_len(&self) -> usize {
+        self.kv_cache.borrow().current_seq_len()
+    }
+
+    #[cfg(feature = "cuda")]
+    fn set_kv_cache_len(&self, len: usize) -> Result<(), Error> {
+        self.kv_cache
+            .borrow_mut()
+            .set_current_len(len)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "set dynamic KV length", e))
     }
 
     fn clear_cache(&self) {
@@ -434,16 +630,67 @@ impl DecoderLayer {
         })
     }
 
-    fn forward(&self, hidden_states: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
+    fn forward(
+        &self,
+        hidden_states: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        attention_mask: Option<&Tensor>,
+    ) -> Result<Tensor, Error> {
         let residual = hidden_states.clone();
         let normalized = self.input_layernorm.forward(hidden_states)?;
-        let mixed = self.attention.forward(&normalized, cos, sin)?;
+        let mixed = self
+            .attention
+            .forward(&normalized, cos, sin, attention_mask)?;
         let hidden_states = (&residual + &mixed)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention residual", e))?;
         let residual = hidden_states.clone();
         let normalized = self.post_attention_layernorm.forward(&hidden_states)?;
         let mlp = self.mlp.forward(&normalized)?;
         (&residual + &mlp).map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP residual", e))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn forward_dynamic(
+        &self,
+        hidden_states: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        query_lengths: &Tensor,
+        kv_lengths: &Tensor,
+        kv_positions: &Tensor,
+    ) -> Result<Tensor, Error> {
+        let residual = hidden_states.clone();
+        let normalized = self.input_layernorm.forward(hidden_states)?;
+        let mixed = self.attention.forward_dynamic(
+            &normalized,
+            cos,
+            sin,
+            query_lengths,
+            kv_lengths,
+            kv_positions,
+        )?;
+        let hidden_states = (&residual + &mixed)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention residual", e))?;
+        let residual = hidden_states.clone();
+        let normalized = self.post_attention_layernorm.forward(&hidden_states)?;
+        let mlp = self.mlp.forward(&normalized)?;
+        (&residual + &mlp).map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP residual", e))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn prepare_dynamic_cache(&self, query_len: usize, cache_len: usize) -> Result<(), Error> {
+        self.attention.prepare_dynamic_cache(query_len, cache_len)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn set_kv_cache_len(&self, len: usize) -> Result<(), Error> {
+        self.attention.set_kv_cache_len(len)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn kv_cache_len(&self) -> usize {
+        self.attention.kv_cache_len()
     }
 
     fn clear_cache(&self) {
@@ -474,10 +721,12 @@ pub(crate) fn interleaved_axis_ids(rotary_dim: usize, mrope_section: &[usize]) -
 
 /// Visual features tapped from the vision tower, to be added to the
 /// image-token hidden states of the first `embeds.len()` decoder layers.
-/// `image_span` is the `(start, len)` of the contiguous image-token span.
+/// `image_spans` carries one contiguous image-token `(start, len)` span per
+/// batch row; `embeds[layer]` concatenates the rows' feature maps in row
+/// order, so rows may have different span lengths (different image grids).
 #[derive(Debug, Clone)]
 pub(crate) struct DeepstackVisualEmbeds {
-    pub image_span: (usize, usize),
+    pub image_spans: Vec<(usize, usize)>,
     pub embeds: Vec<Tensor>,
 }
 
@@ -527,10 +776,16 @@ impl TextRotaryEmbedding {
 }
 
 pub(crate) struct Qwen3VlTextModel {
+    #[cfg(feature = "cuda")]
+    decode_graph: RefCell<Option<SingleTokenDecoderCudaGraph>>,
     embed_tokens: Embedding,
     layers: Vec<DecoderLayer>,
     norm: RmsNorm,
     rotary_emb: TextRotaryEmbedding,
+    // Must stay the last field: it drops last and drains CUDA errors the
+    // other fields' frees may stash (see CudaGraphDrainGuard).
+    #[cfg(feature = "cuda")]
+    _drain_guard: CudaGraphDrainGuard,
 }
 
 impl Qwen3VlTextModel {
@@ -544,11 +799,18 @@ impl Qwen3VlTextModel {
         let norm = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("norm"))
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load final norm", e))?;
         let rotary_emb = TextRotaryEmbedding::new(cfg, vb.device())?;
+
+        #[cfg(feature = "cuda")]
+        let _drain_guard = CudaGraphDrainGuard::new(vb.device());
         Ok(Self {
+            #[cfg(feature = "cuda")]
+            decode_graph: RefCell::new(None),
             embed_tokens,
             layers,
             norm,
             rotary_emb,
+            #[cfg(feature = "cuda")]
+            _drain_guard,
         })
     }
 
@@ -568,13 +830,14 @@ impl Qwen3VlTextModel {
         inputs_embeds: &Tensor,
         position_ids: &Tensor,
         deepstack: Option<&DeepstackVisualEmbeds>,
+        attention_mask: Option<&Tensor>,
     ) -> Result<Tensor, Error> {
         let (cos, sin) = self
             .rotary_emb
             .forward(position_ids, inputs_embeds.dtype())?;
         let mut hidden_states = inputs_embeds.clone();
         for (layer_index, layer) in self.layers.iter().enumerate() {
-            hidden_states = layer.forward(&hidden_states, &cos, &sin)?;
+            hidden_states = layer.forward(&hidden_states, &cos, &sin, attention_mask)?;
             if let Some(deepstack) = deepstack
                 && layer_index < deepstack.embeds.len()
             {
@@ -586,6 +849,283 @@ impl Qwen3VlTextModel {
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "final norm", e))
     }
 
+    #[cfg(feature = "cuda")]
+    fn forward_dynamic(
+        &self,
+        inputs_embeds: &Tensor,
+        position_ids: &Tensor,
+        query_lengths: &Tensor,
+        kv_lengths: &Tensor,
+        kv_positions: &Tensor,
+    ) -> Result<Tensor, Error> {
+        let (cos, sin) = self
+            .rotary_emb
+            .forward(position_ids, inputs_embeds.dtype())?;
+        let mut hidden_states = inputs_embeds.clone();
+        for layer in &self.layers {
+            hidden_states = layer.forward_dynamic(
+                &hidden_states,
+                &cos,
+                &sin,
+                query_lengths,
+                kv_lengths,
+                kv_positions,
+            )?;
+        }
+        self.norm
+            .forward(&hidden_states)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "final norm", e))
+    }
+
+    fn project_logits(&self, hidden_states: &Tensor, lm_head: &Linear) -> Result<Tensor, Error> {
+        lm_head
+            .forward(hidden_states)
+            .and_then(|logits| logits.i((0, 0, ..)))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "decode LM head", e))
+    }
+
+    /// One decode step at `position_ids`; batch rows beyond the first
+    /// require `attention_mask`.
+    pub(crate) fn forward_decode_logits(
+        &self,
+        inputs_embeds: &Tensor,
+        position_ids: &Tensor,
+        attention_mask: Option<&Tensor>,
+        lm_head: &Linear,
+    ) -> Result<Tensor, Error> {
+        #[cfg(feature = "cuda")]
+        if attention_mask.is_none() {
+            let kv_len = self.kv_cache_len().saturating_add(1);
+            if let Some(logits) = self.replay_cuda_graph(inputs_embeds, position_ids, kv_len)? {
+                return Ok(logits);
+            }
+        }
+        let hidden = self.forward(inputs_embeds, position_ids, None, attention_mask)?;
+        self.project_logits(&hidden, lm_head)
+    }
+
+    /// Capture the batch-1 single-token decode graph when eligible.
+    pub(crate) fn prepare_ar_cuda_graph(
+        &self,
+        prompt_len: usize,
+        max_new_tokens: usize,
+        lm_head: &Linear,
+    ) -> Result<(), Error> {
+        if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
+            || std::env::var_os("OAR_WEVISDOC_DISABLE_CUDA_GRAPH").is_some()
+        {
+            #[cfg(feature = "cuda")]
+            self.invalidate_cuda_graph();
+            return Ok(());
+        }
+        #[cfg(feature = "cuda")]
+        if self.embed_tokens.embeddings().device().is_cuda()
+            && matches!(
+                self.embed_tokens.embeddings().dtype(),
+                DType::BF16 | DType::F16
+            )
+        {
+            let Some(cache_len) =
+                decoder_cache_capacity(prompt_len, max_new_tokens, WEVISDOC_DECODE_CACHE_LEN)
+            else {
+                self.invalidate_cuda_graph();
+                return Ok(());
+            };
+            let required = prompt_len
+                .saturating_add(max_new_tokens)
+                .min(WEVISDOC_DECODE_CACHE_LEN);
+            let reusable = self
+                .decode_graph
+                .borrow()
+                .as_ref()
+                .is_some_and(|graph| graph.cache_len >= required);
+            if reusable {
+                return Ok(());
+            }
+            self.invalidate_cuda_graph();
+            self.capture_cuda_graph(cache_len, lm_head)?;
+        }
+        let _ = prompt_len;
+        let _ = max_new_tokens;
+        let _ = lm_head;
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    fn capture_cuda_graph(&self, cache_len: usize, lm_head: &Linear) -> Result<(), Error> {
+        use candle_core::cuda_backend::cudarc::driver::sys::{
+            CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
+        };
+
+        if self.decode_graph.borrow().is_some() {
+            return Ok(());
+        }
+        let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
+            return Ok(());
+        };
+        let query_len = 1;
+        for layer in &self.layers {
+            layer.prepare_dynamic_cache(query_len, cache_len)?;
+        }
+        let hidden_size = self
+            .embed_tokens
+            .embeddings()
+            .dim(1)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph hidden size", e))?;
+        let device = self.embed_tokens.embeddings().device().clone();
+        let hidden_input = Tensor::zeros(
+            (1, query_len, hidden_size),
+            self.embed_tokens.embeddings().dtype(),
+            &device,
+        )
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph hidden input", e))?;
+        let position_input = Tensor::zeros((3, 1, query_len), DType::I64, &device)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph position input", e))?;
+        let query_lengths = Tensor::new(&[0u32, query_len as u32], &device)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph query lengths", e))?;
+        let kv_lengths = CudaGraphKvLengths::new(query_len, &device)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph KV lengths", e))?;
+        let kv_positions =
+            Tensor::arange(0u32, cache_len as u32, &device)?.reshape((1, 1, cache_len))?;
+        let stream = cuda.cuda_stream();
+        let _htod_cache = cuda.enable_cuda_graph_htod_cache();
+
+        let warm = self.forward_dynamic(
+            &hidden_input,
+            &position_input,
+            &query_lengths,
+            kv_lengths.tensor(),
+            &kv_positions,
+        )?;
+        let warm_logits = self.project_logits(&warm, lm_head)?;
+        sync_graph_tensor(MODEL_NAME, &warm_logits, "warm decoder CUDA graph")?;
+        // Allocate the output buffer before capture so it belongs to the
+        // regular stream-ordered pool; a capture-time allocation lives in the
+        // graph's private pool and can never be returned to the allocator
+        // safely. Prime the copy so the captured run sees a warm kernel.
+        let logits_output = Tensor::zeros_like(&warm_logits)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph logits output", e))?;
+        logits_output
+            .slice_set(&warm_logits, 0, 0)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "prime graph logits copy", e))?;
+
+        stream
+            .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
+            .map_err(|e| cuda_graph_error(MODEL_NAME, "begin decoder CUDA graph capture", e))?;
+        let captured_output: Result<(), Error> = (|| {
+            let hidden = self.forward_dynamic(
+                &hidden_input,
+                &position_input,
+                &query_lengths,
+                kv_lengths.tensor(),
+                &kv_positions,
+            )?;
+            let logits = self.project_logits(&hidden, lm_head)?;
+            logits_output
+                .slice_set(&logits, 0, 0)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "record graph logits copy", e))
+        })();
+        if let Err(error) = captured_output {
+            let _ = stream.end_capture(
+                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            );
+            return Err(error);
+        }
+        let graph = stream
+            .end_capture(
+                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            )
+            .map_err(|e| cuda_graph_error(MODEL_NAME, "end decoder CUDA graph capture", e))?
+            .ok_or_else(|| Error::Config {
+                message: format!("{MODEL_NAME} decoder capture returned no graph"),
+            })?;
+        graph
+            .launch()
+            .map_err(|e| cuda_graph_error(MODEL_NAME, "warm decoder CUDA graph", e))?;
+        sync_graph_tensor(MODEL_NAME, &logits_output, "sync decoder CUDA graph")?;
+        self.clear_cache();
+        *self.decode_graph.borrow_mut() = Some(SingleTokenDecoderCudaGraph {
+            graph,
+            hidden_input,
+            position_input,
+            _query_lengths: query_lengths,
+            kv_lengths,
+            logits_output,
+            cache_len,
+        });
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    fn replay_cuda_graph(
+        &self,
+        inputs_embeds: &Tensor,
+        position_ids: &Tensor,
+        kv_len: usize,
+    ) -> Result<Option<Tensor>, Error> {
+        let captured_ref = self.decode_graph.borrow();
+        let Some(captured) = captured_ref.as_ref() else {
+            return Ok(None);
+        };
+        if kv_len > captured.cache_len {
+            drop(captured_ref);
+            self.invalidate_cuda_graph();
+            return Ok(None);
+        }
+        if inputs_embeds.shape() != captured.hidden_input.shape()
+            || position_ids.shape() != captured.position_input.shape()
+        {
+            return Ok(None);
+        }
+        captured
+            .hidden_input
+            .slice_set(inputs_embeds, 0, 0)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy graph hidden", e))?;
+        captured
+            .position_input
+            .slice_set(position_ids, 0, 0)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy graph positions", e))?;
+        captured
+            .kv_lengths
+            .update(kv_len)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "update graph KV lengths", e))?;
+        captured
+            .graph
+            .launch()
+            .map_err(|e| cuda_graph_error(MODEL_NAME, "launch decoder CUDA graph", e))?;
+        for layer in &self.layers {
+            layer.set_kv_cache_len(kv_len)?;
+        }
+        Ok(Some(captured.logits_output.clone()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn invalidate_cuda_graph(&self) {
+        if let Some(graph) = self.decode_graph.borrow_mut().take() {
+            graph.dispose();
+        }
+    }
+
+    pub(crate) fn invalidate_ar_cuda_graph(&self) {
+        #[cfg(feature = "cuda")]
+        self.invalidate_cuda_graph();
+    }
+
+    /// Whether the decode graph is currently captured — lets the GPU
+    /// self-check assert the capture really ran (it is bf16/f16-gated).
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    pub(crate) fn decode_graph_captured(&self) -> bool {
+        self.decode_graph.borrow().is_some()
+    }
+
+    #[cfg(feature = "cuda")]
+    fn kv_cache_len(&self) -> usize {
+        let len = self.layers.first().map_or(0, |layer| layer.kv_cache_len());
+        debug_assert!(self.layers.iter().all(|layer| layer.kv_cache_len() == len));
+        len
+    }
+
     pub(crate) fn clear_cache(&self) {
         for layer in &self.layers {
             layer.clear_cache();
@@ -593,8 +1133,19 @@ impl Qwen3VlTextModel {
     }
 }
 
-/// Add one DeepStack feature map to the image-token span of `hidden_states`
-/// (`(1, seq, hidden)` batch layout).
+#[cfg(feature = "cuda")]
+impl Drop for Qwen3VlTextModel {
+    fn drop(&mut self) {
+        // A cached graph must go through dispose: plainly dropping it returns
+        // graph-bound buffers to the allocator and poisons it.
+        self.invalidate_cuda_graph();
+    }
+}
+
+/// Add one DeepStack feature map to each row's image-token span of
+/// `hidden_states` (`(batch, seq, hidden)` layout). Rows share the span
+/// lengths may differ across rows (different image grids); starts shift with
+/// left padding.
 fn add_deepstack(
     hidden_states: Tensor,
     deepstack: &DeepstackVisualEmbeds,
@@ -603,56 +1154,76 @@ fn add_deepstack(
     let (batch, seq_len, hidden_size) = hidden_states
         .dims3()
         .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "deepstack input", e))?;
-    let (start, len) = deepstack.image_span;
-    if batch != 1 || start + len > seq_len {
+    if batch != deepstack.image_spans.len() {
         return Err(Error::InvalidInput {
             message: format!(
-                "{MODEL_NAME} deepstack span {start}..{} outside sequence (batch {batch}, len {seq_len})",
-                start + len
+                "{MODEL_NAME} deepstack spans cover {} rows, hidden states have {batch}",
+                deepstack.image_spans.len()
             ),
         });
     }
+    let total_features: usize = deepstack.image_spans.iter().map(|&(_, len)| len).sum();
     let embeds = deepstack.embeds[layer_index]
         .to_dtype(hidden_states.dtype())
         .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "deepstack feature layout", e))?;
-    if embeds
+    let embeds_len = embeds
         .dim(0)
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "deepstack feature length", e))?
-        != len
-    {
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "deepstack feature length", e))?;
+    if embeds_len != total_features {
         return Err(Error::InvalidInput {
             message: format!(
-                "{MODEL_NAME} deepstack feature length {} != image span {len}",
-                deepstack.embeds[layer_index].dim(0).unwrap_or(0)
+                "{MODEL_NAME} deepstack feature length {embeds_len} != total span {total_features}"
             ),
         });
     }
-    let prefix = if start == 0 {
-        Tensor::zeros(
-            (1, 0, hidden_size),
-            hidden_states.dtype(),
-            hidden_states.device(),
-        )
-    } else {
-        hidden_states.narrow(1, 0, start)
+    let mut rows = Vec::with_capacity(batch);
+    let mut feature_offset = 0usize;
+    for (row, &(start, len)) in deepstack.image_spans.iter().enumerate() {
+        if len == 0 || start + len > seq_len {
+            return Err(Error::InvalidInput {
+                message: format!(
+                    "{MODEL_NAME} deepstack span {start}..{} outside row {row} (len {seq_len})",
+                    start + len
+                ),
+            });
+        }
+        let row_features = embeds
+            .narrow(0, feature_offset, len)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "deepstack row features", e))?;
+        feature_offset += len;
+        let row_hidden = hidden_states.i(row)?;
+        let prefix = if start == 0 {
+            Tensor::zeros(
+                (0, hidden_size),
+                hidden_states.dtype(),
+                hidden_states.device(),
+            )
+        } else {
+            row_hidden.narrow(0, 0, start)
+        }
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "deepstack prefix", e))?;
+        let image_hidden = row_hidden
+            .narrow(0, start, len)
+            .and_then(|image| image + row_features)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "deepstack add", e))?;
+        let suffix = if start + len == seq_len {
+            Tensor::zeros(
+                (0, hidden_size),
+                hidden_states.dtype(),
+                hidden_states.device(),
+            )
+        } else {
+            row_hidden.narrow(0, start + len, seq_len - start - len)
+        }
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "deepstack suffix", e))?;
+        rows.push(
+            Tensor::cat(&[&prefix, &image_hidden, &suffix], 0)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "deepstack splice", e))?,
+        );
     }
-    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "deepstack prefix", e))?;
-    let image_hidden = hidden_states
-        .narrow(1, start, len)
-        .and_then(|image| image + &embeds.unsqueeze(0)?)
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "deepstack add", e))?;
-    let suffix = if start + len == seq_len {
-        Tensor::zeros(
-            (1, 0, hidden_size),
-            hidden_states.dtype(),
-            hidden_states.device(),
-        )
-    } else {
-        hidden_states.narrow(1, start + len, seq_len - start - len)
-    }
-    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "deepstack suffix", e))?;
-    Tensor::cat(&[&prefix, &image_hidden, &suffix], 1)
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "deepstack splice", e))
+    let refs: Vec<&Tensor> = rows.iter().collect();
+    Tensor::stack(&refs, 0)
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "deepstack batch stack", e))
 }
 
 #[cfg(test)]
@@ -717,6 +1288,345 @@ mod tests {
         assert!(cfg.validate().is_err());
     }
 
+    /// Random-weight equivalence of the padded batch forward against
+    /// per-sequence forwards: two rows with different lengths, left-padded,
+    /// per-row MRoPE positions, batch DeepStack spans, and the combined
+    /// causal+padding mask must produce identical last-token logits to
+    /// running each row alone.
+    #[test]
+    fn batched_forward_matches_single_sequences_with_deepstack() -> Result<(), Error> {
+        use crate::runtime::attention::{
+            combine_masks, create_causal_mask, create_left_padding_mask,
+        };
+        let device = Device::Cpu;
+        let cfg = valid_tiny_config();
+        let vb = random_varbuilder(&cfg, &device);
+        let model = Qwen3VlTextModel::load(&cfg, vb.pp("model"))?;
+        let lm_head = candle_nn::Linear::new(
+            vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")?,
+            None,
+        );
+
+        // Two sequences with image spans at different offsets.
+        let hidden_size = cfg.hidden_size;
+        let seq_a = 12usize;
+        let seq_b = 9usize;
+        let span = 4usize;
+        let build_row = |seq_len: usize, image_start: usize| -> Result<(Tensor, Tensor), Error> {
+            let embeds = Tensor::from_vec(
+                (0..seq_len * hidden_size)
+                    .map(|i| (i % 17) as f32 / 17.0)
+                    .collect(),
+                (1, seq_len, hidden_size),
+                &device,
+            )?;
+            let mut axes = [Vec::new(), Vec::new(), Vec::new()];
+            for position in 0..seq_len as i64 {
+                for axis in &mut axes {
+                    axis.push(position);
+                }
+            }
+            let data: Vec<i64> = axes.into_iter().flatten().collect();
+            let position_ids = Tensor::from_vec(data, (3, 1, seq_len), &device)?;
+            let _ = image_start;
+            Ok((embeds, position_ids))
+        };
+        let (embeds_a, pos_a) = build_row(seq_a, 4)?;
+        let (embeds_b, pos_b) = build_row(seq_b, 3)?;
+        let lens = [seq_a, seq_b];
+        let max_len = *lens.iter().max().unwrap();
+
+        let feature = |tokens: usize| -> Tensor {
+            Tensor::from_vec(
+                (0..tokens * hidden_size)
+                    .map(|i| ((i * 7) % 23) as f32 / 23.0)
+                    .collect(),
+                (tokens, hidden_size),
+                &device,
+            )
+            .unwrap()
+        };
+        let single_deepstack = |image_start: usize, pad_len: usize| DeepstackVisualEmbeds {
+            image_spans: vec![(image_start + pad_len, span)],
+            embeds: vec![feature(span)],
+        };
+
+        // Batched: left-pad both rows, shift spans, combined mask.
+        let mut embeds_rows = Vec::new();
+        let mut position_rows = Vec::new();
+        let mut spans = Vec::new();
+        for (embeds, positions, image_start) in
+            [(&embeds_a, &pos_a, 4usize), (&embeds_b, &pos_b, 3usize)]
+        {
+            let pad_len = max_len - positions.dim(2)?;
+            let pad = Tensor::zeros((1, pad_len, hidden_size), DType::F32, &device)?;
+            embeds_rows.push(Tensor::cat(&[&pad, embeds], 1)?);
+            let pad_pos = Tensor::zeros((3, 1, pad_len), pos_a.dtype(), &device)?;
+            position_rows.push(Tensor::cat(&[&pad_pos, positions], 2)?);
+            spans.push((image_start + pad_len, span));
+        }
+        let batch_embeds = Tensor::cat(&embeds_rows.iter().collect::<Vec<_>>(), 0)?;
+        let batch_positions = Tensor::cat(&position_rows.iter().collect::<Vec<_>>(), 1)?;
+        let deepstack = DeepstackVisualEmbeds {
+            image_spans: spans,
+            embeds: vec![feature(2 * span)],
+        };
+        let causal = create_causal_mask(max_len, max_len, DType::F32, &device)?;
+        let padding = create_left_padding_mask(&lens, max_len, DType::F32, &device)?;
+        let mask = combine_masks(&causal, &padding)?;
+
+        model.clear_cache();
+        let batched = model.forward(
+            &batch_embeds,
+            &batch_positions,
+            Some(&deepstack),
+            Some(&mask),
+        )?;
+        let batched_logits = lm_head.forward(&batched.i((.., max_len - 1, ..))?.contiguous()?)?;
+
+        for (row, (embeds, positions, image_start)) in
+            [(&embeds_a, &pos_a, 4usize), (&embeds_b, &pos_b, 3usize)]
+                .into_iter()
+                .enumerate()
+        {
+            let single_deepstack = single_deepstack(image_start, 0);
+            model.clear_cache();
+            let single = model.forward(embeds, positions, Some(&single_deepstack), None)?;
+            let seq_len = positions.dim(2)?;
+            let last = single.i((0, seq_len - 1, ..))?.contiguous()?.unsqueeze(0)?;
+            let single_logits = lm_head.forward(&last)?;
+            let a = batched_logits.i(row)?;
+            let b = single_logits.i(0)?;
+            let diff = (&a - &b)?.abs()?.max_all()?.to_scalar::<f32>()?;
+            assert!(diff < 1e-4, "row {row}: batched vs single delta {diff}");
+        }
+        Ok(())
+    }
+
+    /// GPU self-check: a bf16 random-weight model on CUDA must actually
+    /// capture the decode graph (prepare succeeds, decode steps replay it),
+    /// and graph replay must be token-identical to eager decoding on the
+    /// same model. Skips without a CUDA device; opt in with
+    /// `OAR_WEVISDOC_GPU_SELFTEST=1`.
+    #[test]
+    fn cuda_decode_graph_captures_and_matches_eager() {
+        #[cfg(feature = "cuda")]
+        {
+            use candle_nn::Linear;
+            if std::env::var_os("OAR_WEVISDOC_GPU_SELFTEST").is_none() {
+                eprintln!("skipping: OAR_WEVISDOC_GPU_SELFTEST is not set");
+                return;
+            }
+            let Ok(device) = Device::new_cuda(0) else {
+                eprintln!("skipping: no CUDA device");
+                return;
+            };
+            let cfg = valid_tiny_config();
+            // The decode graph is bf16/f16-gated: build in bf16 so the
+            // test really exercises capture and replay.
+            let vb = random_varbuilder_typed(&cfg, &device, DType::BF16);
+            let model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
+            let lm_head = Linear::new(
+                vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
+                    .unwrap(),
+                None,
+            );
+
+            let ids: Vec<u32> = (4..36).map(|i| 10 + i % 60).collect();
+            let seq_len = ids.len();
+            let token_ids = Tensor::from_vec(ids.clone(), (1, seq_len), &device).unwrap();
+            let embeds = model.embed(&token_ids).unwrap();
+            let positions = {
+                let base = Tensor::arange(0i64, seq_len as i64, &device)
+                    .unwrap()
+                    .reshape((1, 1, seq_len))
+                    .unwrap();
+                let mut data = Vec::with_capacity(3 * seq_len);
+                for _ in 0..3 {
+                    data.extend(base.flatten_all().unwrap().to_vec1::<i64>().unwrap());
+                }
+                Tensor::from_vec(data, (3, 1, seq_len), &device).unwrap()
+            };
+
+            // Eager baseline: greedy decode without the graph.
+            model.clear_cache();
+            let hidden = model.forward(&embeds, &positions, None, None).unwrap();
+            let mut logits = lm_head
+                .forward(
+                    &hidden
+                        .i((0, seq_len - 1, ..))
+                        .unwrap()
+                        .unsqueeze(0)
+                        .unwrap(),
+                )
+                .unwrap()
+                .squeeze(0)
+                .unwrap();
+            let mut eager = Vec::new();
+            for step in 0..12 {
+                let scores = logits
+                    .to_dtype(DType::F32)
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap();
+                let mut best = 0usize;
+                let mut best_value = f32::NEG_INFINITY;
+                for (i, &v) in scores.iter().enumerate() {
+                    if v > best_value {
+                        best_value = v;
+                        best = i;
+                    }
+                }
+                if best as u32 == cfg.eos_token_id {
+                    break;
+                }
+                eager.push(best as u32);
+                let token = Tensor::from_vec(vec![best as u32], (1, 1), &device).unwrap();
+                let embed = model.embed(&token).unwrap();
+                let pos =
+                    Tensor::from_vec(vec![(seq_len + step) as i64; 3], (3, 1, 1), &device).unwrap();
+                logits = model
+                    .forward_decode_logits(&embed, &pos, None, &lm_head)
+                    .unwrap();
+            }
+
+            // Graph path: capture, assert it happened, replay the same steps.
+            model.clear_cache();
+            model.prepare_ar_cuda_graph(seq_len, 12, &lm_head).unwrap();
+            assert!(
+                model.decode_graph_captured(),
+                "decode graph did not capture (dtype gate?)"
+            );
+            let hidden = model.forward(&embeds, &positions, None, None).unwrap();
+            let mut logits = lm_head
+                .forward(
+                    &hidden
+                        .i((0, seq_len - 1, ..))
+                        .unwrap()
+                        .unsqueeze(0)
+                        .unwrap(),
+                )
+                .unwrap()
+                .squeeze(0)
+                .unwrap();
+            let mut graphed = Vec::new();
+            for step in 0..12 {
+                let scores = logits
+                    .to_dtype(DType::F32)
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap();
+                let mut best = 0usize;
+                let mut best_value = f32::NEG_INFINITY;
+                for (i, &v) in scores.iter().enumerate() {
+                    if v > best_value {
+                        best_value = v;
+                        best = i;
+                    }
+                }
+                if best as u32 == cfg.eos_token_id {
+                    break;
+                }
+                graphed.push(best as u32);
+                let token = Tensor::from_vec(vec![best as u32], (1, 1), &device).unwrap();
+                let embed = model.embed(&token).unwrap();
+                let pos =
+                    Tensor::from_vec(vec![(seq_len + step) as i64; 3], (3, 1, 1), &device).unwrap();
+                logits = model
+                    .forward_decode_logits(&embed, &pos, None, &lm_head)
+                    .unwrap();
+            }
+            assert_eq!(
+                graphed, eager,
+                "graph-replayed decoding must match eager decoding"
+            );
+        }
+        #[cfg(not(feature = "cuda"))]
+        eprintln!("skipping: built without the cuda feature");
+    }
+
+    fn random_varbuilder(cfg: &Qwen3VlTextConfig, device: &Device) -> VarBuilder<'static> {
+        random_varbuilder_typed(cfg, device, DType::F32)
+    }
+
+    fn random_varbuilder_typed(
+        cfg: &Qwen3VlTextConfig,
+        device: &Device,
+        dtype: DType,
+    ) -> VarBuilder<'static> {
+        use candle_nn::VarBuilder;
+        let mut tensors = std::collections::HashMap::new();
+        let h = cfg.hidden_size;
+        let put = |tensors: &mut std::collections::HashMap<String, Tensor>,
+                   name: String,
+                   shape: Vec<usize>| {
+            let len: usize = shape.iter().product();
+            let data: Vec<f32> = (0..len)
+                .map(|i| {
+                    let x = (i as u32).wrapping_mul(2_654_435_761) % 10_001;
+                    (x as f32 / 10_000.0 - 0.5) * 0.1
+                })
+                .collect();
+            let tensor = Tensor::from_vec(data, shape, device)
+                .unwrap()
+                .to_dtype(dtype)
+                .unwrap();
+            tensors.insert(name, tensor);
+        };
+        put(
+            &mut tensors,
+            "model.embed_tokens.weight".into(),
+            vec![cfg.vocab_size, h],
+        );
+        put(&mut tensors, "model.norm.weight".into(), vec![h]);
+        put(
+            &mut tensors,
+            "lm_head.weight".into(),
+            vec![cfg.vocab_size, h],
+        );
+        let prefix = "model.layers.0";
+        for proj in ["q_proj", "k_proj", "v_proj", "o_proj"] {
+            let out = if proj == "q_proj" {
+                cfg.num_attention_heads * cfg.head_dim
+            } else if proj == "o_proj" {
+                cfg.hidden_size
+            } else {
+                cfg.num_key_value_heads * cfg.head_dim
+            };
+            put(
+                &mut tensors,
+                format!("{prefix}.self_attn.{proj}.weight"),
+                vec![out, h],
+            );
+        }
+        put(
+            &mut tensors,
+            format!("{prefix}.self_attn.q_norm.weight"),
+            vec![cfg.head_dim],
+        );
+        put(
+            &mut tensors,
+            format!("{prefix}.self_attn.k_norm.weight"),
+            vec![cfg.head_dim],
+        );
+        for norm in ["input_layernorm", "post_attention_layernorm"] {
+            put(&mut tensors, format!("{prefix}.{norm}.weight"), vec![h]);
+        }
+        for proj in ["gate_proj", "up_proj"] {
+            put(
+                &mut tensors,
+                format!("{prefix}.mlp.{proj}.weight"),
+                vec![cfg.intermediate_size, h],
+            );
+        }
+        put(
+            &mut tensors,
+            format!("{prefix}.mlp.down_proj.weight"),
+            vec![h, cfg.intermediate_size],
+        );
+        VarBuilder::from_tensors(tensors, dtype, device)
+    }
+
     fn valid_tiny_config() -> Qwen3VlTextConfig {
         Qwen3VlTextConfig {
             model_type: "qwen3_vl_text".to_string(),
@@ -751,7 +1661,7 @@ mod tests {
         )?;
         let embeds = Tensor::from_vec(vec![100f32; 8], (2, 4), &device)?;
         let deepstack = DeepstackVisualEmbeds {
-            image_span: (2, 2),
+            image_spans: vec![(2, 2)],
             embeds: vec![embeds],
         };
         let out = add_deepstack(hidden, &deepstack, 0)?;
@@ -775,7 +1685,7 @@ mod tests {
         let hidden = Tensor::zeros((1, 4, 4), DType::F32, &device)?;
         let embeds = Tensor::zeros((2, 4), DType::F32, &device)?;
         let deepstack = DeepstackVisualEmbeds {
-            image_span: (3, 2),
+            image_spans: vec![(3, 2)],
             embeds: vec![embeds],
         };
         assert!(add_deepstack(hidden, &deepstack, 0).is_err());

@@ -14,6 +14,10 @@ use super::processing::{
 };
 use crate::backbones::qwen3_vl::{DeepstackVisualEmbeds, Qwen3VlTextModel, Qwen3VlVisionModel};
 use crate::error::Error;
+use crate::runtime::attention::{
+    combine_masks, create_causal_mask, create_generation_mask_if_needed, create_left_padding_mask,
+    decode_position_buffer,
+};
 use crate::runtime::checkpoint::{collect_safetensors, load_optional_json_config};
 #[cfg(feature = "cuda")]
 use crate::runtime::cuda::{ArgmaxFirstBf16, ArgmaxFirstF32};
@@ -156,19 +160,25 @@ impl WeVisDoc {
             .collect())
     }
 
-    /// Generate raw token ids for each input page.
+    /// Generate raw token ids for each input page. A single page runs through
+    /// the CUDA-graph decode fast path; larger batches run a padded batch
+    /// prefill and decode (the graph is single-sequence only).
     pub fn generate_tokens(
         &self,
         images: &[RgbImage],
         max_new_tokens: usize,
     ) -> crate::error::BatchResult<Vec<u32>> {
-        Ok(images
-            .iter()
-            .map(|image| {
-                self.generate_one(image, max_new_tokens)
-                    .map(|(tokens, _)| tokens)
-            })
-            .collect())
+        if images.len() <= 1 {
+            return Ok(images
+                .iter()
+                .map(|image| {
+                    self.generate_one(image, max_new_tokens)
+                        .map(|(tokens, _)| tokens)
+                })
+                .collect());
+        }
+        self.generate_batch_tokens(images, max_new_tokens)
+            .map(|results| results.into_iter().map(Ok).collect())
     }
 
     /// Generate one page's tokens plus whether decoding stopped on an EOS
@@ -216,9 +226,11 @@ impl WeVisDoc {
             self.image_token_id,
             &self.device,
         )?;
+        self.text
+            .prepare_ar_cuda_graph(input_ids.len(), max_new_tokens, &self.lm_head)?;
         let hidden = self
             .text
-            .forward(&inputs_embeds, &position_ids, Some(&deepstack))?;
+            .forward(&inputs_embeds, &position_ids, Some(&deepstack), None)?;
         let prompt_len = input_ids.len();
         let last_hidden = hidden
             .i((0, prompt_len - 1, ..))
@@ -251,13 +263,232 @@ impl WeVisDoc {
             let token_embed = self.text.embed(&token_ids)?;
             let position = prompt_len as i64 + step as i64 + rope_delta;
             let position_ids = text_position_ids(position, &self.device)?;
-            let hidden = self.text.forward(&token_embed, &position_ids, None)?;
-            logits =
-                self.logits_from_hidden(&hidden.i((0, 0, ..)).map_err(|e| {
-                    candle_to_ocr_inference(MODEL_NAME, "select decode hidden", e)
-                })?)?;
+            logits = self.text.forward_decode_logits(
+                &token_embed,
+                &position_ids,
+                None,
+                &self.lm_head,
+            )?;
         }
         Ok((generated, false))
+    }
+
+    /// Padded batch generation: the same tokens as per-page generation, with
+    /// one prefill and one decode step for the whole batch. Unequal prompt
+    /// lengths are left-padded; prefill and decode masks hide the padded KV
+    /// positions, DeepStack spans and per-row MRoPE positions shift with the
+    /// padding, and each sequence stops at its own EOS.
+    fn generate_batch_tokens(
+        &self,
+        images: &[RgbImage],
+        max_new_tokens: usize,
+    ) -> Result<Vec<Vec<u32>>, Error> {
+        let batch_size = images.len();
+        let context_limit = self.cfg.text_config.max_position_embeddings;
+        if max_new_tokens == 0 {
+            return Ok(vec![Vec::new(); batch_size]);
+        }
+
+        let mut rows: Vec<BatchPrompt> = Vec::with_capacity(batch_size);
+        for image in images {
+            let image_inputs = preprocess_image(
+                image,
+                &self.image_cfg,
+                &self.cfg.vision_config,
+                &self.device,
+                self.dtype,
+            )?;
+            let prompt = build_prompt(image_inputs.num_image_tokens, DEFAULT_SYSTEM_PROMPT);
+            let encoding =
+                self.tokenizer
+                    .encode(prompt, false)
+                    .map_err(|e| Error::InvalidInput {
+                        message: format!("WeVisDoc: tokenizer encode failed: {e}"),
+                    })?;
+            let input_ids = encoding.get_ids().to_vec();
+            if input_ids.is_empty() {
+                return Err(Error::InvalidInput {
+                    message: "WeVisDoc: prompt tokenization produced no tokens".to_string(),
+                });
+            }
+            validate_generation_length(input_ids.len(), max_new_tokens, context_limit)?;
+            let (inputs_embeds, deepstack) = self.prepare_inputs(&input_ids, &image_inputs)?;
+            let (position_ids, rope_delta) = build_position_ids(
+                &input_ids,
+                image_inputs.grid_thw,
+                self.cfg.vision_config.spatial_merge_size,
+                self.cfg.vision_start_token_id,
+                self.image_token_id,
+                &self.device,
+            )?;
+            rows.push(BatchPrompt {
+                input_ids,
+                inputs_embeds,
+                deepstack,
+                position_ids,
+                rope_delta,
+            });
+        }
+
+        let seq_lens: Vec<usize> = rows.iter().map(|row| row.input_ids.len()).collect();
+        let max_seq_len = *seq_lens.iter().max().ok_or_else(|| Error::InvalidInput {
+            message: "WeVisDoc: empty batch is not supported".to_string(),
+        })?;
+
+        // Left-pad embeds and positions; DeepStack spans shift with the pad.
+        let mut embeds_rows = Vec::with_capacity(batch_size);
+        let mut position_rows = Vec::with_capacity(batch_size);
+        let mut spans = Vec::with_capacity(batch_size);
+        for (row, &seq_len) in rows.iter().zip(&seq_lens) {
+            let pad_len = max_seq_len - seq_len;
+            let embeds = if pad_len > 0 {
+                let pad = Tensor::zeros(
+                    (1, pad_len, self.cfg.text_config.hidden_size),
+                    row.inputs_embeds.dtype(),
+                    &self.device,
+                )
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create pad", e))?;
+                Tensor::cat(&[&pad, &row.inputs_embeds], 1)
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "cat pad", e))?
+            } else {
+                row.inputs_embeds.clone()
+            };
+            embeds_rows.push(embeds);
+            let mut positions = row.position_ids.clone();
+            if pad_len > 0 {
+                let pad = Tensor::zeros((3, 1, pad_len), row.position_ids.dtype(), &self.device)
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create pad positions", e))?;
+                positions = Tensor::cat(&[&pad, &positions], 2)
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "cat pad positions", e))?;
+            }
+            position_rows.push(positions);
+            spans.push((
+                row.deepstack.image_spans[0].0 + pad_len,
+                row.deepstack.image_spans[0].1,
+            ));
+        }
+        // Concatenate the per-row DeepStack feature maps in row order; rows
+        // may carry different image grids, so span lengths differ.
+        let mut deepstack_embeds = Vec::new();
+        for layer in 0..rows[0].deepstack.embeds.len() {
+            let mut parts = Vec::with_capacity(batch_size);
+            for row in &rows {
+                parts.push(row.deepstack.embeds[layer].clone());
+            }
+            let refs: Vec<&Tensor> = parts.iter().collect();
+            deepstack_embeds.push(
+                Tensor::cat(&refs, 0).map_err(|e| {
+                    candle_to_ocr_inference(MODEL_NAME, "stack deepstack features", e)
+                })?,
+            );
+        }
+        let deepstack = DeepstackVisualEmbeds {
+            image_spans: spans,
+            embeds: deepstack_embeds,
+        };
+
+        let embeds_refs: Vec<&Tensor> = embeds_rows.iter().collect();
+        let inputs_embeds = Tensor::cat(&embeds_refs, 0)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "stack embeds", e))?;
+        let position_refs: Vec<&Tensor> = position_rows.iter().collect();
+        let position_ids = Tensor::cat(&position_refs, 1)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "stack positions", e))?;
+        let mask = if batch_size > 1 {
+            let causal = create_causal_mask(max_seq_len, max_seq_len, self.dtype, &self.device)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create causal mask", e))?;
+            let padding =
+                create_left_padding_mask(&seq_lens, max_seq_len, self.dtype, &self.device)
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create padding mask", e))?;
+            Some(
+                combine_masks(&causal, &padding)
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "combine masks", e))?,
+            )
+        } else {
+            None
+        };
+
+        self.text.clear_cache();
+        // Batch prefill replaces the batch-1 KV backing storage; drop any
+        // captured graph before those raw pointers become stale.
+        self.text.invalidate_ar_cuda_graph();
+        let hidden = self.text.forward(
+            &inputs_embeds,
+            &position_ids,
+            Some(&deepstack),
+            mask.as_ref(),
+        )?;
+        let last_hidden = hidden
+            .i((.., max_seq_len - 1, ..))
+            .and_then(|h| h.contiguous())
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "select last hidden", e))?;
+        let mut logits_rows = self
+            .lm_head
+            .forward(&last_hidden)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "batch lm_head", e))?
+            .to_dtype(DType::F32)?
+            .to_vec2::<f32>()
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read batch logits", e))?;
+
+        let mut generated: Vec<Vec<u32>> = vec![Vec::new(); batch_size];
+        let mut finished = vec![false; batch_size];
+        let mut positions: Vec<i64> = seq_lens
+            .iter()
+            .zip(rows.iter().map(|row| row.rope_delta))
+            .map(|(&len, delta)| len as i64 + delta)
+            .collect();
+        let pad_lens: Vec<usize> = seq_lens.iter().map(|&len| max_seq_len - len).collect();
+        let mut kv_len = max_seq_len;
+
+        for step in 0..max_new_tokens {
+            if finished.iter().all(|&f| f) {
+                break;
+            }
+            let mut next_tokens: Vec<u32> = Vec::with_capacity(batch_size);
+            for row in 0..batch_size {
+                if finished[row] {
+                    next_tokens.push(0);
+                    continue;
+                }
+                let token = argmax_token(&logits_rows[row])?;
+                if self.stop_token_ids.contains(&token) {
+                    finished[row] = true;
+                } else {
+                    generated[row].push(token);
+                }
+                next_tokens.push(token);
+            }
+            if finished.iter().all(|&f| f) {
+                break;
+            }
+            if step + 1 == max_new_tokens {
+                break;
+            }
+
+            let tokens = Tensor::from_vec(next_tokens, (batch_size, 1), &self.device)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create decode tokens", e))?;
+            let embeds = self.text.embed(&tokens)?;
+            let pos_data = decode_position_buffer(&positions, 3);
+            let pos = Tensor::from_vec(pos_data, (3, batch_size, 1), &self.device)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create decode positions", e))?;
+            kv_len += 1;
+            let gen_mask =
+                create_generation_mask_if_needed(&pad_lens, kv_len, self.dtype, &self.device)
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create decode mask", e))?;
+            let hidden = self.text.forward(&embeds, &pos, None, gen_mask.as_ref())?;
+            logits_rows = self
+                .lm_head
+                .forward(&hidden)
+                .and_then(|l| l.squeeze(1))
+                .and_then(|l| l.to_dtype(DType::F32))
+                .and_then(|l| l.to_vec2::<f32>())
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "batch decode lm_head", e))?;
+            for (row, position) in positions.iter_mut().enumerate() {
+                if !finished[row] {
+                    *position += 1;
+                }
+            }
+        }
+        Ok(generated)
     }
 
     /// Embed the token ids and splice in the vision embeddings, returning the
@@ -326,7 +557,7 @@ impl WeVisDoc {
         let inputs_embeds = Tensor::cat(&[&prefix, &image_embeds, &suffix], 1)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "merge multimodal embeddings", e))?;
         let deepstack = DeepstackVisualEmbeds {
-            image_span: (start, image_len),
+            image_spans: vec![(start, image_len)],
             embeds: deepstack_features,
         };
         Ok((inputs_embeds, deepstack))
@@ -366,6 +597,28 @@ impl WeVisDoc {
     ) -> &crate::backbones::qwen_vl_processing::MinerUImageProcessorConfig {
         &self.image_cfg
     }
+}
+
+/// One page's prepared prompt for batch generation.
+struct BatchPrompt {
+    input_ids: Vec<u32>,
+    inputs_embeds: Tensor,
+    deepstack: DeepstackVisualEmbeds,
+    position_ids: Tensor,
+    rope_delta: i64,
+}
+
+/// Greedy argmax over a host score row (first index wins ties).
+fn argmax_token(scores: &[f32]) -> Result<u32, Error> {
+    let mut best = 0usize;
+    let mut best_value = f32::NEG_INFINITY;
+    for (index, &value) in scores.iter().enumerate() {
+        if value > best_value {
+            best_value = value;
+            best = index;
+        }
+    }
+    Ok(best as u32)
 }
 
 fn require_token_id(
