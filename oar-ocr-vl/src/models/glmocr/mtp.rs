@@ -12,7 +12,7 @@ use crate::runtime::decoder_graph::{
     cuda_graph_error,
 };
 use crate::utils::candle_to_ocr_inference;
-use candle_core::{D, DType, Device, Tensor};
+use candle_core::{D, DType, Tensor};
 use candle_nn::{
     Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, linear_no_bias, rms_norm,
 };

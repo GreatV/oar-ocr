@@ -1364,7 +1364,6 @@ impl GlmOcrTextModel {
             kv_lengths: CudaGraphKvLengths::new(query_len, device)
                 .map_err(|e| candle_to_ocr_inference("GLM-OCR", "graph KV lengths", e))?,
             lm_head: lm_head.clone(),
-            extra: Vec::new(),
         };
         let graph = capture_decoder_graph(
             device,
@@ -1427,7 +1426,6 @@ impl GlmOcrTextModel {
             kv_lengths: CudaGraphKvLengths::new(query_len, device)
                 .map_err(|e| candle_to_ocr_inference("GLM-OCR", "verification KV lengths", e))?,
             lm_head: lm_head.clone(),
-            extra: Vec::new(),
         };
         let graph = capture_decoder_graph(
             device,

@@ -35,9 +35,6 @@ pub(crate) struct CudaGraphInputs {
     /// The LM head read inside the captured region; the graph holds this
     /// clone so the body never needs an outer borrow.
     pub(crate) lm_head: candle_nn::Linear,
-    /// Model-specific extra inputs read by the captured region (for
-    /// example hoisted index rows or padding bounds).
-    pub(crate) extra: Vec<Tensor>,
 }
 
 /// A captured decoder graph over a model-defined input bundle `I`.

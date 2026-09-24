@@ -15,7 +15,7 @@ use crate::runtime::decoder_graph::{
 };
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 #[cfg(feature = "cuda")]
-use candle_core::{DType, Device};
+use candle_core::DType;
 use candle_core::{IndexOp, Tensor};
 use candle_nn::{Linear, Module};
 use std::cell::RefCell;
@@ -734,7 +734,6 @@ impl Ernie4_5Model {
             kv_lengths: CudaGraphKvLengths::new(query_len, device)
                 .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "graph KV lengths", e))?,
             lm_head: lm_head.clone(),
-            extra: Vec::new(),
         };
         let graph = capture_decoder_graph(
             device,

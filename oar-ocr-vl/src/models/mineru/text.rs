@@ -15,7 +15,7 @@ use crate::runtime::decoder_graph::{
 };
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 #[cfg(feature = "cuda")]
-use candle_core::{DType, Device};
+use candle_core::DType;
 use candle_core::{IndexOp, Tensor};
 use candle_nn::{
     Embedding, Linear, Module, VarBuilder, embedding, linear, linear_no_bias, rms_norm,
@@ -728,7 +728,6 @@ impl MinerUTextModel {
             kv_lengths: CudaGraphKvLengths::new(query_len, device)
                 .map_err(|e| candle_to_ocr_inference("MinerU2.5", "graph KV lengths", e))?,
             lm_head: lm_head.clone(),
-            extra: Vec::new(),
         };
         let graph = capture_decoder_graph(
             device,
