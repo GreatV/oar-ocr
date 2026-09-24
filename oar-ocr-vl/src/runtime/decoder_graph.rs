@@ -95,7 +95,7 @@ impl<I> std::fmt::Debug for DecoderCudaGraph<I> {
 /// launches and synchronizes the warm launch, and assembles the graph.
 #[cfg(feature = "cuda")]
 pub(crate) fn capture_decoder_graph<M, I>(
-    cuda: &std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaDevice>,
+    device: &Device,
     model_name: &'static str,
     model: &M,
     inputs: I,
@@ -106,7 +106,11 @@ pub(crate) fn capture_decoder_graph<M, I>(
         CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
     };
 
-    let device = Device::Cuda(cuda.clone());
+    let Device::Cuda(cuda) = device else {
+        return Err(Error::Config {
+            message: format!("{model_name} decoder graphs require a CUDA device"),
+        });
+    };
     let stream = cuda.cuda_stream();
     let _htod_cache = cuda.enable_cuda_graph_htod_cache();
 
@@ -116,7 +120,7 @@ pub(crate) fn capture_decoder_graph<M, I>(
         sync_graph_tensor(
             model_name,
             output,
-            &format!("warm decoder CUDA graph output {index}"),
+            output_context(index, "warm decoder CUDA graph"),
         )?;
         synced.push(output.clone());
     }
@@ -177,16 +181,30 @@ pub(crate) fn capture_decoder_graph<M, I>(
         sync_graph_tensor(
             model_name,
             buffer,
-            &format!("sync decoder CUDA graph output {index}"),
+            output_context(index, "sync decoder CUDA graph"),
         )?;
     }
     Ok(DecoderCudaGraph {
         graph,
         inputs,
         outputs,
-        device,
+        device: Device::Cuda(cuda.clone()),
         cache_len,
     })
+}
+
+/// Static context labels for graph output synchronization.
+#[cfg(feature = "cuda")]
+fn output_context(index: usize, stage: &'static str) -> &'static str {
+    match (stage, index) {
+        ("warm decoder CUDA graph", 0) => "warm decoder CUDA graph output 0",
+        ("warm decoder CUDA graph", 1) => "warm decoder CUDA graph output 1",
+        ("warm decoder CUDA graph", 2) => "warm decoder CUDA graph output 2",
+        ("sync decoder CUDA graph", 0) => "sync decoder CUDA graph output 0",
+        ("sync decoder CUDA graph", 1) => "sync decoder CUDA graph output 1",
+        ("sync decoder CUDA graph", 2) => "sync decoder CUDA graph output 2",
+        _ => "decoder CUDA graph output",
+    }
 }
 
 /// Match eager decoder attention: a single query has no future token to mask,
@@ -415,7 +433,6 @@ impl std::fmt::Debug for CudaGraphKvLengths {
 /// that stale CUDA_ERROR_INVALID_VALUE. `dispose` drops everything and then
 /// drains the stashed error so nothing leaks and no context state is kept
 /// alive by forgotten tensors.
-#[cfg(feature = "cuda")]
 #[cfg(test)]
 mod tests {
     use super::{decoder_attention_is_causal, decoder_cache_capacity};

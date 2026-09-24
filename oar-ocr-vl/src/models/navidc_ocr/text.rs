@@ -19,8 +19,8 @@ use crate::runtime::cuda::dynamic_kv::DynamicKvAppend;
 use crate::runtime::decoder_graph::decoder_cache_capacity;
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
-    CapturedInputs, CudaGraphDrainGuard, CudaGraphInputs, CudaGraphKvLengths, DecoderCudaGraph,
-    capture_decoder_graph, cuda_graph_error, decoder_attention_is_causal, sync_graph_tensor,
+    CudaGraphDrainGuard, CudaGraphInputs, CudaGraphKvLengths, DecoderCudaGraph,
+    capture_decoder_graph, cuda_graph_error, decoder_attention_is_causal,
 };
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 #[cfg(feature = "cuda")]
@@ -722,16 +722,13 @@ impl NaviDcTextModel {
 
     #[cfg(feature = "cuda")]
     fn capture_cuda_graph(&self, cache_len: usize, lm_head: &Linear) -> Result<(), Error> {
-        use candle_core::cuda_backend::cudarc::driver::sys::{
-            CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
-        };
-
         if self.decode_graph.borrow().is_some() {
             return Ok(());
         }
-        let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
+        let device = self.embed_tokens.embeddings().device();
+        if !device.is_cuda() {
             return Ok(());
-        };
+        }
         let query_len = 1;
         for layer in &self.layers {
             layer
@@ -761,7 +758,7 @@ impl NaviDcTextModel {
             extra: Vec::new(),
         };
         let graph = capture_decoder_graph(
-            cuda,
+            device,
             "NaviDC-OCR",
             self,
             inputs,
