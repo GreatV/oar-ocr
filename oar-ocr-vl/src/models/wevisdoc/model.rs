@@ -228,9 +228,9 @@ impl WeVisDoc {
         )?;
         self.text
             .prepare_ar_cuda_graph(input_ids.len(), max_new_tokens, &self.lm_head)?;
-        let hidden = self
-            .text
-            .forward(&inputs_embeds, &position_ids, Some(&deepstack), None)?;
+        let hidden =
+            self.text
+                .forward(&inputs_embeds, &position_ids, Some(&deepstack), None, None)?;
         let prompt_len = input_ids.len();
         let last_hidden = hidden
             .i((0, prompt_len - 1, ..))
@@ -407,6 +407,14 @@ impl WeVisDoc {
             None
         };
 
+        // Per-row real-token spans: left-padded rows attend only within
+        // their own span, which lets the prefill use the flash kernel per
+        // row instead of materialized masked scores.
+        let row_spans: Vec<(usize, usize)> = seq_lens
+            .iter()
+            .map(|&len| (max_seq_len - len, len))
+            .collect();
+
         self.text.clear_cache();
         // Batch prefill replaces the batch-1 KV backing storage; drop any
         // captured graph before those raw pointers become stale.
@@ -416,6 +424,7 @@ impl WeVisDoc {
             &position_ids,
             Some(&deepstack),
             mask.as_ref(),
+            Some(&row_spans),
         )?;
         let last_hidden = hidden
             .i((.., max_seq_len - 1, ..))
@@ -474,7 +483,9 @@ impl WeVisDoc {
             let gen_mask =
                 create_generation_mask_if_needed(&pad_lens, kv_len, self.dtype, &self.device)
                     .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create decode mask", e))?;
-            let hidden = self.text.forward(&embeds, &pos, None, gen_mask.as_ref())?;
+            let hidden = self
+                .text
+                .forward(&embeds, &pos, None, gen_mask.as_ref(), None)?;
             logits_rows = self
                 .lm_head
                 .forward(&hidden)

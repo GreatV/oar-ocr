@@ -312,6 +312,7 @@ impl Qwen3Attention {
         cos: &Tensor,
         sin: &Tensor,
         attention_mask: Option<&Tensor>,
+        row_spans: Option<&[(usize, usize)]>,
     ) -> Result<Tensor, Error> {
         let (batch, seq_len, _) = hidden_states
             .dims3()
@@ -322,7 +323,7 @@ impl Qwen3Attention {
             .borrow_mut()
             .append(&k, &v)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "KV cache", e))?;
-        let output = self.attend(&q, &k, &v, batch, seq_len, attention_mask)?;
+        let output = self.attend(&q, &k, &v, attention_mask, row_spans)?;
         self.project_output(&output, batch, seq_len)
     }
 
@@ -380,10 +381,28 @@ impl Qwen3Attention {
         q: &Tensor,
         k: &Tensor,
         v: &Tensor,
-        batch: usize,
-        seq_len: usize,
+        attention_mask: Option<&Tensor>,
+        row_spans: Option<&[(usize, usize)]>,
+    ) -> Result<Tensor, Error> {
+        if let Some(spans) = row_spans
+            && let Some(output) = self.attend_rows(q, k, v, spans)?
+        {
+            return Ok(output);
+        }
+        self.attend_masked(q, k, v, attention_mask)
+    }
+
+    fn attend_masked(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
         attention_mask: Option<&Tensor>,
     ) -> Result<Tensor, Error> {
+        let (batch, seq_len) = q
+            .dims4()
+            .map(|(batch, _, seq_len, _)| (batch, seq_len))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention shape", e))?;
         // Single-token decoding keeps to the eager gemm kernels: FA2 tiles
         // q into 128-row blocks, so a one-query step lights up only
         // `heads` blocks (12% of the SMs here) and reads the KV cache at
@@ -442,6 +461,65 @@ impl Qwen3Attention {
                 .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "grouped-query attention", e))
             }
         }
+    }
+
+    /// Left-padded batch prefill: every row attends only within its own
+    /// `[start, start + len)` span, so run the same flash kernel the
+    /// single-row prefill uses per row instead of materializing
+    /// `(batch, heads, seq, seq)` scores under an additive mask. Pad
+    /// positions receive zero attention output; nothing downstream reads
+    /// them (their KV columns stay masked during decode).
+    fn attend_rows(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        spans: &[(usize, usize)],
+    ) -> Result<Option<Tensor>, Error> {
+        let (batch, seq_len) = q
+            .dims4()
+            .map(|(batch, _, seq_len, _)| (batch, seq_len))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention shape", e))?;
+        if spans.len() != batch {
+            return Err(Error::Config {
+                message: format!(
+                    "{MODEL_NAME} row spans ({}) do not cover the batch ({batch})",
+                    spans.len()
+                ),
+            });
+        }
+        let mut rows = Vec::with_capacity(batch);
+        for (row, &(start, len)) in spans.iter().enumerate() {
+            if len == 0 || start + len > seq_len {
+                return Err(Error::Config {
+                    message: format!(
+                        "{MODEL_NAME} row span ({start}, {len}) outside the padded length {seq_len}"
+                    ),
+                });
+            }
+            let narrow_row = |t: &Tensor| -> Result<Tensor, Error> {
+                t.narrow(0, row, 1)
+                    .and_then(|t| t.narrow(2, start, len))
+                    .and_then(|t| t.contiguous())
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "row attention slice", e))
+            };
+            let (q_row, k_row, v_row) = (narrow_row(q)?, narrow_row(k)?, narrow_row(v)?);
+            // Flash unavailable (CPU or unsupported dtype): the caller's
+            // padding mask takes over on the eager path.
+            let Some(output) = flash_attention(&q_row, &k_row, &v_row, self.scaling, len > 1)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "row flash attention", e))?
+            else {
+                return Ok(None);
+            };
+            let padded = output
+                .pad_with_zeros(2, start, seq_len - len - start)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "row attention padding", e))?;
+            rows.push(padded);
+        }
+        let refs: Vec<&Tensor> = rows.iter().collect();
+        let output = Tensor::cat(&refs, 0)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "row attention output", e))?;
+        Ok(Some(output))
     }
 
     fn project_output(
@@ -636,12 +714,13 @@ impl DecoderLayer {
         cos: &Tensor,
         sin: &Tensor,
         attention_mask: Option<&Tensor>,
+        row_spans: Option<&[(usize, usize)]>,
     ) -> Result<Tensor, Error> {
         let residual = hidden_states.clone();
         let normalized = self.input_layernorm.forward(hidden_states)?;
         let mixed = self
             .attention
-            .forward(&normalized, cos, sin, attention_mask)?;
+            .forward(&normalized, cos, sin, attention_mask, row_spans)?;
         let hidden_states = (&residual + &mixed)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention residual", e))?;
         let residual = hidden_states.clone();
@@ -831,13 +910,14 @@ impl Qwen3VlTextModel {
         position_ids: &Tensor,
         deepstack: Option<&DeepstackVisualEmbeds>,
         attention_mask: Option<&Tensor>,
+        row_spans: Option<&[(usize, usize)]>,
     ) -> Result<Tensor, Error> {
         let (cos, sin) = self
             .rotary_emb
             .forward(position_ids, inputs_embeds.dtype())?;
         let mut hidden_states = inputs_embeds.clone();
         for (layer_index, layer) in self.layers.iter().enumerate() {
-            hidden_states = layer.forward(&hidden_states, &cos, &sin, attention_mask)?;
+            hidden_states = layer.forward(&hidden_states, &cos, &sin, attention_mask, row_spans)?;
             if let Some(deepstack) = deepstack
                 && layer_index < deepstack.embeds.len()
             {
@@ -900,7 +980,7 @@ impl Qwen3VlTextModel {
                 return Ok(logits);
             }
         }
-        let hidden = self.forward(inputs_embeds, position_ids, None, attention_mask)?;
+        let hidden = self.forward(inputs_embeds, position_ids, None, attention_mask, None)?;
         self.project_logits(&hidden, lm_head)
     }
 
@@ -1377,11 +1457,13 @@ mod tests {
         let mask = combine_masks(&causal, &padding)?;
 
         model.clear_cache();
+        let row_spans = [(max_len - seq_a, seq_a), (max_len - seq_b, seq_b)];
         let batched = model.forward(
             &batch_embeds,
             &batch_positions,
             Some(&deepstack),
             Some(&mask),
+            Some(&row_spans),
         )?;
         let batched_logits = lm_head.forward(&batched.i((.., max_len - 1, ..))?.contiguous()?)?;
 
@@ -1392,7 +1474,7 @@ mod tests {
         {
             let single_deepstack = single_deepstack(image_start, 0);
             model.clear_cache();
-            let single = model.forward(embeds, positions, Some(&single_deepstack), None)?;
+            let single = model.forward(embeds, positions, Some(&single_deepstack), None, None)?;
             let seq_len = positions.dim(2)?;
             let last = single.i((0, seq_len - 1, ..))?.contiguous()?.unsqueeze(0)?;
             let single_logits = lm_head.forward(&last)?;
@@ -1462,7 +1544,9 @@ mod tests {
 
             // Eager baseline: greedy decode without the graph.
             model.clear_cache();
-            let hidden = model.forward(&embeds, &positions, None, None).unwrap();
+            let hidden = model
+                .forward(&embeds, &positions, None, None, None)
+                .unwrap();
             let mut logits = lm_head
                 .forward(
                     &hidden
@@ -1509,7 +1593,9 @@ mod tests {
                 model.decode_graph_captured(),
                 "decode graph did not capture (dtype gate?)"
             );
-            let hidden = model.forward(&embeds, &positions, None, None).unwrap();
+            let hidden = model
+                .forward(&embeds, &positions, None, None, None)
+                .unwrap();
             let mut logits = lm_head
                 .forward(
                     &hidden
