@@ -1630,9 +1630,9 @@ impl Qwen3VlTextModel {
         self.invalidate_batch_cuda_graph();
     }
 
-    /// Whether the batched decode graph is currently captured — used to
-    /// skip building eager masks when replay will handle everything.
-    #[cfg(feature = "cuda")]
+    /// Whether the batched decode graph is currently captured — asserted
+    /// by the GPU self-checks.
+    #[cfg(all(test, feature = "cuda"))]
     pub(crate) fn batch_decode_graph_captured(&self) -> bool {
         self.batch_decode_graph.borrow().is_some()
     }
@@ -2124,10 +2124,9 @@ mod tests {
                 let ids = Tensor::from_vec(tokens.clone(), (batch, 1), &device).unwrap();
                 let embed = model.embed(&ids).unwrap();
                 let mut pos_data = Vec::with_capacity(3 * batch);
-                for axis in 0..3 {
-                    for row in 0..batch {
-                        pos_data.push((seq_lens[row] + step) as i64);
-                        let _ = axis;
+                for _ in 0..3 {
+                    for &seq_len in &seq_lens {
+                        pos_data.push((seq_len + step) as i64);
                     }
                 }
                 let pos = Tensor::from_vec(pos_data, (3, batch, 1), &device).unwrap();
@@ -2172,9 +2171,9 @@ mod tests {
                 let ids = Tensor::from_vec(tokens.clone(), (batch, 1), &device).unwrap();
                 let embed = model.embed(&ids).unwrap();
                 let mut pos_data = Vec::with_capacity(3 * batch);
-                for _ in 0..3 {
-                    for row in 0..batch {
-                        pos_data.push((seq_lens[row] + step) as i64);
+                for &seq_len in &seq_lens {
+                    for _ in 0..3 {
+                        pos_data.push((seq_len + step) as i64);
                     }
                 }
                 let pos = Tensor::from_vec(pos_data, (3, batch, 1), &device).unwrap();
