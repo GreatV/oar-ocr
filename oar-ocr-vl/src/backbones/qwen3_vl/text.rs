@@ -1422,7 +1422,16 @@ mod tests {
                 eprintln!("skipping: no CUDA device");
                 return;
             };
-            let cfg = valid_tiny_config();
+            let mut cfg = valid_tiny_config();
+            // Real-model attention dims: the tiny shapes take different
+            // kernels than production decode.
+            cfg.hidden_size = 2048;
+            cfg.intermediate_size = 6144;
+            cfg.num_attention_heads = 16;
+            cfg.num_key_value_heads = 8;
+            cfg.head_dim = 128;
+            cfg.num_hidden_layers = 28;
+            cfg.vocab_size = 32768;
             // The decode graph is bf16/f16-gated: build in bf16 so the
             // test really exercises capture and replay.
             let vb = random_varbuilder_typed(&cfg, &device, DType::BF16);
@@ -1433,7 +1442,9 @@ mod tests {
                 None,
             );
 
-            let ids: Vec<u32> = (4..36).map(|i| 10 + i % 60).collect();
+            // A prompt over 4096 tokens forces the 8192 capacity bucket —
+            // the size class the real model decodes from.
+            let ids: Vec<u32> = (0..4200).map(|i| 10 + i % 60).collect();
             let seq_len = ids.len();
             let token_ids = Tensor::from_vec(ids.clone(), (1, seq_len), &device).unwrap();
             let embeds = model.embed(&token_ids).unwrap();
@@ -1585,46 +1596,48 @@ mod tests {
             "lm_head.weight".into(),
             vec![cfg.vocab_size, h],
         );
-        let prefix = "model.layers.0";
-        for proj in ["q_proj", "k_proj", "v_proj", "o_proj"] {
-            let out = if proj == "q_proj" {
-                cfg.num_attention_heads * cfg.head_dim
-            } else if proj == "o_proj" {
-                cfg.hidden_size
-            } else {
-                cfg.num_key_value_heads * cfg.head_dim
-            };
+        for layer in 0..cfg.num_hidden_layers {
+            let prefix = format!("model.layers.{layer}");
+            for proj in ["q_proj", "k_proj", "v_proj", "o_proj"] {
+                let out = if proj == "q_proj" {
+                    cfg.num_attention_heads * cfg.head_dim
+                } else if proj == "o_proj" {
+                    cfg.hidden_size
+                } else {
+                    cfg.num_key_value_heads * cfg.head_dim
+                };
+                put(
+                    &mut tensors,
+                    format!("{prefix}.self_attn.{proj}.weight"),
+                    vec![out, h],
+                );
+            }
             put(
                 &mut tensors,
-                format!("{prefix}.self_attn.{proj}.weight"),
-                vec![out, h],
+                format!("{prefix}.self_attn.q_norm.weight"),
+                vec![cfg.head_dim],
             );
-        }
-        put(
-            &mut tensors,
-            format!("{prefix}.self_attn.q_norm.weight"),
-            vec![cfg.head_dim],
-        );
-        put(
-            &mut tensors,
-            format!("{prefix}.self_attn.k_norm.weight"),
-            vec![cfg.head_dim],
-        );
-        for norm in ["input_layernorm", "post_attention_layernorm"] {
-            put(&mut tensors, format!("{prefix}.{norm}.weight"), vec![h]);
-        }
-        for proj in ["gate_proj", "up_proj"] {
             put(
                 &mut tensors,
-                format!("{prefix}.mlp.{proj}.weight"),
-                vec![cfg.intermediate_size, h],
+                format!("{prefix}.self_attn.k_norm.weight"),
+                vec![cfg.head_dim],
+            );
+            for norm in ["input_layernorm", "post_attention_layernorm"] {
+                put(&mut tensors, format!("{prefix}.{norm}.weight"), vec![h]);
+            }
+            for proj in ["gate_proj", "up_proj"] {
+                put(
+                    &mut tensors,
+                    format!("{prefix}.mlp.{proj}.weight"),
+                    vec![cfg.intermediate_size, h],
+                );
+            }
+            put(
+                &mut tensors,
+                format!("{prefix}.mlp.down_proj.weight"),
+                vec![h, cfg.intermediate_size],
             );
         }
-        put(
-            &mut tensors,
-            format!("{prefix}.mlp.down_proj.weight"),
-            vec![h, cfg.intermediate_size],
-        );
         VarBuilder::from_tensors(tensors, dtype, device)
     }
 
