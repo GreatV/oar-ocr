@@ -677,7 +677,7 @@ pub fn create_left_padding_mask(
         let pad_len = Tensor::from_vec(
             seq_lens
                 .iter()
-                .map(|&len| (max_len - len) as u32)
+                .map(|&len| max_len.saturating_sub(len) as u32)
                 .collect::<Vec<_>>(),
             (batch_size, 1, 1, 1),
             compute_device,
