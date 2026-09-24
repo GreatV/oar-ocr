@@ -46,9 +46,6 @@ const MTP_DRAFT_TOKENS: usize = 3;
 const MTP_QUERY_LEN: usize = MTP_DRAFT_TOKENS + 1;
 /// Below this budget speculation costs more than plain decoding.
 const MTP_MIN_NEW_TOKENS: usize = 8;
-/// Upper bound for the draft head's fixed-capacity KV bucket.
-#[cfg(feature = "cuda")]
-const DECODE_CACHE_LEN: usize = 16_384;
 
 struct TextCacheGuard<'a>(&'a DeepSeekV2TextModel);
 
@@ -211,7 +208,7 @@ impl JinaOcr {
         if self.mtp_enabled(max_new_tokens) {
             let mtp = self.mtp.as_ref().expect("MTP availability checked");
             mtp.clear_kv_cache();
-            self.prepare_mtp_graphs(prompt.input_ids.len(), max_new_tokens);
+            self.prepare_mtp_graphs(prompt.input_ids.len(), max_new_tokens)?;
             let hidden = self
                 .text
                 .forward(&prompt.inputs_embeds, &prompt.position_ids, None)?;
@@ -244,6 +241,8 @@ impl JinaOcr {
         let prompt = self.prepare_prompt(image, max_new_tokens)?;
         self.text.clear_kv_cache();
         let _cache_guard = TextCacheGuard(&self.text);
+        self.text
+            .prepare_ar_cuda_graph(prompt.input_ids.len(), max_new_tokens, &self.lm_head)?;
         let hidden = self
             .text
             .forward(&prompt.inputs_embeds, &prompt.position_ids, None)?;
@@ -319,6 +318,9 @@ impl JinaOcr {
         };
 
         self.text.clear_kv_cache();
+        // Batch prefill replaces the batch-1 KV backing storage; drop any
+        // captured graph before those raw pointers become stale.
+        self.text.invalidate_ar_cuda_graph();
         let hidden = self
             .text
             .forward(&inputs_embeds, &position_ids, mask.as_ref())?;
@@ -409,40 +411,48 @@ impl JinaOcr {
         }
     }
 
-    /// FastMTP speculation is off by default: it stays token-identical to
-    /// plain greedy decoding, but the MoE router's host round-trips
-    /// serialize the target forward, so speculation is not yet a net win
-    /// (a device-side MoE router would unlock it). Opt in explicitly with
-    /// `OAR_JINAOCR_ENABLE_MTP`.
+    /// FastMTP speculation is on by default where the draft head is loaded
+    /// (CUDA): greedy verification keeps the output token-identical to plain
+    /// autoregressive decoding. Disable with `OAR_JINAOCR_DISABLE_MTP` (skip
+    /// loading the head) or `OAR_VL_DISABLE_SPECULATIVE`.
     fn mtp_enabled(&self, max_new_tokens: usize) -> bool {
         self.mtp.is_some()
+            && self.device.is_cuda()
             && max_new_tokens >= MTP_MIN_NEW_TOKENS
             && std::env::var_os("OAR_VL_DISABLE_SPECULATIVE").is_none()
-            && std::env::var_os("OAR_JINAOCR_ENABLE_MTP").is_some()
     }
 
     /// Capture the FastMTP draft graph over a fixed-capacity KV bucket. The
     /// dense draft block stays fully on-device, so it is the one piece of the
     /// speculative loop that graph capture can accelerate (the target's MoE
     /// layers route through the host and must stay eager).
+    /// Capture the target verification block and the FastMTP draft graph
+    /// over a shared fixed-capacity KV bucket.
     #[cfg(feature = "cuda")]
-    fn prepare_mtp_graphs(&self, prompt_len: usize, max_new_tokens: usize) {
-        use crate::runtime::decoder_graph::decoder_cache_capacity;
+    fn prepare_mtp_graphs(&self, prompt_len: usize, max_new_tokens: usize) -> Result<(), Error> {
         let mtp = self.mtp.as_ref().expect("MTP availability checked");
-        let draft_budget = max_new_tokens + MTP_QUERY_LEN + MTP_DRAFT_TOKENS;
-        match decoder_cache_capacity(prompt_len, draft_budget, DECODE_CACHE_LEN) {
-            Some(cache_len) => {
-                if let Err(error) = mtp.prepare_cuda_graph(cache_len) {
-                    tracing::warn!("JinaOCR MTP graph capture failed: {error}");
-                    mtp.disable_cuda_graph();
-                }
+        if let Some(cache_len) = self.text.prepare_verification_cuda_graph(
+            prompt_len,
+            max_new_tokens,
+            MTP_QUERY_LEN,
+            &self.lm_head,
+        )? {
+            if let Err(error) = mtp.prepare_cuda_graph(cache_len) {
+                tracing::warn!("JinaOCR MTP graph capture failed: {error}");
+                mtp.disable_cuda_graph();
             }
-            None => mtp.disable_cuda_graph(),
+        } else {
+            // An eager prefill may grow/reallocate draft storage; a graph
+            // captured earlier would retain stale device pointers.
+            mtp.disable_cuda_graph();
         }
+        Ok(())
     }
 
     #[cfg(not(feature = "cuda"))]
-    fn prepare_mtp_graphs(&self, _prompt_len: usize, _max_new_tokens: usize) {}
+    fn prepare_mtp_graphs(&self, _prompt_len: usize, _max_new_tokens: usize) -> Result<(), Error> {
+        Ok(())
+    }
 
     /// Tokenize the fixed OCR prompt for one page and splice the visual
     /// features into the image placeholder positions.
@@ -661,15 +671,19 @@ impl GreedyEngine<'_> {
         let mut history = prompt_ids.to_vec();
 
         for step in 0..max_new_tokens {
-            let mut scores = logits
-                .to_dtype(DType::F32)
-                .and_then(|l| l.to_vec1::<f32>())
-                .map_err(|e| candle_to_ocr_inference(self.model_name, "read decode scores", e))?;
-            if want_trace {
+            let token = if want_trace {
+                let mut scores = logits
+                    .to_dtype(DType::F32)
+                    .and_then(|l| l.to_vec1::<f32>())
+                    .map_err(|e| {
+                        candle_to_ocr_inference(self.model_name, "read decode scores", e)
+                    })?;
                 trace.step_top.push(top3(&scores));
-            }
-            apply_no_repeat_ngram(&history, &mut scores);
-            let token = argmax(&scores)?;
+                apply_no_repeat_ngram(&history, &mut scores);
+                argmax(&scores)?
+            } else {
+                select_greedy_token(&logits, &history)?
+            };
             if self.eos_token_ids.contains(&token) {
                 trace.hit_eos = true;
                 return Ok(trace);
@@ -724,14 +738,12 @@ impl GreedyEngine<'_> {
         let last_hidden = prompt_hidden
             .i((0, prompt_len - 1, ..))
             .map_err(|e| candle_to_ocr_inference(name, "MTP prompt hidden", e))?;
-        let mut scores = self
+        let prompt_logits = self
             .lm_head
             .forward(&last_hidden.unsqueeze(0)?)
-            .and_then(|l| l.squeeze(0).and_then(|l| l.to_dtype(DType::F32)))
-            .and_then(|l| l.to_vec1::<f32>())
+            .and_then(|l| l.squeeze(0))
             .map_err(|e| candle_to_ocr_inference(name, "MTP prompt logits", e))?;
-        apply_no_repeat_ngram(prompt_ids, &mut scores);
-        let mut current = argmax(&scores)?;
+        let mut current = select_greedy_token(&prompt_logits, prompt_ids)?;
         if self.eos_token_ids.contains(&current) {
             return Ok((Vec::new(), true));
         }
@@ -783,17 +795,12 @@ impl GreedyEngine<'_> {
             let (block_hidden, block_logits) =
                 self.text
                     .forward_verification_tokens(&embeds, &query_positions, self.lm_head)?;
-            let block_scores = block_logits
-                .to_dtype(DType::F32)
-                .and_then(|l| l.to_vec2::<f32>())
-                .map_err(|e| candle_to_ocr_inference(name, "MTP verification logits", e))?;
-
             // Greedy verification, ban applied sequentially over the block.
             let mut block_tokens = [0u32; MTP_QUERY_LEN];
             let mut block_history = history.clone();
-            for (slot, mut scores) in block_scores.into_iter().enumerate() {
-                apply_no_repeat_ngram(&block_history, &mut scores);
-                block_tokens[slot] = argmax(&scores)?;
+            for slot in 0..MTP_QUERY_LEN {
+                let row = block_logits.i(slot)?;
+                block_tokens[slot] = select_greedy_token(&row, &block_history)?;
                 block_history.push(query_ids[slot]);
             }
 
@@ -939,31 +946,92 @@ fn require_token_id(
     Ok(token_id)
 }
 
-/// `SlidingWindowNoRepeatNgramProcessor`: ban the tokens that would complete
-/// an n-gram seen within the last `NGRAM_WINDOW` tokens of the running
-/// sequence, minus the whitelist.
-fn apply_no_repeat_ngram(sequence: &[u32], scores: &mut [f32]) {
+/// `SlidingWindowNoRepeatNgramProcessor`: the token ids that would complete
+/// an n-gram already seen within the last `NGRAM_WINDOW` tokens of the
+/// running sequence, minus the whitelist.
+fn ngram_banned_tokens(sequence: &[u32]) -> Vec<u32> {
     if NGRAM_SIZE == 0 {
-        return;
+        return Vec::new();
     }
     let len = sequence.len();
     if len < NGRAM_SIZE {
-        return;
+        return Vec::new();
     }
     let search_start = len.saturating_sub(NGRAM_WINDOW);
     let search_end = len - NGRAM_SIZE + 1;
     if search_end <= search_start {
-        return;
+        return Vec::new();
     }
     let prefix = &sequence[len - NGRAM_SIZE + 1..];
+    let mut banned = Vec::new();
     for start in search_start..search_end {
         if sequence[start..start + NGRAM_SIZE - 1] == *prefix {
             let next = sequence[start + NGRAM_SIZE - 1];
             if !NGRAM_WHITELIST.contains(&next) {
-                scores[next as usize] = f32::NEG_INFINITY;
+                banned.push(next);
             }
         }
     }
+    banned
+}
+
+/// Host-side application of [`ngram_banned_tokens`] to a score row.
+fn apply_no_repeat_ngram(sequence: &[u32], scores: &mut [f32]) {
+    for token in ngram_banned_tokens(sequence) {
+        scores[token as usize] = f32::NEG_INFINITY;
+    }
+}
+
+/// Greedy pick under the n-gram ban without streaming the vocabulary through
+/// the host: the banned set depends only on the token history, so a sparse
+/// device-side mask plus a stable device argmax reads back a single token.
+/// Semantics match `apply_no_repeat_ngram` + `argmax` exactly.
+fn select_greedy_token(logits: &Tensor, history: &[u32]) -> Result<u32, Error> {
+    if logits.device().is_cuda() {
+        #[cfg(feature = "cuda")]
+        {
+            use crate::runtime::cuda::{ArgmaxFirstBf16, ArgmaxFirstF32, MaskTokenIds};
+            let vocab = logits.elem_count();
+            let row = logits
+                .reshape((1, vocab))
+                .and_then(|l| l.contiguous())
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "reshape greedy logits", e))?;
+            let banned = ngram_banned_tokens(history);
+            let row = if banned.is_empty() {
+                row
+            } else {
+                let ids = Tensor::new(banned, logits.device())
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "upload banned ids", e))?;
+                row.inplace_op2(&ids, &MaskTokenIds)
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "mask banned ids", e))?;
+                row
+            };
+            let token = match row.dtype() {
+                DType::BF16 => row.apply_op1_no_bwd(&ArgmaxFirstBf16),
+                DType::F32 => row.apply_op1_no_bwd(&ArgmaxFirstF32),
+                dtype => {
+                    return Err(Error::Config {
+                        message: format!("{MODEL_NAME}: unsupported greedy logits dtype {dtype:?}"),
+                    });
+                }
+            }
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "stable GPU argmax", e))?;
+            return token
+                .i(0)
+                .and_then(|t| t.to_scalar::<u32>())
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy greedy token", e));
+        }
+        #[allow(unreachable_code)]
+        return Err(Error::Config {
+            message: format!("{MODEL_NAME}: CUDA logits on a non-CUDA build"),
+        });
+    }
+    let mut scores = logits
+        .to_dtype(DType::F32)
+        .and_then(|l| l.to_vec1::<f32>())
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read greedy scores", e))?;
+    apply_no_repeat_ngram(history, &mut scores);
+    argmax(&scores)
 }
 
 fn argmax(scores: &[f32]) -> Result<u32, Error> {

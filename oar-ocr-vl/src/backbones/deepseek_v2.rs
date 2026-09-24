@@ -30,11 +30,82 @@ use std::cell::RefCell;
 #[cfg(feature = "cuda")]
 use crate::runtime::cuda::dynamic_kv::DynamicKvAppend;
 #[cfg(feature = "cuda")]
-use crate::runtime::decoder_graph::decoder_attention_is_causal;
+use crate::runtime::decoder_graph::{
+    CudaGraphDrainGuard, CudaGraphKvLengths, SingleTokenDecoderCudaGraph, cuda_graph_error,
+    decoder_attention_is_causal, decoder_cache_capacity, drop_and_drain, report_stashed_cuda_error,
+    sync_graph_tensor,
+};
 #[cfg(feature = "cuda")]
 use candle_core::Device;
 
 const MODEL_NAME: &str = "DeepSeek-V2";
+
+/// Upper bound for graph-backed decode KV buckets, mirroring the context the
+/// checkpoints are actually used with.
+#[cfg(feature = "cuda")]
+const DECODE_CACHE_LEN: usize = 16_384;
+
+fn graphs_disabled() -> bool {
+    std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
+        || std::env::var_os("OAR_DEEPSEEK_V2_DISABLE_CUDA_GRAPH").is_some()
+}
+
+#[cfg(feature = "cuda")]
+struct VerificationCudaGraph {
+    // The graph owns device pointers into all tensors below; dispose via
+    // `dispose` so capture-touched buffers are never returned to the
+    // stream-ordered allocator (see SingleTokenDecoderCudaGraph::dispose).
+    graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
+    hidden_input: Tensor,
+    position_input: Tensor,
+    _query_lengths: Tensor,
+    kv_lengths: CudaGraphKvLengths,
+    hidden_output: Tensor,
+    logits_output: Tensor,
+    cache_len: usize,
+    query_len: usize,
+}
+
+#[cfg(feature = "cuda")]
+impl VerificationCudaGraph {
+    fn dispose(self) {
+        let Self {
+            graph,
+            hidden_input,
+            position_input,
+            _query_lengths,
+            kv_lengths,
+            hidden_output,
+            logits_output,
+            cache_len: _,
+            query_len: _,
+        } = self;
+        let device = hidden_input.device().clone();
+        report_stashed_cuda_error(&device, "CUDA graph disposal");
+        drop_and_drain(graph, &device);
+        drop_and_drain(logits_output, &device);
+        drop_and_drain(hidden_output, &device);
+        drop_and_drain(kv_lengths, &device);
+        drop_and_drain(_query_lengths, &device);
+        drop_and_drain(position_input, &device);
+        drop_and_drain(hidden_input, &device);
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl std::fmt::Debug for VerificationCudaGraph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerificationCudaGraph")
+            .field("query_len", &self.query_len)
+            .field("cache_len", &self.cache_len)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn decode_capacity(prompt_len: usize, max_new_tokens: usize) -> Option<usize> {
+    decoder_cache_capacity(prompt_len, max_new_tokens, DECODE_CACHE_LEN)
+}
 
 fn default_scoring_func() -> String {
     "softmax".to_string()
@@ -462,14 +533,22 @@ impl DenseMlp {
 }
 
 /// `DeepseekV2MoE`: greedy top-k softmax routing over the routed experts plus
-/// the always-on shared expert block. The gate runs in f32 and the expert
-/// outputs are combined in the gate's f32 weights, mirroring `moe_infer`.
+/// the always-on shared expert block. The gate runs in f32 like the
+/// reference; routing stays on-device (top-k by argsort, one small router-id
+/// readback on the generic path, fused `moe_gemm` kernels on CUDA
+/// half-precision) so the layer is CUDA-graph safe and never streams expert
+/// outputs through the host.
 #[derive(Debug)]
 struct MoeFeedForward {
     gate: Tensor,
-    experts: Vec<DenseMlp>,
+    /// Stacked `[gate; up]` expert weights, `(E, 2I, H)`.
+    gate_up_w: Tensor,
+    /// Stacked down-projection weights, `(E, H, I)`.
+    down_w: Tensor,
     shared_experts: DenseMlp,
     top_k: usize,
+    n_experts: usize,
+    intermediate: usize,
 }
 
 impl MoeFeedForward {
@@ -478,15 +557,41 @@ impl MoeFeedForward {
             .pp("gate")
             .get((cfg.n_routed_experts, cfg.hidden_size), "weight")
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load MoE gate", e))?;
-        let experts = (0..cfg.n_routed_experts)
-            .map(|i| {
-                DenseMlp::load(
-                    cfg.hidden_size,
-                    cfg.moe_intermediate_size,
-                    vb.pp("experts").pp(i),
+        let experts_vb = vb.pp("experts");
+        let mut gate_up: Vec<Tensor> = Vec::with_capacity(cfg.n_routed_experts);
+        let mut down: Vec<Tensor> = Vec::with_capacity(cfg.n_routed_experts);
+        for index in 0..cfg.n_routed_experts {
+            let expert = experts_vb.pp(index);
+            let gate_proj = expert
+                .get(
+                    (cfg.moe_intermediate_size, cfg.hidden_size),
+                    "gate_proj.weight",
                 )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load expert gate_proj", e))?;
+            let up_proj = expert
+                .get(
+                    (cfg.moe_intermediate_size, cfg.hidden_size),
+                    "up_proj.weight",
+                )
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load expert up_proj", e))?;
+            let down_proj = expert
+                .get(
+                    (cfg.hidden_size, cfg.moe_intermediate_size),
+                    "down_proj.weight",
+                )
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load expert down_proj", e))?;
+            gate_up.push(
+                Tensor::cat(&[&gate_proj, &up_proj], 0)
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "stack expert gate_up", e))?,
+            );
+            down.push(down_proj);
+        }
+        let refs: Vec<&Tensor> = gate_up.iter().collect();
+        let gate_up_w = Tensor::stack(&refs, 0)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "stack MoE gate_up", e))?;
+        let refs: Vec<&Tensor> = down.iter().collect();
+        let down_w = Tensor::stack(&refs, 0)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "stack MoE down", e))?;
         let shared_experts = DenseMlp::load(
             cfg.hidden_size,
             cfg.moe_intermediate_size * cfg.n_shared_experts,
@@ -494,10 +599,197 @@ impl MoeFeedForward {
         )?;
         Ok(Self {
             gate,
-            experts,
+            gate_up_w,
+            down_w,
             shared_experts,
             top_k: cfg.num_experts_per_tok,
+            n_experts: cfg.n_routed_experts,
+            intermediate: cfg.moe_intermediate_size,
         })
+    }
+
+    /// Router scores and the on-device greedy top-k (descending, unnormalized
+    /// — `norm_topk_prob` is false and `routed_scaling_factor` is 1).
+    fn route(&self, flat: &Tensor) -> Result<(Tensor, Tensor), Error> {
+        let logits = flat
+            .to_dtype(DType::F32)
+            .and_then(|x| x.matmul(&self.gate.to_dtype(DType::F32)?.t()?))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE router matmul", e))?;
+        let scores = candle_nn::ops::softmax_last_dim(&logits)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE router softmax", e))?;
+        let topk_ids = scores
+            .arg_sort_last_dim(false)
+            .and_then(|order| order.narrow(candle_core::D::Minus1, 0, self.top_k))
+            .and_then(|ids| ids.contiguous())
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE router top-k", e))?;
+        let topk_weights = scores
+            .gather(&topk_ids, candle_core::D::Minus1)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE router gather", e))?;
+        Ok((topk_ids, topk_weights))
+    }
+
+    /// Fused `moe_gemm` path for CUDA half-precision tensors (the kernel only
+    /// accepts f16/bf16).
+    #[cfg(feature = "cuda")]
+    fn forward_fused(
+        &self,
+        flat: &Tensor,
+        topk_ids: &Tensor,
+        topk_weights: &Tensor,
+        is_prefill: bool,
+    ) -> Result<Tensor, Error> {
+        use candle_nn::moe::moe_gemm;
+
+        let (tokens, hidden) = flat.dims2()?;
+        let (expert_ids, sorted_token_ids) = topk_ids
+            .flatten_all()
+            .and_then(|flat| flat.sort_last_dim(true))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE token sort", e))?;
+        let gate_up = moe_gemm(
+            flat,
+            &self.gate_up_w,
+            &None,
+            &sorted_token_ids,
+            &expert_ids,
+            self.top_k,
+            is_prefill,
+        )
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "fused MoE gate_up gemm", e))?;
+        let gate = gate_up
+            .narrow(candle_core::D::Minus1, 0, self.intermediate)
+            .and_then(|g| g.contiguous())
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "fused MoE gate split", e))?;
+        let up = gate_up
+            .narrow(candle_core::D::Minus1, self.intermediate, self.intermediate)
+            .and_then(|u| u.contiguous())
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "fused MoE up split", e))?;
+        let gate = candle_nn::ops::silu(&gate)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "fused MoE silu", e))?;
+        let down_inputs = (&gate * &up)
+            .and_then(|x| x.reshape(((), self.intermediate)))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "fused MoE down input", e))?;
+        let routed = moe_gemm(
+            &down_inputs,
+            &self.down_w,
+            &Some(topk_weights.clone()),
+            &sorted_token_ids,
+            &expert_ids,
+            self.top_k,
+            is_prefill,
+        )
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "fused MoE down gemm", e))?
+        .reshape((tokens, (), hidden))
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "fused MoE down reshape", e))?
+        .to_dtype(DType::F32)
+        .and_then(|y| y.sum(candle_core::D::Minus2))
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "fused MoE combine", e))?;
+        Ok(routed)
+    }
+
+    /// Generic device-resident path: one small router-id readback groups
+    /// (token, slot) pairs by expert, each expert runs one dense batch, and
+    /// the f32 combine uses `index_add` in expert order — bit-identical to
+    /// the reference `moe_infer` accumulation.
+    fn forward_indexed(
+        &self,
+        flat: &Tensor,
+        topk_ids: &Tensor,
+        topk_weights: &Tensor,
+    ) -> Result<Tensor, Error> {
+        let (tokens, hidden) = flat
+            .dims2()
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE input shape", e))?;
+        let ids: Vec<u32> = topk_ids
+            .flatten_all()
+            .and_then(|ids| ids.to_vec1::<u32>())
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read router ids", e))?;
+        let weights_flat = topk_weights
+            .reshape((tokens * self.top_k,))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "flatten router weights", e))?;
+        let device = flat.device();
+
+        let mut by_expert: Vec<Vec<(usize, usize)>> = vec![Vec::new(); self.n_experts];
+        for (slot, &id) in ids.iter().enumerate() {
+            by_expert[id as usize].push((slot / self.top_k, slot));
+        }
+
+        let mut combined = Tensor::zeros((tokens, hidden), DType::F32, device)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE combine buffer", e))?;
+        for (expert, slots) in by_expert.iter().enumerate() {
+            if slots.is_empty() {
+                continue;
+            }
+            let rows: Vec<u32> = slots.iter().map(|&(token, _)| token as u32).collect();
+            let slot_ids: Vec<u32> = slots.iter().map(|&(_, slot)| slot as u32).collect();
+            let row_index = Tensor::from_vec(rows, slots.len(), device)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE row index", e))?;
+            let slot_index = Tensor::from_vec(slot_ids, slots.len(), device)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE slot index", e))?;
+            let routed = flat
+                .index_select(&row_index, 0)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE gather rows", e))?;
+            let gate_up_w = self
+                .gate_up_w
+                .i((expert, ..))
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE expert weights", e))?;
+            let gate_w = gate_up_w
+                .narrow(0, 0, self.intermediate)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE gate weight", e))?;
+            let up_w = gate_up_w
+                .narrow(0, self.intermediate, self.intermediate)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE up weight", e))?;
+            let gate = routed
+                .matmul(&gate_w.t()?)
+                .and_then(|g| candle_nn::ops::silu(&g))
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE expert gate", e))?;
+            let up = routed
+                .matmul(&up_w.t()?)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE expert up", e))?;
+            let down_w = self
+                .down_w
+                .i((expert, ..))
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE expert down weight", e))?;
+            let expert_out = (&gate * &up)?
+                .matmul(&down_w.t()?)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE expert down", e))?;
+            let weights = weights_flat
+                .index_select(&slot_index, 0)
+                .and_then(|w| w.reshape((slots.len(), 1)))
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE slot weights", e))?;
+            let weighted = expert_out
+                .to_dtype(DType::F32)?
+                .broadcast_mul(&weights)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE weight outputs", e))?;
+            combined = combined
+                .index_add(&row_index, &weighted, 0)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE combine", e))?;
+        }
+        Ok(combined)
+    }
+
+    /// Graph-captured decode/verification path: identical math to
+    /// [`Self::forward`] via the fused `moe_gemm` kernels, fully on-device.
+    /// Only called with the handful of tokens a decode step or verification
+    /// block produces — `sort_last_dim` over `tokens * top_k` elements uses
+    /// shared memory that stops fitting beyond a few thousand pairs.
+    #[cfg(feature = "cuda")]
+    fn forward_dynamic(&self, xs: &Tensor) -> Result<Tensor, Error> {
+        let (batch, seq, hidden) = xs
+            .dims3()
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE input shape", e))?;
+        let tokens = batch * seq;
+        let flat = xs
+            .reshape((tokens, hidden))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE flatten", e))?;
+        let (topk_ids, topk_weights) = self.route(&flat)?;
+        let routed = self.forward_fused(&flat, &topk_ids, &topk_weights, false)?;
+        let shared = self.shared_experts.forward(&flat)?;
+        let combined = routed
+            .to_dtype(xs.dtype())
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE routed cast", e))?;
+        (&combined + &shared)?
+            .reshape((batch, seq, hidden))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE output", e))
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor, Error> {
@@ -505,91 +797,20 @@ impl MoeFeedForward {
             .dims3()
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE input shape", e))?;
         let tokens = batch * seq;
-        let flat = xs.reshape((tokens, hidden))?;
+        let flat = xs
+            .reshape((tokens, hidden))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE flatten", e))?;
+        let (topk_ids, topk_weights) = self.route(&flat)?;
+        let routed = self.forward_indexed(&flat, &topk_ids, &topk_weights)?;
 
-        // Router: f32 logits, softmax scores, greedy top-k sorted by weight
-        // (like `torch.topk`), weights unnormalized (`routed_scaling_factor` 1).
-        let logits = flat
-            .to_dtype(DType::F32)?
-            .matmul(&self.gate.to_dtype(DType::F32)?.t()?)?;
-        let scores = candle_nn::ops::softmax_last_dim(&logits)?;
-        let (topk_ids, topk_weights) = topk_weights(&scores, self.top_k)?;
-        let ids: Vec<u32> = topk_ids
-            .flatten_all()?
-            .to_vec1::<u32>()
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read router ids", e))?;
-        let weights: Vec<f32> = topk_weights
-            .flatten_all()?
-            .to_vec1::<f32>()
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read router weights", e))?;
-
-        // Group selected (token, slot) pairs by expert so each expert runs one
-        // dense batch, then combine in the router's f32 like `moe_infer`.
-        let mut by_expert: Vec<Vec<(usize, usize)>> = vec![Vec::new(); self.experts.len()];
-        for (slot, &id) in ids.iter().enumerate() {
-            by_expert[id as usize].push((slot / self.top_k, slot));
-        }
-
-        let mut combined = vec![0f32; tokens * hidden];
-        for (expert_index, slots) in by_expert.iter().enumerate() {
-            if slots.is_empty() {
-                continue;
-            }
-            let rows: Vec<u32> = slots.iter().map(|&(token, _)| token as u32).collect();
-            let row_index = Tensor::from_vec(rows, slots.len(), xs.device())?;
-            let routed = flat.index_select(&row_index, 0)?;
-            let expert_out = self.experts[expert_index]
-                .forward(&routed)?
-                .to_dtype(DType::F32)?
-                .to_vec2::<f32>()
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read expert output", e))?;
-            for (row, &(token, slot)) in slots.iter().enumerate() {
-                let weight = weights[slot];
-                let base_in = token * hidden;
-                for dim in 0..hidden {
-                    combined[base_in + dim] += weight * expert_out[row][dim];
-                }
-            }
-        }
-        let combined =
-            Tensor::from_vec(combined, (tokens, hidden), xs.device())?.to_dtype(xs.dtype())?;
         let shared = self.shared_experts.forward(&flat)?;
+        let combined = routed
+            .to_dtype(xs.dtype())
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE routed cast", e))?;
         (&combined + &shared)?
             .reshape((batch, seq, hidden))
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MoE output", e))
     }
-}
-
-/// Sorted top-k over softmax scores: `(ids (tokens, k) u32, weights (tokens,
-/// k) f32)`. Ties break toward the lower expert id.
-fn topk_weights(scores: &Tensor, k: usize) -> Result<(Tensor, Tensor), Error> {
-    let (tokens, experts) = scores.dims2()?;
-    let data = scores
-        .flatten_all()?
-        .to_vec1::<f32>()
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read router scores", e))?;
-    let mut ids = Vec::with_capacity(tokens * k);
-    let mut weights = Vec::with_capacity(tokens * k);
-    for token in 0..tokens {
-        let row = &data[token * experts..(token + 1) * experts];
-        let mut order: Vec<u32> = (0..experts as u32).collect();
-        order.sort_by(|&a, &b| {
-            row[b as usize]
-                .partial_cmp(&row[a as usize])
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.cmp(&b))
-        });
-        order.truncate(k);
-        for &id in &order {
-            ids.push(id);
-            weights.push(row[id as usize]);
-        }
-    }
-    let device = scores.device();
-    Ok((
-        Tensor::from_vec(ids, (tokens, k), device)?,
-        Tensor::from_vec(weights, (tokens, k), device)?,
-    ))
 }
 
 #[derive(Debug)]
@@ -679,7 +900,13 @@ impl DecoderLayer {
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention residual", e))?;
         let residual = hidden_states.clone();
         let normalized = self.post_attention_layernorm.forward(&hidden_states)?;
-        let mlp = self.forward_mlp(&normalized)?;
+        // Graph capture forbids host reads, so the MoE layers take the fused
+        // on-device kernels here (decode and verification blocks only — a
+        // few tokens at a time).
+        let mlp = match &self.mlp {
+            FeedForward::Dense(mlp) => mlp.forward(&normalized)?,
+            FeedForward::Moe(moe) => moe.forward_dynamic(&normalized)?,
+        };
         (&residual + &mlp).map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP residual", e))
     }
 
@@ -708,10 +935,18 @@ impl DecoderLayer {
 }
 
 pub(crate) struct DeepSeekV2TextModel {
+    #[cfg(feature = "cuda")]
+    decode_graph: RefCell<Option<SingleTokenDecoderCudaGraph>>,
+    #[cfg(feature = "cuda")]
+    verification_graph: RefCell<Option<VerificationCudaGraph>>,
     embed_tokens: Embedding,
     layers: Vec<DecoderLayer>,
     norm: RmsNorm,
     rotary: RotaryEmbedding,
+    // Must stay the last field: it drops last and drains CUDA errors the
+    // other fields' frees may stash (see CudaGraphDrainGuard).
+    #[cfg(feature = "cuda")]
+    _drain_guard: CudaGraphDrainGuard,
 }
 
 impl DeepSeekV2TextModel {
@@ -729,11 +964,20 @@ impl DeepSeekV2TextModel {
         let norm = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("norm"))
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load final norm", e))?;
         let rotary = RotaryEmbedding::new_dynamic(cfg.head_dim()?, cfg.rope_theta, vb.device())?;
+
+        #[cfg(feature = "cuda")]
+        let _drain_guard = CudaGraphDrainGuard::new(vb.device());
         Ok(Self {
+            #[cfg(feature = "cuda")]
+            decode_graph: RefCell::new(None),
+            #[cfg(feature = "cuda")]
+            verification_graph: RefCell::new(None),
             embed_tokens,
             layers,
             norm,
             rotary,
+            #[cfg(feature = "cuda")]
+            _drain_guard,
         })
     }
 
@@ -753,27 +997,6 @@ impl DeepSeekV2TextModel {
         self.norm.weight().clone()
     }
 
-    fn prepare_rope(
-        &self,
-        inputs_embeds: &Tensor,
-        position_ids: &Tensor,
-    ) -> Result<(Tensor, Tensor), Error> {
-        let (cos, sin) = self
-            .rotary
-            .forward_multi_axis(position_ids, inputs_embeds.dtype())?;
-        // (1, batch, seq, head_dim) -> (batch, 1, seq, head_dim): broadcast
-        // over heads in the attention projections.
-        let cos = cos
-            .squeeze(0)
-            .and_then(|c| c.unsqueeze(1))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "RoPE cos layout", e))?;
-        let sin = sin
-            .squeeze(0)
-            .and_then(|s| s.unsqueeze(1))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "RoPE sin layout", e))?;
-        Ok((cos, sin))
-    }
-
     /// `(B, seq, hidden)` final hidden states (post final norm) at the plain
     /// sequential positions given by `position_ids` (`(1, B, seq)`).
     pub(crate) fn forward(
@@ -782,7 +1005,13 @@ impl DeepSeekV2TextModel {
         position_ids: &Tensor,
         attention_mask: Option<&Tensor>,
     ) -> Result<Tensor, Error> {
-        let (cos, sin) = self.prepare_rope(inputs_embeds, position_ids)?;
+        let (cos, sin) = self
+            .rotary
+            .forward_multi_axis(position_ids, inputs_embeds.dtype())?;
+        // (1, batch, seq, head_dim) -> (batch, 1, seq, head_dim): broadcast
+        // over heads in the attention projections.
+        let cos = cos.squeeze(0)?.unsqueeze(1)?;
+        let sin = sin.squeeze(0)?.unsqueeze(1)?;
         let mut hidden_states = inputs_embeds.clone();
         for layer in &self.layers {
             hidden_states = layer.forward(&hidden_states, &cos, &sin, attention_mask)?;
@@ -800,8 +1029,20 @@ impl DeepSeekV2TextModel {
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "decode LM head", e))
     }
 
-    /// One decode step at `position_ids`; batch rows beyond the first
-    /// require `attention_mask`.
+    /// Per-position logits over a whole query block, for greedy verification.
+    fn project_all_logits(
+        &self,
+        hidden_states: &Tensor,
+        lm_head: &Linear,
+    ) -> Result<Tensor, Error> {
+        lm_head
+            .forward(hidden_states)
+            .and_then(|logits| logits.squeeze(0))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "verification LM head", e))
+    }
+
+    /// One eager or graph-replayed decode step at `position_ids`; batch rows
+    /// beyond the first require `attention_mask` (graphs are batch-1 only).
     pub(crate) fn forward_decode_logits(
         &self,
         inputs_embeds: &Tensor,
@@ -809,6 +1050,13 @@ impl DeepSeekV2TextModel {
         attention_mask: Option<&Tensor>,
         lm_head: &Linear,
     ) -> Result<Tensor, Error> {
+        #[cfg(feature = "cuda")]
+        if attention_mask.is_none() {
+            let kv_len = self.kv_cache_len().saturating_add(1);
+            if let Some(logits) = self.replay_cuda_graph(inputs_embeds, position_ids, kv_len)? {
+                return Ok(logits);
+            }
+        }
         let hidden = self.forward(inputs_embeds, position_ids, attention_mask)?;
         self.project_logits(&hidden, lm_head)
     }
@@ -817,7 +1065,7 @@ impl DeepSeekV2TextModel {
     ///
     /// Returns the target's post-final-norm hidden states (which the FastMTP
     /// draft consumes on its next sync pass) and the block's per-position
-    /// logits; the caller applies greedy-decoding logit processors host-side
+    /// logits; the caller applies greedy decoding logit processors host-side
     /// before argmaxing, so speculation cannot change the official recipe.
     pub(crate) fn forward_verification_tokens(
         &self,
@@ -825,12 +1073,464 @@ impl DeepSeekV2TextModel {
         position_ids: &Tensor,
         lm_head: &Linear,
     ) -> Result<(Tensor, Tensor), Error> {
+        #[cfg(feature = "cuda")]
+        let query_len = inputs_embeds
+            .dim(1)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "verification query length", e))?;
+        #[cfg(feature = "cuda")]
+        {
+            let kv_len = self.kv_cache_len().saturating_add(query_len);
+            if let Some(output) =
+                self.replay_verification_cuda_graph(inputs_embeds, position_ids, kv_len)?
+            {
+                return Ok(output);
+            }
+        }
         let hidden = self.forward(inputs_embeds, position_ids, None)?;
-        let logits = lm_head
-            .forward(&hidden)
-            .and_then(|l| l.squeeze(0))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "verification LM head", e))?;
+        let logits = self.project_all_logits(&hidden, lm_head)?;
         Ok((hidden, logits))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn forward_dynamic(
+        &self,
+        inputs_embeds: &Tensor,
+        position_ids: &Tensor,
+        query_lengths: &Tensor,
+        kv_lengths: &Tensor,
+    ) -> Result<Tensor, Error> {
+        let (cos, sin) = self
+            .rotary
+            .forward_multi_axis(position_ids, inputs_embeds.dtype())?;
+        let cos = cos.squeeze(0)?.unsqueeze(1)?;
+        let sin = sin.squeeze(0)?.unsqueeze(1)?;
+        let mut hidden_states = inputs_embeds.clone();
+        for layer in &self.layers {
+            hidden_states =
+                layer.forward_dynamic(&hidden_states, &cos, &sin, query_lengths, kv_lengths)?;
+        }
+        self.norm
+            .forward(&hidden_states)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "final norm", e))
+    }
+
+    /// Capture the batch-1 single-token decode graph when eligible.
+    pub(crate) fn prepare_ar_cuda_graph(
+        &self,
+        prompt_len: usize,
+        max_new_tokens: usize,
+        lm_head: &Linear,
+    ) -> Result<(), Error> {
+        if graphs_disabled() {
+            #[cfg(feature = "cuda")]
+            self.invalidate_cuda_graph();
+            return Ok(());
+        }
+        #[cfg(feature = "cuda")]
+        if self.embed_tokens.embeddings().device().is_cuda()
+            && matches!(
+                self.embed_tokens.embeddings().dtype(),
+                DType::BF16 | DType::F16
+            )
+        {
+            let Some(cache_len) = decode_capacity(prompt_len, max_new_tokens) else {
+                self.invalidate_cuda_graph();
+                return Ok(());
+            };
+            let required = prompt_len
+                .saturating_add(max_new_tokens)
+                .min(DECODE_CACHE_LEN);
+            let reusable = self
+                .decode_graph
+                .borrow()
+                .as_ref()
+                .is_some_and(|graph| graph.cache_len >= required);
+            if reusable {
+                return Ok(());
+            }
+            self.invalidate_cuda_graph();
+            self.capture_cuda_graph(cache_len, lm_head)?;
+        }
+        let _ = prompt_len;
+        let _ = max_new_tokens;
+        let _ = lm_head;
+        Ok(())
+    }
+
+    /// Capture the fixed-width MTP verification block; returns the shared
+    /// cache bucket the draft model should capture against.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn prepare_verification_cuda_graph(
+        &self,
+        prompt_len: usize,
+        max_new_tokens: usize,
+        query_len: usize,
+        lm_head: &Linear,
+    ) -> Result<Option<usize>, Error> {
+        if query_len == 0 || graphs_disabled() {
+            self.invalidate_cuda_graph();
+            return Ok(None);
+        }
+        if !self.embed_tokens.embeddings().device().is_cuda()
+            || !matches!(
+                self.embed_tokens.embeddings().dtype(),
+                DType::BF16 | DType::F16
+            )
+        {
+            self.invalidate_cuda_graph();
+            return Ok(None);
+        }
+
+        // Verification can temporarily place a complete query block in KV
+        // beyond the user-visible output limit, so reserve one extra block.
+        let Some(cache_len) = decode_capacity(prompt_len, max_new_tokens.saturating_add(query_len))
+        else {
+            self.invalidate_cuda_graph();
+            return Ok(None);
+        };
+        let required = prompt_len
+            .saturating_add(max_new_tokens)
+            .saturating_add(query_len)
+            .min(DECODE_CACHE_LEN);
+        let retained_cache_len = self
+            .verification_graph
+            .borrow()
+            .as_ref()
+            .filter(|graph| graph.query_len == query_len && graph.cache_len >= required)
+            .map(|graph| graph.cache_len);
+        if let Some(retained_cache_len) = retained_cache_len {
+            // The draft graph shares this capacity contract. Returning the
+            // newly computed (possibly smaller) bucket would force it to
+            // recapture even though the retained target graph is reusable.
+            return Ok(Some(retained_cache_len));
+        }
+
+        self.invalidate_cuda_graph();
+        self.capture_verification_cuda_graph(cache_len, query_len, lm_head)?;
+        Ok(Some(cache_len))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn capture_cuda_graph(&self, cache_len: usize, lm_head: &Linear) -> Result<(), Error> {
+        use candle_core::cuda_backend::cudarc::driver::sys::{
+            CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
+        };
+
+        if self.decode_graph.borrow().is_some() {
+            return Ok(());
+        }
+        let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
+            return Ok(());
+        };
+        let device = self.embed_tokens.embeddings().device().clone();
+        let query_len = 1;
+        for layer in &self.layers {
+            layer.prepare_dynamic_cache(query_len, cache_len)?;
+        }
+        let hidden_size = self
+            .embed_tokens
+            .embeddings()
+            .dim(1)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph hidden size", e))?;
+        let hidden_input = Tensor::zeros(
+            (1, query_len, hidden_size),
+            self.embed_tokens.embeddings().dtype(),
+            &device,
+        )
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph hidden input", e))?;
+        let position_input = Tensor::zeros((1, 1, query_len), DType::U32, &device)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph position input", e))?;
+        let query_lengths = Tensor::new(&[0u32, query_len as u32], &device)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph query lengths", e))?;
+        let kv_lengths = CudaGraphKvLengths::new(query_len, &device)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph KV lengths", e))?;
+        let stream = cuda.cuda_stream();
+        let _htod_cache = cuda.enable_cuda_graph_htod_cache();
+
+        let warm = self.forward_dynamic(
+            &hidden_input,
+            &position_input,
+            &query_lengths,
+            kv_lengths.tensor(),
+        )?;
+        let warm_logits = self.project_logits(&warm, lm_head)?;
+        sync_graph_tensor(MODEL_NAME, &warm_logits, "warm decoder CUDA graph")?;
+        // Allocate the output buffer before capture so it belongs to the
+        // regular stream-ordered pool; a capture-time allocation lives in the
+        // graph's private pool and can never be returned to the allocator
+        // safely. Prime the copy so the captured run sees a warm kernel.
+        let logits_output = Tensor::zeros_like(&warm_logits)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph logits output", e))?;
+        logits_output
+            .slice_set(&warm_logits, 0, 0)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "prime graph logits copy", e))?;
+
+        stream
+            .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
+            .map_err(|e| cuda_graph_error(MODEL_NAME, "begin decoder CUDA graph capture", e))?;
+        let captured_output: Result<(), Error> = (|| {
+            let hidden = self.forward_dynamic(
+                &hidden_input,
+                &position_input,
+                &query_lengths,
+                kv_lengths.tensor(),
+            )?;
+            let logits = self.project_logits(&hidden, lm_head)?;
+            logits_output
+                .slice_set(&logits, 0, 0)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "record graph logits copy", e))
+        })();
+        if let Err(error) = captured_output {
+            let _ = stream.end_capture(
+                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            );
+            return Err(error);
+        }
+        let graph = stream
+            .end_capture(
+                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            )
+            .map_err(|e| cuda_graph_error(MODEL_NAME, "end decoder CUDA graph capture", e))?
+            .ok_or_else(|| Error::Config {
+                message: format!("{MODEL_NAME} decoder capture returned no graph"),
+            })?;
+        graph
+            .launch()
+            .map_err(|e| cuda_graph_error(MODEL_NAME, "warm decoder CUDA graph", e))?;
+        sync_graph_tensor(MODEL_NAME, &logits_output, "sync decoder CUDA graph")?;
+        self.clear_kv_cache();
+        *self.decode_graph.borrow_mut() = Some(SingleTokenDecoderCudaGraph {
+            graph,
+            hidden_input,
+            position_input,
+            _query_lengths: query_lengths,
+            kv_lengths,
+            logits_output,
+            cache_len,
+        });
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    fn capture_verification_cuda_graph(
+        &self,
+        cache_len: usize,
+        query_len: usize,
+        lm_head: &Linear,
+    ) -> Result<(), Error> {
+        use candle_core::cuda_backend::cudarc::driver::sys::{
+            CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
+        };
+
+        let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
+            return Ok(());
+        };
+        let device = self.embed_tokens.embeddings().device().clone();
+        for layer in &self.layers {
+            layer.prepare_dynamic_cache(query_len, cache_len)?;
+        }
+        let hidden_size = self
+            .embed_tokens
+            .embeddings()
+            .dim(1)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph hidden size", e))?;
+        let hidden_input = Tensor::zeros(
+            (1, query_len, hidden_size),
+            self.embed_tokens.embeddings().dtype(),
+            &device,
+        )
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "verification graph input", e))?;
+        let position_input = Tensor::zeros((1, 1, query_len), DType::U32, &device)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "verification graph positions", e))?;
+        let query_lengths = Tensor::new(&[0u32, query_len as u32], &device)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "verification query lengths", e))?;
+        let kv_lengths = CudaGraphKvLengths::new(query_len, &device)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "verification KV lengths", e))?;
+        let stream = cuda.cuda_stream();
+        let _htod_cache = cuda.enable_cuda_graph_htod_cache();
+
+        let warm = self.forward_dynamic(
+            &hidden_input,
+            &position_input,
+            &query_lengths,
+            kv_lengths.tensor(),
+        )?;
+        let warm_logits = self.project_all_logits(&warm, lm_head)?;
+        sync_graph_tensor(MODEL_NAME, &warm_logits, "warm verification CUDA graph")?;
+        // Allocate the output buffers before capture so they belong to the
+        // regular stream-ordered pool; a capture-time allocation lives in the
+        // graph's private pool and can never be returned to the allocator
+        // safely. Prime the copies so the captured run sees warm kernels.
+        let hidden_output = Tensor::zeros_like(&warm)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "verification hidden output", e))?;
+        let logits_output = Tensor::zeros_like(&warm_logits)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "verification logits output", e))?;
+        hidden_output.slice_set(&warm, 0, 0).map_err(|e| {
+            candle_to_ocr_inference(MODEL_NAME, "prime verification hidden copy", e)
+        })?;
+        logits_output.slice_set(&warm_logits, 0, 0).map_err(|e| {
+            candle_to_ocr_inference(MODEL_NAME, "prime verification logits copy", e)
+        })?;
+
+        stream
+            .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
+            .map_err(|e| cuda_graph_error(MODEL_NAME, "begin verification graph capture", e))?;
+        let captured_output: Result<(), Error> = (|| {
+            let hidden = self.forward_dynamic(
+                &hidden_input,
+                &position_input,
+                &query_lengths,
+                kv_lengths.tensor(),
+            )?;
+            let logits = self.project_all_logits(&hidden, lm_head)?;
+            hidden_output.slice_set(&hidden, 0, 0).map_err(|e| {
+                candle_to_ocr_inference(MODEL_NAME, "record verification hidden copy", e)
+            })?;
+            logits_output.slice_set(&logits, 0, 0).map_err(|e| {
+                candle_to_ocr_inference(MODEL_NAME, "record verification logits copy", e)
+            })
+        })();
+        if let Err(error) = captured_output {
+            let _ = stream.end_capture(
+                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            );
+            return Err(error);
+        }
+        let graph = stream
+            .end_capture(
+                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            )
+            .map_err(|e| cuda_graph_error(MODEL_NAME, "end verification graph capture", e))?
+            .ok_or_else(|| Error::Config {
+                message: format!("{MODEL_NAME} verification capture returned no graph"),
+            })?;
+        graph
+            .launch()
+            .map_err(|e| cuda_graph_error(MODEL_NAME, "warm verification CUDA graph", e))?;
+        sync_graph_tensor(MODEL_NAME, &logits_output, "sync verification CUDA graph")?;
+        self.clear_kv_cache();
+        *self.verification_graph.borrow_mut() = Some(VerificationCudaGraph {
+            graph,
+            hidden_input,
+            position_input,
+            _query_lengths: query_lengths,
+            kv_lengths,
+            hidden_output,
+            logits_output,
+            cache_len,
+            query_len,
+        });
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    fn replay_cuda_graph(
+        &self,
+        inputs_embeds: &Tensor,
+        position_ids: &Tensor,
+        kv_len: usize,
+    ) -> Result<Option<Tensor>, Error> {
+        let captured_ref = self.decode_graph.borrow();
+        let Some(captured) = captured_ref.as_ref() else {
+            return Ok(None);
+        };
+        if kv_len > captured.cache_len {
+            drop(captured_ref);
+            self.invalidate_cuda_graph();
+            return Ok(None);
+        }
+        if inputs_embeds.shape() != captured.hidden_input.shape()
+            || position_ids.shape() != captured.position_input.shape()
+        {
+            return Ok(None);
+        }
+        captured
+            .hidden_input
+            .slice_set(inputs_embeds, 0, 0)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy graph hidden", e))?;
+        captured
+            .position_input
+            .slice_set(position_ids, 0, 0)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy graph positions", e))?;
+        captured
+            .kv_lengths
+            .update(kv_len)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "update graph KV lengths", e))?;
+        captured
+            .graph
+            .launch()
+            .map_err(|e| cuda_graph_error(MODEL_NAME, "launch decoder CUDA graph", e))?;
+        for layer in &self.layers {
+            layer.set_kv_cache_len(kv_len)?;
+        }
+        Ok(Some(captured.logits_output.clone()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn replay_verification_cuda_graph(
+        &self,
+        inputs_embeds: &Tensor,
+        position_ids: &Tensor,
+        kv_len: usize,
+    ) -> Result<Option<(Tensor, Tensor)>, Error> {
+        let captured_ref = self.verification_graph.borrow();
+        let Some(captured) = captured_ref.as_ref() else {
+            return Ok(None);
+        };
+        if kv_len > captured.cache_len {
+            drop(captured_ref);
+            self.invalidate_cuda_graph();
+            return Ok(None);
+        }
+        if inputs_embeds.shape() != captured.hidden_input.shape()
+            || position_ids.shape() != captured.position_input.shape()
+        {
+            return Ok(None);
+        }
+        captured
+            .hidden_input
+            .slice_set(inputs_embeds, 0, 0)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy verification hidden", e))?;
+        captured
+            .position_input
+            .slice_set(position_ids, 0, 0)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy verification positions", e))?;
+        captured.kv_lengths.update(kv_len).map_err(|e| {
+            candle_to_ocr_inference(MODEL_NAME, "update verification KV lengths", e)
+        })?;
+        captured
+            .graph
+            .launch()
+            .map_err(|e| cuda_graph_error(MODEL_NAME, "launch verification CUDA graph", e))?;
+        for layer in &self.layers {
+            layer.set_kv_cache_len(kv_len)?;
+        }
+        Ok(Some((
+            captured.hidden_output.clone(),
+            captured.logits_output.clone(),
+        )))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn invalidate_cuda_graph(&self) {
+        if let Some(graph) = self.decode_graph.borrow_mut().take() {
+            graph.dispose();
+        }
+        if let Some(graph) = self.verification_graph.borrow_mut().take() {
+            graph.dispose();
+        }
+    }
+
+    pub(crate) fn invalidate_ar_cuda_graph(&self) {
+        #[cfg(feature = "cuda")]
+        self.invalidate_cuda_graph();
+    }
+
+    #[cfg(feature = "cuda")]
+    fn kv_cache_len(&self) -> usize {
+        let len = self.layers.first().map_or(0, |layer| layer.kv_cache_len());
+        debug_assert!(self.layers.iter().all(|layer| layer.kv_cache_len() == len));
+        len
     }
 
     pub(crate) fn trim_kv_cache(&self, len: usize) -> Result<(), Error> {
@@ -844,6 +1544,15 @@ impl DeepSeekV2TextModel {
         for layer in &self.layers {
             layer.clear_cache();
         }
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl Drop for DeepSeekV2TextModel {
+    fn drop(&mut self) {
+        // A cached graph must go through dispose: plainly dropping it returns
+        // graph-bound buffers to the allocator and poisons it.
+        self.invalidate_cuda_graph();
     }
 }
 

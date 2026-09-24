@@ -5,10 +5,10 @@
 //! linear projector. Pages are encoded as a padded 1024px global view plus
 //! (when the page is larger than 640px) up to nine 640px tiles
 //! (`crop_mode`), and generation follows the official greedy recipe with a
-//! sliding-window no-repeat-ngram guard. The FastMTP draft head implements
-//! lossless three-token speculation (greedy verification keeps the sequence
-//! identical; opt-in via `OAR_JINAOCR_ENABLE_MTP`) with a CUDA-graph-captured
-//! draft step; multi-page calls run a padded batch prefill and decode.
+//! sliding-window no-repeat-ngram guard. On CUDA the decode step and the
+//! FastMTP draft's speculation run as CUDA graphs (on-device MoE routing and
+//! greedy selection keep them graph-safe), with lossless greedy verification;
+//! multi-page calls run a padded batch prefill and decode.
 
 mod adapter;
 mod config;

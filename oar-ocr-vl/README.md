@@ -258,7 +258,7 @@ let markdown = model
 println!("{markdown}");
 ```
 
-Output is Markdown with LaTeX formulas and HTML tables; the same `generate` path serves `DocParser` region crops. The checkpoint's FastMTP head is implemented as lossless speculative decoding (greedy verification plus the host-side no-repeat-ngram guard keep the output token-identical to plain autoregressive decoding) and its dense draft step is CUDA-graph captured, but it is disabled by default: the MoE router's host round-trips serialize the target forward, so speculation is not a net win until a device-side router lands. Opt in with `OAR_JINAOCR_ENABLE_MTP`. Multi-image calls use a padded batch prefill and decode.
+Output is Markdown with LaTeX formulas and HTML tables; the same `generate` path serves `DocParser` region crops. The checkpoint's FastMTP head adds lossless speculative decoding (greedy verification plus the no-repeat-ngram guard keep the output token-identical to plain autoregressive decoding); routing, verification, and the greedy pick all stay on-device, and the single-token decode and draft steps run as CUDA graphs. Disable speculation with `OAR_JINAOCR_DISABLE_MTP` or `OAR_VL_DISABLE_SPECULATIVE`. Multi-image calls use a padded batch prefill and decode.
 
 ## Running Examples
 
