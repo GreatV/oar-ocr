@@ -610,7 +610,7 @@ pub(crate) struct PreparedPrompt {
 /// greedy decoding are token-identical, so pausing never changes the output.
 #[derive(Debug, Clone)]
 pub(crate) struct AdaptiveSpec {
-    /// Verification rounds in the sliding acceptance window.
+    /// Verification rounds in the sliding acceptance window (default 16).
     pub window_rounds: usize,
     /// Mean committed tokens per round below which speculation pauses.
     /// Measured on RTX 4090 (bf16, 1024-token pages, six-page sweep with
@@ -619,11 +619,16 @@ pub(crate) struct AdaptiveSpec {
     /// pages between 1.7 and 1.9 gain nothing from speculation — pausing
     /// them costs nothing and removes the downside.
     pub break_even: f64,
-    /// Plain-decode tokens before the first speculation probe. A probe
-    /// rebuilds the draft state with one dense-layer pass over the committed
-    /// prefix (~tens of milliseconds); each consecutive fallback doubles the
-    /// next interval so pages that keep rejecting stay in plain decoding.
+    /// Plain-decode tokens before the first speculation probe (default
+    /// 256). A probe rebuilds the draft state with one dense-layer pass over
+    /// the committed prefix (~tens of milliseconds); each consecutive
+    /// fallback quadruples the next interval so pages that keep rejecting
+    /// stay in plain decoding.
     pub probe_interval: usize,
+    /// Capture the decode graph at the first probe (default true;
+    /// `OAR_JINAOCR_DISABLE_LAZY_DECODE_GRAPH` forces it off regardless).
+    /// Exposed for the GPU self-check, which A/B-compares the two settings.
+    pub lazy_decode_graph: bool,
 }
 
 impl Default for AdaptiveSpec {
@@ -632,6 +637,7 @@ impl Default for AdaptiveSpec {
             window_rounds: 16,
             break_even: 1.9,
             probe_interval: 256,
+            lazy_decode_graph: true,
         }
     }
 }
@@ -821,7 +827,12 @@ impl GreedyEngine<'_> {
                     // First probe pays the page's only speculative setup:
                     // graph capture plus a full draft sync.
                     if !graphs_ready {
-                        self.prepare_speculation_graphs(prompt_ids.len(), max_new_tokens)?;
+                        self.prepare_speculation_graphs(
+                            prompt_ids.len(),
+                            max_new_tokens,
+                            generated.len(),
+                            adaptive.lazy_decode_graph,
+                        )?;
                         graphs_ready = true;
                     }
                     drafts = self.rebuild_drafts(
@@ -913,6 +924,13 @@ impl GreedyEngine<'_> {
                 let mean: f64 =
                     window.iter().map(|&keep| keep as f64).sum::<f64>() / window.len() as f64;
                 if mean < adaptive.break_even {
+                    tracing::debug!(
+                        committed = generated.len(),
+                        mean,
+                        break_even = adaptive.break_even,
+                        next_cooldown = next_probe_interval,
+                        "MTP fallback to plain decoding"
+                    );
                     cooldown_remaining = next_probe_interval;
                     // Exponential backoff: a page that keeps rejecting
                     // speculation spends progressively more of itself in
@@ -950,21 +968,34 @@ impl GreedyEngine<'_> {
     }
 
     /// Capture the target verification and draft graphs (CUDA only; a no-op
-    /// elsewhere).
-    fn prepare_speculation_graphs(
+    /// elsewhere). Instrumented with `tracing::debug!` at each stage and the
+    /// committed-token position it happens at, so divergences can be checked
+    /// against the nearest KV restore. `OAR_JINAOCR_DISABLE_LAZY_DECODE_GRAPH`
+    /// keeps cooldown decoding eager (the verification graph and the
+    /// snapshot/restore cycle still run) for A/B numerics experiments.
+    pub(crate) fn prepare_speculation_graphs(
         &self,
         prompt_len: usize,
         max_new_tokens: usize,
+        committed: usize,
+        lazy_decode_graph: bool,
     ) -> Result<(), Error> {
         #[cfg(feature = "cuda")]
         {
             let mtp = self.mtp.ok_or_else(|| Error::Config {
                 message: format!("{}: MTP draft head is not loaded", self.model_name),
             })?;
+            tracing::debug!(
+                committed,
+                prompt_len,
+                max_new_tokens,
+                "MTP probe: begin setup"
+            );
             // Captures reuse the fixed KV storage but their warmup runs
             // overwrite the leading positions and reset the logical length —
             // snapshot and restore the live cache around them.
             let saved = self.text.save_kv_cache()?;
+            tracing::debug!(committed, "MTP probe: KV snapshot taken");
             if let Some(cache_len) = self.text.prepare_verification_cuda_graph(
                 prompt_len,
                 max_new_tokens,
@@ -988,8 +1019,9 @@ impl GreedyEngine<'_> {
                 mtp.disable_cuda_graph();
             }
             self.text.restore_kv_cache(&saved)?;
+            tracing::debug!(committed, "MTP probe: KV restored, setup done");
         }
-        let _ = (prompt_len, max_new_tokens);
+        let _ = (prompt_len, max_new_tokens, committed, lazy_decode_graph);
         Ok(())
     }
 
@@ -1341,7 +1373,15 @@ mod tests {
             device: &Device,
             with_mtp: bool,
         ) -> VarBuilder<'static> {
-            use candle_core::DType;
+            random_varbuilder_typed(cfg, device, with_mtp, DType::F32)
+        }
+
+        fn random_varbuilder_typed(
+            cfg: &DeepSeekV2TextConfig,
+            device: &Device,
+            with_mtp: bool,
+            dtype: DType,
+        ) -> VarBuilder<'static> {
             let mut tensors: HashMap<String, Tensor> = HashMap::new();
             let h = cfg.hidden_size;
             let put = |tensors: &mut HashMap<String, Tensor>, name: String, shape: Vec<usize>| {
@@ -1355,7 +1395,7 @@ mod tests {
                     .collect();
                 let tensor = Tensor::from_vec(data, shape, device)
                     .unwrap()
-                    .to_dtype(DType::F32)
+                    .to_dtype(dtype)
                     .unwrap();
                 tensors.insert(name, tensor);
             };
@@ -1472,7 +1512,7 @@ mod tests {
                     vec![h, cfg.intermediate_size],
                 );
             }
-            VarBuilder::from_tensors(tensors, DType::F32, device)
+            VarBuilder::from_tensors(tensors, dtype, device)
         }
 
         struct TinyModel {
@@ -1480,6 +1520,37 @@ mod tests {
             mtp: Option<JinaOcrMtp>,
             lm_head: Linear,
             eos: Vec<u32>,
+        }
+
+        #[cfg(feature = "cuda")]
+        fn build_tiny_on(device: &Device) -> (TinyModel, Device) {
+            let cfg = tiny_config();
+            let vb = random_varbuilder(&cfg, device, true);
+            let text = DeepSeekV2TextModel::load(&cfg, vb.pp("model")).unwrap();
+            let lm_head = Linear::new(
+                vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
+                    .unwrap(),
+                None,
+            );
+            let mtp = Some(
+                JinaOcrMtp::load(
+                    &cfg,
+                    text.token_embedding_weight(),
+                    text.final_norm_weight(),
+                    lm_head.weight().clone(),
+                    vb.clone(),
+                )
+                .unwrap(),
+            );
+            (
+                TinyModel {
+                    text,
+                    mtp,
+                    lm_head,
+                    eos: vec![3],
+                },
+                device.clone(),
+            )
         }
 
         fn build_tiny(with_mtp: bool) -> (TinyModel, Device) {
@@ -1602,6 +1673,7 @@ mod tests {
                 window_rounds: 2,
                 break_even: 10.0,
                 probe_interval: 3,
+                lazy_decode_graph: true,
             };
             model.text.clear_kv_cache();
             if let Some(mtp) = model.mtp.as_ref() {
@@ -1620,6 +1692,176 @@ mod tests {
                 "adaptive switching output must match greedy"
             );
             assert_eq!(hit_eos, plain.hit_eos);
+        }
+
+        /// GPU self-check for the mid-generation KV snapshot/restore cycle,
+        /// run in BF16 so the CUDA graphs (f16/bf16-gated) actually capture:
+        /// (1) element-wise KV equality across the production capture flow —
+        /// prefill, snapshot, the same graph captures the engine performs
+        /// (whose warmups overwrite the storage prefix and reset the length),
+        /// restore — with the captures asserted to have happened; (2) token
+        /// identity through forced probe → capture → restore → fallback →
+        /// re-probe cycles, with and without the lazy decode graph (the only
+        /// scheduled difference; the verification capture, snapshot, and
+        /// restore run in both). Skips without a CUDA device; opt in with
+        /// `OAR_JINAOCR_GPU_SELFTEST=1`.
+        #[test]
+        fn cuda_kv_snapshot_restore_preserves_state() {
+            #[cfg(feature = "cuda")]
+            {
+                use crate::backbones::deepseek_v2::DeepSeekV2TextModel;
+                if std::env::var_os("OAR_JINAOCR_GPU_SELFTEST").is_none() {
+                    eprintln!("skipping: OAR_JINAOCR_GPU_SELFTEST is not set");
+                    return;
+                }
+                let Ok(device) = candle_core::Device::new_cuda(0) else {
+                    eprintln!("skipping: no CUDA device");
+                    return;
+                };
+                let ids: Vec<u32> = (4..40).map(|i| 8 + i % 50).collect();
+
+                let build = |lazy_decode_graph: bool| {
+                    let cfg = tiny_config();
+                    let vb = random_varbuilder_typed(&cfg, &device, true, DType::BF16);
+                    let text = DeepSeekV2TextModel::load(&cfg, vb.pp("model")).unwrap();
+                    let lm_head = Linear::new(
+                        vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
+                            .unwrap(),
+                        None,
+                    );
+                    let mtp = JinaOcrMtp::load(
+                        &cfg,
+                        text.token_embedding_weight(),
+                        text.final_norm_weight(),
+                        lm_head.weight().clone(),
+                        vb.clone(),
+                    )
+                    .unwrap();
+                    let model = TinyModel {
+                        text,
+                        mtp: Some(mtp),
+                        lm_head,
+                        eos: vec![3],
+                    };
+                    let prompt = prepared_prompt(&model, &device, &ids);
+                    (model, prompt, lazy_decode_graph)
+                };
+
+                // (1) Element-wise snapshot/restore across the real capture
+                //     flow, in bf16 so the graphs capture.
+                let (model, prompt, _) = build(true);
+                model.text.clear_kv_cache();
+                let hidden = model
+                    .text
+                    .forward(&prompt.inputs_embeds, &prompt.position_ids, None)
+                    .unwrap();
+                let before = model.text.save_kv_cache().unwrap();
+                engine(&model, &device)
+                    .prepare_speculation_graphs(ids.len(), 48, ids.len(), true)
+                    .unwrap();
+                let (decode, verification) = model.text.graphs_captured();
+                assert!(decode, "decode graph did not capture (dtype gate?)");
+                assert!(
+                    verification,
+                    "verification graph did not capture (dtype gate?)"
+                );
+                model.text.restore_kv_cache(&before).unwrap();
+                let after = model.text.save_kv_cache().unwrap();
+                for (layer, (saved, got)) in before.iter().zip(&after).enumerate() {
+                    assert_eq!(saved.2, got.2, "layer {layer} length mismatch");
+                    let saved_k = saved
+                        .0
+                        .flatten_all()
+                        .unwrap()
+                        .to_dtype(DType::F32)
+                        .unwrap()
+                        .to_vec1::<f32>()
+                        .unwrap();
+                    let got_k = got
+                        .0
+                        .flatten_all()
+                        .unwrap()
+                        .to_dtype(DType::F32)
+                        .unwrap()
+                        .to_vec1::<f32>()
+                        .unwrap();
+                    let saved_v = saved
+                        .1
+                        .flatten_all()
+                        .unwrap()
+                        .to_dtype(DType::F32)
+                        .unwrap()
+                        .to_vec1::<f32>()
+                        .unwrap();
+                    let got_v = got
+                        .1
+                        .flatten_all()
+                        .unwrap()
+                        .to_dtype(DType::F32)
+                        .unwrap()
+                        .to_vec1::<f32>()
+                        .unwrap();
+                    assert_eq!(saved_k, got_k, "layer {layer} keys differ after restore");
+                    assert_eq!(saved_v, got_v, "layer {layer} values differ after restore");
+                }
+
+                // Baseline: uninterrupted plain decoding (eager, graphs off
+                // via the schedule) for reference.
+                let forced = AdaptiveSpec {
+                    window_rounds: 2,
+                    break_even: 10.0,
+                    probe_interval: 4,
+                    lazy_decode_graph: false,
+                };
+                model.text.clear_kv_cache();
+                let hidden = model
+                    .text
+                    .forward(&prompt.inputs_embeds, &prompt.position_ids, None)
+                    .unwrap();
+                let plain = engine(&model, &device)
+                    .ar_tokens(&prompt.input_ids, &hidden, 40, false)
+                    .unwrap();
+
+                // (2) Forced probe → capture → restore → fallback → re-probe
+                //     cycles, A/B on the lazy decode graph only. Both runs
+                //     capture the verification graph mid-generation and both
+                //     snapshot/restore around it, so token equality shows the
+                //     restore (and the decode-graph replay at T=1) preserve
+                //     the greedy sequence.
+                let mut results = Vec::new();
+                for lazy in [true, false] {
+                    let (model, prompt, _) = build(lazy);
+                    model.text.clear_kv_cache();
+                    let hidden = model
+                        .text
+                        .forward(&prompt.inputs_embeds, &prompt.position_ids, None)
+                        .unwrap();
+                    let adaptive = AdaptiveSpec {
+                        lazy_decode_graph: lazy,
+                        ..forced
+                    };
+                    let (tokens, hit_eos) = engine(&model, &device)
+                        .mtp_tokens(&prompt.input_ids, &hidden, 40, &adaptive)
+                        .unwrap();
+                    if lazy {
+                        let (decode, verification) = model.text.graphs_captured();
+                        assert!(
+                            decode && verification,
+                            "forced-cycle run did not capture both graphs"
+                        );
+                    }
+                    results.push((tokens, hit_eos));
+                }
+                assert_eq!(
+                    results[0].0, plain.tokens,
+                    "probe/restore cycles with the decode graph must match greedy"
+                );
+                assert_eq!(results[0].0, results[1].0, "lazy decode graph A/B mismatch");
+                assert_eq!(results[0].1, plain.hit_eos);
+                assert_eq!(results[0].1, results[1].1);
+            }
+            #[cfg(not(feature = "cuda"))]
+            eprintln!("skipping: built without the cuda feature");
         }
 
         #[test]

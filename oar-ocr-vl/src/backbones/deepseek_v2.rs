@@ -1708,6 +1708,17 @@ impl DeepSeekV2TextModel {
         self.invalidate_cuda_graph();
     }
 
+    /// Whether the decode and verification graphs are currently captured —
+    /// lets the GPU self-check assert the mid-generation captures really ran
+    /// (they are bf16/f16-gated).
+    #[cfg(feature = "cuda")]
+    pub(crate) fn graphs_captured(&self) -> (bool, bool) {
+        (
+            self.decode_graph.borrow().is_some(),
+            self.verification_graph.borrow().is_some(),
+        )
+    }
+
     #[cfg(feature = "cuda")]
     fn kv_cache_len(&self) -> usize {
         let len = self.layers.first().map_or(0, |layer| layer.kv_cache_len());
