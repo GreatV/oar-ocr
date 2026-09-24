@@ -1864,6 +1864,116 @@ mod tests {
             eprintln!("skipping: built without the cuda feature");
         }
 
+        /// GPU self-check for graph re-capture within one process, in BF16 so
+        /// the graphs capture: a short prompt captures a small bucket, a
+        /// longer prompt forces a re-capture, the larger graph then covers
+        /// the short prompt again, and finally a second instance captures
+        /// while the first graphs are alive. Every graphed run must produce
+        /// the same tokens as the same model on the graphs-off schedule.
+        /// Skips without a CUDA device; opt in with
+        /// `OAR_JINAOCR_GPU_SELFTEST=1`.
+        #[test]
+        fn cuda_graph_recaptures_and_second_instances_match() {
+            #[cfg(feature = "cuda")]
+            {
+                use crate::backbones::deepseek_v2::DeepSeekV2TextModel;
+                if std::env::var_os("OAR_JINAOCR_GPU_SELFTEST").is_none() {
+                    eprintln!("skipping: OAR_JINAOCR_GPU_SELFTEST is not set");
+                    return;
+                }
+                let Ok(device) = candle_core::Device::new_cuda(0) else {
+                    eprintln!("skipping: no CUDA device");
+                    return;
+                };
+                let short: Vec<u32> = (4..36).map(|i| 8 + i % 50).collect();
+                let long: Vec<u32> = (0..600).map(|i| 8 + i % 50).collect();
+
+                let build_bf16 = || {
+                    let cfg = tiny_config();
+                    let vb = random_varbuilder_typed(&cfg, &device, true, DType::BF16);
+                    let text = DeepSeekV2TextModel::load(&cfg, vb.pp("model")).unwrap();
+                    let lm_head = Linear::new(
+                        vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
+                            .unwrap(),
+                        None,
+                    );
+                    let mtp = JinaOcrMtp::load(
+                        &cfg,
+                        text.token_embedding_weight(),
+                        text.final_norm_weight(),
+                        lm_head.weight().clone(),
+                        vb.clone(),
+                    )
+                    .unwrap();
+                    TinyModel {
+                        text,
+                        mtp: Some(mtp),
+                        lm_head,
+                        eos: vec![3],
+                    }
+                };
+                let run = |model: &TinyModel, ids: &[u32], lazy: bool| -> Vec<u32> {
+                    let prompt = prepared_prompt(model, &device, ids);
+                    model.text.clear_kv_cache();
+                    let hidden = model
+                        .text
+                        .forward(&prompt.inputs_embeds, &prompt.position_ids, None)
+                        .unwrap();
+                    let adaptive = AdaptiveSpec {
+                        window_rounds: 2,
+                        break_even: 10.0,
+                        probe_interval: 4,
+                        lazy_decode_graph: lazy,
+                    };
+                    engine(model, &device)
+                        .mtp_tokens(&prompt.input_ids, &hidden, 24, &adaptive)
+                        .unwrap()
+                        .0
+                };
+
+                let model = build_bf16();
+                // Small bucket first.
+                let ref_short = run(&model, &short, false);
+                assert_eq!(
+                    run(&model, &short, true),
+                    ref_short,
+                    "small-bucket graphed run must match the graphs-off schedule"
+                );
+                let (decode, verification) = model.text.graphs_captured();
+                assert!(
+                    decode && verification,
+                    "small-bucket run did not capture both graphs"
+                );
+
+                // Growth past the captured bucket forces a re-capture in the
+                // same process.
+                let ref_long = run(&model, &long, false);
+                assert_eq!(
+                    run(&model, &long, true),
+                    ref_long,
+                    "re-captured graphed run must match the graphs-off schedule"
+                );
+
+                // The larger graph now covers the short prompt again.
+                assert_eq!(
+                    run(&model, &short, true),
+                    ref_short,
+                    "reused graphed run must match the graphs-off schedule"
+                );
+
+                // A second instance capturing while the first graphs live.
+                let second = build_bf16();
+                let ref_second = run(&second, &long, false);
+                assert_eq!(
+                    run(&second, &long, true),
+                    ref_second,
+                    "second-instance graphed run must match the graphs-off schedule"
+                );
+            }
+            #[cfg(not(feature = "cuda"))]
+            eprintln!("skipping: built without the cuda feature");
+        }
+
         #[test]
         fn batched_forward_matches_single_sequences() {
             let (model, device) = build_tiny(false);
