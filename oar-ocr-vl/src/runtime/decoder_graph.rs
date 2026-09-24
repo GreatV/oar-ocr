@@ -257,6 +257,10 @@ pub(crate) struct SingleTokenDecoderCudaGraph {
     pub(crate) _query_lengths: Tensor,
     pub(crate) kv_lengths: CudaGraphKvLengths,
     pub(crate) logits_output: Tensor,
+    /// Device tensors the captured graph reads that no model field owns.
+    /// Dropping them would return their pool blocks for reuse while replays
+    /// still read them.
+    pub(crate) retained_inputs: Vec<Tensor>,
     pub(crate) cache_len: usize,
 }
 
@@ -270,6 +274,7 @@ impl SingleTokenDecoderCudaGraph {
             _query_lengths,
             kv_lengths,
             logits_output,
+            retained_inputs,
             cache_len: _,
         } = self;
         let device = hidden_input.device().clone();
@@ -280,6 +285,9 @@ impl SingleTokenDecoderCudaGraph {
         drop_and_drain(_query_lengths, &device);
         drop_and_drain(position_input, &device);
         drop_and_drain(hidden_input, &device);
+        for tensor in retained_inputs {
+            drop_and_drain(tensor, &device);
+        }
     }
 }
 

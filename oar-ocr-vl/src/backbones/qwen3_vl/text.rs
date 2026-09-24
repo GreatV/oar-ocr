@@ -19,7 +19,7 @@ use crate::runtime::cuda::dynamic_kv::DynamicKvAppend;
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
     CudaGraphDrainGuard, CudaGraphKvLengths, SingleTokenDecoderCudaGraph, cuda_graph_error,
-    decoder_attention_is_causal, decoder_cache_capacity, sync_graph_tensor,
+    decoder_cache_capacity, sync_graph_tensor,
 };
 use crate::runtime::errors::candle_to_ocr_inference;
 use crate::runtime::tensor::rotate_half;
@@ -1051,6 +1051,7 @@ impl Qwen3VlTextModel {
             _query_lengths: query_lengths,
             kv_lengths,
             logits_output,
+            retained_inputs: vec![kv_positions],
             cache_len,
         });
         Ok(())

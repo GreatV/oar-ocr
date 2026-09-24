@@ -1477,6 +1477,7 @@ impl GlmOcrTextModel {
             _query_lengths: query_lengths,
             kv_lengths,
             logits_output,
+            retained_inputs: Vec::new(),
             cache_len,
         });
         Ok(())
