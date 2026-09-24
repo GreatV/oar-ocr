@@ -23,6 +23,43 @@ pub(crate) fn decoder_cache_capacity(
     Some(required.max(1).next_power_of_two().min(limit))
 }
 
+#[cfg(feature = "cuda")]
+pub(crate) struct CudaGraphInputBag {
+    tensors: Vec<Tensor>,
+}
+
+#[cfg(feature = "cuda")]
+impl CudaGraphInputBag {
+    pub(crate) fn new() -> Self {
+        Self {
+            tensors: Vec::new(),
+        }
+    }
+
+    /// Register one external input and return its handle.
+    pub(crate) fn register(&mut self, tensor: &Tensor) -> usize {
+        self.tensors.push(tensor.clone());
+        self.tensors.len() - 1
+    }
+
+    /// Borrow a registered input by handle.
+    pub(crate) fn get(&self, handle: usize) -> &Tensor {
+        &self.tensors[handle]
+    }
+
+    /// Consume the bag into the graph's retained-inputs list.
+    pub(crate) fn into_retained(self) -> Vec<Tensor> {
+        self.tensors
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl Default for CudaGraphInputBag {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Match eager decoder attention: a single query has no future token to mask,
 /// while verification blocks must remain causal within the block.
 #[cfg(any(feature = "cuda", test))]
@@ -257,6 +294,10 @@ pub(crate) struct SingleTokenDecoderCudaGraph {
     pub(crate) _query_lengths: Tensor,
     pub(crate) kv_lengths: CudaGraphKvLengths,
     pub(crate) logits_output: Tensor,
+    /// Device tensors the captured graph reads that no model field owns;
+    /// dropping them would return their pool blocks for reuse while
+    /// replays still read them.
+    pub(crate) retained_inputs: Vec<Tensor>,
     pub(crate) cache_len: usize,
 }
 
@@ -270,6 +311,7 @@ impl SingleTokenDecoderCudaGraph {
             _query_lengths,
             kv_lengths,
             logits_output,
+            retained_inputs,
             cache_len: _,
         } = self;
         let device = hidden_input.device().clone();
@@ -280,6 +322,9 @@ impl SingleTokenDecoderCudaGraph {
         drop_and_drain(_query_lengths, &device);
         drop_and_drain(position_input, &device);
         drop_and_drain(hidden_input, &device);
+        for tensor in retained_inputs {
+            drop_and_drain(tensor, &device);
+        }
     }
 }
 

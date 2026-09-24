@@ -8,8 +8,9 @@ use crate::runtime::cuda::dynamic_kv::DynamicKvAppend;
 use crate::runtime::decoder_graph::decoder_cache_capacity;
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
-    CudaGraphDrainGuard, CudaGraphKvLengths, SingleTokenDecoderCudaGraph, cuda_graph_error,
-    decoder_attention_is_causal, drop_and_drain, report_stashed_cuda_error, sync_graph_tensor,
+    CudaGraphDrainGuard, CudaGraphInputBag, CudaGraphKvLengths, SingleTokenDecoderCudaGraph,
+    cuda_graph_error, decoder_attention_is_causal, drop_and_drain, report_stashed_cuda_error,
+    sync_graph_tensor,
 };
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
@@ -1415,14 +1416,22 @@ impl GlmOcrTextModel {
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "graph query lengths", e))?;
         let kv_lengths = CudaGraphKvLengths::new(query_len, device)
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "graph KV lengths", e))?;
+        // Register every external input the captured region reads; the bag
+        // becomes the graph's retained inputs, so each tensor outlives all
+        // replays by construction.
+        let mut bag = CudaGraphInputBag::new();
+        let hidden_handle = bag.register(&hidden_input);
+        let position_handle = bag.register(&position_input);
+        let query_handle = bag.register(&query_lengths);
+        let kv_handle = bag.register(kv_lengths.tensor());
         let stream = cuda.cuda_stream();
         let _htod_cache = cuda.enable_cuda_graph_htod_cache();
 
         let warm = self.forward_dynamic(
-            &hidden_input,
-            &position_input,
-            &query_lengths,
-            kv_lengths.tensor(),
+            bag.get(hidden_handle),
+            bag.get(position_handle),
+            bag.get(query_handle),
+            bag.get(kv_handle),
         )?;
         let warm_logits = self.project_logits(&warm, lm_head)?;
         sync_graph_tensor("GLM-OCR", &warm_logits, "warm decoder CUDA graph")?;
@@ -1441,10 +1450,10 @@ impl GlmOcrTextModel {
             .map_err(|e| cuda_graph_error("GLM-OCR", "begin decoder CUDA graph capture", e))?;
         let captured_output: Result<(), Error> = (|| {
             let hidden = self.forward_dynamic(
-                &hidden_input,
-                &position_input,
-                &query_lengths,
-                kv_lengths.tensor(),
+                bag.get(hidden_handle),
+                bag.get(position_handle),
+                bag.get(query_handle),
+                bag.get(kv_handle),
             )?;
             let logits = self.project_logits(&hidden, lm_head)?;
             logits_output
@@ -1477,6 +1486,7 @@ impl GlmOcrTextModel {
             _query_lengths: query_lengths,
             kv_lengths,
             logits_output,
+            retained_inputs: bag.into_retained(),
             cache_len,
         });
         Ok(())
