@@ -23,41 +23,118 @@ pub(crate) fn decoder_cache_capacity(
     Some(required.max(1).next_power_of_two().min(limit))
 }
 
+/// Inputs a decoder graph captures, named and typed. Built by the model
+/// (the shapes and dtypes are model knowledge) and handed to
+/// [`capture_decoder_graph`], which stores every field in the returned
+/// graph so each tensor outlives all replays.
 #[cfg(feature = "cuda")]
-pub(crate) struct CudaGraphInputBag {
-    tensors: Vec<Tensor>,
+pub(crate) struct CudaGraphInputs {
+    pub(crate) hidden: Tensor,
+    pub(crate) positions: Tensor,
+    pub(crate) query_lengths: Tensor,
+    pub(crate) kv_lengths: CudaGraphKvLengths,
+    /// Model-specific extra inputs read by the captured region (for
+    /// example hoisted index rows or padding bounds); retained verbatim.
+    pub(crate) extra: Vec<Tensor>,
 }
 
+/// The registered inputs a capture body may read. The body is a plain
+/// `fn` pointer, so nothing outside `model` and these tensors can reach
+/// the captured region — the compiler rejects any outer capture.
 #[cfg(feature = "cuda")]
-impl CudaGraphInputBag {
-    pub(crate) fn new() -> Self {
-        Self {
-            tensors: Vec::new(),
-        }
-    }
-
-    /// Register one external input and return its handle.
-    pub(crate) fn register(&mut self, tensor: &Tensor) -> usize {
-        self.tensors.push(tensor.clone());
-        self.tensors.len() - 1
-    }
-
-    /// Borrow a registered input by handle.
-    pub(crate) fn get(&self, handle: usize) -> &Tensor {
-        &self.tensors[handle]
-    }
-
-    /// Consume the bag into the graph's retained-inputs list.
-    pub(crate) fn into_retained(self) -> Vec<Tensor> {
-        self.tensors
-    }
+pub(crate) struct CapturedInputs<'a> {
+    pub(crate) hidden: &'a Tensor,
+    pub(crate) positions: &'a Tensor,
+    pub(crate) query_lengths: &'a Tensor,
+    pub(crate) kv_lengths: &'a Tensor,
+    pub(crate) extra: &'a [Tensor],
 }
 
+/// Capture a single-token decoder graph.
+///
+/// `body` computes this step's logits from the registered inputs; it must
+/// be a function item (no closures) so the captured region can only read
+/// model-owned weights and the registered tensors. The helper runs the
+/// warmup, allocates and primes the output buffer, captures, launches and
+/// synchronizes the warm launch, and assembles the graph struct.
 #[cfg(feature = "cuda")]
-impl Default for CudaGraphInputBag {
-    fn default() -> Self {
-        Self::new()
+pub(crate) fn capture_decoder_graph<M>(
+    cuda: &std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaDevice>,
+    model_name: &'static str,
+    model: &M,
+    lm_head: &candle_nn::Linear,
+    inputs: CudaGraphInputs,
+    body: fn(&M, &candle_nn::Linear, &CapturedInputs<'_>) -> Result<Tensor, Error>,
+    cache_len: usize,
+) -> Result<SingleTokenDecoderCudaGraph, Error> {
+    use candle_core::cuda_backend::cudarc::driver::sys::{
+        CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
+    };
+
+    let CudaGraphInputs {
+        hidden,
+        positions,
+        query_lengths,
+        kv_lengths,
+        extra,
+    } = inputs;
+    let captured = CapturedInputs {
+        hidden: &hidden,
+        positions: &positions,
+        query_lengths: &query_lengths,
+        kv_lengths: kv_lengths.tensor(),
+        extra: &extra,
+    };
+    let stream = cuda.cuda_stream();
+    let _htod_cache = cuda.enable_cuda_graph_htod_cache();
+
+    let warm_logits = body(model, lm_head, &captured)?;
+    sync_graph_tensor(model_name, &warm_logits, "warm decoder CUDA graph")?;
+    // Allocate the output buffer before capture so it belongs to the
+    // regular stream-ordered pool; a capture-time allocation lives in the
+    // graph's private pool and can never be returned to the allocator
+    // safely. Prime the copy so the captured run sees a warm kernel.
+    let logits_output = Tensor::zeros_like(&warm_logits)
+        .map_err(|e| candle_to_ocr_inference(model_name, "graph logits output", e))?;
+    logits_output
+        .slice_set(&warm_logits, 0, 0)
+        .map_err(|e| candle_to_ocr_inference(model_name, "prime graph logits copy", e))?;
+
+    stream
+        .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
+        .map_err(|e| cuda_graph_error(model_name, "begin decoder CUDA graph capture", e))?;
+    let captured_output: Result<(), Error> = (|| {
+        let logits = body(model, lm_head, &captured)?;
+        logits_output
+            .slice_set(&logits, 0, 0)
+            .map_err(|e| candle_to_ocr_inference(model_name, "record graph logits copy", e))
+    })();
+    if let Err(error) = captured_output {
+        let _ = stream.end_capture(
+            CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+        );
+        return Err(error);
     }
+    let graph = stream
+        .end_capture(CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH)
+        .map_err(|e| cuda_graph_error(model_name, "end decoder CUDA graph capture", e))?
+        .ok_or_else(|| Error::Config {
+            message: format!("{model_name} decoder capture returned no graph"),
+        })?;
+    graph
+        .launch()
+        .map_err(|e| cuda_graph_error(model_name, "warm decoder CUDA graph", e))?;
+    sync_graph_tensor(model_name, &logits_output, "sync decoder CUDA graph")?;
+    Ok(SingleTokenDecoderCudaGraph {
+        graph,
+        hidden_input: hidden,
+        position_input: positions,
+        _query_lengths: query_lengths,
+        kv_lengths,
+        logits_output,
+        retained_inputs: extra,
+        cache_len,
+    })
 }
 
 /// Match eager decoder attention: a single query has no future token to mask,
