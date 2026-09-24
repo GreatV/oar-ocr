@@ -189,13 +189,23 @@ impl JinaOcrMtp {
     /// Shared-norm hidden states and their greedy proposals for one span. The
     /// returned hidden states feed the next recurrent step (FastMTP trains
     /// with this post-norm feedback).
-    fn forward_tokens(
+    /// Shared-head greedy proposal for a hidden-state block, `(rows,)` u32.
+    fn tokens_from_hidden(&self, hidden_states: &Tensor) -> Result<Tensor, Error> {
+        self.shared_head
+            .forward(hidden_states)
+            .and_then(|logits| logits.squeeze(0))
+            .and_then(|logits| logits.argmax(candle_core::D::Minus1))
+            .map_err(|e| candle_to_ocr_inference("JinaOCR", "MTP shared head argmax", e))
+    }
+
+    fn forward_tokens_inner(
         &self,
         input_ids: &Tensor,
         previous_hidden_states: &Tensor,
         position_ids: &Tensor,
         mask_first_position: bool,
-    ) -> Result<(Tensor, Tensor), Error> {
+        want_proposals: bool,
+    ) -> Result<(Tensor, Option<Tensor>), Error> {
         let hidden_states =
             self.fuse_inputs(input_ids, previous_hidden_states, mask_first_position)?;
         let (cos, sin) = self.rope_tables(position_ids, &hidden_states)?;
@@ -204,13 +214,27 @@ impl JinaOcrMtp {
             .shared_norm
             .forward(&hidden_states)
             .map_err(|e| candle_to_ocr_inference("JinaOCR", "MTP shared norm", e))?;
+        if !want_proposals {
+            return Ok((hidden_states, None));
+        }
         let tokens = self
             .shared_head
             .forward(&hidden_states)
             .and_then(|logits| logits.squeeze(0))
             .and_then(|logits| logits.argmax(candle_core::D::Minus1))
             .map_err(|e| candle_to_ocr_inference("JinaOCR", "MTP shared head argmax", e))?;
-        Ok((hidden_states, tokens))
+        Ok((hidden_states, Some(tokens)))
+    }
+
+    fn forward_tokens(
+        &self,
+        input_id: &Tensor,
+        previous_hidden_state: &Tensor,
+        position_ids: &Tensor,
+    ) -> Result<(Tensor, Tensor), Error> {
+        let (hidden_states, tokens) =
+            self.forward_tokens_inner(input_id, previous_hidden_state, position_ids, false, true)?;
+        Ok((hidden_states, tokens.expect("want_proposals")))
     }
 
     #[cfg(feature = "cuda")]
@@ -261,8 +285,10 @@ impl JinaOcrMtp {
         Ok((cos, sin))
     }
 
-    /// Synchronize the draft with an accepted target span and return the
-    /// span's hidden states plus its greedy proposals.
+    /// Synchronize the draft with a target span and return the span's hidden
+    /// states plus the greedy proposal for the span's LAST position (the only
+    /// one callers consume — scoring the whole span through the shared head
+    /// would dominate every sync's cost).
     pub(crate) fn sync_target_span(
         &self,
         shifted_input_ids: &Tensor,
@@ -270,12 +296,21 @@ impl JinaOcrMtp {
         position_ids: &Tensor,
         mask_first_position: bool,
     ) -> Result<(Tensor, Tensor), Error> {
-        self.forward_tokens(
+        let (hidden_states, _) = self.forward_tokens_inner(
             shifted_input_ids,
             target_hidden_states,
             position_ids,
             mask_first_position,
-        )
+            false,
+        )?;
+        let seq_len = hidden_states
+            .dim(1)
+            .map_err(|e| candle_to_ocr_inference("JinaOCR", "MTP span length", e))?;
+        let last = hidden_states
+            .narrow(1, seq_len - 1, 1)
+            .map_err(|e| candle_to_ocr_inference("JinaOCR", "MTP last hidden", e))?;
+        let token = self.tokens_from_hidden(&last)?;
+        Ok((hidden_states, token))
     }
 
     /// Recurrently propose one more token from the preceding MTP hidden state.
@@ -294,7 +329,7 @@ impl JinaOcrMtp {
                 return Ok(output);
             }
         }
-        self.forward_tokens(input_id, previous_hidden_state, position_ids, false)
+        self.forward_tokens(input_id, previous_hidden_state, position_ids)
     }
 
     #[cfg(feature = "cuda")]

@@ -31,9 +31,8 @@ use std::cell::RefCell;
 use crate::runtime::cuda::dynamic_kv::DynamicKvAppend;
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
-    CudaGraphDrainGuard, CudaGraphKvLengths, SingleTokenDecoderCudaGraph, cuda_graph_error,
-    decoder_attention_is_causal, decoder_cache_capacity, drop_and_drain, report_stashed_cuda_error,
-    sync_graph_tensor,
+    CudaGraphDrainGuard, CudaGraphKvLengths, cuda_graph_error, decoder_attention_is_causal,
+    decoder_cache_capacity, drop_and_drain, report_stashed_cuda_error, sync_graph_tensor,
 };
 #[cfg(feature = "cuda")]
 use candle_core::Device;
@@ -1006,6 +1005,59 @@ impl DecoderLayer {
     fn trim_kv_cache(&self, len: usize) -> Result<(), Error> {
         self.attention.trim_kv_cache(len)
     }
+
+    /// Snapshot the live KV contents (`((k, v, len),)` triples per layer
+    /// dimension), so a mid-generation graph capture can restore them after
+    /// its warmup runs disturb the shared storage.
+    #[cfg(feature = "cuda")]
+    fn save_kv_cache(&self) -> Result<(Tensor, Tensor, usize), Error> {
+        let cache = self.attention.kv_cache.borrow();
+        let len = cache.current_seq_len();
+        let Some((storage_k, storage_v)) = cache.storage() else {
+            let device = storage_k_device(&cache);
+            return Ok((Tensor::new(0f32, &device)?, Tensor::new(0f32, &device)?, 0));
+        };
+        let k = storage_k
+            .narrow(2, 0, len)
+            .and_then(|k| k.contiguous())
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "snapshot KV keys", e))?;
+        let v = storage_v
+            .narrow(2, 0, len)
+            .and_then(|v| v.contiguous())
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "snapshot KV values", e))?;
+        drop(cache);
+        Ok((k, v, len))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn restore_kv_cache(&self, (k, v, len): &(Tensor, Tensor, usize)) -> Result<(), Error> {
+        if *len == 0 {
+            self.attention.clear_cache();
+            return Ok(());
+        }
+        {
+            let cache = self.attention.kv_cache.borrow_mut();
+            let (storage_k, storage_v) = cache.storage().ok_or_else(|| Error::Config {
+                message: format!("{MODEL_NAME} KV storage missing during restore"),
+            })?;
+            storage_k
+                .slice_set(k, 2, 0)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "restore KV keys", e))?;
+            storage_v
+                .slice_set(v, 2, 0)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "restore KV values", e))?;
+        }
+        self.attention.set_kv_cache_len(*len)
+    }
+}
+
+/// Device of a cache's storage for empty snapshots.
+#[cfg(feature = "cuda")]
+fn storage_k_device(cache: &TrimmableKvCache) -> Device {
+    cache
+        .storage()
+        .map(|(k, _)| k.device().clone())
+        .unwrap_or(Device::Cpu)
 }
 
 pub(crate) struct DeepSeekV2TextModel {
@@ -1308,6 +1360,18 @@ impl DeepSeekV2TextModel {
         self.invalidate_cuda_graph();
         self.capture_verification_cuda_graph(cache_len, query_len, lm_head)?;
         Ok(Some(cache_len))
+    }
+
+    /// Capture the decode graph against an existing fixed-capacity bucket
+    /// (e.g. one a verification graph already holds, so the shared storage is
+    /// reused instead of reallocated). No-op when a decode graph exists.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn capture_ar_cuda_graph_with_capacity(
+        &self,
+        cache_len: usize,
+        lm_head: &Linear,
+    ) -> Result<(), Error> {
+        self.capture_cuda_graph(cache_len, lm_head)
     }
 
     #[cfg(feature = "cuda")]
@@ -1654,6 +1718,28 @@ impl DeepSeekV2TextModel {
     pub(crate) fn trim_kv_cache(&self, len: usize) -> Result<(), Error> {
         for layer in &self.layers {
             layer.trim_kv_cache(len)?;
+        }
+        Ok(())
+    }
+
+    /// Snapshot every layer's live KV contents. Mid-generation graph captures
+    /// reuse the fixed storage but their warmup runs overwrite the first
+    /// positions and reset the logical length; this saves what must be
+    /// restored afterwards.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn save_kv_cache(&self) -> Result<Vec<(Tensor, Tensor, usize)>, Error> {
+        let mut saved = Vec::with_capacity(self.layers.len());
+        for layer in &self.layers {
+            saved.push(layer.save_kv_cache()?);
+        }
+        Ok(saved)
+    }
+
+    /// Restore a [`Self::save_kv_cache`] snapshot into the live storage.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn restore_kv_cache(&self, saved: &[(Tensor, Tensor, usize)]) -> Result<(), Error> {
+        for (layer, snapshot) in self.layers.iter().zip(saved) {
+            layer.restore_kv_cache(snapshot)?;
         }
         Ok(())
     }

@@ -44,8 +44,10 @@ const NGRAM_WHITELIST: [u32; 2] = [128_821, 128_822];
 /// `mtp_num_speculative_steps`: FastMTP draft tokens per verification block.
 const MTP_DRAFT_TOKENS: usize = 3;
 const MTP_QUERY_LEN: usize = MTP_DRAFT_TOKENS + 1;
-/// Below this budget speculation costs more than plain decoding.
-const MTP_MIN_NEW_TOKENS: usize = 8;
+/// Below this budget speculation costs more than plain decoding: the
+/// per-page setup (initial draft sync plus graph captures, ~80ms on an RTX
+/// 4090) dominates short generations.
+const MTP_MIN_NEW_TOKENS: usize = 384;
 
 struct TextCacheGuard<'a>(&'a DeepSeekV2TextModel);
 
@@ -206,9 +208,6 @@ impl JinaOcr {
         self.text.clear_kv_cache();
         let _cache_guard = TextCacheGuard(&self.text);
         if self.mtp_enabled(max_new_tokens) {
-            let mtp = self.mtp.as_ref().expect("MTP availability checked");
-            mtp.clear_kv_cache();
-            self.prepare_mtp_graphs(prompt.input_ids.len(), max_new_tokens)?;
             let hidden = self
                 .text
                 .forward(&prompt.inputs_embeds, &prompt.position_ids, None)?;
@@ -429,34 +428,6 @@ impl JinaOcr {
     /// dense draft block stays fully on-device, so it is the one piece of the
     /// speculative loop that graph capture can accelerate (the target's MoE
     /// layers route through the host and must stay eager).
-    /// Capture the target verification block and the FastMTP draft graph
-    /// over a shared fixed-capacity KV bucket.
-    #[cfg(feature = "cuda")]
-    fn prepare_mtp_graphs(&self, prompt_len: usize, max_new_tokens: usize) -> Result<(), Error> {
-        let mtp = self.mtp.as_ref().expect("MTP availability checked");
-        if let Some(cache_len) = self.text.prepare_verification_cuda_graph(
-            prompt_len,
-            max_new_tokens,
-            MTP_QUERY_LEN,
-            &self.lm_head,
-        )? {
-            if let Err(error) = mtp.prepare_cuda_graph(cache_len) {
-                tracing::warn!("JinaOCR MTP graph capture failed: {error}");
-                mtp.disable_cuda_graph();
-            }
-        } else {
-            // An eager prefill may grow/reallocate draft storage; a graph
-            // captured earlier would retain stale device pointers.
-            mtp.disable_cuda_graph();
-        }
-        Ok(())
-    }
-
-    #[cfg(not(feature = "cuda"))]
-    fn prepare_mtp_graphs(&self, _prompt_len: usize, _max_new_tokens: usize) -> Result<(), Error> {
-        Ok(())
-    }
-
     /// Tokenize the fixed OCR prompt for one page and splice the visual
     /// features into the image placeholder positions.
     fn prepare_prompt(
@@ -642,15 +613,16 @@ pub(crate) struct AdaptiveSpec {
     /// Verification rounds in the sliding acceptance window.
     pub window_rounds: usize,
     /// Mean committed tokens per round below which speculation pauses.
-    /// Measured on RTX 4090 (bf16, 1024-token pages): acceptance ~1.5 ran
-    /// 3-11% behind plain decoding, ~1.96 was break-even to +3%, and 2.4+
-    /// won 10%+. The conservative crossing for staying within ~2% of plain
-    /// decoding therefore sits at 1.7.
+    /// Measured on RTX 4090 (bf16, 1024-token pages, six-page sweep with
+    /// sub-0.3% run noise): acceptance ~1.5 lost 3-11%, ~1.9 sat within
+    /// ±2%, and 2.4+ won about 10%. The real crossing is close to 2.0, so
+    /// pages between 1.7 and 1.9 gain nothing from speculation — pausing
+    /// them costs nothing and removes the downside.
     pub break_even: f64,
-    /// Plain-decode tokens between speculation probes. A probe rebuilds the
-    /// draft state with one dense-layer pass over the committed prefix
-    /// (~tens of milliseconds), so a wide interval keeps the amortized cost
-    /// around a percent.
+    /// Plain-decode tokens before the first speculation probe. A probe
+    /// rebuilds the draft state with one dense-layer pass over the committed
+    /// prefix (~tens of milliseconds); each consecutive fallback doubles the
+    /// next interval so pages that keep rejecting stay in plain decoding.
     pub probe_interval: usize,
 }
 
@@ -658,7 +630,7 @@ impl Default for AdaptiveSpec {
     fn default() -> Self {
         Self {
             window_rounds: 16,
-            break_even: 1.7,
+            break_even: 1.9,
             probe_interval: 256,
         }
     }
@@ -783,19 +755,11 @@ impl GreedyEngine<'_> {
             return Ok((Vec::new(), true));
         }
 
-        // Initial draft: sync the FastMTP layer over the whole prompt.
-        mtp.clear_kv_cache();
-        let mut shifted_ids = Vec::with_capacity(prompt_len);
-        shifted_ids.extend_from_slice(&prompt_ids[1..]);
-        shifted_ids.push(current);
-        let shifted = Tensor::from_vec(shifted_ids, (1, prompt_len), self.device)
-            .map_err(|e| candle_to_ocr_inference(name, "MTP shifted prompt ids", e))?;
-        let positions =
-            Tensor::arange(0u32, prompt_len as u32, self.device)?.reshape((1, 1, prompt_len))?;
-        let (span_hidden, span_tokens) =
-            mtp.sync_target_span(&shifted, prompt_hidden, &positions, true)?;
-        let mut drafts =
-            self.complete_mtp_drafts(mtp, &span_hidden, &span_tokens, prompt_len as u32)?;
+        // Speculation starts paused: pages that never reach the first probe
+        // (short outputs, or the budget is small) run plain decoding with
+        // zero speculative setup, and the first probe pays the only full
+        // draft sync of the page.
+        let mut drafts: Vec<u32> = Vec::new();
 
         let mut generated: Vec<u32> = Vec::with_capacity(max_new_tokens);
         let mut history = prompt_ids.to_vec();
@@ -814,7 +778,9 @@ impl GreedyEngine<'_> {
         // again every `probe_interval` committed tokens.
         let mut window: std::collections::VecDeque<usize> =
             std::collections::VecDeque::with_capacity(adaptive.window_rounds.max(1));
-        let mut cooldown_remaining = 0usize;
+        let mut cooldown_remaining = adaptive.probe_interval;
+        let mut next_probe_interval = adaptive.probe_interval;
+        let mut graphs_ready = false;
 
         loop {
             if self.eos_token_ids.contains(&current) {
@@ -825,6 +791,14 @@ impl GreedyEngine<'_> {
             history.push(current);
             if generated.len() == max_new_tokens {
                 break;
+            }
+
+            if drafts.is_empty() && cooldown_remaining == 0 {
+                // Budget-exhaustion safety: the cooldown path always fills
+                // `drafts` before it expires.
+                return Err(Error::Config {
+                    message: format!("{name}: speculation has neither drafts nor a cooldown"),
+                });
             }
 
             if cooldown_remaining > 0 {
@@ -844,8 +818,12 @@ impl GreedyEngine<'_> {
                 position += 1;
                 cooldown_remaining -= 1;
                 if cooldown_remaining == 0 {
-                    // Probe: rebuild the draft state over the whole committed
-                    // prefix and resume speculation.
+                    // First probe pays the page's only speculative setup:
+                    // graph capture plus a full draft sync.
+                    if !graphs_ready {
+                        self.prepare_speculation_graphs(prompt_ids.len(), max_new_tokens)?;
+                        graphs_ready = true;
+                    }
                     drafts = self.rebuild_drafts(
                         mtp,
                         prompt_hidden,
@@ -923,6 +901,10 @@ impl GreedyEngine<'_> {
             position += keep as u32;
             current = next_token;
 
+            if window.is_empty() {
+                // Fresh window (first round or just re-entered after a probe).
+                next_probe_interval = adaptive.probe_interval;
+            }
             window.push_back(keep);
             if window.len() > adaptive.window_rounds {
                 window.pop_front();
@@ -931,7 +913,11 @@ impl GreedyEngine<'_> {
                 let mean: f64 =
                     window.iter().map(|&keep| keep as f64).sum::<f64>() / window.len() as f64;
                 if mean < adaptive.break_even {
-                    cooldown_remaining = adaptive.probe_interval;
+                    cooldown_remaining = next_probe_interval;
+                    // Exponential backoff: a page that keeps rejecting
+                    // speculation spends progressively more of itself in
+                    // plain decoding.
+                    next_probe_interval = next_probe_interval.saturating_mul(4);
                     window.clear();
                 }
             }
@@ -961,6 +947,50 @@ impl GreedyEngine<'_> {
             );
         }
         Ok((generated, hit_eos))
+    }
+
+    /// Capture the target verification and draft graphs (CUDA only; a no-op
+    /// elsewhere).
+    fn prepare_speculation_graphs(
+        &self,
+        prompt_len: usize,
+        max_new_tokens: usize,
+    ) -> Result<(), Error> {
+        #[cfg(feature = "cuda")]
+        {
+            let mtp = self.mtp.ok_or_else(|| Error::Config {
+                message: format!("{}: MTP draft head is not loaded", self.model_name),
+            })?;
+            // Captures reuse the fixed KV storage but their warmup runs
+            // overwrite the leading positions and reset the logical length —
+            // snapshot and restore the live cache around them.
+            let saved = self.text.save_kv_cache()?;
+            if let Some(cache_len) = self.text.prepare_verification_cuda_graph(
+                prompt_len,
+                max_new_tokens,
+                MTP_QUERY_LEN,
+                self.lm_head,
+            )? {
+                // Cooldown decoding runs through the graph too: capture the
+                // decode graph against the verification bucket so the shared
+                // KV storage is reused, not reallocated.
+                if let Err(error) = self
+                    .text
+                    .capture_ar_cuda_graph_with_capacity(cache_len, self.lm_head)
+                {
+                    tracing::warn!("JinaOCR decode graph capture failed: {error}");
+                }
+                if let Err(error) = mtp.prepare_cuda_graph(cache_len) {
+                    tracing::warn!("JinaOCR MTP graph capture failed: {error}");
+                    mtp.disable_cuda_graph();
+                }
+            } else {
+                mtp.disable_cuda_graph();
+            }
+            self.text.restore_kv_cache(&saved)?;
+        }
+        let _ = (prompt_len, max_new_tokens);
+        Ok(())
     }
 
     /// Rebuild the draft state over the whole committed prefix — the same
