@@ -857,6 +857,13 @@ impl NaviDcTextModel {
             layer.clear_kv_cache();
         }
     }
+
+    /// Whether the decode graph is currently captured — asserted by the GPU
+    /// self-checks.
+    #[cfg(all(test, feature = "cuda"))]
+    fn decode_graph_captured(&self) -> bool {
+        self.decode_graph.borrow().is_some()
+    }
 }
 
 #[cfg(feature = "cuda")]
@@ -865,5 +872,327 @@ impl Drop for NaviDcTextModel {
         // A cached graph must go through dispose: plainly dropping it returns
         // graph-bound buffers to the allocator and poisons it.
         self.invalidate_cuda_graph();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(feature = "cuda")]
+    use super::super::config::NaviDcConfig;
+    #[cfg(feature = "cuda")]
+    use super::*;
+
+    /// GPU self-check for the decode graph lifecycle, in BF16 so the graph
+    /// captures: a short prompt captures a small bucket, a longer prompt
+    /// forces a same-process re-capture, the larger graph then covers the
+    /// short prompt again, and a second instance captures while the first
+    /// graph is alive. Every graphed run must match plain eager decoding.
+    /// Skips without a CUDA device; opt in with
+    /// `OAR_NAVIDC_GPU_SELFTEST=1`.
+    #[test]
+    fn cuda_decode_graph_recaptures_and_matches_eager() {
+        #[cfg(feature = "cuda")]
+        {
+            use candle_nn::Linear;
+            if std::env::var_os("OAR_NAVIDC_GPU_SELFTEST").is_none() {
+                eprintln!("skipping: OAR_NAVIDC_GPU_SELFTEST is not set");
+                return;
+            }
+            let Ok(device) = Device::new_cuda(0) else {
+                eprintln!("skipping: no CUDA device");
+                return;
+            };
+            let cfg = production_config();
+            let tensors = random_var_map(&cfg, &device, DType::BF16);
+            let make_vb =
+                || candle_nn::VarBuilder::from_tensors(tensors.clone(), DType::BF16, &device);
+            let model = NaviDcTextModel::load(&cfg, make_vb().pp("model")).unwrap();
+            let lm_head = Linear::new(
+                make_vb()
+                    .get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
+                    .unwrap(),
+                None,
+            );
+
+            let long: Vec<u32> = (0..4200).map(|i| 10 + i % 60).collect();
+            let short: Vec<u32> = (0..600).map(|i| 10 + i % 60).collect();
+
+            // Small bucket first.
+            assert_eq!(
+                greedy_eager(&model, &lm_head, &short, 8),
+                greedy_graphed(&model, &lm_head, &short, 8),
+                "small-bucket graph decode must match eager"
+            );
+            assert!(model.decode_graph_captured());
+
+            // Growth past the captured bucket forces a re-capture in the
+            // same process — the dangling-read failure mode.
+            assert_eq!(
+                greedy_eager(&model, &lm_head, &long, 8),
+                greedy_graphed(&model, &lm_head, &long, 8),
+                "re-captured graph decode must match eager"
+            );
+
+            // The larger graph now covers the short prompt again (reuse).
+            assert_eq!(
+                greedy_eager(&model, &lm_head, &short, 8),
+                greedy_graphed(&model, &lm_head, &short, 8),
+                "reused graph decode must match eager"
+            );
+
+            // A second instance capturing while the first graph is alive.
+            let second = NaviDcTextModel::load(&cfg, make_vb().pp("model")).unwrap();
+            assert_eq!(
+                greedy_eager(&second, &lm_head, &long, 8),
+                greedy_graphed(&second, &lm_head, &long, 8),
+                "second-instance graph decode must match eager"
+            );
+        }
+        #[cfg(not(feature = "cuda"))]
+        eprintln!("skipping: built without the cuda feature");
+    }
+
+    #[cfg(feature = "cuda")]
+    fn production_config() -> NaviDcConfig {
+        NaviDcConfig {
+            vocab_size: 32768,
+            hidden_size: 2048,
+            intermediate_size: 6144,
+            num_hidden_layers: 4,
+            num_attention_heads: 16,
+            num_key_value_heads: 8,
+            attention_dropout: 0.0,
+            rms_norm_eps: 1e-6,
+            rope_theta: 1_000_000.0,
+            max_position_embeddings: 262_144,
+            head_dim: Some(128),
+            hidden_act: "silu".to_string(),
+            tie_word_embeddings: true,
+            bos_token_id: 0,
+            eos_token_id: 1,
+            pad_token_id: None,
+            vision_start_token_id: 2,
+            vision_end_token_id: 3,
+            vision_token_id: 4,
+            image_token_id: 5,
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn random_var_map(
+        cfg: &NaviDcConfig,
+        device: &Device,
+        dtype: DType,
+    ) -> std::collections::HashMap<String, Tensor> {
+        let mut tensors = std::collections::HashMap::new();
+        let h = cfg.hidden_size;
+        let head_dim = cfg.head_dim.unwrap();
+        let put = |tensors: &mut std::collections::HashMap<String, Tensor>,
+                   name: String,
+                   shape: Vec<usize>| {
+            let len: usize = shape.iter().product();
+            let data: Vec<f32> = (0..len)
+                .map(|i| {
+                    let x = (i as u32).wrapping_mul(2_654_435_761) % 10_001;
+                    (x as f32 / 10_000.0 - 0.5) * 0.1
+                })
+                .collect();
+            let tensor = Tensor::from_vec(data, shape, device)
+                .unwrap()
+                .to_dtype(dtype)
+                .unwrap();
+            tensors.insert(name, tensor);
+        };
+        put(
+            &mut tensors,
+            "model.embed_tokens.weight".into(),
+            vec![cfg.vocab_size, h],
+        );
+        put(&mut tensors, "model.norm.weight".into(), vec![h]);
+        put(
+            &mut tensors,
+            "lm_head.weight".into(),
+            vec![cfg.vocab_size, h],
+        );
+        for layer in 0..cfg.num_hidden_layers {
+            let prefix = format!("model.layers.{layer}");
+            put(
+                &mut tensors,
+                format!("{prefix}.self_attn.q_proj.weight"),
+                vec![cfg.num_attention_heads * head_dim, h],
+            );
+            put(
+                &mut tensors,
+                format!("{prefix}.self_attn.k_proj.weight"),
+                vec![cfg.num_key_value_heads * head_dim, h],
+            );
+            put(
+                &mut tensors,
+                format!("{prefix}.self_attn.v_proj.weight"),
+                vec![cfg.num_key_value_heads * head_dim, h],
+            );
+            put(
+                &mut tensors,
+                format!("{prefix}.self_attn.o_proj.weight"),
+                vec![h, cfg.num_attention_heads * head_dim],
+            );
+            put(
+                &mut tensors,
+                format!("{prefix}.self_attn.q_norm.weight"),
+                vec![head_dim],
+            );
+            put(
+                &mut tensors,
+                format!("{prefix}.self_attn.k_norm.weight"),
+                vec![head_dim],
+            );
+            for norm in ["input_layernorm", "post_attention_layernorm"] {
+                put(&mut tensors, format!("{prefix}.{norm}.weight"), vec![h]);
+            }
+            for proj in ["gate_proj", "up_proj"] {
+                put(
+                    &mut tensors,
+                    format!("{prefix}.mlp.{proj}.weight"),
+                    vec![cfg.intermediate_size, h],
+                );
+            }
+            put(
+                &mut tensors,
+                format!("{prefix}.mlp.down_proj.weight"),
+                vec![h, cfg.intermediate_size],
+            );
+        }
+        tensors
+    }
+
+    /// Greedy decode driven by plain `forward` calls: never captures or
+    /// replays the decode graph, so it is the eager reference.
+    #[cfg(feature = "cuda")]
+    fn greedy_eager(
+        model: &NaviDcTextModel,
+        lm_head: &candle_nn::Linear,
+        ids: &[u32],
+        steps: usize,
+    ) -> Vec<u32> {
+        let device = model.embed_tokens.embeddings().device();
+        let seq_len = ids.len();
+        let token_ids = Tensor::from_vec(ids.to_vec(), (1, seq_len), device).unwrap();
+        let embeds = model.embed(&token_ids).unwrap();
+        let positions = text_position_ids(seq_len, device);
+        model.clear_kv_cache();
+        let mut logits = step_logits(model, lm_head, &embeds, &positions, seq_len);
+        let mut out = Vec::new();
+        for step in 0..steps {
+            let best = argmax_of(&logits);
+            out.push(best as u32);
+            let embed = embed_token(model, device, best as u32);
+            let pos = decode_position(seq_len + step, device);
+            let hidden = model.forward(&embed, &pos, None).unwrap();
+            logits = project(model, lm_head, &hidden);
+        }
+        out
+    }
+
+    /// Greedy decode through `prepare_ar_cuda_graph` +
+    /// `forward_decode_logits`, i.e. exactly the production graph path.
+    #[cfg(feature = "cuda")]
+    fn greedy_graphed(
+        model: &NaviDcTextModel,
+        lm_head: &candle_nn::Linear,
+        ids: &[u32],
+        steps: usize,
+    ) -> Vec<u32> {
+        let device = model.embed_tokens.embeddings().device();
+        let seq_len = ids.len();
+        let token_ids = Tensor::from_vec(ids.to_vec(), (1, seq_len), device).unwrap();
+        let embeds = model.embed(&token_ids).unwrap();
+        let positions = text_position_ids(seq_len, device);
+        model.clear_kv_cache();
+        model
+            .prepare_ar_cuda_graph(seq_len, steps, lm_head)
+            .unwrap();
+        assert!(
+            model.decode_graph_captured(),
+            "decode graph did not capture (dtype gate?)"
+        );
+        let mut logits = step_logits(model, lm_head, &embeds, &positions, seq_len);
+        let mut out = Vec::new();
+        for step in 0..steps {
+            let best = argmax_of(&logits);
+            out.push(best as u32);
+            let embed = embed_token(model, device, best as u32);
+            let pos = decode_position(seq_len + step, device);
+            logits = model
+                .forward_decode_logits(&embed, &pos, None, lm_head)
+                .unwrap();
+        }
+        out
+    }
+
+    #[cfg(feature = "cuda")]
+    fn step_logits(
+        model: &NaviDcTextModel,
+        lm_head: &candle_nn::Linear,
+        embeds: &Tensor,
+        positions: &Tensor,
+        seq_len: usize,
+    ) -> Tensor {
+        let hidden = model.forward(embeds, positions, None).unwrap();
+        let last = hidden
+            .i((0, seq_len - 1, ..))
+            .unwrap()
+            .contiguous()
+            .unwrap();
+        lm_head.forward(&last.unsqueeze(0).unwrap()).unwrap()
+    }
+
+    #[cfg(feature = "cuda")]
+    fn project(model: &NaviDcTextModel, lm_head: &candle_nn::Linear, hidden: &Tensor) -> Tensor {
+        let last = hidden.i((0, 0, ..)).unwrap().contiguous().unwrap();
+        lm_head.forward(&last.unsqueeze(0).unwrap()).unwrap()
+    }
+
+    #[cfg(feature = "cuda")]
+    fn embed_token(model: &NaviDcTextModel, device: &Device, token: u32) -> Tensor {
+        let ids = Tensor::from_vec(vec![token], (1, 1), device).unwrap();
+        model.embed(&ids).unwrap()
+    }
+
+    #[cfg(feature = "cuda")]
+    fn decode_position(position: usize, device: &Device) -> Tensor {
+        Tensor::from_vec(vec![position as i64; 3], (3, 1, 1), device).unwrap()
+    }
+
+    #[cfg(feature = "cuda")]
+    fn text_position_ids(seq_len: usize, device: &Device) -> Tensor {
+        let base = Tensor::arange(0i64, seq_len as i64, device)
+            .unwrap()
+            .reshape((1, 1, seq_len))
+            .unwrap();
+        let mut data = Vec::with_capacity(3 * seq_len);
+        for _ in 0..3 {
+            data.extend(base.flatten_all().unwrap().to_vec1::<i64>().unwrap());
+        }
+        Tensor::from_vec(data, (3, 1, seq_len), device).unwrap()
+    }
+
+    #[cfg(feature = "cuda")]
+    fn argmax_of(logits: &Tensor) -> usize {
+        let scores = logits
+            .flatten_all()
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let mut best = 0usize;
+        let mut best_value = f32::NEG_INFINITY;
+        for (i, &v) in scores.iter().enumerate() {
+            if v > best_value {
+                best_value = v;
+                best = i;
+            }
+        }
+        best
     }
 }
