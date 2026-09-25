@@ -1117,7 +1117,7 @@ mod tests {
             let embed = embed_token(model, device, best as u32);
             let pos = decode_position(seq_len + step, device);
             let hidden = model.forward(&embed, &pos, None).unwrap();
-            logits = project(model, lm_head, &hidden);
+            logits = project(lm_head, &hidden);
         }
         out
     }
@@ -1176,7 +1176,7 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    fn project(model: &NaviDcTextModel, lm_head: &candle_nn::Linear, hidden: &Tensor) -> Tensor {
+    fn project(lm_head: &candle_nn::Linear, hidden: &Tensor) -> Tensor {
         let last = hidden.i((0, 0, ..)).unwrap().contiguous().unwrap();
         lm_head.forward(&last.unsqueeze(0).unwrap()).unwrap()
     }
