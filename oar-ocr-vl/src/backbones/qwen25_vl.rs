@@ -26,7 +26,7 @@ fn default_hidden_act() -> String {
 }
 
 /// Shared Qwen2.5-VL windowed vision-tower configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct NaviDcVisionConfig {
     pub depth: usize,
     pub hidden_size: usize,

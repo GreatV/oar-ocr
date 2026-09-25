@@ -878,9 +878,13 @@ impl Drop for NaviDcTextModel {
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "cuda")]
-    use super::super::config::NaviDcConfig;
+    use super::super::config::{NaviDcConfig, NaviDcRopeScaling, NaviDcTextConfig};
     #[cfg(feature = "cuda")]
     use super::*;
+    #[cfg(feature = "cuda")]
+    use crate::backbones::qwen25_vl::NaviDcVisionConfig;
+    #[cfg(feature = "cuda")]
+    use candle_core::Device;
 
     /// GPU self-check for the decode graph lifecycle, in BF16 so the graph
     /// captures: a short prompt captures a small bucket, a longer prompt
@@ -952,6 +956,25 @@ mod tests {
         eprintln!("skipping: built without the cuda feature");
     }
 
+    /// Vision-tower values for the text-side self-test; the tower itself
+    /// never runs, but the config must be constructible. Built by field
+    /// assignment because the config type keeps private channel fields.
+    #[cfg(feature = "cuda")]
+    fn test_vision_config() -> NaviDcVisionConfig {
+        let mut vision = NaviDcVisionConfig::default();
+        vision.depth = 4;
+        vision.hidden_size = 128;
+        vision.out_hidden_size = 2048;
+        vision.num_heads = 8;
+        vision.intermediate_size = 256;
+        vision.hidden_act = "silu".to_string();
+        vision.patch_size = 14;
+        vision.spatial_merge_size = 2;
+        vision.temporal_patch_size = 2;
+        vision.window_size = 7;
+        vision
+    }
+
     #[cfg(feature = "cuda")]
     fn production_config() -> NaviDcConfig {
         NaviDcConfig {
@@ -975,6 +998,12 @@ mod tests {
             vision_end_token_id: 3,
             vision_token_id: 4,
             image_token_id: 5,
+            video_token_id: 6,
+            rope_scaling: NaviDcRopeScaling {
+                mrope_section: vec![16, 24, 24],
+            },
+            vision_config: test_vision_config(),
+            text_config: NaviDcTextConfig::default(),
         }
     }
 
