@@ -768,6 +768,7 @@ struct Qwen3Mlp {
     gate_proj: Linear,
     up_proj: Linear,
     down_proj: Linear,
+    intermediate_size: usize,
 }
 
 impl Qwen3Mlp {
@@ -782,6 +783,7 @@ impl Qwen3Mlp {
             gate_proj,
             up_proj,
             down_proj,
+            intermediate_size: cfg.intermediate_size,
         })
     }
 
@@ -795,7 +797,9 @@ impl Qwen3Mlp {
         let rows = xs.dim(1)?;
         let element_size = xs.dtype().size_in_bytes();
         let on_cuda = xs.device().is_cuda();
-        let intermediate_bytes = rows.saturating_mul(6144).saturating_mul(element_size);
+        let intermediate_bytes = rows
+            .saturating_mul(self.intermediate_size)
+            .saturating_mul(element_size);
         if on_cuda || intermediate_bytes <= 256 * 1024 * 1024 {
             let gate = self
                 .gate_proj
