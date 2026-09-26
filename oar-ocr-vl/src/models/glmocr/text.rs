@@ -1479,6 +1479,9 @@ impl GlmOcrTextModel {
             logits_output,
             retained_inputs: Vec::new(),
             cache_len,
+            // Declared-max bucket, no ladder: the ceiling equals the
+            // bucket, so replay never grows it.
+            ceiling: cache_len,
         });
         Ok(())
     }

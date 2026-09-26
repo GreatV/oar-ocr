@@ -1626,6 +1626,7 @@ impl Qwen3VlTextModel {
     fn capture_cuda_graph(
         &self,
         cache_len: usize,
+        ceiling: usize,
         lm_head: &Linear,
         append_slot: usize,
     ) -> Result<(), Error> {
