@@ -373,9 +373,30 @@ impl GlmOcrVisionAttention {
             )
         })?;
 
-        let attn =
-            crate::attention::scaled_dot_product_attention(&q, &k, &v, None, self.scaling, false)
-                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "vision attention", e))?;
+        let attn = match crate::attention::flash_attention(&q, &k, &v, self.scaling, false)
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "vision flash attention", e))?
+        {
+            Some(output) => output,
+            None if seq_len > crate::attention::VISION_CHUNKED_ATTN_SEQ_THRESHOLD => {
+                crate::attention::chunked_vision_attention(
+                    &q,
+                    &k,
+                    &v,
+                    self.scaling,
+                    crate::attention::VISION_CHUNKED_ATTN_CHUNK_SIZE,
+                )
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "chunked vision attention", e))?
+            }
+            None => crate::attention::scaled_dot_product_attention(
+                &q,
+                &k,
+                &v,
+                None,
+                self.scaling,
+                false,
+            )
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "vision attention", e))?,
+        };
         let attn = attn
             .transpose(1, 2)
             .map_err(|e| {
