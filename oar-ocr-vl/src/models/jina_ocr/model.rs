@@ -14,6 +14,13 @@
 //! slower; the one winning page gained 5%), so the draft head is only loaded
 //! on request — see [`JinaOcrLoadOptions::with_mtp`] and
 //! `OAR_JINAOCR_ENABLE_MTP`.
+//!
+//! Token-identity caveat: in exact arithmetic greedy verification emits the
+//! plain-greedy sequence, but the 4-token verification pass computes logits
+//! with different kernel batching than single-token decode (measured on the
+//! real checkpoint in bf16: max |Δlogit| ≈ 0.25-0.56 on identical KV state),
+//! so picks with a near-tie top-2 margin (≲0.1) can flip. Single-token
+//! cooldown decoding is bitwise-identical between graph replay and eager.
 
 use super::config::JinaOcrConfig;
 use super::mtp::JinaOcrMtp;
@@ -82,8 +89,9 @@ pub struct GenerationTrace {
 pub struct JinaOcrLoadOptions {
     /// Load the trained FastMTP draft head for speculative decoding
     /// (default: off). Greedy verification keeps the output token-identical
-    /// to plain decoding, but speculation is slower than graphed plain
-    /// decoding on typical pages (see the module documentation), so the head
+    /// to plain decoding in exact arithmetic (bf16 kernel noise can flip
+    /// near-tie picks — see the module documentation), but speculation is
+    /// slower than graphed plain decoding on typical pages, so the head
     /// is only loaded when explicitly requested here or via
     /// `OAR_JINAOCR_ENABLE_MTP`.
     pub mtp: bool,
@@ -463,7 +471,8 @@ impl JinaOcr {
     /// `OAR_JINAOCR_ENABLE_MTP`, because graphed plain decoding beat adaptive
     /// MTP on 17 of 18 OmniDocBench demo pages (RTX 4090, bf16). Greedy
     /// verification keeps the output token-identical to plain autoregressive
-    /// decoding either way.
+    /// decoding in exact arithmetic (near-tie picks can flip on bf16 kernel
+    /// noise — see the module documentation).
     fn mtp_enabled(&self, max_new_tokens: usize) -> bool {
         self.mtp.is_some() && self.device.is_cuda() && max_new_tokens >= MTP_MIN_NEW_TOKENS
     }
@@ -816,7 +825,9 @@ impl GreedyEngine<'_> {
 
     /// Speculative greedy decoding with the FastMTP draft head. Greedy
     /// verification accepts only the token-equality prefix, so the emitted
-    /// sequence matches [`Self::ar_tokens`] exactly; the n-gram ban is
+    /// sequence matches [`Self::ar_tokens`] in exact arithmetic (bf16 kernel
+    /// noise between the verification block and single-token decode can flip
+    /// near-tie picks — see the module docs); the n-gram ban is
     /// applied to the verification logits host-side, sequentially over the
     /// accepted block (positions past a rejection are computed over the
     /// wrong prefix and discarded by the accept loop).

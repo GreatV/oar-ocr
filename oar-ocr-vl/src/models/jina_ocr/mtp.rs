@@ -5,8 +5,12 @@
 //! true, so the embedding table, final norm, and LM head are the target
 //! model's own tensors). The layer is reused recurrently to propose
 //! `mtp_num_speculative_steps` tokens; greedy verification in the caller
-//! accepts only the token-equality prefix, so the emitted sequence stays
-//! identical to plain greedy decoding. The head is loaded only on explicit
+//! accepts only the token-equality prefix, so the emitted sequence matches
+//! plain greedy decoding up to bf16 kernel noise at near-tie picks (the
+//! 4-token verification pass and single-token decode differ by max
+//! |Δlogit| ≈ 0.25-0.56 on identical KV state, measured on the real
+//! checkpoint; see the model module docs). The head is loaded only on
+//! explicit
 //! request (`JinaOcrLoadOptions::with_mtp` / `OAR_JINAOCR_ENABLE_MTP`):
 //! measured on the OmniDocBench demo pages (RTX 4090, bf16), adaptive MTP
 //! lost to graphed plain decoding on 17 of 18 pages.
