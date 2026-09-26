@@ -81,7 +81,7 @@ pub fn preprocess_image(
     // side (for example a 10x200 rule); scale those up proportionally so
     // the processor's factor check passes instead of failing the page.
     let min_edge = (cfg.merge_size * cfg.patch_size) as u32;
-    let image = upscale_min_edge(image, min_edge);
+    let image = upscale_min_edge(image, min_edge, SMART_RESIZE_MAX_RATIO);
     let inputs = preprocess_images(std::slice::from_ref(&image), cfg, device, dtype)?;
     let grid_thw = *inputs
         .image_grid_thw
@@ -100,17 +100,44 @@ pub fn preprocess_image(
 
 /// Scale an image up until its shorter edge reaches `min_edge`, keeping the
 /// aspect ratio. Images already at or above `min_edge` pass through
-/// untouched.
-fn upscale_min_edge(image: &RgbImage, min_edge: u32) -> RgbImage {
+/// untouched. An aspect ratio beyond the processor's limit is padded on the
+/// short side (centered, white) so extreme crops — a 5x4000 rule, say —
+/// survive both the factor check and `smart_resize`'s ratio bound.
+use image::Rgb;
+
+/// `smart_resize` rejects aspect ratios above 200.
+const SMART_RESIZE_MAX_RATIO: f32 = 200.0;
+
+fn upscale_min_edge(image: &RgbImage, min_edge: u32, max_ratio: f32) -> RgbImage {
     let (w, h) = image.dimensions();
     let min_dim = w.min(h);
-    if min_dim == 0 || min_dim >= min_edge {
+    if min_dim == 0 {
         return image.clone();
     }
-    let scale = min_edge as f32 / min_dim as f32;
-    let new_w = ((w as f32 * scale).ceil() as u32).max(min_edge);
-    let new_h = ((h as f32 * scale).ceil() as u32).max(min_edge);
-    image::imageops::resize(image, new_w, new_h, image::imageops::FilterType::CatmullRom)
+    let mut out = if min_dim >= min_edge {
+        image.clone()
+    } else {
+        let scale = min_edge as f32 / min_dim as f32;
+        let new_w = ((w as f32 * scale).ceil() as u32).max(min_edge);
+        let new_h = ((h as f32 * scale).ceil() as u32).max(min_edge);
+        image::imageops::resize(image, new_w, new_h, image::imageops::FilterType::CatmullRom)
+    };
+    let (w, h) = out.dimensions();
+    let min_dim = w.min(h).max(1);
+    let ratio = w.max(h) as f32 / min_dim as f32;
+    if ratio > max_ratio {
+        let (new_w, new_h) = if w > h {
+            (w, ((w as f32 / max_ratio).ceil() as u32).max(min_dim))
+        } else {
+            (((h as f32 / max_ratio).ceil() as u32).max(min_dim), h)
+        };
+        let mut canvas = RgbImage::from_pixel(new_w, new_h, Rgb([255, 255, 255]));
+        let x = ((new_w - w) / 2) as i64;
+        let y = ((new_h - h) / 2) as i64;
+        image::imageops::overlay(&mut canvas, &out, x, y);
+        out = canvas;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -141,7 +168,7 @@ mod tests {
             rescale_factor: 1.0 / 255.0,
         };
         let vision = &config.vision_config;
-        for (w, h) in [(10u32, 200u32), (200, 10), (31, 31)] {
+        for (w, h) in [(10u32, 200u32), (200, 10), (31, 31), (5, 4000), (4000, 5)] {
             let img = RgbImage::from_pixel(w, h, Rgb([120, 140, 160]));
             let inputs = preprocess_image(&img, &cfg, vision, &Device::Cpu, DType::F32)
                 .unwrap_or_else(|e| panic!("{w}x{h} failed: {e}"));
