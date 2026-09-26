@@ -2966,9 +2966,10 @@ mod tests {
                 "compatible single-row storage must not be released"
             );
             model.release_incompatible_fixed_storage(Some(2));
-            // (batch width mismatch IS released — only single survives)
+            // Batch width over single-row storage: the storage is released
+            // and its graph goes with it.
             assert!(!model.batch_decode_graph_captured());
-            assert!(model.decode_graph_captured());
+            assert!(!model.decode_graph_captured());
 
             // Decode still matches eager after everything.
             let eager = greedy_eager(&model, &lm_head, &ids, 8);
