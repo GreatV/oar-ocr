@@ -3266,12 +3266,20 @@ mod tests {
         let embeds = model.embed(&token_ids).unwrap();
         let positions = text_position_ids_range(seq_len, device);
         model.clear_cache();
-        model.prepare_ar_cuda_graph(seq_len, steps + seq_len + 8, lm_head, true).unwrap();
+        model
+            .prepare_ar_cuda_graph(seq_len, steps + seq_len + 8, lm_head, true)
+            .unwrap();
         let hidden = model
             .forward(&embeds, &positions, None, None, None)
             .unwrap();
         let mut logits = lm_head
-            .forward(&hidden.i((0, seq_len - 1, ..)).unwrap().unsqueeze(0).unwrap())
+            .forward(
+                &hidden
+                    .i((0, seq_len - 1, ..))
+                    .unwrap()
+                    .unsqueeze(0)
+                    .unwrap(),
+            )
             .unwrap()
             .squeeze(0)
             .unwrap();
@@ -3281,12 +3289,8 @@ mod tests {
             out.push(best);
             let token = Tensor::from_vec(vec![best], (1, 1), device).unwrap();
             let embed = model.embed(&token).unwrap();
-            let pos = Tensor::from_vec(
-                vec![(seq_len + step) as i64; 3],
-                (3, 1, 1),
-                device,
-            )
-            .unwrap();
+            let pos =
+                Tensor::from_vec(vec![(seq_len + step) as i64; 3], (3, 1, 1), device).unwrap();
             logits = model
                 .forward_decode_logits(&embed, &pos, None, lm_head)
                 .unwrap();
