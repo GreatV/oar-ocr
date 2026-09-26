@@ -34,15 +34,13 @@ pub fn plan_num_image_tokens(
     cfg: &MinerUImageProcessorConfig,
 ) -> Result<usize, Error> {
     cfg.validate()?;
+    // Mirror preprocess_image's exact sequence: pad to the ratio limit,
+    // upscale the short edge, then resize. Calling the same helpers keeps
+    // the plan and the real path from drifting.
     let factor = (cfg.merge_size * cfg.patch_size) as u32;
-    let (w0, h0) = (image.width(), image.height());
-    let min_dim = w0.min(h0);
-    let (mut w, mut h) = (w0, h0);
-    if min_dim > 0 && min_dim < factor {
-        let scale = factor as f32 / min_dim as f32;
-        w = ((w as f32 * scale).ceil() as u32).max(factor);
-        h = ((h as f32 * scale).ceil() as u32).max(factor);
-    }
+    let padded = pad_to_ratio(image, SMART_RESIZE_MAX_RATIO);
+    let upscaled = upscale_min_edge(&padded, factor);
+    let (w, h) = (upscaled.width(), upscaled.height());
     let (min_pixels, max_pixels) = if cfg.do_resize {
         cfg.pixel_bounds()?
     } else {
@@ -221,6 +219,52 @@ mod tests {
             let inputs = preprocess_image(&img, &cfg, vision, &Device::Cpu, DType::F32)
                 .unwrap_or_else(|e| panic!("{w}x{h} failed: {e}"));
             assert!(inputs.num_image_tokens > 0, "{w}x{h} produced no tokens");
+        }
+    }
+
+    #[test]
+    fn plan_matches_actual_token_counts() {
+        // plan_num_image_tokens mirrors preprocess_image's resize math;
+        // any drift between the two shows up here.
+        let config = super::super::config::tests::official_config();
+        let cfg = MinerUImageProcessorConfig {
+            min_pixels: Some(65536),
+            max_pixels: Some(16_777_216),
+            size: None,
+            do_resize: true,
+            do_rescale: true,
+            do_normalize: true,
+            do_convert_rgb: true,
+            patch_size: config.vision_config.patch_size,
+            temporal_patch_size: config.vision_config.temporal_patch_size,
+            merge_size: config.vision_config.spatial_merge_size,
+            image_mean: vec![0.4814547, 0.4578275, 0.4082107],
+            image_std: vec![0.2686295, 0.2613026, 0.2757771],
+            resample: None,
+            rescale_factor: 1.0 / 255.0,
+        };
+        let vision = &config.vision_config;
+        for (w, h) in [
+            (800u32, 600u32),
+            (100, 100),
+            (1024, 2048),
+            (10, 200),
+            (200, 10),
+            (1, 4096),
+            (4096, 1),
+            (5, 4000),
+            (4000, 5),
+        ] {
+            let img = RgbImage::from_pixel(w, h, Rgb([120, 140, 160]));
+            let planned = plan_num_image_tokens(&img, &cfg)
+                .unwrap_or_else(|e| panic!("plan {w}x{h} failed: {e}"));
+            let actual = preprocess_image(&img, &cfg, vision, &Device::Cpu, DType::F32)
+                .unwrap_or_else(|e| panic!("preprocess {w}x{h} failed: {e}"))
+                .num_image_tokens;
+            assert_eq!(
+                planned, actual,
+                "plan/preprocess drift at {w}x{h}: {planned} vs {actual}"
+            );
         }
     }
 

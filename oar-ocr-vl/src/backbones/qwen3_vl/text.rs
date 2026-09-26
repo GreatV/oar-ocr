@@ -821,6 +821,16 @@ fn injected_capture_failure_after_layer(index: usize) -> bool {
         .is_some_and(|target| index + 1 == target)
 }
 
+/// Test-only injection point: after which layer's bucket growth should
+/// fail. Unset means the growth runs to completion.
+#[cfg(all(test, feature = "cuda"))]
+fn injected_growth_failure_after_layer(index: usize) -> bool {
+    std::env::var_os("OAR_WEVISDOC_FAIL_GROW_AFTER_LAYER")
+        .and_then(|value| value.into_string().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|target| index + 1 == target)
+}
+
 /// Masked attention in one pass; `is_causal` follows the mask's absence so
 /// mask-less callers get the kernel's causal flag.
 fn attention_masked_single(
@@ -1300,12 +1310,6 @@ impl Qwen3VlTextModel {
         query_len: usize,
         cache_len: usize,
     ) -> Result<(), Error> {
-        #[cfg(test)]
-        if std::env::var_os("OAR_WEVISDOC_FAIL_GROW").is_some() {
-            return Err(Error::Config {
-                message: "injected growth failure (test)".to_string(),
-            });
-        }
         let kv_heads = self
             .layers
             .first()
@@ -1316,8 +1320,18 @@ impl Qwen3VlTextModel {
             .first()
             .map(|layer| layer.attention_head_dim())
             .unwrap_or(1);
-        for layer in &self.layers {
+        for (index, layer) in self.layers.iter().enumerate() {
             layer.grow_dynamic_cache_batch(batch, query_len, kv_heads, head_dim, cache_len)?;
+            #[cfg(test)]
+            if injected_growth_failure_after_layer(index) {
+                // Fires after this layer's new-bucket allocation: the
+                // fallback must tolerate a partially grown set (layers
+                // below hold the new bucket, the rest the old one) and the
+                // eager append path must keep working across both.
+                return Err(Error::Config {
+                    message: "injected growth failure (test)".to_string(),
+                });
+            }
         }
         Ok(())
     }
@@ -1728,15 +1742,32 @@ impl Qwen3VlTextModel {
             self.invalidate_batch_cuda_graph();
             let pads: Vec<usize> = rows.pad_lens.iter().map(|&pad| pad as usize).collect();
             if let Err(error) = self.grow_dynamic_cache_batch(batch, 1, next) {
-                // Growing the fixed buckets failed, but the current fixed
-                // storage still holds the live KV up to kv_len - 1: the
-                // eager append path grows it organically from there. Only
-                // the graphs are dropped.
+                // Growing the fixed buckets failed — possibly midway, with
+                // some layers on the new bucket and the rest on the old
+                // one. Both hold the live KV up to kv_len - 1, and the
+                // eager append path grows each layer organically from
+                // wherever it sits. Only the graphs are dropped.
                 tracing::warn!(
                     "{MODEL_NAME} batch KV growth to bucket {next} failed: {error}; continuing eager"
                 );
                 self.invalidate_cuda_graph();
                 self.invalidate_batch_cuda_graph();
+                #[cfg(test)]
+                {
+                    let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
+                        return Ok(None);
+                    };
+                    cuda.cuda_stream().synchronize().unwrap();
+                    let output = std::process::Command::new("nvidia-smi")
+                        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+                        .output();
+                    if let Ok(out) = output {
+                        eprintln!(
+                            "DBGM8 batch at-growth-failure used={}MiB",
+                            String::from_utf8_lossy(&out.stdout).trim()
+                        );
+                    }
+                }
                 return Ok(None);
             }
             if let Err(error) =
@@ -2105,14 +2136,31 @@ impl Qwen3VlTextModel {
             self.invalidate_cuda_graph();
             self.invalidate_batch_cuda_graph();
             if let Err(error) = self.grow_dynamic_cache(1, next) {
-                // Same as the batch path: the current fixed storage keeps
-                // the live KV; only the graphs are dropped and the eager
-                // append path grows the storage organically.
+                // Same as the batch path: a mid-way failure leaves some
+                // layers on the new bucket and the rest on the old one,
+                // all holding the live KV; the eager append path grows
+                // each layer organically from wherever it sits.
                 tracing::warn!(
                     "{MODEL_NAME} decoder KV growth to bucket {next} failed: {error}; continuing eager"
                 );
                 self.invalidate_cuda_graph();
                 self.invalidate_batch_cuda_graph();
+                #[cfg(test)]
+                {
+                    let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
+                        return Ok(None);
+                    };
+                    cuda.cuda_stream().synchronize().unwrap();
+                    let output = std::process::Command::new("nvidia-smi")
+                        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+                        .output();
+                    if let Ok(out) = output {
+                        eprintln!(
+                            "DBGM8 single at-growth-failure used={}MiB",
+                            String::from_utf8_lossy(&out.stdout).trim()
+                        );
+                    }
+                }
                 return Ok(None);
             }
             if let Err(error) = self.capture_cuda_graph(next, ceiling, lm_head, kv_len - 1) {
@@ -2963,20 +3011,41 @@ mod tests {
             assert!(model.batch_decode_graph_captured());
 
             // A single-page request arrives: its entry frees the batch
-            // graph and buckets before vision encoding.
+            // graph and buckets BEFORE anything is uploaded (this reading
+            // is the pre-pixel_values probe). Small pool/fragmentation
+            // residue can survive the trim, so the tolerance is loose; the
+            // release-skipped control below proves the assertion catches a
+            // real leak.
             model.release_incompatible_fixed_storage(None, Some(8192));
-            let after = measured(&model);
-            eprintln!("DBGM3 after-single-entry-release={after}MiB");
-            // Small pool/fragmentation residue can survive the trim, so
-            // the tolerance here is loose; the release-skipped control at
-            // the end proves the assertion catches a real leak.
+            let pre_upload = measured(&model);
+            eprintln!("DBGM3 single-entry pre-upload={pre_upload}MiB");
             assert!(
-                after.saturating_sub(baseline) <= 64,
+                pre_upload.saturating_sub(baseline) <= 64,
                 "batch storage survived the single-page entry: {} MiB",
-                after.saturating_sub(baseline)
+                pre_upload.saturating_sub(baseline)
             );
             assert!(!model.batch_decode_graph_captured());
             assert!(!model.decode_graph_captured());
+
+            // Control: with the entry release skipped, the pre-upload
+            // probe stays ~1.9 GiB above baseline.
+            unsafe { std::env::set_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE", "1") };
+            model
+                .prepare_batch_ar_cuda_graph(2, 600, 8192, &[0, 10], &lm_head, false)
+                .unwrap();
+            assert!(model.batch_decode_graph_captured());
+            model.release_incompatible_fixed_storage(None, Some(8192));
+            let skipped = measured(&model);
+            eprintln!("DBGM3 single-entry control (skipped)={skipped}MiB");
+            assert!(
+                skipped.saturating_sub(baseline) >= 500,
+                "the memory assertion failed to catch a missing release"
+            );
+            unsafe { std::env::remove_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE") };
+            model.release_incompatible_fixed_storage(None, Some(8192));
+            let settled = measured(&model);
+            eprintln!("DBGM3 single-entry settled={settled}MiB");
+            assert!(settled.saturating_sub(baseline) <= 64);
 
             // Single-page decoding captures a single-row graph.
             model
@@ -3234,10 +3303,12 @@ mod tests {
             );
             assert!(model.decode_graph_captured(), "control keeps the graph");
 
-            // Injected: growth fails mid-run; eager carries the rest.
-            unsafe { std::env::set_var("OAR_WEVISDOC_FAIL_GROW", "1") };
+            // Injected: growth fails after the 2nd of 4 layers (midway,
+            // with both buckets partially resident); eager carries the
+            // rest.
+            unsafe { std::env::set_var("OAR_WEVISDOC_FAIL_GROW_AFTER_LAYER", "2") };
             let fallback = greedy_graphed_steps(&model, &lm_head, &ids, steps);
-            unsafe { std::env::remove_var("OAR_WEVISDOC_FAIL_GROW") };
+            unsafe { std::env::remove_var("OAR_WEVISDOC_FAIL_GROW_AFTER_LAYER") };
             assert_eq!(
                 fallback, reference,
                 "growth-failure fallback must match eager"
