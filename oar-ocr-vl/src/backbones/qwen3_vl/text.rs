@@ -19,8 +19,8 @@ use crate::runtime::cuda::dynamic_kv::{DynamicBatchKvAppend, DynamicKvAppend};
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
     BatchDecodeRows, BatchDecoderCudaGraph, CudaGraphDrainGuard, CudaGraphKvLengths,
-    CudaGraphPerRowU32, SingleTokenDecoderCudaGraph, cuda_graph_error, next_decode_bucket,
-    prompt_decode_bucket, sync_graph_tensor,
+    CudaGraphPerRowU32, SingleTokenDecoderCudaGraph, cuda_graph_error, decode_bucket_ceiling,
+    next_decode_bucket, prompt_decode_bucket, sync_graph_tensor,
 };
 use crate::runtime::errors::candle_to_ocr_inference;
 use crate::runtime::tensor::rotate_half;
@@ -1247,9 +1247,10 @@ impl Qwen3VlTextModel {
             if reusable {
                 return Ok(());
             }
+            let ceiling = decode_bucket_ceiling(cache_len, WEVISDOC_DECODE_CACHE_LEN);
             self.invalidate_cuda_graph();
             self.invalidate_batch_cuda_graph();
-            self.capture_batch_cuda_graph(batch, cache_len, pad_lens, lm_head, 0)?;
+            self.capture_batch_cuda_graph(batch, cache_len, ceiling, pad_lens, lm_head, 0)?;
         }
         let _ = (prompt_len, pad_lens, lm_head);
         Ok(())
@@ -1260,6 +1261,7 @@ impl Qwen3VlTextModel {
         &self,
         batch: usize,
         cache_len: usize,
+        ceiling: usize,
         pad_lens: &[usize],
         lm_head: &Linear,
         append_slot: usize,
@@ -1407,6 +1409,7 @@ impl Qwen3VlTextModel {
             retained_inputs: vec![kv_positions],
             batch,
             cache_len,
+            ceiling,
         });
         Ok(())
     }
@@ -1430,12 +1433,12 @@ impl Qwen3VlTextModel {
                 .is_some_and(|captured| max_kv_len > captured.cache_len)
         };
         if overflow {
-            let (batch, cache_len) = {
+            let (batch, cache_len, ceiling) = {
                 let captured_ref = self.batch_decode_graph.borrow();
                 let captured = captured_ref.as_ref().expect("overflow implies Some");
-                (captured.batch, captured.cache_len)
+                (captured.batch, captured.cache_len, captured.ceiling)
             };
-            let Some(next) = next_decode_bucket(cache_len, WEVISDOC_DECODE_CACHE_LEN) else {
+            let Some(next) = next_decode_bucket(cache_len, ceiling) else {
                 // Ladder ceiling: the rest of this generation decodes eager,
                 // whose append path grows the storage organically.
                 self.invalidate_cuda_graph();
@@ -1452,7 +1455,7 @@ impl Qwen3VlTextModel {
             let pads: Vec<usize> = rows.pad_lens.iter().map(|&pad| pad as usize).collect();
             self.grow_dynamic_cache_batch(batch, 1, next)?;
             if let Err(error) =
-                self.capture_batch_cuda_graph(batch, next, &pads, lm_head, max_kv_len - 1)
+                self.capture_batch_cuda_graph(batch, next, ceiling, &pads, lm_head, max_kv_len - 1)
             {
                 tracing::warn!(
                     "{MODEL_NAME} batch graph re-capture at bucket {next} failed: {error}; continuing eager"
@@ -1610,9 +1613,10 @@ impl Qwen3VlTextModel {
             if reusable {
                 return Ok(());
             }
+            let ceiling = decode_bucket_ceiling(cache_len, WEVISDOC_DECODE_CACHE_LEN);
             self.invalidate_cuda_graph();
             self.invalidate_batch_cuda_graph();
-            self.capture_cuda_graph(cache_len, lm_head, 0)?;
+            self.capture_cuda_graph(cache_len, ceiling, lm_head, 0)?;
         }
         let _ = (prompt_len, lm_head);
         Ok(())
@@ -1737,6 +1741,7 @@ impl Qwen3VlTextModel {
             logits_output,
             retained_inputs: vec![kv_positions],
             cache_len,
+            ceiling,
         });
         Ok(())
     }
@@ -1759,14 +1764,14 @@ impl Qwen3VlTextModel {
                 .is_some_and(|captured| kv_len > captured.cache_len)
         };
         if overflow {
-            let cache_len = {
+            let (cache_len, ceiling) = {
                 let captured_ref = self.decode_graph.borrow();
                 captured_ref
                     .as_ref()
-                    .map(|captured| captured.cache_len)
+                    .map(|captured| (captured.cache_len, captured.ceiling))
                     .expect("overflow implies Some")
             };
-            let Some(next) = next_decode_bucket(cache_len, WEVISDOC_DECODE_CACHE_LEN) else {
+            let Some(next) = next_decode_bucket(cache_len, ceiling) else {
                 // Ladder ceiling: the rest of this generation decodes eager,
                 // whose append path grows the storage organically.
                 self.invalidate_cuda_graph();
@@ -1779,7 +1784,7 @@ impl Qwen3VlTextModel {
             self.invalidate_cuda_graph();
             self.invalidate_batch_cuda_graph();
             self.grow_dynamic_cache(1, next)?;
-            if let Err(error) = self.capture_cuda_graph(next, lm_head, kv_len - 1) {
+            if let Err(error) = self.capture_cuda_graph(next, ceiling, lm_head, kv_len - 1) {
                 tracing::warn!(
                     "{MODEL_NAME} decoder graph re-capture at bucket {next} failed: {error}; continuing eager"
                 );

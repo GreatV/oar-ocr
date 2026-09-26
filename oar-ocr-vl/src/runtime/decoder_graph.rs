@@ -38,14 +38,26 @@ pub(crate) fn prompt_decode_bucket(prompt_len: usize, limit: usize) -> Option<us
 }
 
 /// Bucket the ladder grows to once a generation reaches the end of
-/// `cache_len`: double, capped at `limit`. `None` means the ladder is at
-/// its ceiling and an overflowing generation falls back to eager.
+/// `cache_len`: fourfold, capped at the graph's `ceiling`. One jump to the
+/// ceiling keeps the re-capture and KV-copy cost of a climb to a single
+/// step; `None` means the ladder is at its ceiling and an overflowing
+/// generation falls back to eager.
 #[cfg(any(feature = "cuda", test))]
-pub(crate) fn next_decode_bucket(cache_len: usize, limit: usize) -> Option<usize> {
-    if cache_len == 0 || cache_len >= limit {
+pub(crate) fn next_decode_bucket(cache_len: usize, ceiling: usize) -> Option<usize> {
+    if cache_len == 0 || cache_len >= ceiling {
         return None;
     }
-    Some((cache_len.saturating_mul(2)).min(limit))
+    Some(cache_len.saturating_mul(4).min(ceiling))
+}
+
+/// Generation ceiling for a graph captured at `prompt_bucket`: four times
+/// the prompt, clamped to `limit`. Full pages keep the full ceiling, while
+/// short region crops stop climbing early — a region generation that
+/// outruns four times its prompt is the rare runaway, and eager attention
+/// narrows to the real length for the remainder.
+#[cfg(any(feature = "cuda", test))]
+pub(crate) fn decode_bucket_ceiling(prompt_bucket: usize, limit: usize) -> usize {
+    prompt_bucket.saturating_mul(4).min(limit).max(1)
 }
 
 /// Match eager decoder attention: a single query has no future token to mask,
@@ -375,6 +387,8 @@ pub(crate) struct SingleTokenDecoderCudaGraph {
     /// still read them.
     pub(crate) retained_inputs: Vec<Tensor>,
     pub(crate) cache_len: usize,
+    /// Ladder cap this graph grows under (a capture-time constant).
+    pub(crate) ceiling: usize,
 }
 
 #[cfg(feature = "cuda")]
@@ -389,6 +403,7 @@ impl SingleTokenDecoderCudaGraph {
             logits_output,
             retained_inputs,
             cache_len: _,
+            ceiling: _,
         } = self;
         let device = hidden_input.device().clone();
         report_stashed_cuda_error(&device, "decoder CUDA graph disposal");
@@ -432,6 +447,8 @@ pub(crate) struct BatchDecoderCudaGraph {
     pub(crate) retained_inputs: Vec<Tensor>,
     pub(crate) batch: usize,
     pub(crate) cache_len: usize,
+    /// Ladder cap this graph grows under (a capture-time constant).
+    pub(crate) ceiling: usize,
 }
 
 #[cfg(feature = "cuda")]
@@ -447,6 +464,7 @@ impl BatchDecoderCudaGraph {
             retained_inputs,
             batch: _,
             cache_len: _,
+            ceiling: _,
         } = self;
         let device = hidden_input.device().clone();
         report_stashed_cuda_error(&device, "batch decoder CUDA graph disposal");
@@ -470,6 +488,7 @@ impl std::fmt::Debug for BatchDecoderCudaGraph {
         f.debug_struct("BatchDecoderCudaGraph")
             .field("batch", &self.batch)
             .field("cache_len", &self.cache_len)
+            .field("ceiling", &self.ceiling)
             .finish_non_exhaustive()
     }
 }
@@ -480,6 +499,7 @@ impl std::fmt::Debug for SingleTokenDecoderCudaGraph {
         f.debug_struct("SingleTokenDecoderCudaGraph")
             .field("hidden", &self.hidden_input.shape())
             .field("cache_len", &self.cache_len)
+            .field("ceiling", &self.ceiling)
             .finish_non_exhaustive()
     }
 }
@@ -487,8 +507,8 @@ impl std::fmt::Debug for SingleTokenDecoderCudaGraph {
 #[cfg(test)]
 mod tests {
     use super::{
-        decoder_attention_is_causal, decoder_cache_capacity, next_decode_bucket,
-        prompt_decode_bucket,
+        decode_bucket_ceiling, decoder_attention_is_causal, decoder_cache_capacity,
+        next_decode_bucket, prompt_decode_bucket,
     };
 
     #[test]
@@ -510,9 +530,13 @@ mod tests {
         assert_eq!(prompt_decode_bucket(2048, LIMIT), Some(4096));
         assert_eq!(prompt_decode_bucket(LIMIT, LIMIT), None);
         assert_eq!(prompt_decode_bucket(1, 0), None);
-        assert_eq!(next_decode_bucket(512, LIMIT), Some(1024));
+        assert_eq!(next_decode_bucket(512, LIMIT), Some(2048));
         assert_eq!(next_decode_bucket(8_192, 8_192), None);
         assert_eq!(next_decode_bucket(0, LIMIT), None);
+        assert_eq!(decode_bucket_ceiling(256, LIMIT), 1024);
+        assert_eq!(decode_bucket_ceiling(2_048, LIMIT), 8_192);
+        assert_eq!(decode_bucket_ceiling(4_096, LIMIT), LIMIT);
+        assert_eq!(decode_bucket_ceiling(16_384, LIMIT), LIMIT);
     }
 
     #[test]
