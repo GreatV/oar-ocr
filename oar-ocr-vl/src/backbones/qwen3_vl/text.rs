@@ -2502,8 +2502,9 @@ mod tests {
                 let mut pool: candle_core::cuda_backend::cudarc::driver::sys::CUmemoryPool =
                     std::ptr::null_mut();
                 unsafe {
-                    cuDeviceGetDefaultMemPool(&mut pool, ordinal as i32);
-                    cuMemPoolTrimTo(pool, 0);
+                    use candle_core::cuda_backend::cudarc::driver::sys;
+                    sys::cuDeviceGetDefaultMemPool(&mut pool, ordinal as i32);
+                    sys::cuMemPoolTrimTo(pool, 0);
                 }
             }
             fn smi_used() -> u64 {
