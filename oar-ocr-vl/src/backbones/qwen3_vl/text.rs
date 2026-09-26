@@ -1660,13 +1660,14 @@ impl Qwen3VlTextModel {
         .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph hidden input", e))?;
         let position_input = Tensor::zeros((3, 1, query_len), DType::I64, &device)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph position input", e))?;
-        // Warm and captured runs append at `append_slot`: 0 for a fresh
-        // capture, the live history length when a grown bucket is
-        // re-captured mid-generation, so the warmup never overwrites
-        // preserved KV entries.
-        let query_lengths = Tensor::new(&[0u32, append_slot as u32], &device)
+        // Warm and captured runs append after the live history: slot
+        // `append_slot` (0 for a fresh capture, the preserved length when a
+        // grown bucket is re-captured mid-generation), so the warmup never
+        // overwrites real KV entries. The append kernel derives the slot
+        // from the cumulative END, hence `append_slot + query_len`.
+        let query_lengths = Tensor::new(&[0u32, query_len as u32], &device)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph query lengths", e))?;
-        let kv_lengths = CudaGraphKvLengths::new(append_slot, &device)
+        let kv_lengths = CudaGraphKvLengths::new(append_slot + query_len, &device)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph KV lengths", e))?;
         let kv_positions =
             Tensor::arange(0u32, cache_len as u32, &device)?.reshape((1, 1, cache_len))?;
