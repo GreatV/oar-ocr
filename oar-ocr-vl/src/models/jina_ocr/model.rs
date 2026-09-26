@@ -219,6 +219,13 @@ impl JinaOcr {
             )?;
             Ok((tokens, hit_eos))
         } else {
+            // Plain decoding captures the AR graph too, so the no-MTP path
+            // and disabled-speculation runs decode at graph speed.
+            self.text.prepare_ar_cuda_graph(
+                prompt.input_ids.len(),
+                max_new_tokens,
+                &self.lm_head,
+            )?;
             let hidden = self
                 .text
                 .forward(&prompt.inputs_embeds, &prompt.position_ids, None)?;
