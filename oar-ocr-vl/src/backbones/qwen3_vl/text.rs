@@ -3121,7 +3121,7 @@ mod tests {
 
             // Control: with the entry release skipped, the orphan stays.
             unsafe { std::env::set_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE", "1") };
-            model.release_incompatible_fixed_storage(None);
+            model.release_incompatible_fixed_storage(None, None);
             let skipped = measured(&model);
             eprintln!("DBGM5 control (release skipped)={skipped}MiB");
             assert!(
@@ -3129,7 +3129,7 @@ mod tests {
                 "the memory assertion failed to catch a missing release"
             );
             unsafe { std::env::remove_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE") };
-            model.release_incompatible_fixed_storage(None);
+            model.release_incompatible_fixed_storage(None, Some(8192));
             let released = measured(&model);
             eprintln!("DBGM5 batch orphan released={released}MiB");
             assert!(released.saturating_sub(baseline) <= 64);
