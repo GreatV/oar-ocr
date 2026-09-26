@@ -2210,6 +2210,17 @@ impl Qwen3VlTextModel {
         }
     }
 
+    /// Test-only accessors for the production-entry memory checks.
+    #[cfg(all(test, feature = "cuda"))]
+    pub(crate) fn embed_tokens_device(&self) -> &Device {
+        self.embed_tokens.embeddings().device()
+    }
+
+    #[cfg(all(test, feature = "cuda"))]
+    pub(crate) fn cuda_device(&self) -> Option<&Device> {
+        Some(self.embed_tokens.embeddings().device())
+    }
+
     /// Whether the batched decode graph is currently captured — asserted
     /// by the GPU self-checks.
     #[cfg(all(test, feature = "cuda"))]

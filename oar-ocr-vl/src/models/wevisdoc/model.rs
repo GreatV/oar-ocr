@@ -1532,32 +1532,25 @@ mod tests {
                 .expect("load image b");
 
             let baseline = {
-                let Device::Cuda(cuda) = model.text_model().embed_tokens.embeddings().device()
-                else {
+                let Some(device) = model.text_model().cuda_device() else {
                     unreachable!()
                 };
-                cuda.cuda_stream().synchronize().unwrap();
-                // The async allocator hides pool-internal reuse from
-                // nvidia-smi; trim to live allocations before reading.
-                use crate::runtime::decoder_graph::drain_cuda_context_errors;
-                use candle_core::cuda_backend::cudarc::driver::sys::{
-                    cuDeviceGetDefaultMemPool, cuMemPoolTrimTo,
-                };
-                let ordinal = cuda.cuda_stream().context().ordinal();
-                let mut pool: candle_core::cuda_backend::cudarc::driver::sys::CUmemoryPool =
-                    std::ptr::null_mut();
-                unsafe {
-                    cuDeviceGetDefaultMemPool(&mut pool, ordinal as i32);
-                    cuMemPoolTrimTo(pool, 0);
+                if let Device::Cuda(cuda) = device {
+                    cuda.cuda_stream().synchronize().unwrap();
+                    // The async allocator hides pool-internal reuse from
+                    // nvidia-smi; trim to live allocations before reading.
+                    use candle_core::cuda_backend::cudarc::driver::sys::{
+                        cuDeviceGetDefaultMemPool, cuMemPoolTrimTo,
+                    };
+                    let ordinal = cuda.cuda_stream().context().ordinal();
+                    let mut pool: candle_core::cuda_backend::cudarc::driver::sys::CUmemoryPool =
+                        std::ptr::null_mut();
+                    unsafe {
+                        cuDeviceGetDefaultMemPool(&mut pool, ordinal as i32);
+                        cuMemPoolTrimTo(pool, 0);
+                    }
+                    crate::runtime::decoder_graph::drain_cuda_context_errors(device);
                 }
-                drain_cuda_context_errors(
-                    &model
-                        .text_model()
-                        .embed_tokens
-                        .embeddings()
-                        .device()
-                        .clone(),
-                );
                 smi_used()
             };
             eprintln!("DBGM7 baseline={baseline}MiB");
@@ -1576,7 +1569,7 @@ mod tests {
                 .generate_one(&image_a, 64, LoopGuard::Standard)
                 .expect("single-page generation succeeds");
             assert!(!tokens.0.is_empty());
-            let probe = crate::models::wevisdoc::processing::LAST_UPLOAD_PROBE_MIB
+            let probe = crate::wevisdoc::processing::LAST_UPLOAD_PROBE_MIB
                 .load(std::sync::atomic::Ordering::Relaxed);
             eprintln!("DBGM7 single-entry pre-upload probe={probe}MiB");
             assert!(
@@ -1591,7 +1584,7 @@ mod tests {
             let _ = model
                 .generate_one(&image_a, 64, LoopGuard::Standard)
                 .unwrap();
-            let probe = crate::models::wevisdoc::processing::LAST_UPLOAD_PROBE_MIB
+            let probe = crate::wevisdoc::processing::LAST_UPLOAD_PROBE_MIB
                 .load(std::sync::atomic::Ordering::Relaxed);
             eprintln!("DBGM7 control (release skipped) probe={probe}MiB");
             assert!(
@@ -1607,7 +1600,7 @@ mod tests {
             let texts = model.generate(&[image_a, image_b], 64).unwrap();
             assert_eq!(texts.len(), 2);
             unsafe { std::env::remove_var("OAR_WEVISDOC_PROBE_UPLOAD") };
-            let probe = crate::models::wevisdoc::processing::LAST_UPLOAD_PROBE_MIB
+            let probe = crate::wevisdoc::processing::LAST_UPLOAD_PROBE_MIB
                 .load(std::sync::atomic::Ordering::Relaxed);
             eprintln!("DBGM7 batch-entry pre-upload probe={probe}MiB");
             assert!(
