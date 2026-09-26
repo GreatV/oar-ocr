@@ -23,9 +23,9 @@ use crate::runtime::decoder_graph::{
     CudaGraphKvLengths, DecoderCudaGraph, capture_decoder_graph, cuda_graph_error,
 };
 use crate::runtime::errors::candle_to_ocr_inference;
-use candle_core::Tensor;
 #[cfg(feature = "cuda")]
-use candle_core::{DType, Device};
+use candle_core::DType;
+use candle_core::Tensor;
 use candle_nn::{Embedding, Linear, Module, RmsNorm, VarBuilder, linear_no_bias, rms_norm};
 #[cfg(feature = "cuda")]
 use std::cell::RefCell;
