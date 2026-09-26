@@ -5,10 +5,15 @@
 //! the official `example.py` transformers recipe: greedy decoding with a
 //! sliding-window no-repeat-ngram guard (35-grams within a 1024-token window,
 //! `<td>`/`</td>` whitelisted). On CUDA the decode step runs inside a CUDA
-//! graph, and the trained FastMTP draft head (`mtp_module`) proposes
-//! three-token blocks whose greedy verification preserves the plain-greedy
-//! sequence; the n-gram ban is applied to the verification logits host-side
-//! so speculation cannot change the official recipe.
+//! graph. The trained FastMTP draft head (`mtp_module`) can additionally
+//! propose three-token blocks whose greedy verification preserves the
+//! plain-greedy sequence (the n-gram ban is applied to the verification
+//! logits host-side, so speculation cannot change the official recipe), but
+//! speculation is OPT-IN: on the OmniDocBench demo pages (RTX 4090, bf16)
+//! adaptive MTP lost to graphed plain decoding on 17 of 18 pages (1.3%-7.5%
+//! slower; the one winning page gained 5%), so the draft head is only loaded
+//! on request — see [`JinaOcrLoadOptions::with_mtp`] and
+//! `OAR_JINAOCR_ENABLE_MTP`.
 
 use super::config::JinaOcrConfig;
 use super::mtp::JinaOcrMtp;
@@ -71,6 +76,27 @@ pub struct GenerationTrace {
     pub step_top: Vec<[(u32, f32); 3]>,
 }
 
+/// Load-time options for [`JinaOcr`], builder-style like
+/// [`crate::RuntimeConfig`].
+#[derive(Debug, Clone, Default)]
+pub struct JinaOcrLoadOptions {
+    /// Load the trained FastMTP draft head for speculative decoding
+    /// (default: off). Greedy verification keeps the output token-identical
+    /// to plain decoding, but speculation is slower than graphed plain
+    /// decoding on typical pages (see the module documentation), so the head
+    /// is only loaded when explicitly requested here or via
+    /// `OAR_JINAOCR_ENABLE_MTP`.
+    pub mtp: bool,
+}
+
+impl JinaOcrLoadOptions {
+    /// Opt in to FastMTP speculative decoding (CUDA only).
+    pub fn with_mtp(mut self, mtp: bool) -> Self {
+        self.mtp = mtp;
+        self
+    }
+}
+
 /// End-to-end jina-ocr-v1 page parser.
 pub struct JinaOcr {
     device: Device,
@@ -97,6 +123,15 @@ impl JinaOcr {
     pub fn from_dir_with_runtime(
         model_dir: impl AsRef<Path>,
         runtime: crate::RuntimeConfig,
+    ) -> Result<Self, Error> {
+        Self::from_dir_with_options(model_dir, runtime, JinaOcrLoadOptions::default())
+    }
+
+    /// Load with explicit [`JinaOcrLoadOptions`] (FastMTP speculation opt-in).
+    pub fn from_dir_with_options(
+        model_dir: impl AsRef<Path>,
+        runtime: crate::RuntimeConfig,
+        options: JinaOcrLoadOptions,
     ) -> Result<Self, Error> {
         let (device, dtype) = runtime.resolve();
         let model_dir = model_dir.as_ref();
@@ -131,8 +166,11 @@ impl JinaOcr {
             .pp("model")
             .get(cfg.text.hidden_size, "view_seperator")
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load view_seperator", e))?;
+        // The FastMTP draft head is opt-in: on the OmniDocBench demo pages
+        // (RTX 4090, bf16) adaptive MTP lost to graphed plain decoding on 17
+        // of 18 pages, so it loads only when explicitly requested.
         let mtp = if cfg.num_nextn_predict_layers.unwrap_or(0) >= 1
-            && std::env::var_os("OAR_JINAOCR_DISABLE_MTP").is_none()
+            && (options.mtp || std::env::var_os("OAR_JINAOCR_ENABLE_MTP").is_some())
         {
             Some(JinaOcrMtp::load(
                 &cfg.text,
@@ -420,15 +458,14 @@ impl JinaOcr {
         }
     }
 
-    /// FastMTP speculation is on by default where the draft head is loaded
-    /// (CUDA): greedy verification keeps the output token-identical to plain
-    /// autoregressive decoding. Disable with `OAR_JINAOCR_DISABLE_MTP` (skip
-    /// loading the head) or `OAR_VL_DISABLE_SPECULATIVE`.
+    /// FastMTP speculation runs only where the draft head was loaded — an
+    /// explicit opt-in via [`JinaOcrLoadOptions::with_mtp`] or
+    /// `OAR_JINAOCR_ENABLE_MTP`, because graphed plain decoding beat adaptive
+    /// MTP on 17 of 18 OmniDocBench demo pages (RTX 4090, bf16). Greedy
+    /// verification keeps the output token-identical to plain autoregressive
+    /// decoding either way.
     fn mtp_enabled(&self, max_new_tokens: usize) -> bool {
-        self.mtp.is_some()
-            && self.device.is_cuda()
-            && max_new_tokens >= MTP_MIN_NEW_TOKENS
-            && std::env::var_os("OAR_VL_DISABLE_SPECULATIVE").is_none()
+        self.mtp.is_some() && self.device.is_cuda() && max_new_tokens >= MTP_MIN_NEW_TOKENS
     }
 
     /// Capture the FastMTP draft graph over a fixed-capacity KV bucket. The
@@ -1340,6 +1377,12 @@ fn top3(scores: &[f32]) -> [(u32, f32); 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mtp_load_option_defaults_to_off() {
+        assert!(!JinaOcrLoadOptions::default().mtp);
+        assert!(JinaOcrLoadOptions::default().with_mtp(true).mtp);
+    }
 
     #[test]
     fn ngram_ban_blocks_repeats_inside_the_window() {

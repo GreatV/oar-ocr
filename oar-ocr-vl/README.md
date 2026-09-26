@@ -258,7 +258,7 @@ let markdown = model
 println!("{markdown}");
 ```
 
-Output is Markdown with LaTeX formulas and HTML tables; the same `generate` path serves `DocParser` region crops. The checkpoint's FastMTP head adds lossless speculative decoding (greedy verification plus the no-repeat-ngram guard keep the output token-identical to plain autoregressive decoding); routing, verification, and the greedy pick all stay on-device, and the single-token decode and draft steps run as CUDA graphs. Disable speculation with `OAR_JINAOCR_DISABLE_MTP` or `OAR_VL_DISABLE_SPECULATIVE`. Multi-image calls use a padded batch prefill and decode.
+Output is Markdown with LaTeX formulas and HTML tables; the same `generate` path serves `DocParser` region crops. On CUDA the single-token decode step runs as a CUDA graph. The checkpoint's FastMTP head can add lossless speculative decoding (greedy verification plus the no-repeat-ngram guard keep the output token-identical to plain autoregressive decoding), but it is **opt-in**: measured on the OmniDocBench demo pages (RTX 4090, bf16), adaptive MTP was slower than graphed plain decoding on 17 of 18 pages (by 1.3%-7.5%; the one winning page gained 5%). Enable it with `OAR_JINAOCR_ENABLE_MTP=1` or `JinaOcrLoadOptions::with_mtp(true)` (`--mtp` in the example). Multi-image calls use a padded batch prefill and decode.
 
 ## Running Examples
 

@@ -19,10 +19,10 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info};
 
-use oar_ocr_vl::JinaOcr;
 use oar_ocr_vl::jina_ocr::DEFAULT_MAX_NEW_TOKENS;
 use oar_ocr_vl::utils::image::load_image;
 use oar_ocr_vl::utils::parse_device;
+use oar_ocr_vl::{JinaOcr, JinaOcrLoadOptions, RuntimeConfig};
 
 #[derive(Parser)]
 #[command(name = "jina_ocr")]
@@ -43,6 +43,11 @@ struct Args {
     /// Maximum number of new tokens to generate per page
     #[arg(long, default_value_t = DEFAULT_MAX_NEW_TOKENS)]
     max_tokens: usize,
+
+    /// Opt in to FastMTP speculative decoding (CUDA only; off by default
+    /// because graphed plain decoding is faster on typical pages)
+    #[arg(long)]
+    mtp: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -83,7 +88,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Loading jina-ocr-v1 model...");
     let load_start = Instant::now();
-    let model = JinaOcr::from_dir(&args.model_dir, device)?;
+    let model = if args.mtp {
+        JinaOcr::from_dir_with_options(
+            &args.model_dir,
+            RuntimeConfig::new(device),
+            JinaOcrLoadOptions::default().with_mtp(true),
+        )?
+    } else {
+        JinaOcr::from_dir(&args.model_dir, device)?
+    };
     info!(
         "jina-ocr-v1 loaded in {:.2}ms",
         load_start.elapsed().as_secs_f64() * 1000.0

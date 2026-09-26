@@ -6,7 +6,10 @@
 //! model's own tensors). The layer is reused recurrently to propose
 //! `mtp_num_speculative_steps` tokens; greedy verification in the caller
 //! accepts only the token-equality prefix, so the emitted sequence stays
-//! identical to plain greedy decoding.
+//! identical to plain greedy decoding. The head is loaded only on explicit
+//! request (`JinaOcrLoadOptions::with_mtp` / `OAR_JINAOCR_ENABLE_MTP`):
+//! measured on the OmniDocBench demo pages (RTX 4090, bf16), adaptive MTP
+//! lost to graphed plain decoding on 17 of 18 pages.
 
 use crate::backbones::deepseek_v2::{DeepSeekV2MtpBlock, DeepSeekV2TextConfig};
 use crate::error::Error;

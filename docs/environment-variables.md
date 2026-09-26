@@ -19,6 +19,7 @@ Runtime environment variables read by the oar-ocr crates. Project-specific varia
 | [`OAR_PADDLEOCR_VL_DISABLE_CUDA_GRAPH`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Disable PaddleOCR-VL CUDA graphs |
 | [`OAR_GLMOCR_DISABLE_MTP`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Disable GLM-OCR MTP |
 | [`OAR_GLMOCR_DISABLE_CUDA_GRAPH`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Disable GLM-OCR CUDA graphs |
+| [`OAR_JINAOCR_ENABLE_MTP`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Opt in to jina-ocr-v1 FastMTP speculation |
 | [`OAR_HUNYUAN_DISABLE_CUDA_GRAPH`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Disable HunyuanOCR CUDA graphs |
 | [`OAR_HUNYUAN_DISABLE_AR_CUDA_GRAPH`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Disable HunyuanOCR AR CUDA graph |
 | [`OAR_MINERU_DISABLE_CUDA_GRAPH`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Disable MinerU CUDA graphs |
@@ -65,7 +66,7 @@ OAR_VL_ATTN_FULL_SEQ_THRESHOLD=0 cargo run --release --features cuda -p oar-ocr-
 
 ## VL Performance and Debug Overrides
 
-The following presence-based switches select portable fallbacks or disable optional accelerations. Setting a variable to any value enables the switch.
+The following presence-based switches select portable fallbacks, disable optional accelerations, or opt in to the ones that are off by default. Setting a variable to any value enables the switch.
 
 | Variable | Scope | Effect |
 |---|---|---|
@@ -79,13 +80,14 @@ The following presence-based switches select portable fallbacks or disable optio
 | `OAR_PADDLEOCR_VL_DISABLE_CUDA_GRAPH` | PaddleOCR-VL variants | Disable decoder CUDA graphs only for PaddleOCR-VL |
 | `OAR_GLMOCR_DISABLE_MTP` | GLM-OCR | Do not load or use the MTP predictor |
 | `OAR_GLMOCR_DISABLE_CUDA_GRAPH` | GLM-OCR | Disable autoregressive and MTP CUDA graphs |
+| `OAR_JINAOCR_ENABLE_MTP` | jina-ocr-v1 | Opt in to FastMTP speculative decoding (off by default: adaptive MTP was slower than graphed plain decoding on 17 of 18 OmniDocBench demo pages, RTX 4090 bf16; output stays token-identical either way) |
 | `OAR_HUNYUAN_DISABLE_CUDA_GRAPH` | HunyuanOCR | Disable target, autoregressive, and DFlash CUDA graphs |
 | `OAR_HUNYUAN_DISABLE_AR_CUDA_GRAPH` | HunyuanOCR | Disable only the single-token autoregressive CUDA graph |
 | `OAR_MINERU_DISABLE_CUDA_GRAPH` | MinerU2.5/Pro | Disable decoder CUDA graphs |
 | `OAR_MINERU_DISABLE_GPU_SAMPLING` | MinerU2.5/Pro | Use the host sampling fallback instead of the CUDA greedy sampler |
 | `OAR_MINERU_DIFFUSION_DISABLE_GPU_SAMPLING` | MinerU-Diffusion | Use the host sampling fallback instead of the CUDA sampler |
 
-These switches are primarily useful for compatibility checks, debugging, and numerical comparisons. The accelerated paths remain enabled by default when the active device and dtype support them.
+These switches are primarily useful for compatibility checks, debugging, and numerical comparisons. Except where a row says otherwise, the accelerated paths remain enabled by default when the active device and dtype support them.
 
 OvisOCR2 uses the shared dtype, FlashAttention, and grouped-query-attention controls. It has no model-specific runtime environment override.
 

@@ -102,7 +102,7 @@ pub use hpd_parsing::{HpdGenerationConfig, HpdOutput, HpdParsing, HpdRuntimeStat
 pub use hunyuanocr::{
     DFlashConfig, DFlashTargetConfig, HunyuanOcr, HunyuanOcrParseOptions, HunyuanOcrVersion,
 };
-pub use jina_ocr::{JinaOcr, JinaOcrParseOptions};
+pub use jina_ocr::{JinaOcr, JinaOcrLoadOptions, JinaOcrParseOptions};
 pub use mineru::{MinerU, MinerUParseOptions};
 pub use mineru_diffusion::{
     DiffusionGenerationConfig, MinerUDiffusion, MinerUDiffusionParseOptions,
