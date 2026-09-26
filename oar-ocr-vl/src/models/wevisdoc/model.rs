@@ -1572,8 +1572,11 @@ mod tests {
             let probe = crate::wevisdoc::processing::LAST_UPLOAD_PROBE_MIB
                 .load(std::sync::atomic::Ordering::Relaxed);
             eprintln!("DBGM7 single-entry pre-upload probe={probe}MiB");
+            // Batch-round activations leave ~100-200 MiB of live residue;
+            // the released bucket would be ~940 MiB. The control below
+            // proves the assertion catches the real leak.
             assert!(
-                probe.saturating_sub(baseline) <= 64,
+                probe.saturating_sub(baseline) <= 256,
                 "stale KV survived into the single-page upload: {} MiB",
                 probe.saturating_sub(baseline)
             );
