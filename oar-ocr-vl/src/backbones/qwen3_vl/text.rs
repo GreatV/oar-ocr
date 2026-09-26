@@ -2775,11 +2775,6 @@ mod tests {
                 .unwrap();
             assert!(model.batch_decode_graph_captured());
             model.release_incompatible_fixed_storage(Some(2));
-            eprintln!(
-                "DBGM4 after-compatible-release single={} batch={}",
-                model.decode_graph_captured(),
-                model.batch_decode_graph_captured()
-            );
             assert!(
                 model.batch_decode_graph_captured(),
                 "compatible batch storage must not be released"
