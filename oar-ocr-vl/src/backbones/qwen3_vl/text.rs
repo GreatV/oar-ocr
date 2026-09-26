@@ -2611,10 +2611,11 @@ mod tests {
             eprintln!("DBGM1 settled after control={settled}MiB");
             assert!(settled.saturating_sub(baseline) <= 16);
 
-            // The eager fallback decodes correctly after all of this.
+            // With the injection cleared, decoding captures normally again
+            // and matches eager.
             let eager = greedy_eager(&model, &lm_head, &ids, 8);
-            let graphed = greedy_graphed(&model, &lm_head, &ids, 8, false);
-            assert_eq!(graphed, eager, "eager fallback must match eager output");
+            let graphed = greedy_graphed(&model, &lm_head, &ids, 8, true);
+            assert_eq!(graphed, eager, "decode after recovery must match eager");
 
             // The allocator stays healthy.
             drop(model);
