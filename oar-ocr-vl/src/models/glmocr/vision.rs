@@ -373,29 +373,29 @@ impl GlmOcrVisionAttention {
             )
         })?;
 
-        let attn = match crate::attention::flash_attention(&q, &k, &v, self.scaling, false)
-            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "vision flash attention", e))?
-        {
-            Some(output) => output,
-            None if seq_len > crate::attention::VISION_CHUNKED_ATTN_SEQ_THRESHOLD => {
-                crate::attention::chunked_vision_attention(
+        // Unlike the other vision towers (flash first), this tower keeps the
+        // original eager sdpa call below the chunk threshold: GLM-OCR mostly
+        // serves DocParser region crops, which are small, and those must stay
+        // bitwise-compatible with the released behavior. Only oversized pages
+        // (which previously errored or stalled) switch kernels — flash when
+        // available, query-chunked eager otherwise.
+        let attn = if seq_len <= crate::attention::VISION_CHUNKED_ATTN_SEQ_THRESHOLD {
+            crate::attention::scaled_dot_product_attention(&q, &k, &v, None, self.scaling, false)
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "vision attention", e))?
+        } else {
+            match crate::attention::flash_attention(&q, &k, &v, self.scaling, false)
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "vision flash attention", e))?
+            {
+                Some(output) => output,
+                None => crate::attention::chunked_vision_attention(
                     &q,
                     &k,
                     &v,
                     self.scaling,
                     crate::attention::VISION_CHUNKED_ATTN_CHUNK_SIZE,
                 )
-                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "chunked vision attention", e))?
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "chunked vision attention", e))?,
             }
-            None => crate::attention::scaled_dot_product_attention(
-                &q,
-                &k,
-                &v,
-                None,
-                self.scaling,
-                false,
-            )
-            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "vision attention", e))?,
         };
         let attn = attn
             .transpose(1, 2)
