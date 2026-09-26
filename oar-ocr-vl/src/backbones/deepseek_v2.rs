@@ -31,8 +31,8 @@ use std::cell::RefCell;
 use crate::runtime::cuda::dynamic_kv::DynamicKvAppend;
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
-    CudaGraphDrainGuard, CudaGraphKvLengths, cuda_graph_error, decoder_attention_is_causal,
-    decoder_cache_capacity, drop_and_drain, report_stashed_cuda_error, sync_graph_tensor,
+    CudaGraphDrainGuard, CudaGraphInputs, CudaGraphKvLengths, DecoderCudaGraph,
+    capture_decoder_graph, cuda_graph_error, decoder_attention_is_causal, decoder_cache_capacity,
 };
 #[cfg(feature = "cuda")]
 use candle_core::Device;
@@ -60,108 +60,27 @@ fn graphs_disabled() -> bool {
         || std::env::var_os("OAR_JINAOCR_DISABLE_CUDA_GRAPH").is_some()
 }
 
-/// Captured single-token decode step that exports both the logits and the
-/// fed token's hidden state, so adaptive speculation can collect the states
-/// it needs for a later re-sync without leaving graph replay. Replay hands
-/// out owned copies of the outputs — the captured buffers are overwritten by
-/// every launch, and callers keep them across later replays.
+/// The captured verification graph plus its block width, which the reuse
+/// check in `prepare_verification_cuda_graph` matches against.
 #[cfg(feature = "cuda")]
-struct DecodeCudaGraph {
-    // The graph owns device pointers into all tensors below; dispose via
-    // `dispose` so capture-touched buffers are never returned to the
-    // stream-ordered allocator (see SingleTokenDecoderCudaGraph::dispose).
-    graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
-    hidden_input: Tensor,
-    position_input: Tensor,
-    _query_lengths: Tensor,
-    kv_lengths: CudaGraphKvLengths,
-    logits_output: Tensor,
-    hidden_output: Tensor,
-    cache_len: usize,
-}
-
-#[cfg(feature = "cuda")]
-impl DecodeCudaGraph {
-    fn dispose(self) {
-        let Self {
-            graph,
-            hidden_input,
-            position_input,
-            _query_lengths,
-            kv_lengths,
-            logits_output,
-            hidden_output,
-            cache_len: _,
-        } = self;
-        let device = hidden_input.device().clone();
-        report_stashed_cuda_error(&device, "decoder CUDA graph disposal");
-        drop_and_drain(graph, &device);
-        drop_and_drain(hidden_output, &device);
-        drop_and_drain(logits_output, &device);
-        drop_and_drain(kv_lengths, &device);
-        drop_and_drain(_query_lengths, &device);
-        drop_and_drain(position_input, &device);
-        drop_and_drain(hidden_input, &device);
-    }
-}
-
-#[cfg(feature = "cuda")]
-impl std::fmt::Debug for DecodeCudaGraph {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DecodeCudaGraph")
-            .field("cache_len", &self.cache_len)
-            .finish_non_exhaustive()
-    }
-}
-
-#[cfg(feature = "cuda")]
-struct VerificationCudaGraph {
-    // The graph owns device pointers into all tensors below; dispose via
-    // `dispose` so capture-touched buffers are never returned to the
-    // stream-ordered allocator (see SingleTokenDecoderCudaGraph::dispose).
-    graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
-    hidden_input: Tensor,
-    position_input: Tensor,
-    _query_lengths: Tensor,
-    kv_lengths: CudaGraphKvLengths,
-    hidden_output: Tensor,
-    logits_output: Tensor,
-    cache_len: usize,
+struct VerificationGraph {
+    graph: DecoderCudaGraph<CudaGraphInputs>,
     query_len: usize,
 }
 
 #[cfg(feature = "cuda")]
-impl VerificationCudaGraph {
+impl VerificationGraph {
     fn dispose(self) {
-        let Self {
-            graph,
-            hidden_input,
-            position_input,
-            _query_lengths,
-            kv_lengths,
-            hidden_output,
-            logits_output,
-            cache_len: _,
-            query_len: _,
-        } = self;
-        let device = hidden_input.device().clone();
-        report_stashed_cuda_error(&device, "CUDA graph disposal");
-        drop_and_drain(graph, &device);
-        drop_and_drain(logits_output, &device);
-        drop_and_drain(hidden_output, &device);
-        drop_and_drain(kv_lengths, &device);
-        drop_and_drain(_query_lengths, &device);
-        drop_and_drain(position_input, &device);
-        drop_and_drain(hidden_input, &device);
+        self.graph.dispose();
     }
 }
 
 #[cfg(feature = "cuda")]
-impl std::fmt::Debug for VerificationCudaGraph {
+impl std::fmt::Debug for VerificationGraph {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VerificationCudaGraph")
+        f.debug_struct("VerificationGraph")
             .field("query_len", &self.query_len)
-            .field("cache_len", &self.cache_len)
+            .field("cache_len", &self.graph.cache_len)
             .finish_non_exhaustive()
     }
 }
@@ -1136,9 +1055,9 @@ fn storage_k_device(cache: &TrimmableKvCache) -> Device {
 
 pub(crate) struct DeepSeekV2TextModel {
     #[cfg(feature = "cuda")]
-    decode_graph: RefCell<Option<DecodeCudaGraph>>,
+    decode_graph: RefCell<Option<DecoderCudaGraph<CudaGraphInputs>>>,
     #[cfg(feature = "cuda")]
-    verification_graph: RefCell<Option<VerificationCudaGraph>>,
+    verification_graph: RefCell<Option<VerificationGraph>>,
     embed_tokens: Embedding,
     layers: Vec<DecoderLayer>,
     norm: RmsNorm,
@@ -1422,8 +1341,8 @@ impl DeepSeekV2TextModel {
             .verification_graph
             .borrow()
             .as_ref()
-            .filter(|graph| graph.query_len == query_len && graph.cache_len >= required)
-            .map(|graph| graph.cache_len);
+            .filter(|graph| graph.query_len == query_len && graph.graph.cache_len >= required)
+            .map(|graph| graph.graph.cache_len);
         if let Some(retained_cache_len) = retained_cache_len {
             // The draft graph shares this capacity contract. Returning the
             // newly computed (possibly smaller) bucket would force it to
@@ -1448,19 +1367,34 @@ impl DeepSeekV2TextModel {
         self.capture_cuda_graph(cache_len, lm_head)
     }
 
+    /// The captured decode step: a bare `fn` so the captured region can only
+    /// read model-owned weights and the registered inputs. Exports the logits
+    /// and the fed token's hidden state (the MTP cooldown keeps the hidden
+    /// for the next draft rebuild).
+    #[cfg(feature = "cuda")]
+    fn decode_graph_body(this: &Self, inputs: &CudaGraphInputs) -> Result<Vec<Tensor>, Error> {
+        let hidden = this.forward_dynamic(
+            &inputs.hidden,
+            &inputs.positions,
+            &inputs.query_lengths,
+            inputs.kv_lengths.tensor(),
+        )?;
+        let token_hidden = hidden
+            .i((0, 0, ..))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph hidden slice", e))?;
+        let logits = this.project_logits(&hidden, &inputs.lm_head)?;
+        Ok(vec![logits, token_hidden])
+    }
+
     #[cfg(feature = "cuda")]
     fn capture_cuda_graph(&self, cache_len: usize, lm_head: &Linear) -> Result<(), Error> {
-        use candle_core::cuda_backend::cudarc::driver::sys::{
-            CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
-        };
-
         if self.decode_graph.borrow().is_some() {
             return Ok(());
         }
-        let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
+        let device = self.embed_tokens.embeddings().device();
+        if !device.is_cuda() {
             return Ok(());
-        };
-        let device = self.embed_tokens.embeddings().device().clone();
+        }
         let query_len = 1;
         for layer in &self.layers {
             layer.prepare_dynamic_cache(query_len, cache_len)?;
@@ -1470,98 +1404,49 @@ impl DeepSeekV2TextModel {
             .embeddings()
             .dim(1)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph hidden size", e))?;
-        let hidden_input = Tensor::zeros(
-            (1, query_len, hidden_size),
-            self.embed_tokens.embeddings().dtype(),
-            &device,
-        )
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph hidden input", e))?;
-        let position_input = Tensor::zeros((1, 1, query_len), DType::U32, &device)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph position input", e))?;
-        let query_lengths = Tensor::new(&[0u32, query_len as u32], &device)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph query lengths", e))?;
-        let kv_lengths = CudaGraphKvLengths::new(query_len, &device)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph KV lengths", e))?;
-        let stream = cuda.cuda_stream();
-        let _htod_cache = cuda.enable_cuda_graph_htod_cache();
-
-        let warm = self.forward_dynamic(
-            &hidden_input,
-            &position_input,
-            &query_lengths,
-            kv_lengths.tensor(),
-        )?;
-        let warm_logits = self.project_logits(&warm, lm_head)?;
-        sync_graph_tensor(MODEL_NAME, &warm_logits, "warm decoder CUDA graph")?;
-        // Allocate the output buffers before capture so they belong to the
-        // regular stream-ordered pool; a capture-time allocation lives in the
-        // graph's private pool and can never be returned to the allocator
-        // safely. Prime the copies so the captured run sees warm kernels.
-        let logits_output = Tensor::zeros_like(&warm_logits)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph logits output", e))?;
-        logits_output
-            .slice_set(&warm_logits, 0, 0)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "prime graph logits copy", e))?;
-        let warm_hidden = warm
-            .i((0, 0, ..))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "warm decoder hidden", e))?;
-        let hidden_output = Tensor::zeros_like(&warm_hidden)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph hidden output", e))?;
-        hidden_output
-            .slice_set(&warm_hidden, 0, 0)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "prime graph hidden copy", e))?;
-
-        stream
-            .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
-            .map_err(|e| cuda_graph_error(MODEL_NAME, "begin decoder CUDA graph capture", e))?;
-        let captured_output: Result<(), Error> = (|| {
-            let hidden = self.forward_dynamic(
-                &hidden_input,
-                &position_input,
-                &query_lengths,
-                kv_lengths.tensor(),
-            )?;
-            let token_hidden = hidden
-                .i((0, 0, ..))
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph hidden slice", e))?;
-            let logits = self.project_logits(&hidden, lm_head)?;
-            logits_output
-                .slice_set(&logits, 0, 0)
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "record graph logits copy", e))?;
-            hidden_output
-                .slice_set(&token_hidden, 0, 0)
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "record graph hidden copy", e))
-        })();
-        if let Err(error) = captured_output {
-            let _ = stream.end_capture(
-                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-            );
-            return Err(error);
-        }
-        let graph = stream
-            .end_capture(
-                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+        let inputs = CudaGraphInputs {
+            hidden: Tensor::zeros(
+                (1, query_len, hidden_size),
+                self.embed_tokens.embeddings().dtype(),
+                device,
             )
-            .map_err(|e| cuda_graph_error(MODEL_NAME, "end decoder CUDA graph capture", e))?
-            .ok_or_else(|| Error::Config {
-                message: format!("{MODEL_NAME} decoder capture returned no graph"),
-            })?;
-        graph
-            .launch()
-            .map_err(|e| cuda_graph_error(MODEL_NAME, "warm decoder CUDA graph", e))?;
-        sync_graph_tensor(MODEL_NAME, &logits_output, "sync decoder CUDA graph")?;
-        self.clear_kv_cache();
-        *self.decode_graph.borrow_mut() = Some(DecodeCudaGraph {
-            graph,
-            hidden_input,
-            position_input,
-            _query_lengths: query_lengths,
-            kv_lengths,
-            logits_output,
-            hidden_output,
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph hidden input", e))?,
+            positions: Tensor::zeros((1, 1, query_len), DType::U32, device)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph position input", e))?,
+            query_lengths: Tensor::new(&[0u32, query_len as u32], device)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph query lengths", e))?,
+            kv_lengths: CudaGraphKvLengths::new(query_len, device)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph KV lengths", e))?,
+            lm_head: lm_head.clone(),
+        };
+        let graph = capture_decoder_graph(
+            device,
+            MODEL_NAME,
+            self,
+            inputs,
+            Self::decode_graph_body,
             cache_len,
-        });
+        )?;
+        self.clear_kv_cache();
+        *self.decode_graph.borrow_mut() = Some(graph);
         Ok(())
+    }
+
+    /// The captured verification block: hidden states plus per-position
+    /// logits, as a bare `fn` over the registered inputs.
+    #[cfg(feature = "cuda")]
+    fn verification_graph_body(
+        this: &Self,
+        inputs: &CudaGraphInputs,
+    ) -> Result<Vec<Tensor>, Error> {
+        let hidden = this.forward_dynamic(
+            &inputs.hidden,
+            &inputs.positions,
+            &inputs.query_lengths,
+            inputs.kv_lengths.tensor(),
+        )?;
+        let logits = this.project_all_logits(&hidden, &inputs.lm_head)?;
+        Ok(vec![hidden, logits])
     }
 
     #[cfg(feature = "cuda")]
@@ -1571,14 +1456,10 @@ impl DeepSeekV2TextModel {
         query_len: usize,
         lm_head: &Linear,
     ) -> Result<(), Error> {
-        use candle_core::cuda_backend::cudarc::driver::sys::{
-            CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
-        };
-
-        let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
+        let device = self.embed_tokens.embeddings().device();
+        if !device.is_cuda() {
             return Ok(());
-        };
-        let device = self.embed_tokens.embeddings().device().clone();
+        }
         for layer in &self.layers {
             layer.prepare_dynamic_cache(query_len, cache_len)?;
         }
@@ -1587,92 +1468,33 @@ impl DeepSeekV2TextModel {
             .embeddings()
             .dim(1)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph hidden size", e))?;
-        let hidden_input = Tensor::zeros(
-            (1, query_len, hidden_size),
-            self.embed_tokens.embeddings().dtype(),
-            &device,
-        )
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "verification graph input", e))?;
-        let position_input = Tensor::zeros((1, 1, query_len), DType::U32, &device)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "verification graph positions", e))?;
-        let query_lengths = Tensor::new(&[0u32, query_len as u32], &device)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "verification query lengths", e))?;
-        let kv_lengths = CudaGraphKvLengths::new(query_len, &device)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "verification KV lengths", e))?;
-        let stream = cuda.cuda_stream();
-        let _htod_cache = cuda.enable_cuda_graph_htod_cache();
-
-        let warm = self.forward_dynamic(
-            &hidden_input,
-            &position_input,
-            &query_lengths,
-            kv_lengths.tensor(),
-        )?;
-        let warm_logits = self.project_all_logits(&warm, lm_head)?;
-        sync_graph_tensor(MODEL_NAME, &warm_logits, "warm verification CUDA graph")?;
-        // Allocate the output buffers before capture so they belong to the
-        // regular stream-ordered pool; a capture-time allocation lives in the
-        // graph's private pool and can never be returned to the allocator
-        // safely. Prime the copies so the captured run sees warm kernels.
-        let hidden_output = Tensor::zeros_like(&warm)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "verification hidden output", e))?;
-        let logits_output = Tensor::zeros_like(&warm_logits)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "verification logits output", e))?;
-        hidden_output.slice_set(&warm, 0, 0).map_err(|e| {
-            candle_to_ocr_inference(MODEL_NAME, "prime verification hidden copy", e)
-        })?;
-        logits_output.slice_set(&warm_logits, 0, 0).map_err(|e| {
-            candle_to_ocr_inference(MODEL_NAME, "prime verification logits copy", e)
-        })?;
-
-        stream
-            .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
-            .map_err(|e| cuda_graph_error(MODEL_NAME, "begin verification graph capture", e))?;
-        let captured_output: Result<(), Error> = (|| {
-            let hidden = self.forward_dynamic(
-                &hidden_input,
-                &position_input,
-                &query_lengths,
-                kv_lengths.tensor(),
-            )?;
-            let logits = self.project_all_logits(&hidden, lm_head)?;
-            hidden_output.slice_set(&hidden, 0, 0).map_err(|e| {
-                candle_to_ocr_inference(MODEL_NAME, "record verification hidden copy", e)
-            })?;
-            logits_output.slice_set(&logits, 0, 0).map_err(|e| {
-                candle_to_ocr_inference(MODEL_NAME, "record verification logits copy", e)
-            })
-        })();
-        if let Err(error) = captured_output {
-            let _ = stream.end_capture(
-                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-            );
-            return Err(error);
-        }
-        let graph = stream
-            .end_capture(
-                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+        let inputs = CudaGraphInputs {
+            hidden: Tensor::zeros(
+                (1, query_len, hidden_size),
+                self.embed_tokens.embeddings().dtype(),
+                device,
             )
-            .map_err(|e| cuda_graph_error(MODEL_NAME, "end verification graph capture", e))?
-            .ok_or_else(|| Error::Config {
-                message: format!("{MODEL_NAME} verification capture returned no graph"),
-            })?;
-        graph
-            .launch()
-            .map_err(|e| cuda_graph_error(MODEL_NAME, "warm verification CUDA graph", e))?;
-        sync_graph_tensor(MODEL_NAME, &logits_output, "sync verification CUDA graph")?;
-        self.clear_kv_cache();
-        *self.verification_graph.borrow_mut() = Some(VerificationCudaGraph {
-            graph,
-            hidden_input,
-            position_input,
-            _query_lengths: query_lengths,
-            kv_lengths,
-            hidden_output,
-            logits_output,
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "verification graph input", e))?,
+            positions: Tensor::zeros((1, 1, query_len), DType::U32, device).map_err(|e| {
+                candle_to_ocr_inference(MODEL_NAME, "verification graph positions", e)
+            })?,
+            query_lengths: Tensor::new(&[0u32, query_len as u32], device).map_err(|e| {
+                candle_to_ocr_inference(MODEL_NAME, "verification query lengths", e)
+            })?,
+            kv_lengths: CudaGraphKvLengths::new(query_len, device)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "verification KV lengths", e))?,
+            lm_head: lm_head.clone(),
+        };
+        let graph = capture_decoder_graph(
+            device,
+            MODEL_NAME,
+            self,
+            inputs,
+            Self::verification_graph_body,
             cache_len,
-            query_len,
-        });
+        )?;
+        self.clear_kv_cache();
+        *self.verification_graph.borrow_mut() = Some(VerificationGraph { graph, query_len });
         Ok(())
     }
 
@@ -1692,20 +1514,23 @@ impl DeepSeekV2TextModel {
             self.invalidate_cuda_graph();
             return Ok(None);
         }
-        if inputs_embeds.shape() != captured.hidden_input.shape()
-            || position_ids.shape() != captured.position_input.shape()
+        if inputs_embeds.shape() != captured.inputs.hidden.shape()
+            || position_ids.shape() != captured.inputs.positions.shape()
         {
             return Ok(None);
         }
         captured
-            .hidden_input
+            .inputs
+            .hidden
             .slice_set(inputs_embeds, 0, 0)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy graph hidden", e))?;
         captured
-            .position_input
+            .inputs
+            .positions
             .slice_set(position_ids, 0, 0)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy graph positions", e))?;
         captured
+            .inputs
             .kv_lengths
             .update(kv_len)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "update graph KV lengths", e))?;
@@ -1720,12 +1545,10 @@ impl DeepSeekV2TextModel {
         // buffers, and callers (the MTP cooldown) keep the hidden state across
         // later replays.
         Ok(Some((
-            captured
-                .logits_output
+            captured.outputs[0]
                 .copy()
                 .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy graph logits", e))?,
-            captured
-                .hidden_output
+            captured.outputs[1]
                 .copy()
                 .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy graph hidden", e))?,
         )))
@@ -1742,25 +1565,28 @@ impl DeepSeekV2TextModel {
         let Some(captured) = captured_ref.as_ref() else {
             return Ok(None);
         };
+        let captured = &captured.graph;
         if kv_len > captured.cache_len {
             drop(captured_ref);
             self.invalidate_cuda_graph();
             return Ok(None);
         }
-        if inputs_embeds.shape() != captured.hidden_input.shape()
-            || position_ids.shape() != captured.position_input.shape()
+        if inputs_embeds.shape() != captured.inputs.hidden.shape()
+            || position_ids.shape() != captured.inputs.positions.shape()
         {
             return Ok(None);
         }
         captured
-            .hidden_input
+            .inputs
+            .hidden
             .slice_set(inputs_embeds, 0, 0)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy verification hidden", e))?;
         captured
-            .position_input
+            .inputs
+            .positions
             .slice_set(position_ids, 0, 0)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy verification positions", e))?;
-        captured.kv_lengths.update(kv_len).map_err(|e| {
+        captured.inputs.kv_lengths.update(kv_len).map_err(|e| {
             candle_to_ocr_inference(MODEL_NAME, "update verification KV lengths", e)
         })?;
         captured
@@ -1773,12 +1599,10 @@ impl DeepSeekV2TextModel {
         // Owned copies, as in `replay_cuda_graph`: callers stash hidden rows
         // for the next draft rebuild, past later replays.
         Ok(Some((
-            captured
-                .hidden_output
+            captured.outputs[0]
                 .copy()
                 .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy verification hidden", e))?,
-            captured
-                .logits_output
+            captured.outputs[1]
                 .copy()
                 .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy verification logits", e))?,
         )))
