@@ -940,9 +940,10 @@ fn text_position_ids(position: i64, device: &Device) -> Result<Tensor, Error> {
 /// loop instead of real content. Two loop shapes are recognized:
 ///
 /// * exact cycles — every repeated unit identical — which cover collapsed
-///   single-token runs and repeated sentences; they need at least
-///   `MIN_REPEATS` repetitions and `EXACT_TAIL_UNITS × period` tokens of
-///   looping tail;
+///   single-token runs and repeated sentences; they need `EXACT_TAIL_UNITS
+///   × period` tokens of looping tail, at least `MIN_REPEATS` repeats.
+///   The tail budget keeps short-period markup (empty rows, dots) safe
+///   while long sentence cycles still trip after a handful of repeats;
 /// * near-cycles — units differing in at most two token slots, the same
 ///   slots every time — which cover counter loops like an incrementing
 ///   year. These need a period of at least `MIN_NEAR_PERIOD` (short
@@ -955,7 +956,7 @@ fn text_position_ids(position: i64, device: &Device) -> Result<Tensor, Error> {
 fn trailing_decode_loop(tokens: &[u32]) -> Option<(usize, usize)> {
     const MAX_PERIOD: usize = 128;
     const MIN_TAIL: usize = 64;
-    const MIN_REPEATS: usize = 8;
+    const MIN_REPEATS: usize = 4;
     const EXACT_TAIL_UNITS: usize = 96;
     const MIN_NEAR_PERIOD: usize = 8;
     const MIN_NEAR_REPEATS: usize = 8;
@@ -1166,16 +1167,19 @@ mod tests {
         assert!(keep >= period && keep < run.len());
         assert!(run[..keep].iter().all(|&t| t == 5));
 
-        // A 20-token sentence repeated 12 times: period 20 wins over its
-        // divisors, one full cycle stays after the trim.
+        // A 20-token sentence repeated 12 times. The reported period is
+        // the longest qualifying cycle (a multiple of the sentence), and
+        // the trim keeps whole cycles of that period.
         let sentence: Vec<u32> = (100..120).collect();
         let mut looped = Vec::new();
         for _ in 0..12 {
             looped.extend_from_slice(&sentence);
         }
-        assert_eq!(trailing_decode_loop(&looped), Some((20, 12)));
-        let trimmed = looped.len() - 11 * 20;
-        assert_eq!(&looped[..trimmed], &sentence);
+        let (period, repeats) = trailing_decode_loop(&looped).expect("sentence cycle detected");
+        assert_eq!(period % 20, 0);
+        let trimmed = looped.len() - (repeats - 1) * period;
+        assert_eq!(trimmed % period, 0);
+        assert!(looped[..trimmed].ends_with(&sentence));
 
         // A long sentence-level exact cycle (the newspaper-page runaway:
         // ~68 tokens per cycle) repeated 9 times.
