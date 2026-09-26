@@ -244,11 +244,6 @@ impl WeVisDoc {
         if max_new_tokens == 0 {
             return Ok((Vec::new(), false));
         }
-        // A batch-shaped graph left over from region decoding cannot serve
-        // a single-page request; free its fixed KV before vision encoding
-        // competes for memory.
-        #[cfg(feature = "cuda")]
-        self.text.release_incompatible_fixed_storage(None);
         let context_limit = self.cfg.text_config.max_position_embeddings;
         let image_inputs = preprocess_image(
             image,
@@ -271,6 +266,21 @@ impl WeVisDoc {
             });
         }
         validate_generation_length(input_ids.len(), max_new_tokens, context_limit)?;
+
+        // A batch-shaped graph left over from region decoding cannot serve
+        // a single-page request. The prompt length — and with it the
+        // decode bucket this request will use — is known now, before the
+        // vision tower runs, so the release decision is exact.
+        #[cfg(feature = "cuda")]
+        {
+            let expected_bucket = expected_decode_bucket(
+                input_ids.len(),
+                max_new_tokens,
+                loop_guard != LoopGuard::Off,
+            );
+            self.text
+                .release_incompatible_fixed_storage(None, expected_bucket);
+        }
 
         let (inputs_embeds, deepstack) = self.prepare_inputs(&input_ids, &image_inputs)?;
         let (position_ids, rope_delta) = build_position_ids(
@@ -356,18 +366,15 @@ impl WeVisDoc {
         loop_guard: LoopGuard,
     ) -> Result<Vec<Vec<u32>>, Error> {
         let batch_size = images.len();
-        // A single-row graph cannot serve a batch request, and a batch
-        // graph of a different width cannot be reused either; free their
-        // fixed KV before vision encoding competes for memory.
-        #[cfg(feature = "cuda")]
-        self.text
-            .release_incompatible_fixed_storage(Some(batch_size));
         let context_limit = self.cfg.text_config.max_position_embeddings;
         if max_new_tokens == 0 {
             return Ok(vec![Vec::new(); batch_size]);
         }
 
-        let mut rows: Vec<BatchPrompt> = Vec::with_capacity(batch_size);
+        // Pass 1: image preprocessing and tokenization — the prompt
+        // lengths, and with them the decode bucket this request will use,
+        // are known here, before the vision tower runs.
+        let mut drafts: Vec<(Vec<u32>, WeVisDocImageInputs)> = Vec::with_capacity(batch_size);
         for image in images {
             let image_inputs = preprocess_image(
                 image,
@@ -390,6 +397,30 @@ impl WeVisDoc {
                 });
             }
             validate_generation_length(input_ids.len(), max_new_tokens, context_limit)?;
+            drafts.push((input_ids, image_inputs));
+        }
+
+        // Release graphs and fixed KV that cannot serve this batch before
+        // the vision tower competes with them for memory.
+        #[cfg(feature = "cuda")]
+        {
+            let max_prompt_len = drafts
+                .iter()
+                .map(|(ids, _)| ids.len())
+                .max()
+                .unwrap_or_default();
+            let expected_bucket = expected_decode_bucket(
+                max_prompt_len,
+                max_new_tokens,
+                loop_guard != LoopGuard::Off,
+            );
+            self.text
+                .release_incompatible_fixed_storage(Some(batch_size), expected_bucket);
+        }
+
+        // Pass 2: vision tower, embeddings, positions.
+        let mut rows: Vec<BatchPrompt> = Vec::with_capacity(batch_size);
+        for (input_ids, image_inputs) in drafts {
             let (inputs_embeds, deepstack) = self.prepare_inputs(&input_ids, &image_inputs)?;
             let (position_ids, rope_delta) = build_position_ids(
                 &input_ids,
@@ -729,6 +760,20 @@ impl WeVisDoc {
         &self,
     ) -> &crate::backbones::qwen_vl_processing::MinerUImageProcessorConfig {
         &self.image_cfg
+    }
+}
+
+/// The decode bucket a request of this prompt length and budget will
+/// capture: region decoding uses the prompt-sized ladder, page decoding
+/// the legacy declared-maximum bucket. `None` means the prompt does not
+/// fit any bucket and the request stays eager.
+#[cfg(feature = "cuda")]
+fn expected_decode_bucket(prompt_len: usize, max_new_tokens: usize, region: bool) -> Option<usize> {
+    let limit = crate::backbones::qwen3_vl::text::WEVISDOC_DECODE_CACHE_LEN;
+    if region {
+        crate::runtime::decoder_graph::prompt_decode_bucket(prompt_len, limit)
+    } else {
+        crate::runtime::decoder_graph::decoder_cache_capacity(prompt_len, max_new_tokens, limit)
     }
 }
 

@@ -804,6 +804,13 @@ impl Qwen3Mlp {
     }
 }
 
+/// Test probe: the query chunk size last used by the causal chunked
+/// attention path (0 when that path has not run since the last probe
+/// reset). Lets tests assert the call site's chunk, not just the helper.
+#[cfg(test)]
+pub(crate) static LAST_CAUSAL_CHUNK: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Test-only injection point: after which layer's KV allocation a capture
 /// should fail. Unset means only the post-allocation full injection fires.
 #[cfg(all(test, feature = "cuda"))]
@@ -848,10 +855,15 @@ fn attention_masked_chunked(
     scaling: f64,
     num_kv_groups: usize,
 ) -> Result<Tensor, Error> {
+    #[cfg(test)]
+    {
+        LAST_CAUSAL_CHUNK.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
     const MASKED_ATTN_CHUNK: usize = 1024;
-    let (batch, seq_len, num_heads) = q
+    // Layout is (batch, heads, seq, head_dim): the head count is dim 1.
+    let (batch, num_heads, seq_len) = q
         .dims4()
-        .map(|(batch, _, seq_len, heads)| (batch, seq_len, heads))
+        .map(|(batch, heads, seq_len, _)| (batch, heads, seq_len))
         .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention shape", e))?;
     if attention_mask.is_none() && batch != 1 {
         return Err(Error::Config {
@@ -870,6 +882,8 @@ fn attention_masked_chunked(
         crate::runtime::attention::ATTENTION_CHUNK_SCRATCH_BUDGET,
     )
     .min(MASKED_ATTN_CHUNK);
+    #[cfg(test)]
+    LAST_CAUSAL_CHUNK.store(chunk_size, std::sync::atomic::Ordering::Relaxed);
     let mut chunks = Vec::with_capacity(seq_len.div_ceil(chunk_size));
     let mut start = 0usize;
     while start < seq_len {
@@ -1203,27 +1217,29 @@ impl Qwen3VlTextModel {
         else {
             return;
         };
-        let compatible = match request_batch {
+        let compatible = match (request_batch, expected_cache_len) {
+            // Unknown bucket: be conservative, release.
+            (_, None) => false,
             // Single-page request: only single-row storage backed by a
-            // live single-row graph is reusable.
-            None => {
+            // live single-row graph of this bucket is reusable.
+            (None, Some(expected)) => {
                 storage_batch == 1
-                    && self.decode_graph.borrow().is_some()
+                    && storage_cap == expected
                     && self
                         .decode_graph
                         .borrow()
                         .as_ref()
-                        .is_some_and(|graph| graph.cache_len == storage_cap)
+                        .is_some_and(|graph| graph.cache_len == expected)
             }
             // Batch request: only same-width storage backed by a live
-            // batch graph of the same width and capacity is reusable.
-            Some(width) => {
-                storage_batch == width
-                    && self
-                        .batch_decode_graph
-                        .borrow()
-                        .as_ref()
-                        .is_some_and(|graph| graph.batch == width && graph.cache_len == storage_cap)
+            // batch graph of the same width and bucket is reusable.
+            (Some(width), Some(expected)) => {
+                self.batch_decode_graph
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|graph| graph.batch == width && graph.cache_len == expected)
+                    && storage_batch == width
+                    && storage_cap == expected
             }
         };
         if !compatible {
@@ -2517,6 +2533,55 @@ mod tests {
     /// Batched decode graph vs the eager masked path: two left-padded rows
     /// of different lengths, checked token-for-token. Opt in with
     /// `OAR_WEVISDOC_GPU_SELFTEST=1`.
+    /// The chunk used by the production entry must match the helper's
+    /// math at the call site: 16 heads at 4096 tokens shrink to 440 rows.
+    /// (Regressions like reading head_dim as the head count show up here.)
+    #[test]
+    fn causal_chunk_call_site_uses_the_budget() {
+        #[cfg(feature = "cuda")]
+        {
+            if std::env::var_os("OAR_WEVISDOC_GPU_SELFTEST").is_none() {
+                eprintln!("skipping: OAR_WEVISDOC_GPU_SELFTEST is not set");
+                return;
+            }
+            let Ok(device) = Device::new_cuda(0) else {
+                eprintln!("skipping: no CUDA device");
+                return;
+            };
+            let mut cfg = valid_tiny_config();
+            cfg.hidden_size = 2048;
+            cfg.intermediate_size = 6144;
+            cfg.num_attention_heads = 16;
+            cfg.num_key_value_heads = 8;
+            cfg.head_dim = 128;
+            cfg.num_hidden_layers = 2;
+            cfg.vocab_size = 32768;
+            let tensors = random_var_map(&cfg, &device, DType::BF16);
+            let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
+            let model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
+
+            let seq = 4096usize;
+            let q = Tensor::randn(0f32, 1f32, (1, 16, seq, cfg.head_dim), &device)
+                .unwrap()
+                .to_dtype(DType::BF16)
+                .unwrap();
+            let k = Tensor::randn(0f32, 1f32, (1, 8, seq, cfg.head_dim), &device)
+                .unwrap()
+                .to_dtype(DType::BF16)
+                .unwrap();
+            let v = Tensor::randn(0f32, 1f32, (1, 8, seq, cfg.head_dim), &device)
+                .unwrap()
+                .to_dtype(DType::BF16)
+                .unwrap();
+            attention_masked_chunked(&q, &k, &v, None, 1.0, 2).unwrap();
+            let used = LAST_CAUSAL_CHUNK.load(std::sync::atomic::Ordering::Relaxed);
+            eprintln!("DBGM6 call-site chunk at 16 heads x 4096 = {used}");
+            assert_eq!(used, 440, "call site must size the chunk by head count");
+        }
+        #[cfg(not(feature = "cuda"))]
+        eprintln!("skipping: built without the cuda feature");
+    }
+
     /// The chunk follows the scratch budget: full 1024 while that fits,
     /// shrinking only when a page outgrows it. The helper itself is the
     /// budget formula, asserted here for the text shape.
@@ -2868,7 +2933,7 @@ mod tests {
 
             // A single-page request arrives: its entry frees the batch
             // graph and buckets before vision encoding.
-            model.release_incompatible_fixed_storage(None);
+            model.release_incompatible_fixed_storage(None, Some(8192));
             let after = measured(&model);
             eprintln!("DBGM3 after-single-entry-release={after}MiB");
             // Small pool/fragmentation residue can survive the trim, so
@@ -2890,7 +2955,7 @@ mod tests {
 
             // A region-style batch request arrives: its entry frees the
             // single-row graph and buckets.
-            model.release_incompatible_fixed_storage(Some(2));
+            model.release_incompatible_fixed_storage(Some(2), Some(8192));
             let after = measured(&model);
             eprintln!("DBGM3 after-batch-entry-release={after}MiB");
             // Same small pool/fragmentation residue as the single-page
@@ -2904,12 +2969,26 @@ mod tests {
             assert!(!model.decode_graph_captured());
             assert!(!model.batch_decode_graph_captured());
 
-            // Compatible storage survives a same-width request.
+            // Same width, smaller bucket: the big buckets cannot serve
+            // the next request (its prepare would recapture), so the
+            // entry releases them before vision encoding.
+            model
+                .release_incompatible_fixed_storage(Some(2), Some(1024));
+            let after_shrink = measured(&model);
+            eprintln!("DBGM3 after-small-bucket-release={after_shrink}MiB");
+            assert!(
+                after_shrink.saturating_sub(baseline) <= 64,
+                "8192-bucket storage survived a 1024-bucket request: {} MiB",
+                after_shrink.saturating_sub(baseline)
+            );
+            assert!(!model.batch_decode_graph_captured());
+
+            // Compatible storage survives a same-width, same-bucket request.
             model
                 .prepare_batch_ar_cuda_graph(2, 600, 8192, &[0, 10], &lm_head, false)
                 .unwrap();
             assert!(model.batch_decode_graph_captured());
-            model.release_incompatible_fixed_storage(Some(2));
+            model.release_incompatible_fixed_storage(Some(2), Some(8192));
             assert!(
                 model.batch_decode_graph_captured(),
                 "compatible batch storage must not be released"
@@ -2925,7 +3004,7 @@ mod tests {
             unsafe {
                 std::env::set_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE", "1");
             }
-            model.release_incompatible_fixed_storage(None);
+            model.release_incompatible_fixed_storage(None, None);
             let skipped = measured(&model);
             eprintln!("DBGM3 control (release skipped)={skipped}MiB");
             assert!(
@@ -2935,7 +3014,7 @@ mod tests {
             unsafe {
                 std::env::remove_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE");
             }
-            model.release_incompatible_fixed_storage(None);
+            model.release_incompatible_fixed_storage(None, None);
             let settled = measured(&model);
             eprintln!("DBGM3 settled after control={settled}MiB");
             assert!(settled.saturating_sub(baseline) <= 64);
@@ -3057,7 +3136,7 @@ mod tests {
                 .prepare_ar_cuda_graph(600, 8192, &lm_head, false)
                 .unwrap();
             assert!(model.decode_graph_captured());
-            model.release_incompatible_fixed_storage(None);
+            model.release_incompatible_fixed_storage(None, Some(8192));
             assert!(
                 model.decode_graph_captured(),
                 "compatible single-row storage must not be released"
