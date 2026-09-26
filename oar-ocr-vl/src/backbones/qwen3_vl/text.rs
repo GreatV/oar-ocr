@@ -1828,13 +1828,12 @@ impl Qwen3VlTextModel {
         }
         #[cfg(test)]
         {
-            let capacity = self.layers[0].debug_kv_cache_state().0;
             let output = std::process::Command::new("nvidia-smi")
                 .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
                 .output()
                 .unwrap();
             eprintln!(
-                "DBGX post-allocate capacity={capacity} used={}MiB",
+                "DBGX post-allocate used={}MiB",
                 String::from_utf8_lossy(&output.stdout).trim()
             );
         }
