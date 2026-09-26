@@ -2405,12 +2405,15 @@ mod tests {
 
             // Batch graph: decode through it and assert every logit is
             // finite (NaN would flow from the masked attention rows).
-            let rows = vec![(0..540).map(|i| 10 + i % 60).collect::<Vec<u32>>(), {
-                let mut r = (0..520).map(|i| 10 + i % 60).collect::<Vec<u32>>();
-                r
-            }];
-            let (embeds, positions, seq_lens, pads) = build_padded_batch(&rows);
+            let seq_lens = vec![540usize, 520usize];
+            let pads = vec![0usize, 20usize];
             let pad_starts: Vec<u32> = pads.iter().map(|&pad| pad as u32).collect();
+            let embeds = Tensor::randn(0f32, 1f32, (2, 540, cfg.hidden_size), &device)
+                .unwrap()
+                .to_dtype(DType::F16)
+                .unwrap();
+            let positions = Tensor::zeros((3, 2, 540), DType::I64, &device).unwrap();
+            let rows = vec![540usize, 520usize];
             model.clear_cache();
             model
                 .prepare_batch_ar_cuda_graph(
@@ -2451,13 +2454,13 @@ mod tests {
                         "F16 batch graph produced non-finite logits at step {step} row {row}"
                     );
                 }
-                eprintln!("DBGF16 batch step {step} picked {tokens:?}");
                 let tokens: Vec<u32> = (0..rows.len())
                     .map(|row| {
                         let t = logits.i(row).unwrap();
                         argmax_of(&t) as u32
                     })
                     .collect();
+                eprintln!("DBGF16 batch step {step} picked {tokens:?}");
                 let kv_len = 540 + step + 1;
                 let row_starts = vec![(kv_len - 1) as u32; rows.len()];
                 let ids_t = Tensor::from_vec(tokens.clone(), (rows.len(), 1), &device).unwrap();
