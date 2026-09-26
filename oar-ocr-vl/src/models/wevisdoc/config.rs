@@ -57,11 +57,8 @@ impl WeVisDocConfig {
         }
         self.text_config.validate()?;
         self.vision_config.validate()?;
-        if !self.tie_word_embeddings() {
-            return Err(Error::Config {
-                message: "WeVisDoc requires tied token embeddings".to_string(),
-            });
-        }
+        // Untied checkpoints (WeVisDoc-4B) must ship their own
+        // `lm_head.weight`; tied ones reuse the token embeddings.
         for (name, token_id) in [
             ("image_token_id", self.image_token_id),
             ("video_token_id", self.video_token_id),
@@ -183,11 +180,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn rejects_untied_checkpoint() {
+    fn untied_checkpoints_validate_and_report_their_tie_state() {
         let mut cfg = official_config();
+        assert!(cfg.tie_word_embeddings());
         cfg.tie_word_embeddings = false;
         cfg.text_config.tie_word_embeddings = false;
-        assert!(cfg.validate().unwrap_err().to_string().contains("tied"));
+        cfg.validate().unwrap();
+        assert!(!cfg.tie_word_embeddings());
     }
 
     #[test]

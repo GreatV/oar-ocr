@@ -114,9 +114,20 @@ impl WeVisDoc {
         };
         let text = Qwen3VlTextModel::load(&cfg.text_config, vb.pp("model").pp("language_model"))?;
         let vision = Qwen3VlVisionModel::load(&cfg.vision_config, vb.pp("model").pp("visual"))?;
-        // WeVisDoc ties the language-model output projection to token
-        // embeddings (`tie_word_embeddings`, checked against the config).
-        let lm_head = Linear::new(text.token_embedding_weight(), None);
+        // The output projection reuses the token embeddings when tied
+        // (WeVisDoc-2B) and otherwise loads the checkpoint's lm_head
+        // (WeVisDoc-4B).
+        let lm_head = if cfg.tie_word_embeddings() {
+            Linear::new(text.token_embedding_weight(), None)
+        } else {
+            let weight = vb
+                .get(
+                    (cfg.text_config.vocab_size, cfg.text_config.hidden_size),
+                    "lm_head.weight",
+                )
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load lm_head", e))?;
+            Linear::new(weight, None)
+        };
 
         let generation_cfg: Option<WeVisDocGenerationConfig> = load_optional_json_config(
             model_dir.join("generation_config.json"),
