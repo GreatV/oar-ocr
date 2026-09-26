@@ -1143,7 +1143,7 @@ mod tests {
         assert!(trailing_decode_loop(&two).is_some());
 
         // Widely varying units are not a near-cycle: real prose survives.
-        let mut state = 9_876_543_21u64;
+        let mut state = 987_654_321u64;
         let prose: Vec<u32> = (0..300)
             .map(|_| {
                 state = state
