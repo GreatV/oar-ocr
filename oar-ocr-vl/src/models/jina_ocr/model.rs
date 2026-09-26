@@ -1177,15 +1177,10 @@ impl GreedyEngine<'_> {
         let mut draft_tensors = Vec::with_capacity(MTP_DRAFT_TOKENS);
 
         while draft_tensors.len() < MTP_DRAFT_TOKENS {
-            // CUDA-graph replay overwrites its captured output storage. Keep
-            // each proposal in independent storage before launching the next
-            // recurrent step, otherwise earlier draft handles would silently
-            // observe the newest token.
-            draft_tensors.push(
-                token
-                    .copy()
-                    .map_err(|e| candle_to_ocr_inference(name, "save MTP proposal", e))?,
-            );
+            // Proposals are owned tensors (`predict_single` graph replays
+            // hand back copies, the eager path allocates fresh ones), so a
+            // shared handle stays valid across later recurrent steps.
+            draft_tensors.push(token.clone());
             if draft_tensors.len() == MTP_DRAFT_TOKENS {
                 break;
             }
@@ -1789,6 +1784,24 @@ mod tests {
             assert_eq!(hit_eos, plain.hit_eos);
         }
 
+        /// CUDA graph capture uses process-global stream capture, so tests
+        /// that capture graphs must not run concurrently in one process.
+        #[cfg(feature = "cuda")]
+        static CUDA_GRAPH_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        #[cfg(feature = "cuda")]
+        fn cuda_selftest_device() -> Option<Device> {
+            if std::env::var_os("OAR_JINAOCR_GPU_SELFTEST").is_none() {
+                eprintln!("skipping: OAR_JINAOCR_GPU_SELFTEST is not set");
+                return None;
+            }
+            let Ok(device) = Device::new_cuda(0) else {
+                eprintln!("skipping: no CUDA device");
+                return None;
+            };
+            Some(device)
+        }
+
         /// GPU self-check for the mid-generation KV snapshot/restore cycle,
         /// run in BF16 so the CUDA graphs (f16/bf16-gated) actually capture:
         /// (1) element-wise KV equality across the production capture flow —
@@ -1813,6 +1826,7 @@ mod tests {
                     eprintln!("skipping: no CUDA device");
                     return;
                 };
+                let _cuda_lock = CUDA_GRAPH_TEST_LOCK.lock().unwrap();
                 let ids: Vec<u32> = (4..40).map(|i| 8 + i % 50).collect();
 
                 let build = |lazy_decode_graph: bool| {
@@ -1989,6 +2003,280 @@ mod tests {
             eprintln!("skipping: built without the cuda feature");
         }
 
+        /// Regression self-check for the graph-output aliasing bug: replays
+        /// overwrite the captured output buffers, and the MTP loop keeps
+        /// cooldown/verification hidden states across later replays for the
+        /// next draft rebuild. Replay must therefore hand out owned copies;
+        /// reading an earlier reply after a later replay must return the
+        /// earlier values. Skips without a CUDA device; opt in with
+        /// `OAR_JINAOCR_GPU_SELFTEST=1`.
+        #[test]
+        fn cuda_graph_replay_outputs_survive_later_replays() {
+            #[cfg(feature = "cuda")]
+            {
+                use crate::backbones::deepseek_v2::DeepSeekV2TextModel;
+                let Some(device) = cuda_selftest_device() else {
+                    return;
+                };
+                let _cuda_lock = CUDA_GRAPH_TEST_LOCK.lock().unwrap();
+                let cfg = tiny_config();
+                let vb = random_varbuilder_typed(&cfg, &device, true, DType::BF16);
+                let text = DeepSeekV2TextModel::load(&cfg, vb.pp("model")).unwrap();
+                let lm_head = Linear::new(
+                    vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
+                        .unwrap(),
+                    None,
+                );
+                let mtp = JinaOcrMtp::load(
+                    &cfg,
+                    text.token_embedding_weight(),
+                    text.final_norm_weight(),
+                    lm_head.weight().clone(),
+                    vb.clone(),
+                )
+                .unwrap();
+                let ids: Vec<u32> = (4..40).map(|i| 8 + i % 50).collect();
+                let prompt_len = ids.len();
+
+                let prefill = |text: &DeepSeekV2TextModel| {
+                    text.clear_kv_cache();
+                    let token_ids =
+                        Tensor::from_vec(ids.clone(), (1, prompt_len), &device).unwrap();
+                    let embeds = text.embed(&token_ids).unwrap();
+                    let positions = Tensor::arange(0u32, prompt_len as u32, &device)
+                        .unwrap()
+                        .reshape((1, 1, prompt_len))
+                        .unwrap();
+                    text.forward(&embeds, &positions, None).unwrap()
+                };
+                let decode_step = |token: u32, position: u32| {
+                    let t = Tensor::from_vec(vec![token], (1, 1), &device).unwrap();
+                    let embeds = text.embed(&t).unwrap();
+                    let pos = Tensor::arange(position, position + 1, &device)
+                        .unwrap()
+                        .reshape((1, 1, 1))
+                        .unwrap();
+                    text.forward_decode_logits_and_hidden(&embeds, &pos, &lm_head)
+                        .unwrap()
+                };
+                let host_f32 = |t: &Tensor| {
+                    t.to_dtype(DType::F32)
+                        .unwrap()
+                        .flatten_all()
+                        .unwrap()
+                        .to_vec1::<f32>()
+                        .unwrap()
+                };
+
+                // (1) Decode graph: two replays, then re-read the first
+                //     outputs — they must still hold the first step's values.
+                text.prepare_ar_cuda_graph(prompt_len, 48, &lm_head)
+                    .unwrap();
+                let _ = prefill(&text);
+                let (logits1, hidden1) = decode_step(9, prompt_len as u32);
+                let logits1_host = host_f32(&logits1);
+                let hidden1_host = host_f32(&hidden1);
+                let _ = decode_step(10, prompt_len as u32 + 1);
+                assert_eq!(
+                    host_f32(&logits1),
+                    logits1_host,
+                    "decode replay logits were overwritten by the next replay"
+                );
+                assert_eq!(
+                    host_f32(&hidden1),
+                    hidden1_host,
+                    "decode replay hidden was overwritten by the next replay"
+                );
+
+                // (2) Verification graph: same check over a 4-token block.
+                let Some(bucket) = text
+                    .prepare_verification_cuda_graph(prompt_len, 48, MTP_QUERY_LEN, &lm_head)
+                    .unwrap()
+                else {
+                    panic!("verification graph did not capture (dtype gate?)");
+                };
+                let _ = prefill(&text);
+                let verify_step = |first: u32, position: u32| {
+                    let ids4: Vec<u32> = (0..MTP_QUERY_LEN as u32).map(|i| first + i).collect();
+                    let t = Tensor::from_vec(ids4, (1, MTP_QUERY_LEN), &device).unwrap();
+                    let embeds = text.embed(&t).unwrap();
+                    let pos = Tensor::arange(position, position + MTP_QUERY_LEN as u32, &device)
+                        .unwrap()
+                        .reshape((1, 1, MTP_QUERY_LEN))
+                        .unwrap();
+                    text.forward_verification_tokens(&embeds, &pos, &lm_head)
+                        .unwrap()
+                };
+                let (hidden_b1, logits_b1) = verify_step(11, prompt_len as u32);
+                let hidden_b1_host = host_f32(&hidden_b1);
+                let logits_b1_host = host_f32(&logits_b1);
+                let _ = verify_step(21, prompt_len as u32 + MTP_QUERY_LEN as u32);
+                assert_eq!(
+                    host_f32(&hidden_b1),
+                    hidden_b1_host,
+                    "verification replay hidden was overwritten by the next replay"
+                );
+                assert_eq!(
+                    host_f32(&logits_b1),
+                    logits_b1_host,
+                    "verification replay logits were overwritten by the next replay"
+                );
+
+                // (3) MTP draft graph: same check over recurrent proposals.
+                mtp.prepare_cuda_graph(bucket).unwrap();
+                mtp.clear_kv_cache();
+                let draft_step = |token: u32, hidden: &Tensor, position: u32| {
+                    let t = Tensor::from_vec(vec![token], (1, 1), &device).unwrap();
+                    let pos = Tensor::arange(position, position + 1, &device)
+                        .unwrap()
+                        .reshape((1, 1, 1))
+                        .unwrap();
+                    mtp.predict_single(&t, hidden, &pos).unwrap()
+                };
+                let draft_hidden0 =
+                    Tensor::zeros((1, 1, cfg.hidden_size), DType::BF16, &device).unwrap();
+                let (d_hidden1, d_token1) = draft_step(31, &draft_hidden0, 0);
+                let d_hidden1_host = host_f32(&d_hidden1);
+                let d_token1_host = d_token1.flatten_all().unwrap().to_vec1::<u32>().unwrap();
+                let _ = draft_step(32, &d_hidden1, 1);
+                assert_eq!(
+                    host_f32(&d_hidden1),
+                    d_hidden1_host,
+                    "draft replay hidden was overwritten by the next replay"
+                );
+                assert_eq!(
+                    d_token1.flatten_all().unwrap().to_vec1::<u32>().unwrap(),
+                    d_token1_host,
+                    "draft replay token was overwritten by the next replay"
+                );
+            }
+            #[cfg(not(feature = "cuda"))]
+            eprintln!("skipping: built without the cuda feature");
+        }
+
+        /// Numerical evidence for the graph/eager decode comparison the MTP
+        /// A/B hinges on: on the same KV state and the same fixed-capacity
+        /// bucket, a graph-replayed decode step and an eager decode step must
+        /// agree up to kernel noise. Prints the max |Δlogit|, whether the two
+        /// rows are bitwise equal, and both top-2 margins; asserts the greedy
+        /// picks match on this deterministic model. Also compares an eager
+        /// step over an exactly-grown (contiguous) cache — the pure-AR
+        /// configuration. Skips without a CUDA device; opt in with
+        /// `OAR_JINAOCR_GPU_SELFTEST=1`.
+        #[test]
+        fn cuda_decode_graph_logits_track_eager_on_fixed_bucket() {
+            #[cfg(feature = "cuda")]
+            {
+                use crate::backbones::deepseek_v2::DeepSeekV2TextModel;
+                let Some(device) = cuda_selftest_device() else {
+                    return;
+                };
+                let _cuda_lock = CUDA_GRAPH_TEST_LOCK.lock().unwrap();
+                let cfg = tiny_config();
+                let vb = random_varbuilder_typed(&cfg, &device, true, DType::BF16);
+                let text = DeepSeekV2TextModel::load(&cfg, vb.pp("model")).unwrap();
+                let lm_head = Linear::new(
+                    vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
+                        .unwrap(),
+                    None,
+                );
+                let ids: Vec<u32> = (4..40).map(|i| 8 + i % 50).collect();
+                let prompt_len = ids.len();
+
+                let prefill = || {
+                    text.clear_kv_cache();
+                    let token_ids =
+                        Tensor::from_vec(ids.clone(), (1, prompt_len), &device).unwrap();
+                    let embeds = text.embed(&token_ids).unwrap();
+                    let positions = Tensor::arange(0u32, prompt_len as u32, &device)
+                        .unwrap()
+                        .reshape((1, 1, prompt_len))
+                        .unwrap();
+                    text.forward(&embeds, &positions, None).unwrap()
+                };
+                let decode_step = |token: u32, position: u32| {
+                    let t = Tensor::from_vec(vec![token], (1, 1), &device).unwrap();
+                    let embeds = text.embed(&t).unwrap();
+                    let pos = Tensor::arange(position, position + 1, &device)
+                        .unwrap()
+                        .reshape((1, 1, 1))
+                        .unwrap();
+                    text.forward_decode_logits_and_hidden(&embeds, &pos, &lm_head)
+                        .unwrap()
+                        .0
+                };
+                let host_f32 = |t: &Tensor| {
+                    t.to_dtype(DType::F32)
+                        .unwrap()
+                        .flatten_all()
+                        .unwrap()
+                        .to_vec1::<f32>()
+                        .unwrap()
+                };
+                let stats = |row: &[f32]| {
+                    let top = top3(row);
+                    (top[0].0, top[0].1 - top[1].1)
+                };
+
+                // Eager reference on an exactly-grown (contiguous) cache —
+                // the pure-AR decode configuration.
+                let _ = prefill();
+                let logits_contiguous = host_f32(&decode_step(9, prompt_len as u32));
+
+                // Capture both graphs against the shared fixed bucket, then
+                // restore the live KV (the production probe sequence).
+                let saved = {
+                    let _ = prefill();
+                    text.save_kv_cache().unwrap()
+                };
+                let Some(bucket) = text
+                    .prepare_verification_cuda_graph(prompt_len, 48, MTP_QUERY_LEN, &lm_head)
+                    .unwrap()
+                else {
+                    panic!("verification graph did not capture (dtype gate?)");
+                };
+                text.capture_ar_cuda_graph_with_capacity(bucket, &lm_head)
+                    .unwrap();
+                text.restore_kv_cache(&saved).unwrap();
+
+                // Graphed decode step over the fixed bucket.
+                let logits_graph = host_f32(&decode_step(9, prompt_len as u32));
+
+                // Eager decode step over the same bucket: appends return
+                // strided narrow views — the MTP cooldown configuration.
+                text.restore_kv_cache(&saved).unwrap();
+                text.invalidate_ar_cuda_graph();
+                let logits_strided = host_f32(&decode_step(9, prompt_len as u32));
+
+                let max_diff = |a: &[f32], b: &[f32]| {
+                    a.iter()
+                        .zip(b)
+                        .map(|(x, y)| (x - y).abs())
+                        .fold(0.0f32, f32::max)
+                };
+                let dg = max_diff(&logits_graph, &logits_strided);
+                let dc = max_diff(&logits_graph, &logits_contiguous);
+                let dsc = max_diff(&logits_strided, &logits_contiguous);
+                let (argmax_g, margin_g) = stats(&logits_graph);
+                let (argmax_e, margin_e) = stats(&logits_strided);
+                eprintln!(
+                    "decode graph vs eager (same bucket): max |Δlogit| = {dg:.6} (graph vs contiguous-eager {dc:.6}, strided vs contiguous {dsc:.6})"
+                );
+                eprintln!(
+                    "bitwise: graph==strided {} graph==contiguous {}; top-2 margins: graph {margin_g:.6} eager {margin_e:.6}",
+                    logits_graph == logits_strided,
+                    logits_graph == logits_contiguous,
+                );
+                assert_eq!(argmax_g, argmax_e, "greedy picks diverged");
+                assert!(
+                    dg <= 1.0,
+                    "kernel noise cannot explain a {dg} logit gap — suspect KV state corruption"
+                );
+            }
+            #[cfg(not(feature = "cuda"))]
+            eprintln!("skipping: built without the cuda feature");
+        }
+
         /// GPU self-check for graph re-capture within one process, in BF16 so
         /// the graphs capture: a short prompt captures a small bucket, a
         /// longer prompt forces a re-capture, the larger graph then covers
@@ -2049,6 +2337,7 @@ mod tests {
                     eprintln!("skipping: no CUDA device");
                     return;
                 };
+                let _cuda_lock = CUDA_GRAPH_TEST_LOCK.lock().unwrap();
                 let short: Vec<u32> = (4..36).map(|i| 8 + i % 50).collect();
                 let long: Vec<u32> = (0..600).map(|i| 8 + i % 50).collect();
 

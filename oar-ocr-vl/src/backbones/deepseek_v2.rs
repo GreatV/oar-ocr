@@ -58,7 +58,9 @@ fn graphs_disabled() -> bool {
 
 /// Captured single-token decode step that exports both the logits and the
 /// fed token's hidden state, so adaptive speculation can collect the states
-/// it needs for a later re-sync without leaving graph replay.
+/// it needs for a later re-sync without leaving graph replay. Replay hands
+/// out owned copies of the outputs — the captured buffers are overwritten by
+/// every launch, and callers keep them across later replays.
 #[cfg(feature = "cuda")]
 struct DecodeCudaGraph {
     // The graph owns device pointers into all tensors below; dispose via
@@ -1642,9 +1644,18 @@ impl DeepSeekV2TextModel {
         for layer in &self.layers {
             layer.set_kv_cache_len(kv_len)?;
         }
+        // Return owned copies: the next replay overwrites the captured output
+        // buffers, and callers (the MTP cooldown) keep the hidden state across
+        // later replays.
         Ok(Some((
-            captured.logits_output.clone(),
-            captured.hidden_output.clone(),
+            captured
+                .logits_output
+                .copy()
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy graph logits", e))?,
+            captured
+                .hidden_output
+                .copy()
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy graph hidden", e))?,
         )))
     }
 
@@ -1687,9 +1698,17 @@ impl DeepSeekV2TextModel {
         for layer in &self.layers {
             layer.set_kv_cache_len(kv_len)?;
         }
+        // Owned copies, as in `replay_cuda_graph`: callers stash hidden rows
+        // for the next draft rebuild, past later replays.
         Ok(Some((
-            captured.hidden_output.clone(),
-            captured.logits_output.clone(),
+            captured
+                .hidden_output
+                .copy()
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy verification hidden", e))?,
+            captured
+                .logits_output
+                .copy()
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy verification logits", e))?,
         )))
     }
 

@@ -516,9 +516,17 @@ impl JinaOcrMtp {
             .launch()
             .map_err(|e| cuda_graph_error("JinaOCR", "launch MTP CUDA graph", e))?;
         self.block.set_kv_cache_len(kv_len)?;
+        // Owned copies: the next replay overwrites the captured output
+        // buffers, and the caller feeds this hidden state into that replay.
         Ok(Some((
-            captured.hidden_output.clone(),
-            captured.token_output.clone(),
+            captured
+                .hidden_output
+                .copy()
+                .map_err(|e| candle_to_ocr_inference("JinaOCR", "copy MTP hidden", e))?,
+            captured
+                .token_output
+                .copy()
+                .map_err(|e| candle_to_ocr_inference("JinaOCR", "copy MTP token", e))?,
         )))
     }
 
