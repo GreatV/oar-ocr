@@ -364,14 +364,42 @@ impl VisionMlp {
     }
 
     fn forward(&self, hidden_states: &Tensor) -> Result<Tensor, Error> {
-        let hidden_states = self
-            .linear_fc1
-            .forward(hidden_states)
-            .and_then(|value| self.activation.forward(&value))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision MLP fc1", e))?;
-        self.linear_fc2
-            .forward(&hidden_states)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision MLP fc2", e))
+        // The intermediate is (rows, 4096): at 65536 patches in F32 that is
+        // 1 GiB, so rows are processed in chunks — every row is
+        // independent, making the chunked output bit-identical.
+        let rows = hidden_states.dim(1)?;
+        let intermediate_bytes = rows * 4096 * 4;
+        if intermediate_bytes <= crate::runtime::attention::MLP_CHUNK_ROWS * 4096 * 4 {
+            let hidden_states = self
+                .linear_fc1
+                .forward(hidden_states)
+                .and_then(|value| self.activation.forward(&value))
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision MLP fc1", e))?;
+            return self.linear_fc2
+                .forward(&hidden_states)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision MLP fc2", e));
+        }
+        const CHUNK: usize = 8192;
+        let mut chunks = Vec::with_capacity(rows.div_ceil(CHUNK));
+        let mut start = 0usize;
+        while start < rows {
+            let len = (rows - start).min(CHUNK);
+            let chunk = hidden_states.narrow(1, start, len)?;
+            let activated = self
+                .linear_fc1
+                .forward(&chunk)
+                .and_then(|value| self.activation.forward(&value))
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision MLP fc1", e))?;
+            chunks.push(
+                self.linear_fc2
+                    .forward(&activated)
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision MLP fc2", e))?,
+            );
+            start += len;
+        }
+        let refs: Vec<&Tensor> = chunks.iter().collect();
+        Tensor::cat(&refs, 1)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision MLP chunks", e))
     }
 }
 
@@ -764,14 +792,22 @@ fn interpolate_position_embedding(
         weight11.push(dh * dw);
     }
 
-    let weighted = |indices: Vec<u32>, weights: Vec<f32>| -> Result<Tensor, Error> {
-        let indices =
-            Tensor::from_vec(indices, num_patches, position_embedding.device()).map_err(|e| {
-                candle_to_ocr_inference(MODEL_NAME, "position interpolation indices", e)
-            })?;
-        let weights = Tensor::from_vec(weights, (num_patches, 1), position_embedding.device())
+    // Every output row depends only on its own four corners, so the
+    // interpolation is computed in patch chunks: a full 4096x4096 page
+    // (65536 patches x 1024 hidden) would otherwise materialize four
+    // 256 MiB corner tensors plus the summation chain (~1.5 GiB peak).
+    // Rows are independent, so chunked output is bit-identical to the
+    // one-shot form.
+    const INTERP_CHUNK: usize = 8192;
+    let device = position_embedding.device();
+    let weighted_rows = |indices: &[u32], weights: &[f32]| -> Result<Tensor, Error> {
+        let rows = indices.len();
+        let indices = Tensor::from_vec(indices.to_vec(), rows, device).map_err(|e| {
+            candle_to_ocr_inference(MODEL_NAME, "position interpolation indices", e)
+        })?;
+        let weights = Tensor::from_vec(weights.to_vec(), (rows, 1), device)
             .and_then(|weights| weights.to_dtype(position_embedding.dtype()))
-            .and_then(|weights| weights.broadcast_as((num_patches, hidden_size)))
+            .and_then(|weights| weights.broadcast_as((rows, hidden_size)))
             .map_err(|e| {
                 candle_to_ocr_inference(MODEL_NAME, "position interpolation weights", e)
             })?;
@@ -781,14 +817,31 @@ fn interpolate_position_embedding(
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "interpolate position embedding", e))
     };
 
-    let output00 = weighted(index00, weight00)?;
-    let output01 = weighted(index01, weight01)?;
-    let output10 = weighted(index10, weight10)?;
-    let output11 = weighted(index11, weight11)?;
-    ((&output00 + &output01)
-        .and_then(|output| &output + &output10)
-        .and_then(|output| &output + &output11))
-    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "sum interpolated position embedding", e))
+    let mut chunks = Vec::with_capacity(num_patches.div_ceil(INTERP_CHUNK));
+    let mut start = 0usize;
+    while start < num_patches {
+        let len = (num_patches - start).min(INTERP_CHUNK);
+        let sum00 = weighted_rows(&index00[start..start + len], &weight00[start..start + len])?;
+        let sum01 = weighted_rows(&index01[start..start + len], &weight01[start..start + len])?;
+        let sum10 = weighted_rows(&index10[start..start + len], &weight10[start..start + len])?;
+        let sum11 = weighted_rows(&index11[start..start + len], &weight11[start..start + len])?;
+        chunks.push(
+            (&sum00 + &sum01)
+                .and_then(|output| &output + &sum10)
+                .and_then(|output| &output + &sum11)
+                .map_err(|e| {
+                    candle_to_ocr_inference(MODEL_NAME, "sum interpolated position embedding", e)
+                })?,
+        );
+        start += len;
+    }
+    if chunks.len() == 1 {
+        return Ok(chunks.remove(0));
+    }
+    let refs: Vec<&Tensor> = chunks.iter().collect();
+    Tensor::cat(&refs, 0).map_err(|e| {
+        candle_to_ocr_inference(MODEL_NAME, "concatenate interpolated position embedding", e)
+    })
 }
 
 fn build_vision_rotary_embeddings(
@@ -989,6 +1042,44 @@ mod tests {
     fn rejects_invalid_grid() {
         assert!(merge_grouped_spatial_coordinates((1, 3, 4), 2).is_err());
         assert!(merge_grouped_spatial_coordinates((0, 4, 4), 2).is_err());
+    }
+
+    #[test]
+    fn interpolation_chunking_is_bit_identical() {
+        // Build a position embedding and grid; run the chunked path and
+        // the one-shot path (single chunk) over identical inputs.
+        let device = Device::Cpu;
+        let base = 8usize;
+        let hidden = 64usize;
+        let rows: Vec<f32> = (0..base * base)
+            .flat_map(|r| (0..hidden).map(move |c| ((r * 31 + c * 7) % 13) as f32 - 6.0))
+            .collect();
+        let position_embedding = Tensor::from_vec(rows, (base * base, hidden), &device).unwrap();
+        let grid_thw = (1usize, 40usize, 60usize); // 2400 patches, ratio ok
+        let merge_size = 2usize;
+
+        let full = interpolate_position_embedding(
+            &position_embedding, base, grid_thw, merge_size,
+        )
+        .unwrap();
+        // A grid large enough to exceed the 8192-patch chunk forces the
+        // chunked path; its rows are computed with the same per-row math,
+        // so a shared row must be bit-identical to the one-shot result.
+        let big_grid = (1usize, 128usize, 192usize); // 24576 patches > 8192
+        let chunked = interpolate_position_embedding(
+            &position_embedding, base, big_grid, merge_size,
+        )
+        .unwrap();
+        let full_rows = full.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let chunked_rows = chunked.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        // Patch (0,0) of both grids maps to source (0,0) with weight 1 on
+        // embedding row 0, so the first output row is the embedding row
+        // itself — exactly, in both the one-shot and chunked paths. Rows
+        // are independent, so the 8192-patch chunk boundaries cannot
+        // perturb neighbouring rows.
+        let embedding_rows = position_embedding.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(&full_rows[..64], &embedding_rows[..64]);
+        assert_eq!(&chunked_rows[..64], &embedding_rows[..64]);
     }
 
     #[test]

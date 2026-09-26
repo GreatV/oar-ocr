@@ -286,6 +286,10 @@ pub(crate) fn attention_query_chunk(num_heads: usize, kv_len: usize, budget: usi
     (budget / per_row).max(1)
 }
 
+/// Rows above which a row-wise MLP activation stage materializes its
+/// intermediate through the chunked helper instead of in one pass.
+pub(crate) const MLP_CHUNK_ROWS: usize = 8192;
+
 /// Sequence length above which vision backends use query-chunked attention to
 /// cap the size of the temporary attention-score matrix.
 #[allow(dead_code)]

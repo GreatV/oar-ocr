@@ -786,21 +786,57 @@ impl Qwen3Mlp {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor, Error> {
-        let gate = self
-            .gate_proj
-            .forward(xs)
-            .and_then(|gate| candle_nn::ops::silu(&gate))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP gate", e))?;
-        let up = self
-            .up_proj
-            .forward(xs)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP up", e))?;
-        self.down_proj
-            .forward(
-                &(&gate * &up)
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP gate product", e))?,
-            )
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP down", e))
+        // The intermediate is (rows, 6144): a 16K-token page in F32 is
+        // ~400 MiB, so rows are processed in chunks when the page is large
+        // — every row is independent, keeping the output bit-identical.
+        let rows = xs.dim(1)?;
+        let intermediate_bytes = rows * 6144 * 4;
+        if intermediate_bytes <= 256 * 1024 * 1024 {
+            let gate = self
+                .gate_proj
+                .forward(xs)
+                .and_then(|gate| candle_nn::ops::silu(&gate))
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP gate", e))?;
+            let up = self
+                .up_proj
+                .forward(xs)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP up", e))?;
+            return self.down_proj
+                .forward(
+                    &(&gate * &up)
+                        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP gate product", e))?,
+                )
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP down", e));
+        }
+        const CHUNK: usize = 8192;
+        let mut chunks = Vec::with_capacity(rows.div_ceil(CHUNK));
+        let mut start = 0usize;
+        while start < rows {
+            let len = (rows - start).min(CHUNK);
+            let chunk = xs.narrow(1, start, len)?;
+            let gate = self
+                .gate_proj
+                .forward(&chunk)
+                .and_then(|gate| candle_nn::ops::silu(&gate))
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP gate", e))?;
+            let up = self
+                .up_proj
+                .forward(&chunk)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP up", e))?;
+            chunks.push(
+                self.down_proj
+                    .forward(
+                        &(&gate * &up).map_err(|e| {
+                            candle_to_ocr_inference(MODEL_NAME, "MLP gate product", e)
+                        })?,
+                    )
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP down", e))?,
+            );
+            start += len;
+        }
+        let refs: Vec<&Tensor> = chunks.iter().collect();
+        Tensor::cat(&refs, 1)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP chunks", e))
     }
 }
 
