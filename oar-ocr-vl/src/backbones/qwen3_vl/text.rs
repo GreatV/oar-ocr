@@ -797,6 +797,16 @@ impl Qwen3Mlp {
     }
 }
 
+/// Test-only injection point: after which layer's KV allocation a capture
+/// should fail. Unset means only the post-allocation full injection fires.
+#[cfg(all(test, feature = "cuda"))]
+fn injected_capture_failure_after_layer(index: usize) -> bool {
+    std::env::var_os("OAR_WEVISDOC_FAIL_CAPTURE_AFTER_LAYER")
+        .and_then(|value| value.into_string().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|target| index + 1 == target)
+}
+
 /// Masked attention in one pass; `is_causal` follows the mask's absence so
 /// mask-less callers get the kernel's causal flag.
 fn attention_masked_single(
@@ -1146,6 +1156,23 @@ impl Qwen3VlTextModel {
         self.grow_dynamic_cache_batch(1, query_len, cache_len)
     }
 
+    /// Tear down everything a failed capture left behind — both graphs
+    /// (never installed, but cheap to drop) and every layer's
+    /// preallocated fixed-capacity KV storage — so the eager fallback runs
+    /// with the memory it needs.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn recover_failed_capture(&self) {
+        self.invalidate_cuda_graph();
+        self.invalidate_batch_cuda_graph();
+        #[cfg(test)]
+        if std::env::var_os("OAR_WEVISDOC_SKIP_RELEASE").is_some() {
+            // Test-only control: skip the storage release so the memory
+            // assertions can prove they catch a missing release.
+            return;
+        }
+        self.release_dynamic_caches();
+    }
+
     /// Free every layer's fixed-capacity KV storage after a failed graph
     /// capture, before the eager fallback runs: the fallback exists for
     /// low-memory situations, and the preallocated buckets would only
@@ -1360,21 +1387,14 @@ impl Qwen3VlTextModel {
             }
             self.invalidate_cuda_graph();
             self.invalidate_batch_cuda_graph();
-            if let Err(error) = self.capture_batch_cuda_graph(
+            self.capture_batch_cuda_graph(
                 batch,
                 cache_len,
                 WEVISDOC_DECODE_CACHE_LEN,
                 pad_lens,
                 lm_head,
                 0,
-            ) {
-                tracing::warn!(
-                    "{MODEL_NAME} batch graph capture failed: {error}; continuing eager"
-                );
-                self.invalidate_cuda_graph();
-                self.invalidate_batch_cuda_graph();
-                self.release_dynamic_caches();
-            }
+            )?;
         }
         let _ = (prompt_len, max_new_tokens, pad_lens, lm_head, ladder);
         Ok(())
@@ -1396,12 +1416,6 @@ impl Qwen3VlTextModel {
 
         if self.batch_decode_graph.borrow().is_some() {
             return Ok(());
-        }
-        #[cfg(test)]
-        if std::env::var_os("OAR_WEVISDOC_FAIL_CAPTURE").is_some() {
-            return Err(Error::Config {
-                message: "injected capture failure (test)".to_string(),
-            });
         }
         if pad_lens.len() != batch {
             return Err(Error::Config {
@@ -1432,8 +1446,20 @@ impl Qwen3VlTextModel {
             .first()
             .map(|layer| layer.attention_head_dim())
             .unwrap_or(1);
-        for layer in &self.layers {
+        for (index, layer) in self.layers.iter().enumerate() {
             layer.prepare_dynamic_cache_batch(batch, query_len, kv_heads, head_dim, cache_len)?;
+            #[cfg(test)]
+            if injected_capture_failure_after_layer(index) {
+                return Err(Error::Config {
+                    message: "injected capture failure (test)".to_string(),
+                });
+            }
+        }
+        #[cfg(test)]
+        if std::env::var_os("OAR_WEVISDOC_FAIL_CAPTURE").is_some() {
+            return Err(Error::Config {
+                message: "injected capture failure (test)".to_string(),
+            });
         }
         let hidden_size = self
             .embed_tokens
@@ -1757,19 +1783,7 @@ impl Qwen3VlTextModel {
             }
             self.invalidate_cuda_graph();
             self.invalidate_batch_cuda_graph();
-            if let Err(error) =
-                self.capture_cuda_graph(cache_len, WEVISDOC_DECODE_CACHE_LEN, lm_head, 0)
-            {
-                // The graph is only an optimization; a failed capture (for
-                // example a KV preallocation that outgrew free memory)
-                // falls back to eager instead of failing the request.
-                tracing::warn!(
-                    "{MODEL_NAME} decoder graph capture failed: {error}; continuing eager"
-                );
-                self.invalidate_cuda_graph();
-                self.invalidate_batch_cuda_graph();
-                self.release_dynamic_caches();
-            }
+            self.capture_cuda_graph(cache_len, WEVISDOC_DECODE_CACHE_LEN, lm_head, 0)?;
         }
         let _ = (prompt_len, max_new_tokens, lm_head, ladder);
         Ok(())
@@ -1790,12 +1804,6 @@ impl Qwen3VlTextModel {
         if self.decode_graph.borrow().is_some() {
             return Ok(());
         }
-        #[cfg(test)]
-        if std::env::var_os("OAR_WEVISDOC_FAIL_CAPTURE").is_some() {
-            return Err(Error::Config {
-                message: "injected capture failure (test)".to_string(),
-            });
-        }
         let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
             return Ok(());
         };
@@ -1807,8 +1815,22 @@ impl Qwen3VlTextModel {
             });
         }
         let query_len = 1;
-        for layer in &self.layers {
+        for (index, layer) in self.layers.iter().enumerate() {
             layer.prepare_dynamic_cache(query_len, cache_len)?;
+            #[cfg(test)]
+            if injected_capture_failure_after_layer(index) {
+                // Fires after this layer's KV allocation: the fallback must
+                // release a partially allocated set of fixed buckets.
+                return Err(Error::Config {
+                    message: "injected capture failure (test)".to_string(),
+                });
+            }
+        }
+        #[cfg(test)]
+        if std::env::var_os("OAR_WEVISDOC_FAIL_CAPTURE").is_some() {
+            return Err(Error::Config {
+                message: "injected capture failure (test)".to_string(),
+            });
         }
         let hidden_size = self
             .embed_tokens
@@ -2419,9 +2441,11 @@ mod tests {
         );
     }
 
-    /// An injected capture failure must leave both graphs uncaptured and
-    /// the decode must continue on eager with matching output, and the
-    /// allocator must stay healthy afterwards.
+    /// An injected capture failure — fired after the fixed KV buckets are
+    /// already allocated — must be recoverable: the fallback tears down
+    /// the preallocated storage, device memory returns to the baseline,
+    /// and the eager decode matches eager output. A control run with the
+    /// release skipped proves the memory assertion can catch the bug.
     #[test]
     fn cuda_capture_failure_falls_back_to_eager() {
         #[cfg(feature = "cuda")]
@@ -2448,11 +2472,10 @@ mod tests {
                     Err(_) => 0,
                 }
             }
-
-            // Environment-coupled: the self-test runner is single-threaded,
-            // so the process-global mutation is contained to this test.
-            // SAFETY: no other thread reads the environment concurrently.
+            // SAFETY: the self-test runner is single-threaded, so the
+            // process-global environment is owned by this test.
             unsafe { std::env::set_var("OAR_WEVISDOC_FAIL_CAPTURE", "1") };
+
             let mut cfg = valid_tiny_config();
             cfg.hidden_size = 2048;
             cfg.intermediate_size = 6144;
@@ -2471,8 +2494,7 @@ mod tests {
             );
             let ids = (0..600).map(|i| 10 + i % 60).collect::<Vec<u32>>();
 
-            // Warm up and settle the baseline: the model, its weights, and
-            // whatever the allocator keeps from loading.
+            // Warm up, then settle the baseline.
             model.clear_cache();
             let _ = model
                 .forward(
@@ -2485,36 +2507,84 @@ mod tests {
                 .unwrap();
             let baseline = smi_used();
             eprintln!("DBGM1 baseline={baseline}MiB");
+            assert!(baseline > 0, "nvidia-smi unavailable; cannot measure");
 
+            // Single-row capture fails after every layer allocated its KV:
+            // at the failure instant the buckets must be visible in memory.
+            let result = model.prepare_ar_cuda_graph(600, 8, &lm_head, true);
+            assert!(result.is_err(), "injected capture failure must surface");
+            let at_failure = smi_used();
+            eprintln!("DBGM1 single at-failure={at_failure}MiB");
+            assert!(
+                at_failure.saturating_sub(baseline) >= 200,
+                "the fixed KV buckets were not allocated before the failure"
+            );
+            model.recover_failed_capture();
+            let after_fallback = smi_used();
+            eprintln!("DBGM1 single after-fallback={after_fallback}MiB");
+            assert!(after_fallback.saturating_sub(baseline) <= 16);
+
+            // Partial allocation: fail after the 2nd of 4 layers.
+            unsafe {
+                std::env::set_var("OAR_WEVISDOC_FAIL_CAPTURE_AFTER_LAYER", "2");
+            }
+            let result = model.prepare_ar_cuda_graph(600, 8, &lm_head, true);
+            assert!(result.is_err(), "partial injection must surface");
+            let at_partial = smi_used();
+            eprintln!("DBGM1 single at-partial={at_partial}MiB");
+            assert!(at_partial.saturating_sub(baseline) >= 100);
+            model.recover_failed_capture();
+            let after_partial = smi_used();
+            eprintln!("DBGM1 single after-partial={after_partial}MiB");
+            assert!(after_partial.saturating_sub(baseline) <= 16);
+            unsafe {
+                std::env::remove_var("OAR_WEVISDOC_FAIL_CAPTURE_AFTER_LAYER");
+            }
+
+            // Batch capture fails after all layers allocated (batch 2
+            // doubles the buckets).
+            let result = model.prepare_batch_ar_cuda_graph(2, 600, 8, &[0, 10], &lm_head, true);
+            assert!(
+                result.is_err(),
+                "injected batch capture failure must surface"
+            );
+            let at_batch = smi_used();
+            eprintln!("DBGM1 batch at-failure={at_batch}MiB");
+            assert!(at_batch.saturating_sub(baseline) >= 200);
+            model.recover_failed_capture();
+            let after_batch = smi_used();
+            eprintln!("DBGM1 batch after-fallback={after_batch}MiB");
+            assert!(after_batch.saturating_sub(baseline) <= 16);
+            assert!(!model.batch_decode_graph_captured());
+            assert!(!model.decode_graph_captured());
+
+            // Control: with the release skipped, the preallocated buckets
+            // stay resident — proving the assertion above catches the bug.
+            unsafe { std::env::set_var("OAR_WEVISDOC_SKIP_RELEASE", "1") };
+            let result = model.prepare_batch_ar_cuda_graph(2, 600, 8, &[0, 10], &lm_head, true);
+            assert!(result.is_err());
+            model.recover_failed_capture();
+            let no_release = smi_used();
+            eprintln!("DBGM1 control (release skipped)={no_release}MiB");
+            assert!(
+                no_release.saturating_sub(baseline) >= 200,
+                "the memory assertion failed to catch a missing release"
+            );
+            unsafe {
+                std::env::remove_var("OAR_WEVISDOC_SKIP_RELEASE");
+                std::env::remove_var("OAR_WEVISDOC_FAIL_CAPTURE");
+            }
+            model.recover_failed_capture();
+            let settled = smi_used();
+            eprintln!("DBGM1 settled after control={settled}MiB");
+            assert!(settled.saturating_sub(baseline) <= 16);
+
+            // The eager fallback decodes correctly after all of this.
             let eager = greedy_eager(&model, &lm_head, &ids, 8);
             let graphed = greedy_graphed(&model, &lm_head, &ids, 8, false);
             assert_eq!(graphed, eager, "eager fallback must match eager output");
-            assert!(!model.decode_graph_captured());
-            let after_single = smi_used();
-            eprintln!("DBGM1 after-single-fallback={after_single}MiB");
-            assert!(
-                after_single.saturating_sub(baseline) <= 16,
-                "single-row capture failure leaked {} MiB above the baseline",
-                after_single.saturating_sub(baseline)
-            );
 
-            model
-                .prepare_batch_ar_cuda_graph(2, 600, 8, &[0, 10], &lm_head, true)
-                .unwrap();
-            assert!(!model.batch_decode_graph_captured());
-            assert!(!model.decode_graph_captured());
-            let after_batch = smi_used();
-            eprintln!("DBGM1 after-batch-fallback={after_batch}MiB");
-            assert!(
-                after_batch.saturating_sub(baseline) <= 16,
-                "batch capture failure leaked {} MiB above the baseline",
-                after_batch.saturating_sub(baseline)
-            );
-
-            // SAFETY: the self-test runner is single-threaded.
-            unsafe { std::env::remove_var("OAR_WEVISDOC_FAIL_CAPTURE") };
-
-            // The allocator stays healthy after the aborted captures.
+            // The allocator stays healthy.
             drop(model);
             drop(lm_head);
             let probe = Tensor::randn(0f32, 1f32, (64, 64), &device).unwrap();

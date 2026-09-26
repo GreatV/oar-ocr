@@ -485,14 +485,19 @@ impl WeVisDoc {
             let pads: Vec<usize> = (0..batch_size)
                 .map(|row| max_seq_len - seq_lens[row])
                 .collect();
-            self.text.prepare_batch_ar_cuda_graph(
+            if let Err(error) = self.text.prepare_batch_ar_cuda_graph(
                 batch_size,
                 max_seq_len,
                 max_new_tokens,
                 &pads,
                 &self.lm_head,
                 loop_guard != LoopGuard::Off,
-            )?
+            ) {
+                tracing::warn!(
+                    "{MODEL_NAME} batch graph capture failed: {error}; continuing eager"
+                );
+                self.text.recover_failed_capture();
+            }
         }
         let hidden = self.text.forward(
             &inputs_embeds,
