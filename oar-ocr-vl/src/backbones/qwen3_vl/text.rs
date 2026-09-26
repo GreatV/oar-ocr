@@ -1827,6 +1827,18 @@ impl Qwen3VlTextModel {
             }
         }
         #[cfg(test)]
+        {
+            let capacity = self.layers[0].debug_kv_cache_state().0;
+            let output = std::process::Command::new("nvidia-smi")
+                .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+                .output()
+                .unwrap();
+            eprintln!(
+                "DBGX post-allocate capacity={capacity} used={}MiB",
+                String::from_utf8_lossy(&output.stdout).trim()
+            );
+        }
+        #[cfg(test)]
         if std::env::var_os("OAR_WEVISDOC_FAIL_CAPTURE").is_some() {
             return Err(Error::Config {
                 message: "injected capture failure (test)".to_string(),
