@@ -2976,8 +2976,7 @@ mod tests {
             // Same width, smaller bucket: the big buckets cannot serve
             // the next request (its prepare would recapture), so the
             // entry releases them before vision encoding.
-            model
-                .release_incompatible_fixed_storage(Some(2), Some(1024));
+            model.release_incompatible_fixed_storage(Some(2), Some(1024));
             let after_shrink = measured(&model);
             eprintln!("DBGM3 after-small-bucket-release={after_shrink}MiB");
             assert!(
@@ -3098,8 +3097,7 @@ mod tests {
             );
 
             // A batch request arrives: its entry releases the orphan.
-            model
-                .release_incompatible_fixed_storage(Some(2), Some(8192));
+            model.release_incompatible_fixed_storage(Some(2), Some(8192));
             let released = measured(&model);
             eprintln!("DBGM5 single orphan released={released}MiB");
             assert!(released.saturating_sub(baseline) <= 64);
@@ -3148,8 +3146,7 @@ mod tests {
             );
             // Batch width over single-row storage: mismatched, so the
             // storage is released (with its graph).
-            model
-                .release_incompatible_fixed_storage(Some(2), Some(1024));
+            model.release_incompatible_fixed_storage(Some(2), Some(1024));
             assert!(!model.batch_decode_graph_captured());
             assert!(!model.decode_graph_captured());
 
