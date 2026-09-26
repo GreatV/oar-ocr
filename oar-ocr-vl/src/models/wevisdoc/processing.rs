@@ -77,7 +77,12 @@ pub fn preprocess_image(
     dtype: DType,
 ) -> Result<WeVisDocImageInputs, Error> {
     validate_processor_vision_compatibility(cfg, vision)?;
-    let inputs = preprocess_images(std::slice::from_ref(image), cfg, device, dtype)?;
+    // Document-parser crops can be narrower than the patch grid on one
+    // side (for example a 10x200 rule); scale those up proportionally so
+    // the processor's factor check passes instead of failing the page.
+    let min_edge = (cfg.merge_size * cfg.patch_size) as u32;
+    let image = upscale_min_edge(image, min_edge);
+    let inputs = preprocess_images(std::slice::from_ref(&image), cfg, device, dtype)?;
     let grid_thw = *inputs
         .image_grid_thw
         .first()
@@ -93,11 +98,56 @@ pub fn preprocess_image(
     })
 }
 
+/// Scale an image up until its shorter edge reaches `min_edge`, keeping the
+/// aspect ratio. Images already at or above `min_edge` pass through
+/// untouched.
+fn upscale_min_edge(image: &RgbImage, min_edge: u32) -> RgbImage {
+    let (w, h) = image.dimensions();
+    let min_dim = w.min(h);
+    if min_dim == 0 || min_dim >= min_edge {
+        return image.clone();
+    }
+    let scale = min_edge as f32 / min_dim as f32;
+    let new_w = ((w as f32 * scale).ceil() as u32).max(min_edge);
+    let new_h = ((h as f32 * scale).ceil() as u32).max(min_edge);
+    image::imageops::resize(image, new_w, new_h, image::imageops::FilterType::CatmullRom)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::config::tests::CONFIG;
     use super::*;
     use image::Rgb;
+
+    #[test]
+    fn narrow_parser_crops_preprocess_instead_of_failing() {
+        let config = super::super::config::tests::official_config();
+        // The official fixture embeds the processor block; mirror the
+        // loader's defaults for the fields it omits.
+        let cfg = MinerUImageProcessorConfig {
+            min_pixels: Some(65536),
+            max_pixels: Some(16_777_216),
+            size: None,
+            do_resize: true,
+            do_rescale: true,
+            do_normalize: true,
+            do_convert_rgb: true,
+            patch_size: config.vision_config.patch_size,
+            temporal_patch_size: config.vision_config.temporal_patch_size,
+            merge_size: config.vision_config.spatial_merge_size,
+            image_mean: vec![0.48145466, 0.4578275, 0.40821073],
+            image_std: vec![0.26862954, 0.26130258, 0.27577711],
+            resample: None,
+            rescale_factor: 1.0 / 255.0,
+        };
+        let vision = &config.vision_config;
+        for (w, h) in [(10u32, 200u32), (200, 10), (31, 31)] {
+            let img = RgbImage::from_pixel(w, h, Rgb([120, 140, 160]));
+            let inputs = preprocess_image(&img, &cfg, vision, &Device::Cpu, DType::F32)
+                .unwrap_or_else(|e| panic!("{w}x{h} failed: {e}"));
+            assert!(inputs.num_image_tokens > 0, "{w}x{h} produced no tokens");
+        }
+    }
 
     /// Matches the official `preprocessor_config.json` (Tencent/WeVisDoc-2B).
     fn processor_config() -> MinerUImageProcessorConfig {
