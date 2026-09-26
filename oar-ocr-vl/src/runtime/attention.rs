@@ -720,8 +720,9 @@ pub fn create_left_padding_mask(
 /// batches). Returns a `(batch, 1, 1, kv_len)` additive mask (`0` attendable, a
 /// large negative for padding); a no-op when there is no padding.
 ///
-/// Every `pad_lens` entry must be `<= kv_len`; a larger entry would mask every
-/// position and is an error.
+/// Every `pad_lens` entry must be `< kv_len`: `kv_len` includes the current
+/// token, so `pad_len >= kv_len` would mask every position of the row and
+/// degenerate the softmax to NaN — an error, not a mask.
 pub fn create_generation_mask(
     pad_lens: &[usize],
     kv_len: usize,
@@ -729,8 +730,10 @@ pub fn create_generation_mask(
     device: &Device,
 ) -> Result<Tensor> {
     let batch_size = pad_lens.len();
-    if let Some(&pad) = pad_lens.iter().find(|&&pad| pad > kv_len) {
-        candle_core::bail!("create_generation_mask: pad_len {pad} exceeds kv_len {kv_len}");
+    if let Some(&pad) = pad_lens.iter().find(|&&pad| pad >= kv_len) {
+        candle_core::bail!(
+            "create_generation_mask: pad_len {pad} leaves no attendable position in kv_len {kv_len}"
+        );
     }
 
     on_compute_device(device, |compute_device| {
@@ -1617,8 +1620,9 @@ mod tests {
                 .iter()
                 .all(|&v| v == 0.0)
         );
-        let mask = create_generation_mask(&[5], 5, DType::F32, &device);
-        assert!(mask.is_ok());
+        // pad_len == kv_len would also mask the current token (kv_len
+        // includes it) — the same NaN degeneracy, also rejected.
+        assert!(create_generation_mask(&[5], 5, DType::F32, &device).is_err());
         let mask = create_generation_mask(&[2], 5, DType::F32, &device)?;
         let row = mask.flatten_all()?.to_vec1::<f32>()?;
         assert!(row[0] < -1e8 && row[1] < -1e8);
