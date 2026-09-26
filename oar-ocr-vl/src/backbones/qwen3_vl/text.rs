@@ -2395,6 +2395,8 @@ mod tests {
             // Single-row graph: finite logits and greedy agreement.
             let eager = greedy_eager(&model, &lm_head, &ids, 8);
             let graphed = greedy_graphed(&model, &lm_head, &ids, 8, true);
+            eprintln!("DBGF16 single eager={eager:?}");
+            eprintln!("DBGF16 single graphed={graphed:?}");
             assert_eq!(graphed, eager, "F16 single-row graph must match eager");
 
             // Batch graph: decode through it and assert every logit is
@@ -2433,11 +2435,19 @@ mod tests {
                     .to_vec2::<f32>()
                     .unwrap();
                 for (row, score) in scores.iter().enumerate() {
+                    let nonfinite = score.iter().filter(|v| !v.is_finite()).count();
+                    let lo = score.iter().cloned().fold(f32::INFINITY, f32::min);
+                    let hi = score.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    eprintln!(
+                        "DBGF16 batch step {step} row {row}: len {} non-finite {nonfinite} range [{lo:.3}, {hi:.3}]",
+                        score.len()
+                    );
                     assert!(
-                        score.iter().all(|v| v.is_finite()),
+                        nonfinite == 0,
                         "F16 batch graph produced non-finite logits at step {step} row {row}"
                     );
                 }
+                eprintln!("DBGF16 batch step {step} picked {tokens:?}");
                 let tokens: Vec<u32> = (0..rows.len())
                     .map(|row| {
                         let t = logits.i(row).unwrap();
