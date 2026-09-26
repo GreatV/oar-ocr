@@ -69,10 +69,9 @@ impl RecognitionBackend for WeVisDoc {
         BackendCapabilities {
             // Tables come back as HTML, not OTSL.
             table_output_is_otsl: false,
-            // Greedy decode can fall into a sentence-level loop; the
-            // generation loop already stops exact token cycles, and the
-            // parser-level truncation catches what slips past it.
-            truncate_repetitive_output: true,
+            // Region decoding stops token-level loops itself; the parser's
+            // text-level truncation would only add false hits on top of it.
+            truncate_repetitive_output: false,
             ..BackendCapabilities::default()
         }
     }

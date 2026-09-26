@@ -11,7 +11,7 @@
 
 use crate::error::Error;
 use crate::runtime::attention::{
-    RotaryEmbedding, flash_attention, scaled_dot_product_attention_gqa,
+    RotaryEmbedding, create_causal_mask, flash_attention, scaled_dot_product_attention_gqa,
 };
 use crate::runtime::cache::TrimmableKvCache;
 #[cfg(feature = "cuda")]
@@ -422,48 +422,26 @@ impl Qwen3Attention {
             Some(output) => Ok(output),
             None => {
                 // Masked batch attention materializes (B, heads, q, kv)
-                // scores eagerly; page-scale prefills chunk the query axis so
-                // the transient stays bounded.
+                // scores eagerly; page-scale prefills chunk the query axis
+                // so the transient stays bounded. Mask-less single-row
+                // causal prefill chunks the same way — a 16K-token page
+                // would otherwise materialize the full score matrix at
+                // once — building each chunk's causal mask at the chunk's
+                // query offset.
                 const MASKED_ATTN_CHUNK: usize = 1024;
-                if attention_mask.is_some() && seq_len > MASKED_ATTN_CHUNK {
-                    let mut chunks = Vec::with_capacity(seq_len.div_ceil(MASKED_ATTN_CHUNK));
-                    let mut start = 0usize;
-                    while start < seq_len {
-                        let len = (seq_len - start).min(MASKED_ATTN_CHUNK);
-                        let q_chunk = q.narrow(2, start, len)?;
-                        let mask_chunk = attention_mask
-                            .map(|mask| mask.narrow(2, start, len))
-                            .transpose()?;
-                        chunks.push(
-                            scaled_dot_product_attention_gqa(
-                                &q_chunk,
-                                k,
-                                v,
-                                mask_chunk.as_ref(),
-                                self.scaling,
-                                false,
-                                self.num_kv_groups,
-                            )
-                            .map_err(|e| {
-                                candle_to_ocr_inference(MODEL_NAME, "grouped-query attention", e)
-                            })?,
-                        );
-                        start += len;
-                    }
-                    let refs: Vec<&Tensor> = chunks.iter().collect();
-                    return Tensor::cat(&refs, 2)
-                        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention chunks", e));
+                let chunked = attention_mask.is_some() && seq_len > MASKED_ATTN_CHUNK
+                    || (attention_mask.is_none() && batch == 1 && seq_len > MASKED_ATTN_CHUNK);
+                if chunked {
+                    return attention_masked_chunked(
+                        q,
+                        k,
+                        v,
+                        attention_mask,
+                        self.scaling,
+                        self.num_kv_groups,
+                    );
                 }
-                scaled_dot_product_attention_gqa(
-                    q,
-                    k,
-                    v,
-                    attention_mask,
-                    self.scaling,
-                    attention_mask.is_none(),
-                    self.num_kv_groups,
-                )
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "grouped-query attention", e))
+                attention_masked_single(q, k, v, attention_mask, self.scaling, self.num_kv_groups)
             }
         }
     }
@@ -797,6 +775,92 @@ impl Qwen3Mlp {
             )
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP down", e))
     }
+}
+
+/// Masked attention in one pass; `is_causal` follows the mask's absence so
+/// mask-less callers get the kernel's causal flag.
+fn attention_masked_single(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    attention_mask: Option<&Tensor>,
+    scaling: f64,
+    num_kv_groups: usize,
+) -> Result<Tensor, Error> {
+    scaled_dot_product_attention_gqa(
+        q,
+        k,
+        v,
+        attention_mask,
+        scaling,
+        attention_mask.is_none(),
+        num_kv_groups,
+    )
+    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "grouped-query attention", e))
+}
+
+/// Query-chunked masked attention. The caller's mask is narrowed along the
+/// query axis per chunk; a mask-less single-row causal prefill builds each
+/// chunk's causal mask at the chunk's query offset instead, so page-scale
+/// sequences never materialize the full (heads, seq, seq) score matrix.
+fn attention_masked_chunked(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    attention_mask: Option<&Tensor>,
+    scaling: f64,
+    num_kv_groups: usize,
+) -> Result<Tensor, Error> {
+    const MASKED_ATTN_CHUNK: usize = 1024;
+    let (batch, seq_len) = q
+        .dims4()
+        .map(|(batch, _, seq_len, _)| (batch, seq_len))
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention shape", e))?;
+    if attention_mask.is_none() && batch != 1 {
+        return Err(Error::Config {
+            message: format!(
+                "{MODEL_NAME} causal chunked attention requires batch size 1, got {batch}"
+            ),
+        });
+    }
+    let mut chunks = Vec::with_capacity(seq_len.div_ceil(MASKED_ATTN_CHUNK));
+    let mut start = 0usize;
+    while start < seq_len {
+        let len = (seq_len - start).min(MASKED_ATTN_CHUNK);
+        let q_chunk = q.narrow(2, start, len)?;
+        let mask_chunk = match attention_mask {
+            Some(mask) => Some(mask.narrow(2, start, len)?),
+            None => {
+                // Causal single-row prefill: the query chunk may only see
+                // its prefix, so narrow K/V to `start + len` — the dropped
+                // columns sit behind the causal mask (-inf) and contribute
+                // exactly zero, keeping the result bit-identical.
+                let visible = start + len;
+                Some(create_causal_mask(len, visible, q.dtype(), q.device())?)
+            }
+        };
+        // The caller's mask already hides columns; keep the full K/V.
+        // The causal path narrows K/V to the visible prefix — the dropped
+        // columns sit behind the causal mask (-inf) and contribute exactly
+        // zero, so the result stays bit-identical.
+        let (k_chunk, v_chunk) = if attention_mask.is_some() {
+            (k, v)
+        } else {
+            (&k.narrow(2, 0, start + len)?, &v.narrow(2, 0, start + len)?)
+        };
+        chunks.push(scaled_dot_product_attention_gqa(
+            &q_chunk,
+            k_chunk,
+            v_chunk,
+            mask_chunk.as_ref(),
+            scaling,
+            false,
+            num_kv_groups,
+        )?);
+        start += len;
+    }
+    let refs: Vec<&Tensor> = chunks.iter().collect();
+    Tensor::cat(&refs, 2).map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention chunks", e))
 }
 
 #[derive(Debug)]
@@ -2261,6 +2325,32 @@ mod tests {
     /// Batched decode graph vs the eager masked path: two left-padded rows
     /// of different lengths, checked token-for-token. Opt in with
     /// `OAR_WEVISDOC_GPU_SELFTEST=1`.
+    /// Chunked causal attention must agree with the one-pass form to
+    /// float epsilon: only the softmax reduction grouping changes.
+    #[test]
+    fn causal_chunked_attention_matches_single_pass() {
+        let device = Device::Cpu;
+        let (heads, seq, head_dim, kv_heads) = (4usize, 2560usize, 32usize, 2usize);
+        let q = Tensor::randn(0f32, 1f32, (1, heads, seq, head_dim), &device).unwrap();
+        let k = Tensor::randn(0f32, 1f32, (1, kv_heads, seq, head_dim), &device).unwrap();
+        let v = Tensor::randn(0f32, 1f32, (1, kv_heads, seq, head_dim), &device).unwrap();
+        let scaling = 1.0 / (head_dim as f64).sqrt();
+        let single = attention_masked_single(&q, &k, &v, None, scaling, 2).unwrap();
+        let chunked = attention_masked_chunked(&q, &k, &v, None, scaling, 2).unwrap();
+        let a = single.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let b = chunked.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let worst = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        eprintln!("causal chunk vs single max|delta| = {worst:e}");
+        assert!(
+            worst < 1e-3,
+            "chunked causal attention diverged: max|delta| = {worst}"
+        );
+    }
+
     #[test]
     fn cuda_batch_decode_graph_matches_masked_eager() {
         #[cfg(feature = "cuda")]

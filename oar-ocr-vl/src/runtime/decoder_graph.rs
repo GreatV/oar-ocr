@@ -460,10 +460,11 @@ impl BatchDecoderCudaGraph {
         report_stashed_cuda_error(&device, "batch decoder CUDA graph disposal");
         drop_and_drain(graph, &device);
         drop_and_drain(logits_output, &device);
-        let tensor = row_starts.tensor.clone();
-        drop_and_drain(tensor, &device);
-        let tensor = pad_bounds.tensor.clone();
-        drop_and_drain(tensor, &device);
+        // Drop the whole per-row wrappers, not clones of their tensors: the
+        // owning buffers must be freed while a drain can still pick up
+        // whatever their destructors stash.
+        drop_and_drain(row_starts, &device);
+        drop_and_drain(pad_bounds, &device);
         drop_and_drain(position_input, &device);
         drop_and_drain(hidden_input, &device);
         for tensor in retained_inputs {

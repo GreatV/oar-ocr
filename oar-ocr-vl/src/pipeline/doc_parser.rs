@@ -396,8 +396,12 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
                 continue;
             }
 
-            // Apply repetition truncation if needed
-            if self.backend.capabilities().truncate_repetitive_output {
+            // Apply repetition truncation if needed. Table markup is
+            // exempt: legitimate tables repeat identical rows well past
+            // the threshold, and collapsing them yields invalid HTML.
+            if self.backend.capabilities().truncate_repetitive_output
+                && task != RecognitionTask::Table
+            {
                 generated = truncate_repetitive_content(&generated, 10, 10, 10);
             }
 
@@ -883,6 +887,66 @@ mod tests {
 
     /// The parser must run end to end on a caller-supplied `LayoutSource`,
     /// which is the path that needs no ONNX Runtime.
+    /// Truncation-enabled backend echoing a table whose rows repeat
+    /// identically — the shape text-level repetition truncation must not
+    /// touch.
+    struct TableEchoBackend;
+
+    impl RecognitionBackend for TableEchoBackend {
+        fn recognize(
+            &self,
+            _image: RgbImage,
+            task: RecognitionTask,
+            _max_tokens: usize,
+        ) -> Result<String, Error> {
+            if task == RecognitionTask::Table {
+                let mut rows = String::new();
+                for _ in 0..12 {
+                    rows.push_str("<tr><td></td><td></td></tr>\n");
+                }
+                Ok(format!("<table>\n{rows}</table>"))
+            } else {
+                Ok("plain text\n".repeat(12))
+            }
+        }
+
+        fn capabilities(&self) -> crate::api::recognition::BackendCapabilities {
+            crate::api::recognition::BackendCapabilities {
+                truncate_repetitive_output: true,
+                ..crate::api::recognition::BackendCapabilities::default()
+            }
+        }
+    }
+
+    #[test]
+    fn table_output_survives_repetition_truncation() {
+        let backend = TableEchoBackend;
+        let parser = DocParser::new(&backend);
+        let layout = StaticLayout::new(vec![
+            element("table", 10.0, 10.0, 190.0, 100.0),
+            element("text", 10.0, 110.0, 190.0, 210.0),
+        ]);
+
+        let result = parser
+            .parse(&layout, RgbImage::new(200, 210))
+            .expect("parse succeeds");
+
+        // The table keeps every row: collapsing identical rows would
+        // yield invalid HTML.
+        let table_text = result.layout_elements[0].text.as_deref().unwrap();
+        assert_eq!(
+            table_text.matches("<tr>").count(),
+            12,
+            "table rows must not be collapsed by repetition truncation"
+        );
+        // Non-table text with the same repetition still gets truncated.
+        let text = result.layout_elements[1].text.as_deref().unwrap();
+        assert!(
+            !text.contains("plain text\nplain text"),
+            "repeated text should still be truncated"
+        );
+    }
+
     #[test]
     fn parses_with_a_static_layout_source() {
         let backend = RecordingBackend {
