@@ -2513,6 +2513,8 @@ mod tests {
                             .unwrap()
                             .to_dtype(DType::F32)
                             .unwrap()
+                            .flatten_all()
+                            .unwrap()
                             .to_vec1::<f32>()
                             .unwrap(),
                     );
@@ -2570,6 +2572,8 @@ mod tests {
                         .i(0)
                         .unwrap()
                         .to_dtype(DType::F32)
+                        .unwrap()
+                        .flatten_all()
                         .unwrap()
                         .to_vec1::<f32>()
                         .unwrap();
