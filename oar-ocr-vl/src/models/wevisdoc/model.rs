@@ -782,6 +782,22 @@ fn expected_decode_bucket(prompt_len: usize, max_new_tokens: usize, region: bool
     }
 }
 
+#[cfg(all(test, feature = "cuda"))]
+fn smi_used() -> u64 {
+    let output = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+        .output();
+    match output {
+        Ok(out) => String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .lines()
+            .next()
+            .and_then(|line| line.trim().parse().ok())
+            .unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
 /// One page's prepared prompt for batch generation.
 struct BatchPrompt {
     input_ids: Vec<u32>,
@@ -1476,5 +1492,114 @@ mod tests {
     fn greedy_argmax_prefers_the_first_tied_token() {
         let logits = Tensor::from_vec(vec![1f32, 3., 3., 2.], 4, &Device::Cpu).unwrap();
         assert_eq!(select_greedy_token(&logits).unwrap(), 1);
+    }
+
+    /// Production-entry memory check with a real checkpoint (env-gated:
+    /// OAR_WEVISDOC_ENTRY_TEST_MODEL_DIR / _IMAGE_A / _IMAGE_B). After a
+    /// region batch leaves a multi-GiB fixed bucket behind, the
+    /// single-page entry (generate_one) and the batch entry
+    /// (generate_tokens) must both release stale fixed KV before pixel
+    /// values are uploaded — verified via the preprocess_image probe —
+    /// with a release-skipped control.
+    #[test]
+    fn cuda_production_entries_release_stale_fixed_kv() {
+        #[cfg(feature = "cuda")]
+        {
+            if std::env::var_os("OAR_WEVISDOC_GPU_SELFTEST").is_none() {
+                eprintln!("skipping: OAR_WEVISDOC_GPU_SELFTEST is not set");
+                return;
+            }
+            let (Some(model_dir), Some(image_a), Some(image_b)) = (
+                std::env::var_os("OAR_WEVISDOC_ENTRY_TEST_MODEL_DIR"),
+                std::env::var_os("OAR_WEVISDOC_ENTRY_TEST_IMAGE_A"),
+                std::env::var_os("OAR_WEVISDOC_ENTRY_TEST_IMAGE_B"),
+            ) else {
+                eprintln!("skipping: set OAR_WEVISDOC_ENTRY_TEST_MODEL_DIR and _IMAGE_A/_IMAGE_B");
+                return;
+            };
+            let device = Device::new_cuda(0).unwrap();
+            let model = WeVisDoc::from_dir(std::path::Path::new(&model_dir), device.clone())
+                .expect("load WeVisDoc");
+            let image_a = crate::utils::image::load_image(std::path::Path::new(&image_a))
+                .expect("load image a");
+            let image_b = crate::utils::image::load_image(std::path::Path::new(&image_b))
+                .expect("load image b");
+
+            let baseline = {
+                let Device::Cuda(cuda) = model.text.embed_tokens.embeddings().device() else {
+                    unreachable!()
+                };
+                cuda.cuda_stream().synchronize().unwrap();
+                // The async allocator hides pool-internal reuse from
+                // nvidia-smi; trim to live allocations before reading.
+                use crate::runtime::decoder_graph::drain_cuda_context_errors;
+                use candle_core::cuda_backend::cudarc::driver::sys::{
+                    cuDeviceGetDefaultMemPool, cuMemPoolTrimTo,
+                };
+                let ordinal = cuda.cuda_stream().context().ordinal();
+                let mut pool: candle_core::cuda_backend::cudarc::driver::sys::CUmemoryPool =
+                    std::ptr::null_mut();
+                unsafe {
+                    cuDeviceGetDefaultMemPool(&mut pool, ordinal as i32);
+                    cuMemPoolTrimTo(pool, 0);
+                }
+                drain_cuda_context_errors(&model.text.embed_tokens.embeddings().device().clone());
+                smi_used()
+            };
+            eprintln!("DBGM7 baseline={baseline}MiB");
+
+            // Region-style batch request: captures a same-width graph and
+            // preallocates the big fixed buckets.
+            let texts = model
+                .generate(&[image_a.clone(), image_b.clone()], 64)
+                .unwrap();
+            assert_eq!(texts.len(), 2);
+
+            // Single-page entry: probe armed; the release must land before
+            // preprocess_image uploads pixel values.
+            unsafe { std::env::set_var("OAR_WEVISDOC_PROBE_UPLOAD", "1") };
+            let tokens = model
+                .generate_one(&image_a, 64, LoopGuard::Standard)
+                .expect("single-page generation succeeds");
+            assert!(!tokens.0.is_empty());
+            let probe = LAST_UPLOAD_PROBE_MIB.load(std::sync::atomic::Ordering::Relaxed);
+            eprintln!("DBGM7 single-entry pre-upload probe={probe}MiB");
+            assert!(
+                probe.saturating_sub(baseline) <= 64,
+                "stale KV survived into the single-page upload: {} MiB",
+                probe.saturating_sub(baseline)
+            );
+
+            // Control: with the entry release skipped, the upload point
+            // sees the stale bucket.
+            unsafe { std::env::set_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE", "1") };
+            let _ = model
+                .generate_one(&image_a, 64, LoopGuard::Standard)
+                .unwrap();
+            let probe = LAST_UPLOAD_PROBE_MIB.load(std::sync::atomic::Ordering::Relaxed);
+            eprintln!("DBGM7 control (release skipped) probe={probe}MiB");
+            assert!(
+                probe.saturating_sub(baseline) >= 500,
+                "the memory assertion failed to catch a missing release"
+            );
+            unsafe { std::env::remove_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE") };
+
+            // Batch entry: after the single-page phase the single-row
+            // bucket is stale for a batch request; the entry must release
+            // it before the upload.
+            unsafe { std::env::set_var("OAR_WEVISDOC_PROBE_UPLOAD", "1") };
+            let texts = model.generate(&[image_a, image_b], 64).unwrap();
+            assert_eq!(texts.len(), 2);
+            unsafe { std::env::remove_var("OAR_WEVISDOC_PROBE_UPLOAD") };
+            let probe = LAST_UPLOAD_PROBE_MIB.load(std::sync::atomic::Ordering::Relaxed);
+            eprintln!("DBGM7 batch-entry pre-upload probe={probe}MiB");
+            assert!(
+                probe.saturating_sub(baseline) <= 64,
+                "stale KV survived into the batch upload: {} MiB",
+                probe.saturating_sub(baseline)
+            );
+        }
+        #[cfg(not(feature = "cuda"))]
+        eprintln!("skipping: built without the cuda feature");
     }
 }

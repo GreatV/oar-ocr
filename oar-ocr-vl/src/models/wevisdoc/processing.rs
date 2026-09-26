@@ -16,6 +16,12 @@ pub struct WeVisDocImageInputs {
     pub num_image_tokens: usize,
 }
 
+/// Test probe: device MiB observed at the last pixel-value upload point
+/// (stored by the cfg(test) hook in `preprocess_image`).
+#[cfg(all(test, feature = "cuda"))]
+pub(crate) static LAST_UPLOAD_PROBE_MIB: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 pub(crate) fn load_image_processor_config(
     path: impl AsRef<Path>,
 ) -> Result<MinerUImageProcessorConfig, Error> {
@@ -118,22 +124,26 @@ pub fn preprocess_image(
     dtype: DType,
 ) -> Result<WeVisDocImageInputs, Error> {
     validate_processor_vision_compatibility(cfg, vision)?;
-    // Test-only production-entry probe: reports device memory at the
+    // Test-only production-entry probe: records device memory at the
     // upload point when the self-check drives a real generate_one.
     #[cfg(all(test, feature = "cuda"))]
     if std::env::var_os("OAR_WEVISDOC_PROBE_UPLOAD").is_some() {
         if let Device::Cuda(cuda) = device {
-            let stream = cuda.cuda_stream();
-            stream.synchronize().unwrap();
+            cuda.cuda_stream().synchronize().unwrap();
             let output = std::process::Command::new("nvidia-smi")
                 .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
                 .output();
-            if let Ok(out) = output {
-                eprintln!(
-                    "DBGM9 pre-upload used={}MiB",
-                    String::from_utf8_lossy(&out.stdout).trim()
-                );
-            }
+            let mib = match output {
+                Ok(out) => String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .lines()
+                    .next()
+                    .and_then(|line| line.trim().parse().ok())
+                    .unwrap_or(0),
+                Err(_) => 0,
+            };
+            LAST_UPLOAD_PROBE_MIB.store(mib, std::sync::atomic::Ordering::Relaxed);
+            eprintln!("DBGM9 pre-upload used={mib}MiB");
         }
     }
     // Document-parser crops can be narrower than the patch grid on one
