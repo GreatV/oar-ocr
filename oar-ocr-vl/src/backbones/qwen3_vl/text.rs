@@ -1818,17 +1818,6 @@ impl Qwen3VlTextModel {
         for (index, layer) in self.layers.iter().enumerate() {
             layer.prepare_dynamic_cache(query_len, cache_len)?;
             #[cfg(test)]
-            {
-                let output = std::process::Command::new("nvidia-smi")
-                    .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-                    .output()
-                    .unwrap();
-                eprintln!(
-                    "DBGY layer {index} prepared cap={cache_len} used={}MiB",
-                    String::from_utf8_lossy(&output.stdout).trim()
-                );
-            }
-            #[cfg(test)]
             if injected_capture_failure_after_layer(index) {
                 // Fires after this layer's KV allocation: the fallback must
                 // release a partially allocated set of fixed buckets.
@@ -1836,17 +1825,6 @@ impl Qwen3VlTextModel {
                     message: "injected capture failure (test)".to_string(),
                 });
             }
-        }
-        #[cfg(test)]
-        {
-            let output = std::process::Command::new("nvidia-smi")
-                .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-                .output()
-                .unwrap();
-            eprintln!(
-                "DBGX post-allocate used={}MiB",
-                String::from_utf8_lossy(&output.stdout).trim()
-            );
         }
         #[cfg(test)]
         if std::env::var_os("OAR_WEVISDOC_FAIL_CAPTURE").is_some() {
@@ -2480,6 +2458,28 @@ mod tests {
                 eprintln!("skipping: no CUDA device");
                 return;
             };
+            // CUDA's async allocator serves allocations from a memory
+            // pool whose free blocks are invisible to nvidia-smi, so every
+            // reading is taken after trimming the pool down to its live
+            // allocations. Without this the phases never move the needle.
+            use candle_core::cuda_backend::cudarc::driver::sys::{
+                cuDeviceGetDefaultMemPool, cuMemPoolTrimTo,
+            };
+            fn trim_pool(model: &Qwen3VlTextModel) {
+                let ordinal = model
+                    .embed_tokens
+                    .embeddings()
+                    .device()
+                    .cuda_stream()
+                    .context()
+                    .ordinal();
+                let mut pool: candle_core::cuda_backend::cudarc::driver::sys::CUmemoryPool =
+                    std::ptr::null_mut();
+                unsafe {
+                    cuDeviceGetDefaultMemPool(&mut pool, ordinal as i32);
+                    cuMemPoolTrimTo(pool, 0);
+                }
+            }
             fn smi_used() -> u64 {
                 let output = std::process::Command::new("nvidia-smi")
                     .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
@@ -2493,6 +2493,10 @@ mod tests {
                         .unwrap_or(0),
                     Err(_) => 0,
                 }
+            }
+            fn measured(model: &Qwen3VlTextModel) -> u64 {
+                trim_pool(model);
+                smi_used()
             }
             // SAFETY: the self-test runner is single-threaded, so the
             // process-global environment is owned by this test.
@@ -2530,7 +2534,7 @@ mod tests {
                     Some(&[(0usize, 8)]),
                 )
                 .unwrap();
-            let baseline = smi_used();
+            let baseline = measured(&model);
             eprintln!("DBGM1 baseline={baseline}MiB");
             assert!(baseline > 0, "nvidia-smi unavailable; cannot measure");
 
@@ -2538,14 +2542,14 @@ mod tests {
             // at the failure instant the buckets must be visible in memory.
             let result = model.prepare_ar_cuda_graph(600, 8192, &lm_head, false);
             assert!(result.is_err(), "injected capture failure must surface");
-            let at_failure = smi_used();
+            let at_failure = measured(&model);
             eprintln!("DBGM1 single at-failure={at_failure}MiB");
             assert!(
                 at_failure.saturating_sub(baseline) >= 500,
                 "the fixed KV buckets were not allocated before the failure"
             );
             model.recover_failed_capture();
-            let after_fallback = smi_used();
+            let after_fallback = measured(&model);
             eprintln!("DBGM1 single after-fallback={after_fallback}MiB");
             assert!(after_fallback.saturating_sub(baseline) <= 16);
 
@@ -2555,11 +2559,11 @@ mod tests {
             }
             let result = model.prepare_ar_cuda_graph(600, 8192, &lm_head, false);
             assert!(result.is_err(), "partial injection must surface");
-            let at_partial = smi_used();
+            let at_partial = measured(&model);
             eprintln!("DBGM1 single at-partial={at_partial}MiB");
             assert!(at_partial.saturating_sub(baseline) >= 300);
             model.recover_failed_capture();
-            let after_partial = smi_used();
+            let after_partial = measured(&model);
             eprintln!("DBGM1 single after-partial={after_partial}MiB");
             assert!(after_partial.saturating_sub(baseline) <= 16);
             unsafe {
@@ -2573,11 +2577,11 @@ mod tests {
                 result.is_err(),
                 "injected batch capture failure must surface"
             );
-            let at_batch = smi_used();
+            let at_batch = measured(&model);
             eprintln!("DBGM1 batch at-failure={at_batch}MiB");
             assert!(at_batch.saturating_sub(baseline) >= 500);
             model.recover_failed_capture();
-            let after_batch = smi_used();
+            let after_batch = measured(&model);
             eprintln!("DBGM1 batch after-fallback={after_batch}MiB");
             assert!(after_batch.saturating_sub(baseline) <= 16);
             assert!(!model.batch_decode_graph_captured());
@@ -2589,7 +2593,7 @@ mod tests {
             let result = model.prepare_batch_ar_cuda_graph(2, 600, 8192, &[0, 10], &lm_head, false);
             assert!(result.is_err());
             model.recover_failed_capture();
-            let no_release = smi_used();
+            let no_release = measured(&model);
             eprintln!("DBGM1 control (release skipped)={no_release}MiB");
             assert!(
                 no_release.saturating_sub(baseline) >= 500,
@@ -2600,7 +2604,7 @@ mod tests {
                 std::env::remove_var("OAR_WEVISDOC_FAIL_CAPTURE");
             }
             model.recover_failed_capture();
-            let settled = smi_used();
+            let settled = measured(&model);
             eprintln!("DBGM1 settled after control={settled}MiB");
             assert!(settled.saturating_sub(baseline) <= 16);
 
