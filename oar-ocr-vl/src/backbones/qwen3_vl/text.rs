@@ -1609,13 +1609,13 @@ impl Qwen3VlTextModel {
                 self.invalidate_batch_cuda_graph();
                 return Ok(());
             };
-            // Exact bucket match: a wider graph would scan past the mask
-            // for the whole generation, the cost the ladder avoids.
-            let reusable = self
-                .decode_graph
-                .borrow()
-                .as_ref()
-                .is_some_and(|graph| graph.cache_len == cache_len);
+            // Reuse within one doubling: region sweeps visit nearby prompt
+            // sizes, and re-capturing per region costs more than the wider
+            // scan. Anything further out re-captures, keeping the scan
+            // proportional to the prompt.
+            let reusable = self.decode_graph.borrow().as_ref().is_some_and(|graph| {
+                graph.cache_len >= cache_len && graph.cache_len < cache_len * 2
+            });
             if reusable {
                 return Ok(());
             }
