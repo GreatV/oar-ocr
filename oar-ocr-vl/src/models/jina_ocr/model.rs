@@ -1004,12 +1004,19 @@ impl GreedyEngine<'_> {
             )? {
                 // Cooldown decoding runs through the graph too: capture the
                 // decode graph against the verification bucket so the shared
-                // KV storage is reused, not reallocated.
-                if let Err(error) = self
-                    .text
-                    .capture_ar_cuda_graph_with_capacity(cache_len, self.lm_head)
-                {
-                    tracing::warn!("JinaOCR decode graph capture failed: {error}");
+                // KV storage is reused, not reallocated. Disabling the lazy
+                // decode graph keeps cooldown decoding eager (the
+                // verification graph and snapshot/restore still run) for
+                // A/B numerics experiments.
+                let capture_decode_graph = lazy_decode_graph
+                    && std::env::var_os("OAR_JINAOCR_DISABLE_LAZY_DECODE_GRAPH").is_none();
+                if capture_decode_graph {
+                    if let Err(error) = self
+                        .text
+                        .capture_ar_cuda_graph_with_capacity(cache_len, self.lm_head)
+                    {
+                        tracing::warn!("JinaOCR decode graph capture failed: {error}");
+                    }
                 }
                 if let Err(error) = mtp.prepare_cuda_graph(cache_len) {
                     tracing::warn!("JinaOCR MTP graph capture failed: {error}");
@@ -1021,7 +1028,7 @@ impl GreedyEngine<'_> {
             self.text.restore_kv_cache(&saved)?;
             tracing::debug!(committed, "MTP probe: KV restored, setup done");
         }
-        let _ = (prompt_len, max_new_tokens, committed, lazy_decode_graph);
+        let _ = (prompt_len, max_new_tokens, committed);
         Ok(())
     }
 
@@ -1851,13 +1858,12 @@ mod tests {
                     let (tokens, hit_eos) = engine(&model, &device)
                         .mtp_tokens(&prompt.input_ids, &hidden, 40, &adaptive)
                         .unwrap();
-                    if lazy {
-                        let (decode, verification) = model.text.graphs_captured();
-                        assert!(
-                            decode && verification,
-                            "forced-cycle run did not capture both graphs"
-                        );
-                    }
+                    let (decode, verification) = model.text.graphs_captured();
+                    assert!(verification, "forced-cycle run did not verify");
+                    assert_eq!(
+                        decode, lazy,
+                        "the lazy decode graph switch must control capture"
+                    );
                     results.push((tokens, hit_eos));
                 }
                 assert_eq!(
