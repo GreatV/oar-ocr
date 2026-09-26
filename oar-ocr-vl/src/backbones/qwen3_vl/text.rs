@@ -2504,7 +2504,10 @@ mod tests {
             cfg.num_attention_heads = 16;
             cfg.num_key_value_heads = 8;
             cfg.head_dim = 128;
-            cfg.num_hidden_layers = 4;
+            // Production-shape depth: 28 layers at the 8192 bucket hold
+            // ~940 MiB of fixed KV, far past the CUDA pool's slack, so the
+            // memory phases are visible to nvidia-smi.
+            cfg.num_hidden_layers = 28;
             cfg.vocab_size = 32768;
             let tensors = random_var_map(&cfg, &device, DType::BF16);
             let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
