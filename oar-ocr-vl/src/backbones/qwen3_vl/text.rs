@@ -2492,6 +2492,12 @@ mod tests {
                 }
             }
             fn measured(model: &Qwen3VlTextModel) -> u64 {
+                // Stream-ordered frees/allocation must settle before the
+                // trim can reclaim them.
+                let Device::Cuda(cuda) = model.embed_tokens.embeddings().device() else {
+                    return 0;
+                };
+                cuda.cuda_stream().synchronize().unwrap();
                 trim_pool(model);
                 smi_used()
             }
