@@ -19,8 +19,8 @@ use crate::runtime::cuda::dynamic_kv::{DynamicBatchKvAppend, DynamicKvAppend};
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
     BatchDecodeRows, BatchDecoderCudaGraph, CudaGraphDrainGuard, CudaGraphKvLengths,
-    CudaGraphPerRowU32, SingleTokenDecoderCudaGraph, cuda_graph_error, next_decode_bucket,
-    prompt_decode_bucket, sync_graph_tensor,
+    CudaGraphPerRowU32, SingleTokenDecoderCudaGraph, cuda_graph_error, decoder_cache_capacity,
+    next_decode_bucket, prompt_decode_bucket, sync_graph_tensor,
 };
 use crate::runtime::errors::candle_to_ocr_inference;
 use crate::runtime::tensor::rotate_half;
@@ -1204,15 +1204,18 @@ impl Qwen3VlTextModel {
 
     /// Capture the batched decode graph for one batch width. The layout
     /// change replaces the per-layer KV storage, so any single-row graph is
-    /// invalidated first. The bucket starts just past the prompt; replay
-    /// doubles it when the generation outgrows it.
+    /// invalidated first. Region decoding (`ladder`) starts the bucket just
+    /// past the prompt and grows it on demand; page decoding pins the
+    /// legacy declared-maximum bucket, reproducing the reference numerics.
     #[cfg(feature = "cuda")]
     pub(crate) fn prepare_batch_ar_cuda_graph(
         &self,
         batch: usize,
         prompt_len: usize,
+        max_new_tokens: usize,
         pad_lens: &[usize],
         lm_head: &Linear,
+        ladder: bool,
     ) -> Result<(), Error> {
         if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
             || std::env::var_os("OAR_WEVISDOC_DISABLE_CUDA_GRAPH").is_some()
@@ -1227,8 +1230,11 @@ impl Qwen3VlTextModel {
                 DType::BF16 | DType::F16
             )
         {
-            let Some(cache_len) = prompt_decode_bucket(prompt_len, WEVISDOC_DECODE_CACHE_LEN)
-            else {
+            let Some(cache_len) = (if ladder {
+                prompt_decode_bucket(prompt_len, WEVISDOC_DECODE_CACHE_LEN)
+            } else {
+                decoder_cache_capacity(prompt_len, max_new_tokens, WEVISDOC_DECODE_CACHE_LEN)
+            }) else {
                 self.invalidate_batch_cuda_graph();
                 return Ok(());
             };
@@ -1258,7 +1264,7 @@ impl Qwen3VlTextModel {
                 0,
             )?;
         }
-        let _ = (prompt_len, pad_lens, lm_head);
+        let _ = (prompt_len, max_new_tokens, pad_lens, lm_head, ladder);
         Ok(())
     }
 
@@ -1579,13 +1585,16 @@ impl Qwen3VlTextModel {
         self.project_logits(&hidden, lm_head)
     }
 
-    /// Capture the batch-1 single-token decode graph when eligible. The
-    /// bucket starts just past the prompt; replay doubles it when the
-    /// generation outgrows it.
+    /// Capture the batch-1 single-token decode graph when eligible.
+    /// Region decoding (`ladder`) starts the bucket just past the prompt
+    /// and grows it on demand; page decoding pins the legacy
+    /// declared-maximum bucket, reproducing the reference numerics.
     pub(crate) fn prepare_ar_cuda_graph(
         &self,
         prompt_len: usize,
+        max_new_tokens: usize,
         lm_head: &Linear,
+        ladder: bool,
     ) -> Result<(), Error> {
         if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
             || std::env::var_os("OAR_WEVISDOC_DISABLE_CUDA_GRAPH").is_some()
@@ -1601,8 +1610,11 @@ impl Qwen3VlTextModel {
                 DType::BF16 | DType::F16
             )
         {
-            let Some(cache_len) = prompt_decode_bucket(prompt_len, WEVISDOC_DECODE_CACHE_LEN)
-            else {
+            let Some(cache_len) = (if ladder {
+                prompt_decode_bucket(prompt_len, WEVISDOC_DECODE_CACHE_LEN)
+            } else {
+                decoder_cache_capacity(prompt_len, max_new_tokens, WEVISDOC_DECODE_CACHE_LEN)
+            }) else {
                 // Eager fallback: the prompt alone does not fit the largest
                 // bucket, so no graph may stay alive over it.
                 self.invalidate_cuda_graph();
@@ -1623,7 +1635,7 @@ impl Qwen3VlTextModel {
             self.invalidate_batch_cuda_graph();
             self.capture_cuda_graph(cache_len, WEVISDOC_DECODE_CACHE_LEN, lm_head, 0)?;
         }
-        let _ = (prompt_len, lm_head);
+        let _ = (prompt_len, max_new_tokens, lm_head, ladder);
         Ok(())
     }
 
@@ -2387,7 +2399,7 @@ mod tests {
 
                 model.clear_cache();
                 model
-                    .prepare_batch_ar_cuda_graph(batch, max_seq, &pads, &lm_head)
+                    .prepare_batch_ar_cuda_graph(batch, max_seq, steps, &pads, &lm_head, true)
                     .unwrap();
                 assert!(
                     model.batch_decode_graph_captured(),
@@ -2502,7 +2514,7 @@ mod tests {
                 // Graphed pass, recording row 0's logits every step.
                 model.clear_cache();
                 model
-                    .prepare_batch_ar_cuda_graph(probe_batch, max_seq, &pads, &lm_head)
+                    .prepare_batch_ar_cuda_graph(probe_batch, max_seq, steps, &pads, &lm_head, true)
                     .unwrap();
                 let hidden = model
                     .forward(&embeds, &positions, None, Some(&prefill_mask), None)
@@ -2627,7 +2639,9 @@ mod tests {
             // fallback decode still has to match eager token for token.
             let huge: Vec<u32> = (0..8300).map(|i| 10 + i as u32 % 60).collect();
             model.clear_cache();
-            model.prepare_ar_cuda_graph(huge.len(), &lm_head).unwrap();
+            model
+                .prepare_ar_cuda_graph(huge.len(), 4, &lm_head, true)
+                .unwrap();
             assert!(
                 !model.decode_graph_captured(),
                 "eager fallback must drop the single-row graph"
@@ -2729,7 +2743,9 @@ mod tests {
         let embeds = model.embed(&token_ids).unwrap();
         let positions = text_position_ids_range(seq_len, device);
         model.clear_cache();
-        model.prepare_ar_cuda_graph(seq_len, lm_head).unwrap();
+        model
+            .prepare_ar_cuda_graph(seq_len, steps, lm_head, true)
+            .unwrap();
         assert_eq!(
             model.decode_graph_captured(),
             expect_capture,

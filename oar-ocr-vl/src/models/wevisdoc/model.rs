@@ -183,11 +183,13 @@ impl WeVisDoc {
     }
 
     /// Region-recognition entry: identical to [`Self::generate_tokens`]
-    /// except the degenerate-loop guard is active. Only region crops run
-    /// with the guard — full-page parsing must reproduce the reference
-    /// decoding, where legitimate repeated structures (empty table rows,
-    /// dot leaders, repeated headers) would risk being cut.
-    pub(crate) fn generate_tokens_with_loop_guard(
+    /// except decoding uses the region bucket ladder and the degenerate
+    /// loop guard. Only region crops run this way — full-page parsing must
+    /// reproduce the reference decoding, where legitimate repeated
+    /// structures (empty table rows, dot leaders, repeated headers) would
+    /// risk being cut, and the wider reference bucket keeps the numerics
+    /// bit-identical.
+    pub(crate) fn generate_tokens_for_regions(
         &self,
         images: &[RgbImage],
         max_new_tokens: usize,
@@ -199,18 +201,18 @@ impl WeVisDoc {
         &self,
         images: &[RgbImage],
         max_new_tokens: usize,
-        loop_guard: bool,
+        region_recognition: bool,
     ) -> crate::error::BatchResult<Vec<u32>> {
         if images.len() <= 1 {
             return Ok(images
                 .iter()
                 .map(|image| {
-                    self.generate_one(image, max_new_tokens, loop_guard)
+                    self.generate_one(image, max_new_tokens, region_recognition)
                         .map(|(tokens, _)| tokens)
                 })
                 .collect());
         }
-        self.generate_batch_tokens(images, max_new_tokens, loop_guard)
+        self.generate_batch_tokens(images, max_new_tokens, region_recognition)
             .map(|results| results.into_iter().map(Ok).collect())
     }
 
@@ -221,7 +223,7 @@ impl WeVisDoc {
         &self,
         image: &RgbImage,
         max_new_tokens: usize,
-        loop_guard: bool,
+        region_recognition: bool,
     ) -> Result<(Vec<u32>, bool), Error> {
         self.text.clear_cache();
         let _cache_guard = TextCacheGuard(&self.text);
@@ -260,8 +262,12 @@ impl WeVisDoc {
             self.image_token_id,
             &self.device,
         )?;
-        self.text
-            .prepare_ar_cuda_graph(input_ids.len(), &self.lm_head)?;
+        self.text.prepare_ar_cuda_graph(
+            input_ids.len(),
+            max_new_tokens,
+            &self.lm_head,
+            region_recognition,
+        )?;
         let hidden =
             self.text
                 .forward(&inputs_embeds, &position_ids, Some(&deepstack), None, None)?;
@@ -287,7 +293,8 @@ impl WeVisDoc {
             // (one is kept) both bounds the output and saves the rest of
             // the token budget. Region crops only — see
             // `generate_tokens_with_loop_guard`.
-            if loop_guard && let Some((period, repeats)) = trailing_decode_loop(&generated) {
+            if region_recognition && let Some((period, repeats)) = trailing_decode_loop(&generated)
+            {
                 generated.truncate(generated.len() - (repeats - 1) * period);
                 return Ok((generated, false));
             }
@@ -324,7 +331,7 @@ impl WeVisDoc {
         &self,
         images: &[RgbImage],
         max_new_tokens: usize,
-        loop_guard: bool,
+        region_recognition: bool,
     ) -> Result<Vec<Vec<u32>>, Error> {
         let batch_size = images.len();
         let context_limit = self.cfg.text_config.max_position_embeddings;
@@ -470,8 +477,14 @@ impl WeVisDoc {
             let pads: Vec<usize> = (0..batch_size)
                 .map(|row| max_seq_len - seq_lens[row])
                 .collect();
-            self.text
-                .prepare_batch_ar_cuda_graph(batch_size, max_seq_len, &pads, &self.lm_head)?;
+            self.text.prepare_batch_ar_cuda_graph(
+                batch_size,
+                max_seq_len,
+                max_new_tokens,
+                &pads,
+                &self.lm_head,
+                region_recognition,
+            )?;
         }
         let hidden = self.text.forward(
             &inputs_embeds,
@@ -526,7 +539,7 @@ impl WeVisDoc {
                     // repeated cycles (one is kept) and retire the row so
                     // the batch stops paying for its decode. Region crops
                     // only — see `generate_tokens_with_loop_guard`.
-                    if loop_guard
+                    if region_recognition
                         && let Some((period, repeats)) = trailing_decode_loop(&generated[row])
                     {
                         let keep = generated[row].len() - (repeats - 1) * period;

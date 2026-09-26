@@ -36,7 +36,7 @@ impl RecognitionBackend for WeVisDoc {
         // emits Markdown text, HTML tables, and LaTeX formulas, so every
         // region task runs the same full-page prompt.
         let tokens = self
-            .generate_tokens_with_loop_guard(std::slice::from_ref(&image), max_tokens)?
+            .generate_tokens_for_regions(std::slice::from_ref(&image), max_tokens)?
             .pop()
             .ok_or_else(|| Error::invalid_input("WeVisDoc returned no recognition result"))??;
         Ok(postprocess(task, &self.decode_tokens(&tokens)?))
@@ -56,7 +56,7 @@ impl RecognitionBackend for WeVisDoc {
             )));
         }
         Ok(self
-            .generate_tokens_with_loop_guard(&images, max_tokens)?
+            .generate_tokens_for_regions(&images, max_tokens)?
             .into_iter()
             .zip(tasks.iter().copied())
             .map(|(result, task)| {
