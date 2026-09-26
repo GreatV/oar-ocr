@@ -41,7 +41,7 @@ const MODEL_NAME: &str = "Qwen3-VL";
 /// longer generations falling back to eager decoding against per-step
 /// scan cost.
 #[cfg(feature = "cuda")]
-const WEVISDOC_DECODE_CACHE_LEN: usize = 8_192;
+pub(crate) const WEVISDOC_DECODE_CACHE_LEN: usize = 8_192;
 
 fn default_rms_norm_eps() -> f64 {
     1e-6
@@ -1200,7 +1200,11 @@ impl Qwen3VlTextModel {
     /// encoding — the next prepare only replaces them after both — and
     /// competing allocations can OOM there. Compatible storage stays.
     #[cfg(feature = "cuda")]
-    pub(crate) fn release_incompatible_fixed_storage(&self, request_batch: Option<usize>) {
+    pub(crate) fn release_incompatible_fixed_storage(
+        &self,
+        request_batch: Option<usize>,
+        expected_cache_len: Option<usize>,
+    ) {
         #[cfg(test)]
         if std::env::var_os("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE").is_some() {
             // Test-only control: keep the incompatible storage so the
