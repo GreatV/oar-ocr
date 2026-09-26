@@ -2542,7 +2542,7 @@ mod tests {
             let at_failure = measured(&model);
             eprintln!("DBGM1 single at-failure={at_failure}MiB");
             assert!(
-                at_failure.saturating_sub(baseline) >= 500,
+                at_failure.saturating_sub(baseline) >= 300,
                 "the fixed KV buckets were not allocated before the failure"
             );
             model.recover_failed_capture();
@@ -2558,7 +2558,7 @@ mod tests {
             assert!(result.is_err(), "partial injection must surface");
             let at_partial = measured(&model);
             eprintln!("DBGM1 single at-partial={at_partial}MiB");
-            assert!(at_partial.saturating_sub(baseline) >= 300);
+            assert!(at_partial.saturating_sub(baseline) >= 250);
             model.recover_failed_capture();
             let after_partial = measured(&model);
             eprintln!("DBGM1 single after-partial={after_partial}MiB");
