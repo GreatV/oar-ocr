@@ -135,8 +135,8 @@ mod tests {
             patch_size: config.vision_config.patch_size,
             temporal_patch_size: config.vision_config.temporal_patch_size,
             merge_size: config.vision_config.spatial_merge_size,
-            image_mean: vec![0.48145466, 0.4578275, 0.40821073],
-            image_std: vec![0.26862954, 0.26130258, 0.27577711],
+            image_mean: vec![0.4814547, 0.4578275, 0.4082107],
+            image_std: vec![0.2686295, 0.2613026, 0.2757771],
             resample: None,
             rescale_factor: 1.0 / 255.0,
         };

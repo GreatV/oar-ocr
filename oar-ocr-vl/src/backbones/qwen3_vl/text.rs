@@ -1633,13 +1633,6 @@ impl Qwen3VlTextModel {
         }
     }
 
-    pub(crate) fn invalidate_ar_cuda_graph(&self) {
-        #[cfg(feature = "cuda")]
-        self.invalidate_cuda_graph();
-        #[cfg(feature = "cuda")]
-        self.invalidate_batch_cuda_graph();
-    }
-
     /// Whether the batched decode graph is currently captured — asserted
     /// by the GPU self-checks.
     #[cfg(all(test, feature = "cuda"))]
