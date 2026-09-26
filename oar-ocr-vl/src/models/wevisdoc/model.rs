@@ -472,6 +472,10 @@ impl WeVisDoc {
             .map(|(&len, delta)| len as i64 + delta)
             .collect();
         let pad_lens: Vec<usize> = seq_lens.iter().map(|&len| max_seq_len - len).collect();
+        // The graph mask is refreshed from these every step, so a reused
+        // graph never reads the previous batch's padding bounds.
+        #[cfg(feature = "cuda")]
+        let pad_starts: Vec<u32> = pad_lens.iter().map(|&pad| pad as u32).collect();
         let mut kv_len = max_seq_len;
 
         for step in 0..max_new_tokens {
@@ -518,6 +522,7 @@ impl WeVisDoc {
                 &embeds,
                 &pos,
                 &row_starts,
+                &pad_starts,
                 kv_len,
                 gen_mask.as_ref(),
                 &self.lm_head,

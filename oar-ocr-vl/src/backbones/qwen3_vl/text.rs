@@ -18,7 +18,7 @@ use crate::runtime::cache::TrimmableKvCache;
 use crate::runtime::cuda::dynamic_kv::{DynamicBatchKvAppend, DynamicKvAppend};
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
-    BatchDecoderCudaGraph, CudaGraphDrainGuard, CudaGraphKvLengths, CudaGraphRowStarts,
+    BatchDecoderCudaGraph, CudaGraphDrainGuard, CudaGraphKvLengths, CudaGraphPerRowU32,
     SingleTokenDecoderCudaGraph, cuda_graph_error, decoder_cache_capacity, sync_graph_tensor,
 };
 use crate::runtime::errors::candle_to_ocr_inference;
@@ -579,8 +579,10 @@ impl Qwen3Attention {
 
     /// Batched CUDA-graph decode step: every row appends at its own
     /// device-side offset and attends over `[pad_row, start_row + query_len)`
-    /// inside the shared fixed-capacity storage. `kv_positions` and
-    /// `pad_bounds` are capture-time constants (see the single-row variant).
+    /// inside the shared fixed-capacity storage. `kv_positions` is a
+    /// capture-time constant (its values depend only on the pinned
+    /// `cache_len`); `row_starts` and `pad_bounds` are rewritten before
+    /// every replay, so no input survives from a previous batch.
     #[cfg(feature = "cuda")]
     fn forward_dynamic_batch(
         &self,
@@ -1160,6 +1162,11 @@ impl Qwen3VlTextModel {
                 self.invalidate_batch_cuda_graph();
                 return Ok(());
             };
+            // Reuse is sound only because every batch-dependent graph input
+            // is rewritten before replay: hidden states, positions, row
+            // starts, and the pad bounds behind the attention mask. What
+            // stays baked in is a function of (batch, cache_len) alone,
+            // which this check pins.
             let reusable = self
                 .batch_decode_graph
                 .borrow()
@@ -1230,16 +1237,26 @@ impl Qwen3VlTextModel {
         .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "batch graph hidden input", e))?;
         let position_input = Tensor::zeros((3, batch, query_len), DType::I64, &device)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "batch graph position input", e))?;
-        let row_starts = CudaGraphRowStarts::new(batch, &device)
+        let row_starts = CudaGraphPerRowU32::new(&[batch], &device)
             .map_err(|e| cuda_graph_error(MODEL_NAME, "batch graph row starts", e))?;
         let kv_positions =
             Tensor::arange(0u32, cache_len as u32, &device)?.reshape((1, 1, 1, cache_len))?;
-        let pad_bounds = Tensor::from_vec(
-            pad_lens.iter().map(|&pad| pad as u32).collect::<Vec<u32>>(),
-            (batch, 1, 1, 1),
-            &device,
-        )
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "batch graph padding bounds", e))?;
+        // Padded-span bounds live in a pinned-backed device buffer so every
+        // batch rewrites them before replay; a capture-time constant here is
+        // what let a reused graph mask with the previous batch's pads.
+        let pad_bounds = CudaGraphPerRowU32::new(&[batch, 1, 1, 1], &device)
+            .map_err(|e| cuda_graph_error(MODEL_NAME, "batch graph pad bounds", e))?;
+        let pads: Vec<u32> = pad_lens
+            .iter()
+            .map(|&pad| {
+                u32::try_from(pad).map_err(|_| Error::Config {
+                    message: format!("{MODEL_NAME} batch graph pad {pad} exceeds u32"),
+                })
+            })
+            .collect::<Result<Vec<u32>, Error>>()?;
+        pad_bounds
+            .update(&pads)
+            .map_err(|e| cuda_graph_error(MODEL_NAME, "seed batch graph pad bounds", e))?;
         let stream = cuda.cuda_stream();
         let _htod_cache = cuda.enable_cuda_graph_htod_cache();
 
@@ -1248,7 +1265,7 @@ impl Qwen3VlTextModel {
             &position_input,
             row_starts.tensor(),
             &kv_positions,
-            &pad_bounds,
+            pad_bounds.tensor(),
         )?;
         let warm_logits = self.project_logits_batch(&warm, lm_head)?;
         sync_graph_tensor(MODEL_NAME, &warm_logits, "warm batch decoder CUDA graph")?;
@@ -1267,7 +1284,7 @@ impl Qwen3VlTextModel {
                 &position_input,
                 row_starts.tensor(),
                 &kv_positions,
-                &pad_bounds,
+                pad_bounds.tensor(),
             )?;
             let logits = self.project_logits_batch(&hidden, lm_head)?;
             logits_output
@@ -1298,8 +1315,9 @@ impl Qwen3VlTextModel {
             hidden_input,
             position_input,
             row_starts,
+            pad_bounds,
             logits_output,
-            retained_inputs: vec![kv_positions, pad_bounds],
+            retained_inputs: vec![kv_positions],
             batch,
             cache_len,
         });
@@ -1312,6 +1330,7 @@ impl Qwen3VlTextModel {
         inputs_embeds: &Tensor,
         position_ids: &Tensor,
         row_starts: &[u32],
+        pad_lens: &[u32],
         max_kv_len: usize,
     ) -> Result<Option<Tensor>, Error> {
         let captured_ref = self.batch_decode_graph.borrow();
@@ -1344,6 +1363,10 @@ impl Qwen3VlTextModel {
             .update(row_starts)
             .map_err(|e| cuda_graph_error(MODEL_NAME, "update batch graph row starts", e))?;
         captured
+            .pad_bounds
+            .update(pad_lens)
+            .map_err(|e| cuda_graph_error(MODEL_NAME, "update batch graph pad bounds", e))?;
+        captured
             .graph
             .launch()
             .map_err(|e| cuda_graph_error(MODEL_NAME, "launch batch decoder graph", e))?;
@@ -1354,22 +1377,29 @@ impl Qwen3VlTextModel {
     }
 
     /// One batched decode step at `position_ids`; returns `(batch, vocab)`
-    /// logits. Falls back to the eager masked path when no graph fits.
+    /// logits. `pad_lens` are the batch's per-row left-padding lengths — the
+    /// graph mask is refreshed from them before replay. Falls back to the
+    /// eager masked path when no graph fits.
     #[cfg(feature = "cuda")]
     pub(crate) fn forward_decode_logits_batch(
         &self,
         inputs_embeds: &Tensor,
         position_ids: &Tensor,
         row_starts: &[u32],
+        pad_lens: &[u32],
         max_kv_len: usize,
         attention_mask: Option<&Tensor>,
         lm_head: &Linear,
     ) -> Result<Tensor, Error> {
         // The captured graph masks padding internally, so replay takes
         // priority; the caller's mask only serves the eager fallback.
-        if let Some(logits) =
-            self.replay_batch_cuda_graph(inputs_embeds, position_ids, row_starts, max_kv_len)?
-        {
+        if let Some(logits) = self.replay_batch_cuda_graph(
+            inputs_embeds,
+            position_ids,
+            row_starts,
+            pad_lens,
+            max_kv_len,
+        )? {
             return Ok(logits);
         }
         let hidden = self.forward(inputs_embeds, position_ids, None, attention_mask, None)?;
@@ -1987,7 +2017,7 @@ mod tests {
             // First capture at the small bucket.
             assert_eq!(
                 greedy_eager(&model, &lm_head, &short, 8),
-                greedy_graphed(&model, &lm_head, &short, 8),
+                greedy_graphed(&model, &lm_head, &short, 8, true),
                 "small-bucket graph decode must match eager"
             );
             assert!(model.decode_graph_captured());
@@ -1996,14 +2026,14 @@ mod tests {
             // same process — the dangling-read bug reproduced here.
             assert_eq!(
                 greedy_eager(&model, &lm_head, &long, 8),
-                greedy_graphed(&model, &lm_head, &long, 8),
+                greedy_graphed(&model, &lm_head, &long, 8, true),
                 "re-captured graph decode must match eager"
             );
 
             // The larger graph now covers the small prompt again (reuse).
             assert_eq!(
                 greedy_eager(&model, &lm_head, &short, 8),
-                greedy_graphed(&model, &lm_head, &short, 8),
+                greedy_graphed(&model, &lm_head, &short, 8, true),
                 "reused graph decode must match eager"
             );
 
@@ -2012,7 +2042,7 @@ mod tests {
             let second = Qwen3VlTextModel::load(&cfg, make_vb().pp("model")).unwrap();
             assert_eq!(
                 greedy_eager(&second, &lm_head, &long, 8),
-                greedy_graphed(&second, &lm_head, &long, 8),
+                greedy_graphed(&second, &lm_head, &long, 8, true),
                 "second-instance graph decode must match eager"
             );
         }
@@ -2059,150 +2089,204 @@ mod tests {
 
             let make_ids =
                 |len: usize| -> Vec<u32> { (0..len).map(|i| 10 + i as u32 % 60).collect() };
-            let rows = [make_ids(200), make_ids(120)];
-            let seq_lens: Vec<usize> = rows.iter().map(|r| r.len()).collect();
-            let batch = rows.len();
-            let max_seq = *seq_lens.iter().max().unwrap();
-            let pads: Vec<usize> = seq_lens.iter().map(|&len| max_seq - len).collect();
-
-            // Left-padded embeds and positions.
-            let mut embed_rows = Vec::new();
-            let mut position_rows = Vec::new();
-            for row in &rows {
-                let ids = Tensor::from_vec(row.clone(), (1, row.len()), &device).unwrap();
-                let embeds = model.embed(&ids).unwrap();
-                let pad = Tensor::zeros(
-                    (1, max_seq - row.len(), cfg.hidden_size),
-                    DType::BF16,
-                    &device,
-                )
-                .unwrap();
-                embed_rows.push(Tensor::cat(&[&pad, &embeds], 1).unwrap());
-                let base = Tensor::arange(0i64, row.len() as i64, &device)
-                    .unwrap()
-                    .reshape((1, 1, row.len()))
-                    .unwrap();
-                let mut data = Vec::with_capacity(3 * row.len());
-                for _ in 0..3 {
-                    data.extend(base.flatten_all().unwrap().to_vec1::<i64>().unwrap());
-                }
-                let positions = Tensor::from_vec(data, (3, 1, row.len()), &device).unwrap();
-                let pad_pos =
-                    Tensor::zeros((3, 1, max_seq - row.len()), DType::I64, &device).unwrap();
-                position_rows.push(Tensor::cat(&[&pad_pos, &positions], 2).unwrap());
-            }
-            let embeds = Tensor::cat(&embed_rows.iter().collect::<Vec<_>>(), 0).unwrap();
-            let positions = Tensor::cat(&position_rows.iter().collect::<Vec<_>>(), 1).unwrap();
-            let causal = create_causal_mask(max_seq, max_seq, DType::BF16, &device).unwrap();
-            let padding =
-                create_left_padding_mask(&seq_lens, max_seq, DType::BF16, &device).unwrap();
-            let prefill_mask = combine_masks(&causal, &padding).unwrap();
-
             let steps = 6usize;
-            let decode_step = |row: usize, logits: &Tensor| -> u32 {
+
+            fn decode_step(row: usize, logits: &Tensor) -> u32 {
                 let scores = logits.i(row).unwrap();
                 argmax_of(&scores) as u32
-            };
-
-            // Eager reference: masked prefill + masked decode steps.
-            model.clear_cache();
-            let hidden = model
-                .forward(&embeds, &positions, None, Some(&prefill_mask), None)
-                .unwrap();
-            let mut logits = lm_head
-                .forward(
-                    &hidden
-                        .i((.., max_seq - 1, ..))
-                        .unwrap()
-                        .contiguous()
-                        .unwrap(),
-                )
-                .unwrap();
-            let mut eager = Vec::new();
-            for step in 0..steps {
-                let mut tokens = Vec::new();
-                for row in 0..batch {
-                    tokens.push(decode_step(row, &logits));
-                }
-                eager.push(tokens.clone());
-                let kv_len = max_seq + step + 1;
-                let ids = Tensor::from_vec(tokens.clone(), (batch, 1), &device).unwrap();
-                let embed = model.embed(&ids).unwrap();
-                let mut pos_data = Vec::with_capacity(3 * batch);
-                for _ in 0..3 {
-                    for &seq_len in &seq_lens {
-                        pos_data.push((seq_len + step) as i64);
-                    }
-                }
-                let pos = Tensor::from_vec(pos_data, (3, batch, 1), &device).unwrap();
-                let gen_mask =
-                    create_generation_mask_if_needed(&pads, kv_len, DType::BF16, &device).unwrap();
-                let hidden = model
-                    .forward(&embed, &pos, None, gen_mask.as_ref(), None)
-                    .unwrap();
-                logits = lm_head.forward(&hidden).unwrap();
             }
 
-            // Graphed: same prefill, decode through the batched graph.
-            model.clear_cache();
-            model
-                .prepare_batch_ar_cuda_graph(batch, max_seq, steps, &pads, &lm_head)
-                .unwrap();
-            assert!(
-                model.batch_decode_graph_captured(),
-                "batch decode graph did not capture (dtype gate?)"
-            );
-            let hidden = model
-                .forward(&embeds, &positions, None, Some(&prefill_mask), None)
-                .unwrap();
-            let mut logits = lm_head
-                .forward(
-                    &hidden
-                        .i((.., max_seq - 1, ..))
-                        .unwrap()
-                        .contiguous()
-                        .unwrap(),
-                )
-                .unwrap();
-            let mut graphed = Vec::new();
-            for step in 0..steps {
-                let mut tokens = Vec::new();
-                for row in 0..batch {
-                    tokens.push(decode_step(row, &logits));
-                }
-                graphed.push(tokens.clone());
-                let kv_len = max_seq + step + 1;
-                let row_starts = vec![(kv_len - 1) as u32; batch];
-                let ids = Tensor::from_vec(tokens.clone(), (batch, 1), &device).unwrap();
-                let embed = model.embed(&ids).unwrap();
-                let mut pos_data = Vec::with_capacity(3 * batch);
-                for &seq_len in &seq_lens {
-                    for _ in 0..3 {
-                        pos_data.push((seq_len + step) as i64);
+            // Left-padded embeds and positions for one batch, plus its
+            // per-row sequence and pad lengths.
+            let build_padded_batch =
+                |rows: &[Vec<u32>]| -> (Tensor, Tensor, Vec<usize>, Vec<usize>) {
+                    let seq_lens: Vec<usize> = rows.iter().map(|r| r.len()).collect();
+                    let max_seq = *seq_lens.iter().max().unwrap();
+                    let pads: Vec<usize> = seq_lens.iter().map(|&len| max_seq - len).collect();
+                    let mut embed_rows = Vec::new();
+                    let mut position_rows = Vec::new();
+                    for row in rows {
+                        let ids = Tensor::from_vec(row.clone(), (1, row.len()), &device).unwrap();
+                        let embeds = model.embed(&ids).unwrap();
+                        let pad = Tensor::zeros(
+                            (1, max_seq - row.len(), cfg.hidden_size),
+                            DType::BF16,
+                            &device,
+                        )
+                        .unwrap();
+                        embed_rows.push(Tensor::cat(&[&pad, &embeds], 1).unwrap());
+                        let base = Tensor::arange(0i64, row.len() as i64, &device)
+                            .unwrap()
+                            .reshape((1, 1, row.len()))
+                            .unwrap();
+                        let mut data = Vec::with_capacity(3 * row.len());
+                        for _ in 0..3 {
+                            data.extend(base.flatten_all().unwrap().to_vec1::<i64>().unwrap());
+                        }
+                        let positions = Tensor::from_vec(data, (3, 1, row.len()), &device).unwrap();
+                        let pad_pos =
+                            Tensor::zeros((3, 1, max_seq - row.len()), DType::I64, &device)
+                                .unwrap();
+                        position_rows.push(Tensor::cat(&[&pad_pos, &positions], 2).unwrap());
                     }
-                }
-                let pos = Tensor::from_vec(pos_data, (3, batch, 1), &device).unwrap();
-                let gen_mask =
-                    create_generation_mask_if_needed(&pads, kv_len, DType::BF16, &device).unwrap();
-                logits = model
-                    .forward_decode_logits_batch(
-                        &embed,
-                        &pos,
-                        &row_starts,
-                        kv_len,
-                        gen_mask.as_ref(),
-                        &lm_head,
+                    let embeds = Tensor::cat(&embed_rows.iter().collect::<Vec<_>>(), 0).unwrap();
+                    let positions =
+                        Tensor::cat(&position_rows.iter().collect::<Vec<_>>(), 1).unwrap();
+                    (embeds, positions, seq_lens, pads)
+                };
+
+            // One batch through the eager masked path: masked prefill plus
+            // `steps` masked decode steps, one token row per step.
+            let run_eager_batch = |rows: &[Vec<u32>]| -> Vec<Vec<u32>> {
+                let (embeds, positions, seq_lens, pads) = build_padded_batch(rows);
+                let batch = rows.len();
+                let max_seq = *seq_lens.iter().max().unwrap();
+                let causal = create_causal_mask(max_seq, max_seq, DType::BF16, &device).unwrap();
+                let padding =
+                    create_left_padding_mask(&seq_lens, max_seq, DType::BF16, &device).unwrap();
+                let prefill_mask = combine_masks(&causal, &padding).unwrap();
+
+                model.clear_cache();
+                let hidden = model
+                    .forward(&embeds, &positions, None, Some(&prefill_mask), None)
+                    .unwrap();
+                let mut logits = lm_head
+                    .forward(
+                        &hidden
+                            .i((.., max_seq - 1, ..))
+                            .unwrap()
+                            .contiguous()
+                            .unwrap(),
                     )
                     .unwrap();
-            }
+                let mut tokens_per_step = Vec::new();
+                for step in 0..steps {
+                    let mut tokens = Vec::new();
+                    for row in 0..batch {
+                        tokens.push(decode_step(row, &logits));
+                    }
+                    tokens_per_step.push(tokens.clone());
+                    let kv_len = max_seq + step + 1;
+                    let ids = Tensor::from_vec(tokens.clone(), (batch, 1), &device).unwrap();
+                    let embed = model.embed(&ids).unwrap();
+                    let mut pos_data = Vec::with_capacity(3 * batch);
+                    for _ in 0..3 {
+                        for &seq_len in &seq_lens {
+                            pos_data.push((seq_len + step) as i64);
+                        }
+                    }
+                    let pos = Tensor::from_vec(pos_data, (3, batch, 1), &device).unwrap();
+                    let gen_mask =
+                        create_generation_mask_if_needed(&pads, kv_len, DType::BF16, &device)
+                            .unwrap();
+                    let hidden = model
+                        .forward(&embed, &pos, None, gen_mask.as_ref(), None)
+                        .unwrap();
+                    logits = lm_head.forward(&hidden).unwrap();
+                }
+                tokens_per_step
+            };
+
+            // The same batch through the production path: identical prefill,
+            // decode steps replay the captured batch graph.
+            let run_graphed_batch = |rows: &[Vec<u32>]| -> Vec<Vec<u32>> {
+                let (embeds, positions, seq_lens, pads) = build_padded_batch(rows);
+                let batch = rows.len();
+                let max_seq = *seq_lens.iter().max().unwrap();
+                let pad_starts: Vec<u32> = pads.iter().map(|&pad| pad as u32).collect();
+                let causal = create_causal_mask(max_seq, max_seq, DType::BF16, &device).unwrap();
+                let padding =
+                    create_left_padding_mask(&seq_lens, max_seq, DType::BF16, &device).unwrap();
+                let prefill_mask = combine_masks(&causal, &padding).unwrap();
+
+                model.clear_cache();
+                model
+                    .prepare_batch_ar_cuda_graph(batch, max_seq, steps, &pads, &lm_head)
+                    .unwrap();
+                assert!(
+                    model.batch_decode_graph_captured(),
+                    "batch decode graph did not capture (dtype gate?)"
+                );
+                let hidden = model
+                    .forward(&embeds, &positions, None, Some(&prefill_mask), None)
+                    .unwrap();
+                let mut logits = lm_head
+                    .forward(
+                        &hidden
+                            .i((.., max_seq - 1, ..))
+                            .unwrap()
+                            .contiguous()
+                            .unwrap(),
+                    )
+                    .unwrap();
+                let mut tokens_per_step = Vec::new();
+                for step in 0..steps {
+                    let mut tokens = Vec::new();
+                    for row in 0..batch {
+                        tokens.push(decode_step(row, &logits));
+                    }
+                    tokens_per_step.push(tokens.clone());
+                    let kv_len = max_seq + step + 1;
+                    let row_starts = vec![(kv_len - 1) as u32; batch];
+                    let ids = Tensor::from_vec(tokens.clone(), (batch, 1), &device).unwrap();
+                    let embed = model.embed(&ids).unwrap();
+                    let mut pos_data = Vec::with_capacity(3 * batch);
+                    for &seq_len in &seq_lens {
+                        for _ in 0..3 {
+                            pos_data.push((seq_len + step) as i64);
+                        }
+                    }
+                    let pos = Tensor::from_vec(pos_data, (3, batch, 1), &device).unwrap();
+                    let gen_mask =
+                        create_generation_mask_if_needed(&pads, kv_len, DType::BF16, &device)
+                            .unwrap();
+                    logits = model
+                        .forward_decode_logits_batch(
+                            &embed,
+                            &pos,
+                            &row_starts,
+                            &pad_starts,
+                            kv_len,
+                            gen_mask.as_ref(),
+                            &lm_head,
+                        )
+                        .unwrap();
+                }
+                tokens_per_step
+            };
+
+            // First batch: captures the batch graph.
+            let batch_a: Vec<Vec<u32>> = vec![make_ids(200), make_ids(120)];
             assert_eq!(
-                graphed, eager,
-                "batched graph decode must match the eager masked path"
+                run_graphed_batch(&batch_a),
+                run_eager_batch(&batch_a),
+                "first batch graph decode must match the eager masked path"
+            );
+
+            // Second batch: same width, different row lengths — different
+            // pads and a different prefill width, so the graph is reused.
+            // Every batch-dependent input must be rewritten before replay;
+            // a stale pad mask reads the previous batch's padding bounds and
+            // derails the decode (the bug this guards).
+            let batch_b: Vec<Vec<u32>> = vec![make_ids(140), make_ids(180)];
+            assert_eq!(
+                run_graphed_batch(&batch_b),
+                run_eager_batch(&batch_b),
+                "reused graph decode must match eager for a different batch shape"
+            );
+
+            // Third batch: a new width forces a re-capture; it must match too.
+            let batch_c: Vec<Vec<u32>> = vec![make_ids(150), make_ids(130), make_ids(110)];
+            assert_eq!(
+                run_graphed_batch(&batch_c),
+                run_eager_batch(&batch_c),
+                "re-captured graph decode must match eager after a width change"
             );
 
             // A single-row request whose prompt exceeds the bucket limit
             // falls back to eager: both graphs must be dropped, because the
-            // long decode would outgrow their captured KV storage.
+            // long decode would outgrow their captured KV storage. The
+            // fallback decode still has to match eager token for token.
             let huge: Vec<u32> = (0..8300).map(|i| 10 + i as u32 % 60).collect();
             model.clear_cache();
             model
@@ -2218,8 +2302,18 @@ mod tests {
             );
             assert_eq!(
                 greedy_eager(&model, &lm_head, &huge, 4),
-                greedy_graphed(&model, &lm_head, &huge, 4),
-                "long-prompt decode must still match eager"
+                greedy_graphed(&model, &lm_head, &huge, 4, false),
+                "long-prompt eager fallback decode must still match eager"
+            );
+
+            // After the batch graph ran and the fallback dropped both
+            // graphs, a fresh single-row capture must work again at the
+            // production bucket and match eager token for token.
+            let long = make_ids(4200);
+            assert_eq!(
+                greedy_eager(&model, &lm_head, &long, 8),
+                greedy_graphed(&model, &lm_head, &long, 8, true),
+                "capture after the eager fallback must match eager"
             );
 
             // Dropping a model with a live batch graph must dispose it
@@ -2282,13 +2376,16 @@ mod tests {
     }
 
     /// Greedy decode through `prepare_ar_cuda_graph` + `forward_decode_logits`,
-    /// i.e. exactly the production graph path.
+    /// i.e. exactly the production graph path. `expect_capture` asserts the
+    /// capture state the request deserves: prompts beyond the bucket limit
+    /// stay eager, everything else must capture.
     #[cfg(feature = "cuda")]
     fn greedy_graphed(
         model: &Qwen3VlTextModel,
         lm_head: &candle_nn::Linear,
         ids: &[u32],
         steps: usize,
+        expect_capture: bool,
     ) -> Vec<u32> {
         let device = model.embed_tokens.embeddings().device();
         let seq_len = ids.len();
@@ -2299,9 +2396,10 @@ mod tests {
         model
             .prepare_ar_cuda_graph(seq_len, steps, lm_head)
             .unwrap();
-        assert!(
+        assert_eq!(
             model.decode_graph_captured(),
-            "decode graph did not capture (dtype gate?)"
+            expect_capture,
+            "single-row graph capture state does not match the request"
         );
         let hidden = model
             .forward(&embeds, &positions, None, None, None)
