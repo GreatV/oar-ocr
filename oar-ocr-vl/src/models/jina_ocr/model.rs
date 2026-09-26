@@ -1202,6 +1202,14 @@ fn select_greedy_token(logits: &Tensor, history: &[u32]) -> Result<u32, Error> {
                     .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "mask banned ids", e))?;
                 row
             };
+            // F16 logits upcast to F32 first: the argmax is breadth-one,
+            // so the cast costs one vocab-wide copy.
+            let row = if row.dtype() == DType::F16 {
+                row.to_dtype(DType::F32)
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "upcast f16 logits", e))?
+            } else {
+                row
+            };
             let token = match row.dtype() {
                 DType::BF16 => row.apply_op1_no_bwd(&ArgmaxFirstBf16),
                 DType::F32 => row.apply_op1_no_bwd(&ArgmaxFirstF32),
