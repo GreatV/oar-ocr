@@ -34,13 +34,14 @@ pub fn plan_num_image_tokens(
     cfg: &MinerUImageProcessorConfig,
 ) -> Result<usize, Error> {
     cfg.validate()?;
-    // Mirror preprocess_image's exact sequence: pad to the ratio limit,
-    // upscale the short edge, then resize. Calling the same helpers keeps
-    // the plan and the real path from drifting.
+    // Mirror preprocess_image's exact sequence through the pure dims
+    // functions: pad to the ratio limit, upscale the short edge, then
+    // resize. No pixel buffers are touched.
     let factor = (cfg.merge_size * cfg.patch_size) as u32;
-    let padded = pad_to_ratio(image, SMART_RESIZE_MAX_RATIO);
-    let upscaled = upscale_min_edge(&padded, factor);
-    let (w, h) = (upscaled.width(), upscaled.height());
+    let (w, h) = {
+        let (pw, ph) = padded_dims(image.width(), image.height(), SMART_RESIZE_MAX_RATIO);
+        upscaled_dims(pw, ph, factor)
+    };
     let (min_pixels, max_pixels) = if cfg.do_resize {
         cfg.pixel_bounds()?
     } else {
@@ -117,6 +118,24 @@ pub fn preprocess_image(
     dtype: DType,
 ) -> Result<WeVisDocImageInputs, Error> {
     validate_processor_vision_compatibility(cfg, vision)?;
+    // Test-only production-entry probe: reports device memory at the
+    // upload point when the self-check drives a real generate_one.
+    #[cfg(all(test, feature = "cuda"))]
+    if std::env::var_os("OAR_WEVISDOC_PROBE_UPLOAD").is_some() {
+        if let Device::Cuda(cuda) = device {
+            let stream = cuda.cuda_stream();
+            stream.synchronize().unwrap();
+            let output = std::process::Command::new("nvidia-smi")
+                .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+                .output();
+            if let Ok(out) = output {
+                eprintln!(
+                    "DBGM9 pre-upload used={}MiB",
+                    String::from_utf8_lossy(&out.stdout).trim()
+                );
+            }
+        }
+    }
     // Document-parser crops can be narrower than the patch grid on one
     // side (for example a 10x200 rule). Pad the aspect ratio first, then
     // scale up to the patch grid: the other order lets a 1x4096 rule
@@ -141,29 +160,52 @@ pub fn preprocess_image(
     })
 }
 
+/// `smart_resize` rejects aspect ratios above 200.
+const SMART_RESIZE_MAX_RATIO: f32 = 200.0;
+
+/// Target dims after padding the short side so the aspect ratio is within
+/// the processor's limit. Pure arithmetic — no pixel buffers touched.
+fn padded_dims(w: u32, h: u32, max_ratio: f32) -> (u32, u32) {
+    if w == 0 || h == 0 {
+        return (w, h);
+    }
+    let ratio = w.max(h) as f32 / w.min(h) as f32;
+    if ratio <= max_ratio {
+        return (w, h);
+    }
+    if w > h {
+        (w, ((w as f32 / max_ratio).ceil() as u32).max(1))
+    } else {
+        (((h as f32 / max_ratio).ceil() as u32).max(1), h)
+    }
+}
+
+/// Target dims after scaling until the shorter edge reaches `min_edge`.
+/// Pure arithmetic — no pixel buffers touched.
+fn upscaled_dims(w: u32, h: u32, min_edge: u32) -> (u32, u32) {
+    let min_dim = w.min(h);
+    if min_dim == 0 || min_dim >= min_edge {
+        return (w, h);
+    }
+    let scale = min_edge as f32 / min_dim as f32;
+    (
+        ((w as f32 * scale).ceil() as u32).max(min_edge),
+        ((h as f32 * scale).ceil() as u32).max(min_edge),
+    )
+}
+
 /// Pad the short side (centered, white) until the aspect ratio is within
 /// the processor's limit, so extreme crops — a 1x4096 rule, say — survive
 /// `smart_resize`'s ratio bound. Runs before any upscaling: padding the
 /// already-upscaled image would multiply the pad into the upscale.
 use image::Rgb;
 
-/// `smart_resize` rejects aspect ratios above 200.
-const SMART_RESIZE_MAX_RATIO: f32 = 200.0;
-
 fn pad_to_ratio(image: &RgbImage, max_ratio: f32) -> RgbImage {
     let (w, h) = image.dimensions();
-    if w == 0 || h == 0 {
+    let (new_w, new_h) = padded_dims(w, h, max_ratio);
+    if (new_w, new_h) == (w, h) {
         return image.clone();
     }
-    let ratio = w.max(h) as f32 / w.min(h) as f32;
-    if ratio <= max_ratio {
-        return image.clone();
-    }
-    let (new_w, new_h) = if w > h {
-        (w, ((w as f32 / max_ratio).ceil() as u32).max(1))
-    } else {
-        (((h as f32 / max_ratio).ceil() as u32).max(1), h)
-    };
     let mut canvas = RgbImage::from_pixel(new_w, new_h, Rgb([255, 255, 255]));
     let x = ((new_w - w) / 2) as i64;
     let y = ((new_h - h) / 2) as i64;
@@ -176,13 +218,10 @@ fn pad_to_ratio(image: &RgbImage, max_ratio: f32) -> RgbImage {
 /// untouched.
 fn upscale_min_edge(image: &RgbImage, min_edge: u32) -> RgbImage {
     let (w, h) = image.dimensions();
-    let min_dim = w.min(h);
-    if min_dim == 0 || min_dim >= min_edge {
+    let (new_w, new_h) = upscaled_dims(w, h, min_edge);
+    if (new_w, new_h) == (w, h) {
         return image.clone();
     }
-    let scale = min_edge as f32 / min_dim as f32;
-    let new_w = ((w as f32 * scale).ceil() as u32).max(min_edge);
-    let new_h = ((h as f32 * scale).ceil() as u32).max(min_edge);
     image::imageops::resize(image, new_w, new_h, image::imageops::FilterType::CatmullRom)
 }
 
@@ -219,6 +258,34 @@ mod tests {
             let inputs = preprocess_image(&img, &cfg, vision, &Device::Cpu, DType::F32)
                 .unwrap_or_else(|e| panic!("{w}x{h} failed: {e}"));
             assert!(inputs.num_image_tokens > 0, "{w}x{h} produced no tokens");
+        }
+    }
+
+    #[test]
+    fn dims_arithmetic_matches_pixel_helpers() {
+        // The plan path uses these pure functions; they must agree with
+        // what the pixel-carrying helpers actually do.
+        let cases = [
+            (1u32, 4096u32),
+            (4096, 1),
+            (10, 200),
+            (200, 10),
+            (800, 600),
+            (5, 4000),
+        ];
+        for (w, h) in cases {
+            let img = RgbImage::from_pixel(w, h, Rgb([1, 2, 3]));
+            let (pw, ph) = padded_dims(w, h, SMART_RESIZE_MAX_RATIO);
+            let padded = pad_to_ratio(&img, SMART_RESIZE_MAX_RATIO);
+            assert_eq!((pw, ph), (padded.width(), padded.height()), "pad {w}x{h}");
+            let (uw, uh) = upscaled_dims(pw, ph, 32);
+            let upscaled = upscale_min_edge(&padded, 32);
+            assert_eq!(
+                (uw, uh),
+                (upscaled.width(), upscaled.height()),
+                "scale {w}x{h}"
+            );
+            assert!(uw >= 32 && uh >= 32, "{w}x{h} below factor");
         }
     }
 
