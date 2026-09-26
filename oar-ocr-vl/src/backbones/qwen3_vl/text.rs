@@ -19,8 +19,8 @@ use crate::runtime::cuda::dynamic_kv::{DynamicBatchKvAppend, DynamicKvAppend};
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
     BatchDecodeRows, BatchDecoderCudaGraph, CudaGraphDrainGuard, CudaGraphKvLengths,
-    CudaGraphPerRowU32, SingleTokenDecoderCudaGraph, cuda_graph_error, decode_bucket_ceiling,
-    next_decode_bucket, prompt_decode_bucket, sync_graph_tensor,
+    CudaGraphPerRowU32, SingleTokenDecoderCudaGraph, cuda_graph_error, next_decode_bucket,
+    prompt_decode_bucket, sync_graph_tensor,
 };
 use crate::runtime::errors::candle_to_ocr_inference;
 use crate::runtime::tensor::rotate_half;
@@ -1247,10 +1247,16 @@ impl Qwen3VlTextModel {
             if reusable {
                 return Ok(());
             }
-            let ceiling = decode_bucket_ceiling(cache_len, WEVISDOC_DECODE_CACHE_LEN);
             self.invalidate_cuda_graph();
             self.invalidate_batch_cuda_graph();
-            self.capture_batch_cuda_graph(batch, cache_len, ceiling, pad_lens, lm_head, 0)?;
+            self.capture_batch_cuda_graph(
+                batch,
+                cache_len,
+                WEVISDOC_DECODE_CACHE_LEN,
+                pad_lens,
+                lm_head,
+                0,
+            )?;
         }
         let _ = (prompt_len, pad_lens, lm_head);
         Ok(())
@@ -1613,10 +1619,9 @@ impl Qwen3VlTextModel {
             if reusable {
                 return Ok(());
             }
-            let ceiling = decode_bucket_ceiling(cache_len, WEVISDOC_DECODE_CACHE_LEN);
             self.invalidate_cuda_graph();
             self.invalidate_batch_cuda_graph();
-            self.capture_cuda_graph(cache_len, ceiling, lm_head, 0)?;
+            self.capture_cuda_graph(cache_len, WEVISDOC_DECODE_CACHE_LEN, lm_head, 0)?;
         }
         let _ = (prompt_len, lm_head);
         Ok(())

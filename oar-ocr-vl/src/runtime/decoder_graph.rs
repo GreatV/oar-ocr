@@ -50,16 +50,6 @@ pub(crate) fn next_decode_bucket(cache_len: usize, ceiling: usize) -> Option<usi
     Some(cache_len.saturating_mul(4).min(ceiling))
 }
 
-/// Generation ceiling for a graph captured at `prompt_bucket`: four times
-/// the prompt, clamped to `limit`. Full pages keep the full ceiling, while
-/// short region crops stop climbing early — a region generation that
-/// outruns four times its prompt is the rare runaway, and eager attention
-/// narrows to the real length for the remainder.
-#[cfg(any(feature = "cuda", test))]
-pub(crate) fn decode_bucket_ceiling(prompt_bucket: usize, limit: usize) -> usize {
-    prompt_bucket.saturating_mul(4).min(limit).max(1)
-}
-
 /// Match eager decoder attention: a single query has no future token to mask,
 /// while verification blocks must remain causal within the block.
 #[cfg(any(feature = "cuda", test))]
@@ -507,8 +497,8 @@ impl std::fmt::Debug for SingleTokenDecoderCudaGraph {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_bucket_ceiling, decoder_attention_is_causal, decoder_cache_capacity,
-        next_decode_bucket, prompt_decode_bucket,
+        decoder_attention_is_causal, decoder_cache_capacity, next_decode_bucket,
+        prompt_decode_bucket,
     };
 
     #[test]
@@ -533,10 +523,6 @@ mod tests {
         assert_eq!(next_decode_bucket(512, LIMIT), Some(2048));
         assert_eq!(next_decode_bucket(8_192, 8_192), None);
         assert_eq!(next_decode_bucket(0, LIMIT), None);
-        assert_eq!(decode_bucket_ceiling(256, LIMIT), 1024);
-        assert_eq!(decode_bucket_ceiling(2_048, LIMIT), 8_192);
-        assert_eq!(decode_bucket_ceiling(4_096, LIMIT), LIMIT);
-        assert_eq!(decode_bucket_ceiling(16_384, LIMIT), LIMIT);
     }
 
     #[test]

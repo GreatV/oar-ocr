@@ -894,16 +894,27 @@ fn text_position_ids(position: i64, device: &Device) -> Result<Tensor, Error> {
     })
 }
 
-/// Longest exact token cycle at the tail of `tokens`, reported as
+/// Longest token cycle at the tail of `tokens`, reported as
 /// `(period, repeats)`, when the repetition is strong enough to be a decode
-/// loop instead of real content. Shortest cycles must repeat many times,
-/// longer ones only a few, and the looping tail always spans at least
-/// `MIN_TAIL` tokens, so dot leaders, bullet markers, and short repeated
-/// markup never trip it.
+/// loop instead of real content. Two loop shapes are recognized:
+///
+/// * exact cycles — every repeated unit identical — which cover collapsed
+///   single-token runs and repeated sentences; they need `MIN_REPEATS`
+///   repetitions spanning at least `MIN_TAIL` tokens;
+/// * near-cycles — units differing in at most two token slots, the same
+///   slots every time — which cover counter loops like an incrementing
+///   year. These need a period of at least `MIN_NEAR_PERIOD` (short
+///   periods are where legitimate enumeration markup lives) and more
+///   repetitions than the exact rule.
+///
+/// Exactness thresholds keep dot leaders, bullet markers, and short
+/// repeated markup from tripping the detector.
 fn trailing_decode_loop(tokens: &[u32]) -> Option<(usize, usize)> {
     const MAX_PERIOD: usize = 64;
     const MIN_TAIL: usize = 64;
     const MIN_REPEATS: usize = 4;
+    const MIN_NEAR_PERIOD: usize = 8;
+    const MAX_NEAR_DIFF: usize = 2;
     let len = tokens.len();
     if len < MIN_TAIL {
         return None;
@@ -912,13 +923,47 @@ fn trailing_decode_loop(tokens: &[u32]) -> Option<(usize, usize)> {
     // one full cycle of the pattern instead of a fragment of it.
     for period in (1..=MAX_PERIOD.min(len / MIN_REPEATS)).rev() {
         let unit = &tokens[len - period..];
+        // Slots where the last two units disagree — the counter positions.
+        let near_slots: Vec<usize> = if period >= MIN_NEAR_PERIOD {
+            let previous = &tokens[len - 2 * period..len - period];
+            unit.iter()
+                .zip(previous.iter())
+                .enumerate()
+                .filter_map(|(slot, (a, b))| (a != b).then_some(slot))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if near_slots.len() > MAX_NEAR_DIFF {
+            continue;
+        }
         let mut repeats = 1;
-        while (repeats + 1) * period <= len
-            && &tokens[len - (repeats + 1) * period..len - repeats * period] == unit
-        {
+        let near = !near_slots.is_empty();
+        while (repeats + 1) * period <= len {
+            let candidate = &tokens[len - (repeats + 1) * period..len - repeats * period];
+            let matches = if near {
+                // The unit must agree with the reference everywhere outside
+                // the counter slots.
+                candidate.len() == unit.len()
+                    && candidate
+                        .iter()
+                        .zip(unit.iter())
+                        .enumerate()
+                        .all(|(slot, (a, b))| a == b || near_slots.contains(&slot))
+            } else {
+                candidate == unit
+            };
+            if !matches {
+                break;
+            }
             repeats += 1;
         }
-        if repeats >= MIN_TAIL.div_ceil(period).max(MIN_REPEATS) {
+        let needed = if near {
+            (MIN_TAIL * 3 / 2).div_ceil(period).max(MIN_REPEATS + 2)
+        } else {
+            MIN_TAIL.div_ceil(period).max(MIN_REPEATS)
+        };
+        if repeats >= needed {
             return Some((period, repeats));
         }
     }
@@ -1074,6 +1119,38 @@ mod tests {
                 .zip(alternating[keep - period..keep].iter().cycle())
                 .all(|(&a, &b)| a == b)
         );
+    }
+
+    #[test]
+    fn counter_loops_with_one_moving_slot_are_loops() {
+        // The newspaper-page failure mode: an otherwise fixed sentence
+        // whose year token increments every cycle.
+        let mut counter = Vec::new();
+        for year in 2015..2055u32 {
+            counter.extend_from_slice(&[10, 11, 12, 13, 14, 15, 16, year, 18, 19, 20]);
+        }
+        let (period, repeats) = trailing_decode_loop(&counter).expect("counter loop detected");
+        let keep = counter.len() - (repeats - 1) * period;
+        assert!(keep >= period && keep < counter.len());
+        // The kept prefix is exactly whole units of the reported cycle.
+        assert_eq!(keep % period, 0);
+
+        // Two moving slots still qualify.
+        let mut two = Vec::new();
+        for year in 2015..2065u32 {
+            two.extend_from_slice(&[1, 2, 3, year, 5, 6, 7, 8, year + 1, 10, 11, 12, 13]);
+        }
+        assert!(trailing_decode_loop(&two).is_some());
+
+        // Widely varying units are not a near-cycle: real prose survives.
+        let mut state = 9_876_543_21u64;
+        let prose: Vec<u32> = (0..300)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (state >> 33) as u32
+            })
+            .collect();
+        assert_eq!(trailing_decode_loop(&prose), None);
     }
 
     #[test]
