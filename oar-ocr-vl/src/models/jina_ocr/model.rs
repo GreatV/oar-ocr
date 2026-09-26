@@ -604,11 +604,58 @@ pub(crate) struct PreparedPrompt {
     pub(crate) position_ids: Tensor,
 }
 
-/// Tuning for the adaptive speculation controller. Speculation is paused
-/// when a page's recent acceptance sits below the break-even point and
-/// probed again periodically; the switch is pure scheduling — MTP and plain
-/// greedy decoding are token-identical, so pausing never changes the output.
-#[derive(Debug, Clone)]
+/// Probe cadence for the adaptive speculation loop: a sliding accept-length
+/// window decides when to fall back, and each fallback quadruples the next
+/// probe interval. Re-entering speculation after a cooldown keeps the backed
+/// off interval; only the very first window resets it.
+#[derive(Debug)]
+pub(crate) struct ProbeScheduler {
+    probe_interval: usize,
+    break_even: f64,
+    window_rounds: usize,
+    window: std::collections::VecDeque<usize>,
+    next_probe_interval: usize,
+    entered_once: bool,
+}
+
+impl ProbeScheduler {
+    pub(crate) fn new(probe_interval: usize, window_rounds: usize, break_even: f64) -> Self {
+        Self {
+            probe_interval,
+            break_even,
+            window_rounds,
+            window: std::collections::VecDeque::new(),
+            next_probe_interval: probe_interval,
+            entered_once: false,
+        }
+    }
+
+    /// Record one round's accepted length. Returns the cooldown length to
+    /// run when the window says speculation is not paying off.
+    pub(crate) fn record_keep(&mut self, keep: usize) -> Option<usize> {
+        if self.window.is_empty() && !self.entered_once {
+            self.next_probe_interval = self.probe_interval;
+        }
+        self.window.push_back(keep);
+        if self.window.len() > self.window_rounds {
+            self.window.pop_front();
+        }
+        if self.window.len() == self.window_rounds {
+            let mean: f64 =
+                self.window.iter().map(|&k| k as f64).sum::<f64>() / self.window.len() as f64;
+            if mean < self.break_even {
+                let cooldown = self.next_probe_interval;
+                self.next_probe_interval = self.next_probe_interval.saturating_mul(4);
+                self.window.clear();
+                self.entered_once = true;
+                return Some(cooldown);
+            }
+        }
+        self.entered_once = true;
+        None
+    }
+}
+
 pub(crate) struct AdaptiveSpec {
     /// Verification rounds in the sliding acceptance window (default 16).
     pub window_rounds: usize,
@@ -782,10 +829,12 @@ impl GreedyEngine<'_> {
         // Adaptive controller: speculate while the recent acceptance window
         // holds up, fall back to plain decoding when it does not, and probe
         // again every `probe_interval` committed tokens.
-        let mut window: std::collections::VecDeque<usize> =
-            std::collections::VecDeque::with_capacity(adaptive.window_rounds.max(1));
+        let mut scheduler = ProbeScheduler::new(
+            adaptive.probe_interval,
+            adaptive.window_rounds,
+            adaptive.break_even,
+        );
         let mut cooldown_remaining = adaptive.probe_interval;
-        let mut next_probe_interval = adaptive.probe_interval;
         let mut graphs_ready = false;
 
         loop {
@@ -843,7 +892,6 @@ impl GreedyEngine<'_> {
                         &committed_hiddens,
                         base,
                     )?;
-                    window.clear();
                 }
                 continue;
             }
@@ -912,32 +960,14 @@ impl GreedyEngine<'_> {
             position += keep as u32;
             current = next_token;
 
-            if window.is_empty() {
-                // Fresh window (first round or just re-entered after a probe).
-                next_probe_interval = adaptive.probe_interval;
-            }
-            window.push_back(keep);
-            if window.len() > adaptive.window_rounds {
-                window.pop_front();
-            }
-            if window.len() == adaptive.window_rounds {
-                let mean: f64 =
-                    window.iter().map(|&keep| keep as f64).sum::<f64>() / window.len() as f64;
-                if mean < adaptive.break_even {
-                    tracing::debug!(
-                        committed = generated.len(),
-                        mean,
-                        break_even = adaptive.break_even,
-                        next_cooldown = next_probe_interval,
-                        "MTP fallback to plain decoding"
-                    );
-                    cooldown_remaining = next_probe_interval;
-                    // Exponential backoff: a page that keeps rejecting
-                    // speculation spends progressively more of itself in
-                    // plain decoding.
-                    next_probe_interval = next_probe_interval.saturating_mul(4);
-                    window.clear();
-                }
+            if let Some(cooldown) = scheduler.record_keep(keep) {
+                tracing::debug!(
+                    committed = generated.len(),
+                    break_even = adaptive.break_even,
+                    next_cooldown = cooldown,
+                    "MTP fallback to plain decoding"
+                );
+                cooldown_remaining = cooldown;
             }
 
             // Re-sync the draft with the accepted target span.
@@ -1028,7 +1058,7 @@ impl GreedyEngine<'_> {
             self.text.restore_kv_cache(&saved)?;
             tracing::debug!(committed, "MTP probe: KV restored, setup done");
         }
-        let _ = (prompt_len, max_new_tokens, committed);
+        let _ = (prompt_len, max_new_tokens, committed, lazy_decode_graph);
         Ok(())
     }
 
@@ -1886,6 +1916,31 @@ mod tests {
         /// the same tokens as the same model on the graphs-off schedule.
         /// Skips without a CUDA device; opt in with
         /// `OAR_JINAOCR_GPU_SELFTEST=1`.
+        #[test]
+        fn probe_backoff_survives_reentry() {
+            use super::ProbeScheduler;
+            // Two-round window, break-even above every single-token accept:
+            // each completed window falls back and must quadruple the next
+            // cooldown, including after re-entering speculation.
+            let mut scheduler = ProbeScheduler::new(256, 2, 1.9);
+            let mut cooldowns = Vec::new();
+            for _ in 0..4 {
+                // Re-entry round (fresh empty window): keeps the backed-off
+                // interval instead of resetting to the base 256.
+                if let Some(cooldown) = scheduler.record_keep(1) {
+                    cooldowns.push(cooldown);
+                }
+                if let Some(cooldown) = scheduler.record_keep(1) {
+                    cooldowns.push(cooldown);
+                }
+            }
+            assert_eq!(
+                cooldowns,
+                vec![256, 1024, 4096, 16384],
+                "sustained low acceptance must quadruple the probe interval"
+            );
+        }
+
         #[test]
         fn cuda_graph_recaptures_and_second_instances_match() {
             #[cfg(feature = "cuda")]
