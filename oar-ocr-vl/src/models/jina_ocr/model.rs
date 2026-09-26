@@ -1080,13 +1080,12 @@ impl GreedyEngine<'_> {
                 // A/B numerics experiments.
                 let capture_decode_graph = lazy_decode_graph
                     && std::env::var_os("OAR_JINAOCR_DISABLE_LAZY_DECODE_GRAPH").is_none();
-                if capture_decode_graph {
-                    if let Err(error) = self
+                if capture_decode_graph
+                    && let Err(error) = self
                         .text
                         .capture_ar_cuda_graph_with_capacity(cache_len, self.lm_head)
-                    {
-                        tracing::warn!("JinaOCR decode graph capture failed: {error}");
-                    }
+                {
+                    tracing::warn!("JinaOCR decode graph capture failed: {error}");
                 }
                 if let Err(error) = mtp.prepare_cuda_graph(cache_len) {
                     tracing::warn!("JinaOCR MTP graph capture failed: {error}");
@@ -1637,37 +1636,6 @@ mod tests {
             eos: Vec<u32>,
         }
 
-        #[cfg(feature = "cuda")]
-        fn build_tiny_on(device: &Device) -> (TinyModel, Device) {
-            let cfg = tiny_config();
-            let vb = random_varbuilder(&cfg, device, true);
-            let text = DeepSeekV2TextModel::load(&cfg, vb.pp("model")).unwrap();
-            let lm_head = Linear::new(
-                vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
-                    .unwrap(),
-                None,
-            );
-            let mtp = Some(
-                JinaOcrMtp::load(
-                    &cfg,
-                    text.token_embedding_weight(),
-                    text.final_norm_weight(),
-                    lm_head.weight().clone(),
-                    vb.clone(),
-                )
-                .unwrap(),
-            );
-            (
-                TinyModel {
-                    text,
-                    mtp,
-                    lm_head,
-                    eos: vec![3],
-                },
-                device.clone(),
-            )
-        }
-
         fn build_tiny(with_mtp: bool) -> (TinyModel, Device) {
             let device = Device::Cpu;
             let cfg = tiny_config();
@@ -1866,7 +1834,9 @@ mod tests {
                 //     flow, in bf16 so the graphs capture.
                 let (model, prompt, _) = build(true);
                 model.text.clear_kv_cache();
-                let hidden = model
+                // The forward pass only needs to populate the KV cache; the
+                // hidden states themselves are unused in this part.
+                let _ = model
                     .text
                     .forward(&prompt.inputs_embeds, &prompt.position_ids, None)
                     .unwrap();
