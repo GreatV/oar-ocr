@@ -19,8 +19,8 @@ use crate::runtime::cuda::dynamic_kv::{DynamicBatchKvAppend, DynamicKvAppend};
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
     BatchDecodeRows, BatchDecoderCudaGraph, CudaGraphDrainGuard, CudaGraphKvLengths,
-    CudaGraphPerRowU32, SingleTokenDecoderCudaGraph, cuda_graph_error, decoder_cache_capacity,
-    sync_graph_tensor,
+    CudaGraphPerRowU32, SingleTokenDecoderCudaGraph, cuda_graph_error, next_decode_bucket,
+    prompt_decode_bucket, sync_graph_tensor,
 };
 use crate::runtime::errors::candle_to_ocr_inference;
 use crate::runtime::tensor::rotate_half;
@@ -32,9 +32,11 @@ use std::cell::RefCell;
 
 const MODEL_NAME: &str = "Qwen3-VL";
 
-/// Upper bound for graph-backed decode KV buckets. The graph's masked
-/// attention scans the whole bucket every step, so this trades generation
-/// headroom before falling back to eager decoding against per-step scan cost.
+/// Upper bound for graph-backed decode KV buckets. Captured buckets start
+/// just past the prompt and double as the generation grows; this ceiling
+/// keeps the graph's masked attention from scanning unboundedly, with
+/// longer generations falling back to eager decoding against per-step
+/// scan cost.
 #[cfg(feature = "cuda")]
 const WEVISDOC_DECODE_CACHE_LEN: usize = 8_192;
 
@@ -557,6 +559,32 @@ impl Qwen3Attention {
         self.prepare_dynamic_cache_batch(1, query_len, self.num_kv_heads, self.head_dim, cache_len)
     }
 
+    /// Double the single-row decode bucket, preserving appended history.
+    #[cfg(feature = "cuda")]
+    fn grow_dynamic_cache(&self, query_len: usize, cache_len: usize) -> Result<(), Error> {
+        self.grow_dynamic_cache_batch(1, query_len, cache_len)
+    }
+
+    /// Double the batched decode bucket, preserving appended history.
+    #[cfg(feature = "cuda")]
+    fn grow_dynamic_cache_batch(
+        &self,
+        batch: usize,
+        query_len: usize,
+        cache_len: usize,
+    ) -> Result<(), Error> {
+        for layer in &self.layers {
+            layer.grow_dynamic_cache_batch(
+                batch,
+                query_len,
+                self.num_kv_heads,
+                self.head_dim,
+                cache_len,
+            )?;
+        }
+        Ok(())
+    }
+
     #[cfg(feature = "cuda")]
     fn prepare_dynamic_cache_batch(
         &self,
@@ -576,6 +604,31 @@ impl Qwen3Attention {
             .borrow_mut()
             .initialize_storage_with_capacity(&template, cache_len)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "initialize dynamic KV", e))
+    }
+
+    /// Grow the fixed storage, preserving appended history. The template
+    /// matches `prepare_dynamic_cache_batch`'s, so a capture at the new
+    /// capacity afterwards sees the storage as already reusable instead of
+    /// re-initializing it and discarding that history.
+    #[cfg(feature = "cuda")]
+    fn grow_dynamic_cache_batch(
+        &self,
+        batch: usize,
+        query_len: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        cache_len: usize,
+    ) -> Result<(), Error> {
+        let template = Tensor::zeros(
+            (batch, kv_heads, query_len, head_dim),
+            self.q_proj.weight().dtype(),
+            self.q_proj.weight().device(),
+        )
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "dynamic KV template", e))?;
+        self.kv_cache
+            .borrow_mut()
+            .grow_fixed_storage(&template, cache_len)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "grow dynamic KV", e))
     }
 
     /// Batched CUDA-graph decode step: every row appends at its own
@@ -871,6 +924,19 @@ impl DecoderLayer {
     }
 
     #[cfg(feature = "cuda")]
+    fn grow_dynamic_cache_batch(
+        &self,
+        batch: usize,
+        query_len: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        cache_len: usize,
+    ) -> Result<(), Error> {
+        self.attention
+            .grow_dynamic_cache_batch(batch, query_len, kv_heads, head_dim, cache_len)
+    }
+
+    #[cfg(feature = "cuda")]
     fn forward_dynamic_batch(
         &self,
         hidden_states: &Tensor,
@@ -1134,13 +1200,13 @@ impl Qwen3VlTextModel {
 
     /// Capture the batched decode graph for one batch width. The layout
     /// change replaces the per-layer KV storage, so any single-row graph is
-    /// invalidated first.
+    /// invalidated first. The bucket starts just past the prompt; replay
+    /// doubles it when the generation outgrows it.
     #[cfg(feature = "cuda")]
     pub(crate) fn prepare_batch_ar_cuda_graph(
         &self,
         batch: usize,
         prompt_len: usize,
-        max_new_tokens: usize,
         pad_lens: &[usize],
         lm_head: &Linear,
     ) -> Result<(), Error> {
@@ -1157,8 +1223,7 @@ impl Qwen3VlTextModel {
                 DType::BF16 | DType::F16
             )
         {
-            let Some(cache_len) =
-                decoder_cache_capacity(prompt_len, max_new_tokens, WEVISDOC_DECODE_CACHE_LEN)
+            let Some(cache_len) = prompt_decode_bucket(prompt_len, WEVISDOC_DECODE_CACHE_LEN)
             else {
                 self.invalidate_batch_cuda_graph();
                 return Ok(());
@@ -1166,21 +1231,23 @@ impl Qwen3VlTextModel {
             // Reuse is sound only because every batch-dependent graph input
             // is rewritten before replay: hidden states, positions, row
             // starts, and the pad bounds behind the attention mask. What
-            // stays baked in is a function of (batch, cache_len) alone,
-            // which this check pins.
+            // stays baked in is a function of (batch, cache_len) alone.
+            // The bucket must match exactly: a wider graph would scan past
+            // the padding mask for the whole generation, which is the cost
+            // the ladder exists to avoid.
             let reusable = self
                 .batch_decode_graph
                 .borrow()
                 .as_ref()
-                .is_some_and(|graph| graph.batch == batch && graph.cache_len >= cache_len);
+                .is_some_and(|graph| graph.batch == batch && graph.cache_len == cache_len);
             if reusable {
                 return Ok(());
             }
             self.invalidate_cuda_graph();
             self.invalidate_batch_cuda_graph();
-            self.capture_batch_cuda_graph(batch, cache_len, pad_lens, lm_head)?;
+            self.capture_batch_cuda_graph(batch, cache_len, pad_lens, lm_head, 0)?;
         }
-        let _ = (prompt_len, max_new_tokens, pad_lens, lm_head);
+        let _ = (prompt_len, pad_lens, lm_head);
         Ok(())
     }
 
@@ -1191,6 +1258,7 @@ impl Qwen3VlTextModel {
         cache_len: usize,
         pad_lens: &[usize],
         lm_head: &Linear,
+        append_slot: usize,
     ) -> Result<(), Error> {
         use candle_core::cuda_backend::cudarc::driver::sys::{
             CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
@@ -1210,6 +1278,13 @@ impl Qwen3VlTextModel {
         let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
             return Ok(());
         };
+        if append_slot >= cache_len {
+            return Err(Error::Config {
+                message: format!(
+                    "{MODEL_NAME} batch graph append slot {append_slot} outside bucket {cache_len}"
+                ),
+            });
+        }
         let query_len = 1;
         let kv_heads = self
             .layers
@@ -1240,6 +1315,13 @@ impl Qwen3VlTextModel {
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "batch graph position input", e))?;
         let row_starts = CudaGraphPerRowU32::new(&[batch], &device)
             .map_err(|e| cuda_graph_error(MODEL_NAME, "batch graph row starts", e))?;
+        // Warm and captured runs append at `append_slot`: 0 for a fresh
+        // capture, the live history length when a grown bucket is
+        // re-captured mid-generation, so the warmup never overwrites
+        // preserved KV entries.
+        row_starts
+            .update(&vec![append_slot as u32; batch])
+            .map_err(|e| cuda_graph_error(MODEL_NAME, "seed batch graph row starts", e))?;
         let kv_positions =
             Tensor::arange(0u32, cache_len as u32, &device)?.reshape((1, 1, 1, cache_len))?;
         // Padded-span bounds live in a pinned-backed device buffer so every
@@ -1330,22 +1412,56 @@ impl Qwen3VlTextModel {
         &self,
         inputs_embeds: &Tensor,
         position_ids: &Tensor,
-        row_starts: &[u32],
-        pad_lens: &[u32],
+        rows: BatchDecodeRows<'_>,
         max_kv_len: usize,
+        lm_head: &Linear,
     ) -> Result<Option<Tensor>, Error> {
+        if self.batch_decode_graph.borrow().is_none() {
+            return Ok(None);
+        }
+        let overflow = {
+            let captured_ref = self.batch_decode_graph.borrow();
+            captured_ref
+                .as_ref()
+                .is_some_and(|captured| max_kv_len > captured.cache_len)
+        };
+        if overflow {
+            let (batch, cache_len) = {
+                let captured_ref = self.batch_decode_graph.borrow();
+                let captured = captured_ref.as_ref().expect("overflow implies Some");
+                (captured.batch, captured.cache_len)
+            };
+            let Some(next) = next_decode_bucket(cache_len, WEVISDOC_DECODE_CACHE_LEN) else {
+                // Ladder ceiling: the rest of this generation decodes eager,
+                // whose append path grows the storage organically.
+                self.invalidate_cuda_graph();
+                self.invalidate_batch_cuda_graph();
+                return Ok(None);
+            };
+            // Grow the fixed bucket and re-capture. Appended history is
+            // preserved, and the re-captured graph warms up appending at
+            // the live end of the sequence (`max_kv_len - 1`), so the
+            // warmup cannot overwrite real KV entries. Graphs are disposed
+            // before the storage move: both hold pointers into it.
+            self.invalidate_cuda_graph();
+            self.invalidate_batch_cuda_graph();
+            let pads: Vec<usize> = rows.pad_lens.iter().map(|&pad| pad as usize).collect();
+            self.grow_dynamic_cache_batch(batch, 1, next)?;
+            if let Err(error) =
+                self.capture_batch_cuda_graph(batch, next, &pads, lm_head, max_kv_len - 1)
+            {
+                tracing::warn!(
+                    "{MODEL_NAME} batch graph re-capture at bucket {next} failed: {error}; continuing eager"
+                );
+                self.invalidate_cuda_graph();
+                self.invalidate_batch_cuda_graph();
+                return Ok(None);
+            }
+        }
         let captured_ref = self.batch_decode_graph.borrow();
         let Some(captured) = captured_ref.as_ref() else {
             return Ok(None);
         };
-        if max_kv_len > captured.cache_len {
-            drop(captured_ref);
-            // Same reasoning as the single-row fallback: the replacement
-            // capture re-initializes storage both graphs may reference.
-            self.invalidate_cuda_graph();
-            self.invalidate_batch_cuda_graph();
-            return Ok(None);
-        }
         if inputs_embeds.shape() != captured.hidden_input.shape()
             || position_ids.shape() != captured.position_input.shape()
         {
@@ -1361,11 +1477,11 @@ impl Qwen3VlTextModel {
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy batch graph positions", e))?;
         captured
             .row_starts
-            .update(row_starts)
+            .update(rows.row_starts)
             .map_err(|e| cuda_graph_error(MODEL_NAME, "update batch graph row starts", e))?;
         captured
             .pad_bounds
-            .update(pad_lens)
+            .update(rows.pad_lens)
             .map_err(|e| cuda_graph_error(MODEL_NAME, "update batch graph pad bounds", e))?;
         captured
             .graph
@@ -1393,13 +1509,9 @@ impl Qwen3VlTextModel {
     ) -> Result<Tensor, Error> {
         // The captured graph masks padding internally, so replay takes
         // priority; the caller's mask only serves the eager fallback.
-        if let Some(logits) = self.replay_batch_cuda_graph(
-            inputs_embeds,
-            position_ids,
-            rows.row_starts,
-            rows.pad_lens,
-            max_kv_len,
-        )? {
+        if let Some(logits) =
+            self.replay_batch_cuda_graph(inputs_embeds, position_ids, rows, max_kv_len, lm_head)?
+        {
             return Ok(logits);
         }
         let hidden = self.forward(inputs_embeds, position_ids, None, attention_mask, None)?;
@@ -1444,7 +1556,9 @@ impl Qwen3VlTextModel {
         #[cfg(feature = "cuda")]
         if attention_mask.is_none() {
             let kv_len = self.kv_cache_len().saturating_add(1);
-            if let Some(logits) = self.replay_cuda_graph(inputs_embeds, position_ids, kv_len)? {
+            if let Some(logits) =
+                self.replay_cuda_graph(inputs_embeds, position_ids, kv_len, lm_head)?
+            {
                 return Ok(logits);
             }
         }
@@ -1452,11 +1566,12 @@ impl Qwen3VlTextModel {
         self.project_logits(&hidden, lm_head)
     }
 
-    /// Capture the batch-1 single-token decode graph when eligible.
+    /// Capture the batch-1 single-token decode graph when eligible. The
+    /// bucket starts just past the prompt; replay doubles it when the
+    /// generation outgrows it.
     pub(crate) fn prepare_ar_cuda_graph(
         &self,
         prompt_len: usize,
-        max_new_tokens: usize,
         lm_head: &Linear,
     ) -> Result<(), Error> {
         if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
@@ -1473,38 +1588,39 @@ impl Qwen3VlTextModel {
                 DType::BF16 | DType::F16
             )
         {
-            let Some(cache_len) =
-                decoder_cache_capacity(prompt_len, max_new_tokens, WEVISDOC_DECODE_CACHE_LEN)
+            let Some(cache_len) = prompt_decode_bucket(prompt_len, WEVISDOC_DECODE_CACHE_LEN)
             else {
-                // Eager fallback: a long decode can outgrow the captured KV
-                // storage, so no graph may stay alive over it.
+                // Eager fallback: the prompt alone does not fit the largest
+                // bucket, so no graph may stay alive over it.
                 self.invalidate_cuda_graph();
                 self.invalidate_batch_cuda_graph();
                 return Ok(());
             };
-            let required = prompt_len
-                .saturating_add(max_new_tokens)
-                .min(WEVISDOC_DECODE_CACHE_LEN);
+            // Exact bucket match: a wider graph would scan past the mask
+            // for the whole generation, the cost the ladder avoids.
             let reusable = self
                 .decode_graph
                 .borrow()
                 .as_ref()
-                .is_some_and(|graph| graph.cache_len >= required);
+                .is_some_and(|graph| graph.cache_len == cache_len);
             if reusable {
                 return Ok(());
             }
             self.invalidate_cuda_graph();
             self.invalidate_batch_cuda_graph();
-            self.capture_cuda_graph(cache_len, lm_head)?;
+            self.capture_cuda_graph(cache_len, lm_head, 0)?;
         }
-        let _ = prompt_len;
-        let _ = max_new_tokens;
-        let _ = lm_head;
+        let _ = (prompt_len, lm_head);
         Ok(())
     }
 
     #[cfg(feature = "cuda")]
-    fn capture_cuda_graph(&self, cache_len: usize, lm_head: &Linear) -> Result<(), Error> {
+    fn capture_cuda_graph(
+        &self,
+        cache_len: usize,
+        lm_head: &Linear,
+        append_slot: usize,
+    ) -> Result<(), Error> {
         use candle_core::cuda_backend::cudarc::driver::sys::{
             CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
         };
@@ -1515,6 +1631,13 @@ impl Qwen3VlTextModel {
         let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
             return Ok(());
         };
+        if append_slot >= cache_len {
+            return Err(Error::Config {
+                message: format!(
+                    "{MODEL_NAME} decoder graph append slot {append_slot} outside bucket {cache_len}"
+                ),
+            });
+        }
         let query_len = 1;
         for layer in &self.layers {
             layer.prepare_dynamic_cache(query_len, cache_len)?;
@@ -1533,9 +1656,13 @@ impl Qwen3VlTextModel {
         .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph hidden input", e))?;
         let position_input = Tensor::zeros((3, 1, query_len), DType::I64, &device)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph position input", e))?;
-        let query_lengths = Tensor::new(&[0u32, query_len as u32], &device)
+        // Warm and captured runs append at `append_slot`: 0 for a fresh
+        // capture, the live history length when a grown bucket is
+        // re-captured mid-generation, so the warmup never overwrites
+        // preserved KV entries.
+        let query_lengths = Tensor::new(&[0u32, append_slot as u32], &device)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph query lengths", e))?;
-        let kv_lengths = CudaGraphKvLengths::new(query_len, &device)
+        let kv_lengths = CudaGraphKvLengths::new(append_slot, &device)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph KV lengths", e))?;
         let kv_positions =
             Tensor::arange(0u32, cache_len as u32, &device)?.reshape((1, 1, cache_len))?;
@@ -1615,20 +1742,51 @@ impl Qwen3VlTextModel {
         inputs_embeds: &Tensor,
         position_ids: &Tensor,
         kv_len: usize,
+        lm_head: &Linear,
     ) -> Result<Option<Tensor>, Error> {
+        if self.decode_graph.borrow().is_none() {
+            return Ok(None);
+        }
+        let overflow = {
+            let captured_ref = self.decode_graph.borrow();
+            captured_ref
+                .as_ref()
+                .is_some_and(|captured| kv_len > captured.cache_len)
+        };
+        if overflow {
+            let cache_len = {
+                let captured_ref = self.decode_graph.borrow();
+                captured_ref
+                    .as_ref()
+                    .map(|captured| captured.cache_len)
+                    .expect("overflow implies Some")
+            };
+            let Some(next) = next_decode_bucket(cache_len, WEVISDOC_DECODE_CACHE_LEN) else {
+                // Ladder ceiling: the rest of this generation decodes eager,
+                // whose append path grows the storage organically.
+                self.invalidate_cuda_graph();
+                self.invalidate_batch_cuda_graph();
+                return Ok(None);
+            };
+            // Grow the fixed bucket and re-capture; appended history is
+            // preserved and the warmup appends at the live end of the
+            // sequence. Graphs are disposed before the storage move.
+            self.invalidate_cuda_graph();
+            self.invalidate_batch_cuda_graph();
+            self.grow_dynamic_cache(1, next)?;
+            if let Err(error) = self.capture_cuda_graph(next, lm_head, kv_len - 1) {
+                tracing::warn!(
+                    "{MODEL_NAME} decoder graph re-capture at bucket {next} failed: {error}; continuing eager"
+                );
+                self.invalidate_cuda_graph();
+                self.invalidate_batch_cuda_graph();
+                return Ok(None);
+            }
+        }
         let captured_ref = self.decode_graph.borrow();
         let Some(captured) = captured_ref.as_ref() else {
             return Ok(None);
         };
-        if kv_len > captured.cache_len {
-            drop(captured_ref);
-            // Falling back to eager decode re-captures on the next prepare;
-            // drop both graphs because either can point at KV storage the
-            // replacement re-initializes.
-            self.invalidate_cuda_graph();
-            self.invalidate_batch_cuda_graph();
-            return Ok(None);
-        }
         if inputs_embeds.shape() != captured.hidden_input.shape()
             || position_ids.shape() != captured.position_input.shape()
         {
@@ -2030,11 +2188,23 @@ mod tests {
                 "re-captured graph decode must match eager"
             );
 
-            // The larger graph now covers the small prompt again (reuse).
+            // The larger graph now covers the small prompt again: the
+            // ladder shrinks the bucket back to the prompt's own.
             assert_eq!(
                 greedy_eager(&model, &lm_head, &short, 8),
                 greedy_graphed(&model, &lm_head, &short, 8, true),
-                "reused graph decode must match eager"
+                "shrunk-bucket graph decode must match eager"
+            );
+
+            // A generation that crosses the captured bucket mid-decode:
+            // the ladder doubles it, preserves the KV history, and decode
+            // must still match eager token for token. Prompt 100 tokens ->
+            // 128 bucket; 130 steps run to KV 230, growing 128 -> 256.
+            let medium: Vec<u32> = (0..100).map(|i| 10 + i % 60).collect();
+            assert_eq!(
+                greedy_eager(&model, &lm_head, &medium, 130),
+                greedy_graphed(&model, &lm_head, &medium, 130, true),
+                "ladder-grown graph decode must match eager"
             );
 
             // A second instance capturing while the first graph is alive —
@@ -2137,7 +2307,7 @@ mod tests {
 
             // One batch through the eager masked path: masked prefill plus
             // `steps` masked decode steps, one token row per step.
-            let run_eager_batch = |rows: &[Vec<u32>]| -> Vec<Vec<u32>> {
+            let run_eager_batch = |rows: &[Vec<u32>], steps: usize| -> Vec<Vec<u32>> {
                 let (embeds, positions, seq_lens, pads) = build_padded_batch(rows);
                 let batch = rows.len();
                 let max_seq = *seq_lens.iter().max().unwrap();
@@ -2189,7 +2359,7 @@ mod tests {
 
             // The same batch through the production path: identical prefill,
             // decode steps replay the captured batch graph.
-            let run_graphed_batch = |rows: &[Vec<u32>]| -> Vec<Vec<u32>> {
+            let run_graphed_batch = |rows: &[Vec<u32>], steps: usize| -> Vec<Vec<u32>> {
                 let (embeds, positions, seq_lens, pads) = build_padded_batch(rows);
                 let batch = rows.len();
                 let max_seq = *seq_lens.iter().max().unwrap();
@@ -2201,7 +2371,7 @@ mod tests {
 
                 model.clear_cache();
                 model
-                    .prepare_batch_ar_cuda_graph(batch, max_seq, steps, &pads, &lm_head)
+                    .prepare_batch_ar_cuda_graph(batch, max_seq, &pads, &lm_head)
                     .unwrap();
                 assert!(
                     model.batch_decode_graph_captured(),
@@ -2260,8 +2430,8 @@ mod tests {
             // First batch: captures the batch graph.
             let batch_a: Vec<Vec<u32>> = vec![make_ids(200), make_ids(120)];
             assert_eq!(
-                run_graphed_batch(&batch_a),
-                run_eager_batch(&batch_a),
+                run_graphed_batch(&batch_a, steps),
+                run_eager_batch(&batch_a, steps),
                 "first batch graph decode must match the eager masked path"
             );
 
@@ -2272,18 +2442,164 @@ mod tests {
             // derails the decode (the bug this guards).
             let batch_b: Vec<Vec<u32>> = vec![make_ids(140), make_ids(180)];
             assert_eq!(
-                run_graphed_batch(&batch_b),
-                run_eager_batch(&batch_b),
+                run_graphed_batch(&batch_b, steps),
+                run_eager_batch(&batch_b, steps),
                 "reused graph decode must match eager for a different batch shape"
             );
 
             // Third batch: a new width forces a re-capture; it must match too.
             let batch_c: Vec<Vec<u32>> = vec![make_ids(150), make_ids(130), make_ids(110)];
             assert_eq!(
-                run_graphed_batch(&batch_c),
-                run_eager_batch(&batch_c),
+                run_graphed_batch(&batch_c, steps),
+                run_eager_batch(&batch_c, steps),
                 "re-captured graph decode must match eager after a width change"
             );
+
+            // Fourth batch: a smaller prompt bucket shrinks the graph, then
+            // a long generation crosses the bucket mid-decode — the ladder
+            // doubles it, preserves the KV history, and must still match
+            // eager token for token.
+            let batch_d: Vec<Vec<u32>> = vec![make_ids(100), make_ids(90)];
+            assert_eq!(
+                run_graphed_batch(&batch_d, 40),
+                run_eager_batch(&batch_d, 40),
+                "ladder-grown graph decode must match eager"
+            );
+
+            // Teacher forcing along the graph's own token sequence: replay
+            // the generated tokens through the eager path and bound the
+            // per-step |delta logit| on row 0. Argmax agreement alone can
+            // hide compensating drift; this catches a stale mask or a
+            // missed rewrite while it is still a rounding artifact.
+            {
+                let rows: Vec<Vec<u32>> = vec![make_ids(100), make_ids(90)];
+                let probe_steps = 40usize;
+                let (embeds, positions, seq_lens, pads) = build_padded_batch(&rows);
+                let probe_batch = rows.len();
+                let max_seq = *seq_lens.iter().max().unwrap();
+                let pad_starts: Vec<u32> = pads.iter().map(|&pad| pad as u32).collect();
+                let causal = create_causal_mask(max_seq, max_seq, DType::BF16, &device).unwrap();
+                let padding =
+                    create_left_padding_mask(&seq_lens, max_seq, DType::BF16, &device).unwrap();
+                let prefill_mask = combine_masks(&causal, &padding).unwrap();
+
+                // Graphed pass, recording row 0's logits every step.
+                model.clear_cache();
+                model
+                    .prepare_batch_ar_cuda_graph(probe_batch, max_seq, &pads, &lm_head)
+                    .unwrap();
+                let hidden = model
+                    .forward(&embeds, &positions, None, Some(&prefill_mask), None)
+                    .unwrap();
+                let mut logits = lm_head
+                    .forward(
+                        &hidden
+                            .i((.., max_seq - 1, ..))
+                            .unwrap()
+                            .contiguous()
+                            .unwrap(),
+                    )
+                    .unwrap();
+                let mut graphed_tokens: Vec<Vec<u32>> = Vec::new();
+                let mut graphed_row0: Vec<Vec<f32>> = Vec::new();
+                for step in 0..probe_steps {
+                    graphed_row0.push(
+                        logits
+                            .i(0)
+                            .unwrap()
+                            .to_dtype(DType::F32)
+                            .unwrap()
+                            .to_vec1::<f32>()
+                            .unwrap(),
+                    );
+                    let mut tokens = Vec::new();
+                    for row in 0..probe_batch {
+                        tokens.push(decode_step(row, &logits));
+                    }
+                    graphed_tokens.push(tokens.clone());
+                    let kv_len = max_seq + step + 1;
+                    let row_starts = vec![(kv_len - 1) as u32; probe_batch];
+                    let ids = Tensor::from_vec(tokens, (probe_batch, 1), &device).unwrap();
+                    let embed = model.embed(&ids).unwrap();
+                    let mut pos_data = Vec::with_capacity(3 * probe_batch);
+                    for &seq_len in &seq_lens {
+                        for _ in 0..3 {
+                            pos_data.push((seq_len + step) as i64);
+                        }
+                    }
+                    let pos = Tensor::from_vec(pos_data, (3, probe_batch, 1), &device).unwrap();
+                    let gen_mask =
+                        create_generation_mask_if_needed(&pads, kv_len, DType::BF16, &device)
+                            .unwrap();
+                    logits = model
+                        .forward_decode_logits_batch(
+                            &embed,
+                            &pos,
+                            BatchDecodeRows {
+                                row_starts: &row_starts,
+                                pad_lens: &pad_starts,
+                            },
+                            kv_len,
+                            gen_mask.as_ref(),
+                            &lm_head,
+                        )
+                        .unwrap();
+                }
+
+                // Eager replay on the recorded tokens.
+                model.clear_cache();
+                let hidden = model
+                    .forward(&embeds, &positions, None, Some(&prefill_mask), None)
+                    .unwrap();
+                let mut logits = lm_head
+                    .forward(
+                        &hidden
+                            .i((.., max_seq - 1, ..))
+                            .unwrap()
+                            .contiguous()
+                            .unwrap(),
+                    )
+                    .unwrap();
+                let mut worst_delta = 0.0f32;
+                for step in 0..probe_steps {
+                    let eager0 = logits
+                        .i(0)
+                        .unwrap()
+                        .to_dtype(DType::F32)
+                        .unwrap()
+                        .to_vec1::<f32>()
+                        .unwrap();
+                    let delta = graphed_row0[step]
+                        .iter()
+                        .zip(eager0.iter())
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0.0f32, f32::max);
+                    worst_delta = worst_delta.max(delta);
+                    let tokens = graphed_tokens[step].clone();
+                    let kv_len = max_seq + step + 1;
+                    let ids = Tensor::from_vec(tokens, (probe_batch, 1), &device).unwrap();
+                    let embed = model.embed(&ids).unwrap();
+                    let mut pos_data = Vec::with_capacity(3 * probe_batch);
+                    for _ in 0..3 {
+                        for &seq_len in &seq_lens {
+                            pos_data.push((seq_len + step) as i64);
+                        }
+                    }
+                    let pos = Tensor::from_vec(pos_data, (3, probe_batch, 1), &device).unwrap();
+                    let gen_mask =
+                        create_generation_mask_if_needed(&pads, kv_len, DType::BF16, &device)
+                            .unwrap();
+                    let hidden = model
+                        .forward(&embed, &pos, None, gen_mask.as_ref(), None)
+                        .unwrap();
+                    logits = lm_head.forward(&hidden).unwrap();
+                }
+                assert!(
+                    worst_delta < 2.0,
+                    "teacher-forced |delta logit| reached {worst_delta}, \
+                     the graph path is not tracking eager"
+                );
+            }
 
             // A single-row request whose prompt exceeds the bucket limit
             // falls back to eager: both graphs must be dropped, because the
@@ -2395,9 +2711,7 @@ mod tests {
         let embeds = model.embed(&token_ids).unwrap();
         let positions = text_position_ids_range(seq_len, device);
         model.clear_cache();
-        model
-            .prepare_ar_cuda_graph(seq_len, steps, lm_head)
-            .unwrap();
+        model.prepare_ar_cuda_graph(seq_len, lm_head).unwrap();
         assert_eq!(
             model.decode_graph_captured(),
             expect_capture,

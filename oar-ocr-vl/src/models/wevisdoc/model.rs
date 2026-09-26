@@ -238,7 +238,7 @@ impl WeVisDoc {
             &self.device,
         )?;
         self.text
-            .prepare_ar_cuda_graph(input_ids.len(), max_new_tokens, &self.lm_head)?;
+            .prepare_ar_cuda_graph(input_ids.len(), &self.lm_head)?;
         let hidden =
             self.text
                 .forward(&inputs_embeds, &position_ids, Some(&deepstack), None, None)?;
@@ -260,6 +260,13 @@ impl WeVisDoc {
                 return Ok((generated, true));
             }
             generated.push(token);
+            // A greedy loop never reaches EOS; cutting the repeated cycles
+            // (one is kept) both bounds the output and saves the rest of
+            // the token budget.
+            if let Some((period, repeats)) = trailing_decode_loop(&generated) {
+                generated.truncate(generated.len() - (repeats - 1) * period);
+                return Ok((generated, false));
+            }
             if step + 1 == max_new_tokens {
                 break;
             }
@@ -427,22 +434,19 @@ impl WeVisDoc {
             .collect();
 
         self.text.clear_cache();
-        // The batched prepare reuses a compatible captured graph (same batch
-        // width, sufficient capacity) and otherwise re-captures, dropping
+        // The batched prepare reuses the captured graph when the batch
+        // width and prompt bucket match, and otherwise re-captures, dropping
         // any single-row graph that points at (1, H, C, D) storage first —
         // so the prefill writes straight into the graph's fixed capacity.
+        // The bucket starts just past the prompt and grows with the
+        // generation.
         #[cfg(feature = "cuda")]
         {
             let pads: Vec<usize> = (0..batch_size)
                 .map(|row| max_seq_len - seq_lens[row])
                 .collect();
-            self.text.prepare_batch_ar_cuda_graph(
-                batch_size,
-                max_seq_len,
-                max_new_tokens,
-                &pads,
-                &self.lm_head,
-            )?;
+            self.text
+                .prepare_batch_ar_cuda_graph(batch_size, max_seq_len, &pads, &self.lm_head)?;
         }
         let hidden = self.text.forward(
             &inputs_embeds,
@@ -493,6 +497,14 @@ impl WeVisDoc {
                     finished[row] = true;
                 } else {
                     generated[row].push(token);
+                    // Same loop guard as single-row generation: cut the
+                    // repeated cycles (one is kept) and retire the row so
+                    // the batch stops paying for its decode.
+                    if let Some((period, repeats)) = trailing_decode_loop(&generated[row]) {
+                        let keep = generated[row].len() - (repeats - 1) * period;
+                        generated[row].truncate(keep);
+                        finished[row] = true;
+                    }
                 }
                 next_tokens.push(token);
             }
@@ -882,6 +894,37 @@ fn text_position_ids(position: i64, device: &Device) -> Result<Tensor, Error> {
     })
 }
 
+/// Longest exact token cycle at the tail of `tokens`, reported as
+/// `(period, repeats)`, when the repetition is strong enough to be a decode
+/// loop instead of real content. Shortest cycles must repeat many times,
+/// longer ones only a few, and the looping tail always spans at least
+/// `MIN_TAIL` tokens, so dot leaders, bullet markers, and short repeated
+/// markup never trip it.
+fn trailing_decode_loop(tokens: &[u32]) -> Option<(usize, usize)> {
+    const MAX_PERIOD: usize = 64;
+    const MIN_TAIL: usize = 64;
+    const MIN_REPEATS: usize = 4;
+    let len = tokens.len();
+    if len < MIN_TAIL {
+        return None;
+    }
+    // Longest period first: a loop that also matches a longer cycle keeps
+    // one full cycle of the pattern instead of a fragment of it.
+    for period in (1..=MAX_PERIOD.min(len / MIN_REPEATS)).rev() {
+        let unit = &tokens[len - period..];
+        let mut repeats = 1;
+        while (repeats + 1) * period <= len
+            && &tokens[len - (repeats + 1) * period..len - repeats * period] == unit
+        {
+            repeats += 1;
+        }
+        if repeats >= MIN_TAIL.div_ceil(period).max(MIN_REPEATS) {
+            return Some((period, repeats));
+        }
+    }
+    None
+}
+
 fn select_greedy_token(logits: &Tensor) -> Result<u32, Error> {
     #[cfg(feature = "cuda")]
     if logits.device().is_cuda() && matches!(logits.dtype(), DType::BF16 | DType::F32) {
@@ -971,6 +1014,66 @@ mod tests {
     fn position_ids_reject_misplaced_image_tokens() {
         let ids = vec![151_655u32; 4];
         assert!(build_position_ids(&ids, (1, 4, 2), 2, 151_652, 151_655, &Device::Cpu).is_err());
+    }
+
+    #[test]
+    fn short_or_acyclic_tails_are_not_loops() {
+        assert_eq!(trailing_decode_loop(&[]), None);
+        assert_eq!(trailing_decode_loop(&[1, 2, 3, 1, 2, 3]), None);
+
+        // Two repetitions of a sentence-length cycle: normal prose.
+        let mut prose = vec![10u32; 20];
+        prose.extend_from_within(..20);
+        assert_eq!(trailing_decode_loop(&prose), None);
+
+        // Long acyclic tail (LCG noise never closes an exact cycle).
+        let mut state = 12345u64;
+        let noise: Vec<u32> = (0..600)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (state >> 33) as u32
+            })
+            .collect();
+        assert_eq!(trailing_decode_loop(&noise), None);
+    }
+
+    #[test]
+    fn degenerate_cycles_are_detected_with_the_longest_period() {
+        // Single-token loop (the 3993x "。" failure mode). A constant run
+        // is periodic under every divisor, so the reported period varies —
+        // what matters is that it trips and the trim keeps one cycle.
+        let run = vec![5u32; 70];
+        let (period, repeats) = trailing_decode_loop(&run).expect("constant run is a loop");
+        let keep = run.len() - (repeats - 1) * period;
+        assert!(keep >= period && keep < run.len());
+        assert!(run[..keep].iter().all(|&t| t == 5));
+
+        // A 20-token sentence repeated 5 times: period 20 wins over its
+        // divisors, one full cycle stays after the trim.
+        let sentence: Vec<u32> = (100..120).collect();
+        let mut looped = Vec::new();
+        for _ in 0..5 {
+            looped.extend_from_slice(&sentence);
+        }
+        assert_eq!(trailing_decode_loop(&looped), Some((20, 5)));
+        let (period, repeats) = trailing_decode_loop(&looped).unwrap();
+        let trimmed = looped.len() - (repeats - 1) * period;
+        assert_eq!(&looped[..trimmed], &sentence);
+
+        // Alternating pair sustained past the tail bound.
+        let alternating: Vec<u32> = (0..80).map(|i| if i % 2 == 0 { 3 } else { 4 }).collect();
+        let (period, repeats) =
+            trailing_decode_loop(&alternating).expect("alternating run is a loop");
+        let keep = alternating.len() - (repeats - 1) * period;
+        assert!(keep >= period && keep < alternating.len());
+        assert!(
+            alternating[..keep]
+                .iter()
+                .zip(alternating[keep - period..keep].iter().cycle())
+                .all(|(&a, &b)| a == b)
+        );
     }
 
     #[test]

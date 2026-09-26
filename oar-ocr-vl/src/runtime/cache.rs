@@ -256,6 +256,71 @@ impl TrimmableKvCache {
         self.storage.as_ref().map(|(k, v)| (k.clone(), v.clone()))
     }
 
+    /// Grow fixed-capacity storage to `capacity`, preserving the appended
+    /// history. CUDA-graph decode paths call this mid-generation when the
+    /// captured bucket must double; the caller disposes the captured graphs
+    /// first, so replacing the backing tensors here is safe. When storage
+    /// is absent (or already dead) this simply initializes at `capacity`.
+    pub fn grow_fixed_storage(&mut self, template: &Tensor, capacity: usize) -> Result<()> {
+        if capacity == 0 {
+            return Err(candle_core::Error::Msg(
+                "TrimmableKvCache capacity must be non-zero".into(),
+            ));
+        }
+        let reusable = self.storage.as_ref().is_some_and(|(storage_k, _)| {
+            self.capacity == capacity
+                && storage_k.dtype() == template.dtype()
+                && storage_k.device().same_device(template.device())
+                && storage_k.dims().len() == template.dims().len()
+                && storage_k
+                    .dims()
+                    .iter()
+                    .zip(template.dims())
+                    .enumerate()
+                    .all(|(dim, (stored, new))| {
+                        if dim == self.cat_dim {
+                            *stored == capacity
+                        } else {
+                            stored == new
+                        }
+                    })
+        });
+        if reusable {
+            return Ok(());
+        }
+        let growable = self.storage.as_ref().is_some_and(|(storage_k, _)| {
+            self.cur_len > 0
+                && storage_k.dtype() == template.dtype()
+                && storage_k.device().same_device(template.device())
+                && storage_k.dims().len() == template.dims().len()
+                && storage_k
+                    .dims()
+                    .iter()
+                    .zip(template.dims())
+                    .enumerate()
+                    .all(|(dim, (stored, new))| dim == self.cat_dim || stored == new)
+        });
+        if !growable {
+            return self.initialize_storage_with_capacity(template, capacity);
+        }
+        let (old_k, old_v) = self.storage.as_ref().expect("storage checked above");
+        let old_k = old_k.narrow(self.cat_dim, 0, self.cur_len)?.contiguous()?;
+        let old_v = old_v.narrow(self.cat_dim, 0, self.cur_len)?.contiguous()?;
+        let mut shape = template.dims().to_vec();
+        shape[self.cat_dim] = capacity;
+        let new_k = Tensor::zeros(shape.as_slice(), template.dtype(), template.device())?;
+        let new_v = Tensor::zeros(shape.as_slice(), template.dtype(), template.device())?;
+        new_k.slice_set(&old_k, self.cat_dim, 0)?;
+        new_v.slice_set(&old_v, self.cat_dim, 0)?;
+        self.capacity = capacity;
+        self.kv = Some((
+            new_k.narrow(self.cat_dim, 0, self.cur_len)?,
+            new_v.narrow(self.cat_dim, 0, self.cur_len)?,
+        ));
+        self.storage = Some((new_k, new_v));
+        Ok(())
+    }
+
     /// Update only the logical length after a device-side graph append.
     pub fn set_current_len(&mut self, len: usize) -> Result<()> {
         if len > self.capacity {
@@ -397,6 +462,40 @@ mod tests {
         let mut c = TrimmableKvCache::new(2, 64);
         let template = Tensor::zeros((1, 2, 1, 4), DType::F32, &dev()).unwrap();
         assert!(c.initialize_storage_with_capacity(&template, 0).is_err());
+    }
+
+    #[test]
+    fn grow_fixed_storage_preserves_history() -> Result<()> {
+        let mut c = TrimmableKvCache::new(2, 64);
+        let template = Tensor::zeros((1, 2, 1, 2), DType::F32, &dev())?;
+        c.initialize_storage_with_capacity(&template, 4)?;
+        let first = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 2, 1, 2), &dev())?;
+        c.append(&first, &first)?;
+        let second = Tensor::from_vec(vec![5.0f32, 6.0, 7.0, 8.0], (1, 2, 1, 2), &dev())?;
+        c.append(&second, &second)?;
+
+        c.grow_fixed_storage(&template, 8)?;
+        assert_eq!(c.storage_capacity(), 8);
+        assert_eq!(c.current_seq_len(), 2);
+        let k = c.k().unwrap();
+        let v = c.v().unwrap();
+        assert_eq!(k.dims(), &[1, 2, 2, 2]);
+        // Head-major layout: (head, token, dim).
+        assert_eq!(
+            k.flatten_all()?.to_vec1::<f32>()?,
+            vec![1.0, 2.0, 5.0, 6.0, 3.0, 4.0, 7.0, 8.0]
+        );
+        assert_eq!(
+            v.flatten_all()?.to_vec1::<f32>()?,
+            vec![1.0, 2.0, 5.0, 6.0, 3.0, 4.0, 7.0, 8.0]
+        );
+        // The new slots exist and start zeroed, ready for graph appends.
+        assert_eq!(c.storage().unwrap().0.dims(), &[1, 2, 8, 2]);
+
+        // Growing to the capacity already in place is a no-op.
+        c.grow_fixed_storage(&template, 8)?;
+        assert_eq!(c.current_seq_len(), 2);
+        Ok(())
     }
 
     #[test]

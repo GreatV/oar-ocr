@@ -23,6 +23,31 @@ pub(crate) fn decoder_cache_capacity(
     Some(required.max(1).next_power_of_two().min(limit))
 }
 
+/// Initial decode bucket for a prompt under the growth ladder: the next
+/// power of two covering the prompt plus one decode step. Capturing just
+/// past the prompt keeps the graph's masked attention proportional to what
+/// the generation actually needs; replay doubles the bucket when the
+/// sequence outgrows it. `None` keeps prompts at or over `limit` on the
+/// eager path entirely — their KV can never fit a bucket.
+#[cfg(any(feature = "cuda", test))]
+pub(crate) fn prompt_decode_bucket(prompt_len: usize, limit: usize) -> Option<usize> {
+    if prompt_len >= limit || limit == 0 {
+        return None;
+    }
+    Some(prompt_len.saturating_add(1).next_power_of_two().min(limit))
+}
+
+/// Bucket the ladder grows to once a generation reaches the end of
+/// `cache_len`: double, capped at `limit`. `None` means the ladder is at
+/// its ceiling and an overflowing generation falls back to eager.
+#[cfg(any(feature = "cuda", test))]
+pub(crate) fn next_decode_bucket(cache_len: usize, limit: usize) -> Option<usize> {
+    if cache_len == 0 || cache_len >= limit {
+        return None;
+    }
+    Some((cache_len.saturating_mul(2)).min(limit))
+}
+
 /// Match eager decoder attention: a single query has no future token to mask,
 /// while verification blocks must remain causal within the block.
 #[cfg(any(feature = "cuda", test))]
@@ -461,7 +486,10 @@ impl std::fmt::Debug for SingleTokenDecoderCudaGraph {
 
 #[cfg(test)]
 mod tests {
-    use super::{decoder_attention_is_causal, decoder_cache_capacity};
+    use super::{
+        decoder_attention_is_causal, decoder_cache_capacity, next_decode_bucket,
+        prompt_decode_bucket,
+    };
 
     #[test]
     fn cache_capacity_uses_bounded_power_of_two_buckets() {
@@ -472,6 +500,19 @@ mod tests {
         assert_eq!(decoder_cache_capacity(100, 0, LIMIT), None);
         assert_eq!(decoder_cache_capacity(LIMIT, 1, LIMIT), None);
         assert_eq!(decoder_cache_capacity(1, 1, 0), None);
+    }
+
+    #[test]
+    fn prompt_bucket_covers_the_prompt_and_the_ladder_doubles() {
+        const LIMIT: usize = 16_384;
+        assert_eq!(prompt_decode_bucket(1500, LIMIT), Some(2048));
+        assert_eq!(prompt_decode_bucket(2047, LIMIT), Some(2048));
+        assert_eq!(prompt_decode_bucket(2048, LIMIT), Some(4096));
+        assert_eq!(prompt_decode_bucket(LIMIT, LIMIT), None);
+        assert_eq!(prompt_decode_bucket(1, 0), None);
+        assert_eq!(next_decode_bucket(512, LIMIT), Some(1024));
+        assert_eq!(next_decode_bucket(8_192, 8_192), None);
+        assert_eq!(next_decode_bucket(0, LIMIT), None);
     }
 
     #[test]
