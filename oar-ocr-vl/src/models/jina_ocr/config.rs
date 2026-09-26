@@ -161,6 +161,49 @@ impl JinaOcrConfig {
             });
         }
         self.text.validate()?;
+        // Vision tower geometry: every field that later appears as a divisor
+        // or a shape is validated here so a bad checkpoint fails at load time
+        // with a config error instead of a division-by-zero panic.
+        let sam = &self.vision_config.width.sam_vit_b;
+        let clip = &self.vision_config.width.clip_l;
+        for (name, heads, width) in [
+            ("sam_vit_b", sam.heads, sam.width),
+            ("clip-l", clip.heads, clip.width),
+        ] {
+            if heads == 0 || width == 0 || !width.is_multiple_of(heads) {
+                return Err(Error::Config {
+                    message: format!(
+                        "JinaOCR vision {name}: width {width} must be non-zero and divide evenly into {heads} heads"
+                    ),
+                });
+            }
+        }
+        for (name, layers) in [("sam_vit_b", sam.layers), ("clip-l", clip.layers)] {
+            if layers == 0 {
+                return Err(Error::Config {
+                    message: format!("JinaOCR vision {name}: layers must be non-zero"),
+                });
+            }
+        }
+        if clip.patch_size == 0 {
+            return Err(Error::Config {
+                message: "JinaOCR vision clip-l: patch_size must be non-zero".to_string(),
+            });
+        }
+        if let Some(size) = clip.image_size
+            && (size == 0 || !size.is_multiple_of(clip.patch_size))
+        {
+            return Err(Error::Config {
+                message: format!(
+                    "JinaOCR vision clip-l: image_size {size} must be a positive multiple of patch_size {}",
+                    clip.patch_size
+                ),
+            });
+        }
+        // SAM pretrained grid: image_size must be a positive multiple of the
+        // SAM patch size (16).
+        self.vision_config
+            .sam_grid_side(self.vision_config.image_size)?;
         for (name, token_id) in [
             ("bos_token_id", self.text.bos_token_id),
             ("eos_token_id", self.text.eos_token_id),
@@ -351,5 +394,54 @@ mod tests {
                 .to_string()
                 .contains("multi-head attention")
         );
+    }
+
+    #[test]
+    fn rejects_zero_heads_and_undividable_vision_widths() {
+        let mut cfg: JinaOcrConfig = serde_json::from_str(CONFIG).unwrap();
+        cfg.vision_config.width.sam_vit_b.heads = 0;
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("sam_vit_b"), "unexpected error: {err}");
+
+        let mut cfg: JinaOcrConfig = serde_json::from_str(CONFIG).unwrap();
+        cfg.vision_config.width.clip_l.heads = 0;
+        assert!(cfg.validate().unwrap_err().to_string().contains("clip-l"));
+
+        let mut cfg: JinaOcrConfig = serde_json::from_str(CONFIG).unwrap();
+        cfg.vision_config.width.sam_vit_b.heads = 7; // 768 % 7 != 0
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_zero_vision_layers_patch_size_and_bad_image_size() {
+        let mut cfg: JinaOcrConfig = serde_json::from_str(CONFIG).unwrap();
+        cfg.vision_config.width.sam_vit_b.layers = 0;
+        assert!(cfg.validate().unwrap_err().to_string().contains("layers"));
+
+        let mut cfg: JinaOcrConfig = serde_json::from_str(CONFIG).unwrap();
+        cfg.vision_config.width.clip_l.patch_size = 0;
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("patch_size")
+        );
+
+        // clip image_size not divisible by its patch size
+        let mut cfg: JinaOcrConfig = serde_json::from_str(CONFIG).unwrap();
+        cfg.vision_config.width.clip_l.image_size = Some(225);
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("image_size")
+        );
+
+        // SAM image_size not a multiple of the 16px patch
+        let mut cfg: JinaOcrConfig = serde_json::from_str(CONFIG).unwrap();
+        cfg.vision_config.image_size = 641;
+        assert!(cfg.validate().is_err());
+        cfg.vision_config.image_size = 0;
+        assert!(cfg.validate().is_err());
     }
 }
