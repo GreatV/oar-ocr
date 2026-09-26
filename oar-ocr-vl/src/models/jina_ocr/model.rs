@@ -1802,6 +1802,14 @@ mod tests {
             Some(device)
         }
 
+        #[cfg(feature = "cuda")]
+        fn cuda_graph_test_lock() -> std::sync::MutexGuard<'static, ()> {
+            // Ignore poisoning: one failing self-test must not fail the rest.
+            CUDA_GRAPH_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+        }
+
         /// GPU self-check for the mid-generation KV snapshot/restore cycle,
         /// run in BF16 so the CUDA graphs (f16/bf16-gated) actually capture:
         /// (1) element-wise KV equality across the production capture flow —
@@ -1826,7 +1834,7 @@ mod tests {
                     eprintln!("skipping: no CUDA device");
                     return;
                 };
-                let _cuda_lock = CUDA_GRAPH_TEST_LOCK.lock().unwrap();
+                let _cuda_lock = cuda_graph_test_lock();
                 let ids: Vec<u32> = (4..40).map(|i| 8 + i % 50).collect();
 
                 let build = |lazy_decode_graph: bool| {
@@ -2018,7 +2026,7 @@ mod tests {
                 let Some(device) = cuda_selftest_device() else {
                     return;
                 };
-                let _cuda_lock = CUDA_GRAPH_TEST_LOCK.lock().unwrap();
+                let _cuda_lock = cuda_graph_test_lock();
                 let cfg = tiny_config();
                 let vb = random_varbuilder_typed(&cfg, &device, true, DType::BF16);
                 let text = DeepSeekV2TextModel::load(&cfg, vb.pp("model")).unwrap();
@@ -2171,7 +2179,7 @@ mod tests {
                 let Some(device) = cuda_selftest_device() else {
                     return;
                 };
-                let _cuda_lock = CUDA_GRAPH_TEST_LOCK.lock().unwrap();
+                let _cuda_lock = cuda_graph_test_lock();
                 let cfg = tiny_config();
                 let vb = random_varbuilder_typed(&cfg, &device, true, DType::BF16);
                 let text = DeepSeekV2TextModel::load(&cfg, vb.pp("model")).unwrap();
@@ -2294,7 +2302,7 @@ mod tests {
                     eprintln!("skipping: OAR_JINAOCR_GPU_SELFTEST_MODEL is not set");
                     return;
                 };
-                let _cuda_lock = CUDA_GRAPH_TEST_LOCK.lock().unwrap();
+                let _cuda_lock = cuda_graph_test_lock();
                 let model = JinaOcr::from_dir_with_options(
                     &dir,
                     crate::RuntimeConfig::new(device),
@@ -2305,7 +2313,7 @@ mod tests {
                     eprintln!("skipping: real-checkpoint check needs bf16/f16");
                     return;
                 }
-                let image = RgbImage::from_pixel(64, 64, image::Rgb([255u8; 3]));
+                let image = RgbImage::from_pixel(1024, 1024, image::Rgb([255u8; 3]));
                 let max_new_tokens = 512;
                 let prompt = model.prepare_prompt(&image, max_new_tokens).unwrap();
                 let prompt_len = prompt.input_ids.len();
@@ -2476,7 +2484,7 @@ mod tests {
                     eprintln!("skipping: no CUDA device");
                     return;
                 };
-                let _cuda_lock = CUDA_GRAPH_TEST_LOCK.lock().unwrap();
+                let _cuda_lock = cuda_graph_test_lock();
                 let short: Vec<u32> = (4..36).map(|i| 8 + i % 50).collect();
                 let long: Vec<u32> = (0..600).map(|i| 8 + i % 50).collect();
 
