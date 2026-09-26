@@ -2533,12 +2533,12 @@ mod tests {
 
             // Single-row capture fails after every layer allocated its KV:
             // at the failure instant the buckets must be visible in memory.
-            let result = model.prepare_ar_cuda_graph(600, 8, &lm_head, true);
+            let result = model.prepare_ar_cuda_graph(600, 8192, &lm_head, false);
             assert!(result.is_err(), "injected capture failure must surface");
             let at_failure = smi_used();
             eprintln!("DBGM1 single at-failure={at_failure}MiB");
             assert!(
-                at_failure.saturating_sub(baseline) >= 200,
+                at_failure.saturating_sub(baseline) >= 500,
                 "the fixed KV buckets were not allocated before the failure"
             );
             model.recover_failed_capture();
@@ -2548,13 +2548,13 @@ mod tests {
 
             // Partial allocation: fail after the 2nd of 4 layers.
             unsafe {
-                std::env::set_var("OAR_WEVISDOC_FAIL_CAPTURE_AFTER_LAYER", "2");
+                std::env::set_var("OAR_WEVISDOC_FAIL_CAPTURE_AFTER_LAYER", "24");
             }
-            let result = model.prepare_ar_cuda_graph(600, 8, &lm_head, true);
+            let result = model.prepare_ar_cuda_graph(600, 8192, &lm_head, false);
             assert!(result.is_err(), "partial injection must surface");
             let at_partial = smi_used();
             eprintln!("DBGM1 single at-partial={at_partial}MiB");
-            assert!(at_partial.saturating_sub(baseline) >= 100);
+            assert!(at_partial.saturating_sub(baseline) >= 300);
             model.recover_failed_capture();
             let after_partial = smi_used();
             eprintln!("DBGM1 single after-partial={after_partial}MiB");
@@ -2565,14 +2565,14 @@ mod tests {
 
             // Batch capture fails after all layers allocated (batch 2
             // doubles the buckets).
-            let result = model.prepare_batch_ar_cuda_graph(2, 600, 8, &[0, 10], &lm_head, true);
+            let result = model.prepare_batch_ar_cuda_graph(2, 600, 8192, &[0, 10], &lm_head, false);
             assert!(
                 result.is_err(),
                 "injected batch capture failure must surface"
             );
             let at_batch = smi_used();
             eprintln!("DBGM1 batch at-failure={at_batch}MiB");
-            assert!(at_batch.saturating_sub(baseline) >= 200);
+            assert!(at_batch.saturating_sub(baseline) >= 500);
             model.recover_failed_capture();
             let after_batch = smi_used();
             eprintln!("DBGM1 batch after-fallback={after_batch}MiB");
@@ -2583,13 +2583,13 @@ mod tests {
             // Control: with the release skipped, the preallocated buckets
             // stay resident — proving the assertion above catches the bug.
             unsafe { std::env::set_var("OAR_WEVISDOC_SKIP_RELEASE", "1") };
-            let result = model.prepare_batch_ar_cuda_graph(2, 600, 8, &[0, 10], &lm_head, true);
+            let result = model.prepare_batch_ar_cuda_graph(2, 600, 8192, &[0, 10], &lm_head, false);
             assert!(result.is_err());
             model.recover_failed_capture();
             let no_release = smi_used();
             eprintln!("DBGM1 control (release skipped)={no_release}MiB");
             assert!(
-                no_release.saturating_sub(baseline) >= 200,
+                no_release.saturating_sub(baseline) >= 500,
                 "the memory assertion failed to catch a missing release"
             );
             unsafe {
