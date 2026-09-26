@@ -20,6 +20,12 @@ pub struct JinaOcrConfig {
     pub vision_config: VisionConfig,
     #[serde(default)]
     pub num_nextn_predict_layers: Option<usize>,
+    /// Reference `modeling_deepseekocr.py` always concatenates mrope views as
+    /// [local, global, separator] and never reads this flag; accept only the
+    /// value our implementation matches so a "tail" checkpoint fails loudly
+    /// instead of silently reordering positions.
+    #[serde(default)]
+    pub global_view_pos: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -128,6 +134,15 @@ impl JinaOcrConfig {
     }
 
     pub fn validate(&self) -> Result<(), Error> {
+        if let Some(view_pos) = &self.global_view_pos
+            && view_pos != "head"
+        {
+            return Err(Error::Config {
+                message: format!(
+                    "JinaOCR expects global_view_pos 'head' (the reference fixes [local, global, sep] order), got '{view_pos}'"
+                ),
+            });
+        }
         if self.model_type != "deepseek_vl_v2" {
             return Err(Error::Config {
                 message: format!(
