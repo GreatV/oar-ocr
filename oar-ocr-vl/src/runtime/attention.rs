@@ -659,6 +659,9 @@ fn masked_score(dtype: DType) -> f64 {
 /// Returns a `(batch, 1, 1, max_len)` mask where left-padded positions
 /// (`j < max_len - seq_len`) are strongly negative and valid positions are `0`.
 /// With `seq_lens = [3, 5]` and `max_len = 5`, item 0 is `[m, m, 0, 0, 0]`.
+///
+/// Every `seq_lens` entry must be `<= max_len`; a longer entry is an error
+/// (rather than silently being treated as unpadded).
 pub fn create_left_padding_mask(
     seq_lens: &[usize],
     max_len: usize,
@@ -666,6 +669,11 @@ pub fn create_left_padding_mask(
     device: &Device,
 ) -> Result<Tensor> {
     let batch_size = seq_lens.len();
+    if let Some(&len) = seq_lens.iter().find(|&&len| len > max_len) {
+        candle_core::bail!(
+            "create_left_padding_mask: sequence length {len} exceeds max_len {max_len}"
+        );
+    }
 
     on_compute_device(device, |compute_device| {
         // Keep the comparison in integer space, like the causal mask: BF16
@@ -711,6 +719,9 @@ pub fn create_left_padding_mask(
 /// token never attends to padding KV (which would corrupt unequal-length
 /// batches). Returns a `(batch, 1, 1, kv_len)` additive mask (`0` attendable, a
 /// large negative for padding); a no-op when there is no padding.
+///
+/// Every `pad_lens` entry must be `<= kv_len`; a larger entry would mask every
+/// position and is an error.
 pub fn create_generation_mask(
     pad_lens: &[usize],
     kv_len: usize,
@@ -718,6 +729,9 @@ pub fn create_generation_mask(
     device: &Device,
 ) -> Result<Tensor> {
     let batch_size = pad_lens.len();
+    if let Some(&pad) = pad_lens.iter().find(|&&pad| pad > kv_len) {
+        candle_core::bail!("create_generation_mask: pad_len {pad} exceeds kv_len {kv_len}");
+    }
 
     on_compute_device(device, |compute_device| {
         // Integer-space comparison, matching `create_left_padding_mask`:
@@ -1584,6 +1598,31 @@ mod tests {
         let mask = create_generation_mask_if_needed(&[3, 0, 1], 32, DType::F32, &device)?
             .expect("unequal prompts need a padding mask");
         assert_eq!(mask.dims(), &[3, 1, 1, 32]);
+        Ok(())
+    }
+
+    #[test]
+    fn padding_masks_reject_overlong_inputs() -> Result<()> {
+        let device = Device::Cpu;
+        // A sequence longer than max_len must be an error, not a silent
+        // "no padding" row.
+        assert!(create_left_padding_mask(&[3, 7], 5, DType::F32, &device).is_err());
+        // A pad wider than the KV length would mask every position.
+        assert!(create_generation_mask(&[2, 9], 5, DType::F32, &device).is_err());
+        // Boundary values stay legal and unchanged.
+        let mask = create_left_padding_mask(&[5], 5, DType::F32, &device)?;
+        assert!(
+            mask.flatten_all()?
+                .to_vec1::<f32>()?
+                .iter()
+                .all(|&v| v == 0.0)
+        );
+        let mask = create_generation_mask(&[5], 5, DType::F32, &device);
+        assert!(mask.is_ok());
+        let mask = create_generation_mask(&[2], 5, DType::F32, &device)?;
+        let row = mask.flatten_all()?.to_vec1::<f32>()?;
+        assert!(row[0] < -1e8 && row[1] < -1e8);
+        assert_eq!(&row[2..], &[0.0, 0.0, 0.0]);
         Ok(())
     }
 
