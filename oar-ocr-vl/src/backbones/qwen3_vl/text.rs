@@ -2611,9 +2611,7 @@ mod tests {
             // fallback decode still has to match eager token for token.
             let huge: Vec<u32> = (0..8300).map(|i| 10 + i as u32 % 60).collect();
             model.clear_cache();
-            model
-                .prepare_ar_cuda_graph(huge.len(), 4, &lm_head)
-                .unwrap();
+            model.prepare_ar_cuda_graph(huge.len(), &lm_head).unwrap();
             assert!(
                 !model.decode_graph_captured(),
                 "eager fallback must drop the single-row graph"
