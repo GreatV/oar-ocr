@@ -849,8 +849,7 @@ impl Qwen3Mlp {
 
 /// Test probe: how many times the text MLP chunked path has run.
 #[cfg(all(test, not(feature = "cuda")))]
-static TEXT_MLP_CHUNK_RUNS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static TEXT_MLP_CHUNK_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Test probe: the query chunk size last used by the causal chunked
 /// attention path (0 when that path has not run since the last probe
@@ -2762,10 +2761,7 @@ mod tests {
             .and_then(|gate| candle_nn::ops::silu(&gate))
             .unwrap();
         let up = mlp.up_proj.forward(&xs).unwrap();
-        let single = mlp
-            .down_proj
-            .forward(&(&gate * &up).unwrap())
-            .unwrap();
+        let single = mlp.down_proj.forward(&(&gate * &up).unwrap()).unwrap();
         assert_eq!(
             chunked.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
             single.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
