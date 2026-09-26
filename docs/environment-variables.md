@@ -20,6 +20,9 @@ Runtime environment variables read by the oar-ocr crates. Project-specific varia
 | [`OAR_GLMOCR_DISABLE_MTP`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Disable GLM-OCR MTP |
 | [`OAR_GLMOCR_DISABLE_CUDA_GRAPH`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Disable GLM-OCR CUDA graphs |
 | [`OAR_JINAOCR_ENABLE_MTP`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Opt in to jina-ocr-v1 FastMTP speculation |
+| [`OAR_JINAOCR_DISABLE_CUDA_GRAPH`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Disable all jina-ocr-v1 CUDA graphs |
+| [`OAR_DEEPSEEK_V2_DISABLE_CUDA_GRAPH`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Disable jina-ocr-v1 target decode/verification graphs |
+| [`OAR_JINAOCR_DISABLE_LAZY_DECODE_GRAPH`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Eager MTP cooldown decoding (A/B numerics) |
 | [`OAR_HUNYUAN_DISABLE_CUDA_GRAPH`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Disable HunyuanOCR CUDA graphs |
 | [`OAR_HUNYUAN_DISABLE_AR_CUDA_GRAPH`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Disable HunyuanOCR AR CUDA graph |
 | [`OAR_MINERU_DISABLE_CUDA_GRAPH`](#vl-performance-and-debug-overrides) | `oar-ocr-vl` | unset | Disable MinerU CUDA graphs |
@@ -80,7 +83,10 @@ The following presence-based switches select portable fallbacks, disable optiona
 | `OAR_PADDLEOCR_VL_DISABLE_CUDA_GRAPH` | PaddleOCR-VL variants | Disable decoder CUDA graphs only for PaddleOCR-VL |
 | `OAR_GLMOCR_DISABLE_MTP` | GLM-OCR | Do not load or use the MTP predictor |
 | `OAR_GLMOCR_DISABLE_CUDA_GRAPH` | GLM-OCR | Disable autoregressive and MTP CUDA graphs |
-| `OAR_JINAOCR_ENABLE_MTP` | jina-ocr-v1 | Opt in to FastMTP speculative decoding (off by default: adaptive MTP was slower than graphed plain decoding on 17 of 18 OmniDocBench demo pages, RTX 4090 bf16; output stays token-identical either way) |
+| `OAR_JINAOCR_ENABLE_MTP` | jina-ocr-v1 | Opt in to FastMTP speculative decoding (off by default: adaptive MTP won on none of the 18 OmniDocBench demo pages, RTX 4090 bf16; CUDA only). Output matches plain decoding in exact arithmetic — in bf16 the verification block's kernel batching can flip near-tie picks |
+| `OAR_JINAOCR_DISABLE_CUDA_GRAPH` | jina-ocr-v1 | Disable all jina-ocr-v1 CUDA graphs (target decode, verification, MTP draft) |
+| `OAR_DEEPSEEK_V2_DISABLE_CUDA_GRAPH` | DeepSeek-V2 backbone (jina-ocr-v1) | Disable the target decode and verification CUDA graphs |
+| `OAR_JINAOCR_DISABLE_LAZY_DECODE_GRAPH` | jina-ocr-v1 | A/B numerics knob: with MTP enabled, keep cooldown decoding eager (verification graph and KV snapshot/restore still run) |
 | `OAR_HUNYUAN_DISABLE_CUDA_GRAPH` | HunyuanOCR | Disable target, autoregressive, and DFlash CUDA graphs |
 | `OAR_HUNYUAN_DISABLE_AR_CUDA_GRAPH` | HunyuanOCR | Disable only the single-token autoregressive CUDA graph |
 | `OAR_MINERU_DISABLE_CUDA_GRAPH` | MinerU2.5/Pro | Disable decoder CUDA graphs |

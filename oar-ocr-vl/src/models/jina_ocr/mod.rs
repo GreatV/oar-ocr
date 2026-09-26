@@ -12,9 +12,9 @@
 //! noise can flip near-tie picks — see the model module docs), but it is
 //! opt-in
 //! ([`JinaOcrLoadOptions::with_mtp`] or `OAR_JINAOCR_ENABLE_MTP`): on the
-//! OmniDocBench demo pages (RTX 4090, bf16) adaptive MTP lost to graphed
-//! plain decoding on 17 of 18 pages. Multi-page calls run a padded batch
-//! prefill and decode.
+//! OmniDocBench demo pages (RTX 4090, bf16) adaptive MTP won on no page
+//! (median 3.7% slower than graphed plain decoding). Multi-page calls run a
+//! padded batch prefill and decode.
 
 mod adapter;
 mod config;

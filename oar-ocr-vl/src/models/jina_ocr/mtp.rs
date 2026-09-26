@@ -1,4 +1,4 @@
-//! jina-ocr-v1 FastMTP draft head used for lossless greedy speculation.
+//! jina-ocr-v1 FastMTP draft head used for greedy speculation.
 //!
 //! The checkpoint ships one trained dense MTP layer (`mtp_module.heads.0`,
 //! `mtp_share_embedding_weights`/`mtp_share_lm_head`/`mtp_share_norm` all
@@ -13,7 +13,7 @@
 //! explicit
 //! request (`JinaOcrLoadOptions::with_mtp` / `OAR_JINAOCR_ENABLE_MTP`):
 //! measured on the OmniDocBench demo pages (RTX 4090, bf16), adaptive MTP
-//! lost to graphed plain decoding on 17 of 18 pages.
+//! won on no page (median 3.7% slower than graphed plain decoding).
 
 use crate::backbones::deepseek_v2::{DeepSeekV2MtpBlock, DeepSeekV2TextConfig};
 use crate::error::Error;
