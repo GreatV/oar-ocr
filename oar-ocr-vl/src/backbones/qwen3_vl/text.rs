@@ -1330,14 +1330,20 @@ impl Qwen3VlTextModel {
             }
             self.invalidate_cuda_graph();
             self.invalidate_batch_cuda_graph();
-            self.capture_batch_cuda_graph(
+            if let Err(error) = self.capture_batch_cuda_graph(
                 batch,
                 cache_len,
                 WEVISDOC_DECODE_CACHE_LEN,
                 pad_lens,
                 lm_head,
                 0,
-            )?;
+            ) {
+                tracing::warn!(
+                    "{MODEL_NAME} batch graph capture failed: {error}; continuing eager"
+                );
+                self.invalidate_cuda_graph();
+                self.invalidate_batch_cuda_graph();
+            }
         }
         let _ = (prompt_len, max_new_tokens, pad_lens, lm_head, ladder);
         Ok(())
@@ -1359,6 +1365,12 @@ impl Qwen3VlTextModel {
 
         if self.batch_decode_graph.borrow().is_some() {
             return Ok(());
+        }
+        #[cfg(test)]
+        if std::env::var_os("OAR_WEVISDOC_FAIL_CAPTURE").is_some() {
+            return Err(Error::Config {
+                message: "injected capture failure (test)".to_string(),
+            });
         }
         if pad_lens.len() != batch {
             return Err(Error::Config {
@@ -1714,7 +1726,18 @@ impl Qwen3VlTextModel {
             }
             self.invalidate_cuda_graph();
             self.invalidate_batch_cuda_graph();
-            self.capture_cuda_graph(cache_len, WEVISDOC_DECODE_CACHE_LEN, lm_head, 0)?;
+            if let Err(error) =
+                self.capture_cuda_graph(cache_len, WEVISDOC_DECODE_CACHE_LEN, lm_head, 0)
+            {
+                // The graph is only an optimization; a failed capture (for
+                // example a KV preallocation that outgrew free memory)
+                // falls back to eager instead of failing the request.
+                tracing::warn!(
+                    "{MODEL_NAME} decoder graph capture failed: {error}; continuing eager"
+                );
+                self.invalidate_cuda_graph();
+                self.invalidate_batch_cuda_graph();
+            }
         }
         let _ = (prompt_len, max_new_tokens, lm_head, ladder);
         Ok(())
@@ -1734,6 +1757,12 @@ impl Qwen3VlTextModel {
 
         if self.decode_graph.borrow().is_some() {
             return Ok(());
+        }
+        #[cfg(test)]
+        if std::env::var_os("OAR_WEVISDOC_FAIL_CAPTURE").is_some() {
+            return Err(Error::Config {
+                message: "injected capture failure (test)".to_string(),
+            });
         }
         let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
             return Ok(());
@@ -2356,6 +2385,65 @@ mod tests {
             worst < 1e-3,
             "chunked causal attention diverged: max|delta| = {worst}"
         );
+    }
+
+    /// An injected capture failure must leave both graphs uncaptured and
+    /// the decode must continue on eager with matching output, and the
+    /// allocator must stay healthy afterwards.
+    #[test]
+    fn cuda_capture_failure_falls_back_to_eager() {
+        #[cfg(feature = "cuda")]
+        {
+            if std::env::var_os("OAR_WEVISDOC_GPU_SELFTEST").is_none() {
+                eprintln!("skipping: OAR_WEVISDOC_GPU_SELFTEST is not set");
+                return;
+            }
+            let Ok(device) = Device::new_cuda(0) else {
+                eprintln!("skipping: no CUDA device");
+                return;
+            };
+            // Environment-coupled: the self-test runner is single-threaded.
+            std::env::set_var("OAR_WEVISDOC_FAIL_CAPTURE", "1");
+            let mut cfg = valid_tiny_config();
+            cfg.hidden_size = 2048;
+            cfg.intermediate_size = 6144;
+            cfg.num_attention_heads = 16;
+            cfg.num_key_value_heads = 8;
+            cfg.head_dim = 128;
+            cfg.num_hidden_layers = 4;
+            cfg.vocab_size = 32768;
+            let tensors = random_var_map(&cfg, &device, DType::BF16);
+            let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
+            let model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
+            let lm_head = Linear::new(
+                vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
+                    .unwrap(),
+                None,
+            );
+            let ids = (0..600).map(|i| 10 + i % 60).collect::<Vec<u32>>();
+
+            let eager = greedy_eager(&model, &lm_head, &ids, 8);
+            let graphed = greedy_graphed(&model, &lm_head, &ids, 8, false);
+            assert_eq!(graphed, eager, "eager fallback must match eager output");
+            assert!(!model.decode_graph_captured());
+
+            model
+                .prepare_batch_ar_cuda_graph(2, 600, 8, &[0, 10], &lm_head, true)
+                .unwrap();
+            assert!(!model.batch_decode_graph_captured());
+            assert!(!model.decode_graph_captured());
+
+            std::env::remove_var("OAR_WEVISDOC_FAIL_CAPTURE");
+
+            // The allocator stays healthy after the aborted captures.
+            drop(model);
+            drop(lm_head);
+            let probe = Tensor::randn(0f32, 1f32, (64, 64), &device).unwrap();
+            let probe = (&probe * &probe).unwrap().sum_all().unwrap();
+            let _ = probe.to_scalar::<f32>().unwrap();
+        }
+        #[cfg(not(feature = "cuda"))]
+        eprintln!("skipping: built without the cuda feature");
     }
 
     /// F16 graphs must produce finite logits: the attention fill has to

@@ -5,11 +5,26 @@ use crate::api::generation::GenerationOptions;
 use image::RgbImage;
 
 /// Region-recognition behavior consumed by the pipeline scheduler.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BackendCapabilities {
     pub table_output_is_otsl: bool,
     pub preprocess_formula_margin: bool,
     pub truncate_repetitive_output: bool,
+    /// Whether the backend can recognize chart regions. Backends whose
+    /// prompts ignore figures set this to `false`; the parser then leaves
+    /// chart regions unrecognized instead of collecting empty output.
+    pub supports_chart: bool,
+}
+
+impl Default for BackendCapabilities {
+    fn default() -> Self {
+        Self {
+            table_output_is_otsl: false,
+            preprocess_formula_margin: false,
+            truncate_repetitive_output: false,
+            supports_chart: true,
+        }
+    }
 }
 
 /// Semantic task requested for a detected document region.

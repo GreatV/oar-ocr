@@ -270,6 +270,13 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             let Some(task) = task_for_element_type(element.element_type) else {
                 continue;
             };
+            // Backends that cannot read charts leave those regions
+            // unrecognized; the element stays in the document without text
+            // rather than collecting whatever the model emits for a figure
+            // its prompt tells it to ignore.
+            if task == RecognitionTask::Chart && !self.backend.capabilities().supports_chart {
+                continue;
+            }
 
             let group = group_by_first.get(&idx);
             let mut cropped = if let Some(group) = group {
@@ -916,6 +923,57 @@ mod tests {
                 ..crate::api::recognition::BackendCapabilities::default()
             }
         }
+    }
+
+    /// A backend that cannot read charts: chart regions must be left as
+    /// placeholders instead of reaching the model.
+    struct NoChartBackend;
+
+    impl RecognitionBackend for NoChartBackend {
+        fn recognize(
+            &self,
+            _image: RgbImage,
+            task: RecognitionTask,
+            _max_tokens: usize,
+        ) -> Result<String, Error> {
+            match task {
+                RecognitionTask::Chart => {
+                    panic!("chart regions must not reach a backend without chart support")
+                }
+                other => Ok(format!("recognized {other:?}")),
+            }
+        }
+
+        fn capabilities(&self) -> crate::api::recognition::BackendCapabilities {
+            crate::api::recognition::BackendCapabilities {
+                supports_chart: false,
+                ..crate::api::recognition::BackendCapabilities::default()
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_chart_regions_are_skipped_not_recognized() {
+        assert!(crate::api::recognition::BackendCapabilities::default().supports_chart);
+        let backend = NoChartBackend;
+        let parser = DocParser::new(&backend);
+        let layout = StaticLayout::new(vec![
+            element("chart", 10.0, 10.0, 190.0, 100.0),
+            element("text", 10.0, 110.0, 190.0, 210.0),
+        ]);
+
+        let result = parser
+            .parse(&layout, RgbImage::new(200, 210))
+            .expect("parse succeeds");
+
+        // The chart element stays in the document, unrecognized; the text
+        // region still runs.
+        assert_eq!(result.layout_elements.len(), 2);
+        assert_eq!(result.layout_elements[0].text, None);
+        assert_eq!(
+            result.layout_elements[1].text.as_deref(),
+            Some("recognized Ocr")
+        );
     }
 
     #[test]

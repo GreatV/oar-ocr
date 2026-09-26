@@ -15,8 +15,7 @@ use super::processing::{
 use crate::backbones::qwen3_vl::{DeepstackVisualEmbeds, Qwen3VlTextModel, Qwen3VlVisionModel};
 use crate::error::Error;
 use crate::runtime::attention::{
-    combine_masks, create_causal_mask, create_generation_mask_if_needed, create_left_padding_mask,
-    decode_position_buffer, row_flash_attention_available,
+    create_generation_mask_if_needed, decode_position_buffer, row_flash_attention_available,
 };
 use crate::runtime::checkpoint::{collect_safetensors, load_optional_json_config};
 #[cfg(feature = "cuda")]
@@ -204,6 +203,20 @@ impl WeVisDoc {
         max_new_tokens: usize,
         loop_guard: LoopGuard,
     ) -> crate::error::BatchResult<Vec<u32>> {
+        // Without the per-row flash path, batched prefill would have to
+        // materialize a quadratic (B,1,S,S) mask — pages near the token
+        // limit already need gigabytes for it. Running the pages through
+        // the single-page decoder instead keeps every row bit-identical to
+        // the reference single-page decoding at single-page memory cost.
+        if !row_flash_attention_available(&self.device, self.dtype) {
+            return Ok(images
+                .iter()
+                .map(|image| {
+                    self.generate_one(image, max_new_tokens, loop_guard)
+                        .map(|(tokens, _)| tokens)
+                })
+                .collect());
+        }
         if images.len() <= 1 {
             return Ok(images
                 .iter()
@@ -447,26 +460,10 @@ impl WeVisDoc {
         let position_refs: Vec<&Tensor> = position_rows.iter().collect();
         let position_ids = Tensor::cat(&position_refs, 1)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "stack positions", e))?;
-        // The quadratic causal+padding mask is only built for paths that
-        // will actually read it: on CUDA the per-row flash prefill attends
-        // each row's real span directly and never touches the mask, so
-        // materializing it there would only cost (B,1,S,S) memory — over
-        // 1 GiB for two 16K-token rows. CPU, Metal, and flash-unsupported
-        // dtypes keep the mask for the masked fallback, with identical
-        // numerics to before.
-        let mask = if batch_size > 1 && !row_flash_attention_available(&self.device, self.dtype) {
-            let causal = create_causal_mask(max_seq_len, max_seq_len, self.dtype, &self.device)
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create causal mask", e))?;
-            let padding =
-                create_left_padding_mask(&seq_lens, max_seq_len, self.dtype, &self.device)
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create padding mask", e))?;
-            Some(
-                combine_masks(&causal, &padding)
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "combine masks", e))?,
-            )
-        } else {
-            None
-        };
+        // Batched decoding only runs on devices with per-row flash, whose
+        // prefill attends each row's real span directly — no quadratic
+        // (B,1,S,S) mask is ever materialized. Other devices take the
+        // per-page sequential path above.
 
         // Per-row real-token spans: left-padded rows attend only within
         // their own span, which lets the prefill use the flash kernel per
@@ -501,7 +498,7 @@ impl WeVisDoc {
             &inputs_embeds,
             &position_ids,
             Some(&deepstack),
-            mask.as_ref(),
+            None,
             Some(&row_spans),
         )?;
         let last_hidden = hidden
@@ -1192,6 +1189,14 @@ mod tests {
             })
             .collect();
         assert_eq!(trailing_decode_loop(&noise), None);
+    }
+
+    #[test]
+    fn non_flash_devices_take_the_sequential_batch_path() {
+        // CPU never has flash; the batch entry must dispatch those devices
+        // to the per-page sequential path (see generate_tokens_impl).
+        assert!(!row_flash_attention_available(&Device::Cpu, DType::BF16));
+        assert!(!row_flash_attention_available(&Device::Cpu, DType::F32));
     }
 
     #[test]

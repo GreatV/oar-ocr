@@ -94,6 +94,9 @@ impl RecognitionBackend for WeVisDoc {
             // Region decoding stops token-level loops itself; the parser's
             // text-level truncation would only add false hits on top of it.
             truncate_repetitive_output: false,
+            // The official page prompt tells the model to ignore figures,
+            // so chart crops would produce empty or stray-label output.
+            supports_chart: false,
             ..BackendCapabilities::default()
         }
     }
