@@ -1818,6 +1818,17 @@ impl Qwen3VlTextModel {
         for (index, layer) in self.layers.iter().enumerate() {
             layer.prepare_dynamic_cache(query_len, cache_len)?;
             #[cfg(test)]
+            {
+                let output = std::process::Command::new("nvidia-smi")
+                    .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+                    .output()
+                    .unwrap();
+                eprintln!(
+                    "DBGY layer {index} prepared cap={cache_len} used={}MiB",
+                    String::from_utf8_lossy(&output.stdout).trim()
+                );
+            }
+            #[cfg(test)]
             if injected_capture_failure_after_layer(index) {
                 // Fires after this layer's KV allocation: the fallback must
                 // release a partially allocated set of fixed buckets.
