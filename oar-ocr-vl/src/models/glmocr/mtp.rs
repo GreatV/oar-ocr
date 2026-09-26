@@ -8,68 +8,19 @@ use super::config::GlmOcrTextConfig;
 use super::text::{GlmOcrTextDecoderLayer, GlmOcrTextRotaryEmbedding};
 use crate::error::Error;
 use crate::runtime::decoder_graph::{
-    CudaGraphDrainGuard, CudaGraphKvLengths, cuda_graph_error, drop_and_drain,
-    report_stashed_cuda_error, sync_graph_tensor,
+    CudaGraphDrainGuard, CudaGraphKvLengths, DecoderCudaGraph, capture_decoder_graph,
+    cuda_graph_error,
 };
 use crate::utils::candle_to_ocr_inference;
-use candle_core::{D, DType, Device, Tensor};
+use candle_core::{D, DType, Tensor};
 use candle_nn::{
     Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, linear_no_bias, rms_norm,
 };
 use std::cell::RefCell;
 
-struct GlmMtpCudaGraph {
-    // The graph owns device pointers into all tensors below; dispose via
-    // `dispose` so capture-touched buffers are never returned to the
-    // stream-ordered allocator (see SingleTokenDecoderCudaGraph::dispose).
-    graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
-    token_input: Tensor,
-    previous_hidden_input: Tensor,
-    position_input: Tensor,
-    _query_lengths: Tensor,
-    kv_lengths: CudaGraphKvLengths,
-    hidden_output: Tensor,
-    token_output: Tensor,
-    cache_len: usize,
-}
-
-impl GlmMtpCudaGraph {
-    fn dispose(self) {
-        let Self {
-            graph,
-            token_input,
-            previous_hidden_input,
-            position_input,
-            _query_lengths,
-            kv_lengths,
-            hidden_output,
-            token_output,
-            cache_len: _,
-        } = self;
-        let device = token_input.device().clone();
-        report_stashed_cuda_error(&device, "CUDA graph disposal");
-        drop_and_drain(graph, &device);
-        drop_and_drain(token_output, &device);
-        drop_and_drain(hidden_output, &device);
-        drop_and_drain(kv_lengths, &device);
-        drop_and_drain(_query_lengths, &device);
-        drop_and_drain(position_input, &device);
-        drop_and_drain(previous_hidden_input, &device);
-        drop_and_drain(token_input, &device);
-    }
-}
-
-impl std::fmt::Debug for GlmMtpCudaGraph {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GlmMtpCudaGraph")
-            .field("cache_len", &self.cache_len)
-            .finish_non_exhaustive()
-    }
-}
-
 #[derive(Debug)]
 pub(super) struct GlmOcrMtpModel {
-    graph: RefCell<Option<GlmMtpCudaGraph>>,
+    graph: RefCell<Option<DecoderCudaGraph<MtpGraphInputs>>>,
     embed_tokens: Embedding,
     enorm: RmsNorm,
     hnorm: RmsNorm,
@@ -81,6 +32,17 @@ pub(super) struct GlmOcrMtpModel {
     // Must stay the last field: it drops last and drains CUDA errors the
     // other fields' frees may stash (see CudaGraphDrainGuard).
     _drain_guard: CudaGraphDrainGuard,
+}
+
+/// Inputs of the MTP draft graph: the sampled token, the previous step's
+/// hidden state, its positions, and the shared length tensors.
+#[cfg(feature = "cuda")]
+struct MtpGraphInputs {
+    token: Tensor,
+    previous_hidden: Tensor,
+    positions: Tensor,
+    query_lengths: Tensor,
+    kv_lengths: CudaGraphKvLengths,
 }
 
 impl GlmOcrMtpModel {
@@ -282,13 +244,10 @@ impl GlmOcrMtpModel {
     }
 
     fn capture_cuda_graph(&self, cache_len: usize) -> Result<(), Error> {
-        use candle_core::cuda_backend::cudarc::driver::sys::{
-            CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
-        };
-
-        let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
+        let device = self.embed_tokens.embeddings().device();
+        if !device.is_cuda() {
             return Ok(());
-        };
+        }
         let query_len = 1;
         self.layer.prepare_dynamic_cache(query_len, cache_len)?;
         let hidden_size = self
@@ -297,95 +256,41 @@ impl GlmOcrMtpModel {
             .dim(1)
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP graph hidden size", e))?;
         let device = self.embed_tokens.embeddings().device();
-        let token_input = Tensor::zeros((1, 1), DType::U32, device)
-            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP graph token", e))?;
-        let previous_hidden_input = Tensor::zeros(
-            (1, 1, hidden_size),
-            self.embed_tokens.embeddings().dtype(),
-            device,
-        )
-        .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP graph hidden input", e))?;
-        let position_input = Tensor::zeros((3, 1, 1), DType::I64, device)
-            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP graph positions", e))?;
-        let query_lengths = Tensor::new(&[0u32, 1u32], device)
-            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP query lengths", e))?;
-        let kv_lengths = CudaGraphKvLengths::new(query_len, device)
-            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP KV lengths", e))?;
-        let stream = cuda.cuda_stream();
-        let _htod_cache = cuda.enable_cuda_graph_htod_cache();
-
-        let (warm_hidden, warm_token) = self.forward_dynamic(
-            &token_input,
-            &previous_hidden_input,
-            &position_input,
-            &query_lengths,
-            kv_lengths.tensor(),
-        )?;
-        sync_graph_tensor("GLM-OCR", &warm_token, "warm MTP CUDA graph")?;
-        // Allocate the output buffers before capture so they belong to the
-        // regular stream-ordered pool; a capture-time allocation lives in the
-        // graph's private pool and can never be returned to the allocator
-        // safely. Prime the copies so the captured run sees warm kernels.
-        let hidden_output = Tensor::zeros_like(&warm_hidden)
-            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP hidden output", e))?;
-        let token_output = Tensor::zeros_like(&warm_token)
-            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP token output", e))?;
-        hidden_output
-            .slice_set(&warm_hidden, 0, 0)
-            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "prime MTP hidden copy", e))?;
-        token_output
-            .slice_set(&warm_token, 0, 0)
-            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "prime MTP token copy", e))?;
-
-        stream
-            .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
-            .map_err(|e| cuda_graph_error("GLM-OCR", "begin MTP CUDA graph capture", e))?;
-        let captured_output: Result<(), Error> = (|| {
-            let (hidden, token) = self.forward_dynamic(
-                &token_input,
-                &previous_hidden_input,
-                &position_input,
-                &query_lengths,
-                kv_lengths.tensor(),
-            )?;
-            hidden_output
-                .slice_set(&hidden, 0, 0)
-                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "record MTP hidden copy", e))?;
-            token_output
-                .slice_set(&token, 0, 0)
-                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "record MTP token copy", e))
-        })();
-        if let Err(error) = captured_output {
-            let _ = stream.end_capture(
-                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-            );
-            return Err(error);
-        }
-        let graph = stream
-            .end_capture(
-                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+        let inputs = MtpGraphInputs {
+            token: Tensor::zeros((1, 1), DType::U32, device)
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP graph token", e))?,
+            previous_hidden: Tensor::zeros(
+                (1, 1, hidden_size),
+                self.embed_tokens.embeddings().dtype(),
+                device,
             )
-            .map_err(|e| cuda_graph_error("GLM-OCR", "end MTP CUDA graph capture", e))?
-            .ok_or_else(|| Error::Config {
-                message: "GLM-OCR MTP capture returned no graph".to_string(),
-            })?;
-        graph
-            .launch()
-            .map_err(|e| cuda_graph_error("GLM-OCR", "warm MTP CUDA graph", e))?;
-        sync_graph_tensor("GLM-OCR", &token_output, "sync MTP CUDA graph")?;
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP graph hidden input", e))?,
+            positions: Tensor::zeros((3, 1, 1), DType::I64, device)
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP graph positions", e))?,
+            query_lengths: Tensor::new(&[0u32, 1u32], device)
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP query lengths", e))?,
+            kv_lengths: CudaGraphKvLengths::new(query_len, device)
+                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "MTP KV lengths", e))?,
+        };
+        let graph =
+            capture_decoder_graph(device, "GLM-OCR", self, inputs, Self::graph_body, cache_len)?;
         self.clear_kv_cache();
-        *self.graph.borrow_mut() = Some(GlmMtpCudaGraph {
-            graph,
-            token_input,
-            previous_hidden_input,
-            position_input,
-            _query_lengths: query_lengths,
-            kv_lengths,
-            hidden_output,
-            token_output,
-            cache_len,
-        });
+        *self.graph.borrow_mut() = Some(graph);
         Ok(())
+    }
+
+    /// The captured MTP step: next hidden state plus its greedy token, as a
+    /// bare `fn` over the registered inputs.
+    #[cfg(feature = "cuda")]
+    fn graph_body(this: &Self, inputs: &MtpGraphInputs) -> Result<Vec<Tensor>, Error> {
+        let (hidden, token) = this.forward_dynamic(
+            &inputs.token,
+            &inputs.previous_hidden,
+            &inputs.positions,
+            &inputs.query_lengths,
+            inputs.kv_lengths.tensor(),
+        )?;
+        Ok(vec![hidden, token])
     }
 
     fn replay_cuda_graph(
@@ -404,25 +309,29 @@ impl GlmOcrMtpModel {
             self.invalidate_cuda_graph();
             return Ok(None);
         }
-        if input_id.shape() != captured.token_input.shape()
-            || previous_hidden_state.shape() != captured.previous_hidden_input.shape()
-            || position_ids.shape() != captured.position_input.shape()
+        if input_id.shape() != captured.inputs.token.shape()
+            || previous_hidden_state.shape() != captured.inputs.previous_hidden.shape()
+            || position_ids.shape() != captured.inputs.positions.shape()
         {
             return Ok(None);
         }
         captured
-            .token_input
+            .inputs
+            .token
             .slice_set(input_id, 0, 0)
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "copy MTP token", e))?;
         captured
-            .previous_hidden_input
+            .inputs
+            .previous_hidden
             .slice_set(previous_hidden_state, 0, 0)
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "copy MTP hidden", e))?;
         captured
-            .position_input
+            .inputs
+            .positions
             .slice_set(position_ids, 0, 0)
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "copy MTP positions", e))?;
         captured
+            .inputs
             .kv_lengths
             .update(kv_len)
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "update MTP KV lengths", e))?;
@@ -432,8 +341,8 @@ impl GlmOcrMtpModel {
             .map_err(|e| cuda_graph_error("GLM-OCR", "launch MTP CUDA graph", e))?;
         self.layer.set_kv_cache_len(kv_len)?;
         Ok(Some((
-            captured.hidden_output.clone(),
-            captured.token_output.clone(),
+            captured.outputs[0].clone(),
+            captured.outputs[1].clone(),
         )))
     }
 

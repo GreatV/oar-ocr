@@ -16,8 +16,8 @@ use crate::runtime::cuda::dynamic_kv::{
 };
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
-    CudaGraphDrainGuard, CudaGraphKvLengths, cuda_graph_error, drop_and_drain,
-    report_stashed_cuda_error, sync_graph_tensor,
+    CudaGraphDrainGuard, CudaGraphKvLengths, DecoderCudaGraph, capture_decoder_graph,
+    cuda_graph_error,
 };
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 use candle_core::{D, DType, Device, Tensor};
@@ -847,61 +847,21 @@ impl DFlashLayer {
     }
 }
 
+/// Inputs of the hunyuan draft graph: the query block, its cos/sin taps,
+/// and the shared length tensors.
 #[cfg(feature = "cuda")]
-struct DFlashCudaGraph {
-    // Dispose via `dispose` so capture-touched buffers are never returned to
-    // the stream-ordered allocator (see SingleTokenDecoderCudaGraph::dispose).
-    graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
-    query_input: Tensor,
-    cos_input: Tensor,
-    sin_input: Tensor,
-    _query_lengths: Tensor,
+struct DFlashGraphInputs {
+    query: Tensor,
+    cos: Tensor,
+    sin: Tensor,
+    query_lengths: Tensor,
     kv_lengths: CudaGraphKvLengths,
-    hidden_output: Tensor,
-    proposals_output: Tensor,
-}
-
-#[cfg(feature = "cuda")]
-impl DFlashCudaGraph {
-    fn dispose(self) {
-        let Self {
-            graph,
-            query_input,
-            cos_input,
-            sin_input,
-            _query_lengths,
-            kv_lengths,
-            hidden_output,
-            proposals_output,
-        } = self;
-        let device = query_input.device().clone();
-        report_stashed_cuda_error(&device, "CUDA graph disposal");
-        drop_and_drain(graph, &device);
-        drop_and_drain(proposals_output, &device);
-        drop_and_drain(hidden_output, &device);
-        drop_and_drain(kv_lengths, &device);
-        drop_and_drain(_query_lengths, &device);
-        drop_and_drain(sin_input, &device);
-        drop_and_drain(cos_input, &device);
-        drop_and_drain(query_input, &device);
-    }
-}
-
-#[cfg(feature = "cuda")]
-impl std::fmt::Debug for DFlashCudaGraph {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DFlashCudaGraph")
-            .field("query_input", &self.query_input.shape())
-            .field("hidden_output", &self.hidden_output.shape())
-            .field("proposals_output", &self.proposals_output.shape())
-            .finish_non_exhaustive()
-    }
 }
 
 /// Loaded DFlash draft and its incremental target-context K/V caches.
 pub(crate) struct DFlashModel {
     #[cfg(feature = "cuda")]
-    decode_graph: RefCell<Option<DFlashCudaGraph>>,
+    decode_graph: RefCell<Option<DecoderCudaGraph<DFlashGraphInputs>>>,
     cfg: DFlashConfig,
     fc: Linear,
     hidden_norm: RmsNorm,
@@ -1216,16 +1176,13 @@ impl DFlashModel {
 
     #[cfg(feature = "cuda")]
     fn capture_cuda_graph(&self) -> Result<(), Error> {
-        use candle_core::cuda_backend::cudarc::driver::sys::{
-            CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
-        };
-
         if self.decode_graph.borrow().is_some() {
             return Ok(());
         }
-        let Device::Cuda(cuda) = &self.device else {
+        let device = &self.device;
+        if !device.is_cuda() {
             return Ok(());
-        };
+        }
         let query_len = self.cfg.block_size;
         let template = Tensor::zeros(
             (
@@ -1242,114 +1199,56 @@ impl DFlashModel {
             cache.initialize_storage(&template)?;
         }
 
-        let query_input = Tensor::zeros(
-            (1, query_len, self.cfg.hidden_size),
-            self.dtype,
-            &self.device,
-        )
-        .map_err(|e| tensor_err("HunyuanOCR DFlash: full graph query input", e))?;
-        let cos_input = Tensor::zeros(
-            (1, 1, query_len, self.cfg.head_dim),
-            self.dtype,
-            &self.device,
-        )
-        .map_err(|e| tensor_err("HunyuanOCR DFlash: full graph cos input", e))?;
-        let sin_input = Tensor::zeros(
-            (1, 1, query_len, self.cfg.head_dim),
-            self.dtype,
-            &self.device,
-        )
-        .map_err(|e| tensor_err("HunyuanOCR DFlash: full graph sin input", e))?;
-        let query_lengths = Tensor::new(&[0u32, query_len as u32], &self.device)
-            .map_err(|e| tensor_err("HunyuanOCR DFlash: full graph query lengths", e))?;
-        let kv_lengths = CudaGraphKvLengths::new(query_len, &self.device)
-            .map_err(|e| tensor_err("HunyuanOCR DFlash: full graph KV lengths", e))?;
-        let stream = cuda.cuda_stream();
-        let _htod_cache = cuda.enable_cuda_graph_htod_cache();
-
-        let warm = self.forward_queries_dynamic(
-            &query_input,
-            &cos_input,
-            &sin_input,
-            &query_lengths,
-            kv_lengths.tensor(),
-        )?;
-        let warm_proposals = self.proposals_from_hidden(&warm)?;
-        sync_graph_tensor(
-            "HunyuanOCR DFlash",
-            &warm_proposals,
-            "warm full draft graph",
-        )?;
-        // Allocate the output buffers before capture so they belong to the
-        // regular stream-ordered pool; a capture-time allocation lives in the
-        // graph's private pool and can never be returned to the allocator
-        // safely. Prime the copies so the captured run sees warm kernels.
-        let hidden_output = Tensor::zeros_like(&warm)
-            .map_err(|e| tensor_err("HunyuanOCR DFlash: full graph hidden output", e))?;
-        let proposals_output = Tensor::zeros_like(&warm_proposals)
-            .map_err(|e| tensor_err("HunyuanOCR DFlash: full graph proposals output", e))?;
-        hidden_output
-            .slice_set(&warm, 0, 0)
-            .map_err(|e| tensor_err("HunyuanOCR DFlash: prime full hidden copy", e))?;
-        proposals_output
-            .slice_set(&warm_proposals, 0, 0)
-            .map_err(|e| tensor_err("HunyuanOCR DFlash: prime full proposals copy", e))?;
-
-        stream
-            .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
-            .map_err(|e| {
-                cuda_graph_error("HunyuanOCR DFlash", "begin full draft graph capture", e)
-            })?;
-        let captured_output: Result<(), Error> = (|| {
-            let hidden = self.forward_queries_dynamic(
-                &query_input,
-                &cos_input,
-                &sin_input,
-                &query_lengths,
-                kv_lengths.tensor(),
-            )?;
-            let proposals = self.proposals_from_hidden(&hidden)?;
-            hidden_output
-                .slice_set(&hidden, 0, 0)
-                .map_err(|e| tensor_err("HunyuanOCR DFlash: record full hidden copy", e))?;
-            proposals_output
-                .slice_set(&proposals, 0, 0)
-                .map_err(|e| tensor_err("HunyuanOCR DFlash: record full proposals copy", e))
-        })();
-        if let Err(error) = captured_output {
-            let _ = stream.end_capture(
-                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-            );
-            return Err(error);
-        }
-        let graph = stream
-            .end_capture(
-                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+        let inputs = DFlashGraphInputs {
+            query: Tensor::zeros(
+                (1, query_len, self.cfg.hidden_size),
+                self.dtype,
+                &self.device,
             )
-            .map_err(|e| cuda_graph_error("HunyuanOCR DFlash", "end full draft graph capture", e))?
-            .ok_or_else(|| Error::Config {
-                message: "HunyuanOCR DFlash full graph capture returned no graph".to_string(),
-            })?;
-        graph
-            .launch()
-            .map_err(|e| cuda_graph_error("HunyuanOCR DFlash", "warm full draft graph", e))?;
-        sync_graph_tensor(
+            .map_err(|e| tensor_err("HunyuanOCR DFlash: full graph query input", e))?,
+            cos: Tensor::zeros(
+                (1, 1, query_len, self.cfg.head_dim),
+                self.dtype,
+                &self.device,
+            )
+            .map_err(|e| tensor_err("HunyuanOCR DFlash: full graph cos input", e))?,
+            sin: Tensor::zeros(
+                (1, 1, query_len, self.cfg.head_dim),
+                self.dtype,
+                &self.device,
+            )
+            .map_err(|e| tensor_err("HunyuanOCR DFlash: full graph sin input", e))?,
+            query_lengths: Tensor::new(&[0u32, query_len as u32], &self.device)
+                .map_err(|e| tensor_err("HunyuanOCR DFlash: full graph query lengths", e))?,
+            kv_lengths: CudaGraphKvLengths::new(query_len, &self.device)
+                .map_err(|e| tensor_err("HunyuanOCR DFlash: full graph KV lengths", e))?,
+        };
+        let graph = capture_decoder_graph(
+            device,
             "HunyuanOCR DFlash",
-            &proposals_output,
-            "sync full draft graph",
+            self,
+            inputs,
+            Self::graph_body,
+            CONTEXT_KV_INITIAL_CAPACITY,
         )?;
         self.clear_context();
-        *self.decode_graph.borrow_mut() = Some(DFlashCudaGraph {
-            graph,
-            query_input,
-            cos_input,
-            sin_input,
-            _query_lengths: query_lengths,
-            kv_lengths,
-            hidden_output,
-            proposals_output,
-        });
+        *self.decode_graph.borrow_mut() = Some(graph);
         Ok(())
+    }
+
+    /// The captured draft step: hidden states plus their block proposals,
+    /// as a bare `fn` over the registered inputs.
+    #[cfg(feature = "cuda")]
+    fn graph_body(this: &Self, inputs: &DFlashGraphInputs) -> Result<Vec<Tensor>, Error> {
+        let hidden = this.forward_queries_dynamic(
+            &inputs.query,
+            &inputs.cos,
+            &inputs.sin,
+            &inputs.query_lengths,
+            inputs.kv_lengths.tensor(),
+        )?;
+        let proposals = this.proposals_from_hidden(&hidden)?;
+        Ok(vec![hidden, proposals])
     }
 
     #[cfg(feature = "cuda")]
@@ -1368,25 +1267,29 @@ impl DFlashModel {
         let Some(captured) = captured_ref.as_ref() else {
             return Ok(None);
         };
-        if query_embeds.shape() != captured.query_input.shape()
-            || cos.shape() != captured.cos_input.shape()
-            || sin.shape() != captured.sin_input.shape()
+        if query_embeds.shape() != captured.inputs.query.shape()
+            || cos.shape() != captured.inputs.cos.shape()
+            || sin.shape() != captured.inputs.sin.shape()
         {
             return Ok(None);
         }
         captured
-            .query_input
+            .inputs
+            .query
             .slice_set(query_embeds, 0, 0)
             .map_err(|e| tensor_err("HunyuanOCR DFlash: copy full graph query", e))?;
         captured
-            .cos_input
+            .inputs
+            .cos
             .slice_set(cos, 0, 0)
             .map_err(|e| tensor_err("HunyuanOCR DFlash: copy full graph cos", e))?;
         captured
-            .sin_input
+            .inputs
+            .sin
             .slice_set(sin, 0, 0)
             .map_err(|e| tensor_err("HunyuanOCR DFlash: copy full graph sin", e))?;
         captured
+            .inputs
             .kv_lengths
             .update(total_kv_len)
             .map_err(|e| tensor_err("HunyuanOCR DFlash: update full graph KV lengths", e))?;
@@ -1394,7 +1297,7 @@ impl DFlashModel {
             .graph
             .launch()
             .map_err(|e| cuda_graph_error("HunyuanOCR DFlash", "launch full draft graph", e))?;
-        Ok(Some(captured.proposals_output.clone()))
+        Ok(Some(captured.outputs[1].clone()))
     }
 
     /// Run the bonus+mask query block and project all mask rows into draft

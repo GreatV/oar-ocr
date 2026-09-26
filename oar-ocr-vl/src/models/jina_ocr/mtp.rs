@@ -20,73 +20,30 @@ use crate::error::Error;
 use crate::runtime::attention::RotaryEmbedding;
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
-    CudaGraphKvLengths, cuda_graph_error, drop_and_drain, report_stashed_cuda_error,
-    sync_graph_tensor,
+    CudaGraphKvLengths, DecoderCudaGraph, capture_decoder_graph, cuda_graph_error,
 };
 use crate::runtime::errors::candle_to_ocr_inference;
-use candle_core::Tensor;
 #[cfg(feature = "cuda")]
-use candle_core::{DType, Device};
+use candle_core::DType;
+use candle_core::Tensor;
 use candle_nn::{Embedding, Linear, Module, RmsNorm, VarBuilder, linear_no_bias, rms_norm};
 #[cfg(feature = "cuda")]
 use std::cell::RefCell;
 
+/// Inputs the draft graph captures, named and typed.
 #[cfg(feature = "cuda")]
-struct MtpCudaGraph {
-    // The graph owns device pointers into all tensors below; dispose via
-    // `dispose` so capture-touched buffers are never returned to the
-    // stream-ordered allocator (see SingleTokenDecoderCudaGraph::dispose).
-    graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
-    token_input: Tensor,
-    previous_hidden_input: Tensor,
-    position_input: Tensor,
-    _query_lengths: Tensor,
+struct MtpGraphInputs {
+    token: Tensor,
+    previous_hidden: Tensor,
+    positions: Tensor,
+    query_lengths: Tensor,
     kv_lengths: CudaGraphKvLengths,
-    hidden_output: Tensor,
-    token_output: Tensor,
-    cache_len: usize,
-}
-
-#[cfg(feature = "cuda")]
-impl MtpCudaGraph {
-    fn dispose(self) {
-        let Self {
-            graph,
-            token_input,
-            previous_hidden_input,
-            position_input,
-            _query_lengths,
-            kv_lengths,
-            hidden_output,
-            token_output,
-            cache_len: _,
-        } = self;
-        let device = token_input.device().clone();
-        report_stashed_cuda_error(&device, "CUDA graph disposal");
-        drop_and_drain(graph, &device);
-        drop_and_drain(token_output, &device);
-        drop_and_drain(hidden_output, &device);
-        drop_and_drain(kv_lengths, &device);
-        drop_and_drain(_query_lengths, &device);
-        drop_and_drain(position_input, &device);
-        drop_and_drain(previous_hidden_input, &device);
-        drop_and_drain(token_input, &device);
-    }
-}
-
-#[cfg(feature = "cuda")]
-impl std::fmt::Debug for MtpCudaGraph {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("JinaOcrMtpGraph")
-            .field("cache_len", &self.cache_len)
-            .finish_non_exhaustive()
-    }
 }
 
 #[derive(Debug)]
 pub(crate) struct JinaOcrMtp {
     #[cfg(feature = "cuda")]
-    graph: RefCell<Option<MtpCudaGraph>>,
+    graph: RefCell<Option<DecoderCudaGraph<MtpGraphInputs>>>,
     embed_tokens: Embedding,
     enorm: RmsNorm,
     hnorm: RmsNorm,
@@ -368,15 +325,26 @@ impl JinaOcrMtp {
         self.capture_cuda_graph(cache_len)
     }
 
+    /// The captured draft step: next hidden state and proposed token, as a
+    /// bare `fn` over the registered inputs.
+    #[cfg(feature = "cuda")]
+    fn draft_graph_body(this: &Self, inputs: &MtpGraphInputs) -> Result<Vec<Tensor>, Error> {
+        let (hidden, token) = this.forward_dynamic(
+            &inputs.token,
+            &inputs.previous_hidden,
+            &inputs.positions,
+            &inputs.query_lengths,
+            inputs.kv_lengths.tensor(),
+        )?;
+        Ok(vec![hidden, token])
+    }
+
     #[cfg(feature = "cuda")]
     fn capture_cuda_graph(&self, cache_len: usize) -> Result<(), Error> {
-        use candle_core::cuda_backend::cudarc::driver::sys::{
-            CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
-        };
-
-        let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
+        let device = self.embed_tokens.embeddings().device();
+        if !device.is_cuda() {
             return Ok(());
-        };
+        }
         let query_len = 1;
         self.block.prepare_dynamic_cache(query_len, cache_len)?;
         let hidden_size = self
@@ -384,95 +352,32 @@ impl JinaOcrMtp {
             .embeddings()
             .dim(1)
             .map_err(|e| candle_to_ocr_inference("JinaOCR", "MTP graph hidden size", e))?;
-        let device = self.embed_tokens.embeddings().device().clone();
-        let token_input = Tensor::zeros((1, 1), DType::U32, &device)
-            .map_err(|e| candle_to_ocr_inference("JinaOCR", "MTP graph token", e))?;
-        let previous_hidden_input = Tensor::zeros(
-            (1, 1, hidden_size),
-            self.embed_tokens.embeddings().dtype(),
-            &device,
-        )
-        .map_err(|e| candle_to_ocr_inference("JinaOCR", "MTP graph hidden input", e))?;
-        let position_input = Tensor::zeros((1, 1, 1), DType::U32, &device)
-            .map_err(|e| candle_to_ocr_inference("JinaOCR", "MTP graph positions", e))?;
-        let query_lengths = Tensor::new(&[0u32, 1u32], &device)
-            .map_err(|e| candle_to_ocr_inference("JinaOCR", "MTP query lengths", e))?;
-        let kv_lengths = CudaGraphKvLengths::new(query_len, &device)
-            .map_err(|e| candle_to_ocr_inference("JinaOCR", "MTP KV lengths", e))?;
-        let stream = cuda.cuda_stream();
-        let _htod_cache = cuda.enable_cuda_graph_htod_cache();
-
-        let (warm_hidden, warm_token) = self.forward_dynamic(
-            &token_input,
-            &previous_hidden_input,
-            &position_input,
-            &query_lengths,
-            kv_lengths.tensor(),
-        )?;
-        sync_graph_tensor("JinaOCR", &warm_token, "warm MTP CUDA graph")?;
-        // Allocate the output buffers before capture so they belong to the
-        // regular stream-ordered pool; a capture-time allocation lives in the
-        // graph's private pool and can never be returned to the allocator
-        // safely. Prime the copies so the captured run sees warm kernels.
-        let hidden_output = Tensor::zeros_like(&warm_hidden)
-            .map_err(|e| candle_to_ocr_inference("JinaOCR", "MTP hidden output", e))?;
-        let token_output = Tensor::zeros_like(&warm_token)
-            .map_err(|e| candle_to_ocr_inference("JinaOCR", "MTP token output", e))?;
-        hidden_output
-            .slice_set(&warm_hidden, 0, 0)
-            .map_err(|e| candle_to_ocr_inference("JinaOCR", "prime MTP hidden copy", e))?;
-        token_output
-            .slice_set(&warm_token, 0, 0)
-            .map_err(|e| candle_to_ocr_inference("JinaOCR", "prime MTP token copy", e))?;
-
-        stream
-            .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
-            .map_err(|e| cuda_graph_error("JinaOCR", "begin MTP CUDA graph capture", e))?;
-        let captured_output: Result<(), Error> = (|| {
-            let (hidden, token) = self.forward_dynamic(
-                &token_input,
-                &previous_hidden_input,
-                &position_input,
-                &query_lengths,
-                kv_lengths.tensor(),
-            )?;
-            hidden_output
-                .slice_set(&hidden, 0, 0)
-                .map_err(|e| candle_to_ocr_inference("JinaOCR", "record MTP hidden copy", e))?;
-            token_output
-                .slice_set(&token, 0, 0)
-                .map_err(|e| candle_to_ocr_inference("JinaOCR", "record MTP token copy", e))
-        })();
-        if let Err(error) = captured_output {
-            let _ = stream.end_capture(
-                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-            );
-            return Err(error);
-        }
-        let graph = stream
-            .end_capture(
-                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+        let inputs = MtpGraphInputs {
+            token: Tensor::zeros((1, 1), DType::U32, device)
+                .map_err(|e| candle_to_ocr_inference("JinaOCR", "MTP graph token", e))?,
+            previous_hidden: Tensor::zeros(
+                (1, 1, hidden_size),
+                self.embed_tokens.embeddings().dtype(),
+                device,
             )
-            .map_err(|e| cuda_graph_error("JinaOCR", "end MTP CUDA graph capture", e))?
-            .ok_or_else(|| Error::Config {
-                message: "JinaOCR MTP capture returned no graph".to_string(),
-            })?;
-        graph
-            .launch()
-            .map_err(|e| cuda_graph_error("JinaOCR", "warm MTP CUDA graph", e))?;
-        sync_graph_tensor("JinaOCR", &token_output, "sync MTP CUDA graph")?;
-        self.clear_kv_cache();
-        *self.graph.borrow_mut() = Some(MtpCudaGraph {
-            graph,
-            token_input,
-            previous_hidden_input,
-            position_input,
-            _query_lengths: query_lengths,
-            kv_lengths,
-            hidden_output,
-            token_output,
+            .map_err(|e| candle_to_ocr_inference("JinaOCR", "MTP graph hidden input", e))?,
+            positions: Tensor::zeros((1, 1, 1), DType::U32, device)
+                .map_err(|e| candle_to_ocr_inference("JinaOCR", "MTP graph positions", e))?,
+            query_lengths: Tensor::new(&[0u32, 1u32], device)
+                .map_err(|e| candle_to_ocr_inference("JinaOCR", "MTP query lengths", e))?,
+            kv_lengths: CudaGraphKvLengths::new(query_len, device)
+                .map_err(|e| candle_to_ocr_inference("JinaOCR", "MTP KV lengths", e))?,
+        };
+        let graph = capture_decoder_graph(
+            device,
+            "JinaOCR",
+            self,
+            inputs,
+            Self::draft_graph_body,
             cache_len,
-        });
+        )?;
+        self.clear_kv_cache();
+        *self.graph.borrow_mut() = Some(graph);
         Ok(())
     }
 
@@ -493,25 +398,29 @@ impl JinaOcrMtp {
             self.invalidate_cuda_graph();
             return Ok(None);
         }
-        if input_id.shape() != captured.token_input.shape()
-            || previous_hidden_state.shape() != captured.previous_hidden_input.shape()
-            || position_ids.shape() != captured.position_input.shape()
+        if input_id.shape() != captured.inputs.token.shape()
+            || previous_hidden_state.shape() != captured.inputs.previous_hidden.shape()
+            || position_ids.shape() != captured.inputs.positions.shape()
         {
             return Ok(None);
         }
         captured
-            .token_input
+            .inputs
+            .token
             .slice_set(input_id, 0, 0)
             .map_err(|e| candle_to_ocr_inference("JinaOCR", "copy MTP token", e))?;
         captured
-            .previous_hidden_input
+            .inputs
+            .previous_hidden
             .slice_set(previous_hidden_state, 0, 0)
             .map_err(|e| candle_to_ocr_inference("JinaOCR", "copy MTP hidden", e))?;
         captured
-            .position_input
+            .inputs
+            .positions
             .slice_set(position_ids, 0, 0)
             .map_err(|e| candle_to_ocr_inference("JinaOCR", "copy MTP positions", e))?;
         captured
+            .inputs
             .kv_lengths
             .update(kv_len)
             .map_err(|e| candle_to_ocr_inference("JinaOCR", "update MTP KV lengths", e))?;
@@ -523,12 +432,10 @@ impl JinaOcrMtp {
         // Owned copies: the next replay overwrites the captured output
         // buffers, and the caller feeds this hidden state into that replay.
         Ok(Some((
-            captured
-                .hidden_output
+            captured.outputs[0]
                 .copy()
                 .map_err(|e| candle_to_ocr_inference("JinaOCR", "copy MTP hidden", e))?,
-            captured
-                .token_output
+            captured.outputs[1]
                 .copy()
                 .map_err(|e| candle_to_ocr_inference("JinaOCR", "copy MTP token", e))?,
         )))

@@ -10,8 +10,8 @@ use crate::runtime::cuda::dynamic_kv::{
 };
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
-    CudaGraphDrainGuard, CudaGraphKvLengths, cuda_graph_error, decoder_attention_is_causal,
-    drop_and_drain, report_stashed_cuda_error, sync_graph_tensor,
+    CudaGraphDrainGuard, CudaGraphKvLengths, DecoderCudaGraph, capture_decoder_graph,
+    cuda_graph_error, decoder_attention_is_causal,
 };
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 #[cfg(feature = "cuda")]
@@ -654,64 +654,16 @@ impl HunyuanAttention {
     }
 }
 
+/// Inputs of the hunyuan target-decoder graph: hidden, precomputed cos/sin
+/// taps, the length tensors, and the auxiliary layer selection.
 #[cfg(feature = "cuda")]
-struct TargetDecoderCudaGraph {
-    // The executable graph owns raw pointers into every tensor below and into
-    // the decoder weights; dispose via `dispose` so capture-touched buffers
-    // are never returned to the stream-ordered allocator (see
-    // SingleTokenDecoderCudaGraph::dispose).
-    graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
-    hidden_input: Tensor,
-    cos_input: Tensor,
-    sin_input: Tensor,
-    _query_lengths: Tensor,
+struct TargetGraphInputs {
+    hidden: Tensor,
+    cos: Tensor,
+    sin: Tensor,
+    query_lengths: Tensor,
     kv_lengths: CudaGraphKvLengths,
-    hidden_output: Tensor,
-    logits_output: Tensor,
-    aux_output: Option<Tensor>,
     aux_layer_ids: Vec<usize>,
-    cache_len: usize,
-}
-
-#[cfg(feature = "cuda")]
-impl TargetDecoderCudaGraph {
-    fn dispose(self) {
-        let Self {
-            graph,
-            hidden_input,
-            cos_input,
-            sin_input,
-            _query_lengths,
-            kv_lengths,
-            hidden_output,
-            logits_output,
-            aux_output,
-            aux_layer_ids: _,
-            cache_len: _,
-        } = self;
-        let device = hidden_input.device().clone();
-        report_stashed_cuda_error(&device, "CUDA graph disposal");
-        drop_and_drain(graph, &device);
-        drop_and_drain(aux_output, &device);
-        drop_and_drain(logits_output, &device);
-        drop_and_drain(hidden_output, &device);
-        drop_and_drain(kv_lengths, &device);
-        drop_and_drain(_query_lengths, &device);
-        drop_and_drain(sin_input, &device);
-        drop_and_drain(cos_input, &device);
-        drop_and_drain(hidden_input, &device);
-    }
-}
-
-#[cfg(feature = "cuda")]
-impl std::fmt::Debug for TargetDecoderCudaGraph {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TargetDecoderCudaGraph")
-            .field("hidden", &self.hidden_input.shape())
-            .field("aux_layer_ids", &self.aux_layer_ids)
-            .field("cache_len", &self.cache_len)
-            .finish_non_exhaustive()
-    }
 }
 
 #[derive(Debug)]
@@ -868,7 +820,7 @@ pub(crate) struct HunyuanLlmOutput {
 #[derive(Debug)]
 pub struct HunyuanLlm {
     #[cfg(feature = "cuda")]
-    decode_graph: RefCell<Option<TargetDecoderCudaGraph>>,
+    decode_graph: RefCell<Option<DecoderCudaGraph<TargetGraphInputs>>>,
     embed_tokens: candle_nn::Embedding,
     layers: Vec<HunyuanDecoderLayer>,
     norm: candle_nn::RmsNorm,
@@ -1052,26 +1004,29 @@ impl HunyuanLlm {
             self.invalidate_cuda_graph();
             return Ok(None);
         }
-        if inputs_embeds.shape() != captured.hidden_input.shape()
-            || cos.shape() != captured.cos_input.shape()
-            || sin.shape() != captured.sin_input.shape()
-            || aux_layer_ids != captured.aux_layer_ids
+        if inputs_embeds.shape() != captured.inputs.hidden.shape()
+            || cos.shape() != captured.inputs.cos.shape()
+            || sin.shape() != captured.inputs.sin.shape()
+            || aux_layer_ids != captured.inputs.aux_layer_ids
         {
             return Ok(None);
         }
         captured
-            .hidden_input
+            .inputs
+            .hidden
             .slice_set(inputs_embeds, 0, 0)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "copy full graph hidden", e))?;
         captured
-            .cos_input
+            .inputs
+            .cos
             .slice_set(cos, 0, 0)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "copy full graph cos", e))?;
         captured
-            .sin_input
+            .inputs
+            .sin
             .slice_set(sin, 0, 0)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "copy full graph sin", e))?;
-        captured.kv_lengths.update(kv_len).map_err(|e| {
+        captured.inputs.kv_lengths.update(kv_len).map_err(|e| {
             candle_to_ocr_inference("HunyuanOCR", "update full graph KV lengths", e)
         })?;
         captured
@@ -1082,9 +1037,9 @@ impl HunyuanLlm {
             layer.set_kv_cache_len(kv_len)?;
         }
         Ok(Some(HunyuanLlmOutput {
-            hidden_states: captured.hidden_output.clone(),
-            logits: Some(captured.logits_output.clone()),
-            aux_hidden_states: captured.aux_output.clone(),
+            hidden_states: captured.outputs[0].clone(),
+            logits: Some(captured.outputs[1].clone()),
+            aux_hidden_states: captured.outputs.get(2).cloned(),
         }))
     }
 
@@ -1268,9 +1223,9 @@ impl HunyuanLlm {
             && target_cuda_graph_dtype_supported(self.embed_tokens.embeddings().dtype())
         {
             let reusable = self.decode_graph.borrow().as_ref().is_some_and(|graph| {
-                graph.hidden_input.dim(1).ok() == Some(query_len)
+                graph.inputs.hidden.dim(1).ok() == Some(query_len)
                     && graph.cache_len == DECODE_ROPE_CACHE_LEN
-                    && graph.aux_layer_ids == aux_layer_ids
+                    && graph.inputs.aux_layer_ids == aux_layer_ids
             });
             if reusable {
                 return Ok(());
@@ -1320,9 +1275,9 @@ impl HunyuanLlm {
                 .saturating_add(max_new_tokens)
                 .min(DECODE_ROPE_CACHE_LEN);
             let reusable = self.decode_graph.borrow().as_ref().is_some_and(|graph| {
-                graph.hidden_input.dim(1).ok() == Some(1)
+                graph.inputs.hidden.dim(1).ok() == Some(1)
                     && graph.cache_len >= required
-                    && graph.aux_layer_ids.is_empty()
+                    && graph.inputs.aux_layer_ids.is_empty()
             });
             if reusable {
                 return Ok(());
@@ -1350,16 +1305,13 @@ impl HunyuanLlm {
         sin_template: &Tensor,
         aux_layer_ids: &[usize],
     ) -> Result<(), Error> {
-        use candle_core::cuda_backend::cudarc::driver::sys::{
-            CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
-        };
-
         if self.decode_graph.borrow().is_some() {
             return Ok(());
         }
-        let Device::Cuda(cuda) = self.decode_cos.device() else {
+        let device = self.decode_cos.device();
+        if !device.is_cuda() {
             return Ok(());
-        };
+        }
         for layer in &self.layers {
             layer
                 .self_attn
@@ -1371,133 +1323,53 @@ impl HunyuanLlm {
             .dim(1)
             .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "graph hidden size", e))?;
         let dtype = self.embed_tokens.embeddings().dtype();
-        let hidden_input =
-            Tensor::zeros((1, query_len, hidden_size), dtype, self.decode_cos.device())
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph hidden input", e))?;
-        let cos_input = Tensor::zeros(
-            cos_template.shape(),
-            cos_template.dtype(),
-            self.decode_cos.device(),
-        )
-        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph cos input", e))?;
-        let sin_input = Tensor::zeros(
-            sin_template.shape(),
-            sin_template.dtype(),
-            self.decode_sin.device(),
-        )
-        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph sin input", e))?;
-        let query_lengths = Tensor::new(&[0u32, query_len as u32], self.decode_cos.device())
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph query lengths", e))?;
-        // These must not share storage: query length stays fixed while
-        // the cumulative KV length is overwritten before every graph replay.
-        let kv_lengths = CudaGraphKvLengths::new(query_len, self.decode_cos.device())
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph KV lengths", e))?;
-        let stream = cuda.cuda_stream();
-        let _htod_cache = cuda.enable_cuda_graph_htod_cache();
-
-        let warm = self.forward_with_aux_dynamic(
-            &hidden_input,
-            &cos_input,
-            &sin_input,
-            &query_lengths,
-            kv_lengths.tensor(),
-            aux_layer_ids,
-        )?;
-        let warm_logits = self.project_logits(&warm.hidden_states)?;
-        sync_graph_tensor("HunyuanOCR", &warm_logits, "warm full target decoder graph")?;
-        // Allocate the output buffers before capture so they belong to the
-        // regular stream-ordered pool; a capture-time allocation lives in the
-        // graph's private pool and can never be returned to the allocator
-        // safely. Prime the copies so the captured run sees warm kernels.
-        let hidden_output = Tensor::zeros_like(&warm.hidden_states)
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph hidden output", e))?;
-        let logits_output = Tensor::zeros_like(&warm_logits)
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph logits output", e))?;
-        let aux_output = warm
-            .aux_hidden_states
-            .as_ref()
-            .map(Tensor::zeros_like)
-            .transpose()
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph aux output", e))?;
-        hidden_output
-            .slice_set(&warm.hidden_states, 0, 0)
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "prime full hidden copy", e))?;
-        logits_output
-            .slice_set(&warm_logits, 0, 0)
-            .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "prime full logits copy", e))?;
-        if let (Some(buffer), Some(source)) = (&aux_output, &warm.aux_hidden_states) {
-            buffer
-                .slice_set(source, 0, 0)
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "prime full aux copy", e))?;
-        }
-
-        stream
-            .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
-            .map_err(|e| {
-                cuda_graph_error("HunyuanOCR", "begin full target decoder graph capture", e)
-            })?;
-        let captured_output: Result<(), Error> = (|| {
-            let output = self.forward_with_aux_dynamic(
-                &hidden_input,
-                &cos_input,
-                &sin_input,
-                &query_lengths,
-                kv_lengths.tensor(),
-                aux_layer_ids,
-            )?;
-            let logits = self.project_logits(&output.hidden_states)?;
-            hidden_output
-                .slice_set(&output.hidden_states, 0, 0)
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "record full hidden copy", e))?;
-            logits_output
-                .slice_set(&logits, 0, 0)
-                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "record full logits copy", e))?;
-            if let (Some(buffer), Some(source)) = (&aux_output, &output.aux_hidden_states) {
-                buffer.slice_set(source, 0, 0).map_err(|e| {
-                    candle_to_ocr_inference("HunyuanOCR", "record full aux copy", e)
-                })?;
-            }
-            Ok(())
-        })();
-        if let Err(error) = captured_output {
-            let _ = stream.end_capture(
-                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-            );
-            return Err(error);
-        }
-        let graph = stream
-            .end_capture(
-                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-            )
-            .map_err(|e| {
-                cuda_graph_error("HunyuanOCR", "end full target decoder graph capture", e)
-            })?
-            .ok_or_else(|| Error::Config {
-                message: "HunyuanOCR full target decoder capture returned no graph".to_string(),
-            })?;
-        graph
-            .launch()
-            .map_err(|e| cuda_graph_error("HunyuanOCR", "warm full target decoder graph", e))?;
-        sync_graph_tensor(
+        let device = self.decode_cos.device();
+        let inputs = TargetGraphInputs {
+            hidden: Tensor::zeros((1, query_len, hidden_size), dtype, device)
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph hidden input", e))?,
+            cos: Tensor::zeros(cos_template.shape(), cos_template.dtype(), device)
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph cos input", e))?,
+            sin: Tensor::zeros(sin_template.shape(), sin_template.dtype(), device)
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph sin input", e))?,
+            query_lengths: Tensor::new(&[0u32, query_len as u32], device).map_err(|e| {
+                candle_to_ocr_inference("HunyuanOCR", "full graph query lengths", e)
+            })?,
+            kv_lengths: CudaGraphKvLengths::new(query_len, device)
+                .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "full graph KV lengths", e))?,
+            aux_layer_ids: aux_layer_ids.to_vec(),
+        };
+        let graph = capture_decoder_graph(
+            device,
             "HunyuanOCR",
-            &logits_output,
-            "sync full target decoder graph",
+            self,
+            inputs,
+            Self::graph_body,
+            cache_len,
         )?;
         self.clear_kv_cache();
-        *self.decode_graph.borrow_mut() = Some(TargetDecoderCudaGraph {
-            graph,
-            hidden_input,
-            cos_input,
-            sin_input,
-            _query_lengths: query_lengths,
-            kv_lengths,
-            hidden_output,
-            logits_output,
-            aux_output,
-            aux_layer_ids: aux_layer_ids.to_vec(),
-            cache_len,
-        });
+        *self.decode_graph.borrow_mut() = Some(graph);
         Ok(())
+    }
+
+    /// The captured target step: hidden states, logits and (when
+    /// configured) the auxiliary layer taps, as a bare `fn` over the
+    /// registered inputs.
+    #[cfg(feature = "cuda")]
+    fn graph_body(this: &Self, inputs: &TargetGraphInputs) -> Result<Vec<Tensor>, Error> {
+        let output = this.forward_with_aux_dynamic(
+            &inputs.hidden,
+            &inputs.cos,
+            &inputs.sin,
+            &inputs.query_lengths,
+            inputs.kv_lengths.tensor(),
+            &inputs.aux_layer_ids,
+        )?;
+        let logits = this.project_logits(&output.hidden_states)?;
+        let mut out = vec![output.hidden_states, logits];
+        if let Some(aux) = output.aux_hidden_states {
+            out.push(aux);
+        }
+        Ok(out)
     }
 
     #[cfg(feature = "cuda")]

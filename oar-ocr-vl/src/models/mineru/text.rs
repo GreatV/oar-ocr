@@ -10,12 +10,12 @@ use crate::runtime::cuda::dynamic_kv::DynamicKvAppend;
 use crate::runtime::decoder_graph::decoder_cache_capacity;
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
-    CudaGraphDrainGuard, CudaGraphKvLengths, SingleTokenDecoderCudaGraph, cuda_graph_error,
-    decoder_attention_is_causal, sync_graph_tensor,
+    CudaGraphDrainGuard, CudaGraphInputs, CudaGraphKvLengths, DecoderCudaGraph,
+    capture_decoder_graph, cuda_graph_error, decoder_attention_is_causal,
 };
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 #[cfg(feature = "cuda")]
-use candle_core::{DType, Device};
+use candle_core::DType;
 use candle_core::{IndexOp, Tensor};
 use candle_nn::{
     Embedding, Linear, Module, VarBuilder, embedding, linear, linear_no_bias, rms_norm,
@@ -530,7 +530,7 @@ impl MinerUDecoderLayer {
 
 pub struct MinerUTextModel {
     #[cfg(feature = "cuda")]
-    decode_graph: RefCell<Option<SingleTokenDecoderCudaGraph>>,
+    decode_graph: RefCell<Option<DecoderCudaGraph<CudaGraphInputs>>>,
     embed_tokens: Embedding,
     layers: Vec<MinerUDecoderLayer>,
     norm: candle_nn::RmsNorm,
@@ -695,16 +695,13 @@ impl MinerUTextModel {
 
     #[cfg(feature = "cuda")]
     fn capture_cuda_graph(&self, cache_len: usize, lm_head: &Linear) -> Result<(), Error> {
-        use candle_core::cuda_backend::cudarc::driver::sys::{
-            CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
-        };
-
         if self.decode_graph.borrow().is_some() {
             return Ok(());
         }
-        let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
+        let device = self.embed_tokens.embeddings().device();
+        if !device.is_cuda() {
             return Ok(());
-        };
+        }
         let query_len = 1;
         for layer in &self.layers {
             layer
@@ -717,83 +714,46 @@ impl MinerUTextModel {
             .dim(1)
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "graph hidden size", e))?;
         let device = self.embed_tokens.embeddings().device();
-        let hidden_input = Tensor::zeros(
-            (1, query_len, hidden_size),
-            self.embed_tokens.embeddings().dtype(),
-            device,
-        )
-        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "graph hidden input", e))?;
-        let position_input = Tensor::zeros((3, 1, query_len), DType::I64, device)
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "graph position input", e))?;
-        let query_lengths = Tensor::new(&[0u32, query_len as u32], device)
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "graph query lengths", e))?;
-        let kv_lengths = CudaGraphKvLengths::new(query_len, device)
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "graph KV lengths", e))?;
-        let stream = cuda.cuda_stream();
-        let _htod_cache = cuda.enable_cuda_graph_htod_cache();
-
-        let warm = self.forward_dynamic(
-            &hidden_input,
-            &position_input,
-            &query_lengths,
-            kv_lengths.tensor(),
-        )?;
-        let warm_logits = self.project_logits(&warm, lm_head)?;
-        sync_graph_tensor("MinerU2.5", &warm_logits, "warm decoder CUDA graph")?;
-        // Allocate the output buffer before capture so it belongs to the
-        // regular stream-ordered pool; a capture-time allocation lives in the
-        // graph's private pool and can never be returned to the allocator
-        // safely. Prime the copy so the captured run sees a warm kernel.
-        let logits_output = Tensor::zeros_like(&warm_logits)
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "graph logits output", e))?;
-        logits_output
-            .slice_set(&warm_logits, 0, 0)
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "prime graph logits copy", e))?;
-
-        stream
-            .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
-            .map_err(|e| cuda_graph_error("MinerU2.5", "begin decoder CUDA graph capture", e))?;
-        let captured_output: Result<(), Error> = (|| {
-            let hidden = self.forward_dynamic(
-                &hidden_input,
-                &position_input,
-                &query_lengths,
-                kv_lengths.tensor(),
-            )?;
-            let logits = self.project_logits(&hidden, lm_head)?;
-            logits_output
-                .slice_set(&logits, 0, 0)
-                .map_err(|e| candle_to_ocr_inference("MinerU2.5", "record graph logits copy", e))
-        })();
-        if let Err(error) = captured_output {
-            let _ = stream.end_capture(
-                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-            );
-            return Err(error);
-        }
-        let graph = stream
-            .end_capture(
-                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+        let inputs = CudaGraphInputs {
+            hidden: Tensor::zeros(
+                (1, query_len, hidden_size),
+                self.embed_tokens.embeddings().dtype(),
+                device,
             )
-            .map_err(|e| cuda_graph_error("MinerU2.5", "end decoder CUDA graph capture", e))?
-            .ok_or_else(|| Error::Config {
-                message: "MinerU2.5 decoder capture returned no graph".to_string(),
-            })?;
-        graph
-            .launch()
-            .map_err(|e| cuda_graph_error("MinerU2.5", "warm decoder CUDA graph", e))?;
-        sync_graph_tensor("MinerU2.5", &logits_output, "sync decoder CUDA graph")?;
-        self.clear_kv_cache();
-        *self.decode_graph.borrow_mut() = Some(SingleTokenDecoderCudaGraph {
-            graph,
-            hidden_input,
-            position_input,
-            _query_lengths: query_lengths,
-            kv_lengths,
-            logits_output,
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "graph hidden input", e))?,
+            positions: Tensor::zeros((3, 1, query_len), DType::I64, device)
+                .map_err(|e| candle_to_ocr_inference("MinerU2.5", "graph position input", e))?,
+            query_lengths: Tensor::new(&[0u32, query_len as u32], device)
+                .map_err(|e| candle_to_ocr_inference("MinerU2.5", "graph query lengths", e))?,
+            kv_lengths: CudaGraphKvLengths::new(query_len, device)
+                .map_err(|e| candle_to_ocr_inference("MinerU2.5", "graph KV lengths", e))?,
+            lm_head: lm_head.clone(),
+        };
+        let graph = capture_decoder_graph(
+            device,
+            "MinerU2.5",
+            self,
+            inputs,
+            Self::decode_graph_body,
             cache_len,
-        });
+        )?;
+        self.clear_kv_cache();
+        *self.decode_graph.borrow_mut() = Some(graph);
         Ok(())
+    }
+
+    /// The captured decode step: a bare `fn` so the captured region can
+    /// only read model-owned weights and the registered inputs.
+    #[cfg(feature = "cuda")]
+    fn decode_graph_body(this: &Self, inputs: &CudaGraphInputs) -> Result<Vec<Tensor>, Error> {
+        let hidden = this.forward_dynamic(
+            &inputs.hidden,
+            &inputs.positions,
+            &inputs.query_lengths,
+            inputs.kv_lengths.tensor(),
+        )?;
+        let logits = this.project_logits(&hidden, &inputs.lm_head)?;
+        Ok(vec![logits])
     }
 
     #[cfg(feature = "cuda")]
@@ -812,20 +772,23 @@ impl MinerUTextModel {
             self.invalidate_cuda_graph();
             return Ok(None);
         }
-        if inputs_embeds.shape() != captured.hidden_input.shape()
-            || position_ids.shape() != captured.position_input.shape()
+        if inputs_embeds.shape() != captured.inputs.hidden.shape()
+            || position_ids.shape() != captured.inputs.positions.shape()
         {
             return Ok(None);
         }
         captured
-            .hidden_input
+            .inputs
+            .hidden
             .slice_set(inputs_embeds, 0, 0)
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "copy graph hidden", e))?;
         captured
-            .position_input
+            .inputs
+            .positions
             .slice_set(position_ids, 0, 0)
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "copy graph positions", e))?;
         captured
+            .inputs
             .kv_lengths
             .update(kv_len)
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "update graph KV lengths", e))?;
@@ -836,7 +799,7 @@ impl MinerUTextModel {
         for layer in &self.layers {
             layer.set_kv_cache_len(kv_len)?;
         }
-        Ok(Some(captured.logits_output.clone()))
+        Ok(Some(captured.outputs[0].clone()))
     }
 
     #[cfg(feature = "cuda")]
