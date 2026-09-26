@@ -22,7 +22,8 @@ use crate::runtime::cuda::dynamic_kv::{DynamicBatchKvAppend, DynamicKvAppend};
 use crate::runtime::decoder_graph::{
     BatchDecodeRows, BatchDecoderCudaGraph, CudaGraphDrainGuard, CudaGraphKvLengths,
     CudaGraphPerRowU32, SingleTokenDecoderCudaGraph, cuda_graph_error, decoder_cache_capacity,
-    drain_cuda_context_errors, next_decode_bucket, prompt_decode_bucket, sync_graph_tensor,
+    drain_cuda_context_errors, drop_and_drain, next_decode_bucket, prompt_decode_bucket,
+    sync_graph_tensor,
 };
 use crate::runtime::errors::candle_to_ocr_inference;
 use crate::runtime::tensor::rotate_half;
