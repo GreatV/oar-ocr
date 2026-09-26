@@ -567,13 +567,9 @@ impl Qwen3Attention {
     #[cfg(feature = "cuda")]
     fn release_dynamic_cache_batch(&self) {
         let device = self.q_proj.weight().device().clone();
-        match self.kv_cache.borrow_mut().take_fixed_storage() {
-            Some((k, v)) => {
-                eprintln!("DBGM2 layer released fixed storage");
-                drop_and_drain(k, &device);
-                drop_and_drain(v, &device);
-            }
-            None => eprintln!("DBGM2 layer had no fixed storage"),
+        if let Some((k, v)) = self.kv_cache.borrow_mut().take_fixed_storage() {
+            drop_and_drain(k, &device);
+            drop_and_drain(v, &device);
         }
     }
 
@@ -1183,10 +1179,6 @@ impl Qwen3VlTextModel {
     /// starve it.
     #[cfg(feature = "cuda")]
     fn release_dynamic_caches(&self) {
-        eprintln!(
-            "DBGM2 release_dynamic_caches over {} layers",
-            self.layers.len()
-        );
         for layer in &self.layers {
             layer.release_dynamic_cache_batch();
         }
