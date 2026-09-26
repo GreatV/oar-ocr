@@ -1,6 +1,6 @@
 use super::config::GlmOcrVisionConfig;
-use crate::attention::on_compute_device;
 use crate::error::Error;
+use crate::runtime::attention::on_compute_device;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::{
@@ -379,20 +379,27 @@ impl GlmOcrVisionAttention {
         // bitwise-compatible with the released behavior. Only oversized pages
         // (which previously errored or stalled) switch kernels — flash when
         // available, query-chunked eager otherwise.
-        let attn = if seq_len <= crate::attention::VISION_CHUNKED_ATTN_SEQ_THRESHOLD {
-            crate::attention::scaled_dot_product_attention(&q, &k, &v, None, self.scaling, false)
-                .map_err(|e| candle_to_ocr_inference("GLM-OCR", "vision attention", e))?
+        let attn = if seq_len <= crate::runtime::attention::VISION_CHUNKED_ATTN_SEQ_THRESHOLD {
+            crate::runtime::attention::scaled_dot_product_attention(
+                &q,
+                &k,
+                &v,
+                None,
+                self.scaling,
+                false,
+            )
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "vision attention", e))?
         } else {
-            match crate::attention::flash_attention(&q, &k, &v, self.scaling, false)
+            match crate::runtime::attention::flash_attention(&q, &k, &v, self.scaling, false)
                 .map_err(|e| candle_to_ocr_inference("GLM-OCR", "vision flash attention", e))?
             {
                 Some(output) => output,
-                None => crate::attention::chunked_vision_attention(
+                None => crate::runtime::attention::chunked_vision_attention(
                     &q,
                     &k,
                     &v,
                     self.scaling,
-                    crate::attention::VISION_CHUNKED_ATTN_CHUNK_SIZE,
+                    crate::runtime::attention::VISION_CHUNKED_ATTN_CHUNK_SIZE,
                 )
                 .map_err(|e| candle_to_ocr_inference("GLM-OCR", "chunked vision attention", e))?,
             }
