@@ -967,13 +967,7 @@ impl GreedyEngine<'_> {
                 self.text
                     .forward_verification_tokens(&embeds, &query_positions, self.lm_head)?;
             // Greedy verification, ban applied sequentially over the block.
-            let mut block_tokens = [0u32; MTP_QUERY_LEN];
-            let mut block_history = history.clone();
-            for slot in 0..MTP_QUERY_LEN {
-                let row = block_logits.i(slot)?;
-                block_tokens[slot] = select_greedy_token(&row, &block_history)?;
-                block_history.push(query_ids[slot]);
-            }
+            let block_tokens = block_greedy_tokens(&block_logits, &query_ids, &history)?;
 
             let mut accepted = 0usize;
             let mut stop = false;
@@ -1300,6 +1294,31 @@ pub(crate) fn validate_prompt_budget(
     Ok(())
 }
 
+/// Greedy-pick every slot of a verification block, applying the n-gram ban
+/// sequentially. `history` already ends with `query_ids[0]` (committed tokens
+/// are pushed at the top of the decode loop); row `s` was computed over the
+/// draft prefix `query_ids[..=s]`, so its ban history is `history` plus the
+/// drafts `query_ids[1..=s]` — pushing `query_ids[0]` again would leave every
+/// later row one token behind.
+fn block_greedy_tokens(
+    block_logits: &Tensor,
+    query_ids: &[u32],
+    history: &[u32],
+) -> Result<[u32; MTP_QUERY_LEN], Error> {
+    debug_assert_eq!(query_ids.len(), MTP_QUERY_LEN);
+    debug_assert_eq!(history.last(), query_ids.first());
+    let mut tokens = [0u32; MTP_QUERY_LEN];
+    let mut block_history = history.to_vec();
+    for (slot, token) in tokens.iter_mut().enumerate() {
+        if slot > 0 {
+            block_history.push(query_ids[slot]);
+        }
+        let row = block_logits.i(slot)?;
+        *token = select_greedy_token(&row, &block_history)?;
+    }
+    Ok(tokens)
+}
+
 fn select_greedy_token(logits: &Tensor, history: &[u32]) -> Result<u32, Error> {
     if logits.device().is_cuda() {
         #[cfg(feature = "cuda")]
@@ -1310,6 +1329,15 @@ fn select_greedy_token(logits: &Tensor, history: &[u32]) -> Result<u32, Error> {
                 .reshape((1, vocab))
                 .and_then(|l| l.contiguous())
                 .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "reshape greedy logits", e))?;
+            // F16 logits upcast to F32 first: the argmax is breadth-one,
+            // so the cast costs one vocab-wide copy. Must happen before the
+            // ban mask — MaskTokenIds only implements BF16 and F32.
+            let row = if row.dtype() == DType::F16 {
+                row.to_dtype(DType::F32)
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "upcast f16 logits", e))?
+            } else {
+                row
+            };
             let banned = ngram_banned_tokens(history);
             let row = if banned.is_empty() {
                 row
@@ -1318,14 +1346,6 @@ fn select_greedy_token(logits: &Tensor, history: &[u32]) -> Result<u32, Error> {
                     .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "upload banned ids", e))?;
                 row.inplace_op2(&ids, &MaskTokenIds)
                     .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "mask banned ids", e))?;
-                row
-            };
-            // F16 logits upcast to F32 first: the argmax is breadth-one,
-            // so the cast costs one vocab-wide copy.
-            let row = if row.dtype() == DType::F16 {
-                row.to_dtype(DType::F32)
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "upcast f16 logits", e))?
-            } else {
                 row
             };
             let token = match row.dtype() {
@@ -1458,6 +1478,60 @@ mod tests {
         let top = top3(&[7.0]);
         assert_eq!(top[0], (0, 7.0));
         assert_eq!(top[1], (0, f32::NEG_INFINITY));
+    }
+
+    /// The block ban must see the draft prefix each row was computed over:
+    /// row 1 of this block has its raw winner banned only if the history used
+    /// for it includes the first draft token (the old code pushed `current`
+    /// twice and left every later row one token behind).
+    #[test]
+    fn block_ban_matches_sequential_ar_history() {
+        // Needle: the last 34 tokens of history-plus-draft-1. `history` holds
+        // one earlier copy of the needle followed by 99, so 99 is banned
+        // exactly from row 1 on.
+        let needle: Vec<u32> = (10..42).chain([50, 51]).collect();
+        assert_eq!(needle.len(), NGRAM_SIZE - 1);
+        let current = 50u32;
+        let drafts = [51u32, 60, 61];
+        let mut history = vec![1u32, 2];
+        history.extend_from_slice(&needle);
+        history.push(99);
+        history.extend_from_slice(&needle[..32]);
+        history.push(current);
+        let mut query_ids = vec![current];
+        query_ids.extend_from_slice(&drafts);
+
+        let vocab = 200usize;
+        let mut rows = vec![0.0f32; MTP_QUERY_LEN * vocab];
+        // Slot 0: free winner 70.
+        rows[70] = 10.0;
+        // Slot 1: raw winner 99 is banned once draft 51 enters the history;
+        // the pick must fall to 71.
+        rows[vocab + 99] = 10.0;
+        rows[vocab + 71] = 9.0;
+        // Slots 2 and 3: free winners 72 and 73.
+        rows[2 * vocab + 72] = 10.0;
+        rows[3 * vocab + 73] = 10.0;
+        let logits = Tensor::from_vec(rows, (MTP_QUERY_LEN, vocab), &Device::Cpu).unwrap();
+
+        let tokens = block_greedy_tokens(&logits, &query_ids, &history).unwrap();
+
+        // Sequential reference: row s bans against history + drafts[..s].
+        let mut reference_history = history.clone();
+        let mut expected = [0u32; MTP_QUERY_LEN];
+        for (slot, expect) in expected.iter_mut().enumerate() {
+            if slot > 0 {
+                reference_history.push(query_ids[slot]);
+            }
+            let mut scores = logits.i(slot).unwrap().to_vec1::<f32>().unwrap();
+            apply_no_repeat_ngram(&reference_history, &mut scores);
+            *expect = argmax(&scores).unwrap();
+        }
+        let mut history_plus_first_draft = history.clone();
+        history_plus_first_draft.push(drafts[0]);
+        assert_eq!(ngram_banned_tokens(&history_plus_first_draft), vec![99]);
+        assert_eq!(tokens, [70, 71, 72, 73]);
+        assert_eq!(tokens, expected);
     }
 
     // Random-weight equivalence tests for the batch and speculative paths.
@@ -2017,6 +2091,24 @@ mod tests {
                 let a = select_greedy_token(&f16, &history).unwrap();
                 let b = select_greedy_token(&f32, &history).unwrap();
                 assert_eq!(a, b, "f16 greedy pick must match the f32 reference");
+
+                // With a non-empty ban set the F16 row must be upcast before
+                // masking (MaskTokenIds has no F16 arm). 35 sevens ban token 7,
+                // so both dtypes must fall through to token 8.
+                let mut banned_scores = vec![0.0f32; 512];
+                banned_scores[7] = 10.0;
+                banned_scores[8] = 9.0;
+                let history = vec![7u32; NGRAM_SIZE];
+                assert_eq!(ngram_banned_tokens(&history), vec![7]);
+                let f16 = Tensor::from_vec(banned_scores.clone(), (1, 512), &device)
+                    .unwrap()
+                    .to_dtype(DType::F16)
+                    .unwrap();
+                let f32 = Tensor::from_vec(banned_scores, (1, 512), &device).unwrap();
+                let a = select_greedy_token(&f16, &history).unwrap();
+                let b = select_greedy_token(&f32, &history).unwrap();
+                assert_eq!(a, 8, "banned f16 pick must skip the masked maximum");
+                assert_eq!(a, b, "banned f16 greedy pick must match f32");
             }
             #[cfg(not(feature = "cuda"))]
             eprintln!("skipping: built without the cuda feature");
