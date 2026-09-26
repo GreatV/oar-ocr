@@ -1165,6 +1165,12 @@ impl Qwen3VlTextModel {
     /// competing allocations can OOM there. Compatible storage stays.
     #[cfg(feature = "cuda")]
     pub(crate) fn release_incompatible_fixed_storage(&self, request_batch: Option<usize>) {
+        #[cfg(test)]
+        if std::env::var_os("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE").is_some() {
+            // Test-only control: keep the incompatible storage so the
+            // memory assertions can prove they catch a missing release.
+            return;
+        }
         let incompatible = match request_batch {
             None => self.batch_decode_graph.borrow().is_some(),
             Some(width) => match self.batch_decode_graph.borrow().as_ref() {
@@ -2767,6 +2773,31 @@ mod tests {
                 model.batch_decode_graph_captured(),
                 "compatible batch storage must not be released"
             );
+
+            // Control: with the entry release skipped, the incompatible
+            // batch buckets stay resident — proving the memory assertion
+            // above catches a missing release.
+            model
+                .prepare_batch_ar_cuda_graph(2, 600, 8192, &[0, 10], &lm_head, false)
+                .unwrap();
+            assert!(model.batch_decode_graph_captured());
+            unsafe {
+                std::env::set_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE", "1");
+            }
+            model.release_incompatible_fixed_storage(None);
+            let skipped = measured(&model);
+            eprintln!("DBGM3 control (release skipped)={skipped}MiB");
+            assert!(
+                skipped.saturating_sub(baseline) >= 500,
+                "the memory assertion failed to catch a missing release"
+            );
+            unsafe {
+                std::env::remove_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE");
+            }
+            model.release_incompatible_fixed_storage(None);
+            let settled = measured(&model);
+            eprintln!("DBGM3 settled after control={settled}MiB");
+            assert!(settled.saturating_sub(baseline) <= 16);
 
             // Decoding still matches eager after all of this.
             let eager = greedy_eager(&model, &lm_head, &ids, 8);
