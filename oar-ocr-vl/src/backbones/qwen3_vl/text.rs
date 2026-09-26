@@ -2642,7 +2642,7 @@ mod tests {
             cfg.num_attention_heads = 16;
             cfg.num_key_value_heads = 8;
             cfg.head_dim = 128;
-            cfg.num_hidden_layers = 4;
+            cfg.num_hidden_layers = 28;
             cfg.vocab_size = 32768;
             // F16 model: the mask fill must be finite in this dtype.
             let tensors = random_var_map(&cfg, &device, DType::F16);
