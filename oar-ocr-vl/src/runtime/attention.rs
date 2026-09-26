@@ -160,6 +160,22 @@ fn flash_attention_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var_os("OAR_VL_DISABLE_FLASH_ATTN").is_some())
 }
 
+/// Whether `flash_attention` will run per-row attention for `dtype` tensors
+/// on `device`. Callers use it to skip work the flash path makes redundant
+/// — for example materializing a quadratic batch attention mask that the
+/// row-split flash path never reads.
+pub fn row_flash_attention_available(device: &Device, dtype: DType) -> bool {
+    #[cfg(feature = "cuda")]
+    {
+        !flash_attention_disabled() && device.is_cuda() && flash_attention_dtype_supported(dtype)
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (device, dtype);
+        false
+    }
+}
+
 /// Helper function to handle Metal device computation.
 ///
 /// Metal backend doesn't support certain operations (arange, broadcast_*, etc.).

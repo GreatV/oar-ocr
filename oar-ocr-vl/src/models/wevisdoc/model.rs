@@ -16,7 +16,7 @@ use crate::backbones::qwen3_vl::{DeepstackVisualEmbeds, Qwen3VlTextModel, Qwen3V
 use crate::error::Error;
 use crate::runtime::attention::{
     combine_masks, create_causal_mask, create_generation_mask_if_needed, create_left_padding_mask,
-    decode_position_buffer,
+    decode_position_buffer, row_flash_attention_available,
 };
 use crate::runtime::checkpoint::{collect_safetensors, load_optional_json_config};
 #[cfg(feature = "cuda")]
@@ -443,7 +443,14 @@ impl WeVisDoc {
         let position_refs: Vec<&Tensor> = position_rows.iter().collect();
         let position_ids = Tensor::cat(&position_refs, 1)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "stack positions", e))?;
-        let mask = if batch_size > 1 {
+        // The quadratic causal+padding mask is only built for paths that
+        // will actually read it: on CUDA the per-row flash prefill attends
+        // each row's real span directly and never touches the mask, so
+        // materializing it there would only cost (B,1,S,S) memory — over
+        // 1 GiB for two 16K-token rows. CPU, Metal, and flash-unsupported
+        // dtypes keep the mask for the masked fallback, with identical
+        // numerics to before.
+        let mask = if batch_size > 1 && !row_flash_attention_available(&self.device, self.dtype) {
             let causal = create_causal_mask(max_seq_len, max_seq_len, self.dtype, &self.device)
                 .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create causal mask", e))?;
             let padding =
@@ -720,18 +727,21 @@ struct BatchPrompt {
     rope_delta: i64,
 }
 
-/// Greedy argmax over a host score row (first index wins ties).
 /// Greedy token per row, computed on the device: one `batch`-wide readback
 /// instead of transferring the full logits matrix to the host every step.
 fn argmax_rows(logits: &Tensor) -> Result<Vec<u32>, Error> {
     #[cfg(feature = "cuda")]
-    if logits.device().is_cuda() && matches!(logits.dtype(), DType::BF16 | DType::F32) {
+    if logits.device().is_cuda() && matches!(logits.dtype(), DType::BF16 | DType::F16 | DType::F32)
+    {
+        // F16 logits convert to F32 on the device first: the argmax kernel
+        // reads F32, and only the picked token ids ever cross back to host.
         let flat = logits
             .reshape((logits.dim(0)?, logits.dim(1)?))
             .and_then(|l| l.contiguous())
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "reshape batch logits", e))?;
         let picked = match flat.dtype() {
             DType::BF16 => flat.apply_op1_no_bwd(&ArgmaxFirstBf16),
+            DType::F16 => flat.to_dtype(DType::F32)?.apply_op1_no_bwd(&ArgmaxFirstF32),
             DType::F32 => flat.apply_op1_no_bwd(&ArgmaxFirstF32),
             _ => unreachable!("dtype checked above"),
         }
@@ -1019,14 +1029,18 @@ fn trailing_decode_loop(tokens: &[u32]) -> Option<(usize, usize)> {
 
 fn select_greedy_token(logits: &Tensor) -> Result<u32, Error> {
     #[cfg(feature = "cuda")]
-    if logits.device().is_cuda() && matches!(logits.dtype(), DType::BF16 | DType::F32) {
+    if logits.device().is_cuda() && matches!(logits.dtype(), DType::BF16 | DType::F16 | DType::F32)
+    {
         let vocab_size = logits.elem_count();
         let logits = logits
             .reshape((1, vocab_size))
-            .and_then(|logits| logits.contiguous())
+            .and_then(|l| l.contiguous())
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "reshape GPU logits", e))?;
         let tokens = match logits.dtype() {
             DType::BF16 => logits.apply_op1_no_bwd(&ArgmaxFirstBf16),
+            DType::F16 => logits
+                .to_dtype(DType::F32)?
+                .apply_op1_no_bwd(&ArgmaxFirstF32),
             DType::F32 => logits.apply_op1_no_bwd(&ArgmaxFirstF32),
             _ => unreachable!("dtype checked above"),
         }
@@ -1129,6 +1143,59 @@ mod tests {
             })
             .collect();
         assert_eq!(trailing_decode_loop(&noise), None);
+    }
+
+    #[test]
+    fn cuda_f16_argmax_matches_f32_batch_and_single() {
+        #[cfg(feature = "cuda")]
+        {
+            let Ok(device) = Device::new_cuda(0) else {
+                eprintln!("skipping: no CUDA device");
+                return;
+            };
+            let vocab = 4096usize;
+            // Values are f16-exact so both tensors hold the same numbers;
+            // the last row ends in an exact tie resolved to first index.
+            let rows: Vec<Vec<f32>> = vec![
+                {
+                    let mut r = vec![0.25f32; vocab];
+                    r[17] = 3.5;
+                    r
+                },
+                {
+                    let mut r = vec![-1.0f32; vocab];
+                    r[7] = 1.5;
+                    r[4000] = 2.25;
+                    r
+                },
+                {
+                    let mut r = vec![0.75f32; vocab];
+                    r[9] = 4.0;
+                    r[13] = 4.0;
+                    r
+                },
+            ];
+            let flat: Vec<f32> = rows.concat();
+            let t32 = Tensor::from_vec(flat, (rows.len(), vocab), &device).unwrap();
+            let t16 = t32.to_dtype(DType::F16).unwrap();
+            assert_eq!(t16.dtype(), DType::F16);
+
+            let picked32 = argmax_rows(&t32).unwrap();
+            let picked16 = argmax_rows(&t16).unwrap();
+            assert_eq!(picked16, picked32, "batch argmax must agree across dtypes");
+            assert_eq!(picked16, vec![17u32, 4000, 9]);
+
+            let single32 = t32.i(2).unwrap();
+            let single16 = t16.i(2).unwrap();
+            assert_eq!(
+                select_greedy_token(&single16).unwrap(),
+                select_greedy_token(&single32).unwrap(),
+                "single-row argmax must agree across dtypes"
+            );
+            assert_eq!(select_greedy_token(&single16).unwrap(), 9);
+        }
+        #[cfg(not(feature = "cuda"))]
+        eprintln!("skipping: built without the cuda feature");
     }
 
     #[test]
