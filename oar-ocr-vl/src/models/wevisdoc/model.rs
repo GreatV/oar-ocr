@@ -521,8 +521,10 @@ impl WeVisDoc {
             let next_logits = self.text.forward_decode_logits_batch(
                 &embeds,
                 &pos,
-                &row_starts,
-                &pad_starts,
+                crate::runtime::decoder_graph::BatchDecodeRows {
+                    row_starts: &row_starts,
+                    pad_lens: &pad_starts,
+                },
                 kv_len,
                 gen_mask.as_ref(),
                 &self.lm_head,

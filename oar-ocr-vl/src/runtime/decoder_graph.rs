@@ -379,6 +379,16 @@ impl SingleTokenDecoderCudaGraph {
     }
 }
 
+/// Per-batch row geometry for a batched decode step: the device write
+/// offsets for this step and the left-padding lengths that bound each
+/// row's live span. Both are rewritten on the device before every graph
+/// replay, so a reused graph never sees a previous batch's rows.
+#[cfg(feature = "cuda")]
+pub(crate) struct BatchDecodeRows<'a> {
+    pub(crate) row_starts: &'a [u32],
+    pub(crate) pad_lens: &'a [u32],
+}
+
 /// Captured storage for a batch-of-rows decode graph. Every row writes at
 /// its own device-side offset and attends only to its own live span.
 #[cfg(feature = "cuda")]

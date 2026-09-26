@@ -18,8 +18,9 @@ use crate::runtime::cache::TrimmableKvCache;
 use crate::runtime::cuda::dynamic_kv::{DynamicBatchKvAppend, DynamicKvAppend};
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
-    BatchDecoderCudaGraph, CudaGraphDrainGuard, CudaGraphKvLengths, CudaGraphPerRowU32,
-    SingleTokenDecoderCudaGraph, cuda_graph_error, decoder_cache_capacity, sync_graph_tensor,
+    BatchDecodeRows, BatchDecoderCudaGraph, CudaGraphDrainGuard, CudaGraphKvLengths,
+    CudaGraphPerRowU32, SingleTokenDecoderCudaGraph, cuda_graph_error, decoder_cache_capacity,
+    sync_graph_tensor,
 };
 use crate::runtime::errors::candle_to_ocr_inference;
 use crate::runtime::tensor::rotate_half;
@@ -1377,16 +1378,15 @@ impl Qwen3VlTextModel {
     }
 
     /// One batched decode step at `position_ids`; returns `(batch, vocab)`
-    /// logits. `pad_lens` are the batch's per-row left-padding lengths — the
-    /// graph mask is refreshed from them before replay. Falls back to the
-    /// eager masked path when no graph fits.
+    /// logits. `rows` carries the batch's per-row write offsets and
+    /// left-padding lengths — the graph mask is refreshed from them before
+    /// replay. Falls back to the eager masked path when no graph fits.
     #[cfg(feature = "cuda")]
     pub(crate) fn forward_decode_logits_batch(
         &self,
         inputs_embeds: &Tensor,
         position_ids: &Tensor,
-        row_starts: &[u32],
-        pad_lens: &[u32],
+        rows: BatchDecodeRows<'_>,
         max_kv_len: usize,
         attention_mask: Option<&Tensor>,
         lm_head: &Linear,
@@ -1396,8 +1396,8 @@ impl Qwen3VlTextModel {
         if let Some(logits) = self.replay_batch_cuda_graph(
             inputs_embeds,
             position_ids,
-            row_starts,
-            pad_lens,
+            rows.row_starts,
+            rows.pad_lens,
             max_kv_len,
         )? {
             return Ok(logits);
@@ -2244,8 +2244,10 @@ mod tests {
                         .forward_decode_logits_batch(
                             &embed,
                             &pos,
-                            &row_starts,
-                            &pad_starts,
+                            BatchDecodeRows {
+                                row_starts: &row_starts,
+                                pad_lens: &pad_starts,
+                            },
                             kv_len,
                             gen_mask.as_ref(),
                             &lm_head,
