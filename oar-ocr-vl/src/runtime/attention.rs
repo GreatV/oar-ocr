@@ -662,7 +662,7 @@ pub(crate) fn decode_position_buffer(positions: &[i64], axes: usize) -> Vec<i64>
 /// F16 tops out at 65504, so the value used for wider dtypes saturates to -inf
 /// there — which is exactly the all-masked-row NaN a finite fill exists to
 /// avoid. Staying well inside the range also keeps `score + fill` finite.
-fn masked_score(dtype: DType) -> f64 {
+pub(crate) fn masked_score(dtype: DType) -> f64 {
     match dtype {
         DType::F16 => -1e4,
         _ => -1e9,

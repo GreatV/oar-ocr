@@ -10,6 +10,8 @@
 //! first `deepstack.len()` decoder layers, prefill only.
 
 use crate::error::Error;
+#[cfg(feature = "cuda")]
+use crate::runtime::attention::masked_score;
 use crate::runtime::attention::{
     RotaryEmbedding, create_causal_mask, flash_attention, scaled_dot_product_attention_gqa,
 };
@@ -630,7 +632,11 @@ impl Qwen3Attention {
         let after_pad = kv_positions.broadcast_ge(pad_bounds)?;
         let before_end = kv_positions.broadcast_lt(&ends)?;
         let live = after_pad.broadcast_mul(&before_end)?;
-        let mask = live.to_dtype(hidden_states.dtype())?.affine(1e9, -1e9)?;
+        // masked_score stays finite in F16: 1e9 saturates to -inf there,
+        // and 0 * inf - inf is exactly the all-NaN row this mask exists to
+        // prevent.
+        let fill = masked_score(hidden_states.dtype());
+        let mask = live.to_dtype(hidden_states.dtype())?.affine(-fill, fill)?;
         let attn = scaled_dot_product_attention_gqa(
             &q,
             &cache_k,
@@ -700,9 +706,10 @@ impl Qwen3Attention {
         let live = kv_positions.broadcast_lt(&kv_bound)?;
         // live -> 0, dead -> -1e9 via a scalar affine (host scalars ride
         // as kernel parameters, so nothing uploads during graph capture).
+        let fill = masked_score(hidden_states.dtype());
         let mask = live
             .to_dtype(hidden_states.dtype())?
-            .affine(1e9, -1e9)?
+            .affine(-fill, fill)?
             .unsqueeze(1)?;
         let attn = scaled_dot_product_attention_gqa(
             &q,
@@ -2349,6 +2356,126 @@ mod tests {
             worst < 1e-3,
             "chunked causal attention diverged: max|delta| = {worst}"
         );
+    }
+
+    /// F16 graphs must produce finite logits: the attention fill has to
+    /// stay inside F16's range, or every masked row collapses to NaN.
+    /// Both graph flavors decode and match F16 eager token for token.
+    #[test]
+    fn cuda_f16_graph_decode_stays_finite_and_matches_eager() {
+        #[cfg(feature = "cuda")]
+        {
+            if std::env::var_os("OAR_WEVISDOC_GPU_SELFTEST").is_none() {
+                eprintln!("skipping: OAR_WEVISDOC_GPU_SELFTEST is not set");
+                return;
+            }
+            let Ok(device) = Device::new_cuda(0) else {
+                eprintln!("skipping: no CUDA device");
+                return;
+            };
+            let mut cfg = valid_tiny_config();
+            cfg.hidden_size = 2048;
+            cfg.intermediate_size = 6144;
+            cfg.num_attention_heads = 16;
+            cfg.num_key_value_heads = 8;
+            cfg.head_dim = 128;
+            cfg.num_hidden_layers = 4;
+            cfg.vocab_size = 32768;
+            // F16 model: the mask fill must be finite in this dtype.
+            let tensors = random_var_map(&cfg, &device, DType::F16);
+            let vb = VarBuilder::from_tensors(tensors, DType::F16, &device);
+            let model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
+            let lm_head = Linear::new(
+                vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
+                    .unwrap(),
+                None,
+            );
+            let ids = (0..600).map(|i| 10 + i % 60).collect::<Vec<u32>>();
+
+            // Single-row graph: finite logits and greedy agreement.
+            let eager = greedy_eager(&model, &lm_head, &ids, 8);
+            let graphed = greedy_graphed(&model, &lm_head, &ids, 8, true);
+            assert_eq!(graphed, eager, "F16 single-row graph must match eager");
+
+            // Batch graph: decode through it and assert every logit is
+            // finite (NaN would flow from the masked attention rows).
+            let rows = vec![(0..540).map(|i| 10 + i % 60).collect::<Vec<u32>>(), {
+                let mut r = (0..520).map(|i| 10 + i % 60).collect::<Vec<u32>>();
+                r
+            }];
+            let (embeds, positions, seq_lens, pads) = build_padded_batch(&rows);
+            let pad_starts: Vec<u32> = pads.iter().map(|&pad| pad as u32).collect();
+            model.clear_cache();
+            model
+                .prepare_batch_ar_cuda_graph(
+                    rows.len(),
+                    *seq_lens.iter().max().unwrap(),
+                    8,
+                    &pads,
+                    &lm_head,
+                    true,
+                )
+                .unwrap();
+            assert!(model.batch_decode_graph_captured());
+            let causal = create_causal_mask(540, 540, DType::F16, &device).unwrap();
+            let padding = create_left_padding_mask(&seq_lens, 540, DType::F16, &device).unwrap();
+            let prefill_mask = combine_masks(&causal, &padding).unwrap();
+            let hidden = model
+                .forward(&embeds, &positions, None, Some(&prefill_mask), None)
+                .unwrap();
+            let mut logits = lm_head
+                .forward(&hidden.i((.., 539, ..)).unwrap().contiguous().unwrap())
+                .unwrap();
+            for step in 0..4 {
+                let scores = logits
+                    .to_dtype(DType::F32)
+                    .unwrap()
+                    .to_vec2::<f32>()
+                    .unwrap();
+                for (row, score) in scores.iter().enumerate() {
+                    assert!(
+                        score.iter().all(|v| v.is_finite()),
+                        "F16 batch graph produced non-finite logits at step {step} row {row}"
+                    );
+                }
+                let tokens: Vec<u32> = (0..rows.len())
+                    .map(|row| {
+                        let t = logits.i(row).unwrap();
+                        argmax_of(&t) as u32
+                    })
+                    .collect();
+                let kv_len = 540 + step + 1;
+                let row_starts = vec![(kv_len - 1) as u32; rows.len()];
+                let ids_t = Tensor::from_vec(tokens.clone(), (rows.len(), 1), &device).unwrap();
+                let embed = model.embed(&ids_t).unwrap();
+                let mut pos_data = Vec::with_capacity(3 * rows.len());
+                for &seq_len in &seq_lens {
+                    for _ in 0..3 {
+                        pos_data.push((seq_len + step) as i64);
+                    }
+                }
+                let pos = Tensor::from_vec(pos_data, (3, rows.len(), 1), &device).unwrap();
+                let gen_mask =
+                    create_generation_mask_if_needed(&pads, kv_len, DType::F16, &device).unwrap();
+                logits = model
+                    .forward_decode_logits_batch(
+                        &embed,
+                        &pos,
+                        BatchDecodeRows {
+                            row_starts: &row_starts,
+                            pad_lens: &pad_starts,
+                        },
+                        kv_len,
+                        gen_mask.as_ref(),
+                        &lm_head,
+                    )
+                    .unwrap();
+            }
+            drop(model);
+            drop(lm_head);
+        }
+        #[cfg(not(feature = "cuda"))]
+        eprintln!("skipping: built without the cuda feature");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Region-recognition adapter for WeVisDoc.
 
 use super::WeVisDoc;
+use super::model::LoopGuard;
 use crate::api::error::{BatchResult, Error};
 use crate::api::recognition::{BackendCapabilities, RecognitionBackend, RecognitionTask};
 use image::RgbImage;
@@ -16,6 +17,15 @@ fn extract_html_table(raw: &str) -> &str {
         return raw;
     };
     &raw[start..start + end + "</table>".len()]
+}
+
+/// Structured regions repeat legitimately; their loop guard only steps in
+/// near the token budget. Text-like regions keep the eager guard.
+fn loop_guard_for_task(task: RecognitionTask) -> LoopGuard {
+    match task {
+        RecognitionTask::Table | RecognitionTask::Formula => LoopGuard::Conservative,
+        RecognitionTask::Ocr | RecognitionTask::Chart => LoopGuard::Standard,
+    }
 }
 
 fn postprocess(task: RecognitionTask, raw: &str) -> String {
@@ -36,7 +46,11 @@ impl RecognitionBackend for WeVisDoc {
         // emits Markdown text, HTML tables, and LaTeX formulas, so every
         // region task runs the same full-page prompt.
         let tokens = self
-            .generate_tokens_for_regions(std::slice::from_ref(&image), max_tokens)?
+            .generate_tokens_for_regions(
+                std::slice::from_ref(&image),
+                max_tokens,
+                loop_guard_for_task(task),
+            )?
             .pop()
             .ok_or_else(|| Error::invalid_input("WeVisDoc returned no recognition result"))??;
         Ok(postprocess(task, &self.decode_tokens(&tokens)?))
@@ -55,8 +69,16 @@ impl RecognitionBackend for WeVisDoc {
                 tasks.len()
             )));
         }
+        // Mixed batches take the conservative guard: it never trims, so
+        // table rows survive even when one element is plain text.
+        let guard = tasks
+            .iter()
+            .copied()
+            .map(loop_guard_for_task)
+            .reduce(|a, b| if a == b { a } else { LoopGuard::Conservative })
+            .unwrap_or(LoopGuard::Standard);
         Ok(self
-            .generate_tokens_for_regions(&images, max_tokens)?
+            .generate_tokens_for_regions(&images, max_tokens, guard)?
             .into_iter()
             .zip(tasks.iter().copied())
             .map(|(result, task)| {

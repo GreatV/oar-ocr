@@ -179,7 +179,7 @@ impl WeVisDoc {
         images: &[RgbImage],
         max_new_tokens: usize,
     ) -> crate::error::BatchResult<Vec<u32>> {
-        self.generate_tokens_impl(images, max_new_tokens, false)
+        self.generate_tokens_impl(images, max_new_tokens, LoopGuard::Off)
     }
 
     /// Region-recognition entry: identical to [`Self::generate_tokens`]
@@ -193,26 +193,27 @@ impl WeVisDoc {
         &self,
         images: &[RgbImage],
         max_new_tokens: usize,
+        loop_guard: LoopGuard,
     ) -> crate::error::BatchResult<Vec<u32>> {
-        self.generate_tokens_impl(images, max_new_tokens, true)
+        self.generate_tokens_impl(images, max_new_tokens, loop_guard)
     }
 
     fn generate_tokens_impl(
         &self,
         images: &[RgbImage],
         max_new_tokens: usize,
-        region_recognition: bool,
+        loop_guard: LoopGuard,
     ) -> crate::error::BatchResult<Vec<u32>> {
         if images.len() <= 1 {
             return Ok(images
                 .iter()
                 .map(|image| {
-                    self.generate_one(image, max_new_tokens, region_recognition)
+                    self.generate_one(image, max_new_tokens, loop_guard)
                         .map(|(tokens, _)| tokens)
                 })
                 .collect());
         }
-        self.generate_batch_tokens(images, max_new_tokens, region_recognition)
+        self.generate_batch_tokens(images, max_new_tokens, loop_guard)
             .map(|results| results.into_iter().map(Ok).collect())
     }
 
@@ -223,7 +224,7 @@ impl WeVisDoc {
         &self,
         image: &RgbImage,
         max_new_tokens: usize,
-        region_recognition: bool,
+        loop_guard: LoopGuard,
     ) -> Result<(Vec<u32>, bool), Error> {
         self.text.clear_cache();
         let _cache_guard = TextCacheGuard(&self.text);
@@ -266,7 +267,7 @@ impl WeVisDoc {
             input_ids.len(),
             max_new_tokens,
             &self.lm_head,
-            region_recognition,
+            loop_guard != LoopGuard::Off,
         )?;
         let hidden =
             self.text
@@ -293,10 +294,13 @@ impl WeVisDoc {
             // (one is kept) both bounds the output and saves the rest of
             // the token budget. Region crops only — see
             // `generate_tokens_with_loop_guard`.
-            if region_recognition && let Some((period, repeats)) = trailing_decode_loop(&generated)
-            {
-                generated.truncate(generated.len() - (repeats - 1) * period);
-                return Ok((generated, false));
+            match loop_guard_action(loop_guard, &generated, max_new_tokens) {
+                Some(LoopAction::TrimStop { period, repeats }) => {
+                    generated.truncate(generated.len() - (repeats - 1) * period);
+                    return Ok((generated, false));
+                }
+                Some(LoopAction::Stop) => return Ok((generated, false)),
+                None => {}
             }
             if step + 1 == max_new_tokens {
                 break;
@@ -331,7 +335,7 @@ impl WeVisDoc {
         &self,
         images: &[RgbImage],
         max_new_tokens: usize,
-        region_recognition: bool,
+        loop_guard: LoopGuard,
     ) -> Result<Vec<Vec<u32>>, Error> {
         let batch_size = images.len();
         let context_limit = self.cfg.text_config.max_position_embeddings;
@@ -490,8 +494,8 @@ impl WeVisDoc {
                 max_new_tokens,
                 &pads,
                 &self.lm_head,
-                region_recognition,
-            )?;
+                loop_guard != LoopGuard::Off,
+            )?
         }
         let hidden = self.text.forward(
             &inputs_embeds,
@@ -546,12 +550,14 @@ impl WeVisDoc {
                     // repeated cycles (one is kept) and retire the row so
                     // the batch stops paying for its decode. Region crops
                     // only — see `generate_tokens_with_loop_guard`.
-                    if region_recognition
-                        && let Some((period, repeats)) = trailing_decode_loop(&generated[row])
-                    {
-                        let keep = generated[row].len() - (repeats - 1) * period;
-                        generated[row].truncate(keep);
-                        finished[row] = true;
+                    match loop_guard_action(loop_guard, &generated[row], max_new_tokens) {
+                        Some(LoopAction::TrimStop { period, repeats }) => {
+                            let keep = generated[row].len() - (repeats - 1) * period;
+                            generated[row].truncate(keep);
+                            finished[row] = true;
+                        }
+                        Some(LoopAction::Stop) => finished[row] = true,
+                        None => {}
                     }
                 }
                 next_tokens.push(token);
@@ -1027,6 +1033,49 @@ fn trailing_decode_loop(tokens: &[u32]) -> Option<(usize, usize)> {
     None
 }
 
+/// How aggressively region decoding guards against degenerate loops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoopGuard {
+    /// Page decoding: no guard, byte-reproduces the reference decoding.
+    Off,
+    /// Text-like regions: stop and trim as soon as the tail cycles.
+    Standard,
+    /// Structured regions (tables, formulas): legitimate output repeats
+    /// rows and patterns, so only intervene when the token budget is
+    /// nearly exhausted — stop, but keep everything generated so far.
+    Conservative,
+}
+
+/// How far the generation may run in [`LoopGuard::Conservative`] before a
+/// detected loop is acted on.
+const CONSERVATIVE_MARGIN: usize = 256;
+
+/// The action the guard takes for `generated` under `mode`, if any.
+/// `budget` is the region's `max_new_tokens`.
+fn loop_guard_action(mode: LoopGuard, generated: &[u32], budget: usize) -> Option<LoopAction> {
+    match mode {
+        LoopGuard::Off => None,
+        LoopGuard::Conservative => {
+            let near_budget = budget.saturating_sub(generated.len()) <= CONSERVATIVE_MARGIN;
+            near_budget
+                .then(|| trailing_decode_loop(generated))
+                .flatten()
+                .map(|_| LoopAction::Stop)
+        }
+        LoopGuard::Standard => trailing_decode_loop(generated)
+            .map(|(period, repeats)| LoopAction::TrimStop { period, repeats }),
+    }
+}
+
+/// What to do with a detected loop.
+#[derive(Debug, PartialEq, Eq)]
+enum LoopAction {
+    /// Drop the repeated cycles (one stays) and stop the sequence.
+    TrimStop { period: usize, repeats: usize },
+    /// Stop without touching the generated tokens.
+    Stop,
+}
+
 fn select_greedy_token(logits: &Tensor) -> Result<u32, Error> {
     #[cfg(feature = "cuda")]
     if logits.device().is_cuda() && matches!(logits.dtype(), DType::BF16 | DType::F16 | DType::F32)
@@ -1143,6 +1192,48 @@ mod tests {
             })
             .collect();
         assert_eq!(trailing_decode_loop(&noise), None);
+    }
+
+    #[test]
+    fn loop_guard_respects_task_modes() {
+        let budget = 4096usize;
+        // A table region: ten identical long rows (>= 30 tokens each) plus
+        // the closing tag — legitimate structure, not a loop.
+        let row: Vec<u32> = (300..340).collect();
+        let mut table = Vec::new();
+        for _ in 0..10 {
+            table.extend_from_slice(&row);
+        }
+        table.extend_from_slice(&[500, 501]);
+        assert_eq!(
+            loop_guard_action(LoopGuard::Conservative, &table, budget),
+            None,
+            "table rows far from the budget must not be touched"
+        );
+
+        // A genuine dead loop only acts once the budget is nearly spent,
+        // and even then keeps everything generated so far.
+        let mut dead = Vec::new();
+        for _ in 0..120 {
+            dead.extend_from_slice(&[7u32, 8, 9]);
+        }
+        assert_eq!(
+            loop_guard_action(LoopGuard::Conservative, &dead, budget),
+            None
+        );
+        match loop_guard_action(LoopGuard::Conservative, &dead, dead.len() + 128) {
+            Some(LoopAction::Stop) => {}
+            other => panic!("expected Stop near the budget, got {other:?}"),
+        }
+
+        // Text-like regions keep today's behavior: trim cycles and stop.
+        match loop_guard_action(LoopGuard::Standard, &dead, budget) {
+            Some(LoopAction::TrimStop { .. }) => {}
+            other => panic!("expected TrimStop under Standard, got {other:?}"),
+        }
+
+        // Page decoding never guards.
+        assert_eq!(loop_guard_action(LoopGuard::Off, &dead, budget), None);
     }
 
     #[test]

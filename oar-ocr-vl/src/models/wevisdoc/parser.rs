@@ -37,7 +37,8 @@ impl PageParser for WeVisDoc {
     type Options = WeVisDocParseOptions;
 
     fn parse_page(&self, image: &RgbImage, options: &Self::Options) -> Result<PageDocument, Error> {
-        let (tokens, finished) = self.generate_one(image, options.max_new_tokens, false)?;
+        let (tokens, finished) =
+            self.generate_one(image, options.max_new_tokens, super::model::LoopGuard::Off)?;
         let markdown = self.decode_tokens(&tokens)?;
         let diagnostics = if finished {
             Vec::new()
