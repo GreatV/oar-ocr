@@ -1146,7 +1146,9 @@ mod tests {
         let mut state = 9_876_543_21u64;
         let prose: Vec<u32> = (0..300)
             .map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 (state >> 33) as u32
             })
             .collect();
