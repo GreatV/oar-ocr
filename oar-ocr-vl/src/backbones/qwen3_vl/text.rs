@@ -801,7 +801,8 @@ impl Qwen3Mlp {
                 .up_proj
                 .forward(xs)
                 .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP up", e))?;
-            return self.down_proj
+            return self
+                .down_proj
                 .forward(
                     &(&gate * &up)
                         .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP gate product", e))?,
@@ -835,8 +836,7 @@ impl Qwen3Mlp {
             start += len;
         }
         let refs: Vec<&Tensor> = chunks.iter().collect();
-        Tensor::cat(&refs, 1)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP chunks", e))
+        Tensor::cat(&refs, 1).map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP chunks", e))
     }
 }
 

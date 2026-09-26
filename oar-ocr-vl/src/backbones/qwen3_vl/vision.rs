@@ -375,7 +375,8 @@ impl VisionMlp {
                 .forward(hidden_states)
                 .and_then(|value| self.activation.forward(&value))
                 .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision MLP fc1", e))?;
-            return self.linear_fc2
+            return self
+                .linear_fc2
                 .forward(&hidden_states)
                 .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision MLP fc2", e));
         }
@@ -1058,18 +1059,15 @@ mod tests {
         let grid_thw = (1usize, 40usize, 60usize); // 2400 patches, ratio ok
         let merge_size = 2usize;
 
-        let full = interpolate_position_embedding(
-            &position_embedding, base, grid_thw, merge_size,
-        )
-        .unwrap();
+        let full = interpolate_position_embedding(&position_embedding, base, grid_thw, merge_size)
+            .unwrap();
         // A grid large enough to exceed the 8192-patch chunk forces the
         // chunked path; its rows are computed with the same per-row math,
         // so a shared row must be bit-identical to the one-shot result.
         let big_grid = (1usize, 128usize, 192usize); // 24576 patches > 8192
-        let chunked = interpolate_position_embedding(
-            &position_embedding, base, big_grid, merge_size,
-        )
-        .unwrap();
+        let chunked =
+            interpolate_position_embedding(&position_embedding, base, big_grid, merge_size)
+                .unwrap();
         let full_rows = full.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         let chunked_rows = chunked.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         // Patch (0,0) of both grids maps to source (0,0) with weight 1 on
@@ -1077,7 +1075,11 @@ mod tests {
         // itself — exactly, in both the one-shot and chunked paths. Rows
         // are independent, so the 8192-patch chunk boundaries cannot
         // perturb neighbouring rows.
-        let embedding_rows = position_embedding.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let embedding_rows = position_embedding
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
         assert_eq!(&full_rows[..64], &embedding_rows[..64]);
         assert_eq!(&chunked_rows[..64], &embedding_rows[..64]);
     }
