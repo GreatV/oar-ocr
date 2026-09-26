@@ -230,6 +230,20 @@ fn apply_rotary_pos_emb_vision(
     Ok((q, k))
 }
 
+/// Soft cap for one chunk's F32 attention-score scratch (~110 MiB — the
+/// same footprint the shared 256-row default produces at ~6.9K patches).
+const VISION_CHUNK_SCRATCH_BUDGET: usize = 110 * 1024 * 1024;
+
+/// Largest query chunk whose F32 score matrix stays within the scratch
+/// budget. Sequences short enough for the shared default keep it, so
+/// behavior is unchanged until a page grows past ~6.9K patches.
+fn vision_chunk_size(num_heads: usize, seq_len: usize) -> usize {
+    let default = crate::runtime::attention::VISION_CHUNKED_ATTN_CHUNK_SIZE;
+    let per_row = num_heads.max(1) * seq_len.max(1) * 4;
+    let fits = (VISION_CHUNK_SCRATCH_BUDGET / per_row).max(1);
+    fits.min(default)
+}
+
 #[derive(Debug, Clone)]
 struct VisionAttention {
     qkv: Linear,
@@ -262,8 +276,8 @@ impl VisionAttention {
     /// Non-causal attention over one image's patches.
     fn forward(&self, hidden_states: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
         use crate::runtime::attention::{
-            VISION_CHUNKED_ATTN_CHUNK_SIZE, VISION_CHUNKED_ATTN_SEQ_THRESHOLD,
-            chunked_vision_attention, flash_attention, scaled_dot_product_attention,
+            VISION_CHUNKED_ATTN_SEQ_THRESHOLD, chunked_vision_attention, flash_attention,
+            scaled_dot_product_attention,
         };
         let sequence_length = hidden_states
             .dim(0)
@@ -305,10 +319,10 @@ impl VisionAttention {
         {
             Some(output) => output,
             None if sequence_length > VISION_CHUNKED_ATTN_SEQ_THRESHOLD => {
-                chunked_vision_attention(&q, &k, &v, self.scale, VISION_CHUNKED_ATTN_CHUNK_SIZE)
-                    .map_err(|e| {
-                        candle_to_ocr_inference(MODEL_NAME, "chunked vision attention", e)
-                    })?
+                let chunk_size = vision_chunk_size(self.num_heads, sequence_length);
+                chunked_vision_attention(&q, &k, &v, self.scale, chunk_size).map_err(|e| {
+                    candle_to_ocr_inference(MODEL_NAME, "chunked vision attention", e)
+                })?
             }
             None => scaled_dot_product_attention(&q, &k, &v, None, self.scale, false)
                 .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision attention", e))?,

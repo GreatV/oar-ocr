@@ -244,6 +244,11 @@ impl WeVisDoc {
         if max_new_tokens == 0 {
             return Ok((Vec::new(), false));
         }
+        // A batch-shaped graph left over from region decoding cannot serve
+        // a single-page request; free its fixed KV before vision encoding
+        // competes for memory.
+        #[cfg(feature = "cuda")]
+        self.text.release_incompatible_fixed_storage(None);
         let context_limit = self.cfg.text_config.max_position_embeddings;
         let image_inputs = preprocess_image(
             image,
@@ -351,6 +356,12 @@ impl WeVisDoc {
         loop_guard: LoopGuard,
     ) -> Result<Vec<Vec<u32>>, Error> {
         let batch_size = images.len();
+        // A single-row graph cannot serve a batch request, and a batch
+        // graph of a different width cannot be reused either; free their
+        // fixed KV before vision encoding competes for memory.
+        #[cfg(feature = "cuda")]
+        self.text
+            .release_incompatible_fixed_storage(Some(batch_size));
         let context_limit = self.cfg.text_config.max_position_embeddings;
         if max_new_tokens == 0 {
             return Ok(vec![Vec::new(); batch_size]);

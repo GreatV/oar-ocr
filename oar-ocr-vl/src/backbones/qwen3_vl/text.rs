@@ -1156,6 +1156,27 @@ impl Qwen3VlTextModel {
         self.grow_dynamic_cache_batch(1, query_len, cache_len)
     }
 
+    /// Free graphs and fixed-capacity KV storage that cannot serve the
+    /// incoming request: a single-row request cannot reuse a batch graph
+    /// (and vice versa), and a batch request of a different width cannot
+    /// reuse the captured batch graph. Their preallocated buckets would
+    /// otherwise sit in memory through image preprocessing and vision
+    /// encoding — the next prepare only replaces them after both — and
+    /// competing allocations can OOM there. Compatible storage stays.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn release_incompatible_fixed_storage(&self, request_batch: Option<usize>) {
+        let incompatible = match request_batch {
+            None => self.batch_decode_graph.borrow().is_some(),
+            Some(width) => match self.batch_decode_graph.borrow().as_ref() {
+                Some(graph) => graph.batch != width,
+                None => self.decode_graph.borrow().is_some(),
+            },
+        };
+        if incompatible {
+            self.recover_failed_capture();
+        }
+    }
+
     /// Tear down everything a failed capture left behind — both graphs
     /// (never installed, but cheap to drop) and every layer's
     /// preallocated fixed-capacity KV storage — so the eager fallback runs
@@ -2468,6 +2489,51 @@ mod tests {
         );
     }
 
+    // The CUDA async allocator hides pool-internal reuse from nvidia-smi;
+    // trim the pool to its live allocations before every reading or the
+    // phases never move the needle.
+    #[cfg(all(test, feature = "cuda"))]
+    fn trim_pool(model: &Qwen3VlTextModel) {
+        let Device::Cuda(cuda) = model.embed_tokens.embeddings().device() else {
+            return;
+        };
+        cuda.cuda_stream().synchronize().unwrap();
+        let ordinal = cuda.cuda_stream().context().ordinal();
+        let mut pool: candle_core::cuda_backend::cudarc::driver::sys::CUmemoryPool =
+            std::ptr::null_mut();
+        unsafe {
+            use candle_core::cuda_backend::cudarc::driver::sys;
+            sys::cuDeviceGetDefaultMemPool(&mut pool, ordinal as i32);
+            sys::cuMemPoolTrimTo(pool, 0);
+        }
+    }
+
+    #[cfg(all(test, feature = "cuda"))]
+    fn smi_used() -> u64 {
+        let output = std::process::Command::new("nvidia-smi")
+            .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+            .output();
+        match output {
+            Ok(out) => String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .lines()
+                .next()
+                .and_then(|line| line.trim().parse().ok())
+                .unwrap_or(0),
+            Err(_) => 0,
+        }
+    }
+
+    #[cfg(all(test, feature = "cuda"))]
+    fn measured(model: &Qwen3VlTextModel) -> u64 {
+        let Device::Cuda(cuda) = model.embed_tokens.embeddings().device() else {
+            return 0;
+        };
+        cuda.cuda_stream().synchronize().unwrap();
+        trim_pool(model);
+        smi_used()
+    }
+
     /// An injected capture failure — fired after the fixed KV buckets are
     /// already allocated — must be absorbed by the production prepare call
     /// itself: no error may escape, both graphs stay uncaptured, the
@@ -2490,46 +2556,6 @@ mod tests {
                 combine_masks, create_causal_mask, create_generation_mask_if_needed,
                 create_left_padding_mask,
             };
-            // The CUDA async allocator hides pool-internal reuse from
-            // nvidia-smi; trim the pool to its live allocations before
-            // every reading or the phases never move the needle.
-            fn trim_pool(model: &Qwen3VlTextModel) {
-                let Device::Cuda(cuda) = model.embed_tokens.embeddings().device() else {
-                    return;
-                };
-                cuda.cuda_stream().synchronize().unwrap();
-                let ordinal = cuda.cuda_stream().context().ordinal();
-                let mut pool: candle_core::cuda_backend::cudarc::driver::sys::CUmemoryPool =
-                    std::ptr::null_mut();
-                unsafe {
-                    use candle_core::cuda_backend::cudarc::driver::sys;
-                    sys::cuDeviceGetDefaultMemPool(&mut pool, ordinal as i32);
-                    sys::cuMemPoolTrimTo(pool, 0);
-                }
-            }
-            fn smi_used() -> u64 {
-                let output = std::process::Command::new("nvidia-smi")
-                    .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-                    .output();
-                match output {
-                    Ok(out) => String::from_utf8_lossy(&out.stdout)
-                        .trim()
-                        .lines()
-                        .next()
-                        .and_then(|line| line.trim().parse().ok())
-                        .unwrap_or(0),
-                    Err(_) => 0,
-                }
-            }
-            fn measured(model: &Qwen3VlTextModel) -> u64 {
-                let Device::Cuda(cuda) = model.embed_tokens.embeddings().device() else {
-                    return 0;
-                };
-                cuda.cuda_stream().synchronize().unwrap();
-                trim_pool(model);
-                smi_used()
-            }
-
             // Production-shape depth: 28 layers at the 8192 bucket hold
             // ~940 MiB of fixed KV, far past the pool's slack.
             let mut cfg = valid_tiny_config();
@@ -2640,6 +2666,112 @@ mod tests {
             let probe = Tensor::randn(0f32, 1f32, (64, 64), &device).unwrap();
             let probe = (&probe * &probe).unwrap().sum_all().unwrap();
             let _ = probe.to_scalar::<f32>().unwrap();
+        }
+        #[cfg(not(feature = "cuda"))]
+        eprintln!("skipping: built without the cuda feature");
+    }
+
+    /// A batch-shaped graph left behind by region decoding must be freed
+    /// before a single-page request starts (and vice versa), or its fixed
+    /// KV buckets compete with vision encoding for memory. Compatible
+    /// storage must survive.
+    #[test]
+    fn cuda_incompatible_fixed_storage_is_released_before_the_next_request() {
+        #[cfg(feature = "cuda")]
+        {
+            if std::env::var_os("OAR_WEVISDOC_GPU_SELFTEST").is_none() {
+                eprintln!("skipping: OAR_WEVISDOC_GPU_SELFTEST is not set");
+                return;
+            }
+            let Ok(device) = Device::new_cuda(0) else {
+                eprintln!("skipping: no CUDA device");
+                return;
+            };
+            let mut cfg = valid_tiny_config();
+            cfg.hidden_size = 2048;
+            cfg.intermediate_size = 6144;
+            cfg.num_attention_heads = 16;
+            cfg.num_key_value_heads = 8;
+            cfg.head_dim = 128;
+            cfg.num_hidden_layers = 28;
+            cfg.vocab_size = 32768;
+            let tensors = random_var_map(&cfg, &device, DType::BF16);
+            let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
+            let model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
+            let lm_head = Linear::new(
+                vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
+                    .unwrap(),
+                None,
+            );
+            let ids = (0..600).map(|i| 10 + i % 60).collect::<Vec<u32>>();
+
+            model.clear_cache();
+            let _ = model
+                .forward(
+                    &Tensor::zeros((1, 8, cfg.hidden_size), DType::BF16, &device).unwrap(),
+                    &Tensor::zeros((3, 1, 8), DType::I64, &device).unwrap(),
+                    None,
+                    None,
+                    Some(&[(0usize, 8)]),
+                )
+                .unwrap();
+            let baseline = measured(&model);
+            eprintln!("DBGM3 baseline={baseline}MiB");
+            assert!(baseline > 0, "nvidia-smi unavailable; cannot measure");
+
+            // Region-style batch request captures a batch graph.
+            model
+                .prepare_batch_ar_cuda_graph(2, 600, 8192, &[0, 10], &lm_head, false)
+                .unwrap();
+            assert!(model.batch_decode_graph_captured());
+
+            // A single-page request arrives: its entry frees the batch
+            // graph and buckets before vision encoding.
+            model.release_incompatible_fixed_storage(None);
+            let after = measured(&model);
+            eprintln!("DBGM3 after-single-entry-release={after}MiB");
+            assert!(
+                after.saturating_sub(baseline) <= 16,
+                "batch storage survived the single-page entry: {} MiB",
+                after.saturating_sub(baseline)
+            );
+            assert!(!model.batch_decode_graph_captured());
+            assert!(!model.decode_graph_captured());
+
+            // Single-page decoding captures a single-row graph.
+            model
+                .prepare_ar_cuda_graph(600, 8192, &lm_head, false)
+                .unwrap();
+            assert!(model.decode_graph_captured());
+
+            // A region-style batch request arrives: its entry frees the
+            // single-row graph and buckets.
+            model.release_incompatible_fixed_storage(Some(2));
+            let after = measured(&model);
+            eprintln!("DBGM3 after-batch-entry-release={after}MiB");
+            assert!(
+                after.saturating_sub(baseline) <= 16,
+                "single-row storage survived the batch entry: {} MiB",
+                after.saturating_sub(baseline)
+            );
+            assert!(!model.decode_graph_captured());
+            assert!(!model.batch_decode_graph_captured());
+
+            // Compatible storage survives a same-width request.
+            model
+                .prepare_batch_ar_cuda_graph(2, 600, 8192, &[0, 10], &lm_head, false)
+                .unwrap();
+            assert!(model.batch_decode_graph_captured());
+            model.release_incompatible_fixed_storage(Some(2));
+            assert!(
+                model.batch_decode_graph_captured(),
+                "compatible batch storage must not be released"
+            );
+
+            // Decoding still matches eager after all of this.
+            let eager = greedy_eager(&model, &lm_head, &ids, 8);
+            let graphed = greedy_graphed(&model, &lm_head, &ids, 8, true);
+            assert_eq!(graphed, eager, "decode must match eager afterwards");
         }
         #[cfg(not(feature = "cuda"))]
         eprintln!("skipping: built without the cuda feature");
