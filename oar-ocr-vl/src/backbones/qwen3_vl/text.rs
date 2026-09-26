@@ -849,9 +849,9 @@ fn attention_masked_chunked(
     num_kv_groups: usize,
 ) -> Result<Tensor, Error> {
     const MASKED_ATTN_CHUNK: usize = 1024;
-    let (batch, seq_len) = q
+    let (batch, seq_len, num_heads) = q
         .dims4()
-        .map(|(batch, _, seq_len, _)| (batch, seq_len))
+        .map(|(batch, _, seq_len, heads)| (batch, seq_len, heads))
         .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention shape", e))?;
     if attention_mask.is_none() && batch != 1 {
         return Err(Error::Config {
@@ -860,10 +860,20 @@ fn attention_masked_chunked(
             ),
         });
     }
-    let mut chunks = Vec::with_capacity(seq_len.div_ceil(MASKED_ATTN_CHUNK));
+    // The chunk shrinks by scratch budget on page-scale sequences: a
+    // 1024-row chunk of a 16K-token page would materialize a ~1 GiB F32
+    // score matrix per chunk. Sequences short enough for the full 1024
+    // keep it, so behavior below that scale is unchanged.
+    let chunk_size = crate::runtime::attention::attention_query_chunk(
+        num_heads,
+        seq_len,
+        crate::runtime::attention::ATTENTION_CHUNK_SCRATCH_BUDGET,
+    )
+    .min(MASKED_ATTN_CHUNK);
+    let mut chunks = Vec::with_capacity(seq_len.div_ceil(chunk_size));
     let mut start = 0usize;
     while start < seq_len {
-        let len = (seq_len - start).min(MASKED_ATTN_CHUNK);
+        let len = (seq_len - start).min(chunk_size);
         let q_chunk = q.narrow(2, start, len)?;
         let mask_chunk = match attention_mask {
             Some(mask) => Some(mask.narrow(2, start, len)?),
@@ -2507,6 +2517,93 @@ mod tests {
     /// Batched decode graph vs the eager masked path: two left-padded rows
     /// of different lengths, checked token-for-token. Opt in with
     /// `OAR_WEVISDOC_GPU_SELFTEST=1`.
+    /// The chunk follows the scratch budget: full 1024 while that fits,
+    /// shrinking only when a page outgrows it. The helper itself is the
+    /// budget formula, asserted here for the text shape.
+    #[test]
+    fn causal_chunk_size_tracks_the_scratch_budget() {
+        use crate::runtime::attention::{ATTENTION_CHUNK_SCRATCH_BUDGET, attention_query_chunk};
+        let heads = 16usize;
+        // Pages up to ~1.7K tokens keep the full 1024-row chunk.
+        assert_eq!(
+            attention_query_chunk(heads, 1760, ATTENTION_CHUNK_SCRATCH_BUDGET).min(1024),
+            1024
+        );
+        // Page-scale sequences shrink to the budget's fit.
+        assert_eq!(
+            attention_query_chunk(heads, 4096, ATTENTION_CHUNK_SCRATCH_BUDGET).min(1024),
+            440
+        );
+        assert_eq!(
+            attention_query_chunk(heads, 16384, ATTENTION_CHUNK_SCRATCH_BUDGET).min(1024),
+            110
+        );
+        // Never below one row.
+        assert!(attention_query_chunk(heads, usize::MAX, ATTENTION_CHUNK_SCRATCH_BUDGET) >= 1);
+    }
+
+    #[test]
+    fn causal_chunked_attention_matches_single_pass_at_budget_scale() {
+        // A budget small enough to shrink the chunk at a moderate
+        // sequence, compared against the one-pass form.
+        use crate::runtime::attention::attention_query_chunk;
+        let device = Device::Cpu;
+        let (heads, seq, head_dim) = (4usize, 2560usize, 32usize);
+        let budget = 1024usize * 1024usize; // ~1 MiB scratch
+        let chunk = attention_query_chunk(heads, seq, budget).min(1024);
+        assert_eq!(chunk, 25, "budget must shrink the chunk for this shape");
+        let kv_heads = heads / 2;
+        let q = Tensor::randn(0f32, 1f32, (1, heads, seq, head_dim), &device).unwrap();
+        let k = Tensor::randn(0f32, 1f32, (1, kv_heads, seq, head_dim), &device).unwrap();
+        let v = Tensor::randn(0f32, 1f32, (1, kv_heads, seq, head_dim), &device).unwrap();
+        let scaling = 1.0 / (head_dim as f64).sqrt();
+        let single = attention_masked_single(&q, &k, &v, None, scaling, 2).unwrap();
+        // The helper reads the shared budget; run the same math with the
+        // test budget by chunking here through the same kernel calls.
+        let mut chunks = Vec::new();
+        let mut start = 0usize;
+        while start < seq {
+            let len = (seq - start).min(chunk);
+            let visible = start + len;
+            chunks.push(
+                scaled_dot_product_attention_gqa(
+                    &q.narrow(2, start, len).unwrap(),
+                    &k.narrow(2, 0, visible).unwrap(),
+                    &v.narrow(2, 0, visible).unwrap(),
+                    // (narrowed K/V keep their kv_heads width)
+                    Some(
+                        &crate::runtime::attention::create_causal_mask(
+                            len,
+                            visible,
+                            q.dtype(),
+                            &device,
+                        )
+                        .unwrap(),
+                    ),
+                    scaling,
+                    false,
+                    2,
+                )
+                .unwrap(),
+            );
+            start += len;
+        }
+        let refs: Vec<&Tensor> = chunks.iter().collect();
+        let chunked = Tensor::cat(&refs, 2).unwrap();
+        let a = single.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let b = chunked.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let worst = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        eprintln!("budget-scaled causal chunk vs single max|delta| = {worst:e}");
+        assert!(
+            worst < 1e-3,
+            "budget-scaled chunking diverged: max|delta| = {worst}"
+        );
+    }
+
     /// Chunked causal attention must agree with the one-pass form to
     /// float epsilon: only the softmax reduction grouping changes.
     #[test]

@@ -230,18 +230,16 @@ fn apply_rotary_pos_emb_vision(
     Ok((q, k))
 }
 
-/// Soft cap for one chunk's F32 attention-score scratch (~110 MiB — the
-/// same footprint the shared 256-row default produces at ~6.9K patches).
-const VISION_CHUNK_SCRATCH_BUDGET: usize = 110 * 1024 * 1024;
-
 /// Largest query chunk whose F32 score matrix stays within the scratch
 /// budget. Sequences short enough for the shared default keep it, so
 /// behavior is unchanged until a page grows past ~6.9K patches.
 fn vision_chunk_size(num_heads: usize, seq_len: usize) -> usize {
-    let default = crate::runtime::attention::VISION_CHUNKED_ATTN_CHUNK_SIZE;
-    let per_row = num_heads.max(1) * seq_len.max(1) * 4;
-    let fits = (VISION_CHUNK_SCRATCH_BUDGET / per_row).max(1);
-    fits.min(default)
+    let shared = crate::runtime::attention::attention_query_chunk(
+        num_heads,
+        seq_len,
+        crate::runtime::attention::ATTENTION_CHUNK_SCRATCH_BUDGET,
+    );
+    shared.min(crate::runtime::attention::VISION_CHUNKED_ATTN_CHUNK_SIZE)
 }
 
 #[derive(Debug, Clone)]

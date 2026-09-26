@@ -267,6 +267,25 @@ pub fn scaled_dot_product_attention(
     attn_weights.matmul(v)
 }
 
+/// Soft cap for one attention chunk's F32 score scratch (~110 MiB — the
+/// same footprint the shared 256-row vision default produces at ~6.9K
+/// patches).
+pub(crate) const ATTENTION_CHUNK_SCRATCH_BUDGET: usize = 110 * 1024 * 1024;
+
+/// Largest query chunk whose F32 score scratch — one F32 row per head per
+/// KV position — stays within `budget`. Callers clamp to their preferred
+/// chunk so behavior only changes when a page outgrows it.
+pub(crate) fn attention_query_chunk(num_heads: usize, kv_len: usize, budget: usize) -> usize {
+    // Checked so an adversarial size cannot overflow: an overflowing row
+    // is far beyond any budget, and the chunk floors at one row.
+    let per_row = num_heads
+        .max(1)
+        .checked_mul(kv_len.max(1))
+        .and_then(|v| v.checked_mul(4))
+        .unwrap_or(usize::MAX);
+    (budget / per_row).max(1)
+}
+
 /// Sequence length above which vision backends use query-chunked attention to
 /// cap the size of the temporary attention-score matrix.
 #[allow(dead_code)]
