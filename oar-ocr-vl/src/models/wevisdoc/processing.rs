@@ -25,6 +25,48 @@ pub(crate) fn load_image_processor_config(
     Ok(cfg)
 }
 
+/// CPU-only planning for one page image: mirrors the upscale + resize the
+/// real preprocessing performs and returns the resulting image-token count.
+/// Lets callers know the decode bucket — and release stale fixed KV —
+/// before anything is uploaded to the device.
+pub fn plan_num_image_tokens(
+    image: &RgbImage,
+    cfg: &MinerUImageProcessorConfig,
+) -> Result<usize, Error> {
+    cfg.validate()?;
+    let factor = (cfg.merge_size * cfg.patch_size) as u32;
+    let (w0, h0) = (image.width(), image.height());
+    let min_dim = w0.min(h0);
+    let (mut w, mut h) = (w0, h0);
+    if min_dim > 0 && min_dim < factor {
+        let scale = factor as f32 / min_dim as f32;
+        w = ((w as f32 * scale).ceil() as u32).max(factor);
+        h = ((h as f32 * scale).ceil() as u32).max(factor);
+    }
+    let (min_pixels, max_pixels) = if cfg.do_resize {
+        cfg.pixel_bounds()?
+    } else {
+        (0, 0)
+    };
+    let (rh, rw) = if cfg.do_resize {
+        crate::runtime::image::smart_resize(h, w, factor, min_pixels, max_pixels)?
+    } else {
+        (h, w)
+    };
+    if rh % cfg.patch_size as u32 != 0 || rw % cfg.patch_size as u32 != 0 {
+        return Err(Error::InvalidInput {
+            message: format!(
+                "WeVisDoc preprocessing plan: {rh}x{rw} not divisible by patch {}",
+                cfg.patch_size
+            ),
+        });
+    }
+    let grid_h = rh / cfg.patch_size as u32;
+    let grid_w = rw / cfg.patch_size as u32;
+    let merge_group = cfg.merge_size * cfg.merge_size;
+    Ok(grid_h as usize * grid_w as usize / merge_group)
+}
+
 pub(crate) fn validate_processor_vision_compatibility(
     cfg: &MinerUImageProcessorConfig,
     vision: &Qwen3VlVisionConfig,

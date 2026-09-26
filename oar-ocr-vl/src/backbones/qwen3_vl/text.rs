@@ -1300,6 +1300,12 @@ impl Qwen3VlTextModel {
         query_len: usize,
         cache_len: usize,
     ) -> Result<(), Error> {
+        #[cfg(test)]
+        if std::env::var_os("OAR_WEVISDOC_FAIL_GROW").is_some() {
+            return Err(Error::Config {
+                message: "injected growth failure (test)".to_string(),
+            });
+        }
         let kv_heads = self
             .layers
             .first()
@@ -1721,7 +1727,18 @@ impl Qwen3VlTextModel {
             self.invalidate_cuda_graph();
             self.invalidate_batch_cuda_graph();
             let pads: Vec<usize> = rows.pad_lens.iter().map(|&pad| pad as usize).collect();
-            self.grow_dynamic_cache_batch(batch, 1, next)?;
+            if let Err(error) = self.grow_dynamic_cache_batch(batch, 1, next) {
+                // Growing the fixed buckets failed, but the current fixed
+                // storage still holds the live KV up to kv_len - 1: the
+                // eager append path grows it organically from there. Only
+                // the graphs are dropped.
+                tracing::warn!(
+                    "{MODEL_NAME} batch KV growth to bucket {next} failed: {error}; continuing eager"
+                );
+                self.invalidate_cuda_graph();
+                self.invalidate_batch_cuda_graph();
+                return Ok(None);
+            }
             if let Err(error) =
                 self.capture_batch_cuda_graph(batch, next, ceiling, &pads, lm_head, max_kv_len - 1)
             {
@@ -2087,7 +2104,17 @@ impl Qwen3VlTextModel {
             // sequence. Graphs are disposed before the storage move.
             self.invalidate_cuda_graph();
             self.invalidate_batch_cuda_graph();
-            self.grow_dynamic_cache(1, next)?;
+            if let Err(error) = self.grow_dynamic_cache(1, next) {
+                // Same as the batch path: the current fixed storage keeps
+                // the live KV; only the graphs are dropped and the eager
+                // append path grows the storage organically.
+                tracing::warn!(
+                    "{MODEL_NAME} decoder KV growth to bucket {next} failed: {error}; continuing eager"
+                );
+                self.invalidate_cuda_graph();
+                self.invalidate_batch_cuda_graph();
+                return Ok(None);
+            }
             if let Err(error) = self.capture_cuda_graph(next, ceiling, lm_head, kv_len - 1) {
                 tracing::warn!(
                     "{MODEL_NAME} decoder graph re-capture at bucket {next} failed: {error}; continuing eager"
@@ -3157,6 +3184,114 @@ mod tests {
         }
         #[cfg(not(feature = "cuda"))]
         eprintln!("skipping: built without the cuda feature");
+    }
+
+    /// Growth-failure fallback: decoding past the captured bucket with the
+    /// growth injected to fail must complete on eager, match eager output
+    /// token for token, and leave no graph behind. Without the injection
+    /// the same run grows and finishes on the graph (control).
+    #[test]
+    fn cuda_growth_failure_falls_back_to_eager_and_matches() {
+        #[cfg(feature = "cuda")]
+        {
+            if std::env::var_os("OAR_WEVISDOC_GPU_SELFTEST").is_none() {
+                eprintln!("skipping: OAR_WEVISDOC_GPU_SELFTEST is not set");
+                return;
+            }
+            let Ok(device) = Device::new_cuda(0) else {
+                eprintln!("skipping: no CUDA device");
+                return;
+            };
+            let mut cfg = valid_tiny_config();
+            cfg.hidden_size = 2048;
+            cfg.intermediate_size = 6144;
+            cfg.num_attention_heads = 16;
+            cfg.num_key_value_heads = 8;
+            cfg.head_dim = 128;
+            cfg.num_hidden_layers = 4;
+            cfg.vocab_size = 32768;
+            let tensors = random_var_map(&cfg, &device, DType::BF16);
+            let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
+            let model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
+            let lm_head = Linear::new(
+                vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
+                    .unwrap(),
+                None,
+            );
+            let ids = (0..600).map(|i| 10 + i % 60).collect::<Vec<u32>>();
+            // Prompt 600 -> ladder bucket 1024; 440 decode steps cross the
+            // bucket at kv 1025 and grow (or fail-growing, injected).
+            let steps = 440usize;
+
+            // Reference: pure eager over the same horizon.
+            let reference = greedy_eager(&model, &lm_head, &ids, steps);
+
+            // Control: growth succeeds; the run finishes on the graph.
+            let graphed = greedy_graphed_steps(&model, &lm_head, &ids, steps);
+            assert_eq!(
+                graphed, reference,
+                "graph decode with growth must match eager"
+            );
+            assert!(model.decode_graph_captured(), "control keeps the graph");
+
+            // Injected: growth fails mid-run; eager carries the rest.
+            unsafe { std::env::set_var("OAR_WEVISDOC_FAIL_GROW", "1") };
+            let fallback = greedy_graphed_steps(&model, &lm_head, &ids, steps);
+            unsafe { std::env::remove_var("OAR_WEVISDOC_FAIL_GROW") };
+            assert_eq!(
+                fallback, reference,
+                "growth-failure fallback must match eager"
+            );
+            assert!(
+                !model.decode_graph_captured(),
+                "the failed growth must leave no graph behind"
+            );
+        }
+        #[cfg(not(feature = "cuda"))]
+        eprintln!("skipping: built without the cuda feature");
+    }
+
+    /// Greedy decode through prepare + forward_decode_logits for `steps`
+    /// steps (the production path), returning the token sequence.
+    #[cfg(all(test, feature = "cuda"))]
+    fn greedy_graphed_steps(
+        model: &Qwen3VlTextModel,
+        lm_head: &Linear,
+        ids: &[u32],
+        steps: usize,
+    ) -> Vec<u32> {
+        let device = model.embed_tokens.embeddings().device();
+        let seq_len = ids.len();
+        let token_ids = Tensor::from_vec(ids.to_vec(), (1, seq_len), device).unwrap();
+        let embeds = model.embed(&token_ids).unwrap();
+        let positions = text_position_ids_range(seq_len, device);
+        model.clear_cache();
+        model.prepare_ar_cuda_graph(seq_len, steps + seq_len + 8, lm_head, true).unwrap();
+        let hidden = model
+            .forward(&embeds, &positions, None, None, None)
+            .unwrap();
+        let mut logits = lm_head
+            .forward(&hidden.i((0, seq_len - 1, ..)).unwrap().unsqueeze(0).unwrap())
+            .unwrap()
+            .squeeze(0)
+            .unwrap();
+        let mut out = Vec::with_capacity(steps);
+        for step in 0..steps {
+            let best = argmax_of(&logits) as u32;
+            out.push(best);
+            let token = Tensor::from_vec(vec![best], (1, 1), device).unwrap();
+            let embed = model.embed(&token).unwrap();
+            let pos = Tensor::from_vec(
+                vec![(seq_len + step) as i64; 3],
+                (3, 1, 1),
+                device,
+            )
+            .unwrap();
+            logits = model
+                .forward_decode_logits(&embed, &pos, None, lm_head)
+                .unwrap();
+        }
+        out
     }
 
     /// F16 graphs must produce finite logits: the attention fill has to

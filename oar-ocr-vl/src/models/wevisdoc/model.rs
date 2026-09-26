@@ -9,7 +9,7 @@
 
 use super::config::WeVisDocConfig;
 use super::processing::{
-    WeVisDocImageInputs, load_image_processor_config, preprocess_image,
+    WeVisDocImageInputs, load_image_processor_config, plan_num_image_tokens, preprocess_image,
     validate_processor_vision_compatibility,
 };
 use crate::backbones::qwen3_vl::{DeepstackVisualEmbeds, Qwen3VlTextModel, Qwen3VlVisionModel};
@@ -374,16 +374,10 @@ impl WeVisDoc {
         // Pass 1: image preprocessing and tokenization — the prompt
         // lengths, and with them the decode bucket this request will use,
         // are known here, before the vision tower runs.
-        let mut drafts: Vec<(Vec<u32>, WeVisDocImageInputs)> = Vec::with_capacity(batch_size);
+        let mut drafts: Vec<(Vec<u32>, RgbImage)> = Vec::with_capacity(batch_size);
         for image in images {
-            let image_inputs = preprocess_image(
-                image,
-                &self.image_cfg,
-                &self.cfg.vision_config,
-                &self.device,
-                self.dtype,
-            )?;
-            let prompt = build_prompt(image_inputs.num_image_tokens, DEFAULT_SYSTEM_PROMPT);
+            let num_image_tokens = plan_num_image_tokens(image, &self.image_cfg)?;
+            let prompt = build_prompt(num_image_tokens, DEFAULT_SYSTEM_PROMPT);
             let encoding =
                 self.tokenizer
                     .encode(prompt, false)
@@ -397,7 +391,7 @@ impl WeVisDoc {
                 });
             }
             validate_generation_length(input_ids.len(), max_new_tokens, context_limit)?;
-            drafts.push((input_ids, image_inputs));
+            drafts.push((input_ids, image.clone()));
         }
 
         // Release graphs and fixed KV that cannot serve this batch before
@@ -418,9 +412,16 @@ impl WeVisDoc {
                 .release_incompatible_fixed_storage(Some(batch_size), expected_bucket);
         }
 
-        // Pass 2: vision tower, embeddings, positions.
+        // Pass 2: image upload, vision tower, embeddings, positions.
         let mut rows: Vec<BatchPrompt> = Vec::with_capacity(batch_size);
-        for (input_ids, image_inputs) in drafts {
+        for (input_ids, image) in drafts {
+            let image_inputs = preprocess_image(
+                &image,
+                &self.image_cfg,
+                &self.cfg.vision_config,
+                &self.device,
+                self.dtype,
+            )?;
             let (inputs_embeds, deepstack) = self.prepare_inputs(&input_ids, &image_inputs)?;
             let (position_ids, rope_delta) = build_position_ids(
                 &input_ids,
