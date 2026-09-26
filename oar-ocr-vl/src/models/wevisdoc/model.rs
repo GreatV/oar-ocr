@@ -753,6 +753,12 @@ impl WeVisDoc {
             })
     }
 
+    /// Test-only access for the production-entry self-check.
+    #[cfg(all(test, feature = "cuda"))]
+    pub(crate) fn text_model(&self) -> &Qwen3VlTextModel {
+        &self.text
+    }
+
     pub fn tokenizer(&self) -> &Tokenizer {
         &self.tokenizer
     }
@@ -1526,7 +1532,8 @@ mod tests {
                 .expect("load image b");
 
             let baseline = {
-                let Device::Cuda(cuda) = model.text.embed_tokens.embeddings().device() else {
+                let Device::Cuda(cuda) = model.text_model().embed_tokens.embeddings().device()
+                else {
                     unreachable!()
                 };
                 cuda.cuda_stream().synchronize().unwrap();
@@ -1543,7 +1550,14 @@ mod tests {
                     cuDeviceGetDefaultMemPool(&mut pool, ordinal as i32);
                     cuMemPoolTrimTo(pool, 0);
                 }
-                drain_cuda_context_errors(&model.text.embed_tokens.embeddings().device().clone());
+                drain_cuda_context_errors(
+                    &model
+                        .text_model()
+                        .embed_tokens
+                        .embeddings()
+                        .device()
+                        .clone(),
+                );
                 smi_used()
             };
             eprintln!("DBGM7 baseline={baseline}MiB");
@@ -1562,7 +1576,8 @@ mod tests {
                 .generate_one(&image_a, 64, LoopGuard::Standard)
                 .expect("single-page generation succeeds");
             assert!(!tokens.0.is_empty());
-            let probe = LAST_UPLOAD_PROBE_MIB.load(std::sync::atomic::Ordering::Relaxed);
+            let probe = crate::models::wevisdoc::processing::LAST_UPLOAD_PROBE_MIB
+                .load(std::sync::atomic::Ordering::Relaxed);
             eprintln!("DBGM7 single-entry pre-upload probe={probe}MiB");
             assert!(
                 probe.saturating_sub(baseline) <= 64,
@@ -1576,7 +1591,8 @@ mod tests {
             let _ = model
                 .generate_one(&image_a, 64, LoopGuard::Standard)
                 .unwrap();
-            let probe = LAST_UPLOAD_PROBE_MIB.load(std::sync::atomic::Ordering::Relaxed);
+            let probe = crate::models::wevisdoc::processing::LAST_UPLOAD_PROBE_MIB
+                .load(std::sync::atomic::Ordering::Relaxed);
             eprintln!("DBGM7 control (release skipped) probe={probe}MiB");
             assert!(
                 probe.saturating_sub(baseline) >= 500,
@@ -1591,7 +1607,8 @@ mod tests {
             let texts = model.generate(&[image_a, image_b], 64).unwrap();
             assert_eq!(texts.len(), 2);
             unsafe { std::env::remove_var("OAR_WEVISDOC_PROBE_UPLOAD") };
-            let probe = LAST_UPLOAD_PROBE_MIB.load(std::sync::atomic::Ordering::Relaxed);
+            let probe = crate::models::wevisdoc::processing::LAST_UPLOAD_PROBE_MIB
+                .load(std::sync::atomic::Ordering::Relaxed);
             eprintln!("DBGM7 batch-entry pre-upload probe={probe}MiB");
             assert!(
                 probe.saturating_sub(baseline) <= 64,
