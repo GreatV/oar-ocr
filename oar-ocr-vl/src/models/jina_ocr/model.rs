@@ -98,7 +98,8 @@ pub struct JinaOcrLoadOptions {
 }
 
 impl JinaOcrLoadOptions {
-    /// Opt in to FastMTP speculative decoding (CUDA only).
+    /// Opt in to FastMTP speculative decoding (CUDA only — enabling it for a
+    /// non-CUDA device fails at load with a configuration error).
     pub fn with_mtp(mut self, mtp: bool) -> Self {
         self.mtp = mtp;
         self
@@ -177,9 +178,12 @@ impl JinaOcr {
         // The FastMTP draft head is opt-in: on the OmniDocBench demo pages
         // (RTX 4090, bf16) adaptive MTP lost to graphed plain decoding on 17
         // of 18 pages, so it loads only when explicitly requested.
-        let mtp = if cfg.num_nextn_predict_layers.unwrap_or(0) >= 1
-            && (options.mtp || std::env::var_os("OAR_JINAOCR_ENABLE_MTP").is_some())
-        {
+        let mtp = if mtp_load_decision(
+            cfg.num_nextn_predict_layers.unwrap_or(0) >= 1,
+            options.mtp,
+            std::env::var_os("OAR_JINAOCR_ENABLE_MTP").is_some(),
+            device.is_cuda(),
+        )? {
             Some(JinaOcrMtp::load(
                 &cfg.text,
                 text.token_embedding_weight(),
@@ -1210,6 +1214,35 @@ impl GreedyEngine<'_> {
     }
 }
 
+/// Whether to load the FastMTP draft head. The head only runs on CUDA
+/// (`mtp_enabled` gates on the device), so an explicit API opt-in on a
+/// non-CUDA device is a configuration error, while the environment variable
+/// alone just skips loading with a warning — it may be set globally and must
+/// not break CPU inference.
+fn mtp_load_decision(
+    draft_available: bool,
+    api_opt_in: bool,
+    env_opt_in: bool,
+    cuda: bool,
+) -> Result<bool, Error> {
+    if !draft_available || !(api_opt_in || env_opt_in) {
+        return Ok(false);
+    }
+    if cuda {
+        return Ok(true);
+    }
+    if api_opt_in {
+        return Err(Error::Config {
+            message: "JinaOCR FastMTP speculative decoding is only supported on CUDA devices"
+                .to_string(),
+        });
+    }
+    tracing::warn!(
+        "OAR_JINAOCR_ENABLE_MTP is set but the device is not CUDA; skipping the FastMTP draft head"
+    );
+    Ok(false)
+}
+
 fn require_token_id(
     tokenizer: &Tokenizer,
     token: &str,
@@ -1419,6 +1452,21 @@ mod tests {
     fn mtp_load_option_defaults_to_off() {
         assert!(!JinaOcrLoadOptions::default().mtp);
         assert!(JinaOcrLoadOptions::default().with_mtp(true).mtp);
+    }
+
+    #[test]
+    fn mtp_load_decision_gates_on_device_and_opt_in_source() {
+        // No draft head in the checkpoint, or no opt-in at all: never load.
+        assert!(!mtp_load_decision(false, true, true, true).unwrap());
+        assert!(!mtp_load_decision(true, false, false, true).unwrap());
+        // Either opt-in loads on CUDA.
+        assert!(mtp_load_decision(true, true, false, true).unwrap());
+        assert!(mtp_load_decision(true, false, true, true).unwrap());
+        // API opt-in on a non-CUDA device is a hard error.
+        assert!(mtp_load_decision(true, true, false, false).is_err());
+        assert!(mtp_load_decision(true, true, true, false).is_err());
+        // The environment variable alone only skips with a warning.
+        assert!(!mtp_load_decision(true, false, true, false).unwrap());
     }
 
     #[test]
