@@ -2373,6 +2373,10 @@ mod tests {
                 eprintln!("skipping: no CUDA device");
                 return;
             };
+            use crate::runtime::attention::{
+                combine_masks, create_causal_mask, create_generation_mask_if_needed,
+                create_left_padding_mask,
+            };
             let mut cfg = valid_tiny_config();
             cfg.hidden_size = 2048;
             cfg.intermediate_size = 6144;
