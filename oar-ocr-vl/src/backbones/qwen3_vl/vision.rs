@@ -242,6 +242,11 @@ fn vision_chunk_size(num_heads: usize, seq_len: usize) -> usize {
     shared.min(crate::runtime::attention::VISION_CHUNKED_ATTN_CHUNK_SIZE)
 }
 
+/// Test probe: how many times the vision MLP chunked path has run.
+#[cfg(all(test, not(feature = "cuda")))]
+static VISION_MLP_CHUNK_RUNS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 #[derive(Debug, Clone)]
 struct VisionAttention {
     qkv: Linear,
@@ -340,6 +345,7 @@ struct VisionMlp {
     linear_fc1: Linear,
     linear_fc2: Linear,
     activation: Activation,
+    intermediate_size: usize,
 }
 
 impl VisionMlp {
@@ -360,16 +366,24 @@ impl VisionMlp {
             linear_fc1,
             linear_fc2,
             activation: cfg.hidden_act,
+            intermediate_size: cfg.intermediate_size,
         })
     }
 
     fn forward(&self, hidden_states: &Tensor) -> Result<Tensor, Error> {
-        // The intermediate is (rows, 4096): at 65536 patches in F32 that is
-        // 1 GiB, so rows are processed in chunks — every row is
-        // independent, making the chunked output bit-identical.
-        let rows = hidden_states.dim(1)?;
-        let intermediate_bytes = rows * 4096 * 4;
-        if intermediate_bytes <= crate::runtime::attention::MLP_CHUNK_ROWS * 4096 * 4 {
+        // The tower layout is (seq, hidden). The intermediate is
+        // (seq, intermediate): at 65536 patches in F32 that is 1 GiB, so
+        // rows are processed in chunks — every row is independent, making
+        // the chunked output bit-identical. CUDA keeps the single-pass
+        // path: bf16 intermediates are only ~512 MiB there, and chunking
+        // would change GEMM shapes and potentially bf16 accumulation.
+        let rows = hidden_states.dim(0)?;
+        let element_size = hidden_states.dtype().size_in_bytes();
+        let on_cuda = hidden_states.device().is_cuda();
+        let intermediate_bytes = rows
+            .saturating_mul(self.intermediate_size)
+            .saturating_mul(element_size);
+        if on_cuda || intermediate_bytes <= 256 * 1024 * 1024 {
             let hidden_states = self
                 .linear_fc1
                 .forward(hidden_states)
@@ -385,7 +399,7 @@ impl VisionMlp {
         let mut start = 0usize;
         while start < rows {
             let len = (rows - start).min(CHUNK);
-            let chunk = hidden_states.narrow(1, start, len)?;
+            let chunk = hidden_states.narrow(0, start, len)?;
             let activated = self
                 .linear_fc1
                 .forward(&chunk)
@@ -398,8 +412,10 @@ impl VisionMlp {
             );
             start += len;
         }
+        #[cfg(test)]
+        VISION_MLP_CHUNK_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let refs: Vec<&Tensor> = chunks.iter().collect();
-        Tensor::cat(&refs, 1)
+        Tensor::cat(&refs, 0)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision MLP chunks", e))
     }
 }
@@ -1043,6 +1059,56 @@ mod tests {
     fn rejects_invalid_grid() {
         assert!(merge_grouped_spatial_coordinates((1, 3, 4), 2).is_err());
         assert!(merge_grouped_spatial_coordinates((0, 4, 4), 2).is_err());
+    }
+
+    /// The vision MLP chunk path (CPU, rows above the intermediate budget)
+    /// must produce bit-identical output to the single-pass path.
+    #[test]
+    fn vision_mlp_chunks_match_single_pass() {
+        let device = Device::Cpu;
+        let mut cfg = tiny_config();
+        cfg.hidden_size = 64;
+        cfg.intermediate_size = 4096;
+        let mut tensors = test_tensors(&cfg, &device);
+        tensors.insert(
+            "mlp.linear_fc1.weight".to_string(),
+            Tensor::randn(0f32, 1f32, (4096, cfg.hidden_size), &device).unwrap(),
+        );
+        tensors.insert(
+            "mlp.linear_fc1.bias".to_string(),
+            Tensor::zeros(4096, DType::F32, &device).unwrap(),
+        );
+        tensors.insert(
+            "mlp.linear_fc2.weight".to_string(),
+            Tensor::randn(0f32, 1f32, (cfg.hidden_size, 4096), &device).unwrap(),
+        );
+        tensors.insert(
+            "mlp.linear_fc2.bias".to_string(),
+            Tensor::zeros(cfg.hidden_size, DType::F32, &device).unwrap(),
+        );
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
+        let mlp = VisionMlp::load(&cfg, vb).unwrap();
+        // 40000 rows x 4096 intermediate x 4B = 625 MiB > 256 MiB budget.
+        let xs = Tensor::randn(0f32, 1f32, (40000, cfg.hidden_size), &device).unwrap();
+        VISION_MLP_CHUNK_RUNS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let chunked = mlp.forward(&xs).unwrap();
+        assert!(
+            VISION_MLP_CHUNK_RUNS.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            "the chunk path did not execute"
+        );
+
+        // Unchunked reference: same linears, single pass.
+        let activated = mlp
+            .linear_fc1
+            .forward(&xs)
+            .and_then(|value| mlp.activation.forward(&value))
+            .unwrap();
+        let single = mlp.linear_fc2.forward(&activated).unwrap();
+        assert_eq!(
+            chunked.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            single.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            "chunked vision MLP must be bit-identical"
+        );
     }
 
     #[test]

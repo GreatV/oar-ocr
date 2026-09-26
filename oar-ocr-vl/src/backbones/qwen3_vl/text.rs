@@ -787,11 +787,16 @@ impl Qwen3Mlp {
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor, Error> {
         // The intermediate is (rows, 6144): a 16K-token page in F32 is
-        // ~400 MiB, so rows are processed in chunks when the page is large
-        // — every row is independent, keeping the output bit-identical.
+        // ~400 MiB (CPU), so non-CUDA devices process rows in chunks —
+        // every row is independent, keeping the output bit-identical.
+        // CUDA keeps the single-pass path: bf16 intermediates are only
+        // ~200 MiB there and chunking would change GEMM shapes (potential
+        // bf16 accumulation differences).
         let rows = xs.dim(1)?;
-        let intermediate_bytes = rows * 6144 * 4;
-        if intermediate_bytes <= 256 * 1024 * 1024 {
+        let element_size = xs.dtype().size_in_bytes();
+        let on_cuda = xs.device().is_cuda();
+        let intermediate_bytes = rows.saturating_mul(6144).saturating_mul(element_size);
+        if on_cuda || intermediate_bytes <= 256 * 1024 * 1024 {
             let gate = self
                 .gate_proj
                 .forward(xs)
@@ -835,10 +840,17 @@ impl Qwen3Mlp {
             );
             start += len;
         }
+        #[cfg(test)]
+        TEXT_MLP_CHUNK_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let refs: Vec<&Tensor> = chunks.iter().collect();
         Tensor::cat(&refs, 1).map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP chunks", e))
     }
 }
+
+/// Test probe: how many times the text MLP chunked path has run.
+#[cfg(all(test, not(feature = "cuda")))]
+static TEXT_MLP_CHUNK_RUNS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Test probe: the query chunk size last used by the causal chunked
 /// attention path (0 when that path has not run since the last probe
@@ -2711,6 +2723,56 @@ mod tests {
     /// The chunk follows the scratch budget: full 1024 while that fits,
     /// shrinking only when a page outgrows it. The helper itself is the
     /// budget formula, asserted here for the text shape.
+    /// The text MLP chunk path (CPU, rows above the intermediate budget)
+    /// must produce bit-identical output to the single-pass path.
+    #[test]
+    fn text_mlp_chunks_match_single_pass() {
+        let device = Device::Cpu;
+        let mut cfg = valid_tiny_config();
+        cfg.hidden_size = 256;
+        cfg.intermediate_size = 6144;
+        let mut tensors = random_var_map(&cfg, &device, DType::F32);
+        tensors.insert(
+            "gate_proj.weight".to_string(),
+            Tensor::randn(0f32, 1f32, (6144, cfg.hidden_size), &device).unwrap(),
+        );
+        tensors.insert(
+            "up_proj.weight".to_string(),
+            Tensor::randn(0f32, 1f32, (6144, cfg.hidden_size), &device).unwrap(),
+        );
+        tensors.insert(
+            "down_proj.weight".to_string(),
+            Tensor::randn(0f32, 1f32, (cfg.hidden_size, 6144), &device).unwrap(),
+        );
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
+        let mlp = Qwen3Mlp::load(&cfg, vb).unwrap();
+        // 11000 rows x 6144 x 4B = 270 MiB > 256 MiB budget (CPU F32).
+        let xs = Tensor::randn(0f32, 1f32, (1, 11000, cfg.hidden_size), &device).unwrap();
+        TEXT_MLP_CHUNK_RUNS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let chunked = mlp.forward(&xs).unwrap();
+        assert!(
+            TEXT_MLP_CHUNK_RUNS.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            "the chunk path did not execute"
+        );
+
+        // Unchunked reference: same linears, single pass.
+        let gate = mlp
+            .gate_proj
+            .forward(&xs)
+            .and_then(|gate| candle_nn::ops::silu(&gate))
+            .unwrap();
+        let up = mlp.up_proj.forward(&xs).unwrap();
+        let single = mlp
+            .down_proj
+            .forward(&(&gate * &up).unwrap())
+            .unwrap();
+        assert_eq!(
+            chunked.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            single.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            "chunked text MLP must be bit-identical"
+        );
+    }
+
     #[test]
     fn causal_chunk_size_tracks_the_scratch_budget() {
         use crate::runtime::attention::{ATTENTION_CHUNK_SCRATCH_BUDGET, attention_query_chunk};
