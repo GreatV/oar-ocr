@@ -1935,6 +1935,35 @@ mod tests {
             eprintln!("skipping: built without the cuda feature");
         }
 
+        /// F16 logits must greedy-pick on CUDA without the old unsupported-
+        /// dtype error, matching the F32 upcast reference.
+        #[test]
+        fn cuda_f16_logits_greedy_pick_matches_f32() {
+            #[cfg(feature = "cuda")]
+            {
+                if std::env::var_os("OAR_JINAOCR_GPU_SELFTEST").is_none() {
+                    eprintln!("skipping: OAR_JINAOCR_GPU_SELFTEST is not set");
+                    return;
+                }
+                let Ok(device) = candle_core::Device::new_cuda(0) else {
+                    eprintln!("skipping: no CUDA device");
+                    return;
+                };
+                let scores: Vec<f32> = (0..512).map(|i| (i % 37) as f32 / 37.0).collect();
+                let f16 = Tensor::from_vec(scores.clone(), (1, 512), &device)
+                    .unwrap()
+                    .to_dtype(DType::F16)
+                    .unwrap();
+                let f32 = Tensor::from_vec(scores, (1, 512), &device).unwrap();
+                let history = vec![0u32; 3];
+                let a = select_greedy_token(&f16, &history).unwrap();
+                let b = select_greedy_token(&f32, &history).unwrap();
+                assert_eq!(a, b, "f16 greedy pick must match the f32 reference");
+            }
+            #[cfg(not(feature = "cuda"))]
+            eprintln!("skipping: built without the cuda feature");
+        }
+
         /// GPU self-check for graph re-capture within one process, in BF16 so
         /// the graphs capture: a short prompt captures a small bucket, a
         /// longer prompt forces a re-capture, the larger graph then covers
@@ -2042,7 +2071,7 @@ mod tests {
                 };
 
                 let model = build_bf16();
-                // Small bucket first.
+                // Small bucket first, with the production lazy setting.
                 let ref_short = run(&model, &short, false);
                 assert_eq!(
                     run(&model, &short, true),
