@@ -1028,7 +1028,12 @@ impl GreedyEngine<'_> {
                     next_cooldown = cooldown,
                     "MTP fallback to plain decoding"
                 );
+                // The cooldown decodes plainly and the probe at its end
+                // rebuilds the draft state from scratch, so this round's
+                // resync would produce drafts nothing reads — skip it.
                 cooldown_remaining = cooldown;
+                drafts.clear();
+                continue;
             }
 
             // Re-sync the draft with the accepted target span.
