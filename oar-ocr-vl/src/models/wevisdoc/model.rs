@@ -416,11 +416,10 @@ impl WeVisDoc {
             .collect();
 
         self.text.clear_cache();
-        // Any single-row graph points at (1, H, C, D) storage; the batched
-        // capture below re-initializes (batch, H, C, D) storage, so drop it
-        // first, then capture the batched decode graph so the prefill writes
-        // straight into its fixed-capacity storage.
-        self.text.invalidate_ar_cuda_graph();
+        // The batched prepare reuses a compatible captured graph (same batch
+        // width, sufficient capacity) and otherwise re-captures, dropping
+        // any single-row graph that points at (1, H, C, D) storage first —
+        // so the prefill writes straight into the graph's fixed capacity.
         #[cfg(feature = "cuda")]
         {
             let pads: Vec<usize> = (0..batch_size)
