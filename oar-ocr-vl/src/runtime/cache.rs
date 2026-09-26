@@ -251,6 +251,17 @@ impl TrimmableKvCache {
         Ok(())
     }
 
+    /// Drop fixed-capacity storage entirely, restoring the organically
+    /// grown eager form. Returns the backing tensors so the caller can free
+    /// them next to a context drain; nothing is retained.
+    pub fn take_fixed_storage(&mut self) -> Option<(Tensor, Tensor)> {
+        let storage = self.storage.take()?;
+        self.kv = None;
+        self.cur_len = 0;
+        self.capacity = 0;
+        Some(storage)
+    }
+
     /// Return the fixed backing tensors used by dynamic CUDA-graph appends.
     pub fn storage(&self) -> Option<(Tensor, Tensor)> {
         self.storage.as_ref().map(|(k, v)| (k.clone(), v.clone()))

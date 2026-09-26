@@ -22,7 +22,7 @@ use crate::runtime::cuda::dynamic_kv::{DynamicBatchKvAppend, DynamicKvAppend};
 use crate::runtime::decoder_graph::{
     BatchDecodeRows, BatchDecoderCudaGraph, CudaGraphDrainGuard, CudaGraphKvLengths,
     CudaGraphPerRowU32, SingleTokenDecoderCudaGraph, cuda_graph_error, decoder_cache_capacity,
-    next_decode_bucket, prompt_decode_bucket, sync_graph_tensor,
+    drain_cuda_context_errors, next_decode_bucket, prompt_decode_bucket, sync_graph_tensor,
 };
 use crate::runtime::errors::candle_to_ocr_inference;
 use crate::runtime::tensor::rotate_half;
@@ -560,6 +560,18 @@ impl Qwen3Attention {
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "initialize dynamic KV", e))
     }
 
+    /// Free the fixed-capacity KV storage, restoring the organically
+    /// grown eager cache form. Used when a graph capture fails: the fixed
+    /// buckets were preallocated for a decode that will never run.
+    #[cfg(feature = "cuda")]
+    fn release_dynamic_cache_batch(&self) {
+        let device = self.q_proj.weight().device().clone();
+        if let Some((k, v)) = self.kv_cache.borrow_mut().take_fixed_storage() {
+            drop_and_drain(k, &device);
+            drop_and_drain(v, &device);
+        }
+    }
+
     /// Grow the fixed storage, preserving appended history. The template
     /// matches `prepare_dynamic_cache_batch`'s, so a capture at the new
     /// capacity afterwards sees the storage as already reusable instead of
@@ -982,6 +994,11 @@ impl DecoderLayer {
     }
 
     #[cfg(feature = "cuda")]
+    fn release_dynamic_cache_batch(&self) {
+        self.attention.release_dynamic_cache_batch()
+    }
+
+    #[cfg(feature = "cuda")]
     fn forward_dynamic_batch(
         &self,
         hidden_states: &Tensor,
@@ -1126,6 +1143,18 @@ impl Qwen3VlTextModel {
     #[cfg(feature = "cuda")]
     fn grow_dynamic_cache(&self, query_len: usize, cache_len: usize) -> Result<(), Error> {
         self.grow_dynamic_cache_batch(1, query_len, cache_len)
+    }
+
+    /// Free every layer's fixed-capacity KV storage after a failed graph
+    /// capture, before the eager fallback runs: the fallback exists for
+    /// low-memory situations, and the preallocated buckets would only
+    /// starve it.
+    #[cfg(feature = "cuda")]
+    fn release_dynamic_caches(&self) {
+        for layer in &self.layers {
+            layer.release_dynamic_cache_batch();
+        }
+        drain_cuda_context_errors(self.embed_tokens.embeddings().device());
     }
 
     /// Double the batched decode bucket, preserving appended history.
@@ -1343,6 +1372,7 @@ impl Qwen3VlTextModel {
                 );
                 self.invalidate_cuda_graph();
                 self.invalidate_batch_cuda_graph();
+                self.release_dynamic_caches();
             }
         }
         let _ = (prompt_len, max_new_tokens, pad_lens, lm_head, ladder);
@@ -1737,6 +1767,7 @@ impl Qwen3VlTextModel {
                 );
                 self.invalidate_cuda_graph();
                 self.invalidate_batch_cuda_graph();
+                self.release_dynamic_caches();
             }
         }
         let _ = (prompt_len, max_new_tokens, lm_head, ladder);
@@ -2402,6 +2433,21 @@ mod tests {
                 eprintln!("skipping: no CUDA device");
                 return;
             };
+            fn smi_used() -> u64 {
+                let output = std::process::Command::new("nvidia-smi")
+                    .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+                    .output();
+                match output {
+                    Ok(out) => String::from_utf8_lossy(&out.stdout)
+                        .trim()
+                        .lines()
+                        .next()
+                        .and_then(|line| line.trim().parse().ok())
+                        .unwrap_or(0),
+                    Err(_) => 0,
+                }
+            }
+
             // Environment-coupled: the self-test runner is single-threaded,
             // so the process-global mutation is contained to this test.
             // SAFETY: no other thread reads the environment concurrently.
@@ -2424,16 +2470,45 @@ mod tests {
             );
             let ids = (0..600).map(|i| 10 + i % 60).collect::<Vec<u32>>();
 
+            // Warm up and settle the baseline: the model, its weights, and
+            // whatever the allocator keeps from loading.
+            model.clear_cache();
+            let _ = model
+                .forward(
+                    &Tensor::zeros((1, 8, cfg.hidden_size), DType::BF16, &device).unwrap(),
+                    &Tensor::zeros((3, 1, 8), DType::I64, &device).unwrap(),
+                    None,
+                    None,
+                    Some(&[(0usize, 8)]),
+                )
+                .unwrap();
+            let baseline = smi_used();
+            eprintln!("DBGM1 baseline={baseline}MiB");
+
             let eager = greedy_eager(&model, &lm_head, &ids, 8);
             let graphed = greedy_graphed(&model, &lm_head, &ids, 8, false);
             assert_eq!(graphed, eager, "eager fallback must match eager output");
             assert!(!model.decode_graph_captured());
+            let after_single = smi_used();
+            eprintln!("DBGM1 after-single-fallback={after_single}MiB");
+            assert!(
+                after_single.saturating_sub(baseline) <= 16,
+                "single-row capture failure leaked {} MiB above the baseline",
+                after_single.saturating_sub(baseline)
+            );
 
             model
                 .prepare_batch_ar_cuda_graph(2, 600, 8, &[0, 10], &lm_head, true)
                 .unwrap();
             assert!(!model.batch_decode_graph_captured());
             assert!(!model.decode_graph_captured());
+            let after_batch = smi_used();
+            eprintln!("DBGM1 after-batch-fallback={after_batch}MiB");
+            assert!(
+                after_batch.saturating_sub(baseline) <= 16,
+                "batch capture failure leaked {} MiB above the baseline",
+                after_batch.saturating_sub(baseline)
+            );
 
             // SAFETY: the self-test runner is single-threaded.
             unsafe { std::env::remove_var("OAR_WEVISDOC_FAIL_CAPTURE") };
