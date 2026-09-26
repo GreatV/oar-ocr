@@ -2466,13 +2466,10 @@ mod tests {
                 cuDeviceGetDefaultMemPool, cuMemPoolTrimTo,
             };
             fn trim_pool(model: &Qwen3VlTextModel) {
-                let ordinal = model
-                    .embed_tokens
-                    .embeddings()
-                    .device()
-                    .cuda_stream()
-                    .context()
-                    .ordinal();
+                let Device::Cuda(cuda) = model.embed_tokens.embeddings().device() else {
+                    return;
+                };
+                let ordinal = cuda.cuda_stream().context().ordinal();
                 let mut pool: candle_core::cuda_backend::cudarc::driver::sys::CUmemoryPool =
                     std::ptr::null_mut();
                 unsafe {
