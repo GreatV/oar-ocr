@@ -884,6 +884,12 @@ impl GreedyEngine<'_> {
             }
             generated.push(current);
             history.push(current);
+            tracing::trace!(
+                index = generated.len() - 1,
+                token = current,
+                cooldown = cooldown_remaining > 0,
+                "MTP committed token"
+            );
             if generated.len() == max_new_tokens {
                 break;
             }
@@ -973,6 +979,12 @@ impl GreedyEngine<'_> {
                 }
                 generated.push(token);
                 history.push(token);
+                tracing::trace!(
+                    index = generated.len() - 1,
+                    token,
+                    cooldown = false,
+                    "MTP committed token"
+                );
                 if generated.len() == max_new_tokens {
                     stop = true;
                     break;
