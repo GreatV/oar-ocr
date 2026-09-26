@@ -2402,8 +2402,10 @@ mod tests {
                 eprintln!("skipping: no CUDA device");
                 return;
             };
-            // Environment-coupled: the self-test runner is single-threaded.
-            std::env::set_var("OAR_WEVISDOC_FAIL_CAPTURE", "1");
+            // Environment-coupled: the self-test runner is single-threaded,
+            // so the process-global mutation is contained to this test.
+            // SAFETY: no other thread reads the environment concurrently.
+            unsafe { std::env::set_var("OAR_WEVISDOC_FAIL_CAPTURE", "1") };
             let mut cfg = valid_tiny_config();
             cfg.hidden_size = 2048;
             cfg.intermediate_size = 6144;
@@ -2433,7 +2435,8 @@ mod tests {
             assert!(!model.batch_decode_graph_captured());
             assert!(!model.decode_graph_captured());
 
-            std::env::remove_var("OAR_WEVISDOC_FAIL_CAPTURE");
+            // SAFETY: the self-test runner is single-threaded.
+            unsafe { std::env::remove_var("OAR_WEVISDOC_FAIL_CAPTURE") };
 
             // The allocator stays healthy after the aborted captures.
             drop(model);
