@@ -1235,6 +1235,10 @@ impl Qwen3VlTextModel {
             } else {
                 decoder_cache_capacity(prompt_len, max_new_tokens, WEVISDOC_DECODE_CACHE_LEN)
             }) else {
+                // The following batch prefill reinitializes the shared KV
+                // storage, so the single-row graph must go with the batch
+                // graph — same reasoning as the single-row fallback below.
+                self.invalidate_cuda_graph();
                 self.invalidate_batch_cuda_graph();
                 return Ok(());
             };
@@ -1599,8 +1603,14 @@ impl Qwen3VlTextModel {
         if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
             || std::env::var_os("OAR_WEVISDOC_DISABLE_CUDA_GRAPH").is_some()
         {
+            // The gate removes every graph, not just this path's: a live
+            // batch graph would keep replaying against KV storage the
+            // single-row layout no longer matches.
             #[cfg(feature = "cuda")]
-            self.invalidate_cuda_graph();
+            {
+                self.invalidate_cuda_graph();
+                self.invalidate_batch_cuda_graph();
+            }
             return Ok(());
         }
         #[cfg(feature = "cuda")]
@@ -2664,6 +2674,31 @@ mod tests {
                 greedy_eager(&model, &lm_head, &long, 8),
                 greedy_graphed(&model, &lm_head, &long, 8, true),
                 "capture after the eager fallback must match eager"
+            );
+
+            // The reverse fallback: with the single-row graph alive, an
+            // over-limit batch request stays eager and its prefill
+            // reinitializes the KV storage — the fallback must drop BOTH
+            // graphs, or the next single-row replay reads freed memory.
+            model.clear_cache();
+            model.prepare_ar_cuda_graph(600, 8, &lm_head, true).unwrap();
+            assert!(model.decode_graph_captured());
+            model
+                .prepare_batch_ar_cuda_graph(2, 8300, steps, &[0, 10], &lm_head, true)
+                .unwrap();
+            assert!(
+                !model.decode_graph_captured(),
+                "over-limit batch fallback must drop the single-row graph"
+            );
+            assert!(
+                !model.batch_decode_graph_captured(),
+                "over-limit batch fallback must drop the batch graph"
+            );
+            let after = make_ids(600);
+            assert_eq!(
+                greedy_eager(&model, &lm_head, &after, 8),
+                greedy_graphed(&model, &lm_head, &after, 8, true),
+                "single-row decode after the batch eager fallback must match eager"
             );
 
             // Dropping a model with a live batch graph must dispose it
