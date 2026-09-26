@@ -910,7 +910,7 @@ fn text_position_ids(position: i64, device: &Device) -> Result<Tensor, Error> {
 /// Exactness thresholds keep dot leaders, bullet markers, and short
 /// repeated markup from tripping the detector.
 fn trailing_decode_loop(tokens: &[u32]) -> Option<(usize, usize)> {
-    const MAX_PERIOD: usize = 64;
+    const MAX_PERIOD: usize = 128;
     const MIN_TAIL: usize = 64;
     const MIN_REPEATS: usize = 4;
     const MIN_NEAR_PERIOD: usize = 8;
@@ -1141,6 +1141,19 @@ mod tests {
             two.extend_from_slice(&[1, 2, 3, year, 5, 6, 7, 8, year + 1, 10, 11, 12, 13]);
         }
         assert!(trailing_decode_loop(&two).is_some());
+
+        // A long sentence-level exact cycle (the newspaper-page runaway:
+        // ~68 tokens per cycle) is past the old 64-period horizon.
+        let sentence: Vec<u32> = (200..268).collect();
+        let mut long_loop = Vec::new();
+        for _ in 0..5 {
+            long_loop.extend_from_slice(&sentence);
+        }
+        let (period, repeats) =
+            trailing_decode_loop(&long_loop).expect("long sentence cycle detected");
+        assert!(period >= 68);
+        let keep = long_loop.len() - (repeats - 1) * period;
+        assert_eq!(&long_loop[..keep], &sentence);
 
         // Widely varying units are not a near-cycle: real prose survives.
         let mut state = 987_654_321u64;
