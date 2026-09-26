@@ -2277,6 +2277,145 @@ mod tests {
             eprintln!("skipping: built without the cuda feature");
         }
 
+        /// Real-checkpoint version of the graph/eager numerics check, at the
+        /// model's real scale (MoE routing, head dim, vocab). Gated on
+        /// `OAR_JINAOCR_GPU_SELFTEST_MODEL=<model dir>` in addition to
+        /// `OAR_JINAOCR_GPU_SELFTEST=1`; prints max |Δlogit|/|Δhidden| and the
+        /// top-2 margins of one cooldown-style decode step on identical KV
+        /// state, once right after prefill and once 64 tokens into decoding.
+        #[test]
+        fn cuda_real_checkpoint_decode_graph_vs_eager() {
+            #[cfg(feature = "cuda")]
+            {
+                let Some(device) = cuda_selftest_device() else {
+                    return;
+                };
+                let Ok(dir) = std::env::var("OAR_JINAOCR_GPU_SELFTEST_MODEL") else {
+                    eprintln!("skipping: OAR_JINAOCR_GPU_SELFTEST_MODEL is not set");
+                    return;
+                };
+                let _cuda_lock = CUDA_GRAPH_TEST_LOCK.lock().unwrap();
+                let model = JinaOcr::from_dir_with_options(
+                    &dir,
+                    crate::RuntimeConfig::new(device),
+                    JinaOcrLoadOptions::default().with_mtp(true),
+                )
+                .unwrap();
+                if !matches!(model.dtype, DType::BF16 | DType::F16) {
+                    eprintln!("skipping: real-checkpoint check needs bf16/f16");
+                    return;
+                }
+                let image = RgbImage::from_pixel(64, 64, image::Rgb([255u8; 3]));
+                let max_new_tokens = 512;
+                let prompt = model.prepare_prompt(&image, max_new_tokens).unwrap();
+                let prompt_len = prompt.input_ids.len();
+                let engine = model.engine();
+                let host_f32 = |t: &Tensor| {
+                    t.to_dtype(DType::F32)
+                        .unwrap()
+                        .flatten_all()
+                        .unwrap()
+                        .to_vec1::<f32>()
+                        .unwrap()
+                };
+                let max_diff = |a: &[f32], b: &[f32]| {
+                    a.iter()
+                        .zip(b)
+                        .map(|(x, y)| (x - y).abs())
+                        .fold(0.0f32, f32::max)
+                };
+                let decode_step = |token: u32, committed: usize| {
+                    let t = Tensor::from_vec(vec![token], (1, 1), &model.device).unwrap();
+                    let embeds = model.text.embed(&t).unwrap();
+                    let position = (prompt_len + committed) as u32;
+                    let pos = Tensor::arange(position, position + 1, &model.device)
+                        .unwrap()
+                        .reshape((1, 1, 1))
+                        .unwrap();
+                    model
+                        .text
+                        .forward_decode_logits_and_hidden(&embeds, &pos, &model.lm_head)
+                        .unwrap()
+                };
+
+                // Prefill and pick the first token eagerly (no graphs yet).
+                model.text.clear_kv_cache();
+                let hidden = model
+                    .text
+                    .forward(&prompt.inputs_embeds, &prompt.position_ids, None)
+                    .unwrap();
+                let last = hidden.i((0, prompt_len - 1, ..)).unwrap();
+                let logits = model
+                    .lm_head
+                    .forward(&last.unsqueeze(0).unwrap())
+                    .and_then(|l| l.squeeze(0))
+                    .unwrap();
+                let mut history = prompt.input_ids.clone();
+                let mut current = select_greedy_token(&logits, &history).unwrap();
+                let mut committed = 0usize;
+
+                for stage in [0usize, 64] {
+                    // Advance eagerly to this stage's committed length.
+                    while committed < stage {
+                        let (logits, _) = decode_step(current, committed);
+                        history.push(current);
+                        committed += 1;
+                        current = select_greedy_token(&logits, &history).unwrap();
+                    }
+                    // Identical KV state for both paths: snapshot, run the
+                    // probe capture flow (snapshots/restores internally), then
+                    // decode the same token graphed and eagerly.
+                    let saved = model.text.save_kv_cache().unwrap();
+                    engine
+                        .prepare_speculation_graphs(prompt_len, max_new_tokens, stage, true)
+                        .unwrap();
+                    let (logits_g, hidden_g) = decode_step(current, committed);
+                    let (logits_g, hidden_g) = (host_f32(&logits_g), host_f32(&hidden_g));
+                    model.text.restore_kv_cache(&saved).unwrap();
+                    model.text.invalidate_ar_cuda_graph();
+                    let (logits_e, hidden_e) = decode_step(current, committed);
+                    let (logits_e, hidden_e) = (host_f32(&logits_e), host_f32(&hidden_e));
+
+                    let dg = max_diff(&logits_g, &logits_e);
+                    let dh = max_diff(&hidden_g, &hidden_e);
+                    let top_g = top3(&logits_g);
+                    let top_e = top3(&logits_e);
+                    eprintln!(
+                        "real-checkpoint decode at kv={}: max |Δlogit| = {dg:.6}, max |Δhidden| = {dh:.6}, bitwise logits = {}",
+                        prompt_len + committed,
+                        logits_g == logits_e,
+                    );
+                    eprintln!(
+                        "top-2: graph ({}, {:.4}, margin {:.6}) eager ({}, {:.4}, margin {:.6})",
+                        top_g[0].0,
+                        top_g[0].1,
+                        top_g[0].1 - top_g[1].1,
+                        top_e[0].0,
+                        top_e[0].1,
+                        top_e[0].1 - top_e[1].1,
+                    );
+                    assert_eq!(
+                        top_g[0].0,
+                        top_e[0].0,
+                        "greedy picks diverged at kv={}",
+                        prompt_len + committed
+                    );
+                    assert!(
+                        dg <= 1.0,
+                        "kernel noise cannot explain a {dg} logit gap — suspect KV state corruption"
+                    );
+                    // Commit the eager step's pick and continue eagerly.
+                    history.push(current);
+                    committed += 1;
+                    let mut scores = logits_e.clone();
+                    apply_no_repeat_ngram(&history, &mut scores);
+                    current = argmax(&scores).unwrap();
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            eprintln!("skipping: built without the cuda feature");
+        }
+
         /// GPU self-check for graph re-capture within one process, in BF16 so
         /// the graphs capture: a short prompt captures a small bucket, a
         /// longer prompt forces a re-capture, the larger graph then covers
