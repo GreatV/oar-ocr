@@ -251,6 +251,17 @@ impl TrimmableKvCache {
         Ok(())
     }
 
+    /// Layout of the fixed-capacity storage: `(batch, capacity)`, present
+    /// only while fixed storage exists. Callers compare it against the
+    /// incoming request: graphs can disappear while their fixed KV survives
+    /// (the bucket-ceiling eager fallback), so the storage — not the graph —
+    /// is what decides reuse.
+    pub fn fixed_storage_layout(&self) -> Option<(usize, usize)> {
+        self.storage
+            .as_ref()
+            .map(|(storage_k, _)| (storage_k.dim(0).unwrap_or(0), self.capacity))
+    }
+
     /// Drop fixed-capacity storage entirely, restoring the organically
     /// grown eager form. Returns the backing tensors so the caller can free
     /// them next to a context drain; nothing is retained.

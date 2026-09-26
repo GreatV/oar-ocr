@@ -561,6 +561,13 @@ impl Qwen3Attention {
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "initialize dynamic KV", e))
     }
 
+    /// Layout of this layer's fixed KV storage: `(batch, capacity)`, or
+    /// `None` while the cache is on the organically grown eager form.
+    #[cfg(feature = "cuda")]
+    fn fixed_storage_layout(&self) -> Option<(usize, usize)> {
+        self.kv_cache.borrow().fixed_storage_layout()
+    }
+
     /// Free the fixed-capacity KV storage, restoring the organically
     /// grown eager cache form. Used when a graph capture fails: the fixed
     /// buckets were preallocated for a decode that will never run.
@@ -1010,6 +1017,11 @@ impl DecoderLayer {
     }
 
     #[cfg(feature = "cuda")]
+    fn fixed_storage_layout(&self) -> Option<(usize, usize)> {
+        self.attention.fixed_storage_layout()
+    }
+
+    #[cfg(feature = "cuda")]
     fn forward_dynamic_batch(
         &self,
         hidden_states: &Tensor,
@@ -1171,14 +1183,40 @@ impl Qwen3VlTextModel {
             // memory assertions can prove they catch a missing release.
             return;
         }
-        let incompatible = match request_batch {
-            None => self.batch_decode_graph.borrow().is_some(),
-            Some(width) => match self.batch_decode_graph.borrow().as_ref() {
-                Some(graph) => graph.batch != width,
-                None => self.decode_graph.borrow().is_some(),
-            },
+        // The storage layout is authoritative: graphs can disappear while
+        // their fixed KV survives (the bucket-ceiling eager fallback), so
+        // storage without a matching graph is released unconditionally.
+        let Some((storage_batch, storage_cap)) = self
+            .layers
+            .first()
+            .and_then(|layer| layer.fixed_storage_layout())
+        else {
+            return;
         };
-        if incompatible {
+        let compatible = match request_batch {
+            // Single-page request: only single-row storage backed by a
+            // live single-row graph is reusable.
+            None => {
+                storage_batch == 1
+                    && self.decode_graph.borrow().is_some()
+                    && self
+                        .decode_graph
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|graph| graph.cache_len == storage_cap)
+            }
+            // Batch request: only same-width storage backed by a live
+            // batch graph of the same width and capacity is reusable.
+            Some(width) => {
+                storage_batch == width
+                    && self
+                        .batch_decode_graph
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|graph| graph.batch == width && graph.cache_len == storage_cap)
+            }
+        };
+        if !compatible {
             self.recover_failed_capture();
         }
     }
@@ -2806,6 +2844,133 @@ mod tests {
             assert!(settled.saturating_sub(baseline) <= 64);
 
             // Decoding still matches eager after all of this.
+            let eager = greedy_eager(&model, &lm_head, &ids, 8);
+            let graphed = greedy_graphed(&model, &lm_head, &ids, 8, true);
+            assert_eq!(graphed, eager, "decode must match eager afterwards");
+        }
+        #[cfg(not(feature = "cuda"))]
+        eprintln!("skipping: built without the cuda feature");
+    }
+
+    /// The bucket-ceiling eager fallback invalidates both graphs while
+    /// deliberately keeping the fixed KV storage for the ongoing eager
+    /// decode. The orphaned storage — several GiB with no graph left —
+    /// must be released at the next request's entry, in both directions,
+    /// and compatible graph-backed storage must still survive.
+    #[test]
+    fn cuda_ceiling_fallback_leftovers_are_released_at_entry() {
+        #[cfg(feature = "cuda")]
+        {
+            if std::env::var_os("OAR_WEVISDOC_GPU_SELFTEST").is_none() {
+                eprintln!("skipping: OAR_WEVISDOC_GPU_SELFTEST is not set");
+                return;
+            }
+            let Ok(device) = Device::new_cuda(0) else {
+                eprintln!("skipping: no CUDA device");
+                return;
+            };
+            let mut cfg = valid_tiny_config();
+            cfg.hidden_size = 2048;
+            cfg.intermediate_size = 6144;
+            cfg.num_attention_heads = 16;
+            cfg.num_key_value_heads = 8;
+            cfg.head_dim = 128;
+            cfg.num_hidden_layers = 28;
+            cfg.vocab_size = 32768;
+            let tensors = random_var_map(&cfg, &device, DType::BF16);
+            let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
+            let model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
+            let lm_head = Linear::new(
+                vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
+                    .unwrap(),
+                None,
+            );
+            let ids = (0..600).map(|i| 10 + i % 60).collect::<Vec<u32>>();
+
+            model.clear_cache();
+            let _ = model
+                .forward(
+                    &Tensor::zeros((1, 8, cfg.hidden_size), DType::BF16, &device).unwrap(),
+                    &Tensor::zeros((3, 1, 8), DType::I64, &device).unwrap(),
+                    None,
+                    None,
+                    Some(&[(0usize, 8)]),
+                )
+                .unwrap();
+            let baseline = measured(&model);
+            eprintln!("DBGM5 baseline={baseline}MiB");
+            assert!(baseline > 0, "nvidia-smi unavailable; cannot measure");
+
+            // Single-row graph captured, then the ceiling fallback state:
+            // both graphs invalidated, the fixed storage deliberately kept
+            // for the ongoing eager decode.
+            model
+                .prepare_ar_cuda_graph(600, 8192, &lm_head, false)
+                .unwrap();
+            assert!(model.decode_graph_captured());
+            model.invalidate_cuda_graph();
+            model.invalidate_batch_cuda_graph();
+            let orphaned = measured(&model);
+            eprintln!("DBGM5 single orphaned={orphaned}MiB");
+            assert!(
+                orphaned.saturating_sub(baseline) >= 300,
+                "the orphaned single-row storage was not resident"
+            );
+
+            // A batch request arrives: its entry releases the orphan.
+            model.release_incompatible_fixed_storage(Some(2));
+            let released = measured(&model);
+            eprintln!("DBGM5 single orphan released={released}MiB");
+            assert!(released.saturating_sub(baseline) <= 64);
+            assert!(!model.decode_graph_captured());
+            assert!(!model.batch_decode_graph_captured());
+
+            // Reverse direction: batch graph, ceiling fallback, then a
+            // single-page request.
+            model
+                .prepare_batch_ar_cuda_graph(2, 600, 8192, &[0, 10], &lm_head, false)
+                .unwrap();
+            assert!(model.batch_decode_graph_captured());
+            model.invalidate_cuda_graph();
+            model.invalidate_batch_cuda_graph();
+            let orphaned = measured(&model);
+            eprintln!("DBGM5 batch orphaned={orphaned}MiB");
+            assert!(
+                orphaned.saturating_sub(baseline) >= 300,
+                "the orphaned batch storage was not resident"
+            );
+
+            // Control: with the entry release skipped, the orphan stays.
+            unsafe { std::env::set_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE", "1") };
+            model.release_incompatible_fixed_storage(None);
+            let skipped = measured(&model);
+            eprintln!("DBGM5 control (release skipped)={skipped}MiB");
+            assert!(
+                skipped.saturating_sub(baseline) >= 300,
+                "the memory assertion failed to catch a missing release"
+            );
+            unsafe { std::env::remove_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE") };
+            model.release_incompatible_fixed_storage(None);
+            let released = measured(&model);
+            eprintln!("DBGM5 batch orphan released={released}MiB");
+            assert!(released.saturating_sub(baseline) <= 64);
+
+            // Compatible graph-backed storage still survives its entry.
+            model
+                .prepare_ar_cuda_graph(600, 8192, &lm_head, false)
+                .unwrap();
+            assert!(model.decode_graph_captured());
+            model.release_incompatible_fixed_storage(None);
+            assert!(
+                model.decode_graph_captured(),
+                "compatible single-row storage must not be released"
+            );
+            model.release_incompatible_fixed_storage(Some(2));
+            // (batch width mismatch IS released — only single survives)
+            assert!(!model.batch_decode_graph_captured());
+            assert!(model.decode_graph_captured());
+
+            // Decode still matches eager after everything.
             let eager = greedy_eager(&model, &lm_head, &ids, 8);
             let graphed = greedy_graphed(&model, &lm_head, &ids, 8, true);
             assert_eq!(graphed, eager, "decode must match eager afterwards");
