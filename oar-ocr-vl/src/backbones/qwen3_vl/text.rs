@@ -559,32 +559,6 @@ impl Qwen3Attention {
         self.prepare_dynamic_cache_batch(1, query_len, self.num_kv_heads, self.head_dim, cache_len)
     }
 
-    /// Double the single-row decode bucket, preserving appended history.
-    #[cfg(feature = "cuda")]
-    fn grow_dynamic_cache(&self, query_len: usize, cache_len: usize) -> Result<(), Error> {
-        self.grow_dynamic_cache_batch(1, query_len, cache_len)
-    }
-
-    /// Double the batched decode bucket, preserving appended history.
-    #[cfg(feature = "cuda")]
-    fn grow_dynamic_cache_batch(
-        &self,
-        batch: usize,
-        query_len: usize,
-        cache_len: usize,
-    ) -> Result<(), Error> {
-        for layer in &self.layers {
-            layer.grow_dynamic_cache_batch(
-                batch,
-                query_len,
-                self.num_kv_heads,
-                self.head_dim,
-                cache_len,
-            )?;
-        }
-        Ok(())
-    }
-
     #[cfg(feature = "cuda")]
     fn prepare_dynamic_cache_batch(
         &self,
@@ -1077,6 +1051,36 @@ pub(crate) struct Qwen3VlTextModel {
 }
 
 impl Qwen3VlTextModel {
+    /// Double the single-row decode bucket, preserving appended history.
+    #[cfg(feature = "cuda")]
+    fn grow_dynamic_cache(&self, query_len: usize, cache_len: usize) -> Result<(), Error> {
+        self.grow_dynamic_cache_batch(1, query_len, cache_len)
+    }
+
+    /// Double the batched decode bucket, preserving appended history.
+    #[cfg(feature = "cuda")]
+    fn grow_dynamic_cache_batch(
+        &self,
+        batch: usize,
+        query_len: usize,
+        cache_len: usize,
+    ) -> Result<(), Error> {
+        let kv_heads = self
+            .layers
+            .first()
+            .map(|layer| layer.attention_num_kv_heads())
+            .unwrap_or(1);
+        let head_dim = self
+            .layers
+            .first()
+            .map(|layer| layer.attention_head_dim())
+            .unwrap_or(1);
+        for layer in &self.layers {
+            layer.grow_dynamic_cache_batch(batch, query_len, kv_heads, head_dim, cache_len)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn load(cfg: &Qwen3VlTextConfig, vb: VarBuilder) -> Result<Self, Error> {
         let embed_tokens = embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("embed_tokens"))
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load token embeddings", e))?;
