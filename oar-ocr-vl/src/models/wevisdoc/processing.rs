@@ -82,7 +82,7 @@ pub fn preprocess_image(
     // the processor's factor check passes instead of failing the page.
     let min_edge = (cfg.merge_size * cfg.patch_size) as u32;
     let image = upscale_min_edge(image, min_edge, SMART_RESIZE_MAX_RATIO);
-    let inputs = preprocess_images(std::slice::from_ref(&image), cfg, device, dtype)?;
+    let inputs = preprocess_images(std::slice::from_ref(&image), cfg, device, dtype, "WeVisDoc")?;
     let grid_thw = *inputs
         .image_grid_thw
         .first()

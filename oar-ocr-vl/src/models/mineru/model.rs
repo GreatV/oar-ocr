@@ -357,7 +357,13 @@ impl MinerU {
     ) -> Result<Vec<Vec<u32>>, Error> {
         let batch_size = images.len();
 
-        let image_inputs = preprocess_images(images, &self.image_cfg, &self.device, self.dtype)?;
+        let image_inputs = preprocess_images(
+            images,
+            &self.image_cfg,
+            &self.device,
+            self.dtype,
+            "MinerU2.5",
+        )?;
         let image_token_counts: Vec<usize> = image_inputs
             .image_grid_thw
             .iter()

@@ -256,6 +256,7 @@ impl MinerUDiffusion {
             &self.image_cfg,
             &self.device,
             self.dtype,
+            "MinerU-Diffusion",
         )?;
         let patches = self
             .vision
