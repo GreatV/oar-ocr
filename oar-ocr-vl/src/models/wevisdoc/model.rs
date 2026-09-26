@@ -179,16 +179,38 @@ impl WeVisDoc {
         images: &[RgbImage],
         max_new_tokens: usize,
     ) -> crate::error::BatchResult<Vec<u32>> {
+        self.generate_tokens_impl(images, max_new_tokens, false)
+    }
+
+    /// Region-recognition entry: identical to [`Self::generate_tokens`]
+    /// except the degenerate-loop guard is active. Only region crops run
+    /// with the guard — full-page parsing must reproduce the reference
+    /// decoding, where legitimate repeated structures (empty table rows,
+    /// dot leaders, repeated headers) would risk being cut.
+    pub(crate) fn generate_tokens_with_loop_guard(
+        &self,
+        images: &[RgbImage],
+        max_new_tokens: usize,
+    ) -> crate::error::BatchResult<Vec<u32>> {
+        self.generate_tokens_impl(images, max_new_tokens, true)
+    }
+
+    fn generate_tokens_impl(
+        &self,
+        images: &[RgbImage],
+        max_new_tokens: usize,
+        loop_guard: bool,
+    ) -> crate::error::BatchResult<Vec<u32>> {
         if images.len() <= 1 {
             return Ok(images
                 .iter()
                 .map(|image| {
-                    self.generate_one(image, max_new_tokens)
+                    self.generate_one(image, max_new_tokens, loop_guard)
                         .map(|(tokens, _)| tokens)
                 })
                 .collect());
         }
-        self.generate_batch_tokens(images, max_new_tokens)
+        self.generate_batch_tokens(images, max_new_tokens, loop_guard)
             .map(|results| results.into_iter().map(Ok).collect())
     }
 
@@ -199,6 +221,7 @@ impl WeVisDoc {
         &self,
         image: &RgbImage,
         max_new_tokens: usize,
+        loop_guard: bool,
     ) -> Result<(Vec<u32>, bool), Error> {
         self.text.clear_cache();
         let _cache_guard = TextCacheGuard(&self.text);
@@ -262,8 +285,9 @@ impl WeVisDoc {
             generated.push(token);
             // A greedy loop never reaches EOS; cutting the repeated cycles
             // (one is kept) both bounds the output and saves the rest of
-            // the token budget.
-            if let Some((period, repeats)) = trailing_decode_loop(&generated) {
+            // the token budget. Region crops only — see
+            // `generate_tokens_with_loop_guard`.
+            if loop_guard && let Some((period, repeats)) = trailing_decode_loop(&generated) {
                 generated.truncate(generated.len() - (repeats - 1) * period);
                 return Ok((generated, false));
             }
@@ -300,6 +324,7 @@ impl WeVisDoc {
         &self,
         images: &[RgbImage],
         max_new_tokens: usize,
+        loop_guard: bool,
     ) -> Result<Vec<Vec<u32>>, Error> {
         let batch_size = images.len();
         let context_limit = self.cfg.text_config.max_position_embeddings;
@@ -499,8 +524,11 @@ impl WeVisDoc {
                     generated[row].push(token);
                     // Same loop guard as single-row generation: cut the
                     // repeated cycles (one is kept) and retire the row so
-                    // the batch stops paying for its decode.
-                    if let Some((period, repeats)) = trailing_decode_loop(&generated[row]) {
+                    // the batch stops paying for its decode. Region crops
+                    // only — see `generate_tokens_with_loop_guard`.
+                    if loop_guard
+                        && let Some((period, repeats)) = trailing_decode_loop(&generated[row])
+                    {
                         let keep = generated[row].len() - (repeats - 1) * period;
                         generated[row].truncate(keep);
                         finished[row] = true;
@@ -899,21 +927,26 @@ fn text_position_ids(position: i64, device: &Device) -> Result<Tensor, Error> {
 /// loop instead of real content. Two loop shapes are recognized:
 ///
 /// * exact cycles — every repeated unit identical — which cover collapsed
-///   single-token runs and repeated sentences; they need `MIN_REPEATS`
-///   repetitions spanning at least `MIN_TAIL` tokens;
+///   single-token runs and repeated sentences; they need at least
+///   `MIN_REPEATS` repetitions and `EXACT_TAIL_UNITS × period` tokens of
+///   looping tail;
 /// * near-cycles — units differing in at most two token slots, the same
 ///   slots every time — which cover counter loops like an incrementing
 ///   year. These need a period of at least `MIN_NEAR_PERIOD` (short
-///   periods are where legitimate enumeration markup lives) and more
-///   repetitions than the exact rule.
+///   periods are where legitimate enumeration markup lives) and a longer
+///   looping tail than the exact rule.
 ///
-/// Exactness thresholds keep dot leaders, bullet markers, and short
-/// repeated markup from tripping the detector.
+/// The repetition floors sit well above what legitimate content repeats:
+/// empty table rows, dot leaders, and repeated headers stay in the single
+/// digits of cycles, while the observed decode loops run tens of cycles.
 fn trailing_decode_loop(tokens: &[u32]) -> Option<(usize, usize)> {
     const MAX_PERIOD: usize = 128;
     const MIN_TAIL: usize = 64;
-    const MIN_REPEATS: usize = 4;
+    const MIN_REPEATS: usize = 8;
+    const EXACT_TAIL_UNITS: usize = 96;
     const MIN_NEAR_PERIOD: usize = 8;
+    const MIN_NEAR_REPEATS: usize = 8;
+    const NEAR_TAIL_UNITS: usize = 128;
     const MAX_NEAR_DIFF: usize = 2;
     let len = tokens.len();
     if len < MIN_TAIL {
@@ -959,9 +992,9 @@ fn trailing_decode_loop(tokens: &[u32]) -> Option<(usize, usize)> {
             repeats += 1;
         }
         let needed = if near {
-            (MIN_TAIL * 3 / 2).div_ceil(period).max(MIN_REPEATS + 2)
+            NEAR_TAIL_UNITS.div_ceil(period).max(MIN_NEAR_REPEATS)
         } else {
-            MIN_TAIL.div_ceil(period).max(MIN_REPEATS)
+            EXACT_TAIL_UNITS.div_ceil(period).max(MIN_REPEATS)
         };
         if repeats >= needed {
             return Some((period, repeats));
@@ -1085,40 +1118,76 @@ mod tests {
     }
 
     #[test]
+    fn legitimate_repeated_structures_do_not_trip_the_guard() {
+        // Empty table rows (a spacer table in a region crop): a handful of
+        // identical rows is normal content, not a decode loop.
+        let row = [11u32, 12, 13, 14, 15, 16];
+        let mut table = vec![10u32];
+        for _ in 0..6 {
+            table.extend_from_slice(&row);
+        }
+        table.extend_from_slice(&[17, 18]);
+        assert_eq!(trailing_decode_loop(&table), None);
+
+        // Dot leaders: 「标题……40」 — the run closes with a page number.
+        let mut toc = vec![20u32, 21, 22];
+        for _ in 0..40 {
+            toc.extend_from_slice(&[23, 24]);
+        }
+        toc.extend_from_slice(&[25, 26]);
+        assert_eq!(trailing_decode_loop(&toc), None);
+
+        // A bare single-token dot run just under the exact floor.
+        let dots = vec![7u32; 90];
+        assert_eq!(trailing_decode_loop(&dots), None);
+    }
+
+    #[test]
     fn degenerate_cycles_are_detected_with_the_longest_period() {
         // Single-token loop (the 3993x "。" failure mode). A constant run
         // is periodic under every divisor, so the reported period varies —
         // what matters is that it trips and the trim keeps one cycle.
-        let run = vec![5u32; 70];
+        let run = vec![5u32; 200];
         let (period, repeats) = trailing_decode_loop(&run).expect("constant run is a loop");
         let keep = run.len() - (repeats - 1) * period;
         assert!(keep >= period && keep < run.len());
         assert!(run[..keep].iter().all(|&t| t == 5));
 
-        // A 20-token sentence repeated 5 times: period 20 wins over its
+        // A 20-token sentence repeated 12 times: period 20 wins over its
         // divisors, one full cycle stays after the trim.
         let sentence: Vec<u32> = (100..120).collect();
         let mut looped = Vec::new();
-        for _ in 0..5 {
+        for _ in 0..12 {
             looped.extend_from_slice(&sentence);
         }
-        assert_eq!(trailing_decode_loop(&looped), Some((20, 5)));
-        let (period, repeats) = trailing_decode_loop(&looped).unwrap();
-        let trimmed = looped.len() - (repeats - 1) * period;
+        assert_eq!(trailing_decode_loop(&looped), Some((20, 12)));
+        let trimmed = looped.len() - 11 * 20;
         assert_eq!(&looped[..trimmed], &sentence);
 
-        // Alternating pair sustained past the tail bound.
-        let alternating: Vec<u32> = (0..80).map(|i| if i % 2 == 0 { 3 } else { 4 }).collect();
+        // A long sentence-level exact cycle (the newspaper-page runaway:
+        // ~68 tokens per cycle) repeated 9 times.
+        let long_sentence: Vec<u32> = (200..268).collect();
+        let mut long_loop = Vec::new();
+        for _ in 0..9 {
+            long_loop.extend_from_slice(&long_sentence);
+        }
         let (period, repeats) =
-            trailing_decode_loop(&alternating).expect("alternating run is a loop");
-        let keep = alternating.len() - (repeats - 1) * period;
-        assert!(keep >= period && keep < alternating.len());
-        assert!(
-            alternating[..keep]
-                .iter()
-                .zip(alternating[keep - period..keep].iter().cycle())
-                .all(|(&a, &b)| a == b)
-        );
+            trailing_decode_loop(&long_loop).expect("long sentence cycle detected");
+        assert!(period >= 68);
+        let keep = long_loop.len() - (repeats - 1) * period;
+        assert_eq!(&long_loop[..keep], &long_sentence);
+
+        // Widely varying units are not a near-cycle: real prose survives.
+        let mut state = 987_654_321u64;
+        let prose: Vec<u32> = (0..300)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (state >> 33) as u32
+            })
+            .collect();
+        assert_eq!(trailing_decode_loop(&prose), None);
     }
 
     #[test]
@@ -1141,19 +1210,6 @@ mod tests {
             two.extend_from_slice(&[1, 2, 3, year, 5, 6, 7, 8, year + 1, 10, 11, 12, 13]);
         }
         assert!(trailing_decode_loop(&two).is_some());
-
-        // A long sentence-level exact cycle (the newspaper-page runaway:
-        // ~68 tokens per cycle) is past the old 64-period horizon.
-        let sentence: Vec<u32> = (200..268).collect();
-        let mut long_loop = Vec::new();
-        for _ in 0..5 {
-            long_loop.extend_from_slice(&sentence);
-        }
-        let (period, repeats) =
-            trailing_decode_loop(&long_loop).expect("long sentence cycle detected");
-        assert!(period >= 68);
-        let keep = long_loop.len() - (repeats - 1) * period;
-        assert_eq!(&long_loop[..keep], &sentence);
 
         // Widely varying units are not a near-cycle: real prose survives.
         let mut state = 987_654_321u64;
