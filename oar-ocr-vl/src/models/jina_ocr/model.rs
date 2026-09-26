@@ -10,9 +10,8 @@
 //! plain-greedy sequence (the n-gram ban is applied to the verification
 //! logits host-side, so speculation cannot change the official recipe), but
 //! speculation is OPT-IN: on the OmniDocBench demo pages (RTX 4090, bf16)
-//! adaptive MTP lost to graphed plain decoding on 17 of 18 pages (1.3%-7.5%
-//! slower; the one winning page gained 5%), so the draft head is only loaded
-//! on request — see [`JinaOcrLoadOptions::with_mtp`] and
+//! adaptive MTP won on no page (median 3.7% slower than graphed plain
+//! decoding, +0.7% in total), so the draft head is only loaded on request — see [`JinaOcrLoadOptions::with_mtp`] and
 //! `OAR_JINAOCR_ENABLE_MTP`.
 //!
 //! Token-identity caveat: in exact arithmetic greedy verification emits the
@@ -176,8 +175,8 @@ impl JinaOcr {
             .get(cfg.text.hidden_size, "view_seperator")
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load view_seperator", e))?;
         // The FastMTP draft head is opt-in: on the OmniDocBench demo pages
-        // (RTX 4090, bf16) adaptive MTP lost to graphed plain decoding on 17
-        // of 18 pages, so it loads only when explicitly requested.
+        // (RTX 4090, bf16) adaptive MTP won on no page against graphed plain
+        // decoding, so it loads only when explicitly requested.
         let mtp = if mtp_load_decision(
             cfg.num_nextn_predict_layers.unwrap_or(0) >= 1,
             options.mtp,
@@ -473,7 +472,7 @@ impl JinaOcr {
     /// FastMTP speculation runs only where the draft head was loaded — an
     /// explicit opt-in via [`JinaOcrLoadOptions::with_mtp`] or
     /// `OAR_JINAOCR_ENABLE_MTP`, because graphed plain decoding beat adaptive
-    /// MTP on 17 of 18 OmniDocBench demo pages (RTX 4090, bf16). Greedy
+    /// MTP on every OmniDocBench demo page (RTX 4090, bf16). Greedy
     /// verification keeps the output token-identical to plain autoregressive
     /// decoding in exact arithmetic (near-tie picks can flip on bf16 kernel
     /// noise — see the module documentation).
@@ -1624,6 +1623,7 @@ mod tests {
                 use_mla: false,
                 tie_word_embeddings: false,
                 attention_bias: false,
+                hidden_act: "silu".to_string(),
                 mlp_bias: false,
                 q_lora_rank: None,
                 kv_lora_rank: None,

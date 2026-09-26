@@ -26,6 +26,11 @@ pub struct JinaOcrConfig {
     /// instead of silently reordering positions.
     #[serde(default)]
     pub global_view_pos: Option<String>,
+    /// The processor emits 2D view separators; accept only that protocol so a
+    /// checkpoint with a different tiling scheme fails loudly instead of
+    /// mis-ordering views.
+    #[serde(default)]
+    pub tile_tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -143,11 +148,28 @@ impl JinaOcrConfig {
                 ),
             });
         }
+        if let Some(tile_tag) = &self.tile_tag
+            && tile_tag != "2D"
+        {
+            return Err(Error::Config {
+                message: format!(
+                    "JinaOCR expects tile_tag '2D' (the view-separator protocol), got '{tile_tag}'"
+                ),
+            });
+        }
         if self.model_type != "deepseek_vl_v2" {
             return Err(Error::Config {
                 message: format!(
                     "JinaOCR expected model_type 'deepseek_vl_v2', got '{}'",
                     self.model_type
+                ),
+            });
+        }
+        if self.vision_config.model_type != "vision" {
+            return Err(Error::Config {
+                message: format!(
+                    "JinaOCR expected vision_config model_type 'vision', got '{}'",
+                    self.vision_config.model_type
                 ),
             });
         }
@@ -425,6 +447,58 @@ mod tests {
             let err = cfg.validate().unwrap_err().to_string();
             assert!(err.contains("MLA"), "unexpected error: {err}");
         }
+    }
+
+    #[test]
+    fn rejects_non_silu_tied_embeddings_and_bad_eps() {
+        let mut cfg: JinaOcrConfig = serde_json::from_str(CONFIG).unwrap();
+        cfg.text.hidden_act = "gelu".to_string();
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("hidden_act")
+        );
+
+        let mut cfg: JinaOcrConfig = serde_json::from_str(CONFIG).unwrap();
+        cfg.text.tie_word_embeddings = true;
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("tie_word_embeddings")
+        );
+
+        for bad in [0.0, -1e-6, f64::NAN, f64::INFINITY] {
+            let mut cfg: JinaOcrConfig = serde_json::from_str(CONFIG).unwrap();
+            cfg.text.rms_norm_eps = bad;
+            assert!(
+                cfg.validate().is_err(),
+                "rms_norm_eps {bad} must be rejected"
+            );
+        }
+
+        let mut cfg: JinaOcrConfig = serde_json::from_str(CONFIG).unwrap();
+        cfg.tile_tag = Some("1D".to_string());
+        assert!(cfg.validate().unwrap_err().to_string().contains("tile_tag"));
+
+        let mut cfg: JinaOcrConfig = serde_json::from_str(CONFIG).unwrap();
+        cfg.text.moe_intermediate_size = 0;
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("moe_intermediate_size")
+        );
+
+        let mut cfg: JinaOcrConfig = serde_json::from_str(CONFIG).unwrap();
+        cfg.vision_config.model_type = "vit".to_string();
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("vision_config")
+        );
     }
 
     #[test]

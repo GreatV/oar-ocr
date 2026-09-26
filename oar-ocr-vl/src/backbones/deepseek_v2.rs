@@ -52,8 +52,12 @@ const FUSED_MOE_MAX_PAIRS: usize = 4096;
 const DECODE_CACHE_LEN: usize = 16_384;
 
 fn graphs_disabled() -> bool {
+    // OAR_JINAOCR_DISABLE_CUDA_GRAPH covers all three jina graphs (target AR
+    // decode, verification, and the MTP draft — the draft checks it too, in
+    // mtp.rs), like OAR_GLMOCR_DISABLE_CUDA_GRAPH does for GLM-OCR.
     std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
         || std::env::var_os("OAR_DEEPSEEK_V2_DISABLE_CUDA_GRAPH").is_some()
+        || std::env::var_os("OAR_JINAOCR_DISABLE_CUDA_GRAPH").is_some()
 }
 
 /// Captured single-token decode step that exports both the logits and the
@@ -175,6 +179,10 @@ fn default_topk_method() -> String {
     "greedy".to_string()
 }
 
+fn default_hidden_act() -> String {
+    "silu".to_string()
+}
+
 fn default_one() -> usize {
     1
 }
@@ -223,6 +231,9 @@ pub struct DeepSeekV2TextConfig {
     pub tie_word_embeddings: bool,
     #[serde(default)]
     pub attention_bias: bool,
+    /// Dense and expert MLPs are hardwired to SiLU; validated, not ignored.
+    #[serde(default = "default_hidden_act")]
+    pub hidden_act: String,
     /// DeepSeek-V3-style MLP biases; this port loads every projection with
     /// `linear_no_bias`, so a checkpoint carrying biases would be silently
     /// dropped — validated instead.
@@ -268,6 +279,19 @@ impl DeepSeekV2TextConfig {
         if self.mlp_bias {
             return Err(Error::Config {
                 message: "DeepSeek-V2 backbone does not support mlp_bias=true: MLP projections are loaded without bias".to_string(),
+            });
+        }
+        if self.hidden_act != "silu" {
+            return Err(Error::Config {
+                message: format!(
+                    "DeepSeek-V2 backbone hardwires SiLU MLPs; hidden_act '{}' is not supported",
+                    self.hidden_act
+                ),
+            });
+        }
+        if self.tie_word_embeddings {
+            return Err(Error::Config {
+                message: "DeepSeek-V2 backbone loads a separate lm_head; tie_word_embeddings=true is not supported".to_string(),
             });
         }
         if self.q_lora_rank.is_some()
@@ -322,6 +346,7 @@ impl DeepSeekV2TextConfig {
             ("num_attention_heads", self.num_attention_heads),
             ("num_key_value_heads", self.num_key_value_heads),
             ("max_position_embeddings", self.max_position_embeddings),
+            ("moe_intermediate_size", self.moe_intermediate_size),
         ] {
             if count == 0 {
                 return Err(Error::Config {
@@ -343,6 +368,14 @@ impl DeepSeekV2TextConfig {
                 message: format!(
                     "DeepSeek-V2 rope_theta must be finite and positive, got {}",
                     self.rope_theta
+                ),
+            });
+        }
+        if !self.rms_norm_eps.is_finite() || self.rms_norm_eps <= 0.0 {
+            return Err(Error::Config {
+                message: format!(
+                    "DeepSeek-V2 rms_norm_eps must be finite and positive, got {}",
+                    self.rms_norm_eps
                 ),
             });
         }
