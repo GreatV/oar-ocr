@@ -474,15 +474,11 @@ impl JinaOcr {
                 input_ids.push(token);
             }
         }
-        if input_ids.len() + max_new_tokens > self.cfg.text.max_position_embeddings {
-            return Err(Error::InvalidInput {
-                message: format!(
-                    "JinaOCR prompt ({}) plus max_new_tokens ({max_new_tokens}) exceeds context limit {}",
-                    input_ids.len(),
-                    self.cfg.text.max_position_embeddings
-                ),
-            });
-        }
+        validate_prompt_budget(
+            input_ids.len(),
+            max_new_tokens,
+            self.cfg.text.max_position_embeddings,
+        )?;
         let inputs_embeds = self.prepare_inputs(&input_ids, &image_inputs)?;
         let seq_len = input_ids.len();
         let position_ids =
@@ -1226,6 +1222,30 @@ fn apply_no_repeat_ngram(sequence: &[u32], scores: &mut [f32]) {
 /// the host: the banned set depends only on the token history, so a sparse
 /// device-side mask plus a stable device argmax reads back a single token.
 /// Semantics match `apply_no_repeat_ngram` + `argmax` exactly.
+/// Reject request budgets whose prompt plus max_new_tokens would wrap or
+/// exceed the context limit.
+pub(crate) fn validate_prompt_budget(
+    prompt_len: usize,
+    max_new_tokens: usize,
+    limit: usize,
+) -> Result<(), Error> {
+    let budget = prompt_len
+        .checked_add(max_new_tokens)
+        .ok_or_else(|| Error::InvalidInput {
+            message: format!(
+                "JinaOCR max_new_tokens ({max_new_tokens}) overflows the request budget"
+            ),
+        })?;
+    if budget > limit {
+        return Err(Error::InvalidInput {
+            message: format!(
+                "JinaOCR prompt ({prompt_len}) plus max_new_tokens ({max_new_tokens}) exceeds context limit {limit}"
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn select_greedy_token(logits: &Tensor, history: &[u32]) -> Result<u32, Error> {
     if logits.device().is_cuda() {
         #[cfg(feature = "cuda")]
@@ -1923,6 +1943,20 @@ mod tests {
         /// the same tokens as the same model on the graphs-off schedule.
         /// Skips without a CUDA device; opt in with
         /// `OAR_JINAOCR_GPU_SELFTEST=1`.
+        #[test]
+        fn prompt_budget_overflow_is_rejected() {
+            let err = super::super::validate_prompt_budget(1337, usize::MAX, 262_144)
+                .expect_err("usize::MAX budget must be rejected");
+            assert!(
+                err.to_string().contains("overflows"),
+                "unexpected error: {err}"
+            );
+            assert!(super::super::validate_prompt_budget(100, 200, 262_144).is_ok());
+            let err = super::super::validate_prompt_budget(262_000, 200, 262_144)
+                .expect_err("over-limit budget must be rejected");
+            assert!(err.to_string().contains("exceeds context limit"));
+        }
+
         #[test]
         fn probe_backoff_survives_reentry() {
             use super::ProbeScheduler;
