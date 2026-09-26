@@ -3098,7 +3098,8 @@ mod tests {
             );
 
             // A batch request arrives: its entry releases the orphan.
-            model.release_incompatible_fixed_storage(Some(2));
+            model
+                .release_incompatible_fixed_storage(Some(2), Some(8192));
             let released = measured(&model);
             eprintln!("DBGM5 single orphan released={released}MiB");
             assert!(released.saturating_sub(baseline) <= 64);
@@ -3145,9 +3146,10 @@ mod tests {
                 model.decode_graph_captured(),
                 "compatible single-row storage must not be released"
             );
-            model.release_incompatible_fixed_storage(Some(2));
-            // Batch width over single-row storage: the storage is released
-            // and its graph goes with it.
+            // Batch width over single-row storage: mismatched, so the
+            // storage is released (with its graph).
+            model
+                .release_incompatible_fixed_storage(Some(2), Some(1024));
             assert!(!model.batch_decode_graph_captured());
             assert!(!model.decode_graph_captured());
 
