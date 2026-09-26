@@ -831,6 +831,8 @@ fn build_vision_rotary_embeddings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::attention::{chunked_vision_attention, scaled_dot_product_attention};
+    use candle_core::{Device, Tensor};
     use std::collections::HashMap;
 
     fn tiny_config() -> Qwen3VlVisionConfig {
@@ -989,5 +991,48 @@ mod tests {
     fn rejects_invalid_grid() {
         assert!(merge_grouped_spatial_coordinates((1, 3, 4), 2).is_err());
         assert!(merge_grouped_spatial_coordinates((0, 4, 4), 2).is_err());
+    }
+
+    #[test]
+    fn chunk_size_keeps_the_default_for_short_sequences() {
+        // At the shared threshold and for pages up to ~6.9K patches the
+        // default 256-row chunk stays within the scratch budget.
+        assert_eq!(vision_chunk_size(16, 1025), 256);
+        assert_eq!(vision_chunk_size(16, 4096), 256);
+        assert_eq!(vision_chunk_size(16, 6912), 256);
+    }
+
+    #[test]
+    fn chunk_size_shrinks_for_page_scale_sequences() {
+        // 65536 patches: the default chunk would need ~4 GiB of scratch;
+        // the budget caps the chunk instead.
+        let chunk = vision_chunk_size(16, 65536);
+        assert_eq!(chunk, 27);
+        assert!(chunk >= 1);
+    }
+
+    #[test]
+    fn chunked_vision_attention_matches_single_pass() {
+        let device = Device::Cpu;
+        let (heads, seq, head_dim) = (4usize, 2048usize, 32usize);
+        let q = Tensor::randn(0f32, 1f32, (1, heads, seq, head_dim), &device).unwrap();
+        let k = Tensor::randn(0f32, 1f32, (1, heads, seq, head_dim), &device).unwrap();
+        let v = Tensor::randn(0f32, 1f32, (1, heads, seq, head_dim), &device).unwrap();
+        let scale = 1.0 / (head_dim as f64).sqrt();
+        let single = scaled_dot_product_attention(&q, &k, &v, None, scale, false).unwrap();
+        let chunked =
+            chunked_vision_attention(&q, &k, &v, scale, vision_chunk_size(heads, seq)).unwrap();
+        let a = single.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let b = chunked.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let worst = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        eprintln!("vision chunk vs single max|delta| = {worst:e}");
+        assert!(
+            worst < 1e-4,
+            "chunked vision attention diverged: max|delta| = {worst}"
+        );
     }
 }
