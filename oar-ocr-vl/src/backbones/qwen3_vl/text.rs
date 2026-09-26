@@ -1320,6 +1320,9 @@ impl Qwen3VlTextModel {
         };
         if max_kv_len > captured.cache_len {
             drop(captured_ref);
+            // Same reasoning as the single-row fallback: the replacement
+            // capture re-initializes storage both graphs may reference.
+            self.invalidate_cuda_graph();
             self.invalidate_batch_cuda_graph();
             return Ok(None);
         }
@@ -1443,7 +1446,10 @@ impl Qwen3VlTextModel {
             let Some(cache_len) =
                 decoder_cache_capacity(prompt_len, max_new_tokens, WEVISDOC_DECODE_CACHE_LEN)
             else {
+                // Eager fallback: a long decode can outgrow the captured KV
+                // storage, so no graph may stay alive over it.
                 self.invalidate_cuda_graph();
+                self.invalidate_batch_cuda_graph();
                 return Ok(());
             };
             let required = prompt_len
@@ -1586,7 +1592,11 @@ impl Qwen3VlTextModel {
         };
         if kv_len > captured.cache_len {
             drop(captured_ref);
+            // Falling back to eager decode re-captures on the next prepare;
+            // drop both graphs because either can point at KV storage the
+            // replacement re-initializes.
             self.invalidate_cuda_graph();
+            self.invalidate_batch_cuda_graph();
             return Ok(None);
         }
         if inputs_embeds.shape() != captured.hidden_input.shape()
@@ -1663,8 +1673,10 @@ impl Qwen3VlTextModel {
 impl Drop for Qwen3VlTextModel {
     fn drop(&mut self) {
         // A cached graph must go through dispose: plainly dropping it returns
-        // graph-bound buffers to the allocator and poisons it.
+        // graph-bound buffers to the allocator and poisons it. Both the
+        // single-row and the batched graph may be alive at the end.
         self.invalidate_cuda_graph();
+        self.invalidate_batch_cuda_graph();
     }
 }
 
@@ -2194,6 +2206,36 @@ mod tests {
                 graphed, eager,
                 "batched graph decode must match the eager masked path"
             );
+
+            // A single-row request whose prompt exceeds the bucket limit
+            // falls back to eager: both graphs must be dropped, because the
+            // long decode would outgrow their captured KV storage.
+            let huge: Vec<u32> = (0..8300).map(|i| 10 + i as u32 % 60).collect();
+            model.clear_cache();
+            model
+                .prepare_ar_cuda_graph(huge.len(), 4, &lm_head)
+                .unwrap();
+            assert!(
+                !model.decode_graph_captured(),
+                "eager fallback must drop the single-row graph"
+            );
+            assert!(
+                !model.batch_decode_graph_captured(),
+                "eager fallback must drop the batch graph"
+            );
+            assert_eq!(
+                greedy_eager(&model, &lm_head, &huge, 4),
+                greedy_graphed(&model, &lm_head, &huge, 4),
+                "long-prompt decode must still match eager"
+            );
+
+            // Dropping a model with a live batch graph must dispose it
+            // cleanly; the allocator stays healthy for later work.
+            drop(model);
+            drop(lm_head);
+            let probe = Tensor::randn(0f32, 1f32, (64, 64), &device).unwrap();
+            let probe = (&probe * &probe).unwrap().sum_all().unwrap();
+            let _ = probe.to_scalar::<f32>().unwrap();
         }
         #[cfg(not(feature = "cuda"))]
         eprintln!("skipping: built without the cuda feature");
