@@ -2379,6 +2379,25 @@ mod tests {
                         .unwrap();
                     let (logits_g, hidden_g) = decode_step(current, committed);
                     let (logits_g, hidden_g) = (host_f32(&logits_g), host_f32(&hidden_g));
+                    // Verification-block pass over [current, 0, 0, 0]: slot 0
+                    // scores the same position as the decode step, but through
+                    // the 4-token causal graph path — the ε source behind
+                    // residual MTP-vs-AR near-tie flips. (Tail slots are
+                    // discarded and the KV is restored below.)
+                    model.text.restore_kv_cache(&saved).unwrap();
+                    let ids4 = vec![current, 0, 0, 0];
+                    let t4 = Tensor::from_vec(ids4, (1, MTP_QUERY_LEN), &model.device).unwrap();
+                    let embeds4 = model.text.embed(&t4).unwrap();
+                    let start = (prompt_len + committed) as u32;
+                    let pos4 = Tensor::arange(start, start + MTP_QUERY_LEN as u32, &model.device)
+                        .unwrap()
+                        .reshape((1, 1, MTP_QUERY_LEN))
+                        .unwrap();
+                    let (_h4, logits4) = model
+                        .text
+                        .forward_verification_tokens(&embeds4, &pos4, &model.lm_head)
+                        .unwrap();
+                    let logits_v0 = host_f32(&logits4.i((0, ..)).unwrap());
                     model.text.restore_kv_cache(&saved).unwrap();
                     model.text.invalidate_ar_cuda_graph();
                     let (logits_e, hidden_e) = decode_step(current, committed);
@@ -2386,21 +2405,30 @@ mod tests {
 
                     let dg = max_diff(&logits_g, &logits_e);
                     let dh = max_diff(&hidden_g, &hidden_e);
+                    let dv = max_diff(&logits_g, &logits_v0);
                     let top_g = top3(&logits_g);
                     let top_e = top3(&logits_e);
+                    let top_v = top3(&logits_v0);
                     eprintln!(
                         "real-checkpoint decode at kv={}: max |Δlogit| = {dg:.6}, max |Δhidden| = {dh:.6}, bitwise logits = {}",
                         prompt_len + committed,
                         logits_g == logits_e,
                     );
                     eprintln!(
-                        "top-2: graph ({}, {:.4}, margin {:.6}) eager ({}, {:.4}, margin {:.6})",
+                        "verification-block slot 0 vs decode graph: max |Δlogit| = {dv:.6}, bitwise = {}",
+                        logits_g == logits_v0,
+                    );
+                    eprintln!(
+                        "top-2: graph ({}, {:.4}, margin {:.6}) eager ({}, {:.4}, margin {:.6}) verify ({}, {:.4}, margin {:.6})",
                         top_g[0].0,
                         top_g[0].1,
                         top_g[0].1 - top_g[1].1,
                         top_e[0].0,
                         top_e[0].1,
                         top_e[0].1 - top_e[1].1,
+                        top_v[0].0,
+                        top_v[0].1,
+                        top_v[0].1 - top_v[1].1,
                     );
                     assert_eq!(
                         top_g[0].0,
@@ -2409,8 +2437,8 @@ mod tests {
                         prompt_len + committed
                     );
                     assert!(
-                        dg <= 1.0,
-                        "kernel noise cannot explain a {dg} logit gap — suspect KV state corruption"
+                        dg <= 1.0 && dv <= 1.0,
+                        "kernel noise cannot explain logit gaps {dg}/{dv} — suspect KV state corruption"
                     );
                     // Commit the eager step's pick and continue eagerly.
                     history.push(current);
