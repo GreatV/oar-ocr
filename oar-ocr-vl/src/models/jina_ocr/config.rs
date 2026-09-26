@@ -397,6 +397,37 @@ mod tests {
     }
 
     #[test]
+    fn rejects_bias_and_mla_shaped_checkpoints() {
+        // attention_bias/mlp_bias would be silently dropped by the no-bias
+        // loaders; MLA shape fields are plain-MHA-only.
+        let mut cfg: JinaOcrConfig = serde_json::from_str(CONFIG).unwrap();
+        cfg.text.attention_bias = true;
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("attention_bias")
+        );
+
+        let mut cfg: JinaOcrConfig = serde_json::from_str(CONFIG).unwrap();
+        cfg.text.mlp_bias = true;
+        assert!(cfg.validate().unwrap_err().to_string().contains("mlp_bias"));
+
+        for mutate in [
+            (|c: &mut JinaOcrConfig| c.text.q_lora_rank = Some(1536)) as fn(&mut JinaOcrConfig),
+            (|c: &mut JinaOcrConfig| c.text.kv_lora_rank = Some(512)) as fn(&mut JinaOcrConfig),
+            (|c: &mut JinaOcrConfig| c.text.qk_nope_head_dim = 128) as fn(&mut JinaOcrConfig),
+            (|c: &mut JinaOcrConfig| c.text.qk_rope_head_dim = 64) as fn(&mut JinaOcrConfig),
+            (|c: &mut JinaOcrConfig| c.text.v_head_dim = 128) as fn(&mut JinaOcrConfig),
+        ] {
+            let mut cfg: JinaOcrConfig = serde_json::from_str(CONFIG).unwrap();
+            mutate(&mut cfg);
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains("MLA"), "unexpected error: {err}");
+        }
+    }
+
+    #[test]
     fn rejects_zero_heads_and_undividable_vision_widths() {
         let mut cfg: JinaOcrConfig = serde_json::from_str(CONFIG).unwrap();
         cfg.vision_config.width.sam_vit_b.heads = 0;

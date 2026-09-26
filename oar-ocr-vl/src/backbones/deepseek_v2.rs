@@ -223,6 +223,25 @@ pub struct DeepSeekV2TextConfig {
     pub tie_word_embeddings: bool,
     #[serde(default)]
     pub attention_bias: bool,
+    /// DeepSeek-V3-style MLP biases; this port loads every projection with
+    /// `linear_no_bias`, so a checkpoint carrying biases would be silently
+    /// dropped — validated instead.
+    #[serde(default)]
+    pub mlp_bias: bool,
+    /// MLA shape fields. Accepted for schema compatibility with the reference
+    /// configs; `validate` rejects non-default values because this port is
+    /// plain MHA only (`use_mla=false` covers the headline switch, these guard
+    /// the weight shapes).
+    #[serde(default)]
+    pub q_lora_rank: Option<usize>,
+    #[serde(default)]
+    pub kv_lora_rank: Option<usize>,
+    #[serde(default)]
+    pub qk_nope_head_dim: usize,
+    #[serde(default)]
+    pub qk_rope_head_dim: usize,
+    #[serde(default)]
+    pub v_head_dim: usize,
 }
 
 impl DeepSeekV2TextConfig {
@@ -241,6 +260,26 @@ impl DeepSeekV2TextConfig {
     /// Invariants this port relies on; `hidden_act` is fixed to SiLU like the
     /// reference checkpoint family.
     pub fn validate(&self) -> Result<(), Error> {
+        if self.attention_bias {
+            return Err(Error::Config {
+                message: "DeepSeek-V2 backbone does not support attention_bias=true: attention projections are loaded without bias".to_string(),
+            });
+        }
+        if self.mlp_bias {
+            return Err(Error::Config {
+                message: "DeepSeek-V2 backbone does not support mlp_bias=true: MLP projections are loaded without bias".to_string(),
+            });
+        }
+        if self.q_lora_rank.is_some()
+            || self.kv_lora_rank.is_some()
+            || self.qk_nope_head_dim != 0
+            || self.qk_rope_head_dim != 0
+            || self.v_head_dim != 0
+        {
+            return Err(Error::Config {
+                message: "DeepSeek-V2 backbone is plain MHA: MLA shape fields (q_lora_rank, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim) must be null/zero".to_string(),
+            });
+        }
         if self.use_mla {
             return Err(Error::Config {
                 message: "DeepSeek-V2 backbone requires use_mla=false (plain MHA decoder)"
