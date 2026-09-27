@@ -2038,8 +2038,27 @@ mod tests {
         device: &Device,
     ) -> std::collections::HashMap<String, Tensor> {
         let mut tensors = std::collections::HashMap::new();
-        let randn =
-            |rows: usize, cols: usize| Tensor::randn(0f32, 0.1f32, (rows, cols), device).unwrap();
+        // Deterministic stand-in for randn (xorshift64*, uniform on
+        // [-0.1, 0.1)): the graph/eager comparisons must not flake on
+        // unseeded draws.
+        let rng = std::cell::Cell::new(0x9E3779B97F4A7C15u64);
+        let det = |shape: &[usize]| -> Tensor {
+            let len: usize = shape.iter().product();
+            let mut state = rng.get();
+            let values: Vec<f32> = (0..len)
+                .map(|_| {
+                    state ^= state >> 12;
+                    state ^= state << 25;
+                    state ^= state >> 27;
+                    state = state.wrapping_mul(0x2545F4914F6CDD1D);
+                    let u = (state >> 40) as f32 / (1u64 << 24) as f32;
+                    (u - 0.5) * 0.2
+                })
+                .collect();
+            rng.set(state);
+            Tensor::from_vec(values, shape.to_vec(), device).unwrap()
+        };
+        let randn = |rows: usize, cols: usize| det(&[rows, cols]);
         let hidden = cfg.hidden_size;
         let key_dim = cfg.linear_num_key_heads * cfg.linear_key_head_dim;
         let value_dim = cfg.linear_num_value_heads * cfg.linear_value_head_dim;
@@ -2048,10 +2067,7 @@ mod tests {
             "embed_tokens.weight".to_string(),
             randn(cfg.vocab_size, hidden),
         );
-        tensors.insert(
-            "norm.weight".to_string(),
-            Tensor::randn(0f32, 0.1f32, hidden, device).unwrap(),
-        );
+        tensors.insert("norm.weight".to_string(), det(&[hidden]));
         for (index, layer_type) in cfg.layer_types.iter().enumerate() {
             let prefix = format!("layers.{index}");
             if layer_type == "linear_attention" {
@@ -2071,22 +2087,13 @@ mod tests {
                 );
                 tensors.insert(
                     format!("{attn}.conv1d.weight"),
-                    Tensor::randn(
-                        0f32,
-                        0.1f32,
-                        (conv_dim, 1, cfg.linear_conv_kernel_dim),
-                        device,
-                    )
-                    .unwrap(),
+                    det(&[conv_dim, 1, cfg.linear_conv_kernel_dim]),
                 );
                 tensors.insert(
                     format!("{attn}.dt_bias"),
-                    Tensor::randn(0f32, 0.1f32, cfg.linear_num_value_heads, device).unwrap(),
+                    det(&[cfg.linear_num_value_heads]),
                 );
-                tensors.insert(
-                    format!("{attn}.A_log"),
-                    Tensor::randn(0f32, 0.1f32, cfg.linear_num_value_heads, device).unwrap(),
-                );
+                tensors.insert(format!("{attn}.A_log"), det(&[cfg.linear_num_value_heads]));
                 tensors.insert(
                     format!("{attn}.norm.weight"),
                     Tensor::ones(cfg.linear_value_head_dim, DType::F32, device).unwrap(),
@@ -2110,22 +2117,13 @@ mod tests {
                     format!("{attn}.o_proj.weight"),
                     randn(hidden, cfg.num_attention_heads * cfg.head_dim),
                 );
-                tensors.insert(
-                    format!("{attn}.q_norm.weight"),
-                    Tensor::randn(0f32, 0.1f32, cfg.head_dim, device).unwrap(),
-                );
-                tensors.insert(
-                    format!("{attn}.k_norm.weight"),
-                    Tensor::randn(0f32, 0.1f32, cfg.head_dim, device).unwrap(),
-                );
+                tensors.insert(format!("{attn}.q_norm.weight"), det(&[cfg.head_dim]));
+                tensors.insert(format!("{attn}.k_norm.weight"), det(&[cfg.head_dim]));
             }
-            tensors.insert(
-                format!("{prefix}.input_layernorm.weight"),
-                Tensor::randn(0f32, 0.1f32, hidden, device).unwrap(),
-            );
+            tensors.insert(format!("{prefix}.input_layernorm.weight"), det(&[hidden]));
             tensors.insert(
                 format!("{prefix}.post_attention_layernorm.weight"),
-                Tensor::randn(0f32, 0.1f32, hidden, device).unwrap(),
+                det(&[hidden]),
             );
             tensors.insert(
                 format!("{prefix}.mlp.gate_proj.weight"),
@@ -2569,7 +2567,10 @@ mod tests {
         assert!(served.is_none(), "past the ceiling the step decodes eager");
         assert!(!model.decode_graph_captured());
         // Right after retirement — before the eager append grows the
-        // storage organically — the bucket must hug the live length.
+        // storage organically — the bucket hugs the live length. (At the
+        // ceiling the bucket is exactly full, so capacity == cur_len holds
+        // either way; the replacement guarantee itself is covered by the
+        // cache-level shrink tests.)
         let layouts: Vec<_> = model
             .layers
             .iter()
@@ -2580,24 +2581,34 @@ mod tests {
             vec![(1, 8)],
             "buckets must shrink to the live KV at the ceiling, got {layouts:?}"
         );
+        // The retired path continues eager on the shrunk storage.
         let logits = last_logits(&model, &lm_head)?;
 
-        // The same five steps fully eager on a clean model are the
-        // reference the retired path must match.
+        // Reference: a model whose ceiling stays high decodes all five
+        // steps on the graph (re-capturing up the ladder at the fifth).
+        // Retiring at the ceiling must not change the output — both sides
+        // share the four graph steps, and the fifth is a single eager step
+        // against identical states.
         let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
         let reference = OvisOcr2TextModel::load(&cfg, vb)?;
         let lm_head_ref = Linear::new(reference.token_embedding_weight(), None);
         let embeds = reference.embed(&prompt)?;
         reference.forward(&embeds, &prompt_positions)?;
-        for step in 0..4 {
+        reference.prepare_decode_graph(4, 16)?;
+        let mut reference_logits = None;
+        for step in 0..5 {
             let embed = reference.embed(&token)?;
-            reference.forward(&embed, &position_at(4 + step))?;
+            reference_logits = Some(
+                reference
+                    .decode_step_graph(&embed, &position_at(4 + step), &lm_head_ref)?
+                    .expect("the graph should serve every step"),
+            );
         }
-        let reference_logits = last_logits(&reference, &lm_head_ref)?;
+        let reference_logits = reference_logits.expect("five steps ran");
         let worst = max_abs_delta(&logits, &reference_logits);
         assert!(
             worst < 0.05,
-            "eager decode after ceiling retirement diverged: max|delta| = {worst}"
+            "ceiling-retired eager decode diverged from the graphed path: max|delta| = {worst}"
         );
         Ok(())
     }
