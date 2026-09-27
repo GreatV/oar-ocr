@@ -304,18 +304,14 @@ impl TrimmableKvCache {
             return Ok(self.storage.take());
         }
         let (storage_k, storage_v) = self.storage.as_ref().expect("storage checked above");
-        let new_k = storage_k
-            .narrow(self.cat_dim, 0, self.cur_len)?
-            .contiguous()?;
+        let new_k = Self::compact_prefix(storage_k, self.cat_dim, self.cur_len)?;
         #[cfg(test)]
         if FAIL_SHRINK_V_COPY.with(|flag| flag.get()) {
             return Err(candle_core::Error::Msg(
                 "injected shrink failure (test)".into(),
             ));
         }
-        let new_v = storage_v
-            .narrow(self.cat_dim, 0, self.cur_len)?
-            .contiguous()?;
+        let new_v = Self::compact_prefix(storage_v, self.cat_dim, self.cur_len)?;
         // Both copies succeeded: only now swap, keeping `self` fully intact
         // on every error path above.
         let old = self.storage.take().expect("storage checked above");
@@ -323,6 +319,21 @@ impl TrimmableKvCache {
         self.kv = Some((new_k.clone(), new_v.clone()));
         self.storage = Some((new_k, new_v));
         Ok(Some(old))
+    }
+
+    /// Copy the `[0, len)` prefix of `t` along `dim` into a fresh,
+    /// right-sized tensor. Never a view: `contiguous()` would clone the view
+    /// without copying when the prefix is layout-contiguous (a prefix narrow
+    /// at offset 0 with size-1 leading dims, e.g. a single KV head), keeping
+    /// the whole original buffer referenced; `copy()` clones the full
+    /// backing buffer, not just the prefix. Zeros + `slice_set` is the only
+    /// form that always yields exactly `len`-sized owned storage.
+    fn compact_prefix(t: &Tensor, dim: usize, len: usize) -> Result<Tensor> {
+        let view = t.narrow(dim, 0, len)?;
+        let dense = view.contiguous()?;
+        let out = Tensor::zeros(view.shape(), view.dtype(), view.device())?;
+        out.slice_set(&dense, dim, 0)?;
+        Ok(out)
     }
 
     /// Return the fixed backing tensors used by dynamic CUDA-graph appends.
@@ -640,6 +651,37 @@ mod tests {
             vec![
                 1.0, 2.0, 5.0, 6.0, 9.0, 10.0, 3.0, 4.0, 7.0, 8.0, 11.0, 12.0
             ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn shrink_releases_the_bucket_storage() -> Result<()> {
+        // Single KV head, cur_len < capacity: the prefix narrow is
+        // layout-contiguous, so a `contiguous()`-based shrink would only
+        // clone the view and keep the whole bucket referenced.
+        let mut c = TrimmableKvCache::new(2, 64);
+        let template = Tensor::zeros((1, 1, 1, 2), DType::F32, &dev())?;
+        let first = Tensor::from_vec(vec![1.0f32, 2.0], (1, 1, 1, 2), &dev())?;
+        c.append(&first, &first)?;
+        let second = Tensor::from_vec(vec![3.0f32, 4.0], (1, 1, 1, 2), &dev())?;
+        c.append(&second, &second)?;
+        c.grow_fixed_storage(&template, 16)?;
+        assert_eq!(c.storage_capacity(), 16);
+
+        let (old_k, old_v) = c
+            .shrink_fixed_storage_preserving_history()?
+            .expect("fixed storage existed");
+        assert_eq!(c.k().unwrap().dims(), &[1, 1, 2, 2]);
+        // Overwrite the returned bucket in place: with a real right-sized
+        // copy the shrunk cache is unaffected; with a shared view it would
+        // read the overwrite.
+        let ones = Tensor::ones((1, 1, 16, 2), DType::F32, &dev())?;
+        old_k.slice_set(&ones, 2, 0)?;
+        old_v.slice_set(&ones, 2, 0)?;
+        assert_eq!(
+            c.k().unwrap().flatten_all()?.to_vec1::<f32>()?,
+            vec![1.0, 2.0, 3.0, 4.0]
         );
         Ok(())
     }
