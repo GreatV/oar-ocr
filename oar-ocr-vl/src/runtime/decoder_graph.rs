@@ -23,6 +23,227 @@ pub(crate) fn decoder_cache_capacity(
     Some(required.max(1).next_power_of_two().min(limit))
 }
 
+/// Inputs a decoder graph captures, named and typed. Shared by the
+/// decode-shaped captures; graphs with different shapes (draft heads,
+/// auxiliary taps) define their own bundle with equally concrete fields.
+#[cfg(feature = "cuda")]
+pub(crate) struct CudaGraphInputs {
+    pub(crate) hidden: Tensor,
+    pub(crate) positions: Tensor,
+    pub(crate) query_lengths: Tensor,
+    pub(crate) kv_lengths: CudaGraphKvLengths,
+    /// The LM head read inside the captured region; the graph holds this
+    /// clone so the body never needs an outer borrow.
+    pub(crate) lm_head: candle_nn::Linear,
+}
+
+/// Field-wise teardown for a graph's input bundle.
+///
+/// Dropping the bundle whole would let one field's destructor stash a CUDA
+/// error that the next field's destructor overwrites before either is
+/// drained. `dispose` releases each field separately, draining the context
+/// after every drop, matching the per-field teardown the handwritten
+/// graph structs did inline.
+#[cfg(feature = "cuda")]
+pub(crate) trait DecoderGraphInputs {
+    fn dispose(self, device: &Device);
+}
+
+#[cfg(feature = "cuda")]
+impl DecoderGraphInputs for CudaGraphInputs {
+    fn dispose(self, device: &Device) {
+        let Self {
+            hidden,
+            positions,
+            query_lengths,
+            kv_lengths,
+            lm_head,
+        } = self;
+        drop_and_drain(kv_lengths, device);
+        drop_and_drain(query_lengths, device);
+        drop_and_drain(positions, device);
+        drop_and_drain(hidden, device);
+        drop_and_drain(lm_head, device);
+    }
+}
+
+/// A captured decoder graph over a model-defined input bundle `I`.
+///
+/// Owning `inputs` retains every tensor the bundle holds for the graph's
+/// whole lifetime; the capture body is a bare `fn` pointer, so nothing
+/// outside the model (whose weights it owns) and the bundle can reach the
+/// captured region.
+#[cfg(feature = "cuda")]
+pub(crate) struct DecoderCudaGraph<I> {
+    pub(crate) graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
+    pub(crate) inputs: I,
+    pub(crate) outputs: Vec<Tensor>,
+    pub(crate) device: Device,
+    pub(crate) cache_len: usize,
+}
+
+#[cfg(feature = "cuda")]
+impl<I: DecoderGraphInputs> DecoderCudaGraph<I> {
+    pub(crate) fn dispose(self) {
+        let Self {
+            graph,
+            inputs,
+            outputs,
+            device,
+            cache_len: _,
+        } = self;
+        report_stashed_cuda_error(&device, "decoder CUDA graph disposal");
+        drop_and_drain(graph, &device);
+        for tensor in outputs {
+            drop_and_drain(tensor, &device);
+        }
+        // The bundle tears itself down field by field, draining after each
+        // drop, so one field's stashed error cannot overwrite another's.
+        inputs.dispose(&device);
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl<I> std::fmt::Debug for DecoderCudaGraph<I> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecoderCudaGraph")
+            .field("cache_len", &self.cache_len)
+            .field("outputs", &self.outputs.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Per-batch row geometry for a batched decode step: the device write
+/// offsets for this step and the left-padding lengths that bound each
+/// row's live span. Both are rewritten on the device before every graph
+/// replay, so a reused graph never sees a previous batch's rows.
+#[cfg(feature = "cuda")]
+pub(crate) struct BatchDecodeRows<'a> {
+    pub(crate) row_starts: &'a [u32],
+    pub(crate) pad_lens: &'a [u32],
+}
+
+/// Capture a decoder graph.
+///
+/// `body` computes this step's outputs from the registered inputs; it must
+/// be a function item (no closures) so the captured region can only read
+/// model-owned state and the input bundle. The helper runs the warmup,
+/// allocates and primes one output buffer per returned tensor, captures,
+/// launches and synchronizes the warm launch, and assembles the graph.
+#[cfg(feature = "cuda")]
+pub(crate) fn capture_decoder_graph<M, I: DecoderGraphInputs>(
+    device: &Device,
+    model_name: &'static str,
+    model: &M,
+    inputs: I,
+    body: fn(&M, &I) -> Result<Vec<Tensor>, Error>,
+    cache_len: usize,
+) -> Result<DecoderCudaGraph<I>, Error> {
+    use candle_core::cuda_backend::cudarc::driver::sys::{
+        CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
+    };
+
+    let Device::Cuda(cuda) = device else {
+        return Err(Error::Config {
+            message: format!("{model_name} decoder graphs require a CUDA device"),
+        });
+    };
+    let stream = cuda.cuda_stream();
+    let _htod_cache = cuda.enable_cuda_graph_htod_cache();
+
+    let warm_outputs = body(model, &inputs)?;
+    let mut synced = Vec::with_capacity(warm_outputs.len());
+    for (index, output) in warm_outputs.iter().enumerate() {
+        sync_graph_tensor(
+            model_name,
+            output,
+            output_context(index, "warm decoder CUDA graph"),
+        )?;
+        synced.push(output.clone());
+    }
+    // Allocate the output buffers before capture so they belong to the
+    // regular stream-ordered pool; a capture-time allocation lives in the
+    // graph's private pool and can never be returned to the allocator
+    // safely. Prime the copies so the captured run sees warm kernels.
+    let outputs = synced
+        .iter()
+        .map(|warm| {
+            warm.zeros_like()
+                .map_err(|e| candle_to_ocr_inference(model_name, "graph output buffer", e))
+        })
+        .collect::<Result<Vec<Tensor>, Error>>()?;
+    for (buffer, warm) in outputs.iter().zip(&synced) {
+        buffer
+            .slice_set(warm, 0, 0)
+            .map_err(|e| candle_to_ocr_inference(model_name, "prime graph output copy", e))?;
+    }
+
+    stream
+        .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
+        .map_err(|e| cuda_graph_error(model_name, "begin decoder CUDA graph capture", e))?;
+    let captured_output: Result<(), Error> = (|| {
+        let produced = body(model, &inputs)?;
+        if produced.len() != outputs.len() {
+            return Err(Error::Config {
+                message: format!(
+                    "{model_name} capture produced {} outputs after {} in warmup",
+                    produced.len(),
+                    outputs.len()
+                ),
+            });
+        }
+        for (buffer, value) in outputs.iter().zip(&produced) {
+            buffer
+                .slice_set(value, 0, 0)
+                .map_err(|e| candle_to_ocr_inference(model_name, "record graph output copy", e))?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = captured_output {
+        let _ = stream.end_capture(
+            CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+        );
+        return Err(error);
+    }
+    let graph = stream
+        .end_capture(CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH)
+        .map_err(|e| cuda_graph_error(model_name, "end decoder CUDA graph capture", e))?
+        .ok_or_else(|| Error::Config {
+            message: format!("{model_name} decoder capture returned no graph"),
+        })?;
+    graph
+        .launch()
+        .map_err(|e| cuda_graph_error(model_name, "warm decoder CUDA graph", e))?;
+    for (index, buffer) in outputs.iter().enumerate() {
+        sync_graph_tensor(
+            model_name,
+            buffer,
+            output_context(index, "sync decoder CUDA graph"),
+        )?;
+    }
+    Ok(DecoderCudaGraph {
+        graph,
+        inputs,
+        outputs,
+        device: Device::Cuda(cuda.clone()),
+        cache_len,
+    })
+}
+
+/// Static context labels for graph output synchronization.
+#[cfg(feature = "cuda")]
+fn output_context(index: usize, stage: &'static str) -> &'static str {
+    match (stage, index) {
+        ("warm decoder CUDA graph", 0) => "warm decoder CUDA graph output 0",
+        ("warm decoder CUDA graph", 1) => "warm decoder CUDA graph output 1",
+        ("warm decoder CUDA graph", 2) => "warm decoder CUDA graph output 2",
+        ("sync decoder CUDA graph", 0) => "sync decoder CUDA graph output 0",
+        ("sync decoder CUDA graph", 1) => "sync decoder CUDA graph output 1",
+        ("sync decoder CUDA graph", 2) => "sync decoder CUDA graph output 2",
+        _ => "decoder CUDA graph output",
+    }
+}
+
 /// Initial decode bucket for a prompt under the growth ladder: the next
 /// power of two covering the prompt plus one decode step. Capturing just
 /// past the prompt keeps the graph's masked attention proportional to what
@@ -364,137 +585,6 @@ impl std::fmt::Debug for CudaGraphKvLengths {
 /// that stale CUDA_ERROR_INVALID_VALUE. `dispose` drops everything and then
 /// drains the stashed error so nothing leaks and no context state is kept
 /// alive by forgotten tensors.
-#[cfg(feature = "cuda")]
-pub(crate) struct SingleTokenDecoderCudaGraph {
-    pub(crate) graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
-    pub(crate) hidden_input: Tensor,
-    pub(crate) position_input: Tensor,
-    pub(crate) _query_lengths: Tensor,
-    pub(crate) kv_lengths: CudaGraphKvLengths,
-    pub(crate) logits_output: Tensor,
-    /// Device tensors the captured graph reads that no model field owns.
-    /// Dropping them would return their pool blocks for reuse while replays
-    /// still read them.
-    pub(crate) retained_inputs: Vec<Tensor>,
-    pub(crate) cache_len: usize,
-    /// Ladder cap this graph grows under (a capture-time constant).
-    pub(crate) ceiling: usize,
-}
-
-#[cfg(feature = "cuda")]
-impl SingleTokenDecoderCudaGraph {
-    pub(crate) fn dispose(self) {
-        let Self {
-            graph,
-            hidden_input,
-            position_input,
-            _query_lengths,
-            kv_lengths,
-            logits_output,
-            retained_inputs,
-            cache_len: _,
-            ceiling: _,
-        } = self;
-        let device = hidden_input.device().clone();
-        report_stashed_cuda_error(&device, "decoder CUDA graph disposal");
-        drop_and_drain(graph, &device);
-        drop_and_drain(logits_output, &device);
-        drop_and_drain(kv_lengths, &device);
-        drop_and_drain(_query_lengths, &device);
-        drop_and_drain(position_input, &device);
-        drop_and_drain(hidden_input, &device);
-        for tensor in retained_inputs {
-            drop_and_drain(tensor, &device);
-        }
-    }
-}
-
-/// Per-batch row geometry for a batched decode step: the device write
-/// offsets for this step and the left-padding lengths that bound each
-/// row's live span. Both are rewritten on the device before every graph
-/// replay, so a reused graph never sees a previous batch's rows.
-#[cfg(feature = "cuda")]
-pub(crate) struct BatchDecodeRows<'a> {
-    pub(crate) row_starts: &'a [u32],
-    pub(crate) pad_lens: &'a [u32],
-}
-
-/// Captured storage for a batch-of-rows decode graph. Every row writes at
-/// its own device-side offset and attends only to its own live span.
-#[cfg(feature = "cuda")]
-pub(crate) struct BatchDecoderCudaGraph {
-    pub(crate) graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
-    pub(crate) hidden_input: Tensor,
-    pub(crate) position_input: Tensor,
-    pub(crate) row_starts: CudaGraphPerRowU32,
-    /// Per-row left-padding lengths, rewritten for every batch — the mask
-    /// must never outlive the batch whose pads it was built from.
-    pub(crate) pad_bounds: CudaGraphPerRowU32,
-    pub(crate) logits_output: Tensor,
-    /// Device tensors the captured graph reads that no model field owns:
-    /// the constant kv index row. Its values depend only on `cache_len`,
-    /// which the reuse check already pins.
-    pub(crate) retained_inputs: Vec<Tensor>,
-    pub(crate) batch: usize,
-    pub(crate) cache_len: usize,
-    /// Ladder cap this graph grows under (a capture-time constant).
-    pub(crate) ceiling: usize,
-}
-
-#[cfg(feature = "cuda")]
-impl BatchDecoderCudaGraph {
-    pub(crate) fn dispose(self) {
-        let Self {
-            graph,
-            hidden_input,
-            position_input,
-            row_starts,
-            pad_bounds,
-            logits_output,
-            retained_inputs,
-            batch: _,
-            cache_len: _,
-            ceiling: _,
-        } = self;
-        let device = hidden_input.device().clone();
-        report_stashed_cuda_error(&device, "batch decoder CUDA graph disposal");
-        drop_and_drain(graph, &device);
-        drop_and_drain(logits_output, &device);
-        // Drop the whole per-row wrappers, not clones of their tensors: the
-        // owning buffers must be freed while a drain can still pick up
-        // whatever their destructors stash.
-        drop_and_drain(row_starts, &device);
-        drop_and_drain(pad_bounds, &device);
-        drop_and_drain(position_input, &device);
-        drop_and_drain(hidden_input, &device);
-        for tensor in retained_inputs {
-            drop_and_drain(tensor, &device);
-        }
-    }
-}
-
-#[cfg(feature = "cuda")]
-impl std::fmt::Debug for BatchDecoderCudaGraph {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BatchDecoderCudaGraph")
-            .field("batch", &self.batch)
-            .field("cache_len", &self.cache_len)
-            .field("ceiling", &self.ceiling)
-            .finish_non_exhaustive()
-    }
-}
-
-#[cfg(feature = "cuda")]
-impl std::fmt::Debug for SingleTokenDecoderCudaGraph {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SingleTokenDecoderCudaGraph")
-            .field("hidden", &self.hidden_input.shape())
-            .field("cache_len", &self.cache_len)
-            .field("ceiling", &self.ceiling)
-            .finish_non_exhaustive()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{

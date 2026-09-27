@@ -20,10 +20,9 @@ use crate::runtime::cache::TrimmableKvCache;
 use crate::runtime::cuda::dynamic_kv::{DynamicBatchKvAppend, DynamicKvAppend};
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
-    BatchDecodeRows, BatchDecoderCudaGraph, CudaGraphDrainGuard, CudaGraphKvLengths,
-    CudaGraphPerRowU32, SingleTokenDecoderCudaGraph, cuda_graph_error, decoder_cache_capacity,
+    BatchDecodeRows, CudaGraphDrainGuard, CudaGraphKvLengths, CudaGraphPerRowU32, DecoderCudaGraph,
+    DecoderGraphInputs, capture_decoder_graph, cuda_graph_error, decoder_cache_capacity,
     drain_cuda_context_errors, drop_and_drain, next_decode_bucket, prompt_decode_bucket,
-    sync_graph_tensor,
 };
 use crate::runtime::errors::candle_to_ocr_inference;
 use crate::runtime::tensor::rotate_half;
@@ -1270,11 +1269,114 @@ pub(crate) struct TestHooks {
     pub skip_incompatible_release: bool,
 }
 
+/// Inputs the single-row decode graph captures, named and typed. The
+/// bundle owns every tensor the captured region reads that no model field
+/// holds, so nothing outside it can dangle under a live graph.
+#[cfg(feature = "cuda")]
+struct DecodeGraphInputs {
+    hidden: Tensor,
+    positions: Tensor,
+    query_lengths: Tensor,
+    kv_lengths: CudaGraphKvLengths,
+    /// Static [0, cache_len) slot positions; a capture-time constant the
+    /// append kernel indexes with, retained here for the graph's lifetime.
+    kv_positions: Tensor,
+    /// The LM head read inside the captured region.
+    lm_head: candle_nn::Linear,
+}
+
+#[cfg(feature = "cuda")]
+impl DecoderGraphInputs for DecodeGraphInputs {
+    fn dispose(self, device: &Device) {
+        let Self {
+            hidden,
+            positions,
+            query_lengths,
+            kv_lengths,
+            kv_positions,
+            lm_head,
+        } = self;
+        drop_and_drain(kv_lengths, device);
+        drop_and_drain(query_lengths, device);
+        drop_and_drain(positions, device);
+        drop_and_drain(hidden, device);
+        drop_and_drain(kv_positions, device);
+        drop_and_drain(lm_head, device);
+    }
+}
+
+/// Inputs the batched decode graph captures. `row_starts` and `pad_bounds`
+/// are pinned-backed device buffers rewritten before every replay, so a
+/// reused graph never masks with the previous batch's offsets or pads.
+#[cfg(feature = "cuda")]
+struct BatchDecodeGraphInputs {
+    hidden: Tensor,
+    positions: Tensor,
+    row_starts: CudaGraphPerRowU32,
+    /// Static [0, cache_len) slot positions; a capture-time constant the
+    /// append kernel indexes with, retained here for the graph's lifetime.
+    kv_positions: Tensor,
+    pad_bounds: CudaGraphPerRowU32,
+    /// The LM head read inside the captured region.
+    lm_head: candle_nn::Linear,
+}
+
+#[cfg(feature = "cuda")]
+impl DecoderGraphInputs for BatchDecodeGraphInputs {
+    fn dispose(self, device: &Device) {
+        let Self {
+            hidden,
+            positions,
+            row_starts,
+            kv_positions,
+            pad_bounds,
+            lm_head,
+        } = self;
+        drop_and_drain(row_starts, device);
+        drop_and_drain(pad_bounds, device);
+        drop_and_drain(positions, device);
+        drop_and_drain(hidden, device);
+        drop_and_drain(kv_positions, device);
+        drop_and_drain(lm_head, device);
+    }
+}
+
+/// The captured single-row graph plus its ladder ceiling: the framework
+/// records the bucket (`cache_len`), and `ceiling` bounds the ladder's
+/// growth when a generation outgrows the bucket.
+#[cfg(feature = "cuda")]
+struct SingleRowDecodeGraph {
+    graph: DecoderCudaGraph<DecodeGraphInputs>,
+    ceiling: usize,
+}
+
+#[cfg(feature = "cuda")]
+impl SingleRowDecodeGraph {
+    fn dispose(self) {
+        self.graph.dispose();
+    }
+}
+
+/// The captured batch graph plus its batch width and ladder ceiling.
+#[cfg(feature = "cuda")]
+struct BatchedDecodeGraph {
+    graph: DecoderCudaGraph<BatchDecodeGraphInputs>,
+    batch: usize,
+    ceiling: usize,
+}
+
+#[cfg(feature = "cuda")]
+impl BatchedDecodeGraph {
+    fn dispose(self) {
+        self.graph.dispose();
+    }
+}
+
 pub(crate) struct Qwen3VlTextModel {
     #[cfg(feature = "cuda")]
-    decode_graph: RefCell<Option<SingleTokenDecoderCudaGraph>>,
+    decode_graph: RefCell<Option<SingleRowDecodeGraph>>,
     #[cfg(feature = "cuda")]
-    batch_decode_graph: RefCell<Option<BatchDecoderCudaGraph>>,
+    batch_decode_graph: RefCell<Option<BatchedDecodeGraph>>,
     #[cfg(all(test, feature = "cuda"))]
     pub(crate) hooks: TestHooks,
     embed_tokens: Embedding,
@@ -1366,7 +1468,7 @@ impl Qwen3VlTextModel {
                         .decode_graph
                         .borrow()
                         .as_ref()
-                        .is_some_and(|graph| graph.cache_len == expected)
+                        .is_some_and(|graph| graph.graph.cache_len == expected)
             }
             // Batch request: only same-width storage backed by a live
             // batch graph of the same width and bucket is reusable.
@@ -1374,7 +1476,7 @@ impl Qwen3VlTextModel {
                 self.batch_decode_graph
                     .borrow()
                     .as_ref()
-                    .is_some_and(|graph| graph.batch == width && graph.cache_len == expected)
+                    .is_some_and(|graph| graph.batch == width && graph.graph.cache_len == expected)
                     && storage_batch == width
                     && storage_cap == expected
             }
@@ -1638,7 +1740,7 @@ impl Qwen3VlTextModel {
                 .batch_decode_graph
                 .borrow()
                 .as_ref()
-                .is_some_and(|graph| graph.batch == batch && graph.cache_len == cache_len);
+                .is_some_and(|graph| graph.batch == batch && graph.graph.cache_len == cache_len);
             if reusable {
                 return Ok(());
             }
@@ -1672,10 +1774,6 @@ impl Qwen3VlTextModel {
         lm_head: &Linear,
         append_slot: usize,
     ) -> Result<(), Error> {
-        use candle_core::cuda_backend::cudarc::driver::sys::{
-            CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
-        };
-
         if self.batch_decode_graph.borrow().is_some() {
             return Ok(());
         }
@@ -1687,7 +1785,7 @@ impl Qwen3VlTextModel {
                 ),
             });
         }
-        let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
+        let Device::Cuda(_) = self.embed_tokens.embeddings().device() else {
             return Ok(());
         };
         if append_slot >= cache_len {
@@ -1763,72 +1861,48 @@ impl Qwen3VlTextModel {
         pad_bounds
             .update(&pads)
             .map_err(|e| cuda_graph_error(MODEL_NAME, "seed batch graph pad bounds", e))?;
-        let stream = cuda.cuda_stream();
-        let _htod_cache = cuda.enable_cuda_graph_htod_cache();
-
-        let warm = self.forward_dynamic_batch(
-            &hidden_input,
-            &position_input,
-            row_starts.tensor(),
-            &kv_positions,
-            pad_bounds.tensor(),
-        )?;
-        let warm_logits = self.project_logits_batch(&warm, lm_head)?;
-        sync_graph_tensor(MODEL_NAME, &warm_logits, "warm batch decoder CUDA graph")?;
-        let logits_output = Tensor::zeros_like(&warm_logits)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "batch graph logits output", e))?;
-        logits_output
-            .slice_set(&warm_logits, 0, 0)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "prime batch logits copy", e))?;
-
-        stream
-            .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
-            .map_err(|e| cuda_graph_error(MODEL_NAME, "begin batch decoder capture", e))?;
-        let captured_output: Result<(), Error> = (|| {
-            let hidden = self.forward_dynamic_batch(
-                &hidden_input,
-                &position_input,
-                row_starts.tensor(),
-                &kv_positions,
-                pad_bounds.tensor(),
-            )?;
-            let logits = self.project_logits_batch(&hidden, lm_head)?;
-            logits_output
-                .slice_set(&logits, 0, 0)
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "record batch logits copy", e))
-        })();
-        if let Err(error) = captured_output {
-            let _ = stream.end_capture(
-                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-            );
-            return Err(error);
-        }
-        let graph = stream
-            .end_capture(
-                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-            )
-            .map_err(|e| cuda_graph_error(MODEL_NAME, "end batch decoder capture", e))?
-            .ok_or_else(|| Error::Config {
-                message: format!("{MODEL_NAME} batch decoder capture returned no graph"),
-            })?;
-        graph
-            .launch()
-            .map_err(|e| cuda_graph_error(MODEL_NAME, "warm batch decoder graph", e))?;
-        sync_graph_tensor(MODEL_NAME, &logits_output, "sync batch decoder graph")?;
-        self.clear_cache();
-        *self.batch_decode_graph.borrow_mut() = Some(BatchDecoderCudaGraph {
-            graph,
-            hidden_input,
-            position_input,
+        let inputs = BatchDecodeGraphInputs {
+            hidden: hidden_input,
+            positions: position_input,
             row_starts,
+            kv_positions,
             pad_bounds,
-            logits_output,
-            retained_inputs: vec![kv_positions],
-            batch,
+            lm_head: lm_head.clone(),
+        };
+        let graph = capture_decoder_graph(
+            &device,
+            MODEL_NAME,
+            self,
+            inputs,
+            Self::batch_decode_graph_body,
             cache_len,
+        )?;
+        self.clear_cache();
+        *self.batch_decode_graph.borrow_mut() = Some(BatchedDecodeGraph {
+            graph,
+            batch,
             ceiling,
         });
         Ok(())
+    }
+
+    /// Captured region of the batched decode graph: one padded batch decode
+    /// step plus the LM head. The row offsets and pad bounds are bundle
+    /// buffers, so replays rewrite them in place.
+    #[cfg(feature = "cuda")]
+    fn batch_decode_graph_body(
+        this: &Self,
+        inputs: &BatchDecodeGraphInputs,
+    ) -> Result<Vec<Tensor>, Error> {
+        let hidden = this.forward_dynamic_batch(
+            &inputs.hidden,
+            &inputs.positions,
+            inputs.row_starts.tensor(),
+            &inputs.kv_positions,
+            inputs.pad_bounds.tensor(),
+        )?;
+        let logits = this.project_logits_batch(&hidden, &inputs.lm_head)?;
+        Ok(vec![logits])
     }
 
     #[cfg(feature = "cuda")]
@@ -1847,13 +1921,13 @@ impl Qwen3VlTextModel {
             let captured_ref = self.batch_decode_graph.borrow();
             captured_ref
                 .as_ref()
-                .is_some_and(|captured| max_kv_len > captured.cache_len)
+                .is_some_and(|captured| max_kv_len > captured.graph.cache_len)
         };
         if overflow {
             let (batch, cache_len, ceiling) = {
                 let captured_ref = self.batch_decode_graph.borrow();
                 let captured = captured_ref.as_ref().expect("overflow implies Some");
-                (captured.batch, captured.cache_len, captured.ceiling)
+                (captured.batch, captured.graph.cache_len, captured.ceiling)
             };
             let Some(next) = next_decode_bucket(cache_len, ceiling) else {
                 // Ladder ceiling: the rest of this generation decodes eager,
@@ -1914,35 +1988,48 @@ impl Qwen3VlTextModel {
         let Some(captured) = captured_ref.as_ref() else {
             return Ok(None);
         };
-        if inputs_embeds.shape() != captured.hidden_input.shape()
-            || position_ids.shape() != captured.position_input.shape()
+        if inputs_embeds.shape() != captured.graph.inputs.hidden.shape()
+            || position_ids.shape() != captured.graph.inputs.positions.shape()
         {
             return Ok(None);
         }
         captured
-            .hidden_input
+            .graph
+            .inputs
+            .hidden
             .slice_set(inputs_embeds, 0, 0)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy batch graph hidden", e))?;
         captured
-            .position_input
+            .graph
+            .inputs
+            .positions
             .slice_set(position_ids, 0, 0)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy batch graph positions", e))?;
         captured
+            .graph
+            .inputs
             .row_starts
             .update(rows.row_starts)
             .map_err(|e| cuda_graph_error(MODEL_NAME, "update batch graph row starts", e))?;
         captured
+            .graph
+            .inputs
             .pad_bounds
             .update(rows.pad_lens)
             .map_err(|e| cuda_graph_error(MODEL_NAME, "update batch graph pad bounds", e))?;
         captured
+            .graph
             .graph
             .launch()
             .map_err(|e| cuda_graph_error(MODEL_NAME, "launch batch decoder graph", e))?;
         for layer in &self.layers {
             layer.set_kv_cache_len(max_kv_len)?;
         }
-        Ok(Some(captured.logits_output.clone()))
+        // Owned copy: a later replay overwrites the captured output
+        // buffer, and callers may hold the logits past it.
+        Ok(Some(captured.graph.outputs[0].copy().map_err(|e| {
+            candle_to_ocr_inference(MODEL_NAME, "copy batch graph logits", e)
+        })?))
     }
 
     /// One batched decode step at `position_ids`; returns `(batch, vocab)`
@@ -2073,7 +2160,7 @@ impl Qwen3VlTextModel {
             // scan. Anything further out re-captures, keeping the scan
             // proportional to the prompt.
             let reusable = self.decode_graph.borrow().as_ref().is_some_and(|graph| {
-                graph.cache_len >= cache_len && graph.cache_len < cache_len * 2
+                graph.graph.cache_len >= cache_len && graph.graph.cache_len < cache_len * 2
             });
             if reusable {
                 return Ok(());
@@ -2104,14 +2191,10 @@ impl Qwen3VlTextModel {
         lm_head: &Linear,
         append_slot: usize,
     ) -> Result<(), Error> {
-        use candle_core::cuda_backend::cudarc::driver::sys::{
-            CUgraphInstantiate_flags_enum, CUstreamCaptureMode_enum,
-        };
-
         if self.decode_graph.borrow().is_some() {
             return Ok(());
         }
-        let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
+        let Device::Cuda(_) = self.embed_tokens.embeddings().device() else {
             return Ok(());
         };
         if append_slot >= cache_len {
@@ -2163,75 +2246,40 @@ impl Qwen3VlTextModel {
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph KV lengths", e))?;
         let kv_positions =
             Tensor::arange(0u32, cache_len as u32, &device)?.reshape((1, 1, cache_len))?;
-        let stream = cuda.cuda_stream();
-        let _htod_cache = cuda.enable_cuda_graph_htod_cache();
-
-        let warm = self.forward_dynamic(
-            &hidden_input,
-            &position_input,
-            &query_lengths,
-            kv_lengths.tensor(),
-            &kv_positions,
-        )?;
-        let warm_logits = self.project_logits(&warm, lm_head)?;
-        sync_graph_tensor(MODEL_NAME, &warm_logits, "warm decoder CUDA graph")?;
-        // Allocate the output buffer before capture so it belongs to the
-        // regular stream-ordered pool; a capture-time allocation lives in the
-        // graph's private pool and can never be returned to the allocator
-        // safely. Prime the copy so the captured run sees a warm kernel.
-        let logits_output = Tensor::zeros_like(&warm_logits)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph logits output", e))?;
-        logits_output
-            .slice_set(&warm_logits, 0, 0)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "prime graph logits copy", e))?;
-
-        stream
-            .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
-            .map_err(|e| cuda_graph_error(MODEL_NAME, "begin decoder CUDA graph capture", e))?;
-        let captured_output: Result<(), Error> = (|| {
-            let hidden = self.forward_dynamic(
-                &hidden_input,
-                &position_input,
-                &query_lengths,
-                kv_lengths.tensor(),
-                &kv_positions,
-            )?;
-            let logits = self.project_logits(&hidden, lm_head)?;
-            logits_output
-                .slice_set(&logits, 0, 0)
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "record graph logits copy", e))
-        })();
-        if let Err(error) = captured_output {
-            let _ = stream.end_capture(
-                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-            );
-            return Err(error);
-        }
-        let graph = stream
-            .end_capture(
-                CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-            )
-            .map_err(|e| cuda_graph_error(MODEL_NAME, "end decoder CUDA graph capture", e))?
-            .ok_or_else(|| Error::Config {
-                message: format!("{MODEL_NAME} decoder capture returned no graph"),
-            })?;
-        graph
-            .launch()
-            .map_err(|e| cuda_graph_error(MODEL_NAME, "warm decoder CUDA graph", e))?;
-        sync_graph_tensor(MODEL_NAME, &logits_output, "sync decoder CUDA graph")?;
-        self.clear_cache();
-        *self.decode_graph.borrow_mut() = Some(SingleTokenDecoderCudaGraph {
-            graph,
-            hidden_input,
-            position_input,
-            _query_lengths: query_lengths,
+        let inputs = DecodeGraphInputs {
+            hidden: hidden_input,
+            positions: position_input,
+            query_lengths,
             kv_lengths,
-            logits_output,
-            retained_inputs: vec![kv_positions],
+            kv_positions,
+            lm_head: lm_head.clone(),
+        };
+        let graph = capture_decoder_graph(
+            &device,
+            MODEL_NAME,
+            self,
+            inputs,
+            Self::decode_graph_body,
             cache_len,
-            ceiling,
-        });
+        )?;
+        self.clear_cache();
+        *self.decode_graph.borrow_mut() = Some(SingleRowDecodeGraph { graph, ceiling });
         Ok(())
+    }
+
+    /// Captured region of the single-row decode graph: one decode step plus
+    /// the LM head, reading only the registered bundle and model weights.
+    #[cfg(feature = "cuda")]
+    fn decode_graph_body(this: &Self, inputs: &DecodeGraphInputs) -> Result<Vec<Tensor>, Error> {
+        let hidden = this.forward_dynamic(
+            &inputs.hidden,
+            &inputs.positions,
+            &inputs.query_lengths,
+            inputs.kv_lengths.tensor(),
+            &inputs.kv_positions,
+        )?;
+        let logits = this.project_logits(&hidden, &inputs.lm_head)?;
+        Ok(vec![logits])
     }
 
     #[cfg(feature = "cuda")]
@@ -2249,14 +2297,14 @@ impl Qwen3VlTextModel {
             let captured_ref = self.decode_graph.borrow();
             captured_ref
                 .as_ref()
-                .is_some_and(|captured| kv_len > captured.cache_len)
+                .is_some_and(|captured| kv_len > captured.graph.cache_len)
         };
         if overflow {
             let (cache_len, ceiling) = {
                 let captured_ref = self.decode_graph.borrow();
                 captured_ref
                     .as_ref()
-                    .map(|captured| (captured.cache_len, captured.ceiling))
+                    .map(|captured| (captured.graph.cache_len, captured.ceiling))
                     .expect("overflow implies Some")
             };
             let Some(next) = next_decode_bucket(cache_len, ceiling) else {
@@ -2312,31 +2360,42 @@ impl Qwen3VlTextModel {
         let Some(captured) = captured_ref.as_ref() else {
             return Ok(None);
         };
-        if inputs_embeds.shape() != captured.hidden_input.shape()
-            || position_ids.shape() != captured.position_input.shape()
+        if inputs_embeds.shape() != captured.graph.inputs.hidden.shape()
+            || position_ids.shape() != captured.graph.inputs.positions.shape()
         {
             return Ok(None);
         }
         captured
-            .hidden_input
+            .graph
+            .inputs
+            .hidden
             .slice_set(inputs_embeds, 0, 0)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy graph hidden", e))?;
         captured
-            .position_input
+            .graph
+            .inputs
+            .positions
             .slice_set(position_ids, 0, 0)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy graph positions", e))?;
         captured
+            .graph
+            .inputs
             .kv_lengths
             .update(kv_len)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "update graph KV lengths", e))?;
         captured
+            .graph
             .graph
             .launch()
             .map_err(|e| cuda_graph_error(MODEL_NAME, "launch decoder CUDA graph", e))?;
         for layer in &self.layers {
             layer.set_kv_cache_len(kv_len)?;
         }
-        Ok(Some(captured.logits_output.clone()))
+        // Owned copy: a later replay overwrites the captured output
+        // buffer, and callers may hold the logits past it.
+        Ok(Some(captured.graph.outputs[0].copy().map_err(|e| {
+            candle_to_ocr_inference(MODEL_NAME, "copy graph logits", e)
+        })?))
     }
 
     #[cfg(feature = "cuda")]
