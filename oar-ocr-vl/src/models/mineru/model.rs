@@ -1,10 +1,10 @@
-use super::config::{MinerUConfig, MinerUImageProcessorConfig};
+use super::config::{MinerUConfig, QwenVlImageProcessorConfig};
 use super::processing::preprocess_images;
-use super::text::MinerUTextModel;
-use super::vision::MinerUVisionModel;
+use super::vision::Qwen2VlVisionModel;
 use crate::attention::{
     combine_masks, create_causal_mask, create_generation_mask_if_needed, create_left_padding_mask,
 };
+use crate::backbones::qwen2_vl::Qwen2VlTextModel;
 use crate::error::Error;
 #[cfg(feature = "cuda")]
 use crate::runtime::cuda::{ArgmaxFirstBf16, ArgmaxFirstF32, MaskTokenIds};
@@ -81,10 +81,10 @@ pub struct MinerU {
     device: Device,
     dtype: DType,
     cfg: MinerUConfig,
-    image_cfg: MinerUImageProcessorConfig,
+    image_cfg: QwenVlImageProcessorConfig,
     tokenizer: Tokenizer,
-    text: MinerUTextModel,
-    vision: MinerUVisionModel,
+    text: Qwen2VlTextModel,
+    vision: Qwen2VlVisionModel,
     lm_head: Linear,
     image_token_id: u32,
     eos_token_ids: Vec<u32>,
@@ -147,7 +147,7 @@ impl MinerU {
         let model_dir = model_dir.as_ref();
         let cfg = MinerUConfig::from_path(model_dir.join("config.json"))?;
         let image_cfg =
-            MinerUImageProcessorConfig::from_path(model_dir.join("preprocessor_config.json"))?;
+            QwenVlImageProcessorConfig::from_path(model_dir.join("preprocessor_config.json"))?;
 
         if image_cfg.merge_size != cfg.vision_config.spatial_merge_size {
             return Err(Error::Config {
@@ -218,8 +218,8 @@ impl MinerU {
                 .map_err(|e| candle_to_ocr_inference("MinerU2.5", "load safetensors", e))?
         };
 
-        let text = MinerUTextModel::load(&cfg, vb.pp("model"))?;
-        let vision = MinerUVisionModel::load(&cfg.vision_config, vb.pp("visual"))?;
+        let text = Qwen2VlTextModel::load(&cfg.qwen2_vl_text_config()?, vb.pp("model"))?;
+        let vision = Qwen2VlVisionModel::load(&cfg.vision_config, vb.pp("visual"))?;
 
         let image_token_id = cfg.image_token_id;
         let mut eos_token_ids = vec![cfg.eos_token_id];

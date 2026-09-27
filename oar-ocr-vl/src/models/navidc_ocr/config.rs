@@ -1,3 +1,4 @@
+use crate::backbones::qwen2_vl::Qwen2VlTextConfig;
 use crate::error::Error;
 use serde::Deserialize;
 use std::path::Path;
@@ -98,6 +99,30 @@ impl NaviDcConfig {
             });
         }
         Ok(self.hidden_size / self.num_attention_heads)
+    }
+
+    /// Convert to the shared Qwen2 text-tower configuration. NaviDC-OCR
+    /// drops the q/k/v projection biases and normalises each head with
+    /// `q_norm`/`k_norm` before RoPE.
+    pub fn qwen2_vl_text_config(&self) -> Result<Qwen2VlTextConfig, Error> {
+        Ok(Qwen2VlTextConfig {
+            model_name: "NaviDC-OCR",
+            vocab_size: self.vocab_size,
+            hidden_size: self.hidden_size,
+            intermediate_size: self.intermediate_size,
+            num_hidden_layers: self.num_hidden_layers,
+            num_attention_heads: self.num_attention_heads,
+            num_key_value_heads: self.num_key_value_heads,
+            rms_norm_eps: self.rms_norm_eps,
+            rope_theta: self.rope_theta,
+            max_position_embeddings: self.max_position_embeddings,
+            head_dim: self.head_dim()?,
+            mrope_section: self.rope_scaling.mrope_section.clone(),
+            attention_bias: false,
+            qk_head_norm: true,
+            graph_disable_env: "OAR_NAVIDC_DISABLE_CUDA_GRAPH",
+            decode_cache_len: 16_384,
+        })
     }
 
     /// Effective `tie_word_embeddings` flag, honouring both the root field

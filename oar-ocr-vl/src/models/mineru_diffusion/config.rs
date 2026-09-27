@@ -1,12 +1,12 @@
 //! Configuration types for MinerU-Diffusion-V1.
 //!
 //! The checkpoint nests two sub-configs: a Qwen2-VL vision tower
-//! (`vision_config`, reusing [`MinerUVisionConfig`]) and an `SDAR` block-
+//! (`vision_config`, reusing [`Qwen2VlVisionConfig`]) and an `SDAR` block-
 //! diffusion text decoder (`text_config`). The top-level config carries the
 //! multimodal token ids, the mask token used by the diffusion denoiser, and
 //! the vision projector type.
 
-use crate::backbones::qwen2_vl::MinerUVisionConfig;
+use crate::backbones::qwen2_vl::Qwen2VlVisionConfig;
 use crate::error::Error;
 use serde::Deserialize;
 use std::path::Path;
@@ -23,7 +23,7 @@ pub struct MinerUDiffusionConfig {
     /// Qwen2-VL vision tower. On-disk JSON key is `vision_config`
     /// (`vision_model_config` is a runtime alias).
     #[serde(alias = "vision_model_config")]
-    pub vision_config: MinerUVisionConfig,
+    pub vision_config: Qwen2VlVisionConfig,
     pub image_token_id: u32,
     #[serde(default)]
     pub video_token_id: u32,

@@ -15,7 +15,7 @@ fn default_hidden_act() -> String {
 
 /// Shared Qwen2-VL vision-tower configuration.
 #[derive(Debug, Clone, Deserialize)]
-pub struct MinerUVisionConfig {
+pub struct Qwen2VlVisionConfig {
     pub depth: usize,
     pub embed_dim: usize,
     pub hidden_size: usize,
@@ -34,7 +34,7 @@ pub struct MinerUVisionConfig {
     pub temporal_patch_size: usize,
 }
 
-impl MinerUVisionConfig {
+impl Qwen2VlVisionConfig {
     pub fn mlp_hidden_dim(&self) -> usize {
         (self.embed_dim as f64 * self.mlp_ratio).round() as usize
     }
@@ -277,7 +277,7 @@ struct PatchEmbed {
 }
 
 impl PatchEmbed {
-    fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
+    fn load(cfg: &Qwen2VlVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let patch_dim =
             cfg.in_channels() * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size;
         let weight = match vb.get((cfg.embed_dim, patch_dim), "patch_embed.proj.weight") {
@@ -334,7 +334,7 @@ struct VisionAttention {
 }
 
 impl VisionAttention {
-    fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
+    fn load(cfg: &Qwen2VlVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let qkv = linear(cfg.embed_dim, cfg.embed_dim * 3, vb.pp("attn.qkv"))
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "load vision qkv", e))?;
         let proj = linear(cfg.embed_dim, cfg.embed_dim, vb.pp("attn.proj"))
@@ -433,7 +433,7 @@ struct VisionMlp {
 }
 
 impl VisionMlp {
-    fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
+    fn load(cfg: &Qwen2VlVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let hidden_dim = cfg.mlp_hidden_dim();
         let fc1 = linear(cfg.embed_dim, hidden_dim, vb.pp("mlp.fc1"))
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "load vision fc1", e))?;
@@ -464,7 +464,7 @@ struct VisionBlock {
 }
 
 impl VisionBlock {
-    fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
+    fn load(cfg: &Qwen2VlVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let norm_cfg = LayerNormConfig {
             eps: 1e-6,
             ..Default::default()
@@ -522,7 +522,7 @@ struct PatchMerger {
 }
 
 impl PatchMerger {
-    fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
+    fn load(cfg: &Qwen2VlVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         let norm_cfg = LayerNormConfig {
             eps: 1e-6,
             ..Default::default()
@@ -580,7 +580,7 @@ impl PatchMerger {
     }
 }
 
-pub struct MinerUVisionModel {
+pub struct Qwen2VlVisionModel {
     patch_embed: PatchEmbed,
     blocks: Vec<VisionBlock>,
     merger: Option<PatchMerger>,
@@ -589,8 +589,8 @@ pub struct MinerUVisionModel {
 }
 
 #[allow(dead_code)]
-impl MinerUVisionModel {
-    pub fn load(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
+impl Qwen2VlVisionModel {
+    pub fn load(cfg: &Qwen2VlVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         Self::load_inner(cfg, vb, true)
     }
 
@@ -599,13 +599,13 @@ impl MinerUVisionModel {
     /// vision merger to identity and project the raw per-patch hidden states
     /// with an external abstractor instead. Pair with [`forward_tokens`].
     ///
-    /// [`forward_tokens`]: MinerUVisionModel::forward_tokens
-    pub(crate) fn load_backbone(cfg: &MinerUVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
+    /// [`forward_tokens`]: Qwen2VlVisionModel::forward_tokens
+    pub(crate) fn load_backbone(cfg: &Qwen2VlVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
         Self::load_inner(cfg, vb, false)
     }
 
     fn load_inner(
-        cfg: &MinerUVisionConfig,
+        cfg: &Qwen2VlVisionConfig,
         vb: VarBuilder,
         with_merger: bool,
     ) -> Result<Self, Error> {
