@@ -788,19 +788,26 @@ impl Qwen3Mlp {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor, Error> {
-        // The intermediate is (rows, 6144): a 16K-token page in F32 is
-        // ~400 MiB (CPU), so non-CUDA devices process rows in chunks —
-        // every row is independent, keeping the output bit-identical.
-        // CUDA keeps the single-pass path: bf16 intermediates are only
-        // ~200 MiB there and chunking would change GEMM shapes (potential
-        // bf16 accumulation differences).
+        // The intermediate is (rows, intermediate_size): a 16K-token page
+        // in F32 is ~400 MiB (CPU), so non-CUDA devices process rows in
+        // chunks — every row is independent, keeping the output
+        // bit-identical. CUDA keeps the single-pass path: bf16
+        // intermediates are only ~200 MiB there and chunking would change
+        // GEMM shapes (potential bf16 accumulation differences).
+        const BUDGET: usize = 256 * 1024 * 1024;
+        self.forward_with_budget(xs, BUDGET)
+    }
+
+    /// `budget` bounds the F32 intermediate bytes per pass (tests pass a
+    /// small value so the chunk path is reachable with tiny tensors).
+    fn forward_with_budget(&self, xs: &Tensor, budget: usize) -> Result<Tensor, Error> {
         let rows = xs.dim(1)?;
         let element_size = xs.dtype().size_in_bytes();
         let on_cuda = xs.device().is_cuda();
         let intermediate_bytes = rows
             .saturating_mul(self.intermediate_size)
             .saturating_mul(element_size);
-        if on_cuda || intermediate_bytes <= 256 * 1024 * 1024 {
+        if on_cuda || intermediate_bytes <= budget {
             let gate = self
                 .gate_proj
                 .forward(xs)
@@ -852,7 +859,7 @@ impl Qwen3Mlp {
 }
 
 /// Test probe: how many times the text MLP chunked path has run.
-#[cfg(all(test, not(feature = "cuda")))]
+#[cfg(test)]
 static TEXT_MLP_CHUNK_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Test probe: the query chunk size last used by the causal chunked
@@ -862,25 +869,16 @@ static TEXT_MLP_CHUNK_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::
 pub(crate) static LAST_CAUSAL_CHUNK: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-/// Test-only injection point: after which layer's KV allocation a capture
-/// should fail. Unset means only the post-allocation full injection fires.
+/// Serializes GPU self-tests under the default parallel test runner.
+/// Their memory assertions read the device-wide counter (nvidia-smi),
+/// which concurrent tests would otherwise inflate with each other's
+/// allocations — a genuinely shared resource, so unlike the per-instance
+/// `TestHooks` this lock is global. Guard Drop releases it; tests that
+/// only compare tokens are unaffected because they hold no assertions on
+/// device-wide counters, but they take the lock too: their allocations
+/// would still distort a concurrent memory assertion.
 #[cfg(all(test, feature = "cuda"))]
-fn injected_capture_failure_after_layer(index: usize) -> bool {
-    std::env::var_os("OAR_WEVISDOC_FAIL_CAPTURE_AFTER_LAYER")
-        .and_then(|value| value.into_string().ok())
-        .and_then(|value| value.parse::<usize>().ok())
-        .is_some_and(|target| index + 1 == target)
-}
-
-/// Test-only injection point: after which layer's bucket growth should
-/// fail. Unset means the growth runs to completion.
-#[cfg(all(test, feature = "cuda"))]
-fn injected_growth_failure_after_layer(index: usize) -> bool {
-    std::env::var_os("OAR_WEVISDOC_FAIL_GROW_AFTER_LAYER")
-        .and_then(|value| value.into_string().ok())
-        .and_then(|value| value.parse::<usize>().ok())
-        .is_some_and(|target| index + 1 == target)
-}
+pub(crate) static GPU_SELFTEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Masked attention in one pass; `is_causal` follows the mask's absence so
 /// mask-less callers get the kernel's causal flag.
@@ -1231,11 +1229,39 @@ impl TextRotaryEmbedding {
     }
 }
 
+/// Instance-scoped test hooks: capture-failure injections and release
+/// skips, so GPU self-tests drive behavior per model instance instead of
+/// through process-global environment variables — the default parallel
+/// test runner runs tests concurrently, and env vars would cross-talk
+/// between them. Every field defaults to off and production builds
+/// compile none of this in.
+#[cfg(all(test, feature = "cuda"))]
+#[derive(Default)]
+pub(crate) struct TestHooks {
+    /// Make every graph capture fail after the KV buckets are allocated.
+    pub fail_capture: bool,
+    /// Make a capture fail right after 0-based layer `n`'s bucket
+    /// allocation, leaving a partially allocated bucket set behind.
+    pub fail_capture_after_layer: Option<usize>,
+    /// Make a bucket growth fail right after 0-based layer `n`'s
+    /// allocation, leaving both buckets partially resident.
+    pub fail_grow_after_layer: Option<usize>,
+    /// Keep a failed capture's storage instead of releasing it (the
+    /// control that proves the release assertions can fail).
+    pub skip_release: bool,
+    /// Keep incompatible fixed storage at the request entry instead of
+    /// releasing it (the control that proves the entry assertions can
+    /// fail).
+    pub skip_incompatible_release: bool,
+}
+
 pub(crate) struct Qwen3VlTextModel {
     #[cfg(feature = "cuda")]
     decode_graph: RefCell<Option<SingleTokenDecoderCudaGraph>>,
     #[cfg(feature = "cuda")]
     batch_decode_graph: RefCell<Option<BatchDecoderCudaGraph>>,
+    #[cfg(all(test, feature = "cuda"))]
+    pub(crate) hooks: TestHooks,
     embed_tokens: Embedding,
     layers: Vec<DecoderLayer>,
     norm: RmsNorm,
@@ -1247,6 +1273,37 @@ pub(crate) struct Qwen3VlTextModel {
 }
 
 impl Qwen3VlTextModel {
+    /// Test-only injection point: fail the capture right after this
+    /// layer's fixed-KV allocation. The inert production variant keeps
+    /// the call site (and its loop index) compiled in non-test builds.
+    #[cfg(all(test, feature = "cuda"))]
+    fn injected_capture_failure_after_layer(&self, index: usize) -> bool {
+        self.hooks
+            .fail_capture_after_layer
+            .is_some_and(|target| index + 1 == target)
+    }
+
+    /// Inert off-test counterpart: never fires.
+    #[cfg(all(not(test), feature = "cuda"))]
+    fn injected_capture_failure_after_layer(&self, _index: usize) -> bool {
+        false
+    }
+
+    /// Test-only injection point: fail the bucket growth right after
+    /// this layer's new-bucket allocation.
+    #[cfg(all(test, feature = "cuda"))]
+    fn injected_growth_failure_after_layer(&self, index: usize) -> bool {
+        self.hooks
+            .fail_grow_after_layer
+            .is_some_and(|target| index + 1 == target)
+    }
+
+    /// Inert off-test counterpart: never fires.
+    #[cfg(all(not(test), feature = "cuda"))]
+    fn injected_growth_failure_after_layer(&self, _index: usize) -> bool {
+        false
+    }
+
     /// Double the single-row decode bucket, preserving appended history.
     #[cfg(feature = "cuda")]
     fn grow_dynamic_cache(&self, query_len: usize, cache_len: usize) -> Result<(), Error> {
@@ -1266,8 +1323,8 @@ impl Qwen3VlTextModel {
         request_batch: Option<usize>,
         expected_cache_len: Option<usize>,
     ) {
-        #[cfg(test)]
-        if std::env::var_os("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE").is_some() {
+        #[cfg(all(test, feature = "cuda"))]
+        if self.hooks.skip_incompatible_release {
             // Test-only control: keep the incompatible storage so the
             // memory assertions can prove they catch a missing release.
             return;
@@ -1332,8 +1389,8 @@ impl Qwen3VlTextModel {
                 );
             }
         }
-        #[cfg(test)]
-        if std::env::var_os("OAR_WEVISDOC_SKIP_RELEASE").is_some() {
+        #[cfg(all(test, feature = "cuda"))]
+        if self.hooks.skip_release {
             // Test-only control: skip the storage release so the memory
             // assertions can prove they catch a missing release.
             return;
@@ -1373,8 +1430,7 @@ impl Qwen3VlTextModel {
             .unwrap_or(1);
         for (index, layer) in self.layers.iter().enumerate() {
             layer.grow_dynamic_cache_batch(batch, query_len, kv_heads, head_dim, cache_len)?;
-            #[cfg(test)]
-            if injected_growth_failure_after_layer(index) {
+            if self.injected_growth_failure_after_layer(index) {
                 // Fires after this layer's new-bucket allocation: the
                 // fallback must tolerate a partially grown set (layers
                 // below hold the new bucket, the rest the old one) and the
@@ -1405,6 +1461,8 @@ impl Qwen3VlTextModel {
             decode_graph: RefCell::new(None),
             #[cfg(feature = "cuda")]
             batch_decode_graph: RefCell::new(None),
+            #[cfg(all(test, feature = "cuda"))]
+            hooks: TestHooks::default(),
             embed_tokens,
             layers,
             norm,
@@ -1523,6 +1581,12 @@ impl Qwen3VlTextModel {
         lm_head: &Linear,
         ladder: bool,
     ) -> Result<(), Error> {
+        // Single-token budgets run eager, like the single-row entry: the
+        // generation takes no decode step, so the capture and its fixed
+        // buckets would go unused.
+        if max_new_tokens <= 1 {
+            return Ok(());
+        }
         if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
             || std::env::var_os("OAR_WEVISDOC_DISABLE_CUDA_GRAPH").is_some()
         {
@@ -1631,15 +1695,14 @@ impl Qwen3VlTextModel {
             .unwrap_or(1);
         for (index, layer) in self.layers.iter().enumerate() {
             layer.prepare_dynamic_cache_batch(batch, query_len, kv_heads, head_dim, cache_len)?;
-            #[cfg(test)]
-            if injected_capture_failure_after_layer(index) {
+            if self.injected_capture_failure_after_layer(index) {
                 return Err(Error::Config {
                     message: "injected capture failure (test)".to_string(),
                 });
             }
         }
-        #[cfg(test)]
-        if std::env::var_os("OAR_WEVISDOC_FAIL_CAPTURE").is_some() {
+        #[cfg(all(test, feature = "cuda"))]
+        if self.hooks.fail_capture {
             return Err(Error::Config {
                 message: "injected capture failure (test)".to_string(),
             });
@@ -1951,6 +2014,14 @@ impl Qwen3VlTextModel {
         lm_head: &Linear,
         ladder: bool,
     ) -> Result<(), Error> {
+        // A single-token generation takes no decode step at all (the one
+        // token comes from the prefill's own logits), so a captured graph
+        // — and above all its fixed-bucket preallocation — would sit
+        // unused: run it eager. A live graph this request can still reuse
+        // stays put and replays in the decode call.
+        if max_new_tokens <= 1 {
+            return Ok(());
+        }
         if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
             || std::env::var_os("OAR_WEVISDOC_DISABLE_CUDA_GRAPH").is_some()
         {
@@ -2038,8 +2109,7 @@ impl Qwen3VlTextModel {
         let query_len = 1;
         for (index, layer) in self.layers.iter().enumerate() {
             layer.prepare_dynamic_cache(query_len, cache_len)?;
-            #[cfg(test)]
-            if injected_capture_failure_after_layer(index) {
+            if self.injected_capture_failure_after_layer(index) {
                 // Fires after this layer's KV allocation: the fallback must
                 // release a partially allocated set of fixed buckets.
                 return Err(Error::Config {
@@ -2047,8 +2117,8 @@ impl Qwen3VlTextModel {
                 });
             }
         }
-        #[cfg(test)]
-        if std::env::var_os("OAR_WEVISDOC_FAIL_CAPTURE").is_some() {
+        #[cfg(all(test, feature = "cuda"))]
+        if self.hooks.fail_capture {
             return Err(Error::Config {
                 message: "injected capture failure (test)".to_string(),
             });
@@ -2261,12 +2331,7 @@ impl Qwen3VlTextModel {
         }
     }
 
-    /// Test-only accessors for the production-entry memory checks.
-    #[cfg(all(test, feature = "cuda"))]
-    pub(crate) fn embed_tokens_device(&self) -> &Device {
-        self.embed_tokens.embeddings().device()
-    }
-
+    /// Test-only accessor for the production-entry memory checks.
     #[cfg(all(test, feature = "cuda"))]
     pub(crate) fn cuda_device(&self) -> Option<&Device> {
         Some(self.embed_tokens.embeddings().device())
@@ -2593,6 +2658,9 @@ mod tests {
                 eprintln!("skipping: no CUDA device");
                 return;
             };
+
+            // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
+            let _gpu = GPU_SELFTEST_LOCK.lock();
             let mut cfg = valid_tiny_config();
             // Real-model attention dims: the tiny shapes take different
             // kernels than production decode.
@@ -2689,6 +2757,9 @@ mod tests {
                 eprintln!("skipping: no CUDA device");
                 return;
             };
+
+            // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
+            let _gpu = GPU_SELFTEST_LOCK.lock();
             let mut cfg = valid_tiny_config();
             cfg.hidden_size = 2048;
             cfg.intermediate_size = 6144;
@@ -2697,10 +2768,6 @@ mod tests {
             cfg.head_dim = 128;
             cfg.num_hidden_layers = 2;
             cfg.vocab_size = 32768;
-            let tensors = random_var_map(&cfg, &device, DType::BF16);
-            let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
-            let model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
-
             let seq = 4096usize;
             let q = Tensor::randn(0f32, 1f32, (1, 16, seq, cfg.head_dim), &device)
                 .unwrap()
@@ -2731,28 +2798,45 @@ mod tests {
     #[test]
     fn text_mlp_chunks_match_single_pass() {
         let device = Device::Cpu;
-        let mut cfg = valid_tiny_config();
-        cfg.hidden_size = 256;
-        cfg.intermediate_size = 6144;
+        let cfg = valid_tiny_config();
         let mut tensors = random_var_map(&cfg, &device, DType::F32);
         tensors.insert(
             "gate_proj.weight".to_string(),
-            Tensor::randn(0f32, 1f32, (6144, cfg.hidden_size), &device).unwrap(),
+            Tensor::randn(
+                0f32,
+                1f32,
+                (cfg.intermediate_size, cfg.hidden_size),
+                &device,
+            )
+            .unwrap(),
         );
         tensors.insert(
             "up_proj.weight".to_string(),
-            Tensor::randn(0f32, 1f32, (6144, cfg.hidden_size), &device).unwrap(),
+            Tensor::randn(
+                0f32,
+                1f32,
+                (cfg.intermediate_size, cfg.hidden_size),
+                &device,
+            )
+            .unwrap(),
         );
         tensors.insert(
             "down_proj.weight".to_string(),
-            Tensor::randn(0f32, 1f32, (cfg.hidden_size, 6144), &device).unwrap(),
+            Tensor::randn(
+                0f32,
+                1f32,
+                (cfg.hidden_size, cfg.intermediate_size),
+                &device,
+            )
+            .unwrap(),
         );
         let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
         let mlp = Qwen3Mlp::load(&cfg, vb).unwrap();
-        // 11000 rows x 6144 x 4B = 270 MiB > 256 MiB budget (CPU F32).
-        let xs = Tensor::randn(0f32, 1f32, (1, 11000, cfg.hidden_size), &device).unwrap();
+        // 200 rows x 32 intermediate x 4B = 25.6 KiB > the 8 KiB test
+        // budget, so the chunked path runs on tiny tensors.
+        let xs = Tensor::randn(0f32, 1f32, (1, 200, cfg.hidden_size), &device).unwrap();
         TEXT_MLP_CHUNK_RUNS.store(0, std::sync::atomic::Ordering::Relaxed);
-        let chunked = mlp.forward(&xs).unwrap();
+        let chunked = mlp.forward_with_budget(&xs, 8192).unwrap();
         assert!(
             TEXT_MLP_CHUNK_RUNS.load(std::sync::atomic::Ordering::Relaxed) > 0,
             "the chunk path did not execute"
@@ -2946,10 +3030,9 @@ mod tests {
                 eprintln!("skipping: no CUDA device");
                 return;
             };
-            use crate::runtime::attention::{
-                combine_masks, create_causal_mask, create_generation_mask_if_needed,
-                create_left_padding_mask,
-            };
+
+            // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
+            let _gpu = GPU_SELFTEST_LOCK.lock();
             // Production-shape depth: 28 layers at the 8192 bucket hold
             // ~940 MiB of fixed KV, far past the pool's slack.
             let mut cfg = valid_tiny_config();
@@ -2962,7 +3045,7 @@ mod tests {
             cfg.vocab_size = 32768;
             let tensors = random_var_map(&cfg, &device, DType::BF16);
             let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
-            let model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
+            let mut model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
             let lm_head = Linear::new(
                 vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
                     .unwrap(),
@@ -2984,9 +3067,7 @@ mod tests {
             eprintln!("DBGM1 baseline={baseline}MiB");
             assert!(baseline > 0, "nvidia-smi unavailable; cannot measure");
 
-            // SAFETY: the self-test runner is single-threaded, so the
-            // process-global environment is owned by this test.
-            unsafe { std::env::set_var("OAR_WEVISDOC_FAIL_CAPTURE", "1") };
+            model.hooks.fail_capture = true;
 
             // Production single-row entry: succeeds even though the capture
             // failed; no graph may survive.
@@ -3003,18 +3084,14 @@ mod tests {
             assert!(!model.decode_graph_captured());
 
             // Partial allocation: fail after the 24th of 28 layers.
-            unsafe {
-                std::env::set_var("OAR_WEVISDOC_FAIL_CAPTURE_AFTER_LAYER", "24");
-            }
+            model.hooks.fail_capture_after_layer = Some(24);
             model
                 .prepare_ar_cuda_graph(600, 8192, &lm_head, false)
                 .unwrap();
             let after_partial = measured(&model);
             eprintln!("DBGM1 after-partial-fallback={after_partial}MiB");
             assert!(after_partial.saturating_sub(baseline) <= 16);
-            unsafe {
-                std::env::remove_var("OAR_WEVISDOC_FAIL_CAPTURE_AFTER_LAYER");
-            }
+            model.hooks.fail_capture_after_layer = None;
 
             // Production batch entry with all layers allocated.
             model
@@ -3030,7 +3107,7 @@ mod tests {
             // buckets stay resident — proving the assertion above catches
             // a missing release. (The DBGM2 line printed by the recovery
             // is the at-failure reading, taken before the release runs.)
-            unsafe { std::env::set_var("OAR_WEVISDOC_SKIP_RELEASE", "1") };
+            model.hooks.skip_release = true;
             model
                 .prepare_batch_ar_cuda_graph(2, 600, 8192, &[0, 10], &lm_head, false)
                 .unwrap();
@@ -3040,10 +3117,8 @@ mod tests {
                 no_release.saturating_sub(baseline) >= 300,
                 "the memory assertion failed to catch a missing release"
             );
-            unsafe {
-                std::env::remove_var("OAR_WEVISDOC_SKIP_RELEASE");
-                std::env::remove_var("OAR_WEVISDOC_FAIL_CAPTURE");
-            }
+            model.hooks.skip_release = false;
+            model.hooks.fail_capture = false;
             model.recover_failed_capture();
             let settled = measured(&model);
             eprintln!("DBGM1 settled after control={settled}MiB");
@@ -3081,6 +3156,9 @@ mod tests {
                 eprintln!("skipping: no CUDA device");
                 return;
             };
+
+            // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
+            let _gpu = GPU_SELFTEST_LOCK.lock();
             let mut cfg = valid_tiny_config();
             cfg.hidden_size = 2048;
             cfg.intermediate_size = 6144;
@@ -3091,7 +3169,7 @@ mod tests {
             cfg.vocab_size = 32768;
             let tensors = random_var_map(&cfg, &device, DType::BF16);
             let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
-            let model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
+            let mut model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
             let lm_head = Linear::new(
                 vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
                     .unwrap(),
@@ -3138,7 +3216,7 @@ mod tests {
 
             // Control: with the entry release skipped, the pre-upload
             // probe stays ~1.9 GiB above baseline.
-            unsafe { std::env::set_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE", "1") };
+            model.hooks.skip_incompatible_release = true;
             model
                 .prepare_batch_ar_cuda_graph(2, 600, 8192, &[0, 10], &lm_head, false)
                 .unwrap();
@@ -3150,7 +3228,7 @@ mod tests {
                 skipped.saturating_sub(baseline) >= 500,
                 "the memory assertion failed to catch a missing release"
             );
-            unsafe { std::env::remove_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE") };
+            model.hooks.skip_incompatible_release = false;
             model.release_incompatible_fixed_storage(None, Some(8192));
             let settled = measured(&model);
             eprintln!("DBGM3 single-entry settled={settled}MiB");
@@ -3209,9 +3287,7 @@ mod tests {
                 .prepare_batch_ar_cuda_graph(2, 600, 8192, &[0, 10], &lm_head, false)
                 .unwrap();
             assert!(model.batch_decode_graph_captured());
-            unsafe {
-                std::env::set_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE", "1");
-            }
+            model.hooks.skip_incompatible_release = true;
             model.release_incompatible_fixed_storage(None, None);
             let skipped = measured(&model);
             eprintln!("DBGM3 control (release skipped)={skipped}MiB");
@@ -3219,9 +3295,7 @@ mod tests {
                 skipped.saturating_sub(baseline) >= 500,
                 "the memory assertion failed to catch a missing release"
             );
-            unsafe {
-                std::env::remove_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE");
-            }
+            model.hooks.skip_incompatible_release = false;
             model.release_incompatible_fixed_storage(None, None);
             let settled = measured(&model);
             eprintln!("DBGM3 settled after control={settled}MiB");
@@ -3253,6 +3327,9 @@ mod tests {
                 eprintln!("skipping: no CUDA device");
                 return;
             };
+
+            // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
+            let _gpu = GPU_SELFTEST_LOCK.lock();
             let mut cfg = valid_tiny_config();
             cfg.hidden_size = 2048;
             cfg.intermediate_size = 6144;
@@ -3263,7 +3340,7 @@ mod tests {
             cfg.vocab_size = 32768;
             let tensors = random_var_map(&cfg, &device, DType::BF16);
             let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
-            let model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
+            let mut model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
             let lm_head = Linear::new(
                 vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
                     .unwrap(),
@@ -3325,7 +3402,7 @@ mod tests {
             );
 
             // Control: with the entry release skipped, the orphan stays.
-            unsafe { std::env::set_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE", "1") };
+            model.hooks.skip_incompatible_release = true;
             model.release_incompatible_fixed_storage(None, None);
             let skipped = measured(&model);
             eprintln!("DBGM5 control (release skipped)={skipped}MiB");
@@ -3333,7 +3410,7 @@ mod tests {
                 skipped.saturating_sub(baseline) >= 300,
                 "the memory assertion failed to catch a missing release"
             );
-            unsafe { std::env::remove_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE") };
+            model.hooks.skip_incompatible_release = false;
             model.release_incompatible_fixed_storage(None, Some(8192));
             let released = measured(&model);
             eprintln!("DBGM5 batch orphan released={released}MiB");
@@ -3380,6 +3457,9 @@ mod tests {
                 eprintln!("skipping: no CUDA device");
                 return;
             };
+
+            // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
+            let _gpu = GPU_SELFTEST_LOCK.lock();
             let mut cfg = valid_tiny_config();
             cfg.hidden_size = 2048;
             cfg.intermediate_size = 6144;
@@ -3390,7 +3470,7 @@ mod tests {
             cfg.vocab_size = 32768;
             let tensors = random_var_map(&cfg, &device, DType::BF16);
             let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
-            let model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
+            let mut model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
             let lm_head = Linear::new(
                 vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
                     .unwrap(),
@@ -3415,9 +3495,9 @@ mod tests {
             // Injected: growth fails after the 2nd of 4 layers (midway,
             // with both buckets partially resident); eager carries the
             // rest.
-            unsafe { std::env::set_var("OAR_WEVISDOC_FAIL_GROW_AFTER_LAYER", "2") };
+            model.hooks.fail_grow_after_layer = Some(2);
             let fallback = greedy_graphed_steps(&model, &lm_head, &ids, steps);
-            unsafe { std::env::remove_var("OAR_WEVISDOC_FAIL_GROW_AFTER_LAYER") };
+            model.hooks.fail_grow_after_layer = None;
             assert_eq!(
                 fallback, reference,
                 "growth-failure fallback must match eager"
@@ -3426,6 +3506,90 @@ mod tests {
                 !model.decode_graph_captured(),
                 "the failed growth must leave no graph behind"
             );
+        }
+        #[cfg(not(feature = "cuda"))]
+        eprintln!("skipping: built without the cuda feature");
+    }
+
+    /// Single-token budgets (`max_new_tokens <= 1`) take no decode step —
+    /// the one token comes from the prefill's own logits — so the
+    /// production prepare entries must skip graph capture and the
+    /// fixed-bucket preallocation entirely, and the output must match
+    /// eager.
+    #[test]
+    fn cuda_single_token_requests_skip_graph_capture_and_storage() {
+        #[cfg(feature = "cuda")]
+        {
+            if std::env::var_os("OAR_WEVISDOC_GPU_SELFTEST").is_none() {
+                eprintln!("skipping: OAR_WEVISDOC_GPU_SELFTEST is not set");
+                return;
+            }
+            let Ok(device) = Device::new_cuda(0) else {
+                eprintln!("skipping: no CUDA device");
+                return;
+            };
+
+            // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
+            let _gpu = GPU_SELFTEST_LOCK.lock();
+            let mut cfg = valid_tiny_config();
+            cfg.hidden_size = 2048;
+            cfg.intermediate_size = 6144;
+            cfg.num_attention_heads = 16;
+            cfg.num_key_value_heads = 8;
+            cfg.head_dim = 128;
+            cfg.num_hidden_layers = 4;
+            cfg.vocab_size = 32768;
+            let tensors = random_var_map(&cfg, &device, DType::BF16);
+            let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
+            let model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
+            let lm_head = Linear::new(
+                vb.get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
+                    .unwrap(),
+                None,
+            );
+            let ids = (0..600).map(|i| 10 + i % 60).collect::<Vec<u32>>();
+            // The production single-row entry with a single-token budget
+            // captures nothing and pins no bucket. Checked between prepare
+            // and any decode step: after decoding, the eager cache's
+            // organic per-token growth is expected and must not fail this.
+            model.clear_cache();
+            model.prepare_ar_cuda_graph(600, 1, &lm_head, true).unwrap();
+            assert!(!model.decode_graph_captured());
+            assert!(
+                model
+                    .layers
+                    .first()
+                    .and_then(|layer| layer.fixed_storage_layout())
+                    .is_none(),
+                "a single-token request preallocated fixed KV"
+            );
+
+            // The batch entry obeys the same budget rule.
+            model
+                .prepare_batch_ar_cuda_graph(2, 600, 1, &[0, 10], &lm_head, true)
+                .unwrap();
+            assert!(!model.batch_decode_graph_captured());
+            assert!(
+                model
+                    .layers
+                    .first()
+                    .and_then(|layer| layer.fixed_storage_layout())
+                    .is_none(),
+                "a single-token batch request preallocated fixed KV"
+            );
+
+            // The request itself still produces the eager token through the
+            // production-shaped helpers.
+            let reference = greedy_eager(&model, &lm_head, &ids, 1);
+            let graphed = greedy_graphed(&model, &lm_head, &ids, 1, false);
+            assert_eq!(graphed, reference, "single-token output must match eager");
+
+            // Control: a real token budget captures, so the skips above
+            // come from the budget, not from a broken setup.
+            let graphed = greedy_graphed(&model, &lm_head, &ids, 8, true);
+            let control_reference = greedy_eager(&model, &lm_head, &ids, 8);
+            assert_eq!(graphed, control_reference);
+            assert!(model.decode_graph_captured());
         }
         #[cfg(not(feature = "cuda"))]
         eprintln!("skipping: built without the cuda feature");
@@ -3493,6 +3657,9 @@ mod tests {
                 eprintln!("skipping: no CUDA device");
                 return;
             };
+
+            // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
+            let _gpu = GPU_SELFTEST_LOCK.lock();
             use crate::runtime::attention::{
                 combine_masks, create_causal_mask, create_generation_mask_if_needed,
                 create_left_padding_mask,
@@ -3526,14 +3693,14 @@ mod tests {
             // Batch graph: decode through it and assert every logit is
             // finite (NaN would flow from the masked attention rows).
             let seq_lens = vec![540usize, 520usize];
-            let pads = vec![0usize, 20usize];
+            let pads = [0usize, 20usize];
             let pad_starts: Vec<u32> = pads.iter().map(|&pad| pad as u32).collect();
             let embeds = Tensor::randn(0f32, 1f32, (2, 540, cfg.hidden_size), &device)
                 .unwrap()
                 .to_dtype(DType::F16)
                 .unwrap();
             let positions = Tensor::zeros((3, 2, 540), DType::I64, &device).unwrap();
-            let rows = vec![540usize, 520usize];
+            let rows = [540usize, 520usize];
             model.clear_cache();
             model
                 .prepare_batch_ar_cuda_graph(
@@ -3632,6 +3799,9 @@ mod tests {
                 eprintln!("skipping: no CUDA device");
                 return;
             };
+
+            // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
+            let _gpu = GPU_SELFTEST_LOCK.lock();
             let mut cfg = valid_tiny_config();
             cfg.hidden_size = 2048;
             cfg.intermediate_size = 6144;

@@ -16,11 +16,22 @@ pub struct WeVisDocImageInputs {
     pub num_image_tokens: usize,
 }
 
-/// Test probe: device MiB observed at the last pixel-value upload point
-/// (stored by the cfg(test) hook in `preprocess_image`).
+// Test probe: device MiB observed at the pixel-value upload point on
+// this thread's most recent `preprocess_image` call. Thread-local so
+// parallel GPU tests cannot read each other's readings; read it with
+// `take_last_upload_probe_mib` (a doc comment cannot attach to the
+// thread_local! invocation, hence plain comments).
 #[cfg(all(test, feature = "cuda"))]
-pub(crate) static LAST_UPLOAD_PROBE_MIB: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+std::thread_local! {
+    static LAST_UPLOAD_PROBE_MIB: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only accessor: the last upload-point reading stored on this
+/// thread, resetting it to zero.
+#[cfg(all(test, feature = "cuda"))]
+pub(crate) fn take_last_upload_probe_mib() -> u64 {
+    LAST_UPLOAD_PROBE_MIB.with(|probe| probe.replace(0))
+}
 
 pub(crate) fn load_image_processor_config(
     path: impl AsRef<Path>,
@@ -124,27 +135,26 @@ pub fn preprocess_image(
     dtype: DType,
 ) -> Result<WeVisDocImageInputs, Error> {
     validate_processor_vision_compatibility(cfg, vision)?;
-    // Test-only production-entry probe: records device memory at the
-    // upload point when the self-check drives a real generate_one.
+    // Test-only production-entry probe: always armed in cuda test builds
+    // (thread-local, so parallel tests stay isolated) and records device
+    // memory at the upload point, before the pixel values are uploaded.
     #[cfg(all(test, feature = "cuda"))]
-    if std::env::var_os("OAR_WEVISDOC_PROBE_UPLOAD").is_some() {
-        if let Device::Cuda(cuda) = device {
-            cuda.cuda_stream().synchronize().unwrap();
-            let output = std::process::Command::new("nvidia-smi")
-                .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-                .output();
-            let mib = match output {
-                Ok(out) => String::from_utf8_lossy(&out.stdout)
-                    .trim()
-                    .lines()
-                    .next()
-                    .and_then(|line| line.trim().parse().ok())
-                    .unwrap_or(0),
-                Err(_) => 0,
-            };
-            LAST_UPLOAD_PROBE_MIB.store(mib, std::sync::atomic::Ordering::Relaxed);
-            eprintln!("DBGM9 pre-upload used={mib}MiB");
-        }
+    if let Device::Cuda(cuda) = device {
+        cuda.cuda_stream().synchronize().unwrap();
+        let output = std::process::Command::new("nvidia-smi")
+            .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+            .output();
+        let mib = match output {
+            Ok(out) => String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .lines()
+                .next()
+                .and_then(|line| line.trim().parse().ok())
+                .unwrap_or(0),
+            Err(_) => 0,
+        };
+        LAST_UPLOAD_PROBE_MIB.with(|probe| probe.set(mib));
+        eprintln!("DBGM9 pre-upload used={mib}MiB");
     }
     // Document-parser crops can be narrower than the patch grid on one
     // side (for example a 10x200 rule). Pad the aspect ratio first, then

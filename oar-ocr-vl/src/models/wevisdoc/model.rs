@@ -1501,12 +1501,13 @@ mod tests {
     }
 
     /// Production-entry memory check with a real checkpoint (env-gated:
-    /// OAR_WEVISDOC_ENTRY_TEST_MODEL_DIR / _IMAGE_A / _IMAGE_B). After a
+    /// OAR_WEVISDOC_ENTRY_TEST_MODEL_DIR / _IMAGE_A / _IMAGE_B). A
+    /// single-token request runs eager with no graph captured; after a
     /// region batch leaves a multi-GiB fixed bucket behind, the
     /// single-page entry (generate_one) and the batch entry
     /// (generate_tokens) must both release stale fixed KV before pixel
-    /// values are uploaded — verified via the preprocess_image probe —
-    /// with a release-skipped control.
+    /// values are uploaded — verified via the preprocess_image upload
+    /// probe — with a release-skipped control.
     #[test]
     fn cuda_production_entries_release_stale_fixed_kv() {
         #[cfg(feature = "cuda")]
@@ -1523,8 +1524,10 @@ mod tests {
                 eprintln!("skipping: set OAR_WEVISDOC_ENTRY_TEST_MODEL_DIR and _IMAGE_A/_IMAGE_B");
                 return;
             };
+            // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
+            let _gpu = crate::backbones::qwen3_vl::text::GPU_SELFTEST_LOCK.lock();
             let device = Device::new_cuda(0).unwrap();
-            let model = WeVisDoc::from_dir(std::path::Path::new(&model_dir), device.clone())
+            let mut model = WeVisDoc::from_dir(std::path::Path::new(&model_dir), device.clone())
                 .expect("load WeVisDoc");
             let image_a = crate::utils::image::load_image(std::path::Path::new(&image_a))
                 .expect("load image a");
@@ -1555,6 +1558,24 @@ mod tests {
             };
             eprintln!("DBGM7 baseline={baseline}MiB");
 
+            // A single-token page request runs eager: the production
+            // entries skip graph preparation when max_new_tokens <= 1, so
+            // a fresh model must end the request with no graph captured
+            // and no fixed bucket allocated, and still produce the
+            // prefill's greedy token.
+            let (tokens, stopped) = model
+                .generate_one(&image_a, 1, LoopGuard::Off)
+                .expect("single-token generation succeeds");
+            assert!(
+                tokens.len() <= 1 && (!stopped || tokens.is_empty()),
+                "a single-token request produced {} tokens (stopped={stopped})",
+                tokens.len()
+            );
+            assert!(
+                !model.text.decode_graph_captured() && !model.text.batch_decode_graph_captured(),
+                "a single-token request must not capture a graph"
+            );
+
             // Region-style batch request: captures a same-width graph and
             // preallocates the big fixed buckets.
             let texts = model
@@ -1562,15 +1583,14 @@ mod tests {
                 .unwrap();
             assert_eq!(texts.len(), 2);
 
-            // Single-page entry: probe armed; the release must land before
-            // preprocess_image uploads pixel values.
-            unsafe { std::env::set_var("OAR_WEVISDOC_PROBE_UPLOAD", "1") };
+            // Single-page entry: the release must land before
+            // preprocess_image uploads pixel values; the (thread-local)
+            // upload probe stores the reading from this request.
             let tokens = model
                 .generate_one(&image_a, 64, LoopGuard::Standard)
                 .expect("single-page generation succeeds");
             assert!(!tokens.0.is_empty());
-            let probe = crate::wevisdoc::processing::LAST_UPLOAD_PROBE_MIB
-                .load(std::sync::atomic::Ordering::Relaxed);
+            let probe = crate::wevisdoc::processing::take_last_upload_probe_mib();
             eprintln!("DBGM7 single-entry pre-upload probe={probe}MiB");
             // Batch-round activations leave ~100-200 MiB of live residue;
             // the released bucket would be ~940 MiB. The control below
@@ -1583,28 +1603,24 @@ mod tests {
 
             // Control: with the entry release skipped, the upload point
             // sees the stale bucket.
-            unsafe { std::env::set_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE", "1") };
+            model.text.hooks.skip_incompatible_release = true;
             let _ = model
                 .generate_one(&image_a, 64, LoopGuard::Standard)
                 .unwrap();
-            let probe = crate::wevisdoc::processing::LAST_UPLOAD_PROBE_MIB
-                .load(std::sync::atomic::Ordering::Relaxed);
+            let probe = crate::wevisdoc::processing::take_last_upload_probe_mib();
             eprintln!("DBGM7 control (release skipped) probe={probe}MiB");
             assert!(
                 probe.saturating_sub(baseline) >= 500,
                 "the memory assertion failed to catch a missing release"
             );
-            unsafe { std::env::remove_var("OAR_WEVISDOC_SKIP_INCOMPATIBLE_RELEASE") };
+            model.text.hooks.skip_incompatible_release = false;
 
             // Batch entry: after the single-page phase the single-row
             // bucket is stale for a batch request; the entry must release
             // it before the upload.
-            unsafe { std::env::set_var("OAR_WEVISDOC_PROBE_UPLOAD", "1") };
             let texts = model.generate(&[image_a, image_b], 64).unwrap();
             assert_eq!(texts.len(), 2);
-            unsafe { std::env::remove_var("OAR_WEVISDOC_PROBE_UPLOAD") };
-            let probe = crate::wevisdoc::processing::LAST_UPLOAD_PROBE_MIB
-                .load(std::sync::atomic::Ordering::Relaxed);
+            let probe = crate::wevisdoc::processing::take_last_upload_probe_mib();
             eprintln!("DBGM7 batch-entry pre-upload probe={probe}MiB");
             // The stale single-row bucket (~470 MiB) must already be gone;
             // the remaining delta is batch-round activation residue. A

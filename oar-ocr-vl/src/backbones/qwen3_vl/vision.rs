@@ -243,7 +243,7 @@ fn vision_chunk_size(num_heads: usize, seq_len: usize) -> usize {
 }
 
 /// Test probe: how many times the vision MLP chunked path has run.
-#[cfg(all(test, not(feature = "cuda")))]
+#[cfg(test)]
 static VISION_MLP_CHUNK_RUNS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
@@ -377,13 +377,20 @@ impl VisionMlp {
         // the chunked output bit-identical. CUDA keeps the single-pass
         // path: bf16 intermediates are only ~512 MiB there, and chunking
         // would change GEMM shapes and potentially bf16 accumulation.
+        const BUDGET: usize = 256 * 1024 * 1024;
+        self.forward_with_budget(hidden_states, BUDGET)
+    }
+
+    /// `budget` bounds the intermediate bytes per pass (tests pass a
+    /// small value so the chunk path is reachable with tiny tensors).
+    fn forward_with_budget(&self, hidden_states: &Tensor, budget: usize) -> Result<Tensor, Error> {
         let rows = hidden_states.dim(0)?;
         let element_size = hidden_states.dtype().size_in_bytes();
         let on_cuda = hidden_states.device().is_cuda();
         let intermediate_bytes = rows
             .saturating_mul(self.intermediate_size)
             .saturating_mul(element_size);
-        if on_cuda || intermediate_bytes <= 256 * 1024 * 1024 {
+        if on_cuda || intermediate_bytes <= budget {
             let hidden_states = self
                 .linear_fc1
                 .forward(hidden_states)
@@ -1061,26 +1068,27 @@ mod tests {
         assert!(merge_grouped_spatial_coordinates((0, 4, 4), 2).is_err());
     }
 
-    /// The vision MLP chunk path (CPU, rows above the intermediate budget)
-    /// must produce bit-identical output to the single-pass path.
+    /// The vision MLP chunk path (CPU, intermediate above the budget) must
+    /// produce bit-identical output to the single-pass path. A tiny budget
+    /// makes the chunk branch reachable without large fixtures.
     #[test]
     fn vision_mlp_chunks_match_single_pass() {
         let device = Device::Cpu;
         let mut cfg = tiny_config();
         cfg.hidden_size = 64;
-        cfg.intermediate_size = 4096;
+        cfg.intermediate_size = 128;
         let mut tensors = test_tensors(&cfg, &device);
         tensors.insert(
             "mlp.linear_fc1.weight".to_string(),
-            Tensor::randn(0f32, 1f32, (4096, cfg.hidden_size), &device).unwrap(),
+            Tensor::randn(0f32, 1f32, (128, cfg.hidden_size), &device).unwrap(),
         );
         tensors.insert(
             "mlp.linear_fc1.bias".to_string(),
-            Tensor::zeros(4096, DType::F32, &device).unwrap(),
+            Tensor::zeros(128, DType::F32, &device).unwrap(),
         );
         tensors.insert(
             "mlp.linear_fc2.weight".to_string(),
-            Tensor::randn(0f32, 1f32, (cfg.hidden_size, 4096), &device).unwrap(),
+            Tensor::randn(0f32, 1f32, (cfg.hidden_size, 128), &device).unwrap(),
         );
         tensors.insert(
             "mlp.linear_fc2.bias".to_string(),
@@ -1088,10 +1096,9 @@ mod tests {
         );
         let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
         let mlp = VisionMlp::load(&cfg, vb).unwrap();
-        // 40000 rows x 4096 intermediate x 4B = 625 MiB > 256 MiB budget.
-        let xs = Tensor::randn(0f32, 1f32, (40000, cfg.hidden_size), &device).unwrap();
+        let xs = Tensor::randn(0f32, 1f32, (100, cfg.hidden_size), &device).unwrap();
         VISION_MLP_CHUNK_RUNS.store(0, std::sync::atomic::Ordering::Relaxed);
-        let chunked = mlp.forward(&xs).unwrap();
+        let chunked = mlp.forward_with_budget(&xs, 8192).unwrap();
         assert!(
             VISION_MLP_CHUNK_RUNS.load(std::sync::atomic::Ordering::Relaxed) > 0,
             "the chunk path did not execute"
