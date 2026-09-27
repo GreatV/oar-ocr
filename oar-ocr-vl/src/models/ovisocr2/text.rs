@@ -493,6 +493,21 @@ impl GatedDeltaNet {
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN output projection", e))
     }
 
+    /// Release the state buffers. Under CUDA a captured decode graph has
+    /// referenced them (it writes them in place during replay), so they go
+    /// through the drain path rather than a plain drop — unconditionally,
+    /// since the drain is a no-op when nothing was ever captured.
+    #[cfg(feature = "cuda")]
+    fn clear_cache(&self) {
+        for slot in [&self.conv_state, &self.recurrent_state] {
+            if let Some(state) = slot.borrow_mut().take() {
+                let device = state.device().clone();
+                drop_and_drain(state, &device);
+            }
+        }
+    }
+
+    #[cfg(not(feature = "cuda"))]
     fn clear_cache(&self) {
         *self.conv_state.borrow_mut() = None;
         *self.recurrent_state.borrow_mut() = None;
@@ -1106,6 +1121,9 @@ pub(crate) struct OvisOcr2TextModel {
     /// Test-only failure injection; production builds compile this out.
     #[cfg(all(test, feature = "cuda"))]
     hooks: TestHooks,
+    /// Test-only counter for `TestHooks::fail_body_on_call`.
+    #[cfg(all(test, feature = "cuda"))]
+    body_calls: std::cell::Cell<usize>,
     /// Declared last so it drops last: the model's `Drop` disposes the
     /// cached graph, and this guard drains whatever the remaining fields'
     /// frees stash on the CUDA context afterwards.
@@ -1167,6 +1185,9 @@ pub(crate) struct TestHooks {
     /// Fail the decode-graph capture right after the KV buckets are
     /// allocated, leaving them resident for the recovery to shrink.
     pub fail_capture: bool,
+    /// Fail the decode-graph body on its nth invocation (1 = warmup, 2 =
+    /// capture, exercising the shared helper's drained teardown).
+    pub fail_body_on_call: Option<usize>,
     /// Fail the bucket allocation right after 0-based layer `n`'s
     /// `prepare_dynamic_cache`, leaving a partially allocated bucket set
     /// behind (e.g. an OOM on a later layer).
@@ -1210,6 +1231,8 @@ impl OvisOcr2TextModel {
             pending_capture_bucket: RefCell::new(None),
             #[cfg(all(test, feature = "cuda"))]
             hooks: TestHooks::default(),
+            #[cfg(all(test, feature = "cuda"))]
+            body_calls: std::cell::Cell::new(0),
             #[cfg(feature = "cuda")]
             drain_guard: CudaGraphDrainGuard::new(vb.device()),
         })
@@ -1441,6 +1464,16 @@ impl OvisOcr2TextModel {
         this: &Self,
         inputs: &OvisDecodeGraphInputs,
     ) -> Result<Vec<Tensor>, Error> {
+        #[cfg(all(test, feature = "cuda"))]
+        {
+            let call = this.body_calls.get() + 1;
+            this.body_calls.set(call);
+            if this.hooks.fail_body_on_call.is_some_and(|n| call == n) {
+                return Err(Error::Config {
+                    message: "injected capture-body failure (test)".to_string(),
+                });
+            }
+        }
         let (cos, sin) = this
             .rotary_emb
             .forward(&inputs.positions, inputs.hidden.dtype())?;
@@ -2366,6 +2399,77 @@ mod tests {
         assert!(
             worst < 0.05,
             "eager decode after a failed bucket allocation diverged: max|delta| = {worst}"
+        );
+        Ok(())
+    }
+
+    /// A failure inside the capture body must leave the CUDA context clean:
+    /// the shared helper releases the capture-referenced buffers through the
+    /// drain path, so the eager fallback reads no stale
+    /// CUDA_ERROR_INVALID_VALUE. Without a CUDA device the test is a no-op.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn failed_capture_body_drains_and_eager_decode_survives() -> Result<(), Error> {
+        // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
+        let _gpu = crate::backbones::qwen3_vl::text::GPU_SELFTEST_LOCK.lock();
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let cfg = tiny_graph_config();
+        cfg.validate()?;
+        let tensors = tiny_graph_tensors(&cfg, &device);
+        let prompt = Tensor::from_vec(vec![1u32, 2, 3, 4], (1, 4), &device).unwrap();
+        let prompt_positions = Tensor::from_vec(
+            vec![0i64, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
+            (3, 1, 4),
+            &device,
+        )
+        .unwrap();
+        let token = Tensor::from_vec(vec![7u32], (1, 1), &device).unwrap();
+        let pos4 = Tensor::from_vec(vec![4i64; 3], (3, 1, 1), &device).unwrap();
+
+        let vb = VarBuilder::from_tensors(tensors.clone(), DType::BF16, &device);
+        let mut model = OvisOcr2TextModel::load(&cfg, vb)?;
+        // The body's second invocation is the capture itself.
+        model.hooks.fail_body_on_call = Some(2);
+        let lm_head = Linear::new(model.token_embedding_weight(), None);
+        let embeds = model.embed(&prompt)?;
+        model.forward(&embeds, &prompt_positions)?;
+        model.prepare_decode_graph(4, 16)?;
+        let embed = model.embed(&token)?;
+        let served = model.decode_step_graph(&embed, &pos4, &lm_head)?;
+        assert!(served.is_none(), "a failed capture must fall back eager");
+
+        // The failed capture's output buffers and input bundle were
+        // referenced by the capture; plain-dropping them would stash an
+        // INVALID_VALUE on the context.
+        let Device::Cuda(cuda) = &device else {
+            unreachable!()
+        };
+        let status = cuda.cuda_stream().context().check_err();
+        assert!(
+            status.is_ok(),
+            "stashed CUDA error after failed capture: {status:?}"
+        );
+
+        // Fresh allocations and the eager fallback both work afterwards.
+        Tensor::zeros((256, 256), DType::BF16, &device)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "post-failure alloc", e))?;
+        let hidden = model.forward(&embed, &pos4)?;
+        let logits = lm_head
+            .forward(
+                &hidden
+                    .i((0, 0, ..))
+                    .and_then(|last| last.unsqueeze(0))
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager input", e))?,
+            )
+            .and_then(|logits| logits.squeeze(0))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager logits", e))?;
+        let reference = eager_reference_logits(&cfg, tensors, &device)?;
+        let worst = max_abs_delta(&logits, &reference);
+        assert!(
+            worst < 0.05,
+            "eager decode after a failed capture body diverged: max|delta| = {worst}"
         );
         Ok(())
     }

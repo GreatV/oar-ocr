@@ -151,36 +151,71 @@ pub(crate) fn capture_decoder_graph<M, I: DecoderGraphInputs>(
     let stream = cuda.cuda_stream();
     let _htod_cache = cuda.enable_cuda_graph_htod_cache();
 
-    let warm_outputs = body(model, &inputs)?;
+    // Every error path from here on releases the output buffers and the
+    // input bundle through the drain path rather than a plain drop: once a
+    // buffer has been referenced by a capture, a plain drop can stash
+    // CUDA_ERROR_INVALID_VALUE on the context, and the caller's state
+    // rollback or eager fallback would read that stale error. The warmup
+    // stage (before begin_capture) does not reference anything in a graph,
+    // but takes the same path for uniformity.
+    let mut outputs: Vec<Tensor> = Vec::new();
+    macro_rules! bail_drained {
+        ($error:expr) => {{
+            for output in outputs.drain(..) {
+                drop_and_drain(output, device);
+            }
+            // The bundle tears itself down field by field, draining after
+            // each drop.
+            inputs.dispose(device);
+            return Err($error);
+        }};
+    }
+
+    let warm_outputs = match body(model, &inputs) {
+        Ok(warm_outputs) => warm_outputs,
+        Err(error) => bail_drained!(error),
+    };
     let mut synced = Vec::with_capacity(warm_outputs.len());
     for (index, output) in warm_outputs.iter().enumerate() {
-        sync_graph_tensor(
+        if let Err(error) = sync_graph_tensor(
             model_name,
             output,
             output_context(index, "warm decoder CUDA graph"),
-        )?;
+        ) {
+            bail_drained!(error);
+        }
         synced.push(output.clone());
     }
     // Allocate the output buffers before capture so they belong to the
     // regular stream-ordered pool; a capture-time allocation lives in the
     // graph's private pool and can never be returned to the allocator
     // safely. Prime the copies so the captured run sees warm kernels.
-    let outputs = synced
+    outputs = match synced
         .iter()
         .map(|warm| {
             warm.zeros_like()
                 .map_err(|e| candle_to_ocr_inference(model_name, "graph output buffer", e))
         })
-        .collect::<Result<Vec<Tensor>, Error>>()?;
+        .collect::<Result<Vec<Tensor>, Error>>()
+    {
+        Ok(buffers) => buffers,
+        Err(error) => bail_drained!(error),
+    };
     for (buffer, warm) in outputs.iter().zip(&synced) {
-        buffer
+        if let Err(error) = buffer
             .slice_set(warm, 0, 0)
-            .map_err(|e| candle_to_ocr_inference(model_name, "prime graph output copy", e))?;
+            .map_err(|e| candle_to_ocr_inference(model_name, "prime graph output copy", e))
+        {
+            bail_drained!(error);
+        }
     }
 
-    stream
+    if let Err(error) = stream
         .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
-        .map_err(|e| cuda_graph_error(model_name, "begin decoder CUDA graph capture", e))?;
+        .map_err(|e| cuda_graph_error(model_name, "begin decoder CUDA graph capture", e))
+    {
+        bail_drained!(error);
+    }
     let captured_output: Result<(), Error> = (|| {
         let produced = body(model, &inputs)?;
         if produced.len() != outputs.len() {
@@ -203,23 +238,41 @@ pub(crate) fn capture_decoder_graph<M, I: DecoderGraphInputs>(
         let _ = stream.end_capture(
             CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
         );
-        return Err(error);
+        bail_drained!(error);
     }
-    let graph = stream
+    let graph = match stream
         .end_capture(CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH)
-        .map_err(|e| cuda_graph_error(model_name, "end decoder CUDA graph capture", e))?
-        .ok_or_else(|| Error::Config {
+    {
+        Ok(Some(graph)) => graph,
+        Ok(None) => bail_drained!(Error::Config {
             message: format!("{model_name} decoder capture returned no graph"),
-        })?;
-    graph
+        }),
+        Err(error) => {
+            bail_drained!(cuda_graph_error(
+                model_name,
+                "end decoder CUDA graph capture",
+                error
+            ));
+        }
+    };
+    if let Err(error) = graph
         .launch()
-        .map_err(|e| cuda_graph_error(model_name, "warm decoder CUDA graph", e))?;
+        .map_err(|e| cuda_graph_error(model_name, "warm decoder CUDA graph", e))
+    {
+        // The instantiated graph is itself graph-bound state: drain after
+        // dropping it before releasing the buffers it referenced.
+        drop_and_drain(graph, device);
+        bail_drained!(error);
+    }
     for (index, buffer) in outputs.iter().enumerate() {
-        sync_graph_tensor(
+        if let Err(error) = sync_graph_tensor(
             model_name,
             buffer,
             output_context(index, "sync decoder CUDA graph"),
-        )?;
+        ) {
+            drop_and_drain(graph, device);
+            bail_drained!(error);
+        }
     }
     Ok(DecoderCudaGraph {
         graph,

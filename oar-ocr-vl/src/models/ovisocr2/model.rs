@@ -35,6 +35,12 @@ pub struct OvisOcr2 {
     lm_head: Linear,
     stop_token_ids: Vec<u32>,
     image_token_id: u32,
+    // Must stay the last field: the captured decode graph's input bundle
+    // holds a clone of the tied LM head owned here, so this guard drops
+    // last and drains CUDA errors the head's free may stash (see
+    // CudaGraphDrainGuard).
+    #[cfg(feature = "cuda")]
+    _drain_guard: crate::runtime::decoder_graph::CudaGraphDrainGuard,
 }
 
 struct TextCacheGuard<'a>(&'a OvisOcr2TextModel);
@@ -90,6 +96,8 @@ impl OvisOcr2 {
         // (`<|endoftext|>`) and the tokenizer EOS (`<|im_end|>`).
         let stop_token_ids = build_stop_token_ids(cfg.text_config.eos_token_id, tokenizer_eos);
         let image_token_id = cfg.image_token_id;
+        #[cfg(feature = "cuda")]
+        let drain_guard = crate::runtime::decoder_graph::CudaGraphDrainGuard::new(&device);
         Ok(Self {
             device,
             dtype,
@@ -101,6 +109,8 @@ impl OvisOcr2 {
             lm_head,
             stop_token_ids,
             image_token_id,
+            #[cfg(feature = "cuda")]
+            _drain_guard: drain_guard,
         })
     }
 
