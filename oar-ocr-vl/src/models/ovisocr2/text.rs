@@ -1319,13 +1319,13 @@ impl OvisOcr2TextModel {
             self.layers
                 .iter()
                 .enumerate()
-                .try_for_each(|(index, layer)| {
+                .try_for_each(|(_index, layer)| {
                     layer.prepare_dynamic_cache(cache_len)?;
                     #[cfg(all(test, feature = "cuda"))]
                     if self
                         .hooks
                         .fail_prepare_after_layer
-                        .is_some_and(|target| index + 1 == target)
+                        .is_some_and(|target| _index + 1 == target)
                     {
                         return Err(Error::Config {
                             message: "injected prepare failure (test)".to_string(),
@@ -2159,6 +2159,11 @@ mod tests {
         Ok(())
     }
 
+    /// Scenario outcome: the model, the eager step's logits, and the KV
+    /// storage layouts read right after the recovery.
+    #[cfg(feature = "cuda")]
+    type FailedCaptureOutcome = (OvisOcr2TextModel, Tensor, Vec<(usize, usize)>);
+
     /// Runs a prefill plus one lazy-capture decode step under the given hook
     /// configuration, then one eager step. Returns the model, the eager
     /// step's logits, and the KV storage layouts read right after the
@@ -2170,7 +2175,7 @@ mod tests {
         tensors: &std::collections::HashMap<String, Tensor>,
         device: &Device,
         configure: fn(&mut TestHooks),
-    ) -> Result<(OvisOcr2TextModel, Tensor, Vec<(usize, usize)>), Error> {
+    ) -> Result<FailedCaptureOutcome, Error> {
         let prompt = Tensor::from_vec(vec![1u32, 2, 3, 4], (1, 4), device).unwrap();
         let prompt_positions = Tensor::from_vec(
             vec![0i64, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
