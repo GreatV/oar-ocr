@@ -1881,7 +1881,7 @@ impl Qwen3VlTextModel {
             let captured_ref = self.batch_decode_graph.borrow();
             captured_ref
                 .as_ref()
-                .is_some_and(|captured| max_kv_len > captured.cache_len)
+                .is_some_and(|captured| max_kv_len > captured.graph.cache_len)
         };
         if overflow {
             let (batch, cache_len, ceiling) = {
@@ -2120,7 +2120,7 @@ impl Qwen3VlTextModel {
             // scan. Anything further out re-captures, keeping the scan
             // proportional to the prompt.
             let reusable = self.decode_graph.borrow().as_ref().is_some_and(|graph| {
-                graph.cache_len >= cache_len && graph.cache_len < cache_len * 2
+                graph.graph.cache_len >= cache_len && graph.graph.cache_len < cache_len * 2
             });
             if reusable {
                 return Ok(());
