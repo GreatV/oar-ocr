@@ -298,11 +298,10 @@ impl HunyuanAttention {
                 && qkv.dtype() == candle_core::DType::BF16
                 && cos.dtype() == candle_core::DType::F32
                 && sin.dtype() == candle_core::DType::F32
-                && cos_sin.is_some()
+                && let Some(cos_sin) = cos_sin
             {
                 match (&self.query_layernorm, &self.key_layernorm) {
                     (Some(query_norm), Some(key_norm)) => {
-                        let cos_sin = cos_sin.expect("checked above");
                         let q = qkv
                             .apply_op3_no_bwd(
                                 cos_sin,
@@ -362,10 +361,9 @@ impl HunyuanAttention {
             && qkv.dtype() == candle_core::DType::BF16
             && cos.dtype() == candle_core::DType::F32
             && sin.dtype() == candle_core::DType::F32
-            && cos_sin.is_some()
+            && let Some(cos_sin) = cos_sin
         {
             let projection_width = q_width + 2 * kv_width;
-            let cos_sin = cos_sin.expect("checked above");
             let q = Tensor::zeros(
                 (b, self.num_heads, seq_len, self.head_dim),
                 qkv.dtype(),
