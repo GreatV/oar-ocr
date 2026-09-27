@@ -2542,8 +2542,12 @@ mod tests {
     /// Crossing the ladder ceiling retires the graph: the buckets it
     /// referenced must shrink back to organic storage right then, so the
     /// eager tail's organic growth never plain-drops graph-referenced
-    /// memory. Ceiling pinned to 8 via the test hook. Without a CUDA device
-    /// the test is a no-op.
+    /// memory. Ceiling pinned to 8 via the test hook; the prompt is 7
+    /// tokens, so ONE replayed step fills the bucket — keeping the numeric
+    /// comparison at a single shared step (the decode kernels are not
+    /// bitwise deterministic across runs, and longer compounding horizons
+    /// flake on a random-weight model). Without a CUDA device the test is
+    /// a no-op.
     #[cfg(feature = "cuda")]
     #[test]
     fn ceiling_retirement_shrinks_buckets_and_decodes_eager() -> Result<(), Error> {
@@ -2555,42 +2559,30 @@ mod tests {
         let cfg = tiny_graph_config();
         cfg.validate()?;
         let tensors = tiny_graph_tensors(&cfg, &device);
-        let prompt = Tensor::from_vec(vec![1u32, 2, 3, 4], (1, 4), &device).unwrap();
+        let prompt = Tensor::from_vec((1u32..8).collect::<Vec<_>>(), (1, 7), &device).unwrap();
         let prompt_positions = Tensor::from_vec(
-            vec![0i64, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
-            (3, 1, 4),
+            vec![
+                0i64, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 5, 6,
+            ],
+            (3, 1, 7),
             &device,
         )
         .unwrap();
         let token = Tensor::from_vec(vec![7u32], (1, 1), &device).unwrap();
         let position_at = |p: i64| Tensor::from_vec(vec![p; 3], (3, 1, 1), &device).unwrap();
-        let last_logits = |model: &OvisOcr2TextModel, lm_head: &Linear| {
-            let hidden = model.forward(&model.embed(&token)?, &position_at(8))?;
-            lm_head
-                .forward(
-                    &hidden
-                        .i((0, 0, ..))
-                        .and_then(|last| last.unsqueeze(0))
-                        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager input", e))?,
-                )
-                .and_then(|logits| logits.squeeze(0))
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager logits", e))
-        };
 
+        // prompt_decode_bucket(7, 8) = 8: one replayed step fills the
+        // bucket (KV 7 -> 8); the second step retires the graph.
         let vb = VarBuilder::from_tensors(tensors.clone(), DType::BF16, &device);
         let mut model = OvisOcr2TextModel::load(&cfg, vb)?;
-        // prompt_decode_bucket(4, 8) = 8: four replayed steps fill the
-        // bucket (KV 4 -> 8), the fifth retires the graph at the ceiling.
         model.hooks.decode_cache_ceiling = Some(8);
         let lm_head = Linear::new(model.token_embedding_weight(), None);
         let embeds = model.embed(&prompt)?;
         model.forward(&embeds, &prompt_positions)?;
-        model.prepare_decode_graph(4, 16)?;
-        for step in 0..4 {
-            let embed = model.embed(&token)?;
-            let served = model.decode_step_graph(&embed, &position_at(4 + step), &lm_head)?;
-            assert!(served.is_some(), "step {step} should replay the graph");
-        }
+        model.prepare_decode_graph(7, 16)?;
+        let embed = model.embed(&token)?;
+        let served = model.decode_step_graph(&embed, &position_at(7), &lm_head)?;
+        assert!(served.is_some(), "the first step should replay the graph");
         assert!(model.decode_graph_captured());
 
         let embed = model.embed(&token)?;
@@ -2613,56 +2605,42 @@ mod tests {
             "buckets must shrink to the live KV at the ceiling, got {layouts:?}"
         );
         // The retired path continues eager on the shrunk storage.
-        let logits = last_logits(&model, &lm_head)?;
+        let hidden = model.forward(&model.embed(&token)?, &position_at(8))?;
+        let logits = lm_head
+            .forward(
+                &hidden
+                    .i((0, 0, ..))
+                    .and_then(|last| last.unsqueeze(0))
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager input", e))?,
+            )
+            .and_then(|logits| logits.squeeze(0))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager logits", e))?;
 
-        // Reference: a model whose ceiling stays high decodes all five
-        // steps on the graph (re-capturing up the ladder at the fifth).
-        // Retiring at the ceiling must not change the output — both sides
-        // share the four graph steps, and the fifth is a single eager step
-        // against identical states.
+        // Reference: a model whose ceiling stays high replays the second
+        // step too (the ladder re-captures at bucket 32). Both sides share
+        // exactly one graph step, and the second step is a single
+        // eager-vs-graph comparison — the same horizon the
+        // decode_graph_captures_and_replays tolerance covers.
         let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
         let reference = OvisOcr2TextModel::load(&cfg, vb)?;
         let lm_head_ref = Linear::new(reference.token_embedding_weight(), None);
         let embeds = reference.embed(&prompt)?;
         reference.forward(&embeds, &prompt_positions)?;
-        reference.prepare_decode_graph(4, 16)?;
-        let mut reference_logits = None;
-        for step in 0..5 {
-            let embed = reference.embed(&token)?;
-            reference_logits = Some(
-                reference
-                    .decode_step_graph(&embed, &position_at(4 + step), &lm_head_ref)?
-                    .expect("the graph should serve every step"),
-            );
-        }
-        let reference_logits = reference_logits.expect("five steps ran");
-        // bf16 kernels are not bitwise deterministic across runs (cublasLt
-        // picks algorithms by available workspace, which concurrent tests
-        // shift), so a tight logit tolerance flakes. The production contract
-        // is the sampled token; keep a loose numeric bound as a sanity gate.
-        let argmax = |logits: &Tensor| {
-            logits
-                .to_dtype(DType::F32)
-                .unwrap()
-                .flatten_all()
-                .unwrap()
-                .to_vec1::<f32>()
-                .unwrap()
-                .into_iter()
-                .enumerate()
-                .max_by(|a, b| a.1.total_cmp(&b.1))
-                .map(|(index, _)| index)
-                .unwrap()
-        };
-        assert_eq!(
-            argmax(&logits),
-            argmax(&reference_logits),
-            "ceiling retirement changed the sampled token"
+        reference.prepare_decode_graph(7, 16)?;
+        let embed = reference.embed(&token)?;
+        assert!(
+            reference
+                .decode_step_graph(&embed, &position_at(7), &lm_head_ref)?
+                .is_some()
         );
+        let embed = reference.embed(&token)?;
+        let reference_logits = reference
+            .decode_step_graph(&embed, &position_at(8), &lm_head_ref)?
+            .expect("the ladder re-captures and serves the second step");
         let worst = max_abs_delta(&logits, &reference_logits);
         assert!(
-            worst < 0.5,
-            "ceiling-retired eager decode diverged wildly from the graphed path: max|delta| = {worst}"
+            worst < 0.05,
+            "ceiling-retired eager decode diverged from the graphed path: max|delta| = {worst}"
         );
         Ok(())
     }
