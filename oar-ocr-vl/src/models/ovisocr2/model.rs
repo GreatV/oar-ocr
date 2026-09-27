@@ -35,6 +35,12 @@ pub struct OvisOcr2 {
     lm_head: Linear,
     stop_token_ids: Vec<u32>,
     image_token_id: u32,
+    // Must stay the last field: the captured decode graph's input bundle
+    // holds a clone of the tied LM head owned here, so this guard drops
+    // last and drains CUDA errors the head's free may stash (see
+    // CudaGraphDrainGuard).
+    #[cfg(feature = "cuda")]
+    _drain_guard: crate::runtime::decoder_graph::CudaGraphDrainGuard,
 }
 
 struct TextCacheGuard<'a>(&'a OvisOcr2TextModel);
@@ -90,6 +96,8 @@ impl OvisOcr2 {
         // (`<|endoftext|>`) and the tokenizer EOS (`<|im_end|>`).
         let stop_token_ids = build_stop_token_ids(cfg.text_config.eos_token_id, tokenizer_eos);
         let image_token_id = cfg.image_token_id;
+        #[cfg(feature = "cuda")]
+        let drain_guard = crate::runtime::decoder_graph::CudaGraphDrainGuard::new(&device);
         Ok(Self {
             device,
             dtype,
@@ -101,6 +109,8 @@ impl OvisOcr2 {
             lm_head,
             stop_token_ids,
             image_token_id,
+            #[cfg(feature = "cuda")]
+            _drain_guard: drain_guard,
         })
     }
 
@@ -219,6 +229,12 @@ impl OvisOcr2 {
                 message: format!("OvisOCR2 cannot reserve output for {max_new_tokens} tokens: {e}"),
             })?;
 
+        // Record the decode bucket once the prefill has populated the KV
+        // and linear-attention states; the capture itself is lazy and runs
+        // at the first decode step, so a page whose first token is a stop
+        // token never pays for it. A no-op off CUDA or when ineligible.
+        self.text.prepare_decode_graph(prompt_len, max_new_tokens)?;
+
         for step in 0..max_new_tokens {
             let token = select_greedy_token(&logits)?;
             if self.stop_token_ids.contains(&token) {
@@ -239,11 +255,19 @@ impl OvisOcr2 {
             let token_embed = self.text.embed(&token_ids)?;
             let position = prompt_len as i64 + step as i64 + rope_delta;
             let position_ids = text_position_ids(position, &self.device)?;
-            let hidden = self.text.forward(&token_embed, &position_ids)?;
             logits =
-                self.logits_from_hidden(&hidden.i((0, 0, ..)).map_err(|e| {
-                    candle_to_ocr_inference(MODEL_NAME, "select decode hidden", e)
-                })?)?;
+                match self
+                    .text
+                    .decode_step_graph(&token_embed, &position_ids, &self.lm_head)?
+                {
+                    Some(logits) => logits,
+                    None => {
+                        let hidden = self.text.forward(&token_embed, &position_ids)?;
+                        self.logits_from_hidden(&hidden.i((0, 0, ..)).map_err(|e| {
+                            candle_to_ocr_inference(MODEL_NAME, "select decode hidden", e)
+                        })?)?
+                    }
+                };
         }
         Ok(generated)
     }
