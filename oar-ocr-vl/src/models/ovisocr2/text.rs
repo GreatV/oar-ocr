@@ -1204,6 +1204,9 @@ pub(crate) struct TestHooks {
     /// Keep a failed capture's buckets instead of shrinking them (the
     /// control that proves the layout assertions can fail).
     pub skip_release: bool,
+    /// Pin the decode bucket ceiling small so tests can reach the ladder
+    /// ceiling quickly.
+    pub decode_cache_ceiling: Option<usize>,
 }
 
 impl OvisOcr2TextModel {
@@ -1318,7 +1321,7 @@ impl OvisOcr2TextModel {
         // default budget would pin the largest bucket up front and make the
         // masked attention scan 16K slots from the first step. The replay
         // path re-captures into bigger buckets as the sequence grows.
-        let Some(cache_len) = prompt_decode_bucket(prompt_len, OVISOCR2_DECODE_CACHE_LEN) else {
+        let Some(cache_len) = prompt_decode_bucket(prompt_len, self.decode_cache_ceiling()) else {
             // The prompt alone does not fit the largest bucket; no graph may
             // stay alive over it.
             self.invalidate_decode_graph();
@@ -1554,10 +1557,14 @@ impl OvisOcr2TextModel {
                 .as_ref()
                 .map(|graph| graph.cache_len)
                 .expect("overflow implies Some");
-            let Some(next) = next_decode_bucket(cache_len, OVISOCR2_DECODE_CACHE_LEN) else {
-                // Ladder ceiling: the rest of this generation decodes eager;
-                // the append path keeps working on the fixed storage.
+            let Some(next) = next_decode_bucket(cache_len, self.decode_cache_ceiling()) else {
+                // Ladder ceiling: the rest of this generation decodes eager.
+                // The retiring graph referenced the fixed buckets: shrink
+                // them back to organic storage now, so the eager append
+                // path's later growth never plain-drops graph-referenced
+                // memory.
                 self.invalidate_decode_graph();
+                self.release_dynamic_caches();
                 return Ok(None);
             };
             // Grow the fixed buckets and re-capture; the appended history is
@@ -1635,6 +1642,20 @@ impl OvisOcr2TextModel {
         }
     }
 
+    /// Shrink every full-attention layer's fixed KV bucket back to the
+    /// organic eager form, preserving the live history. Runs after a failed
+    /// capture and at the ladder ceiling: the retiring (or never installed)
+    /// graph referenced those buckets, and the organic growth that follows
+    /// must never plain-drop graph-referenced storage.
+    #[cfg(feature = "cuda")]
+    fn release_dynamic_caches(&self) {
+        let device = self.embed_tokens.embeddings().device().clone();
+        for layer in &self.layers {
+            layer.release_dynamic_cache(&device);
+        }
+        drain_cuda_context_errors(&device);
+    }
+
     /// Tear down what a failed capture left behind — the graph (never
     /// installed, but cheap to drop) and every full-attention layer's
     /// preallocated KV bucket, shrunk back to the organic eager form with
@@ -1651,11 +1672,18 @@ impl OvisOcr2TextModel {
             // can prove they catch a missing release.
             return;
         }
-        let device = self.embed_tokens.embeddings().device().clone();
-        for layer in &self.layers {
-            layer.release_dynamic_cache(&device);
+        self.release_dynamic_caches();
+    }
+
+    /// Decode bucket ceiling; tests may pin it small to reach the ladder
+    /// ceiling quickly.
+    #[cfg(feature = "cuda")]
+    fn decode_cache_ceiling(&self) -> usize {
+        #[cfg(all(test, feature = "cuda"))]
+        if let Some(ceiling) = self.hooks.decode_cache_ceiling {
+            return ceiling;
         }
-        drain_cuda_context_errors(&device);
+        OVISOCR2_DECODE_CACHE_LEN
     }
 
     /// Live KV length of the full-attention layers (all share one length).
@@ -2479,6 +2507,97 @@ mod tests {
         assert!(
             worst < 0.05,
             "eager decode after a failed capture body diverged: max|delta| = {worst}"
+        );
+        Ok(())
+    }
+    /// Crossing the ladder ceiling retires the graph: the buckets it
+    /// referenced must shrink back to organic storage right then, so the
+    /// eager tail's organic growth never plain-drops graph-referenced
+    /// memory. Ceiling pinned to 8 via the test hook. Without a CUDA device
+    /// the test is a no-op.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn ceiling_retirement_shrinks_buckets_and_decodes_eager() -> Result<(), Error> {
+        // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
+        let _gpu = crate::backbones::qwen3_vl::text::GPU_SELFTEST_LOCK.lock();
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let cfg = tiny_graph_config();
+        cfg.validate()?;
+        let tensors = tiny_graph_tensors(&cfg, &device);
+        let prompt = Tensor::from_vec(vec![1u32, 2, 3, 4], (1, 4), &device).unwrap();
+        let prompt_positions = Tensor::from_vec(
+            vec![0i64, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
+            (3, 1, 4),
+            &device,
+        )
+        .unwrap();
+        let token = Tensor::from_vec(vec![7u32], (1, 1), &device).unwrap();
+        let position_at = |p: i64| Tensor::from_vec(vec![p; 3], (3, 1, 1), &device).unwrap();
+        let last_logits = |model: &OvisOcr2TextModel, lm_head: &Linear| {
+            let hidden = model.forward(&model.embed(&token)?, &position_at(8))?;
+            lm_head
+                .forward(
+                    &hidden
+                        .i((0, 0, ..))
+                        .and_then(|last| last.unsqueeze(0))
+                        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager input", e))?,
+                )
+                .and_then(|logits| logits.squeeze(0))
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager logits", e))
+        };
+
+        let vb = VarBuilder::from_tensors(tensors.clone(), DType::BF16, &device);
+        let mut model = OvisOcr2TextModel::load(&cfg, vb)?;
+        // prompt_decode_bucket(4, 8) = 8: four replayed steps fill the
+        // bucket (KV 4 -> 8), the fifth retires the graph at the ceiling.
+        model.hooks.decode_cache_ceiling = Some(8);
+        let lm_head = Linear::new(model.token_embedding_weight(), None);
+        let embeds = model.embed(&prompt)?;
+        model.forward(&embeds, &prompt_positions)?;
+        model.prepare_decode_graph(4, 16)?;
+        for step in 0..4 {
+            let embed = model.embed(&token)?;
+            let served = model.decode_step_graph(&embed, &position_at(4 + step), &lm_head)?;
+            assert!(served.is_some(), "step {step} should replay the graph");
+        }
+        assert!(model.decode_graph_captured());
+
+        let embed = model.embed(&token)?;
+        let served = model.decode_step_graph(&embed, &position_at(8), &lm_head)?;
+        assert!(served.is_none(), "past the ceiling the step decodes eager");
+        assert!(!model.decode_graph_captured());
+        // Right after retirement — before the eager append grows the
+        // storage organically — the bucket must hug the live length.
+        let layouts: Vec<_> = model
+            .layers
+            .iter()
+            .filter_map(|layer| layer.fixed_storage_layout())
+            .collect();
+        assert_eq!(
+            layouts,
+            vec![(1, 8)],
+            "buckets must shrink to the live KV at the ceiling, got {layouts:?}"
+        );
+        let logits = last_logits(&model, &lm_head)?;
+
+        // The same five steps fully eager on a clean model are the
+        // reference the retired path must match.
+        let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
+        let reference = OvisOcr2TextModel::load(&cfg, vb)?;
+        let lm_head_ref = Linear::new(reference.token_embedding_weight(), None);
+        let embeds = reference.embed(&prompt)?;
+        reference.forward(&embeds, &prompt_positions)?;
+        for step in 0..4 {
+            let embed = reference.embed(&token)?;
+            reference.forward(&embed, &position_at(4 + step))?;
+        }
+        let reference_logits = last_logits(&reference, &lm_head_ref)?;
+        let worst = max_abs_delta(&logits, &reference_logits);
+        assert!(
+            worst < 0.05,
+            "eager decode after ceiling retirement diverged: max|delta| = {worst}"
         );
         Ok(())
     }

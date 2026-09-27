@@ -567,15 +567,32 @@ impl Qwen3Attention {
         self.kv_cache.borrow().fixed_storage_layout()
     }
 
-    /// Free the fixed-capacity KV storage, restoring the organically
-    /// grown eager cache form. Used when a graph capture fails: the fixed
-    /// buckets were preallocated for a decode that will never run.
+    /// Shrink the fixed-capacity KV storage back to the organically grown
+    /// eager form, preserving the live history. Used when a graph capture
+    /// fails (nothing live yet) and at the ladder ceiling (the eager tail
+    /// keeps decoding on the retained prefix).
     #[cfg(feature = "cuda")]
     fn release_dynamic_cache_batch(&self) {
         let device = self.q_proj.weight().device().clone();
-        if let Some((k, v)) = self.kv_cache.borrow_mut().take_fixed_storage() {
-            drop_and_drain(k, &device);
-            drop_and_drain(v, &device);
+        // Shrink, not take: at the ladder ceiling the live history must
+        // survive, and a failed shrink (OOM) keeps the fixed storage —
+        // eager decode appends into it fine; only the memory is not
+        // reclaimed.
+        match self
+            .kv_cache
+            .borrow_mut()
+            .shrink_fixed_storage_preserving_history()
+        {
+            Ok(Some((k, v))) => {
+                drop_and_drain(k, &device);
+                drop_and_drain(v, &device);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    "{MODEL_NAME} KV bucket shrink failed: {error}; keeping fixed storage, continuing eager"
+                );
+            }
         }
     }
 
@@ -1276,7 +1293,18 @@ pub(crate) struct TestHooks {
     /// releasing it (the control that proves the entry assertions can
     /// fail).
     pub skip_incompatible_release: bool,
+    /// Pin the decode bucket ceiling small so tests can reach the ladder
+    /// ceiling without a 16K-token decode.
+    pub decode_cache_ceiling: Option<usize>,
 }
+
+/// Test probe: bucket capacity a layer reported right after a ladder-ceiling
+/// retirement shrank it (0 = no ceiling retirement since the last reset).
+/// Lets tests assert the ceiling branch fired without driving the decode
+/// loop step by step.
+#[cfg(all(test, feature = "cuda"))]
+pub(crate) static LAST_CEILING_SHRINK_CAPACITY: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Inputs the single-row decode graph captures, named and typed. The
 /// bundle owns every tensor the captured region reads that no model field
@@ -1493,6 +1521,17 @@ impl Qwen3VlTextModel {
         if !compatible {
             self.recover_failed_capture();
         }
+    }
+
+    /// Decode bucket ceiling; tests may pin it small to reach the ladder
+    /// ceiling quickly.
+    #[cfg(feature = "cuda")]
+    fn decode_cache_ceiling(&self) -> usize {
+        #[cfg(all(test, feature = "cuda"))]
+        if let Some(ceiling) = self.hooks.decode_cache_ceiling {
+            return ceiling;
+        }
+        WEVISDOC_DECODE_CACHE_LEN
     }
 
     /// Tear down everything a failed capture left behind — both graphs
@@ -1726,10 +1765,11 @@ impl Qwen3VlTextModel {
                 DType::BF16 | DType::F16
             )
         {
+            let ceiling = self.decode_cache_ceiling();
             let Some(cache_len) = (if ladder {
-                prompt_decode_bucket(prompt_len, WEVISDOC_DECODE_CACHE_LEN)
+                prompt_decode_bucket(prompt_len, ceiling)
             } else {
-                decoder_cache_capacity(prompt_len, max_new_tokens, WEVISDOC_DECODE_CACHE_LEN)
+                decoder_cache_capacity(prompt_len, max_new_tokens, ceiling)
             }) else {
                 // The following batch prefill reinitializes the shared KV
                 // storage, so the single-row graph must go with the batch
@@ -1755,14 +1795,9 @@ impl Qwen3VlTextModel {
             }
             self.invalidate_cuda_graph();
             self.invalidate_batch_cuda_graph();
-            if let Err(error) = self.capture_batch_cuda_graph(
-                batch,
-                cache_len,
-                WEVISDOC_DECODE_CACHE_LEN,
-                pad_lens,
-                lm_head,
-                0,
-            ) {
+            if let Err(error) =
+                self.capture_batch_cuda_graph(batch, cache_len, ceiling, pad_lens, lm_head, 0)
+            {
                 tracing::warn!(
                     "{MODEL_NAME} batch graph capture failed: {error}; continuing eager"
                 );
@@ -1940,9 +1975,22 @@ impl Qwen3VlTextModel {
             };
             let Some(next) = next_decode_bucket(cache_len, ceiling) else {
                 // Ladder ceiling: the rest of this generation decodes eager,
-                // whose append path grows the storage organically.
+                // whose append path grows the storage organically. The
+                // retiring graphs referenced the fixed buckets: shrink them
+                // back to organic storage now, so that later growth never
+                // plain-drops graph-referenced memory.
                 self.invalidate_cuda_graph();
                 self.invalidate_batch_cuda_graph();
+                self.release_dynamic_caches();
+                #[cfg(all(test, feature = "cuda"))]
+                LAST_CEILING_SHRINK_CAPACITY.store(
+                    self.layers
+                        .first()
+                        .and_then(|layer| layer.fixed_storage_layout())
+                        .map(|(_, capacity)| capacity)
+                        .unwrap_or(0),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 return Ok(None);
             };
             // Grow the fixed bucket and re-capture. Appended history is
@@ -2153,10 +2201,11 @@ impl Qwen3VlTextModel {
                 DType::BF16 | DType::F16
             )
         {
+            let ceiling = self.decode_cache_ceiling();
             let Some(cache_len) = (if ladder {
-                prompt_decode_bucket(prompt_len, WEVISDOC_DECODE_CACHE_LEN)
+                prompt_decode_bucket(prompt_len, ceiling)
             } else {
-                decoder_cache_capacity(prompt_len, max_new_tokens, WEVISDOC_DECODE_CACHE_LEN)
+                decoder_cache_capacity(prompt_len, max_new_tokens, ceiling)
             }) else {
                 // Eager fallback: the prompt alone does not fit the largest
                 // bucket, so no graph may stay alive over it.
@@ -2176,9 +2225,7 @@ impl Qwen3VlTextModel {
             }
             self.invalidate_cuda_graph();
             self.invalidate_batch_cuda_graph();
-            if let Err(error) =
-                self.capture_cuda_graph(cache_len, WEVISDOC_DECODE_CACHE_LEN, lm_head, 0)
-            {
+            if let Err(error) = self.capture_cuda_graph(cache_len, ceiling, lm_head, 0) {
                 // The graph is only an optimization: a failed capture (a KV
                 // preallocation that outgrew free memory, say) continues
                 // eager right here, so no caller can forget the fallback.
@@ -2318,9 +2365,22 @@ impl Qwen3VlTextModel {
             };
             let Some(next) = next_decode_bucket(cache_len, ceiling) else {
                 // Ladder ceiling: the rest of this generation decodes eager,
-                // whose append path grows the storage organically.
+                // whose append path grows the storage organically. The
+                // retiring graphs referenced the fixed buckets: shrink them
+                // back to organic storage now, so that later growth never
+                // plain-drops graph-referenced memory.
                 self.invalidate_cuda_graph();
                 self.invalidate_batch_cuda_graph();
+                self.release_dynamic_caches();
+                #[cfg(all(test, feature = "cuda"))]
+                LAST_CEILING_SHRINK_CAPACITY.store(
+                    self.layers
+                        .first()
+                        .and_then(|layer| layer.fixed_storage_layout())
+                        .map(|(_, capacity)| capacity)
+                        .unwrap_or(0),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 return Ok(None);
             };
             // Grow the fixed bucket and re-capture; appended history is
@@ -2816,6 +2876,57 @@ mod tests {
                 greedy_eager(&second, &lm_head, &long, 8),
                 greedy_graphed(&second, &lm_head, &long, 8, true),
                 "second-instance graph decode must match eager"
+            );
+        }
+        #[cfg(not(feature = "cuda"))]
+        eprintln!("skipping: built without the cuda feature");
+    }
+
+    /// Crossing the ladder ceiling retires the graphs and shrinks the fixed
+    /// buckets back to organic storage, so the eager tail's organic growth
+    /// never plain-drops graph-referenced memory. Ceiling pinned to 128 via
+    /// the test hook. Opt in with `OAR_WEVISDOC_GPU_SELFTEST=1`.
+    #[test]
+    fn cuda_ceiling_retirement_shrinks_buckets_and_matches_eager() {
+        #[cfg(feature = "cuda")]
+        {
+            use candle_nn::Linear;
+            if std::env::var_os("OAR_WEVISDOC_GPU_SELFTEST").is_none() {
+                eprintln!("skipping: OAR_WEVISDOC_GPU_SELFTEST is not set");
+                return;
+            }
+            let Ok(device) = Device::new_cuda(0) else {
+                eprintln!("skipping: no CUDA device");
+                return;
+            };
+
+            // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
+            let _gpu = GPU_SELFTEST_LOCK.lock();
+            let cfg = valid_tiny_config();
+            let tensors = random_var_map(&cfg, &device, DType::BF16);
+            let make_vb = || VarBuilder::from_tensors(tensors.clone(), DType::BF16, &device);
+            let mut model = Qwen3VlTextModel::load(&cfg, make_vb().pp("model")).unwrap();
+            let lm_head = Linear::new(
+                make_vb()
+                    .get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
+                    .unwrap(),
+                None,
+            );
+
+            // Ceiling 128, prompt 100: the bucket fills at KV 128 and the
+            // 129th token retires the graph, shrinking to the live length.
+            model.hooks.decode_cache_ceiling = Some(128);
+            LAST_CEILING_SHRINK_CAPACITY.store(0, std::sync::atomic::Ordering::Relaxed);
+            let ids: Vec<u32> = (0..100).map(|i| 10 + i % 60).collect();
+            assert_eq!(
+                greedy_eager(&model, &lm_head, &ids, 130),
+                greedy_graphed(&model, &lm_head, &ids, 130, true),
+                "post-ceiling eager decode must match token for token"
+            );
+            let shrunk = LAST_CEILING_SHRINK_CAPACITY.load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(
+                shrunk, 128,
+                "the ceiling retirement must shrink the bucket to the live KV length"
             );
         }
         #[cfg(not(feature = "cuda"))]
