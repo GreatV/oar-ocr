@@ -479,9 +479,8 @@ impl DFlashAttention {
         if qkv.device().is_cuda()
             && qkv.dtype() == DType::BF16
             && self.head_dim == 128
-            && cos_sin.is_some()
+            && let Some(cos_sin) = cos_sin
         {
-            let cos_sin = cos_sin.expect("checked above");
             let q = qkv
                 .apply_op3_no_bwd(
                     cos_sin,
@@ -559,13 +558,13 @@ impl DFlashAttention {
         #[cfg(feature = "cuda")]
         if input.device().is_cuda()
             && input.dtype() == DType::BF16
-            && cos_sin.is_some()
+            && let Some(cos_sin) = cos_sin
             && self.head_dim.is_multiple_of(2)
         {
             let output = Tensor::zeros(input.shape(), input.dtype(), input.device())
                 .map_err(|e| tensor_err("HunyuanOCR DFlash: allocate fused RoPE output", e))?;
             output
-                .inplace_op3(input, cos_sin.expect("checked above"), &FusedRopeBf16)
+                .inplace_op3(input, cos_sin, &FusedRopeBf16)
                 .map_err(|e| tensor_err("HunyuanOCR DFlash: fused BF16 RoPE", e))?;
             return Ok(output);
         }
@@ -826,14 +825,12 @@ impl DFlashLayer {
     fn forward_dynamic(
         &self,
         hidden: &Tensor,
-        cos: &Tensor,
-        sin: &Tensor,
-        cos_sin: Option<&Tensor>,
+        rope: &DynamicRopeInputs<'_>,
         query_lengths: &Tensor,
         kv_lengths: &Tensor,
         cache: &ContextKv,
     ) -> Result<Tensor, Error> {
-        let (q, k, v) = self.project_qkv_eager(hidden, cos, sin, cos_sin)?;
+        let (q, k, v) = self.project_qkv_eager(hidden, rope.cos, rope.sin, rope.fused_cos_sin)?;
         let attention = self.self_attn.attend_projected_dynamic(
             &q,
             &k,
@@ -845,6 +842,15 @@ impl DFlashLayer {
         let attention = self.self_attn.flatten_attention_output(&attention)?;
         self.post_attention_eager(hidden, &attention)
     }
+}
+
+/// RoPE inputs for the graph-captured dynamic path: the plain cos/sin tables
+/// plus the packed pair the fused kernels read (BF16 only).
+#[cfg(feature = "cuda")]
+struct DynamicRopeInputs<'a> {
+    cos: &'a Tensor,
+    sin: &'a Tensor,
+    fused_cos_sin: Option<&'a Tensor>,
 }
 
 #[cfg(feature = "cuda")]
@@ -1178,16 +1184,13 @@ impl DFlashModel {
             None
         };
         let mut hidden = query_embeds.clone();
+        let rope = DynamicRopeInputs {
+            cos,
+            sin,
+            fused_cos_sin: cos_sin.as_ref(),
+        };
         for (layer, cache) in self.layers.iter().zip(caches.iter()) {
-            hidden = layer.forward_dynamic(
-                &hidden,
-                cos,
-                sin,
-                cos_sin.as_ref(),
-                query_lengths,
-                kv_lengths,
-                cache,
-            )?;
+            hidden = layer.forward_dynamic(&hidden, &rope, query_lengths, kv_lengths, cache)?;
         }
         self.norm
             .forward(&hidden)
