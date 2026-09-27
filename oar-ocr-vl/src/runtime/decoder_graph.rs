@@ -235,9 +235,17 @@ pub(crate) fn capture_decoder_graph<M, I: DecoderGraphInputs>(
         Ok(())
     })();
     if let Err(error) = captured_output {
-        let _ = stream.end_capture(
+        // end_capture may still hand back an instantiated graph even though
+        // the body failed; a plain drop of it can poison the context, so
+        // release it through the drain path like every other teardown.
+        match stream.end_capture(
             CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-        );
+        ) {
+            Ok(Some(graph)) => {
+                drop_and_drain(graph, device);
+            }
+            Ok(None) | Err(_) => {}
+        }
         bail_drained!(error);
     }
     let graph = match stream
