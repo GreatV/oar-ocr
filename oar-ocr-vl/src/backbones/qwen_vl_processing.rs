@@ -116,11 +116,12 @@ pub fn preprocess_images(
     cfg: &MinerUImageProcessorConfig,
     device: &Device,
     dtype: DType,
+    model_name: &str,
 ) -> Result<MinerUImageInputs, Error> {
     cfg.validate()?;
     if images.is_empty() {
         return Err(Error::InvalidInput {
-            message: "MinerU2.5: no images provided".to_string(),
+            message: format!("{model_name}: no images provided"),
         });
     }
 
@@ -161,7 +162,9 @@ pub fn preprocess_images(
         let (h, w) = (img.height(), img.width());
         if cfg.do_resize && (h < factor || w < factor) {
             return Err(Error::InvalidInput {
-                message: format!("MinerU2.5: height/width must be >= factor {factor}, got {h}x{w}"),
+                message: format!(
+                    "{model_name}: height/width must be >= factor {factor}, got {h}x{w}"
+                ),
             });
         }
         let (rh, rw) = if cfg.do_resize {
@@ -179,7 +182,7 @@ pub fn preprocess_images(
         if rh % patch != 0 || rw % patch != 0 {
             return Err(Error::Config {
                 message: format!(
-                    "MinerU2.5 preprocess produced non-divisible dims: {rh}x{rw} not divisible by patch_size={patch}"
+                    "{model_name} preprocess produced non-divisible dims: {rh}x{rw} not divisible by patch_size={patch}"
                 ),
             });
         }
@@ -189,7 +192,7 @@ pub fn preprocess_images(
         if !grid_h.is_multiple_of(merge) || !grid_w.is_multiple_of(merge) {
             return Err(Error::Config {
                 message: format!(
-                    "MinerU2.5 preprocess produced grid not divisible by merge_size={merge}: {grid_h}x{grid_w}"
+                    "{model_name} preprocess produced grid not divisible by merge_size={merge}: {grid_h}x{grid_w}"
                 ),
             });
         }
@@ -227,7 +230,7 @@ pub fn preprocess_images(
             return Err(Error::Processing {
                 kind: crate::error::ProcessingStage::TensorOperation,
                 context: format!(
-                    "MinerU2.5: patch extraction mismatch, got {} expected {}",
+                    "{model_name}: patch extraction mismatch, got {} expected {}",
                     flat_patches.len(),
                     num_patches * patch_dim
                 ),
@@ -248,13 +251,13 @@ pub fn preprocess_images(
     let pixel_values = Tensor::from_vec(all_patches, (total_patches, patch_dim), device)
         .map_err(|e| Error::Processing {
             kind: crate::error::ProcessingStage::TensorOperation,
-            context: "MinerU2.5: failed to create pixel_values tensor".to_string(),
+            context: format!("{model_name}: failed to create pixel_values tensor"),
             source: Box::new(e),
         })?
         .to_dtype(dtype)
         .map_err(|e| Error::Processing {
             kind: crate::error::ProcessingStage::TensorOperation,
-            context: "MinerU2.5: failed to convert pixel_values to target dtype".to_string(),
+            context: format!("{model_name}: failed to convert pixel_values to target dtype"),
             source: Box::new(e),
         })?;
 
@@ -262,4 +265,62 @@ pub fn preprocess_images(
         pixel_values,
         image_grid_thw: grids,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MinerUImageProcessorConfig, preprocess_images};
+    use candle_core::{DType, Device};
+    use image::RgbImage;
+
+    fn fixture_config() -> MinerUImageProcessorConfig {
+        MinerUImageProcessorConfig {
+            min_pixels: Some(65536),
+            max_pixels: Some(16_777_216),
+            size: None,
+            do_resize: true,
+            do_rescale: true,
+            do_normalize: true,
+            do_convert_rgb: true,
+            patch_size: 16,
+            temporal_patch_size: 2,
+            merge_size: 2,
+            image_mean: vec![0.5, 0.5, 0.5],
+            image_std: vec![0.5, 0.5, 0.5],
+            resample: None,
+            rescale_factor: 1.0 / 255.0,
+        }
+    }
+
+    #[test]
+    fn errors_name_the_calling_model() {
+        let cfg = fixture_config();
+        let device = Device::Cpu;
+
+        let empty = preprocess_images(&[], &cfg, &device, DType::F32, "FixtureModel")
+            .expect_err("empty input must fail");
+        assert!(
+            empty
+                .to_string()
+                .contains("FixtureModel: no images provided"),
+            "unexpected error: {empty}"
+        );
+
+        // Below the patch*merge factor (16*2 = 32) on one side.
+        let tiny = RgbImage::from_pixel(10, 200, image::Rgb([120, 140, 160]));
+        let small = preprocess_images(
+            std::slice::from_ref(&tiny),
+            &cfg,
+            &device,
+            DType::F32,
+            "FixtureModel",
+        )
+        .expect_err("sub-factor image must fail");
+        assert!(
+            small
+                .to_string()
+                .contains("FixtureModel: height/width must be >= factor 32"),
+            "unexpected error: {small}"
+        );
+    }
 }

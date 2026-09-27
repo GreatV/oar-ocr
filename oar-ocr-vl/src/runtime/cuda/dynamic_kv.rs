@@ -12,6 +12,93 @@ pub(crate) struct DynamicKvAppend {
     pub cache_len: usize,
 }
 
+pub(crate) struct DynamicBatchKvAppend {
+    pub query_len: usize,
+    pub batch: usize,
+    pub cache_len: usize,
+}
+
+impl InplaceOp3 for DynamicBatchKvAppend {
+    fn name(&self) -> &'static str {
+        "oar-dynamic-batch-kv-append"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _cache: &mut CpuStorage,
+        _cache_layout: &Layout,
+        _source: &CpuStorage,
+        _source_layout: &Layout,
+        _starts: &CpuStorage,
+        _starts_layout: &Layout,
+    ) -> Result<()> {
+        candle_core::bail!("batched dynamic KV append is CUDA-only")
+    }
+
+    fn cuda_fwd(
+        &self,
+        cache: &mut candle_core::CudaStorage,
+        cache_layout: &Layout,
+        source: &candle_core::CudaStorage,
+        source_layout: &Layout,
+        starts: &candle_core::CudaStorage,
+        starts_layout: &Layout,
+    ) -> Result<()> {
+        use candle_core::cuda_backend::WrapErr;
+        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+
+        let (_, num_heads, cache_len, head_dim) = cache_layout.shape().dims4()?;
+        let (src_batch, _, query_len, _) = source_layout.shape().dims4()?;
+        if src_batch != self.batch || query_len != self.query_len || cache_len != self.cache_len {
+            candle_core::bail!(
+                "batched dynamic KV shape mismatch cache={:?} source={:?}",
+                cache_layout.shape(),
+                source_layout.shape()
+            )
+        }
+        if starts_layout.shape().dims1()? != self.batch {
+            candle_core::bail!(
+                "batched dynamic KV append needs {} row starts, got {:?}",
+                self.batch,
+                starts_layout.shape()
+            )
+        }
+        let device = cache.device().clone();
+        let starts = starts.as_cuda_slice::<u32>()?;
+        let starts = starts.slice(starts_layout.start_offset()..);
+        let count = self.batch * num_heads * query_len * head_dim;
+        macro_rules! launch {
+            ($ty:ty, $function:literal) => {{
+                let cache = cache.as_cuda_slice_mut::<$ty>()?;
+                let source = source.as_cuda_slice::<$ty>()?;
+                let mut cache = cache.slice_mut(cache_layout.start_offset()..);
+                let source = source.slice(source_layout.start_offset()..);
+                let function =
+                    device.get_or_load_custom_func($function, CUDA_KERNEL_MODULE, PTX)?;
+                let mut builder = function.builder();
+                builder.arg(&mut cache);
+                builder.arg(&source);
+                builder.arg(&starts);
+                candle_core::builder_arg!(
+                    builder,
+                    query_len as u32,
+                    self.batch as u32,
+                    num_heads as u32,
+                    head_dim as u32,
+                    cache_len as u32
+                );
+                unsafe { builder.launch(LaunchConfig::for_num_elems(count as u32)) }.w()?;
+            }};
+        }
+        match cache.dtype() {
+            candle_core::DType::F16 => launch!(half::f16, "append_kv_batch_f16"),
+            candle_core::DType::BF16 => launch!(half::bf16, "append_kv_batch_bf16"),
+            dtype => candle_core::bail!("batched dynamic KV append does not support {dtype:?}"),
+        }
+        Ok(())
+    }
+}
+
 pub(crate) struct DynamicPagedKvAppend {
     pub query_len: usize,
     pub cache_len: usize,
