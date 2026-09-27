@@ -160,6 +160,22 @@ fn flash_attention_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var_os("OAR_VL_DISABLE_FLASH_ATTN").is_some())
 }
 
+/// Whether `flash_attention` will run per-row attention for `dtype` tensors
+/// on `device`. Callers use it to skip work the flash path makes redundant
+/// — for example materializing a quadratic batch attention mask that the
+/// row-split flash path never reads.
+pub fn row_flash_attention_available(device: &Device, dtype: DType) -> bool {
+    #[cfg(feature = "cuda")]
+    {
+        !flash_attention_disabled() && device.is_cuda() && flash_attention_dtype_supported(dtype)
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (device, dtype);
+        false
+    }
+}
+
 /// Helper function to handle Metal device computation.
 ///
 /// Metal backend doesn't support certain operations (arange, broadcast_*, etc.).
@@ -249,6 +265,25 @@ pub fn scaled_dot_product_attention(
 
     // Attention @ V
     attn_weights.matmul(v)
+}
+
+/// Soft cap for one attention chunk's F32 score scratch (~110 MiB — the
+/// same footprint the shared 256-row vision default produces at ~6.9K
+/// patches).
+pub(crate) const ATTENTION_CHUNK_SCRATCH_BUDGET: usize = 110 * 1024 * 1024;
+
+/// Largest query chunk whose F32 score scratch — one F32 row per head per
+/// KV position — stays within `budget`. Callers clamp to their preferred
+/// chunk so behavior only changes when a page outgrows it.
+pub(crate) fn attention_query_chunk(num_heads: usize, kv_len: usize, budget: usize) -> usize {
+    // Checked so an adversarial size cannot overflow: an overflowing row
+    // is far beyond any budget, and the chunk floors at one row.
+    let per_row = num_heads
+        .max(1)
+        .checked_mul(kv_len.max(1))
+        .and_then(|v| v.checked_mul(4))
+        .unwrap_or(usize::MAX);
+    (budget / per_row).max(1)
 }
 
 /// Sequence length above which vision backends use query-chunked attention to
@@ -646,7 +681,7 @@ pub(crate) fn decode_position_buffer(positions: &[i64], axes: usize) -> Vec<i64>
 /// F16 tops out at 65504, so the value used for wider dtypes saturates to -inf
 /// there — which is exactly the all-masked-row NaN a finite fill exists to
 /// avoid. Staying well inside the range also keeps `score + fill` finite.
-fn masked_score(dtype: DType) -> f64 {
+pub(crate) fn masked_score(dtype: DType) -> f64 {
     match dtype {
         DType::F16 => -1e4,
         _ => -1e9,

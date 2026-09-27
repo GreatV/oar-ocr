@@ -270,6 +270,13 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             let Some(task) = task_for_element_type(element.element_type) else {
                 continue;
             };
+            // Backends that cannot read charts leave those regions
+            // unrecognized; the element stays in the document without text
+            // rather than collecting whatever the model emits for a figure
+            // its prompt tells it to ignore.
+            if task == RecognitionTask::Chart && !self.backend.capabilities().supports_chart {
+                continue;
+            }
 
             let group = group_by_first.get(&idx);
             let mut cropped = if let Some(group) = group {
@@ -396,8 +403,12 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
                 continue;
             }
 
-            // Apply repetition truncation if needed
-            if self.backend.capabilities().truncate_repetitive_output {
+            // Apply repetition truncation if needed. Table markup is
+            // exempt: legitimate tables repeat identical rows well past
+            // the threshold, and collapsing them yields invalid HTML.
+            if self.backend.capabilities().truncate_repetitive_output
+                && task != RecognitionTask::Table
+            {
                 generated = truncate_repetitive_content(&generated, 10, 10, 10);
             }
 
@@ -883,6 +894,117 @@ mod tests {
 
     /// The parser must run end to end on a caller-supplied `LayoutSource`,
     /// which is the path that needs no ONNX Runtime.
+    /// Truncation-enabled backend echoing a table whose rows repeat
+    /// identically — the shape text-level repetition truncation must not
+    /// touch.
+    struct TableEchoBackend;
+
+    impl RecognitionBackend for TableEchoBackend {
+        fn recognize(
+            &self,
+            _image: RgbImage,
+            task: RecognitionTask,
+            _max_tokens: usize,
+        ) -> Result<String, Error> {
+            if task == RecognitionTask::Table {
+                let mut rows = String::new();
+                for _ in 0..12 {
+                    rows.push_str("<tr><td></td><td></td></tr>\n");
+                }
+                Ok(format!("<table>\n{rows}</table>"))
+            } else {
+                Ok("plain text\n".repeat(12))
+            }
+        }
+
+        fn capabilities(&self) -> crate::api::recognition::BackendCapabilities {
+            crate::api::recognition::BackendCapabilities {
+                truncate_repetitive_output: true,
+                ..crate::api::recognition::BackendCapabilities::default()
+            }
+        }
+    }
+
+    /// A backend that cannot read charts: chart regions must be left as
+    /// placeholders instead of reaching the model.
+    struct NoChartBackend;
+
+    impl RecognitionBackend for NoChartBackend {
+        fn recognize(
+            &self,
+            _image: RgbImage,
+            task: RecognitionTask,
+            _max_tokens: usize,
+        ) -> Result<String, Error> {
+            match task {
+                RecognitionTask::Chart => {
+                    panic!("chart regions must not reach a backend without chart support")
+                }
+                other => Ok(format!("recognized {other:?}")),
+            }
+        }
+
+        fn capabilities(&self) -> crate::api::recognition::BackendCapabilities {
+            crate::api::recognition::BackendCapabilities {
+                supports_chart: false,
+                ..crate::api::recognition::BackendCapabilities::default()
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_chart_regions_are_skipped_not_recognized() {
+        assert!(crate::api::recognition::BackendCapabilities::default().supports_chart);
+        let backend = NoChartBackend;
+        let parser = DocParser::new(&backend);
+        let layout = StaticLayout::new(vec![
+            element("chart", 10.0, 10.0, 190.0, 100.0),
+            element("text", 10.0, 110.0, 190.0, 210.0),
+        ]);
+
+        let result = parser
+            .parse(&layout, RgbImage::new(200, 210))
+            .expect("parse succeeds");
+
+        // The chart element stays in the document, unrecognized; the text
+        // region still runs.
+        assert_eq!(result.layout_elements.len(), 2);
+        assert_eq!(result.layout_elements[0].text, None);
+        assert_eq!(
+            result.layout_elements[1].text.as_deref(),
+            Some("recognized Ocr")
+        );
+    }
+
+    #[test]
+    fn table_output_survives_repetition_truncation() {
+        let backend = TableEchoBackend;
+        let parser = DocParser::new(&backend);
+        let layout = StaticLayout::new(vec![
+            element("table", 10.0, 10.0, 190.0, 100.0),
+            element("text", 10.0, 110.0, 190.0, 210.0),
+        ]);
+
+        let result = parser
+            .parse(&layout, RgbImage::new(200, 210))
+            .expect("parse succeeds");
+
+        // The table keeps every row: collapsing identical rows would
+        // yield invalid HTML.
+        let table_text = result.layout_elements[0].text.as_deref().unwrap();
+        assert_eq!(
+            table_text.matches("<tr>").count(),
+            12,
+            "table rows must not be collapsed by repetition truncation"
+        );
+        // Non-table text with the same repetition still gets truncated.
+        let text = result.layout_elements[1].text.as_deref().unwrap();
+        assert!(
+            !text.contains("plain text\nplain text"),
+            "repeated text should still be truncated"
+        );
+    }
+
     #[test]
     fn parses_with_a_static_layout_source() {
         let backend = RecordingBackend {

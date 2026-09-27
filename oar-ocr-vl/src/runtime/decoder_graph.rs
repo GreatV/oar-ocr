@@ -83,6 +83,16 @@ impl<I> std::fmt::Debug for DecoderCudaGraph<I> {
     }
 }
 
+/// Per-batch row geometry for a batched decode step: the device write
+/// offsets for this step and the left-padding lengths that bound each
+/// row's live span. Both are rewritten on the device before every graph
+/// replay, so a reused graph never sees a previous batch's rows.
+#[cfg(feature = "cuda")]
+pub(crate) struct BatchDecodeRows<'a> {
+    pub(crate) row_starts: &'a [u32],
+    pub(crate) pad_lens: &'a [u32],
+}
+
 /// Capture a decoder graph.
 ///
 /// `body` computes this step's outputs from the registered inputs; it must
@@ -202,6 +212,33 @@ fn output_context(index: usize, stage: &'static str) -> &'static str {
         ("sync decoder CUDA graph", 2) => "sync decoder CUDA graph output 2",
         _ => "decoder CUDA graph output",
     }
+}
+
+/// Initial decode bucket for a prompt under the growth ladder: the next
+/// power of two covering the prompt plus one decode step. Capturing just
+/// past the prompt keeps the graph's masked attention proportional to what
+/// the generation actually needs; replay doubles the bucket when the
+/// sequence outgrows it. `None` keeps prompts at or over `limit` on the
+/// eager path entirely — their KV can never fit a bucket.
+#[cfg(any(feature = "cuda", test))]
+pub(crate) fn prompt_decode_bucket(prompt_len: usize, limit: usize) -> Option<usize> {
+    if prompt_len >= limit || limit == 0 {
+        return None;
+    }
+    Some(prompt_len.saturating_add(1).next_power_of_two().min(limit))
+}
+
+/// Bucket the ladder grows to once a generation reaches the end of
+/// `cache_len`: fourfold, capped at the graph's `ceiling`. One jump to the
+/// ceiling keeps the re-capture and KV-copy cost of a climb to a single
+/// step; `None` means the ladder is at its ceiling and an overflowing
+/// generation falls back to eager.
+#[cfg(any(feature = "cuda", test))]
+pub(crate) fn next_decode_bucket(cache_len: usize, ceiling: usize) -> Option<usize> {
+    if cache_len == 0 || cache_len >= ceiling {
+        return None;
+    }
+    Some(cache_len.saturating_mul(4).min(ceiling))
 }
 
 /// Match eager decoder attention: a single query has no future token to mask,
@@ -336,6 +373,90 @@ struct CopyPinnedKvLengths<'a> {
     source: &'a candle_core::cuda_backend::cudarc::driver::PinnedHostSlice<u32>,
 }
 
+/// Per-row u32 device values for a batched decode graph: one u32 per row,
+/// refreshed from pinned memory before each replay. Backs both the row
+/// write offsets and the per-row padding bounds — any batch-dependent value
+/// the captured graph reads must live here so replays see the current batch.
+#[cfg(feature = "cuda")]
+pub(crate) struct CudaGraphPerRowU32 {
+    tensor: Tensor,
+    host: RefCell<candle_core::cuda_backend::cudarc::driver::PinnedHostSlice<u32>>,
+}
+
+#[cfg(feature = "cuda")]
+impl CudaGraphPerRowU32 {
+    /// `shape` fixes how the graph broadcasts the row values: row starts
+    /// use one flat slot per row, pad bounds broadcast against a rank-4
+    /// attention mask.
+    pub(crate) fn new(shape: &[usize], device: &Device) -> candle_core::Result<Self> {
+        use candle_core::cuda_backend::WrapErr;
+
+        let Device::Cuda(cuda) = device else {
+            candle_core::bail!("CUDA-graph per-row values require a CUDA device")
+        };
+        let len = shape.iter().try_fold(1usize, |acc, &dim| {
+            acc.checked_mul(dim)
+                .ok_or_else(|| candle_core::Error::Msg("per-row shape overflows".to_string()))
+        })?;
+        let values = vec![0u32; len];
+        let tensor = Tensor::new(values.as_slice(), device)?.reshape(shape)?;
+        let stream = cuda.cuda_stream();
+        // SAFETY: the slice is initialized immediately below before the
+        // page-locked allocation can be read or copied.
+        let mut host = unsafe { stream.context().alloc_pinned::<u32>(len) }.w()?;
+        let host_ptr = host.as_mut_ptr().w()?;
+        // SAFETY: `host` owns `len` properly aligned u32 slots.
+        unsafe {
+            for (slot, value) in
+                std::iter::zip(std::slice::from_raw_parts_mut(host_ptr, len), &values)
+            {
+                *slot = *value;
+            }
+        }
+        Ok(Self {
+            tensor,
+            host: RefCell::new(host),
+        })
+    }
+
+    pub(crate) fn tensor(&self) -> &Tensor {
+        &self.tensor
+    }
+
+    pub(crate) fn update(&self, values: &[u32]) -> candle_core::Result<()> {
+        use candle_core::cuda_backend::WrapErr;
+
+        if values.len() != self.tensor.elem_count() {
+            candle_core::bail!(
+                "CUDA-graph per-row values need {} entries, got {}",
+                self.tensor.elem_count(),
+                values.len()
+            );
+        }
+        let mut host = self.host.borrow_mut();
+        let host_ptr = host.as_mut_ptr().w()?;
+        // SAFETY: waiting in `as_mut_ptr` makes the previous asynchronous
+        // copy safe to overwrite; the slice spans exactly the owned slots.
+        unsafe {
+            for (slot, value) in std::iter::zip(
+                std::slice::from_raw_parts_mut(host_ptr, values.len()),
+                values,
+            ) {
+                *slot = *value;
+            }
+        }
+        self.tensor
+            .inplace_op1(&CopyPinnedKvLengths { source: &host })
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl std::fmt::Debug for CudaGraphPerRowU32 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CudaGraphPerRowU32").finish_non_exhaustive()
+    }
+}
+
 #[cfg(feature = "cuda")]
 impl InplaceOp1 for CopyPinnedKvLengths<'_> {
     fn name(&self) -> &'static str {
@@ -354,8 +475,12 @@ impl InplaceOp1 for CopyPinnedKvLengths<'_> {
         let Some((start, end)) = layout.contiguous_offsets() else {
             candle_core::bail!("CUDA-graph KV lengths must be contiguous")
         };
-        if end.saturating_sub(start) != 2 {
-            candle_core::bail!("CUDA-graph KV lengths must contain two u32 values")
+        if end.saturating_sub(start) != self.source.len() {
+            candle_core::bail!(
+                "CUDA-graph KV lengths destination has {} slots for {} values",
+                end.saturating_sub(start),
+                self.source.len()
+            )
         }
         let device = storage.device.clone();
         let destination = storage.as_cuda_slice_mut::<u32>()?;
@@ -432,7 +557,10 @@ impl std::fmt::Debug for CudaGraphKvLengths {
 /// alive by forgotten tensors.
 #[cfg(test)]
 mod tests {
-    use super::{decoder_attention_is_causal, decoder_cache_capacity};
+    use super::{
+        decoder_attention_is_causal, decoder_cache_capacity, next_decode_bucket,
+        prompt_decode_bucket,
+    };
 
     #[test]
     fn cache_capacity_uses_bounded_power_of_two_buckets() {
@@ -443,6 +571,19 @@ mod tests {
         assert_eq!(decoder_cache_capacity(100, 0, LIMIT), None);
         assert_eq!(decoder_cache_capacity(LIMIT, 1, LIMIT), None);
         assert_eq!(decoder_cache_capacity(1, 1, 0), None);
+    }
+
+    #[test]
+    fn prompt_bucket_covers_the_prompt_and_the_ladder_doubles() {
+        const LIMIT: usize = 16_384;
+        assert_eq!(prompt_decode_bucket(1500, LIMIT), Some(2048));
+        assert_eq!(prompt_decode_bucket(2047, LIMIT), Some(2048));
+        assert_eq!(prompt_decode_bucket(2048, LIMIT), Some(4096));
+        assert_eq!(prompt_decode_bucket(LIMIT, LIMIT), None);
+        assert_eq!(prompt_decode_bucket(1, 0), None);
+        assert_eq!(next_decode_bucket(512, LIMIT), Some(2048));
+        assert_eq!(next_decode_bucket(8_192, 8_192), None);
+        assert_eq!(next_decode_bucket(0, LIMIT), None);
     }
 
     #[test]
