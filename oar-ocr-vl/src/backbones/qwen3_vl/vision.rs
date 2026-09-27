@@ -1178,14 +1178,15 @@ mod tests {
     #[test]
     fn chunked_vision_attention_matches_single_pass() {
         let device = Device::Cpu;
-        let (heads, seq, head_dim) = (4usize, 2048usize, 32usize);
+        // Tiny explicit chunk (16) over a short sequence keeps this at
+        // millisecond scale while walking the same loop as production.
+        let (heads, seq, head_dim) = (4usize, 96usize, 32usize);
         let q = Tensor::randn(0f32, 1f32, (1, heads, seq, head_dim), &device).unwrap();
         let k = Tensor::randn(0f32, 1f32, (1, heads, seq, head_dim), &device).unwrap();
         let v = Tensor::randn(0f32, 1f32, (1, heads, seq, head_dim), &device).unwrap();
         let scale = 1.0 / (head_dim as f64).sqrt();
         let single = scaled_dot_product_attention(&q, &k, &v, None, scale, false).unwrap();
-        let chunked =
-            chunked_vision_attention(&q, &k, &v, scale, vision_chunk_size(heads, seq)).unwrap();
+        let chunked = chunked_vision_attention(&q, &k, &v, scale, 16).unwrap();
         let a = single.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         let b = chunked.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         let worst = a

@@ -904,8 +904,6 @@ fn attention_masked_single(
 
 /// Query-chunked masked attention. The caller's mask is narrowed along the
 /// query axis per chunk; a mask-less single-row causal prefill builds each
-/// chunk's causal mask at the chunk's query offset instead, so page-scale
-/// sequences never materialize the full (heads, seq, seq) score matrix.
 fn attention_masked_chunked(
     q: &Tensor,
     k: &Tensor,
@@ -943,6 +941,23 @@ fn attention_masked_chunked(
     .min(MASKED_ATTN_CHUNK);
     #[cfg(test)]
     LAST_CAUSAL_CHUNK.store(chunk_size, std::sync::atomic::Ordering::Relaxed);
+    attention_masked_chunked_with_chunk(q, k, v, attention_mask, scaling, num_kv_groups, chunk_size)
+}
+
+/// Explicit-chunk form of `attention_masked_chunked`: production always
+/// goes through the wrapper above (which sizes the chunk from the shared
+/// scratch budget); tests pass a tiny chunk so the loop is reachable at
+/// millisecond scale.
+fn attention_masked_chunked_with_chunk(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    attention_mask: Option<&Tensor>,
+    scaling: f64,
+    num_kv_groups: usize,
+    chunk_size: usize,
+) -> Result<Tensor, Error> {
+    let seq_len = q.dim(2)?;
     let mut chunks = Vec::with_capacity(seq_len.div_ceil(chunk_size));
     let mut start = 0usize;
     while start < seq_len {
@@ -2879,80 +2894,22 @@ mod tests {
         assert!(attention_query_chunk(heads, usize::MAX, ATTENTION_CHUNK_SCRATCH_BUDGET) >= 1);
     }
 
-    #[test]
-    fn causal_chunked_attention_matches_single_pass_at_budget_scale() {
-        // A budget small enough to shrink the chunk at a moderate
-        // sequence, compared against the one-pass form.
-        use crate::runtime::attention::attention_query_chunk;
-        let device = Device::Cpu;
-        let (heads, seq, head_dim) = (4usize, 2560usize, 32usize);
-        let budget = 1024usize * 1024usize; // ~1 MiB scratch
-        let chunk = attention_query_chunk(heads, seq, budget).min(1024);
-        assert_eq!(chunk, 25, "budget must shrink the chunk for this shape");
-        let kv_heads = heads / 2;
-        let q = Tensor::randn(0f32, 1f32, (1, heads, seq, head_dim), &device).unwrap();
-        let k = Tensor::randn(0f32, 1f32, (1, kv_heads, seq, head_dim), &device).unwrap();
-        let v = Tensor::randn(0f32, 1f32, (1, kv_heads, seq, head_dim), &device).unwrap();
-        let scaling = 1.0 / (head_dim as f64).sqrt();
-        let single = attention_masked_single(&q, &k, &v, None, scaling, 2).unwrap();
-        // The helper reads the shared budget; run the same math with the
-        // test budget by chunking here through the same kernel calls.
-        let mut chunks = Vec::new();
-        let mut start = 0usize;
-        while start < seq {
-            let len = (seq - start).min(chunk);
-            let visible = start + len;
-            chunks.push(
-                scaled_dot_product_attention_gqa(
-                    &q.narrow(2, start, len).unwrap(),
-                    &k.narrow(2, 0, visible).unwrap(),
-                    &v.narrow(2, 0, visible).unwrap(),
-                    // (narrowed K/V keep their kv_heads width)
-                    Some(
-                        &crate::runtime::attention::create_causal_mask(
-                            len,
-                            visible,
-                            q.dtype(),
-                            &device,
-                        )
-                        .unwrap(),
-                    ),
-                    scaling,
-                    false,
-                    2,
-                )
-                .unwrap(),
-            );
-            start += len;
-        }
-        let refs: Vec<&Tensor> = chunks.iter().collect();
-        let chunked = Tensor::cat(&refs, 2).unwrap();
-        let a = single.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-        let b = chunked.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-        let worst = a
-            .iter()
-            .zip(b.iter())
-            .map(|(x, y)| (x - y).abs())
-            .fold(0.0f32, f32::max);
-        eprintln!("budget-scaled causal chunk vs single max|delta| = {worst:e}");
-        assert!(
-            worst < 1e-3,
-            "budget-scaled chunking diverged: max|delta| = {worst}"
-        );
-    }
-
-    /// Chunked causal attention must agree with the one-pass form to
-    /// float epsilon: only the softmax reduction grouping changes.
+    /// Chunked causal attention must agree with the one-pass form:
+    /// only the softmax reduction grouping changes. A tiny explicit
+    /// chunk keeps this at millisecond scale (the production wrapper
+    /// drives the same loop with the budget-sized chunk).
     #[test]
     fn causal_chunked_attention_matches_single_pass() {
         let device = Device::Cpu;
-        let (heads, seq, head_dim, kv_heads) = (4usize, 2560usize, 32usize, 2usize);
+        let (heads, seq, head_dim, kv_heads) = (4usize, 32usize, 32usize, 2usize);
         let q = Tensor::randn(0f32, 1f32, (1, heads, seq, head_dim), &device).unwrap();
         let k = Tensor::randn(0f32, 1f32, (1, kv_heads, seq, head_dim), &device).unwrap();
         let v = Tensor::randn(0f32, 1f32, (1, kv_heads, seq, head_dim), &device).unwrap();
         let scaling = 1.0 / (head_dim as f64).sqrt();
+
+        // Causal single-row prefill: K/V narrow to the visible prefix.
         let single = attention_masked_single(&q, &k, &v, None, scaling, 2).unwrap();
-        let chunked = attention_masked_chunked(&q, &k, &v, None, scaling, 2).unwrap();
+        let chunked = attention_masked_chunked_with_chunk(&q, &k, &v, None, scaling, 2, 8).unwrap();
         let a = single.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         let b = chunked.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         let worst = a
@@ -2960,10 +2917,39 @@ mod tests {
             .zip(b.iter())
             .map(|(x, y)| (x - y).abs())
             .fold(0.0f32, f32::max);
-        eprintln!("causal chunk vs single max|delta| = {worst:e}");
         assert!(
             worst < 1e-3,
             "chunked causal attention diverged: max|delta| = {worst}"
+        );
+
+        // Masked multi-row form: the caller's mask hides the columns and
+        // the full K/V stays.
+        // (seq, seq) query-major mask: the chunk loop narrows the query
+        // axis; mask content is irrelevant to the comparison because both
+        // sides see the same one.
+        let mask =
+            crate::runtime::attention::create_causal_mask(seq, seq, q.dtype(), &device).unwrap();
+        let masked_single = attention_masked_single(&q, &k, &v, Some(&mask), scaling, 2).unwrap();
+        let masked_chunked =
+            attention_masked_chunked_with_chunk(&q, &k, &v, Some(&mask), scaling, 2, 8).unwrap();
+        let a = masked_single
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let b = masked_chunked
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let worst = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 1e-3,
+            "chunked masked attention diverged: max|delta| = {worst}"
         );
     }
 
