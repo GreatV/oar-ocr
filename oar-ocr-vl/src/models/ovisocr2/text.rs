@@ -158,15 +158,28 @@ fn cached_depthwise_conv_step(
 /// fixed allocation per state, which the CUDA-graph capture can safely hold
 /// a pointer to, and an eager fallback after a replay reads the values the
 /// graph last wrote — one buffer, no synchronization between the two paths.
+///
+/// The slot must hold a contiguous tensor from the very first write:
+/// `slice_set` requires both sides contiguous, and producers such as
+/// `Tensor::narrow` hand in non-contiguous views. Replacing the buffer on a
+/// later non-contiguous write is not an option — a captured graph keeps a
+/// pointer to this exact allocation — so contiguity is enforced here, at
+/// the funnel through which every state write passes.
 fn store_state(
     slot: &RefCell<Option<Tensor>>,
     new_state: Tensor,
     context: &'static str,
 ) -> Result<(), Error> {
+    // A no-op clone when `new_state` is already contiguous.
+    let new_state = new_state
+        .contiguous()
+        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, context, e))?;
     let mut borrow = slot.borrow_mut();
     if let Some(existing) = borrow.as_ref()
         && existing.shape() == new_state.shape()
     {
+        // Guaranteed contiguous: the slot is only ever filled above.
+        debug_assert!(existing.is_contiguous());
         existing
             .slice_set(&new_state, 0, 0)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, context, e))?;
@@ -1534,6 +1547,43 @@ mod tests {
         assert_eq!(slot.borrow().as_ref().unwrap().dims(), &[2, 2, 4]);
     }
 
+    /// Regression test for the production eager path: prefill stores the GDN
+    /// conv state as a non-contiguous `narrow` view, and every following
+    /// decode step must still be able to store the next state in place.
+    /// Exercises a tiny three-layer model (linear/full/linear attention)
+    /// through the same `forward` the generation loop drives, on CPU — no
+    /// CUDA graph involved. Runs in well under 50ms.
+    #[test]
+    fn prefill_then_decode_steps_store_states() -> Result<(), Error> {
+        let device = Device::Cpu;
+        let cfg = tiny_graph_config();
+        cfg.validate()?;
+        let tensors = tiny_graph_tensors(&cfg, &device);
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
+        let model = OvisOcr2TextModel::load(&cfg, vb)?;
+
+        // Prefill four tokens through the production forward.
+        let prompt = Tensor::from_vec(vec![1u32, 2, 3, 4], (1, 4), &device).unwrap();
+        let prompt_positions = Tensor::from_vec(
+            vec![0i64, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
+            (3, 1, 4),
+            &device,
+        )
+        .unwrap();
+        let embeds = model.embed(&prompt)?;
+        model.forward(&embeds, &prompt_positions)?;
+
+        // Three decode steps through the same production forward.
+        let token = Tensor::from_vec(vec![7u32], (1, 1), &device).unwrap();
+        for step in 0..3 {
+            let position = 4 + step as i64;
+            let positions = Tensor::from_vec(vec![position; 3], (3, 1, 1), &device).unwrap();
+            let embed = model.embed(&token)?;
+            model.forward(&embed, &positions)?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn cached_depthwise_step_matches_grouped_convolution() -> candle_core::Result<()> {
         let state = Tensor::from_vec(
@@ -1675,7 +1725,6 @@ mod tests {
         assert!((values[31] - 20f32.cos()).abs() < 1e-6);
     }
 
-    #[cfg(feature = "cuda")]
     fn tiny_graph_config() -> OvisOcr2TextConfig {
         OvisOcr2TextConfig {
             model_type: "qwen3_5_text".to_string(),
@@ -1722,7 +1771,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "cuda")]
     fn tiny_graph_tensors(
         cfg: &OvisOcr2TextConfig,
         device: &Device,
