@@ -7,12 +7,12 @@
 //! `<|vision_end|>` directly (no separator).
 
 use super::config::NaviDcConfig;
-use super::text::NaviDcTextModel;
 use super::vision::NaviDcVisionModel;
 use crate::attention::{
     combine_masks, create_causal_mask, create_generation_mask_if_needed, create_left_padding_mask,
 };
-use crate::backbones::qwen_vl_processing::{MinerUImageProcessorConfig, preprocess_images};
+use crate::backbones::qwen_vl_processing::{QwenVlImageProcessorConfig, preprocess_images};
+use crate::backbones::qwen2_vl::Qwen2VlTextModel;
 use crate::error::Error;
 #[cfg(feature = "cuda")]
 use crate::runtime::cuda::{ArgmaxFirstBf16, ArgmaxFirstF32, MaskTokenIds};
@@ -34,9 +34,9 @@ pub struct NaviDcOcr {
     device: Device,
     dtype: DType,
     cfg: NaviDcConfig,
-    image_cfg: MinerUImageProcessorConfig,
+    image_cfg: QwenVlImageProcessorConfig,
     tokenizer: Tokenizer,
-    text: NaviDcTextModel,
+    text: Qwen2VlTextModel,
     vision: NaviDcVisionModel,
     lm_head: Linear,
     image_token_id: u32,
@@ -99,7 +99,7 @@ impl NaviDcOcr {
         let cfg = NaviDcConfig::from_path(model_dir.join("config.json"))?;
         cfg.validate()?;
         let image_cfg =
-            MinerUImageProcessorConfig::from_path(model_dir.join("preprocessor_config.json"))?;
+            QwenVlImageProcessorConfig::from_path(model_dir.join("preprocessor_config.json"))?;
         image_cfg.validate()?;
 
         if image_cfg.merge_size != cfg.vision_config.spatial_merge_size {
@@ -169,7 +169,7 @@ impl NaviDcOcr {
                 .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "load safetensors", e))?
         };
 
-        let text = NaviDcTextModel::load(&cfg, vb.pp("model"))?;
+        let text = Qwen2VlTextModel::load(&cfg.qwen2_vl_text_config()?, vb.pp("model"))?;
         let vision = NaviDcVisionModel::load(&cfg.vision_config, vb.pp("visual"))?;
 
         let image_token_id = cfg.image_token_id;

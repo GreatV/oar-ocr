@@ -1,13 +1,13 @@
-//! Qwen2.5 text tower for NaviDC-OCR.
+//! Qwen2-family text decoder shared by the MinerU2.5 and NaviDC-OCR towers.
 //!
-//! Structured after `mineru::text` (the in-repo Qwen2-VL decoder) with the two
-//! Qwen2.5 differences: attention projections carry **no bias** and each head
-//! is normalised by `q_norm`/`k_norm` (RMSNorm over `head_dim`, applied after
-//! the projection and before RoPE, see `modeling_naviocr.py` lines 679-686),
-//! and `head_dim` comes from the explicit config field (128) rather than
-//! `hidden_size / num_attention_heads` (64).
+//! Both checkpoints carry the same Qwen2/Qwen2.5 decoder stack (mrope
+//! attention over a TrimmableKvCache); they differ only in knobs expressed
+//! by [`Qwen2VlTextConfig`]: whether the attention projections carry a bias
+//! and whether each head is normalised by `q_norm`/`k_norm` (RMSNorm over
+//! `head_dim`, applied after the projection and before RoPE). The CUDA
+//! decode-graph lifecycle (single-bucket capture, capacity-based reuse,
+//! eager fallback) is written once here for both.
 
-use super::config::NaviDcConfig;
 use crate::attention::{
     RotaryEmbedding, flash_attention, scaled_dot_product_attention_gqa, select_rope_sections,
 };
@@ -22,16 +22,50 @@ use crate::runtime::decoder_graph::{
     CudaGraphDrainGuard, CudaGraphInputs, CudaGraphKvLengths, DecoderCudaGraph,
     capture_decoder_graph, cuda_graph_error, decoder_attention_is_causal,
 };
-use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
+use crate::runtime::errors::{candle_to_ocr_inference, candle_to_ocr_processing};
+use crate::runtime::tensor::rotate_half;
 #[cfg(feature = "cuda")]
 use candle_core::DType;
 use candle_core::{IndexOp, Tensor};
-use candle_nn::{Embedding, Linear, Module, VarBuilder, embedding, linear_no_bias, rms_norm};
+use candle_nn::{
+    Embedding, Linear, Module, VarBuilder, embedding, linear, linear_no_bias, rms_norm,
+};
 use std::cell::RefCell;
 use std::sync::Arc;
 
-#[cfg(feature = "cuda")]
-const NAVIDC_DECODE_CACHE_LEN: usize = 16_384;
+/// Text-decoder configuration for the shared Qwen2-family tower. Each model
+/// converts its checkpoint config into this struct; the knob fields carry
+/// the per-model differences so the decoder code itself stays shared.
+#[derive(Debug, Clone)]
+pub struct Qwen2VlTextConfig {
+    /// Model name prefixing every error message (byte-identical to the
+    /// per-model towers this replaces).
+    pub model_name: &'static str,
+    pub vocab_size: usize,
+    pub hidden_size: usize,
+    pub intermediate_size: usize,
+    pub num_hidden_layers: usize,
+    pub num_attention_heads: usize,
+    pub num_key_value_heads: usize,
+    pub rms_norm_eps: f64,
+    pub rope_theta: f64,
+    pub max_position_embeddings: usize,
+    /// Effective attention head dim, computed by the caller (MinerU2.5
+    /// derives it from `hidden_size / num_attention_heads`; NaviDC-OCR
+    /// prefers its explicit config field).
+    pub head_dim: usize,
+    pub mrope_section: Vec<usize>,
+    /// Whether the q/k/v projections load a bias term.
+    pub attention_bias: bool,
+    /// Whether each head is normalised by `self_attn.q_norm`/`k_norm`
+    /// (RMSNorm over `head_dim`) before RoPE.
+    pub qk_head_norm: bool,
+    /// Extra env var (besides `OAR_VL_DISABLE_CUDA_GRAPH`) that disables
+    /// the decode graph for this model.
+    pub graph_disable_env: &'static str,
+    /// Upper bound on the decode-graph KV bucket.
+    pub decode_cache_len: usize,
+}
 
 fn apply_multimodal_rotary_pos_emb(
     q: &Tensor,
@@ -39,6 +73,7 @@ fn apply_multimodal_rotary_pos_emb(
     cos: &Tensor,
     sin: &Tensor,
     mrope_section: &[usize],
+    model_name: &str,
 ) -> Result<(Tensor, Tensor), Error> {
     let cos = select_rope_sections(cos, mrope_section, 3)?;
     let sin = select_rope_sections(sin, mrope_section, 3)?;
@@ -46,7 +81,7 @@ fn apply_multimodal_rotary_pos_emb(
     let q_mul = q.broadcast_mul(&cos).map_err(|e| {
         candle_to_ocr_processing(
             crate::error::ProcessingStage::TensorOperation,
-            "NaviDC-OCR: mrope q*cos failed",
+            format!("{model_name}: mrope q*cos failed"),
             e,
         )
     })?;
@@ -54,14 +89,14 @@ fn apply_multimodal_rotary_pos_emb(
     let q_half_mul = q_half.broadcast_mul(&sin).map_err(|e| {
         candle_to_ocr_processing(
             crate::error::ProcessingStage::TensorOperation,
-            "NaviDC-OCR: mrope rotate_half(q)*sin failed",
+            format!("{model_name}: mrope rotate_half(q)*sin failed"),
             e,
         )
     })?;
     let q_rot = (&q_mul + &q_half_mul).map_err(|e| {
         candle_to_ocr_processing(
             crate::error::ProcessingStage::TensorOperation,
-            "NaviDC-OCR: mrope apply on q failed",
+            format!("{model_name}: mrope apply on q failed"),
             e,
         )
     })?;
@@ -69,7 +104,7 @@ fn apply_multimodal_rotary_pos_emb(
     let k_mul = k.broadcast_mul(&cos).map_err(|e| {
         candle_to_ocr_processing(
             crate::error::ProcessingStage::TensorOperation,
-            "NaviDC-OCR: mrope k*cos failed",
+            format!("{model_name}: mrope k*cos failed"),
             e,
         )
     })?;
@@ -77,14 +112,14 @@ fn apply_multimodal_rotary_pos_emb(
     let k_half_mul = k_half.broadcast_mul(&sin).map_err(|e| {
         candle_to_ocr_processing(
             crate::error::ProcessingStage::TensorOperation,
-            "NaviDC-OCR: mrope rotate_half(k)*sin failed",
+            format!("{model_name}: mrope rotate_half(k)*sin failed"),
             e,
         )
     })?;
     let k_rot = (&k_mul + &k_half_mul).map_err(|e| {
         candle_to_ocr_processing(
             crate::error::ProcessingStage::TensorOperation,
-            "NaviDC-OCR: mrope apply on k failed",
+            format!("{model_name}: mrope apply on k failed"),
             e,
         )
     })?;
@@ -93,32 +128,34 @@ fn apply_multimodal_rotary_pos_emb(
 }
 
 #[derive(Debug, Clone)]
-struct NaviDcMlp {
+struct Qwen2VlMlp {
     gate_proj: Linear,
     up_proj: Linear,
     down_proj: Linear,
+    model_name: &'static str,
 }
 
-impl NaviDcMlp {
-    fn load(cfg: &NaviDcConfig, vb: VarBuilder) -> Result<Self, Error> {
+impl Qwen2VlMlp {
+    fn load(cfg: &Qwen2VlTextConfig, vb: VarBuilder) -> Result<Self, Error> {
         let gate_proj = linear_no_bias(
             cfg.hidden_size,
             cfg.intermediate_size,
             vb.pp("mlp.gate_proj"),
         )
-        .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "load gate_proj", e))?;
+        .map_err(|e| candle_to_ocr_inference(cfg.model_name, "load gate_proj", e))?;
         let up_proj = linear_no_bias(cfg.hidden_size, cfg.intermediate_size, vb.pp("mlp.up_proj"))
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "load up_proj", e))?;
+            .map_err(|e| candle_to_ocr_inference(cfg.model_name, "load up_proj", e))?;
         let down_proj = linear_no_bias(
             cfg.intermediate_size,
             cfg.hidden_size,
             vb.pp("mlp.down_proj"),
         )
-        .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "load down_proj", e))?;
+        .map_err(|e| candle_to_ocr_inference(cfg.model_name, "load down_proj", e))?;
         Ok(Self {
             gate_proj,
             up_proj,
             down_proj,
+            model_name: cfg.model_name,
         })
     }
 
@@ -126,82 +163,122 @@ impl NaviDcMlp {
         let gate = self
             .gate_proj
             .forward(xs)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "mlp gate_proj", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "mlp gate_proj", e))?;
         let gate = candle_nn::ops::silu(&gate)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "mlp silu", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "mlp silu", e))?;
         let up = self
             .up_proj
             .forward(xs)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "mlp up_proj", e))?;
-        let prod =
-            (&gate * &up).map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "mlp gate*up", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "mlp up_proj", e))?;
+        let prod = (&gate * &up)
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "mlp gate*up", e))?;
         self.down_proj
             .forward(&prod)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "mlp down_proj", e))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "mlp down_proj", e))
     }
 }
 
 #[derive(Debug)]
-struct NaviDcAttention {
+struct Qwen2VlAttention {
     q_proj: Linear,
     k_proj: Linear,
     v_proj: Linear,
     o_proj: Linear,
     /// Per-head RMSNorm applied to Q after projection, before RoPE.
-    q_norm: candle_nn::RmsNorm,
+    q_norm: Option<candle_nn::RmsNorm>,
     /// Per-head RMSNorm applied to K after projection, before RoPE.
-    k_norm: candle_nn::RmsNorm,
+    k_norm: Option<candle_nn::RmsNorm>,
     num_heads: usize,
     num_kv_heads: usize,
     num_kv_groups: usize,
     head_dim: usize,
     scaling: f64,
     mrope_section: Vec<usize>,
+    model_name: &'static str,
     kv_cache: RefCell<TrimmableKvCache>,
 }
 
-impl NaviDcAttention {
-    fn load(cfg: &NaviDcConfig, vb: VarBuilder) -> Result<Self, Error> {
+impl Qwen2VlAttention {
+    fn load(cfg: &Qwen2VlTextConfig, vb: VarBuilder) -> Result<Self, Error> {
         if !cfg
             .num_attention_heads
             .is_multiple_of(cfg.num_key_value_heads)
         {
             return Err(Error::Config {
                 message: format!(
-                    "NaviDC-OCR: num_attention_heads ({}) must be divisible by num_key_value_heads ({})",
-                    cfg.num_attention_heads, cfg.num_key_value_heads
+                    "{}: num_attention_heads ({}) must be divisible by num_key_value_heads ({})",
+                    cfg.model_name, cfg.num_attention_heads, cfg.num_key_value_heads
                 ),
             });
         }
-        let head_dim = cfg.head_dim()?;
-        let q_proj = linear_no_bias(
-            cfg.hidden_size,
-            cfg.num_attention_heads * head_dim,
-            vb.pp("self_attn.q_proj"),
-        )
-        .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "load q_proj", e))?;
-        let k_proj = linear_no_bias(
-            cfg.hidden_size,
-            cfg.num_key_value_heads * head_dim,
-            vb.pp("self_attn.k_proj"),
-        )
-        .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "load k_proj", e))?;
-        let v_proj = linear_no_bias(
-            cfg.hidden_size,
-            cfg.num_key_value_heads * head_dim,
-            vb.pp("self_attn.v_proj"),
-        )
-        .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "load v_proj", e))?;
+        let head_dim = cfg.head_dim;
+        // NaviDC-OCR (and Qwen2.5 generally) drops the projection biases;
+        // MinerU2.5 keeps them on q/k/v. `o_proj` never carries one.
+        let (q_proj, k_proj, v_proj) = if cfg.attention_bias {
+            (
+                linear(
+                    cfg.hidden_size,
+                    cfg.num_attention_heads * head_dim,
+                    vb.pp("self_attn.q_proj"),
+                )
+                .map_err(|e| candle_to_ocr_inference(cfg.model_name, "load q_proj", e))?,
+                linear(
+                    cfg.hidden_size,
+                    cfg.num_key_value_heads * head_dim,
+                    vb.pp("self_attn.k_proj"),
+                )
+                .map_err(|e| candle_to_ocr_inference(cfg.model_name, "load k_proj", e))?,
+                linear(
+                    cfg.hidden_size,
+                    cfg.num_key_value_heads * head_dim,
+                    vb.pp("self_attn.v_proj"),
+                )
+                .map_err(|e| candle_to_ocr_inference(cfg.model_name, "load v_proj", e))?,
+            )
+        } else {
+            (
+                linear_no_bias(
+                    cfg.hidden_size,
+                    cfg.num_attention_heads * head_dim,
+                    vb.pp("self_attn.q_proj"),
+                )
+                .map_err(|e| candle_to_ocr_inference(cfg.model_name, "load q_proj", e))?,
+                linear_no_bias(
+                    cfg.hidden_size,
+                    cfg.num_key_value_heads * head_dim,
+                    vb.pp("self_attn.k_proj"),
+                )
+                .map_err(|e| candle_to_ocr_inference(cfg.model_name, "load k_proj", e))?,
+                linear_no_bias(
+                    cfg.hidden_size,
+                    cfg.num_key_value_heads * head_dim,
+                    vb.pp("self_attn.v_proj"),
+                )
+                .map_err(|e| candle_to_ocr_inference(cfg.model_name, "load v_proj", e))?,
+            )
+        };
         let o_proj = linear_no_bias(
             cfg.num_attention_heads * head_dim,
             cfg.hidden_size,
             vb.pp("self_attn.o_proj"),
         )
-        .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "load o_proj", e))?;
-        let q_norm = rms_norm(head_dim, cfg.rms_norm_eps, vb.pp("self_attn.q_norm"))
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "load q_norm", e))?;
-        let k_norm = rms_norm(head_dim, cfg.rms_norm_eps, vb.pp("self_attn.k_norm"))
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "load k_norm", e))?;
+        .map_err(|e| candle_to_ocr_inference(cfg.model_name, "load o_proj", e))?;
+        let q_norm = if cfg.qk_head_norm {
+            Some(
+                rms_norm(head_dim, cfg.rms_norm_eps, vb.pp("self_attn.q_norm"))
+                    .map_err(|e| candle_to_ocr_inference(cfg.model_name, "load q_norm", e))?,
+            )
+        } else {
+            None
+        };
+        let k_norm = if cfg.qk_head_norm {
+            Some(
+                rms_norm(head_dim, cfg.rms_norm_eps, vb.pp("self_attn.k_norm"))
+                    .map_err(|e| candle_to_ocr_inference(cfg.model_name, "load k_norm", e))?,
+            )
+        } else {
+            None
+        };
 
         // Trim/gather-capable KV cache.
         let kv_cache = TrimmableKvCache::new(2, cfg.max_position_embeddings.max(8192));
@@ -218,7 +295,8 @@ impl NaviDcAttention {
             num_kv_groups: cfg.num_attention_heads / cfg.num_key_value_heads,
             head_dim,
             scaling: (head_dim as f64).powf(-0.5),
-            mrope_section: cfg.rope_scaling.mrope_section.clone(),
+            mrope_section: cfg.mrope_section.clone(),
+            model_name: cfg.model_name,
             kv_cache: RefCell::new(kv_cache),
         })
     }
@@ -231,52 +309,65 @@ impl NaviDcAttention {
     ) -> Result<(Tensor, Tensor, Tensor), Error> {
         let (b, seq_len, _) = hidden_states
             .dims3()
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "attn hidden_states dims3", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attn hidden_states dims3", e))?;
 
         // Qwen2.5 normalises each head on the (b, s, h, head_dim) view before
         // the transpose and RoPE application.
         let q = self
             .q_proj
             .forward(hidden_states)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "attn q_proj", e))?
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attn q_proj", e))?
             .reshape((b, seq_len, self.num_heads, self.head_dim))
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "attn q reshape", e))?;
-        let q = self
-            .q_norm
-            .forward(&q)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "attn q_norm", e))?
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attn q reshape", e))?;
+        let q = match &self.q_norm {
+            Some(q_norm) => q_norm
+                .forward(&q)
+                .map_err(|e| candle_to_ocr_inference(self.model_name, "attn q_norm", e))?,
+            None => q,
+        };
+        let q = q
             .transpose(1, 2)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "attn q transpose", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attn q transpose", e))?;
 
         let k = self
             .k_proj
             .forward(hidden_states)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "attn k_proj", e))?
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attn k_proj", e))?
             .reshape((b, seq_len, self.num_kv_heads, self.head_dim))
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "attn k reshape", e))?;
-        let k = self
-            .k_norm
-            .forward(&k)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "attn k_norm", e))?
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attn k reshape", e))?;
+        let k = match &self.k_norm {
+            Some(k_norm) => k_norm
+                .forward(&k)
+                .map_err(|e| candle_to_ocr_inference(self.model_name, "attn k_norm", e))?,
+            None => k,
+        };
+        let k = k
             .transpose(1, 2)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "attn k transpose", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attn k transpose", e))?;
 
         let v = self
             .v_proj
             .forward(hidden_states)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "attn v_proj", e))?
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attn v_proj", e))?
             .reshape((b, seq_len, self.num_kv_heads, self.head_dim))
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "attn v reshape", e))?
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attn v reshape", e))?
             .transpose(1, 2)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "attn v transpose", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attn v transpose", e))?;
 
-        let (q, k) = apply_multimodal_rotary_pos_emb(&q, &k, cos, sin, &self.mrope_section)?;
+        let (q, k) = apply_multimodal_rotary_pos_emb(
+            &q,
+            &k,
+            cos,
+            sin,
+            &self.mrope_section,
+            self.model_name,
+        )?;
         let k = k
             .contiguous()
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "attn k contiguous", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attn k contiguous", e))?;
         let v = v
             .contiguous()
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "attn v contiguous", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attn v contiguous", e))?;
 
         Ok((q, k, v))
     }
@@ -290,18 +381,18 @@ impl NaviDcAttention {
     ) -> Result<Tensor, Error> {
         let (b, seq_len, _) = hidden_states
             .dims3()
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "attn hidden_states dims3", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attn hidden_states dims3", e))?;
         let (q, k, v) = self.project_qkv(hidden_states, cos, sin)?;
 
         let (k, v) = self
             .kv_cache
             .borrow_mut()
             .append(&k, &v)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "attn kv_cache append", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attn kv_cache append", e))?;
         let is_causal = attention_mask.is_none();
         let flash = if b == 1 {
             flash_attention(&q, &k, &v, self.scaling, seq_len > 1)
-                .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "flash attention", e))?
+                .map_err(|e| candle_to_ocr_inference(self.model_name, "flash attention", e))?
         } else {
             None
         };
@@ -316,7 +407,7 @@ impl NaviDcAttention {
                 is_causal,
                 self.num_kv_groups,
             )
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "grouped-query attention", e))?,
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "grouped-query attention", e))?,
         };
         self.project_attention_output(&attn_output, b, seq_len)
     }
@@ -329,13 +420,13 @@ impl NaviDcAttention {
     ) -> Result<Tensor, Error> {
         let attn_output = attn_output
             .transpose(1, 2)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "attn output transpose", e))?
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attn output transpose", e))?
             .reshape((batch, seq_len, self.num_heads * self.head_dim))
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "attn output reshape", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attn output reshape", e))?;
 
         self.o_proj
             .forward(&attn_output)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "attn o_proj", e))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attn o_proj", e))
     }
 
     #[cfg(feature = "cuda")]
@@ -345,11 +436,11 @@ impl NaviDcAttention {
             self.k_proj.weight().dtype(),
             self.k_proj.weight().device(),
         )
-        .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "dynamic KV template", e))?;
+        .map_err(|e| candle_to_ocr_inference(self.model_name, "dynamic KV template", e))?;
         self.kv_cache
             .borrow_mut()
             .initialize_storage_with_capacity(&template, cache_len)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "initialize dynamic KV", e))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "initialize dynamic KV", e))
     }
 
     #[cfg(feature = "cuda")]
@@ -362,18 +453,21 @@ impl NaviDcAttention {
         kv_lengths: &Tensor,
     ) -> Result<Tensor, Error> {
         let (batch, query_len, _) = hidden_states.dims3().map_err(|e| {
-            candle_to_ocr_inference("NaviDC-OCR", "dynamic attention hidden shape", e)
+            candle_to_ocr_inference(self.model_name, "dynamic attention hidden shape", e)
         })?;
         if batch != 1 {
             return Err(Error::Config {
-                message: "NaviDC-OCR CUDA-graph attention requires batch size 1".to_string(),
+                message: format!(
+                    "{} CUDA-graph attention requires batch size 1",
+                    self.model_name
+                ),
             });
         }
         let (q, k, v) = self.project_qkv(hidden_states, cos, sin)?;
         let cache = self.kv_cache.borrow();
         let cache_len = cache.storage_capacity();
         let (cache_k, cache_v) = cache.storage().ok_or_else(|| Error::Config {
-            message: "NaviDC-OCR dynamic KV storage is not initialized".to_string(),
+            message: format!("{} dynamic KV storage is not initialized", self.model_name),
         })?;
         drop(cache);
         let append = DynamicKvAppend {
@@ -382,23 +476,23 @@ impl NaviDcAttention {
         };
         cache_k
             .inplace_op3(&k, kv_lengths, &append)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "dynamic key cache append", e))?;
-        cache_v
-            .inplace_op3(&v, kv_lengths, &append)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "dynamic value cache append", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "dynamic key cache append", e))?;
+        cache_v.inplace_op3(&v, kv_lengths, &append).map_err(|e| {
+            candle_to_ocr_inference(self.model_name, "dynamic value cache append", e)
+        })?;
 
         let q = q
             .squeeze(0)
             .and_then(|q| q.transpose(0, 1))
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "dynamic Q layout", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "dynamic Q layout", e))?;
         let cache_k = cache_k
             .squeeze(0)
             .and_then(|k| k.transpose(0, 1))
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "dynamic K layout", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "dynamic K layout", e))?;
         let cache_v = cache_v
             .squeeze(0)
             .and_then(|v| v.transpose(0, 1))
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "dynamic V layout", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "dynamic V layout", e))?;
         let attn = candle_flash_attn::flash_attn_varlen(
             &q,
             &cache_k,
@@ -410,10 +504,10 @@ impl NaviDcAttention {
             self.scaling as f32,
             decoder_attention_is_causal(query_len),
         )
-        .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "dynamic flash attention", e))?
+        .map_err(|e| candle_to_ocr_inference(self.model_name, "dynamic flash attention", e))?
         .transpose(0, 1)
         .and_then(|attn| attn.unsqueeze(0))
-        .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "dynamic attention layout", e))?;
+        .map_err(|e| candle_to_ocr_inference(self.model_name, "dynamic attention layout", e))?;
         self.project_attention_output(&attn, batch, query_len)
     }
 
@@ -431,34 +525,36 @@ impl NaviDcAttention {
         self.kv_cache
             .borrow_mut()
             .set_current_len(len)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "set dynamic KV length", e))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "set dynamic KV length", e))
     }
 }
 
-pub struct NaviDcDecoderLayer {
-    self_attn: NaviDcAttention,
-    mlp: NaviDcMlp,
+pub struct Qwen2VlDecoderLayer {
+    self_attn: Qwen2VlAttention,
+    mlp: Qwen2VlMlp,
     input_layernorm: candle_nn::RmsNorm,
     post_attention_layernorm: candle_nn::RmsNorm,
+    model_name: &'static str,
 }
 
-impl NaviDcDecoderLayer {
-    fn load(cfg: &NaviDcConfig, vb: VarBuilder) -> Result<Self, Error> {
-        let self_attn = NaviDcAttention::load(cfg, vb.clone())?;
-        let mlp = NaviDcMlp::load(cfg, vb.clone())?;
+impl Qwen2VlDecoderLayer {
+    fn load(cfg: &Qwen2VlTextConfig, vb: VarBuilder) -> Result<Self, Error> {
+        let self_attn = Qwen2VlAttention::load(cfg, vb.clone())?;
+        let mlp = Qwen2VlMlp::load(cfg, vb.clone())?;
         let input_layernorm = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "load input_layernorm", e))?;
+            .map_err(|e| candle_to_ocr_inference(cfg.model_name, "load input_layernorm", e))?;
         let post_attention_layernorm = rms_norm(
             cfg.hidden_size,
             cfg.rms_norm_eps,
             vb.pp("post_attention_layernorm"),
         )
-        .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "load post_attention_layernorm", e))?;
+        .map_err(|e| candle_to_ocr_inference(cfg.model_name, "load post_attention_layernorm", e))?;
         Ok(Self {
             self_attn,
             mlp,
             input_layernorm,
             post_attention_layernorm,
+            model_name: cfg.model_name,
         })
     }
 
@@ -473,14 +569,17 @@ impl NaviDcDecoderLayer {
         let hidden_states = self
             .input_layernorm
             .forward(hidden_states)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "input_layernorm", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "input_layernorm", e))?;
         let hidden_states = self
             .self_attn
             .forward(&hidden_states, cos, sin, attention_mask)?;
         let hidden_states = (&residual + &hidden_states).map_err(|e| {
             candle_to_ocr_processing(
                 crate::error::ProcessingStage::TensorOperation,
-                "NaviDC-OCR: attn residual add failed",
+                format!(
+                    "{model_name}: attn residual add failed",
+                    model_name = self.model_name
+                ),
                 e,
             )
         })?;
@@ -489,12 +588,15 @@ impl NaviDcDecoderLayer {
         let hidden_states = self
             .post_attention_layernorm
             .forward(&hidden_states)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "post_attention_layernorm", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "post_attention_layernorm", e))?;
         let hidden_states = self.mlp.forward(&hidden_states)?;
         (&residual + &hidden_states).map_err(|e| {
             candle_to_ocr_processing(
                 crate::error::ProcessingStage::TensorOperation,
-                "NaviDC-OCR: mlp residual add failed",
+                format!(
+                    "{model_name}: mlp residual add failed",
+                    model_name = self.model_name
+                ),
                 e,
             )
         })
@@ -513,14 +615,17 @@ impl NaviDcDecoderLayer {
         let hidden_states = self
             .input_layernorm
             .forward(hidden_states)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "input_layernorm", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "input_layernorm", e))?;
         let hidden_states =
             self.self_attn
                 .forward_dynamic(&hidden_states, cos, sin, query_lengths, kv_lengths)?;
         let hidden_states = (&residual + &hidden_states).map_err(|e| {
             candle_to_ocr_processing(
                 crate::error::ProcessingStage::TensorOperation,
-                "NaviDC-OCR: attn residual add failed",
+                format!(
+                    "{model_name}: attn residual add failed",
+                    model_name = self.model_name
+                ),
                 e,
             )
         })?;
@@ -529,12 +634,15 @@ impl NaviDcDecoderLayer {
         let hidden_states = self
             .post_attention_layernorm
             .forward(&hidden_states)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "post_attention_layernorm", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "post_attention_layernorm", e))?;
         let hidden_states = self.mlp.forward(&hidden_states)?;
         (&residual + &hidden_states).map_err(|e| {
             candle_to_ocr_processing(
                 crate::error::ProcessingStage::TensorOperation,
-                "NaviDC-OCR: mlp residual add failed",
+                format!(
+                    "{model_name}: mlp residual add failed",
+                    model_name = self.model_name
+                ),
                 e,
             )
         })
@@ -555,35 +663,38 @@ impl NaviDcDecoderLayer {
     }
 }
 
-pub struct NaviDcTextModel {
+pub struct Qwen2VlTextModel {
     #[cfg(feature = "cuda")]
     decode_graph: RefCell<Option<DecoderCudaGraph<CudaGraphInputs>>>,
     embed_tokens: Embedding,
-    layers: Vec<NaviDcDecoderLayer>,
+    layers: Vec<Qwen2VlDecoderLayer>,
     norm: candle_nn::RmsNorm,
     rotary_emb: Arc<RotaryEmbedding>,
+    model_name: &'static str,
+    graph_disable_env: &'static str,
+    #[cfg(feature = "cuda")]
+    decode_cache_len: usize,
     // Must stay the last field: it drops last and drains CUDA errors the
     // other fields' frees may stash (see CudaGraphDrainGuard).
     #[cfg(feature = "cuda")]
     _drain_guard: CudaGraphDrainGuard,
 }
 
-impl NaviDcTextModel {
-    pub fn load(cfg: &NaviDcConfig, vb: VarBuilder) -> Result<Self, Error> {
+impl Qwen2VlTextModel {
+    pub fn load(cfg: &Qwen2VlTextConfig, vb: VarBuilder) -> Result<Self, Error> {
         let embed_tokens = embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("embed_tokens"))
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "load embed_tokens", e))?;
+            .map_err(|e| candle_to_ocr_inference(cfg.model_name, "load embed_tokens", e))?;
 
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         for i in 0..cfg.num_hidden_layers {
             let layer_vb = vb.pp(format!("layers.{i}"));
-            layers.push(NaviDcDecoderLayer::load(cfg, layer_vb)?);
+            layers.push(Qwen2VlDecoderLayer::load(cfg, layer_vb)?);
         }
 
         let norm = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("norm"))
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "load norm", e))?;
-        let head_dim = cfg.head_dim()?;
+            .map_err(|e| candle_to_ocr_inference(cfg.model_name, "load norm", e))?;
         let rotary_emb = Arc::new(RotaryEmbedding::new_multi_axis(
-            head_dim,
+            cfg.head_dim,
             cfg.rope_theta,
             3,
             vb.device(),
@@ -598,6 +709,10 @@ impl NaviDcTextModel {
             layers,
             norm,
             rotary_emb,
+            model_name: cfg.model_name,
+            graph_disable_env: cfg.graph_disable_env,
+            #[cfg(feature = "cuda")]
+            decode_cache_len: cfg.decode_cache_len,
             #[cfg(feature = "cuda")]
             _drain_guard,
         })
@@ -606,7 +721,7 @@ impl NaviDcTextModel {
     pub fn embed(&self, input_ids: &Tensor) -> Result<Tensor, Error> {
         self.embed_tokens
             .forward(input_ids)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "embed forward", e))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "embed forward", e))
     }
 
     pub fn forward(
@@ -625,14 +740,14 @@ impl NaviDcTextModel {
         }
         self.norm
             .forward(&hidden_states)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "norm forward", e))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "norm forward", e))
     }
 
     fn project_logits(&self, hidden_states: &Tensor, lm_head: &Linear) -> Result<Tensor, Error> {
         lm_head
             .forward(hidden_states)
             .and_then(|logits| logits.i((0, 0, ..)))
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "decode LM head", e))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "decode LM head", e))
     }
 
     pub(crate) fn forward_decode_logits(
@@ -671,7 +786,7 @@ impl NaviDcTextModel {
         }
         self.norm
             .forward(&hidden_states)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "dynamic norm", e))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "dynamic norm", e))
     }
 
     pub(crate) fn prepare_ar_cuda_graph(
@@ -681,7 +796,7 @@ impl NaviDcTextModel {
         lm_head: &Linear,
     ) -> Result<(), Error> {
         if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
-            || std::env::var_os("OAR_NAVIDC_DISABLE_CUDA_GRAPH").is_some()
+            || std::env::var_os(self.graph_disable_env).is_some()
         {
             #[cfg(feature = "cuda")]
             self.invalidate_cuda_graph();
@@ -695,14 +810,14 @@ impl NaviDcTextModel {
             )
         {
             let Some(cache_len) =
-                decoder_cache_capacity(prompt_len, max_new_tokens, NAVIDC_DECODE_CACHE_LEN)
+                decoder_cache_capacity(prompt_len, max_new_tokens, self.decode_cache_len)
             else {
                 self.invalidate_cuda_graph();
                 return Ok(());
             };
             let required = prompt_len
                 .saturating_add(max_new_tokens)
-                .min(NAVIDC_DECODE_CACHE_LEN);
+                .min(self.decode_cache_len);
             let reusable = self
                 .decode_graph
                 .borrow()
@@ -739,7 +854,7 @@ impl NaviDcTextModel {
             .embed_tokens
             .embeddings()
             .dim(1)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "graph hidden size", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "graph hidden size", e))?;
         let device = self.embed_tokens.embeddings().device();
         let inputs = CudaGraphInputs {
             hidden: Tensor::zeros(
@@ -747,18 +862,18 @@ impl NaviDcTextModel {
                 self.embed_tokens.embeddings().dtype(),
                 device,
             )
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "graph hidden input", e))?,
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "graph hidden input", e))?,
             positions: Tensor::zeros((3, 1, query_len), DType::I64, device)
-                .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "graph position input", e))?,
+                .map_err(|e| candle_to_ocr_inference(self.model_name, "graph position input", e))?,
             query_lengths: Tensor::new(&[0u32, query_len as u32], device)
-                .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "graph query lengths", e))?,
+                .map_err(|e| candle_to_ocr_inference(self.model_name, "graph query lengths", e))?,
             kv_lengths: CudaGraphKvLengths::new(query_len, device)
-                .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "graph KV lengths", e))?,
+                .map_err(|e| candle_to_ocr_inference(self.model_name, "graph KV lengths", e))?,
             lm_head: lm_head.clone(),
         };
         let graph = capture_decoder_graph(
             device,
-            "NaviDC-OCR",
+            self.model_name,
             self,
             inputs,
             Self::decode_graph_body,
@@ -808,24 +923,28 @@ impl NaviDcTextModel {
             .inputs
             .hidden
             .slice_set(inputs_embeds, 0, 0)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "copy graph hidden", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "copy graph hidden", e))?;
         captured
             .inputs
             .positions
             .slice_set(position_ids, 0, 0)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "copy graph positions", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "copy graph positions", e))?;
         captured
             .inputs
             .kv_lengths
             .update(kv_len)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "update graph KV lengths", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "update graph KV lengths", e))?;
         captured
             .graph
             .launch()
-            .map_err(|e| cuda_graph_error("NaviDC-OCR", "launch decoder CUDA graph", e))?;
+            .map_err(|e| cuda_graph_error(self.model_name, "launch decoder CUDA graph", e))?;
         for layer in &self.layers {
             layer.set_kv_cache_len(kv_len)?;
         }
+        // A borrowed alias is safe because both callers (the MinerU2.5 and
+        // NaviDC-OCR decode loops) consume the logits with
+        // `select_next_token` and drop them before the next replay
+        // overwrites this buffer.
         Ok(Some(captured.outputs[0].clone()))
     }
 
@@ -867,7 +986,7 @@ impl NaviDcTextModel {
 }
 
 #[cfg(feature = "cuda")]
-impl Drop for NaviDcTextModel {
+impl Drop for Qwen2VlTextModel {
     fn drop(&mut self) {
         // A cached graph must go through dispose: plainly dropping it returns
         // graph-bound buffers to the allocator and poisons it.
@@ -877,14 +996,156 @@ impl Drop for NaviDcTextModel {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "cuda")]
-    use super::super::config::{NaviDcConfig, NaviDcRopeScaling, NaviDcTextConfig};
-    #[cfg(feature = "cuda")]
-    use super::*;
-    #[cfg(feature = "cuda")]
-    use crate::backbones::qwen25_vl::NaviDcVisionConfig;
-    #[cfg(feature = "cuda")]
-    use candle_core::Device;
+    use super::{Qwen2VlTextConfig, Qwen2VlTextModel};
+    use candle_core::{DType, Device, Tensor};
+    use candle_nn::VarBuilder;
+
+    /// One knob combination: the MinerU2.5 tuning (bias, no head norm) and
+    /// the NaviDC-OCR tuning (no bias, q_norm/k_norm).
+    #[derive(Clone, Copy)]
+    struct Tuning {
+        name: &'static str,
+        attention_bias: bool,
+        qk_head_norm: bool,
+    }
+
+    const MINERU_TUNING: Tuning = Tuning {
+        name: "MinerU2.5",
+        attention_bias: true,
+        qk_head_norm: false,
+    };
+
+    const NAVIDC_TUNING: Tuning = Tuning {
+        name: "NaviDC-OCR",
+        attention_bias: false,
+        qk_head_norm: true,
+    };
+
+    /// CPU-runnable config small enough for a fast unit test: two layers,
+    /// four heads of width eight.
+    fn unit_config(tuning: Tuning) -> Qwen2VlTextConfig {
+        Qwen2VlTextConfig {
+            model_name: tuning.name,
+            vocab_size: 64,
+            hidden_size: 32,
+            intermediate_size: 64,
+            num_hidden_layers: 2,
+            num_attention_heads: 4,
+            num_key_value_heads: 2,
+            rms_norm_eps: 1e-6,
+            rope_theta: 1_000_000.0,
+            max_position_embeddings: 512,
+            head_dim: 8,
+            mrope_section: vec![2, 1, 1],
+            attention_bias: tuning.attention_bias,
+            qk_head_norm: tuning.qk_head_norm,
+            graph_disable_env: "OAR_UNIT_TEST_DISABLE_CUDA_GRAPH",
+            decode_cache_len: 512,
+        }
+    }
+
+    /// Weight map holding exactly the names a tuning loads: bias vectors on
+    /// q/k/v only when `attention_bias`, `q_norm`/`k_norm` only when
+    /// `qk_head_norm`.
+    fn unit_var_map(
+        cfg: &Qwen2VlTextConfig,
+        include_bias: bool,
+        include_qk_norm: bool,
+    ) -> std::collections::HashMap<String, Tensor> {
+        let device = Device::Cpu;
+        let mut tensors = std::collections::HashMap::new();
+        let zeros = |shape: Vec<usize>| Tensor::zeros(shape, DType::F32, &device).unwrap();
+        tensors.insert(
+            "embed_tokens.weight".into(),
+            zeros(vec![cfg.vocab_size, cfg.hidden_size]),
+        );
+        tensors.insert("norm.weight".into(), zeros(vec![cfg.hidden_size]));
+        for layer in 0..cfg.num_hidden_layers {
+            let prefix = format!("layers.{layer}");
+            for proj in ["q_proj", "k_proj", "v_proj"] {
+                let rows = if proj == "q_proj" {
+                    cfg.num_attention_heads
+                } else {
+                    cfg.num_key_value_heads
+                } * cfg.head_dim;
+                tensors.insert(
+                    format!("{prefix}.self_attn.{proj}.weight"),
+                    zeros(vec![rows, cfg.hidden_size]),
+                );
+                if include_bias {
+                    tensors.insert(format!("{prefix}.self_attn.{proj}.bias"), zeros(vec![rows]));
+                }
+            }
+            tensors.insert(
+                format!("{prefix}.self_attn.o_proj.weight"),
+                zeros(vec![
+                    cfg.hidden_size,
+                    cfg.num_attention_heads * cfg.head_dim,
+                ]),
+            );
+            if include_qk_norm {
+                for norm in ["q_norm", "k_norm"] {
+                    tensors.insert(
+                        format!("{prefix}.self_attn.{norm}.weight"),
+                        zeros(vec![cfg.head_dim]),
+                    );
+                }
+            }
+            for norm in ["input_layernorm", "post_attention_layernorm"] {
+                tensors.insert(
+                    format!("{prefix}.{norm}.weight"),
+                    zeros(vec![cfg.hidden_size]),
+                );
+            }
+            for proj in ["gate_proj", "up_proj"] {
+                tensors.insert(
+                    format!("{prefix}.mlp.{proj}.weight"),
+                    zeros(vec![cfg.intermediate_size, cfg.hidden_size]),
+                );
+            }
+            tensors.insert(
+                format!("{prefix}.mlp.down_proj.weight"),
+                zeros(vec![cfg.hidden_size, cfg.intermediate_size]),
+            );
+        }
+        tensors
+    }
+
+    /// Both knob combinations load exactly their own weight names and run a
+    /// forward pass; the missing-name cases prove the bias and head-norm
+    /// loads are really gated by the config.
+    #[test]
+    fn knobs_gate_loaded_weight_names_and_forward_runs() {
+        let device = Device::Cpu;
+        for tuning in [MINERU_TUNING, NAVIDC_TUNING] {
+            let cfg = unit_config(tuning);
+            let tensors = unit_var_map(&cfg, tuning.attention_bias, tuning.qk_head_norm);
+            let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
+            let model = Qwen2VlTextModel::load(&cfg, vb).unwrap();
+            let ids = Tensor::zeros((1, 4), DType::U32, &device).unwrap();
+            let embeds = model.embed(&ids).unwrap();
+            let axis = Tensor::arange(0i64, 4, &device).unwrap();
+            let positions = Tensor::cat(&[&axis, &axis, &axis], 0)
+                .unwrap()
+                .reshape((3, 1, 4))
+                .unwrap();
+            let hidden = model.forward(&embeds, &positions, None).unwrap();
+            assert_eq!(hidden.dims(), &[1, 4, cfg.hidden_size]);
+        }
+
+        // The MinerU2.5 tuning (bias) must reject a checkpoint without
+        // q/k/v biases; the NaviDC-OCR tuning (qk_head_norm) must reject
+        // one without q_norm/k_norm.
+        let bias_cfg = unit_config(MINERU_TUNING);
+        let tensors = unit_var_map(&bias_cfg, false, false);
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
+        assert!(Qwen2VlTextModel::load(&bias_cfg, vb.pp("layers.0")).is_err());
+
+        let qk_cfg = unit_config(NAVIDC_TUNING);
+        let tensors = unit_var_map(&qk_cfg, false, false);
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
+        assert!(Qwen2VlTextModel::load(&qk_cfg, vb.pp("layers.0")).is_err());
+    }
 
     /// GPU self-check for the decode graph lifecycle, in BF16 so the graph
     /// captures: a short prompt captures a small bucket, a longer prompt
@@ -892,25 +1153,33 @@ mod tests {
     /// short prompt again, and a second instance captures while the first
     /// graph is alive. Every graphed run must match plain eager decoding.
     /// Skips without a CUDA device; opt in with
-    /// `OAR_NAVIDC_GPU_SELFTEST=1`.
+    /// `OAR_MINERU_GPU_SELFTEST=1` / `OAR_NAVIDC_GPU_SELFTEST=1`.
     #[test]
-    fn cuda_decode_graph_recaptures_and_matches_eager() {
+    fn cuda_decode_graph_recaptures_and_matches_eager_for_both_tunings() {
         #[cfg(feature = "cuda")]
         {
             use candle_nn::Linear;
-            if std::env::var_os("OAR_NAVIDC_GPU_SELFTEST").is_none() {
-                eprintln!("skipping: OAR_NAVIDC_GPU_SELFTEST is not set");
+            let tuning = if std::env::var_os("OAR_MINERU_GPU_SELFTEST").is_some() {
+                Some(MINERU_TUNING)
+            } else if std::env::var_os("OAR_NAVIDC_GPU_SELFTEST").is_some() {
+                Some(NAVIDC_TUNING)
+            } else {
+                None
+            };
+            let Some(tuning) = tuning else {
+                eprintln!(
+                    "skipping: neither OAR_MINERU_GPU_SELFTEST nor OAR_NAVIDC_GPU_SELFTEST is set"
+                );
                 return;
-            }
+            };
             let Ok(device) = Device::new_cuda(0) else {
                 eprintln!("skipping: no CUDA device");
                 return;
             };
-            let cfg = production_config();
-            let tensors = random_var_map(&cfg, &device, DType::BF16);
-            let make_vb =
-                || candle_nn::VarBuilder::from_tensors(tensors.clone(), DType::BF16, &device);
-            let model = NaviDcTextModel::load(&cfg, make_vb().pp("model")).unwrap();
+            let cfg = gpu_selftest_config(tuning);
+            let tensors = gpu_selftest_var_map(&cfg, &device);
+            let make_vb = || VarBuilder::from_tensors(tensors.clone(), DType::BF16, &device);
+            let model = Qwen2VlTextModel::load(&cfg, make_vb()).unwrap();
             let lm_head = Linear::new(
                 make_vb()
                     .get((cfg.vocab_size, cfg.hidden_size), "lm_head.weight")
@@ -945,7 +1214,7 @@ mod tests {
             );
 
             // A second instance capturing while the first graph is alive.
-            let second = NaviDcTextModel::load(&cfg, make_vb().pp("model")).unwrap();
+            let second = Qwen2VlTextModel::load(&cfg, make_vb()).unwrap();
             assert_eq!(
                 greedy_eager(&second, &lm_head, &long, 8),
                 greedy_graphed(&second, &lm_head, &long, 8),
@@ -956,66 +1225,38 @@ mod tests {
         eprintln!("skipping: built without the cuda feature");
     }
 
-    /// Vision-tower values for the text-side self-test; the tower itself
-    /// never runs, but the config must be constructible. Built by field
-    /// assignment because the config type keeps private channel fields.
+    /// Text-tower shape mirroring the NaviDC-OCR production config (head
+    /// dim 128, mrope 16/24/24, four layers) at reduced width.
     #[cfg(feature = "cuda")]
-    fn test_vision_config() -> NaviDcVisionConfig {
-        let mut vision = NaviDcVisionConfig::default();
-        vision.depth = 4;
-        vision.hidden_size = 128;
-        vision.out_hidden_size = 2048;
-        vision.num_heads = 8;
-        vision.intermediate_size = 256;
-        vision.hidden_act = "silu".to_string();
-        vision.patch_size = 14;
-        vision.spatial_merge_size = 2;
-        vision.temporal_patch_size = 2;
-        vision.window_size = 7;
-        vision
-    }
-
-    #[cfg(feature = "cuda")]
-    fn production_config() -> NaviDcConfig {
-        NaviDcConfig {
+    fn gpu_selftest_config(tuning: Tuning) -> Qwen2VlTextConfig {
+        Qwen2VlTextConfig {
+            model_name: tuning.name,
             vocab_size: 32768,
             hidden_size: 2048,
             intermediate_size: 6144,
             num_hidden_layers: 4,
             num_attention_heads: 16,
             num_key_value_heads: 8,
-            attention_dropout: 0.0,
             rms_norm_eps: 1e-6,
             rope_theta: 1_000_000.0,
             max_position_embeddings: 262_144,
-            head_dim: Some(128),
-            hidden_act: "silu".to_string(),
-            tie_word_embeddings: true,
-            bos_token_id: 0,
-            eos_token_id: 1,
-            pad_token_id: None,
-            vision_start_token_id: 2,
-            vision_end_token_id: 3,
-            vision_token_id: 4,
-            image_token_id: 5,
-            video_token_id: 6,
-            rope_scaling: NaviDcRopeScaling {
-                mrope_section: vec![16, 24, 24],
-            },
-            vision_config: test_vision_config(),
-            text_config: NaviDcTextConfig::default(),
+            head_dim: 128,
+            mrope_section: vec![16, 24, 24],
+            attention_bias: tuning.attention_bias,
+            qk_head_norm: tuning.qk_head_norm,
+            graph_disable_env: "OAR_VL_DISABLE_CUDA_GRAPH",
+            decode_cache_len: 16_384,
         }
     }
 
     #[cfg(feature = "cuda")]
-    fn random_var_map(
-        cfg: &NaviDcConfig,
+    fn gpu_selftest_var_map(
+        cfg: &Qwen2VlTextConfig,
         device: &Device,
-        dtype: DType,
     ) -> std::collections::HashMap<String, Tensor> {
         let mut tensors = std::collections::HashMap::new();
         let h = cfg.hidden_size;
-        let head_dim = cfg.head_dim.unwrap();
+        let head_dim = cfg.head_dim;
         let put = |tensors: &mut std::collections::HashMap<String, Tensor>,
                    name: String,
                    shape: Vec<usize>| {
@@ -1028,53 +1269,56 @@ mod tests {
                 .collect();
             let tensor = Tensor::from_vec(data, shape, device)
                 .unwrap()
-                .to_dtype(dtype)
+                .to_dtype(DType::BF16)
                 .unwrap();
             tensors.insert(name, tensor);
         };
         put(
             &mut tensors,
-            "model.embed_tokens.weight".into(),
+            "embed_tokens.weight".into(),
             vec![cfg.vocab_size, h],
         );
-        put(&mut tensors, "model.norm.weight".into(), vec![h]);
+        put(&mut tensors, "norm.weight".into(), vec![h]);
         put(
             &mut tensors,
             "lm_head.weight".into(),
             vec![cfg.vocab_size, h],
         );
         for layer in 0..cfg.num_hidden_layers {
-            let prefix = format!("model.layers.{layer}");
-            put(
-                &mut tensors,
-                format!("{prefix}.self_attn.q_proj.weight"),
-                vec![cfg.num_attention_heads * head_dim, h],
-            );
-            put(
-                &mut tensors,
-                format!("{prefix}.self_attn.k_proj.weight"),
-                vec![cfg.num_key_value_heads * head_dim, h],
-            );
-            put(
-                &mut tensors,
-                format!("{prefix}.self_attn.v_proj.weight"),
-                vec![cfg.num_key_value_heads * head_dim, h],
-            );
+            let prefix = format!("layers.{layer}");
+            for (proj, heads) in [
+                ("q_proj", cfg.num_attention_heads),
+                ("k_proj", cfg.num_key_value_heads),
+                ("v_proj", cfg.num_key_value_heads),
+            ] {
+                let rows = heads * head_dim;
+                put(
+                    &mut tensors,
+                    format!("{prefix}.self_attn.{proj}.weight"),
+                    vec![rows, h],
+                );
+                if cfg.attention_bias {
+                    put(
+                        &mut tensors,
+                        format!("{prefix}.self_attn.{proj}.bias"),
+                        vec![rows],
+                    );
+                }
+            }
             put(
                 &mut tensors,
                 format!("{prefix}.self_attn.o_proj.weight"),
                 vec![h, cfg.num_attention_heads * head_dim],
             );
-            put(
-                &mut tensors,
-                format!("{prefix}.self_attn.q_norm.weight"),
-                vec![head_dim],
-            );
-            put(
-                &mut tensors,
-                format!("{prefix}.self_attn.k_norm.weight"),
-                vec![head_dim],
-            );
+            if cfg.qk_head_norm {
+                for norm in ["q_norm", "k_norm"] {
+                    put(
+                        &mut tensors,
+                        format!("{prefix}.self_attn.{norm}.weight"),
+                        vec![head_dim],
+                    );
+                }
+            }
             for norm in ["input_layernorm", "post_attention_layernorm"] {
                 put(&mut tensors, format!("{prefix}.{norm}.weight"), vec![h]);
             }
@@ -1098,7 +1342,7 @@ mod tests {
     /// replays the decode graph, so it is the eager reference.
     #[cfg(feature = "cuda")]
     fn greedy_eager(
-        model: &NaviDcTextModel,
+        model: &Qwen2VlTextModel,
         lm_head: &candle_nn::Linear,
         ids: &[u32],
         steps: usize,
@@ -1126,7 +1370,7 @@ mod tests {
     /// `forward_decode_logits`, i.e. exactly the production graph path.
     #[cfg(feature = "cuda")]
     fn greedy_graphed(
-        model: &NaviDcTextModel,
+        model: &Qwen2VlTextModel,
         lm_head: &candle_nn::Linear,
         ids: &[u32],
         steps: usize,
@@ -1160,7 +1404,7 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     fn step_logits(
-        model: &NaviDcTextModel,
+        model: &Qwen2VlTextModel,
         lm_head: &candle_nn::Linear,
         embeds: &Tensor,
         positions: &Tensor,
@@ -1182,7 +1426,7 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    fn embed_token(model: &NaviDcTextModel, device: &Device, token: u32) -> Tensor {
+    fn embed_token(model: &Qwen2VlTextModel, device: &Device, token: u32) -> Tensor {
         let ids = Tensor::from_vec(vec![token], (1, 1), device).unwrap();
         model.embed(&ids).unwrap()
     }

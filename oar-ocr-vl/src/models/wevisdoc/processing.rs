@@ -1,7 +1,7 @@
 //! Image preprocessing for WeVisDoc (Qwen2VLImageProcessorFast semantics).
 
 use super::config::Qwen3VlVisionConfig;
-use crate::backbones::qwen_vl_processing::{MinerUImageProcessorConfig, preprocess_images};
+use crate::backbones::qwen_vl_processing::{QwenVlImageProcessorConfig, preprocess_images};
 use crate::error::Error;
 use crate::runtime::checkpoint::load_json_config;
 use candle_core::{DType, Device, Tensor};
@@ -35,8 +35,8 @@ pub(crate) fn take_last_upload_probe_mib() -> u64 {
 
 pub(crate) fn load_image_processor_config(
     path: impl AsRef<Path>,
-) -> Result<MinerUImageProcessorConfig, Error> {
-    let cfg: MinerUImageProcessorConfig =
+) -> Result<QwenVlImageProcessorConfig, Error> {
+    let cfg: QwenVlImageProcessorConfig =
         load_json_config(path, "WeVisDoc", "preprocessor_config.json")?;
     cfg.validate()?;
     Ok(cfg)
@@ -48,7 +48,7 @@ pub(crate) fn load_image_processor_config(
 /// before anything is uploaded to the device.
 pub fn plan_num_image_tokens(
     image: &RgbImage,
-    cfg: &MinerUImageProcessorConfig,
+    cfg: &QwenVlImageProcessorConfig,
 ) -> Result<usize, Error> {
     cfg.validate()?;
     // Mirror preprocess_image's exact sequence through the pure dims
@@ -84,7 +84,7 @@ pub fn plan_num_image_tokens(
 }
 
 pub(crate) fn validate_processor_vision_compatibility(
-    cfg: &MinerUImageProcessorConfig,
+    cfg: &QwenVlImageProcessorConfig,
     vision: &Qwen3VlVisionConfig,
 ) -> Result<(), Error> {
     if cfg.patch_size != vision.patch_size {
@@ -129,7 +129,7 @@ pub(crate) fn validate_processor_vision_compatibility(
 /// `Qwen2VLImageProcessorFast` checkpoint metadata.
 pub fn preprocess_image(
     image: &RgbImage,
-    cfg: &MinerUImageProcessorConfig,
+    cfg: &QwenVlImageProcessorConfig,
     vision: &Qwen3VlVisionConfig,
     device: &Device,
     dtype: DType,
@@ -256,7 +256,7 @@ mod tests {
         let config = super::super::config::tests::official_config();
         // The official fixture embeds the processor block; mirror the
         // loader's defaults for the fields it omits.
-        let cfg = MinerUImageProcessorConfig {
+        let cfg = QwenVlImageProcessorConfig {
             min_pixels: Some(65536),
             max_pixels: Some(16_777_216),
             size: None,
@@ -314,7 +314,7 @@ mod tests {
         // plan_num_image_tokens mirrors preprocess_image's resize math;
         // any drift between the two shows up here.
         let config = super::super::config::tests::official_config();
-        let cfg = MinerUImageProcessorConfig {
+        let cfg = QwenVlImageProcessorConfig {
             min_pixels: Some(65536),
             max_pixels: Some(16_777_216),
             size: None,
@@ -366,7 +366,7 @@ mod tests {
         // final grid stays valid. The bound is ratio-driven, so a small
         // strip (1x400) exercises the same math at millisecond cost.
         let config = super::super::config::tests::official_config();
-        let cfg = MinerUImageProcessorConfig {
+        let cfg = QwenVlImageProcessorConfig {
             min_pixels: Some(65536),
             max_pixels: Some(16_777_216),
             size: None,
@@ -410,7 +410,7 @@ mod tests {
     }
 
     /// Matches the official `preprocessor_config.json` (Tencent/WeVisDoc-2B).
-    fn processor_config() -> MinerUImageProcessorConfig {
+    fn processor_config() -> QwenVlImageProcessorConfig {
         serde_json::from_str(
             r#"{
               "size": {"longest_edge": 16777216, "shortest_edge": 65536},

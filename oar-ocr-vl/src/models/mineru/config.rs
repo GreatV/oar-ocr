@@ -1,3 +1,4 @@
+use crate::backbones::qwen2_vl::Qwen2VlTextConfig;
 use crate::error::Error;
 use serde::Deserialize;
 use std::path::Path;
@@ -29,7 +30,7 @@ pub struct MinerUTextConfig {
     pub tie_word_embeddings: bool,
 }
 
-pub use crate::backbones::qwen2_vl::MinerUVisionConfig;
+pub use crate::backbones::qwen2_vl::Qwen2VlVisionConfig;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MinerUConfig {
@@ -66,7 +67,7 @@ pub struct MinerUConfig {
     pub video_token_id: u32,
     #[serde(default)]
     pub rope_scaling: MinerURopeScaling,
-    pub vision_config: MinerUVisionConfig,
+    pub vision_config: Qwen2VlVisionConfig,
     /// Nested text-tower config present in newer transformers checkpoints
     /// (e.g. `MinerU2.5-Pro-2605`). Absent on the original 2509 layout.
     #[serde(default)]
@@ -95,6 +96,29 @@ impl MinerUConfig {
         }
         Ok(self.hidden_size / self.num_attention_heads)
     }
+
+    /// Convert to the shared Qwen2 text-tower configuration. MinerU2.5
+    /// keeps the q/k/v projection biases and has no per-head q/k norm.
+    pub fn qwen2_vl_text_config(&self) -> Result<Qwen2VlTextConfig, Error> {
+        Ok(Qwen2VlTextConfig {
+            model_name: "MinerU2.5",
+            vocab_size: self.vocab_size,
+            hidden_size: self.hidden_size,
+            intermediate_size: self.intermediate_size,
+            num_hidden_layers: self.num_hidden_layers,
+            num_attention_heads: self.num_attention_heads,
+            num_key_value_heads: self.num_key_value_heads,
+            rms_norm_eps: self.rms_norm_eps,
+            rope_theta: self.rope_theta,
+            max_position_embeddings: self.max_position_embeddings,
+            head_dim: self.head_dim()?,
+            mrope_section: self.rope_scaling.mrope_section.clone(),
+            attention_bias: true,
+            qk_head_norm: false,
+            graph_disable_env: "OAR_MINERU_DISABLE_CUDA_GRAPH",
+            decode_cache_len: 16_384,
+        })
+    }
 }
 
-pub use crate::backbones::qwen_vl_processing::{MinerUImageProcessorConfig, MinerUImageSize};
+pub use crate::backbones::qwen_vl_processing::{QwenVlImageProcessorConfig, QwenVlImageSize};

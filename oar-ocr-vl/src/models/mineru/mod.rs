@@ -10,12 +10,11 @@ mod config;
 mod model;
 mod parser;
 pub(crate) use crate::backbones::qwen_vl_processing as processing;
-mod text;
 pub(crate) use crate::backbones::qwen2_vl as vision;
 
 pub use config::{
-    MinerUConfig, MinerUImageProcessorConfig, MinerUImageSize, MinerURopeScaling, MinerUTextConfig,
-    MinerUVisionConfig,
+    MinerUConfig, MinerURopeScaling, MinerUTextConfig, Qwen2VlVisionConfig,
+    QwenVlImageProcessorConfig, QwenVlImageSize,
 };
 pub use model::MinerU;
 pub use parser::MinerUParseOptions;
