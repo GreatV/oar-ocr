@@ -997,7 +997,11 @@ impl Drop for Qwen2VlTextModel {
 #[cfg(test)]
 mod tests {
     use super::{Qwen2VlTextConfig, Qwen2VlTextModel};
+    #[cfg(feature = "cuda")]
+    use candle_core::IndexOp;
     use candle_core::{DType, Device, Tensor};
+    #[cfg(feature = "cuda")]
+    use candle_nn::Module;
     use candle_nn::VarBuilder;
 
     /// One knob combination: the MinerU2.5 tuning (bias, no head norm) and
