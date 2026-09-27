@@ -273,6 +273,34 @@ impl TrimmableKvCache {
         Some(storage)
     }
 
+    /// Shrink fixed-capacity storage back to the organically grown form,
+    /// preserving the live history: the `cur_len` prefix is copied into
+    /// fresh right-sized tensors that become the backing storage, and the
+    /// old bucket is returned so the caller can free it next to a context
+    /// drain. Used when a CUDA-graph capture fails after the buckets were
+    /// preallocated — the eager fallback keeps its KV while the unused spare
+    /// capacity stops holding memory.
+    pub fn shrink_fixed_storage_preserving_history(&mut self) -> Result<Option<(Tensor, Tensor)>> {
+        let Some((storage_k, storage_v)) = self.storage.take() else {
+            return Ok(None);
+        };
+        if self.cur_len == 0 {
+            self.kv = None;
+            self.capacity = 0;
+            return Ok(Some((storage_k, storage_v)));
+        }
+        let new_k = storage_k
+            .narrow(self.cat_dim, 0, self.cur_len)?
+            .contiguous()?;
+        let new_v = storage_v
+            .narrow(self.cat_dim, 0, self.cur_len)?
+            .contiguous()?;
+        self.capacity = self.cur_len;
+        self.kv = Some((new_k.clone(), new_v.clone()));
+        self.storage = Some((new_k, new_v));
+        Ok(Some((storage_k, storage_v)))
+    }
+
     /// Return the fixed backing tensors used by dynamic CUDA-graph appends.
     pub fn storage(&self) -> Option<(Tensor, Tensor)> {
         self.storage.as_ref().map(|(k, v)| (k.clone(), v.clone()))
@@ -517,6 +545,41 @@ mod tests {
         // Growing to the capacity already in place is a no-op.
         c.grow_fixed_storage(&template, 8)?;
         assert_eq!(c.current_seq_len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn shrink_fixed_storage_preserves_history() -> Result<()> {
+        let mut c = TrimmableKvCache::new(2, 64);
+        let template = Tensor::zeros((1, 2, 1, 2), DType::F32, &dev())?;
+        let first = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 2, 1, 2), &dev())?;
+        c.append(&first, &first)?;
+        let second = Tensor::from_vec(vec![5.0f32, 6.0, 7.0, 8.0], (1, 2, 1, 2), &dev())?;
+        c.append(&second, &second)?;
+        // A capture preallocates a bucket far beyond the live history.
+        c.grow_fixed_storage(&template, 16)?;
+        assert_eq!(c.storage_capacity(), 16);
+
+        let released = c.shrink_fixed_storage_preserving_history()?;
+        assert!(released.is_some());
+        // Back to the organic form: capacity hugs the live length, and the
+        // head-major contents are intact.
+        assert_eq!(c.storage_capacity(), 2);
+        assert_eq!(c.current_seq_len(), 2);
+        assert_eq!(
+            c.k().unwrap().flatten_all()?.to_vec1::<f32>()?,
+            vec![1.0, 2.0, 5.0, 6.0, 3.0, 4.0, 7.0, 8.0]
+        );
+        // The eager append path keeps working on the shrunk storage.
+        let third = Tensor::from_vec(vec![9.0f32, 10.0, 11.0, 12.0], (1, 2, 1, 2), &dev())?;
+        c.append(&third, &third)?;
+        assert_eq!(c.current_seq_len(), 3);
+        assert_eq!(
+            c.k().unwrap().flatten_all()?.to_vec1::<f32>()?,
+            vec![
+                1.0, 2.0, 5.0, 6.0, 9.0, 10.0, 3.0, 4.0, 7.0, 8.0, 11.0, 12.0
+            ]
+        );
         Ok(())
     }
 

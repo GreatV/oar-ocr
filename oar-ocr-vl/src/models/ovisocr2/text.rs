@@ -17,8 +17,8 @@ use crate::runtime::cuda::dynamic_kv::DynamicKvAppend;
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
     CudaGraphDrainGuard, CudaGraphKvLengths, DecoderCudaGraph, DecoderGraphInputs,
-    capture_decoder_graph, cuda_graph_error, drop_and_drain, next_decode_bucket,
-    prompt_decode_bucket,
+    capture_decoder_graph, cuda_graph_error, drain_cuda_context_errors, drop_and_drain,
+    next_decode_bucket, prompt_decode_bucket,
 };
 use crate::utils::{candle_to_ocr_inference, rotate_half};
 #[cfg(feature = "cuda")]
@@ -712,6 +712,28 @@ impl FullAttention {
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "set dynamic KV length", e))
     }
 
+    /// Shrink the fixed KV bucket back to the organic eager form after a
+    /// failed capture, preserving the live history and freeing the spare
+    /// capacity next to a context drain.
+    #[cfg(feature = "cuda")]
+    fn release_dynamic_cache(&self, device: &Device) {
+        let released = self
+            .kv_cache
+            .borrow_mut()
+            .shrink_fixed_storage_preserving_history();
+        if let Ok(Some((k, v))) = released {
+            drop_and_drain(k, device);
+            drop_and_drain(v, device);
+        }
+    }
+
+    /// Layout of the KV storage, `(batch, capacity)`, while any storage
+    /// exists — after a shrink the organic storage reports the live length.
+    #[cfg(all(test, feature = "cuda"))]
+    fn fixed_storage_layout(&self) -> Option<(usize, usize)> {
+        self.kv_cache.borrow().fixed_storage_layout()
+    }
+
     /// CUDA-graph decode step: appends into fixed-capacity storage and runs
     /// masked attention over `[0, kv_len)`. Mirrors the eager prologue op for
     /// op; only the cache append and the attention call differ (the graph
@@ -959,6 +981,21 @@ impl DecoderLayer {
             TokenMixer::Full(layer) => layer.set_kv_cache_len(len),
         }
     }
+
+    #[cfg(feature = "cuda")]
+    fn release_dynamic_cache(&self, device: &Device) {
+        if let TokenMixer::Full(layer) = &self.mixer {
+            layer.release_dynamic_cache(device);
+        }
+    }
+
+    #[cfg(all(test, feature = "cuda"))]
+    fn fixed_storage_layout(&self) -> Option<(usize, usize)> {
+        match &self.mixer {
+            TokenMixer::Linear(_) => None,
+            TokenMixer::Full(layer) => layer.fixed_storage_layout(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1051,6 +1088,9 @@ pub(crate) struct OvisOcr2TextModel {
     /// for a graph it would never replay.
     #[cfg(feature = "cuda")]
     pending_capture_bucket: RefCell<Option<usize>>,
+    /// Test-only failure injection; production builds compile this out.
+    #[cfg(all(test, feature = "cuda"))]
+    hooks: TestHooks,
     /// Declared last so it drops last: the model's `Drop` disposes the
     /// cached graph, and this guard drains whatever the remaining fields'
     /// frees stash on the CUDA context afterwards.
@@ -1103,6 +1143,20 @@ impl DecoderGraphInputs for OvisDecodeGraphInputs {
 static DECODE_GRAPH_REPLAYS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// Test-only capture failure injection, mirroring the qwen3_vl hooks.
+/// Every field defaults to off and production builds compile none of this
+/// in.
+#[cfg(all(test, feature = "cuda"))]
+#[derive(Default)]
+pub(crate) struct TestHooks {
+    /// Fail the decode-graph capture right after the KV buckets are
+    /// allocated, leaving them resident for the recovery to shrink.
+    pub fail_capture: bool,
+    /// Keep a failed capture's buckets instead of shrinking them (the
+    /// control that proves the layout assertions can fail).
+    pub skip_release: bool,
+}
+
 impl OvisOcr2TextModel {
     pub(crate) fn load(cfg: &OvisOcr2TextConfig, vb: VarBuilder) -> Result<Self, Error> {
         if cfg.layer_types.len() != cfg.num_hidden_layers {
@@ -1135,6 +1189,8 @@ impl OvisOcr2TextModel {
             decode_graph: RefCell::new(None),
             #[cfg(feature = "cuda")]
             pending_capture_bucket: RefCell::new(None),
+            #[cfg(all(test, feature = "cuda"))]
+            hooks: TestHooks::default(),
             #[cfg(feature = "cuda")]
             drain_guard: CudaGraphDrainGuard::new(vb.device()),
         })
@@ -1256,6 +1312,12 @@ impl OvisOcr2TextModel {
         for layer in &self.layers {
             layer.prepare_dynamic_cache(cache_len)?;
         }
+        #[cfg(all(test, feature = "cuda"))]
+        if self.hooks.fail_capture {
+            // Injected failure with the buckets already allocated, exercising
+            // the caller's recovery path.
+            return Ok(false);
+        }
         let snapshots = self.snapshot_linear_states()?;
         let embeddings = self.embed_tokens.embeddings();
         let device = embeddings.device().clone();
@@ -1364,10 +1426,12 @@ impl OvisOcr2TextModel {
                 return Ok(None);
             };
             let prompt_len = self.kv_cache_len();
-            // A soft capture failure already logged itself; the eager
-            // fallback runs on the rolled-back states. A rollback failure is
-            // a hard error and propagates.
+            // A soft capture failure already logged itself; release the
+            // preallocated buckets so the eager fallback and later pages do
+            // not carry them. A rollback failure is a hard error and
+            // propagates.
             if !self.capture_decode_graph(cache_len, prompt_len, lm_head)? {
+                self.recover_failed_capture();
                 return Ok(None);
             }
         }
@@ -1398,10 +1462,12 @@ impl OvisOcr2TextModel {
                     tracing::warn!(
                         "{MODEL_NAME} decoder KV growth to bucket {next} failed: {error}; continuing eager"
                     );
+                    self.recover_failed_capture();
                     return Ok(None);
                 }
             }
             if !self.capture_decode_graph(next, kv_len - 1, lm_head)? {
+                self.recover_failed_capture();
                 return Ok(None);
             }
             tracing::info!("{MODEL_NAME} decoder graph ladder: bucket {cache_len} -> {next}");
@@ -1461,6 +1527,29 @@ impl OvisOcr2TextModel {
         if let Some(graph) = self.decode_graph.borrow_mut().take() {
             graph.dispose();
         }
+    }
+
+    /// Tear down what a failed capture left behind — the graph (never
+    /// installed, but cheap to drop) and every full-attention layer's
+    /// preallocated KV bucket, shrunk back to the organic eager form with
+    /// the prompt history preserved. The eager fallback exists for
+    /// low-memory situations; buckets a decode will never use would only
+    /// starve it and the pages after it.
+    #[cfg(feature = "cuda")]
+    fn recover_failed_capture(&self) {
+        self.invalidate_decode_graph();
+        self.pending_capture_bucket.borrow_mut().take();
+        #[cfg(all(test, feature = "cuda"))]
+        if self.hooks.skip_release {
+            // Test-only control: keep the buckets so the layout assertions
+            // can prove they catch a missing release.
+            return;
+        }
+        let device = self.embed_tokens.embeddings().device().clone();
+        for layer in &self.layers {
+            layer.release_dynamic_cache(&device);
+        }
+        drain_cuda_context_errors(&device);
     }
 
     /// Live KV length of the full-attention layers (all share one length).
@@ -1930,6 +2019,9 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn decode_graph_captures_and_replays() -> Result<(), Error> {
+        // Serialize with the other GPU self-tests: concurrent CUDA-graph
+        // captures on one device are not safe.
+        let _gpu = crate::backbones::qwen3_vl::text::GPU_SELFTEST_LOCK.lock();
         let Ok(device) = Device::new_cuda(0) else {
             return Ok(());
         };
@@ -2014,6 +2106,126 @@ mod tests {
         assert!(
             worst < 0.05,
             "graph logits diverged from eager: max|delta| = {worst}"
+        );
+        Ok(())
+    }
+
+    /// A failed capture must shrink the preallocated KV buckets back to the
+    /// organic eager form — preserving the prompt history — so the eager
+    /// fallback and later pages do not carry the spare capacity. The
+    /// `skip_release` control proves the layout assertions catch a missing
+    /// release. Without a CUDA device the test is a no-op.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn failed_capture_shrinks_buckets_and_eager_decode_survives() -> Result<(), Error> {
+        // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
+        let _gpu = crate::backbones::qwen3_vl::text::GPU_SELFTEST_LOCK.lock();
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let cfg = tiny_graph_config();
+        cfg.validate()?;
+        let tensors = tiny_graph_tensors(&cfg, &device);
+        let prompt = Tensor::from_vec(vec![1u32, 2, 3, 4], (1, 4), &device).unwrap();
+        let prompt_positions = Tensor::from_vec(
+            vec![0i64, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
+            (3, 1, 4),
+            &device,
+        )
+        .unwrap();
+        let token = Tensor::from_vec(vec![7u32], (1, 1), &device).unwrap();
+        let pos4 = Tensor::from_vec(vec![4i64; 3], (3, 1, 1), &device).unwrap();
+
+        let prefill_and_step =
+            |fail_capture: bool,
+             skip_release: bool|
+             -> Result<(OvisOcr2TextModel, Tensor, Vec<(usize, usize)>), Error> {
+                let vb = VarBuilder::from_tensors(tensors.clone(), DType::BF16, &device);
+                let mut model = OvisOcr2TextModel::load(&cfg, vb)?;
+                model.hooks.fail_capture = fail_capture;
+                model.hooks.skip_release = skip_release;
+                let lm_head = Linear::new(model.token_embedding_weight(), None);
+                let embeds = model.embed(&prompt)?;
+                model.forward(&embeds, &prompt_positions)?;
+                model.prepare_decode_graph(4, 16)?;
+                // The first decode step triggers the lazy capture; the hook
+                // fails it after the buckets are allocated.
+                let embed = model.embed(&token)?;
+                let served = model.decode_step_graph(&embed, &pos4, &lm_head)?;
+                assert!(served.is_none(), "a failed capture must fall back eager");
+                assert!(!model.decode_graph_captured());
+                // Read the layout right after the recovery: a further eager step
+                // grows the organic storage again and would mask the shrink.
+                let layouts = model
+                    .layers
+                    .iter()
+                    .filter_map(|layer| layer.fixed_storage_layout())
+                    .collect();
+                // Eager decode continues on the preserved prompt history.
+                let hidden = model.forward(&embed, &pos4)?;
+                let logits = lm_head
+                    .forward(
+                        &hidden
+                            .i((0, 0, ..))
+                            .and_then(|last| last.unsqueeze(0))
+                            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager input", e))?,
+                    )
+                    .and_then(|logits| logits.squeeze(0))
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager logits", e))?;
+                Ok((model, logits, layouts))
+            };
+
+        // prompt_decode_bucket(4) is 8: before the fix the bucket stayed at
+        // (1, 8) through the eager fallback.
+        let (recovered, logits_recovered, layouts) = prefill_and_step(true, false)?;
+        assert_eq!(
+            layouts,
+            vec![(1, 4)],
+            "buckets must shrink to the live prompt KV, got {layouts:?}"
+        );
+
+        // The control: skipping the release keeps the preallocated bucket,
+        // proving the assertion above can fail.
+        let (_kept, _, layouts) = prefill_and_step(true, true)?;
+        assert_eq!(
+            layouts,
+            vec![(1, 8)],
+            "control kept its bucket: {layouts:?}"
+        );
+
+        // The preserved history must produce the same logits as a clean
+        // eager model that never tried to capture.
+        let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
+        let reference = OvisOcr2TextModel::load(&cfg, vb)?;
+        let lm_head = Linear::new(reference.token_embedding_weight(), None);
+        let embeds = reference.embed(&prompt)?;
+        reference.forward(&embeds, &prompt_positions)?;
+        let embed = reference.embed(&token)?;
+        let hidden = reference.forward(&embed, &pos4)?;
+        let logits_reference = lm_head
+            .forward(
+                &hidden
+                    .i((0, 0, ..))
+                    .and_then(|last| last.unsqueeze(0))
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "reference input", e))?,
+            )
+            .and_then(|logits| logits.squeeze(0))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "reference logits", e))?;
+        let recovered_f32 = logits_recovered.to_dtype(DType::F32).unwrap();
+        let reference_f32 = logits_reference.to_dtype(DType::F32).unwrap();
+        let worst = (recovered_f32 - reference_f32)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+            .into_iter()
+            .fold(0f32, f32::max);
+        assert!(
+            worst < 0.05,
+            "eager decode after a failed capture diverged: max|delta| = {worst}"
         );
         Ok(())
     }
