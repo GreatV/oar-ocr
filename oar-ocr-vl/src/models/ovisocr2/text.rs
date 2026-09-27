@@ -1242,13 +1242,17 @@ impl OvisOcr2TextModel {
     /// the states are snapshotted first and restored afterwards. The KV
     /// warmup appends only into the scratch slot at `prompt_len`, so the
     /// history is never touched.
+    /// Returns `Ok(false)` when the capture itself failed — the eager
+    /// fallback then runs on the rolled-back states. A state rollback
+    /// failure is a hard error: continuing eager with half-restored states
+    /// would silently corrupt the output, so it propagates instead.
     #[cfg(feature = "cuda")]
     fn capture_decode_graph(
         &self,
         cache_len: usize,
         prompt_len: usize,
         lm_head: &Linear,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         for layer in &self.layers {
             layer.prepare_dynamic_cache(cache_len)?;
         }
@@ -1280,14 +1284,28 @@ impl OvisOcr2TextModel {
             Self::decode_graph_body,
             cache_len,
         );
-        // Whether or not the capture succeeded, the warmup may have advanced
-        // the linear-attention states with scratch input: put the prefill's
-        // values back into the fixed buffers.
-        self.restore_linear_states(snapshots)?;
-        let graph = captured?;
+        let graph = match captured {
+            Ok(graph) => graph,
+            Err(capture_error) => {
+                // The warmup may have advanced the linear-attention states
+                // with scratch input: put the prefill's values back into the
+                // fixed buffers so the eager fallback reads them intact.
+                self.restore_linear_states(snapshots)?;
+                tracing::warn!(
+                    "{MODEL_NAME} decoder graph capture failed: {capture_error}; continuing eager"
+                );
+                return Ok(false);
+            }
+        };
+        if let Err(error) = self.restore_linear_states(snapshots) {
+            // A plainly dropped graph returns graph-bound buffers to the
+            // allocator and poisons it: dispose before propagating.
+            graph.dispose();
+            return Err(error);
+        }
         tracing::info!("{MODEL_NAME} decoder graph captured: bucket={cache_len}");
         *self.decode_graph.borrow_mut() = Some(graph);
-        Ok(())
+        Ok(true)
     }
 
     /// Captured region of the decode graph: one decode step plus the LM
@@ -1346,13 +1364,10 @@ impl OvisOcr2TextModel {
                 return Ok(None);
             };
             let prompt_len = self.kv_cache_len();
-            if let Err(error) = self.capture_decode_graph(cache_len, prompt_len, lm_head) {
-                // The graph is only an optimization: a failed capture
-                // continues eager on the same fixed state buffers and KV
-                // storage.
-                tracing::warn!(
-                    "{MODEL_NAME} decoder graph capture failed: {error}; continuing eager"
-                );
+            // A soft capture failure already logged itself; the eager
+            // fallback runs on the rolled-back states. A rollback failure is
+            // a hard error and propagates.
+            if !self.capture_decode_graph(cache_len, prompt_len, lm_head)? {
                 return Ok(None);
             }
         }
@@ -1386,10 +1401,7 @@ impl OvisOcr2TextModel {
                     return Ok(None);
                 }
             }
-            if let Err(error) = self.capture_decode_graph(next, kv_len - 1, lm_head) {
-                tracing::warn!(
-                    "{MODEL_NAME} decoder graph re-capture at bucket {next} failed: {error}; continuing eager"
-                );
+            if !self.capture_decode_graph(next, kv_len - 1, lm_head)? {
                 return Ok(None);
             }
             tracing::info!("{MODEL_NAME} decoder graph ladder: bucket {cache_len} -> {next}");
