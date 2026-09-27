@@ -1315,24 +1315,24 @@ impl OvisOcr2TextModel {
         prompt_len: usize,
         lm_head: &Linear,
     ) -> Result<bool, Error> {
-        let prepared = self
-            .layers
-            .iter()
-            .enumerate()
-            .try_for_each(|(index, layer)| {
-                layer.prepare_dynamic_cache(cache_len)?;
-                #[cfg(all(test, feature = "cuda"))]
-                if self
-                    .hooks
-                    .fail_prepare_after_layer
-                    .is_some_and(|target| index + 1 == target)
-                {
-                    return Err(Error::Config {
-                        message: "injected prepare failure (test)".to_string(),
-                    });
-                }
-                Ok(())
-            });
+        let prepared: Result<(), Error> =
+            self.layers
+                .iter()
+                .enumerate()
+                .try_for_each(|(index, layer)| {
+                    layer.prepare_dynamic_cache(cache_len)?;
+                    #[cfg(all(test, feature = "cuda"))]
+                    if self
+                        .hooks
+                        .fail_prepare_after_layer
+                        .is_some_and(|target| index + 1 == target)
+                    {
+                        return Err(Error::Config {
+                            message: "injected prepare failure (test)".to_string(),
+                        });
+                    }
+                    Ok(())
+                });
         if let Err(error) = prepared {
             tracing::warn!(
                 "{MODEL_NAME} decoder graph bucket preparation failed: {error}; continuing eager"
