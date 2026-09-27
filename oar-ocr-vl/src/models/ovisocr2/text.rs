@@ -740,7 +740,7 @@ impl FullAttention {
     /// failed capture, preserving the live history and freeing the spare
     /// capacity next to a context drain.
     #[cfg(feature = "cuda")]
-    fn release_dynamic_cache(&self, device: &Device) {
+    fn release_dynamic_cache(&self, device: &Device) -> Result<(), Error> {
         match self
             .kv_cache
             .borrow_mut()
@@ -751,19 +751,18 @@ impl FullAttention {
                 drop_and_drain(v, device);
             }
             Ok(None) => {}
-            // Shrinking failed — typically itself an OOM raised right after
-            // the capture's own allocation failure. Keep the fixed storage:
-            // eager decode appends into it just fine
-            // (TrimmableKvCache::append, runtime/cache.rs:69), exactly like
-            // the ladder-ceiling fallback that decodes eager on fixed
-            // storage (text.rs:1502). Only the spare memory is not
-            // reclaimed.
+            // A failed shrink (OOM) is a hard error: keeping the
+            // graph-referenced bucket would let a later organic append
+            // plain-drop it, so the page fails instead.
             Err(error) => {
-                tracing::warn!(
-                    "{MODEL_NAME} KV bucket shrink failed: {error}; keeping fixed storage, continuing eager"
-                );
+                return Err(candle_to_ocr_inference(
+                    MODEL_NAME,
+                    "shrink KV bucket",
+                    error,
+                ));
             }
         }
+        Ok(())
     }
 
     /// Layout of the KV storage, `(batch, capacity)`, while any storage
@@ -1022,10 +1021,11 @@ impl DecoderLayer {
     }
 
     #[cfg(feature = "cuda")]
-    fn release_dynamic_cache(&self, device: &Device) {
+    fn release_dynamic_cache(&self, device: &Device) -> Result<(), Error> {
         if let TokenMixer::Full(layer) = &self.mixer {
-            layer.release_dynamic_cache(device);
+            layer.release_dynamic_cache(device)?;
         }
+        Ok(())
     }
 
     #[cfg(all(test, feature = "cuda"))]
@@ -1540,7 +1540,7 @@ impl OvisOcr2TextModel {
             // not carry them. A rollback failure is a hard error and
             // propagates.
             if !self.capture_decode_graph(cache_len, prompt_len, lm_head)? {
-                self.recover_failed_capture();
+                self.recover_failed_capture()?;
                 return Ok(None);
             }
         }
@@ -1564,7 +1564,7 @@ impl OvisOcr2TextModel {
                 // path's later growth never plain-drops graph-referenced
                 // memory.
                 self.invalidate_decode_graph();
-                self.release_dynamic_caches();
+                self.release_dynamic_caches()?;
                 return Ok(None);
             };
             // Grow the fixed buckets and re-capture; the appended history is
@@ -1575,12 +1575,12 @@ impl OvisOcr2TextModel {
                     tracing::warn!(
                         "{MODEL_NAME} decoder KV growth to bucket {next} failed: {error}; continuing eager"
                     );
-                    self.recover_failed_capture();
+                    self.recover_failed_capture()?;
                     return Ok(None);
                 }
             }
             if !self.capture_decode_graph(next, kv_len - 1, lm_head)? {
-                self.recover_failed_capture();
+                self.recover_failed_capture()?;
                 return Ok(None);
             }
             tracing::info!("{MODEL_NAME} decoder graph ladder: bucket {cache_len} -> {next}");
@@ -1648,12 +1648,13 @@ impl OvisOcr2TextModel {
     /// graph referenced those buckets, and the organic growth that follows
     /// must never plain-drop graph-referenced storage.
     #[cfg(feature = "cuda")]
-    fn release_dynamic_caches(&self) {
+    fn release_dynamic_caches(&self) -> Result<(), Error> {
         let device = self.embed_tokens.embeddings().device().clone();
         for layer in &self.layers {
-            layer.release_dynamic_cache(&device);
+            layer.release_dynamic_cache(&device)?;
         }
         drain_cuda_context_errors(&device);
+        Ok(())
     }
 
     /// Tear down what a failed capture left behind — the graph (never
@@ -1663,16 +1664,16 @@ impl OvisOcr2TextModel {
     /// low-memory situations; buckets a decode will never use would only
     /// starve it and the pages after it.
     #[cfg(feature = "cuda")]
-    fn recover_failed_capture(&self) {
+    fn recover_failed_capture(&self) -> Result<(), Error> {
         self.invalidate_decode_graph();
         self.pending_capture_bucket.borrow_mut().take();
         #[cfg(all(test, feature = "cuda"))]
         if self.hooks.skip_release {
             // Test-only control: keep the buckets so the layout assertions
             // can prove they catch a missing release.
-            return;
+            return Ok(());
         }
-        self.release_dynamic_caches();
+        self.release_dynamic_caches()
     }
 
     /// Decode bucket ceiling; tests may pin it small to reach the ladder
@@ -2609,6 +2610,57 @@ mod tests {
         assert!(
             worst < 0.05,
             "ceiling-retired eager decode diverged from the graphed path: max|delta| = {worst}"
+        );
+        Ok(())
+    }
+
+    /// A shrink failure at the ladder ceiling is a hard error: the GPU is
+    /// out of memory by then, and continuing eager would let a later
+    /// organic append plain-drop the graph-referenced bucket. Without a
+    /// CUDA device the test is a no-op.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn ceiling_shrink_failure_fails_the_page() -> Result<(), Error> {
+        // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
+        let _gpu = crate::backbones::qwen3_vl::text::GPU_SELFTEST_LOCK.lock();
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let cfg = tiny_graph_config();
+        cfg.validate()?;
+        let tensors = tiny_graph_tensors(&cfg, &device);
+        let prompt = Tensor::from_vec(vec![1u32, 2, 3, 4], (1, 4), &device).unwrap();
+        let prompt_positions = Tensor::from_vec(
+            vec![0i64, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
+            (3, 1, 4),
+            &device,
+        )
+        .unwrap();
+        let token = Tensor::from_vec(vec![7u32], (1, 1), &device).unwrap();
+        let position_at = |p: i64| Tensor::from_vec(vec![p; 3], (3, 1, 1), &device).unwrap();
+
+        let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
+        let mut model = OvisOcr2TextModel::load(&cfg, vb)?;
+        model.hooks.decode_cache_ceiling = Some(8);
+        let lm_head = Linear::new(model.token_embedding_weight(), None);
+        let embeds = model.embed(&prompt)?;
+        model.forward(&embeds, &prompt_positions)?;
+        model.prepare_decode_graph(4, 16)?;
+        for step in 0..4 {
+            let embed = model.embed(&token)?;
+            let served = model.decode_step_graph(&embed, &position_at(4 + step), &lm_head)?;
+            assert!(served.is_some(), "step {step} should replay the graph");
+        }
+
+        // The ceiling step's shrink fails (injected at the V copy): the
+        // page must fail, not continue eager on the graph-referenced bucket.
+        crate::runtime::cache::FAIL_SHRINK_V_COPY.with(|flag| flag.set(true));
+        let embed = model.embed(&token)?;
+        let result = model.decode_step_graph(&embed, &position_at(8), &lm_head);
+        crate::runtime::cache::FAIL_SHRINK_V_COPY.with(|flag| flag.set(false));
+        assert!(
+            result.is_err(),
+            "a shrink failure at the ceiling must fail the page"
         );
         Ok(())
     }

@@ -15,7 +15,8 @@ use candle_core::{Result, Tensor};
 // Thread-local so parallel tests cannot cross-talk.
 #[cfg(test)]
 thread_local! {
-    static FAIL_SHRINK_V_COPY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static FAIL_SHRINK_V_COPY: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 /// Append-and-trim KV cache.

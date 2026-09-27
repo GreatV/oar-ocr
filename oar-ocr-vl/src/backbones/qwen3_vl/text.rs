@@ -572,12 +572,12 @@ impl Qwen3Attention {
     /// fails (nothing live yet) and at the ladder ceiling (the eager tail
     /// keeps decoding on the retained prefix).
     #[cfg(feature = "cuda")]
-    fn release_dynamic_cache_batch(&self) {
+    fn release_dynamic_cache_batch(&self) -> Result<(), Error> {
         let device = self.q_proj.weight().device().clone();
         // Shrink, not take: at the ladder ceiling the live history must
-        // survive, and a failed shrink (OOM) keeps the fixed storage —
-        // eager decode appends into it fine; only the memory is not
-        // reclaimed.
+        // survive. A failed shrink (OOM) is a hard error: keeping the
+        // graph-referenced bucket would let a later organic append
+        // plain-drop it, so the page fails instead.
         match self
             .kv_cache
             .borrow_mut()
@@ -589,11 +589,14 @@ impl Qwen3Attention {
             }
             Ok(None) => {}
             Err(error) => {
-                tracing::warn!(
-                    "{MODEL_NAME} KV bucket shrink failed: {error}; keeping fixed storage, continuing eager"
-                );
+                return Err(candle_to_ocr_inference(
+                    MODEL_NAME,
+                    "shrink KV bucket",
+                    error,
+                ));
             }
         }
+        Ok(())
     }
 
     /// Grow the fixed storage, preserving appended history. The template
@@ -1135,7 +1138,7 @@ impl DecoderLayer {
     }
 
     #[cfg(feature = "cuda")]
-    fn release_dynamic_cache_batch(&self) {
+    fn release_dynamic_cache_batch(&self) -> Result<(), Error> {
         self.attention.release_dynamic_cache_batch()
     }
 
@@ -1476,12 +1479,12 @@ impl Qwen3VlTextModel {
         &self,
         request_batch: Option<usize>,
         expected_cache_len: Option<usize>,
-    ) {
+    ) -> Result<(), Error> {
         #[cfg(all(test, feature = "cuda"))]
         if self.hooks.skip_incompatible_release {
             // Test-only control: keep the incompatible storage so the
             // memory assertions can prove they catch a missing release.
-            return;
+            return Ok(());
         }
         // The storage layout is authoritative: graphs can disappear while
         // their fixed KV survives (the bucket-ceiling eager fallback), so
@@ -1491,7 +1494,7 @@ impl Qwen3VlTextModel {
             .first()
             .and_then(|layer| layer.fixed_storage_layout())
         else {
-            return;
+            return Ok(());
         };
         let compatible = match (request_batch, expected_cache_len) {
             // Unknown bucket: be conservative, release.
@@ -1519,8 +1522,9 @@ impl Qwen3VlTextModel {
             }
         };
         if !compatible {
-            self.recover_failed_capture();
+            self.recover_failed_capture()?;
         }
+        Ok(())
     }
 
     /// Decode bucket ceiling; tests may pin it small to reach the ladder
@@ -1539,7 +1543,7 @@ impl Qwen3VlTextModel {
     /// preallocated fixed-capacity KV storage — so the eager fallback runs
     /// with the memory it needs.
     #[cfg(feature = "cuda")]
-    pub(crate) fn recover_failed_capture(&self) {
+    pub(crate) fn recover_failed_capture(&self) -> Result<(), Error> {
         self.invalidate_cuda_graph();
         self.invalidate_batch_cuda_graph();
         #[cfg(test)]
@@ -1558,9 +1562,9 @@ impl Qwen3VlTextModel {
         if self.hooks.skip_release {
             // Test-only control: skip the storage release so the memory
             // assertions can prove they catch a missing release.
-            return;
+            return Ok(());
         }
-        self.release_dynamic_caches();
+        self.release_dynamic_caches()
     }
 
     /// Free every layer's fixed-capacity KV storage after a failed graph
@@ -1568,11 +1572,12 @@ impl Qwen3VlTextModel {
     /// low-memory situations, and the preallocated buckets would only
     /// starve it.
     #[cfg(feature = "cuda")]
-    fn release_dynamic_caches(&self) {
+    fn release_dynamic_caches(&self) -> Result<(), Error> {
         for layer in &self.layers {
-            layer.release_dynamic_cache_batch();
+            layer.release_dynamic_cache_batch()?;
         }
         drain_cuda_context_errors(self.embed_tokens.embeddings().device());
+        Ok(())
     }
 
     /// Double the batched decode bucket, preserving appended history.
@@ -1801,7 +1806,7 @@ impl Qwen3VlTextModel {
                 tracing::warn!(
                     "{MODEL_NAME} batch graph capture failed: {error}; continuing eager"
                 );
-                self.recover_failed_capture();
+                self.recover_failed_capture()?;
             }
         }
         let _ = (prompt_len, max_new_tokens, pad_lens, lm_head, ladder);
@@ -1981,7 +1986,7 @@ impl Qwen3VlTextModel {
                 // plain-drops graph-referenced memory.
                 self.invalidate_cuda_graph();
                 self.invalidate_batch_cuda_graph();
-                self.release_dynamic_caches();
+                self.release_dynamic_caches()?;
                 #[cfg(all(test, feature = "cuda"))]
                 LAST_CEILING_SHRINK_CAPACITY.store(
                     self.layers
@@ -2232,7 +2237,7 @@ impl Qwen3VlTextModel {
                 tracing::warn!(
                     "{MODEL_NAME} decoder graph capture failed: {error}; continuing eager"
                 );
-                self.recover_failed_capture();
+                self.recover_failed_capture()?;
             }
         }
         let _ = (prompt_len, max_new_tokens, lm_head, ladder);
@@ -2371,7 +2376,7 @@ impl Qwen3VlTextModel {
                 // plain-drops graph-referenced memory.
                 self.invalidate_cuda_graph();
                 self.invalidate_batch_cuda_graph();
-                self.release_dynamic_caches();
+                self.release_dynamic_caches()?;
                 #[cfg(all(test, feature = "cuda"))]
                 LAST_CEILING_SHRINK_CAPACITY.store(
                     self.layers
@@ -3284,7 +3289,7 @@ mod tests {
             );
             model.hooks.skip_release = false;
             model.hooks.fail_capture = false;
-            model.recover_failed_capture();
+            model.recover_failed_capture().unwrap();
             let settled = measured(&model);
             eprintln!("DBGM1 settled after control={settled}MiB");
             assert!(settled.saturating_sub(baseline) <= 16);
@@ -3368,7 +3373,9 @@ mod tests {
             // residue can survive the trim, so the tolerance is loose; the
             // release-skipped control below proves the assertion catches a
             // real leak.
-            model.release_incompatible_fixed_storage(None, Some(8192));
+            model
+                .release_incompatible_fixed_storage(None, Some(8192))
+                .unwrap();
             let pre_upload = measured(&model);
             eprintln!("DBGM3 single-entry pre-upload={pre_upload}MiB");
             assert!(
@@ -3386,7 +3393,9 @@ mod tests {
                 .prepare_batch_ar_cuda_graph(2, 600, 8192, &[0, 10], &lm_head, false)
                 .unwrap();
             assert!(model.batch_decode_graph_captured());
-            model.release_incompatible_fixed_storage(None, Some(8192));
+            model
+                .release_incompatible_fixed_storage(None, Some(8192))
+                .unwrap();
             let skipped = measured(&model);
             eprintln!("DBGM3 single-entry control (skipped)={skipped}MiB");
             assert!(
@@ -3394,7 +3403,9 @@ mod tests {
                 "the memory assertion failed to catch a missing release"
             );
             model.hooks.skip_incompatible_release = false;
-            model.release_incompatible_fixed_storage(None, Some(8192));
+            model
+                .release_incompatible_fixed_storage(None, Some(8192))
+                .unwrap();
             let settled = measured(&model);
             eprintln!("DBGM3 single-entry settled={settled}MiB");
             assert!(settled.saturating_sub(baseline) <= 64);
@@ -3407,7 +3418,9 @@ mod tests {
 
             // A region-style batch request arrives: its entry frees the
             // single-row graph and buckets.
-            model.release_incompatible_fixed_storage(Some(2), Some(8192));
+            model
+                .release_incompatible_fixed_storage(Some(2), Some(8192))
+                .unwrap();
             let after = measured(&model);
             eprintln!("DBGM3 after-batch-entry-release={after}MiB");
             // Same small pool/fragmentation residue as the single-page
@@ -3424,7 +3437,9 @@ mod tests {
             // Same width, smaller bucket: the big buckets cannot serve
             // the next request (its prepare would recapture), so the
             // entry releases them before vision encoding.
-            model.release_incompatible_fixed_storage(Some(2), Some(1024));
+            model
+                .release_incompatible_fixed_storage(Some(2), Some(1024))
+                .unwrap();
             let after_shrink = measured(&model);
             eprintln!("DBGM3 after-small-bucket-release={after_shrink}MiB");
             assert!(
@@ -3439,7 +3454,9 @@ mod tests {
                 .prepare_batch_ar_cuda_graph(2, 600, 8192, &[0, 10], &lm_head, false)
                 .unwrap();
             assert!(model.batch_decode_graph_captured());
-            model.release_incompatible_fixed_storage(Some(2), Some(8192));
+            model
+                .release_incompatible_fixed_storage(Some(2), Some(8192))
+                .unwrap();
             assert!(
                 model.batch_decode_graph_captured(),
                 "compatible batch storage must not be released"
@@ -3453,7 +3470,9 @@ mod tests {
                 .unwrap();
             assert!(model.batch_decode_graph_captured());
             model.hooks.skip_incompatible_release = true;
-            model.release_incompatible_fixed_storage(None, None);
+            model
+                .release_incompatible_fixed_storage(None, None)
+                .unwrap();
             let skipped = measured(&model);
             eprintln!("DBGM3 control (release skipped)={skipped}MiB");
             assert!(
@@ -3461,7 +3480,9 @@ mod tests {
                 "the memory assertion failed to catch a missing release"
             );
             model.hooks.skip_incompatible_release = false;
-            model.release_incompatible_fixed_storage(None, None);
+            model
+                .release_incompatible_fixed_storage(None, None)
+                .unwrap();
             let settled = measured(&model);
             eprintln!("DBGM3 settled after control={settled}MiB");
             assert!(settled.saturating_sub(baseline) <= 64);
@@ -3544,7 +3565,9 @@ mod tests {
             );
 
             // A batch request arrives: its entry releases the orphan.
-            model.release_incompatible_fixed_storage(Some(2), Some(8192));
+            model
+                .release_incompatible_fixed_storage(Some(2), Some(8192))
+                .unwrap();
             let released = measured(&model);
             eprintln!("DBGM5 single orphan released={released}MiB");
             assert!(released.saturating_sub(baseline) <= 64);
@@ -3568,7 +3591,9 @@ mod tests {
 
             // Control: with the entry release skipped, the orphan stays.
             model.hooks.skip_incompatible_release = true;
-            model.release_incompatible_fixed_storage(None, None);
+            model
+                .release_incompatible_fixed_storage(None, None)
+                .unwrap();
             let skipped = measured(&model);
             eprintln!("DBGM5 control (release skipped)={skipped}MiB");
             assert!(
@@ -3576,7 +3601,9 @@ mod tests {
                 "the memory assertion failed to catch a missing release"
             );
             model.hooks.skip_incompatible_release = false;
-            model.release_incompatible_fixed_storage(None, Some(8192));
+            model
+                .release_incompatible_fixed_storage(None, Some(8192))
+                .unwrap();
             let released = measured(&model);
             eprintln!("DBGM5 batch orphan released={released}MiB");
             assert!(released.saturating_sub(baseline) <= 64);
@@ -3586,14 +3613,18 @@ mod tests {
                 .prepare_ar_cuda_graph(600, 8192, &lm_head, false)
                 .unwrap();
             assert!(model.decode_graph_captured());
-            model.release_incompatible_fixed_storage(None, Some(8192));
+            model
+                .release_incompatible_fixed_storage(None, Some(8192))
+                .unwrap();
             assert!(
                 model.decode_graph_captured(),
                 "compatible single-row storage must not be released"
             );
             // Batch width over single-row storage: mismatched, so the
             // storage is released (with its graph).
-            model.release_incompatible_fixed_storage(Some(2), Some(1024));
+            model
+                .release_incompatible_fixed_storage(Some(2), Some(1024))
+                .unwrap();
             assert!(!model.batch_decode_graph_captured());
             assert!(!model.decode_graph_captured());
 

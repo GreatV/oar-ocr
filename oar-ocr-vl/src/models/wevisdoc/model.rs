@@ -276,7 +276,7 @@ impl WeVisDoc {
                 loop_guard != LoopGuard::Off,
             );
             self.text
-                .release_incompatible_fixed_storage(None, expected_bucket);
+                .release_incompatible_fixed_storage(None, expected_bucket)?;
         }
 
         let image_inputs = preprocess_image(
@@ -413,7 +413,7 @@ impl WeVisDoc {
                 loop_guard != LoopGuard::Off,
             );
             self.text
-                .release_incompatible_fixed_storage(Some(batch_size), expected_bucket);
+                .release_incompatible_fixed_storage(Some(batch_size), expected_bucket)?;
         }
 
         // Pass 2: image upload, vision tower, embeddings, positions.
