@@ -772,6 +772,19 @@ impl FullAttention {
         self.kv_cache.borrow().fixed_storage_layout()
     }
 
+    /// Drop the fixed KV storage entirely between pages: every page
+    /// re-captures from scratch, so retaining the bucket would only save
+    /// one allocation — while a plain drop of the graph-referenced storage
+    /// can poison the context. Take it out and release through the drain
+    /// path instead.
+    #[cfg(feature = "cuda")]
+    fn drop_fixed_storage(&self, device: &Device) {
+        if let Some((k, v)) = self.kv_cache.borrow_mut().take_fixed_storage() {
+            drop_and_drain(k, device);
+            drop_and_drain(v, device);
+        }
+    }
+
     /// CUDA-graph decode step: appends into fixed-capacity storage and runs
     /// masked attention over `[0, kv_len)`. Mirrors the eager prologue op for
     /// op; only the cache append and the attention call differ (the graph
@@ -1026,6 +1039,13 @@ impl DecoderLayer {
             layer.release_dynamic_cache(device)?;
         }
         Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    fn drop_fixed_storage(&self, device: &Device) {
+        if let TokenMixer::Full(layer) = &self.mixer {
+            layer.drop_fixed_storage(device);
+        }
     }
 
     #[cfg(all(test, feature = "cuda"))]
@@ -1283,6 +1303,16 @@ impl OvisOcr2TextModel {
         {
             self.invalidate_decode_graph();
             self.pending_capture_bucket.borrow_mut().take();
+            // Free the fixed KV buckets too: reset() only clears the
+            // logical length, and a longer prompt on the next page would
+            // make the prefill's append plain-drop this graph-referenced
+            // storage. Every page re-captures anyway, so retention only
+            // saved one allocation.
+            let device = self.embed_tokens.embeddings().device().clone();
+            for layer in &self.layers {
+                layer.drop_fixed_storage(&device);
+            }
+            drain_cuda_context_errors(&device);
         }
         for layer in &self.layers {
             layer.clear_cache();
@@ -2661,6 +2691,61 @@ mod tests {
         assert!(
             result.is_err(),
             "a shrink failure at the ceiling must fail the page"
+        );
+        Ok(())
+    }
+
+    /// Between pages, clear_cache must free the fixed KV buckets (drained),
+    /// not just the logical length: the next page's longer prompt would
+    /// otherwise make the prefill append plain-drop graph-referenced
+    /// storage. Without a CUDA device the test is a no-op.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn clear_cache_releases_fixed_buckets() -> Result<(), Error> {
+        // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
+        let _gpu = crate::backbones::qwen3_vl::text::GPU_SELFTEST_LOCK.lock();
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let cfg = tiny_graph_config();
+        cfg.validate()?;
+        let tensors = tiny_graph_tensors(&cfg, &device);
+        let prompt = Tensor::from_vec(vec![1u32, 2, 3, 4], (1, 4), &device).unwrap();
+        let prompt_positions = Tensor::from_vec(
+            vec![0i64, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
+            (3, 1, 4),
+            &device,
+        )
+        .unwrap();
+        let token = Tensor::from_vec(vec![7u32], (1, 1), &device).unwrap();
+        let pos4 = Tensor::from_vec(vec![4i64; 3], (3, 1, 1), &device).unwrap();
+
+        let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
+        let model = OvisOcr2TextModel::load(&cfg, vb)?;
+        let lm_head = Linear::new(model.token_embedding_weight(), None);
+        let embeds = model.embed(&prompt)?;
+        model.forward(&embeds, &prompt_positions)?;
+        model.prepare_decode_graph(4, 16)?;
+        // Two decode steps: the first captures, so the buckets are
+        // graph-referenced now.
+        let embed = model.embed(&token)?;
+        assert!(model.decode_step_graph(&embed, &pos4, &lm_head)?.is_some());
+        let layouts: Vec<_> = model
+            .layers
+            .iter()
+            .filter_map(|layer| layer.fixed_storage_layout())
+            .collect();
+        assert_eq!(layouts, vec![(1, 8)], "bucket live while decoding");
+
+        model.clear_cache();
+        let layouts: Vec<_> = model
+            .layers
+            .iter()
+            .filter_map(|layer| layer.fixed_storage_layout())
+            .collect();
+        assert!(
+            layouts.is_empty(),
+            "clear_cache must free the fixed buckets, got {layouts:?}"
         );
         Ok(())
     }
