@@ -717,13 +717,28 @@ impl FullAttention {
     /// capacity next to a context drain.
     #[cfg(feature = "cuda")]
     fn release_dynamic_cache(&self, device: &Device) {
-        let released = self
+        match self
             .kv_cache
             .borrow_mut()
-            .shrink_fixed_storage_preserving_history();
-        if let Ok(Some((k, v))) = released {
-            drop_and_drain(k, device);
-            drop_and_drain(v, device);
+            .shrink_fixed_storage_preserving_history()
+        {
+            Ok(Some((k, v))) => {
+                drop_and_drain(k, device);
+                drop_and_drain(v, device);
+            }
+            Ok(None) => {}
+            // Shrinking failed — typically itself an OOM raised right after
+            // the capture's own allocation failure. Keep the fixed storage:
+            // eager decode appends into it just fine
+            // (TrimmableKvCache::append, runtime/cache.rs:69), exactly like
+            // the ladder-ceiling fallback that decodes eager on fixed
+            // storage (text.rs:1502). Only the spare memory is not
+            // reclaimed.
+            Err(error) => {
+                tracing::warn!(
+                    "{MODEL_NAME} KV bucket shrink failed: {error}; keeping fixed storage, continuing eager"
+                );
+            }
         }
     }
 

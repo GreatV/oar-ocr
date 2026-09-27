@@ -10,6 +10,14 @@
 
 use candle_core::{Result, Tensor};
 
+// Test-only injection: fail the V copy in
+// `shrink_fixed_storage_preserving_history` after the K copy succeeded.
+// Thread-local so parallel tests cannot cross-talk.
+#[cfg(test)]
+thread_local! {
+    static FAIL_SHRINK_V_COPY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Append-and-trim KV cache.
 ///
 /// `Clone` mirrors `candle_nn::kv_cache::KvCache::Clone`: it produces a
@@ -280,25 +288,41 @@ impl TrimmableKvCache {
     /// drain. Used when a CUDA-graph capture fails after the buckets were
     /// preallocated — the eager fallback keeps its KV while the unused spare
     /// capacity stops holding memory.
+    ///
+    /// The shrunk copies are allocated BEFORE `self` is touched: this
+    /// recovery runs right after an allocation failure (typically OOM), so
+    /// these copies are exactly what may fail — and a failure must leave
+    /// the cache exactly as it was, fixed storage included.
     pub fn shrink_fixed_storage_preserving_history(&mut self) -> Result<Option<(Tensor, Tensor)>> {
-        let Some((storage_k, storage_v)) = self.storage.take() else {
+        if self.storage.is_none() {
             return Ok(None);
-        };
+        }
         if self.cur_len == 0 {
+            // Nothing to preserve and nothing to allocate: taking is safe.
             self.kv = None;
             self.capacity = 0;
-            return Ok(Some((storage_k, storage_v)));
+            return Ok(self.storage.take());
         }
+        let (storage_k, storage_v) = self.storage.as_ref().expect("storage checked above");
         let new_k = storage_k
             .narrow(self.cat_dim, 0, self.cur_len)?
             .contiguous()?;
+        #[cfg(test)]
+        if FAIL_SHRINK_V_COPY.with(|flag| flag.get()) {
+            return Err(candle_core::Error::Msg(
+                "injected shrink failure (test)".into(),
+            ));
+        }
         let new_v = storage_v
             .narrow(self.cat_dim, 0, self.cur_len)?
             .contiguous()?;
+        // Both copies succeeded: only now swap, keeping `self` fully intact
+        // on every error path above.
+        let old = self.storage.take().expect("storage checked above");
         self.capacity = self.cur_len;
         self.kv = Some((new_k.clone(), new_v.clone()));
         self.storage = Some((new_k, new_v));
-        Ok(Some((storage_k, storage_v)))
+        Ok(Some(old))
     }
 
     /// Return the fixed backing tensors used by dynamic CUDA-graph appends.
@@ -571,6 +595,43 @@ mod tests {
             vec![1.0, 2.0, 5.0, 6.0, 3.0, 4.0, 7.0, 8.0]
         );
         // The eager append path keeps working on the shrunk storage.
+        let third = Tensor::from_vec(vec![9.0f32, 10.0, 11.0, 12.0], (1, 2, 1, 2), &dev())?;
+        c.append(&third, &third)?;
+        assert_eq!(c.current_seq_len(), 3);
+        assert_eq!(
+            c.k().unwrap().flatten_all()?.to_vec1::<f32>()?,
+            vec![
+                1.0, 2.0, 5.0, 6.0, 9.0, 10.0, 3.0, 4.0, 7.0, 8.0, 11.0, 12.0
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_shrink_leaves_cache_fully_intact() -> Result<()> {
+        let mut c = TrimmableKvCache::new(2, 64);
+        let template = Tensor::zeros((1, 2, 1, 2), DType::F32, &dev())?;
+        let first = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 2, 1, 2), &dev())?;
+        c.append(&first, &first)?;
+        let second = Tensor::from_vec(vec![5.0f32, 6.0, 7.0, 8.0], (1, 2, 1, 2), &dev())?;
+        c.append(&second, &second)?;
+        c.grow_fixed_storage(&template, 16)?;
+        assert_eq!(c.storage_capacity(), 16);
+
+        // The V copy fails, as an OOM right after the capture's own OOM
+        // would: the cache must come out exactly as before the call.
+        FAIL_SHRINK_V_COPY.with(|flag| flag.set(true));
+        let result = c.shrink_fixed_storage_preserving_history();
+        FAIL_SHRINK_V_COPY.with(|flag| flag.set(false));
+        assert!(result.is_err());
+        assert_eq!(c.storage_capacity(), 16);
+        assert_eq!(c.current_seq_len(), 2);
+        assert_eq!(
+            c.k().unwrap().flatten_all()?.to_vec1::<f32>()?,
+            vec![1.0, 2.0, 5.0, 6.0, 3.0, 4.0, 7.0, 8.0]
+        );
+
+        // Eager append still works on the retained storage, history intact.
         let third = Tensor::from_vec(vec![9.0f32, 10.0, 11.0, 12.0], (1, 2, 1, 2), &dev())?;
         c.append(&third, &third)?;
         assert_eq!(c.current_seq_len(), 3);
