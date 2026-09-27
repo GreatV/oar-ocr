@@ -1,3 +1,4 @@
+use crate::backbones::qwen3_vl::vision::Qwen3VlVisionConfig;
 use crate::error::Error;
 use candle_nn::Activation;
 use serde::Deserialize;
@@ -298,6 +299,32 @@ impl OvisOcr2VisionConfig {
             });
         }
         Ok(side)
+    }
+
+    /// Backbone configuration for the shared Qwen3-VL vision tower.
+    ///
+    /// The OvisOCR2 (`qwen3_5`) vision tower is architecturally a Qwen3-VL
+    /// tower without DeepStack taps, so the fields map one to one; only the
+    /// `model_type` tag differs (`initializer_range` has no runtime meaning
+    /// and is intentionally not carried over). Field-by-field on purpose:
+    /// a new field on either struct must fail to compile here rather than
+    /// be silently dropped.
+    pub(crate) fn to_qwen3_vl(&self) -> Qwen3VlVisionConfig {
+        Qwen3VlVisionConfig {
+            model_type: "qwen3_vl".to_string(),
+            depth: self.depth,
+            hidden_size: self.hidden_size,
+            intermediate_size: self.intermediate_size,
+            num_heads: self.num_heads,
+            in_channels: self.in_channels,
+            patch_size: self.patch_size,
+            spatial_merge_size: self.spatial_merge_size,
+            temporal_patch_size: self.temporal_patch_size,
+            out_hidden_size: self.out_hidden_size,
+            num_position_embeddings: self.num_position_embeddings,
+            hidden_act: self.hidden_act,
+            deepstack_visual_indexes: self.deepstack_visual_indexes.clone(),
+        }
     }
 
     pub fn validate(&self) -> Result<(), Error> {
