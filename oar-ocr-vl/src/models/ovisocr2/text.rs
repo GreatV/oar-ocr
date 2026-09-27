@@ -1190,14 +1190,8 @@ impl OvisOcr2TextModel {
             self.invalidate_decode_graph();
             return Ok(());
         };
-        // Reuse within one doubling; anything further out re-captures.
-        let reusable =
-            self.decode_graph.borrow().as_ref().is_some_and(|graph| {
-                graph.cache_len >= cache_len && graph.cache_len < cache_len * 2
-            });
-        if reusable {
-            return Ok(());
-        }
+        // `clear_cache` disposes the graph at the start of every page, so a
+        // live graph never reaches this point: each page captures once.
         self.invalidate_decode_graph();
         if let Err(error) = self.capture_decode_graph(cache_len, prompt_len, lm_head) {
             // The graph is only an optimization: a failed capture continues
@@ -1293,10 +1287,19 @@ impl OvisOcr2TextModel {
             )?;
         }
         let hidden = this.norm.forward(&hidden_states)?;
+        // Match the eager LM head's GEMM shape exactly: the eager path
+        // selects the last row to (H) and unsqueezes to (1, H) before the
+        // projection, so the graph does the same rather than projecting the
+        // (1, 1, H) tensor (a different cublas shape can round differently).
         let logits = inputs
             .lm_head
-            .forward(&hidden)
-            .and_then(|logits| logits.i((0, 0)))
+            .forward(
+                &hidden
+                    .i((0, 0, ..))
+                    .and_then(|last| last.unsqueeze(0))
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph LM head input", e))?,
+            )
+            .and_then(|logits| logits.squeeze(0))
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "decode LM head", e))?;
         Ok(vec![logits])
     }
@@ -1893,8 +1896,13 @@ mod tests {
         eager.forward(&embeds, &prompt_positions)?;
         let hidden = eager.forward(&eager.embed(&token)?, &pos4)?;
         let logits_eager = Linear::new(eager.token_embedding_weight(), None)
-            .forward(&hidden)
-            .and_then(|logits| logits.i((0, 0)))
+            .forward(
+                &hidden
+                    .i((0, 0, ..))
+                    .and_then(|last| last.unsqueeze(0))
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager reference input", e))?,
+            )
+            .and_then(|logits| logits.squeeze(0))
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager reference logits", e))?;
         // The graph attends with masked SDPA while the eager path uses
         // flash attention; same math to bf16 resolution.
