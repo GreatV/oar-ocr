@@ -1045,6 +1045,12 @@ pub(crate) struct OvisOcr2TextModel {
     rotary_emb: TextRotaryEmbedding,
     #[cfg(feature = "cuda")]
     decode_graph: RefCell<Option<DecoderCudaGraph<OvisDecodeGraphInputs>>>,
+    /// Bucket a lazy capture will use at the first decode step, set by
+    /// `prepare_decode_graph`. Capture waits until a second token is
+    /// actually needed: a generation whose first token stops it never pays
+    /// for a graph it would never replay.
+    #[cfg(feature = "cuda")]
+    pending_capture_bucket: RefCell<Option<usize>>,
     /// Declared last so it drops last: the model's `Drop` disposes the
     /// cached graph, and this guard drains whatever the remaining fields'
     /// frees stash on the CUDA context afterwards.
@@ -1128,6 +1134,8 @@ impl OvisOcr2TextModel {
             #[cfg(feature = "cuda")]
             decode_graph: RefCell::new(None),
             #[cfg(feature = "cuda")]
+            pending_capture_bucket: RefCell::new(None),
+            #[cfg(feature = "cuda")]
             drain_guard: CudaGraphDrainGuard::new(vb.device()),
         })
     }
@@ -1162,21 +1170,24 @@ impl OvisOcr2TextModel {
         // buffers and the fixed KV storage; it must be disposed before
         // either is released here.
         #[cfg(feature = "cuda")]
-        self.invalidate_decode_graph();
+        {
+            self.invalidate_decode_graph();
+            self.pending_capture_bucket.borrow_mut().take();
+        }
         for layer in &self.layers {
             layer.clear_cache();
         }
     }
 
-    /// Capture the single-token decode graph after a prefill, when the
-    /// linear-attention states and the KV history are live. Buckets follow
-    /// the shared ladder; anything ineligible stays eager.
+    /// Record the decode bucket after a prefill; the capture itself is lazy
+    /// and happens at the first decode step (see `decode_step_graph`), so a
+    /// generation stopped by its very first token never captures. Buckets
+    /// follow the shared ladder; anything ineligible stays eager.
     #[cfg(feature = "cuda")]
     pub(crate) fn prepare_decode_graph(
         &self,
         prompt_len: usize,
         max_new_tokens: usize,
-        lm_head: &Linear,
     ) -> Result<(), Error> {
         // A single-token generation takes no decode step at all (the one
         // token comes from the prefill's own logits), so a captured graph
@@ -1188,6 +1199,7 @@ impl OvisOcr2TextModel {
             || std::env::var_os("OAR_OVISOCR2_DISABLE_CUDA_GRAPH").is_some()
         {
             self.invalidate_decode_graph();
+            self.pending_capture_bucket.borrow_mut().take();
             return Ok(());
         }
         let embeddings = self.embed_tokens.embeddings();
@@ -1203,16 +1215,13 @@ impl OvisOcr2TextModel {
             // The prompt alone does not fit the largest bucket; no graph may
             // stay alive over it.
             self.invalidate_decode_graph();
+            self.pending_capture_bucket.borrow_mut().take();
             return Ok(());
         };
         // `clear_cache` disposes the graph at the start of every page, so a
         // live graph never reaches this point: each page captures once.
         self.invalidate_decode_graph();
-        if let Err(error) = self.capture_decode_graph(cache_len, prompt_len, lm_head) {
-            // The graph is only an optimization: a failed capture continues
-            // eager on the same fixed state buffers and KV storage.
-            tracing::warn!("{MODEL_NAME} decoder graph capture failed: {error}; continuing eager");
-        }
+        *self.pending_capture_bucket.borrow_mut() = Some(cache_len);
         Ok(())
     }
 
@@ -1221,7 +1230,6 @@ impl OvisOcr2TextModel {
         &self,
         _prompt_len: usize,
         _max_new_tokens: usize,
-        _lm_head: &Linear,
     ) -> Result<(), Error> {
         Ok(())
     }
@@ -1322,7 +1330,10 @@ impl OvisOcr2TextModel {
 
     /// Replay the captured graph for one decode step. Returns `None` when no
     /// graph fits this step (not captured, shape mismatch, or past the
-    /// ladder ceiling) and the caller should run the eager path.
+    /// ladder ceiling) and the caller should run the eager path. The first
+    /// call after `prepare_decode_graph` captures on demand: by then the
+    /// generation loop has emitted a non-stop token, so the graph is known
+    /// to be needed.
     #[cfg(feature = "cuda")]
     pub(crate) fn decode_step_graph(
         &self,
@@ -1331,7 +1342,19 @@ impl OvisOcr2TextModel {
         lm_head: &Linear,
     ) -> Result<Option<Tensor>, Error> {
         if self.decode_graph.borrow().is_none() {
-            return Ok(None);
+            let Some(cache_len) = self.pending_capture_bucket.borrow_mut().take() else {
+                return Ok(None);
+            };
+            let prompt_len = self.kv_cache_len();
+            if let Err(error) = self.capture_decode_graph(cache_len, prompt_len, lm_head) {
+                // The graph is only an optimization: a failed capture
+                // continues eager on the same fixed state buffers and KV
+                // storage.
+                tracing::warn!(
+                    "{MODEL_NAME} decoder graph capture failed: {error}; continuing eager"
+                );
+                return Ok(None);
+            }
         }
         let kv_len = self.kv_cache_len().saturating_add(1);
         let overflow = self
@@ -1907,7 +1930,9 @@ mod tests {
         // Tied LM head, built exactly as `OvisOcr2::from_dir` builds it.
         let lm_head = Linear::new(graphed.token_embedding_weight(), None);
 
-        // Prefill four tokens, then capture — the production ordering.
+        // Prefill four tokens, then let the first decode step capture — the
+        // production ordering. Preparing alone must not capture: a page
+        // stopped by its first token never pays for a graph.
         let prompt = Tensor::from_vec(vec![1u32, 2, 3, 4], (1, 4), &device).unwrap();
         let prompt_positions = Tensor::from_vec(
             vec![0i64, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
@@ -1917,10 +1942,10 @@ mod tests {
         .unwrap();
         let embeds = graphed.embed(&prompt)?;
         graphed.forward(&embeds, &prompt_positions)?;
-        graphed.prepare_decode_graph(4, 16, &lm_head)?;
+        graphed.prepare_decode_graph(4, 16)?;
         assert!(
-            graphed.decode_graph_captured(),
-            "decode graph was not captured"
+            !graphed.decode_graph_captured(),
+            "capture is lazy until the first decode step"
         );
         DECODE_GRAPH_REPLAYS.store(0, std::sync::atomic::Ordering::Relaxed);
 
@@ -1929,6 +1954,10 @@ mod tests {
         let embed = graphed.embed(&token)?;
         let logits = graphed.decode_step_graph(&embed, &pos4, &lm_head)?;
         let logits_graph = logits.expect("the captured graph should serve the step");
+        assert!(
+            graphed.decode_graph_captured(),
+            "the first decode step must capture the graph"
+        );
         assert_eq!(logits_graph.dims(), &[cfg.vocab_size]);
         let embed = graphed.embed(&token)?;
         let pos5 = Tensor::from_vec(vec![5i64; 3], (3, 1, 1), &device).unwrap();

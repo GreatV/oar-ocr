@@ -219,10 +219,11 @@ impl OvisOcr2 {
                 message: format!("OvisOCR2 cannot reserve output for {max_new_tokens} tokens: {e}"),
             })?;
 
-        // Capture the decode graph once the prefill has populated the KV
-        // and linear-attention states; a no-op off CUDA or when ineligible.
-        self.text
-            .prepare_decode_graph(prompt_len, max_new_tokens, &self.lm_head)?;
+        // Record the decode bucket once the prefill has populated the KV
+        // and linear-attention states; the capture itself is lazy and runs
+        // at the first decode step, so a page whose first token is a stop
+        // token never pays for it. A no-op off CUDA or when ineligible.
+        self.text.prepare_decode_graph(prompt_len, max_new_tokens)?;
 
         for step in 0..max_new_tokens {
             let token = select_greedy_token(&logits)?;
