@@ -2544,10 +2544,11 @@ mod tests {
     /// eager tail's organic growth never plain-drops graph-referenced
     /// memory. Ceiling pinned to 8 via the test hook; the prompt is 7
     /// tokens, so ONE replayed step fills the bucket — keeping the numeric
-    /// comparison at a single shared step (the decode kernels are not
-    /// bitwise deterministic across runs, and longer compounding horizons
-    /// flake on a random-weight model). Without a CUDA device the test is
-    /// a no-op.
+    /// comparison at a single shared step. Longer compounding horizons
+    /// flaked under concurrent GPU load on this random-weight model (cause
+    /// not located; one candidate mechanism is cuBLAS picking different
+    /// algorithms when memory/workspace is tight). Without a CUDA device
+    /// the test is a no-op.
     #[cfg(feature = "cuda")]
     #[test]
     fn ceiling_retirement_shrinks_buckets_and_decodes_eager() -> Result<(), Error> {
