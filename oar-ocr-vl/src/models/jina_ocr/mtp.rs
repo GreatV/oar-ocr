@@ -20,11 +20,14 @@ use crate::error::Error;
 use crate::runtime::attention::RotaryEmbedding;
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
-    CudaGraphKvLengths, DecoderCudaGraph, capture_decoder_graph, cuda_graph_error,
+    CudaGraphKvLengths, DecoderCudaGraph, DecoderGraphInputs, capture_decoder_graph,
+    cuda_graph_error, drop_and_drain,
 };
 use crate::runtime::errors::candle_to_ocr_inference;
 #[cfg(feature = "cuda")]
 use candle_core::DType;
+#[cfg(feature = "cuda")]
+use candle_core::Device;
 use candle_core::Tensor;
 use candle_nn::{Embedding, Linear, Module, RmsNorm, VarBuilder, linear_no_bias, rms_norm};
 #[cfg(feature = "cuda")]
@@ -38,6 +41,24 @@ struct MtpGraphInputs {
     positions: Tensor,
     query_lengths: Tensor,
     kv_lengths: CudaGraphKvLengths,
+}
+
+#[cfg(feature = "cuda")]
+impl DecoderGraphInputs for MtpGraphInputs {
+    fn dispose(self, device: &Device) {
+        let Self {
+            token,
+            previous_hidden,
+            positions,
+            query_lengths,
+            kv_lengths,
+        } = self;
+        drop_and_drain(kv_lengths, device);
+        drop_and_drain(query_lengths, device);
+        drop_and_drain(positions, device);
+        drop_and_drain(previous_hidden, device);
+        drop_and_drain(token, device);
+    }
 }
 
 #[derive(Debug)]

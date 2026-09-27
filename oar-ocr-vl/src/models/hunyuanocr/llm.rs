@@ -10,8 +10,8 @@ use crate::runtime::cuda::dynamic_kv::{
 };
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
-    CudaGraphDrainGuard, CudaGraphKvLengths, DecoderCudaGraph, capture_decoder_graph,
-    cuda_graph_error, decoder_attention_is_causal,
+    CudaGraphDrainGuard, CudaGraphKvLengths, DecoderCudaGraph, DecoderGraphInputs,
+    capture_decoder_graph, cuda_graph_error, decoder_attention_is_causal, drop_and_drain,
 };
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 #[cfg(feature = "cuda")]
@@ -662,6 +662,27 @@ struct TargetGraphInputs {
     query_lengths: Tensor,
     kv_lengths: CudaGraphKvLengths,
     aux_layer_ids: Vec<usize>,
+}
+
+#[cfg(feature = "cuda")]
+impl DecoderGraphInputs for TargetGraphInputs {
+    fn dispose(self, device: &Device) {
+        let Self {
+            hidden,
+            cos,
+            sin,
+            query_lengths,
+            kv_lengths,
+            aux_layer_ids,
+        } = self;
+        drop_and_drain(kv_lengths, device);
+        drop_and_drain(query_lengths, device);
+        drop_and_drain(sin, device);
+        drop_and_drain(cos, device);
+        drop_and_drain(hidden, device);
+        // Plain host-side indices: no CUDA resource to drain after.
+        drop(aux_layer_ids);
+    }
 }
 
 #[derive(Debug)]

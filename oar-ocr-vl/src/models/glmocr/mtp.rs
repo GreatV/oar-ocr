@@ -8,11 +8,11 @@ use super::config::GlmOcrTextConfig;
 use super::text::{GlmOcrTextDecoderLayer, GlmOcrTextRotaryEmbedding};
 use crate::error::Error;
 use crate::runtime::decoder_graph::{
-    CudaGraphDrainGuard, CudaGraphKvLengths, DecoderCudaGraph, capture_decoder_graph,
-    cuda_graph_error,
+    CudaGraphDrainGuard, CudaGraphKvLengths, DecoderCudaGraph, DecoderGraphInputs,
+    capture_decoder_graph, cuda_graph_error, drop_and_drain,
 };
 use crate::utils::candle_to_ocr_inference;
-use candle_core::{D, DType, Tensor};
+use candle_core::{D, DType, Device, Tensor};
 use candle_nn::{
     Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, linear_no_bias, rms_norm,
 };
@@ -43,6 +43,24 @@ struct MtpGraphInputs {
     positions: Tensor,
     query_lengths: Tensor,
     kv_lengths: CudaGraphKvLengths,
+}
+
+#[cfg(feature = "cuda")]
+impl DecoderGraphInputs for MtpGraphInputs {
+    fn dispose(self, device: &Device) {
+        let Self {
+            token,
+            previous_hidden,
+            positions,
+            query_lengths,
+            kv_lengths,
+        } = self;
+        drop_and_drain(kv_lengths, device);
+        drop_and_drain(query_lengths, device);
+        drop_and_drain(positions, device);
+        drop_and_drain(previous_hidden, device);
+        drop_and_drain(token, device);
+    }
 }
 
 impl GlmOcrMtpModel {

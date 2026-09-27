@@ -16,8 +16,8 @@ use crate::runtime::cuda::dynamic_kv::{
 };
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
-    CudaGraphDrainGuard, CudaGraphKvLengths, DecoderCudaGraph, capture_decoder_graph,
-    cuda_graph_error,
+    CudaGraphDrainGuard, CudaGraphKvLengths, DecoderCudaGraph, DecoderGraphInputs,
+    capture_decoder_graph, cuda_graph_error, drop_and_drain,
 };
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
 use candle_core::{D, DType, Device, Tensor};
@@ -862,6 +862,24 @@ struct DFlashGraphInputs {
     sin: Tensor,
     query_lengths: Tensor,
     kv_lengths: CudaGraphKvLengths,
+}
+
+#[cfg(feature = "cuda")]
+impl DecoderGraphInputs for DFlashGraphInputs {
+    fn dispose(self, device: &Device) {
+        let Self {
+            query,
+            cos,
+            sin,
+            query_lengths,
+            kv_lengths,
+        } = self;
+        drop_and_drain(kv_lengths, device);
+        drop_and_drain(query_lengths, device);
+        drop_and_drain(sin, device);
+        drop_and_drain(cos, device);
+        drop_and_drain(query, device);
+    }
 }
 
 /// Loaded DFlash draft and its incremental target-context K/V caches.

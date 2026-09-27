@@ -21,8 +21,8 @@ use crate::runtime::cuda::dynamic_kv::{DynamicBatchKvAppend, DynamicKvAppend};
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
     BatchDecodeRows, CudaGraphDrainGuard, CudaGraphKvLengths, CudaGraphPerRowU32, DecoderCudaGraph,
-    capture_decoder_graph, cuda_graph_error, decoder_cache_capacity, drain_cuda_context_errors,
-    drop_and_drain, next_decode_bucket, prompt_decode_bucket,
+    DecoderGraphInputs, capture_decoder_graph, cuda_graph_error, decoder_cache_capacity,
+    drain_cuda_context_errors, drop_and_drain, next_decode_bucket, prompt_decode_bucket,
 };
 use crate::runtime::errors::candle_to_ocr_inference;
 use crate::runtime::tensor::rotate_half;
@@ -1285,6 +1285,26 @@ struct DecodeGraphInputs {
     lm_head: candle_nn::Linear,
 }
 
+#[cfg(feature = "cuda")]
+impl DecoderGraphInputs for DecodeGraphInputs {
+    fn dispose(self, device: &Device) {
+        let Self {
+            hidden,
+            positions,
+            query_lengths,
+            kv_lengths,
+            kv_positions,
+            lm_head,
+        } = self;
+        drop_and_drain(kv_lengths, device);
+        drop_and_drain(query_lengths, device);
+        drop_and_drain(positions, device);
+        drop_and_drain(hidden, device);
+        drop_and_drain(kv_positions, device);
+        drop_and_drain(lm_head, device);
+    }
+}
+
 /// Inputs the batched decode graph captures. `row_starts` and `pad_bounds`
 /// are pinned-backed device buffers rewritten before every replay, so a
 /// reused graph never masks with the previous batch's offsets or pads.
@@ -1299,6 +1319,26 @@ struct BatchDecodeGraphInputs {
     pad_bounds: CudaGraphPerRowU32,
     /// The LM head read inside the captured region.
     lm_head: candle_nn::Linear,
+}
+
+#[cfg(feature = "cuda")]
+impl DecoderGraphInputs for BatchDecodeGraphInputs {
+    fn dispose(self, device: &Device) {
+        let Self {
+            hidden,
+            positions,
+            row_starts,
+            kv_positions,
+            pad_bounds,
+            lm_head,
+        } = self;
+        drop_and_drain(row_starts, device);
+        drop_and_drain(pad_bounds, device);
+        drop_and_drain(positions, device);
+        drop_and_drain(hidden, device);
+        drop_and_drain(kv_positions, device);
+        drop_and_drain(lm_head, device);
+    }
 }
 
 /// The captured single-row graph plus its ladder ceiling: the framework

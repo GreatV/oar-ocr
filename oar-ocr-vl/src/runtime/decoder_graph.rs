@@ -37,6 +37,36 @@ pub(crate) struct CudaGraphInputs {
     pub(crate) lm_head: candle_nn::Linear,
 }
 
+/// Field-wise teardown for a graph's input bundle.
+///
+/// Dropping the bundle whole would let one field's destructor stash a CUDA
+/// error that the next field's destructor overwrites before either is
+/// drained. `dispose` releases each field separately, draining the context
+/// after every drop, matching the per-field teardown the handwritten
+/// graph structs did inline.
+#[cfg(feature = "cuda")]
+pub(crate) trait DecoderGraphInputs {
+    fn dispose(self, device: &Device);
+}
+
+#[cfg(feature = "cuda")]
+impl DecoderGraphInputs for CudaGraphInputs {
+    fn dispose(self, device: &Device) {
+        let Self {
+            hidden,
+            positions,
+            query_lengths,
+            kv_lengths,
+            lm_head,
+        } = self;
+        drop_and_drain(kv_lengths, device);
+        drop_and_drain(query_lengths, device);
+        drop_and_drain(positions, device);
+        drop_and_drain(hidden, device);
+        drop_and_drain(lm_head, device);
+    }
+}
+
 /// A captured decoder graph over a model-defined input bundle `I`.
 ///
 /// Owning `inputs` retains every tensor the bundle holds for the graph's
@@ -53,7 +83,7 @@ pub(crate) struct DecoderCudaGraph<I> {
 }
 
 #[cfg(feature = "cuda")]
-impl<I> DecoderCudaGraph<I> {
+impl<I: DecoderGraphInputs> DecoderCudaGraph<I> {
     pub(crate) fn dispose(self) {
         let Self {
             graph,
@@ -67,9 +97,9 @@ impl<I> DecoderCudaGraph<I> {
         for tensor in outputs {
             drop_and_drain(tensor, &device);
         }
-        // The bundle's tensors are dropped after the error drain so a
-        // stashed async error surfaces before any allocator interaction.
-        drop(inputs);
+        // The bundle tears itself down field by field, draining after each
+        // drop, so one field's stashed error cannot overwrite another's.
+        inputs.dispose(&device);
     }
 }
 
@@ -101,7 +131,7 @@ pub(crate) struct BatchDecodeRows<'a> {
 /// allocates and primes one output buffer per returned tensor, captures,
 /// launches and synchronizes the warm launch, and assembles the graph.
 #[cfg(feature = "cuda")]
-pub(crate) fn capture_decoder_graph<M, I>(
+pub(crate) fn capture_decoder_graph<M, I: DecoderGraphInputs>(
     device: &Device,
     model_name: &'static str,
     model: &M,
