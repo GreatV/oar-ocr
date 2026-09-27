@@ -32,6 +32,10 @@ pub struct MinerUTextConfig {
 
 pub use crate::backbones::qwen2_vl::Qwen2VlVisionConfig;
 
+/// Deprecated alias kept for the published `0.9.x` API surface.
+#[deprecated(since = "0.9.3", note = "use Qwen2VlVisionConfig")]
+pub type MinerUVisionConfig = Qwen2VlVisionConfig;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct MinerUConfig {
     pub vocab_size: usize,
@@ -122,3 +126,11 @@ impl MinerUConfig {
 }
 
 pub use crate::backbones::qwen_vl_processing::{QwenVlImageProcessorConfig, QwenVlImageSize};
+
+/// Deprecated alias kept for the published `0.9.x` API surface.
+#[deprecated(since = "0.9.3", note = "use QwenVlImageProcessorConfig")]
+pub type MinerUImageProcessorConfig = QwenVlImageProcessorConfig;
+
+/// Deprecated alias kept for the published `0.9.x` API surface.
+#[deprecated(since = "0.9.3", note = "use QwenVlImageSize")]
+pub type MinerUImageSize = QwenVlImageSize;

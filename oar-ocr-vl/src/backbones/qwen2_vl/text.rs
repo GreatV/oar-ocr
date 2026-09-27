@@ -1048,6 +1048,19 @@ mod tests {
         }
     }
 
+    /// The full error text including every wrapped cause, so assertions can
+    /// match the candle message naming a missing weight.
+    fn error_chain(err: &dyn std::error::Error) -> String {
+        let mut text = err.to_string();
+        let mut source = err.source();
+        while let Some(err) = source {
+            text.push_str(": ");
+            text.push_str(&err.to_string());
+            source = err.source();
+        }
+        text
+    }
+
     /// Weight map holding exactly the names a tuning loads: bias vectors on
     /// q/k/v only when `attention_bias`, `q_norm`/`k_norm` only when
     /// `qk_head_norm`.
@@ -1137,18 +1150,36 @@ mod tests {
             assert_eq!(hidden.dims(), &[1, 4, cfg.hidden_size]);
         }
 
-        // The MinerU2.5 tuning (bias) must reject a checkpoint without
-        // q/k/v biases; the NaviDC-OCR tuning (qk_head_norm) must reject
-        // one without q_norm/k_norm.
+        // The MinerU2.5 tuning (bias) must reject a checkpoint whose q/k/v
+        // biases are missing, and the NaviDC-OCR tuning (qk_head_norm) one
+        // whose q_norm/k_norm are missing; the error names the exact
+        // weight that failed to load, so the cases cannot pass by failing
+        // somewhere earlier.
         let bias_cfg = unit_config(MINERU_TUNING);
         let tensors = unit_var_map(&bias_cfg, false, false);
         let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
-        assert!(Qwen2VlTextModel::load(&bias_cfg, vb.pp("layers.0")).is_err());
+        let err = match Qwen2VlTextModel::load(&bias_cfg, vb) {
+            Ok(_) => panic!("bias-negative case loaded a checkpoint missing q_proj.bias"),
+            Err(err) => err,
+        };
+        let chain = error_chain(&err);
+        assert!(
+            chain.contains("q_proj.bias"),
+            "bias-negative case failed with unexpected error: {chain}"
+        );
 
         let qk_cfg = unit_config(NAVIDC_TUNING);
         let tensors = unit_var_map(&qk_cfg, false, false);
         let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
-        assert!(Qwen2VlTextModel::load(&qk_cfg, vb.pp("layers.0")).is_err());
+        let err = match Qwen2VlTextModel::load(&qk_cfg, vb) {
+            Ok(_) => panic!("qk-norm-negative case loaded a checkpoint missing q_norm.weight"),
+            Err(err) => err,
+        };
+        let chain = error_chain(&err);
+        assert!(
+            chain.contains("q_norm.weight"),
+            "qk-norm-negative case failed with unexpected error: {chain}"
+        );
     }
 
     /// GPU self-check for the decode graph lifecycle, in BF16 so the graph
