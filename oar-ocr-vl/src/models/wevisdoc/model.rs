@@ -59,7 +59,7 @@ pub struct WeVisDoc {
     device: Device,
     dtype: DType,
     cfg: WeVisDocConfig,
-    image_cfg: crate::backbones::qwen_vl_processing::MinerUImageProcessorConfig,
+    image_cfg: crate::backbones::qwen_vl_processing::QwenVlImageProcessorConfig,
     tokenizer: Tokenizer,
     text: Qwen3VlTextModel,
     vision: Qwen3VlVisionModel,
@@ -769,7 +769,7 @@ impl WeVisDoc {
 
     pub fn image_processor_config(
         &self,
-    ) -> &crate::backbones::qwen_vl_processing::MinerUImageProcessorConfig {
+    ) -> &crate::backbones::qwen_vl_processing::QwenVlImageProcessorConfig {
         &self.image_cfg
     }
 }

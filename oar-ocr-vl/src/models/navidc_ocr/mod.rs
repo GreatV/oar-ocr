@@ -19,7 +19,6 @@
 mod adapter;
 mod config;
 mod model;
-mod text;
 use crate::backbones::qwen25_vl as vision;
 
 pub use config::{NaviDcConfig, NaviDcRopeScaling, NaviDcTextConfig, NaviDcVisionConfig};

@@ -13,8 +13,8 @@
 use super::config::MinerUDiffusionConfig;
 use super::projector::VisionAbstractor;
 use super::text::{SdarKvCache, SdarModel};
-use crate::backbones::qwen_vl_processing::{MinerUImageProcessorConfig, preprocess_images};
-use crate::backbones::qwen2_vl::MinerUVisionModel;
+use crate::backbones::qwen_vl_processing::{QwenVlImageProcessorConfig, preprocess_images};
+use crate::backbones::qwen2_vl::Qwen2VlVisionModel;
 use crate::error::Error;
 #[cfg(feature = "cuda")]
 use crate::runtime::cuda::SampleWithConfidence;
@@ -82,9 +82,9 @@ pub struct MinerUDiffusion {
     device: Device,
     dtype: DType,
     cfg: MinerUDiffusionConfig,
-    image_cfg: MinerUImageProcessorConfig,
+    image_cfg: QwenVlImageProcessorConfig,
     tokenizer: Tokenizer,
-    vision: MinerUVisionModel,
+    vision: Qwen2VlVisionModel,
     abstractor: VisionAbstractor,
     text: SdarModel,
     image_token_id: u32,
@@ -106,7 +106,7 @@ impl MinerUDiffusion {
         let model_dir = model_dir.as_ref();
         let cfg = MinerUDiffusionConfig::from_path(model_dir.join("config.json"))?;
         let mut image_cfg =
-            MinerUImageProcessorConfig::from_path(model_dir.join("preprocessor_config.json"))?;
+            QwenVlImageProcessorConfig::from_path(model_dir.join("preprocessor_config.json"))?;
         // MinerU-Diffusion ships both an explicit `min/max_pixels` pair and a
         // `size` block whose `longest_edge` (12845056) is the absolute ceiling,
         // not the operating cap. When both are present, prefer the explicit
@@ -140,7 +140,7 @@ impl MinerUDiffusion {
         };
 
         let merge_size = cfg.projector_merge_size()?;
-        let vision = MinerUVisionModel::load_backbone(&cfg.vision_config, vb.pp("vision_model"))?;
+        let vision = Qwen2VlVisionModel::load_backbone(&cfg.vision_config, vb.pp("vision_model"))?;
         let abstractor = VisionAbstractor::load(
             vb.pp("vision_abstractor").pp("projection"),
             cfg.vision_config.embed_dim,

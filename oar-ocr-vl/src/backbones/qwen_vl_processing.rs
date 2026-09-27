@@ -10,13 +10,13 @@ use std::path::Path;
 /// Image processor shared by Qwen-VL-derived OCR checkpoints.
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
-pub struct MinerUImageProcessorConfig {
+pub struct QwenVlImageProcessorConfig {
     #[serde(default)]
     pub min_pixels: Option<u32>,
     #[serde(default)]
     pub max_pixels: Option<u32>,
     #[serde(default)]
-    pub size: Option<MinerUImageSize>,
+    pub size: Option<QwenVlImageSize>,
     #[serde(default = "crate::runtime::checkpoint::default_true")]
     pub do_resize: bool,
     #[serde(default = "crate::runtime::checkpoint::default_true")]
@@ -37,12 +37,12 @@ pub struct MinerUImageProcessorConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct MinerUImageSize {
+pub struct QwenVlImageSize {
     pub shortest_edge: u32,
     pub longest_edge: u32,
 }
 
-impl MinerUImageProcessorConfig {
+impl QwenVlImageProcessorConfig {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
         crate::runtime::checkpoint::load_json_config(
             path,
@@ -106,18 +106,18 @@ impl MinerUImageProcessorConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct MinerUImageInputs {
+pub struct QwenVlImageInputs {
     pub pixel_values: Tensor,
     pub image_grid_thw: Vec<(usize, usize, usize)>,
 }
 
 pub fn preprocess_images(
     images: &[RgbImage],
-    cfg: &MinerUImageProcessorConfig,
+    cfg: &QwenVlImageProcessorConfig,
     device: &Device,
     dtype: DType,
     model_name: &str,
-) -> Result<MinerUImageInputs, Error> {
+) -> Result<QwenVlImageInputs, Error> {
     cfg.validate()?;
     if images.is_empty() {
         return Err(Error::InvalidInput {
@@ -261,7 +261,7 @@ pub fn preprocess_images(
             source: Box::new(e),
         })?;
 
-    Ok(MinerUImageInputs {
+    Ok(QwenVlImageInputs {
         pixel_values,
         image_grid_thw: grids,
     })
@@ -269,12 +269,12 @@ pub fn preprocess_images(
 
 #[cfg(test)]
 mod tests {
-    use super::{MinerUImageProcessorConfig, preprocess_images};
+    use super::{QwenVlImageProcessorConfig, preprocess_images};
     use candle_core::{DType, Device};
     use image::RgbImage;
 
-    fn fixture_config() -> MinerUImageProcessorConfig {
-        MinerUImageProcessorConfig {
+    fn fixture_config() -> QwenVlImageProcessorConfig {
+        QwenVlImageProcessorConfig {
             min_pixels: Some(65536),
             max_pixels: Some(16_777_216),
             size: None,
