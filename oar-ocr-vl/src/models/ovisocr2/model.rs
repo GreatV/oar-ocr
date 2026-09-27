@@ -219,6 +219,11 @@ impl OvisOcr2 {
                 message: format!("OvisOCR2 cannot reserve output for {max_new_tokens} tokens: {e}"),
             })?;
 
+        // Capture the decode graph once the prefill has populated the KV
+        // and linear-attention states; a no-op off CUDA or when ineligible.
+        self.text
+            .prepare_decode_graph(prompt_len, max_new_tokens, &self.lm_head)?;
+
         for step in 0..max_new_tokens {
             let token = select_greedy_token(&logits)?;
             if self.stop_token_ids.contains(&token) {
@@ -239,11 +244,19 @@ impl OvisOcr2 {
             let token_embed = self.text.embed(&token_ids)?;
             let position = prompt_len as i64 + step as i64 + rope_delta;
             let position_ids = text_position_ids(position, &self.device)?;
-            let hidden = self.text.forward(&token_embed, &position_ids)?;
             logits =
-                self.logits_from_hidden(&hidden.i((0, 0, ..)).map_err(|e| {
-                    candle_to_ocr_inference(MODEL_NAME, "select decode hidden", e)
-                })?)?;
+                match self
+                    .text
+                    .decode_step_graph(&token_embed, &position_ids, &self.lm_head)?
+                {
+                    Some(logits) => logits,
+                    None => {
+                        let hidden = self.text.forward(&token_embed, &position_ids)?;
+                        self.logits_from_hidden(&hidden.i((0, 0, ..)).map_err(|e| {
+                            candle_to_ocr_inference(MODEL_NAME, "select decode hidden", e)
+                        })?)?
+                    }
+                };
         }
         Ok(generated)
     }
