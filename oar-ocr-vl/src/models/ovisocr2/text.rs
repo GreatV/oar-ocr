@@ -708,10 +708,19 @@ impl FullAttention {
             self.q_proj.weight().device(),
         )
         .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "dynamic KV template", e))?;
-        self.kv_cache
+        let released = self
+            .kv_cache
             .borrow_mut()
             .grow_fixed_storage(&template, cache_len)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "prepare dynamic KV", e))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "prepare dynamic KV", e))?;
+        // The replaced bucket was referenced by the graph disposed before
+        // this growth: release it through the drain path, not a plain drop.
+        if let Some((k, v)) = released {
+            let device = template.device();
+            drop_and_drain(k, device);
+            drop_and_drain(v, device);
+        }
+        Ok(())
     }
 
     #[cfg(feature = "cuda")]
