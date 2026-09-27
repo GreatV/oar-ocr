@@ -17,8 +17,8 @@ use crate::runtime::cuda::dynamic_kv::DynamicKvAppend;
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::{
     CudaGraphDrainGuard, CudaGraphKvLengths, DecoderCudaGraph, DecoderGraphInputs,
-    capture_decoder_graph, cuda_graph_error, decoder_cache_capacity, drop_and_drain,
-    next_decode_bucket,
+    capture_decoder_graph, cuda_graph_error, drop_and_drain, next_decode_bucket,
+    prompt_decode_bucket,
 };
 use crate::utils::{candle_to_ocr_inference, rotate_half};
 #[cfg(feature = "cuda")]
@@ -1195,9 +1195,11 @@ impl OvisOcr2TextModel {
         {
             return Ok(());
         }
-        let Some(cache_len) =
-            decoder_cache_capacity(prompt_len, max_new_tokens, OVISOCR2_DECODE_CACHE_LEN)
-        else {
+        // Start the ladder at the prompt, not at the declared budget: the
+        // default budget would pin the largest bucket up front and make the
+        // masked attention scan 16K slots from the first step. The replay
+        // path re-captures into bigger buckets as the sequence grows.
+        let Some(cache_len) = prompt_decode_bucket(prompt_len, OVISOCR2_DECODE_CACHE_LEN) else {
             // The prompt alone does not fit the largest bucket; no graph may
             // stay alive over it.
             self.invalidate_decode_graph();
@@ -1275,6 +1277,7 @@ impl OvisOcr2TextModel {
         // values back into the fixed buffers.
         self.restore_linear_states(snapshots)?;
         let graph = captured?;
+        tracing::info!("{MODEL_NAME} decoder graph captured: bucket={cache_len}");
         *self.decode_graph.borrow_mut() = Some(graph);
         Ok(())
     }
@@ -1366,6 +1369,7 @@ impl OvisOcr2TextModel {
                 );
                 return Ok(None);
             }
+            tracing::info!("{MODEL_NAME} decoder graph ladder: bucket {cache_len} -> {next}");
         }
         let captured_ref = self.decode_graph.borrow();
         let Some(captured) = captured_ref.as_ref() else {
