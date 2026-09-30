@@ -186,6 +186,11 @@ pub struct OARStructureBuilder {
 
     // Configuration
     ort_session_config: Option<OrtSessionConfig>,
+    // Per-model overrides of `ort_session_config` (formula has its own above)
+    layout_ort_session_config: Option<OrtSessionConfig>,
+    text_detection_ort_session_config: Option<OrtSessionConfig>,
+    text_recognition_ort_session_config: Option<OrtSessionConfig>,
+    table_ort_session_config: Option<OrtSessionConfig>,
     layout_detection_config: Option<LayoutDetectionConfig>,
     table_classification_config: Option<TableClassificationConfig>,
     table_cell_detection_config: Option<TableCellDetectionConfig>,
@@ -283,6 +288,10 @@ impl OARStructureBuilder {
             text_detection_model_name: None,
             text_recognition_model_name: None,
             ort_session_config: None,
+            layout_ort_session_config: None,
+            text_detection_ort_session_config: None,
+            text_recognition_ort_session_config: None,
+            table_ort_session_config: None,
             layout_detection_config: None,
             table_classification_config: None,
             table_cell_detection_config: None,
@@ -297,9 +306,43 @@ impl OARStructureBuilder {
 
     /// Sets the ONNX Runtime session configuration.
     ///
-    /// This configuration will be applied to all models in the pipeline.
+    /// This configuration will be applied to all models in the pipeline, except
+    /// where a per-model session (`layout_ort_session`, `text_detection_ort_session`,
+    /// `text_recognition_ort_session`, `table_ort_session`, `formula_ort_session`)
+    /// overrides it.
     pub fn ort_session(mut self, config: OrtSessionConfig) -> Self {
         self.ort_session_config = Some(config);
+        self
+    }
+
+    /// Sets an ONNX Runtime session configuration only for layout detection.
+    ///
+    /// Useful to run the layout model on an accelerator while the rest of the
+    /// pipeline stays on the session set by [`Self::ort_session`]. Region
+    /// detection (`region_model_name`) keeps the pipeline-wide session.
+    pub fn layout_ort_session(mut self, config: OrtSessionConfig) -> Self {
+        self.layout_ort_session_config = Some(config);
+        self
+    }
+
+    /// Sets an ONNX Runtime session configuration only for text detection.
+    pub fn text_detection_ort_session(mut self, config: OrtSessionConfig) -> Self {
+        self.text_detection_ort_session_config = Some(config);
+        self
+    }
+
+    /// Sets an ONNX Runtime session configuration only for text recognition.
+    pub fn text_recognition_ort_session(mut self, config: OrtSessionConfig) -> Self {
+        self.text_recognition_ort_session_config = Some(config);
+        self
+    }
+
+    /// Sets an ONNX Runtime session configuration only for the table models:
+    /// classification, cell detection and structure recognition. Table
+    /// orientation reuses the document orientation model and keeps the
+    /// pipeline-wide session.
+    pub fn table_ort_session(mut self, config: OrtSessionConfig) -> Self {
+        self.table_ort_session_config = Some(config);
         self
     }
 
@@ -864,7 +907,11 @@ impl OARStructureBuilder {
             .unwrap_or_else(LayoutDetectionConfig::with_pp_structurev3_defaults);
         layout_builder = layout_builder.with_config(effective_layout_cfg);
 
-        if let Some(ref ort_config) = self.ort_session_config {
+        if let Some(ort_config) = self
+            .layout_ort_session_config
+            .as_ref()
+            .or(self.ort_session_config.as_ref())
+        {
             layout_builder = layout_builder.with_ort_config(ort_config.clone());
         }
 
@@ -914,7 +961,11 @@ impl OARStructureBuilder {
                     builder = builder.with_config(config.clone());
                 }
 
-                if let Some(ref ort_config) = self.ort_session_config {
+                if let Some(ort_config) = self
+                    .table_ort_session_config
+                    .as_ref()
+                    .or(self.ort_session_config.as_ref())
+                {
                     builder = builder.with_ort_config(ort_config.clone());
                 }
 
@@ -965,7 +1016,11 @@ impl OARStructureBuilder {
                 builder = builder.with_config(config.clone());
             }
 
-            if let Some(ref ort_config) = self.ort_session_config {
+            if let Some(ort_config) = self
+                .table_ort_session_config
+                .as_ref()
+                .or(self.ort_session_config.as_ref())
+            {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
@@ -1006,7 +1061,11 @@ impl OARStructureBuilder {
                         builder = builder.with_config(config.clone());
                     }
 
-                    if let Some(ref ort_config) = self.ort_session_config {
+                    if let Some(ort_config) = self
+                        .table_ort_session_config
+                        .as_ref()
+                        .or(self.ort_session_config.as_ref())
+                    {
                         builder = builder.with_ort_config(ort_config.clone());
                     }
 
@@ -1020,7 +1079,11 @@ impl OARStructureBuilder {
                         builder = builder.with_config(config.clone());
                     }
 
-                    if let Some(ref ort_config) = self.ort_session_config {
+                    if let Some(ort_config) = self
+                        .table_ort_session_config
+                        .as_ref()
+                        .or(self.ort_session_config.as_ref())
+                    {
                         builder = builder.with_ort_config(ort_config.clone());
                     }
 
@@ -1064,7 +1127,11 @@ impl OARStructureBuilder {
                 builder = builder.with_config(config.clone());
             }
 
-            if let Some(ref ort_config) = self.ort_session_config {
+            if let Some(ort_config) = self
+                .table_ort_session_config
+                .as_ref()
+                .or(self.ort_session_config.as_ref())
+            {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
@@ -1093,7 +1160,11 @@ impl OARStructureBuilder {
                 builder = builder.with_config(config.clone());
             }
 
-            if let Some(ref ort_config) = self.ort_session_config {
+            if let Some(ort_config) = self
+                .table_ort_session_config
+                .as_ref()
+                .or(self.ort_session_config.as_ref())
+            {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
@@ -1117,7 +1188,11 @@ impl OARStructureBuilder {
                 builder = builder.with_config(config.clone());
             }
 
-            if let Some(ref ort_config) = self.ort_session_config {
+            if let Some(ort_config) = self
+                .table_ort_session_config
+                .as_ref()
+                .or(self.ort_session_config.as_ref())
+            {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
@@ -1141,7 +1216,11 @@ impl OARStructureBuilder {
                 builder = builder.with_config(config.clone());
             }
 
-            if let Some(ref ort_config) = self.ort_session_config {
+            if let Some(ort_config) = self
+                .table_ort_session_config
+                .as_ref()
+                .or(self.ort_session_config.as_ref())
+            {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
@@ -1280,7 +1359,11 @@ impl OARStructureBuilder {
                 builder = builder.model_name(name.clone());
             }
 
-            if let Some(ref ort_config) = self.ort_session_config {
+            if let Some(ort_config) = self
+                .text_detection_ort_session_config
+                .as_ref()
+                .or(self.ort_session_config.as_ref())
+            {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
@@ -1325,7 +1408,11 @@ impl OARStructureBuilder {
                 builder = builder.model_name(name.clone());
             }
 
-            if let Some(ref ort_config) = self.ort_session_config {
+            if let Some(ort_config) = self
+                .text_recognition_ort_session_config
+                .as_ref()
+                .or(self.ort_session_config.as_ref())
+            {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
@@ -3700,6 +3787,39 @@ mod tests {
         assert!(builder.layout_detection_config.is_some());
         assert_eq!(builder.image_batch_size, Some(4));
         assert_eq!(builder.region_batch_size, Some(64));
+    }
+
+    #[test]
+    fn test_structure_builder_per_model_sessions_leave_the_global_one_alone() {
+        let global = OrtSessionConfig::default().with_intra_threads(1);
+        let layout = OrtSessionConfig::default().with_intra_threads(7);
+
+        let builder = OARStructureBuilder::new("layout.onnx")
+            .ort_session(global)
+            .layout_ort_session(layout);
+
+        let threads = |config: &Option<OrtSessionConfig>| config.as_ref().map(|c| c.intra_threads);
+        assert_eq!(threads(&builder.ort_session_config), Some(Some(1)));
+        assert_eq!(threads(&builder.layout_ort_session_config), Some(Some(7)));
+        assert!(builder.text_detection_ort_session_config.is_none());
+        assert!(builder.text_recognition_ort_session_config.is_none());
+        assert!(builder.table_ort_session_config.is_none());
+        assert!(builder.formula_ort_session_config.is_none());
+
+        let builder = builder
+            .text_detection_ort_session(OrtSessionConfig::default().with_intra_threads(2))
+            .text_recognition_ort_session(OrtSessionConfig::default().with_intra_threads(3))
+            .table_ort_session(OrtSessionConfig::default().with_intra_threads(4));
+        assert_eq!(
+            threads(&builder.text_detection_ort_session_config),
+            Some(Some(2))
+        );
+        assert_eq!(
+            threads(&builder.text_recognition_ort_session_config),
+            Some(Some(3))
+        );
+        assert_eq!(threads(&builder.table_ort_session_config), Some(Some(4)));
+        assert_eq!(threads(&builder.ort_session_config), Some(Some(1)));
     }
 
     #[test]
