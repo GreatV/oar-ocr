@@ -79,6 +79,7 @@ pub struct OrtCoreMLConfig {
 }
 
 pub(crate) const COREML_CONFIG_ENTRY: &str = "oar.internal.coreml_config";
+pub(crate) const ERROR_ON_EP_FAILURE_ENTRY: &str = "oar.internal.error_on_ep_failure";
 
 /// Execution providers for ONNX Runtime.
 ///
@@ -271,6 +272,24 @@ impl OrtSessionConfig {
             .transpose()
     }
 
+    /// Makes session creation fail when an explicitly requested execution
+    /// provider other than CPU cannot be registered.
+    ///
+    /// By default ONNX Runtime logs the registration error and carries on with
+    /// the next provider in the list (ultimately CPU), so a misconfigured
+    /// accelerator goes unnoticed. Enable this when the caller has its own
+    /// fallback and needs to know the accelerator is not in use.
+    pub fn with_error_on_ep_failure(self, enable: bool) -> Self {
+        self.add_config_entry(ERROR_ON_EP_FAILURE_ENTRY, enable.to_string())
+    }
+
+    pub(crate) fn error_on_ep_failure(&self) -> bool {
+        self.session_config_entries
+            .as_ref()
+            .and_then(|entries| entries.get(ERROR_ON_EP_FAILURE_ENTRY))
+            .is_some_and(|value| value == "true")
+    }
+
     /// Effective intra-op thread count, defaulting to available parallelism.
     pub fn get_intra_threads(&self) -> usize {
         self.intra_threads.unwrap_or_else(|| {
@@ -414,5 +433,25 @@ mod tests {
         };
         let config = OrtSessionConfig::new().with_coreml_config(expected.clone());
         assert_eq!(config.coreml_config().unwrap(), Some(expected));
+    }
+
+    #[test]
+    fn error_on_ep_failure_is_opt_in() {
+        assert!(!OrtSessionConfig::new().error_on_ep_failure());
+        assert!(
+            !OrtSessionConfig::new()
+                .with_error_on_ep_failure(false)
+                .error_on_ep_failure()
+        );
+
+        let coreml = OrtCoreMLConfig {
+            static_input_shapes: Some(true),
+            ..Default::default()
+        };
+        let config = OrtSessionConfig::new()
+            .with_coreml_config(coreml.clone())
+            .with_error_on_ep_failure(true);
+        assert!(config.error_on_ep_failure());
+        assert_eq!(config.coreml_config().unwrap(), Some(coreml));
     }
 }
