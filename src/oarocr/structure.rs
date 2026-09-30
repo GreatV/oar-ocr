@@ -1484,6 +1484,44 @@ struct PreparedPage {
     precomputed_text_regions: Option<Vec<crate::oarocr::TextRegion>>,
 }
 
+/// Applies the per-block re-recognition of an OCR region that spans several layout
+/// blocks. The first crop whose text survives recognition takes over the original
+/// region and the rest are appended. Tying the takeover to the first *block's* crop
+/// instead leaves the full-width original in place whenever that crop comes back
+/// empty (e.g. dropped by `score_threshold`), and the original line is then
+/// stitched into every block it touches, next to the appended crops.
+fn apply_split_recognition(
+    region: &mut crate::oarocr::TextRegion,
+    crops: impl IntoIterator<Item = (oar_ocr_core::processors::BoundingBox, (String, f32))>,
+    appended: &mut Vec<crate::oarocr::TextRegion>,
+) {
+    let mut replaced = false;
+    for (crop_box, (text, score)) in crops {
+        if text.is_empty() {
+            continue;
+        }
+        if !replaced {
+            region.bounding_box = crop_box.clone();
+            region.dt_poly = Some(crop_box.clone());
+            region.rec_poly = Some(crop_box);
+            region.text = Some(Arc::from(text));
+            region.confidence = Some(score);
+            replaced = true;
+        } else {
+            appended.push(crate::oarocr::TextRegion {
+                bounding_box: crop_box.clone(),
+                dt_poly: Some(crop_box.clone()),
+                rec_poly: Some(crop_box),
+                text: Some(Arc::from(text)),
+                confidence: Some(score),
+                orientation_angle: None,
+                word_boxes: None,
+                label: None,
+            });
+        }
+    }
+}
+
 impl OARStructure {
     fn finish_layout_elements(layout_elements: &mut Vec<crate::domain::structure::LayoutElement>) {
         if layout_elements.len() > 1 {
@@ -1609,9 +1647,9 @@ impl OARStructure {
             let ocr_box = text_regions[ocr_idx].bounding_box.clone();
 
             let mut crops: Vec<image::RgbImage> = Vec::new();
-            let mut crop_boxes: Vec<(BoundingBox, bool)> = Vec::new(); // (bbox, is_first)
+            let mut crop_boxes: Vec<BoundingBox> = Vec::new();
 
-            for (j, layout_idx) in layout_ids.iter().enumerate() {
+            for layout_idx in layout_ids.iter() {
                 let layout_box = &layout_elements[*layout_idx].bbox;
                 let Some(crop_box) = aabb_intersection(&ocr_box, layout_box) else {
                     continue;
@@ -1629,7 +1667,7 @@ impl OARStructure {
 
                 if let Ok(crop_img) = BBoxCrop::crop_bounding_box(page_image, &crop_box) {
                     crops.push(crop_img);
-                    crop_boxes.push((crop_box, j == 0));
+                    crop_boxes.push(crop_box);
                 }
             }
             multi_layout_crop_count += crop_boxes.len();
@@ -1651,32 +1689,13 @@ impl OARStructure {
                 rec_scores.extend(rec_result.scores);
             }
 
-            for ((crop_box, is_first), (text, score)) in crop_boxes
-                .into_iter()
-                .zip(rec_texts.into_iter().zip(rec_scores))
-            {
-                if text.is_empty() {
-                    continue;
-                }
-                if is_first {
-                    text_regions[ocr_idx].bounding_box = crop_box.clone();
-                    text_regions[ocr_idx].dt_poly = Some(crop_box.clone());
-                    text_regions[ocr_idx].rec_poly = Some(crop_box.clone());
-                    text_regions[ocr_idx].text = Some(Arc::from(text));
-                    text_regions[ocr_idx].confidence = Some(score);
-                } else {
-                    appended_regions.push(crate::oarocr::TextRegion {
-                        bounding_box: crop_box.clone(),
-                        dt_poly: Some(crop_box.clone()),
-                        rec_poly: Some(crop_box),
-                        text: Some(Arc::from(text)),
-                        confidence: Some(score),
-                        orientation_angle: None,
-                        word_boxes: None,
-                        label: None,
-                    });
-                }
-            }
+            apply_split_recognition(
+                &mut text_regions[ocr_idx],
+                crop_boxes
+                    .into_iter()
+                    .zip(rec_texts.into_iter().zip(rec_scores)),
+                &mut appended_regions,
+            );
         }
 
         if !appended_regions.is_empty() {
@@ -3634,6 +3653,62 @@ mod tests {
         );
         assert!(builder.table_classification_model.is_none());
         assert!(builder.formula_recognition_model.is_none());
+    }
+
+    use oar_ocr_core::processors::BoundingBox;
+
+    fn split_region() -> crate::oarocr::TextRegion {
+        crate::oarocr::TextRegion::with_recognition(
+            BoundingBox::from_coords(0.0, 0.0, 200.0, 20.0),
+            Some(Arc::from("title body")),
+            Some(0.9),
+        )
+    }
+
+    fn crops(texts: [&str; 2]) -> Vec<(BoundingBox, (String, f32))> {
+        vec![
+            (
+                BoundingBox::from_coords(0.0, 0.0, 60.0, 20.0),
+                (texts[0].to_string(), 0.9),
+            ),
+            (
+                BoundingBox::from_coords(60.0, 0.0, 200.0, 20.0),
+                (texts[1].to_string(), 0.9),
+            ),
+        ]
+    }
+
+    #[test]
+    fn test_split_recognition_keeps_the_first_block_first() {
+        let mut region = split_region();
+        let mut appended = Vec::new();
+        apply_split_recognition(&mut region, crops(["title", "body"]), &mut appended);
+        assert_eq!(region.text.as_deref(), Some("title"));
+        assert_eq!(region.bounding_box.x_max(), 60.0);
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0].text.as_deref(), Some("body"));
+    }
+
+    #[test]
+    fn test_split_recognition_replaces_with_the_first_surviving_crop() {
+        // The first block's crop was filtered out: the original full-width line must
+        // not survive next to the body crop, or it is stitched into both blocks.
+        let mut region = split_region();
+        let mut appended = Vec::new();
+        apply_split_recognition(&mut region, crops(["", "body"]), &mut appended);
+        assert_eq!(region.text.as_deref(), Some("body"));
+        assert_eq!(region.bounding_box.x_min(), 60.0);
+        assert!(appended.is_empty());
+    }
+
+    #[test]
+    fn test_split_recognition_leaves_the_region_when_every_crop_is_empty() {
+        let mut region = split_region();
+        let mut appended = Vec::new();
+        apply_split_recognition(&mut region, crops(["", ""]), &mut appended);
+        assert_eq!(region.text.as_deref(), Some("title body"));
+        assert_eq!(region.bounding_box.x_max(), 200.0);
+        assert!(appended.is_empty());
     }
 
     #[test]
