@@ -199,6 +199,42 @@ pub struct OARStructureBuilder {
     region_batch_size: Option<usize>,
 }
 
+/// Resolves a `layout_model_name` preset to its layout model configuration.
+///
+/// Presets are matched case- and separator-insensitively so the documented
+/// forms (e.g. `PicoDet-L_layout_17cls`, `RT-DETR-H_layout_17cls`,
+/// `PP-DocLayout_plus-L`) resolve correctly. Mirrors the normalization used by
+/// `region_model_name`. An unknown name logs a warning and falls back to
+/// `PP-DocLayout_plus-L`.
+fn layout_model_config_from_name(name: &str) -> oar_ocr_core::domain::adapters::LayoutModelConfig {
+    use oar_ocr_core::domain::adapters::LayoutModelConfig;
+    match name.to_lowercase().replace('-', "_").as_str() {
+        "picodet_layout_1x" => LayoutModelConfig::picodet_layout_1x(),
+        "picodet_layout_1x_table" => LayoutModelConfig::picodet_layout_1x_table(),
+        "picodet_s_layout_3cls" => LayoutModelConfig::picodet_s_layout_3cls(),
+        "picodet_l_layout_3cls" => LayoutModelConfig::picodet_l_layout_3cls(),
+        "picodet_s_layout_17cls" => LayoutModelConfig::picodet_s_layout_17cls(),
+        "picodet_l_layout_17cls" => LayoutModelConfig::picodet_l_layout_17cls(),
+        "rt_detr_h_layout_3cls" => LayoutModelConfig::rtdetr_h_layout_3cls(),
+        "rt_detr_h_layout_17cls" => LayoutModelConfig::rtdetr_h_layout_17cls(),
+        "pp_docblocklayout" => LayoutModelConfig::pp_docblocklayout(),
+        "pp_doclayout_s" => LayoutModelConfig::pp_doclayout_s(),
+        "pp_doclayout_m" => LayoutModelConfig::pp_doclayout_m(),
+        "pp_doclayout_l" => LayoutModelConfig::pp_doclayout_l(),
+        "pp_doclayout_plus_l" => LayoutModelConfig::pp_doclayout_plus_l(),
+        "pp_doclayoutv2" | "pp_doclayout_v2" => LayoutModelConfig::pp_doclayoutv2(),
+        "pp_doclayoutv3" | "pp_doclayout_v3" => LayoutModelConfig::pp_doclayoutv3(),
+        _ => {
+            tracing::warn!(
+                requested = %name,
+                "Unknown --layout-model-name preset; falling back to PP-DocLayout_plus-L. \
+                 This may apply the wrong class labels/preprocessing for your model."
+            );
+            LayoutModelConfig::pp_doclayout_plus_l()
+        }
+    }
+}
+
 impl OARStructureBuilder {
     const MAX_BATCH_SIZE: usize = 4096;
 
@@ -281,6 +317,7 @@ impl OARStructureBuilder {
     /// `pp_doclayout_plus_l` are equivalent. Supported presets:
     /// - `PP-DocLayout_plus-L` (default)
     /// - `PP-DocLayout-S`, `PP-DocLayout-M`, `PP-DocLayout-L`
+    /// - `PP-DocLayoutV2`, `PP-DocLayoutV3`
     /// - `PP-DocBlockLayout`
     /// - `PicoDet_layout_1x`, `PicoDet_layout_1x_table`
     /// - `PicoDet-S_layout_3cls`, `PicoDet-L_layout_3cls`
@@ -812,34 +849,7 @@ impl OARStructureBuilder {
 
         // Use explicit model name or default
         let layout_model_config = if let Some(name) = &self.layout_model_name {
-            use oar_ocr_core::domain::adapters::LayoutModelConfig;
-            // Match presets case- and separator-insensitively so the documented
-            // forms (e.g. `PicoDet-L_layout_17cls`, `RT-DETR-H_layout_17cls`,
-            // `PP-DocLayout_plus-L`) resolve correctly. Mirrors the normalization
-            // used by `region_model_name` below.
-            match name.to_lowercase().replace('-', "_").as_str() {
-                "picodet_layout_1x" => LayoutModelConfig::picodet_layout_1x(),
-                "picodet_layout_1x_table" => LayoutModelConfig::picodet_layout_1x_table(),
-                "picodet_s_layout_3cls" => LayoutModelConfig::picodet_s_layout_3cls(),
-                "picodet_l_layout_3cls" => LayoutModelConfig::picodet_l_layout_3cls(),
-                "picodet_s_layout_17cls" => LayoutModelConfig::picodet_s_layout_17cls(),
-                "picodet_l_layout_17cls" => LayoutModelConfig::picodet_l_layout_17cls(),
-                "rt_detr_h_layout_3cls" => LayoutModelConfig::rtdetr_h_layout_3cls(),
-                "rt_detr_h_layout_17cls" => LayoutModelConfig::rtdetr_h_layout_17cls(),
-                "pp_docblocklayout" => LayoutModelConfig::pp_docblocklayout(),
-                "pp_doclayout_s" => LayoutModelConfig::pp_doclayout_s(),
-                "pp_doclayout_m" => LayoutModelConfig::pp_doclayout_m(),
-                "pp_doclayout_l" => LayoutModelConfig::pp_doclayout_l(),
-                "pp_doclayout_plus_l" => LayoutModelConfig::pp_doclayout_plus_l(),
-                _ => {
-                    tracing::warn!(
-                        requested = %name,
-                        "Unknown --layout-model-name preset; falling back to PP-DocLayout_plus-L. \
-                         This may apply the wrong class labels/preprocessing for your model."
-                    );
-                    LayoutModelConfig::pp_doclayout_plus_l()
-                }
-            }
+            layout_model_config_from_name(name)
         } else {
             // Default fallback
             crate::domain::adapters::LayoutModelConfig::pp_doclayout_plus_l()
@@ -3537,6 +3547,39 @@ mod tests {
         );
         assert!(builder.table_classification_model.is_none());
         assert!(builder.formula_recognition_model.is_none());
+    }
+
+    #[test]
+    fn test_layout_model_name_resolves_doclayout_v2_and_v3() {
+        use oar_ocr_core::domain::adapters::LayoutModelConfig;
+        for name in ["PP-DocLayoutV2", "pp_doclayoutv2", "PP-DocLayout-V2"] {
+            let config = layout_model_config_from_name(name);
+            assert_eq!(
+                config.model_name,
+                LayoutModelConfig::pp_doclayoutv2().model_name,
+                "{name}"
+            );
+            assert_eq!(config.num_classes, 25, "{name}");
+            assert!(config.class_labels.values().any(|label| label == "seal"));
+        }
+        let v3 = layout_model_config_from_name("PP-DocLayoutV3");
+        assert_eq!(
+            v3.model_name,
+            LayoutModelConfig::pp_doclayoutv3().model_name
+        );
+        assert_eq!(v3.num_classes, 25);
+    }
+
+    #[test]
+    fn test_layout_model_name_keeps_existing_presets_and_fallback() {
+        use oar_ocr_core::domain::adapters::LayoutModelConfig;
+        let m = layout_model_config_from_name("PP-DocLayout-M");
+        assert_eq!(m.model_name, LayoutModelConfig::pp_doclayout_m().model_name);
+        let fallback = layout_model_config_from_name("not-a-preset");
+        assert_eq!(
+            fallback.model_name,
+            LayoutModelConfig::pp_doclayout_plus_l().model_name
+        );
     }
 
     #[test]
