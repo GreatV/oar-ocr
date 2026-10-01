@@ -8,21 +8,21 @@ fn default_text_hidden_act() -> String {
 }
 
 /// `rope_scaling` block. Only `mrope_section` is consumed — the `type` /
-/// `rope_type` keys (NaviDC-OCR ships both, value `"default"`) need no
+/// `rope_type` keys (TeleOCR ships both, value `"default"`) need no
 /// handling, and undeclared keys are ignored by serde by default.
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct NaviDcRopeScaling {
+pub struct TeleOcrRopeScaling {
     #[serde(default)]
     pub mrope_section: Vec<usize>,
 }
 
 /// Subset of the nested `text_config` block emitted by newer transformers
-/// (>= 4.52) checkpoints such as NaviDC-OCR. The root config carries nearly
+/// (>= 4.52) checkpoints such as TeleOCR. The root config carries nearly
 /// all text-tower fields; only `pad_token_id`, `tie_word_embeddings`,
 /// `layer_types`, and a redundant `head_dim`/`eos_token_id` live here. Each
-/// accessor on [`NaviDcConfig`] resolves the effective value from both spots.
+/// accessor on [`TeleOcrConfig`] resolves the effective value from both spots.
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct NaviDcTextConfig {
+pub struct TeleOcrTextConfig {
     #[serde(default)]
     pub head_dim: Option<usize>,
     #[serde(default)]
@@ -35,11 +35,11 @@ pub struct NaviDcTextConfig {
     pub layer_types: Vec<String>,
 }
 
-pub use crate::backbones::qwen25_vl::NaviDcVisionConfig;
+pub use crate::backbones::qwen25_vl::TeleOcrVisionConfig;
 
-/// Root `config.json` for NaviDC-OCR (`Qwen2_5_VLForConditionalGeneration`).
+/// Root `config.json` for TeleOCR (`Qwen2_5_VLForConditionalGeneration`).
 #[derive(Debug, Clone, Deserialize)]
-pub struct NaviDcConfig {
+pub struct TeleOcrConfig {
     pub vocab_size: usize,
     pub hidden_size: usize,
     pub intermediate_size: usize,
@@ -72,19 +72,19 @@ pub struct NaviDcConfig {
     #[serde(default)]
     pub video_token_id: u32,
     #[serde(default)]
-    pub rope_scaling: NaviDcRopeScaling,
-    pub vision_config: NaviDcVisionConfig,
+    pub rope_scaling: TeleOcrRopeScaling,
+    pub vision_config: TeleOcrVisionConfig,
     #[serde(default)]
-    pub text_config: NaviDcTextConfig,
+    pub text_config: TeleOcrTextConfig,
 }
 
-impl NaviDcConfig {
+impl TeleOcrConfig {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
-        crate::utils::load_json_config(path, "NaviDC-OCR", "config.json")
+        crate::utils::load_json_config(path, "TeleOCR", "config.json")
     }
 
     /// Effective attention head dim: the explicit `head_dim` field when set
-    /// (NaviDC-OCR ships 128, larger than `hidden/heads` = 64), falling back
+    /// (TeleOCR ships 128, larger than `hidden/heads` = 64), falling back
     /// to `hidden_size / num_attention_heads`.
     pub fn head_dim(&self) -> Result<usize, Error> {
         if let Some(head_dim) = self.head_dim.or(self.text_config.head_dim) {
@@ -93,7 +93,7 @@ impl NaviDcConfig {
         if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
             return Err(Error::Config {
                 message: format!(
-                    "NaviDC-OCR: hidden_size {} not divisible by num_attention_heads {} and no explicit head_dim",
+                    "TeleOCR: hidden_size {} not divisible by num_attention_heads {} and no explicit head_dim",
                     self.hidden_size, self.num_attention_heads
                 ),
             });
@@ -101,12 +101,12 @@ impl NaviDcConfig {
         Ok(self.hidden_size / self.num_attention_heads)
     }
 
-    /// Convert to the shared Qwen2 text-tower configuration. NaviDC-OCR
+    /// Convert to the shared Qwen2 text-tower configuration. TeleOCR
     /// drops the q/k/v projection biases and normalises each head with
     /// `q_norm`/`k_norm` before RoPE.
     pub fn qwen2_vl_text_config(&self) -> Result<Qwen2VlTextConfig, Error> {
         Ok(Qwen2VlTextConfig {
-            model_name: "NaviDC-OCR",
+            model_name: "TeleOCR",
             vocab_size: self.vocab_size,
             hidden_size: self.hidden_size,
             intermediate_size: self.intermediate_size,
@@ -120,18 +120,18 @@ impl NaviDcConfig {
             mrope_section: self.rope_scaling.mrope_section.clone(),
             attention_bias: false,
             qk_head_norm: true,
-            graph_disable_env: "OAR_NAVIDC_DISABLE_CUDA_GRAPH",
+            graph_disable_env: "OAR_TELEOCR_DISABLE_CUDA_GRAPH",
             decode_cache_len: 16_384,
         })
     }
 
     /// Effective `tie_word_embeddings` flag, honouring both the root field
-    /// and the nested `text_config` field (where NaviDC-OCR sets it true).
+    /// and the nested `text_config` field (where TeleOCR sets it true).
     pub fn tie_word_embeddings(&self) -> bool {
         self.tie_word_embeddings || self.text_config.tie_word_embeddings
     }
 
-    /// Effective pad token id; NaviDC-OCR only declares it in `text_config`.
+    /// Effective pad token id; TeleOCR only declares it in `text_config`.
     pub fn effective_pad_token_id(&self) -> Option<u32> {
         self.pad_token_id.or(self.text_config.pad_token_id)
     }
@@ -148,7 +148,7 @@ impl NaviDcConfig {
     pub fn mrope_section(&self) -> Result<&[usize], Error> {
         if self.rope_scaling.mrope_section.is_empty() {
             return Err(Error::Config {
-                message: "NaviDC-OCR: rope_scaling.mrope_section is required".to_string(),
+                message: "TeleOCR: rope_scaling.mrope_section is required".to_string(),
             });
         }
         Ok(&self.rope_scaling.mrope_section)
@@ -161,7 +161,7 @@ impl NaviDcConfig {
         {
             return Err(Error::Config {
                 message: format!(
-                    "NaviDC-OCR: num_attention_heads ({}) must be divisible by num_key_value_heads ({})",
+                    "TeleOCR: num_attention_heads ({}) must be divisible by num_key_value_heads ({})",
                     self.num_attention_heads, self.num_key_value_heads
                 ),
             });
@@ -172,7 +172,7 @@ impl NaviDcConfig {
         if section_sum * 2 != head_dim {
             return Err(Error::Config {
                 message: format!(
-                    "NaviDC-OCR: mrope_section sums to {section_sum}; doubled ({}) must equal head_dim {head_dim}",
+                    "TeleOCR: mrope_section sums to {section_sum}; doubled ({}) must equal head_dim {head_dim}",
                     section_sum * 2
                 ),
             });
@@ -185,7 +185,7 @@ impl NaviDcConfig {
             .any(|layer| layer == "sliding_attention")
         {
             return Err(Error::Config {
-                message: "NaviDC-OCR: sliding_attention layers are not supported".to_string(),
+                message: "TeleOCR: sliding_attention layers are not supported".to_string(),
             });
         }
 
@@ -195,7 +195,7 @@ impl NaviDcConfig {
             if index >= vision.depth {
                 return Err(Error::Config {
                     message: format!(
-                        "NaviDC-OCR: fullatt_block_indexes entry {index} >= vision depth {}",
+                        "TeleOCR: fullatt_block_indexes entry {index} >= vision depth {}",
                         vision.depth
                     ),
                 });
@@ -205,12 +205,12 @@ impl NaviDcConfig {
             .spatial_merge_size
             .checked_mul(vision.patch_size)
             .ok_or_else(|| Error::Config {
-                message: "NaviDC-OCR: vision spatial_merge_size * patch_size overflow".to_string(),
+                message: "TeleOCR: vision spatial_merge_size * patch_size overflow".to_string(),
             })?;
         if window_tokens == 0 || !vision.window_size.is_multiple_of(window_tokens) {
             return Err(Error::Config {
                 message: format!(
-                    "NaviDC-OCR: window_size ({}) must be a multiple of spatial_merge_size * patch_size ({window_tokens})",
+                    "TeleOCR: window_size ({}) must be a multiple of spatial_merge_size * patch_size ({window_tokens})",
                     vision.window_size
                 ),
             });
@@ -224,7 +224,7 @@ pub(crate) fn test_config_json() -> String {
     fixture_json_inner()
 }
 
-/// Minimal config matching the real StarDoc-AI/NaviDC-OCR layout: text
+/// Minimal config matching the real XingChen-AGI/TeleOCR layout: text
 /// fields at the root AND in `text_config`, both `in_chans` spellings, and
 /// both `type`/`rope_type` rope keys.
 #[cfg(test)]
@@ -284,12 +284,12 @@ fn fixture_json_inner() -> String {
 mod tests {
     use super::*;
 
-    fn parse_fixture() -> NaviDcConfig {
+    fn parse_fixture() -> TeleOcrConfig {
         serde_json::from_str(&test_config_json()).expect("fixture config must parse")
     }
 
     #[test]
-    fn parses_navidc_checkpoint_layout() {
+    fn parses_teleocr_checkpoint_layout() {
         let cfg = parse_fixture();
         assert_eq!(cfg.head_dim().unwrap(), 128);
         assert_eq!(cfg.vocab_size, 151936);

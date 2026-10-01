@@ -1,4 +1,4 @@
-//! Qwen2-family text decoder shared by the MinerU2.5 and NaviDC-OCR towers.
+//! Qwen2-family text decoder shared by the MinerU2.5 and TeleOCR towers.
 //!
 //! Both checkpoints carry the same Qwen2/Qwen2.5 decoder stack (mrope
 //! attention over a TrimmableKvCache); they differ only in knobs expressed
@@ -51,7 +51,7 @@ pub struct Qwen2VlTextConfig {
     pub rope_theta: f64,
     pub max_position_embeddings: usize,
     /// Effective attention head dim, computed by the caller (MinerU2.5
-    /// derives it from `hidden_size / num_attention_heads`; NaviDC-OCR
+    /// derives it from `hidden_size / num_attention_heads`; TeleOCR
     /// prefers its explicit config field).
     pub head_dim: usize,
     pub mrope_section: Vec<usize>,
@@ -212,7 +212,7 @@ impl Qwen2VlAttention {
             });
         }
         let head_dim = cfg.head_dim;
-        // NaviDC-OCR (and Qwen2.5 generally) drops the projection biases;
+        // TeleOCR (and Qwen2.5 generally) drops the projection biases;
         // MinerU2.5 keeps them on q/k/v. `o_proj` never carries one.
         let (q_proj, k_proj, v_proj) = if cfg.attention_bias {
             (
@@ -942,7 +942,7 @@ impl Qwen2VlTextModel {
             layer.set_kv_cache_len(kv_len)?;
         }
         // A borrowed alias is safe because both callers (the MinerU2.5 and
-        // NaviDC-OCR decode loops) consume the logits with
+        // TeleOCR decode loops) consume the logits with
         // `select_next_token` and drop them before the next replay
         // overwrites this buffer.
         Ok(Some(captured.outputs[0].clone()))
@@ -1005,7 +1005,7 @@ mod tests {
     use candle_nn::VarBuilder;
 
     /// One knob combination: the MinerU2.5 tuning (bias, no head norm) and
-    /// the NaviDC-OCR tuning (no bias, q_norm/k_norm).
+    /// the TeleOCR tuning (no bias, q_norm/k_norm).
     #[derive(Clone, Copy)]
     struct Tuning {
         name: &'static str,
@@ -1019,8 +1019,8 @@ mod tests {
         qk_head_norm: false,
     };
 
-    const NAVIDC_TUNING: Tuning = Tuning {
-        name: "NaviDC-OCR",
+    const TELEOCR_TUNING: Tuning = Tuning {
+        name: "TeleOCR",
         attention_bias: false,
         qk_head_norm: true,
     };
@@ -1134,7 +1134,7 @@ mod tests {
     #[test]
     fn knobs_gate_loaded_weight_names_and_forward_runs() {
         let device = Device::Cpu;
-        for tuning in [MINERU_TUNING, NAVIDC_TUNING] {
+        for tuning in [MINERU_TUNING, TELEOCR_TUNING] {
             let cfg = unit_config(tuning);
             let tensors = unit_var_map(&cfg, tuning.attention_bias, tuning.qk_head_norm);
             let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
@@ -1151,7 +1151,7 @@ mod tests {
         }
 
         // The MinerU2.5 tuning (bias) must reject a checkpoint whose q/k/v
-        // biases are missing, and the NaviDC-OCR tuning (qk_head_norm) one
+        // biases are missing, and the TeleOCR tuning (qk_head_norm) one
         // whose q_norm/k_norm are missing; the error names the exact
         // weight that failed to load, so the cases cannot pass by failing
         // somewhere earlier.
@@ -1168,7 +1168,7 @@ mod tests {
             "bias-negative case failed with unexpected error: {chain}"
         );
 
-        let qk_cfg = unit_config(NAVIDC_TUNING);
+        let qk_cfg = unit_config(TELEOCR_TUNING);
         let tensors = unit_var_map(&qk_cfg, false, false);
         let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
         let err = match Qwen2VlTextModel::load(&qk_cfg, vb) {
@@ -1188,7 +1188,7 @@ mod tests {
     /// short prompt again, and a second instance captures while the first
     /// graph is alive. Every graphed run must match plain eager decoding.
     /// Skips without a CUDA device; opt in with
-    /// `OAR_MINERU_GPU_SELFTEST=1` / `OAR_NAVIDC_GPU_SELFTEST=1`.
+    /// `OAR_MINERU_GPU_SELFTEST=1` / `OAR_TELEOCR_GPU_SELFTEST=1`.
     #[test]
     fn cuda_decode_graph_recaptures_and_matches_eager_for_both_tunings() {
         #[cfg(feature = "cuda")]
@@ -1196,14 +1196,14 @@ mod tests {
             use candle_nn::Linear;
             let tuning = if std::env::var_os("OAR_MINERU_GPU_SELFTEST").is_some() {
                 Some(MINERU_TUNING)
-            } else if std::env::var_os("OAR_NAVIDC_GPU_SELFTEST").is_some() {
-                Some(NAVIDC_TUNING)
+            } else if std::env::var_os("OAR_TELEOCR_GPU_SELFTEST").is_some() {
+                Some(TELEOCR_TUNING)
             } else {
                 None
             };
             let Some(tuning) = tuning else {
                 eprintln!(
-                    "skipping: neither OAR_MINERU_GPU_SELFTEST nor OAR_NAVIDC_GPU_SELFTEST is set"
+                    "skipping: neither OAR_MINERU_GPU_SELFTEST nor OAR_TELEOCR_GPU_SELFTEST is set"
                 );
                 return;
             };
@@ -1260,7 +1260,7 @@ mod tests {
         eprintln!("skipping: built without the cuda feature");
     }
 
-    /// Text-tower shape mirroring the NaviDC-OCR production config (head
+    /// Text-tower shape mirroring the TeleOCR production config (head
     /// dim 128, mrope 16/24/24, four layers) at reduced width.
     #[cfg(feature = "cuda")]
     fn gpu_selftest_config(tuning: Tuning) -> Qwen2VlTextConfig {

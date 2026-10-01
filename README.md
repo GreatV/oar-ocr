@@ -132,10 +132,10 @@ The [`oar-ocr-vl`](oar-ocr-vl/README.md) crate provides native [Candle](https://
 | [MinerU2.5-2509](https://huggingface.co/opendatalab/MinerU2.5-2509-1.2B) | 1.2B | Model-native two-step layout detection and content extraction |
 | [MinerU2.5-Pro-2605](https://huggingface.co/opendatalab/MinerU2.5-Pro-2605-1.2B) | 1.2B | Newer MinerU2.5 checkpoint using the same two-step pipeline |
 | [MinerU-Diffusion-V1-0320](https://huggingface.co/opendatalab/MinerU-Diffusion-V1-0320-2.5B) | 2.5B | Block-diffusion OCR with structured two-step extraction or single-pass text recognition |
-| [NaviDC-OCR](https://huggingface.co/StarDoc-AI/NaviDC-OCR) | 1.2B | Text, table (OTSL), formula, code, and layout recognition for digital and camera-captured documents |
+| [TeleOCR](https://huggingface.co/XingChen-AGI/TeleOCR) | 1.2B | Text, table (OTSL), formula, code, and layout recognition for digital and camera-captured documents (formerly NaviDC-OCR) |
 | [jina-ocr-v1](https://huggingface.co/jinaai/jina-ocr-v1) | 3B (570M active) | End-to-end page-to-Markdown parsing (SAM+CLIP DeepEncoder over a DeepSeek-V2 MoE decoder) |
 
-PaddleOCR-VL variants, GLM-OCR, NaviDC-OCR, jina-ocr-v1, and WeVisDoc integrate with the external-layout [`DocParser`](oar-ocr-vl/README.md#document-parsing-pipeline). OvisOCR2, WeVisDoc, HPD-Parsing, and the MonkeyOCRv2 S/B parsing models also provide model-native full-page paths through dedicated examples. HunyuanOCR and the MinerU models also use their model-native parsing pipelines.
+PaddleOCR-VL variants, GLM-OCR, TeleOCR, jina-ocr-v1, and WeVisDoc integrate with the external-layout [`DocParser`](oar-ocr-vl/README.md#document-parsing-pipeline). OvisOCR2, WeVisDoc, HPD-Parsing, and the MonkeyOCRv2 S/B parsing models also provide model-native full-page paths through dedicated examples. HunyuanOCR and the MinerU models also use their model-native parsing pipelines.
 
 See the [`oar-ocr-vl` guide](oar-ocr-vl/README.md) for setup and [`oar-ocr-vl/examples`](oar-ocr-vl/examples) for runnable examples.
 

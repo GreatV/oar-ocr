@@ -8,10 +8,10 @@ const MODEL_MODULES: &[&str] = &[
     "mineru",
     "mineru_diffusion",
     "monkeyocrv2",
-    "navidc_ocr",
     "ovisocr2",
     "paddleocr_vl",
     "pp_doclayout",
+    "teleocr",
 ];
 
 fn collect_rust_sources(dir: &Path, sources: &mut Vec<std::path::PathBuf>) {

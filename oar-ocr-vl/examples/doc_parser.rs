@@ -38,10 +38,10 @@
 //!     --layout-dir PaddlePaddle/PP-DocLayoutV3_safetensors \
 //!     document.jpg
 //!
-//! # Using NaviDC-OCR model
+//! # Using TeleOCR model
 //! cargo run -p oar-ocr-vl --example doc_parser -- \
-//!     --model-name navidc \
-//!     --model-dir StarDoc-AI/NaviDC-OCR \
+//!     --model-name teleocr \
+//!     --model-dir XingChen-AGI/TeleOCR \
 //!     --layout-dir PaddlePaddle/PP-DocLayoutV3_safetensors \
 //!     document.jpg
 //!
@@ -87,9 +87,9 @@ enum ModelName {
     /// GLM-OCR: OCR expert VLM (GLM-V)
     #[value(name = "glmocr")]
     GlmOcr,
-    /// NaviDC-OCR: document parsing VLM (Qwen2.5-VL backbone)
-    #[value(name = "navidc")]
-    NaviDc,
+    /// TeleOCR: document parsing VLM (Qwen2.5-VL backbone)
+    #[value(name = "teleocr")]
+    TeleOcr,
     /// jina-ocr-v1: end-to-end page-to-Markdown parser (SAM+CLIP over a
     /// DeepSeek-V2 MoE decoder)
     #[value(name = "jina-ocr")]
@@ -103,7 +103,7 @@ enum ModelName {
 #[derive(Parser)]
 #[command(name = "doc_parser")]
 #[command(
-    about = "Unified external-layout DocParser - supports PaddleOCR-VL, PaddleOCR-VL-1.5/1.6, GLM-OCR, NaviDC-OCR, jina-ocr-v1, and WeVisDoc"
+    about = "Unified external-layout DocParser - supports PaddleOCR-VL, PaddleOCR-VL-1.5/1.6, GLM-OCR, TeleOCR, jina-ocr-v1, and WeVisDoc"
 )]
 struct Args {
     /// Recognition model to use
@@ -146,7 +146,7 @@ struct Args {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use oar_ocr_vl::{GlmOcr, JinaOcr, NaviDcOcr, PaddleOcrVl, WeVisDoc};
+    use oar_ocr_vl::{GlmOcr, JinaOcr, PaddleOcrVl, TeleOcr, WeVisDoc};
 
     utils::init_tracing();
     let args = Args::parse();
@@ -222,12 +222,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with_region_batch_size(args.region_batch_size);
             process_images(&parser, &layout, &existing_images, &args)?;
         }
-        ModelName::NaviDc => {
-            info!("Loading NaviDC-OCR model...");
+        ModelName::TeleOcr => {
+            info!("Loading TeleOCR model...");
             let load_start = Instant::now();
-            let model = NaviDcOcr::from_dir(&args.model_dir, device)?;
+            let model = TeleOcr::from_dir(&args.model_dir, device)?;
             info!(
-                "NaviDC-OCR loaded in {:.2}ms",
+                "TeleOCR loaded in {:.2}ms",
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
 

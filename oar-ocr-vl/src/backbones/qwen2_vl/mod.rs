@@ -2,7 +2,7 @@
 //!
 //! [`vision`] holds the vision tower (used by MinerU2.5 and
 //! MinerU-Diffusion); [`text`] holds the Qwen2 text decoder shared by
-//! MinerU2.5 and NaviDC-OCR, parameterised by [`Qwen2VlTextConfig`].
+//! MinerU2.5 and TeleOCR, parameterised by [`Qwen2VlTextConfig`].
 
 mod text;
 mod vision;
