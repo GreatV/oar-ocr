@@ -1,6 +1,6 @@
-//! NaviDC-OCR Document Recognition Example (Candle-based)
+//! TeleOCR Document Recognition Example (Candle-based)
 //!
-//! Runs the ~1.2B StarDoc-AI NaviDC-OCR checkpoint on images with the
+//! Runs the ~1.2B TeleOCR checkpoint on images with the
 //! official per-task prompts: text, table (OTSL), formula (LaTeX), code,
 //! layout, distorted layout, and scientific-figure table extraction. The
 //! bundled `assets/` images in the model directory make handy inputs.
@@ -8,17 +8,17 @@
 //! # Usage
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --example navidc_ocr -- [OPTIONS] <IMAGES>...
+//! cargo run -p oar-ocr-vl --example teleocr -- [OPTIONS] <IMAGES>...
 //! ```
 //!
 //! # Example
 //!
 //! ```bash
-//! cargo run -p oar-ocr-vl --features cuda --example navidc_ocr -- \
-//!     --model-dir StarDoc-AI/NaviDC-OCR \
+//! cargo run -p oar-ocr-vl --features cuda --example teleocr -- \
+//!     --model-dir XingChen-AGI/TeleOCR \
 //!     --device cuda:0 \
 //!     --task table \
-//!     StarDoc-AI/NaviDC-OCR/assets/table.png
+//!     XingChen-AGI/TeleOCR/assets/table.png
 //! ```
 
 mod utils;
@@ -32,7 +32,7 @@ use tracing::{error, info};
 use oar_ocr_vl::utils::convert_otsl_to_html;
 use oar_ocr_vl::utils::image::load_image;
 use oar_ocr_vl::utils::parse_device;
-use oar_ocr_vl::{NaviDcOcr, NaviDcTask};
+use oar_ocr_vl::{TeleOcr, TeleOcrTask};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum Task {
@@ -53,25 +53,25 @@ enum Task {
 }
 
 impl Task {
-    fn to_model(self) -> NaviDcTask {
+    fn to_model(self) -> TeleOcrTask {
         match self {
-            Self::Text => NaviDcTask::Text,
-            Self::Table => NaviDcTask::Table,
-            Self::Formula => NaviDcTask::Formula,
-            Self::Code => NaviDcTask::Code,
-            Self::Layout => NaviDcTask::Layout,
-            Self::LayoutDistorted => NaviDcTask::LayoutDistorted,
-            Self::ScientificFigure => NaviDcTask::ScientificFigure,
+            Self::Text => TeleOcrTask::Text,
+            Self::Table => TeleOcrTask::Table,
+            Self::Formula => TeleOcrTask::Formula,
+            Self::Code => TeleOcrTask::Code,
+            Self::Layout => TeleOcrTask::Layout,
+            Self::LayoutDistorted => TeleOcrTask::LayoutDistorted,
+            Self::ScientificFigure => TeleOcrTask::ScientificFigure,
         }
     }
 }
 
 #[derive(Parser)]
-#[command(name = "navidc_ocr")]
-#[command(about = "NaviDC-OCR document recognition - text, table, formula, code, and layout tasks")]
+#[command(name = "teleocr")]
+#[command(about = "TeleOCR document recognition - text, table, formula, code, and layout tasks")]
 struct Args {
-    /// Path to a NaviDC-OCR model directory
-    #[arg(short, long, default_value = "StarDoc-AI/NaviDC-OCR")]
+    /// Path to a TeleOCR model directory
+    #[arg(short, long, default_value = "XingChen-AGI/TeleOCR")]
     model_dir: PathBuf,
 
     /// Paths to input images to process
@@ -133,12 +133,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = parse_device(&args.device)?;
     info!("Using device: {:?}", device);
 
-    info!(
-        "Loading NaviDC-OCR model from: {}",
-        args.model_dir.display()
-    );
+    info!("Loading TeleOCR model from: {}", args.model_dir.display());
     let load_start = Instant::now();
-    let model = NaviDcOcr::from_dir(&args.model_dir, device)?;
+    let model = TeleOcr::from_dir(&args.model_dir, device)?;
     info!(
         "Model loaded in {:.2}ms",
         load_start.elapsed().as_secs_f64() * 1000.0

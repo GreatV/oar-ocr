@@ -1,6 +1,6 @@
-//! Region-recognition adapter for NaviDC-OCR.
+//! Region-recognition adapter for TeleOCR.
 
-use super::{NaviDcOcr, NaviDcTask, postprocess_formula};
+use super::{TeleOcr, TeleOcrTask, postprocess_formula};
 use crate::api::error::{BatchResult, Error};
 use crate::api::recognition::{BackendCapabilities, RecognitionBackend, RecognitionTask};
 use crate::render::text::truncate_repetitive_content;
@@ -9,9 +9,9 @@ use image::RgbImage;
 
 fn prompt(task: RecognitionTask) -> &'static str {
     match task {
-        RecognitionTask::Ocr | RecognitionTask::Chart => NaviDcTask::Text.prompt(),
-        RecognitionTask::Table => NaviDcTask::Table.prompt(),
-        RecognitionTask::Formula => NaviDcTask::Formula.prompt(),
+        RecognitionTask::Ocr | RecognitionTask::Chart => TeleOcrTask::Text.prompt(),
+        RecognitionTask::Table => TeleOcrTask::Table.prompt(),
+        RecognitionTask::Formula => TeleOcrTask::Formula.prompt(),
     }
 }
 
@@ -22,7 +22,7 @@ fn postprocess(task: RecognitionTask, raw: &str) -> String {
     }
 }
 
-impl RecognitionBackend for NaviDcOcr {
+impl RecognitionBackend for TeleOcr {
     fn recognize(
         &self,
         image: RgbImage,
@@ -34,7 +34,7 @@ impl RecognitionBackend for NaviDcOcr {
             .generate(&[image], &[prompt(task)], max_tokens)?
             .into_iter()
             .next()
-            .ok_or_else(|| Error::invalid_input("NaviDC-OCR returned no result"))??;
+            .ok_or_else(|| Error::invalid_input("TeleOCR returned no result"))??;
         Ok(postprocess(
             task,
             &truncate_repetitive_content(&output, 10, 10, 10),

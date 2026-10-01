@@ -1,9 +1,10 @@
-//! NaviDC-OCR (Vision-Language) model.
+//! TeleOCR (Vision-Language) model, formerly NaviDC-OCR (renamed upstream
+//! on 2026-09-10; the checkpoints are identical).
 //!
-//! Native Rust inference for the ~1.2B StarDoc-AI NaviDC-OCR checkpoint
+//! Native Rust inference for the ~1.2B TeleOCR checkpoint
 //! (Qwen2.5-VL backbone with a windowed vision tower). Construct with
-//! [`NaviDcOcr::from_dir`] pointing at the model directory (for example
-//! `models/StarDoc-AI/NaviDC-OCR`). Supported tasks (see [`NaviDcTask`]):
+//! [`TeleOcr::from_dir`] pointing at the model directory (for example
+//! `models/XingChen-AGI/TeleOCR`). Supported tasks (see [`TeleOcrTask`]):
 //! - OCR text recognition
 //! - Table recognition (outputs OTSL; convert with
 //!   [`crate::utils::convert_otsl_to_html`])
@@ -13,7 +14,7 @@
 //! - Scientific-figure table extraction (outputs OTSL)
 //!
 //! Layout tasks expect the input resized to 1036×1036 (bicubic), as the
-//! model card's quickstart does; [`NaviDcTask::resize_square`] reports that
+//! model card's quickstart does; [`TeleOcrTask::resize_square`] reports that
 //! expectation.
 
 mod adapter;
@@ -21,12 +22,12 @@ mod config;
 mod model;
 use crate::backbones::qwen25_vl as vision;
 
-pub use config::{NaviDcConfig, NaviDcRopeScaling, NaviDcTextConfig, NaviDcVisionConfig};
-pub use model::NaviDcOcr;
+pub use config::{TeleOcrConfig, TeleOcrRopeScaling, TeleOcrTextConfig, TeleOcrVisionConfig};
+pub use model::TeleOcr;
 
-/// NaviDC-OCR task with the official prompt from the model card's quickstart.
+/// TeleOCR task with the official prompt from the model card's quickstart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NaviDcTask {
+pub enum TeleOcrTask {
     /// Plain text recognition.
     Text,
     /// Table structure recognition; the model emits OTSL.
@@ -36,7 +37,7 @@ pub enum NaviDcTask {
     /// Code snippet parsing.
     Code,
     /// Full-page layout analysis (resize the input to 1036×1036 first, see
-    /// [`NaviDcTask::resize_square`]).
+    /// [`TeleOcrTask::resize_square`]).
     Layout,
     /// Multi-point layout segmentation for distorted/camera-captured pages.
     LayoutDistorted,
@@ -44,7 +45,7 @@ pub enum NaviDcTask {
     ScientificFigure,
 }
 
-impl NaviDcTask {
+impl TeleOcrTask {
     /// Official per-task prompt (verbatim from the model card quickstart).
     /// `LayoutDistorted` keeps its leading `\n`.
     pub fn prompt(self) -> &'static str {
@@ -107,44 +108,44 @@ mod tests {
     #[test]
     fn task_prompts_match_official_quickstart() {
         assert_eq!(
-            NaviDcTask::Text.prompt(),
+            TeleOcrTask::Text.prompt(),
             "Please output the text content from the image."
         );
         assert_eq!(
-            NaviDcTask::Table.prompt(),
+            TeleOcrTask::Table.prompt(),
             "This is the image of a table. Please output the table in OTSL format."
         );
         assert_eq!(
-            NaviDcTask::Formula.prompt(),
+            TeleOcrTask::Formula.prompt(),
             "Please write out the expression of the formula in the image using LaTeX format."
         );
         assert_eq!(
-            NaviDcTask::Code.prompt(),
+            TeleOcrTask::Code.prompt(),
             "The image contains a code snippet, please output the parsing result."
         );
-        assert_eq!(NaviDcTask::Layout.prompt(), "Analyze the image layout.");
+        assert_eq!(TeleOcrTask::Layout.prompt(), "Analyze the image layout.");
         assert_eq!(
-            NaviDcTask::LayoutDistorted.prompt(),
+            TeleOcrTask::LayoutDistorted.prompt(),
             "\nMulti-point Layout Segmentation Analysis."
         );
         assert_eq!(
-            NaviDcTask::ScientificFigure.prompt(),
+            TeleOcrTask::ScientificFigure.prompt(),
             "This is a scientific figure. Please extract the table implied by this figure."
         );
     }
 
     #[test]
     fn layout_tasks_resize_to_1036() {
-        assert_eq!(NaviDcTask::Layout.resize_square(), Some(1036));
-        assert_eq!(NaviDcTask::LayoutDistorted.resize_square(), Some(1036));
-        assert_eq!(NaviDcTask::Text.resize_square(), None);
+        assert_eq!(TeleOcrTask::Layout.resize_square(), Some(1036));
+        assert_eq!(TeleOcrTask::LayoutDistorted.resize_square(), Some(1036));
+        assert_eq!(TeleOcrTask::Text.resize_square(), None);
     }
 
     #[test]
     fn otsl_tasks_are_table_like() {
-        assert!(NaviDcTask::Table.outputs_otsl());
-        assert!(NaviDcTask::ScientificFigure.outputs_otsl());
-        assert!(!NaviDcTask::Text.outputs_otsl());
+        assert!(TeleOcrTask::Table.outputs_otsl());
+        assert!(TeleOcrTask::ScientificFigure.outputs_otsl());
+        assert!(!TeleOcrTask::Text.outputs_otsl());
     }
 
     #[test]

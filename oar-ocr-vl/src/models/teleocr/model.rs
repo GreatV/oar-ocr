@@ -1,13 +1,13 @@
-//! NaviDC-OCR (Vision-Language) model implementation.
+//! TeleOCR (Vision-Language) model implementation.
 //!
-//! NaviDC-OCR is a Qwen2.5-VL checkpoint; generation is greedy with the
+//! TeleOCR is a Qwen2.5-VL checkpoint; generation is greedy with the
 //! checkpoint's `repetition_penalty` (1.05) applied as a logits processor,
 //! matching `generate(do_sample=False)` in the official quickstart. Prompts
 //! use the stock Qwen chat template with the instruction following
 //! `<|vision_end|>` directly (no separator).
 
-use super::config::NaviDcConfig;
-use super::vision::NaviDcVisionModel;
+use super::config::TeleOcrConfig;
+use super::vision::TeleOcrVisionModel;
 use crate::attention::{
     combine_masks, create_causal_mask, create_generation_mask_if_needed, create_left_padding_mask,
 };
@@ -30,14 +30,14 @@ use std::collections::HashSet;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
-pub struct NaviDcOcr {
+pub struct TeleOcr {
     device: Device,
     dtype: DType,
-    cfg: NaviDcConfig,
+    cfg: TeleOcrConfig,
     image_cfg: QwenVlImageProcessorConfig,
     tokenizer: Tokenizer,
     text: Qwen2VlTextModel,
-    vision: NaviDcVisionModel,
+    vision: TeleOcrVisionModel,
     lm_head: Linear,
     image_token_id: u32,
     eos_token_ids: Vec<u32>,
@@ -60,13 +60,13 @@ pub struct NaviDcOcr {
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-enum NaviDcEosTokenId {
+enum TeleOcrEosTokenId {
     Single(u32),
     Multi(Vec<u32>),
 }
 
 #[derive(Debug, Deserialize)]
-struct NaviDcGenerationConfig {
+struct TeleOcrGenerationConfig {
     #[serde(default)]
     do_sample: Option<bool>,
     #[serde(default)]
@@ -80,12 +80,12 @@ struct NaviDcGenerationConfig {
     #[serde(default)]
     no_repeat_ngram_size: Option<usize>,
     #[serde(default)]
-    eos_token_id: Option<NaviDcEosTokenId>,
+    eos_token_id: Option<TeleOcrEosTokenId>,
     #[serde(default)]
     pad_token_id: Option<u32>,
 }
 
-impl NaviDcOcr {
+impl TeleOcr {
     pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         Self::from_dir_with_runtime(model_dir, crate::RuntimeConfig::new(device))
     }
@@ -96,7 +96,7 @@ impl NaviDcOcr {
     ) -> Result<Self, Error> {
         let (device, dtype) = runtime.resolve();
         let model_dir = model_dir.as_ref();
-        let cfg = NaviDcConfig::from_path(model_dir.join("config.json"))?;
+        let cfg = TeleOcrConfig::from_path(model_dir.join("config.json"))?;
         cfg.validate()?;
         let image_cfg =
             QwenVlImageProcessorConfig::from_path(model_dir.join("preprocessor_config.json"))?;
@@ -105,7 +105,7 @@ impl NaviDcOcr {
         if image_cfg.merge_size != cfg.vision_config.spatial_merge_size {
             return Err(Error::Config {
                 message: format!(
-                    "NaviDC-OCR merge_size mismatch: preprocessor {} != vision {}",
+                    "TeleOCR merge_size mismatch: preprocessor {} != vision {}",
                     image_cfg.merge_size, cfg.vision_config.spatial_merge_size
                 ),
             });
@@ -113,7 +113,7 @@ impl NaviDcOcr {
         if image_cfg.patch_size != cfg.vision_config.patch_size {
             return Err(Error::Config {
                 message: format!(
-                    "NaviDC-OCR patch_size mismatch: preprocessor {} != vision {}",
+                    "TeleOCR patch_size mismatch: preprocessor {} != vision {}",
                     image_cfg.patch_size, cfg.vision_config.patch_size
                 ),
             });
@@ -121,7 +121,7 @@ impl NaviDcOcr {
 
         let tokenizer =
             Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| Error::Config {
-                message: format!("failed to load NaviDC-OCR tokenizer.json: {e}"),
+                message: format!("failed to load TeleOCR tokenizer.json: {e}"),
             })?;
 
         let gen_cfg = load_generation_config(model_dir.join("generation_config.json"))?;
@@ -129,7 +129,7 @@ impl NaviDcOcr {
             .as_ref()
             .and_then(|cfg| cfg.repetition_penalty)
             .unwrap_or(1.0);
-        // The official NaviDC-OCR quickstart sets no no_repeat_ngram_size, so
+        // The official TeleOCR quickstart sets no no_repeat_ngram_size, so
         // unlike MinerU2.5 the default here stays disabled.
         let no_repeat_ngram_size = gen_cfg
             .as_ref()
@@ -155,30 +155,30 @@ impl NaviDcOcr {
         {
             return Err(Error::Config {
                 message: format!(
-                    "NaviDC-OCR image_token_id mismatch: tokenizer {tok_image_id} != config {}",
+                    "TeleOCR image_token_id mismatch: tokenizer {tok_image_id} != config {}",
                     cfg.image_token_id
                 ),
             });
         }
 
-        let weight_files = crate::utils::collect_safetensors(model_dir, "NaviDC-OCR")?;
+        let weight_files = crate::utils::collect_safetensors(model_dir, "TeleOCR")?;
         // SAFETY: from_mmaped_safetensors memory-maps the weight files directly;
         // the caller must ensure they are valid and not modified while in use.
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&weight_files, dtype, &device)
-                .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "load safetensors", e))?
+                .map_err(|e| candle_to_ocr_inference("TeleOCR", "load safetensors", e))?
         };
 
         let text = Qwen2VlTextModel::load(&cfg.qwen2_vl_text_config()?, vb.pp("model"))?;
-        let vision = NaviDcVisionModel::load(&cfg.vision_config, vb.pp("visual"))?;
+        let vision = TeleOcrVisionModel::load(&cfg.vision_config, vb.pp("visual"))?;
 
         let image_token_id = cfg.image_token_id;
         let mut eos_token_ids = vec![cfg.effective_eos_token_id()];
         if let Some(gen_cfg) = &gen_cfg {
             if let Some(eos) = &gen_cfg.eos_token_id {
                 match eos {
-                    NaviDcEosTokenId::Single(id) => eos_token_ids.push(*id),
-                    NaviDcEosTokenId::Multi(ids) => eos_token_ids.extend(ids.iter().copied()),
+                    TeleOcrEosTokenId::Single(id) => eos_token_ids.push(*id),
+                    TeleOcrEosTokenId::Multi(ids) => eos_token_ids.extend(ids.iter().copied()),
                 }
             }
             if let Some(pad) = gen_cfg.pad_token_id {
@@ -207,7 +207,7 @@ impl NaviDcOcr {
             Linear::new(text.token_embedding_weight(), None)
         } else {
             linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))
-                .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "load lm_head", e))?
+                .map_err(|e| candle_to_ocr_inference("TeleOCR", "load lm_head", e))?
         };
 
         #[cfg(feature = "cuda")]
@@ -232,7 +232,7 @@ impl NaviDcOcr {
             top_p,
             top_k,
             #[cfg(feature = "cuda")]
-            gpu_greedy_sampling: std::env::var_os("OAR_NAVIDC_DISABLE_GPU_SAMPLING").is_none(),
+            gpu_greedy_sampling: std::env::var_os("OAR_TELEOCR_DISABLE_GPU_SAMPLING").is_none(),
             #[cfg(feature = "cuda")]
             _drain_guard,
         })
@@ -263,7 +263,7 @@ impl NaviDcOcr {
         if images.len() != instructions.len() {
             return Err(Error::InvalidInput {
                 message: format!(
-                    "NaviDC-OCR: images count ({}) != instructions count ({})",
+                    "TeleOCR: images count ({}) != instructions count ({})",
                     images.len(),
                     instructions.len()
                 ),
@@ -291,7 +291,7 @@ impl NaviDcOcr {
         if images.len() != instructions.len() {
             return Err(Error::InvalidInput {
                 message: format!(
-                    "NaviDC-OCR: images count ({}) != instructions count ({})",
+                    "TeleOCR: images count ({}) != instructions count ({})",
                     images.len(),
                     instructions.len()
                 ),
@@ -308,13 +308,8 @@ impl NaviDcOcr {
     ) -> Result<Vec<Vec<u32>>, Error> {
         let batch_size = images.len();
 
-        let image_inputs = preprocess_images(
-            images,
-            &self.image_cfg,
-            &self.device,
-            self.dtype,
-            "NaviDC-OCR",
-        )?;
+        let image_inputs =
+            preprocess_images(images, &self.image_cfg, &self.device, self.dtype, "TeleOCR")?;
         let image_token_counts: Vec<usize> = image_inputs
             .image_grid_thw
             .iter()
@@ -333,7 +328,7 @@ impl NaviDcOcr {
                 .tokenizer
                 .encode(prompt, false)
                 .map_err(|e| Error::InvalidInput {
-                    message: format!("NaviDC-OCR: tokenizer encode failed: {e}"),
+                    message: format!("TeleOCR: tokenizer encode failed: {e}"),
                 })?;
 
             let input_ids =
@@ -347,11 +342,11 @@ impl NaviDcOcr {
         let expected_embeds: usize = image_token_counts.iter().sum();
         let actual_embeds = image_embeds_all
             .dim(0)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "image_embeds dim", e))?;
+            .map_err(|e| candle_to_ocr_inference("TeleOCR", "image_embeds dim", e))?;
         if actual_embeds != expected_embeds {
             return Err(Error::InvalidInput {
                 message: format!(
-                    "NaviDC-OCR: image embeds count mismatch: got {actual_embeds}, expected {expected_embeds}"
+                    "TeleOCR: image embeds count mismatch: got {actual_embeds}, expected {expected_embeds}"
                 ),
             });
         }
@@ -359,7 +354,7 @@ impl NaviDcOcr {
         let seq_lens: Vec<usize> = all_input_ids.iter().map(|ids| ids.len()).collect();
         let Some(&max_seq_len) = seq_lens.iter().max() else {
             return Err(Error::InvalidInput {
-                message: "NaviDC-OCR: empty batch is not supported".to_string(),
+                message: "TeleOCR: empty batch is not supported".to_string(),
             });
         };
 
@@ -376,12 +371,12 @@ impl NaviDcOcr {
 
             let image_embeds = image_embeds_all
                 .narrow(0, embed_offset, image_token_count)
-                .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "narrow image embeds", e))?;
+                .map_err(|e| candle_to_ocr_inference("TeleOCR", "narrow image embeds", e))?;
             embed_offset += image_token_count;
 
             let input_ids_t = Tensor::new(input_ids.clone(), &self.device)
                 .and_then(|t| t.reshape((1, seq_len)))
-                .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "create input_ids", e))?;
+                .map_err(|e| candle_to_ocr_inference("TeleOCR", "create input_ids", e))?;
             let mut inputs_embeds = self.text.embed(&input_ids_t)?;
 
             let first_img_pos = input_ids.iter().position(|&id| id == self.image_token_id);
@@ -390,36 +385,34 @@ impl NaviDcOcr {
                 if image_end > seq_len {
                     return Err(Error::InvalidInput {
                         message: format!(
-                            "NaviDC-OCR: image token span out of range: {image_end} > {seq_len}"
+                            "TeleOCR: image token span out of range: {image_end} > {seq_len}"
                         ),
                     });
                 }
                 let mut parts: Vec<Tensor> = Vec::with_capacity(3);
                 if first_pos > 0 {
                     parts.push(
-                        inputs_embeds.narrow(1, 0, first_pos).map_err(|e| {
-                            candle_to_ocr_inference("NaviDC-OCR", "narrow prefix", e)
-                        })?,
+                        inputs_embeds
+                            .narrow(1, 0, first_pos)
+                            .map_err(|e| candle_to_ocr_inference("TeleOCR", "narrow prefix", e))?,
                     );
                 }
                 parts.push(
                     image_embeds
                         .unsqueeze(0)
-                        .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "unsqueeze img", e))?,
+                        .map_err(|e| candle_to_ocr_inference("TeleOCR", "unsqueeze img", e))?,
                 );
                 if image_end < seq_len {
                     parts.push(
                         inputs_embeds
                             .narrow(1, image_end, seq_len - image_end)
-                            .map_err(|e| {
-                                candle_to_ocr_inference("NaviDC-OCR", "narrow suffix", e)
-                            })?,
+                            .map_err(|e| candle_to_ocr_inference("TeleOCR", "narrow suffix", e))?,
                     );
                 }
 
                 let refs: Vec<&Tensor> = parts.iter().collect();
                 inputs_embeds = Tensor::cat(&refs, 1)
-                    .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "cat embeds", e))?;
+                    .map_err(|e| candle_to_ocr_inference("TeleOCR", "cat embeds", e))?;
             }
 
             if pad_len > 0 {
@@ -428,9 +421,9 @@ impl NaviDcOcr {
                     inputs_embeds.dtype(),
                     &self.device,
                 )
-                .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "create pad", e))?;
+                .map_err(|e| candle_to_ocr_inference("TeleOCR", "create pad", e))?;
                 inputs_embeds = Tensor::cat(&[&pad, &inputs_embeds], 1)
-                    .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "cat pad", e))?;
+                    .map_err(|e| candle_to_ocr_inference("TeleOCR", "cat pad", e))?;
             }
             batch_embeds.push(inputs_embeds);
 
@@ -445,9 +438,9 @@ impl NaviDcOcr {
 
             let pos_ids = if pad_len > 0 {
                 let pad_pos = Tensor::zeros((3, 1, pad_len), DType::I64, &self.device)
-                    .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "create pad pos", e))?;
+                    .map_err(|e| candle_to_ocr_inference("TeleOCR", "create pad pos", e))?;
                 Tensor::cat(&[&pad_pos, &pos_ids], 2)
-                    .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "cat pad pos", e))?
+                    .map_err(|e| candle_to_ocr_inference("TeleOCR", "cat pad pos", e))?
             } else {
                 pos_ids
             };
@@ -456,23 +449,23 @@ impl NaviDcOcr {
 
         let batch_refs: Vec<&Tensor> = batch_embeds.iter().collect();
         let inputs_embeds = Tensor::cat(&batch_refs, 0)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "stack embeds", e))?;
+            .map_err(|e| candle_to_ocr_inference("TeleOCR", "stack embeds", e))?;
 
         let pos_refs: Vec<&Tensor> = batch_position_ids.iter().collect();
         let position_ids = Tensor::cat(&pos_refs, 1)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "stack pos", e))?;
+            .map_err(|e| candle_to_ocr_inference("TeleOCR", "stack pos", e))?;
 
         let mask = if batch_size == 1 {
             None
         } else {
             let causal = create_causal_mask(max_seq_len, max_seq_len, self.dtype, &self.device)
-                .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "create causal", e))?;
+                .map_err(|e| candle_to_ocr_inference("TeleOCR", "create causal", e))?;
             let padding =
                 create_left_padding_mask(&seq_lens, max_seq_len, self.dtype, &self.device)
-                    .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "create padding", e))?;
+                    .map_err(|e| candle_to_ocr_inference("TeleOCR", "create padding", e))?;
             Some(
                 combine_masks(&causal, &padding)
-                    .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "combine masks", e))?,
+                    .map_err(|e| candle_to_ocr_inference("TeleOCR", "combine masks", e))?,
             )
         };
 
@@ -492,17 +485,17 @@ impl NaviDcOcr {
         let last_hidden = hidden
             .i((.., max_seq_len - 1, ..))
             .and_then(|hidden| hidden.contiguous())
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "get last hidden", e))?;
+            .map_err(|e| candle_to_ocr_inference("TeleOCR", "get last hidden", e))?;
         let batched_logits = self
             .lm_head
             .forward(&last_hidden)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "lm_head", e))?;
+            .map_err(|e| candle_to_ocr_inference("TeleOCR", "lm_head", e))?;
         let mut logits_list: Vec<Tensor> = Vec::with_capacity(batch_size);
         for i in 0..batch_size {
             logits_list.push(
                 batched_logits
                     .i(i)
-                    .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "select logits", e))?,
+                    .map_err(|e| candle_to_ocr_inference("TeleOCR", "select logits", e))?,
             );
         }
 
@@ -550,20 +543,20 @@ impl NaviDcOcr {
 
             let tokens = Tensor::new(next_tokens, &self.device)
                 .and_then(|t| t.reshape((batch_size, 1)))
-                .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "create tokens", e))?;
+                .map_err(|e| candle_to_ocr_inference("TeleOCR", "create tokens", e))?;
             let embeds = self.text.embed(&tokens)?;
 
             let pos_data = crate::attention::decode_position_buffer(&positions, 3);
             let pos = Tensor::new(pos_data, &self.device)
                 .and_then(|t| t.reshape((3, batch_size, 1)))
-                .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "create pos", e))?;
+                .map_err(|e| candle_to_ocr_inference("TeleOCR", "create pos", e))?;
 
             kv_len += 1;
             let gen_mask = if batch_size == 1 {
                 None
             } else {
                 create_generation_mask_if_needed(&pad_lens, kv_len, self.dtype, &self.device)
-                    .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "create gen mask", e))?
+                    .map_err(|e| candle_to_ocr_inference("TeleOCR", "create gen mask", e))?
             };
 
             logits_list.clear();
@@ -580,10 +573,10 @@ impl NaviDcOcr {
                     .lm_head
                     .forward(&hs)
                     .and_then(|t| t.squeeze(1))
-                    .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "lm_head step", e))?;
+                    .map_err(|e| candle_to_ocr_inference("TeleOCR", "lm_head step", e))?;
                 for i in 0..batch_size {
                     logits_list.push(batched_logits.i(i).map_err(|e| {
-                        candle_to_ocr_inference("NaviDC-OCR", "select step logits", e)
+                        candle_to_ocr_inference("TeleOCR", "select step logits", e)
                     })?);
                 }
             }
@@ -646,12 +639,10 @@ fn build_prompt(instruction: &str) -> String {
     )
 }
 
-fn load_generation_config(path: impl AsRef<Path>) -> Result<Option<NaviDcGenerationConfig>, Error> {
-    crate::runtime::checkpoint::load_optional_json_config(
-        path,
-        "NaviDC-OCR",
-        "generation_config.json",
-    )
+fn load_generation_config(
+    path: impl AsRef<Path>,
+) -> Result<Option<TeleOcrGenerationConfig>, Error> {
+    crate::runtime::checkpoint::load_optional_json_config(path, "TeleOCR", "generation_config.json")
 }
 
 struct SamplingParams {
@@ -676,7 +667,7 @@ fn select_next_token(
     history: &[u32],
     params: &SamplingParams,
 ) -> Result<u32, Error> {
-    // NaviDC-OCR's generation config sets top_k=1, so decoding is greedy
+    // TeleOCR's generation config sets top_k=1, so decoding is greedy
     // even though do_sample=true; repetition_penalty=1.05 still runs as a
     // logits processor, which keeps this on the CPU path below.
     #[cfg(feature = "cuda")]
@@ -700,26 +691,26 @@ fn select_next_token(
     {
         let not_nan = logits
             .eq(logits)
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "Metal NaN mask", e))?;
+            .map_err(|e| candle_to_ocr_inference("TeleOCR", "Metal NaN mask", e))?;
         let neg_inf = Tensor::new(f32::NEG_INFINITY, logits.device())
             .and_then(|value| value.to_dtype(logits.dtype()))
             .and_then(|value| value.broadcast_as(logits.dims()))
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "Metal NaN replacement", e))?;
+            .map_err(|e| candle_to_ocr_inference("TeleOCR", "Metal NaN replacement", e))?;
         return not_nan
             .where_cond(logits, &neg_inf)
             .and_then(|logits| logits.argmax(candle_core::D::Minus1))
             .and_then(|token| token.to_scalar::<u32>())
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "Metal greedy argmax", e));
+            .map_err(|e| candle_to_ocr_inference("TeleOCR", "Metal greedy argmax", e));
     }
 
     let logits = logits
         .to_dtype(DType::F32)
-        .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "logits cast", e))?
+        .map_err(|e| candle_to_ocr_inference("TeleOCR", "logits cast", e))?
         .to_device(&Device::Cpu)
-        .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "logits to cpu", e))?;
+        .map_err(|e| candle_to_ocr_inference("TeleOCR", "logits to cpu", e))?;
     let mut logits_vec = logits
         .to_vec1::<f32>()
-        .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "logits to vec", e))?;
+        .map_err(|e| candle_to_ocr_inference("TeleOCR", "logits to vec", e))?;
 
     apply_sampling_processors(&mut logits_vec, history, params);
 
@@ -745,29 +736,29 @@ fn select_greedy_token_cuda(
     let logits = logits
         .reshape((1, vocab_size))
         .and_then(|logits| logits.contiguous())
-        .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "reshape GPU logits", e))?;
+        .map_err(|e| candle_to_ocr_inference("TeleOCR", "reshape GPU logits", e))?;
     let banned = no_repeat_ngram_banned_tokens(history, no_repeat_ngram_size);
     if !banned.is_empty() {
         let banned = Tensor::new(banned, logits.device())
-            .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "upload banned token ids", e))?;
-        logits.inplace_op2(&banned, &MaskTokenIds).map_err(|e| {
-            candle_to_ocr_inference("NaviDC-OCR", "apply GPU no-repeat-ngram mask", e)
-        })?;
+            .map_err(|e| candle_to_ocr_inference("TeleOCR", "upload banned token ids", e))?;
+        logits
+            .inplace_op2(&banned, &MaskTokenIds)
+            .map_err(|e| candle_to_ocr_inference("TeleOCR", "apply GPU no-repeat-ngram mask", e))?;
     }
     let tokens = match logits.dtype() {
         DType::BF16 => logits.apply_op1_no_bwd(&ArgmaxFirstBf16),
         DType::F32 => logits.apply_op1_no_bwd(&ArgmaxFirstF32),
         dtype => {
             return Err(Error::Config {
-                message: format!("NaviDC-OCR: unsupported GPU greedy logits dtype {dtype:?}"),
+                message: format!("TeleOCR: unsupported GPU greedy logits dtype {dtype:?}"),
             });
         }
     }
-    .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "stable GPU argmax", e))?;
+    .map_err(|e| candle_to_ocr_inference("TeleOCR", "stable GPU argmax", e))?;
     tokens
         .i(0)
         .and_then(|token| token.to_scalar::<u32>())
-        .map_err(|e| candle_to_ocr_inference("NaviDC-OCR", "copy selected token", e))
+        .map_err(|e| candle_to_ocr_inference("TeleOCR", "copy selected token", e))
 }
 
 fn apply_sampling_processors(logits: &mut [f32], history: &[u32], params: &SamplingParams) {
@@ -947,7 +938,7 @@ fn expand_image_tokens(
             let count = image_token_counts
                 .get(idx)
                 .ok_or_else(|| Error::InvalidInput {
-                    message: "NaviDC-OCR: image token count mismatch".to_string(),
+                    message: "TeleOCR: image token count mismatch".to_string(),
                 })?;
             out.extend(std::iter::repeat_n(image_token_id, *count));
             idx += 1;
@@ -957,7 +948,7 @@ fn expand_image_tokens(
     }
     if idx != image_token_counts.len() {
         return Err(Error::InvalidInput {
-            message: "NaviDC-OCR: image token count mismatch".to_string(),
+            message: "TeleOCR: image token count mismatch".to_string(),
         });
     }
     Ok(out)
@@ -967,7 +958,7 @@ fn expand_image_tokens(
 /// positions advance all three together; image positions hold t fixed and
 /// enumerate the merged grid (see `get_rope_index` in `modeling_naviocr.py`).
 fn get_rope_index(
-    cfg: &NaviDcConfig,
+    cfg: &TeleOcrConfig,
     input_ids: &[u32],
     image_grid_thw: &[(usize, usize, usize)],
     spatial_merge_size: usize,
@@ -982,14 +973,14 @@ fn get_rope_index(
         }
         if input_ids[i] == cfg.vision_start_token_id && input_ids[i + 1] == cfg.video_token_id {
             return Err(Error::InvalidInput {
-                message: "NaviDC-OCR: video inputs are not supported".to_string(),
+                message: "TeleOCR: video inputs are not supported".to_string(),
             });
         }
     }
     if image_count != image_grid_thw.len() {
         return Err(Error::InvalidInput {
             message: format!(
-                "NaviDC-OCR: image count mismatch between prompt ({image_count}) and image_grid_thw ({})",
+                "TeleOCR: image count mismatch between prompt ({image_count}) and image_grid_thw ({})",
                 image_grid_thw.len()
             ),
         });
@@ -1006,7 +997,7 @@ fn get_rope_index(
             .map(|p| st + p)
             .ok_or_else(|| Error::InvalidInput {
                 message: format!(
-                    "NaviDC-OCR: expected image token for image[{image_index}] but none found"
+                    "TeleOCR: expected image token for image[{image_index}] but none found"
                 ),
             })?;
 
@@ -1049,7 +1040,7 @@ fn get_rope_index(
     if positions.len() != input_ids.len() {
         return Err(Error::InvalidInput {
             message: format!(
-                "NaviDC-OCR: rope position ids length mismatch: got {}, expected {}",
+                "TeleOCR: rope position ids length mismatch: got {}, expected {}",
                 positions.len(),
                 input_ids.len()
             ),
@@ -1070,7 +1061,7 @@ fn get_rope_index(
         .map_err(|e| {
             candle_to_ocr_processing(
                 crate::error::ProcessingStage::TensorOperation,
-                "NaviDC-OCR: build position_ids tensor failed",
+                "TeleOCR: build position_ids tensor failed",
                 e,
             )
         })?;
@@ -1110,7 +1101,7 @@ mod tests {
         assert!(expand_image_tokens(&ids, 9, &[1]).is_err());
     }
 
-    fn rope_cfg() -> NaviDcConfig {
+    fn rope_cfg() -> TeleOcrConfig {
         serde_json::from_str(&super::super::config::test_config_json()).unwrap()
     }
 
