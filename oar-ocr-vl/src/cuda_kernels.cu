@@ -4,4 +4,4 @@
 // with their Rust modules.
 #include "runtime/cuda/dynamic_kv.cu"
 
-#include "models/ovisocr2/gated_delta.cu"
+#include "backbones/qwen3_5/gated_delta.cu"

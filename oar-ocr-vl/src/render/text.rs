@@ -319,6 +319,48 @@ pub fn truncate_repetitive_content(
     content.to_string()
 }
 
+/// Clean a truncated repetitive tail using the shared Qwen3.5-models
+/// heuristic (identical constants in the official OvisOCR2 and Xiaomi-OCR-0
+/// post-processing).
+///
+/// Only outputs of at least 8,000 characters are touched: when a period of up
+/// to 200 characters repeats at least 5 times and the repeated run spans at
+/// least 100 characters, the tail collapses to one period plus the
+/// partial-period remainder.
+pub fn clean_truncated_repeats(text: &str) -> String {
+    const MIN_TEXT_LEN: usize = 8_000;
+    const MAX_PERIOD: usize = 200;
+    const MIN_REPEAT_CHARS: usize = 100;
+    const MIN_REPEAT_TIMES: usize = 5;
+
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    if n < MIN_TEXT_LEN {
+        return text.to_string();
+    }
+    for unit_len in 1..=MAX_PERIOD.min(n - 1) {
+        if chars[n - 1] != chars[n - 1 - unit_len] {
+            continue;
+        }
+        let mut match_len = 1usize;
+        let mut index = n - 2;
+        while index >= unit_len && chars[index] == chars[index - unit_len] {
+            match_len += 1;
+            index -= 1;
+        }
+        let total_len = match_len + unit_len;
+        let repeat_times = total_len / unit_len;
+        let tail_len = total_len % unit_len;
+        if repeat_times >= MIN_REPEAT_TIMES && total_len >= MIN_REPEAT_CHARS {
+            let prefix_end = n - total_len + unit_len;
+            let mut output: String = chars[..prefix_end].iter().collect();
+            output.extend(chars[n - tail_len..].iter());
+            return output;
+        }
+    }
+    text.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,5 +438,20 @@ mod tests {
 
         let s3: Vec<char> = "hello".chars().collect();
         assert_eq!(find_shortest_repeating_substring(&s3), None);
+    }
+
+    #[test]
+    fn short_text_is_not_repeat_cleaned() {
+        let text = "abc".repeat(100);
+        assert_eq!(clean_truncated_repeats(&text), text);
+    }
+
+    #[test]
+    fn long_repetitive_tail_is_cleaned() {
+        let prefix = "x".repeat(8_000);
+        let text = format!("{prefix}{}", "abcdef".repeat(30));
+        let cleaned = clean_truncated_repeats(&text);
+        assert!(cleaned.len() < text.len());
+        assert!(cleaned.starts_with(&prefix));
     }
 }

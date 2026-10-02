@@ -21,6 +21,8 @@
 //! - `ovisocr2` - OvisOCR2 end-to-end page-to-Markdown parser (Qwen3.5)
 //! - `wevisdoc` - WeVisDoc end-to-end page-to-Markdown parser (Qwen3-VL
 //!   backbone with DeepStack)
+//! - `xiaomi_ocr` - Xiaomi-OCR-0 end-to-end page-to-Markdown parser
+//!   (Qwen3.5, sharing its text tower with OvisOCR2)
 //! - `doc_parser` - Unified document parsing with pluggable recognition backends
 //! - `pp_doclayout` - Native PP-DocLayoutV2/V3 layout detection and reading
 //!   order
@@ -92,6 +94,8 @@ pub mod teleocr;
 pub mod utils;
 #[path = "models/wevisdoc/mod.rs"]
 pub mod wevisdoc;
+#[path = "models/xiaomi_ocr/mod.rs"]
+pub mod xiaomi_ocr;
 
 // Backwards-compatible shared attention path.
 pub mod attention;
@@ -115,6 +119,7 @@ pub use monkeyocrv2::{MonkeyOcrV2, MonkeyOcrV2ParseOptions, MonkeyOcrV2Task};
 pub use ovisocr2::{OvisOcr2, OvisOcr2ParseOptions};
 pub use teleocr::{TeleOcr, TeleOcrTask};
 pub use wevisdoc::{WeVisDoc, WeVisDocParseOptions};
+pub use xiaomi_ocr::{XiaomiOcr, XiaomiOcrParseOptions};
 
 pub use api::generation::GenerationOptions;
 pub use api::page_parser::PageParser;

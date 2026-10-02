@@ -1,3 +1,4 @@
+use crate::backbones::qwen3_5::text::{Qwen35RopeParameters, Qwen35TextConfig};
 use crate::backbones::qwen3_vl::vision::Qwen3VlVisionConfig;
 use crate::error::Error;
 use candle_nn::Activation;
@@ -9,250 +10,17 @@ pub const OVIS_OCR2_MIN_PIXELS: u32 = 448 * 448;
 /// Maximum image area used by the official OvisOCR2 runtime.
 pub const OVIS_OCR2_MAX_PIXELS: u32 = 2880 * 2880;
 
+// The Qwen3.5 text-decoder checkpoint config is shared with Xiaomi-OCR-0 and
+// lives on the backbone; these aliases keep the historical OvisOCR2 names.
+pub type OvisOcr2RopeParameters = Qwen35RopeParameters;
+pub type OvisOcr2TextConfig = Qwen35TextConfig;
+
 fn default_true() -> bool {
     true
 }
 
 fn default_rescale_factor() -> f32 {
     1.0 / 255.0
-}
-
-fn default_partial_rotary_factor() -> f64 {
-    0.25
-}
-
-fn default_rope_theta() -> f64 {
-    10_000_000.0
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct OvisOcr2RopeParameters {
-    pub rope_type: String,
-    pub mrope_section: Vec<usize>,
-    #[serde(default)]
-    pub mrope_interleaved: bool,
-    #[serde(default = "default_rope_theta")]
-    pub rope_theta: f64,
-    #[serde(default = "default_partial_rotary_factor")]
-    pub partial_rotary_factor: f64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct OvisOcr2TextConfig {
-    pub model_type: String,
-    pub vocab_size: usize,
-    pub hidden_size: usize,
-    pub intermediate_size: usize,
-    pub num_hidden_layers: usize,
-    pub num_attention_heads: usize,
-    pub num_key_value_heads: usize,
-    pub head_dim: usize,
-    pub hidden_act: Activation,
-    pub max_position_embeddings: usize,
-    pub rms_norm_eps: f64,
-    pub rope_parameters: OvisOcr2RopeParameters,
-    pub layer_types: Vec<String>,
-    pub linear_conv_kernel_dim: usize,
-    pub linear_key_head_dim: usize,
-    pub linear_value_head_dim: usize,
-    pub linear_num_key_heads: usize,
-    pub linear_num_value_heads: usize,
-    pub eos_token_id: u32,
-    #[serde(default)]
-    pub attention_bias: bool,
-    #[serde(default)]
-    pub attention_dropout: f32,
-    #[serde(default)]
-    pub attn_output_gate: bool,
-    #[serde(default)]
-    pub initializer_range: f64,
-    #[serde(default)]
-    pub full_attention_interval: usize,
-    #[serde(default)]
-    pub mlp_only_layers: Vec<usize>,
-    #[serde(default)]
-    pub mtp_num_hidden_layers: usize,
-    #[serde(default)]
-    pub mtp_use_dedicated_embeddings: bool,
-    #[serde(default)]
-    pub tie_word_embeddings: bool,
-    #[serde(default)]
-    pub use_cache: bool,
-    #[serde(default)]
-    pub dtype: Option<String>,
-    #[serde(default)]
-    pub mamba_ssm_dtype: Option<String>,
-}
-
-impl OvisOcr2TextConfig {
-    pub fn validate(&self) -> Result<(), Error> {
-        if self.hidden_size == 0
-            || self.intermediate_size == 0
-            || self.vocab_size == 0
-            || self.num_hidden_layers == 0
-            || self.num_attention_heads == 0
-            || self.num_key_value_heads == 0
-            || self.head_dim == 0
-            || self.max_position_embeddings == 0
-        {
-            return Err(Error::Config {
-                message: "OvisOCR2 text dimensions must be non-zero".to_string(),
-            });
-        }
-        if self.model_type != "qwen3_5_text" {
-            return Err(Error::Config {
-                message: format!(
-                    "OvisOCR2 expected text model_type 'qwen3_5_text', got '{}'",
-                    self.model_type
-                ),
-            });
-        }
-        if self.hidden_act != Activation::Silu {
-            return Err(Error::Config {
-                message: format!(
-                    "OvisOCR2 text decoder supports hidden_act 'silu', got {:?}",
-                    self.hidden_act
-                ),
-            });
-        }
-        if self.attention_bias {
-            return Err(Error::Config {
-                message: "OvisOCR2 attention_bias=true is not supported".to_string(),
-            });
-        }
-        if !self.attn_output_gate {
-            return Err(Error::Config {
-                message: "OvisOCR2 requires attn_output_gate=true".to_string(),
-            });
-        }
-        if !self.rms_norm_eps.is_finite() || self.rms_norm_eps <= 0.0 {
-            return Err(Error::Config {
-                message: format!(
-                    "OvisOCR2 rms_norm_eps must be finite and positive, got {}",
-                    self.rms_norm_eps
-                ),
-            });
-        }
-        if self.eos_token_id as usize >= self.vocab_size {
-            return Err(Error::Config {
-                message: format!(
-                    "OvisOCR2 eos_token_id {} is outside vocab_size {}",
-                    self.eos_token_id, self.vocab_size
-                ),
-            });
-        }
-        if !self
-            .num_attention_heads
-            .is_multiple_of(self.num_key_value_heads)
-        {
-            return Err(Error::Config {
-                message: format!(
-                    "OvisOCR2 num_attention_heads ({}) must be divisible by num_key_value_heads ({})",
-                    self.num_attention_heads, self.num_key_value_heads
-                ),
-            });
-        }
-        if self.layer_types.len() != self.num_hidden_layers {
-            return Err(Error::Config {
-                message: format!(
-                    "OvisOCR2 layer_types length ({}) must equal num_hidden_layers ({})",
-                    self.layer_types.len(),
-                    self.num_hidden_layers
-                ),
-            });
-        }
-        if self
-            .layer_types
-            .iter()
-            .any(|kind| kind != "linear_attention" && kind != "full_attention")
-        {
-            return Err(Error::Config {
-                message: "OvisOCR2 layer_types contains an unsupported layer type".to_string(),
-            });
-        }
-        if self.linear_conv_kernel_dim == 0
-            || self.linear_key_head_dim == 0
-            || self.linear_value_head_dim == 0
-            || self.linear_num_key_heads == 0
-            || self.linear_num_value_heads == 0
-        {
-            return Err(Error::Config {
-                message: "OvisOCR2 linear-attention dimensions must be non-zero".to_string(),
-            });
-        }
-        if self.linear_key_head_dim != self.linear_value_head_dim {
-            return Err(Error::Config {
-                message: format!(
-                    "OvisOCR2 requires equal linear key/value head dims, got {}/{}",
-                    self.linear_key_head_dim, self.linear_value_head_dim
-                ),
-            });
-        }
-        if !self
-            .linear_num_value_heads
-            .is_multiple_of(self.linear_num_key_heads)
-        {
-            return Err(Error::Config {
-                message: format!(
-                    "OvisOCR2 linear_num_value_heads ({}) must be divisible by linear_num_key_heads ({})",
-                    self.linear_num_value_heads, self.linear_num_key_heads
-                ),
-            });
-        }
-        if self.rope_parameters.rope_type != "default" {
-            return Err(Error::Config {
-                message: format!(
-                    "OvisOCR2 unsupported rope_type '{}'",
-                    self.rope_parameters.rope_type
-                ),
-            });
-        }
-        if !self.rope_parameters.mrope_interleaved {
-            return Err(Error::Config {
-                message: "OvisOCR2 requires interleaved MRoPE".to_string(),
-            });
-        }
-        if self.rope_parameters.mrope_section.len() != 3
-            || self.rope_parameters.mrope_section.contains(&0)
-        {
-            return Err(Error::Config {
-                message: "OvisOCR2 mrope_section must contain three non-zero entries".to_string(),
-            });
-        }
-        if !self.rope_parameters.rope_theta.is_finite() || self.rope_parameters.rope_theta <= 0.0 {
-            return Err(Error::Config {
-                message: format!(
-                    "OvisOCR2 rope_theta must be finite and positive, got {}",
-                    self.rope_parameters.rope_theta
-                ),
-            });
-        }
-        let partial = self.rope_parameters.partial_rotary_factor;
-        if !partial.is_finite() || !(0.0..=1.0).contains(&partial) || partial == 0.0 {
-            return Err(Error::Config {
-                message: format!("OvisOCR2 partial_rotary_factor must be in (0, 1], got {partial}"),
-            });
-        }
-        let rotary_dim = (self.head_dim as f64 * partial) as usize;
-        let section_sum = self
-            .rope_parameters
-            .mrope_section
-            .iter()
-            .try_fold(0usize, |sum, &value| sum.checked_add(value))
-            .ok_or_else(|| Error::Config {
-                message: "OvisOCR2 mrope_section sum overflow".to_string(),
-            })?;
-        if rotary_dim == 0 || !rotary_dim.is_multiple_of(2) || section_sum != rotary_dim / 2 {
-            return Err(Error::Config {
-                message: format!(
-                    "OvisOCR2 mrope_section {:?} must sum to rotary_dim/2 ({})",
-                    self.rope_parameters.mrope_section,
-                    rotary_dim / 2
-                ),
-            });
-        }
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -402,7 +170,7 @@ impl OvisOcr2Config {
                 ),
             });
         }
-        self.text_config.validate()?;
+        self.text_config.validate_for("OvisOCR2")?;
         self.vision_config.validate()?;
         if !self.tie_word_embeddings() {
             return Err(Error::Config {
