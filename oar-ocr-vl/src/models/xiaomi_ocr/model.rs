@@ -1,37 +1,72 @@
-use super::config::{OvisOcr2Config, OvisOcr2ImageProcessorConfig};
-use super::processing::{
-    OvisOcr2ImageInputs, preprocess_image, validate_processor_vision_compatibility,
-};
-use super::vision::OvisOcr2VisionModel;
-use crate::api::recognition::RecognitionTask;
+use super::config::{XiaomiOcrConfig, XiaomiOcrProcessorConfig};
+use super::processing::{XiaomiOcrImageInputs, preprocess_image};
 use crate::backbones::qwen3_5::text::Qwen35TextModel;
+use crate::backbones::qwen3_vl::Qwen3VlVisionModel;
 use crate::error::Error;
+use crate::render::table::convert_otsl_to_html;
+use crate::render::text::clean_truncated_repeats;
 #[cfg(feature = "cuda")]
 use crate::runtime::cuda::{ArgmaxFirstBf16, ArgmaxFirstF32};
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};
 use image::RgbImage;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
-const MODEL_NAME: &str = "OvisOCR2";
+const MODEL_NAME: &str = "Xiaomi-OCR-0";
 
-/// Official OvisOCR2 full-page document parsing instruction.
-pub const DEFAULT_PROMPT: &str = "\nExtract all readable content from the image in natural human reading order and output the result as a single Markdown document. For charts or images, represent them using an HTML image tag: <img src=\"images/bbox_{left}_{top}_{right}_{bottom}.jpg\" />, where left, top, right, bottom are bounding box coordinates scaled to [0, 1000). Format formulas as LaTeX. Format tables as HTML: <table>...</table>. Transcribe all other text as standard Markdown. Preserve the original text without translation or paraphrasing.";
+/// Env var that forces the decode-graph path off for this model (the shared
+/// `OAR_VL_DISABLE_CUDA_GRAPH` switch applies on top of it).
+const GRAPH_DISABLE_ENV: &str = "OAR_XIAOMI_OCR_DISABLE_CUDA_GRAPH";
 
-/// Upstream generation limit used by the official OvisOCR2 example.
-pub const DEFAULT_MAX_NEW_TOKENS: usize = 16_384;
+/// Official Xiaomi-OCR-0 whole-page document parsing instruction.
+pub const DEFAULT_PROMPT: &str = "Extract all information from the main body of the document image and represent it in markdown format, ignoring headers and footers. Tables should be expressed in OTSL format, formulas in the document should be represented using LATEX format, and the parsing should be organized according to the reading order.";
 
-/// End-to-end OvisOCR2 page parser backed by Qwen3.5-0.8B.
-pub struct OvisOcr2 {
+/// Official text-region instruction.
+pub const TEXT_REGION_PROMPT: &str = "Extract the text in the image.";
+
+/// Official table-region instruction (the output is OTSL; the pipeline's
+/// `table_output_is_otsl` capability converts it to HTML).
+pub const TABLE_REGION_PROMPT: &str = "Parse the table in the image into OTSL.";
+
+/// Official formula-region instruction.
+pub const FORMULA_REGION_PROMPT: &str =
+    "Identify the formula in the image and represent it using LATEX format.";
+
+/// Official key-information-extraction instruction prefix; a JSON schema
+/// follows it (see [`key_information_extraction_prompt`]).
+pub const KIE_PROMPT: &str = "Extract key information in the image";
+
+/// Generation limit used by the official Xiaomi-OCR-0 example.
+pub const DEFAULT_MAX_NEW_TOKENS: usize = 4_096;
+
+/// Blank-line separator between Markdown blocks (the official post-processing
+/// splits on `\n\s*\n` with capture-preserving splits).
+static MARKDOWN_BLOCK_SEP_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\n\s*\n").expect("static regex"));
+
+/// Build the official key-information-extraction prompt: the instruction
+/// followed by the caller's JSON schema.
+///
+/// The model card pairs the fixed instruction with a schema such as
+/// `Please output the key information in JSON format according to the
+/// following schema: {...}`.
+pub fn key_information_extraction_prompt(schema: &str) -> String {
+    format!("{KIE_PROMPT}\n\n{}", schema.trim())
+}
+
+/// End-to-end Xiaomi-OCR-0 page parser backed by Qwen3.5-0.8B.
+pub struct XiaomiOcr {
     device: Device,
     dtype: DType,
-    cfg: OvisOcr2Config,
-    image_cfg: OvisOcr2ImageProcessorConfig,
+    cfg: XiaomiOcrConfig,
+    processor_cfg: XiaomiOcrProcessorConfig,
     tokenizer: Tokenizer,
     text: Qwen35TextModel,
-    vision: OvisOcr2VisionModel,
+    vision: Qwen3VlVisionModel,
     lm_head: Linear,
     stop_token_ids: Vec<u32>,
     image_token_id: u32,
@@ -51,8 +86,8 @@ impl Drop for TextCacheGuard<'_> {
     }
 }
 
-impl OvisOcr2 {
-    /// Load an OvisOCR2 Hugging Face model directory.
+impl XiaomiOcr {
+    /// Load a Xiaomi-OCR-0 Hugging Face model directory.
     pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         Self::from_dir_with_runtime(model_dir, crate::RuntimeConfig::new(device))
     }
@@ -63,13 +98,13 @@ impl OvisOcr2 {
     ) -> Result<Self, Error> {
         let (device, dtype) = runtime.resolve();
         let model_dir = model_dir.as_ref();
-        let cfg = OvisOcr2Config::from_path(model_dir.join("config.json"))?;
-        let image_cfg =
-            OvisOcr2ImageProcessorConfig::from_path(model_dir.join("preprocessor_config.json"))?;
-        validate_processor_vision_compatibility(&image_cfg, &cfg.vision_config)?;
+        let cfg = XiaomiOcrConfig::from_path(model_dir.join("config.json"))?;
+        let processor_cfg =
+            XiaomiOcrProcessorConfig::from_path(model_dir.join("processor_config.json"))?;
+        processor_cfg.validate_vision_compatibility(&cfg.vision_config)?;
         let tokenizer =
             Tokenizer::from_file(model_dir.join("tokenizer.json")).map_err(|e| Error::Config {
-                message: format!("failed to load OvisOCR2 tokenizer.json: {e}"),
+                message: format!("failed to load Xiaomi-OCR-0 tokenizer.json: {e}"),
             })?;
         require_token_id(&tokenizer, "<|image_pad|>", Some(cfg.image_token_id))?;
         require_token_id(
@@ -90,16 +125,25 @@ impl OvisOcr2 {
         let text = Qwen35TextModel::load(
             &cfg.text_config,
             MODEL_NAME,
-            "OAR_OVISOCR2_DISABLE_CUDA_GRAPH",
+            GRAPH_DISABLE_ENV,
             vb.pp("model").pp("language_model"),
         )?;
-        let vision = OvisOcr2VisionModel::load(&cfg.vision_config, vb.pp("model").pp("visual"))?;
-        // OvisOCR2 ties the language-model output projection to token embeddings.
+        let vision = Qwen3VlVisionModel::load(
+            &cfg.vision_config.to_qwen3_vl(),
+            vb.pp("model").pp("visual"),
+        )?;
+        // Xiaomi-OCR-0 ties the language-model output projection to token
+        // embeddings (the checkpoint additionally carries unused MTP weights
+        // that this inference path never reads).
         let lm_head = Linear::new(text.token_embedding_weight(), None);
 
-        // vLLM's OvisOCR2 path stops on both the model-config EOS
-        // (`<|endoftext|>`) and the tokenizer EOS (`<|im_end|>`).
-        let stop_token_ids = build_stop_token_ids(cfg.text_config.eos_token_id, tokenizer_eos);
+        // Stop on both the text tower's EOS (`<|endoftext|>`), the top-level
+        // model-config EOS (`<|im_end|>`), and the tokenizer's EOS token.
+        let stop_token_ids = build_stop_token_ids(
+            cfg.text_config.eos_token_id,
+            cfg.eos_token_id,
+            tokenizer_eos,
+        );
         let image_token_id = cfg.image_token_id;
         #[cfg(feature = "cuda")]
         let drain_guard = crate::runtime::decoder_graph::CudaGraphDrainGuard::new(&device);
@@ -107,7 +151,7 @@ impl OvisOcr2 {
             device,
             dtype,
             cfg,
-            image_cfg,
+            processor_cfg,
             tokenizer,
             text,
             vision,
@@ -119,7 +163,21 @@ impl OvisOcr2 {
         })
     }
 
-    /// Generate model-native Markdown, retaining visual-region image tags.
+    /// Generate raw token ids for each input page using the official
+    /// whole-page instruction.
+    pub fn generate_tokens(
+        &self,
+        images: &[RgbImage],
+        max_new_tokens: usize,
+    ) -> crate::error::BatchResult<Vec<u32>> {
+        Ok(images
+            .iter()
+            .map(|image| self.generate_one(image, DEFAULT_PROMPT, max_new_tokens))
+            .collect())
+    }
+
+    /// Generate text with the official whole-page instruction, applying the
+    /// shared truncated-tail cleanup to each decode.
     pub fn generate(
         &self,
         images: &[RgbImage],
@@ -132,48 +190,42 @@ impl OvisOcr2 {
             .collect())
     }
 
-    /// Parse pages using the official post-processing, which removes visual
-    /// region `<img ...>` blocks by default.
+    /// Parse pages using the official whole-page post-processing: collapse
+    /// degenerate repeated tails and convert OTSL table blocks to HTML.
     pub fn parse(
         &self,
         images: &[RgbImage],
         max_new_tokens: usize,
-    ) -> crate::error::BatchResult<String> {
-        self.parse_with_image_tags(images, max_new_tokens, false)
-    }
-
-    /// Parse pages and optionally retain the model's visual-region image tags.
-    pub fn parse_with_image_tags(
-        &self,
-        images: &[RgbImage],
-        max_new_tokens: usize,
-        keep_image_tags: bool,
     ) -> crate::error::BatchResult<String> {
         Ok(self
             .generate_tokens(images, max_new_tokens)?
             .into_iter()
             .map(|result| {
                 result.and_then(|tokens| {
-                    let text = self.decode_tokens_raw(&tokens)?;
-                    Ok(postprocess_text(text, keep_image_tags))
+                    self.decode_tokens(&tokens)
+                        .map(|text| finalize_markdown(&text))
                 })
             })
             .collect())
     }
 
-    /// Generate raw token ids for each input page.
-    pub fn generate_tokens(
+    /// Generate raw token ids for one image under an arbitrary instruction
+    /// (the official whole-page prompt or a task-region prompt).
+    pub fn generate_tokens_with_prompt(
         &self,
-        images: &[RgbImage],
+        image: &RgbImage,
+        instruction: &str,
         max_new_tokens: usize,
-    ) -> crate::error::BatchResult<Vec<u32>> {
-        Ok(images
-            .iter()
-            .map(|image| self.generate_one(image, max_new_tokens))
-            .collect())
+    ) -> Result<Vec<u32>, Error> {
+        self.generate_one(image, instruction, max_new_tokens)
     }
 
-    fn generate_one(&self, image: &RgbImage, max_new_tokens: usize) -> Result<Vec<u32>, Error> {
+    fn generate_one(
+        &self,
+        image: &RgbImage,
+        instruction: &str,
+        max_new_tokens: usize,
+    ) -> Result<Vec<u32>, Error> {
         self.text.clear_cache();
         let _cache_guard = TextCacheGuard(&self.text);
         if max_new_tokens == 0 {
@@ -182,29 +234,29 @@ impl OvisOcr2 {
         if max_new_tokens > self.cfg.text_config.max_position_embeddings {
             return Err(Error::InvalidInput {
                 message: format!(
-                    "OvisOCR2 max_new_tokens {max_new_tokens} exceeds context limit {}",
+                    "Xiaomi-OCR-0 max_new_tokens {max_new_tokens} exceeds context limit {}",
                     self.cfg.text_config.max_position_embeddings
                 ),
             });
         }
         let image_inputs = preprocess_image(
             image,
-            &self.image_cfg,
+            &self.processor_cfg,
             &self.cfg.vision_config,
             &self.device,
             self.dtype,
         )?;
-        let prompt = build_prompt(image_inputs.num_image_tokens);
+        let prompt = build_prompt(instruction, image_inputs.num_image_tokens);
         let encoding = self
             .tokenizer
             .encode(prompt, false)
             .map_err(|e| Error::InvalidInput {
-                message: format!("OvisOCR2: tokenizer encode failed: {e}"),
+                message: format!("Xiaomi-OCR-0: tokenizer encode failed: {e}"),
             })?;
         let input_ids = encoding.get_ids().to_vec();
         if input_ids.is_empty() {
             return Err(Error::InvalidInput {
-                message: "OvisOCR2: prompt tokenization produced no tokens".to_string(),
+                message: "Xiaomi-OCR-0: prompt tokenization produced no tokens".to_string(),
             });
         }
         validate_generation_length(
@@ -231,7 +283,9 @@ impl OvisOcr2 {
         generated
             .try_reserve_exact(max_new_tokens)
             .map_err(|e| Error::InvalidInput {
-                message: format!("OvisOCR2 cannot reserve output for {max_new_tokens} tokens: {e}"),
+                message: format!(
+                    "Xiaomi-OCR-0 cannot reserve output for {max_new_tokens} tokens: {e}"
+                ),
             })?;
 
         // Record the decode bucket once the prefill has populated the KV
@@ -253,7 +307,7 @@ impl OvisOcr2 {
             let token_ids = Tensor::from_vec(vec![token], (1, 1), &self.device).map_err(|e| {
                 candle_to_ocr_processing(
                     crate::error::ProcessingStage::TensorOperation,
-                    "OvisOCR2: create decode token",
+                    "Xiaomi-OCR-0: create decode token",
                     e,
                 )
             })?;
@@ -280,7 +334,7 @@ impl OvisOcr2 {
     fn prepare_inputs(
         &self,
         input_ids: &[u32],
-        image_inputs: &OvisOcr2ImageInputs,
+        image_inputs: &XiaomiOcrImageInputs,
     ) -> Result<Tensor, Error> {
         let seq_len = input_ids.len();
         let token_ids = Tensor::from_vec(input_ids.to_vec(), (1, seq_len), &self.device)
@@ -288,7 +342,8 @@ impl OvisOcr2 {
         let embeds = self.text.embed(&token_ids)?;
         let image_embeds = self
             .vision
-            .forward(&image_inputs.pixel_values, image_inputs.grid_thw)?
+            .forward(&image_inputs.pixel_values, &[image_inputs.grid_thw])?
+            .0
             .to_dtype(self.dtype)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "cast image embeddings", e))?;
 
@@ -303,7 +358,7 @@ impl OvisOcr2 {
         if image_positions.len() != image_len || image_positions.is_empty() {
             return Err(Error::InvalidInput {
                 message: format!(
-                    "OvisOCR2: image placeholder count ({}) != image embedding count ({image_len})",
+                    "Xiaomi-OCR-0: image placeholder count ({}) != image embedding count ({image_len})",
                     image_positions.len()
                 ),
             });
@@ -315,7 +370,7 @@ impl OvisOcr2 {
             .any(|(offset, &position)| position != start + offset)
         {
             return Err(Error::InvalidInput {
-                message: "OvisOCR2: image placeholder tokens must be contiguous".to_string(),
+                message: "Xiaomi-OCR-0: image placeholder tokens must be contiguous".to_string(),
             });
         }
         let end = start + image_positions.len();
@@ -352,18 +407,19 @@ impl OvisOcr2 {
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "language model head", e))
     }
 
-    /// Decode generated token ids and apply the official truncated-repeat cleanup.
+    /// Decode generated token ids and apply the shared truncated-repeat
+    /// cleanup.
     pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, Error> {
         Ok(clean_truncated_repeats(&self.decode_tokens_raw(tokens)?))
     }
 
-    /// Decode token ids without OvisOCR2 post-processing.
+    /// Decode token ids without any post-processing.
     pub fn decode_tokens_raw(&self, tokens: &[u32]) -> Result<String, Error> {
         self.tokenizer
             .decode(tokens, true)
             .map(|text| text.trim().to_string())
             .map_err(|e| Error::InvalidInput {
-                message: format!("OvisOCR2: tokenizer decode failed: {e}"),
+                message: format!("Xiaomi-OCR-0: tokenizer decode failed: {e}"),
             })
     }
 
@@ -371,12 +427,12 @@ impl OvisOcr2 {
         &self.tokenizer
     }
 
-    pub fn config(&self) -> &OvisOcr2Config {
+    pub fn config(&self) -> &XiaomiOcrConfig {
         &self.cfg
     }
 
-    pub fn image_processor_config(&self) -> &OvisOcr2ImageProcessorConfig {
-        &self.image_cfg
+    pub fn processor_config(&self) -> &XiaomiOcrProcessorConfig {
+        &self.processor_cfg
     }
 }
 
@@ -386,22 +442,29 @@ fn require_token_id(
     expected: Option<u32>,
 ) -> Result<u32, Error> {
     let token_id = tokenizer.token_to_id(token).ok_or_else(|| Error::Config {
-        message: format!("OvisOCR2 tokenizer is missing required token {token:?}"),
+        message: format!("Xiaomi-OCR-0 tokenizer is missing required token {token:?}"),
     })?;
     if let Some(expected) = expected
         && token_id != expected
     {
         return Err(Error::Config {
             message: format!(
-                "OvisOCR2 token {token:?} id mismatch: tokenizer {token_id} != config {expected}"
+                "Xiaomi-OCR-0 token {token:?} id mismatch: tokenizer {token_id} != config {expected}"
             ),
         });
     }
     Ok(token_id)
 }
 
-fn build_stop_token_ids(config_eos: u32, tokenizer_eos: u32) -> Vec<u32> {
-    let mut token_ids = vec![config_eos, tokenizer_eos];
+fn build_stop_token_ids(
+    text_config_eos: u32,
+    top_level_eos: Option<u32>,
+    tokenizer_eos: u32,
+) -> Vec<u32> {
+    let mut token_ids = [Some(text_config_eos), top_level_eos, Some(tokenizer_eos)]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<u32>>();
     token_ids.sort_unstable();
     token_ids.dedup();
     token_ids
@@ -415,26 +478,29 @@ fn validate_generation_length(
     let requested = prompt_len
         .checked_add(max_new_tokens)
         .ok_or_else(|| Error::InvalidInput {
-            message: "OvisOCR2 requested sequence length overflows usize".to_string(),
+            message: "Xiaomi-OCR-0 requested sequence length overflows usize".to_string(),
         })?;
     if requested > context_limit {
         return Err(Error::InvalidInput {
             message: format!(
-                "OvisOCR2 prompt ({prompt_len}) plus max_new_tokens ({max_new_tokens}) exceeds context limit {context_limit}"
+                "Xiaomi-OCR-0 prompt ({prompt_len}) plus max_new_tokens ({max_new_tokens}) exceeds context limit {context_limit}"
             ),
         });
     }
     Ok(())
 }
 
-fn build_prompt(num_image_tokens: usize) -> String {
-    let mut prompt = String::with_capacity(DEFAULT_PROMPT.len() + num_image_tokens * 13 + 128);
+/// Frame an instruction the way the official chat template does for a
+/// non-thinking request: one image span, the instruction text, and the empty
+/// think block before the assistant turn.
+fn build_prompt(instruction: &str, num_image_tokens: usize) -> String {
+    let mut prompt = String::with_capacity(instruction.len() + num_image_tokens * 13 + 128);
     prompt.push_str("<|im_start|>user\n<|vision_start|>");
     for _ in 0..num_image_tokens {
         prompt.push_str("<|image_pad|>");
     }
     prompt.push_str("<|vision_end|>");
-    prompt.push_str(DEFAULT_PROMPT);
+    prompt.push_str(instruction);
     prompt.push_str("<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
     prompt
 }
@@ -450,7 +516,7 @@ fn build_position_ids(
         .iter()
         .position(|&token| token == image_token_id)
         .ok_or_else(|| Error::InvalidInput {
-            message: "OvisOCR2: image token missing from prompt".to_string(),
+            message: "Xiaomi-OCR-0: image token missing from prompt".to_string(),
         })?;
     let image_len = input_ids
         .iter()
@@ -459,7 +525,7 @@ fn build_position_ids(
         .count();
     if input_ids[image_start + image_len..].contains(&image_token_id) {
         return Err(Error::InvalidInput {
-            message: "OvisOCR2: non-contiguous image token span".to_string(),
+            message: "Xiaomi-OCR-0: non-contiguous image token span".to_string(),
         });
     }
     let (grid_t, grid_h, grid_w) = grid_thw;
@@ -469,7 +535,7 @@ fn build_position_ids(
     {
         return Err(Error::Config {
             message: format!(
-                "OvisOCR2: invalid image grid {grid_thw:?} for merge size {spatial_merge_size}"
+                "Xiaomi-OCR-0: invalid image grid {grid_thw:?} for merge size {spatial_merge_size}"
             ),
         });
     }
@@ -478,7 +544,7 @@ fn build_position_ids(
     if image_len != grid_t * llm_h * llm_w {
         return Err(Error::InvalidInput {
             message: format!(
-                "OvisOCR2: image token count {image_len} != merged grid token count {}",
+                "Xiaomi-OCR-0: image token count {image_len} != merged grid token count {}",
                 grid_t * llm_h * llm_w
             ),
         });
@@ -523,7 +589,7 @@ fn build_position_ids(
     let tensor = Tensor::from_vec(data, (3, 1, seq_len), device).map_err(|e| {
         candle_to_ocr_processing(
             crate::error::ProcessingStage::TensorOperation,
-            "OvisOCR2: create multimodal position ids",
+            "Xiaomi-OCR-0: create multimodal position ids",
             e,
         )
     })?;
@@ -534,7 +600,7 @@ fn text_position_ids(position: i64, device: &Device) -> Result<Tensor, Error> {
     Tensor::from_vec(vec![position; 3], (3, 1, 1), device).map_err(|e| {
         candle_to_ocr_processing(
             crate::error::ProcessingStage::TensorOperation,
-            "OvisOCR2: create decode position ids",
+            "Xiaomi-OCR-0: create decode position ids",
             e,
         )
     })
@@ -566,46 +632,82 @@ fn select_greedy_token(logits: &Tensor) -> Result<u32, Error> {
         .map_err(|e| {
             candle_to_ocr_processing(
                 crate::error::ProcessingStage::TensorOperation,
-                "OvisOCR2: greedy argmax",
+                "Xiaomi-OCR-0: greedy argmax",
                 e,
             )
         })
 }
 
-/// Remove model-emitted visual-region image-tag blocks, matching upstream.
-pub fn filter_visual_image_tags(text: &str) -> String {
-    text.split("\n\n")
-        .filter(|block| !block.trim().starts_with("<img src=\"images/bbox_"))
-        .collect::<Vec<_>>()
-        .join("\n\n")
+/// Official whole-page post-processing: collapse degenerate repeated tails,
+/// then convert OTSL table blocks to HTML tables.
+pub fn finalize_markdown(text: &str) -> String {
+    convert_markdown_otsl_tables(&clean_truncated_repeats(text))
 }
 
-fn postprocess_text(text: String, keep_image_tags: bool) -> String {
-    let text = if keep_image_tags {
-        text
-    } else {
-        filter_visual_image_tags(&text)
-    };
-    clean_truncated_repeats(&text)
-}
+/// Convert OTSL table blocks inside whole-page Markdown to HTML tables,
+/// matching the official post-processing: blank-line-separated blocks that
+/// contain OTSL tags are converted; fenced code blocks and their fences pass
+/// through untouched, and blocks whose conversion comes back empty keep their
+/// original text.
+pub fn convert_markdown_otsl_tables(markdown: &str) -> String {
+    const OTSL_TAGS: [&str; 6] = ["<fcel>", "<ecel>", "<nl>", "<lcel>", "<ucel>", "<xcel>"];
+    if markdown.is_empty() || !OTSL_TAGS.iter().any(|tag| markdown.contains(tag)) {
+        return markdown.to_string();
+    }
 
-pub(super) fn postprocess_recognition_text(text: String, task: RecognitionTask) -> String {
-    postprocess_text(text, task == RecognitionTask::Chart)
-}
+    // Split into alternating `[block, separator, block, ...]` slices so the
+    // exact blank-line separators survive the round trip.
+    let mut parts: Vec<&str> = Vec::new();
+    let mut last = 0;
+    for separator in MARKDOWN_BLOCK_SEP_RE.find_iter(markdown) {
+        parts.push(&markdown[last..separator.start()]);
+        parts.push(separator.as_str());
+        last = separator.end();
+    }
+    parts.push(&markdown[last..]);
 
-// The truncated-tail cleaner is shared with Xiaomi-OCR-0 (both models'
-// official post-processing carries the same heuristic); it lives in the
-// render layer and is re-exported here to preserve the public path.
-pub use crate::render::text::clean_truncated_repeats;
+    let mut output = String::with_capacity(markdown.len());
+    let mut in_fence = false;
+    for (index, part) in parts.iter().enumerate() {
+        if index % 2 == 1 {
+            output.push_str(part);
+            continue;
+        }
+        let block = part;
+        let fence_count = block.matches("```").count();
+        // The fence lines themselves and anything inside an open fence are
+        // code, not a stray OTSL table.
+        let skip = in_fence || fence_count > 0;
+        if fence_count % 2 == 1 {
+            in_fence = !in_fence;
+        }
+        if skip || !OTSL_TAGS.iter().any(|tag| block.contains(tag)) {
+            output.push_str(block);
+            continue;
+        }
+        let converted = convert_otsl_to_html(block.trim());
+        if converted.trim().is_empty() {
+            output.push_str(block);
+        } else {
+            output.push_str(&converted);
+        }
+    }
+    output
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn stop_tokens_include_model_and_tokenizer_eos() {
-        assert_eq!(build_stop_token_ids(248_044, 248_046), [248_044, 248_046]);
-        assert_eq!(build_stop_token_ids(248_044, 248_044), [248_044]);
+    fn stop_tokens_union_text_top_level_and_tokenizer_eos() {
+        // Released checkpoint: tower EOS 248044 (<|endoftext|>), top-level
+        // EOS 248046 (<|im_end|>), tokenizer EOS 248046.
+        assert_eq!(
+            build_stop_token_ids(248_044, Some(248_046), 248_046),
+            [248_044, 248_046]
+        );
+        assert_eq!(build_stop_token_ids(248_044, None, 248_044), [248_044]);
     }
 
     #[test]
@@ -629,18 +731,30 @@ mod tests {
 
     #[test]
     fn generation_length_is_checked_without_overflow() {
-        validate_generation_length(775, 16_384, 262_144).unwrap();
+        validate_generation_length(775, 4_096, 262_144).unwrap();
         assert!(validate_generation_length(775, 262_000, 262_144).is_err());
         assert!(validate_generation_length(1, usize::MAX, usize::MAX).is_err());
     }
 
     #[test]
-    fn official_prompt_has_exact_no_think_framing() {
-        let prompt = build_prompt(2);
+    fn official_prompts_frame_the_document_instruction() {
+        let prompt = build_prompt(DEFAULT_PROMPT, 2);
         assert!(prompt.starts_with(
-            "<|im_start|>user\n<|vision_start|><|image_pad|><|image_pad|><|vision_end|>\nExtract"
+            "<|im_start|>user\n<|vision_start|><|image_pad|><|image_pad|><|vision_end|>Extract"
         ));
         assert!(prompt.ends_with("<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"));
+        assert_eq!(TEXT_REGION_PROMPT, "Extract the text in the image.");
+        assert_eq!(
+            TABLE_REGION_PROMPT,
+            "Parse the table in the image into OTSL."
+        );
+        assert!(FORMULA_REGION_PROMPT.starts_with("Identify the formula"));
+        assert_eq!(
+            key_information_extraction_prompt(
+                "Please output the key information in JSON format according to the following schema:\n{\"date\": \"\"}"
+            ),
+            "Extract key information in the image\n\nPlease output the key information in JSON format according to the following schema:\n{\"date\": \"\"}"
+        );
     }
 
     #[test]
@@ -659,31 +773,48 @@ mod tests {
     }
 
     #[test]
-    fn visual_image_tag_blocks_are_removed() {
-        let text = "before\n\n<img src=\"images/bbox_1_2_3_4.jpg\" />\n\nafter";
-        assert_eq!(filter_visual_image_tags(text), "before\n\nafter");
+    fn otsl_blocks_in_markdown_become_html_tables() {
+        let otsl = "<fcel>Item<fcel>Qty<nl><fcel>Tea<fcel>2<nl>";
+        let markdown = format!("# Receipt\n\n{otsl}\n\nThat is all.");
+        let converted = convert_markdown_otsl_tables(&markdown);
+        assert!(converted.contains("<table>"));
+        assert!(converted.contains("Tea"));
+        assert!(!converted.contains("<fcel>"));
+        // The non-table prose survives with its separators.
+        assert!(converted.contains("# Receipt\n\n"));
+        assert!(converted.ends_with("That is all."));
     }
 
     #[test]
-    fn chart_recognition_keeps_visual_image_tags() {
-        let text = "<img src=\"images/bbox_1_2_3_4.jpg\" />";
-        assert_eq!(
-            postprocess_recognition_text(text.to_string(), RecognitionTask::Chart),
-            text
-        );
+    fn fenced_otsl_passes_through_untouched() {
+        let markdown = "```text\n<fcel>a<nl>\n```\n\n<fcel>b<nl>";
+        let converted = convert_markdown_otsl_tables(markdown);
+        assert!(converted.contains("```text\n<fcel>a<nl>\n```"));
+        assert!(converted.contains("<table>"));
     }
 
     #[test]
-    fn mixed_recognition_tasks_filter_only_non_charts() {
-        let text = "<img src=\"images/bbox_1_2_3_4.jpg\" />";
-        let tasks = [
-            RecognitionTask::Ocr,
-            RecognitionTask::Chart,
-            RecognitionTask::Table,
-            RecognitionTask::Formula,
-        ];
-        let outputs = tasks.map(|task| postprocess_recognition_text(text.to_string(), task));
+    fn markdown_without_otsl_tags_is_untouched() {
+        let markdown = "# Doc\n\n| a | b |\n|---|---|\n\n```rust\nfn main() {}\n```";
+        assert_eq!(convert_markdown_otsl_tables(markdown), markdown);
+    }
 
-        assert_eq!(outputs, ["", text, "", ""]);
+    #[test]
+    fn otsl_conversion_keeps_surrounding_prose() {
+        let markdown = "intro\n\n<fcel>keep<nl>\n\noutro";
+        let converted = convert_markdown_otsl_tables(markdown);
+        assert!(converted.contains("<table>"));
+        assert!(converted.contains("intro"));
+        assert!(converted.contains("outro"));
+    }
+
+    #[test]
+    fn otsl_conversion_preserves_separator_shapes() {
+        let markdown = "<fcel>a<nl>\n\n\n<fcel>b<nl>";
+        let converted = convert_markdown_otsl_tables(markdown);
+        // Each block becomes its own table; the triple-newline separator
+        // survives between them.
+        assert_eq!(converted.matches("<table>").count(), 2);
+        assert!(converted.contains("\n\n\n"));
     }
 }

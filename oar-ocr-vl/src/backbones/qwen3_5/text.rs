@@ -1,11 +1,15 @@
-//! Qwen3.5 text decoder used by OvisOCR2.
+//! Qwen3.5 text decoder shared by the OvisOCR2 and Xiaomi-OCR-0 towers.
 //!
 //! Qwen3.5 alternates three Gated DeltaNet layers with one full-attention
 //! layer. Its decoder RMSNorm checkpoints are zero-centred (`1 + weight`),
 //! while Gated DeltaNet's internal gated RMSNorm is conventionally centred at
 //! one. Its multimodal RoPE frequencies are interleaved T/H/W.
+//!
+//! The checkpoint-facing [`Qwen35TextConfig`] and the decode-graph lifecycle
+//! live here so both models stay byte-identical in behavior; each model
+//! contributes its own display name (for error messages) and graph-disable
+//! env var at load time.
 
-use super::config::OvisOcr2TextConfig;
 use super::gated_delta::gated_delta_rule;
 use crate::attention::{RotaryEmbedding, flash_attention, scaled_dot_product_attention_gqa};
 use crate::error::Error;
@@ -20,7 +24,8 @@ use crate::runtime::decoder_graph::{
     capture_decoder_graph, cuda_graph_error, drain_cuda_context_errors, drop_and_drain,
     next_decode_bucket, prompt_decode_bucket,
 };
-use crate::utils::{candle_to_ocr_inference, rotate_half};
+use crate::runtime::errors::candle_to_ocr_inference;
+use crate::runtime::tensor::rotate_half;
 #[cfg(feature = "cuda")]
 use candle_core::IndexOp;
 use candle_core::{D, DType, Device, Tensor};
@@ -28,69 +33,326 @@ use candle_nn::{
     Conv1d, Conv1dConfig, Embedding, Linear, Module, RmsNorm, VarBuilder, embedding,
     linear_no_bias, rms_norm,
 };
+use serde::Deserialize;
 use std::cell::RefCell;
 
-const MODEL_NAME: &str = "OvisOCR2";
+fn default_partial_rotary_factor() -> f64 {
+    0.25
+}
+
+fn default_rope_theta() -> f64 {
+    10_000_000.0
+}
+
+/// Nested `rope_parameters` block of a Qwen3.5 text config.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Qwen35RopeParameters {
+    pub rope_type: String,
+    pub mrope_section: Vec<usize>,
+    #[serde(default)]
+    pub mrope_interleaved: bool,
+    #[serde(default = "default_rope_theta")]
+    pub rope_theta: f64,
+    #[serde(default = "default_partial_rotary_factor")]
+    pub partial_rotary_factor: f64,
+}
+
+/// Text-decoder configuration shared by Qwen3.5 checkpoints.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Qwen35TextConfig {
+    pub model_type: String,
+    pub vocab_size: usize,
+    pub hidden_size: usize,
+    pub intermediate_size: usize,
+    pub num_hidden_layers: usize,
+    pub num_attention_heads: usize,
+    pub num_key_value_heads: usize,
+    pub head_dim: usize,
+    pub hidden_act: candle_nn::Activation,
+    pub max_position_embeddings: usize,
+    pub rms_norm_eps: f64,
+    pub rope_parameters: Qwen35RopeParameters,
+    pub layer_types: Vec<String>,
+    pub linear_conv_kernel_dim: usize,
+    pub linear_key_head_dim: usize,
+    pub linear_value_head_dim: usize,
+    pub linear_num_key_heads: usize,
+    pub linear_num_value_heads: usize,
+    pub eos_token_id: u32,
+    #[serde(default)]
+    pub attention_bias: bool,
+    #[serde(default)]
+    pub attention_dropout: f32,
+    #[serde(default)]
+    pub attn_output_gate: bool,
+    #[serde(default)]
+    pub initializer_range: f64,
+    #[serde(default)]
+    pub full_attention_interval: usize,
+    #[serde(default)]
+    pub mlp_only_layers: Vec<usize>,
+    #[serde(default)]
+    pub mtp_num_hidden_layers: usize,
+    #[serde(default)]
+    pub mtp_use_dedicated_embeddings: bool,
+    #[serde(default)]
+    pub tie_word_embeddings: bool,
+    #[serde(default)]
+    pub use_cache: bool,
+    #[serde(default)]
+    pub dtype: Option<String>,
+    #[serde(default)]
+    pub mamba_ssm_dtype: Option<String>,
+}
+
+impl Qwen35TextConfig {
+    /// Architecture-level validation. `model` names the calling checkpoint in
+    /// every message, so both models report their own name from shared code.
+    pub fn validate_for(&self, model: &str) -> Result<(), Error> {
+        if self.hidden_size == 0
+            || self.intermediate_size == 0
+            || self.vocab_size == 0
+            || self.num_hidden_layers == 0
+            || self.num_attention_heads == 0
+            || self.num_key_value_heads == 0
+            || self.head_dim == 0
+            || self.max_position_embeddings == 0
+        {
+            return Err(Error::Config {
+                message: format!("{model} text dimensions must be non-zero"),
+            });
+        }
+        if self.model_type != "qwen3_5_text" {
+            return Err(Error::Config {
+                message: format!(
+                    "{model} expected text model_type 'qwen3_5_text', got '{}'",
+                    self.model_type
+                ),
+            });
+        }
+        if self.hidden_act != candle_nn::Activation::Silu {
+            return Err(Error::Config {
+                message: format!(
+                    "{model} text decoder supports hidden_act 'silu', got {:?}",
+                    self.hidden_act
+                ),
+            });
+        }
+        if self.attention_bias {
+            return Err(Error::Config {
+                message: format!("{model} attention_bias=true is not supported"),
+            });
+        }
+        if !self.attn_output_gate {
+            return Err(Error::Config {
+                message: format!("{model} requires attn_output_gate=true"),
+            });
+        }
+        if !self.rms_norm_eps.is_finite() || self.rms_norm_eps <= 0.0 {
+            return Err(Error::Config {
+                message: format!(
+                    "{model} rms_norm_eps must be finite and positive, got {}",
+                    self.rms_norm_eps
+                ),
+            });
+        }
+        if self.eos_token_id as usize >= self.vocab_size {
+            return Err(Error::Config {
+                message: format!(
+                    "{model} eos_token_id {} is outside vocab_size {}",
+                    self.eos_token_id, self.vocab_size
+                ),
+            });
+        }
+        if !self
+            .num_attention_heads
+            .is_multiple_of(self.num_key_value_heads)
+        {
+            return Err(Error::Config {
+                message: format!(
+                    "{model} num_attention_heads ({}) must be divisible by num_key_value_heads ({})",
+                    self.num_attention_heads, self.num_key_value_heads
+                ),
+            });
+        }
+        if self.layer_types.len() != self.num_hidden_layers {
+            return Err(Error::Config {
+                message: format!(
+                    "{model} layer_types length ({}) must equal num_hidden_layers ({})",
+                    self.layer_types.len(),
+                    self.num_hidden_layers
+                ),
+            });
+        }
+        if self
+            .layer_types
+            .iter()
+            .any(|kind| kind != "linear_attention" && kind != "full_attention")
+        {
+            return Err(Error::Config {
+                message: format!("{model} layer_types contains an unsupported layer type"),
+            });
+        }
+        if self.linear_conv_kernel_dim == 0
+            || self.linear_key_head_dim == 0
+            || self.linear_value_head_dim == 0
+            || self.linear_num_key_heads == 0
+            || self.linear_num_value_heads == 0
+        {
+            return Err(Error::Config {
+                message: format!("{model} linear-attention dimensions must be non-zero"),
+            });
+        }
+        if self.linear_key_head_dim != self.linear_value_head_dim {
+            return Err(Error::Config {
+                message: format!(
+                    "{model} requires equal linear key/value head dims, got {}/{}",
+                    self.linear_key_head_dim, self.linear_value_head_dim
+                ),
+            });
+        }
+        if !self
+            .linear_num_value_heads
+            .is_multiple_of(self.linear_num_key_heads)
+        {
+            return Err(Error::Config {
+                message: format!(
+                    "{model} linear_num_value_heads ({}) must be divisible by linear_num_key_heads ({})",
+                    self.linear_num_value_heads, self.linear_num_key_heads
+                ),
+            });
+        }
+        if self.rope_parameters.rope_type != "default" {
+            return Err(Error::Config {
+                message: format!(
+                    "{model} unsupported rope_type '{}'",
+                    self.rope_parameters.rope_type
+                ),
+            });
+        }
+        if !self.rope_parameters.mrope_interleaved {
+            return Err(Error::Config {
+                message: format!("{model} requires interleaved MRoPE"),
+            });
+        }
+        if self.rope_parameters.mrope_section.len() != 3
+            || self.rope_parameters.mrope_section.contains(&0)
+        {
+            return Err(Error::Config {
+                message: format!("{model} mrope_section must contain three non-zero entries"),
+            });
+        }
+        if !self.rope_parameters.rope_theta.is_finite() || self.rope_parameters.rope_theta <= 0.0 {
+            return Err(Error::Config {
+                message: format!(
+                    "{model} rope_theta must be finite and positive, got {}",
+                    self.rope_parameters.rope_theta
+                ),
+            });
+        }
+        let partial = self.rope_parameters.partial_rotary_factor;
+        if !partial.is_finite() || !(0.0..=1.0).contains(&partial) || partial == 0.0 {
+            return Err(Error::Config {
+                message: format!("{model} partial_rotary_factor must be in (0, 1], got {partial}"),
+            });
+        }
+        let rotary_dim = (self.head_dim as f64 * partial) as usize;
+        let section_sum = self
+            .rope_parameters
+            .mrope_section
+            .iter()
+            .try_fold(0usize, |sum, &value| sum.checked_add(value))
+            .ok_or_else(|| Error::Config {
+                message: format!("{model} mrope_section sum overflow"),
+            })?;
+        if rotary_dim == 0 || !rotary_dim.is_multiple_of(2) || section_sum != rotary_dim / 2 {
+            return Err(Error::Config {
+                message: format!(
+                    "{model} mrope_section {:?} must sum to rotary_dim/2 ({})",
+                    self.rope_parameters.mrope_section,
+                    rotary_dim / 2
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validation with the generic backbone name in messages.
+    pub fn validate(&self) -> Result<(), Error> {
+        self.validate_for("Qwen3.5")
+    }
+}
 
 #[derive(Debug, Clone)]
 struct AdditiveRmsNorm {
     weight: Tensor,
     eps: f64,
+    model_name: &'static str,
 }
 
 impl AdditiveRmsNorm {
-    fn load(dim: usize, eps: f64, vb: VarBuilder) -> Result<Self, Error> {
+    fn load(dim: usize, eps: f64, model_name: &'static str, vb: VarBuilder) -> Result<Self, Error> {
         let weight = vb
             .get(dim, "weight")
             .and_then(|weight| weight.to_dtype(DType::F32))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load additive RMSNorm", e))?;
-        Ok(Self { weight, eps })
+            .map_err(|e| candle_to_ocr_inference(model_name, "load additive RMSNorm", e))?;
+        Ok(Self {
+            weight,
+            eps,
+            model_name,
+        })
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor, Error> {
         let dtype = xs.dtype();
         let xs = xs
             .to_dtype(DType::F32)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "RMSNorm input cast", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "RMSNorm input cast", e))?;
         let variance = xs
             .sqr()
             .and_then(|xs| xs.mean_keepdim(D::Minus1))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "RMSNorm variance", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "RMSNorm variance", e))?;
         let normalized = xs
             .broadcast_div(
                 &(variance + self.eps)
                     .and_then(|variance| variance.sqrt())
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "RMSNorm rsqrt", e))?,
+                    .map_err(|e| candle_to_ocr_inference(self.model_name, "RMSNorm rsqrt", e))?,
             )
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "RMSNorm normalize", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "RMSNorm normalize", e))?;
         let scale = (&self.weight + 1.0)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "RMSNorm scale", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "RMSNorm scale", e))?;
         normalized
             .broadcast_mul(&scale)
             .and_then(|xs| xs.to_dtype(dtype))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "RMSNorm output", e))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "RMSNorm output", e))
     }
 }
 
 #[derive(Debug, Clone)]
-struct OvisMlp {
+struct Qwen35Mlp {
     gate_proj: Linear,
     up_proj: Linear,
     down_proj: Linear,
+    model_name: &'static str,
 }
 
-impl OvisMlp {
-    fn load(cfg: &OvisOcr2TextConfig, vb: VarBuilder) -> Result<Self, Error> {
+impl Qwen35Mlp {
+    fn load(
+        cfg: &Qwen35TextConfig,
+        model_name: &'static str,
+        vb: VarBuilder,
+    ) -> Result<Self, Error> {
         let gate_proj = linear_no_bias(cfg.hidden_size, cfg.intermediate_size, vb.pp("gate_proj"))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load MLP gate_proj", e))?;
+            .map_err(|e| candle_to_ocr_inference(model_name, "load MLP gate_proj", e))?;
         let up_proj = linear_no_bias(cfg.hidden_size, cfg.intermediate_size, vb.pp("up_proj"))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load MLP up_proj", e))?;
+            .map_err(|e| candle_to_ocr_inference(model_name, "load MLP up_proj", e))?;
         let down_proj = linear_no_bias(cfg.intermediate_size, cfg.hidden_size, vb.pp("down_proj"))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load MLP down_proj", e))?;
+            .map_err(|e| candle_to_ocr_inference(model_name, "load MLP down_proj", e))?;
         Ok(Self {
             gate_proj,
             up_proj,
             down_proj,
+            model_name,
         })
     }
 
@@ -99,17 +361,17 @@ impl OvisMlp {
             .gate_proj
             .forward(xs)
             .and_then(|gate| candle_nn::ops::silu(&gate))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP gate", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "MLP gate", e))?;
         let up = self
             .up_proj
             .forward(xs)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP up", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "MLP up", e))?;
         self.down_proj
             .forward(
                 &(&gate * &up)
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP gate product", e))?,
+                    .map_err(|e| candle_to_ocr_inference(self.model_name, "MLP gate product", e))?,
             )
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "MLP down", e))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "MLP down", e))
     }
 }
 
@@ -132,6 +394,7 @@ struct GatedDeltaNet {
     conv_kernel_size: usize,
     conv_state: RefCell<Option<Tensor>>,
     recurrent_state: RefCell<Option<Tensor>>,
+    model_name: &'static str,
 }
 
 fn cached_depthwise_conv_step(
@@ -168,12 +431,13 @@ fn cached_depthwise_conv_step(
 fn store_state(
     slot: &RefCell<Option<Tensor>>,
     new_state: Tensor,
+    model_name: &'static str,
     context: &'static str,
 ) -> Result<(), Error> {
     // A no-op clone when `new_state` is already contiguous.
     let new_state = new_state
         .contiguous()
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, context, e))?;
+        .map_err(|e| candle_to_ocr_inference(model_name, context, e))?;
     let mut borrow = slot.borrow_mut();
     if let Some(existing) = borrow.as_ref()
         && existing.shape() == new_state.shape()
@@ -182,7 +446,7 @@ fn store_state(
         debug_assert!(existing.is_contiguous());
         existing
             .slice_set(&new_state, 0, 0)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, context, e))?;
+            .map_err(|e| candle_to_ocr_inference(model_name, context, e))?;
         return Ok(());
     }
     *borrow = Some(new_state);
@@ -190,7 +454,11 @@ fn store_state(
 }
 
 impl GatedDeltaNet {
-    fn load(cfg: &OvisOcr2TextConfig, vb: VarBuilder) -> Result<Self, Error> {
+    fn load(
+        cfg: &Qwen35TextConfig,
+        model_name: &'static str,
+        vb: VarBuilder,
+    ) -> Result<Self, Error> {
         let key_dim = cfg.linear_num_key_heads * cfg.linear_key_head_dim;
         let value_dim = cfg.linear_num_value_heads * cfg.linear_value_head_dim;
         let conv_dim = key_dim * 2 + value_dim;
@@ -200,7 +468,7 @@ impl GatedDeltaNet {
         {
             return Err(Error::Config {
                 message: format!(
-                    "OvisOCR2: linear_num_value_heads ({}) must be divisible by linear_num_key_heads ({})",
+                    "{model_name}: linear_num_value_heads ({}) must be divisible by linear_num_key_heads ({})",
                     cfg.linear_num_value_heads, cfg.linear_num_key_heads
                 ),
             });
@@ -208,36 +476,36 @@ impl GatedDeltaNet {
         if cfg.linear_key_head_dim != cfg.linear_value_head_dim {
             return Err(Error::Config {
                 message: format!(
-                    "OvisOCR2 currently requires equal Gated DeltaNet key/value head dims, got {}/{}",
+                    "{model_name} currently requires equal Gated DeltaNet key/value head dims, got {}/{}",
                     cfg.linear_key_head_dim, cfg.linear_value_head_dim
                 ),
             });
         }
 
         let in_proj_qkv = linear_no_bias(cfg.hidden_size, conv_dim, vb.pp("in_proj_qkv"))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load GDN in_proj_qkv", e))?;
+            .map_err(|e| candle_to_ocr_inference(model_name, "load GDN in_proj_qkv", e))?;
         let in_proj_z = linear_no_bias(cfg.hidden_size, value_dim, vb.pp("in_proj_z"))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load GDN in_proj_z", e))?;
+            .map_err(|e| candle_to_ocr_inference(model_name, "load GDN in_proj_z", e))?;
         let in_proj_b = linear_no_bias(
             cfg.hidden_size,
             cfg.linear_num_value_heads,
             vb.pp("in_proj_b"),
         )
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load GDN in_proj_b", e))?;
+        .map_err(|e| candle_to_ocr_inference(model_name, "load GDN in_proj_b", e))?;
         let in_proj_a = linear_no_bias(
             cfg.hidden_size,
             cfg.linear_num_value_heads,
             vb.pp("in_proj_a"),
         )
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load GDN in_proj_a", e))?;
+        .map_err(|e| candle_to_ocr_inference(model_name, "load GDN in_proj_a", e))?;
         let conv_weight = vb
             .get((conv_dim, 1, cfg.linear_conv_kernel_dim), "conv1d.weight")
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load GDN conv1d", e))?;
+            .map_err(|e| candle_to_ocr_inference(model_name, "load GDN conv1d", e))?;
         let decode_conv_weight = conv_weight
             .to_dtype(DType::F32)
             .and_then(|weight| weight.squeeze(1))
             .and_then(|weight| weight.unsqueeze(0))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load GDN decode conv weight", e))?;
+            .map_err(|e| candle_to_ocr_inference(model_name, "load GDN decode conv weight", e))?;
         let conv1d = Conv1d::new(
             conv_weight,
             None,
@@ -250,20 +518,20 @@ impl GatedDeltaNet {
         let dt_bias = vb
             .get(cfg.linear_num_value_heads, "dt_bias")
             .and_then(|x| x.to_dtype(DType::F32))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load GDN dt_bias", e))?;
+            .map_err(|e| candle_to_ocr_inference(model_name, "load GDN dt_bias", e))?;
         let neg_a = vb
             .get(cfg.linear_num_value_heads, "A_log")
             .and_then(|x| x.to_dtype(DType::F32))
             .and_then(|x| x.exp())
             .and_then(|x| x.neg())
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load GDN A_log", e))?;
+            .map_err(|e| candle_to_ocr_inference(model_name, "load GDN A_log", e))?;
         // Qwen3_5RMSNormGated initializes this weight to one and applies a
         // plain RMSNorm before the SiLU gate. It intentionally differs from
         // the zero-centred AdditiveRmsNorm used by the decoder layers.
         let norm = rms_norm(cfg.linear_value_head_dim, cfg.rms_norm_eps, vb.pp("norm"))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load GDN norm", e))?;
+            .map_err(|e| candle_to_ocr_inference(model_name, "load GDN norm", e))?;
         let out_proj = linear_no_bias(value_dim, cfg.hidden_size, vb.pp("out_proj"))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load GDN out_proj", e))?;
+            .map_err(|e| candle_to_ocr_inference(model_name, "load GDN out_proj", e))?;
 
         Ok(Self {
             in_proj_qkv,
@@ -283,13 +551,14 @@ impl GatedDeltaNet {
             conv_kernel_size: cfg.linear_conv_kernel_dim,
             conv_state: RefCell::new(None),
             recurrent_state: RefCell::new(None),
+            model_name,
         })
     }
 
     fn causal_conv(&self, mixed: &Tensor) -> Result<Tensor, Error> {
         let (batch, channels, seq_len) = mixed
             .dims3()
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN convolution input", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN convolution input", e))?;
         let previous = self.conv_state.borrow().clone();
         let (output, new_state) = match previous.as_ref() {
             None => {
@@ -298,7 +567,7 @@ impl GatedDeltaNet {
                     .forward(mixed)
                     .and_then(|output| output.narrow(2, 0, seq_len))
                     .map_err(|e| {
-                        candle_to_ocr_inference(MODEL_NAME, "GDN causal convolution", e)
+                        candle_to_ocr_inference(self.model_name, "GDN causal convolution", e)
                     })?;
                 let new_state = if seq_len >= self.conv_kernel_size {
                     mixed.narrow(2, seq_len - self.conv_kernel_size, self.conv_kernel_size)
@@ -308,10 +577,14 @@ impl GatedDeltaNet {
                         mixed.dtype(),
                         mixed.device(),
                     )
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "pad GDN conv state", e))?;
+                    .map_err(|e| {
+                        candle_to_ocr_inference(self.model_name, "pad GDN conv state", e)
+                    })?;
                     Tensor::cat(&[&padding, mixed], 2)
                 }
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN update conv state", e))?;
+                .map_err(|e| {
+                    candle_to_ocr_inference(self.model_name, "GDN update conv state", e)
+                })?;
                 (output, new_state)
             }
             Some(state) if seq_len == 1 => {
@@ -325,11 +598,13 @@ impl GatedDeltaNet {
                     &self.decode_conv_weight,
                     self.conv_kernel_size,
                 )
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN decode convolution", e))?
+                .map_err(|e| {
+                    candle_to_ocr_inference(self.model_name, "GDN decode convolution", e)
+                })?
             }
             Some(state) => {
                 let joined = Tensor::cat(&[state, mixed], 2).map_err(|e| {
-                    candle_to_ocr_inference(MODEL_NAME, "join GDN convolution context", e)
+                    candle_to_ocr_inference(self.model_name, "join GDN convolution context", e)
                 })?;
                 let conv = Conv1d::new(
                     self.conv1d.weight().clone(),
@@ -343,10 +618,10 @@ impl GatedDeltaNet {
                     .forward(&joined)
                     .and_then(|output| output.narrow(2, 1, seq_len))
                     .map_err(|e| {
-                        candle_to_ocr_inference(MODEL_NAME, "GDN causal convolution", e)
+                        candle_to_ocr_inference(self.model_name, "GDN causal convolution", e)
                     })?;
                 let context_len = joined.dim(2).map_err(|e| {
-                    candle_to_ocr_inference(MODEL_NAME, "GDN convolution cache length", e)
+                    candle_to_ocr_inference(self.model_name, "GDN convolution cache length", e)
                 })?;
                 let new_state = joined
                     .narrow(
@@ -354,46 +629,53 @@ impl GatedDeltaNet {
                         context_len - self.conv_kernel_size,
                         self.conv_kernel_size,
                     )
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN update conv state", e))?;
+                    .map_err(|e| {
+                        candle_to_ocr_inference(self.model_name, "GDN update conv state", e)
+                    })?;
                 (output, new_state)
             }
         };
-        store_state(&self.conv_state, new_state, "GDN store conv state")?;
+        store_state(
+            &self.conv_state,
+            new_state,
+            self.model_name,
+            "GDN store conv state",
+        )?;
 
         candle_nn::ops::silu(&output)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN convolution SiLU", e))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN convolution SiLU", e))
     }
 
     fn forward(&self, hidden_states: &Tensor) -> Result<Tensor, Error> {
         let (batch, seq_len, _) = hidden_states
             .dims3()
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN input shape", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN input shape", e))?;
         let mixed = self
             .in_proj_qkv
             .forward(hidden_states)
             .and_then(|x| x.transpose(1, 2))
             .and_then(|x| x.contiguous())
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN qkv projection", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN qkv projection", e))?;
         let mixed = self
             .causal_conv(&mixed)?
             .transpose(1, 2)
             .and_then(|x| x.contiguous())
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN qkv layout", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN qkv layout", e))?;
 
         let key_dim = self.num_key_heads * self.key_head_dim;
         let value_dim = self.num_value_heads * self.value_head_dim;
         let query = mixed
             .narrow(D::Minus1, 0, key_dim)
             .and_then(|x| x.reshape((batch, seq_len, self.num_key_heads, self.key_head_dim)))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN query", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN query", e))?;
         let key = mixed
             .narrow(D::Minus1, key_dim, key_dim)
             .and_then(|x| x.reshape((batch, seq_len, self.num_key_heads, self.key_head_dim)))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN key", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN key", e))?;
         let value = mixed
             .narrow(D::Minus1, key_dim * 2, value_dim)
             .and_then(|x| x.reshape((batch, seq_len, self.num_value_heads, self.value_head_dim)))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN value", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN value", e))?;
 
         let repeat = self.num_value_heads / self.num_key_heads;
         let query = if repeat == 1 {
@@ -403,7 +685,9 @@ impl GatedDeltaNet {
                 .unsqueeze(3)
                 .and_then(|x| x.repeat((1, 1, 1, repeat, 1)))
                 .and_then(|x| x.reshape((batch, seq_len, self.num_value_heads, self.key_head_dim)))
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN repeat query heads", e))?
+                .map_err(|e| {
+                    candle_to_ocr_inference(self.model_name, "GDN repeat query heads", e)
+                })?
         };
         let key = if repeat == 1 {
             key
@@ -411,23 +695,23 @@ impl GatedDeltaNet {
             key.unsqueeze(3)
                 .and_then(|x| x.repeat((1, 1, 1, repeat, 1)))
                 .and_then(|x| x.reshape((batch, seq_len, self.num_value_heads, self.key_head_dim)))
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN repeat key heads", e))?
+                .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN repeat key heads", e))?
         };
         let packed_qkv = Tensor::cat(&[&query, &key, &value], D::Minus1)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN pack qkv", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN pack qkv", e))?;
 
         let beta = self
             .in_proj_b
             .forward(hidden_states)
             .and_then(|x| candle_nn::ops::sigmoid(&x))
             .and_then(|x| x.to_dtype(DType::F32))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN beta", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN beta", e))?;
         let a = self
             .in_proj_a
             .forward(hidden_states)
             .and_then(|x| x.to_dtype(DType::F32))
             .and_then(|x| x.broadcast_add(&self.dt_bias))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN decay projection", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN decay projection", e))?;
         // Stable equivalent of log(1 + exp(a)), matching torch softplus
         // without overflowing for large positive decay logits.
         let softplus = a
@@ -440,12 +724,12 @@ impl GatedDeltaNet {
                     .and_then(|correction| correction.log())
                     .and_then(|correction| positive + correction)
             })
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN softplus", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN softplus", e))?;
         let g = softplus
             .broadcast_mul(&self.neg_a)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN decay", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN decay", e))?;
         let gb = Tensor::stack(&[&g, &beta], D::Minus1)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN pack decay/beta", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN pack decay/beta", e))?;
 
         let initial_state = match self.recurrent_state.borrow().as_ref() {
             Some(state) => state.clone(),
@@ -459,13 +743,14 @@ impl GatedDeltaNet {
                 DType::F32,
                 hidden_states.device(),
             )
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN initial state", e))?,
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN initial state", e))?,
         };
         let (core, final_state) = gated_delta_rule(&packed_qkv, &gb, &initial_state)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN recurrence", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN recurrence", e))?;
         store_state(
             &self.recurrent_state,
             final_state,
+            self.model_name,
             "GDN store recurrent state",
         )?;
 
@@ -473,24 +758,24 @@ impl GatedDeltaNet {
             .in_proj_z
             .forward(hidden_states)
             .and_then(|x| x.reshape((batch, seq_len, self.num_value_heads, self.value_head_dim)))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN z projection", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN z projection", e))?;
         let core = self
             .norm
             .forward(&core)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN output norm", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN output norm", e))?;
         let gate = z
             .to_dtype(DType::F32)
             .and_then(|z| candle_nn::ops::silu(&z))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN output gate", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN output gate", e))?;
         let core = core
             .to_dtype(DType::F32)
             .and_then(|core| core.broadcast_mul(&gate))
             .and_then(|core| core.to_dtype(hidden_states.dtype()))
             .and_then(|core| core.reshape((batch, seq_len, value_dim)))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN gated output", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN gated output", e))?;
         self.out_proj
             .forward(&core)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "GDN output projection", e))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "GDN output projection", e))
     }
 
     /// Release the state buffers. Under CUDA a captured decode graph has
@@ -528,17 +813,22 @@ struct FullAttention {
     head_dim: usize,
     scaling: f64,
     kv_cache: RefCell<TrimmableKvCache>,
+    model_name: &'static str,
 }
 
 impl FullAttention {
-    fn load(cfg: &OvisOcr2TextConfig, vb: VarBuilder) -> Result<Self, Error> {
+    fn load(
+        cfg: &Qwen35TextConfig,
+        model_name: &'static str,
+        vb: VarBuilder,
+    ) -> Result<Self, Error> {
         if !cfg
             .num_attention_heads
             .is_multiple_of(cfg.num_key_value_heads)
         {
             return Err(Error::Config {
                 message: format!(
-                    "OvisOCR2: num_attention_heads ({}) must be divisible by num_key_value_heads ({})",
+                    "{model_name}: num_attention_heads ({}) must be divisible by num_key_value_heads ({})",
                     cfg.num_attention_heads, cfg.num_key_value_heads
                 ),
             });
@@ -548,27 +838,29 @@ impl FullAttention {
             cfg.num_attention_heads * cfg.head_dim * 2,
             vb.pp("q_proj"),
         )
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load attention q_proj", e))?;
+        .map_err(|e| candle_to_ocr_inference(model_name, "load attention q_proj", e))?;
         let k_proj = linear_no_bias(
             cfg.hidden_size,
             cfg.num_key_value_heads * cfg.head_dim,
             vb.pp("k_proj"),
         )
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load attention k_proj", e))?;
+        .map_err(|e| candle_to_ocr_inference(model_name, "load attention k_proj", e))?;
         let v_proj = linear_no_bias(
             cfg.hidden_size,
             cfg.num_key_value_heads * cfg.head_dim,
             vb.pp("v_proj"),
         )
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load attention v_proj", e))?;
+        .map_err(|e| candle_to_ocr_inference(model_name, "load attention v_proj", e))?;
         let o_proj = linear_no_bias(
             cfg.num_attention_heads * cfg.head_dim,
             cfg.hidden_size,
             vb.pp("o_proj"),
         )
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load attention o_proj", e))?;
-        let q_norm = AdditiveRmsNorm::load(cfg.head_dim, cfg.rms_norm_eps, vb.pp("q_norm"))?;
-        let k_norm = AdditiveRmsNorm::load(cfg.head_dim, cfg.rms_norm_eps, vb.pp("k_norm"))?;
+        .map_err(|e| candle_to_ocr_inference(model_name, "load attention o_proj", e))?;
+        let q_norm =
+            AdditiveRmsNorm::load(cfg.head_dim, cfg.rms_norm_eps, model_name, vb.pp("q_norm"))?;
+        let k_norm =
+            AdditiveRmsNorm::load(cfg.head_dim, cfg.rms_norm_eps, model_name, vb.pp("k_norm"))?;
         Ok(Self {
             q_proj,
             k_proj,
@@ -582,90 +874,91 @@ impl FullAttention {
             head_dim: cfg.head_dim,
             scaling: 1.0 / (cfg.head_dim as f64).sqrt(),
             kv_cache: RefCell::new(TrimmableKvCache::new(2, cfg.max_position_embeddings)),
+            model_name,
         })
     }
 
     fn apply_rope(&self, tensor: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
-        let rotary_dim = cos
-            .dim(D::Minus1)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention rotary dimension", e))?;
+        let rotary_dim = cos.dim(D::Minus1).map_err(|e| {
+            candle_to_ocr_inference(self.model_name, "attention rotary dimension", e)
+        })?;
         let rotary = tensor
             .narrow(D::Minus1, 0, rotary_dim)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention rotary slice", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention rotary slice", e))?;
         let pass = tensor
             .narrow(D::Minus1, rotary_dim, self.head_dim - rotary_dim)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention pass slice", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention pass slice", e))?;
         let cos = cos
             .unsqueeze(1)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention cos layout", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention cos layout", e))?;
         let sin = sin
             .unsqueeze(1)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention sin layout", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention sin layout", e))?;
         let rotated = rotate_half(&rotary)?;
         let embedded = (rotary
             .broadcast_mul(&cos)
             .and_then(|lhs| rotated.broadcast_mul(&sin).and_then(|rhs| &lhs + &rhs)))
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "apply attention RoPE", e))?;
+        .map_err(|e| candle_to_ocr_inference(self.model_name, "apply attention RoPE", e))?;
         Tensor::cat(&[&embedded, &pass], D::Minus1)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention RoPE output", e))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention RoPE output", e))
     }
 
     fn forward(&self, hidden_states: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
         let (batch, seq_len, _) = hidden_states
             .dims3()
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention input", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention input", e))?;
         let qg = self
             .q_proj
             .forward(hidden_states)
             .and_then(|x| x.reshape((batch, seq_len, self.num_heads, self.head_dim * 2)))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention q/g projection", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention q/g projection", e))?;
         let q = qg
             .narrow(D::Minus1, 0, self.head_dim)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention q slice", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention q slice", e))?;
         let gate = qg
             .narrow(D::Minus1, self.head_dim, self.head_dim)
             .and_then(|x| x.reshape((batch, seq_len, self.num_heads * self.head_dim)))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention gate slice", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention gate slice", e))?;
         let q = self
             .q_norm
             .forward(&q)?
             .transpose(1, 2)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention q layout", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention q layout", e))?;
         let k = self
             .k_proj
             .forward(hidden_states)
             .and_then(|x| x.reshape((batch, seq_len, self.num_kv_heads, self.head_dim)))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention k projection", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention k projection", e))?;
         let k = self
             .k_norm
             .forward(&k)?
             .transpose(1, 2)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention k layout", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention k layout", e))?;
         let v = self
             .v_proj
             .forward(hidden_states)
             .and_then(|x| x.reshape((batch, seq_len, self.num_kv_heads, self.head_dim)))
             .and_then(|x| x.transpose(1, 2))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention v projection", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention v projection", e))?;
         let q = self
             .apply_rope(&q, cos, sin)?
             .contiguous()
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention q contiguous", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention q contiguous", e))?;
         let k = self
             .apply_rope(&k, cos, sin)?
             .contiguous()
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention k contiguous", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention k contiguous", e))?;
         let v = v
             .contiguous()
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention v contiguous", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention v contiguous", e))?;
         let (k, v) = self
             .kv_cache
             .borrow_mut()
             .append(&k, &v)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention KV cache", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention KV cache", e))?;
 
         let output = match flash_attention(&q, &k, &v, self.scaling, seq_len > 1)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "flash attention", e))?
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "flash attention", e))?
         {
             Some(output) => output,
             None => scaled_dot_product_attention_gqa(
@@ -677,21 +970,19 @@ impl FullAttention {
                 true,
                 self.num_kv_groups,
             )
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "grouped-query attention", e))?,
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "grouped-query attention", e))?,
         };
         let output = output
             .transpose(1, 2)
             .and_then(|x| x.reshape((batch, seq_len, self.num_heads * self.head_dim)))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention output layout", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention output layout", e))?;
         let gate = candle_nn::ops::sigmoid(&gate)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention output gate", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention output gate", e))?;
         self.o_proj
-            .forward(
-                &(&output * &gate).map_err(|e| {
-                    candle_to_ocr_inference(MODEL_NAME, "attention gated output", e)
-                })?,
-            )
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention output projection", e))
+            .forward(&(&output * &gate).map_err(|e| {
+                candle_to_ocr_inference(self.model_name, "attention gated output", e)
+            })?)
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention output projection", e))
     }
 
     fn clear_cache(&self) {
@@ -707,12 +998,12 @@ impl FullAttention {
             self.q_proj.weight().dtype(),
             self.q_proj.weight().device(),
         )
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "dynamic KV template", e))?;
+        .map_err(|e| candle_to_ocr_inference(self.model_name, "dynamic KV template", e))?;
         let released = self
             .kv_cache
             .borrow_mut()
             .grow_fixed_storage(&template, cache_len)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "prepare dynamic KV", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "prepare dynamic KV", e))?;
         // The replaced bucket was referenced by the graph disposed before
         // this growth: release it through the drain path, not a plain drop.
         if let Some((k, v)) = released {
@@ -733,7 +1024,7 @@ impl FullAttention {
         self.kv_cache
             .borrow_mut()
             .set_current_len(len)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "set dynamic KV length", e))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "set dynamic KV length", e))
     }
 
     /// Shrink the fixed KV bucket back to the organic eager form after a
@@ -756,7 +1047,7 @@ impl FullAttention {
             // plain-drop it, so the page fails instead.
             Err(error) => {
                 return Err(candle_to_ocr_inference(
-                    MODEL_NAME,
+                    self.model_name,
                     "shrink KV bucket",
                     error,
                 ));
@@ -801,13 +1092,14 @@ impl FullAttention {
         kv_lengths: &Tensor,
         kv_positions: &Tensor,
     ) -> Result<Tensor, Error> {
+        let model_name = self.model_name;
         let (batch, seq_len, _) = hidden_states
             .dims3()
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "dynamic attention input", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "dynamic attention input", e))?;
         if batch != 1 {
             return Err(Error::Config {
                 message: format!(
-                    "{MODEL_NAME} CUDA-graph attention requires batch size 1, got {batch}"
+                    "{model_name} CUDA-graph attention requires batch size 1, got {batch}"
                 ),
             });
         }
@@ -815,51 +1107,51 @@ impl FullAttention {
             .q_proj
             .forward(hidden_states)
             .and_then(|x| x.reshape((batch, seq_len, self.num_heads, self.head_dim * 2)))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention q/g projection", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention q/g projection", e))?;
         let q = qg
             .narrow(D::Minus1, 0, self.head_dim)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention q slice", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention q slice", e))?;
         let gate = qg
             .narrow(D::Minus1, self.head_dim, self.head_dim)
             .and_then(|x| x.reshape((batch, seq_len, self.num_heads * self.head_dim)))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention gate slice", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention gate slice", e))?;
         let q = self
             .q_norm
             .forward(&q)?
             .transpose(1, 2)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention q layout", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention q layout", e))?;
         let k = self
             .k_proj
             .forward(hidden_states)
             .and_then(|x| x.reshape((batch, seq_len, self.num_kv_heads, self.head_dim)))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention k projection", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention k projection", e))?;
         let k = self
             .k_norm
             .forward(&k)?
             .transpose(1, 2)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention k layout", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention k layout", e))?;
         let v = self
             .v_proj
             .forward(hidden_states)
             .and_then(|x| x.reshape((batch, seq_len, self.num_kv_heads, self.head_dim)))
             .and_then(|x| x.transpose(1, 2))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention v projection", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention v projection", e))?;
         let q = self
             .apply_rope(&q, cos, sin)?
             .contiguous()
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention q contiguous", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention q contiguous", e))?;
         let k = self
             .apply_rope(&k, cos, sin)?
             .contiguous()
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention k contiguous", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention k contiguous", e))?;
         let v = v
             .contiguous()
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention v contiguous", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention v contiguous", e))?;
 
         let cache = self.kv_cache.borrow();
         let cache_len = cache.storage_capacity();
         let (cache_k, cache_v) = cache.storage().ok_or_else(|| Error::Config {
-            message: format!("{MODEL_NAME} dynamic KV storage is not initialized"),
+            message: format!("{model_name} dynamic KV storage is not initialized"),
         })?;
         drop(cache);
         let append = DynamicKvAppend {
@@ -868,10 +1160,10 @@ impl FullAttention {
         };
         cache_k
             .inplace_op3(&k, kv_lengths, &append)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "dynamic key cache append", e))?;
-        cache_v
-            .inplace_op3(&v, kv_lengths, &append)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "dynamic value cache append", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "dynamic key cache append", e))?;
+        cache_v.inplace_op3(&v, kv_lengths, &append).map_err(|e| {
+            candle_to_ocr_inference(self.model_name, "dynamic value cache append", e)
+        })?;
 
         // Attention over the fixed-capacity storage with a device-side
         // additive mask derived from `kv_lengths`; masked positions get a
@@ -880,7 +1172,7 @@ impl FullAttention {
         let kv_bound = kv_lengths
             .i(1..)
             .and_then(|bound| bound.reshape((1, 1, 1)))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "dynamic KV bound", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "dynamic KV bound", e))?;
         let live = kv_positions.broadcast_lt(&kv_bound)?;
         let fill = masked_score(hidden_states.dtype());
         let mask = live
@@ -896,20 +1188,18 @@ impl FullAttention {
             false,
             self.num_kv_groups,
         )
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "dynamic masked attention", e))?;
+        .map_err(|e| candle_to_ocr_inference(self.model_name, "dynamic masked attention", e))?;
         let output = output
             .transpose(1, 2)
             .and_then(|x| x.reshape((batch, seq_len, self.num_heads * self.head_dim)))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention output layout", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention output layout", e))?;
         let gate = candle_nn::ops::sigmoid(&gate)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention output gate", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention output gate", e))?;
         self.o_proj
-            .forward(
-                &(&output * &gate).map_err(|e| {
-                    candle_to_ocr_inference(MODEL_NAME, "attention gated output", e)
-                })?,
-            )
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention output projection", e))
+            .forward(&(&output * &gate).map_err(|e| {
+                candle_to_ocr_inference(self.model_name, "attention gated output", e)
+            })?)
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention output projection", e))
     }
 }
 
@@ -922,37 +1212,48 @@ enum TokenMixer {
 #[derive(Debug)]
 struct DecoderLayer {
     mixer: TokenMixer,
-    mlp: OvisMlp,
+    mlp: Qwen35Mlp,
     input_layernorm: AdditiveRmsNorm,
     post_attention_layernorm: AdditiveRmsNorm,
+    model_name: &'static str,
 }
 
 impl DecoderLayer {
-    fn load(cfg: &OvisOcr2TextConfig, layer_type: &str, vb: VarBuilder) -> Result<Self, Error> {
+    fn load(
+        cfg: &Qwen35TextConfig,
+        layer_type: &str,
+        model_name: &'static str,
+        vb: VarBuilder,
+    ) -> Result<Self, Error> {
         let mixer = match layer_type {
             "linear_attention" => {
-                TokenMixer::Linear(GatedDeltaNet::load(cfg, vb.pp("linear_attn"))?)
+                TokenMixer::Linear(GatedDeltaNet::load(cfg, model_name, vb.pp("linear_attn"))?)
             }
-            "full_attention" => TokenMixer::Full(FullAttention::load(cfg, vb.pp("self_attn"))?),
+            "full_attention" => {
+                TokenMixer::Full(FullAttention::load(cfg, model_name, vb.pp("self_attn"))?)
+            }
             other => {
                 return Err(Error::Config {
-                    message: format!("OvisOCR2: unsupported decoder layer type '{other}'"),
+                    message: format!("{model_name}: unsupported decoder layer type '{other}'"),
                 });
             }
         };
         Ok(Self {
             mixer,
-            mlp: OvisMlp::load(cfg, vb.pp("mlp"))?,
+            mlp: Qwen35Mlp::load(cfg, model_name, vb.pp("mlp"))?,
             input_layernorm: AdditiveRmsNorm::load(
                 cfg.hidden_size,
                 cfg.rms_norm_eps,
+                model_name,
                 vb.pp("input_layernorm"),
             )?,
             post_attention_layernorm: AdditiveRmsNorm::load(
                 cfg.hidden_size,
                 cfg.rms_norm_eps,
+                model_name,
                 vb.pp("post_attention_layernorm"),
             )?,
+            model_name,
         })
     }
 
@@ -964,12 +1265,12 @@ impl DecoderLayer {
             TokenMixer::Full(layer) => layer.forward(&normalized, cos, sin)?,
         };
         let hidden_states = (&residual + &mixed)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "decoder mixer residual", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "decoder mixer residual", e))?;
         let residual = hidden_states.clone();
         let hidden_states = self.post_attention_layernorm.forward(&hidden_states)?;
         let hidden_states = self.mlp.forward(&hidden_states)?;
         (&residual + &hidden_states)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "decoder MLP residual", e))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "decoder MLP residual", e))
     }
 
     fn clear_cache(&self) {
@@ -1000,12 +1301,12 @@ impl DecoderLayer {
             }
         };
         let hidden_states = (&residual + &mixed)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "decoder mixer residual", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "decoder mixer residual", e))?;
         let residual = hidden_states.clone();
         let hidden_states = self.post_attention_layernorm.forward(&hidden_states)?;
         let hidden_states = self.mlp.forward(&hidden_states)?;
         (&residual + &hidden_states)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "decoder MLP residual", e))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "decoder MLP residual", e))
     }
 
     #[cfg(feature = "cuda")]
@@ -1061,21 +1362,26 @@ impl DecoderLayer {
 struct TextRotaryEmbedding {
     rotary: RotaryEmbedding,
     axis_ids: Tensor,
+    model_name: &'static str,
 }
 
 impl TextRotaryEmbedding {
-    fn new(cfg: &OvisOcr2TextConfig, device: &Device) -> Result<Self, Error> {
+    fn new(
+        cfg: &Qwen35TextConfig,
+        model_name: &'static str,
+        device: &Device,
+    ) -> Result<Self, Error> {
         let rotary_dim = (cfg.head_dim as f64 * cfg.rope_parameters.partial_rotary_factor) as usize;
         if rotary_dim == 0 || !rotary_dim.is_multiple_of(2) {
             return Err(Error::Config {
-                message: format!("OvisOCR2: invalid rotary dimension {rotary_dim}"),
+                message: format!("{model_name}: invalid rotary dimension {rotary_dim}"),
             });
         }
         let half = rotary_dim / 2;
         if cfg.rope_parameters.mrope_section.iter().sum::<usize>() != half {
             return Err(Error::Config {
                 message: format!(
-                    "OvisOCR2: mrope_section {:?} must sum to rotary_dim/2 ({half})",
+                    "{model_name}: mrope_section {:?} must sum to rotary_dim/2 ({half})",
                     cfg.rope_parameters.mrope_section
                 ),
             });
@@ -1087,8 +1393,12 @@ impl TextRotaryEmbedding {
             (1, 1, rotary_dim, 1),
             device,
         )
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create mRoPE axis map", e))?;
-        Ok(Self { rotary, axis_ids })
+        .map_err(|e| candle_to_ocr_inference(model_name, "create mRoPE axis map", e))?;
+        Ok(Self {
+            rotary,
+            axis_ids,
+            model_name,
+        })
     }
 
     fn forward(&self, position_ids: &Tensor, dtype: DType) -> Result<(Tensor, Tensor), Error> {
@@ -1099,20 +1409,20 @@ impl TextRotaryEmbedding {
     fn select_axes(&self, values: &Tensor) -> Result<Tensor, Error> {
         let (_, batch, seq_len, rotary_dim) = values
             .dims4()
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "mRoPE tensor shape", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "mRoPE tensor shape", e))?;
         let values = values
             .permute((1, 2, 3, 0))
             .and_then(|values| values.contiguous())
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "mRoPE axis layout", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "mRoPE axis layout", e))?;
         let axis_ids = self
             .axis_ids
             .expand((batch, seq_len, rotary_dim, 1))
             .and_then(|axis_ids| axis_ids.contiguous())
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "expand mRoPE axis map", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "expand mRoPE axis map", e))?;
         values
             .gather(&axis_ids, 3)
             .and_then(|values| values.squeeze(3))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "select mRoPE axes", e))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "select mRoPE axes", e))
     }
 }
 
@@ -1134,13 +1444,20 @@ fn interleaved_axis_ids(rotary_dim: usize, mrope_section: &[usize]) -> Vec<u32> 
         .collect()
 }
 
-pub(crate) struct OvisOcr2TextModel {
+pub(crate) struct Qwen35TextModel {
     embed_tokens: Embedding,
     layers: Vec<DecoderLayer>,
     norm: AdditiveRmsNorm,
     rotary_emb: TextRotaryEmbedding,
+    /// Display name used in every error message and log line.
+    model_name: &'static str,
+    /// Extra env var (besides `OAR_VL_DISABLE_CUDA_GRAPH`) that disables the
+    /// decode graph for the owning model. Only read by the CUDA decode-graph
+    /// gate; the CPU-only build never captures.
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    graph_disable_env: &'static str,
     #[cfg(feature = "cuda")]
-    decode_graph: RefCell<Option<DecoderCudaGraph<OvisDecodeGraphInputs>>>,
+    decode_graph: RefCell<Option<DecoderCudaGraph<Qwen35DecodeGraphInputs>>>,
     /// Bucket a lazy capture will use at the first decode step, set by
     /// `prepare_decode_graph`. Capture waits until a second token is
     /// actually needed: a generation whose first token stops it never pays
@@ -1164,13 +1481,13 @@ pub(crate) struct OvisOcr2TextModel {
 /// Largest KV bucket a captured decode graph covers; sized to the official
 /// generation limit so a full-length decode never leaves the graph path.
 #[cfg(feature = "cuda")]
-const OVISOCR2_DECODE_CACHE_LEN: usize = 16_384;
+const QWEN35_DECODE_CACHE_LEN: usize = 16_384;
 
 /// Inputs the decode graph captures, named and typed. The bundle owns every
 /// tensor the captured region reads that no model field holds, so nothing
 /// outside it can dangle under a live graph.
 #[cfg(feature = "cuda")]
-struct OvisDecodeGraphInputs {
+struct Qwen35DecodeGraphInputs {
     hidden: Tensor,
     positions: Tensor,
     kv_lengths: CudaGraphKvLengths,
@@ -1183,7 +1500,7 @@ struct OvisDecodeGraphInputs {
 }
 
 #[cfg(feature = "cuda")]
-impl DecoderGraphInputs for OvisDecodeGraphInputs {
+impl DecoderGraphInputs for Qwen35DecodeGraphInputs {
     fn dispose(self, device: &Device) {
         let Self {
             hidden,
@@ -1229,30 +1546,45 @@ pub(crate) struct TestHooks {
     pub decode_cache_ceiling: Option<usize>,
 }
 
-impl OvisOcr2TextModel {
-    pub(crate) fn load(cfg: &OvisOcr2TextConfig, vb: VarBuilder) -> Result<Self, Error> {
+impl Qwen35TextModel {
+    /// Load the decoder from `model.language_model` weights.
+    ///
+    /// `model_name` prefixes every error message and log line so both
+    /// consuming models report their own name; `graph_disable_env` names the
+    /// model-specific switch that forces eager decode (checked alongside the
+    /// shared `OAR_VL_DISABLE_CUDA_GRAPH`).
+    pub(crate) fn load(
+        cfg: &Qwen35TextConfig,
+        model_name: &'static str,
+        graph_disable_env: &'static str,
+        vb: VarBuilder,
+    ) -> Result<Self, Error> {
         if cfg.layer_types.len() != cfg.num_hidden_layers {
             return Err(Error::Config {
                 message: format!(
-                    "OvisOCR2: layer_types has {} entries, expected {}",
+                    "{model_name}: layer_types has {} entries, expected {}",
                     cfg.layer_types.len(),
                     cfg.num_hidden_layers
                 ),
             });
         }
         let embed_tokens = embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("embed_tokens"))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load token embeddings", e))?;
+            .map_err(|e| candle_to_ocr_inference(model_name, "load token embeddings", e))?;
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         for (index, layer_type) in cfg.layer_types.iter().enumerate() {
             layers.push(DecoderLayer::load(
                 cfg,
                 layer_type,
+                model_name,
                 vb.pp(format!("layers.{index}")),
             )?);
         }
-        let norm = AdditiveRmsNorm::load(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("norm"))?;
-        let rotary_emb = TextRotaryEmbedding::new(cfg, vb.device())?;
+        let norm =
+            AdditiveRmsNorm::load(cfg.hidden_size, cfg.rms_norm_eps, model_name, vb.pp("norm"))?;
+        let rotary_emb = TextRotaryEmbedding::new(cfg, model_name, vb.device())?;
         Ok(Self {
+            model_name,
+            graph_disable_env,
             embed_tokens,
             layers,
             norm,
@@ -1273,7 +1605,7 @@ impl OvisOcr2TextModel {
     pub(crate) fn embed(&self, input_ids: &Tensor) -> Result<Tensor, Error> {
         self.embed_tokens
             .forward(input_ids)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "token embedding", e))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "token embedding", e))
     }
 
     pub(crate) fn token_embedding_weight(&self) -> Tensor {
@@ -1336,7 +1668,7 @@ impl OvisOcr2TextModel {
             return Ok(());
         }
         if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
-            || std::env::var_os("OAR_OVISOCR2_DISABLE_CUDA_GRAPH").is_some()
+            || std::env::var_os(self.graph_disable_env).is_some()
         {
             self.invalidate_decode_graph();
             self.pending_capture_bucket.borrow_mut().take();
@@ -1395,6 +1727,7 @@ impl OvisOcr2TextModel {
         prompt_len: usize,
         lm_head: &Linear,
     ) -> Result<bool, Error> {
+        let model_name = self.model_name;
         let prepared: Result<(), Error> =
             self.layers
                 .iter()
@@ -1415,7 +1748,7 @@ impl OvisOcr2TextModel {
                 });
         if let Err(error) = prepared {
             tracing::warn!(
-                "{MODEL_NAME} decoder graph bucket preparation failed: {error}; continuing eager"
+                "{model_name} decoder graph bucket preparation failed: {error}; continuing eager"
             );
             return Ok(false);
         }
@@ -1429,29 +1762,33 @@ impl OvisOcr2TextModel {
             Ok(snapshots) => snapshots,
             Err(error) => {
                 tracing::warn!(
-                    "{MODEL_NAME} decoder graph state snapshot failed: {error}; continuing eager"
+                    "{model_name} decoder graph state snapshot failed: {error}; continuing eager"
                 );
                 return Ok(false);
             }
         };
         let embeddings = self.embed_tokens.embeddings();
         let device = embeddings.device().clone();
-        let inputs: Result<OvisDecodeGraphInputs, Error> = (|| {
+        let inputs: Result<Qwen35DecodeGraphInputs, Error> = (|| {
             let hidden_size = embeddings
                 .dim(1)
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph hidden size", e))?;
-            Ok(OvisDecodeGraphInputs {
-                hidden: Tensor::zeros((1, 1, hidden_size), embeddings.dtype(), &device)
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph hidden input", e))?,
-                positions: Tensor::zeros((3, 1, 1), DType::I64, &device)
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph position input", e))?,
+                .map_err(|e| candle_to_ocr_inference(self.model_name, "graph hidden size", e))?;
+            Ok(Qwen35DecodeGraphInputs {
+                hidden: Tensor::zeros((1, 1, hidden_size), embeddings.dtype(), &device).map_err(
+                    |e| candle_to_ocr_inference(self.model_name, "graph hidden input", e),
+                )?,
+                positions: Tensor::zeros((3, 1, 1), DType::I64, &device).map_err(|e| {
+                    candle_to_ocr_inference(self.model_name, "graph position input", e)
+                })?,
                 // The append kernel derives the write slot from the
                 // cumulative END, hence prompt_len + one decode step.
                 kv_lengths: CudaGraphKvLengths::new(prompt_len + 1, &device)
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph KV lengths", e))?,
+                    .map_err(|e| candle_to_ocr_inference(self.model_name, "graph KV lengths", e))?,
                 kv_positions: Tensor::arange(0u32, cache_len as u32, &device)?
                     .reshape((1, 1, cache_len))
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph KV positions", e))?,
+                    .map_err(|e| {
+                        candle_to_ocr_inference(self.model_name, "graph KV positions", e)
+                    })?,
                 lm_head: lm_head.clone(),
             })
         })();
@@ -1462,14 +1799,14 @@ impl OvisOcr2TextModel {
                 // the soft return (a failed rollback is the hard error).
                 self.restore_linear_states(snapshots)?;
                 tracing::warn!(
-                    "{MODEL_NAME} decoder graph input allocation failed: {error}; continuing eager"
+                    "{model_name} decoder graph input allocation failed: {error}; continuing eager"
                 );
                 return Ok(false);
             }
         };
         let captured = capture_decoder_graph(
             &device,
-            MODEL_NAME,
+            self.model_name,
             self,
             inputs,
             Self::decode_graph_body,
@@ -1483,7 +1820,7 @@ impl OvisOcr2TextModel {
                 // fixed buffers so the eager fallback reads them intact.
                 self.restore_linear_states(snapshots)?;
                 tracing::warn!(
-                    "{MODEL_NAME} decoder graph capture failed: {capture_error}; continuing eager"
+                    "{model_name} decoder graph capture failed: {capture_error}; continuing eager"
                 );
                 return Ok(false);
             }
@@ -1494,7 +1831,7 @@ impl OvisOcr2TextModel {
             graph.dispose();
             return Err(error);
         }
-        tracing::info!("{MODEL_NAME} decoder graph captured: bucket={cache_len}");
+        tracing::info!("{model_name} decoder graph captured: bucket={cache_len}");
         *self.decode_graph.borrow_mut() = Some(graph);
         Ok(true)
     }
@@ -1504,7 +1841,7 @@ impl OvisOcr2TextModel {
     #[cfg(feature = "cuda")]
     fn decode_graph_body(
         this: &Self,
-        inputs: &OvisDecodeGraphInputs,
+        inputs: &Qwen35DecodeGraphInputs,
     ) -> Result<Vec<Tensor>, Error> {
         #[cfg(all(test, feature = "cuda"))]
         {
@@ -1540,10 +1877,12 @@ impl OvisOcr2TextModel {
                 &hidden
                     .i((0, 0, ..))
                     .and_then(|last| last.unsqueeze(0))
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "graph LM head input", e))?,
+                    .map_err(|e| {
+                        candle_to_ocr_inference(this.model_name, "graph LM head input", e)
+                    })?,
             )
             .and_then(|logits| logits.squeeze(0))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "decode LM head", e))?;
+            .map_err(|e| candle_to_ocr_inference(this.model_name, "decode LM head", e))?;
         Ok(vec![logits])
     }
 
@@ -1560,6 +1899,7 @@ impl OvisOcr2TextModel {
         position_ids: &Tensor,
         lm_head: &Linear,
     ) -> Result<Option<Tensor>, Error> {
+        let model_name = self.model_name;
         if self.decode_graph.borrow().is_none() {
             let Some(cache_len) = self.pending_capture_bucket.borrow_mut().take() else {
                 return Ok(None);
@@ -1603,7 +1943,7 @@ impl OvisOcr2TextModel {
             for layer in &self.layers {
                 if let Err(error) = layer.prepare_dynamic_cache(next) {
                     tracing::warn!(
-                        "{MODEL_NAME} decoder KV growth to bucket {next} failed: {error}; continuing eager"
+                        "{model_name} decoder KV growth to bucket {next} failed: {error}; continuing eager"
                     );
                     self.recover_failed_capture()?;
                     return Ok(None);
@@ -1613,7 +1953,7 @@ impl OvisOcr2TextModel {
                 self.recover_failed_capture()?;
                 return Ok(None);
             }
-            tracing::info!("{MODEL_NAME} decoder graph ladder: bucket {cache_len} -> {next}");
+            tracing::info!("{model_name} decoder graph ladder: bucket {cache_len} -> {next}");
         }
         let captured_ref = self.decode_graph.borrow();
         let Some(captured) = captured_ref.as_ref() else {
@@ -1628,21 +1968,21 @@ impl OvisOcr2TextModel {
             .inputs
             .hidden
             .slice_set(inputs_embeds, 0, 0)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy graph hidden", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "copy graph hidden", e))?;
         captured
             .inputs
             .positions
             .slice_set(position_ids, 0, 0)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "copy graph positions", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "copy graph positions", e))?;
         captured
             .inputs
             .kv_lengths
             .update(kv_len)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "update graph KV lengths", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "update graph KV lengths", e))?;
         captured
             .graph
             .launch()
-            .map_err(|e| cuda_graph_error(MODEL_NAME, "launch decoder CUDA graph", e))?;
+            .map_err(|e| cuda_graph_error(self.model_name, "launch decoder CUDA graph", e))?;
         for layer in &self.layers {
             layer.set_full_kv_cache_len(kv_len)?;
         }
@@ -1651,7 +1991,7 @@ impl OvisOcr2TextModel {
         // Owned copy: a later replay overwrites the captured output buffer,
         // and callers may hold the logits past it.
         Ok(Some(captured.outputs[0].copy().map_err(|e| {
-            candle_to_ocr_inference(MODEL_NAME, "copy graph logits", e)
+            candle_to_ocr_inference(self.model_name, "copy graph logits", e)
         })?))
     }
 
@@ -1714,7 +2054,7 @@ impl OvisOcr2TextModel {
         if let Some(ceiling) = self.hooks.decode_cache_ceiling {
             return ceiling;
         }
-        OVISOCR2_DECODE_CACHE_LEN
+        QWEN35_DECODE_CACHE_LEN
     }
 
     /// Live KV length of the full-attention layers (all share one length).
@@ -1739,6 +2079,7 @@ impl OvisOcr2TextModel {
     /// rolled back into the same fixed buffers.
     #[cfg(feature = "cuda")]
     fn snapshot_linear_states(&self) -> Result<Vec<(Tensor, Tensor)>, Error> {
+        let model_name = self.model_name;
         let mut snapshots = Vec::new();
         for layer in &self.layers {
             let TokenMixer::Linear(layer) = &layer.mixer else {
@@ -1747,12 +2088,12 @@ impl OvisOcr2TextModel {
             let conv = layer.conv_state.borrow().as_ref().map(|state| {
                 state
                     .copy()
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "snapshot conv state", e))
+                    .map_err(|e| candle_to_ocr_inference(self.model_name, "snapshot conv state", e))
             });
             let recurrent = layer.recurrent_state.borrow().as_ref().map(|state| {
-                state
-                    .copy()
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "snapshot recurrent state", e))
+                state.copy().map_err(|e| {
+                    candle_to_ocr_inference(self.model_name, "snapshot recurrent state", e)
+                })
             });
             match (conv, recurrent) {
                 (Some(conv), Some(recurrent)) => snapshots.push((conv?, recurrent?)),
@@ -1762,7 +2103,7 @@ impl OvisOcr2TextModel {
                 _ => {
                     return Err(Error::Config {
                         message: format!(
-                            "{MODEL_NAME} partial Gated DeltaNet state at graph capture"
+                            "{model_name} partial Gated DeltaNet state at graph capture"
                         ),
                     });
                 }
@@ -1781,8 +2122,18 @@ impl OvisOcr2TextModel {
             let Some((conv, recurrent)) = snapshots.next() else {
                 continue;
             };
-            store_state(&layer.conv_state, conv, "restore conv state")?;
-            store_state(&layer.recurrent_state, recurrent, "restore recurrent state")?;
+            store_state(
+                &layer.conv_state,
+                conv,
+                self.model_name,
+                "restore conv state",
+            )?;
+            store_state(
+                &layer.recurrent_state,
+                recurrent,
+                self.model_name,
+                "restore recurrent state",
+            )?;
         }
         Ok(())
     }
@@ -1796,7 +2147,7 @@ impl OvisOcr2TextModel {
 }
 
 #[cfg(feature = "cuda")]
-impl Drop for OvisOcr2TextModel {
+impl Drop for Qwen35TextModel {
     fn drop(&mut self) {
         // A cached graph must go through dispose: plainly dropping it
         // returns graph-bound buffers to the allocator and poisons it.
@@ -1817,6 +2168,7 @@ mod tests {
         store_state(
             &slot,
             Tensor::ones((1, 2, 4), DType::F32, &device).unwrap(),
+            "Qwen3.5-test",
             "test store",
         )
         .unwrap();
@@ -1834,6 +2186,7 @@ mod tests {
         store_state(
             &slot,
             Tensor::zeros((2, 2, 4), DType::F32, &device).unwrap(),
+            "Qwen3.5-test",
             "test store",
         )
         .unwrap();
@@ -1853,7 +2206,7 @@ mod tests {
         cfg.validate()?;
         let tensors = tiny_graph_tensors(&cfg, &device);
         let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
-        let model = OvisOcr2TextModel::load(&cfg, vb)?;
+        let model = Qwen35TextModel::load(&cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
 
         // Prefill four tokens through the production forward.
         let prompt = Tensor::from_vec(vec![1u32, 2, 3, 4], (1, 4), &device).unwrap();
@@ -2003,6 +2356,7 @@ mod tests {
                 &Device::Cpu,
             )
             .unwrap(),
+            model_name: "Qwen3.5-test",
         };
         let ids = Tensor::from_vec(
             [vec![10i64; 32], vec![20i64; 32], vec![30i64; 32]].concat(),
@@ -2018,8 +2372,8 @@ mod tests {
         assert!((values[31] - 20f32.cos()).abs() < 1e-6);
     }
 
-    fn tiny_graph_config() -> OvisOcr2TextConfig {
-        OvisOcr2TextConfig {
+    fn tiny_graph_config() -> Qwen35TextConfig {
+        Qwen35TextConfig {
             model_type: "qwen3_5_text".to_string(),
             vocab_size: 128,
             hidden_size: 64,
@@ -2031,7 +2385,7 @@ mod tests {
             hidden_act: candle_nn::Activation::Silu,
             max_position_embeddings: 256,
             rms_norm_eps: 1e-6,
-            rope_parameters: super::super::config::OvisOcr2RopeParameters {
+            rope_parameters: super::Qwen35RopeParameters {
                 rope_type: "default".to_string(),
                 mrope_section: vec![3, 3, 2],
                 mrope_interleaved: true,
@@ -2065,7 +2419,7 @@ mod tests {
     }
 
     fn tiny_graph_tensors(
-        cfg: &OvisOcr2TextConfig,
+        cfg: &Qwen35TextConfig,
         device: &Device,
     ) -> std::collections::HashMap<String, Tensor> {
         let mut tensors = std::collections::HashMap::new();
@@ -2193,7 +2547,8 @@ mod tests {
         let tensors = tiny_graph_tensors(&cfg, &device);
 
         let vb = VarBuilder::from_tensors(tensors.clone(), DType::BF16, &device);
-        let graphed = OvisOcr2TextModel::load(&cfg, vb)?;
+        let graphed =
+            Qwen35TextModel::load(&cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
         // Tied LM head, built exactly as `OvisOcr2::from_dir` builds it.
         let lm_head = Linear::new(graphed.token_embedding_weight(), None);
 
@@ -2239,7 +2594,7 @@ mod tests {
 
         // Eager reference: an identical model without a captured graph.
         let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
-        let eager = OvisOcr2TextModel::load(&cfg, vb)?;
+        let eager = Qwen35TextModel::load(&cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
         let embeds = eager.embed(&prompt)?;
         eager.forward(&embeds, &prompt_positions)?;
         let hidden = eager.forward(&eager.embed(&token)?, &pos4)?;
@@ -2248,10 +2603,12 @@ mod tests {
                 &hidden
                     .i((0, 0, ..))
                     .and_then(|last| last.unsqueeze(0))
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager reference input", e))?,
+                    .map_err(|e| {
+                        candle_to_ocr_inference(self.model_name, "eager reference input", e)
+                    })?,
             )
             .and_then(|logits| logits.squeeze(0))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager reference logits", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "eager reference logits", e))?;
         // The graph attends with masked SDPA while the eager path uses
         // flash attention; same math to bf16 resolution.
         let graph_f32 = logits_graph.to_dtype(DType::F32).unwrap();
@@ -2276,7 +2633,7 @@ mod tests {
     /// Scenario outcome: the model, the eager step's logits, and the KV
     /// storage layouts read right after the recovery.
     #[cfg(feature = "cuda")]
-    type FailedCaptureOutcome = (OvisOcr2TextModel, Tensor, Vec<(usize, usize)>);
+    type FailedCaptureOutcome = (Qwen35TextModel, Tensor, Vec<(usize, usize)>);
 
     /// Runs a prefill plus one lazy-capture decode step under the given hook
     /// configuration, then one eager step. Returns the model, the eager
@@ -2285,7 +2642,7 @@ mod tests {
     /// would mask the shrink).
     #[cfg(feature = "cuda")]
     fn failed_capture_scenario(
-        cfg: &OvisOcr2TextConfig,
+        cfg: &Qwen35TextConfig,
         tensors: &std::collections::HashMap<String, Tensor>,
         device: &Device,
         configure: fn(&mut TestHooks),
@@ -2300,7 +2657,8 @@ mod tests {
         let token = Tensor::from_vec(vec![7u32], (1, 1), device).unwrap();
         let pos4 = Tensor::from_vec(vec![4i64; 3], (3, 1, 1), device).unwrap();
         let vb = VarBuilder::from_tensors(tensors.clone(), DType::BF16, device);
-        let mut model = OvisOcr2TextModel::load(cfg, vb)?;
+        let mut model =
+            Qwen35TextModel::load(cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
         configure(&mut model.hooks);
         let lm_head = Linear::new(model.token_embedding_weight(), None);
         let embeds = model.embed(&prompt)?;
@@ -2323,10 +2681,10 @@ mod tests {
                 &hidden
                     .i((0, 0, ..))
                     .and_then(|last| last.unsqueeze(0))
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager input", e))?,
+                    .map_err(|e| candle_to_ocr_inference(self.model_name, "eager input", e))?,
             )
             .and_then(|logits| logits.squeeze(0))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager logits", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "eager logits", e))?;
         Ok((model, logits, layouts))
     }
 
@@ -2334,7 +2692,7 @@ mod tests {
     /// capture: the reference the recovered model's output must match.
     #[cfg(feature = "cuda")]
     fn eager_reference_logits(
-        cfg: &OvisOcr2TextConfig,
+        cfg: &Qwen35TextConfig,
         tensors: std::collections::HashMap<String, Tensor>,
         device: &Device,
     ) -> Result<Tensor, Error> {
@@ -2347,7 +2705,8 @@ mod tests {
         .unwrap();
         let pos4 = Tensor::from_vec(vec![4i64; 3], (3, 1, 1), device).unwrap();
         let vb = VarBuilder::from_tensors(tensors, DType::BF16, device);
-        let reference = OvisOcr2TextModel::load(cfg, vb)?;
+        let reference =
+            Qwen35TextModel::load(cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
         let lm_head = Linear::new(reference.token_embedding_weight(), None);
         let embeds = reference.embed(&prompt)?;
         reference.forward(&embeds, &prompt_positions)?;
@@ -2358,10 +2717,10 @@ mod tests {
                 &hidden
                     .i((0, 0, ..))
                     .and_then(|last| last.unsqueeze(0))
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "reference input", e))?,
+                    .map_err(|e| candle_to_ocr_inference(self.model_name, "reference input", e))?,
             )
             .and_then(|logits| logits.squeeze(0))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "reference logits", e))
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "reference logits", e))
     }
 
     /// max |a-b| in F32.
@@ -2495,7 +2854,8 @@ mod tests {
         let pos4 = Tensor::from_vec(vec![4i64; 3], (3, 1, 1), &device).unwrap();
 
         let vb = VarBuilder::from_tensors(tensors.clone(), DType::BF16, &device);
-        let mut model = OvisOcr2TextModel::load(&cfg, vb)?;
+        let mut model =
+            Qwen35TextModel::load(&cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
         // The body's second invocation is the capture itself.
         model.hooks.fail_body_on_call = Some(2);
         let lm_head = Linear::new(model.token_embedding_weight(), None);
@@ -2520,17 +2880,17 @@ mod tests {
 
         // Fresh allocations and the eager fallback both work afterwards.
         Tensor::zeros((256, 256), DType::BF16, &device)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "post-failure alloc", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "post-failure alloc", e))?;
         let hidden = model.forward(&embed, &pos4)?;
         let logits = lm_head
             .forward(
                 &hidden
                     .i((0, 0, ..))
                     .and_then(|last| last.unsqueeze(0))
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager input", e))?,
+                    .map_err(|e| candle_to_ocr_inference(self.model_name, "eager input", e))?,
             )
             .and_then(|logits| logits.squeeze(0))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager logits", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "eager logits", e))?;
         let reference = eager_reference_logits(&cfg, tensors, &device)?;
         let worst = max_abs_delta(&logits, &reference);
         assert!(
@@ -2575,7 +2935,8 @@ mod tests {
         // prompt_decode_bucket(7, 8) = 8: one replayed step fills the
         // bucket (KV 7 -> 8); the second step retires the graph.
         let vb = VarBuilder::from_tensors(tensors.clone(), DType::BF16, &device);
-        let mut model = OvisOcr2TextModel::load(&cfg, vb)?;
+        let mut model =
+            Qwen35TextModel::load(&cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
         model.hooks.decode_cache_ceiling = Some(8);
         let lm_head = Linear::new(model.token_embedding_weight(), None);
         let embeds = model.embed(&prompt)?;
@@ -2612,10 +2973,10 @@ mod tests {
                 &hidden
                     .i((0, 0, ..))
                     .and_then(|last| last.unsqueeze(0))
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager input", e))?,
+                    .map_err(|e| candle_to_ocr_inference(self.model_name, "eager input", e))?,
             )
             .and_then(|logits| logits.squeeze(0))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "eager logits", e))?;
+            .map_err(|e| candle_to_ocr_inference(self.model_name, "eager logits", e))?;
 
         // Reference: a model whose ceiling stays high replays the second
         // step too (the ladder re-captures at bucket 32). Both sides share
@@ -2623,7 +2984,8 @@ mod tests {
         // eager-vs-graph comparison — the same horizon the
         // decode_graph_captures_and_replays tolerance covers.
         let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
-        let reference = OvisOcr2TextModel::load(&cfg, vb)?;
+        let reference =
+            Qwen35TextModel::load(&cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
         let lm_head_ref = Linear::new(reference.token_embedding_weight(), None);
         let embeds = reference.embed(&prompt)?;
         reference.forward(&embeds, &prompt_positions)?;
@@ -2672,7 +3034,8 @@ mod tests {
         let position_at = |p: i64| Tensor::from_vec(vec![p; 3], (3, 1, 1), &device).unwrap();
 
         let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
-        let mut model = OvisOcr2TextModel::load(&cfg, vb)?;
+        let mut model =
+            Qwen35TextModel::load(&cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
         model.hooks.decode_cache_ceiling = Some(8);
         let lm_head = Linear::new(model.token_embedding_weight(), None);
         let embeds = model.embed(&prompt)?;
@@ -2723,7 +3086,7 @@ mod tests {
         let pos4 = Tensor::from_vec(vec![4i64; 3], (3, 1, 1), &device).unwrap();
 
         let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
-        let model = OvisOcr2TextModel::load(&cfg, vb)?;
+        let model = Qwen35TextModel::load(&cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
         let lm_head = Linear::new(model.token_embedding_weight(), None);
         let embeds = model.embed(&prompt)?;
         model.forward(&embeds, &prompt_positions)?;

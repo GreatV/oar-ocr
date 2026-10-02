@@ -14,6 +14,7 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 | [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) | 0.9B | External-layout page parsing, text, table, and formula recognition |
 | [OvisOCR2](https://huggingface.co/ATH-MaaS/OvisOCR2) | 0.8B | Model-native full-page document-to-Markdown parsing |
 | [WeVisDoc-2B/4B](https://huggingface.co/tencent/WeVisDoc-2B) | 2B | Model-native full-page document-to-Markdown parsing (Qwen3-VL with DeepStack) |
+| [Xiaomi-OCR-0](https://huggingface.co/SeerRay-Lab/Xiaomi-OCR-0) | 0.8B | Model-native full-page document-to-Markdown parsing and text/table/formula/KIE region prompts (Qwen3.5) |
 | [MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) | 0.6B | Model-native layout, end-to-end parsing, text, formula, and OTSL-table recognition |
 | [MonkeyOCRv2-B-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-B-Parsing) | 0.7B | Higher-capacity ViT-B variant with the same parsing and recognition tasks |
 | [HPD-Parsing](https://huggingface.co/PaddlePaddle/HPD-Parsing) | 1B | Model-native hierarchical full-page parsing with forked KV-prefix reuse and optional P-MTP |
@@ -34,7 +35,7 @@ See [`examples`](examples) for runnable examples.
 1. **Layout detection** to identify document regions and their reading order. `PpDocLayout` is a native Candle port of PP-DocLayoutV2/V3; any other detector can be plugged in through the `LayoutSource` trait.
 2. **VL-based recognition** to extract content from each region
 
-Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, TeleOCR, jina-ocr-v1, MonkeyOCRv2, OvisOCR2, WeVisDoc, HunyuanOCR, MinerU2.5/Pro, or MinerU-Diffusion for externally detected crops. HPD-Parsing currently supports only its model-native full-page protocol. For complete pages, prefer each model's native path where available: MonkeyOCRv2 `Layout`/`EndToEnd`, OvisOCR2, jina-ocr-v1, WeVisDoc, and HPD-Parsing full-page parsing, HunyuanOCR full-page prompts, and the MinerU two-step extraction examples.
+Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, TeleOCR, jina-ocr-v1, MonkeyOCRv2, OvisOCR2, WeVisDoc, Xiaomi-OCR-0, HunyuanOCR, MinerU2.5/Pro, or MinerU-Diffusion for externally detected crops. HPD-Parsing currently supports only its model-native full-page protocol. For complete pages, prefer each model's native path where available: MonkeyOCRv2 `Layout`/`EndToEnd`, OvisOCR2, jina-ocr-v1, WeVisDoc, Xiaomi-OCR-0, and HPD-Parsing full-page parsing, HunyuanOCR full-page prompts, and the MinerU two-step extraction examples.
 
 ## Installation
 
@@ -133,6 +134,28 @@ println!("{markdown}");
 ```
 
 The official runtime resizes RGB input with bicubic antialiasing to a 32-pixel-aligned area between `448²` and `2880²` pixels. Its fixed prompt requests reading-order Markdown, LaTeX formulas, HTML tables, and bounding-box `<img>` tags for visual regions. `parse` removes those visual-region blocks by default before applying truncated-repeat cleanup; call `parse_with_image_tags(..., true)` or `generate` to retain the references. The library does not create the referenced bounding-box crop files.
+
+### Xiaomi-OCR-0
+
+Xiaomi-OCR-0 performs model-native full-page parsing without an external layout detector, sharing its Qwen3.5 text tower with OvisOCR2. `parse` applies the official prompt and image preprocessing and returns one Markdown document per page with the official post-processing applied: truncated-repeat cleanup and OTSL table blocks converted to HTML.
+
+```rust
+use oar_ocr_vl::utils::image::load_image;
+use oar_ocr_vl::xiaomi_ocr::DEFAULT_MAX_NEW_TOKENS;
+use oar_ocr_vl::utils::parse_device;
+use oar_ocr_vl::XiaomiOcr;
+
+let image = load_image("document.png")?;
+let model = XiaomiOcr::from_dir("SeerRay-Lab/Xiaomi-OCR-0", parse_device("cpu")?)?;
+let markdown = model
+    .parse(&[image], DEFAULT_MAX_NEW_TOKENS)?
+    .into_iter()
+    .next()
+    .expect("one result")?;
+println!("{markdown}");
+```
+
+The processor resizes RGB input with bicubic antialiasing to a 32-pixel-aligned area between the advertised bounds (`256²`–`4096²` pixels). The official prompts cover whole-page parsing, text regions, OTSL tables, LaTeX formulas, and key-information extraction (see the `xiaomi_ocr` module constants); as a `RecognitionBackend`, tables come back in OTSL and are converted to HTML by the pipeline, and chart regions are left unrecognized because the model defines no chart prompt.
 
 ### WeVisDoc
 
@@ -300,7 +323,7 @@ cargo run --release -p oar-ocr-vl --features cuda --example doc_parser -- \
     document.jpg
 ```
 
-The CLI example exposes the layout-first PaddleOCR-VL, GLM-OCR, TeleOCR, and jina-ocr-v1 paths. MonkeyOCRv2, OvisOCR2, HunyuanOCR, and the MinerU models also implement `RecognitionBackend`; their dedicated examples remain the preferred complete-page paths. HPD-Parsing uses its model-native full-page protocol instead of `RecognitionBackend`.
+The CLI example exposes the layout-first PaddleOCR-VL, GLM-OCR, TeleOCR, and jina-ocr-v1 paths. MonkeyOCRv2, OvisOCR2, Xiaomi-OCR-0, HunyuanOCR, and the MinerU models also implement `RecognitionBackend`; their dedicated examples remain the preferred complete-page paths. HPD-Parsing uses its model-native full-page protocol instead of `RecognitionBackend`.
 
 ### PaddleOCR-VL Direct Inference
 
@@ -366,6 +389,17 @@ The example accepts multiple page images. It uses the official prompt and defaul
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda --example ovisocr2 -- \
     --model-dir ATH-MaaS/OvisOCR2 \
+    --device cuda:0 \
+    document-1.jpg document-2.jpg
+```
+
+### Xiaomi-OCR-0 Full-Page Parsing
+
+The example accepts multiple page images. It uses the official prompt and defaults to 4,096 generated tokens per page; tables are converted from OTSL to HTML by the official post-processing.
+
+```bash
+cargo run --release -p oar-ocr-vl --features cuda --example xiaomi_ocr -- \
+    --model-dir SeerRay-Lab/Xiaomi-OCR-0 \
     --device cuda:0 \
     document-1.jpg document-2.jpg
 ```
