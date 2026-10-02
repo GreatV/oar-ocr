@@ -323,9 +323,9 @@ pub fn truncate_repetitive_content(
 /// heuristic (identical constants in the official OvisOCR2 and Xiaomi-OCR-0
 /// post-processing).
 ///
-/// Only long outputs are touched: the last `unit_len` characters must repeat
-/// at least [`MIN_REPEAT_TIMES`] times and span at least [`MIN_REPEAT_CHARS`]
-/// characters, in which case the tail collapses to one period plus the
+/// Only outputs of at least 8,000 characters are touched: when a period of up
+/// to 200 characters repeats at least 5 times and the repeated run spans at
+/// least 100 characters, the tail collapses to one period plus the
 /// partial-period remainder.
 pub fn clean_truncated_repeats(text: &str) -> String {
     const MIN_TEXT_LEN: usize = 8_000;

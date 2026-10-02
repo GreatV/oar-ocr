@@ -1,7 +1,7 @@
 //! OvisOCR2 document-to-Markdown model support.
 //!
 //! The Qwen3.5 text tower (decoder and Gated DeltaNet kernel) lives in
-//! [`crate::backbones::qwen3_5`], shared with Xiaomi-OCR-0.
+//! `backbones::qwen3_5`, shared with Xiaomi-OCR-0.
 
 mod adapter;
 mod config;
