@@ -186,6 +186,11 @@ pub struct OARStructureBuilder {
 
     // Configuration
     ort_session_config: Option<OrtSessionConfig>,
+    // Per-model overrides of `ort_session_config` (formula has its own above)
+    layout_ort_session_config: Option<OrtSessionConfig>,
+    text_detection_ort_session_config: Option<OrtSessionConfig>,
+    text_recognition_ort_session_config: Option<OrtSessionConfig>,
+    table_ort_session_config: Option<OrtSessionConfig>,
     layout_detection_config: Option<LayoutDetectionConfig>,
     table_classification_config: Option<TableClassificationConfig>,
     table_cell_detection_config: Option<TableCellDetectionConfig>,
@@ -197,6 +202,42 @@ pub struct OARStructureBuilder {
     // Batch sizes
     image_batch_size: Option<usize>,
     region_batch_size: Option<usize>,
+}
+
+/// Resolves a `layout_model_name` preset to its layout model configuration.
+///
+/// Presets are matched case- and separator-insensitively so the documented
+/// forms (e.g. `PicoDet-L_layout_17cls`, `RT-DETR-H_layout_17cls`,
+/// `PP-DocLayout_plus-L`) resolve correctly. Mirrors the normalization used by
+/// `region_model_name`. An unknown name logs a warning and falls back to
+/// `PP-DocLayout_plus-L`.
+fn layout_model_config_from_name(name: &str) -> oar_ocr_core::domain::adapters::LayoutModelConfig {
+    use oar_ocr_core::domain::adapters::LayoutModelConfig;
+    match name.to_lowercase().replace('-', "_").as_str() {
+        "picodet_layout_1x" => LayoutModelConfig::picodet_layout_1x(),
+        "picodet_layout_1x_table" => LayoutModelConfig::picodet_layout_1x_table(),
+        "picodet_s_layout_3cls" => LayoutModelConfig::picodet_s_layout_3cls(),
+        "picodet_l_layout_3cls" => LayoutModelConfig::picodet_l_layout_3cls(),
+        "picodet_s_layout_17cls" => LayoutModelConfig::picodet_s_layout_17cls(),
+        "picodet_l_layout_17cls" => LayoutModelConfig::picodet_l_layout_17cls(),
+        "rt_detr_h_layout_3cls" => LayoutModelConfig::rtdetr_h_layout_3cls(),
+        "rt_detr_h_layout_17cls" => LayoutModelConfig::rtdetr_h_layout_17cls(),
+        "pp_docblocklayout" => LayoutModelConfig::pp_docblocklayout(),
+        "pp_doclayout_s" => LayoutModelConfig::pp_doclayout_s(),
+        "pp_doclayout_m" => LayoutModelConfig::pp_doclayout_m(),
+        "pp_doclayout_l" => LayoutModelConfig::pp_doclayout_l(),
+        "pp_doclayout_plus_l" => LayoutModelConfig::pp_doclayout_plus_l(),
+        "pp_doclayoutv2" | "pp_doclayout_v2" => LayoutModelConfig::pp_doclayoutv2(),
+        "pp_doclayoutv3" | "pp_doclayout_v3" => LayoutModelConfig::pp_doclayoutv3(),
+        _ => {
+            tracing::warn!(
+                requested = %name,
+                "Unknown --layout-model-name preset; falling back to PP-DocLayout_plus-L. \
+                 This may apply the wrong class labels/preprocessing for your model."
+            );
+            LayoutModelConfig::pp_doclayout_plus_l()
+        }
+    }
 }
 
 impl OARStructureBuilder {
@@ -247,6 +288,10 @@ impl OARStructureBuilder {
             text_detection_model_name: None,
             text_recognition_model_name: None,
             ort_session_config: None,
+            layout_ort_session_config: None,
+            text_detection_ort_session_config: None,
+            text_recognition_ort_session_config: None,
+            table_ort_session_config: None,
             layout_detection_config: None,
             table_classification_config: None,
             table_cell_detection_config: None,
@@ -261,9 +306,43 @@ impl OARStructureBuilder {
 
     /// Sets the ONNX Runtime session configuration.
     ///
-    /// This configuration will be applied to all models in the pipeline.
+    /// This configuration will be applied to all models in the pipeline, except
+    /// where a per-model session (`layout_ort_session`, `text_detection_ort_session`,
+    /// `text_recognition_ort_session`, `table_ort_session`, `formula_ort_session`)
+    /// overrides it.
     pub fn ort_session(mut self, config: OrtSessionConfig) -> Self {
         self.ort_session_config = Some(config);
+        self
+    }
+
+    /// Sets an ONNX Runtime session configuration only for layout detection.
+    ///
+    /// Useful to run the layout model on an accelerator while the rest of the
+    /// pipeline stays on the session set by [`Self::ort_session`]. Region
+    /// detection (`region_model_name`) keeps the pipeline-wide session.
+    pub fn layout_ort_session(mut self, config: OrtSessionConfig) -> Self {
+        self.layout_ort_session_config = Some(config);
+        self
+    }
+
+    /// Sets an ONNX Runtime session configuration only for text detection.
+    pub fn text_detection_ort_session(mut self, config: OrtSessionConfig) -> Self {
+        self.text_detection_ort_session_config = Some(config);
+        self
+    }
+
+    /// Sets an ONNX Runtime session configuration only for text recognition.
+    pub fn text_recognition_ort_session(mut self, config: OrtSessionConfig) -> Self {
+        self.text_recognition_ort_session_config = Some(config);
+        self
+    }
+
+    /// Sets an ONNX Runtime session configuration only for the table models:
+    /// classification, cell detection and structure recognition. Table
+    /// orientation reuses the document orientation model and keeps the
+    /// pipeline-wide session.
+    pub fn table_ort_session(mut self, config: OrtSessionConfig) -> Self {
+        self.table_ort_session_config = Some(config);
         self
     }
 
@@ -281,6 +360,7 @@ impl OARStructureBuilder {
     /// `pp_doclayout_plus_l` are equivalent. Supported presets:
     /// - `PP-DocLayout_plus-L` (default)
     /// - `PP-DocLayout-S`, `PP-DocLayout-M`, `PP-DocLayout-L`
+    /// - `PP-DocLayoutV2`, `PP-DocLayoutV3`
     /// - `PP-DocBlockLayout`
     /// - `PicoDet_layout_1x`, `PicoDet_layout_1x_table`
     /// - `PicoDet-S_layout_3cls`, `PicoDet-L_layout_3cls`
@@ -812,34 +892,7 @@ impl OARStructureBuilder {
 
         // Use explicit model name or default
         let layout_model_config = if let Some(name) = &self.layout_model_name {
-            use oar_ocr_core::domain::adapters::LayoutModelConfig;
-            // Match presets case- and separator-insensitively so the documented
-            // forms (e.g. `PicoDet-L_layout_17cls`, `RT-DETR-H_layout_17cls`,
-            // `PP-DocLayout_plus-L`) resolve correctly. Mirrors the normalization
-            // used by `region_model_name` below.
-            match name.to_lowercase().replace('-', "_").as_str() {
-                "picodet_layout_1x" => LayoutModelConfig::picodet_layout_1x(),
-                "picodet_layout_1x_table" => LayoutModelConfig::picodet_layout_1x_table(),
-                "picodet_s_layout_3cls" => LayoutModelConfig::picodet_s_layout_3cls(),
-                "picodet_l_layout_3cls" => LayoutModelConfig::picodet_l_layout_3cls(),
-                "picodet_s_layout_17cls" => LayoutModelConfig::picodet_s_layout_17cls(),
-                "picodet_l_layout_17cls" => LayoutModelConfig::picodet_l_layout_17cls(),
-                "rt_detr_h_layout_3cls" => LayoutModelConfig::rtdetr_h_layout_3cls(),
-                "rt_detr_h_layout_17cls" => LayoutModelConfig::rtdetr_h_layout_17cls(),
-                "pp_docblocklayout" => LayoutModelConfig::pp_docblocklayout(),
-                "pp_doclayout_s" => LayoutModelConfig::pp_doclayout_s(),
-                "pp_doclayout_m" => LayoutModelConfig::pp_doclayout_m(),
-                "pp_doclayout_l" => LayoutModelConfig::pp_doclayout_l(),
-                "pp_doclayout_plus_l" => LayoutModelConfig::pp_doclayout_plus_l(),
-                _ => {
-                    tracing::warn!(
-                        requested = %name,
-                        "Unknown --layout-model-name preset; falling back to PP-DocLayout_plus-L. \
-                         This may apply the wrong class labels/preprocessing for your model."
-                    );
-                    LayoutModelConfig::pp_doclayout_plus_l()
-                }
-            }
+            layout_model_config_from_name(name)
         } else {
             // Default fallback
             crate::domain::adapters::LayoutModelConfig::pp_doclayout_plus_l()
@@ -854,7 +907,11 @@ impl OARStructureBuilder {
             .unwrap_or_else(LayoutDetectionConfig::with_pp_structurev3_defaults);
         layout_builder = layout_builder.with_config(effective_layout_cfg);
 
-        if let Some(ref ort_config) = self.ort_session_config {
+        if let Some(ort_config) = self
+            .layout_ort_session_config
+            .as_ref()
+            .or(self.ort_session_config.as_ref())
+        {
             layout_builder = layout_builder.with_ort_config(ort_config.clone());
         }
 
@@ -904,7 +961,11 @@ impl OARStructureBuilder {
                     builder = builder.with_config(config.clone());
                 }
 
-                if let Some(ref ort_config) = self.ort_session_config {
+                if let Some(ort_config) = self
+                    .table_ort_session_config
+                    .as_ref()
+                    .or(self.ort_session_config.as_ref())
+                {
                     builder = builder.with_ort_config(ort_config.clone());
                 }
 
@@ -955,7 +1016,11 @@ impl OARStructureBuilder {
                 builder = builder.with_config(config.clone());
             }
 
-            if let Some(ref ort_config) = self.ort_session_config {
+            if let Some(ort_config) = self
+                .table_ort_session_config
+                .as_ref()
+                .or(self.ort_session_config.as_ref())
+            {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
@@ -996,7 +1061,11 @@ impl OARStructureBuilder {
                         builder = builder.with_config(config.clone());
                     }
 
-                    if let Some(ref ort_config) = self.ort_session_config {
+                    if let Some(ort_config) = self
+                        .table_ort_session_config
+                        .as_ref()
+                        .or(self.ort_session_config.as_ref())
+                    {
                         builder = builder.with_ort_config(ort_config.clone());
                     }
 
@@ -1010,7 +1079,11 @@ impl OARStructureBuilder {
                         builder = builder.with_config(config.clone());
                     }
 
-                    if let Some(ref ort_config) = self.ort_session_config {
+                    if let Some(ort_config) = self
+                        .table_ort_session_config
+                        .as_ref()
+                        .or(self.ort_session_config.as_ref())
+                    {
                         builder = builder.with_ort_config(ort_config.clone());
                     }
 
@@ -1054,7 +1127,11 @@ impl OARStructureBuilder {
                 builder = builder.with_config(config.clone());
             }
 
-            if let Some(ref ort_config) = self.ort_session_config {
+            if let Some(ort_config) = self
+                .table_ort_session_config
+                .as_ref()
+                .or(self.ort_session_config.as_ref())
+            {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
@@ -1083,7 +1160,11 @@ impl OARStructureBuilder {
                 builder = builder.with_config(config.clone());
             }
 
-            if let Some(ref ort_config) = self.ort_session_config {
+            if let Some(ort_config) = self
+                .table_ort_session_config
+                .as_ref()
+                .or(self.ort_session_config.as_ref())
+            {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
@@ -1107,7 +1188,11 @@ impl OARStructureBuilder {
                 builder = builder.with_config(config.clone());
             }
 
-            if let Some(ref ort_config) = self.ort_session_config {
+            if let Some(ort_config) = self
+                .table_ort_session_config
+                .as_ref()
+                .or(self.ort_session_config.as_ref())
+            {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
@@ -1131,7 +1216,11 @@ impl OARStructureBuilder {
                 builder = builder.with_config(config.clone());
             }
 
-            if let Some(ref ort_config) = self.ort_session_config {
+            if let Some(ort_config) = self
+                .table_ort_session_config
+                .as_ref()
+                .or(self.ort_session_config.as_ref())
+            {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
@@ -1270,7 +1359,11 @@ impl OARStructureBuilder {
                 builder = builder.model_name(name.clone());
             }
 
-            if let Some(ref ort_config) = self.ort_session_config {
+            if let Some(ort_config) = self
+                .text_detection_ort_session_config
+                .as_ref()
+                .or(self.ort_session_config.as_ref())
+            {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
@@ -1315,7 +1408,11 @@ impl OARStructureBuilder {
                 builder = builder.model_name(name.clone());
             }
 
-            if let Some(ref ort_config) = self.ort_session_config {
+            if let Some(ort_config) = self
+                .text_recognition_ort_session_config
+                .as_ref()
+                .or(self.ort_session_config.as_ref())
+            {
                 builder = builder.with_ort_config(ort_config.clone());
             }
 
@@ -1385,6 +1482,44 @@ struct PreparedPage {
     layout_elements: Vec<crate::domain::structure::LayoutElement>,
     detected_region_blocks: Option<Vec<crate::domain::structure::RegionBlock>>,
     precomputed_text_regions: Option<Vec<crate::oarocr::TextRegion>>,
+}
+
+/// Applies the per-block re-recognition of an OCR region that spans several layout
+/// blocks. The first crop whose text survives recognition takes over the original
+/// region and the rest are appended. Tying the takeover to the first *block's* crop
+/// instead leaves the full-width original in place whenever that crop comes back
+/// empty (e.g. dropped by `score_threshold`), and the original line is then
+/// stitched into every block it touches, next to the appended crops.
+fn apply_split_recognition(
+    region: &mut crate::oarocr::TextRegion,
+    crops: impl IntoIterator<Item = (oar_ocr_core::processors::BoundingBox, (String, f32))>,
+    appended: &mut Vec<crate::oarocr::TextRegion>,
+) {
+    let mut replaced = false;
+    for (crop_box, (text, score)) in crops {
+        if text.is_empty() {
+            continue;
+        }
+        if !replaced {
+            region.bounding_box = crop_box.clone();
+            region.dt_poly = Some(crop_box.clone());
+            region.rec_poly = Some(crop_box);
+            region.text = Some(Arc::from(text));
+            region.confidence = Some(score);
+            replaced = true;
+        } else {
+            appended.push(crate::oarocr::TextRegion {
+                bounding_box: crop_box.clone(),
+                dt_poly: Some(crop_box.clone()),
+                rec_poly: Some(crop_box),
+                text: Some(Arc::from(text)),
+                confidence: Some(score),
+                orientation_angle: None,
+                word_boxes: None,
+                label: None,
+            });
+        }
+    }
 }
 
 impl OARStructure {
@@ -1512,9 +1647,9 @@ impl OARStructure {
             let ocr_box = text_regions[ocr_idx].bounding_box.clone();
 
             let mut crops: Vec<image::RgbImage> = Vec::new();
-            let mut crop_boxes: Vec<(BoundingBox, bool)> = Vec::new(); // (bbox, is_first)
+            let mut crop_boxes: Vec<BoundingBox> = Vec::new();
 
-            for (j, layout_idx) in layout_ids.iter().enumerate() {
+            for layout_idx in layout_ids.iter() {
                 let layout_box = &layout_elements[*layout_idx].bbox;
                 let Some(crop_box) = aabb_intersection(&ocr_box, layout_box) else {
                     continue;
@@ -1532,7 +1667,7 @@ impl OARStructure {
 
                 if let Ok(crop_img) = BBoxCrop::crop_bounding_box(page_image, &crop_box) {
                     crops.push(crop_img);
-                    crop_boxes.push((crop_box, j == 0));
+                    crop_boxes.push(crop_box);
                 }
             }
             multi_layout_crop_count += crop_boxes.len();
@@ -1554,32 +1689,13 @@ impl OARStructure {
                 rec_scores.extend(rec_result.scores);
             }
 
-            for ((crop_box, is_first), (text, score)) in crop_boxes
-                .into_iter()
-                .zip(rec_texts.into_iter().zip(rec_scores))
-            {
-                if text.is_empty() {
-                    continue;
-                }
-                if is_first {
-                    text_regions[ocr_idx].bounding_box = crop_box.clone();
-                    text_regions[ocr_idx].dt_poly = Some(crop_box.clone());
-                    text_regions[ocr_idx].rec_poly = Some(crop_box.clone());
-                    text_regions[ocr_idx].text = Some(Arc::from(text));
-                    text_regions[ocr_idx].confidence = Some(score);
-                } else {
-                    appended_regions.push(crate::oarocr::TextRegion {
-                        bounding_box: crop_box.clone(),
-                        dt_poly: Some(crop_box.clone()),
-                        rec_poly: Some(crop_box),
-                        text: Some(Arc::from(text)),
-                        confidence: Some(score),
-                        orientation_angle: None,
-                        word_boxes: None,
-                        label: None,
-                    });
-                }
-            }
+            apply_split_recognition(
+                &mut text_regions[ocr_idx],
+                crop_boxes
+                    .into_iter()
+                    .zip(rec_texts.into_iter().zip(rec_scores)),
+                &mut appended_regions,
+            );
         }
 
         if !appended_regions.is_empty() {
@@ -3539,6 +3655,95 @@ mod tests {
         assert!(builder.formula_recognition_model.is_none());
     }
 
+    use oar_ocr_core::processors::BoundingBox;
+
+    fn split_region() -> crate::oarocr::TextRegion {
+        crate::oarocr::TextRegion::with_recognition(
+            BoundingBox::from_coords(0.0, 0.0, 200.0, 20.0),
+            Some(Arc::from("title body")),
+            Some(0.9),
+        )
+    }
+
+    fn crops(texts: [&str; 2]) -> Vec<(BoundingBox, (String, f32))> {
+        vec![
+            (
+                BoundingBox::from_coords(0.0, 0.0, 60.0, 20.0),
+                (texts[0].to_string(), 0.9),
+            ),
+            (
+                BoundingBox::from_coords(60.0, 0.0, 200.0, 20.0),
+                (texts[1].to_string(), 0.9),
+            ),
+        ]
+    }
+
+    #[test]
+    fn test_split_recognition_keeps_the_first_block_first() {
+        let mut region = split_region();
+        let mut appended = Vec::new();
+        apply_split_recognition(&mut region, crops(["title", "body"]), &mut appended);
+        assert_eq!(region.text.as_deref(), Some("title"));
+        assert_eq!(region.bounding_box.x_max(), 60.0);
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0].text.as_deref(), Some("body"));
+    }
+
+    #[test]
+    fn test_split_recognition_replaces_with_the_first_surviving_crop() {
+        // The first block's crop was filtered out: the original full-width line must
+        // not survive next to the body crop, or it is stitched into both blocks.
+        let mut region = split_region();
+        let mut appended = Vec::new();
+        apply_split_recognition(&mut region, crops(["", "body"]), &mut appended);
+        assert_eq!(region.text.as_deref(), Some("body"));
+        assert_eq!(region.bounding_box.x_min(), 60.0);
+        assert!(appended.is_empty());
+    }
+
+    #[test]
+    fn test_split_recognition_leaves_the_region_when_every_crop_is_empty() {
+        let mut region = split_region();
+        let mut appended = Vec::new();
+        apply_split_recognition(&mut region, crops(["", ""]), &mut appended);
+        assert_eq!(region.text.as_deref(), Some("title body"));
+        assert_eq!(region.bounding_box.x_max(), 200.0);
+        assert!(appended.is_empty());
+    }
+
+    #[test]
+    fn test_layout_model_name_resolves_doclayout_v2_and_v3() {
+        use oar_ocr_core::domain::adapters::LayoutModelConfig;
+        for name in ["PP-DocLayoutV2", "pp_doclayoutv2", "PP-DocLayout-V2"] {
+            let config = layout_model_config_from_name(name);
+            assert_eq!(
+                config.model_name,
+                LayoutModelConfig::pp_doclayoutv2().model_name,
+                "{name}"
+            );
+            assert_eq!(config.num_classes, 25, "{name}");
+            assert!(config.class_labels.values().any(|label| label == "seal"));
+        }
+        let v3 = layout_model_config_from_name("PP-DocLayoutV3");
+        assert_eq!(
+            v3.model_name,
+            LayoutModelConfig::pp_doclayoutv3().model_name
+        );
+        assert_eq!(v3.num_classes, 25);
+    }
+
+    #[test]
+    fn test_layout_model_name_keeps_existing_presets_and_fallback() {
+        use oar_ocr_core::domain::adapters::LayoutModelConfig;
+        let m = layout_model_config_from_name("PP-DocLayout-M");
+        assert_eq!(m.model_name, LayoutModelConfig::pp_doclayout_m().model_name);
+        let fallback = layout_model_config_from_name("not-a-preset");
+        assert_eq!(
+            fallback.model_name,
+            LayoutModelConfig::pp_doclayout_plus_l().model_name
+        );
+    }
+
     #[test]
     fn test_structure_builder_with_table_components() {
         let builder = OARStructureBuilder::new("layout.onnx")
@@ -3657,6 +3862,39 @@ mod tests {
         assert!(builder.layout_detection_config.is_some());
         assert_eq!(builder.image_batch_size, Some(4));
         assert_eq!(builder.region_batch_size, Some(64));
+    }
+
+    #[test]
+    fn test_structure_builder_per_model_sessions_leave_the_global_one_alone() {
+        let global = OrtSessionConfig::default().with_intra_threads(1);
+        let layout = OrtSessionConfig::default().with_intra_threads(7);
+
+        let builder = OARStructureBuilder::new("layout.onnx")
+            .ort_session(global)
+            .layout_ort_session(layout);
+
+        let threads = |config: &Option<OrtSessionConfig>| config.as_ref().map(|c| c.intra_threads);
+        assert_eq!(threads(&builder.ort_session_config), Some(Some(1)));
+        assert_eq!(threads(&builder.layout_ort_session_config), Some(Some(7)));
+        assert!(builder.text_detection_ort_session_config.is_none());
+        assert!(builder.text_recognition_ort_session_config.is_none());
+        assert!(builder.table_ort_session_config.is_none());
+        assert!(builder.formula_ort_session_config.is_none());
+
+        let builder = builder
+            .text_detection_ort_session(OrtSessionConfig::default().with_intra_threads(2))
+            .text_recognition_ort_session(OrtSessionConfig::default().with_intra_threads(3))
+            .table_ort_session(OrtSessionConfig::default().with_intra_threads(4));
+        assert_eq!(
+            threads(&builder.text_detection_ort_session_config),
+            Some(Some(2))
+        );
+        assert_eq!(
+            threads(&builder.text_recognition_ort_session_config),
+            Some(Some(3))
+        );
+        assert_eq!(threads(&builder.table_ort_session_config), Some(Some(4)));
+        assert_eq!(threads(&builder.ort_session_config), Some(Some(1)));
     }
 
     #[test]

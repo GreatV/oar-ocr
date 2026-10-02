@@ -1,7 +1,7 @@
 use super::*;
 use crate::core::config::{
-    COREML_CONFIG_ENTRY, OrtCoreMLConfig, OrtExecutionProvider, OrtGraphOptimizationLevel as OG,
-    OrtSessionConfig,
+    COREML_CONFIG_ENTRY, ERROR_ON_EP_FAILURE_ENTRY, OrtCoreMLConfig, OrtExecutionProvider,
+    OrtGraphOptimizationLevel as OG, OrtSessionConfig,
 };
 use ort::ep::ExecutionProviderDispatch;
 use ort::logging::LogLevel;
@@ -54,7 +54,7 @@ impl OrtInfer {
         }
         if let Some(entries) = &cfg.session_config_entries {
             for (key, value) in entries {
-                if key == COREML_CONFIG_ENTRY {
+                if key == COREML_CONFIG_ENTRY || key == ERROR_ON_EP_FAILURE_ENTRY {
                     continue;
                 }
                 builder = builder.with_config_entry(key, value)?;
@@ -64,7 +64,19 @@ impl OrtInfer {
             let coreml_config = cfg.coreml_config().map_err(|error| {
                 ort::Error::new(format!("invalid CoreML session configuration: {error}"))
             })?;
-            let providers = Self::build_execution_providers(eps, coreml_config.as_ref())?;
+            let mut providers = Self::build_execution_providers(eps, coreml_config.as_ref())?;
+            if cfg.error_on_ep_failure() {
+                // `build_execution_providers` yields exactly one dispatch per
+                // requested provider (or fails), so the two lists line up.
+                providers = eps
+                    .iter()
+                    .zip(providers)
+                    .map(|(ep, provider)| match ep {
+                        OrtExecutionProvider::CPU => provider,
+                        _ => provider.error_on_failure(),
+                    })
+                    .collect();
+            }
             if !providers.is_empty() {
                 builder = builder.with_execution_providers(providers)?;
             }
