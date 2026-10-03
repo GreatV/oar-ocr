@@ -86,6 +86,8 @@ cargo add oar-ocr --features cuda
 
 The CUDA provider supports device selection, a GPU memory limit, arena growth strategy, cuDNN convolution algorithm selection, and maximum-workspace control through `OrtExecutionProvider::CUDA`.
 
+Every ONNX Runtime session keeps its own CUDA memory arena, and arenas do not return memory to the device on their own. `OrtSessionConfig::with_arena_shrinkage(true)` releases idle arena memory after each run, at a small per-run cost. `OARStructureBuilder` enables it by default on CUDA because its many resident models would otherwise reach about 19 GB on a multi-page PDF (about 9 GB with shrinkage). Pass `with_arena_shrinkage(false)` to opt out.
+
 ### `tensorrt`
 
 Enables the NVIDIA TensorRT execution provider on supported Linux and Windows targets. The host must provide compatible TensorRT and CUDA runtimes.

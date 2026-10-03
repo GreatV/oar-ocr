@@ -24,6 +24,7 @@ impl OrtInfer {
             input_name: input_name.unwrap_or("x").to_string(),
             model_path: source.display_path(),
             model_name,
+            run_options: None,
         })
     }
 
@@ -59,6 +60,7 @@ impl OrtInfer {
             .model_name
             .clone()
             .unwrap_or_else(|| "unknown_model".to_string());
+        let run_options = Self::arena_shrinkage_run_options(common)?;
 
         Ok(OrtInfer {
             sessions: vec![Mutex::new(session)],
@@ -66,7 +68,50 @@ impl OrtInfer {
             input_name: input_name.unwrap_or("x").to_string(),
             model_path: source.display_path(),
             model_name,
+            run_options,
         })
+    }
+
+    /// Builds the run options that return idle CUDA arena memory after each
+    /// run, when [`OrtSessionConfig::arena_shrinkage`] is enabled and the
+    /// session targets a CUDA device.
+    ///
+    /// [`OrtSessionConfig::arena_shrinkage`]: crate::core::config::OrtSessionConfig::arena_shrinkage
+    fn arena_shrinkage_run_options(
+        common: &ModelInferenceConfig,
+    ) -> Result<Option<ort::session::RunOptions>, OCRError> {
+        let Some(device) = Self::arena_shrinkage_device(common) else {
+            return Ok(None);
+        };
+        let build = || -> ort::Result<ort::session::RunOptions> {
+            let mut options = ort::session::RunOptions::new()?;
+            options.set("memory.enable_memory_arena_shrinkage", &device)?;
+            Ok(options)
+        };
+        build().map(Some).map_err(|e| OCRError::ConfigError {
+            message: format!("failed to enable CUDA arena shrinkage on {device}: {e}"),
+        })
+    }
+
+    /// The arena to shrink (`gpu:<id>` of the first CUDA execution provider),
+    /// or `None` when shrinkage is off or no CUDA provider is configured.
+    pub(super) fn arena_shrinkage_device(common: &ModelInferenceConfig) -> Option<String> {
+        let cfg = common.ort_session.as_ref()?;
+        if cfg.arena_shrinkage != Some(true) {
+            return None;
+        }
+        cfg.execution_providers
+            .as_ref()?
+            .iter()
+            .find_map(|ep| match ep {
+                // Without the `cuda` feature no CUDA provider is registered, so
+                // there is no CUDA arena to shrink.
+                #[cfg(feature = "cuda")]
+                crate::core::config::OrtExecutionProvider::CUDA { device_id, .. } => {
+                    Some(format!("gpu:{}", device_id.unwrap_or(0)))
+                }
+                _ => None,
+            })
     }
 
     fn ensure_cuda_launch_blocking_if_needed(common: &ModelInferenceConfig) {
