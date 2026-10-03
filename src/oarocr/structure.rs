@@ -199,6 +199,20 @@ pub struct OARStructureBuilder {
     region_batch_size: Option<usize>,
 }
 
+/// Turns CUDA arena shrinkage on for a CUDA session config unless the caller
+/// already chose a value; CPU-only configs are left untouched.
+fn default_arena_shrinkage(config: &mut OrtSessionConfig) {
+    use oar_ocr_core::core::config::OrtExecutionProvider;
+    let uses_cuda = config
+        .execution_providers
+        .iter()
+        .flatten()
+        .any(|ep| matches!(ep, OrtExecutionProvider::CUDA { .. }));
+    if uses_cuda && config.arena_shrinkage.is_none() {
+        config.arena_shrinkage = Some(true);
+    }
+}
+
 impl OARStructureBuilder {
     const MAX_BATCH_SIZE: usize = 4096;
 
@@ -701,6 +715,22 @@ impl OARStructureBuilder {
         }
         if let Some(size) = self.region_batch_size {
             Self::validate_batch_size("region_batch_size", size)?;
+        }
+
+        // The structure pipeline keeps a dozen CUDA sessions resident, each with
+        // its own memory arena sized to the largest crop it has seen; together
+        // they reach ~19 GB on a multi-page PDF and OOM 16 GB cards. Returning
+        // idle arena memory after each run keeps the peak near 9 GB with
+        // byte-identical output, so it is the default here unless the caller
+        // chose explicitly.
+        for config in [
+            self.ort_session_config.as_mut(),
+            self.formula_ort_session_config.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            default_arena_shrinkage(config);
         }
 
         // PP-FormulaNet's CUDA autoregressive Loop races on EP arena buffers when
@@ -3527,6 +3557,33 @@ impl OARStructure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arena_shrinkage_defaults_on_for_cuda_only() {
+        use oar_ocr_core::core::config::OrtExecutionProvider;
+        let cuda = || OrtExecutionProvider::CUDA {
+            device_id: None,
+            gpu_mem_limit: None,
+            arena_extend_strategy: None,
+            cudnn_conv_algo_search: None,
+            cudnn_conv_use_max_workspace: None,
+        };
+
+        let mut config = OrtSessionConfig::new().with_execution_providers(vec![cuda()]);
+        default_arena_shrinkage(&mut config);
+        assert_eq!(config.arena_shrinkage, Some(true));
+
+        let mut explicit = OrtSessionConfig::new()
+            .with_execution_providers(vec![cuda()])
+            .with_arena_shrinkage(false);
+        default_arena_shrinkage(&mut explicit);
+        assert_eq!(explicit.arena_shrinkage, Some(false));
+
+        let mut cpu =
+            OrtSessionConfig::new().with_execution_providers(vec![OrtExecutionProvider::CPU]);
+        default_arena_shrinkage(&mut cpu);
+        assert_eq!(cpu.arena_shrinkage, None);
+    }
 
     #[test]
     fn test_structure_builder_new() {

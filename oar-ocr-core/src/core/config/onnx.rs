@@ -175,6 +175,16 @@ pub struct OrtSessionConfig {
     pub log_verbosity_level: Option<i32>,
     /// Session configuration entries (key-value pairs)
     pub session_config_entries: Option<std::collections::HashMap<String, String>>,
+    /// Return idle CUDA arena memory to the device after every run.
+    ///
+    /// Each ONNX Runtime session keeps its own CUDA memory arena, and arenas
+    /// never give memory back on their own. A pipeline that holds many CUDA
+    /// sessions fed variable-sized crops (layout, table, formula, OCR) grows
+    /// every arena to its high-water mark, and the sum can exceed the GPU even
+    /// though the models never need that much at once. Shrinkage releases the
+    /// unused arena chunks at the end of each run, at a small per-run cost.
+    /// Only takes effect with a CUDA execution provider.
+    pub arena_shrinkage: Option<bool>,
 }
 
 impl OrtSessionConfig {
@@ -220,6 +230,13 @@ impl OrtSessionConfig {
         } else {
             self.execution_providers = Some(vec![provider]);
         }
+        self
+    }
+
+    /// Enables or disables CUDA arena shrinkage after every run (see
+    /// [`OrtSessionConfig::arena_shrinkage`]).
+    pub fn with_arena_shrinkage(mut self, enable: bool) -> Self {
+        self.arena_shrinkage = Some(enable);
         self
     }
 

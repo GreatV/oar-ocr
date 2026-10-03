@@ -63,6 +63,19 @@ impl<'a> TensorInput<'a> {
 }
 
 impl OrtInfer {
+    /// Runs one inference, applying the instance's run options (CUDA arena
+    /// shrinkage) when configured.
+    fn run_session<'s>(
+        &'s self,
+        session: &'s mut ort::session::Session,
+        inputs: SessionInputs<'_, '_, 0>,
+    ) -> ort::Result<ort::session::SessionOutputs<'s>> {
+        match &self.run_options {
+            Some(options) => session.run_with_options(inputs, options),
+            None => session.run(inputs),
+        }
+    }
+
     /// Returns the model path associated with this inference engine.
     pub fn model_path(&self) -> &std::path::Path {
         &self.model_path
@@ -175,12 +188,14 @@ impl OrtInfer {
 
         // Run inference
         let ort_inputs: SessionInputs<'_, '_, 0> = SessionInputs::ValueMap(tensor_refs);
-        let outputs = session_guard.run(ort_inputs).map_err(|e| {
-            OCRError::model_inference_error_builder(&self.model_name, "forward_pass")
-                .input_shape(&input_shape)
-                .context(&context)
-                .build(e)
-        })?;
+        let outputs = self
+            .run_session(&mut session_guard, ort_inputs)
+            .map_err(|e| {
+                OCRError::model_inference_error_builder(&self.model_name, "forward_pass")
+                    .input_shape(&input_shape)
+                    .context(&context)
+                    .build(e)
+            })?;
 
         // Extract all outputs without making assumptions
         let mut results = Vec::new();
@@ -278,18 +293,20 @@ impl OrtInfer {
         let ort_inputs: SessionInputs<'_, '_, 0> = SessionInputs::ValueMap(tensor_refs);
         // Build the error context lazily: formatting the input names only matters
         // when `run` fails, so keep it out of the happy path's allocations.
-        let outputs = session_guard.run(ort_inputs).map_err(|e| {
-            let input_shape = inputs[0].1.shape();
-            let input_names: Vec<&str> = inputs.iter().map(|(name, _)| *name).collect();
-            let context = format!(
-                "ONNX Runtime inference failed with inputs: {}",
-                input_names.join(", ")
-            );
-            OCRError::model_inference_error_builder(&self.model_name, "forward_pass")
-                .input_shape(&input_shape)
-                .context(&context)
-                .build(e)
-        })?;
+        let outputs = self
+            .run_session(&mut session_guard, ort_inputs)
+            .map_err(|e| {
+                let input_shape = inputs[0].1.shape();
+                let input_names: Vec<&str> = inputs.iter().map(|(name, _)| *name).collect();
+                let context = format!(
+                    "ONNX Runtime inference failed with inputs: {}",
+                    input_names.join(", ")
+                );
+                OCRError::model_inference_error_builder(&self.model_name, "forward_pass")
+                    .input_shape(&input_shape)
+                    .context(&context)
+                    .build(e)
+            })?;
 
         let value = &outputs[0];
         let (shape, data) =

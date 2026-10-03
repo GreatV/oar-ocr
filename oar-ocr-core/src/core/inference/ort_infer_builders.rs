@@ -24,6 +24,7 @@ impl OrtInfer {
             input_name: input_name.unwrap_or("x").to_string(),
             model_path: source.display_path(),
             model_name,
+            run_options: None,
         })
     }
 
@@ -59,6 +60,7 @@ impl OrtInfer {
             .model_name
             .clone()
             .unwrap_or_else(|| "unknown_model".to_string());
+        let run_options = Self::arena_shrinkage_run_options(common, &session)?;
 
         Ok(OrtInfer {
             sessions: vec![Mutex::new(session)],
@@ -66,7 +68,79 @@ impl OrtInfer {
             input_name: input_name.unwrap_or("x").to_string(),
             model_path: source.display_path(),
             model_name,
+            run_options,
         })
+    }
+
+    /// Builds the run options that return idle CUDA arena memory after each
+    /// run, when [`OrtSessionConfig::arena_shrinkage`] is enabled and the
+    /// session actually runs on a CUDA device.
+    ///
+    /// A failed CUDA provider registration falls back to CPU without an error,
+    /// and ONNX Runtime rejects every run whose shrink list names a device the
+    /// session has no arena for. So the device comes from the session's
+    /// registered allocators, not just the requested configuration.
+    ///
+    /// [`OrtSessionConfig::arena_shrinkage`]: crate::core::config::OrtSessionConfig::arena_shrinkage
+    fn arena_shrinkage_run_options(
+        common: &ModelInferenceConfig,
+        session: &ort::session::Session,
+    ) -> Result<Option<ort::session::RunOptions>, OCRError> {
+        let Some(device_id) = Self::arena_shrinkage_device(common) else {
+            return Ok(None);
+        };
+        if !Self::session_has_cuda_allocator(session, device_id) {
+            tracing::warn!(
+                "CUDA arena shrinkage requested for gpu:{device_id}, but the session has no \
+                 CUDA allocator there (CUDA provider not registered); continuing without it"
+            );
+            return Ok(None);
+        }
+        let device = format!("gpu:{device_id}");
+        let build = || -> ort::Result<ort::session::RunOptions> {
+            let mut options = ort::session::RunOptions::new()?;
+            options.set("memory.enable_memory_arena_shrinkage", &device)?;
+            Ok(options)
+        };
+        build().map(Some).map_err(|e| OCRError::ConfigError {
+            message: format!("failed to enable CUDA arena shrinkage on {device}: {e}"),
+        })
+    }
+
+    /// The CUDA device whose arena to shrink (the first CUDA execution
+    /// provider's), or `None` when shrinkage is off or no CUDA provider is
+    /// configured.
+    pub(super) fn arena_shrinkage_device(common: &ModelInferenceConfig) -> Option<i32> {
+        let cfg = common.ort_session.as_ref()?;
+        if cfg.arena_shrinkage != Some(true) {
+            return None;
+        }
+        cfg.execution_providers
+            .as_ref()?
+            .iter()
+            .find_map(|ep| match ep {
+                // Without the `cuda` feature no CUDA provider is registered, so
+                // there is no CUDA arena to shrink.
+                #[cfg(feature = "cuda")]
+                crate::core::config::OrtExecutionProvider::CUDA { device_id, .. } => {
+                    Some(device_id.unwrap_or(0))
+                }
+                _ => None,
+            })
+    }
+
+    /// Whether the session holds an allocator for CUDA device `device_id`,
+    /// i.e. the CUDA execution provider registered for that device.
+    fn session_has_cuda_allocator(session: &ort::session::Session, device_id: i32) -> bool {
+        use ort::memory::{AllocationDevice, Allocator, AllocatorType, MemoryInfo, MemoryType};
+        MemoryInfo::new(
+            AllocationDevice::CUDA,
+            device_id,
+            AllocatorType::Device,
+            MemoryType::Default,
+        )
+        .and_then(|info| Allocator::new(session, info))
+        .is_ok()
     }
 
     fn ensure_cuda_launch_blocking_if_needed(common: &ModelInferenceConfig) {

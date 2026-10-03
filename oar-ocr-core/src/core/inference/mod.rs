@@ -34,6 +34,9 @@ pub struct OrtInfer {
     pub(self) input_name: String,
     pub(self) model_path: std::path::PathBuf,
     pub(self) model_name: String,
+    /// Run options applied to every `session.run`; set when CUDA arena
+    /// shrinkage is enabled.
+    pub(self) run_options: Option<ort::session::RunOptions>,
 }
 
 impl std::fmt::Debug for OrtInfer {
@@ -43,6 +46,7 @@ impl std::fmt::Debug for OrtInfer {
             .field("input_name", &self.input_name)
             .field("model_path", &self.model_path)
             .field("model_name", &self.model_name)
+            .field("arena_shrinkage", &self.run_options.is_some())
             .finish()
     }
 }
@@ -125,5 +129,50 @@ mod tests {
         let common = ModelInferenceConfig::new();
         let result = OrtInfer::from_config(&common, "dummy_path.onnx", None);
         assert!(result.is_err()); // File doesn't exist
+    }
+
+    fn config_with(ort: crate::core::config::OrtSessionConfig) -> ModelInferenceConfig {
+        let mut common = ModelInferenceConfig::new();
+        common.ort_session = Some(ort);
+        common
+    }
+
+    #[test]
+    fn arena_shrinkage_is_off_unless_requested() {
+        use crate::core::config::{OrtExecutionProvider, OrtSessionConfig};
+        assert_eq!(
+            OrtInfer::arena_shrinkage_device(&ModelInferenceConfig::new()),
+            None
+        );
+        let cpu = OrtSessionConfig::new()
+            .with_execution_providers(vec![OrtExecutionProvider::CPU])
+            .with_arena_shrinkage(true);
+        assert_eq!(OrtInfer::arena_shrinkage_device(&config_with(cpu)), None);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn arena_shrinkage_targets_the_cuda_device() {
+        use crate::core::config::{OrtExecutionProvider, OrtSessionConfig};
+        let cuda = |device_id| OrtExecutionProvider::CUDA {
+            device_id,
+            gpu_mem_limit: None,
+            arena_extend_strategy: None,
+            cudnn_conv_algo_search: None,
+            cudnn_conv_use_max_workspace: None,
+        };
+        let off = OrtSessionConfig::new().with_execution_providers(vec![cuda(Some(1))]);
+        assert_eq!(OrtInfer::arena_shrinkage_device(&config_with(off)), None);
+        let on = OrtSessionConfig::new()
+            .with_execution_providers(vec![cuda(Some(1)), OrtExecutionProvider::CPU])
+            .with_arena_shrinkage(true);
+        assert_eq!(OrtInfer::arena_shrinkage_device(&config_with(on)), Some(1));
+        let default_device = OrtSessionConfig::new()
+            .with_execution_providers(vec![cuda(None)])
+            .with_arena_shrinkage(true);
+        assert_eq!(
+            OrtInfer::arena_shrinkage_device(&config_with(default_device)),
+            Some(0)
+        );
     }
 }
