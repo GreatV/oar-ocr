@@ -166,16 +166,13 @@ mod tests {
         let on = OrtSessionConfig::new()
             .with_execution_providers(vec![cuda(Some(1)), OrtExecutionProvider::CPU])
             .with_arena_shrinkage(true);
-        assert_eq!(
-            OrtInfer::arena_shrinkage_device(&config_with(on)).as_deref(),
-            Some("gpu:1")
-        );
+        assert_eq!(OrtInfer::arena_shrinkage_device(&config_with(on)), Some(1));
         let default_device = OrtSessionConfig::new()
             .with_execution_providers(vec![cuda(None)])
             .with_arena_shrinkage(true);
         assert_eq!(
-            OrtInfer::arena_shrinkage_device(&config_with(default_device)).as_deref(),
-            Some("gpu:0")
+            OrtInfer::arena_shrinkage_device(&config_with(default_device)),
+            Some(0)
         );
     }
 }
