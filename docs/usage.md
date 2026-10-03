@@ -275,14 +275,14 @@ PaddleOCR-VL-1.5 and PaddleOCR-VL-1.6 are drop-in replacements via `PaddleOcrVl:
 
 ```toml
 [dependencies]
-oar-ocr-vl = "0.9"
+oar-ocr-vl = "0.10"
 ```
 
 For GPU acceleration, enable CUDA:
 
 ```toml
 [dependencies]
-oar-ocr-vl = { version = "0.9", features = ["cuda"] }
+oar-ocr-vl = { version = "0.10", features = ["cuda"] }
 ```
 
 On macOS, use the `metal` feature instead.
