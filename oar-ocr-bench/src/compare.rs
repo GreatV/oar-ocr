@@ -1,13 +1,27 @@
-use crate::result::{Measurement, RunResult};
+use crate::{
+    manifest::Case,
+    result::{CaseResult, Measurement, RunResult},
+};
 use anyhow::{Result, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Measurements by case name; `None` marks a failed case.
-fn measurements(run: &RunResult) -> BTreeMap<&str, Option<&Measurement>> {
+fn cases(run: &RunResult) -> BTreeMap<&str, &CaseResult> {
     run.cases
         .iter()
-        .map(|c| (c.case.name.as_str(), c.measurement.as_ref()))
+        .map(|c| (c.case.name.as_str(), c))
         .collect()
+}
+
+/// Whether two cases run the same workload. The requested device is checked
+/// through the resolved device instead, and sample counts may differ.
+fn same_workload(a: &Case, b: &Case) -> bool {
+    let normalize = |case: &Case| Case {
+        device: String::new(),
+        warmup: 0,
+        repetitions: 0,
+        ..case.clone()
+    };
+    normalize(a) == normalize(b)
 }
 
 pub(crate) struct Comparison {
@@ -64,14 +78,24 @@ pub(crate) fn compare(base: &RunResult, new: &RunResult, limit: f64) -> Result<C
     text.push_str(
         "| Case | Metric | Base | New | Change | Status |\n|---|---|---:|---:|---:|---|\n",
     );
-    let (old, next) = (measurements(base), measurements(new));
+    let (old, next) = (cases(base), cases(new));
     let mut failed = false;
     for name in old.keys().chain(next.keys()).collect::<BTreeSet<_>>() {
-        let (Some(Some(x)), Some(Some(y))) = (old.get(name), next.get(name)) else {
+        let (Some(a), Some(b)) = (old.get(name), next.get(name)) else {
             text.push_str(&format!("| {name} | — | | | | MISSING OR FAILED |\n"));
             failed = true;
             continue;
         };
+        let (Some(x), Some(y)) = (&a.measurement, &b.measurement) else {
+            text.push_str(&format!("| {name} | — | | | | MISSING OR FAILED |\n"));
+            failed = true;
+            continue;
+        };
+        if !same_workload(&a.case, &b.case) {
+            text.push_str(&format!("| {name} | — | | | | CONFIGURATION DIFFERS |\n"));
+            failed = true;
+            continue;
+        }
         if x.pages != y.pages {
             text.push_str(&format!("| {name} | — | | | | INPUTS DIFFER |\n"));
             failed = true;
@@ -199,5 +223,17 @@ mod tests {
             let comparison = compare(a, b, 5.0).unwrap();
             assert!(comparison.failed && comparison.markdown.contains("MISSING OR FAILED"));
         }
+    }
+
+    #[test]
+    fn changed_case_configuration_is_not_compared() {
+        let base = run(100.0, "cpu");
+        let mut more_samples = run(100.0, "cpu");
+        more_samples.cases[0].case.repetitions += 5;
+        assert!(!compare(&base, &more_samples, 5.0).unwrap().failed);
+        let mut batched = run(100.0, "cpu");
+        batched.cases[0].case.options.batch_size = Some(4);
+        let comparison = compare(&base, &batched, 5.0).unwrap();
+        assert!(comparison.failed && comparison.markdown.contains("CONFIGURATION DIFFERS"));
     }
 }
