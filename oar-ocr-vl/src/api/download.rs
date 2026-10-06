@@ -478,6 +478,7 @@ pub(crate) fn snapshot(
     let _lock = SnapshotLock::acquire(&base)?;
     // Another process may have published while we waited for the lock.
     if dir.is_dir() {
+        record_commit(&base, source, revision, &commit);
         return Ok(dir);
     }
     let staging = base.join(format!("{commit}.partial"));
