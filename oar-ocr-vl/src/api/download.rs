@@ -11,8 +11,9 @@
 //! publishes SHA-256; Hugging Face publishes it for LFS files), and the
 //! staging directory is renamed into place only once complete. Published
 //! snapshots are never modified again, so loading one needs no lock and a
-//! failed download leaves earlier snapshots untouched. A `refs/<revision>`
-//! file records which commit each requested revision resolved to.
+//! failed download leaves earlier snapshots untouched. A
+//! `refs/<source>/<revision>` file records which commit each requested
+//! revision resolved to on each source.
 
 use crate::api::error::Error;
 use serde::Deserialize;
@@ -52,6 +53,14 @@ pub enum DownloadSource {
 }
 
 impl DownloadSource {
+    /// Directory under `refs/` that records this source's resolutions.
+    fn ref_dir(self) -> &'static str {
+        match self {
+            Self::ModelScope => "modelscope",
+            Self::HuggingFace => "huggingface",
+        }
+    }
+
     /// The revision downloaded when none is pinned in the options.
     fn default_revision(self) -> &'static str {
         match self {
@@ -63,8 +72,11 @@ impl DownloadSource {
     /// Resolves a revision (branch, tag, or commit) to its commit id.
     fn resolve_url(self, repo: &str, revision: &str) -> String {
         match self {
+            // ModelScope's commits endpoint resolves the revision through
+            // `Ref`; a `Revision` parameter is silently ignored there and
+            // always yields the default branch's head.
             Self::ModelScope => format!(
-                "https://www.modelscope.cn/api/v1/models/{}/commits?Revision={}&PageSize=1",
+                "https://www.modelscope.cn/api/v1/models/{}/commits?Ref={}&PageSize=1",
                 encode_path(repo),
                 encode_component(revision)
             ),
@@ -264,11 +276,14 @@ struct HuggingFaceLfs {
     oid: Option<String>,
 }
 
-/// Parses a ModelScope `repo/files` listing into snapshot files.
-fn parse_modelscope_listing(body: &str) -> Result<Vec<SnapshotFile>, Error> {
+/// Parses a ModelScope `repo/files` listing into snapshot files, plus the
+/// raw entry count including the tree entries that are filtered out — the
+/// endpoint's truncation applies to raw entries.
+fn parse_modelscope_listing(body: &str) -> Result<(Vec<SnapshotFile>, usize), Error> {
     let listing: ModelScopeListing = serde_json::from_str(body)
         .map_err(|error| Error::config(format!("parse ModelScope file listing: {error}")))?;
-    Ok(listing
+    let raw_entries = listing.data.files.len();
+    let files = listing
         .data
         .files
         .into_iter()
@@ -278,7 +293,8 @@ fn parse_modelscope_listing(body: &str) -> Result<Vec<SnapshotFile>, Error> {
             size: entry.size,
             sha256: entry.sha256,
         })
-        .collect())
+        .collect();
+    Ok((files, raw_entries))
 }
 
 /// Parses a Hugging Face `tree` listing into snapshot files. LFS entries
@@ -347,10 +363,30 @@ fn validate_repo_id(repo: &str) -> Result<(), Error> {
                 && !matches!(org, "." | "..")
                 && !matches!(name, "." | "..") =>
         {
+            // Same component rules as listed file paths, so a Windows drive
+            // prefix (`C:/payload`) fails on every platform before any
+            // directory is created.
+            if segments_contain_colon(repo) || !components_are_normal(repo) {
+                return Err(invalid());
+            }
             Ok(())
         }
         _ => Err(invalid()),
     }
+}
+
+/// Whether any `/`-separated segment contains a colon (Windows drive
+/// prefixes and NTFS stream names).
+fn segments_contain_colon(path: &str) -> bool {
+    path.split('/').any(|segment| segment.contains(':'))
+}
+
+/// Whether every path component is [`std::path::Component::Normal`], i.e.
+/// nothing [`Path::join`] would treat specially.
+fn components_are_normal(path: &str) -> bool {
+    Path::new(path)
+        .components()
+        .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 /// ModelScope's `repo/files` endpoint silently truncates at this many
@@ -412,6 +448,7 @@ pub(crate) fn snapshot(
     // A requested revision that already is a commit id with a local snapshot
     // needs no resolution at all.
     if validate_commit(revision).is_ok() && base.join(revision).is_dir() {
+        record_commit(&base, source, revision, revision);
         return Ok(base.join(revision));
     }
     let commit = match resolve_commit(&agent, source, &remote, revision) {
@@ -419,7 +456,7 @@ pub(crate) fn snapshot(
         Err(error) => {
             // Offline (or hub) failure: fall back to the commit this
             // revision resolved to before, when its snapshot survived.
-            if let Some(recorded) = recorded_commit(&base, revision)
+            if let Some(recorded) = recorded_commit(&base, source, revision)
                 && base.join(&recorded).is_dir()
             {
                 tracing::warn!(
@@ -435,6 +472,7 @@ pub(crate) fn snapshot(
     };
     let dir = base.join(&commit);
     if dir.is_dir() {
+        record_commit(&base, source, revision, &commit);
         return Ok(dir);
     }
     let _lock = SnapshotLock::acquire(&base)?;
@@ -478,23 +516,31 @@ pub(crate) fn snapshot(
         ))
     })?;
 
-    // Record which commit the requested revision resolved to, so the latest
-    // completed snapshot of a branch can be found offline.
-    let refs = base.join("refs");
-    if let Err(error) = fs::create_dir_all(&refs)
-        .and_then(|()| fs::write(refs.join(encode_component(revision)), &commit))
-    {
-        tracing::debug!(error = %error, "failed to record the resolved revision");
-    }
+    record_commit(&base, source, revision, &commit);
     Ok(dir)
 }
 
-/// Reads the commit a revision last resolved to, when `refs/<revision>`
-/// recorded one.
-fn recorded_commit(base: &Path, revision: &str) -> Option<String> {
-    let recorded = fs::read_to_string(base.join("refs").join(encode_component(revision))).ok()?;
+/// Reads the commit a revision last resolved to on this source, when
+/// `refs/<source>/<revision>` recorded one.
+fn recorded_commit(base: &Path, source: DownloadSource, revision: &str) -> Option<String> {
+    let path = base
+        .join("refs")
+        .join(source.ref_dir())
+        .join(encode_component(revision));
+    let recorded = fs::read_to_string(path).ok()?;
     let commit = recorded.trim();
     validate_commit(commit).is_ok().then(|| commit.to_string())
+}
+
+/// Best-effort record of what a revision resolved to on this source, so the
+/// latest completed snapshot can be found offline.
+fn record_commit(base: &Path, source: DownloadSource, revision: &str, commit: &str) {
+    let refs = base.join("refs").join(source.ref_dir());
+    if let Err(error) = fs::create_dir_all(&refs)
+        .and_then(|()| fs::write(refs.join(encode_component(revision)), commit))
+    {
+        tracing::debug!(error = %error, "failed to record the resolved revision");
+    }
 }
 
 /// Resolves a revision to the immutable commit id both the listing and every
@@ -569,20 +615,23 @@ fn list_files(
             .into_body()
             .read_to_string()
             .map_err(|error| Error::Io(io::Error::other(format!("read {url}: {error}"))))?;
-        files.extend(match source {
-            DownloadSource::ModelScope => parse_modelscope_listing(&body)?,
+        let page = match source {
+            DownloadSource::ModelScope => {
+                let (files, raw_entries) = parse_modelscope_listing(&body)?;
+                // ModelScope truncates `repo/files` listings at 3,000 raw
+                // entries with no marker; refuse to publish a snapshot from
+                // a possibly partial listing rather than trust it.
+                if raw_entries >= MODELSCOPE_LISTING_LIMIT {
+                    return Err(Error::config(format!(
+                        "ModelScope listing for {repo} returned {raw_entries} entries and may \
+                         be truncated; refusing to publish an incomplete snapshot"
+                    )));
+                }
+                files
+            }
             DownloadSource::HuggingFace => parse_huggingface_listing(&body)?,
-        });
-        // ModelScope truncates `repo/files` listings at 3,000 entries with no
-        // marker; refuse to publish a snapshot from a possibly partial
-        // listing rather than trust it.
-        if source == DownloadSource::ModelScope && files.len() >= MODELSCOPE_LISTING_LIMIT {
-            return Err(Error::config(format!(
-                "ModelScope listing for {repo} returned {} entries and may be truncated; \
-                 refusing to publish an incomplete snapshot",
-                files.len()
-            )));
-        }
+        };
+        files.extend(page);
         match next {
             Some(next_url) => url = next_url,
             None => return Ok(files),
@@ -665,18 +714,14 @@ fn validate_listed_path(path: &str) -> Result<(), Error> {
         return Err(invalid());
     }
     for segment in path.split('/') {
-        // The colon check rejects Windows drive prefixes (`C:/payload`)
-        // everywhere, not only on Windows where they parse as components.
-        if segment.is_empty() || segment == "." || segment == ".." || segment.contains(':') {
+        if segment.is_empty() || segment == "." || segment == ".." {
             return Err(invalid());
         }
     }
-    // Component-based: anything Path::join would treat specially — a
-    // Windows drive prefix, a rooted path — is not a Normal component.
-    if !Path::new(path)
-        .components()
-        .all(|component| matches!(component, std::path::Component::Normal(_)))
-    {
+    // The colon check rejects Windows drive prefixes (`C:/payload`)
+    // everywhere; the component check rejects anything else Path::join
+    // would treat specially.
+    if segments_contain_colon(path) || !components_are_normal(path) {
         return Err(invalid());
     }
     Ok(())
@@ -885,6 +930,8 @@ mod tests {
             "org//name",
             "org/name/extra",
             "org/.",
+            "C:/payload",
+            "org/na:me",
             "",
         ] {
             assert!(snapshot_base(root, bad).is_err(), "{bad:?}");
@@ -916,8 +963,9 @@ mod tests {
             {"Path":"model.safetensors","Sha256":"5ea4","Size":133270468,"Type":"blob"},
             {"Path":"subdir","Sha256":null,"Size":0,"Type":"tree"}
         ]}}"#;
+        let (files, raw_entries) = parse_modelscope_listing(listing).unwrap();
         assert_eq!(
-            parse_modelscope_listing(listing).unwrap(),
+            files,
             vec![
                 SnapshotFile {
                     path: ".gitattributes".into(),
@@ -931,6 +979,8 @@ mod tests {
                 },
             ]
         );
+        // The raw count includes the tree entry the files list drops.
+        assert_eq!(raw_entries, 3);
         // Hugging Face publishes a SHA-256 only for LFS entries.
         let listing = r#"[
             {"path":"config.json","size":2460,"type":"file"},
@@ -966,7 +1016,7 @@ mod tests {
         );
         assert_eq!(
             DownloadSource::ModelScope.resolve_url("org/name", "master"),
-            "https://www.modelscope.cn/api/v1/models/org/name/commits?Revision=master&PageSize=1"
+            "https://www.modelscope.cn/api/v1/models/org/name/commits?Ref=master&PageSize=1"
         );
         assert_eq!(
             DownloadSource::ModelScope.file_url("org/name", "abc123", "a b/c#d.bin"),
