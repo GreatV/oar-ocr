@@ -6,11 +6,9 @@ use oar_ocr::{
     oarocr::{OAROCR, OAROCRBuilder, OARStructure, OARStructureBuilder},
 };
 use oar_ocr_vl::{
-    DocParserConfig, GlmOcr, HpdGenerationConfig, HpdParsing, HunyuanOcr, HunyuanOcrParseOptions,
-    JinaOcr, JinaOcrParseOptions, LayoutPageParser, LayoutPageParserOptions, MinerU,
-    MinerUDiffusion, MinerUDiffusionParseOptions, MinerUParseOptions, MonkeyOcrV2,
-    MonkeyOcrV2ParseOptions, OvisOcr2, OvisOcr2ParseOptions, PaddleOcrVl, PageDocument, PageParser,
-    PpDocLayout, TeleOcr, WeVisDoc, WeVisDocParseOptions, XiaomiOcr, XiaomiOcrParseOptions,
+    AnyPageParser, AnyPageParserOptions, GlmOcr, HpdParsing, HunyuanOcr, JinaOcr, LayoutPageParser,
+    MinerU, MinerUDiffusion, MonkeyOcrV2, OvisOcr2, PaddleOcrVl, PageDocument, PageParser,
+    PpDocLayout, TeleOcr, WeVisDoc, XiaomiOcr,
 };
 use std::path::Path;
 
@@ -32,21 +30,10 @@ fn page_text(page: PageDocument) -> String {
     }
 }
 
-// Per-model dispatch until the VL crate offers a unified parser.
-enum VlModel {
-    Hpd(Box<HpdParsing>),
-    Hunyuan(Box<HunyuanOcr>),
-    Jina(Box<JinaOcr>),
-    MinerU(Box<MinerU>),
-    Diffusion(Box<MinerUDiffusion>),
-    Monkey(Box<MonkeyOcrV2>),
-    Ovis(Box<OvisOcr2>),
-    WeVis(Box<WeVisDoc>),
-    Xiaomi(Box<XiaomiOcr>),
-    Paddle(Box<LayoutPageParser<PpDocLayout, PaddleOcrVl>>),
-    Glm(Box<LayoutPageParser<PpDocLayout, GlmOcr>>),
-    Tele(Box<LayoutPageParser<PpDocLayout, TeleOcr>>),
-}
+/// One of the VL page parsers, chosen by name and driven through the crate's
+/// unified [`AnyPageParser`] contract.
+struct VlModel(AnyPageParser);
+
 impl VlModel {
     fn load(root: &Path, case: &Case, device: &candle_core::Device) -> Result<Self> {
         let path = root.join(
@@ -64,139 +51,42 @@ impl VlModel {
                 device.clone(),
             )?)
         };
-        let config = || DocParserConfig {
-            max_tokens: case.options.max_tokens.unwrap_or(4096),
-            ..Default::default()
-        };
-        let batch = case.options.region_batch_size.unwrap_or(1);
-        Ok(match case.model.as_deref().unwrap_or_default() {
-            "hpd-parsing" => Self::Hpd(Box::new(HpdParsing::from_dir(path, device.clone())?)),
-            "hunyuanocr" => Self::Hunyuan(Box::new(HunyuanOcr::from_dir(path, device.clone())?)),
-            "jina-ocr" => Self::Jina(Box::new(JinaOcr::from_dir(path, device.clone())?)),
-            "mineru" => Self::MinerU(Box::new(MinerU::from_dir(path, device.clone())?)),
-            "mineru-diffusion" => {
-                Self::Diffusion(Box::new(MinerUDiffusion::from_dir(path, device.clone())?))
+        // The shared knobs are applied per page in `parse`; only the model
+        // weights and layout source differ per case.
+        let parser = match case.model.as_deref().unwrap_or_default() {
+            "hpd-parsing" => HpdParsing::from_dir(path, device.clone())?.into(),
+            "hunyuanocr" => HunyuanOcr::from_dir(path, device.clone())?.into(),
+            "jina-ocr" => JinaOcr::from_dir(path, device.clone())?.into(),
+            "mineru" => MinerU::from_dir(path, device.clone())?.into(),
+            "mineru-diffusion" => MinerUDiffusion::from_dir(path, device.clone())?.into(),
+            "monkeyocrv2" => MonkeyOcrV2::from_dir(path, device.clone())?.into(),
+            "ovisocr2" => OvisOcr2::from_dir(path, device.clone())?.into(),
+            "wevisdoc" => WeVisDoc::from_dir(path, device.clone())?.into(),
+            "xiaomi-ocr-0" => XiaomiOcr::from_dir(path, device.clone())?.into(),
+            "paddleocr-vl" => {
+                LayoutPageParser::new(layout()?, PaddleOcrVl::from_dir(path, device.clone())?)
+                    .into()
             }
-            "monkeyocrv2" => Self::Monkey(Box::new(MonkeyOcrV2::from_dir(path, device.clone())?)),
-            "ovisocr2" => Self::Ovis(Box::new(OvisOcr2::from_dir(path, device.clone())?)),
-            "wevisdoc" => Self::WeVis(Box::new(WeVisDoc::from_dir(path, device.clone())?)),
-            "xiaomi-ocr-0" => Self::Xiaomi(Box::new(XiaomiOcr::from_dir(path, device.clone())?)),
-            "paddleocr-vl" => Self::Paddle(Box::new(
-                LayoutPageParser::with_config(
-                    layout()?,
-                    PaddleOcrVl::from_dir(path, device.clone())?,
-                    config(),
-                )
-                .with_region_batch_size(batch),
-            )),
-            "glmocr" => Self::Glm(Box::new(
-                LayoutPageParser::with_config(
-                    layout()?,
-                    GlmOcr::from_dir(path, device.clone())?,
-                    config(),
-                )
-                .with_region_batch_size(batch),
-            )),
-            "teleocr" => Self::Tele(Box::new(
-                LayoutPageParser::with_config(
-                    layout()?,
-                    TeleOcr::from_dir(path, device.clone())?,
-                    config(),
-                )
-                .with_region_batch_size(batch),
-            )),
+            "glmocr" => {
+                LayoutPageParser::new(layout()?, GlmOcr::from_dir(path, device.clone())?).into()
+            }
+            "teleocr" => {
+                LayoutPageParser::new(layout()?, TeleOcr::from_dir(path, device.clone())?).into()
+            }
             model => bail!("unsupported VL model {model}"),
-        })
+        };
+        Ok(Self(parser))
     }
 
     fn parse(&self, image: &RgbImage, case: &Case) -> Result<PageDocument> {
-        let tokens = case.options.max_tokens;
-        Ok(match self {
-            Self::Hpd(model) => {
-                let defaults = HpdGenerationConfig::default();
-                model.parse_page(
-                    image,
-                    &HpdGenerationConfig {
-                        max_new_tokens: tokens.unwrap_or(defaults.max_new_tokens),
-                        ..defaults
-                    },
-                )?
-            }
-            Self::Hunyuan(model) => model.parse_page(
-                image,
-                &HunyuanOcrParseOptions {
-                    max_new_tokens: tokens
-                        .unwrap_or(HunyuanOcrParseOptions::default().max_new_tokens),
-                    ..Default::default()
-                },
-            )?,
-            Self::Jina(model) => model.parse_page(
-                image,
-                &JinaOcrParseOptions {
-                    max_new_tokens: tokens.unwrap_or(JinaOcrParseOptions::default().max_new_tokens),
-                },
-            )?,
-            Self::MinerU(model) => {
-                let defaults = MinerUParseOptions::default();
-                model.parse_page(
-                    image,
-                    &MinerUParseOptions {
-                        max_tokens: tokens.unwrap_or(defaults.max_tokens),
-                        region_batch_size: case
-                            .options
-                            .region_batch_size
-                            .unwrap_or(defaults.region_batch_size),
-                        ..defaults
-                    },
-                )?
-            }
-            Self::Diffusion(model) => {
-                let defaults = MinerUDiffusionParseOptions::default();
-                model.parse_page(
-                    image,
-                    &MinerUDiffusionParseOptions {
-                        generation: oar_ocr_vl::DiffusionGenerationConfig {
-                            gen_length: tokens.unwrap_or(defaults.generation.gen_length),
-                            ..defaults.generation
-                        },
-                        ..defaults
-                    },
-                )?
-            }
-            Self::Monkey(model) => model.parse_page(
-                image,
-                &MonkeyOcrV2ParseOptions {
-                    max_new_tokens: tokens
-                        .unwrap_or(MonkeyOcrV2ParseOptions::default().max_new_tokens),
-                    ..Default::default()
-                },
-            )?,
-            Self::Ovis(model) => model.parse_page(
-                image,
-                &OvisOcr2ParseOptions {
-                    max_new_tokens: tokens
-                        .unwrap_or(OvisOcr2ParseOptions::default().max_new_tokens),
-                    ..Default::default()
-                },
-            )?,
-            Self::WeVis(model) => model.parse_page(
-                image,
-                &WeVisDocParseOptions {
-                    max_new_tokens: tokens
-                        .unwrap_or(WeVisDocParseOptions::default().max_new_tokens),
-                },
-            )?,
-            Self::Xiaomi(model) => model.parse_page(
-                image,
-                &XiaomiOcrParseOptions {
-                    max_new_tokens: tokens
-                        .unwrap_or(XiaomiOcrParseOptions::default().max_new_tokens),
-                },
-            )?,
-            Self::Paddle(model) => model.parse_page(image, &LayoutPageParserOptions::default())?,
-            Self::Glm(model) => model.parse_page(image, &LayoutPageParserOptions::default())?,
-            Self::Tele(model) => model.parse_page(image, &LayoutPageParserOptions::default())?,
-        })
+        let mut options = AnyPageParserOptions::default();
+        if let Some(max_new_tokens) = case.options.max_tokens {
+            options = options.with_max_new_tokens(max_new_tokens);
+        }
+        if let Some(region_batch_size) = case.options.region_batch_size {
+            options = options.with_region_batch_size(region_batch_size);
+        }
+        Ok(self.0.parse_page(image, &options)?)
     }
 }
 

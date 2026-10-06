@@ -73,6 +73,37 @@ pixel coordinates, confidence, reading order, source metadata, tables, and formu
 Recognition failures still return an error, as in `DocParser`. The `doc_parser`
 example uses this new entry point.
 
+## Unified Page Parsing
+
+`AnyPageParser` wraps any of the crate's page parsers behind one `PageParser`
+implementation, so the model can be chosen at runtime — from a config file, CLI
+flag, or benchmark manifest — without per-model dispatch:
+
+```rust
+use oar_ocr_vl::{
+    AnyPageParser, AnyPageParserOptions, LayoutPageParser, PageParser,
+    PaddleOcrVl, PpDocLayout,
+};
+
+let parser = AnyPageParser::from(LayoutPageParser::new(layout, backend));
+let page = parser.parse_page(&image, &AnyPageParserOptions::default())?;
+
+// Override the shared knobs for one page; `None` knobs keep each model's own
+// default and every model-specific option stays untouched.
+let options = AnyPageParserOptions::default().with_max_new_tokens(8192);
+let page = parser.parse_page(&image, &options)?;
+```
+
+Construct it from an already-loaded model with `From`: the model-native parsers
+(`HpdParsing`, `HunyuanOcr`, `JinaOcr`, `MinerU`, `MinerUDiffusion`,
+`MonkeyOcrV2`, `OvisOcr2`, `WeVisDoc`, `XiaomiOcr`) and `LayoutPageParser`
+compositions over `PpDocLayout` (`PaddleOcrVl`, `GlmOcr`, `TeleOcr`).
+`AnyPageParserOptions` carries the knobs every parser shares: `max_new_tokens`
+maps to each model's generation budget (including `MinerUDiffusion`'s
+`gen_length`), and `region_batch_size` applies to the region-batching parsers
+(`MinerU` and the layout-composed models); parsers without a matching concept
+ignore the knob.
+
 ## Installation
 
 This crate is self-contained: everything runs on Candle, it does not depend on `oar-ocr-core`, and **no build of it links ONNX Runtime**.

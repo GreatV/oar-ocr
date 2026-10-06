@@ -1,5 +1,6 @@
 //! Stable request, result, and error contracts for the VL crate.
 
+pub mod any_page_parser;
 pub mod error;
 pub mod generation;
 pub mod page_parser;
