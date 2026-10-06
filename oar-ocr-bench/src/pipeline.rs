@@ -341,8 +341,15 @@ impl Pipeline {
                 .collect(),
             Self::Vl(pipeline) => {
                 ensure!(images.len() == 1, "VL PageParser requires a single page");
-                let text = page_text(pipeline.model.parse(images[0], case)?);
+                let page = pipeline.model.parse(images[0], case)?;
                 pipeline.device.synchronize()?;
+                // A truncated or partially recognized page would look faster.
+                ensure!(
+                    page.diagnostics.is_empty(),
+                    "parser reported diagnostics: {:?}",
+                    page.diagnostics
+                );
+                let text = page_text(page);
                 Ok(vec![text])
             }
         }

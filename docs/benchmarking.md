@@ -74,7 +74,9 @@ PP-DocLayout `layout_path`.
 | `host_peak_bytes` | Linux `VmHWM` of the case process |
 | `gpu` | With `nvml`: device-wide used memory before loading and its sampled peak |
 
-Warmup runs are excluded. GPU memory is device-wide and sampled every 10 ms, so
+Warmup runs are excluded. A VL page with parser diagnostics, such as an exhausted
+token budget or a failed region, fails the case rather than being timed. GPU
+memory is device-wide and sampled every 10 ms, so
 use an otherwise idle GPU and treat the peak as a lower bound. The sampled GPU
 honors `CUDA_VISIBLE_DEVICES`; on multi-GPU hosts also set
 `CUDA_DEVICE_ORDER=PCI_BUS_ID` so CUDA ordinals follow NVML's order.
@@ -86,8 +88,8 @@ cargo run --release -p oar-ocr-bench --bin oar-bench -- \
   compare benchmark-results/base.json benchmark-results/new.json --threshold 5%
 ```
 
-For each case, latency and throughput changes worse than the threshold are
-reported as regressions; memory peaks vary between identical runs and are shown
+For each case, latency and throughput (pages/s, and chars/s for VL) changes worse
+than the threshold are reported as regressions; memory peaks vary between identical runs and are shown
 as information only. Cases are matched by name, and inputs by page path, so keep
 the page images unchanged between the two runs. Cases whose pages or actual
 devices differ are reported instead of compared; with `nvml`, the GPU model is part

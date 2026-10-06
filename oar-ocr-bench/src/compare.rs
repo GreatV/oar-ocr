@@ -36,13 +36,14 @@ fn change(base: f64, new: f64, higher_is_better: bool, limit: f64) -> (f64, bool
 
 /// Compared metrics and their direction (`Some(true)` when higher is better).
 /// Memory peaks vary between identical runs, so they are shown without gating.
-fn metrics(m: &Measurement) -> [(&'static str, Option<f64>, Option<bool>); 6] {
+fn metrics(m: &Measurement) -> [(&'static str, Option<f64>, Option<bool>); 7] {
     let mib = |bytes: u64| bytes as f64 / 1_048_576.0;
     [
         ("mean_ms", Some(m.latency_ms.mean), Some(false)),
         ("p50_ms", Some(m.latency_ms.p50), Some(false)),
         ("p95_ms", Some(m.latency_ms.p95), Some(false)),
         ("pages/s", Some(m.pages_per_second), Some(true)),
+        ("chars/s", m.output_chars_per_second, Some(true)),
         ("host_peak_mib", m.host_peak_bytes.map(mib), None),
         (
             "gpu_delta_mib",
