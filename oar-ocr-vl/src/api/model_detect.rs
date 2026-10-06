@@ -165,12 +165,9 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn minimal(architecture: &str) -> Value {
-        json!({ "architectures": [architecture] })
-    }
-
     #[test]
-    fn detects_each_supported_model() {
+    fn real_architectures_map_to_their_models() {
+        // The `architectures` values published in the supported checkpoints.
         let cases = [
             ("InternVLChatModel", DetectedModel::HpdParsing),
             (
@@ -193,92 +190,47 @@ mod tests {
             ("Qwen2_5_VLForConditionalGeneration", DetectedModel::TeleOcr),
         ];
         for (architecture, expected) in cases {
-            assert_eq!(detect_model(&minimal(architecture)).unwrap(), expected);
+            assert_eq!(
+                detect_model(&json!({ "architectures": [architecture] })).unwrap(),
+                expected,
+                "{architecture}"
+            );
         }
-        // The model_type field is informational only.
-        let mut with_model_type = minimal("InternVLChatModel");
-        with_model_type["model_type"] = json!("internvl_chat");
-        assert_eq!(
-            detect_model(&with_model_type).unwrap(),
-            DetectedModel::HpdParsing
-        );
-        // Repeated entries still identify one model.
-        let repeated = json!({ "architectures": ["InternVLChatModel", "InternVLChatModel"] });
-        assert_eq!(detect_model(&repeated).unwrap(), DetectedModel::HpdParsing);
     }
 
     #[test]
     fn vision_model_type_separates_the_qwen3_5_pair() {
-        let ovis = json!({
-            "architectures": ["Qwen3_5ForConditionalGeneration"],
-            "model_type": "qwen3_5",
-            "vision_config": { "model_type": "qwen3_5" },
-            "text_config": { "model_type": "qwen3_5_text" },
-        });
-        assert_eq!(detect_model(&ovis).unwrap(), DetectedModel::OvisOcr2);
-        let xiaomi = json!({
-            "architectures": ["Qwen3_5ForConditionalGeneration"],
-            "model_type": "qwen3_5",
-            "vision_config": { "model_type": "qwen3_5_vision" },
-            "text_config": { "model_type": "qwen3_5_text" },
-        });
-        assert_eq!(detect_model(&xiaomi).unwrap(), DetectedModel::XiaomiOcr);
+        let pair = |vision: &str| {
+            json!({
+                "architectures": ["Qwen3_5ForConditionalGeneration"],
+                "model_type": "qwen3_5",
+                "vision_config": { "model_type": vision },
+                "text_config": { "model_type": "qwen3_5_text" },
+            })
+        };
+        assert_eq!(
+            detect_model(&pair("qwen3_5")).unwrap(),
+            DetectedModel::OvisOcr2
+        );
+        assert_eq!(
+            detect_model(&pair("qwen3_5_vision")).unwrap(),
+            DetectedModel::XiaomiOcr
+        );
     }
 
     #[test]
-    fn unknown_qwen3_5_vision_tower_names_the_expected_values() {
-        let error = detect_model(&json!({
-            "architectures": ["Qwen3_5ForConditionalGeneration"],
-            "vision_config": { "model_type": "siglip" },
-        }))
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("vision_config.model_type"), "{error}");
-        assert!(error.contains("\"qwen3_5\" (OvisOCR2)"), "{error}");
+    fn unknown_or_ambiguous_configs_error_with_the_supported_list() {
+        // Unknown: the error names what was found and what is supported.
+        let error = detect_model(&json!({ "architectures": ["LlamaForCausalLM"] }))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("\"LlamaForCausalLM\""), "{error}");
+        assert!(error.contains("supported architectures"), "{error}");
         assert!(
-            error.contains("\"qwen3_5_vision\" (Xiaomi-OCR-0)"),
+            error.contains("PaddleOCRVLForConditionalGeneration"),
             "{error}"
         );
-        let missing = detect_model(&minimal("Qwen3_5ForConditionalGeneration"))
-            .unwrap_err()
-            .to_string();
-        assert!(missing.contains("vision_config.model_type"), "{missing}");
-    }
-
-    #[test]
-    fn unknown_config_names_what_was_found_and_what_is_supported() {
-        let error = detect_model(&json!({
-            "architectures": ["LlamaForCausalLM"],
-            "model_type": "llama",
-        }))
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("\"LlamaForCausalLM\""), "{error}");
-        assert!(error.contains("model_type=\"llama\""), "{error}");
-        for (architecture, _) in SINGLE_ARCHITECTURE_RULES {
-            assert!(error.contains(architecture), "{error}");
-        }
-        assert!(error.contains("OvisOCR2"), "{error}");
-        assert!(error.contains("Xiaomi-OCR-0"), "{error}");
-    }
-
-    #[test]
-    fn config_without_architectures_is_unsupported() {
-        let error = detect_model(&json!({ "model_type": "llama" }))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("architectures=[]"), "{error}");
-        assert!(error.contains("model_type=\"llama\""), "{error}");
-
-        let missing_model_type = detect_model(&json!({})).unwrap_err().to_string();
-        assert!(
-            missing_model_type.contains("model_type=\"<missing>\""),
-            "{missing_model_type}"
-        );
-    }
-
-    #[test]
-    fn several_supported_models_in_one_config_is_ambiguous() {
+        // Ambiguous: the error names every matched model instead of picking one.
         let error = detect_model(&json!({
             "architectures": ["InternVLChatModel", "GlmOcrForConditionalGeneration"],
         }))

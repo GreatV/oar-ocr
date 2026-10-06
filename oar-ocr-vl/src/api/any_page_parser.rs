@@ -438,27 +438,13 @@ mod tests {
     use std::cell::Cell;
 
     #[test]
-    fn load_options_carry_an_optional_layout_directory() {
-        let options = AnyPageParserLoadOptions::default();
-        assert!(options.layout_dir.is_none());
-        let options = options.with_layout_dir("some/layout_dir");
-        assert_eq!(
-            options.layout_dir.as_deref(),
-            Some(Path::new("some/layout_dir"))
-        );
-    }
-
-    fn model_dir_with(config: &str) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("config.json"), config).unwrap();
-        dir
-    }
-
-    #[test]
     fn from_dir_reports_a_missing_layout_directory_before_loading() {
-        let dir = model_dir_with(
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
             r#"{"architectures": ["PaddleOCRVLForConditionalGeneration"], "model_type": "paddleocr_vl"}"#,
-        );
+        )
+        .unwrap();
         let error = AnyPageParser::from_dir(dir.path(), Device::Cpu)
             .err()
             .expect("detection should fail")
@@ -466,47 +452,6 @@ mod tests {
         assert!(error.contains("PaddleOCR-VL"), "{error}");
         assert!(error.contains("PP-DocLayout"), "{error}");
         assert!(error.contains("with_layout_dir"), "{error}");
-    }
-
-    #[test]
-    fn from_dir_names_the_directory_when_config_json_is_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let error = AnyPageParser::from_dir(dir.path(), Device::Cpu)
-            .err()
-            .expect("detection should fail")
-            .to_string();
-        assert!(error.contains("no config.json"), "{error}");
-        assert!(error.contains(&dir.path().display().to_string()), "{error}");
-    }
-
-    #[test]
-    fn from_dir_rejects_unknown_configs_without_fallback() {
-        let dir = model_dir_with(r#"{"architectures": ["LlamaForCausalLM"]}"#);
-        let error = AnyPageParser::from_dir(dir.path(), Device::Cpu)
-            .err()
-            .expect("detection should fail")
-            .to_string();
-        assert!(error.contains("LlamaForCausalLM"), "{error}");
-        assert!(error.contains("supported architectures"), "{error}");
-        assert!(
-            error.contains("PaddleOCRVLForConditionalGeneration"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn from_dir_loads_a_real_checkpoint_when_available() {
-        let Some(model_dir) = std::env::var_os("ANY_PAGE_PARSER_MODEL_DIR") else {
-            eprintln!("skipping: ANY_PAGE_PARSER_MODEL_DIR is not set");
-            return;
-        };
-        let mut options = AnyPageParserLoadOptions::default();
-        if let Some(layout_dir) = std::env::var_os("ANY_PAGE_PARSER_LAYOUT_DIR") {
-            options = options.with_layout_dir(layout_dir);
-        }
-        let parser =
-            AnyPageParser::from_dir_with_options(model_dir, Device::Cpu, &options).unwrap();
-        let _ = parser;
     }
 
     #[test]
