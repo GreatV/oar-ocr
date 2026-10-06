@@ -79,7 +79,7 @@ pub struct OrtCoreMLConfig {
 }
 
 pub(crate) const COREML_CONFIG_ENTRY: &str = "oar.internal.coreml_config";
-const AUTO_DEVICE_CONFIG_ENTRY: &str = "oar.internal.auto_device";
+pub(crate) const AUTO_DEVICE_CONFIG_ENTRY: &str = "oar.internal.auto_device";
 
 /// Execution providers for ONNX Runtime.
 ///
@@ -249,7 +249,7 @@ impl OrtSessionConfig {
         self.resolve_auto_with_probe(crate::core::inference::OrtInfer::probe_execution_provider)
     }
 
-    fn resolve_auto_with_probe(
+    pub(crate) fn resolve_auto_with_probe(
         mut self,
         probe: impl FnMut(&OrtExecutionProvider) -> ort::Result<()>,
     ) -> Self {
@@ -263,9 +263,22 @@ impl OrtSessionConfig {
             .filter(|provider| !matches!(provider, OrtExecutionProvider::CPU))
             .collect();
         let selected = Self::auto_with_probe(candidates, probe);
+        let uses_directml = selected
+            .get_execution_providers()
+            .iter()
+            .any(|provider| matches!(provider, OrtExecutionProvider::DirectML { .. }));
         self.execution_providers = selected.execution_providers;
-        self.parallel_execution = self.parallel_execution.or(selected.parallel_execution);
-        self.enable_mem_pattern = self.enable_mem_pattern.or(selected.enable_mem_pattern);
+        if uses_directml {
+            // DirectML fails to initialize with parallel execution or memory
+            // patterns, so its requirements override caller preferences.
+            if self.parallel_execution == Some(true) || self.enable_mem_pattern == Some(true) {
+                tracing::warn!(
+                    "DirectML was selected automatically; disabling parallel execution and memory patterns"
+                );
+            }
+            self.parallel_execution = Some(false);
+            self.enable_mem_pattern = Some(false);
+        }
         self
     }
 
@@ -539,6 +552,33 @@ mod tests {
             serde_json::to_value(resolved).unwrap(),
             serde_json::to_value(expected).unwrap()
         );
+    }
+
+    #[test]
+    fn auto_resolved_directml_overrides_incompatible_caller_settings() {
+        let mut candidates = auto_candidates();
+        candidates.push(OrtExecutionProvider::CPU);
+        let config = OrtSessionConfig::new()
+            .with_execution_providers(candidates)
+            .add_config_entry(AUTO_DEVICE_CONFIG_ENTRY, "1")
+            .with_parallel_execution(true)
+            .with_memory_pattern(true);
+        let resolved = config.resolve_auto_with_probe(|provider| {
+            if matches!(provider, OrtExecutionProvider::DirectML { .. }) {
+                Ok(())
+            } else {
+                Err(ort::Error::new("unavailable"))
+            }
+        });
+        assert_eq!(
+            resolved.get_execution_providers(),
+            [
+                OrtExecutionProvider::DirectML { device_id: Some(0) },
+                OrtExecutionProvider::CPU,
+            ]
+        );
+        assert_eq!(resolved.parallel_execution, Some(false));
+        assert_eq!(resolved.enable_mem_pattern, Some(false));
     }
 
     #[test]
