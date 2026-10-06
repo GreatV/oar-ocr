@@ -46,6 +46,9 @@ enum Action {
         /// Replace the manifest inputs with image files or directories (repeatable).
         #[arg(long = "input")]
         inputs: Vec<PathBuf>,
+        /// Save each page's final-repeat text as `<DIR>/<case>/<image-stem>.md`.
+        #[arg(long)]
+        save_outputs: Option<PathBuf>,
     },
     /// Compare two reports; exit nonzero on regressions or incomparable cases.
     Compare {
@@ -69,6 +72,8 @@ struct Request {
     case: Case,
     inputs: Inputs,
     root: PathBuf,
+    #[serde(default)]
+    save_outputs: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -95,7 +100,16 @@ fn execute(args: Args) -> Result<bool> {
             cases,
             device,
             inputs,
-        } => run(&manifest, &root, output, &cases, device.as_deref(), &inputs),
+            save_outputs,
+        } => run(
+            &manifest,
+            &root,
+            output,
+            &cases,
+            device.as_deref(),
+            &inputs,
+            save_outputs,
+        ),
         Action::Compare {
             base,
             new,
@@ -122,8 +136,10 @@ fn run(
     names: &[String],
     device: Option<&str>,
     inputs: &[PathBuf],
+    save_outputs: Option<PathBuf>,
 ) -> Result<bool> {
     let root = fs::canonicalize(root).context("resolve benchmark root")?;
+    let save_outputs = save_outputs.map(std::path::absolute).transpose()?;
     let input_override = if inputs.is_empty() {
         None
     } else {
@@ -160,6 +176,7 @@ fn run(
                 case: case.clone(),
                 inputs: manifest.inputs.clone(),
                 root: root.clone(),
+                save_outputs: save_outputs.clone(),
             })?,
         )?;
         // Worker warnings go straight to the terminal; failures are kept in the report.
@@ -207,6 +224,11 @@ fn run_case(request: &Request) -> Result<Measurement> {
         .num_threads(case.options.cpu_threads())
         .build_global()?;
     let pages = input::load(&request.root, &request.inputs)?;
+    let output_paths = request
+        .save_outputs
+        .as_deref()
+        .map(|directory| page_output_paths(directory, &case.name, &pages))
+        .transpose()?;
     let load_start = Instant::now();
     let device = pipeline::DeviceSelection::resolve(case)?;
     let device_name = device.name()?;
@@ -223,8 +245,8 @@ fn run_case(request: &Request) -> Result<Measurement> {
     let mut latencies = Vec::new();
     let mut chars = 0usize;
     let mut measured = 0.0;
-    for _ in 0..case.repetitions {
-        for batch in pages.chunks(batch_size) {
+    for repeat in 0..case.repetitions {
+        for (batch_index, batch) in pages.chunks(batch_size).enumerate() {
             let images: Vec<_> = batch.iter().map(|page| &page.image).collect();
             let start = Instant::now();
             let outputs = model.infer(&images, case)?;
@@ -237,6 +259,14 @@ fn run_case(request: &Request) -> Result<Measurement> {
                 .sum::<usize>();
             // Every page in a batch completes when the whole batch does.
             latencies.extend(std::iter::repeat_n(elapsed * 1000.0, batch.len()));
+            if repeat + 1 == case.repetitions
+                && let Some(paths) = &output_paths
+            {
+                for (path, text) in paths[batch_index * batch_size..].iter().zip(&outputs) {
+                    fs::write(path, text)
+                        .with_context(|| format!("save page output {}", path.display()))?;
+                }
+            }
         }
     }
     ensure!(measured > 0.0, "measurement timer returned zero");
@@ -250,4 +280,85 @@ fn run_case(request: &Request) -> Result<Measurement> {
         gpu: sampler.finish(),
         device: device_name,
     })
+}
+
+fn page_output_paths(directory: &Path, case: &str, pages: &[input::Page]) -> Result<Vec<PathBuf>> {
+    let mut components = Path::new(case).components();
+    ensure!(
+        matches!(components.next(), Some(std::path::Component::Normal(_)))
+            && components.next().is_none(),
+        "saving outputs requires a case name without path components"
+    );
+    let directory = directory.join(case);
+    let paths = pages
+        .iter()
+        .map(|page| {
+            let name = Path::new(&page.id)
+                .file_name()
+                .context("page has no filename")?;
+            Ok(directory.join(name).with_extension("md"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(
+        paths
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            == paths.len(),
+        "saving outputs requires unique image stems within each case"
+    );
+    fs::create_dir_all(directory)?;
+    Ok(paths)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pages(ids: &[&str]) -> Vec<input::Page> {
+        ids.iter()
+            .map(|id| input::Page {
+                id: (*id).into(),
+                image: image::RgbImage::new(1, 1),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn saved_pages_use_case_directories_and_preserve_stems() {
+        let directory = tempfile::tempdir().unwrap();
+        let pages = pages(&[
+            "images/document.pdf_4.JPG",
+            "elsewhere/report.v2.png",
+            "图像/页面.tiff",
+            "paper_pg1_repeat1.png",
+        ]);
+        let paths = page_output_paths(directory.path(), "ocr-tiny", &pages).unwrap();
+        let case = directory.path().join("ocr-tiny");
+        assert!(case.is_dir());
+        assert_eq!(
+            paths,
+            [
+                "document.pdf_4.md",
+                "report.v2.md",
+                "页面.md",
+                "paper_pg1_repeat1.md"
+            ]
+            .map(|name| case.join(name))
+        );
+        let other = page_output_paths(directory.path(), "structure-v3", &pages).unwrap();
+        assert_ne!(paths, other);
+        assert!(directory.path().join("structure-v3").is_dir());
+    }
+
+    #[test]
+    fn saving_rejects_colliding_names_and_case_path_components() {
+        let directory = tempfile::tempdir().unwrap();
+        let collision = pages(&["first/page.png", "second/page.jpg"]);
+        assert!(page_output_paths(directory.path(), "ocr-tiny", &collision).is_err());
+        assert!(!directory.path().join("ocr-tiny").exists());
+        for case in ["../escape", ".", "nested/case", ""] {
+            assert!(page_output_paths(directory.path(), case, &pages(&["page.png"])).is_err());
+        }
+    }
 }

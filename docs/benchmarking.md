@@ -64,6 +64,25 @@ Cases may override `device`, `warmup`, `repetitions`, and `[cases.options]`.
 `model` and `model_path`; `paddleocr-vl`, `glmocr`, and `teleocr` also need a
 PP-DocLayout `layout_path`.
 
+## Official accuracy evaluation
+
+Add `run --save-outputs predictions` to write the last measured repeat's text to
+`predictions/<case>/<image-stem>.md`, outside inference timing. VL saves the text
+used for chars/s, OCR saves recognized text, and structure saves Markdown. Use a
+fresh directory per run; duplicate image stems within a case are rejected.
+
+- [OmniDocBench](https://github.com/opendatalab/OmniDocBench): use matching v1.5
+  annotations and images with the `v1_5` evaluation branch. Each image needs a same-stem `.md`.
+  Set the end2end config's `ground_truth.data_path` to the annotation JSON and
+  `prediction.data_path` to `predictions/<case>`, then run the official
+  `python pdf_validation.py --config configs/end2end.yaml`.
+- [olmOCR-Bench](https://github.com/allenai/olmocr): render PDF pages to images
+  first, naming them `<pdf-stem>_pg<1-based-page>_repeat1.png`. The scorer requires
+  `bench_data/<method>/<pdf-relative-stem>_pg<page>_repeat1.md`; arrange saved files
+  into the PDF's relative category directories before running the official
+  `python -m olmocr.bench.benchmark --dir bench_data`. Bench saves flat case
+  directories and does not reconstruct those category paths or rename pages.
+
 ## Measurements
 
 | Field | Meaning |
