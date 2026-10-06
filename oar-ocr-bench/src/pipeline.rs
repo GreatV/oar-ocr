@@ -40,14 +40,17 @@ impl VlModel {
                 .as_deref()
                 .context("VL requires model_path")?,
         );
+        let model = case
+            .model
+            .as_deref()
+            .context("VL requires model")?
+            .parse::<AnyPageParserModel>()?;
         let mut options = AnyPageParserLoadOptions::default();
-        if let Some(model) = &case.model {
-            options = options.with_model(parser_family(model)?);
-        }
         if let Some(layout_path) = &case.layout_path {
             options = options.with_layout_dir(root.join(layout_path));
         }
         Ok(Self(AnyPageParser::from_dir_with_options(
+            model,
             path,
             device.clone(),
             &options,
@@ -64,26 +67,6 @@ impl VlModel {
         }
         Ok(self.0.parse_page(image, &options)?)
     }
-}
-
-/// Maps a manifest `model` name to the parser family it loads explicitly.
-fn parser_family(name: &str) -> Result<AnyPageParserModel> {
-    let family = match name {
-        "hpd-parsing" => AnyPageParserModel::HpdParsing,
-        "hunyuanocr" => AnyPageParserModel::HunyuanOcr,
-        "jina-ocr" => AnyPageParserModel::JinaOcr,
-        "mineru" => AnyPageParserModel::MinerU,
-        "mineru-diffusion" => AnyPageParserModel::MinerUDiffusion,
-        "monkeyocrv2" => AnyPageParserModel::MonkeyOcrV2,
-        "ovisocr2" => AnyPageParserModel::OvisOcr2,
-        "wevisdoc" => AnyPageParserModel::WeVisDoc,
-        "xiaomi-ocr-0" => AnyPageParserModel::XiaomiOcr,
-        "paddleocr-vl" => AnyPageParserModel::PaddleOcrVl,
-        "glmocr" => AnyPageParserModel::GlmOcr,
-        "teleocr" => AnyPageParserModel::TeleOcr,
-        other => bail!("unsupported VL model {other}"),
-    };
-    Ok(family)
 }
 
 pub(crate) enum Pipeline {

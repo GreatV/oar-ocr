@@ -238,6 +238,7 @@ impl Case {
                 }
             }
             Kind::Vl => {
+                ensure!(self.model.is_some(), "{name}: VL requires model");
                 ensure!(self.model_path.is_some(), "{name}: VL requires model_path");
                 ensure!(
                     self.options.batch_size() == 1,
