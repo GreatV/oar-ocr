@@ -93,7 +93,6 @@ struct RawCase {
     device: Option<String>,
     warmup: Option<usize>,
     repetitions: Option<usize>,
-    model: Option<String>,
     model_path: Option<String>,
     layout_path: Option<String>,
     #[serde(default)]
@@ -109,7 +108,6 @@ pub(crate) struct Case {
     pub(crate) device: String,
     pub(crate) warmup: usize,
     pub(crate) repetitions: usize,
-    pub(crate) model: Option<String>,
     pub(crate) model_path: Option<String>,
     pub(crate) layout_path: Option<String>,
     pub(crate) models: Models,
@@ -173,7 +171,6 @@ impl Manifest {
                 kind: row.kind,
                 warmup: row.warmup.unwrap_or(raw.defaults.warmup),
                 repetitions: row.repetitions.unwrap_or(raw.defaults.repetitions),
-                model: row.model,
                 model_path: row.model_path,
                 layout_path: row.layout_path,
                 models: row.models,
@@ -233,40 +230,17 @@ impl Case {
                 }
             }
             Kind::Vl => {
-                let model = self.model.as_deref().context("VL requires model")?;
                 ensure!(self.model_path.is_some(), "{name}: VL requires model_path");
                 ensure!(
                     self.options.batch_size() == 1,
                     "{name}: PageParser handles one page at a time"
                 );
-                ensure!(is_supported_model(model), "unsupported VL model {model}");
-                if is_external_model(model) {
-                    ensure!(self.layout_path.is_some(), "{model} requires layout_path");
-                }
             }
         }
         Ok(())
     }
 }
 
-pub(crate) fn is_external_model(model: &str) -> bool {
-    matches!(model, "paddleocr-vl" | "glmocr" | "teleocr")
-}
-fn is_supported_model(model: &str) -> bool {
-    is_external_model(model)
-        || matches!(
-            model,
-            "hpd-parsing"
-                | "hunyuanocr"
-                | "jina-ocr"
-                | "mineru"
-                | "mineru-diffusion"
-                | "monkeyocrv2"
-                | "ovisocr2"
-                | "wevisdoc"
-                | "xiaomi-ocr-0"
-        )
-}
 /// Bare file names stay registry names for auto-download; paths resolve
 /// against the benchmark root.
 pub(crate) fn model_source(root: &Path, value: &str) -> std::path::PathBuf {

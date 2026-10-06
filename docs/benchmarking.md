@@ -60,9 +60,10 @@ dictionary = "ppocrv6_tiny_dict.txt"
 
 Cases may override `device`, `warmup`, `repetitions`, and `[cases.options]`.
 `structure` cases take a `layout` model (with `layout_name` such as
-`PP-DocLayoutV3`), optional OCR models, and optional table models. `vl` cases take
-`model` and `model_path`; `paddleocr-vl`, `glmocr`, and `teleocr` also need a
-PP-DocLayout `layout_path`.
+`PP-DocLayoutV3`), optional OCR models, and optional table models. `vl` cases
+take a `model_path` whose `config.json` names the model (detected by
+`AnyPageParser::from_dir`); layout-composed models such as PaddleOCR-VL,
+GLM-OCR, and TeleOCR also need a PP-DocLayout `layout_path`.
 
 ## Official accuracy evaluation
 
