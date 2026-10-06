@@ -135,6 +135,44 @@ The layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR) require a
 PP-DocLayout directory in the load options; loading fails with a clear error
 when it is missing.
 
+With the `auto-download` feature, `AnyPageParser::from_pretrained` downloads
+the checkpoint named by the model ID when it is not cached, then loads it
+through the same path:
+
+```rust
+use candle_core::Device;
+use oar_ocr_vl::{
+    AnyPageParser, AnyPageParserModel, AnyPageParserPretrainedOptions, DownloadSource,
+};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let parser = AnyPageParser::from_pretrained(
+    AnyPageParserModel::PaddleOcrVl1_5,
+    Device::Cpu,
+    &AnyPageParserPretrainedOptions::default(),
+)?;
+# let _ = parser;
+# Ok(())
+# }
+```
+
+ModelScope is the default source and Hugging Face is selectable with
+`with_source(DownloadSource::HuggingFace)`; `with_revision` pins a revision
+(the sources' defaults are `master` and `main`), which resolves to an
+immutable commit before anything downloads. Snapshots land under
+`$OAR_HOME/models/<org>/<name>/<commit>` (`$OAR_HOME` defaults to `~/.oar`,
+shared with oar-ocr-core): each file is verified against the SHA-256 the
+source API publishes (Hugging Face publishes it for LFS files), a snapshot
+is staged and published atomically, and published snapshots are never
+modified — a cached commit is reused without any network listing. The
+layout-composed models also download a
+PP-DocLayout checkpoint — `PaddlePaddle/PP-DocLayoutV3_safetensors` by
+default, overridable with `with_layout` or replaced by a local directory with
+`with_layout_dir`. ModelScope publishes GLM-OCR under `ZhipuAI/GLM-OCR` and
+that mirror is used automatically; HunyuanOCR and WeVisDoc are not on
+ModelScope and download from Hugging Face instead (logged once via
+`tracing`), with the cache still keyed by the model ID.
+
 ## Installation
 
 This crate is self-contained: everything runs on Candle, it does not depend on `oar-ocr-core`, and **no build of it links ONNX Runtime**.
@@ -147,6 +185,13 @@ To enable GPU acceleration (CUDA), add the feature flag:
 
 ```bash
 cargo add oar-ocr-vl --features cuda
+```
+
+To download checkpoints by model ID instead of managing local directories,
+enable `auto-download` (see [Unified Page Parsing](#unified-page-parsing)):
+
+```bash
+cargo add oar-ocr-vl --features auto-download
 ```
 
 On macOS, enable Metal instead:

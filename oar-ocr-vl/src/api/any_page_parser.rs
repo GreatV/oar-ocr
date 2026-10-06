@@ -1,5 +1,7 @@
 //! Model-agnostic complete-page parsing and model-directory loading.
 
+#[cfg(feature = "auto-download")]
+use crate::api::download::AnyPageParserPretrainedOptions;
 use crate::api::error::Error;
 use crate::api::page_parser::PageParser;
 use crate::api::recognition::RecognitionBackend;
@@ -447,6 +449,73 @@ impl AnyPageParser {
             )
             .into(),
         })
+    }
+}
+
+#[cfg(feature = "auto-download")]
+impl AnyPageParser {
+    /// Downloads the named model's checkpoint and loads it.
+    ///
+    /// The checkpoint repo — named by the model's Hugging Face ID — is
+    /// downloaded into the cache under `$OAR_HOME/models/<org>/<name>/<commit>`
+    /// (default `~/.oar`) when it is not already there: the requested
+    /// revision resolves to an immutable commit, every file is verified
+    /// against the hashes the source API publishes, and the snapshot is
+    /// published only once complete. The layout checkpoint uses its source's
+    /// default revision.
+    /// ModelScope is the default source; Hugging Face is selectable. The
+    /// layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR) also download
+    /// a PP-DocLayout checkpoint (DEFAULT_LAYOUT_REPO by default) unless the
+    /// options point at a local layout directory. Loading then goes
+    /// through [`from_dir`](Self::from_dir) with each model's own defaults.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use candle_core::Device;
+    /// use oar_ocr_vl::{AnyPageParser, AnyPageParserModel, AnyPageParserPretrainedOptions};
+    ///
+    /// let parser = AnyPageParser::from_pretrained(
+    ///     AnyPageParserModel::PaddleOcrVl1_5,
+    ///     Device::Cpu,
+    ///     &AnyPageParserPretrainedOptions::default(),
+    /// )?;
+    /// # let _ = parser;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "auto-download")]
+    pub fn from_pretrained(
+        model: AnyPageParserModel,
+        device: Device,
+        options: &AnyPageParserPretrainedOptions,
+    ) -> Result<Self, Error> {
+        let source = options.source();
+        let model_dir =
+            crate::api::download::snapshot(source, model.as_str(), options.revision.as_deref())?;
+        let mut load_options = AnyPageParserLoadOptions::default();
+        if Self::needs_layout_dir(model) {
+            // The layout checkpoint always uses its source's default
+            // revision; a pinned model revision never applies to it.
+            let layout_dir = match &options.layout_dir {
+                Some(dir) => dir.clone(),
+                None => crate::api::download::snapshot(source, options.layout(), None)?,
+            };
+            load_options = load_options.with_layout_dir(layout_dir);
+        }
+        Self::from_dir_with_options(model, &model_dir, device, &load_options)
+    }
+
+    /// Whether the model composes an external PP-DocLayout detector and so
+    /// needs a layout directory to load.
+    fn needs_layout_dir(model: AnyPageParserModel) -> bool {
+        matches!(
+            model,
+            AnyPageParserModel::PaddleOcrVl
+                | AnyPageParserModel::PaddleOcrVl1_5
+                | AnyPageParserModel::PaddleOcrVl1_6
+                | AnyPageParserModel::GlmOcr
+                | AnyPageParserModel::TeleOcr
+        )
     }
 }
 

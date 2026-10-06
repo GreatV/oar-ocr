@@ -22,6 +22,8 @@ categories = ["computer-vision", "science"]
 default = []
 # This crate is Candle-only: layout detection runs through `pp_doclayout`, so
 # there is no ONNX Runtime anywhere in the tree and no feature to turn it on.
+# When enabled, auto-download VL checkpoints by model ID (see api::download).
+auto-download = ["dep:ureq", "dep:sha2", "dep:dirs"]
 # When enabled, turns on Candle's CUDA backend for GPU acceleration.
 cuda = [
     "candle-core/cuda",
@@ -43,6 +45,9 @@ candle-core = "0.11.0"
 candle-flash-attn = { version = "0.11.0", optional = true }
 candle-nn = "0.11.0"
 candle-transformers = "0.11.0"
+# Same download stack as oar-ocr-core's auto-download, so the workspace
+# gains no new dependency versions.
+dirs = { version = "7.0", optional = true }
 html-escape = "0.2"
 half = "2"
 image.workspace = true
@@ -52,7 +57,9 @@ rayon.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = { version = "0.11", optional = true }
 thiserror = "2.0"
+ureq = { version = "3.0", default-features = false, features = ["rustls", "platform-verifier"], optional = true }
 tokenizers.workspace = true
 tracing.workspace = true
 
