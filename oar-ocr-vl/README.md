@@ -108,13 +108,19 @@ ignore the knob.
 reading its `config.json`: the `architectures` entry identifies the model, with
 `vision_config.model_type` separating OvisOCR2 from Xiaomi-OCR-0 (they share a
 Qwen3.5 text tower but not a vision tower), and each model then loads through
-its own `from_dir` with its own defaults. Unsupported or ambiguous
-configurations fail with an error naming what was found and the supported
-architectures — there is no fallback:
+its own `from_dir` with its own defaults. Architectures that only name a
+generic backbone — InternVL, Qwen2-VL, Qwen2.5-VL, Qwen3-VL — additionally
+need the supported model's marker (HPD-Parsing's `fork_token_id`, MinerU2.5's
+`<|md_start|>` tokenizer token, TeleOCR's windowed vision tower), because a
+stock checkpoint of the same backbone must not load as the wrong parser;
+WeVisDoc has no marker at all, since its config matches a stock Qwen3-VL
+checkpoint. Unsupported, ambiguous, and unmarked configurations fail with an
+error naming what was found and the supported architectures — there is no
+fallback:
 
 ```rust
 use candle_core::Device;
-use oar_ocr_vl::{AnyPageParser, AnyPageParserLoadOptions};
+use oar_ocr_vl::{AnyPageParser, AnyPageParserLoadOptions, AnyPageParserModel};
 
 // PaddleOCR-VL composes an external PP-DocLayout detector.
 let options = AnyPageParserLoadOptions::default()
@@ -125,8 +131,13 @@ let parser = AnyPageParser::from_dir_with_options(
     &options,
 )?;
 
-// Model-native parsers need no options.
+// Detection identifies most models from their config alone.
 let parser = AnyPageParser::from_dir("tencent/HunyuanOCR", Device::Cpu)?;
+
+// WeVisDoc is indistinguishable from stock Qwen3-VL, so name it explicitly;
+// an explicit family also skips detection.
+let options = AnyPageParserLoadOptions::default().with_model(AnyPageParserModel::WeVisDoc);
+let parser = AnyPageParser::from_dir_with_options("tencent/WeVisDoc-2B", Device::Cpu, &options)?;
 ```
 
 The layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR) require a

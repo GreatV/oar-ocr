@@ -63,7 +63,9 @@ Cases may override `device`, `warmup`, `repetitions`, and `[cases.options]`.
 `PP-DocLayoutV3`), optional OCR models, and optional table models. `vl` cases
 take a `model_path` whose `config.json` names the model (detected by
 `AnyPageParser::from_dir`); layout-composed models such as PaddleOCR-VL,
-GLM-OCR, and TeleOCR also need a PP-DocLayout `layout_path`.
+GLM-OCR, and TeleOCR also need a PP-DocLayout `layout_path`. A `vl` case may
+set `model` to load that parser family explicitly instead of detecting it —
+required for WeVisDoc, whose config matches a stock Qwen3-VL checkpoint.
 
 ## Official accuracy evaluation
 

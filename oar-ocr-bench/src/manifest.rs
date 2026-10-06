@@ -93,6 +93,8 @@ struct RawCase {
     device: Option<String>,
     warmup: Option<usize>,
     repetitions: Option<usize>,
+    /// Parser family loaded explicitly instead of detected (vl cases only).
+    model: Option<String>,
     model_path: Option<String>,
     layout_path: Option<String>,
     #[serde(default)]
@@ -108,6 +110,7 @@ pub(crate) struct Case {
     pub(crate) device: String,
     pub(crate) warmup: usize,
     pub(crate) repetitions: usize,
+    pub(crate) model: Option<String>,
     pub(crate) model_path: Option<String>,
     pub(crate) layout_path: Option<String>,
     pub(crate) models: Models,
@@ -171,6 +174,7 @@ impl Manifest {
                 kind: row.kind,
                 warmup: row.warmup.unwrap_or(raw.defaults.warmup),
                 repetitions: row.repetitions.unwrap_or(raw.defaults.repetitions),
+                model: row.model,
                 model_path: row.model_path,
                 layout_path: row.layout_path,
                 models: row.models,
@@ -208,6 +212,10 @@ impl Case {
         ensure!(
             self.kind == Kind::Vl || self.options.max_tokens.is_none(),
             "{name}: max_tokens applies only to VL cases"
+        );
+        ensure!(
+            self.kind == Kind::Vl || self.model.is_none(),
+            "{name}: model applies only to VL cases"
         );
         let m = &self.models;
         match self.kind {

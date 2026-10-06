@@ -88,6 +88,8 @@ model_path = "models/ATH-MaaS/OvisOCR2"
 [[cases]]
 name = "vl-wevisdoc"
 kind = "vl"
+# WeVisDoc configs are indistinguishable from stock Qwen3-VL, so name it.
+model = "wevisdoc"
 model_path = "models/tencent/WeVisDoc-2B"
 
 [[cases]]

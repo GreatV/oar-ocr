@@ -1,7 +1,7 @@
 //! Model-agnostic complete-page parsing and model-directory loading.
 
 use crate::api::error::Error;
-use crate::api::model_detect::{DetectedModel, detect_model};
+use crate::api::model_detect::detect_model;
 use crate::api::page_parser::PageParser;
 use crate::api::recognition::RecognitionBackend;
 use crate::document::page::PageDocument;
@@ -66,6 +66,65 @@ impl AnyPageParserOptions {
     }
 }
 
+/// The parser family stored in a model directory, one variant per
+/// [`AnyPageParser`] variant.
+///
+/// Passing a family through [`AnyPageParserLoadOptions::with_model`] loads it
+/// directly and skips config detection. Detection refuses checkpoint configs
+/// that only name a generic backbone (InternVL, Qwen2-VL, Qwen2.5-VL,
+/// Qwen3-VL) unless the config carries the supported model's marker, and
+/// WeVisDoc has no marker at all — its config is indistinguishable from a
+/// stock Qwen3-VL checkpoint — so loading one always needs the explicit
+/// family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AnyPageParserModel {
+    /// HPD-Parsing.
+    HpdParsing,
+    /// HunyuanOCR.
+    HunyuanOcr,
+    /// jina-ocr-v1.
+    JinaOcr,
+    /// MinerU2.5 / MinerU2.5-Pro.
+    MinerU,
+    /// MinerU-Diffusion.
+    MinerUDiffusion,
+    /// MonkeyOCRv2.
+    MonkeyOcrV2,
+    /// OvisOCR2.
+    OvisOcr2,
+    /// WeVisDoc.
+    WeVisDoc,
+    /// Xiaomi-OCR-0.
+    XiaomiOcr,
+    /// PaddleOCR-VL.
+    PaddleOcrVl,
+    /// GLM-OCR.
+    GlmOcr,
+    /// TeleOCR.
+    TeleOcr,
+}
+
+impl AnyPageParserModel {
+    /// Human-readable model name used in detection and loading errors.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::HpdParsing => "HPD-Parsing",
+            Self::HunyuanOcr => "HunyuanOCR",
+            Self::JinaOcr => "jina-ocr-v1",
+            Self::MinerU => "MinerU2.5",
+            Self::MinerUDiffusion => "MinerU-Diffusion",
+            Self::MonkeyOcrV2 => "MonkeyOCRv2",
+            Self::OvisOcr2 => "OvisOCR2",
+            Self::WeVisDoc => "WeVisDoc",
+            Self::XiaomiOcr => "Xiaomi-OCR-0",
+            Self::PaddleOcrVl => "PaddleOCR-VL",
+            Self::GlmOcr => "GLM-OCR",
+            Self::TeleOcr => "TeleOCR",
+        }
+    }
+}
+
 /// Directory-loading options for [`AnyPageParser::from_dir_with_options`].
 ///
 /// The layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR) combine their
@@ -75,11 +134,20 @@ impl AnyPageParserOptions {
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct AnyPageParserLoadOptions {
+    /// Load this parser family directly instead of detecting it from the
+    /// model directory's config.
+    pub model: Option<AnyPageParserModel>,
     /// PP-DocLayout checkpoint directory used by the layout-composed models.
     pub layout_dir: Option<PathBuf>,
 }
 
 impl AnyPageParserLoadOptions {
+    /// Load a specific parser family, skipping config detection.
+    pub fn with_model(mut self, model: AnyPageParserModel) -> Self {
+        self.model = Some(model);
+        self
+    }
+
     /// Set the PP-DocLayout directory used by the layout-composed models.
     pub fn with_layout_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.layout_dir = Some(dir.into());
@@ -221,31 +289,39 @@ impl AnyPageParser {
     /// Detection reads the directory's `config.json`: the `architectures`
     /// entries identify the model, with `vision_config.model_type` separating
     /// the two Qwen3.5-based models (OvisOCR2 and Xiaomi-OCR-0 share a text
-    /// tower). The matching parser then loads through its own `from_dir` with
-    /// its own defaults. Unsupported or ambiguous configurations return an
-    /// error naming what was found and the supported architectures; there is
-    /// no fallback. Layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR)
-    /// additionally need a PP-DocLayout directory, which
-    /// [`from_dir_with_options`](Self::from_dir_with_options) accepts.
+    /// tower). Architectures that only name a generic backbone (InternVL,
+    /// Qwen2-VL, Qwen2.5-VL, Qwen3-VL) additionally need the supported
+    /// model's marker — HPD-Parsing's `fork_token_id`, MinerU2.5's
+    /// `<|md_start|>` tokenizer token, or TeleOCR's windowed vision tower
+    /// (`vision_config.window_size`) — and are refused without it, because a
+    /// stock checkpoint of that backbone would otherwise load as the wrong
+    /// parser. WeVisDoc has no marker (its config matches a stock Qwen3-VL
+    /// checkpoint), so it always loads through
+    /// [`from_dir_with_options`](Self::from_dir_with_options) with an explicit
+    /// [`AnyPageParserModel`]. Unsupported or ambiguous configurations return
+    /// an error naming what was found and the supported architectures; there
+    /// is no fallback. Layout-composed models (PaddleOCR-VL, GLM-OCR,
+    /// TeleOCR) additionally need a PP-DocLayout directory.
     pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         Self::from_dir_with_options(model_dir, device, &AnyPageParserLoadOptions::default())
     }
 
     /// Detects and loads a parser from a model directory with loading options.
     ///
-    /// See [`from_dir`](Self::from_dir) for how the model is detected; the
-    /// options only add the PP-DocLayout directory required by the
+    /// See [`from_dir`](Self::from_dir) for how the model is detected; an
+    /// explicit [`AnyPageParserModel`] in the options skips detection, and the
+    /// options carry the PP-DocLayout directory required by the
     /// layout-composed models.
     ///
     /// ```no_run
     /// use candle_core::Device;
-    /// use oar_ocr_vl::{AnyPageParser, AnyPageParserLoadOptions};
+    /// use oar_ocr_vl::{AnyPageParser, AnyPageParserLoadOptions, AnyPageParserModel};
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let options = AnyPageParserLoadOptions::default()
-    ///     .with_layout_dir("PaddlePaddle/PP-DocLayoutV3_safetensors");
+    /// // WeVisDoc configs are indistinguishable from stock Qwen3-VL, so name it.
+    /// let options = AnyPageParserLoadOptions::default().with_model(AnyPageParserModel::WeVisDoc);
     /// let parser =
-    ///     AnyPageParser::from_dir_with_options("PaddlePaddle/PaddleOCR-VL-1.5", Device::Cpu, &options)?;
+    ///     AnyPageParser::from_dir_with_options("tencent/WeVisDoc-2B", Device::Cpu, &options)?;
     /// # let _ = parser;
     /// # Ok(())
     /// # }
@@ -256,40 +332,47 @@ impl AnyPageParser {
         options: &AnyPageParserLoadOptions,
     ) -> Result<Self, Error> {
         let model_dir = model_dir.as_ref();
-        let config_path = model_dir.join("config.json");
-        if !config_path.is_file() {
-            return Err(Error::config(format!(
-                "model directory {} has no config.json to detect a model from",
-                model_dir.display()
-            )));
-        }
-        let config: Value = load_json_config(&config_path, "AnyPageParser", "config.json")
-            .map_err(|error| {
-                Error::config(format!("{error}; model directory: {}", model_dir.display()))
-            })?;
-        let detected = detect_model(&config)?;
-        Ok(match detected {
-            DetectedModel::HpdParsing => HpdParsing::from_dir(model_dir, device)?.into(),
-            DetectedModel::HunyuanOcr => HunyuanOcr::from_dir(model_dir, device)?.into(),
-            DetectedModel::JinaOcr => JinaOcr::from_dir(model_dir, device)?.into(),
-            DetectedModel::MinerU => MinerU::from_dir(model_dir, device)?.into(),
-            DetectedModel::MinerUDiffusion => MinerUDiffusion::from_dir(model_dir, device)?.into(),
-            DetectedModel::MonkeyOcrV2 => MonkeyOcrV2::from_dir(model_dir, device)?.into(),
-            DetectedModel::OvisOcr2 => OvisOcr2::from_dir(model_dir, device)?.into(),
-            DetectedModel::WeVisDoc => WeVisDoc::from_dir(model_dir, device)?.into(),
-            DetectedModel::XiaomiOcr => XiaomiOcr::from_dir(model_dir, device)?.into(),
-            DetectedModel::PaddleOcrVl => LayoutPageParser::new(
-                PpDocLayout::from_dir(required_layout_dir(options, detected)?, device.clone())?,
+        let model = match options.model {
+            Some(model) => model,
+            None => {
+                let config_path = model_dir.join("config.json");
+                if !config_path.is_file() {
+                    return Err(Error::config(format!(
+                        "model directory {} has no config.json to detect a model from",
+                        model_dir.display()
+                    )));
+                }
+                let config: Value = load_json_config(&config_path, "AnyPageParser", "config.json")
+                    .map_err(|error| {
+                        Error::config(format!("{error}; model directory: {}", model_dir.display()))
+                    })?;
+                detect_model(&config, &tokenizer_special_tokens(model_dir))?
+            }
+        };
+        Ok(match model {
+            AnyPageParserModel::HpdParsing => HpdParsing::from_dir(model_dir, device)?.into(),
+            AnyPageParserModel::HunyuanOcr => HunyuanOcr::from_dir(model_dir, device)?.into(),
+            AnyPageParserModel::JinaOcr => JinaOcr::from_dir(model_dir, device)?.into(),
+            AnyPageParserModel::MinerU => MinerU::from_dir(model_dir, device)?.into(),
+            AnyPageParserModel::MinerUDiffusion => {
+                MinerUDiffusion::from_dir(model_dir, device)?.into()
+            }
+            AnyPageParserModel::MonkeyOcrV2 => MonkeyOcrV2::from_dir(model_dir, device)?.into(),
+            AnyPageParserModel::OvisOcr2 => OvisOcr2::from_dir(model_dir, device)?.into(),
+            AnyPageParserModel::WeVisDoc => WeVisDoc::from_dir(model_dir, device)?.into(),
+            AnyPageParserModel::XiaomiOcr => XiaomiOcr::from_dir(model_dir, device)?.into(),
+            AnyPageParserModel::PaddleOcrVl => LayoutPageParser::new(
+                PpDocLayout::from_dir(required_layout_dir(options, model)?, device.clone())?,
                 PaddleOcrVl::from_dir(model_dir, device)?,
             )
             .into(),
-            DetectedModel::GlmOcr => LayoutPageParser::new(
-                PpDocLayout::from_dir(required_layout_dir(options, detected)?, device.clone())?,
+            AnyPageParserModel::GlmOcr => LayoutPageParser::new(
+                PpDocLayout::from_dir(required_layout_dir(options, model)?, device.clone())?,
                 GlmOcr::from_dir(model_dir, device)?,
             )
             .into(),
-            DetectedModel::TeleOcr => LayoutPageParser::new(
-                PpDocLayout::from_dir(required_layout_dir(options, detected)?, device.clone())?,
+            AnyPageParserModel::TeleOcr => LayoutPageParser::new(
+                PpDocLayout::from_dir(required_layout_dir(options, model)?, device.clone())?,
                 TeleOcr::from_dir(model_dir, device)?,
             )
             .into(),
@@ -301,15 +384,37 @@ impl AnyPageParser {
 /// before any weights load, or explains how to provide one.
 fn required_layout_dir(
     options: &AnyPageParserLoadOptions,
-    detected: DetectedModel,
+    model: AnyPageParserModel,
 ) -> Result<&Path, Error> {
     options.layout_dir.as_deref().ok_or_else(|| {
         Error::config(format!(
             "{} parses with an external layout detector; pass a PP-DocLayout directory \
              with AnyPageParserLoadOptions::with_layout_dir",
-            detected.name()
+            model.name()
         ))
     })
+}
+
+/// Special tokens declared by the directory's tokenizer, used as detection
+/// evidence. A missing or unreadable tokenizer config contributes none.
+fn tokenizer_special_tokens(model_dir: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(model_dir.join("tokenizer_config.json")) else {
+        return Vec::new();
+    };
+    let Ok(config) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    config
+        .get("added_tokens_decoder")
+        .and_then(Value::as_object)
+        .map(|entries| {
+            entries
+                .values()
+                .filter(|entry| entry.get("special").and_then(Value::as_bool) == Some(true))
+                .filter_map(|entry| entry.get("content")?.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl PageParser for AnyPageParser {
