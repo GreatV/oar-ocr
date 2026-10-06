@@ -112,11 +112,8 @@ pub(crate) fn load(root: &Path, inputs: &Inputs) -> Result<Vec<Page>> {
                     break;
                 }
                 let pixmap = hayro::render(page, &cache, &Default::default(), &settings);
-                let data: Vec<_> = pixmap
-                    .data_as_u8_slice()
-                    .chunks_exact(4)
-                    .flat_map(|p| p[..3].iter().copied())
-                    .collect();
+                let (pixels, _) = pixmap.data_as_u8_slice().as_chunks::<4>();
+                let data: Vec<_> = pixels.iter().flat_map(|p| p[..3].iter().copied()).collect();
                 let image = RgbImage::from_raw(pixmap.width().into(), pixmap.height().into(), data)
                     .context("invalid PDF raster")?;
                 add(&mut pages, format!("{id}#page:{}", index + 1), image);
