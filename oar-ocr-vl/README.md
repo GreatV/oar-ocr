@@ -61,12 +61,16 @@ let options = LayoutPageParserOptions {
     region_batch_size: Some(4),
 };
 let page = parser.parse_page(&image, &options)?;
+
+// Use the structure entry point when pixel coordinates and metadata are needed.
+let structure = parser.parse_structure(&image, &options)?;
 ```
 
 Pass `&layout` and `&backend` instead to borrow existing models. `DocParser` remains
 available for callers that supply layout on every call and need `StructureResult`.
-The new page output includes normalized blocks, Markdown, crop diagnostics, and
-`structure` with the original pixel coordinates and all structure metadata.
+The new page output includes normalized blocks, Markdown, and crop diagnostics.
+Use `LayoutPageParser::parse_structure` with the same options to obtain the original
+pixel coordinates, confidence, reading order, source metadata, tables, and formulas.
 Recognition failures still return an error, as in `DocParser`. The `doc_parser`
 example uses this new entry point.
 

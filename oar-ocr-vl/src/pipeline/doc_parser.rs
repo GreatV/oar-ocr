@@ -143,13 +143,14 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
         image: RgbImage,
     ) -> Result<StructureResult, Error> {
         self.parse_with_path_image(layout, input_path.into(), index, Cow::Owned(image))
+            .map(|(result, _)| result)
     }
 
     pub(crate) fn parse_image<L: LayoutSource + ?Sized>(
         &self,
         layout: &L,
         image: &RgbImage,
-    ) -> Result<StructureResult, Error> {
+    ) -> Result<(StructureResult, Vec<ParseDiagnostic>), Error> {
         self.parse_with_path_image(layout, "<memory>".into(), 0, Cow::Borrowed(image))
     }
 
@@ -159,7 +160,7 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
         input_path: Arc<str>,
         index: usize,
         image: Cow<'_, RgbImage>,
-    ) -> Result<StructureResult, Error> {
+    ) -> Result<(StructureResult, Vec<ParseDiagnostic>), Error> {
         let (page_w, page_h) = (image.width() as f32, image.height() as f32);
 
         // Step 1: Layout detection
@@ -180,7 +181,9 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
 
         // If no layout elements detected, run OCR on the whole image
         if detected.is_empty() {
-            return self.recognize_full_image(input_path, index, image.into_owned());
+            return self
+                .recognize_full_image(input_path, index, image.into_owned())
+                .map(|result| (result, Vec::new()));
         }
 
         // Step 2: Filter and prepare elements
@@ -201,7 +204,9 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
         }
 
         if elements.is_empty() {
-            return self.recognize_full_image(input_path, index, image.into_owned());
+            return self
+                .recognize_full_image(input_path, index, image.into_owned())
+                .map(|result| (result, Vec::new()));
         }
 
         // Step 3: Number the elements. A `LayoutSource` hands them over in
@@ -479,11 +484,10 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             element.text = Some(processed);
         }
 
-        let mut result = StructureResult::new(input_path, index)
+        let result = StructureResult::new(input_path, index)
             .with_layout_elements(sorted_elements)
             .with_tables(tables);
-        result.diagnostics = diagnostics;
-        Ok(result)
+        Ok((result, diagnostics))
     }
 
     /// Parse a document and convert to markdown.

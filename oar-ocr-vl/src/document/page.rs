@@ -39,10 +39,6 @@ pub struct PageDocument {
     pub raw_output: Option<String>,
     /// Non-fatal block or post-processing failures.
     pub diagnostics: Vec<ParseDiagnostic>,
-    /// Original layout-first result, retaining pixel coordinates, confidence,
-    /// reading order, source metadata, tables, and formulas.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub structure: Option<StructureResult>,
 }
 
 impl PageDocument {
@@ -56,8 +52,9 @@ impl PageDocument {
     ///
     /// Blocks follow the result's reading order and retain original labels.
     /// Coordinates are normalized to the image dimensions and clamped to `[0, 1]`.
-    /// The original result is retained because normalized blocks cannot represent
-    /// all of its metadata. No single raw model output exists for this pipeline.
+    /// For pixel coordinates and full structure metadata, use
+    /// [`LayoutPageParser::parse_structure`](crate::LayoutPageParser::parse_structure).
+    /// No single raw model output exists for this pipeline.
     pub fn from_structure_with_markdown(
         result: StructureResult,
         image_width: u32,
@@ -68,11 +65,10 @@ impl PageDocument {
         let height = image_height.max(1) as f32;
         let blocks = result
             .layout_elements
-            .iter()
+            .into_iter()
             .map(|element| DocumentBlock {
                 block_type: element
                     .label
-                    .clone()
                     .unwrap_or_else(|| element.element_type.as_str().to_string()),
                 bbox: [
                     (element.bbox.x_min() / width).clamp(0.0, 1.0),
@@ -81,15 +77,14 @@ impl PageDocument {
                     (element.bbox.y_max() / height).clamp(0.0, 1.0),
                 ],
                 angle: None,
-                content: element.text.clone(),
+                content: element.text,
             })
             .collect();
         Self {
             blocks,
             markdown: Some(markdown),
             raw_output: None,
-            diagnostics: result.diagnostics.clone(),
-            structure: Some(result),
+            diagnostics: Vec::new(),
         }
     }
 }
@@ -98,12 +93,10 @@ impl PageDocument {
 mod tests {
     use super::*;
     use crate::document::geometry::BoundingBox;
-    use crate::document::structure::{
-        FormulaResult, LayoutElement, LayoutElementType, TableResult, TableType,
-    };
+    use crate::document::structure::{LayoutElement, LayoutElementType};
 
     #[test]
-    fn structure_conversion_preserves_metadata_and_diagnostics() {
+    fn structure_conversion_preserves_blocks_and_markdown() {
         let bbox = BoundingBox::from_coords(10.0, 20.0, 90.0, 60.0);
         let mut text = LayoutElement::new(bbox.clone(), LayoutElementType::Text, 0.75)
             .with_label("paragraph")
@@ -111,20 +104,8 @@ mod tests {
         text.order_index = Some(1);
         let table = LayoutElement::new(bbox.clone(), LayoutElementType::Table, 0.8)
             .with_text("<table><tr><td>cell</td></tr></table>");
-        let mut result = StructureResult::new("page.png", 3)
-            .with_layout_elements(vec![text, table])
-            .with_tables(vec![
-                TableResult::new(bbox.clone(), TableType::Wireless)
-                    .with_html_structure("<table><tr><td>cell</td></tr></table>"),
-            ]);
-        result.formulas.push(FormulaResult::new(bbox, "x^2", 0.9));
-        result.diagnostics.push(ParseDiagnostic {
-            block_index: Some(1),
-            stage: "crop".to_string(),
-            message: "bad crop".to_string(),
-        });
+        let result = StructureResult::new("page.png", 3).with_layout_elements(vec![text, table]);
         let expected_markdown = result.to_markdown();
-        let expected_structure = serde_json::to_value(&result).unwrap();
         let page = PageDocument::from_structure(result, 100, 80);
 
         assert_eq!(page.markdown.as_deref(), Some(expected_markdown.as_str()));
@@ -135,18 +116,14 @@ mod tests {
         assert_eq!(page.blocks[1].block_type, "table");
         assert_eq!(page.blocks[0].angle, None);
         assert!(page.raw_output.is_none());
-        assert_eq!(page.diagnostics[0].block_index, Some(1));
-        assert_eq!(page.diagnostics[0].message, "bad crop");
         assert_eq!(
-            serde_json::to_value(page.structure.as_ref().unwrap()).unwrap(),
-            expected_structure
+            page.blocks[1].content.as_deref(),
+            Some("<table><tr><td>cell</td></tr></table>")
         );
-        let roundtrip: PageDocument =
-            serde_json::from_value(serde_json::to_value(page).unwrap()).unwrap();
-        assert_eq!(
-            serde_json::to_value(roundtrip.structure.unwrap()).unwrap(),
-            expected_structure
-        );
+        assert!(page.diagnostics.is_empty());
+        let expected_page = serde_json::to_value(&page).unwrap();
+        let roundtrip: PageDocument = serde_json::from_value(expected_page.clone()).unwrap();
+        assert_eq!(serde_json::to_value(roundtrip).unwrap(), expected_page);
     }
 
     #[test]

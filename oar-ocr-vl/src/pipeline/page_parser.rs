@@ -4,6 +4,7 @@ use crate::api::error::Error;
 use crate::api::page_parser::PageParser;
 use crate::api::recognition::RecognitionBackend;
 use crate::document::page::PageDocument;
+use crate::document::structure::StructureResult;
 use crate::pipeline::doc_parser::{DocParser, DocParserConfig};
 use crate::pipeline::layout::LayoutSource;
 use image::RgbImage;
@@ -74,27 +75,49 @@ impl<L: LayoutSource, B: RecognitionBackend> LayoutPageParser<L, B> {
     pub fn region_batch_size(&self) -> usize {
         self.region_batch_size
     }
+
+    /// Parse a page into the original layout-first structure representation.
+    ///
+    /// Retains pixel coordinates, confidence, reading order, source metadata,
+    /// tables, and formulas. Crop diagnostics are exposed by
+    /// [`parse_page`](PageParser::parse_page).
+    pub fn parse_structure(
+        &self,
+        image: &RgbImage,
+        options: &LayoutPageParserOptions,
+    ) -> Result<StructureResult, Error> {
+        self.doc_parser(options)
+            .parse_image(&self.layout, image)
+            .map(|(result, _)| result)
+    }
+
+    fn doc_parser(&self, options: &LayoutPageParserOptions) -> DocParser<'_, B> {
+        let config = options.config.as_ref().unwrap_or(&self.config);
+        DocParser::with_config(&self.backend, config.clone())
+            .with_region_batch_size(options.region_batch_size.unwrap_or(self.region_batch_size))
+    }
 }
 
 impl<L: LayoutSource, B: RecognitionBackend> PageParser for LayoutPageParser<L, B> {
     type Options = LayoutPageParserOptions;
 
     fn parse_page(&self, image: &RgbImage, options: &Self::Options) -> Result<PageDocument, Error> {
-        let config = options.config.as_ref().unwrap_or(&self.config);
-        let parser = DocParser::with_config(&self.backend, config.clone())
-            .with_region_batch_size(options.region_batch_size.unwrap_or(self.region_batch_size));
-        let result = parser.parse_image(&self.layout, image)?;
+        let parser = self.doc_parser(options);
+        let (result, diagnostics) = parser.parse_image(&self.layout, image)?;
+        let config = parser.config();
         let markdown = crate::render::markdown::to_markdown(
             &result.layout_elements,
             &config.markdown_ignore_labels,
             config.markdown_pretty,
         );
-        Ok(PageDocument::from_structure_with_markdown(
+        let mut page = PageDocument::from_structure_with_markdown(
             result,
             image.width(),
             image.height(),
             markdown,
-        ))
+        );
+        page.diagnostics = diagnostics;
+        Ok(page)
     }
 }
 
@@ -276,19 +299,23 @@ mod tests {
         let page = parser.parse_page(&image, &Default::default()).unwrap();
         let legacy = DocParser::with_config(parser.backend(), parser.config().clone())
             .with_region_batch_size(2)
-            .parse(parser.layout(), image)
+            .parse(parser.layout(), image.clone())
             .unwrap();
         assert_eq!(page.markdown.unwrap(), legacy.to_markdown());
         assert_eq!(page.blocks.len(), 4);
         assert_eq!(page.blocks[0].block_type, "doc_title");
         assert_eq!(page.blocks[1].bbox, [0.5, 0.1, 0.9, 0.3]);
         assert_eq!(page.blocks[3].content, None);
-        let structure = page.structure.unwrap();
+        let structure = parser.parse_structure(&image, &Default::default()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&structure).unwrap(),
+            serde_json::to_value(&legacy).unwrap()
+        );
         assert_eq!(structure.tables.len(), 2);
         assert_eq!(structure.layout_elements[0].order_index, Some(1));
         assert_eq!(structure.layout_elements[0].confidence, 0.9);
         assert!(page.diagnostics.is_empty());
-        assert_eq!(parser.layout().calls.get(), 2);
+        assert_eq!(parser.layout().calls.get(), 3);
         assert!(
             parser
                 .backend()
@@ -339,6 +366,27 @@ mod tests {
             == [RecognitionTask::Table, RecognitionTask::Table]
             && batch.dimensions == [(48, 24), (48, 24)]));
         backend.batches.borrow_mut().clear();
+        let structure = parser.parse_structure(&image, &options).unwrap();
+        assert_eq!(structure.layout_elements.len(), 5);
+        assert_eq!(
+            structure.layout_elements[0].bbox,
+            BoundingBox::from_coords(10.0, 10.0, 40.0, 20.0)
+        );
+        assert!(
+            backend
+                .batches
+                .borrow()
+                .iter()
+                .all(|batch| batch.max_tokens == 123)
+        );
+        assert!(
+            backend
+                .batches
+                .borrow()
+                .iter()
+                .any(|batch| batch.tasks.len() == 2)
+        );
+        backend.batches.borrow_mut().clear();
         let page = parser.parse_page(&image, &Default::default()).unwrap();
         assert_eq!(page.blocks.len(), 4);
         assert!(
@@ -381,7 +429,15 @@ mod tests {
         assert_eq!(page.diagnostics[0].block_index, Some(0));
         assert_eq!(page.diagnostics[0].stage, "crop");
         assert!(page.diagnostics[0].message.contains("invalid crop region"));
-        assert_eq!(page.structure.unwrap().diagnostics.len(), 1);
+        let image = RgbImage::new(100, 100);
+        let legacy = DocParser::new(parser.backend())
+            .parse(parser.layout(), image.clone())
+            .unwrap();
+        let structure = parser.parse_structure(&image, &Default::default()).unwrap();
+        assert_eq!(
+            serde_json::to_value(structure).unwrap(),
+            serde_json::to_value(legacy).unwrap()
+        );
     }
 
     #[test]
