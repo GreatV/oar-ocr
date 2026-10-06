@@ -12,6 +12,7 @@
 use crate::api::error::Error;
 use crate::api::generation::GenerationOptions;
 use crate::document::geometry::BoundingBox;
+use crate::document::page::ParseDiagnostic;
 use crate::document::structure::{
     LayoutElement, LayoutElementType, StructureResult, TableResult, TableType,
 };
@@ -25,6 +26,7 @@ use crate::render::table::convert_otsl_to_html;
 use crate::render::text::{self, truncate_repetitive_content};
 use image::RgbImage;
 use image::{Rgb, imageops};
+use std::borrow::Cow;
 use std::sync::Arc;
 
 pub use crate::api::recognition::{RecognitionBackend, RecognitionTask};
@@ -140,7 +142,25 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
         index: usize,
         image: RgbImage,
     ) -> Result<StructureResult, Error> {
-        let input_path: Arc<str> = input_path.into();
+        self.parse_with_path_image(layout, input_path.into(), index, Cow::Owned(image))
+            .map(|(result, _)| result)
+    }
+
+    pub(crate) fn parse_image<L: LayoutSource + ?Sized>(
+        &self,
+        layout: &L,
+        image: &RgbImage,
+    ) -> Result<(StructureResult, Vec<ParseDiagnostic>), Error> {
+        self.parse_with_path_image(layout, "<memory>".into(), 0, Cow::Borrowed(image))
+    }
+
+    fn parse_with_path_image<L: LayoutSource + ?Sized>(
+        &self,
+        layout: &L,
+        input_path: Arc<str>,
+        index: usize,
+        image: Cow<'_, RgbImage>,
+    ) -> Result<(StructureResult, Vec<ParseDiagnostic>), Error> {
         let (page_w, page_h) = (image.width() as f32, image.height() as f32);
 
         // Step 1: Layout detection
@@ -161,7 +181,9 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
 
         // If no layout elements detected, run OCR on the whole image
         if detected.is_empty() {
-            return self.recognize_full_image(input_path, index, image);
+            return self
+                .recognize_full_image(input_path, index, image.into_owned())
+                .map(|result| (result, Vec::new()));
         }
 
         // Step 2: Filter and prepare elements
@@ -182,7 +204,9 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
         }
 
         if elements.is_empty() {
-            return self.recognize_full_image(input_path, index, image);
+            return self
+                .recognize_full_image(input_path, index, image.into_owned())
+                .map(|result| (result, Vec::new()));
         }
 
         // Step 3: Number the elements. A `LayoutSource` hands them over in
@@ -253,6 +277,7 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             }
             Ok(())
         };
+        let mut diagnostics = Vec::new();
         let mut merged_by_first: std::collections::HashMap<usize, bool> =
             std::collections::HashMap::new();
         for (idx, element) in sorted_elements.iter_mut().enumerate() {
@@ -293,7 +318,14 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
                     };
                     let crop = match crop_bounding_box(&image, &crop_bbox) {
                         Ok(crop) => crop,
-                        Err(_) => continue,
+                        Err(error) => {
+                            diagnostics.push(ParseDiagnostic {
+                                block_index: Some(g_idx),
+                                stage: "crop".to_string(),
+                                message: error.to_string(),
+                            });
+                            continue;
+                        }
                     };
                     crops.push(crop);
                 }
@@ -318,7 +350,14 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
                     };
                     match crop_bounding_box(&image, &crop_bbox) {
                         Ok(crop) => crop,
-                        Err(_) => continue,
+                        Err(error) => {
+                            diagnostics.push(ParseDiagnostic {
+                                block_index: Some(idx),
+                                stage: "crop".to_string(),
+                                message: error.to_string(),
+                            });
+                            continue;
+                        }
                     }
                 } else {
                     merged_by_first.insert(idx, true);
@@ -332,7 +371,14 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
                 };
                 match crop_bounding_box(&image, &crop_bbox) {
                     Ok(cropped) => cropped,
-                    Err(_) => continue,
+                    Err(error) => {
+                        diagnostics.push(ParseDiagnostic {
+                            block_index: Some(idx),
+                            stage: "crop".to_string(),
+                            message: error.to_string(),
+                        });
+                        continue;
+                    }
                 }
             };
 
@@ -438,9 +484,10 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             element.text = Some(processed);
         }
 
-        Ok(StructureResult::new(input_path, index)
+        let result = StructureResult::new(input_path, index)
             .with_layout_elements(sorted_elements)
-            .with_tables(tables))
+            .with_tables(tables);
+        Ok((result, diagnostics))
     }
 
     /// Parse a document and convert to markdown.

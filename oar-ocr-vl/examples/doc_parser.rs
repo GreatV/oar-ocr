@@ -1,6 +1,6 @@
 //! Unified Document Parser Example
 //!
-//! This example demonstrates the unified DocParser API for external
+//! This example demonstrates the PageParser API for external
 //! layout-first document parsing (layout detection + region recognition).
 //!
 //! HunyuanOCR and the MinerU models are intentionally not exposed here: their
@@ -70,7 +70,7 @@ use tracing::{error, info};
 
 use oar_ocr_vl::utils::image::load_image;
 use oar_ocr_vl::utils::parse_device;
-use oar_ocr_vl::{DocParser, DocParserConfig, PpDocLayout};
+use oar_ocr_vl::{DocParserConfig, LayoutPageParser, PageParser, PpDocLayout};
 
 /// Recognition model type
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -205,9 +205,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
 
-            let parser =
-                DocParser::with_config(&vl, config).with_region_batch_size(args.region_batch_size);
-            process_images(&parser, &layout, &existing_images, &args)?;
+            let parser = LayoutPageParser::with_config(layout, vl, config)
+                .with_region_batch_size(args.region_batch_size);
+            process_images(&parser, &existing_images, &args)?;
         }
         ModelName::GlmOcr => {
             info!("Loading GLM-OCR model...");
@@ -218,9 +218,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
 
-            let parser = DocParser::with_config(&model, config)
+            let parser = LayoutPageParser::with_config(layout, model, config)
                 .with_region_batch_size(args.region_batch_size);
-            process_images(&parser, &layout, &existing_images, &args)?;
+            process_images(&parser, &existing_images, &args)?;
         }
         ModelName::TeleOcr => {
             info!("Loading TeleOCR model...");
@@ -231,9 +231,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
 
-            let parser = DocParser::with_config(&model, config)
+            let parser = LayoutPageParser::with_config(layout, model, config)
                 .with_region_batch_size(args.region_batch_size);
-            process_images(&parser, &layout, &existing_images, &args)?;
+            process_images(&parser, &existing_images, &args)?;
         }
         ModelName::JinaOcr => {
             info!("Loading jina-ocr-v1 model...");
@@ -244,9 +244,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
 
-            let parser = DocParser::with_config(&model, config)
+            let parser = LayoutPageParser::with_config(layout, model, config)
                 .with_region_batch_size(args.region_batch_size);
-            process_images(&parser, &layout, &existing_images, &args)?;
+            process_images(&parser, &existing_images, &args)?;
         }
         ModelName::WeVisDoc => {
             info!("Loading WeVisDoc model...");
@@ -257,22 +257,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
 
-            let parser = DocParser::with_config(&model, config)
+            let parser = LayoutPageParser::with_config(layout, model, config)
                 .with_region_batch_size(args.region_batch_size);
-            process_images(&parser, &layout, &existing_images, &args)?;
+            process_images(&parser, &existing_images, &args)?;
         }
     }
     Ok(())
 }
 
 fn process_images<B: oar_ocr_vl::RecognitionBackend>(
-    parser: &DocParser<B>,
-    layout: &PpDocLayout,
+    parser: &LayoutPageParser<PpDocLayout, B>,
     images: &[PathBuf],
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("\n=== Processing {} images ===", images.len());
-    let ignore_labels = &parser.config().markdown_ignore_labels;
 
     for image_path in images {
         info!("\nProcessing: {}", image_path.display());
@@ -291,15 +289,13 @@ fn process_images<B: oar_ocr_vl::RecognitionBackend>(
         };
 
         let start = Instant::now();
-        let result = parser.parse(layout, rgb_img);
+        let result = parser.parse_page(&rgb_img, &Default::default());
         match result {
             Ok(result) => {
                 info!("  Parsed in {:.2}s", start.elapsed().as_secs_f64());
-                info!("  Elements: {}", result.layout_elements.len());
+                info!("  Elements: {}", result.blocks.len());
 
-                // Get markdown from the parsed result.
-                let markdown =
-                    oar_ocr_vl::utils::to_markdown(&result.layout_elements, ignore_labels, true);
+                let markdown = result.markdown.unwrap_or_default();
 
                 // Save or print
                 if let Some(ref dir) = args.output_dir {
@@ -315,9 +311,9 @@ fn process_images<B: oar_ocr_vl::RecognitionBackend>(
                 }
 
                 if args.verbose {
-                    for (i, el) in result.layout_elements.iter().enumerate() {
+                    for (i, el) in result.blocks.iter().enumerate() {
                         let preview = el
-                            .text
+                            .content
                             .as_ref()
                             .map(|t| {
                                 if t.chars().count() > 40 {
@@ -327,7 +323,7 @@ fn process_images<B: oar_ocr_vl::RecognitionBackend>(
                                 }
                             })
                             .unwrap_or_default();
-                        info!("  [{}] {:?}: {}", i, el.element_type, preview);
+                        info!("  [{}] {:?}: {}", i, el.block_type, preview);
                     }
                 }
             }
