@@ -139,7 +139,6 @@ impl Pipeline {
             unreachable!()
         };
         let source = |name: &str| model_source(root, name);
-        let batch = case.options.batch_size();
         let m = &case.models;
         match case.kind {
             Kind::Ocr => {
@@ -148,8 +147,10 @@ impl Pipeline {
                     source(m.recognizer.as_deref().context("missing recognizer")?),
                     source(m.dictionary.as_deref().context("missing dictionary")?),
                 )
-                .ort_session(config)
-                .image_batch_size(batch);
+                .ort_session(config);
+                if let Some(bytes) = case.options.gpu_memory_budget {
+                    builder = builder.gpu_memory_budget(bytes);
+                }
                 if let Some(size) = case.options.region_batch_size {
                     builder = builder.region_batch_size(size);
                 }
@@ -159,8 +160,10 @@ impl Pipeline {
                 let mut builder = OARStructureBuilder::new(source(
                     m.layout.as_deref().context("missing layout")?,
                 ))
-                .ort_session(config)
-                .image_batch_size(batch);
+                .ort_session(config);
+                if let Some(bytes) = case.options.gpu_memory_budget {
+                    builder = builder.gpu_memory_budget(bytes);
+                }
                 if let Some(name) = &m.layout_name {
                     builder = builder.layout_model_name(name);
                 }

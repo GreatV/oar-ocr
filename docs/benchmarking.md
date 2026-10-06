@@ -45,9 +45,10 @@ repetitions = 5
 
 [defaults.options]
 cpu_threads = 4          # ORT intra-op threads and the Rayon pool
-# batch_size = 1         # classic image batch
+# batch_size = 1         # pages per pipeline call; the library picks its own image batch
 # region_batch_size = 4  # classic region batch; external-layout VL and MinerU
 # max_tokens = 4096      # VL generation budget
+# gpu_memory_budget = 4294967296  # classic GPU tuning hint in bytes
 
 [[cases]]
 name = "ocr-tiny"

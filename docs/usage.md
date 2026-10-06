@@ -907,6 +907,17 @@ Explicit `.image_batch_size(...)` and `.region_batch_size(...)` values always
 take precedence. Model size and CPU topology still matter, so applications with
 fixed workloads should benchmark nearby values.
 
+For a 4 GiB GPU, add `.gpu_memory_budget(4 * 1024 * 1024 * 1024)` to either OCR
+or Structure builder after selecting an accelerator. With whole GiB `g`, image
+batches use `clamp(2*g - 6, 1, 8)` and recognition uses `clamp(12*g - 28, 4, 64)`:
+4 GiB gives 2/20, and 8 GiB or more gives 8/64. Explicit batch sizes still win.
+CUDA arenas are limited
+to half the budget per session, default to `SameAsRequested`, and release idle
+memory; existing smaller arena limits and explicit arena settings are retained.
+The budget is a tuning hint, not measured free VRAM or a device-wide memory cap:
+resident models, concurrent pipelines, and non-arena allocations can exceed it.
+DirectML gets the conservative batches but cannot use CUDA's arena controls.
+
 ### Task-Specific Configs
 
 Each task has its own configuration struct that can be customized:
