@@ -5,8 +5,8 @@
 //! and optionally integrate OCR for text extraction.
 
 use super::builder_utils::{
-    build_optional_adapter, default_cpu_region_batch_size, resolve_device_batch_sizes,
-    resolve_model_path, resolve_model_source,
+    apply_gpu_memory_budget, build_optional_adapter, default_cpu_region_batch_size,
+    resolve_device_batch_sizes, resolve_model_path, resolve_model_source,
 };
 use oar_ocr_core::core::config::OrtSessionConfig;
 use oar_ocr_core::core::traits::OrtConfigurable;
@@ -197,6 +197,7 @@ pub struct OARStructureBuilder {
     // Batch sizes
     image_batch_size: Option<usize>,
     region_batch_size: Option<usize>,
+    gpu_memory_budget: Option<usize>,
 }
 
 /// Detection thresholds and merge rules for a layout preset without an explicit
@@ -314,6 +315,7 @@ impl OARStructureBuilder {
             text_recognition_config: None,
             image_batch_size: None,
             region_batch_size: None,
+            gpu_memory_budget: None,
         }
     }
 
@@ -322,6 +324,18 @@ impl OARStructureBuilder {
     /// This configuration will be applied to all models in the pipeline.
     pub fn ort_session(mut self, config: OrtSessionConfig) -> Self {
         self.ort_session_config = Some(config);
+        self
+    }
+
+    /// Sets a GPU memory budget in bytes without selecting a device.
+    ///
+    /// Budgets up to 4 GiB default to one image and four text regions per batch.
+    /// Explicit batch sizes take precedence. CUDA sessions cap each arena at half
+    /// the budget and default to idle memory recovery and SameAsRequested growth.
+    /// Existing smaller limits and explicit arena settings are retained. This is a tuning hint, not a device-wide cap:
+    /// other sessions, weights, and driver allocations also consume memory.
+    pub fn gpu_memory_budget(mut self, bytes: usize) -> Self {
+        self.gpu_memory_budget = Some(bytes);
         self
     }
 
@@ -728,6 +742,12 @@ impl OARStructureBuilder {
     ///
     /// This method instantiates all adapters and returns a ready-to-use structure analyzer.
     pub fn build(mut self) -> Result<OARStructure, OCRError> {
+        for config in [
+            self.ort_session_config.as_mut(),
+            self.formula_ort_session_config.as_mut(),
+        ] {
+            apply_gpu_memory_budget(config, self.gpu_memory_budget)?;
+        }
         for (component, selection) in [
             ("table_cell_detection", &self.table_cell_detection_type),
             (
@@ -856,6 +876,7 @@ impl OARStructureBuilder {
             self.region_batch_size,
             1,
             cpu_region_batch_size,
+            self.gpu_memory_budget,
         );
 
         // Load character dictionary if OCR is enabled

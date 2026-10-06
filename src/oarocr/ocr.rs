@@ -5,8 +5,8 @@
 //! preprocessing components.
 
 use super::builder_utils::{
-    build_optional_adapter, default_cpu_region_batch_size, resolve_device_batch_sizes,
-    resolve_model_path, resolve_model_source,
+    apply_gpu_memory_budget, build_optional_adapter, default_cpu_region_batch_size,
+    resolve_device_batch_sizes, resolve_model_path, resolve_model_source,
 };
 use oar_ocr_core::core::ModelSource;
 use oar_ocr_core::core::config::OrtSessionConfig;
@@ -81,6 +81,7 @@ pub struct OAROCRBuilder {
     text_recognition_config: Option<TextRecognitionConfig>,
     image_batch_size: Option<usize>,
     region_batch_size: Option<usize>,
+    gpu_memory_budget: Option<usize>,
 
     // Text type and word box options
     text_type: Option<String>,
@@ -120,6 +121,7 @@ impl OAROCRBuilder {
             text_recognition_config: None,
             image_batch_size: None,
             region_batch_size: None,
+            gpu_memory_budget: None,
             text_type: None,
             return_word_box: false,
         }
@@ -137,6 +139,18 @@ impl OAROCRBuilder {
     /// This configuration will be applied to all models in the pipeline.
     pub fn ort_session(mut self, config: OrtSessionConfig) -> Self {
         self.ort_session_config = Some(config);
+        self
+    }
+
+    /// Sets a GPU memory budget in bytes without selecting a device.
+    ///
+    /// Budgets up to 4 GiB default to one image and four text regions per batch.
+    /// Explicit batch sizes take precedence. CUDA sessions cap each arena at half
+    /// the budget and default to idle memory recovery and SameAsRequested growth.
+    /// Existing smaller limits and explicit arena settings are retained. This is a tuning hint, not a device-wide cap:
+    /// other sessions, weights, and driver allocations also consume memory.
+    pub fn gpu_memory_budget(mut self, bytes: usize) -> Self {
+        self.gpu_memory_budget = Some(bytes);
         self
     }
 
@@ -247,6 +261,7 @@ impl OAROCRBuilder {
     ///
     /// This instantiates all adapters and returns an `OAROCR` instance ready for prediction.
     pub fn build(mut self) -> Result<OAROCR, OCRError> {
+        apply_gpu_memory_budget(self.ort_session_config.as_mut(), self.gpu_memory_budget)?;
         if let Some(size) = self.image_batch_size {
             Self::validate_batch_size("image_batch_size", size)?;
         }
@@ -272,6 +287,7 @@ impl OAROCRBuilder {
             self.region_batch_size,
             1,
             cpu_region_batch_size,
+            self.gpu_memory_budget,
         );
 
         // Load character dictionary for text recognition

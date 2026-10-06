@@ -150,6 +150,9 @@ impl Pipeline {
                 )
                 .ort_session(config)
                 .image_batch_size(batch);
+                if let Some(bytes) = case.options.gpu_memory_budget {
+                    builder = builder.gpu_memory_budget(bytes);
+                }
                 if let Some(size) = case.options.region_batch_size {
                     builder = builder.region_batch_size(size);
                 }
@@ -161,6 +164,9 @@ impl Pipeline {
                 ))
                 .ort_session(config)
                 .image_batch_size(batch);
+                if let Some(bytes) = case.options.gpu_memory_budget {
+                    builder = builder.gpu_memory_budget(bytes);
+                }
                 if let Some(name) = &m.layout_name {
                     builder = builder.layout_model_name(name);
                 }

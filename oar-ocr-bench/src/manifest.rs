@@ -25,6 +25,7 @@ pub(crate) struct Options {
     pub(crate) cpu_threads: Option<usize>,
     pub(crate) region_batch_size: Option<usize>,
     pub(crate) max_tokens: Option<usize>,
+    pub(crate) gpu_memory_budget: Option<usize>,
 }
 
 impl Options {
@@ -40,6 +41,11 @@ impl Options {
                 Kind::Vl => self.max_tokens.or(other.max_tokens),
                 _ => self.max_tokens,
             },
+            gpu_memory_budget: self.gpu_memory_budget.or_else(|| {
+                (kind != Kind::Vl)
+                    .then_some(other.gpu_memory_budget)
+                    .flatten()
+            }),
         }
     }
     pub(crate) fn batch_size(&self) -> usize {
@@ -199,6 +205,14 @@ impl Manifest {
 impl Case {
     fn validate(&self) -> Result<()> {
         let name = &self.name;
+        ensure!(
+            self.options.gpu_memory_budget != Some(0),
+            "{name}: gpu_memory_budget must be positive"
+        );
+        ensure!(
+            self.kind != Kind::Vl || self.options.gpu_memory_budget.is_none(),
+            "{name}: gpu_memory_budget applies only to classic cases"
+        );
         ensure!(!name.trim().is_empty(), "case name cannot be empty");
         ensure!(self.repetitions > 0, "{name}: repetitions must be positive");
         ensure!(
@@ -272,6 +286,18 @@ mod tests {
         assert_eq!(manifest.cases[0].warmup, 2);
         assert_eq!(manifest.cases[0].device, "cuda:2");
         assert_eq!(manifest.cases[0].options.cpu_threads(), 2);
+        let budget = (4 * 1024 * 1024 * 1024u64).min(usize::MAX as u64) as usize;
+        let budgeted = SAMPLE.replace(
+            "cpu_threads=2",
+            &format!("cpu_threads=2\ngpu_memory_budget={budget}"),
+        );
+        assert_eq!(
+            Manifest::parse(&budgeted, None, None).unwrap().cases[0]
+                .options
+                .gpu_memory_budget,
+            Some(budget)
+        );
+        assert!(Manifest::parse(&budgeted.replace(&budget.to_string(), "0"), None, None).is_err());
         // Omitted options and their explicit defaults produce the same case.
         let explicit = SAMPLE.replace("cpu_threads=2", "cpu_threads=2\nbatch_size=1");
         assert_eq!(
