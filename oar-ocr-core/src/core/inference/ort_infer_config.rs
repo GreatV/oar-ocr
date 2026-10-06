@@ -67,6 +67,7 @@ impl OrtInfer {
                 3 => LogLevel::Error,
                 _ => LogLevel::Fatal,
             };
+            environment::lower_owned_environment_log_level(logging_level)?;
             builder = builder.with_log_level(logging_level)?;
         }
         if let Some(log_verbosity) = cfg.log_verbosity_level {
