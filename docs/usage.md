@@ -883,6 +883,16 @@ On Windows, examples built with `--features directml` also accept
 `--device directml`, `--device directml:N`, and the shorter `--device dml:N`.
 The selected DirectML provider keeps the accelerator-oriented batch defaults.
 
+### ONNX Runtime logging
+
+OAR defaults ONNX Runtime's global logging to Error only when it initializes the
+environment itself; an environment configured by the application is preserved.
+Explicit session logging requests lower an OAR-owned environment's threshold to
+the lowest requested severity; subsequent sessions do not raise it again.
+To see ORT warnings, call `ort::init().commit()` and set
+`ort::environment::Environment::current()?.set_log_level(ort::logging::LogLevel::Warning)`
+before constructing any OAR model.
+
 ### Device-aware batching
 
 The high-level OCR and Structure builders choose different defaults for CPU and

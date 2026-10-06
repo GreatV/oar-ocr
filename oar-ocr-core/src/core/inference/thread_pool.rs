@@ -57,7 +57,8 @@ impl OrtGlobalThreadPoolOptions {
             options = options.with_spin_control(allow).map_err(config_error)?;
         }
 
-        Ok(ort::init().with_global_thread_pool(options).commit())
+        super::environment::commit_environment(ort::init().with_global_thread_pool(options))
+            .map_err(config_error)
     }
 }
 

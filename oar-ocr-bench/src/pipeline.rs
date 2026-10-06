@@ -2,7 +2,10 @@ use crate::manifest::{Case, Kind, model_source};
 use anyhow::{Context, Result, bail, ensure};
 use image::RgbImage;
 use oar_ocr::{
-    core::config::{OrtExecutionProvider, OrtSessionConfig},
+    core::{
+        config::{OrtExecutionProvider, OrtSessionConfig},
+        inference::initialize_ort_environment,
+    },
     oarocr::{OAROCR, OAROCRBuilder, OARStructure, OARStructureBuilder},
 };
 use oar_ocr_vl::{
@@ -226,6 +229,7 @@ impl Pipeline {
 }
 
 fn ort_config(case: &Case) -> Result<OrtSessionConfig> {
+    initialize_ort_environment()?;
     if case.device == "auto" {
         return Ok(OrtSessionConfig::auto()
             .with_intra_threads(case.options.cpu_threads())

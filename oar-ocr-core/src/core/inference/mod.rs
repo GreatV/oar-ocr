@@ -7,6 +7,7 @@ use crate::core::errors::OCRError;
 use ort::{session::Session, value::ValueType};
 use std::sync::Mutex;
 
+mod environment;
 mod model_source;
 pub mod session;
 mod tensor_output;
@@ -20,6 +21,7 @@ mod ort_infer_config;
 #[path = "ort_infer_execution.rs"]
 mod ort_infer_execution;
 
+pub use environment::initialize_ort_environment;
 pub use model_source::ModelSource;
 pub use ort_infer_builders::ensure_cuda_launch_blocking;
 pub use ort_infer_execution::TensorInput;

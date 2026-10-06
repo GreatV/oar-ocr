@@ -62,3 +62,4 @@ wide = { version = "1.5", optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+tracing-subscriber.workspace = true
