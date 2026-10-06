@@ -25,7 +25,7 @@ image.workspace = true
 nvml-wrapper = { version = "0.13", optional = true }
 oar-ocr = { path = "..", features = ["auto-download"] }
 oar-ocr-vl = { path = "../oar-ocr-vl" }
-ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std"] }
+ort = { workspace = true, features = ["std"] }
 rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -45,6 +45,9 @@ enum Action {
         /// Override all selected cases with an explicit cpu, cuda:N, or metal device.
         #[arg(long)]
         device: Option<String>,
+        /// Override the entire manifest input set with files, directories, or PDFs.
+        #[arg(long = "input")]
+        inputs: Vec<PathBuf>,
     },
     /// Compare metrics and output fingerprints; exit nonzero on regressions or invalid comparisons.
     Compare {
@@ -106,12 +109,14 @@ fn execute(args: Args) -> Result<bool> {
             output,
             cases,
             device,
+            inputs,
         } => run(
             &manifest,
             &root,
             output.as_deref(),
             &cases,
             device.as_deref(),
+            &inputs,
         ),
         Action::Compare {
             base,
@@ -139,10 +144,16 @@ fn run(
     output: Option<&Path>,
     names: &[String],
     device: Option<&str>,
+    inputs: &[PathBuf],
 ) -> Result<bool> {
     let root = fs::canonicalize(root).context("resolve benchmark root")?;
     let raw = fs::read_to_string(path).context("read manifest")?;
-    let manifest = Manifest::parse(&raw, device)?;
+    let input_override = if inputs.is_empty() {
+        None
+    } else {
+        Some(input::from_paths(&root, inputs)?)
+    };
+    let manifest = Manifest::parse(&raw, device, input_override)?;
     for name in names {
         ensure!(
             manifest.cases.iter().any(|case| &case.name == name),
@@ -369,4 +380,34 @@ fn run_case(request: &Request) -> Result<Measurement> {
         output_stable,
         valid,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn run_accepts_repeated_input_flags() {
+        let args = Args::try_parse_from([
+            "oar-bench",
+            "run",
+            "--input",
+            "a.png",
+            "--input",
+            "pages",
+            "--input",
+            "paper.pdf",
+        ])
+        .unwrap();
+        let Action::Run { inputs, .. } = args.command else {
+            panic!("expected run");
+        };
+        assert_eq!(
+            inputs,
+            [
+                PathBuf::from("a.png"),
+                PathBuf::from("pages"),
+                PathBuf::from("paper.pdf")
+            ]
+        );
+    }
 }

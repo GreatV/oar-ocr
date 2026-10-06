@@ -17,11 +17,15 @@ bare model filenames use the existing auto-download registry; populate the cache
 before collecting baselines to exclude network downloads from loading time.
 VL checkpoints are local directories under `models/<org>/<name>`.
 
+Place the pages to measure in the gitignored `benchmark-inputs/` directory,
+or pass files, image directories, and PDFs with repeated `--input` flags.
+The supplied manifest reads that directory without a page limit.
+
 A minimal CPU manifest is:
 
 ```toml
 [inputs]
-images = [".oar/images/general_ocr_001.png"]
+images = ["benchmark-inputs/page.png"]
 # image_dirs = ["images"]       # recursive, sorted, image files only
 # pdfs = ["documents/paper.pdf"]
 # pdf_scale = 2.0               # pixels per PDF point, (0, 4]
@@ -84,11 +88,16 @@ runtime behavior and model defaults apply; no new environment switches are neede
 ```bash
 CARGO_BUILD_JOBS=8 nice -n 10 cargo run --release -p oar-ocr-bench --bin oar-bench -- \
   run --manifest oar-ocr-bench/manifests/default.toml \
-  --case ocr-tiny --device cpu --output benchmark-results/cpu-base.json
+  --case ocr-tiny --device cpu --input benchmark-inputs/page.png \
+  --output benchmark-results/cpu-base.json
 ```
 
 Repeat `--case` to select several cases; omit it to run all cases. `--device`
-overrides the manifest's device for the run. Every case starts a fresh `run-case`
+overrides the manifest's device for the run. Repeated `--input <PATH>` flags
+replace the entire `[inputs]` block: files, recursive image directories, and PDFs
+can be combined, and manifest `max_pages`/`pdf_scale` settings are reset to their
+defaults (all pages, PDF scale 2). Input paths also resolve relative to `--root`.
+Every case starts a fresh `run-case`
 subprocess and exits before the next case starts, releasing model allocations and
 GPU contexts. The parent writes one JSON report and prints a Markdown table.
 An existing output filename is rejected; without `--output`, a timestamped report
@@ -163,6 +172,9 @@ Run the full GPU baseline after the weights/cache are ready:
 CARGO_BUILD_JOBS=8 CUDAFORGE_THREADS=4 nice -n 10 cargo run --release \
   -p oar-ocr-bench --features cuda,nvml --bin oar-bench -- \
   run --manifest oar-ocr-bench/manifests/default.toml \
+  --input benchmark-inputs/layout.jpg \
+  --input benchmark-inputs/general_ocr_001.png \
+  --input benchmark-inputs/table_recognition.jpg \
   --output benchmark-results/gpu-base.json
 ```
 
@@ -181,7 +193,9 @@ and status. Increasing latency/load/peak memory and decreasing throughput are
 regressions only when the change **exceeds** the threshold (default 5%). GPU
 baseline deltas are context, not regressions. Unavailable metrics stay marked
 unavailable. Different repetition counts are allowed, but warmup, decoding,
-batching, input fingerprints, and device configurations must match. Hardware or
+batching, input fingerprints, and device configurations must match. Different
+input identities or hashes are reported as `inputs differ / not comparable`;
+output fingerprints are not compared across those input sets. Hardware or
 build-profile mismatches, added/removed/failed cases, invalid samples, unstable
 outputs, and changed output fingerprints are flagged and return exit code 1,
 as do numerical regressions. Input/JSON/schema/CLI errors return exit code 2.

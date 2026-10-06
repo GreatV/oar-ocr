@@ -23,6 +23,32 @@ fn image_file(path: &Path) -> bool {
             )
         })
 }
+
+pub(crate) fn from_paths(root: &Path, paths: &[PathBuf]) -> Result<Inputs> {
+    let mut inputs = Inputs::default();
+    for path in paths {
+        let metadata = std::fs::metadata(root.join(path))
+            .with_context(|| format!("read input {}", path.display()))?;
+        let value = path.to_string_lossy().into_owned();
+        if metadata.is_dir() {
+            inputs.image_dirs.push(value);
+        } else if metadata.is_file()
+            && path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+        {
+            inputs.pdfs.push(value);
+        } else {
+            ensure!(
+                metadata.is_file() && image_file(path),
+                "unsupported input {}",
+                path.display()
+            );
+            inputs.images.push(value);
+        }
+    }
+    Ok(inputs)
+}
 fn walk(path: &Path, paths: &mut BTreeSet<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(path)
         .with_context(|| format!("read image directory {}", path.display()))?
@@ -112,6 +138,26 @@ pub(crate) fn load(root: &Path, inputs: &Inputs) -> Result<Vec<Page>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cli_paths_classify_files_directories_and_pdfs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("pages")).unwrap();
+        RgbImage::new(2, 3)
+            .save(dir.path().join("image.png"))
+            .unwrap();
+        std::fs::write(dir.path().join("paper.PDF"), b"placeholder").unwrap();
+        let inputs = from_paths(
+            dir.path(),
+            &["image.png".into(), "pages".into(), "paper.PDF".into()],
+        )
+        .unwrap();
+        assert_eq!(inputs.images, ["image.png"]);
+        assert_eq!(inputs.image_dirs, ["pages"]);
+        assert_eq!(inputs.pdfs, ["paper.PDF"]);
+        assert_eq!(inputs.max_pages, None);
+        assert_eq!(inputs.pdf_scale, None);
+        assert!(from_paths(dir.path(), &["missing.png".into()]).is_err());
+    }
     #[test]
     fn image_content_takes_precedence_over_extension() {
         let dir = tempfile::tempdir().unwrap();

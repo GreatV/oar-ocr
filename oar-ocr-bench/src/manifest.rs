@@ -132,6 +132,7 @@ pub(crate) struct Case {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawManifest {
+    #[serde(default)]
     inputs: Inputs,
     #[serde(default)]
     defaults: Defaults,
@@ -159,8 +160,11 @@ pub(crate) fn parse_device(value: &str) -> Result<(String, Option<u32>)> {
 }
 
 impl Manifest {
-    pub(crate) fn parse(text: &str, device: Option<&str>) -> Result<Self> {
-        let raw: RawManifest = toml::from_str(text).context("invalid benchmark manifest")?;
+    pub(crate) fn parse(text: &str, device: Option<&str>, inputs: Option<Inputs>) -> Result<Self> {
+        let mut raw: RawManifest = toml::from_str(text).context("invalid benchmark manifest")?;
+        if let Some(inputs) = inputs {
+            raw.inputs = inputs;
+        }
         ensure!(!raw.cases.is_empty(), "manifest has no cases");
         ensure!(
             !raw.inputs.images.is_empty()
@@ -351,28 +355,54 @@ mod tests {
     use super::*;
     const SAMPLE: &str = "[inputs]\nimages=['page.png']\n[defaults]\nwarmup=2\n[defaults.options]\ncpu_threads=2\n[[cases]]\nname='tiny'\nkind='ocr'\n[cases.models]\ndetector='det.onnx'\nrecognizer='rec.onnx'\ndictionary='dict.txt'\n";
     #[test]
+    fn cli_inputs_replace_the_entire_block_and_allow_missing_manifest_inputs() {
+        let inputs = Inputs {
+            images: vec!["a.png".into(), "b.png".into(), "c.png".into()],
+            ..Default::default()
+        };
+        let limited = SAMPLE.replace(
+            "images=['page.png']",
+            "images=['page.png']\nmax_pages=1\npdf_scale=3.0",
+        );
+        let manifest = Manifest::parse(&limited, None, Some(inputs.clone())).unwrap();
+        assert_eq!(manifest.inputs, inputs);
+        let no_inputs = SAMPLE
+            .strip_prefix("[inputs]\nimages=['page.png']\n")
+            .unwrap();
+        assert!(Manifest::parse(no_inputs, None, None).is_err());
+        assert_eq!(
+            Manifest::parse(no_inputs, None, Some(inputs.clone()))
+                .unwrap()
+                .inputs,
+            inputs
+        );
+    }
+    #[test]
     fn parses_defaults_and_cli_override() {
-        let manifest = Manifest::parse(SAMPLE, Some("cuda:2")).unwrap();
+        let manifest = Manifest::parse(SAMPLE, Some("cuda:2"), None).unwrap();
         assert_eq!(manifest.cases[0].warmup, 2);
         assert_eq!(manifest.cases[0].device, "cuda:2");
         assert_eq!(manifest.cases[0].options.cpu_threads(), 2);
     }
     #[test]
     fn rejects_invalid_cases_and_typos() {
-        assert!(Manifest::parse(&SAMPLE.replace("warmup=2", "warmupp=2"), None).is_err());
-        assert!(Manifest::parse(&SAMPLE.replace("kind='ocr'", "kind='invalid'"), None).is_err());
-        assert!(Manifest::parse(&SAMPLE.replace("warmup=2", "repetitions=0"), None).is_err());
-        assert!(Manifest::parse(SAMPLE, Some("auto")).is_err());
-        assert!(Manifest::parse(SAMPLE, Some("cuda:-1")).is_err());
+        assert!(Manifest::parse(&SAMPLE.replace("warmup=2", "warmupp=2"), None, None).is_err());
+        assert!(
+            Manifest::parse(&SAMPLE.replace("kind='ocr'", "kind='invalid'"), None, None).is_err()
+        );
+        assert!(Manifest::parse(&SAMPLE.replace("warmup=2", "repetitions=0"), None, None).is_err());
+        assert!(Manifest::parse(SAMPLE, Some("auto"), None).is_err());
+        assert!(Manifest::parse(SAMPLE, Some("cuda:-1"), None).is_err());
     }
     #[test]
     fn detects_duplicate_names() {
         let second = SAMPLE.split("[[cases]]").nth(1).unwrap();
-        assert!(Manifest::parse(&format!("{SAMPLE}\n[[cases]]{second}"), None).is_err());
+        assert!(Manifest::parse(&format!("{SAMPLE}\n[[cases]]{second}"), None, None).is_err());
     }
     #[test]
     fn default_manifest_is_valid() {
-        let manifest = Manifest::parse(include_str!("../manifests/default.toml"), None).unwrap();
+        let manifest =
+            Manifest::parse(include_str!("../manifests/default.toml"), None, None).unwrap();
         assert!(manifest.cases.iter().filter(|c| c.kind == Kind::Vl).count() >= 12);
     }
 }

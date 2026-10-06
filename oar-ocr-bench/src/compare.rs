@@ -127,13 +127,19 @@ pub(crate) fn compare(base: &RunResult, new: &RunResult, limit: f64) -> Result<C
             (Some(a), Some(b)) => a.device == b.device,
             _ => true,
         };
+        let same_inputs = corpus(x) == corpus(y);
         let comparable = compatible(a, b)
-            && corpus(x) == corpus(y)
+            && same_inputs
             && x.rate_basis == y.rate_basis
             && x.latency_basis == y.latency_basis
             && same_gpu
             && !hardware_changed;
-        if !comparable {
+        if !same_inputs {
+            text.push_str(&format!(
+                "| {label} | inputs | — | — | — | inputs differ / not comparable |\n"
+            ));
+            failed = true;
+        } else if !comparable {
             text.push_str(&format!(
                 "| {label} | inputs/configuration | — | — | — | INCOMPATIBLE |\n"
             ));
@@ -146,10 +152,16 @@ pub(crate) fn compare(base: &RunResult, new: &RunResult, limit: f64) -> Result<C
             ));
             failed = true;
         }
-        let output_changed = fingerprints(&x.samples) != fingerprints(&y.samples);
+        let output_changed = same_inputs && fingerprints(&x.samples) != fingerprints(&y.samples);
         text.push_str(&format!(
             "| {label} | output fingerprints | — | — | — | {} |\n",
-            if output_changed { "CHANGED" } else { "SAME" }
+            if !same_inputs {
+                "NOT COMPARED (inputs differ)"
+            } else if output_changed {
+                "CHANGED"
+            } else {
+                "SAME"
+            }
         ));
         failed |= output_changed;
         for ((metric, left, direction), (_, right, _)) in metrics(x).into_iter().zip(metrics(y)) {
@@ -200,7 +212,7 @@ mod tests {
         result::{Environment, PageSample, Statistics},
     };
     fn run(latency: f64, output: &str) -> RunResult {
-        let manifest = Manifest::parse("[inputs]\nimages=['page.png']\n[[cases]]\nname='test'\nkind='ocr'\n[cases.models]\ndetector='a'\nrecognizer='b'\ndictionary='c'", None).unwrap();
+        let manifest = Manifest::parse("[inputs]\nimages=['page.png']\n[[cases]]\nname='test'\nkind='ocr'\n[cases.models]\ndetector='a'\nrecognizer='b'\ndictionary='c'", None, None).unwrap();
         RunResult {
             schema_version: 1,
             timestamp_unix_ms: 0,
@@ -264,12 +276,17 @@ mod tests {
         let base = run(100.0, "same");
         let mut next = base.clone();
         next.cases[0].measurement.as_mut().unwrap().samples[0].input_sha256 = "different".into();
+        next.cases[0].measurement.as_mut().unwrap().samples[0].output_sha256 =
+            "also different".into();
+        let comparison = compare(&base, &next, 5.0).unwrap();
+        assert!(comparison.failed);
         assert!(
-            compare(&base, &next, 5.0)
-                .unwrap()
+            comparison
                 .markdown
-                .contains("INCOMPATIBLE")
+                .contains("inputs differ / not comparable")
         );
+        assert!(comparison.markdown.contains("NOT COMPARED (inputs differ)"));
+        assert!(!comparison.markdown.contains("| CHANGED |"));
         next = base.clone();
         next.cases[0].measurement.as_mut().unwrap().valid = false;
         assert!(compare(&base, &next, 5.0).unwrap().failed);

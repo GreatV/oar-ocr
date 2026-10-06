@@ -1,7 +1,6 @@
 # Run from the repository root with --features cuda,nvml.
 [inputs]
-images = [".oar/images/layout.jpg"]
-max_pages = 1
+image_dirs = ["benchmark-inputs"]
 
 [defaults]
 device = "cuda:0"
