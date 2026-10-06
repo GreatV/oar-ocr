@@ -1,4 +1,4 @@
-//! Model-agnostic complete-page parsing.
+//! Model-agnostic complete-page parsing and model-directory loading.
 
 use crate::api::error::Error;
 use crate::api::page_parser::PageParser;
@@ -19,7 +19,11 @@ use crate::pp_doclayout::PpDocLayout;
 use crate::teleocr::TeleOcr;
 use crate::wevisdoc::{WeVisDoc, WeVisDocParseOptions};
 use crate::xiaomi_ocr::{XiaomiOcr, XiaomiOcrParseOptions};
+use candle_core::Device;
 use image::RgbImage;
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 /// Per-page knobs shared by every parser behind [`AnyPageParser`].
 ///
@@ -61,14 +65,177 @@ impl AnyPageParserOptions {
     }
 }
 
+/// The checkpoint repository a model directory holds, one variant per
+/// supported repo.
+///
+/// The [`as_str`](Self::as_str) IDs are the Hugging Face repo IDs exactly as
+/// published; a new protocol version gets a new ID only when it ships as a
+/// new repo, and the same IDs will later drive auto-download. Loading from a
+/// directory always names the model explicitly, because most of these models
+/// are fine-tunes whose checkpoint configs match their public base models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AnyPageParserModel {
+    /// PaddlePaddle/HPD-Parsing.
+    HpdParsing,
+    /// tencent/HunyuanOCR (1.5 and 1.0 revisions).
+    HunyuanOcr,
+    /// jinaai/jina-ocr-v1.
+    JinaOcr,
+    /// opendatalab/MinerU2.5-2509-1.2B.
+    MinerU2509,
+    /// opendatalab/MinerU2.5-Pro-2605-1.2B.
+    MinerUPro,
+    /// opendatalab/MinerU-Diffusion-V1-0320-2.5B.
+    MinerUDiffusion,
+    /// zenosai/MonkeyOCRv2-S-Parsing.
+    MonkeyOcrV2S,
+    /// zenosai/MonkeyOCRv2-B-Parsing.
+    MonkeyOcrV2B,
+    /// ATH-MaaS/OvisOCR2.
+    OvisOcr2,
+    /// tencent/WeVisDoc-2B.
+    WeVisDoc2B,
+    /// tencent/WeVisDoc-4B.
+    WeVisDoc4B,
+    /// SeerRay-Lab/Xiaomi-OCR-0.
+    XiaomiOcr,
+    /// PaddlePaddle/PaddleOCR-VL.
+    PaddleOcrVl,
+    /// PaddlePaddle/PaddleOCR-VL-1.5.
+    PaddleOcrVl1_5,
+    /// PaddlePaddle/PaddleOCR-VL-1.6.
+    PaddleOcrVl1_6,
+    /// zai-org/GLM-OCR.
+    GlmOcr,
+    /// XingChen-AGI/TeleOCR.
+    TeleOcr,
+}
+
+/// The canonical ID table backing [`AnyPageParserModel`] string conversions.
+const MODEL_IDS: &[(&str, AnyPageParserModel)] = &[
+    ("PaddlePaddle/HPD-Parsing", AnyPageParserModel::HpdParsing),
+    ("tencent/HunyuanOCR", AnyPageParserModel::HunyuanOcr),
+    ("jinaai/jina-ocr-v1", AnyPageParserModel::JinaOcr),
+    (
+        "opendatalab/MinerU2.5-2509-1.2B",
+        AnyPageParserModel::MinerU2509,
+    ),
+    (
+        "opendatalab/MinerU2.5-Pro-2605-1.2B",
+        AnyPageParserModel::MinerUPro,
+    ),
+    (
+        "opendatalab/MinerU-Diffusion-V1-0320-2.5B",
+        AnyPageParserModel::MinerUDiffusion,
+    ),
+    (
+        "zenosai/MonkeyOCRv2-S-Parsing",
+        AnyPageParserModel::MonkeyOcrV2S,
+    ),
+    (
+        "zenosai/MonkeyOCRv2-B-Parsing",
+        AnyPageParserModel::MonkeyOcrV2B,
+    ),
+    ("ATH-MaaS/OvisOCR2", AnyPageParserModel::OvisOcr2),
+    ("tencent/WeVisDoc-2B", AnyPageParserModel::WeVisDoc2B),
+    ("tencent/WeVisDoc-4B", AnyPageParserModel::WeVisDoc4B),
+    ("SeerRay-Lab/Xiaomi-OCR-0", AnyPageParserModel::XiaomiOcr),
+    ("PaddlePaddle/PaddleOCR-VL", AnyPageParserModel::PaddleOcrVl),
+    (
+        "PaddlePaddle/PaddleOCR-VL-1.5",
+        AnyPageParserModel::PaddleOcrVl1_5,
+    ),
+    (
+        "PaddlePaddle/PaddleOCR-VL-1.6",
+        AnyPageParserModel::PaddleOcrVl1_6,
+    ),
+    ("zai-org/GLM-OCR", AnyPageParserModel::GlmOcr),
+    ("XingChen-AGI/TeleOCR", AnyPageParserModel::TeleOcr),
+];
+
+impl AnyPageParserModel {
+    /// The canonical Hugging Face repo ID, for manifests and CLIs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HpdParsing => "PaddlePaddle/HPD-Parsing",
+            Self::HunyuanOcr => "tencent/HunyuanOCR",
+            Self::JinaOcr => "jinaai/jina-ocr-v1",
+            Self::MinerU2509 => "opendatalab/MinerU2.5-2509-1.2B",
+            Self::MinerUPro => "opendatalab/MinerU2.5-Pro-2605-1.2B",
+            Self::MinerUDiffusion => "opendatalab/MinerU-Diffusion-V1-0320-2.5B",
+            Self::MonkeyOcrV2S => "zenosai/MonkeyOCRv2-S-Parsing",
+            Self::MonkeyOcrV2B => "zenosai/MonkeyOCRv2-B-Parsing",
+            Self::OvisOcr2 => "ATH-MaaS/OvisOCR2",
+            Self::WeVisDoc2B => "tencent/WeVisDoc-2B",
+            Self::WeVisDoc4B => "tencent/WeVisDoc-4B",
+            Self::XiaomiOcr => "SeerRay-Lab/Xiaomi-OCR-0",
+            Self::PaddleOcrVl => "PaddlePaddle/PaddleOCR-VL",
+            Self::PaddleOcrVl1_5 => "PaddlePaddle/PaddleOCR-VL-1.5",
+            Self::PaddleOcrVl1_6 => "PaddlePaddle/PaddleOCR-VL-1.6",
+            Self::GlmOcr => "zai-org/GLM-OCR",
+            Self::TeleOcr => "XingChen-AGI/TeleOCR",
+        }
+    }
+}
+
+impl fmt::Display for AnyPageParserModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for AnyPageParserModel {
+    type Err = Error;
+
+    /// Parses a Hugging Face repo ID. Hub IDs are case-insensitive, so the
+    /// comparison is too; an unknown ID lists every supported one.
+    fn from_str(id: &str) -> Result<Self, Self::Err> {
+        MODEL_IDS
+            .iter()
+            .find(|(known, _)| known.eq_ignore_ascii_case(id))
+            .map(|(_, model)| *model)
+            .ok_or_else(|| {
+                let valid = MODEL_IDS
+                    .iter()
+                    .map(|(known, _)| *known)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Error::config(format!("unknown model id {id:?}; valid ids: {valid}"))
+            })
+    }
+}
+
+/// Directory-loading options for [`AnyPageParser::from_dir_with_options`].
+///
+/// The layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR) combine their
+/// recognition backbone with an external PP-DocLayout detector, so loading
+/// them needs a PP-DocLayout checkpoint directory in `layout_dir`. Every
+/// other model ignores it.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct AnyPageParserLoadOptions {
+    /// PP-DocLayout checkpoint directory used by the layout-composed models.
+    pub layout_dir: Option<PathBuf>,
+}
+
+impl AnyPageParserLoadOptions {
+    /// Set the PP-DocLayout directory used by the layout-composed models.
+    pub fn with_layout_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.layout_dir = Some(dir.into());
+        self
+    }
+}
+
 /// A complete-page parser that dispatches to any of the crate's parsers.
 ///
 /// Every supported model parses through the same [`PageParser`] contract
 /// behind this enum, so callers can pick a parser at runtime — from a config
 /// file, CLI flag, or benchmark manifest — without writing per-model dispatch.
-/// Convert an already-loaded model with [`From`]; `AnyPageParserOptions`
-/// carries the knobs the parsers share and leaves every other model-specific
-/// option at its default.
+/// Convert an already-loaded model with [`From`], or load one from its model
+/// directory with [`from_dir`](Self::from_dir), which detects the model from
+/// its `config.json`. `AnyPageParserOptions` carries the knobs the parsers
+/// share and leaves every other model-specific option at its default.
 ///
 /// ```no_run
 /// use oar_ocr_vl::{
@@ -186,6 +353,115 @@ impl From<LayoutPageParser<PpDocLayout, TeleOcr>> for AnyPageParser {
     fn from(model: LayoutPageParser<PpDocLayout, TeleOcr>) -> Self {
         Self::TeleOcr(model)
     }
+}
+
+impl AnyPageParser {
+    /// Loads the named parser from a model directory.
+    ///
+    /// The model is always named explicitly by its Hugging Face repo ID (see
+    /// [`AnyPageParserModel`]) — most supported models are fine-tunes whose
+    /// checkpoint configs match their public base models, so the directory
+    /// cannot be identified reliably on its own. The parser loads through its own
+    /// `from_dir` with its own defaults. Layout-composed models (PaddleOCR-VL,
+    /// GLM-OCR, TeleOCR) additionally need a PP-DocLayout directory, which
+    /// [`from_dir_with_options`](Self::from_dir_with_options) accepts.
+    pub fn from_dir(
+        model: AnyPageParserModel,
+        model_dir: impl AsRef<Path>,
+        device: Device,
+    ) -> Result<Self, Error> {
+        Self::from_dir_with_options(
+            model,
+            model_dir,
+            device,
+            &AnyPageParserLoadOptions::default(),
+        )
+    }
+
+    /// Loads the named parser from a model directory with loading options.
+    ///
+    /// See [`from_dir`](Self::from_dir); the options carry the PP-DocLayout
+    /// directory required by the layout-composed models.
+    ///
+    /// ```no_run
+    /// use candle_core::Device;
+    /// use oar_ocr_vl::{AnyPageParser, AnyPageParserLoadOptions, AnyPageParserModel};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// // PaddleOCR-VL composes an external PP-DocLayout detector.
+    /// let options = AnyPageParserLoadOptions::default()
+    ///     .with_layout_dir("PaddlePaddle/PP-DocLayoutV3_safetensors");
+    /// let parser = AnyPageParser::from_dir_with_options(
+    ///     AnyPageParserModel::PaddleOcrVl1_5,
+    ///     "PaddlePaddle/PaddleOCR-VL-1.5",
+    ///     Device::Cpu,
+    ///     &options,
+    /// )?;
+    /// # let _ = parser;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn from_dir_with_options(
+        model: AnyPageParserModel,
+        model_dir: impl AsRef<Path>,
+        device: Device,
+        options: &AnyPageParserLoadOptions,
+    ) -> Result<Self, Error> {
+        let model_dir = model_dir.as_ref();
+        // Sibling variants of one family share its loader; the loaders tell
+        // revisions apart from the directory's own config structure, which the
+        // ID has already vouched for.
+        Ok(match model {
+            AnyPageParserModel::HpdParsing => HpdParsing::from_dir(model_dir, device)?.into(),
+            AnyPageParserModel::HunyuanOcr => HunyuanOcr::from_dir(model_dir, device)?.into(),
+            AnyPageParserModel::JinaOcr => JinaOcr::from_dir(model_dir, device)?.into(),
+            AnyPageParserModel::MinerU2509 | AnyPageParserModel::MinerUPro => {
+                MinerU::from_dir(model_dir, device)?.into()
+            }
+            AnyPageParserModel::MinerUDiffusion => {
+                MinerUDiffusion::from_dir(model_dir, device)?.into()
+            }
+            AnyPageParserModel::MonkeyOcrV2S | AnyPageParserModel::MonkeyOcrV2B => {
+                MonkeyOcrV2::from_dir(model_dir, device)?.into()
+            }
+            AnyPageParserModel::OvisOcr2 => OvisOcr2::from_dir(model_dir, device)?.into(),
+            AnyPageParserModel::WeVisDoc2B | AnyPageParserModel::WeVisDoc4B => {
+                WeVisDoc::from_dir(model_dir, device)?.into()
+            }
+            AnyPageParserModel::XiaomiOcr => XiaomiOcr::from_dir(model_dir, device)?.into(),
+            AnyPageParserModel::PaddleOcrVl
+            | AnyPageParserModel::PaddleOcrVl1_5
+            | AnyPageParserModel::PaddleOcrVl1_6 => LayoutPageParser::new(
+                PpDocLayout::from_dir(required_layout_dir(options, model)?, device.clone())?,
+                PaddleOcrVl::from_dir(model_dir, device)?,
+            )
+            .into(),
+            AnyPageParserModel::GlmOcr => LayoutPageParser::new(
+                PpDocLayout::from_dir(required_layout_dir(options, model)?, device.clone())?,
+                GlmOcr::from_dir(model_dir, device)?,
+            )
+            .into(),
+            AnyPageParserModel::TeleOcr => LayoutPageParser::new(
+                PpDocLayout::from_dir(required_layout_dir(options, model)?, device.clone())?,
+                TeleOcr::from_dir(model_dir, device)?,
+            )
+            .into(),
+        })
+    }
+}
+
+/// Returns the configured layout directory for a layout-composed model,
+/// before any weights load, or explains how to provide one.
+fn required_layout_dir(
+    options: &AnyPageParserLoadOptions,
+    model: AnyPageParserModel,
+) -> Result<&Path, Error> {
+    options.layout_dir.as_deref().ok_or_else(|| {
+        Error::config(format!(
+            "{model} parses with an external layout detector; pass a PP-DocLayout directory \
+             with AnyPageParserLoadOptions::with_layout_dir"
+        ))
+    })
 }
 
 impl PageParser for AnyPageParser {
@@ -312,6 +588,38 @@ mod tests {
     use crate::layout::LayoutDetections;
     use crate::monkeyocrv2::MonkeyOcrV2Task;
     use std::cell::Cell;
+
+    #[test]
+    fn from_dir_reports_a_missing_layout_directory_before_loading() {
+        let dir = tempfile::tempdir().unwrap();
+        let error =
+            AnyPageParser::from_dir(AnyPageParserModel::PaddleOcrVl1_5, dir.path(), Device::Cpu)
+                .err()
+                .expect("the layout directory should be required")
+                .to_string();
+        assert!(error.contains("PaddlePaddle/PaddleOCR-VL-1.5"), "{error}");
+        assert!(error.contains("PP-DocLayout"), "{error}");
+        assert!(error.contains("with_layout_dir"), "{error}");
+    }
+
+    #[test]
+    fn model_ids_round_trip_and_unknown_ids_list_the_valid_ones() {
+        for (id, model) in MODEL_IDS {
+            assert_eq!(model.as_str(), *id);
+            assert_eq!(model.to_string(), *id);
+            assert_eq!(&id.parse::<AnyPageParserModel>().unwrap(), model);
+        }
+        // Hub IDs are case-insensitive.
+        assert_eq!(
+            "tencent/wevisdoc-4b".parse::<AnyPageParserModel>().unwrap(),
+            AnyPageParserModel::WeVisDoc4B
+        );
+        let error = "a/b".parse::<AnyPageParserModel>().unwrap_err().to_string();
+        assert!(error.contains("unknown model id \"a/b\""), "{error}");
+        for (id, _) in MODEL_IDS {
+            assert!(error.contains(id), "{error}");
+        }
+    }
 
     #[test]
     fn none_knobs_reuse_each_models_default() {

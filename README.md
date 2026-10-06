@@ -133,7 +133,7 @@ The [`oar-ocr-vl`](oar-ocr-vl/README.md) crate provides native [Candle](https://
 | [PaddleOCR-VL-1.5](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5) | 0.9B | PaddleOCR-VL tasks plus text spotting and seal recognition |
 | [PaddleOCR-VL-1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) | 0.9B | Region-aware page parsing and task-specific recognition |
 | [TeleOCR](https://huggingface.co/XingChen-AGI/TeleOCR) | 1.2B | Text, table (OTSL), formula, code, and layout recognition for digital and camera-captured documents (formerly NaviDC-OCR) |
-| [WeVisDoc-2B/4B](https://huggingface.co/tencent/WeVisDoc-2B) | 2B | Model-native full-page document-to-Markdown parsing (Qwen3-VL with DeepStack) |
+| [WeVisDoc-2B](https://huggingface.co/tencent/WeVisDoc-2B) / [4B](https://huggingface.co/tencent/WeVisDoc-4B) | 2B / 4B | Model-native full-page document-to-Markdown parsing (Qwen3-VL with DeepStack) |
 | [Xiaomi-OCR-0](https://huggingface.co/SeerRay-Lab/Xiaomi-OCR-0) | 0.8B | Model-native full-page document-to-Markdown parsing (Qwen3.5; tables as OTSL converted to HTML) |
 
 PaddleOCR-VL variants, GLM-OCR, TeleOCR, jina-ocr-v1, and WeVisDoc integrate with the external-layout [`DocParser`](oar-ocr-vl/README.md#document-parsing-pipeline). OvisOCR2, WeVisDoc, Xiaomi-OCR-0, HPD-Parsing, and the MonkeyOCRv2 S/B parsing models also provide model-native full-page paths through dedicated examples. HunyuanOCR and the MinerU models also use their model-native parsing pipelines.

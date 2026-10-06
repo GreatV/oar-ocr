@@ -93,6 +93,7 @@ struct RawCase {
     device: Option<String>,
     warmup: Option<usize>,
     repetitions: Option<usize>,
+    /// Parser family loaded explicitly instead of detected (vl cases only).
     model: Option<String>,
     model_path: Option<String>,
     layout_path: Option<String>,
@@ -212,6 +213,10 @@ impl Case {
             self.kind == Kind::Vl || self.options.max_tokens.is_none(),
             "{name}: max_tokens applies only to VL cases"
         );
+        ensure!(
+            self.kind == Kind::Vl || self.model.is_none(),
+            "{name}: model applies only to VL cases"
+        );
         let m = &self.models;
         match self.kind {
             Kind::Ocr => ensure!(
@@ -233,40 +238,18 @@ impl Case {
                 }
             }
             Kind::Vl => {
-                let model = self.model.as_deref().context("VL requires model")?;
+                ensure!(self.model.is_some(), "{name}: VL requires model");
                 ensure!(self.model_path.is_some(), "{name}: VL requires model_path");
                 ensure!(
                     self.options.batch_size() == 1,
                     "{name}: PageParser handles one page at a time"
                 );
-                ensure!(is_supported_model(model), "unsupported VL model {model}");
-                if is_external_model(model) {
-                    ensure!(self.layout_path.is_some(), "{model} requires layout_path");
-                }
             }
         }
         Ok(())
     }
 }
 
-pub(crate) fn is_external_model(model: &str) -> bool {
-    matches!(model, "paddleocr-vl" | "glmocr" | "teleocr")
-}
-fn is_supported_model(model: &str) -> bool {
-    is_external_model(model)
-        || matches!(
-            model,
-            "hpd-parsing"
-                | "hunyuanocr"
-                | "jina-ocr"
-                | "mineru"
-                | "mineru-diffusion"
-                | "monkeyocrv2"
-                | "ovisocr2"
-                | "wevisdoc"
-                | "xiaomi-ocr-0"
-        )
-}
 /// Bare file names stay registry names for auto-download; paths resolve
 /// against the benchmark root.
 pub(crate) fn model_source(root: &Path, value: &str) -> std::path::PathBuf {

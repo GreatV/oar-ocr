@@ -123,7 +123,9 @@ pub use teleocr::{TeleOcr, TeleOcrTask};
 pub use wevisdoc::{WeVisDoc, WeVisDocParseOptions};
 pub use xiaomi_ocr::{XiaomiOcr, XiaomiOcrParseOptions};
 
-pub use api::any_page_parser::{AnyPageParser, AnyPageParserOptions};
+pub use api::any_page_parser::{
+    AnyPageParser, AnyPageParserLoadOptions, AnyPageParserModel, AnyPageParserOptions,
+};
 pub use api::generation::GenerationOptions;
 pub use api::page_parser::PageParser;
 pub use api::recognition::{BackendCapabilities, RecognitionBackend, RecognitionTask};

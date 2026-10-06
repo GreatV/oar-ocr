@@ -53,74 +53,74 @@ wired_table_cells = "rt-detr-l_wired_table_cell_det.onnx"
 [[cases]]
 name = "vl-hpd-parsing"
 kind = "vl"
-model = "hpd-parsing"
+model = "PaddlePaddle/HPD-Parsing"
 model_path = "models/PaddlePaddle/HPD-Parsing"
 
 [[cases]]
 name = "vl-hunyuanocr"
 kind = "vl"
-model = "hunyuanocr"
+model = "tencent/HunyuanOCR"
 model_path = "models/tencent/HunyuanOCR"
 
 [[cases]]
 name = "vl-jina-ocr"
 kind = "vl"
-model = "jina-ocr"
+model = "jinaai/jina-ocr-v1"
 model_path = "models/jinaai/jina-ocr-v1"
 
 [[cases]]
 name = "vl-mineru"
 kind = "vl"
-model = "mineru"
+model = "opendatalab/MinerU2.5-2509-1.2B"
 model_path = "models/opendatalab/MinerU2.5-2509-1.2B"
 
 [[cases]]
 name = "vl-mineru-diffusion"
 kind = "vl"
-model = "mineru-diffusion"
+model = "opendatalab/MinerU-Diffusion-V1-0320-2.5B"
 model_path = "models/opendatalab/MinerU-Diffusion-V1-0320-2.5B"
 
 [[cases]]
 name = "vl-monkeyocrv2"
 kind = "vl"
-model = "monkeyocrv2"
+model = "zenosai/MonkeyOCRv2-S-Parsing"
 model_path = "models/zenosai/MonkeyOCRv2-S-Parsing"
 
 [[cases]]
 name = "vl-ovisocr2"
 kind = "vl"
-model = "ovisocr2"
+model = "ATH-MaaS/OvisOCR2"
 model_path = "models/ATH-MaaS/OvisOCR2"
 
 [[cases]]
 name = "vl-wevisdoc"
 kind = "vl"
-model = "wevisdoc"
+model = "tencent/WeVisDoc-2B"
 model_path = "models/tencent/WeVisDoc-2B"
 
 [[cases]]
 name = "vl-xiaomi-ocr-0"
 kind = "vl"
-model = "xiaomi-ocr-0"
+model = "SeerRay-Lab/Xiaomi-OCR-0"
 model_path = "models/SeerRay-Lab/Xiaomi-OCR-0"
 
 [[cases]]
 name = "vl-paddleocr-vl"
 kind = "vl"
-model = "paddleocr-vl"
+model = "PaddlePaddle/PaddleOCR-VL-1.5"
 model_path = "models/PaddlePaddle/PaddleOCR-VL-1.5"
 layout_path = "models/PaddlePaddle/PP-DocLayoutV3_safetensors"
 
 [[cases]]
 name = "vl-glmocr"
 kind = "vl"
-model = "glmocr"
+model = "zai-org/GLM-OCR"
 model_path = "models/zai-org/GLM-OCR"
 layout_path = "models/PaddlePaddle/PP-DocLayoutV3_safetensors"
 
 [[cases]]
 name = "vl-teleocr"
 kind = "vl"
-model = "teleocr"
+model = "XingChen-AGI/TeleOCR"
 model_path = "models/XingChen-AGI/TeleOCR"
 layout_path = "models/PaddlePaddle/PP-DocLayoutV3_safetensors"

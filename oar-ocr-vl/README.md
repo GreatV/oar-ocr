@@ -22,7 +22,7 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 | [PaddleOCR-VL-1.5](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5) | 0.9B | PaddleOCR-VL tasks plus text spotting and seal recognition |
 | [PaddleOCR-VL-1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) | 0.9B | Region-aware refinement, drop-in compatible with the 1.5 loader |
 | [TeleOCR](https://huggingface.co/XingChen-AGI/TeleOCR) | 1.2B | Qwen2.5-VL document parser with text, table (OTSL), formula, code, and layout tasks (formerly NaviDC-OCR) |
-| [WeVisDoc-2B/4B](https://huggingface.co/tencent/WeVisDoc-2B) | 2B | Model-native full-page document-to-Markdown parsing (Qwen3-VL with DeepStack) |
+| [WeVisDoc-2B](https://huggingface.co/tencent/WeVisDoc-2B) / [4B](https://huggingface.co/tencent/WeVisDoc-4B) | 2B / 4B | Model-native full-page document-to-Markdown parsing (Qwen3-VL with DeepStack) |
 | [Xiaomi-OCR-0](https://huggingface.co/SeerRay-Lab/Xiaomi-OCR-0) | 0.8B | Model-native full-page document-to-Markdown parsing and text/table/formula/KIE region prompts (Qwen3.5) |
 | [PP-DocLayoutV2](https://huggingface.co/PaddlePaddle/PP-DocLayoutV2_safetensors) / [V3](https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_safetensors) | 54M / 33M | Layout detection and reading-order prediction, feeding `DocParser` |
 
@@ -103,6 +103,37 @@ maps to each model's generation budget (including `MinerUDiffusion`'s
 `gen_length`), and `region_batch_size` applies to the region-batching parsers
 (`MinerU` and the layout-composed models); parsers without a matching concept
 ignore the knob.
+
+`AnyPageParser::from_dir` loads a named parser from a model directory. The
+model is always named explicitly by its Hugging Face repo ID (`tencent/HunyuanOCR`,
+`PaddlePaddle/PaddleOCR-VL-1.5`, …) — most supported models are fine-tunes
+whose checkpoint configs match their public base models, so the directory
+cannot identify the model reliably on its own. Each model then loads through
+its own `from_dir` with its own defaults:
+
+```rust
+use candle_core::Device;
+use oar_ocr_vl::{AnyPageParser, AnyPageParserLoadOptions, AnyPageParserModel};
+
+// PaddleOCR-VL composes an external PP-DocLayout detector.
+let options = AnyPageParserLoadOptions::default()
+    .with_layout_dir("PaddlePaddle/PP-DocLayoutV3_safetensors");
+let parser = AnyPageParser::from_dir_with_options(
+    AnyPageParserModel::PaddleOcrVl1_5,
+    "PaddlePaddle/PaddleOCR-VL-1.5",
+    Device::Cpu,
+    &options,
+)?;
+
+// Model-native parsers need no options; IDs also parse from strings
+// (case-insensitively, like the Hub) for manifests and CLIs.
+let parser = AnyPageParser::from_dir(AnyPageParserModel::HunyuanOcr, "tencent/HunyuanOCR", Device::Cpu)?;
+let model: AnyPageParserModel = "tencent/hunyuanocr".parse()?;
+```
+
+The layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR) require a
+PP-DocLayout directory in the load options; loading fails with a clear error
+when it is missing.
 
 ## Installation
 

@@ -60,9 +60,13 @@ dictionary = "ppocrv6_tiny_dict.txt"
 
 Cases may override `device`, `warmup`, `repetitions`, and `[cases.options]`.
 `structure` cases take a `layout` model (with `layout_name` such as
-`PP-DocLayoutV3`), optional OCR models, and optional table models. `vl` cases take
-`model` and `model_path`; `paddleocr-vl`, `glmocr`, and `teleocr` also need a
-PP-DocLayout `layout_path`.
+`PP-DocLayoutV3`), optional OCR models, and optional table models. `vl` cases
+require `model`, the checkpoint's Hugging Face repo ID (for example
+`PaddlePaddle/PaddleOCR-VL-1.5`), plus the local `model_path`; layout-composed
+models such as PaddleOCR-VL, GLM-OCR, and TeleOCR also need a PP-DocLayout
+`layout_path`. The ID never comes from the directory: most models are
+fine-tunes whose configs match their public base models, so the ID says what
+the directory holds.
 
 ## Official accuracy evaluation
 
