@@ -70,7 +70,7 @@ impl DownloadSource {
             Self::HuggingFace => format!(
                 "https://huggingface.co/api/models/{}/tree/{}?recursive=true",
                 encode_path(repo),
-                encode_path(revision)
+                encode_component(revision)
             ),
         }
     }
@@ -86,7 +86,7 @@ impl DownloadSource {
             Self::HuggingFace => format!(
                 "https://huggingface.co/{}/resolve/{}/{}",
                 encode_path(repo),
-                encode_path(revision),
+                encode_component(revision),
                 encode_path(path)
             ),
         }
@@ -273,12 +273,36 @@ fn cache_root() -> PathBuf {
 
 /// Maps a repo ID to its snapshot directory under the cache root.
 fn snapshot_dir(root: &Path, repo: &str) -> Result<PathBuf, Error> {
-    let (org, name) = repo.split_once('/').ok_or_else(|| {
+    validate_repo_id(repo)?;
+    let (org, name) = repo.split_once('/').expect("validated ids split once");
+    Ok(root.join("models").join(org).join(name))
+}
+
+/// Validates a repository id before it becomes a filesystem path: exactly
+/// two non-empty `<org>/<name>` segments, neither `.` nor `..`, no
+/// backslash, and not absolute. Anything else could escape the cache
+/// directory — the prune walk would follow it out of `$OAR_HOME/models`.
+fn validate_repo_id(repo: &str) -> Result<(), Error> {
+    let invalid = || {
         Error::config(format!(
             "model id {repo:?} is not an <org>/<name> repository id"
         ))
-    })?;
-    Ok(root.join("models").join(org).join(name))
+    };
+    if repo.is_empty() || repo.contains('\\') || repo.starts_with('/') {
+        return Err(invalid());
+    }
+    let mut segments = repo.split('/');
+    match [segments.next(), segments.next(), segments.next()] {
+        [Some(org), Some(name), None]
+            if !org.is_empty()
+                && !name.is_empty()
+                && !matches!(org, "." | "..")
+                && !matches!(name, "." | "..") =>
+        {
+            Ok(())
+        }
+        _ => Err(invalid()),
+    }
 }
 
 const DOWNLOAD_RETRIES: u32 = 3;
@@ -321,6 +345,8 @@ pub(crate) fn snapshot(
             format!("create snapshot directory `{}`: {}", dir.display(), error),
         ))
     })?;
+    // One sync per snapshot at a time, across processes too.
+    let _lock = SnapshotLock::acquire(&dir)?;
 
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(REQUEST_TIMEOUT_SECS)))
@@ -365,10 +391,17 @@ fn prune_stale_files(dir: &Path, files: &[SnapshotFile]) -> Result<(), Error> {
 fn prune_entry(root: &Path, entry_path: &Path, listed: &HashSet<&str>) -> io::Result<bool> {
     let metadata = fs::symlink_metadata(entry_path)?;
     if !metadata.is_dir() {
-        let Some(relative) = entry_path.strip_prefix(root).ok().and_then(|p| p.to_str()) else {
+        let Some(relative) = entry_path
+            .strip_prefix(root)
+            .ok()
+            .and_then(|p| p.to_str())
+            // Listing paths use `/`; normalize Windows separators so the
+            // comparison (and is_ours) sees one shape on every platform.
+            .map(|p| p.replace('\\', "/"))
+        else {
             return Ok(false);
         };
-        if listed.contains(relative) || is_ours(relative) {
+        if listed.contains(relative.as_str()) || is_ours(&relative) {
             return Ok(false);
         }
         tracing::info!(path = %entry_path.display(), "pruned file no longer in the requested revision");
@@ -567,6 +600,40 @@ fn unique_tmp_path(target: &Path) -> PathBuf {
     ))
 }
 
+/// Holds an exclusive advisory lock on `<snapshot>.lock` for the duration
+/// of a snapshot sync; dropping it releases the lock. No timeouts and no
+/// stale-lock recovery — a crashed holder simply leaves an unlocked file.
+struct SnapshotLock {
+    file: File,
+}
+
+impl SnapshotLock {
+    fn acquire(dir: &Path) -> Result<Self, Error> {
+        let name = dir.file_name().unwrap_or_default().to_string_lossy();
+        let path = dir.with_file_name(format!("{name}.lock"));
+        let file = File::create(&path).map_err(|error| {
+            Error::Io(io::Error::new(
+                error.kind(),
+                format!("create `{}`: {}", path.display(), error),
+            ))
+        })?;
+        file.lock().map_err(|error| {
+            Error::Io(io::Error::other(format!(
+                "lock `{}`: {}",
+                path.display(),
+                error
+            )))
+        })?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for SnapshotLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
 /// Deletes a temp file on drop unless defused by a successful rename.
 struct TempFileGuard {
     path: Option<PathBuf>,
@@ -752,7 +819,20 @@ mod tests {
             snapshot_dir(root, "opendatalab/MinerU2.5-2509-1.2B").unwrap(),
             root.join("models/opendatalab/MinerU2.5-2509-1.2B")
         );
-        assert!(snapshot_dir(root, "no-slash").is_err());
+        // Ids that could escape the cache directory are rejected outright.
+        for bad in [
+            "no-slash",
+            "/absolute/repo",
+            "org/../neighbor",
+            "..",
+            r"org/name\with\backslash",
+            "org//name",
+            "org/name/extra",
+            "org/.",
+            "",
+        ] {
+            assert!(snapshot_dir(root, bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
@@ -824,9 +904,16 @@ mod tests {
         // The emptied v1.0 directory went with its file.
         assert!(!root.join("v1.0").exists());
 
-        // URL components and Link pages, shared here to keep tests lean.
-        assert_eq!(encode_component("refs/pr 1#2"), "refs%2Fpr%201%232");
-        assert_eq!(encode_path("a b/c#d"), "a%20b/c%23d");
+        // Revisions encode as one component, paths keep their separators,
+        // and Link pages parse — shared here to keep tests lean.
+        assert_eq!(
+            DownloadSource::HuggingFace.files_url("org/name", "refs/pr 1"),
+            "https://huggingface.co/api/models/org/name/tree/refs%2Fpr%201?recursive=true"
+        );
+        assert_eq!(
+            DownloadSource::ModelScope.file_url("org/name", "main", "a b/c#d.bin"),
+            "https://www.modelscope.cn/api/v1/models/org/name/repo?Revision=main&FilePath=a%20b/c%23d.bin"
+        );
         let link = r#"<https://huggingface.co/api/models/m/tree/main?recursive=true&page=2>; rel="next", <https://huggingface.co/api/models/m/tree/main?recursive=true&page=1>; rel="prev""#;
         assert_eq!(
             next_page(link),
