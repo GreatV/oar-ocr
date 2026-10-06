@@ -144,7 +144,9 @@ impl OAROCRBuilder {
 
     /// Sets a GPU memory budget in bytes without selecting a device.
     ///
-    /// Budgets up to 4 GiB default to one image and four text regions per batch.
+    /// With `g = floor(bytes / GiB)`, image batches use `clamp(2*g - 6, 1, 8)`
+    /// and text-region batches use `clamp(12*g - 28, 4, 64)`, saturating negative
+    /// values at zero. Thus 4 GiB gives 2/20, and 8 GiB or more gives 8/64.
     /// Explicit batch sizes take precedence. CUDA sessions cap each arena at half
     /// the budget and default to idle memory recovery and SameAsRequested growth.
     /// Existing smaller limits and explicit arena settings are retained. This is a tuning hint, not a device-wide cap:

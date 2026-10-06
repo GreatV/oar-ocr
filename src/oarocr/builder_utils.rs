@@ -94,8 +94,14 @@ pub(crate) fn resolve_device_batch_sizes(
 ) -> (Option<usize>, Option<usize>) {
     let uses_accelerator = ort_config.is_some_and(OrtSessionConfig::has_accelerator_provider);
     if uses_accelerator {
-        if gpu_memory_budget.is_some_and(|bytes| bytes as u64 <= 4 * 1024 * 1024 * 1024) {
-            (image_batch_size.or(Some(1)), region_batch_size.or(Some(4)))
+        if let Some(bytes) = gpu_memory_budget {
+            let gib = bytes / (1024 * 1024 * 1024);
+            let images = gib.saturating_mul(2).saturating_sub(6).clamp(1, 8);
+            let regions = gib.saturating_mul(12).saturating_sub(28).clamp(4, 64);
+            (
+                image_batch_size.or(Some(images)),
+                region_batch_size.or(Some(regions)),
+            )
         } else {
             (image_batch_size, region_batch_size)
         }
@@ -243,10 +249,19 @@ mod tests {
             cudnn_conv_use_max_workspace: Some(true), ..
         } if strategy == "SameAsRequested")
         );
-        assert_eq!(
-            resolve_device_batch_sizes(Some(&config), None, None, 1, 4, Some(budget)),
-            (Some(1), Some(4))
-        );
+        for (bytes, images, regions) in [
+            (1u64, 1, 4),
+            (4 * 1024 * 1024 * 1024, 2, 20),
+            (8 * 1024 * 1024 * 1024, 8, 64),
+            (16 * 1024 * 1024 * 1024, 8, 64),
+        ] {
+            if let Ok(bytes) = usize::try_from(bytes) {
+                assert_eq!(
+                    resolve_device_batch_sizes(Some(&config), None, None, 1, 4, Some(bytes)),
+                    (Some(images), Some(regions))
+                );
+            }
+        }
         assert_eq!(
             resolve_device_batch_sizes(Some(&config), Some(3), Some(9), 1, 4, Some(budget)),
             (Some(3), Some(9))
