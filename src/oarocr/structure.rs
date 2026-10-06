@@ -319,6 +319,46 @@ impl OARStructureBuilder {
         }
     }
 
+    /// Creates a PP-StructureV3-style document analysis pipeline.
+    ///
+    /// This is the stack the benchmark tool's `structure-v3` case runs:
+    /// PP-DocLayoutV3 layout detection, PP-OCRv6 Tiny text detection and
+    /// recognition (the structure pipeline OCRs many small region crops, where
+    /// the tiny recognizer's throughput wins and the larger layout and table
+    /// models already dominate memory), PP-LCNet table classification,
+    /// SLANeXt wired and SLANet+ wireless table structure recognition, the
+    /// RT-DETR-L wired cell detector, and the Chinese table structure
+    /// dictionary. With the `auto-download` feature the names resolve through
+    /// the model registry; without it they resolve as local paths like any
+    /// other model source. The returned builder is ordinary, so every setter
+    /// can still override anything.
+    ///
+    /// ```no_run
+    /// use oar_ocr::oarocr::OARStructureBuilder;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let structure = OARStructureBuilder::pp_structurev3().build()?;
+    /// # let _ = structure;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn pp_structurev3() -> Self {
+        use super::ocr::PpOcrV6Size;
+        let size = PpOcrV6Size::Tiny;
+        Self::new("pp-doclayoutv3.onnx")
+            .layout_model_name("PP-DocLayoutV3")
+            .with_ocr(
+                size.detection_model(),
+                size.recognition_model(),
+                size.character_dict(),
+            )
+            .with_table_classification("pp-lcnet_x1_0_table_cls.onnx")
+            .with_wired_table_structure("slanext_wired.onnx")
+            .with_wireless_table_structure("slanet_plus.onnx")
+            .with_wired_table_cell_detection("rt-detr-l_wired_table_cell_det.onnx")
+            .table_structure_dict_path("table_structure_dict_ch.txt")
+    }
+
     /// Sets the ONNX Runtime session configuration.
     ///
     /// This configuration will be applied to all models in the pipeline.
@@ -3599,6 +3639,66 @@ impl OARStructure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pp_structurev3_preset_sets_the_benchmark_stack() {
+        let builder = OARStructureBuilder::pp_structurev3();
+        assert_eq!(
+            builder.layout_detection_model.as_path(),
+            Some(std::path::Path::new("pp-doclayoutv3.onnx"))
+        );
+        assert_eq!(builder.layout_model_name.as_deref(), Some("PP-DocLayoutV3"));
+        assert_eq!(
+            builder
+                .text_detection_model
+                .as_ref()
+                .and_then(|m| m.as_path()),
+            Some(std::path::Path::new("pp-ocrv6_tiny_det.onnx"))
+        );
+        assert_eq!(
+            builder
+                .text_recognition_model
+                .as_ref()
+                .and_then(|m| m.as_path()),
+            Some(std::path::Path::new("pp-ocrv6_tiny_rec.onnx"))
+        );
+        assert_eq!(
+            builder.character_dict_path.as_deref(),
+            Some(std::path::Path::new("ppocrv6_tiny_dict.txt"))
+        );
+        assert_eq!(
+            builder
+                .table_classification_model
+                .as_ref()
+                .and_then(|m| m.as_path()),
+            Some(std::path::Path::new("pp-lcnet_x1_0_table_cls.onnx"))
+        );
+        assert_eq!(
+            builder
+                .wired_table_structure_model
+                .as_ref()
+                .and_then(|m| m.as_path()),
+            Some(std::path::Path::new("slanext_wired.onnx"))
+        );
+        assert_eq!(
+            builder
+                .wireless_table_structure_model
+                .as_ref()
+                .and_then(|m| m.as_path()),
+            Some(std::path::Path::new("slanet_plus.onnx"))
+        );
+        assert_eq!(
+            builder
+                .wired_table_cell_model
+                .as_ref()
+                .and_then(|m| m.as_path()),
+            Some(std::path::Path::new("rt-detr-l_wired_table_cell_det.onnx"))
+        );
+        assert_eq!(
+            builder.table_structure_dict_path.as_deref(),
+            Some(std::path::Path::new("table_structure_dict_ch.txt"))
+        );
+    }
 
     #[test]
     fn layout_presets_include_doclayout_v2_and_v3() {

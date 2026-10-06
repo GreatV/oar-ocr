@@ -36,7 +36,29 @@ Builders also accept raw ONNX bytes such as `include_bytes!`, allowing models to
 
 ### OCR Pipeline
 
-With `auto-download`, pass registered model names directly. Otherwise, replace them with local paths.
+The `pp_ocrv6` preset configures a PP-OCRv6 pipeline by model size, filling in the model names, the matching dictionary, and the official detection thresholds. With `auto-download`, the names resolve through the model registry; without it they resolve as local paths, so nothing changes for offline setups.
+
+```rust
+use oar_ocr::prelude::*;
+use std::path::Path;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ocr = OAROCRBuilder::pp_ocrv6(PpOcrV6Size::Small).build()?;
+
+    let image = load_image(Path::new("document.jpg"))?;
+    let results = ocr.predict(vec![image])?;
+
+    for region in &results[0].text_regions {
+        if let Some((text, confidence)) = region.text_with_confidence() {
+            println!("{text} ({confidence:.2})");
+        }
+    }
+
+    Ok(())
+}
+```
+
+To pick every model yourself, build the same pipeline from explicit names or paths — the advanced form behind the preset:
 
 ```rust
 use oar_ocr::domain::tasks::TextDetectionConfig;
@@ -60,7 +82,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let image = load_image(Path::new("document.jpg"))?;
     let results = ocr.predict(vec![image])?;
-
     for region in &results[0].text_regions {
         if let Some((text, confidence)) = region.text_with_confidence() {
             println!("{text} ({confidence:.2})");
@@ -72,6 +93,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 ### Document Structure Analysis
+
+The `pp_structurev3` preset configures the PP-StructureV3-style stack: PP-DocLayoutV3 layout, PP-OCRv6 Tiny text recognition, table classification, SLANeXt wired and SLANet+ wireless table structure, wired cell detection, and the table dictionary.
+
+```rust
+use oar_ocr::prelude::*;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let structure = OARStructureBuilder::pp_structurev3().build()?;
+
+    let result = structure.predict("document.jpg")?;
+    println!("{}", result.to_markdown());
+
+    Ok(())
+}
+```
+
+The explicit form behind the preset, for choosing each model yourself:
 
 ```rust
 use oar_ocr::prelude::*;

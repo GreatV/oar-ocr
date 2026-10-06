@@ -88,6 +88,61 @@ pub struct OAROCRBuilder {
     return_word_box: bool,
 }
 
+/// PP-OCRv6 model sizes selectable through the [`OAROCRBuilder::pp_ocrv6`]
+/// preset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PpOcrV6Size {
+    /// Fastest models and a reduced 6,904-entry dictionary.
+    Tiny,
+    /// Balanced models over the full 18,708-entry dictionary.
+    Small,
+    /// Most accurate models over the full 18,708-entry dictionary.
+    Medium,
+}
+
+impl PpOcrV6Size {
+    /// Registry name of the detection model for this size.
+    pub(crate) fn detection_model(self) -> &'static str {
+        match self {
+            Self::Tiny => "pp-ocrv6_tiny_det.onnx",
+            Self::Small => "pp-ocrv6_small_det.onnx",
+            Self::Medium => "pp-ocrv6_medium_det.onnx",
+        }
+    }
+
+    /// Registry name of the recognition model for this size.
+    pub(crate) fn recognition_model(self) -> &'static str {
+        match self {
+            Self::Tiny => "pp-ocrv6_tiny_rec.onnx",
+            Self::Small => "pp-ocrv6_small_rec.onnx",
+            Self::Medium => "pp-ocrv6_medium_rec.onnx",
+        }
+    }
+
+    /// Registry name of the matching character dictionary; tiny ships its
+    /// own reduced dictionary, small and medium share the full one.
+    pub(crate) fn character_dict(self) -> &'static str {
+        match self {
+            Self::Tiny => "ppocrv6_tiny_dict.txt",
+            Self::Small | Self::Medium => "ppocrv6_dict.txt",
+        }
+    }
+}
+
+/// The official PaddleOCR detection defaults published for PP-OCRv6
+/// (`DBPostProcess`: `thresh` 0.2, `box_thresh` 0.45, `unclip_ratio` 1.4,
+/// `max_candidates` 3000).
+pub(crate) fn pp_ocrv6_detection_config() -> TextDetectionConfig {
+    TextDetectionConfig {
+        score_threshold: 0.2,
+        box_threshold: 0.45,
+        unclip_ratio: 1.4,
+        max_candidates: 3000,
+        ..TextDetectionConfig::default()
+    }
+}
+
 impl OAROCRBuilder {
     // Guardrail against pathological user input. This is intentionally generous and
     // not a model-tuned throughput limit.
@@ -125,6 +180,35 @@ impl OAROCRBuilder {
             text_type: None,
             return_word_box: false,
         }
+    }
+
+    /// Creates a PP-OCRv6 pipeline for the given model size.
+    ///
+    /// This fills in the registry model names (`pp-ocrv6_{size}_det.onnx`,
+    /// `pp-ocrv6_{size}_rec.onnx`), the matching dictionary (tiny ships its
+    /// own reduced one), and the official PP-OCRv6 detection defaults
+    /// (score 0.2, box 0.45, unclip 1.4, up to 3000 candidates). With the
+    /// `auto-download` feature the names resolve through the model registry;
+    /// without it they resolve as local paths like any other model source.
+    /// The returned builder is ordinary, so every setter can still override
+    /// anything.
+    ///
+    /// ```no_run
+    /// use oar_ocr::oarocr::{OAROCRBuilder, PpOcrV6Size};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ocr = OAROCRBuilder::pp_ocrv6(PpOcrV6Size::Small).build()?;
+    /// # let _ = ocr;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn pp_ocrv6(size: PpOcrV6Size) -> Self {
+        Self::new(
+            size.detection_model(),
+            size.recognition_model(),
+            size.character_dict(),
+        )
+        .text_detection_config(pp_ocrv6_detection_config())
     }
 
     /// Sets the character dictionary from an in-memory string (e.g. from
@@ -1104,6 +1188,46 @@ impl OAROCR {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pp_ocrv6_preset_sets_names_and_official_detection_defaults() {
+        for (size, det, rec, dict) in [
+            (
+                PpOcrV6Size::Tiny,
+                "pp-ocrv6_tiny_det.onnx",
+                "pp-ocrv6_tiny_rec.onnx",
+                "ppocrv6_tiny_dict.txt",
+            ),
+            (
+                PpOcrV6Size::Small,
+                "pp-ocrv6_small_det.onnx",
+                "pp-ocrv6_small_rec.onnx",
+                "ppocrv6_dict.txt",
+            ),
+            (
+                PpOcrV6Size::Medium,
+                "pp-ocrv6_medium_det.onnx",
+                "pp-ocrv6_medium_rec.onnx",
+                "ppocrv6_dict.txt",
+            ),
+        ] {
+            let builder = OAROCRBuilder::pp_ocrv6(size);
+            assert_eq!(
+                builder.text_detection_model.as_path(),
+                Some(std::path::Path::new(det))
+            );
+            assert_eq!(
+                builder.text_recognition_model.as_path(),
+                Some(std::path::Path::new(rec))
+            );
+            assert_eq!(builder.character_dict_path, PathBuf::from(dict));
+            let config = builder.text_detection_config.as_ref().unwrap();
+            assert_eq!(config.score_threshold, 0.2);
+            assert_eq!(config.box_threshold, 0.45);
+            assert_eq!(config.unclip_ratio, 1.4);
+            assert_eq!(config.max_candidates, 3000);
+        }
+    }
 
     #[test]
     fn test_oarocr_builder_new() {
