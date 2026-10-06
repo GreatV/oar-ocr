@@ -29,13 +29,17 @@ pub(crate) struct Options {
 
 impl Options {
     /// Fills unset options from `other`, then records the effective batch size
-    /// and thread count so equivalent manifests produce equal cases.
-    fn inherit(&self, other: &Self) -> Self {
+    /// and thread count so equivalent manifests produce equal cases. A default
+    /// `max_tokens` only reaches VL cases.
+    fn inherit(&self, other: &Self, kind: Kind) -> Self {
         Self {
             batch_size: Some(self.batch_size.or(other.batch_size).unwrap_or(1)),
             cpu_threads: Some(self.cpu_threads.or(other.cpu_threads).unwrap_or(4)),
             region_batch_size: self.region_batch_size.or(other.region_batch_size),
-            max_tokens: self.max_tokens.or(other.max_tokens),
+            max_tokens: match kind {
+                Kind::Vl => self.max_tokens.or(other.max_tokens),
+                _ => self.max_tokens,
+            },
         }
     }
     pub(crate) fn batch_size(&self) -> usize {
@@ -173,7 +177,7 @@ impl Manifest {
                 model_path: row.model_path,
                 layout_path: row.layout_path,
                 models: row.models,
-                options: row.options.inherit(&raw.defaults.options),
+                options: row.options.inherit(&raw.defaults.options, row.kind),
             };
             case.validate()?;
             ensure!(
@@ -290,9 +294,12 @@ mod tests {
             Manifest::parse(&explicit, None, None).unwrap().cases,
             Manifest::parse(SAMPLE, None, None).unwrap().cases
         );
-        assert!(
-            Manifest::parse(&SAMPLE.replace("cpu_threads=2", "max_tokens=8"), None, None).is_err()
-        );
+        // A default max_tokens is meant for VL cases; set on an OCR case it is an error.
+        let default_tokens = SAMPLE.replace("cpu_threads=2", "max_tokens=8");
+        let manifest = Manifest::parse(&default_tokens, None, None).unwrap();
+        assert_eq!(manifest.cases[0].options.max_tokens, None);
+        let case_tokens = format!("{SAMPLE}[cases.options]\nmax_tokens=8\n");
+        assert!(Manifest::parse(&case_tokens, None, None).is_err());
         let inputs = Inputs {
             images: vec!["a.png".into()],
             ..Default::default()
