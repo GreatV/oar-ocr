@@ -22,7 +22,7 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 | [PaddleOCR-VL-1.5](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5) | 0.9B | PaddleOCR-VL tasks plus text spotting and seal recognition |
 | [PaddleOCR-VL-1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) | 0.9B | Region-aware refinement, drop-in compatible with the 1.5 loader |
 | [TeleOCR](https://huggingface.co/XingChen-AGI/TeleOCR) | 1.2B | Qwen2.5-VL document parser with text, table (OTSL), formula, code, and layout tasks (formerly NaviDC-OCR) |
-| [WeVisDoc-2B/4B](https://huggingface.co/tencent/WeVisDoc-2B) | 2B | Model-native full-page document-to-Markdown parsing (Qwen3-VL with DeepStack) |
+| [WeVisDoc-2B](https://huggingface.co/tencent/WeVisDoc-2B) / [4B](https://huggingface.co/tencent/WeVisDoc-4B) | 2B / 4B | Model-native full-page document-to-Markdown parsing (Qwen3-VL with DeepStack) |
 | [Xiaomi-OCR-0](https://huggingface.co/SeerRay-Lab/Xiaomi-OCR-0) | 0.8B | Model-native full-page document-to-Markdown parsing and text/table/formula/KIE region prompts (Qwen3.5) |
 | [PP-DocLayoutV2](https://huggingface.co/PaddlePaddle/PP-DocLayoutV2_safetensors) / [V3](https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_safetensors) | 54M / 33M | Layout detection and reading-order prediction, feeding `DocParser` |
 
