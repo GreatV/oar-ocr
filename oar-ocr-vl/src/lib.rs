@@ -27,12 +27,14 @@
 //! - `pp_doclayout` - Native PP-DocLayoutV2/V3 layout detection and reading
 //!   order
 //! - `layout` - Backend-agnostic [`LayoutSource`] trait feeding `doc_parser`
-//! - `api` - Stable recognition, page parsing, generation, and runtime contracts
+//! - `api` - Stable recognition, page parsing, generation, and runtime
+//!   contracts, plus the model-agnostic [`AnyPageParser`]
 //! - `document` - Standalone VL page and structure types
 //! - `pipeline` - Layout-first and model-native parsing orchestration
 //! - `render` - Markdown, text, and table output normalization
 //! - `attention` - Compatibility path for shared runtime attention
 //!
+//! [`AnyPageParser`]: crate::AnyPageParser
 //! [`LayoutSource`]: layout::LayoutSource
 //!
 //! ## Candle only
@@ -121,6 +123,7 @@ pub use teleocr::{TeleOcr, TeleOcrTask};
 pub use wevisdoc::{WeVisDoc, WeVisDocParseOptions};
 pub use xiaomi_ocr::{XiaomiOcr, XiaomiOcrParseOptions};
 
+pub use api::any_page_parser::{AnyPageParser, AnyPageParserOptions};
 pub use api::generation::GenerationOptions;
 pub use api::page_parser::PageParser;
 pub use api::recognition::{BackendCapabilities, RecognitionBackend, RecognitionTask};
