@@ -216,6 +216,8 @@ pub fn preprocess_image(
     let global_view = normalize_to_tensor(&pad_to_square(image, processor.base_size), device)?;
 
     let tiles_tensor = if tiles.is_empty() {
+        // Create empty tiles in the target dtype: CUDA casts launch a
+        // zero-block kernel for empty tensors.
         Tensor::zeros(
             (
                 0usize,
@@ -223,16 +225,16 @@ pub fn preprocess_image(
                 processor.image_size as usize,
                 processor.image_size as usize,
             ),
-            DType::F32,
+            dtype,
             device,
         )?
     } else {
         let refs: Vec<&Tensor> = tiles.iter().collect();
-        Tensor::cat(&refs, 0)?
+        Tensor::cat(&refs, 0)?.to_dtype(dtype)?
     };
     let inputs = JinaOcrImageInputs {
         global_view: global_view.to_dtype(dtype)?,
-        tiles: tiles_tensor.to_dtype(dtype)?,
+        tiles: tiles_tensor,
         tile_grid,
         num_image_tokens: 0,
         tile_queries,
@@ -289,6 +291,69 @@ mod tests {
         Ok(())
     }
 
+    fn check_small_image_shapes(device: &Device, dtype: DType) -> Result<(), Error> {
+        let processor = JinaOcrProcessorConfig {
+            crop_mode: true,
+            base_size: BASE_SIZE,
+            image_size: TILE_SIZE,
+        };
+        for (width, height) in [(551, 132), (132, 551), (1, 1), (1, 640), (640, 1)] {
+            let image = RgbImage::from_pixel(width, height, Rgb([255, 255, 255]));
+            let inputs = preprocess_image(&image, &processor, device, dtype)?;
+            assert_eq!(inputs.tile_grid, (1, 1));
+            assert_eq!(inputs.global_view.dims(), &[1, 3, 1024, 1024]);
+            assert_eq!(inputs.global_view.dtype(), dtype);
+            assert_eq!(inputs.tiles.dims(), &[0, 3, 640, 640]);
+            assert_eq!(inputs.tiles.dtype(), dtype);
+            assert_eq!(inputs.tiles.elem_count(), 0);
+            assert_eq!(inputs.num_image_tokens, 273);
+            assert_eq!(image_tokens(42, &inputs).len(), 273);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn small_aspect_ratios_have_valid_shapes_in_all_float_dtypes() -> Result<(), Error> {
+        for dtype in [DType::F32, DType::F16, DType::BF16] {
+            check_small_image_shapes(&Device::Cpu, dtype)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn small_aspect_ratios_preprocess_on_cuda() -> Result<(), Box<dyn std::error::Error>> {
+        let device = Device::new_cuda(0)?;
+        for dtype in [DType::F32, DType::F16, DType::BF16] {
+            check_small_image_shapes(&device, dtype)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn degenerate_tiled_images_have_nonempty_views() -> Result<(), Error> {
+        let processor = JinaOcrProcessorConfig {
+            crop_mode: true,
+            base_size: BASE_SIZE,
+            image_size: TILE_SIZE,
+        };
+        for (width, height, grid) in [(1, 641, (1, 9)), (641, 1, (9, 1))] {
+            let image = RgbImage::from_pixel(width, height, Rgb([255, 255, 255]));
+            let inputs = preprocess_image(&image, &processor, &Device::Cpu, DType::BF16)?;
+            assert_eq!(inputs.tile_grid, grid);
+            assert_eq!(inputs.global_view.dims(), &[1, 3, 1024, 1024]);
+            assert_eq!(inputs.tiles.dims(), &[9, 3, 640, 640]);
+            assert_eq!(inputs.tiles.dtype(), DType::BF16);
+            assert_eq!(
+                inputs.num_image_tokens,
+                273 + (10 * grid.0 + 1) * 10 * grid.1
+            );
+            assert_eq!(image_tokens(42, &inputs).len(), inputs.num_image_tokens);
+        }
+        Ok(())
+    }
+
     #[test]
     fn pad_to_square_centers_the_image() {
         let image = RgbImage::from_pixel(100, 50, Rgb([255, 255, 255]));
@@ -307,5 +372,18 @@ mod tests {
         // the smallest grid covering it.
         assert_eq!(dynamic_tile_grid(700, 700), (2, 2));
         assert_eq!(dynamic_tile_grid(1920, 640), (3, 1));
+        for (width, height, expected) in [
+            (551, 132, (4, 1)),
+            (132, 551, (1, 4)),
+            (1, 641, (1, 9)),
+            (641, 1, (9, 1)),
+            (1, u32::MAX, (1, 9)),
+            (u32::MAX, 1, (9, 1)),
+        ] {
+            let grid = dynamic_tile_grid(width, height);
+            assert_eq!(grid, expected);
+            assert!(grid.0 > 0 && grid.1 > 0);
+            assert!((MIN_TILES as usize..=MAX_TILES as usize).contains(&(grid.0 * grid.1)));
+        }
     }
 }
