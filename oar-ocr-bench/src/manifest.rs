@@ -146,17 +146,17 @@ pub(crate) struct Manifest {
 
 pub(crate) fn parse_device(value: &str) -> Result<(String, Option<u32>)> {
     let device = value.to_ascii_lowercase();
-    if device == "cpu" || device == "metal" {
+    if device == "auto" || device == "cpu" || device == "metal" {
         return Ok((device, None));
     }
     if let Some(ordinal) = device.strip_prefix("cuda:") {
         let ordinal = ordinal
             .parse::<u32>()
-            .context("device must be cpu, cuda:N, or metal")?;
+            .context("device must be auto, cpu, cuda:N, or metal")?;
         ensure!(ordinal <= i32::MAX as u32, "CUDA ordinal is too large");
         return Ok((format!("cuda:{ordinal}"), Some(ordinal)));
     }
-    bail!("device must be explicit: cpu, cuda:N, or metal (got {value:?})")
+    bail!("device must be auto, cpu, cuda:N, or metal (got {value:?})")
 }
 
 impl Manifest {
@@ -391,7 +391,10 @@ mod tests {
             Manifest::parse(&SAMPLE.replace("kind='ocr'", "kind='invalid'"), None, None).is_err()
         );
         assert!(Manifest::parse(&SAMPLE.replace("warmup=2", "repetitions=0"), None, None).is_err());
-        assert!(Manifest::parse(SAMPLE, Some("auto"), None).is_err());
+        assert_eq!(
+            Manifest::parse(SAMPLE, Some("AUTO"), None).unwrap().cases[0].device,
+            "auto"
+        );
         assert!(Manifest::parse(SAMPLE, Some("cuda:-1"), None).is_err());
     }
     #[test]

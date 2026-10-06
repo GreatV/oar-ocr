@@ -65,8 +65,12 @@ fn corpus(m: &Measurement) -> BTreeSet<(&str, &str)> {
         .collect()
 }
 fn compatible(a: &CaseResult, b: &CaseResult) -> bool {
+    let device_a = a.resolved_device().unwrap_or("unknown").to_string();
+    let device_b = b.resolved_device().unwrap_or("unknown").to_string();
     let mut a = a.config.clone();
     let mut b = b.config.clone();
+    a.device = device_a;
+    b.device = device_b;
     // Different sample counts are comparable, but decoding and batching must match.
     a.repetitions = 0;
     b.repetitions = 0;
@@ -128,8 +132,14 @@ pub(crate) fn compare(base: &RunResult, new: &RunResult, limit: f64) -> Result<C
             _ => true,
         };
         let same_inputs = corpus(x) == corpus(y);
+        let same_device =
+            a.resolved_device().is_some() && a.resolved_device() == b.resolved_device();
+        let same_gpu_scope =
+            x.gpu.is_none() || y.gpu.is_none() || x.gpu_baseline_stage == y.gpu_baseline_stage;
         let comparable = compatible(a, b)
             && same_inputs
+            && same_device
+            && same_gpu_scope
             && x.rate_basis == y.rate_basis
             && x.latency_basis == y.latency_basis
             && same_gpu
@@ -137,6 +147,13 @@ pub(crate) fn compare(base: &RunResult, new: &RunResult, limit: f64) -> Result<C
         if !same_inputs {
             text.push_str(&format!(
                 "| {label} | inputs | — | — | — | inputs differ / not comparable |\n"
+            ));
+            failed = true;
+        } else if !same_device {
+            text.push_str(&format!(
+                "| {label} | actual device | {} | {} | — | devices differ / not comparable |\n",
+                a.resolved_device().unwrap_or("unknown"),
+                b.resolved_device().unwrap_or("unknown")
             ));
             failed = true;
         } else if !comparable {
@@ -224,6 +241,9 @@ mod tests {
                 config: manifest.cases[0].clone(),
                 error: None,
                 measurement: Some(Measurement {
+                    actual_device: Some("cpu".into()),
+                    device_selection: Some("cpu".into()),
+                    gpu_baseline_stage: None,
                     model_load_ms: 1.0,
                     measured_seconds: latency / 1000.0,
                     latency_ms: Statistics::calculate(&[latency]).unwrap(),
@@ -271,6 +291,40 @@ mod tests {
         assert!(changed.failed && changed.markdown.contains("CHANGED"));
         assert!(!compare(&base, &run(100.0, "same"), 5.0).unwrap().failed);
     }
+    #[test]
+    fn compare_uses_resolved_devices_and_rejects_unknown_auto() {
+        let base = run(100.0, "same");
+        let mut automatic = base.clone();
+        automatic.cases[0].config.device = "auto".into();
+        automatic.cases[0]
+            .measurement
+            .as_mut()
+            .unwrap()
+            .device_selection = Some("auto -> cpu".into());
+        assert!(!compare(&base, &automatic, 5.0).unwrap().failed);
+        automatic.cases[0]
+            .measurement
+            .as_mut()
+            .unwrap()
+            .actual_device = Some("cuda:0".into());
+        let comparison = compare(&base, &automatic, 5.0).unwrap();
+        assert!(
+            comparison.failed
+                && comparison
+                    .markdown
+                    .contains("devices differ / not comparable")
+        );
+        automatic.cases[0]
+            .measurement
+            .as_mut()
+            .unwrap()
+            .actual_device = None;
+        assert!(compare(&base, &automatic, 5.0).unwrap().failed);
+        let mut legacy = base.clone();
+        legacy.cases[0].measurement.as_mut().unwrap().actual_device = None;
+        assert!(!compare(&base, &legacy, 5.0).unwrap().failed);
+    }
+
     #[test]
     fn input_changes_and_invalid_runs_are_not_comparable() {
         let base = run(100.0, "same");

@@ -42,7 +42,7 @@ enum Action {
         /// Restrict execution to named cases (repeat this flag to select several).
         #[arg(long = "case")]
         cases: Vec<String>,
-        /// Override all selected cases with an explicit cpu, cuda:N, or metal device.
+        /// Override all selected cases with auto, cpu, cuda:N, or metal.
         #[arg(long)]
         device: Option<String>,
         /// Override the entire manifest input set with files, directories, or PDFs.
@@ -273,14 +273,18 @@ fn run_case(request: &Request) -> Result<Measurement> {
         .num_threads(case.options.cpu_threads())
         .build_global()?;
     let pages = input::load(&request.root, &request.inputs)?;
+    let selection_start = Instant::now();
+    let device = pipeline::DeviceSelection::resolve(case)?;
+    let actual_device = device.name()?;
+    let selection_seconds = selection_start.elapsed().as_secs_f64();
     let monitor = memory::Monitor::start(
-        &case.device,
+        &actual_device,
         case.options.nvml_device.as_deref(),
         case.options.interval_ms(),
     );
     let load_start = Instant::now();
-    let model = pipeline::Pipeline::load(&request.root, case)?;
-    let model_load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
+    let model = pipeline::Pipeline::load(&request.root, case, device)?;
+    let model_load_ms = (selection_seconds + load_start.elapsed().as_secs_f64()) * 1000.0;
     for _ in 0..case.warmup {
         for batch in pages.chunks(case.options.batch_size()) {
             let images: Vec<_> = batch.iter().map(|page| &page.image).collect();
@@ -355,6 +359,15 @@ fn run_case(request: &Request) -> Result<Measurement> {
         ));
     }
     Ok(Measurement {
+        device_selection: Some(if case.device == actual_device {
+            actual_device.clone()
+        } else {
+            format!("{} -> {actual_device}", case.device)
+        }),
+        actual_device: Some(actual_device),
+        gpu_baseline_stage: gpu
+            .as_ref()
+            .map(|_| "after device resolution, before model loading".to_string()),
         model_load_ms,
         measured_seconds,
         latency_ms,

@@ -57,6 +57,12 @@ pub(crate) struct PageSample {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Measurement {
+    #[serde(default)]
+    pub(crate) actual_device: Option<String>,
+    #[serde(default)]
+    pub(crate) device_selection: Option<String>,
+    #[serde(default)]
+    pub(crate) gpu_baseline_stage: Option<String>,
     pub(crate) model_load_ms: f64,
     pub(crate) measured_seconds: f64,
     pub(crate) latency_ms: Statistics,
@@ -77,6 +83,25 @@ pub(crate) struct CaseResult {
     pub(crate) config: Case,
     pub(crate) measurement: Option<Measurement>,
     pub(crate) error: Option<String>,
+}
+impl CaseResult {
+    pub(crate) fn resolved_device(&self) -> Option<&str> {
+        if let Some(device) = self
+            .measurement
+            .as_ref()
+            .and_then(|m| m.actual_device.as_deref())
+        {
+            return Some(device);
+        }
+        // Older reports only recorded the explicitly requested device.
+        match (self.config.kind, self.config.device.as_str()) {
+            (_, "auto") => None,
+            (crate::manifest::Kind::Ocr | crate::manifest::Kind::Structure, "metal") => {
+                Some("coreml")
+            }
+            (_, device) => Some(device),
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Environment {
@@ -180,10 +205,16 @@ pub(crate) fn fingerprints(
 }
 
 pub(crate) fn table(results: &[CaseResult]) -> String {
-    let mut text = "| Case | Load ms | Mean ms/page | p50 | p95 | Min | Max | Pages/s | Output chars/s | Host peak MiB | GPU peak/delta MiB | Status |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n".to_string();
+    let mut text = "| Case | Device | Load ms | Mean ms/page | p50 | p95 | Min | Max | Pages/s | Output chars/s | Host peak MiB | GPU peak/delta MiB | Status |\n|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n".to_string();
     for row in results {
         let name = row.config.name.replace('|', "\\|").replace('\n', " ");
         if let Some(m) = &row.measurement {
+            let device = m
+                .device_selection
+                .as_deref()
+                .unwrap_or(&row.config.device)
+                .replace('|', "\\|")
+                .replace('\n', " ");
             let host = m
                 .host_peak_bytes
                 .map(|n| format!("{:.2}", n as f64 / 1_048_576.0))
@@ -210,10 +241,10 @@ pub(crate) fn table(results: &[CaseResult]) -> String {
             } else {
                 "OK"
             };
-            text.push_str(&format!("| {name} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {chars} | {host} | {gpu} | {status} |\n", m.model_load_ms, m.latency_ms.mean, m.latency_ms.p50, m.latency_ms.p95, m.latency_ms.min, m.latency_ms.max, m.pages_per_second));
+            text.push_str(&format!("| {name} | {device} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {chars} | {host} | {gpu} | {status} |\n", m.model_load_ms, m.latency_ms.mean, m.latency_ms.p50, m.latency_ms.p95, m.latency_ms.min, m.latency_ms.max, m.pages_per_second));
         } else {
             text.push_str(&format!(
-                "| {name} | — | — | — | — | — | — | — | — | — | — | FAILED |\n"
+                "| {name} | — | — | — | — | — | — | — | — | — | — | — | FAILED |\n"
             ));
         }
     }

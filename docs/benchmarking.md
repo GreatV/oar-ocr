@@ -2,11 +2,16 @@
 
 `oar-bench` measures complete OCR, structure, and VL page parsing runs. It is an
 unpublished workspace binary, separate from the library's Criterion microbenchmarks.
-Run commands from the repository root. It currently accepts explicit `cpu`,
-`cuda:N`, and `metal` devices. For classic pipelines, `metal` selects CoreML;
+Run commands from the repository root. It accepts `auto`, `cpu`, `cuda:N`,
+and `metal` devices. For classic pipelines, `metal` selects CoreML;
 for VL it selects Candle Metal. Accelerator cases require the matching feature
 and platform. An unavailable explicitly requested accelerator fails the case,
-rather than producing a CPU number labelled as GPU performance.
+rather than producing a CPU number labelled as GPU performance. `auto` uses
+`OrtSessionConfig::auto().resolve_auto()` for classic pipelines and
+`oar_ocr_vl::auto_device()` for VL, falling back to CPU when accelerators are
+unavailable. ORT's public auto API probes fixed preferred candidates and permits
+fallback; the harness retains its direct ORT dependency for strict registration
+of arbitrary explicitly requested CUDA ordinals.
 
 ## Manifest
 
@@ -100,6 +105,10 @@ defaults (all pages, PDF scale 2). Input paths also resolve relative to `--root`
 Every case starts a fresh `run-case`
 subprocess and exits before the next case starts, releasing model allocations and
 GPU contexts. The parent writes one JSON report and prints a Markdown table.
+Each successful case records a canonical `actual_device` and a readable
+`device_selection`, such as `auto -> cpu` or `auto -> cuda:0`. Classic CoreML is
+recorded as `coreml`; Candle Metal includes its ordinal (`metal:0`). These identify
+the selected device/provider, not which provider executed every graph node.
 An existing output filename is rejected; without `--output`, a timestamped report
 is created under `benchmark-results/`. Failed cases remain in the report, and the
 run exits nonzero if any case failed, was invalid, or had unstable outputs.
@@ -152,8 +161,14 @@ match CUDA ordinals, particularly when visibility/order is changed. Choose the
 selector matching the requested CUDA device; the report records its UUID.
 The supplied manifest targets CUDA(0) and NVML index 0 for a single-GPU machine.
 
-Sampling starts before model loading and includes warmup and inference. It
-records the initial device-wide memory baseline, sampled peak, and
+Device selection and strict accelerator preflight run before sampling, so auto
+CPU fallback never starts a GPU sampler. Their time remains included in model
+loading time, while NVML initialization is excluded. Sampling starts after
+resolution, before model weights are loaded, and includes warmup and inference.
+The `gpu_baseline_stage` field records that boundary; selection/context startup
+allocations before it are outside the sampled peak/delta. Reports using different
+GPU baseline boundaries are not comparable. Sampling records the initial
+device-wide memory baseline, sampled peak, and
 `peak - baseline` (saturating at zero), in bytes. This is a **sampled lower bound**,
 not an allocator high-water mark; short-lived peaks between samples can be missed.
 The final sample is taken before the model is dropped.
@@ -193,7 +208,11 @@ and status. Increasing latency/load/peak memory and decreasing throughput are
 regressions only when the change **exceeds** the threshold (default 5%). GPU
 baseline deltas are context, not regressions. Unavailable metrics stay marked
 unavailable. Different repetition counts are allowed, but warmup, decoding,
-batching, input fingerprints, and device configurations must match. Different
+batching, input fingerprints, and resolved device configurations must match.
+An explicit `cpu` and `auto -> cpu` can be compared; `auto -> cuda:0` and
+`auto -> cpu` are reported as `devices differ / not comparable`. Older explicit
+reports infer their device from the case configuration; unresolved legacy auto
+reports cannot be compared. Different
 input identities or hashes are reported as `inputs differ / not comparable`;
 output fingerprints are not compared across those input sets. Hardware or
 build-profile mismatches, added/removed/failed cases, invalid samples, unstable

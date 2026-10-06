@@ -229,18 +229,66 @@ pub(crate) struct VlPipeline {
     device: candle_core::Device,
 }
 
-impl Pipeline {
-    pub(crate) fn load(root: &Path, case: &Case) -> Result<Self> {
+pub(crate) enum DeviceSelection {
+    Classic(OrtSessionConfig),
+    Vl(candle_core::Device),
+}
+
+impl DeviceSelection {
+    pub(crate) fn resolve(case: &Case) -> Result<Self> {
         if case.kind == Kind::Vl {
-            let device = oar_ocr_vl::utils::parse_device(&case.device)?;
+            let device = if case.device == "auto" {
+                oar_ocr_vl::auto_device()
+            } else {
+                oar_ocr_vl::utils::parse_device(&case.device)?
+            };
+            return Ok(Self::Vl(device));
+        }
+        if case.models.formula.is_some()
+            && (case.device.starts_with("cuda:")
+                || (case.device == "auto" && cfg!(feature = "cuda")))
+        {
+            oar_ocr::core::inference::ensure_cuda_launch_blocking();
+        }
+        Ok(Self::Classic(ort_config(case)?))
+    }
+
+    pub(crate) fn name(&self) -> Result<String> {
+        match self {
+            Self::Classic(config) => provider_device(config),
+            Self::Vl(device) => Ok(match device.location() {
+                candle_core::DeviceLocation::Cpu => "cpu".to_string(),
+                candle_core::DeviceLocation::Cuda { gpu_id } => format!("cuda:{gpu_id}"),
+                candle_core::DeviceLocation::Metal { gpu_id } => format!("metal:{gpu_id}"),
+            }),
+        }
+    }
+}
+
+fn provider_device(config: &OrtSessionConfig) -> Result<String> {
+    Ok(match config.get_execution_providers().first() {
+        None | Some(OrtExecutionProvider::CPU) => "cpu".into(),
+        Some(OrtExecutionProvider::CUDA { device_id, .. }) => {
+            format!("cuda:{}", device_id.unwrap_or(0))
+        }
+        Some(OrtExecutionProvider::CoreML { .. }) => "coreml".into(),
+        Some(OrtExecutionProvider::DirectML { device_id }) => {
+            format!("directml:{}", device_id.unwrap_or(0))
+        }
+        Some(provider) => bail!("unexpected automatic execution provider {provider:?}"),
+    })
+}
+
+impl Pipeline {
+    pub(crate) fn load(root: &Path, case: &Case, device: DeviceSelection) -> Result<Self> {
+        if let DeviceSelection::Vl(device) = device {
             let model = VlModel::load(root, case, &device)?;
             device.synchronize()?;
             return Ok(Self::Vl(Box::new(VlPipeline { model, device })));
         }
-        if case.models.formula.is_some() && case.device.starts_with("cuda:") {
-            oar_ocr::core::inference::ensure_cuda_launch_blocking();
-        }
-        let config = ort_config(case)?;
+        let DeviceSelection::Classic(config) = device else {
+            unreachable!()
+        };
         let source = |name: &str| model_source(root, name);
         let batch = case.options.batch_size();
         let m = &case.models;
@@ -349,6 +397,11 @@ impl Pipeline {
 }
 
 fn ort_config(case: &Case) -> Result<OrtSessionConfig> {
+    if case.device == "auto" {
+        return Ok(OrtSessionConfig::auto()
+            .with_intra_threads(case.options.cpu_threads())
+            .resolve_auto());
+    }
     let config = OrtSessionConfig::new().with_intra_threads(case.options.cpu_threads());
     if case.device == "cpu" {
         return Ok(config.with_execution_providers(vec![OrtExecutionProvider::CPU]));
@@ -396,10 +449,10 @@ fn ort_config(case: &Case) -> Result<OrtSessionConfig> {
         // A benchmark must not silently label a CPU fallback as an accelerator run.
         let builder = ort::session::Session::builder()?
             .with_intra_threads(1)
-            .map_err(ort::Error::from)?;
+            .map_err(ort::Error::<()>::from)?;
         builder
             .with_execution_providers([strict])
-            .map_err(ort::Error::from)?;
+            .map_err(ort::Error::<()>::from)?;
         Ok(config)
     }
     #[cfg(not(any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
@@ -407,4 +460,48 @@ fn ort_config(case: &Case) -> Result<OrtSessionConfig> {
         "device {} requires its matching accelerator feature and platform",
         case.device
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn provider_names_preserve_cuda_ordinals() {
+        let config = OrtSessionConfig::new().with_execution_providers(vec![
+            OrtExecutionProvider::CUDA {
+                device_id: Some(3),
+                gpu_mem_limit: None,
+                arena_extend_strategy: None,
+                cudnn_conv_algo_search: None,
+                cudnn_conv_use_max_workspace: None,
+            },
+            OrtExecutionProvider::CPU,
+        ]);
+        assert_eq!(provider_device(&config).unwrap(), "cuda:3");
+        assert_eq!(provider_device(&OrtSessionConfig::new()).unwrap(), "cpu");
+    }
+    #[cfg(not(any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+    #[test]
+    fn automatic_devices_resolve_without_loading_weights() {
+        let manifest = crate::manifest::Manifest::parse(
+            include_str!("../manifests/default.toml"),
+            Some("auto"),
+            None,
+        )
+        .unwrap();
+        let classic = &manifest.cases[0];
+        let vl = manifest
+            .cases
+            .iter()
+            .find(|case| case.kind == Kind::Vl)
+            .unwrap();
+        assert_eq!(
+            DeviceSelection::resolve(classic).unwrap().name().unwrap(),
+            "cpu"
+        );
+        assert_eq!(DeviceSelection::resolve(vl).unwrap().name().unwrap(), "cpu");
+        let mut explicit = classic.clone();
+        explicit.device = "cuda:0".into();
+        assert!(DeviceSelection::resolve(&explicit).is_err());
+    }
 }
