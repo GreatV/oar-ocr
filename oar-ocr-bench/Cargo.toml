@@ -20,7 +20,6 @@ nvml = ["dep:nvml-wrapper"]
 anyhow = "1"
 candle-core = "0.11.0"
 clap.workspace = true
-hayro.workspace = true
 image.workspace = true
 nvml-wrapper = { version = "0.13", optional = true }
 oar-ocr = { path = "..", features = ["auto-download"] }
@@ -29,7 +28,6 @@ ort = { workspace = true, features = ["std"] }
 rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.11"
 tempfile.workspace = true
 toml = "1"
 tracing.workspace = true

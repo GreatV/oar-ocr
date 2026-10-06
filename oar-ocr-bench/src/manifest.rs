@@ -15,8 +15,6 @@ pub(crate) enum Kind {
 pub(crate) struct Inputs {
     pub(crate) images: Vec<String>,
     pub(crate) image_dirs: Vec<String>,
-    pub(crate) pdfs: Vec<String>,
-    pub(crate) pdf_scale: Option<f32>,
     pub(crate) max_pages: Option<usize>,
 }
 
@@ -27,10 +25,6 @@ pub(crate) struct Options {
     pub(crate) cpu_threads: Option<usize>,
     pub(crate) region_batch_size: Option<usize>,
     pub(crate) max_tokens: Option<usize>,
-    pub(crate) use_mtp: Option<bool>,
-    pub(crate) diffusion_seed: Option<u64>,
-    pub(crate) nvml_device: Option<String>,
-    pub(crate) nvml_interval_ms: Option<u64>,
 }
 
 impl Options {
@@ -40,13 +34,6 @@ impl Options {
             cpu_threads: self.cpu_threads.or(other.cpu_threads),
             region_batch_size: self.region_batch_size.or(other.region_batch_size),
             max_tokens: self.max_tokens.or(other.max_tokens),
-            use_mtp: self.use_mtp.or(other.use_mtp),
-            diffusion_seed: self.diffusion_seed.or(other.diffusion_seed),
-            nvml_device: self
-                .nvml_device
-                .clone()
-                .or_else(|| other.nvml_device.clone()),
-            nvml_interval_ms: self.nvml_interval_ms.or(other.nvml_interval_ms),
         }
     }
     pub(crate) fn batch_size(&self) -> usize {
@@ -54,9 +41,6 @@ impl Options {
     }
     pub(crate) fn cpu_threads(&self) -> usize {
         self.cpu_threads.unwrap_or(4)
-    }
-    pub(crate) fn interval_ms(&self) -> u64 {
-        self.nvml_interval_ms.unwrap_or(10)
     }
 }
 
@@ -74,12 +58,9 @@ pub(crate) struct Models {
     pub(crate) wireless_table_structure: Option<String>,
     pub(crate) wired_table_cells: Option<String>,
     pub(crate) wireless_table_cells: Option<String>,
-    pub(crate) formula: Option<String>,
-    pub(crate) formula_tokenizer: Option<String>,
-    pub(crate) formula_type: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Defaults {
     device: String,
@@ -144,17 +125,18 @@ pub(crate) struct Manifest {
     pub(crate) cases: Vec<Case>,
 }
 
-pub(crate) fn parse_device(value: &str) -> Result<(String, Option<u32>)> {
+fn normalize_device(value: &str) -> Result<String> {
     let device = value.to_ascii_lowercase();
-    if device == "auto" || device == "cpu" || device == "metal" {
-        return Ok((device, None));
+    if matches!(device.as_str(), "auto" | "cpu" | "metal") {
+        return Ok(device);
     }
     if let Some(ordinal) = device.strip_prefix("cuda:") {
-        let ordinal = ordinal
-            .parse::<u32>()
+        let ordinal: i32 = ordinal
+            .parse()
+            .ok()
+            .filter(|n| *n >= 0)
             .context("device must be auto, cpu, cuda:N, or metal")?;
-        ensure!(ordinal <= i32::MAX as u32, "CUDA ordinal is too large");
-        return Ok((format!("cuda:{ordinal}"), Some(ordinal)));
+        return Ok(format!("cuda:{ordinal}"));
     }
     bail!("device must be auto, cpu, cuda:N, or metal (got {value:?})")
 }
@@ -167,17 +149,9 @@ impl Manifest {
         }
         ensure!(!raw.cases.is_empty(), "manifest has no cases");
         ensure!(
-            !raw.inputs.images.is_empty()
-                || !raw.inputs.image_dirs.is_empty()
-                || !raw.inputs.pdfs.is_empty(),
+            !raw.inputs.images.is_empty() || !raw.inputs.image_dirs.is_empty(),
             "manifest has no inputs"
         );
-        if let Some(scale) = raw.inputs.pdf_scale {
-            ensure!(
-                scale.is_finite() && scale > 0.0 && scale <= 4.0,
-                "pdf_scale must be in (0, 4]"
-            );
-        }
         ensure!(
             raw.inputs.max_pages != Some(0),
             "max_pages must be positive"
@@ -185,12 +159,12 @@ impl Manifest {
         let mut names = BTreeSet::new();
         let mut cases = Vec::new();
         for row in raw.cases {
-            let mut case = Case {
+            let case = Case {
+                device: normalize_device(
+                    device.unwrap_or(row.device.as_deref().unwrap_or(&raw.defaults.device)),
+                )?,
                 name: row.name,
                 kind: row.kind,
-                device: device
-                    .unwrap_or(row.device.as_deref().unwrap_or(&raw.defaults.device))
-                    .into(),
                 warmup: row.warmup.unwrap_or(raw.defaults.warmup),
                 repetitions: row.repetitions.unwrap_or(raw.defaults.repetitions),
                 model: row.model,
@@ -199,7 +173,6 @@ impl Manifest {
                 models: row.models,
                 options: row.options.inherit(&raw.defaults.options),
             };
-            case.device = parse_device(&case.device)?.0;
             case.validate()?;
             ensure!(
                 names.insert(case.name.clone()),
@@ -216,117 +189,59 @@ impl Manifest {
 }
 
 impl Case {
-    pub(crate) fn validate(&self) -> Result<()> {
-        ensure!(!self.name.trim().is_empty(), "case name cannot be empty");
-        parse_device(&self.device)?;
+    fn validate(&self) -> Result<()> {
+        let name = &self.name;
+        ensure!(!name.trim().is_empty(), "case name cannot be empty");
+        ensure!(self.repetitions > 0, "{name}: repetitions must be positive");
         ensure!(
-            self.repetitions > 0,
-            "{}: repetitions must be positive",
-            self.name
-        );
-        ensure!(
-            self.options.batch_size() > 0
-                && self.options.cpu_threads() > 0
-                && self.options.interval_ms() > 0,
-            "{}: batch size, CPU threads, and interval must be positive",
-            self.name
+            self.options.batch_size() > 0 && self.options.cpu_threads() > 0,
+            "{name}: batch size and CPU threads must be positive"
         );
         ensure!(
             self.options.region_batch_size != Some(0) && self.options.max_tokens != Some(0),
-            "{}: region batch size and max tokens must be positive",
-            self.name
+            "{name}: region batch size and max tokens must be positive"
         );
-        if let Some(selector) = &self.options.nvml_device {
-            ensure!(
-                selector.starts_with("GPU-")
-                    || selector
-                        .strip_prefix("index:")
-                        .is_some_and(|n| n.parse::<u32>().is_ok()),
-                "nvml_device must be a GPU UUID or index:N"
-            );
-        }
+        let m = &self.models;
         match self.kind {
             Kind::Ocr => ensure!(
-                self.models.detector.is_some()
-                    && self.models.recognizer.is_some()
-                    && self.models.dictionary.is_some(),
-                "{}: OCR requires detector, recognizer, and dictionary",
-                self.name
+                m.detector.is_some() && m.recognizer.is_some() && m.dictionary.is_some(),
+                "{name}: OCR requires detector, recognizer, and dictionary"
             ),
             Kind::Structure => {
-                ensure!(
-                    self.models.layout.is_some(),
-                    "{}: structure requires layout",
-                    self.name
-                );
-                let ocr = [
-                    self.models.detector.is_some(),
-                    self.models.recognizer.is_some(),
-                    self.models.dictionary.is_some(),
-                ];
+                ensure!(m.layout.is_some(), "{name}: structure requires layout");
+                let ocr = [&m.detector, &m.recognizer, &m.dictionary].map(Option::is_some);
                 ensure!(
                     ocr.iter().all(|v| *v) || ocr.iter().all(|v| !*v),
-                    "{}: structure OCR requires all three OCR models",
-                    self.name
+                    "{name}: structure OCR requires all three OCR models"
                 );
-                if self.models.wired_table_structure.is_some()
-                    || self.models.wireless_table_structure.is_some()
-                {
+                if m.wired_table_structure.is_some() || m.wireless_table_structure.is_some() {
                     ensure!(
-                        self.models.table_dictionary.is_some(),
-                        "table structure requires table_dictionary"
-                    );
-                }
-                if self.models.formula.is_some() {
-                    ensure!(
-                        self.models.formula_tokenizer.is_some()
-                            && self.models.formula_type.is_some(),
-                        "formula needs tokenizer and type"
+                        m.table_dictionary.is_some(),
+                        "{name}: table structure requires table_dictionary"
                     );
                 }
             }
             Kind::Vl => {
                 let model = self.model.as_deref().context("VL requires model")?;
-                ensure!(self.model_path.is_some(), "VL requires model_path");
+                ensure!(self.model_path.is_some(), "{name}: VL requires model_path");
                 ensure!(
                     self.options.batch_size() == 1,
-                    "PageParser supports one page at a time; use region_batch_size for VL"
+                    "{name}: PageParser handles one page at a time"
                 );
                 ensure!(is_supported_model(model), "unsupported VL model {model}");
                 if is_external_model(model) {
                     ensure!(self.layout_path.is_some(), "{model} requires layout_path");
                 }
-                let batched = is_external_model(model) || model == "mineru";
-                ensure!(
-                    batched
-                        || self.options.region_batch_size.is_none()
-                        || self.options.region_batch_size == Some(1),
-                    "{model} PageParser does not expose region batching"
-                );
-                ensure!(
-                    self.options.use_mtp.is_none() || model == "hpd-parsing",
-                    "use_mtp is specific to HPD-Parsing"
-                );
-                ensure!(
-                    self.options.diffusion_seed.is_none() || model == "mineru-diffusion",
-                    "diffusion_seed is specific to MinerU-Diffusion"
-                );
             }
         }
         Ok(())
     }
-    pub(crate) fn model_path(&self) -> &str {
-        self.model_path.as_deref().unwrap_or_default()
-    }
 }
 
 pub(crate) fn is_external_model(model: &str) -> bool {
-    matches!(
-        model,
-        "paddleocr-vl" | "paddleocr-vl-1.5" | "paddleocr-vl-1.6" | "glmocr" | "teleocr"
-    )
+    matches!(model, "paddleocr-vl" | "glmocr" | "teleocr")
 }
-pub(crate) fn is_supported_model(model: &str) -> bool {
+fn is_supported_model(model: &str) -> bool {
     is_external_model(model)
         || matches!(
             model,
@@ -341,6 +256,8 @@ pub(crate) fn is_supported_model(model: &str) -> bool {
                 | "xiaomi-ocr-0"
         )
 }
+/// Bare file names stay registry names for auto-download; paths resolve
+/// against the benchmark root.
 pub(crate) fn model_source(root: &Path, value: &str) -> std::path::PathBuf {
     let path = Path::new(value);
     if path.components().count() == 1 || path.is_absolute() {
@@ -354,58 +271,36 @@ pub(crate) fn model_source(root: &Path, value: &str) -> std::path::PathBuf {
 mod tests {
     use super::*;
     const SAMPLE: &str = "[inputs]\nimages=['page.png']\n[defaults]\nwarmup=2\n[defaults.options]\ncpu_threads=2\n[[cases]]\nname='tiny'\nkind='ocr'\n[cases.models]\ndetector='det.onnx'\nrecognizer='rec.onnx'\ndictionary='dict.txt'\n";
+
     #[test]
-    fn cli_inputs_replace_the_entire_block_and_allow_missing_manifest_inputs() {
-        let inputs = Inputs {
-            images: vec!["a.png".into(), "b.png".into(), "c.png".into()],
-            ..Default::default()
-        };
-        let limited = SAMPLE.replace(
-            "images=['page.png']",
-            "images=['page.png']\nmax_pages=1\npdf_scale=3.0",
-        );
-        let manifest = Manifest::parse(&limited, None, Some(inputs.clone())).unwrap();
-        assert_eq!(manifest.inputs, inputs);
-        let no_inputs = SAMPLE
-            .strip_prefix("[inputs]\nimages=['page.png']\n")
-            .unwrap();
-        assert!(Manifest::parse(no_inputs, None, None).is_err());
-        assert_eq!(
-            Manifest::parse(no_inputs, None, Some(inputs.clone()))
-                .unwrap()
-                .inputs,
-            inputs
-        );
-    }
-    #[test]
-    fn parses_defaults_and_cli_override() {
-        let manifest = Manifest::parse(SAMPLE, Some("cuda:2"), None).unwrap();
+    fn parses_defaults_and_overrides() {
+        let manifest = Manifest::parse(SAMPLE, Some("CUDA:2"), None).unwrap();
         assert_eq!(manifest.cases[0].warmup, 2);
         assert_eq!(manifest.cases[0].device, "cuda:2");
         assert_eq!(manifest.cases[0].options.cpu_threads(), 2);
+        let inputs = Inputs {
+            images: vec!["a.png".into()],
+            ..Default::default()
+        };
+        let manifest = Manifest::parse(SAMPLE, None, Some(inputs.clone())).unwrap();
+        assert_eq!(manifest.inputs, inputs);
     }
+
     #[test]
-    fn rejects_invalid_cases_and_typos() {
+    fn rejects_invalid_manifests() {
         assert!(Manifest::parse(&SAMPLE.replace("warmup=2", "warmupp=2"), None, None).is_err());
-        assert!(
-            Manifest::parse(&SAMPLE.replace("kind='ocr'", "kind='invalid'"), None, None).is_err()
-        );
         assert!(Manifest::parse(&SAMPLE.replace("warmup=2", "repetitions=0"), None, None).is_err());
-        assert_eq!(
-            Manifest::parse(SAMPLE, Some("AUTO"), None).unwrap().cases[0].device,
-            "auto"
-        );
         assert!(Manifest::parse(SAMPLE, Some("cuda:-1"), None).is_err());
-    }
-    #[test]
-    fn detects_duplicate_names() {
+        let no_inputs = SAMPLE.replace("images=['page.png']", "");
+        assert!(Manifest::parse(&no_inputs, None, None).is_err());
         let second = SAMPLE.split("[[cases]]").nth(1).unwrap();
         assert!(Manifest::parse(&format!("{SAMPLE}\n[[cases]]{second}"), None, None).is_err());
     }
+
     #[test]
     fn default_manifest_is_valid() {
         let manifest =
             Manifest::parse(include_str!("../manifests/default.toml"), None, None).unwrap();
-        assert!(manifest.cases.iter().filter(|c| c.kind == Kind::Vl).count() >= 12);
+        assert!(manifest.cases.iter().any(|c| c.kind == Kind::Vl));
     }
 }

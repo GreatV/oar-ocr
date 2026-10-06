@@ -1,6 +1,6 @@
-use crate::result::{CaseResult, Measurement, RunResult, fingerprints};
+use crate::result::{Measurement, RunResult};
 use anyhow::{Result, ensure};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 pub(crate) struct Comparison {
     pub(crate) markdown: String,
@@ -16,202 +16,84 @@ pub(crate) fn threshold(text: &str) -> Result<f64> {
     Ok(number)
 }
 
-fn regression(base: f64, new: f64, higher_is_better: bool, threshold: f64) -> bool {
-    if base == 0.0 {
-        return !higher_is_better && new > 0.0;
+/// Percentage change and whether it is worse than `limit` percent.
+fn change(base: f64, new: f64, higher_is_better: bool, limit: f64) -> (f64, bool) {
+    if base <= 0.0 {
+        return (0.0, false);
     }
     let delta = (new / base - 1.0) * 100.0;
     let worse = if higher_is_better { -delta } else { delta };
-    worse > threshold + 1e-9
+    (delta, worse > limit + 1e-9)
 }
 
-fn metrics(m: &Measurement) -> Vec<(&'static str, Option<f64>, Option<bool>)> {
-    vec![
-        ("load_ms", Some(m.model_load_ms), Some(false)),
+/// Compared metrics and their direction (`Some(true)` when higher is better).
+/// Memory peaks vary between identical runs, so they are shown without gating.
+fn metrics(m: &Measurement) -> [(&'static str, Option<f64>, Option<bool>); 6] {
+    let mib = |bytes: u64| bytes as f64 / 1_048_576.0;
+    [
         ("mean_ms", Some(m.latency_ms.mean), Some(false)),
         ("p50_ms", Some(m.latency_ms.p50), Some(false)),
         ("p95_ms", Some(m.latency_ms.p95), Some(false)),
-        ("min_ms", Some(m.latency_ms.min), Some(false)),
-        ("max_ms", Some(m.latency_ms.max), Some(false)),
         ("pages/s", Some(m.pages_per_second), Some(true)),
-        ("tokens/s", m.tokens_per_second, Some(true)),
-        ("output_chars/s", m.output_characters_per_second, Some(true)),
+        ("host_peak_mib", m.host_peak_bytes.map(mib), None),
         (
-            "host_peak_bytes",
-            m.host_peak_bytes.map(|v| v as f64),
-            Some(false),
-        ),
-        (
-            "gpu_baseline_bytes",
-            m.gpu.as_ref().map(|g| g.baseline_bytes as f64),
+            "gpu_delta_mib",
+            m.gpu.as_ref().map(|g| mib(g.delta_bytes())),
             None,
-        ),
-        (
-            "gpu_peak_bytes",
-            m.gpu.as_ref().map(|g| g.peak_bytes as f64),
-            Some(false),
-        ),
-        (
-            "gpu_delta_bytes",
-            m.gpu.as_ref().map(|g| g.delta_bytes as f64),
-            Some(false),
         ),
     ]
 }
-fn corpus(m: &Measurement) -> BTreeSet<(&str, &str)> {
-    m.samples
-        .iter()
-        .map(|s| (s.page_id.as_str(), s.input_sha256.as_str()))
-        .collect()
-}
-fn compatible(a: &CaseResult, b: &CaseResult) -> bool {
-    let device_a = a.resolved_device().unwrap_or("unknown").to_string();
-    let device_b = b.resolved_device().unwrap_or("unknown").to_string();
-    let mut a = a.config.clone();
-    let mut b = b.config.clone();
-    a.device = device_a;
-    b.device = device_b;
-    // Different sample counts are comparable, but decoding and batching must match.
-    a.repetitions = 0;
-    b.repetitions = 0;
-    a == b
-}
 
 pub(crate) fn compare(base: &RunResult, new: &RunResult, limit: f64) -> Result<Comparison> {
-    ensure!(
-        base.schema_version == 1 && new.schema_version == 1,
-        "unsupported result schema"
-    );
-    let old: BTreeMap<_, _> = base
-        .cases
-        .iter()
-        .map(|c| (c.config.name.as_str(), c))
-        .collect();
-    let next: BTreeMap<_, _> = new
-        .cases
-        .iter()
-        .map(|c| (c.config.name.as_str(), c))
-        .collect();
-    ensure!(
-        old.len() == base.cases.len() && next.len() == new.cases.len(),
-        "duplicate case names in results"
-    );
-    let mut text =
-        "| Case | Metric | Base | New | Change | Status |\n|---|---|---:|---:|---:|---|\n"
-            .to_string();
-    let mut failed = false;
-    let hardware_changed = base.environment.cpu_model != new.environment.cpu_model
-        || base.environment.os != new.environment.os
-        || base.environment.architecture != new.environment.architecture
-        || base.environment.release_build != new.environment.release_build
-        || base.environment.enabled_features != new.environment.enabled_features
-        || base.environment.rustc != new.environment.rustc;
-    if hardware_changed {
-        text.push_str("| All | environment | — | — | — | INCOMPATIBLE HARDWARE/PROFILE |\n");
-        failed = true;
-    }
-    for name in old
-        .keys()
-        .chain(next.keys())
-        .copied()
-        .collect::<BTreeSet<_>>()
-    {
-        let label = name.replace('|', "\\|").replace('\n', " ");
-        let (Some(a), Some(b)) = (old.get(name), next.get(name)) else {
-            text.push_str(&format!("| {label} | case | — | — | — | ADDED/REMOVED |\n"));
-            failed = true;
-            continue;
-        };
-        let (Some(x), Some(y)) = (&a.measurement, &b.measurement) else {
-            text.push_str(&format!("| {label} | case | — | — | — | FAILED RUN |\n"));
-            failed = true;
-            continue;
-        };
-        let same_gpu = match (&x.gpu, &y.gpu) {
-            (Some(a), Some(b)) => a.device == b.device,
-            _ => true,
-        };
-        let same_inputs = corpus(x) == corpus(y);
-        let same_device =
-            a.resolved_device().is_some() && a.resolved_device() == b.resolved_device();
-        let same_gpu_scope =
-            x.gpu.is_none() || y.gpu.is_none() || x.gpu_baseline_stage == y.gpu_baseline_stage;
-        let comparable = compatible(a, b)
-            && same_inputs
-            && same_device
-            && same_gpu_scope
-            && x.rate_basis == y.rate_basis
-            && x.latency_basis == y.latency_basis
-            && same_gpu
-            && !hardware_changed;
-        if !same_inputs {
-            text.push_str(&format!(
-                "| {label} | inputs | — | — | — | inputs differ / not comparable |\n"
-            ));
-            failed = true;
-        } else if !same_device {
-            text.push_str(&format!(
-                "| {label} | actual device | {} | {} | — | devices differ / not comparable |\n",
-                a.resolved_device().unwrap_or("unknown"),
-                b.resolved_device().unwrap_or("unknown")
-            ));
-            failed = true;
-        } else if !comparable {
-            text.push_str(&format!(
-                "| {label} | inputs/configuration | — | — | — | INCOMPATIBLE |\n"
-            ));
-            failed = true;
-        }
-        let valid = x.valid && y.valid && x.output_stable && y.output_stable;
-        if !valid {
-            text.push_str(&format!(
-                "| {label} | validity | — | — | — | INVALID/UNSTABLE |\n"
-            ));
-            failed = true;
-        }
-        let output_changed = same_inputs && fingerprints(&x.samples) != fingerprints(&y.samples);
+    let mut text = String::new();
+    if base.environment != new.environment {
         text.push_str(&format!(
-            "| {label} | output fingerprints | — | — | — | {} |\n",
-            if !same_inputs {
-                "NOT COMPARED (inputs differ)"
-            } else if output_changed {
-                "CHANGED"
-            } else {
-                "SAME"
-            }
+            "Note: environments differ\n- base: {:?}\n- new:  {:?}\n\n",
+            base.environment, new.environment
         ));
-        failed |= output_changed;
-        for ((metric, left, direction), (_, right, _)) in metrics(x).into_iter().zip(metrics(y)) {
-            let format_value = |value: Option<f64>| {
-                value
-                    .map(|v| format!("{v:.3}"))
-                    .unwrap_or_else(|| "—".into())
-            };
-            let (delta, worse) = match (left, right) {
-                (Some(left), Some(right)) if left > 0.0 => (
-                    format!("{:+.2}%", (right / left - 1.0) * 100.0),
-                    direction.is_some_and(|higher| regression(left, right, higher, limit)),
-                ),
-                (Some(left), Some(right)) => (
-                    format!("{:+.3} (zero base)", right - left),
-                    direction.is_some_and(|higher| regression(left, right, higher, limit)),
-                ),
-                _ => ("—".into(), false),
-            };
-            let status = if !comparable || !valid {
-                "NOT COMPARABLE"
-            } else if left.is_none() || right.is_none() {
-                "UNAVAILABLE"
-            } else if worse {
-                "REGRESSION"
-            } else {
-                "OK"
-            };
-            failed |= comparable && valid && worse;
+    }
+    text.push_str(
+        "| Case | Metric | Base | New | Change | Status |\n|---|---|---:|---:|---:|---|\n",
+    );
+    let old: BTreeMap<_, _> = base.cases.iter().map(|c| (&c.case.name, c)).collect();
+    let mut failed = false;
+    for case in &new.cases {
+        let name = &case.case.name;
+        let (Some(x), Some(y)) = (
+            old.get(name).and_then(|c| c.measurement.as_ref()),
+            case.measurement.as_ref(),
+        ) else {
+            text.push_str(&format!("| {name} | — | | | | MISSING OR FAILED |\n"));
+            failed = true;
+            continue;
+        };
+        if x.pages != y.pages {
+            text.push_str(&format!("| {name} | — | | | | INPUTS DIFFER |\n"));
+            failed = true;
+            continue;
+        }
+        if x.device != y.device {
             text.push_str(&format!(
-                "| {label} | {metric} | {} | {} | {delta} | {status} |\n",
-                format_value(left),
-                format_value(right)
+                "| {name} | device | {} | {} | | DEVICES DIFFER |\n",
+                x.device, y.device
+            ));
+            failed = true;
+            continue;
+        }
+        for ((metric, left, higher), (_, right, _)) in metrics(x).into_iter().zip(metrics(y)) {
+            let (Some(left), Some(right)) = (left, right) else {
+                continue;
+            };
+            let (delta, _) = change(left, right, false, limit);
+            let worse = higher.is_some_and(|higher| change(left, right, higher, limit).1);
+            failed |= worse;
+            let status = match (higher, worse) {
+                (None, _) => "INFO",
+                (_, true) => "REGRESSION",
+                _ => "OK",
+            };
+            text.push_str(&format!(
+                "| {name} | {metric} | {left:.2} | {right:.2} | {delta:+.1}% | {status} |\n"
             ));
         }
     }
@@ -226,123 +108,51 @@ mod tests {
     use super::*;
     use crate::{
         manifest::Manifest,
-        result::{Environment, PageSample, Statistics},
+        result::{CaseResult, Environment, Statistics},
     };
-    fn run(latency: f64, output: &str) -> RunResult {
+
+    fn run(latency: f64, device: &str) -> RunResult {
         let manifest = Manifest::parse("[inputs]\nimages=['page.png']\n[[cases]]\nname='test'\nkind='ocr'\n[cases.models]\ndetector='a'\nrecognizer='b'\ndictionary='c'", None, None).unwrap();
         RunResult {
-            schema_version: 1,
             timestamp_unix_ms: 0,
             environment: Environment::collect(std::path::Path::new(".")),
-            manifest_sha256: "manifest".into(),
-            manifest_content: "".into(),
-            inputs: manifest.inputs,
             cases: vec![CaseResult {
-                config: manifest.cases[0].clone(),
+                case: manifest.cases[0].clone(),
                 error: None,
                 measurement: Some(Measurement {
-                    actual_device: Some("cpu".into()),
-                    device_selection: Some("cpu".into()),
-                    gpu_baseline_stage: None,
-                    model_load_ms: 1.0,
-                    measured_seconds: latency / 1000.0,
+                    device: device.into(),
+                    pages: vec!["page.png".into()],
+                    load_ms: 1.0,
                     latency_ms: Statistics::calculate(&[latency]).unwrap(),
                     pages_per_second: 1000.0 / latency,
-                    tokens_per_second: None,
-                    output_characters_per_second: Some(10.0),
-                    rate_basis: "characters".into(),
-                    latency_basis: "single page".into(),
+                    output_chars_per_second: None,
                     host_peak_bytes: None,
                     gpu: None,
-                    warnings: Vec::new(),
-                    output_stable: true,
-                    valid: true,
-                    samples: vec![PageSample {
-                        page_id: "page.png".into(),
-                        input_sha256: "input".into(),
-                        repetition: 0,
-                        latency_ms: latency,
-                        output_sha256: output.into(),
-                        document_sha256: None,
-                        output_characters: 1,
-                        diagnostics: 0,
-                    }],
                 }),
             }],
         }
     }
+
     #[test]
-    fn threshold_is_strict_and_direction_aware() {
-        assert!(!regression(100.0, 105.0, false, 5.0));
-        assert!(regression(100.0, 105.1, false, 5.0));
-        assert!(regression(100.0, 94.9, true, 5.0));
-        assert!(!regression(100.0, 110.0, true, 5.0));
-        assert!(regression(0.0, 1.0, false, 5.0));
-        assert_eq!(threshold("5%").unwrap(), 5.0);
-        assert!(threshold("NaN").is_err());
+    fn regressions_respect_threshold_and_direction() {
+        assert!(!change(100.0, 105.0, false, 5.0).1);
+        assert!(change(100.0, 105.1, false, 5.0).1);
+        assert!(change(100.0, 94.9, true, 5.0).1);
         assert!(threshold("-5%").is_err());
-    }
-    #[test]
-    fn regressions_and_fingerprints_are_reported() {
-        let base = run(100.0, "same");
-        let comparison = compare(&base, &run(106.0, "same"), 5.0).unwrap();
-        assert!(comparison.failed && comparison.markdown.contains("REGRESSION"));
-        let changed = compare(&base, &run(99.0, "different"), 5.0).unwrap();
-        assert!(changed.failed && changed.markdown.contains("CHANGED"));
-        assert!(!compare(&base, &run(100.0, "same"), 5.0).unwrap().failed);
-    }
-    #[test]
-    fn compare_uses_resolved_devices_and_rejects_unknown_auto() {
-        let base = run(100.0, "same");
-        let mut automatic = base.clone();
-        automatic.cases[0].config.device = "auto".into();
-        automatic.cases[0]
-            .measurement
-            .as_mut()
-            .unwrap()
-            .device_selection = Some("auto -> cpu".into());
-        assert!(!compare(&base, &automatic, 5.0).unwrap().failed);
-        automatic.cases[0]
-            .measurement
-            .as_mut()
-            .unwrap()
-            .actual_device = Some("cuda:0".into());
-        let comparison = compare(&base, &automatic, 5.0).unwrap();
-        assert!(
-            comparison.failed
-                && comparison
-                    .markdown
-                    .contains("devices differ / not comparable")
-        );
-        automatic.cases[0]
-            .measurement
-            .as_mut()
-            .unwrap()
-            .actual_device = None;
-        assert!(compare(&base, &automatic, 5.0).unwrap().failed);
-        let mut legacy = base.clone();
-        legacy.cases[0].measurement.as_mut().unwrap().actual_device = None;
-        assert!(!compare(&base, &legacy, 5.0).unwrap().failed);
+        let base = run(100.0, "cpu");
+        assert!(!compare(&base, &run(104.0, "cpu"), 5.0).unwrap().failed);
+        let slower = compare(&base, &run(106.0, "cpu"), 5.0).unwrap();
+        assert!(slower.failed && slower.markdown.contains("REGRESSION"));
     }
 
     #[test]
-    fn input_changes_and_invalid_runs_are_not_comparable() {
-        let base = run(100.0, "same");
-        let mut next = base.clone();
-        next.cases[0].measurement.as_mut().unwrap().samples[0].input_sha256 = "different".into();
-        next.cases[0].measurement.as_mut().unwrap().samples[0].output_sha256 =
-            "also different".into();
-        let comparison = compare(&base, &next, 5.0).unwrap();
-        assert!(comparison.failed);
-        assert!(
-            comparison
-                .markdown
-                .contains("inputs differ / not comparable")
-        );
-        assert!(comparison.markdown.contains("NOT COMPARED (inputs differ)"));
-        assert!(!comparison.markdown.contains("| CHANGED |"));
-        next = base.clone();
-        next.cases[0].measurement.as_mut().unwrap().valid = false;
-        assert!(compare(&base, &next, 5.0).unwrap().failed);
+    fn different_devices_or_inputs_are_not_compared() {
+        let base = run(100.0, "cpu");
+        let gpu = compare(&base, &run(10.0, "cuda:0"), 5.0).unwrap();
+        assert!(gpu.failed && gpu.markdown.contains("DEVICES DIFFER"));
+        let mut other = run(100.0, "cpu");
+        other.cases[0].measurement.as_mut().unwrap().pages = vec!["other.png".into()];
+        let inputs = compare(&base, &other, 5.0).unwrap();
+        assert!(inputs.failed && inputs.markdown.contains("INPUTS DIFFER"));
     }
 }

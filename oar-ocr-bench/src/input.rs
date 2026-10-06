@@ -1,16 +1,14 @@
-use crate::{hash_parts, manifest::Inputs};
+use crate::manifest::Inputs;
 use anyhow::{Context, Result, ensure};
 use image::RgbImage;
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 pub(crate) struct Page {
     pub(crate) id: String,
     pub(crate) image: RgbImage,
-    pub(crate) sha256: String,
 }
 
 fn image_file(path: &Path) -> bool {
@@ -19,28 +17,21 @@ fn image_file(path: &Path) -> bool {
         .is_some_and(|ext| {
             matches!(
                 ext.to_ascii_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "bmp" | "tif" | "tiff" | "webp" | "gif"
+                "png" | "jpg" | "jpeg" | "bmp" | "tif" | "tiff" | "webp"
             )
         })
 }
 
+/// Builds an input set from `--input` paths: image files or directories.
 pub(crate) fn from_paths(root: &Path, paths: &[PathBuf]) -> Result<Inputs> {
     let mut inputs = Inputs::default();
     for path in paths {
-        let metadata = std::fs::metadata(root.join(path))
-            .with_context(|| format!("read input {}", path.display()))?;
         let value = path.to_string_lossy().into_owned();
-        if metadata.is_dir() {
+        if root.join(path).is_dir() {
             inputs.image_dirs.push(value);
-        } else if metadata.is_file()
-            && path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
-        {
-            inputs.pdfs.push(value);
         } else {
             ensure!(
-                metadata.is_file() && image_file(path),
+                root.join(path).is_file() && image_file(path),
                 "unsupported input {}",
                 path.display()
             );
@@ -49,85 +40,44 @@ pub(crate) fn from_paths(root: &Path, paths: &[PathBuf]) -> Result<Inputs> {
     }
     Ok(inputs)
 }
-fn walk(path: &Path, paths: &mut BTreeSet<PathBuf>) -> Result<()> {
-    for entry in std::fs::read_dir(path)
-        .with_context(|| format!("read image directory {}", path.display()))?
+
+fn walk(path: &Path, files: &mut BTreeSet<PathBuf>) -> Result<()> {
+    for entry in
+        std::fs::read_dir(path).with_context(|| format!("read directory {}", path.display()))?
     {
-        let entry = entry?;
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            walk(&entry.path(), paths)?;
-        } else if kind.is_file() && image_file(&entry.path()) {
-            paths.insert(entry.path());
+        let path = entry?.path();
+        if path.is_dir() {
+            walk(&path, files)?;
+        } else if image_file(&path) {
+            files.insert(path);
         }
     }
     Ok(())
 }
-fn add(pages: &mut Vec<Page>, id: String, image: RgbImage) {
-    let sha256 = hash_parts(&[
-        &image.width().to_le_bytes(),
-        &image.height().to_le_bytes(),
-        image.as_raw(),
-    ]);
-    pages.push(Page { id, sha256, image });
-}
 
+/// Loads pages in sorted path order, up to `max_pages`.
 pub(crate) fn load(root: &Path, inputs: &Inputs) -> Result<Vec<Page>> {
-    let mut files: BTreeSet<PathBuf> = inputs
-        .images
-        .iter()
-        .chain(&inputs.pdfs)
-        .map(|p| root.join(p))
-        .collect();
+    let mut files: BTreeSet<PathBuf> = inputs.images.iter().map(|p| root.join(p)).collect();
     for dir in &inputs.image_dirs {
         walk(&root.join(dir), &mut files)?;
     }
-    let limit = inputs.max_pages.unwrap_or(usize::MAX);
-    let mut pages = Vec::new();
-    for path in files {
-        if pages.len() >= limit {
-            break;
-        }
-        let id = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        if path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
-        {
-            let pdf = hayro::hayro_syntax::Pdf::new(Arc::new(std::fs::read(&path)?))
-                .map_err(|error| anyhow::anyhow!("read PDF {id}: {error:?}"))?;
-            let cache = hayro::RenderCache::new();
-            let scale = inputs.pdf_scale.unwrap_or(2.0);
-            let settings = hayro::RenderSettings {
-                x_scale: scale,
-                y_scale: scale,
-                bg_color: hayro::vello_cpu::color::palette::css::WHITE,
-                ..Default::default()
-            };
-            for (index, page) in pdf.pages().iter().enumerate() {
-                if pages.len() >= limit {
-                    break;
-                }
-                let pixmap = hayro::render(page, &cache, &Default::default(), &settings);
-                let (pixels, _) = pixmap.data_as_u8_slice().as_chunks::<4>();
-                let data: Vec<_> = pixels.iter().flat_map(|p| p[..3].iter().copied()).collect();
-                let image = RgbImage::from_raw(pixmap.width().into(), pixmap.height().into(), data)
-                    .context("invalid PDF raster")?;
-                add(&mut pages, format!("{id}#page:{}", index + 1), image);
-            }
-        } else {
-            ensure!(image_file(&path), "unsupported image input {id}");
+    let pages = files
+        .into_iter()
+        .take(inputs.max_pages.unwrap_or(usize::MAX))
+        .map(|path| {
+            let id = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
             let image = image::ImageReader::open(&path)?
                 .with_guessed_format()?
                 .decode()
                 .with_context(|| format!("decode {id}"))?
                 .to_rgb8();
-            add(&mut pages, id, image);
-        }
-    }
+            Ok(Page { id, image })
+        })
+        .collect::<Result<Vec<_>>>()?;
     ensure!(!pages.is_empty(), "input set contains no pages");
     Ok(pages)
 }
@@ -135,57 +85,25 @@ pub(crate) fn load(root: &Path, inputs: &Inputs) -> Result<Vec<Page>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn cli_paths_classify_files_directories_and_pdfs() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("pages")).unwrap();
-        RgbImage::new(2, 3)
-            .save(dir.path().join("image.png"))
-            .unwrap();
-        std::fs::write(dir.path().join("paper.PDF"), b"placeholder").unwrap();
-        let inputs = from_paths(
-            dir.path(),
-            &["image.png".into(), "pages".into(), "paper.PDF".into()],
-        )
-        .unwrap();
-        assert_eq!(inputs.images, ["image.png"]);
-        assert_eq!(inputs.image_dirs, ["pages"]);
-        assert_eq!(inputs.pdfs, ["paper.PDF"]);
-        assert_eq!(inputs.max_pages, None);
-        assert_eq!(inputs.pdf_scale, None);
-        assert!(from_paths(dir.path(), &["missing.png".into()]).is_err());
-    }
-    #[test]
-    fn image_content_takes_precedence_over_extension() {
-        let dir = tempfile::tempdir().unwrap();
-        RgbImage::new(2, 3)
-            .save_with_format(dir.path().join("page.png"), image::ImageFormat::Jpeg)
-            .unwrap();
-        let pages = load(
-            dir.path(),
-            &Inputs {
-                images: vec!["page.png".into()],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(pages[0].image.dimensions(), (2, 3));
-    }
 
     #[test]
-    fn directory_order_and_limit_are_deterministic() {
+    fn directories_are_sorted_and_limited() {
         let dir = tempfile::tempdir().unwrap();
         for name in ["b.png", "a.png"] {
             RgbImage::new(2, 3).save(dir.path().join(name)).unwrap();
         }
-        let inputs = Inputs {
-            image_dirs: vec![".".into()],
-            max_pages: Some(1),
-            ..Default::default()
-        };
-        let pages = load(dir.path(), &inputs).unwrap();
+        let inputs = from_paths(dir.path(), &[".".into()]).unwrap();
+        assert_eq!(inputs.image_dirs, ["."]);
+        let pages = load(
+            dir.path(),
+            &Inputs {
+                max_pages: Some(1),
+                ..inputs
+            },
+        )
+        .unwrap();
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].id, "a.png");
-        assert_eq!(pages[0].sha256.len(), 64);
+        assert!(from_paths(dir.path(), &["missing.png".into()]).is_err());
     }
 }

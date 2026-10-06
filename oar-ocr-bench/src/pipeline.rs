@@ -14,38 +14,15 @@ use oar_ocr_vl::{
 };
 use std::path::Path;
 
-pub(crate) struct Output {
-    pub(crate) text: String,
-    pub(crate) document: Option<PageDocument>,
-    pub(crate) diagnostics: usize,
-}
-impl Output {
-    fn text(text: String) -> Self {
-        Self {
-            text,
-            document: None,
-            diagnostics: 0,
-        }
-    }
-    fn page(page: PageDocument) -> Self {
-        let text = if let Some(markdown) = &page.markdown {
-            markdown.clone()
-        } else if !page.blocks.is_empty() {
-            page.blocks
-                .iter()
-                .filter_map(|block| block.content.as_deref())
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        } else {
-            page.raw_output.clone().unwrap_or_default()
-        };
-        let diagnostics = page.diagnostics.len();
-        Self {
-            text,
-            document: Some(page),
-            diagnostics,
-        }
-    }
+/// Text used for the VL output-rate metric: Markdown when available.
+fn page_text(page: PageDocument) -> String {
+    page.markdown.unwrap_or_else(|| {
+        page.blocks
+            .into_iter()
+            .filter_map(|block| block.content)
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    })
 }
 
 // This dispatch stays inside the harness until a unified parser is available.
@@ -65,7 +42,11 @@ enum VlModel {
 }
 impl VlModel {
     fn load(root: &Path, case: &Case, device: &candle_core::Device) -> Result<Self> {
-        let path = root.join(case.model_path());
+        let path = root.join(
+            case.model_path
+                .as_deref()
+                .context("VL requires model_path")?,
+        );
         let layout = || -> Result<PpDocLayout> {
             Ok(PpDocLayout::from_dir(
                 root.join(
@@ -93,7 +74,7 @@ impl VlModel {
             "ovisocr2" => Self::Ovis(Box::new(OvisOcr2::from_dir(path, device.clone())?)),
             "wevisdoc" => Self::WeVis(Box::new(WeVisDoc::from_dir(path, device.clone())?)),
             "xiaomi-ocr-0" => Self::Xiaomi(Box::new(XiaomiOcr::from_dir(path, device.clone())?)),
-            "paddleocr-vl" | "paddleocr-vl-1.5" | "paddleocr-vl-1.6" => Self::Paddle(Box::new(
+            "paddleocr-vl" => Self::Paddle(Box::new(
                 LayoutPageParser::with_config(
                     layout()?,
                     PaddleOcrVl::from_dir(path, device.clone())?,
@@ -130,7 +111,6 @@ impl VlModel {
                     image,
                     &HpdGenerationConfig {
                         max_new_tokens: tokens.unwrap_or(defaults.max_new_tokens),
-                        use_mtp: case.options.use_mtp.unwrap_or(defaults.use_mtp),
                         ..defaults
                     },
                 )?
@@ -170,10 +150,6 @@ impl VlModel {
                     &MinerUDiffusionParseOptions {
                         generation: oar_ocr_vl::DiffusionGenerationConfig {
                             gen_length: tokens.unwrap_or(defaults.generation.gen_length),
-                            seed: case
-                                .options
-                                .diffusion_seed
-                                .unwrap_or(defaults.generation.seed),
                             ..defaults.generation
                         },
                         ..defaults
@@ -243,12 +219,6 @@ impl DeviceSelection {
                 oar_ocr_vl::utils::parse_device(&case.device)?
             };
             return Ok(Self::Vl(device));
-        }
-        if case.models.formula.is_some()
-            && (case.device.starts_with("cuda:")
-                || (case.device == "auto" && cfg!(feature = "cuda")))
-        {
-            oar_ocr::core::inference::ensure_cuda_launch_blocking();
         }
         Ok(Self::Classic(ort_config(case)?))
     }
@@ -343,54 +313,30 @@ impl Pipeline {
                 if let Some(path) = &m.wireless_table_cells {
                     builder = builder.with_wireless_table_cell_detection(source(path));
                 }
-                if let Some(path) = &m.formula {
-                    builder = builder.with_formula_recognition(
-                        source(path),
-                        source(
-                            m.formula_tokenizer
-                                .as_deref()
-                                .context("missing tokenizer")?,
-                        ),
-                        m.formula_type.as_deref().context("missing formula type")?,
-                    );
-                }
                 Ok(Self::Structure(Box::new(builder.build()?)))
             }
             Kind::Vl => unreachable!(),
         }
     }
 
-    pub(crate) fn infer(&self, images: &[&RgbImage], case: &Case) -> Result<Vec<Output>> {
+    pub(crate) fn infer(&self, images: &[&RgbImage], case: &Case) -> Result<Vec<String>> {
+        let owned = || images.iter().map(|image| (*image).clone()).collect();
         match self {
-            Self::Ocr(model) => {
-                let results =
-                    model.predict(images.iter().map(|image| (*image).clone()).collect())?;
-                ensure!(
-                    results.len() == images.len(),
-                    "OCR result count differs from input count"
-                );
-                Ok(results
-                    .into_iter()
-                    .map(|page| Output::text(page.concatenated_text("\n")))
-                    .collect())
-            }
-            Self::Structure(model) => {
-                let results =
-                    model.predict_images(images.iter().map(|image| (*image).clone()).collect());
-                ensure!(
-                    results.len() == images.len(),
-                    "structure result count differs from input count"
-                );
-                results
-                    .into_iter()
-                    .map(|page| Ok(Output::text(page?.to_markdown())))
-                    .collect()
-            }
+            Self::Ocr(model) => Ok(model
+                .predict(owned())?
+                .into_iter()
+                .map(|page| page.concatenated_text("\n"))
+                .collect()),
+            Self::Structure(model) => model
+                .predict_images(owned())
+                .into_iter()
+                .map(|page| Ok(page?.to_markdown()))
+                .collect(),
             Self::Vl(pipeline) => {
                 ensure!(images.len() == 1, "VL PageParser requires a single page");
-                let output = Output::page(pipeline.model.parse(images[0], case)?);
+                let text = page_text(pipeline.model.parse(images[0], case)?);
                 pipeline.device.synchronize()?;
-                Ok(vec![output])
+                Ok(vec![text])
             }
         }
     }
