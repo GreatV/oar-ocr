@@ -108,3 +108,49 @@ pub trait RecognitionBackend {
         BackendCapabilities::default()
     }
 }
+
+impl<T: RecognitionBackend + ?Sized> RecognitionBackend for &T {
+    fn recognize(
+        &self,
+        image: RgbImage,
+        task: RecognitionTask,
+        max_tokens: usize,
+    ) -> Result<String, Error> {
+        (**self).recognize(image, task, max_tokens)
+    }
+
+    fn recognize_with_options(
+        &self,
+        image: RgbImage,
+        task: RecognitionTask,
+        options: &GenerationOptions,
+    ) -> Result<String, Error> {
+        (**self).recognize_with_options(image, task, options)
+    }
+
+    fn recognize_batch(
+        &self,
+        images: Vec<RgbImage>,
+        tasks: &[RecognitionTask],
+        max_tokens: usize,
+    ) -> BatchResult<String> {
+        (**self).recognize_batch(images, tasks, max_tokens)
+    }
+
+    fn recognize_batch_with_options(
+        &self,
+        images: Vec<RgbImage>,
+        tasks: &[RecognitionTask],
+        options: &GenerationOptions,
+    ) -> BatchResult<String> {
+        (**self).recognize_batch_with_options(images, tasks, options)
+    }
+
+    fn recognition_batch_key(&self, image: &RgbImage, task: RecognitionTask) -> u64 {
+        (**self).recognition_batch_key(image, task)
+    }
+
+    fn capabilities(&self) -> BackendCapabilities {
+        (**self).capabilities()
+    }
+}

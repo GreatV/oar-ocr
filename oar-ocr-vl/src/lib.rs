@@ -130,6 +130,6 @@ pub use document::page::{DocumentBlock, PageDocument, ParseDiagnostic};
 pub use error::{BatchResult, Error, ProcessingStage, Result};
 pub use geometry::{BoundingBox, Point};
 pub use layout::{LayoutDetectionElement, LayoutDetections, LayoutSource, StaticLayout};
-pub use pipeline::page_parser::LayoutFirstPageParser;
+pub use pipeline::page_parser::{LayoutFirstPageParser, LayoutPageParser, LayoutPageParserOptions};
 pub use pp_doclayout::{PpDocLayout, PpDocLayoutVersion};
 pub use structure::{LayoutElement, LayoutElementType, StructureResult, TableResult, TableType};

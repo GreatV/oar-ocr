@@ -6,6 +6,7 @@
 //! carried as fields that would always read back empty.
 
 use crate::document::geometry::BoundingBox;
+use crate::document::page::ParseDiagnostic;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -23,6 +24,9 @@ pub struct StructureResult {
     pub tables: Vec<TableResult>,
     /// Recognized formulas.
     pub formulas: Vec<FormulaResult>,
+    /// Non-fatal issues encountered while preparing regions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<ParseDiagnostic>,
 }
 
 impl StructureResult {
@@ -34,6 +38,7 @@ impl StructureResult {
             layout_elements: Vec::new(),
             tables: Vec::new(),
             formulas: Vec::new(),
+            diagnostics: Vec::new(),
         }
     }
 

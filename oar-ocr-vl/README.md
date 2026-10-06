@@ -37,6 +37,40 @@ See [`examples`](examples) for runnable examples.
 
 Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, TeleOCR, jina-ocr-v1, MonkeyOCRv2, OvisOCR2, WeVisDoc, Xiaomi-OCR-0, HunyuanOCR, MinerU2.5/Pro, or MinerU-Diffusion for externally detected crops. HPD-Parsing currently supports only its model-native full-page protocol. For complete pages, prefer each model's native path where available: MonkeyOCRv2 `Layout`/`EndToEnd`, OvisOCR2, jina-ocr-v1, WeVisDoc, Xiaomi-OCR-0, and HPD-Parsing full-page parsing, HunyuanOCR full-page prompts, and the MinerU two-step extraction examples.
 
+`LayoutPageParser` composes an owned layout source and recognition backend into
+`PageParser`, the same complete-page interface used by the model-native parsers:
+
+```rust
+use oar_ocr_vl::{
+    DocParserConfig, LayoutPageParser, LayoutPageParserOptions, PageParser,
+    PaddleOcrVl, PpDocLayout,
+};
+use oar_ocr_vl::utils::{image::load_image, parse_device};
+
+let device = parse_device("cpu")?;
+let layout = PpDocLayout::from_dir("PaddlePaddle/PP-DocLayoutV3_safetensors", device.clone())?;
+let backend = PaddleOcrVl::from_dir("PaddlePaddle/PaddleOCR-VL-1.5", device)?;
+let parser = LayoutPageParser::new(layout, backend).with_region_batch_size(2);
+let image = load_image("document.jpg")?;
+let page = parser.parse_page(&image, &LayoutPageParserOptions::default())?;
+println!("{}", page.markdown.as_deref().unwrap_or_default());
+
+// Override settings for one page; defaults use the parser's builder settings.
+let options = LayoutPageParserOptions {
+    config: Some(DocParserConfig { max_tokens: 8192, ..Default::default() }),
+    region_batch_size: Some(4),
+};
+let page = parser.parse_page(&image, &options)?;
+```
+
+Pass `&layout` and `&backend` instead to borrow existing models. `DocParser` remains
+available for callers that supply layout on every call and need `StructureResult`.
+The new page output includes normalized blocks, Markdown, crop diagnostics, and
+`structure` with the original pixel coordinates and all structure metadata.
+Recognition failures still return an error, as in `DocParser`. The `doc_parser`
+example uses this new entry point; `--compare-legacy` checks its Markdown against
+`DocParser` using the same models and settings.
+
 ## Installation
 
 This crate is self-contained: everything runs on Candle, it does not depend on `oar-ocr-core`, and **no build of it links ONNX Runtime**.
