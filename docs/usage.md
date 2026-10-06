@@ -849,9 +849,7 @@ let config = OrtSessionConfig::new()
     .with_inter_threads(2);
 ```
 
-Thread-count tuning is workload and CPU dependent. The OCR example exposes the
-relevant controls so Windows users can measure several values without changing
-code:
+Thread-count tuning is workload and CPU dependent. The OCR example exposes the relevant controls so Windows users can measure several values without changing code:
 
 ```powershell
 cargo run --release --example ocr -- --intra-threads 8 <OPTIONS> <IMAGES>...
@@ -859,8 +857,7 @@ cargo run --release --example ocr -- --intra-threads 12 <OPTIONS> <IMAGES>...
 cargo run --release --example ocr -- --intra-threads 16 <OPTIONS> <IMAGES>...
 ```
 
-Pipelines with several ONNX models can share one process-wide worker pool instead
-of creating a pool for every session. Commit it before building any predictor:
+Pipelines with several ONNX models can share one process-wide worker pool instead of creating a pool for every session. Commit it before building any predictor:
 
 ```rust
 use oar_ocr::core::OrtGlobalThreadPoolOptions;
@@ -872,51 +869,21 @@ OrtGlobalThreadPoolOptions::new()
 // Build OAROCR/OARStructure only after the global environment is committed.
 ```
 
-The `ocr` and `structure` examples expose this as `--global-thread-pool`. Do not
-also set session-local thread counts when a global pool is active. Sharing mainly
-reduces worker creation and contention in multi-model pipelines; benchmark it for
-your workload rather than assuming it lowers single-request latency. See ONNX
-Runtime's [thread management guide](https://onnxruntime.ai/docs/performance/tune-performance/threading.html)
-for the underlying process-wide pool behavior.
+The `ocr` and `structure` examples expose this as `--global-thread-pool`. Do not also set session-local thread counts when a global pool is active. Sharing mainly reduces worker creation and contention in multi-model pipelines; benchmark it for your workload rather than assuming it lowers single-request latency. See ONNX Runtime's [thread management guide](https://onnxruntime.ai/docs/performance/tune-performance/threading.html) for the underlying process-wide pool behavior.
 
-On Windows, examples built with `--features directml` also accept
-`--device directml`, `--device directml:N`, and the shorter `--device dml:N`.
-The selected DirectML provider keeps the accelerator-oriented batch defaults.
+On Windows, examples built with `--features directml` also accept `--device directml`, `--device directml:N`, and the shorter `--device dml:N`. The selected DirectML provider keeps the accelerator-oriented batch defaults.
 
 ### ONNX Runtime logging
 
-OAR defaults ONNX Runtime's global logging to Error only when it initializes the
-environment itself; an environment configured by the application is preserved.
-Explicit session logging requests lower an OAR-owned environment's threshold to
-the lowest requested severity; subsequent sessions do not raise it again.
-To see ORT warnings, call `ort::init().commit()` and set
-`ort::environment::Environment::current()?.set_log_level(ort::logging::LogLevel::Warning)`
-before constructing any OAR model.
+OAR defaults ONNX Runtime's global logging to Error only when it initializes the environment itself; an environment configured by the application is preserved. Explicit session logging requests lower an OAR-owned environment's threshold to the lowest requested severity; subsequent sessions do not raise it again. To see ORT warnings, call `ort::init().commit()` and set `ort::environment::Environment::current()?.set_log_level(ort::logging::LogLevel::Warning)` before constructing any OAR model.
 
 ### Device-aware batching
 
-The high-level OCR and Structure builders choose different defaults for CPU and
-accelerator execution. CPU operators already parallelize through ONNX Runtime's
-intra-op pool, so outer image batches default to `1` and text-recognition batches
-default to `4`, except PP-OCRv6 Tiny recognition uses `16` to better amortize its
-much smaller per-item workload. Explicitly configured accelerators retain the
-larger adapter defaults (`8` images for OCR detection, `4` pages for layout
-detection, and `64` text regions for recognition).
+The high-level OCR and Structure builders choose different defaults for CPU and accelerator execution. CPU operators already parallelize through ONNX Runtime's intra-op pool, so outer image batches default to `1` and text-recognition batches default to `4`, except PP-OCRv6 Tiny recognition uses `16` to better amortize its much smaller per-item workload. Explicitly configured accelerators retain the larger adapter defaults (`8` images for OCR detection, `4` pages for layout detection, and `64` text regions for recognition).
 
-Explicit `.image_batch_size(...)` and `.region_batch_size(...)` values always
-take precedence. Model size and CPU topology still matter, so applications with
-fixed workloads should benchmark nearby values.
+Explicit `.image_batch_size(...)` and `.region_batch_size(...)` values always take precedence. Model size and CPU topology still matter, so applications with fixed workloads should benchmark nearby values.
 
-For a 4 GiB GPU, add `.gpu_memory_budget(4 * 1024 * 1024 * 1024)` to either OCR
-or Structure builder after selecting an accelerator. With whole GiB `g`, image
-batches use `clamp(2*g - 6, 1, 8)` and recognition uses `clamp(12*g - 28, 4, 64)`:
-4 GiB gives 2/20, and 8 GiB or more gives 8/64. Explicit batch sizes still win.
-CUDA arenas are limited
-to half the budget per session, default to `SameAsRequested`, and release idle
-memory; existing smaller arena limits and explicit arena settings are retained.
-The budget is a tuning hint, not measured free VRAM or a device-wide memory cap:
-resident models, concurrent pipelines, and non-arena allocations can exceed it.
-DirectML gets the conservative batches but cannot use CUDA's arena controls.
+For a 4 GiB GPU, add `.gpu_memory_budget(4 * 1024 * 1024 * 1024)` to either OCR or Structure builder after selecting an accelerator. With whole GiB `g`, image batches use `clamp(2*g - 6, 1, 8)` and recognition uses `clamp(12*g - 28, 4, 64)`: 4 GiB gives 2/20, and 8 GiB or more gives 8/64. Explicit batch sizes still win. CUDA arenas are limited to half the budget per session, default to `SameAsRequested`, and release idle memory; existing smaller arena limits and explicit arena settings are retained. The budget is a tuning hint, not measured free VRAM or a device-wide memory cap: resident models, concurrent pipelines, and non-arena allocations can exceed it. DirectML gets the conservative batches but cannot use CUDA's arena controls.
 
 ### Task-Specific Configs
 

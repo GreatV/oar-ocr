@@ -37,8 +37,7 @@ See [`examples`](examples) for runnable examples.
 
 Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, TeleOCR, jina-ocr-v1, MonkeyOCRv2, OvisOCR2, WeVisDoc, Xiaomi-OCR-0, HunyuanOCR, MinerU2.5/Pro, or MinerU-Diffusion for externally detected crops. HPD-Parsing currently supports only its model-native full-page protocol. For complete pages, prefer each model's native path where available: MonkeyOCRv2 `Layout`/`EndToEnd`, OvisOCR2, jina-ocr-v1, WeVisDoc, Xiaomi-OCR-0, and HPD-Parsing full-page parsing, HunyuanOCR full-page prompts, and the MinerU two-step extraction examples.
 
-`LayoutPageParser` composes an owned layout source and recognition backend into
-`PageParser`, the same complete-page interface used by the model-native parsers:
+`LayoutPageParser` composes an owned layout source and recognition backend into `PageParser`, the same complete-page interface used by the model-native parsers:
 
 ```rust
 use oar_ocr_vl::{
@@ -65,19 +64,11 @@ let page = parser.parse_page(&image, &options)?;
 let structure = parser.parse_structure(&image, &options)?;
 ```
 
-Pass `&layout` and `&backend` instead to borrow existing models. `DocParser` remains
-available for callers that supply layout on every call and need `StructureResult`.
-The new page output includes normalized blocks, Markdown, and crop diagnostics.
-Use `LayoutPageParser::parse_structure` with the same options to obtain the original
-pixel coordinates, confidence, reading order, source metadata, tables, and formulas.
-Recognition failures still return an error, as in `DocParser`. The `doc_parser`
-example uses this new entry point.
+Pass `&layout` and `&backend` instead to borrow existing models. `DocParser` remains available for callers that supply layout on every call and need `StructureResult`. The new page output includes normalized blocks, Markdown, and crop diagnostics. Use `LayoutPageParser::parse_structure` with the same options to obtain the original pixel coordinates, confidence, reading order, source metadata, tables, and formulas. Recognition failures still return an error, as in `DocParser`. The `doc_parser` example uses this new entry point.
 
 ## Unified Page Parsing
 
-`AnyPageParser` wraps any of the crate's page parsers behind one `PageParser`
-implementation, so the model can be chosen at runtime — from a config file, CLI
-flag, or benchmark manifest — without per-model dispatch:
+`AnyPageParser` wraps any of the crate's page parsers behind one `PageParser` implementation, so the model can be chosen at runtime — from a config file, CLI flag, or benchmark manifest — without per-model dispatch:
 
 ```rust
 use oar_ocr_vl::{
@@ -94,22 +85,9 @@ let options = AnyPageParserOptions::default().with_max_new_tokens(8192);
 let page = parser.parse_page(&image, &options)?;
 ```
 
-Construct it from an already-loaded model with `From`: the model-native parsers
-(`HpdParsing`, `HunyuanOcr`, `JinaOcr`, `MinerU`, `MinerUDiffusion`,
-`MonkeyOcrV2`, `OvisOcr2`, `WeVisDoc`, `XiaomiOcr`) and `LayoutPageParser`
-compositions over `PpDocLayout` (`PaddleOcrVl`, `GlmOcr`, `TeleOcr`).
-`AnyPageParserOptions` carries the knobs every parser shares: `max_new_tokens`
-maps to each model's generation budget (including `MinerUDiffusion`'s
-`gen_length`), and `region_batch_size` applies to the region-batching parsers
-(`MinerU` and the layout-composed models); parsers without a matching concept
-ignore the knob.
+Construct it from an already-loaded model with `From`: the model-native parsers (`HpdParsing`, `HunyuanOcr`, `JinaOcr`, `MinerU`, `MinerUDiffusion`, `MonkeyOcrV2`, `OvisOcr2`, `WeVisDoc`, `XiaomiOcr`) and `LayoutPageParser` compositions over `PpDocLayout` (`PaddleOcrVl`, `GlmOcr`, `TeleOcr`). `AnyPageParserOptions` carries the knobs every parser shares: `max_new_tokens` maps to each model's generation budget (including `MinerUDiffusion`'s `gen_length`), and `region_batch_size` applies to the region-batching parsers (`MinerU` and the layout-composed models); parsers without a matching concept ignore the knob.
 
-`AnyPageParser::from_dir` loads a named parser from a model directory. The
-model is always named explicitly by its Hugging Face repo ID (`tencent/HunyuanOCR`,
-`PaddlePaddle/PaddleOCR-VL-1.5`, …) — most supported models are fine-tunes
-whose checkpoint configs match their public base models, so the directory
-cannot identify the model reliably on its own. Each model then loads through
-its own `from_dir` with its own defaults:
+`AnyPageParser::from_dir` loads a named parser from a model directory. The model is always named explicitly by its Hugging Face repo ID (`tencent/HunyuanOCR`, `PaddlePaddle/PaddleOCR-VL-1.5`, …) — most supported models are fine-tunes whose checkpoint configs match their public base models, so the directory cannot identify the model reliably on its own. Each model then loads through its own `from_dir` with its own defaults:
 
 ```rust
 use candle_core::Device;
@@ -131,13 +109,9 @@ let parser = AnyPageParser::from_dir(AnyPageParserModel::HunyuanOcr, "tencent/Hu
 let model: AnyPageParserModel = "tencent/hunyuanocr".parse()?;
 ```
 
-The layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR) require a
-PP-DocLayout directory in the load options; loading fails with a clear error
-when it is missing.
+The layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR) require a PP-DocLayout directory in the load options; loading fails with a clear error when it is missing.
 
-With the `auto-download` feature, `AnyPageParser::from_pretrained` downloads
-the checkpoint named by the model ID when it is not cached, then loads it
-through the same path:
+With the `auto-download` feature, `AnyPageParser::from_pretrained` downloads the checkpoint named by the model ID when it is not cached, then loads it through the same path:
 
 ```rust
 use candle_core::Device;
@@ -156,22 +130,7 @@ let parser = AnyPageParser::from_pretrained(
 # }
 ```
 
-ModelScope is the default source and Hugging Face is selectable with
-`with_source(DownloadSource::HuggingFace)`; `with_revision` pins a revision
-(the sources' defaults are `master` and `main`), which resolves to an
-immutable commit before anything downloads. Snapshots land under
-`$OAR_HOME/models/<org>/<name>/<commit>` (`$OAR_HOME` defaults to `~/.oar`,
-shared with oar-ocr-core): each file is verified against the SHA-256 the
-source API publishes (Hugging Face publishes it for LFS files), a snapshot
-is staged and published atomically, and published snapshots are never
-modified — a cached commit is reused without any network listing. The
-layout-composed models also download a
-PP-DocLayout checkpoint — `PaddlePaddle/PP-DocLayoutV3_safetensors` by
-default, overridable with `with_layout` or replaced by a local directory with
-`with_layout_dir`. ModelScope publishes GLM-OCR under `ZhipuAI/GLM-OCR` and
-that mirror is used automatically; HunyuanOCR and WeVisDoc are not on
-ModelScope and download from Hugging Face instead (logged once via
-`tracing`), with the cache still keyed by the model ID.
+ModelScope is the default source and Hugging Face is selectable with `with_source(DownloadSource::HuggingFace)`; `with_revision` pins a revision (the sources' defaults are `master` and `main`), which resolves to an immutable commit before anything downloads. Snapshots land under `$OAR_HOME/models/<org>/<name>/<commit>` (`$OAR_HOME` defaults to `~/.oar`, shared with oar-ocr-core): each file is verified against the SHA-256 the source API publishes (Hugging Face publishes it for LFS files), a snapshot is staged and published atomically, and published snapshots are never modified — a cached commit is reused without any network listing. The layout-composed models also download a PP-DocLayout checkpoint — `PaddlePaddle/PP-DocLayoutV3_safetensors` by default, overridable with `with_layout` or replaced by a local directory with `with_layout_dir`. ModelScope publishes GLM-OCR under `ZhipuAI/GLM-OCR` and that mirror is used automatically; HunyuanOCR and WeVisDoc are not on ModelScope and download from Hugging Face instead (logged once via `tracing`), with the cache still keyed by the model ID.
 
 ## Installation
 
@@ -187,8 +146,7 @@ To enable GPU acceleration (CUDA), add the feature flag:
 cargo add oar-ocr-vl --features cuda
 ```
 
-To download checkpoints by model ID instead of managing local directories,
-enable `auto-download` (see [Unified Page Parsing](#unified-page-parsing)):
+To download checkpoints by model ID instead of managing local directories, enable `auto-download` (see [Unified Page Parsing](#unified-page-parsing)):
 
 ```bash
 cargo add oar-ocr-vl --features auto-download
@@ -208,9 +166,7 @@ The crate's custom CUDA kernels compile to PTX for the oldest GPU detected by `n
 
 The snippets below use canonical model repository IDs for the checkpoints.
 
-Examples default to `--device auto`: compiled CUDA(0), then Metal(0), then CPU, falling back on initialization failure.
-Library callers opt in with `auto_device()` or `utils::parse_device("auto")`; the existing dtype probe is unchanged.
-See [Automatic Device Selection](../docs/usage.md#automatic-device-selection) for details; use `--device cpu` to require CPU.
+Examples default to `--device auto`: compiled CUDA(0), then Metal(0), then CPU, falling back on initialization failure. Library callers opt in with `auto_device()` or `utils::parse_device("auto")`; the existing dtype probe is unchanged. See [Automatic Device Selection](../docs/usage.md#automatic-device-selection) for details; use `--device cpu` to require CPU.
 
 ### PaddleOCR-VL
 
