@@ -457,10 +457,12 @@ impl AnyPageParser {
     /// Downloads the named model's checkpoint and loads it.
     ///
     /// The checkpoint repo — named by the model's Hugging Face ID — is
-    /// downloaded into the cache under `$OAR_HOME/models/<org>/<name>`
-    /// (default `~/.oar`) when it is not already there, verified against the
-    /// hashes the source API publishes, and pinned to the options' revision
-    /// (the layout checkpoint uses its source's default revision).
+    /// downloaded into the cache under `$OAR_HOME/models/<org>/<name>/<commit>`
+    /// (default `~/.oar`) when it is not already there: the requested
+    /// revision resolves to an immutable commit, every file is verified
+    /// against the hashes the source API publishes, and the snapshot is
+    /// published only once complete. The layout checkpoint uses its source's
+    /// default revision.
     /// ModelScope is the default source; Hugging Face is selectable. The
     /// layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR) also download
     /// a PP-DocLayout checkpoint (DEFAULT_LAYOUT_REPO by default) unless the

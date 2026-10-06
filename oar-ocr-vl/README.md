@@ -158,12 +158,14 @@ let parser = AnyPageParser::from_pretrained(
 
 ModelScope is the default source and Hugging Face is selectable with
 `with_source(DownloadSource::HuggingFace)`; `with_revision` pins a revision
-(the sources' defaults are `master` and `main`), and the revision used is
-recorded in a `.oar-revision` marker. Snapshots land under
-`$OAR_HOME/models/<org>/<name>` (`$OAR_HOME` defaults to `~/.oar`, shared
-with oar-ocr-core), each file is verified against the SHA-256 the source API
-publishes (Hugging Face publishes it for LFS files), and complete cached
-files are never re-downloaded. The layout-composed models also download a
+(the sources' defaults are `master` and `main`), which resolves to an
+immutable commit before anything downloads. Snapshots land under
+`$OAR_HOME/models/<org>/<name>/<commit>` (`$OAR_HOME` defaults to `~/.oar`,
+shared with oar-ocr-core): each file is verified against the SHA-256 the
+source API publishes (Hugging Face publishes it for LFS files), a snapshot
+is staged and published atomically, and published snapshots are never
+modified — a cached commit is reused without any network listing. The
+layout-composed models also download a
 PP-DocLayout checkpoint — `PaddlePaddle/PP-DocLayoutV3_safetensors` by
 default, overridable with `with_layout` or replaced by a local directory with
 `with_layout_dir`. ModelScope publishes GLM-OCR under `ZhipuAI/GLM-OCR` and

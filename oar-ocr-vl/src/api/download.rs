@@ -3,19 +3,19 @@
 //! [`AnyPageParser::from_pretrained`](crate::AnyPageParser::from_pretrained)
 //! downloads a checkpoint repo by its [`AnyPageParserModel`](crate::AnyPageParserModel)
 //! ID when it is not cached, then loads it through the regular directory
-//! path. Snapshots land under `$OAR_HOME/models/<org>/<name>` (`$OAR_HOME`
-//! defaults to `~/.oar`, as in oar-ocr-core), each file is verified against
-//! the hash the source API provides (ModelScope always publishes SHA-256;
-//! Hugging Face publishes it for LFS files), and complete cached files are
-//! never re-downloaded.
-//!
-//! Repos are pinned to a revision — `master` on ModelScope and `main` on
-//! Hugging Face by default, overridable per call — and the revision used is
-//! recorded in a `.oar-revision` marker inside the snapshot directory.
+//! path. The requested revision is resolved to an immutable commit first,
+//! and each snapshot lives at `$OAR_HOME/models/<org>/<name>/<commit>`
+//! (`$OAR_HOME` defaults to `~/.oar`, as in oar-ocr-core). A snapshot is
+//! downloaded into a `<commit>.partial` staging directory, every file is
+//! verified against the hash the source API provides (ModelScope always
+//! publishes SHA-256; Hugging Face publishes it for LFS files), and the
+//! staging directory is renamed into place only once complete. Published
+//! snapshots are never modified again, so loading one needs no lock and a
+//! failed download leaves earlier snapshots untouched. A `refs/<revision>`
+//! file records which commit each requested revision resolved to.
 
 use crate::api::error::Error;
 use serde::Deserialize;
-use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -57,6 +57,22 @@ impl DownloadSource {
         match self {
             Self::ModelScope => "master",
             Self::HuggingFace => "main",
+        }
+    }
+
+    /// Resolves a revision (branch, tag, or commit) to its commit id.
+    fn resolve_url(self, repo: &str, revision: &str) -> String {
+        match self {
+            Self::ModelScope => format!(
+                "https://www.modelscope.cn/api/v1/models/{}/commits?Revision={}&PageSize=1",
+                encode_path(repo),
+                encode_component(revision)
+            ),
+            Self::HuggingFace => format!(
+                "https://huggingface.co/api/models/{}/revision/{}",
+                encode_path(repo),
+                encode_component(revision)
+            ),
         }
     }
 
@@ -178,6 +194,29 @@ impl AnyPageParserPretrainedOptions {
     }
 }
 
+#[derive(Deserialize)]
+struct ModelScopeCommits {
+    #[serde(rename = "Data")]
+    data: ModelScopeCommitData,
+}
+
+#[derive(Deserialize)]
+struct ModelScopeCommitData {
+    #[serde(rename = "Commit")]
+    commits: Vec<ModelScopeCommit>,
+}
+
+#[derive(Deserialize)]
+struct ModelScopeCommit {
+    #[serde(rename = "Id")]
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct HuggingFaceRevision {
+    sha: String,
+}
+
 /// One file in a repo snapshot.
 #[derive(Debug, PartialEq, Eq)]
 struct SnapshotFile {
@@ -271,11 +310,20 @@ fn cache_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".oar"))
 }
 
-/// Maps a repo ID to its snapshot directory under the cache root.
-fn snapshot_dir(root: &Path, repo: &str) -> Result<PathBuf, Error> {
+/// Maps a repo ID to the directory holding its commit snapshots.
+fn snapshot_base(root: &Path, repo: &str) -> Result<PathBuf, Error> {
     validate_repo_id(repo)?;
     let (org, name) = repo.split_once('/').expect("validated ids split once");
     Ok(root.join("models").join(org).join(name))
+}
+
+/// Commit ids are hex strings from the source APIs; anything else would be
+/// joined into the cache path unchecked.
+fn validate_commit(commit: &str) -> Result<(), Error> {
+    let hex =
+        (40..=64).contains(&commit.len()) && commit.bytes().all(|byte| byte.is_ascii_hexdigit());
+    hex.then_some(())
+        .ok_or_else(|| Error::config(format!("source returned a non-hex commit id {commit:?}")))
 }
 
 /// Validates a repository id before it becomes a filesystem path: exactly
@@ -307,8 +355,10 @@ fn validate_repo_id(repo: &str) -> Result<(), Error> {
 
 const DOWNLOAD_RETRIES: u32 = 3;
 const READ_BUFFER_BYTES: usize = 64 * 1024;
-const REQUEST_TIMEOUT_SECS: u64 = 30 * 60;
 const CONNECT_TIMEOUT_SECS: u64 = 30;
+/// How long to wait for response headers; body reads are unbounded so
+/// multi-GB shards survive slow links.
+const RESPONSE_HEADER_TIMEOUT_SECS: u64 = 60;
 
 /// Resolves which source and remote repo a download actually uses: ModelScope
 /// aliases point at their verified mirror, and repos ModelScope lacks fall
@@ -327,8 +377,14 @@ fn resolve_remote(source: DownloadSource, repo: &str) -> (DownloadSource, String
     (source, repo.to_string())
 }
 
-/// Downloads (or reuses) the pinned snapshot of `repo` and returns its
-/// directory in the cache.
+/// Downloads (or reuses) the snapshot of `repo` at `revision` and returns
+/// its directory in the cache.
+///
+/// The revision resolves to an immutable commit first; a published
+/// `<commit>/` snapshot is returned as-is, and a missing one is staged in
+/// `<commit>.partial` next to it and renamed into place only once every file
+/// is downloaded and verified. The per-repo lock serializes staging and
+/// publishing across processes; loading a published snapshot needs no lock.
 pub(crate) fn snapshot(
     source: DownloadSource,
     repo: &str,
@@ -336,94 +392,121 @@ pub(crate) fn snapshot(
 ) -> Result<PathBuf, Error> {
     let (source, remote) = resolve_remote(source, repo);
     let revision = revision.unwrap_or_else(|| source.default_revision());
-    // The cache stays keyed by the model id, so the source chosen never
-    // changes where a snapshot lives.
-    let dir = snapshot_dir(&cache_root(), repo)?;
-    fs::create_dir_all(&dir).map_err(|error| {
+    let base = snapshot_base(&cache_root(), repo)?;
+    fs::create_dir_all(&base).map_err(|error| {
         Error::Io(io::Error::new(
             error.kind(),
-            format!("create snapshot directory `{}`: {}", dir.display(), error),
+            format!("create snapshot directory `{}`: {}", base.display(), error),
         ))
     })?;
-    // One sync per snapshot at a time, across processes too.
-    let _lock = SnapshotLock::acquire(&dir)?;
 
     let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(REQUEST_TIMEOUT_SECS)))
         .timeout_connect(Some(Duration::from_secs(CONNECT_TIMEOUT_SECS)))
+        .timeout_recv_response(Some(Duration::from_secs(RESPONSE_HEADER_TIMEOUT_SECS)))
         .build()
         .new_agent();
 
-    let files = list_files(&agent, source, &remote, revision)?;
-    prune_stale_files(&dir, &files)?;
-    for file in &files {
-        ensure_file(&agent, source, &remote, revision, &dir, file)?;
+    let commit = resolve_commit(&agent, source, &remote, revision)?;
+    let dir = base.join(&commit);
+    if dir.is_dir() {
+        return Ok(dir);
     }
-
-    let marker = dir.join(".oar-revision");
-    let current = format!("{remote}\n{revision}\n");
-    if fs::read_to_string(&marker).unwrap_or_default() != current {
-        fs::write(&marker, &current).map_err(|error| {
+    let _lock = SnapshotLock::acquire(&base)?;
+    // Another process may have published while we waited for the lock.
+    if dir.is_dir() {
+        return Ok(dir);
+    }
+    let staging = base.join(format!("{commit}.partial"));
+    // A crashed attempt's staging is incomplete by definition; start over.
+    fs::remove_dir_all(&staging)
+        .or_else(|error| match error.kind() {
+            io::ErrorKind::NotFound => Ok(()),
+            _ => Err(error),
+        })
+        .map_err(|error| {
             Error::Io(io::Error::new(
                 error.kind(),
-                format!("write `{}`: {}", marker.display(), error),
+                format!("clean staging `{}`: {}", staging.display(), error),
             ))
         })?;
+    fs::create_dir_all(&staging).map_err(|error| {
+        Error::Io(io::Error::new(
+            error.kind(),
+            format!("create staging `{}`: {}", staging.display(), error),
+        ))
+    })?;
+
+    let files = list_files(&agent, source, &remote, &commit)?;
+    for file in &files {
+        ensure_file(&agent, source, &remote, &commit, &staging, file)?;
+    }
+    fs::rename(&staging, &dir).map_err(|error| {
+        Error::Io(io::Error::new(
+            error.kind(),
+            format!(
+                "publish `{}` -> `{}`: {}",
+                staging.display(),
+                dir.display(),
+                error
+            ),
+        ))
+    })?;
+
+    // Record which commit the requested revision resolved to, so the latest
+    // completed snapshot of a branch can be found offline.
+    let refs = base.join("refs");
+    if let Err(error) = fs::create_dir_all(&refs)
+        .and_then(|()| fs::write(refs.join(encode_component(revision)), &commit))
+    {
+        tracing::debug!(error = %error, "failed to record the resolved revision");
     }
     Ok(dir)
 }
 
-/// Removes cached files the new listing no longer carries, so a snapshot
-/// always matches the requested revision. Our own sidecar and revision-marker
-/// files stay; directories left empty are removed.
-fn prune_stale_files(dir: &Path, files: &[SnapshotFile]) -> Result<(), Error> {
-    let listed: HashSet<&str> = files.iter().map(|file| file.path.as_str()).collect();
-    prune_entry(dir, dir, &listed).map(|_| ()).map_err(|error| {
-        Error::Io(io::Error::new(
-            error.kind(),
-            format!("prune `{}`: {}", dir.display(), error),
-        ))
-    })
-}
-
-/// Returns whether the entry was removed; directories report `false` so their
-/// parent never disappears from under a surviving sibling.
-fn prune_entry(root: &Path, entry_path: &Path, listed: &HashSet<&str>) -> io::Result<bool> {
-    let metadata = fs::symlink_metadata(entry_path)?;
-    if !metadata.is_dir() {
-        let Some(relative) = entry_path
-            .strip_prefix(root)
-            .ok()
-            .and_then(|p| p.to_str())
-            // Listing paths use `/`; normalize Windows separators so the
-            // comparison (and is_ours) sees one shape on every platform.
-            .map(|p| p.replace('\\', "/"))
-        else {
-            return Ok(false);
-        };
-        if listed.contains(relative.as_str()) || is_ours(&relative) {
-            return Ok(false);
+/// Resolves a revision to the immutable commit id both the listing and every
+/// file download are then pinned to.
+fn resolve_commit(
+    agent: &ureq::Agent,
+    source: DownloadSource,
+    repo: &str,
+    revision: &str,
+) -> Result<String, Error> {
+    let url = source.resolve_url(repo, revision);
+    let response = agent.get(&url).call().map_err(|error| {
+        let base = format!("resolve {repo} revision {revision} on {source:?}: {error}");
+        if matches!(&error, ureq::Error::StatusCode(404)) {
+            Error::config(format!(
+                "{base}; the repository or revision is not published on the selected source — \
+                 try DownloadSource::HuggingFace or DownloadSource::ModelScope"
+            ))
+        } else {
+            Error::Io(io::Error::other(base))
         }
-        tracing::info!(path = %entry_path.display(), "pruned file no longer in the requested revision");
-        fs::remove_file(entry_path)?;
-        return Ok(true);
-    }
-    let mut removed_any = false;
-    for child in fs::read_dir(entry_path)? {
-        let child = child?;
-        removed_any |= prune_entry(root, &child.path(), listed)?;
-    }
-    if removed_any && entry_path != root && fs::read_dir(entry_path)?.next().is_none() {
-        // Best effort: drop directories the prune emptied out.
-        let _ = fs::remove_dir(entry_path);
-    }
-    Ok(false)
-}
-
-/// Whether a relative path is one of this module's bookkeeping files.
-fn is_ours(relative: &str) -> bool {
-    let name = relative.rsplit('/').next().unwrap_or(relative);
-    name == ".oar-revision" || (name.starts_with('.') && name.ends_with(".sha256"))
+    })?;
+    let body = response
+        .into_body()
+        .read_to_string()
+        .map_err(|error| Error::Io(io::Error::other(format!("read {url}: {error}"))))?;
+    let commit = match source {
+        DownloadSource::ModelScope => {
+            let commits: ModelScopeCommits = serde_json::from_str(&body)
+                .map_err(|error| Error::config(format!("parse ModelScope commits: {error}")))?;
+            commits
+                .data
+                .commits
+                .into_iter()
+                .next()
+                .map(|commit| commit.id)
+                .ok_or_else(|| Error::config("ModelScope returned no commit for the revision"))?
+        }
+        DownloadSource::HuggingFace => {
+            let revision: HuggingFaceRevision = serde_json::from_str(&body)
+                .map_err(|error| Error::config(format!("parse Hugging Face revision: {error}")))?;
+            revision.sha
+        }
+    };
+    validate_commit(&commit)?;
+    Ok(commit)
 }
 
 /// Lists a repo's files through the source API.
@@ -485,19 +568,18 @@ fn listing_error(source: DownloadSource, repo: &str, error: ureq::Error) -> Erro
     Error::Io(io::Error::other(base))
 }
 
-/// Ensures one snapshot file is present, verified, and untouched since.
+/// Downloads one listed file into the staging directory, verifying it
+/// against the published hash and size.
 fn ensure_file(
     agent: &ureq::Agent,
     source: DownloadSource,
     repo: &str,
     revision: &str,
-    dir: &Path,
+    staging: &Path,
     file: &SnapshotFile,
 ) -> Result<(), Error> {
-    let target = dir.join(&file.path);
-    if cached_file_matches(&target, file)? {
-        return Ok(());
-    }
+    validate_listed_path(&file.path)?;
+    let target = staging.join(&file.path);
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             Error::Io(io::Error::new(
@@ -524,66 +606,24 @@ fn ensure_file(
     }))
 }
 
-/// A cached file matches when its size is right and its SHA-256 vouches for
-/// it — directly, or through the sidecar a previous verification wrote.
-fn cached_file_matches(target: &Path, file: &SnapshotFile) -> Result<bool, Error> {
-    let metadata = match fs::metadata(target) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(Error::Io(io::Error::new(
-                error.kind(),
-                format!("stat `{}`: {}", target.display(), error),
-            )));
-        }
+/// Validates a file path from a listing before it is joined into the staging
+/// directory: no absolute paths, no `.` or `..` segments, no backslashes, no
+/// empty segments.
+fn validate_listed_path(path: &str) -> Result<(), Error> {
+    let invalid = || {
+        Error::config(format!(
+            "listed file path {path:?} is not relative and simple"
+        ))
     };
-    if !metadata.is_file() || metadata.len() != file.size {
-        tracing::warn!(path = %target.display(), "cached file has wrong size; redownloading");
-        return Ok(false);
+    if path.is_empty() || path.starts_with('/') || path.contains('\\') {
+        return Err(invalid());
     }
-    let Some(expected) = &file.sha256 else {
-        // Nothing vouches for a hashless cache entry, and these are small
-        // config and tokenizer files, so always take them fresh.
-        return Ok(false);
-    };
-    if sidecar_records_hash(target, expected) {
-        return Ok(true);
-    }
-    match hash_file(target) {
-        Ok(hash) if hash == *expected => {
-            if let Err(error) = write_sidecar(target, expected) {
-                tracing::debug!(path = %target.display(), error = %error, "failed to write sha256 sidecar; cache will rehash next time");
-            }
-            Ok(true)
-        }
-        Ok(hash) => {
-            tracing::warn!(path = %target.display(), expected = %expected, actual = %hash, "cached file sha256 mismatch; redownloading");
-            Ok(false)
-        }
-        Err(error) => {
-            tracing::warn!(path = %target.display(), error = %error, "failed to hash cached file; redownloading");
-            Ok(false)
+    for segment in path.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(invalid());
         }
     }
-}
-
-/// Accepts a rename destination that lost a race to a concurrent download:
-/// it matches when its size is right and its published hash (or sidecar)
-/// vouches for it — by size alone when the source published no hash.
-fn destination_matches(target: &Path, file: &SnapshotFile) -> bool {
-    let Ok(metadata) = fs::metadata(target) else {
-        return false;
-    };
-    if !metadata.is_file() || metadata.len() != file.size {
-        return false;
-    }
-    match &file.sha256 {
-        None => true,
-        Some(expected) => {
-            sidecar_records_hash(target, expected)
-                || hash_file(target).is_ok_and(|hash| hash == *expected)
-        }
-    }
+    Ok(())
 }
 
 /// Monotonic counter keeping concurrent downloads of the same file from
@@ -731,67 +771,19 @@ fn download_attempt(
         }
     }
 
-    if let Err(error) = fs::rename(guard.path(), target) {
-        // A concurrent download may have renamed its copy onto the target
-        // between our checks and this rename (notably on Windows); accept
-        // the winner when it matches what we asked for.
-        if !destination_matches(target, file) {
-            return Err(Error::Io(io::Error::new(
-                error.kind(),
-                format!(
-                    "move `{}` -> `{}`: {}",
-                    guard.path().display(),
-                    target.display(),
-                    error
-                ),
-            )));
-        }
-        // The guard's drop removes our now-redundant temp file.
-        return Ok(());
-    }
+    fs::rename(guard.path(), target).map_err(|error| {
+        Error::Io(io::Error::new(
+            error.kind(),
+            format!(
+                "move `{}` -> `{}`: {}",
+                guard.path().display(),
+                target.display(),
+                error
+            ),
+        ))
+    })?;
     guard.disarm();
-
-    if let Some(hash) = &file.sha256
-        && let Err(error) = write_sidecar(target, hash)
-    {
-        tracing::debug!(path = %target.display(), error = %error, "failed to write sha256 sidecar after download");
-    }
     Ok(())
-}
-
-fn sidecar_path(path: &Path) -> Option<PathBuf> {
-    let name = path.file_name()?.to_str()?;
-    Some(path.with_file_name(format!(".{name}.sha256")))
-}
-
-fn sidecar_records_hash(path: &Path, expected: &str) -> bool {
-    let Some(sidecar) = sidecar_path(path) else {
-        return false;
-    };
-    match fs::read_to_string(&sidecar) {
-        Ok(contents) => contents.trim().eq_ignore_ascii_case(expected),
-        Err(_) => false,
-    }
-}
-
-fn write_sidecar(path: &Path, hash: &str) -> io::Result<()> {
-    let sidecar = sidecar_path(path)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no filename for sidecar"))?;
-    fs::write(sidecar, hash)
-}
-
-fn hash_file(path: &Path) -> io::Result<String> {
-    let mut file = File::open(path)?;
-    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
-    let mut buffer = vec![0u8; READ_BUFFER_BYTES];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        sha2::Digest::update(&mut hasher, &buffer[..read]);
-    }
-    Ok(encode_hex(&sha2::Digest::finalize(hasher)))
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -809,16 +801,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snapshot_dirs_follow_org_and_name() {
+    fn snapshot_bases_and_ids_are_validated() {
         let root = Path::new("/cache");
         assert_eq!(
-            snapshot_dir(root, "PaddlePaddle/PaddleOCR-VL-1.5").unwrap(),
+            snapshot_base(root, "PaddlePaddle/PaddleOCR-VL-1.5").unwrap(),
             root.join("models/PaddlePaddle/PaddleOCR-VL-1.5")
         );
+        // Commits land one level below the base, hex only.
+        let base = snapshot_base(root, "opendatalab/MinerU2.5-2509-1.2B").unwrap();
         assert_eq!(
-            snapshot_dir(root, "opendatalab/MinerU2.5-2509-1.2B").unwrap(),
-            root.join("models/opendatalab/MinerU2.5-2509-1.2B")
+            base.join("74851b0e4989e661958cd2de23a4a1e3ef4fd5a9"),
+            root.join(
+                "models/opendatalab/MinerU2.5-2509-1.2B/74851b0e4989e661958cd2de23a4a1e3ef4fd5a9"
+            )
         );
+        assert!(validate_commit("74851b0e4989e661958cd2de23a4a1e3ef4fd5a9").is_ok());
+        for bad_commit in ["", "xyz", "../escape", "74851b0e"] {
+            assert!(validate_commit(bad_commit).is_err(), "{bad_commit:?}");
+        }
         // Ids that could escape the cache directory are rejected outright.
         for bad in [
             "no-slash",
@@ -831,8 +831,23 @@ mod tests {
             "org/.",
             "",
         ] {
-            assert!(snapshot_dir(root, bad).is_err(), "{bad:?}");
+            assert!(snapshot_base(root, bad).is_err(), "{bad:?}");
         }
+        // Listed file paths that could escape the staging directory too.
+        for bad in [
+            "/absolute/file",
+            "../escape",
+            "a/./b",
+            "a//b",
+            "trailing/",
+            "a/../b",
+            r"a\b",
+            "",
+        ] {
+            assert!(validate_listed_path(bad).is_err(), "{bad:?}");
+        }
+        assert!(validate_listed_path("config.json").is_ok());
+        assert!(validate_listed_path("v1.0/model-00001-of-00004.safetensors").is_ok());
     }
 
     #[test]
@@ -882,39 +897,24 @@ mod tests {
     }
 
     #[test]
-    fn prune_removes_unlisted_files_and_keeps_bookkeeping() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::fs::write(root.join("config.json"), b"{}").unwrap();
-        std::fs::write(root.join("stale.bin"), b"x").unwrap();
-        std::fs::create_dir(root.join("v1.0")).unwrap();
-        std::fs::write(root.join("v1.0/stale.onnx"), b"x").unwrap();
-        std::fs::write(root.join(".stale.bin.sha256"), b"hash").unwrap();
-        std::fs::write(root.join(".oar-revision"), b"repo\nmaster\n").unwrap();
-        let files = [SnapshotFile {
-            path: "config.json".to_string(),
-            size: 2,
-            sha256: None,
-        }];
-        prune_stale_files(root, &files).unwrap();
-        assert!(root.join("config.json").exists());
-        assert!(root.join(".stale.bin.sha256").exists());
-        assert!(root.join(".oar-revision").exists());
-        assert!(!root.join("stale.bin").exists());
-        // The emptied v1.0 directory went with its file.
-        assert!(!root.join("v1.0").exists());
-
-        // Revisions encode as one component, paths keep their separators,
-        // and Link pages parse — shared here to keep tests lean.
+    fn urls_encode_revisions_as_one_component_and_pages_parse() {
         assert_eq!(
             DownloadSource::HuggingFace.files_url("org/name", "refs/pr 1"),
             "https://huggingface.co/api/models/org/name/tree/refs%2Fpr%201?recursive=true"
         );
         assert_eq!(
-            DownloadSource::ModelScope.file_url("org/name", "main", "a b/c#d.bin"),
-            "https://www.modelscope.cn/api/v1/models/org/name/repo?Revision=main&FilePath=a%20b/c%23d.bin"
+            DownloadSource::HuggingFace.resolve_url("org/name", "main"),
+            "https://huggingface.co/api/models/org/name/revision/main"
         );
-        let link = r#"<https://huggingface.co/api/models/m/tree/main?recursive=true&page=2>; rel="next", <https://huggingface.co/api/models/m/tree/main?recursive=true&page=1>; rel="prev""#;
+        assert_eq!(
+            DownloadSource::ModelScope.resolve_url("org/name", "master"),
+            "https://www.modelscope.cn/api/v1/models/org/name/commits?Revision=master&PageSize=1"
+        );
+        assert_eq!(
+            DownloadSource::ModelScope.file_url("org/name", "abc123", "a b/c#d.bin"),
+            "https://www.modelscope.cn/api/v1/models/org/name/repo?Revision=abc123&FilePath=a%20b/c%23d.bin"
+        );
+        let link = r#"<https://huggingface.co/api/models/m/tree/main?recursive=true&page=2>; rel="next", <https://huggingface.co/api/models/m/tree/main?recursive=true?page=1>; rel="prev""#;
         assert_eq!(
             next_page(link),
             Some("https://huggingface.co/api/models/m/tree/main?recursive=true&page=2")
