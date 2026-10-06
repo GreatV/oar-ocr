@@ -1,0 +1,410 @@
+use crate::manifest::{Case, Kind, model_source};
+use anyhow::{Context, Result, bail, ensure};
+use image::RgbImage;
+use oar_ocr::{
+    core::config::{OrtExecutionProvider, OrtSessionConfig},
+    oarocr::{OAROCR, OAROCRBuilder, OARStructure, OARStructureBuilder},
+};
+use oar_ocr_vl::{
+    DocParserConfig, GlmOcr, HpdGenerationConfig, HpdParsing, HunyuanOcr, HunyuanOcrParseOptions,
+    JinaOcr, JinaOcrParseOptions, LayoutPageParser, LayoutPageParserOptions, MinerU,
+    MinerUDiffusion, MinerUDiffusionParseOptions, MinerUParseOptions, MonkeyOcrV2,
+    MonkeyOcrV2ParseOptions, OvisOcr2, OvisOcr2ParseOptions, PaddleOcrVl, PageDocument, PageParser,
+    PpDocLayout, TeleOcr, WeVisDoc, WeVisDocParseOptions, XiaomiOcr, XiaomiOcrParseOptions,
+};
+use std::path::Path;
+
+pub(crate) struct Output {
+    pub(crate) text: String,
+    pub(crate) document: Option<PageDocument>,
+    pub(crate) diagnostics: usize,
+}
+impl Output {
+    fn text(text: String) -> Self {
+        Self {
+            text,
+            document: None,
+            diagnostics: 0,
+        }
+    }
+    fn page(page: PageDocument) -> Self {
+        let text = if let Some(markdown) = &page.markdown {
+            markdown.clone()
+        } else if !page.blocks.is_empty() {
+            page.blocks
+                .iter()
+                .filter_map(|block| block.content.as_deref())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        } else {
+            page.raw_output.clone().unwrap_or_default()
+        };
+        let diagnostics = page.diagnostics.len();
+        Self {
+            text,
+            document: Some(page),
+            diagnostics,
+        }
+    }
+}
+
+// This dispatch stays inside the harness until a unified parser is available.
+enum VlModel {
+    Hpd(Box<HpdParsing>),
+    Hunyuan(Box<HunyuanOcr>),
+    Jina(Box<JinaOcr>),
+    MinerU(Box<MinerU>),
+    Diffusion(Box<MinerUDiffusion>),
+    Monkey(Box<MonkeyOcrV2>),
+    Ovis(Box<OvisOcr2>),
+    WeVis(Box<WeVisDoc>),
+    Xiaomi(Box<XiaomiOcr>),
+    Paddle(Box<LayoutPageParser<PpDocLayout, PaddleOcrVl>>),
+    Glm(Box<LayoutPageParser<PpDocLayout, GlmOcr>>),
+    Tele(Box<LayoutPageParser<PpDocLayout, TeleOcr>>),
+}
+impl VlModel {
+    fn load(root: &Path, case: &Case, device: &candle_core::Device) -> Result<Self> {
+        let path = root.join(case.model_path());
+        let layout = || -> Result<PpDocLayout> {
+            Ok(PpDocLayout::from_dir(
+                root.join(
+                    case.layout_path
+                        .as_deref()
+                        .context("external layout path missing")?,
+                ),
+                device.clone(),
+            )?)
+        };
+        let config = || DocParserConfig {
+            max_tokens: case.options.max_tokens.unwrap_or(4096),
+            ..Default::default()
+        };
+        let batch = case.options.region_batch_size.unwrap_or(1);
+        Ok(match case.model.as_deref().unwrap_or_default() {
+            "hpd-parsing" => Self::Hpd(Box::new(HpdParsing::from_dir(path, device.clone())?)),
+            "hunyuanocr" => Self::Hunyuan(Box::new(HunyuanOcr::from_dir(path, device.clone())?)),
+            "jina-ocr" => Self::Jina(Box::new(JinaOcr::from_dir(path, device.clone())?)),
+            "mineru" => Self::MinerU(Box::new(MinerU::from_dir(path, device.clone())?)),
+            "mineru-diffusion" => {
+                Self::Diffusion(Box::new(MinerUDiffusion::from_dir(path, device.clone())?))
+            }
+            "monkeyocrv2" => Self::Monkey(Box::new(MonkeyOcrV2::from_dir(path, device.clone())?)),
+            "ovisocr2" => Self::Ovis(Box::new(OvisOcr2::from_dir(path, device.clone())?)),
+            "wevisdoc" => Self::WeVis(Box::new(WeVisDoc::from_dir(path, device.clone())?)),
+            "xiaomi-ocr-0" => Self::Xiaomi(Box::new(XiaomiOcr::from_dir(path, device.clone())?)),
+            "paddleocr-vl" | "paddleocr-vl-1.5" | "paddleocr-vl-1.6" => Self::Paddle(Box::new(
+                LayoutPageParser::with_config(
+                    layout()?,
+                    PaddleOcrVl::from_dir(path, device.clone())?,
+                    config(),
+                )
+                .with_region_batch_size(batch),
+            )),
+            "glmocr" => Self::Glm(Box::new(
+                LayoutPageParser::with_config(
+                    layout()?,
+                    GlmOcr::from_dir(path, device.clone())?,
+                    config(),
+                )
+                .with_region_batch_size(batch),
+            )),
+            "teleocr" => Self::Tele(Box::new(
+                LayoutPageParser::with_config(
+                    layout()?,
+                    TeleOcr::from_dir(path, device.clone())?,
+                    config(),
+                )
+                .with_region_batch_size(batch),
+            )),
+            model => bail!("unsupported VL model {model}"),
+        })
+    }
+
+    fn parse(&self, image: &RgbImage, case: &Case) -> Result<PageDocument> {
+        let tokens = case.options.max_tokens;
+        Ok(match self {
+            Self::Hpd(model) => {
+                let defaults = HpdGenerationConfig::default();
+                model.parse_page(
+                    image,
+                    &HpdGenerationConfig {
+                        max_new_tokens: tokens.unwrap_or(defaults.max_new_tokens),
+                        use_mtp: case.options.use_mtp.unwrap_or(defaults.use_mtp),
+                        ..defaults
+                    },
+                )?
+            }
+            Self::Hunyuan(model) => model.parse_page(
+                image,
+                &HunyuanOcrParseOptions {
+                    max_new_tokens: tokens
+                        .unwrap_or(HunyuanOcrParseOptions::default().max_new_tokens),
+                    ..Default::default()
+                },
+            )?,
+            Self::Jina(model) => model.parse_page(
+                image,
+                &JinaOcrParseOptions {
+                    max_new_tokens: tokens.unwrap_or(JinaOcrParseOptions::default().max_new_tokens),
+                },
+            )?,
+            Self::MinerU(model) => {
+                let defaults = MinerUParseOptions::default();
+                model.parse_page(
+                    image,
+                    &MinerUParseOptions {
+                        max_tokens: tokens.unwrap_or(defaults.max_tokens),
+                        region_batch_size: case
+                            .options
+                            .region_batch_size
+                            .unwrap_or(defaults.region_batch_size),
+                        ..defaults
+                    },
+                )?
+            }
+            Self::Diffusion(model) => {
+                let defaults = MinerUDiffusionParseOptions::default();
+                model.parse_page(
+                    image,
+                    &MinerUDiffusionParseOptions {
+                        generation: oar_ocr_vl::DiffusionGenerationConfig {
+                            gen_length: tokens.unwrap_or(defaults.generation.gen_length),
+                            seed: case
+                                .options
+                                .diffusion_seed
+                                .unwrap_or(defaults.generation.seed),
+                            ..defaults.generation
+                        },
+                        ..defaults
+                    },
+                )?
+            }
+            Self::Monkey(model) => model.parse_page(
+                image,
+                &MonkeyOcrV2ParseOptions {
+                    max_new_tokens: tokens
+                        .unwrap_or(MonkeyOcrV2ParseOptions::default().max_new_tokens),
+                    ..Default::default()
+                },
+            )?,
+            Self::Ovis(model) => model.parse_page(
+                image,
+                &OvisOcr2ParseOptions {
+                    max_new_tokens: tokens
+                        .unwrap_or(OvisOcr2ParseOptions::default().max_new_tokens),
+                    ..Default::default()
+                },
+            )?,
+            Self::WeVis(model) => model.parse_page(
+                image,
+                &WeVisDocParseOptions {
+                    max_new_tokens: tokens
+                        .unwrap_or(WeVisDocParseOptions::default().max_new_tokens),
+                },
+            )?,
+            Self::Xiaomi(model) => model.parse_page(
+                image,
+                &XiaomiOcrParseOptions {
+                    max_new_tokens: tokens
+                        .unwrap_or(XiaomiOcrParseOptions::default().max_new_tokens),
+                },
+            )?,
+            Self::Paddle(model) => model.parse_page(image, &LayoutPageParserOptions::default())?,
+            Self::Glm(model) => model.parse_page(image, &LayoutPageParserOptions::default())?,
+            Self::Tele(model) => model.parse_page(image, &LayoutPageParserOptions::default())?,
+        })
+    }
+}
+
+pub(crate) enum Pipeline {
+    Ocr(Box<OAROCR>),
+    Structure(Box<OARStructure>),
+    Vl(Box<VlPipeline>),
+}
+
+pub(crate) struct VlPipeline {
+    model: VlModel,
+    // The shared device provides an explicit synchronization boundary for timing.
+    device: candle_core::Device,
+}
+
+impl Pipeline {
+    pub(crate) fn load(root: &Path, case: &Case) -> Result<Self> {
+        if case.kind == Kind::Vl {
+            let device = oar_ocr_vl::utils::parse_device(&case.device)?;
+            let model = VlModel::load(root, case, &device)?;
+            device.synchronize()?;
+            return Ok(Self::Vl(Box::new(VlPipeline { model, device })));
+        }
+        if case.models.formula.is_some() && case.device.starts_with("cuda:") {
+            oar_ocr::core::inference::ensure_cuda_launch_blocking();
+        }
+        let config = ort_config(case)?;
+        let source = |name: &str| model_source(root, name);
+        let batch = case.options.batch_size();
+        let m = &case.models;
+        match case.kind {
+            Kind::Ocr => {
+                let mut builder = OAROCRBuilder::new(
+                    source(m.detector.as_deref().context("missing detector")?),
+                    source(m.recognizer.as_deref().context("missing recognizer")?),
+                    source(m.dictionary.as_deref().context("missing dictionary")?),
+                )
+                .ort_session(config)
+                .image_batch_size(batch);
+                if let Some(size) = case.options.region_batch_size {
+                    builder = builder.region_batch_size(size);
+                }
+                Ok(Self::Ocr(Box::new(builder.build()?)))
+            }
+            Kind::Structure => {
+                let mut builder = OARStructureBuilder::new(source(
+                    m.layout.as_deref().context("missing layout")?,
+                ))
+                .ort_session(config)
+                .image_batch_size(batch);
+                if let Some(name) = &m.layout_name {
+                    builder = builder.layout_model_name(name);
+                }
+                if let Some(size) = case.options.region_batch_size {
+                    builder = builder.region_batch_size(size);
+                }
+                if let Some(detector) = &m.detector {
+                    builder = builder.with_ocr(
+                        source(detector),
+                        source(m.recognizer.as_deref().context("missing recognizer")?),
+                        source(m.dictionary.as_deref().context("missing dictionary")?),
+                    );
+                }
+                if let Some(path) = &m.table_dictionary {
+                    builder = builder.table_structure_dict_path(source(path));
+                }
+                if let Some(path) = &m.table_classifier {
+                    builder = builder.with_table_classification(source(path));
+                }
+                if let Some(path) = &m.wired_table_structure {
+                    builder = builder.with_wired_table_structure(source(path));
+                }
+                if let Some(path) = &m.wireless_table_structure {
+                    builder = builder.with_wireless_table_structure(source(path));
+                }
+                if let Some(path) = &m.wired_table_cells {
+                    builder = builder.with_wired_table_cell_detection(source(path));
+                }
+                if let Some(path) = &m.wireless_table_cells {
+                    builder = builder.with_wireless_table_cell_detection(source(path));
+                }
+                if let Some(path) = &m.formula {
+                    builder = builder.with_formula_recognition(
+                        source(path),
+                        source(
+                            m.formula_tokenizer
+                                .as_deref()
+                                .context("missing tokenizer")?,
+                        ),
+                        m.formula_type.as_deref().context("missing formula type")?,
+                    );
+                }
+                Ok(Self::Structure(Box::new(builder.build()?)))
+            }
+            Kind::Vl => unreachable!(),
+        }
+    }
+
+    pub(crate) fn infer(&self, images: &[&RgbImage], case: &Case) -> Result<Vec<Output>> {
+        match self {
+            Self::Ocr(model) => {
+                let results =
+                    model.predict(images.iter().map(|image| (*image).clone()).collect())?;
+                ensure!(
+                    results.len() == images.len(),
+                    "OCR result count differs from input count"
+                );
+                Ok(results
+                    .into_iter()
+                    .map(|page| Output::text(page.concatenated_text("\n")))
+                    .collect())
+            }
+            Self::Structure(model) => {
+                let results =
+                    model.predict_images(images.iter().map(|image| (*image).clone()).collect());
+                ensure!(
+                    results.len() == images.len(),
+                    "structure result count differs from input count"
+                );
+                results
+                    .into_iter()
+                    .map(|page| Ok(Output::text(page?.to_markdown())))
+                    .collect()
+            }
+            Self::Vl(pipeline) => {
+                ensure!(images.len() == 1, "VL PageParser requires a single page");
+                let output = Output::page(pipeline.model.parse(images[0], case)?);
+                pipeline.device.synchronize()?;
+                Ok(vec![output])
+            }
+        }
+    }
+}
+
+fn ort_config(case: &Case) -> Result<OrtSessionConfig> {
+    let config = OrtSessionConfig::new().with_intra_threads(case.options.cpu_threads());
+    if case.device == "cpu" {
+        return Ok(config.with_execution_providers(vec![OrtExecutionProvider::CPU]));
+    }
+    #[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
+    {
+        let (config, strict) = match case.device.as_str() {
+            #[cfg(feature = "cuda")]
+            value if value.starts_with("cuda:") => {
+                let ordinal = value[5..].parse::<i32>()?;
+                let config = config.with_execution_providers(vec![
+                    OrtExecutionProvider::CUDA {
+                        device_id: Some(ordinal),
+                        gpu_mem_limit: None,
+                        arena_extend_strategy: None,
+                        cudnn_conv_algo_search: None,
+                        cudnn_conv_use_max_workspace: None,
+                    },
+                    OrtExecutionProvider::CPU,
+                ]);
+                (
+                    config,
+                    ort::ep::CUDA::default()
+                        .with_device_id(ordinal)
+                        .build()
+                        .error_on_failure(),
+                )
+            }
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            "metal" => {
+                let config = config.with_execution_providers(vec![
+                    OrtExecutionProvider::CoreML {
+                        ane_only: None,
+                        subgraphs: None,
+                    },
+                    OrtExecutionProvider::CPU,
+                ]);
+                (
+                    config,
+                    ort::ep::CoreML::default().build().error_on_failure(),
+                )
+            }
+            value => bail!("device {value} requires its matching accelerator feature and platform"),
+        };
+        // A benchmark must not silently label a CPU fallback as an accelerator run.
+        let builder = ort::session::Session::builder()?
+            .with_intra_threads(1)
+            .map_err(ort::Error::from)?;
+        builder
+            .with_execution_providers([strict])
+            .map_err(ort::Error::from)?;
+        Ok(config)
+    }
+    #[cfg(not(any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+    bail!(
+        "device {} requires its matching accelerator feature and platform",
+        case.device
+    )
+}

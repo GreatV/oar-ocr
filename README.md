@@ -143,6 +143,7 @@ See the [`oar-ocr-vl` guide](oar-ocr-vl/README.md) for setup and [`oar-ocr-vl/ex
 ## Documentation
 
 - [Usage guide](docs/usage.md) — APIs, builder patterns, accelerators, and model loading
+- [Benchmarking](docs/benchmarking.md) — reproducible pipeline baselines and comparisons
 - [Cargo features](docs/features.md) — defaults, execution providers, and feature combinations
 - [Pre-trained models](docs/models.md) — model files, dictionaries, and auto-download behavior
 - [Environment variables](docs/environment-variables.md) — runtime and performance overrides

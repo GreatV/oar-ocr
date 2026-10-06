@@ -1,0 +1,166 @@
+# Run from the repository root with --features cuda,nvml.
+[inputs]
+images = [".oar/images/layout.jpg"]
+max_pages = 1
+
+[defaults]
+device = "cuda:0"
+warmup = 2
+repetitions = 5
+
+[defaults.options]
+cpu_threads = 4
+nvml_device = "index:0"
+nvml_interval_ms = 10
+
+[[cases]]
+name = "ocr-tiny"
+kind = "ocr"
+[cases.models]
+detector = "pp-ocrv6_tiny_det.onnx"
+recognizer = "pp-ocrv6_tiny_rec.onnx"
+dictionary = "ppocrv6_tiny_dict.txt"
+
+[[cases]]
+name = "ocr-small"
+kind = "ocr"
+[cases.models]
+detector = "pp-ocrv6_small_det.onnx"
+recognizer = "pp-ocrv6_small_rec.onnx"
+dictionary = "ppocrv6_dict.txt"
+
+[[cases]]
+name = "ocr-medium"
+kind = "ocr"
+[cases.models]
+detector = "pp-ocrv6_medium_det.onnx"
+recognizer = "pp-ocrv6_medium_rec.onnx"
+dictionary = "ppocrv6_dict.txt"
+
+[[cases]]
+name = "structure-v3"
+kind = "structure"
+[cases.models]
+layout = "pp-doclayoutv3.onnx"
+layout_name = "PP-DocLayoutV3"
+detector = "pp-ocrv6_tiny_det.onnx"
+recognizer = "pp-ocrv6_tiny_rec.onnx"
+dictionary = "ppocrv6_tiny_dict.txt"
+table_dictionary = "table_structure_dict_ch.txt"
+table_classifier = "pp-lcnet_x1_0_table_cls.onnx"
+wired_table_structure = "slanet_plus.onnx"
+wireless_table_structure = "slanet_plus.onnx"
+wired_table_cells = "rt-detr-l_wired_table_cell_det.onnx"
+
+[[cases]]
+name = "vl-hpd-parsing"
+kind = "vl"
+model = "hpd-parsing"
+model_path = "models/PaddlePaddle/HPD-Parsing"
+
+[[cases]]
+name = "vl-hunyuanocr-1.5"
+kind = "vl"
+model = "hunyuanocr"
+model_path = "models/tencent/HunyuanOCR"
+
+[[cases]]
+name = "vl-hunyuanocr-1.0"
+kind = "vl"
+model = "hunyuanocr"
+model_path = "models/tencent/HunyuanOCRv1.0"
+
+[[cases]]
+name = "vl-jina-ocr"
+kind = "vl"
+model = "jina-ocr"
+model_path = "models/jinaai/jina-ocr-v1"
+
+[[cases]]
+name = "vl-mineru-2.5"
+kind = "vl"
+model = "mineru"
+model_path = "models/opendatalab/MinerU2.5-2509-1.2B"
+
+[[cases]]
+name = "vl-mineru-2.5-pro"
+kind = "vl"
+model = "mineru"
+model_path = "models/opendatalab/MinerU2.5-Pro-2605-1.2B"
+
+[[cases]]
+name = "vl-mineru-diffusion"
+kind = "vl"
+model = "mineru-diffusion"
+model_path = "models/opendatalab/MinerU-Diffusion-V1-0320-2.5B"
+
+[[cases]]
+name = "vl-monkeyocrv2-s"
+kind = "vl"
+model = "monkeyocrv2"
+model_path = "models/zenosai/MonkeyOCRv2-S-Parsing"
+
+[[cases]]
+name = "vl-monkeyocrv2-b"
+kind = "vl"
+model = "monkeyocrv2"
+model_path = "models/zenosai/MonkeyOCRv2-B-Parsing"
+
+[[cases]]
+name = "vl-ovisocr2"
+kind = "vl"
+model = "ovisocr2"
+model_path = "models/ATH-MaaS/OvisOCR2"
+
+[[cases]]
+name = "vl-wevisdoc-2b"
+kind = "vl"
+model = "wevisdoc"
+model_path = "models/tencent/WeVisDoc-2B"
+
+[[cases]]
+name = "vl-wevisdoc-4b"
+kind = "vl"
+model = "wevisdoc"
+model_path = "models/tencent/WeVisDoc-4B"
+
+[[cases]]
+name = "vl-xiaomi-ocr-0"
+kind = "vl"
+model = "xiaomi-ocr-0"
+model_path = "models/SeerRay-Lab/Xiaomi-OCR-0"
+
+[[cases]]
+name = "vl-paddleocr-vl"
+kind = "vl"
+model = "paddleocr-vl"
+model_path = "models/PaddlePaddle/PaddleOCR-VL"
+layout_path = "models/PaddlePaddle/PP-DocLayoutV3"
+
+[[cases]]
+name = "vl-paddleocr-vl-1.5"
+kind = "vl"
+model = "paddleocr-vl-1.5"
+model_path = "models/PaddlePaddle/PaddleOCR-VL-1.5"
+layout_path = "models/PaddlePaddle/PP-DocLayoutV3"
+
+[[cases]]
+name = "vl-paddleocr-vl-1.6"
+kind = "vl"
+model = "paddleocr-vl-1.6"
+model_path = "models/PaddlePaddle/PaddleOCR-VL-1.6"
+layout_path = "models/PaddlePaddle/PP-DocLayoutV3"
+
+[[cases]]
+name = "vl-glmocr"
+kind = "vl"
+model = "glmocr"
+model_path = "models/zai-org/GLM-OCR"
+layout_path = "models/PaddlePaddle/PP-DocLayoutV3"
+
+[[cases]]
+name = "vl-teleocr"
+kind = "vl"
+model = "teleocr"
+model_path = "models/XingChen-AGI/TeleOCR"
+layout_path = "models/PaddlePaddle/PP-DocLayoutV3"
