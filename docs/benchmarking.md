@@ -69,7 +69,8 @@ PP-DocLayout `layout_path`.
 Add `run --save-outputs predictions` to write the last measured repeat's text to
 `predictions/<case>/<image-stem>.md`, outside inference timing. VL saves the text
 used for chars/s, OCR saves recognized text, and structure saves Markdown. Use a
-fresh directory per run; duplicate image stems within a case are rejected.
+fresh directory per run: a non-empty case directory is rejected, as are duplicate
+image stems within a case.
 
 - [OmniDocBench](https://github.com/opendatalab/OmniDocBench): use matching v1.5
   annotations and images with the `v1_5` evaluation branch. Each image needs a same-stem `.md`.

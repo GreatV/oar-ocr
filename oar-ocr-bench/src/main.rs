@@ -159,6 +159,8 @@ fn run(
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
     let output = output.unwrap_or_else(|| format!("benchmark-results/run-{timestamp}.json").into());
     ensure!(!output.exists(), "{} already exists", output.display());
+    // Record the checkout before saved outputs can make it look dirty.
+    let environment = Environment::collect(&root);
     let temp = tempfile::tempdir()?;
     let executable = std::env::current_exe()?;
     let mut results = Vec::new();
@@ -206,7 +208,7 @@ fn run(
     let all_succeeded = results.iter().all(|case| case.measurement.is_some());
     let result = RunResult {
         timestamp_unix_ms: timestamp,
-        environment: Environment::collect(&root),
+        environment,
         cases: results,
     };
     if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -308,6 +310,12 @@ fn page_output_paths(directory: &Path, case: &str, pages: &[input::Page]) -> Res
             == paths.len(),
         "saving outputs requires image stems that are unique, ignoring case, within each case"
     );
+    // Leftover files from an earlier run would be scored alongside this one.
+    ensure!(
+        fs::read_dir(&directory).map_or(true, |mut entries| entries.next().is_none()),
+        "output directory {} is not empty; choose a fresh --save-outputs directory",
+        directory.display()
+    );
     fs::create_dir_all(directory)?;
     Ok(paths)
 }
@@ -350,6 +358,9 @@ mod tests {
         let other = page_output_paths(directory.path(), "structure-v3", &pages).unwrap();
         assert_ne!(paths, other);
         assert!(directory.path().join("structure-v3").is_dir());
+        // A case directory holding an earlier run's output is refused.
+        std::fs::write(&paths[0], "old").unwrap();
+        assert!(page_output_paths(directory.path(), "ocr-tiny", &pages).is_err());
     }
 
     #[test]
