@@ -1,0 +1,36 @@
+[package]
+name = "oar-ocr-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "oar-bench"
+path = "src/main.rs"
+
+[features]
+default = []
+cuda = ["oar-ocr/cuda", "oar-ocr-vl/cuda", "ort/cuda"]
+metal = ["oar-ocr/coreml", "oar-ocr-vl/metal", "ort/coreml"]
+nvml = ["dep:nvml-wrapper"]
+
+[dependencies]
+anyhow = "1"
+candle-core = "0.11.0"
+clap.workspace = true
+image.workspace = true
+nvml-wrapper = { version = "0.13", optional = true }
+oar-ocr = { path = "..", features = ["auto-download"] }
+oar-ocr-vl = { path = "../oar-ocr-vl" }
+# Same exact pin as oar-ocr-core; used directly to verify that an explicitly
+# requested execution provider registers.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std"] }
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+toml = "1"
+tracing.workspace = true
+tracing-subscriber.workspace = true
