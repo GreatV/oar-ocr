@@ -1,5 +1,6 @@
 //! Helpers for working directly with ONNX Runtime sessions.
 
+use super::initialize_ort_environment;
 use crate::core::errors::OCRError;
 use crate::core::inference::ModelSource;
 use ort::logging::LogLevel;
@@ -27,6 +28,7 @@ where
     F: FnOnce(SessionBuilder) -> Result<SessionBuilder, ort::Error>,
 {
     let source = model_source.into();
+    initialize_ort_environment()?;
     let builder = Session::builder()?;
     let mut builder = configure_builder(builder)?;
     let session = match &source {
