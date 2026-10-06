@@ -353,6 +353,9 @@ fn validate_repo_id(repo: &str) -> Result<(), Error> {
     }
 }
 
+/// ModelScope's `repo/files` endpoint silently truncates at this many
+/// entries.
+const MODELSCOPE_LISTING_LIMIT: usize = 3_000;
 const DOWNLOAD_RETRIES: u32 = 3;
 const READ_BUFFER_BYTES: usize = 64 * 1024;
 const CONNECT_TIMEOUT_SECS: u64 = 30;
@@ -406,7 +409,30 @@ pub(crate) fn snapshot(
         .build()
         .new_agent();
 
-    let commit = resolve_commit(&agent, source, &remote, revision)?;
+    // A requested revision that already is a commit id with a local snapshot
+    // needs no resolution at all.
+    if validate_commit(revision).is_ok() && base.join(revision).is_dir() {
+        return Ok(base.join(revision));
+    }
+    let commit = match resolve_commit(&agent, source, &remote, revision) {
+        Ok(commit) => commit,
+        Err(error) => {
+            // Offline (or hub) failure: fall back to the commit this
+            // revision resolved to before, when its snapshot survived.
+            if let Some(recorded) = recorded_commit(&base, revision)
+                && base.join(&recorded).is_dir()
+            {
+                tracing::warn!(
+                    repo,
+                    revision,
+                    commit = %recorded,
+                    "revision resolution failed; reusing the recorded snapshot"
+                );
+                return Ok(base.join(recorded));
+            }
+            return Err(error);
+        }
+    };
     let dir = base.join(&commit);
     if dir.is_dir() {
         return Ok(dir);
@@ -461,6 +487,14 @@ pub(crate) fn snapshot(
         tracing::debug!(error = %error, "failed to record the resolved revision");
     }
     Ok(dir)
+}
+
+/// Reads the commit a revision last resolved to, when `refs/<revision>`
+/// recorded one.
+fn recorded_commit(base: &Path, revision: &str) -> Option<String> {
+    let recorded = fs::read_to_string(base.join("refs").join(encode_component(revision))).ok()?;
+    let commit = recorded.trim();
+    validate_commit(commit).is_ok().then(|| commit.to_string())
 }
 
 /// Resolves a revision to the immutable commit id both the listing and every
@@ -539,6 +573,16 @@ fn list_files(
             DownloadSource::ModelScope => parse_modelscope_listing(&body)?,
             DownloadSource::HuggingFace => parse_huggingface_listing(&body)?,
         });
+        // ModelScope truncates `repo/files` listings at 3,000 entries with no
+        // marker; refuse to publish a snapshot from a possibly partial
+        // listing rather than trust it.
+        if source == DownloadSource::ModelScope && files.len() >= MODELSCOPE_LISTING_LIMIT {
+            return Err(Error::config(format!(
+                "ModelScope listing for {repo} returned {} entries and may be truncated; \
+                 refusing to publish an incomplete snapshot",
+                files.len()
+            )));
+        }
         match next {
             Some(next_url) => url = next_url,
             None => return Ok(files),
@@ -608,7 +652,9 @@ fn ensure_file(
 
 /// Validates a file path from a listing before it is joined into the staging
 /// directory: no absolute paths, no `.` or `..` segments, no backslashes, no
-/// empty segments.
+/// empty segments, no Windows drive prefixes, and nothing else
+/// [`Path::join`] would treat specially — every component must be
+/// [`std::path::Component::Normal`].
 fn validate_listed_path(path: &str) -> Result<(), Error> {
     let invalid = || {
         Error::config(format!(
@@ -619,9 +665,19 @@ fn validate_listed_path(path: &str) -> Result<(), Error> {
         return Err(invalid());
     }
     for segment in path.split('/') {
-        if segment.is_empty() || segment == "." || segment == ".." {
+        // The colon check rejects Windows drive prefixes (`C:/payload`)
+        // everywhere, not only on Windows where they parse as components.
+        if segment.is_empty() || segment == "." || segment == ".." || segment.contains(':') {
             return Err(invalid());
         }
+    }
+    // Component-based: anything Path::join would treat specially — a
+    // Windows drive prefix, a rooted path — is not a Normal component.
+    if !Path::new(path)
+        .components()
+        .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(invalid());
     }
     Ok(())
 }
@@ -842,6 +898,8 @@ mod tests {
             "trailing/",
             "a/../b",
             r"a\b",
+            "C:/Users/Public/payload",
+            "drive:relative",
             "",
         ] {
             assert!(validate_listed_path(bad).is_err(), "{bad:?}");
