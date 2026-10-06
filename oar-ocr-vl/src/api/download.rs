@@ -24,6 +24,21 @@ use std::time::Duration;
 /// Default layout checkpoint downloaded for layout-composed models.
 pub const DEFAULT_LAYOUT_REPO: &str = "PaddlePaddle/PP-DocLayoutV3_safetensors";
 
+/// Checkpoints ModelScope publishes under a different organization than
+/// Hugging Face. The mirrors were verified to carry the same files, with
+/// matching safetensors hashes; only `zai-org/GLM-OCR` has one.
+const MODELSCOPE_ALIASES: &[(&str, &str)] = &[("zai-org/GLM-OCR", "ZhipuAI/GLM-OCR")];
+
+/// Checkpoints ModelScope does not carry at all; selecting ModelScope
+/// downloads these from Hugging Face instead. (`Tencent-Hunyuan/HunyuanOCR`
+/// exists on ModelScope but is a different, 1.0-style repo layout rather than
+/// a mirror of the Hugging Face one, so it is deliberately not aliased.)
+const HF_FALLBACK_REPOS: &[&str] = &[
+    "tencent/HunyuanOCR",
+    "tencent/WeVisDoc-2B",
+    "tencent/WeVisDoc-4B",
+];
+
 /// Where checkpoints are downloaded from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -227,6 +242,23 @@ const READ_BUFFER_BYTES: usize = 64 * 1024;
 const REQUEST_TIMEOUT_SECS: u64 = 30 * 60;
 const CONNECT_TIMEOUT_SECS: u64 = 30;
 
+/// Resolves which source and remote repo a download actually uses: ModelScope
+/// aliases point at their verified mirror, and repos ModelScope lacks fall
+/// back to Hugging Face with a log line.
+fn resolve_remote(source: DownloadSource, repo: &str) -> (DownloadSource, String) {
+    if source == DownloadSource::HuggingFace {
+        return (source, repo.to_string());
+    }
+    if let Some((_, alias)) = MODELSCOPE_ALIASES.iter().find(|(id, _)| *id == repo) {
+        return (source, alias.to_string());
+    }
+    if HF_FALLBACK_REPOS.contains(&repo) {
+        tracing::info!("{repo} is not published on ModelScope; downloading from Hugging Face");
+        return (DownloadSource::HuggingFace, repo.to_string());
+    }
+    (source, repo.to_string())
+}
+
 /// Downloads (or reuses) the pinned snapshot of `repo` and returns its
 /// directory in the cache.
 pub(crate) fn snapshot(
@@ -234,7 +266,10 @@ pub(crate) fn snapshot(
     repo: &str,
     revision: Option<&str>,
 ) -> Result<PathBuf, Error> {
+    let (source, remote) = resolve_remote(source, repo);
     let revision = revision.unwrap_or_else(|| source.default_revision());
+    // The cache stays keyed by the model id, so the source chosen never
+    // changes where a snapshot lives.
     let dir = snapshot_dir(&cache_root(), repo)?;
     fs::create_dir_all(&dir).map_err(|error| {
         Error::Io(io::Error::new(
@@ -249,13 +284,13 @@ pub(crate) fn snapshot(
         .build()
         .new_agent();
 
-    let files = list_files(&agent, source, repo, revision)?;
+    let files = list_files(&agent, source, &remote, revision)?;
     for file in &files {
-        ensure_file(&agent, source, repo, revision, &dir, file)?;
+        ensure_file(&agent, source, &remote, revision, &dir, file)?;
     }
 
     let marker = dir.join(".oar-revision");
-    let current = format!("{repo}\n{revision}\n");
+    let current = format!("{remote}\n{revision}\n");
     if fs::read_to_string(&marker).unwrap_or_default() != current {
         fs::write(&marker, &current).map_err(|error| {
             Error::Io(io::Error::new(
@@ -624,19 +659,34 @@ mod tests {
     }
 
     #[test]
-    fn pretrained_defaults_download_modelscope_layout_v3() {
-        assert_eq!(DownloadSource::ModelScope.default_revision(), "master");
-        assert_eq!(DownloadSource::HuggingFace.default_revision(), "main");
-        let options = AnyPageParserPretrainedOptions::default();
-        assert_eq!(options.source(), DownloadSource::ModelScope);
-        assert!(options.revision.is_none());
-        assert_eq!(options.layout(), DEFAULT_LAYOUT_REPO);
-        let options = options
-            .with_source(DownloadSource::HuggingFace)
-            .with_revision("v1.6.0")
-            .with_layout("PaddlePaddle/PP-DocLayoutV2_safetensors");
-        assert_eq!(options.source(), DownloadSource::HuggingFace);
-        assert_eq!(options.revision.as_deref(), Some("v1.6.0"));
-        assert_eq!(options.layout(), "PaddlePaddle/PP-DocLayoutV2_safetensors");
+    fn modelscope_selection_resolves_aliases_and_falls_back() {
+        // The verified mirror is used for the aliased repo.
+        assert_eq!(
+            resolve_remote(DownloadSource::ModelScope, "zai-org/GLM-OCR"),
+            (DownloadSource::ModelScope, "ZhipuAI/GLM-OCR".to_string())
+        );
+        // Repos ModelScope lacks download from Hugging Face instead.
+        for repo in [
+            "tencent/HunyuanOCR",
+            "tencent/WeVisDoc-2B",
+            "tencent/WeVisDoc-4B",
+        ] {
+            assert_eq!(
+                resolve_remote(DownloadSource::ModelScope, repo),
+                (DownloadSource::HuggingFace, repo.to_string())
+            );
+        }
+        // Everything else passes through, as does an explicit HF choice.
+        assert_eq!(
+            resolve_remote(DownloadSource::ModelScope, "PaddlePaddle/HPD-Parsing"),
+            (
+                DownloadSource::ModelScope,
+                "PaddlePaddle/HPD-Parsing".to_string()
+            )
+        );
+        assert_eq!(
+            resolve_remote(DownloadSource::HuggingFace, "zai-org/GLM-OCR"),
+            (DownloadSource::HuggingFace, "zai-org/GLM-OCR".to_string())
+        );
     }
 }

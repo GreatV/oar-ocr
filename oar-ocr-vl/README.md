@@ -166,9 +166,10 @@ publishes (Hugging Face publishes it for LFS files), and complete cached
 files are never re-downloaded. The layout-composed models also download a
 PP-DocLayout checkpoint — `PaddlePaddle/PP-DocLayoutV3_safetensors` by
 default, overridable with `with_layout` or replaced by a local directory with
-`with_layout_dir`. Note that a few model IDs are published on Hugging Face
-only; a repository missing from the selected source fails with an error
-suggesting the other source.
+`with_layout_dir`. ModelScope publishes GLM-OCR under `ZhipuAI/GLM-OCR` and
+that mirror is used automatically; HunyuanOCR and WeVisDoc are not on
+ModelScope and download from Hugging Face instead (logged once via
+`tracing`), with the cache still keyed by the model ID.
 
 ## Installation
 
