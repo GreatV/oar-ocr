@@ -79,6 +79,30 @@ pub struct OrtCoreMLConfig {
 }
 
 pub(crate) const COREML_CONFIG_ENTRY: &str = "oar.internal.coreml_config";
+pub(crate) const AUTO_DEVICE_CONFIG_ENTRY: &str = "oar.internal.auto_device";
+
+/// Identifies automatic candidates by provider kind and device ID, ignoring
+/// tuning fields that model builders may adjust before resolution.
+fn auto_signature(providers: &[OrtExecutionProvider]) -> String {
+    let device = |id: &Option<i32>| id.map_or_else(String::new, |id| format!(":{id}"));
+    providers
+        .iter()
+        .map(|provider| match provider {
+            OrtExecutionProvider::CPU => "cpu".to_string(),
+            OrtExecutionProvider::CUDA { device_id, .. } => format!("cuda{}", device(device_id)),
+            OrtExecutionProvider::DirectML { device_id } => {
+                format!("directml{}", device(device_id))
+            }
+            OrtExecutionProvider::OpenVINO { .. } => "openvino".to_string(),
+            OrtExecutionProvider::TensorRT { device_id, .. } => {
+                format!("tensorrt{}", device(device_id))
+            }
+            OrtExecutionProvider::CoreML { .. } => "coreml".to_string(),
+            OrtExecutionProvider::WebGPU => "webgpu".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
 
 /// Execution providers for ONNX Runtime.
 ///
@@ -193,6 +217,141 @@ impl OrtSessionConfig {
         Self::default()
     }
 
+    /// Select available compiled accelerators in CUDA(0), CoreML, DirectML(0)
+    /// order, with CPU as the final fallback.
+    ///
+    /// Provider registration is probed during model or pipeline construction,
+    /// before choosing pipeline batch defaults. Use [`Self::resolve_auto`] to
+    /// resolve the selection explicitly. Unavailable accelerators are omitted.
+    /// DirectML uses sequential execution and disables memory patterns.
+    /// TensorRT, OpenVINO, and WebGPU require explicit configuration because of
+    /// their initialization cost and compatibility requirements.
+    pub fn auto() -> Self {
+        let mut candidates = vec![
+            #[cfg(feature = "cuda")]
+            OrtExecutionProvider::CUDA {
+                device_id: Some(0),
+                gpu_mem_limit: None,
+                arena_extend_strategy: None,
+                cudnn_conv_algo_search: None,
+                cudnn_conv_use_max_workspace: None,
+            },
+            #[cfg(all(feature = "coreml", any(target_os = "macos", target_os = "ios")))]
+            OrtExecutionProvider::CoreML {
+                ane_only: None,
+                subgraphs: None,
+            },
+            #[cfg(all(feature = "directml", target_os = "windows"))]
+            OrtExecutionProvider::DirectML { device_id: Some(0) },
+        ];
+        let has_candidates = !candidates.is_empty();
+        candidates.push(OrtExecutionProvider::CPU);
+        let config = Self::new().with_execution_providers(candidates);
+        if has_candidates {
+            config.with_pending_auto_selection()
+        } else {
+            config
+        }
+    }
+
+    /// Marks the current provider list as automatic candidates.
+    ///
+    /// The marker records the candidates' kinds and device IDs, so replacing
+    /// `execution_providers` directly cancels the pending selection.
+    pub(crate) fn with_pending_auto_selection(self) -> Self {
+        let signature = auto_signature(&self.get_execution_providers());
+        self.add_config_entry(AUTO_DEVICE_CONFIG_ENTRY, signature)
+    }
+
+    /// Whether automatic execution-provider selection is still pending.
+    pub fn has_pending_auto_selection(&self) -> bool {
+        self.session_config_entries
+            .as_ref()
+            .and_then(|entries| entries.get(AUTO_DEVICE_CONFIG_ENTRY))
+            .is_some_and(|value| *value == auto_signature(&self.get_execution_providers()))
+    }
+
+    /// Resolve automatic provider preferences into available providers.
+    ///
+    /// High-level pipelines call this before choosing batch sizes, and model
+    /// builders call it before creating sessions. Probing can initialize device
+    /// runtimes, so configure global runtime settings before calling this method.
+    /// Explicit provider lists and caller-supplied session settings are preserved.
+    pub fn resolve_auto(self) -> Self {
+        self.resolve_auto_with_probe(crate::core::inference::OrtInfer::probe_execution_provider)
+    }
+
+    pub(crate) fn resolve_auto_with_probe(
+        mut self,
+        probe: impl FnMut(&OrtExecutionProvider) -> ort::Result<()>,
+    ) -> Self {
+        let pending = self.has_pending_auto_selection();
+        self.clear_auto_selection();
+        if !pending {
+            return self;
+        }
+        let candidates = self
+            .get_execution_providers()
+            .into_iter()
+            .filter(|provider| !matches!(provider, OrtExecutionProvider::CPU))
+            .collect();
+        let selected = Self::auto_with_probe(candidates, probe);
+        let uses_directml = selected
+            .get_execution_providers()
+            .iter()
+            .any(|provider| matches!(provider, OrtExecutionProvider::DirectML { .. }));
+        self.execution_providers = selected.execution_providers;
+        if uses_directml {
+            // DirectML fails to initialize with parallel execution or memory
+            // patterns, so its requirements override caller preferences.
+            if self.parallel_execution == Some(true) || self.enable_mem_pattern == Some(true) {
+                tracing::warn!(
+                    "DirectML was selected automatically; disabling parallel execution and memory patterns"
+                );
+            }
+            self.parallel_execution = Some(false);
+            self.enable_mem_pattern = Some(false);
+        }
+        self
+    }
+
+    fn clear_auto_selection(&mut self) {
+        if let Some(entries) = self.session_config_entries.as_mut() {
+            entries.remove(AUTO_DEVICE_CONFIG_ENTRY);
+            if entries.is_empty() {
+                self.session_config_entries = None;
+            }
+        }
+    }
+
+    fn auto_with_probe(
+        candidates: Vec<OrtExecutionProvider>,
+        mut probe: impl FnMut(&OrtExecutionProvider) -> ort::Result<()>,
+    ) -> Self {
+        let mut providers = Vec::new();
+        for provider in candidates {
+            match probe(&provider) {
+                Ok(()) => providers.push(provider),
+                Err(error) => {
+                    tracing::debug!(?provider, %error, "automatic execution provider selection failed")
+                }
+            }
+        }
+        let uses_directml = providers
+            .iter()
+            .any(|provider| matches!(provider, OrtExecutionProvider::DirectML { .. }));
+        tracing::info!(provider = ?providers.first().unwrap_or(&OrtExecutionProvider::CPU), "automatically selected execution provider");
+        providers.push(OrtExecutionProvider::CPU);
+        let config = Self::new().with_execution_providers(providers);
+        if uses_directml {
+            config
+                .with_parallel_execution(false)
+                .with_memory_pattern(false)
+        } else {
+            config
+        }
+    }
+
     /// Sets the number of intra-op threads.
     pub fn with_intra_threads(mut self, threads: usize) -> Self {
         self.intra_threads = Some(threads);
@@ -219,12 +378,14 @@ impl OrtSessionConfig {
 
     /// Sets the execution providers, in order of preference.
     pub fn with_execution_providers(mut self, providers: Vec<OrtExecutionProvider>) -> Self {
+        self.clear_auto_selection();
         self.execution_providers = Some(providers);
         self
     }
 
     /// Appends a single execution provider.
     pub fn add_execution_provider(mut self, provider: OrtExecutionProvider) -> Self {
+        self.clear_auto_selection();
         if let Some(ref mut providers) = self.execution_providers {
             providers.push(provider);
         } else {
@@ -337,6 +498,210 @@ impl OrtSessionConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn auto_candidates() -> Vec<OrtExecutionProvider> {
+        vec![
+            OrtExecutionProvider::CUDA {
+                device_id: Some(0),
+                gpu_mem_limit: None,
+                arena_extend_strategy: None,
+                cudnn_conv_algo_search: None,
+                cudnn_conv_use_max_workspace: None,
+            },
+            OrtExecutionProvider::CoreML {
+                ane_only: None,
+                subgraphs: None,
+            },
+            OrtExecutionProvider::DirectML { device_id: Some(0) },
+        ]
+    }
+
+    #[cfg(not(any(feature = "cuda", feature = "coreml", feature = "directml")))]
+    #[test]
+    fn auto_without_accelerator_features_is_cpu_only() {
+        let auto = OrtSessionConfig::auto();
+        let cpu = OrtSessionConfig::new().with_execution_providers(vec![OrtExecutionProvider::CPU]);
+        assert_eq!(
+            serde_json::to_value(auto).unwrap(),
+            serde_json::to_value(cpu).unwrap()
+        );
+    }
+
+    #[test]
+    fn auto_registration_failures_leave_a_cpu_only_configuration() {
+        let candidates = auto_candidates();
+        let mut attempted = Vec::new();
+        let config = OrtSessionConfig::auto_with_probe(candidates.clone(), |provider| {
+            attempted.push(provider.clone());
+            Err(ort::Error::new("provider unavailable"))
+        });
+        assert_eq!(attempted, candidates);
+        assert_eq!(
+            config.get_execution_providers(),
+            [OrtExecutionProvider::CPU]
+        );
+        assert!(!config.has_accelerator_provider());
+        assert_eq!(config.parallel_execution, None);
+        assert_eq!(config.enable_mem_pattern, None);
+    }
+
+    #[test]
+    fn auto_retains_priority_and_configures_directml() {
+        let candidates = auto_candidates();
+        let config = OrtSessionConfig::auto_with_probe(candidates.clone(), |_| Ok(()));
+        let mut expected = candidates;
+        expected.push(OrtExecutionProvider::CPU);
+        assert_eq!(config.get_execution_providers(), expected);
+        assert!(config.has_accelerator_provider());
+        assert_eq!(config.parallel_execution, Some(false));
+        assert_eq!(config.enable_mem_pattern, Some(false));
+    }
+
+    #[test]
+    fn auto_resolution_preserves_tuning_and_removes_internal_marker() {
+        let mut candidates = auto_candidates();
+        candidates.push(OrtExecutionProvider::CPU);
+        let config = OrtSessionConfig::new()
+            .with_execution_providers(candidates)
+            .with_pending_auto_selection()
+            .add_config_entry("session.dynamic_block_base", "4")
+            .with_intra_threads(2)
+            .with_parallel_execution(true)
+            .with_memory_pattern(true);
+        assert!(config.has_pending_auto_selection());
+        let resolved = config.resolve_auto_with_probe(|_| Err(ort::Error::new("unavailable")));
+        assert!(!resolved.has_pending_auto_selection());
+        assert!(!resolved.has_accelerator_provider());
+        let expected = OrtSessionConfig::new()
+            .with_execution_providers(vec![OrtExecutionProvider::CPU])
+            .add_config_entry("session.dynamic_block_base", "4")
+            .with_intra_threads(2)
+            .with_parallel_execution(true)
+            .with_memory_pattern(true);
+        assert_eq!(
+            serde_json::to_value(resolved).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn auto_resolved_directml_overrides_incompatible_caller_settings() {
+        let mut candidates = auto_candidates();
+        candidates.push(OrtExecutionProvider::CPU);
+        let config = OrtSessionConfig::new()
+            .with_execution_providers(candidates)
+            .with_pending_auto_selection()
+            .with_parallel_execution(true)
+            .with_memory_pattern(true);
+        let resolved = config.resolve_auto_with_probe(|provider| {
+            if matches!(provider, OrtExecutionProvider::DirectML { .. }) {
+                Ok(())
+            } else {
+                Err(ort::Error::new("unavailable"))
+            }
+        });
+        assert_eq!(
+            resolved.get_execution_providers(),
+            [
+                OrtExecutionProvider::DirectML { device_id: Some(0) },
+                OrtExecutionProvider::CPU,
+            ]
+        );
+        assert_eq!(resolved.parallel_execution, Some(false));
+        assert_eq!(resolved.enable_mem_pattern, Some(false));
+    }
+
+    #[test]
+    fn direct_provider_replacement_cancels_pending_auto_selection() {
+        let mut candidates = auto_candidates();
+        candidates.push(OrtExecutionProvider::CPU);
+        let mut config = OrtSessionConfig::new()
+            .with_execution_providers(candidates)
+            .with_pending_auto_selection();
+        assert!(config.has_pending_auto_selection());
+        let explicit = vec![
+            OrtExecutionProvider::OpenVINO {
+                device_type: None,
+                num_threads: None,
+            },
+            OrtExecutionProvider::CPU,
+        ];
+        config.execution_providers = Some(explicit.clone());
+        assert!(!config.has_pending_auto_selection());
+        let resolved =
+            config.resolve_auto_with_probe(|_| panic!("explicit providers must not be probed"));
+        assert_eq!(resolved.get_execution_providers(), explicit);
+        assert!(resolved.session_config_entries.is_none());
+    }
+
+    #[test]
+    fn tuning_a_candidate_keeps_auto_selection_pending() {
+        let mut config = OrtSessionConfig::new()
+            .with_execution_providers(auto_candidates())
+            .with_pending_auto_selection();
+        if let Some(OrtExecutionProvider::CUDA {
+            arena_extend_strategy,
+            ..
+        }) = config
+            .execution_providers
+            .as_mut()
+            .and_then(|eps| eps.first_mut())
+        {
+            *arena_extend_strategy = Some("SameAsRequested".to_string());
+        }
+        assert!(config.has_pending_auto_selection());
+    }
+
+    #[test]
+    fn explicit_provider_resolution_never_probes_hardware() {
+        let config = OrtSessionConfig::new().with_execution_providers(auto_candidates());
+        let expected = serde_json::to_value(&config).unwrap();
+        let resolved =
+            config.resolve_auto_with_probe(|_| panic!("explicit preferences must not be probed"));
+        assert_eq!(serde_json::to_value(resolved).unwrap(), expected);
+    }
+
+    #[test]
+    fn explicit_provider_setters_clear_pending_auto_selection() {
+        let pending = OrtSessionConfig::new()
+            .with_execution_providers(auto_candidates())
+            .with_pending_auto_selection();
+        let explicit = pending
+            .clone()
+            .with_execution_providers(vec![OrtExecutionProvider::CPU]);
+        assert!(!explicit.has_pending_auto_selection());
+        assert_eq!(
+            explicit.get_execution_providers(),
+            [OrtExecutionProvider::CPU]
+        );
+        let appended = pending.add_execution_provider(OrtExecutionProvider::CPU);
+        assert!(!appended.has_pending_auto_selection());
+        let mut expected = auto_candidates();
+        expected.push(OrtExecutionProvider::CPU);
+        assert_eq!(appended.get_execution_providers(), expected);
+    }
+
+    #[test]
+    fn auto_skips_an_unavailable_cuda_provider() {
+        let config = OrtSessionConfig::auto_with_probe(auto_candidates(), |provider| {
+            if matches!(provider, OrtExecutionProvider::CUDA { .. }) {
+                Err(ort::Error::new("CUDA driver unavailable"))
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(
+            config.get_execution_providers(),
+            [
+                OrtExecutionProvider::CoreML {
+                    ane_only: None,
+                    subgraphs: None
+                },
+                OrtExecutionProvider::DirectML { device_id: Some(0) },
+                OrtExecutionProvider::CPU,
+            ]
+        );
+    }
 
     #[test]
     fn test_ort_session_config_builder() {

@@ -81,8 +81,8 @@ struct Args {
     #[arg(long)]
     model_name: Option<String>,
 
-    /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
-    #[arg(long, default_value = "cpu")]
+    /// Device to use for inference (e.g., 'auto', 'cpu', 'cuda', 'cuda:0')
+    #[arg(long, default_value = "auto")]
     device: String,
 
     /// Score threshold for recognition (default: 0.5)

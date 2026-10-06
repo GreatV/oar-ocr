@@ -41,8 +41,8 @@ struct Args {
     #[arg(required = true)]
     images: Vec<PathBuf>,
 
-    /// Device to run on: cpu, cuda, cuda:N, or metal (default: cpu)
-    #[arg(short, long, default_value = "cpu")]
+    /// Device to run on: auto, cpu, cuda, cuda:N, or metal (default: auto)
+    #[arg(short, long, default_value = "auto")]
     device: String,
 
     /// Maximum number of tokens to generate (default: 4096)

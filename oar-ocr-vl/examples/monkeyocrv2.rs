@@ -55,8 +55,8 @@ struct Args {
     #[arg(short, long, value_enum, default_value = "end-to-end")]
     task: Task,
 
-    /// Device: cpu, cuda, cuda:N, or metal
-    #[arg(short, long, default_value = "cpu")]
+    /// Device: auto, cpu, cuda, cuda:N, or metal
+    #[arg(short, long, default_value = "auto")]
     device: String,
 
     /// Maximum generated tokens per image

@@ -134,4 +134,5 @@ pub use layout::{LayoutDetectionElement, LayoutDetections, LayoutSource, StaticL
 pub use pipeline::page_parser::LayoutFirstPageParser;
 pub use pipeline::page_parser::{LayoutPageParser, LayoutPageParserOptions};
 pub use pp_doclayout::{PpDocLayout, PpDocLayoutVersion};
+pub use runtime::device::auto_device;
 pub use structure::{LayoutElement, LayoutElementType, StructureResult, TableResult, TableType};

@@ -15,7 +15,7 @@
 //!
 //! * `-m, --model-dir` - Path to the PaddleOCR-VL model directory
 //! * `-t, --task` - Recognition task: ocr, table, formula, chart, spotting, seal (default: ocr)
-//! * `-d, --device` - Device to run on: cpu, cuda, cuda:N, or metal (default: cpu)
+//! * `-d, --device` - Device to run on: auto, cpu, cuda, cuda:N, or metal (default: auto)
 //! * `--max-tokens` - Maximum number of tokens to generate (default: 512)
 //! * `<IMAGES>...` - Paths to input images to process
 //!
@@ -81,8 +81,8 @@ struct Args {
     #[arg(short, long, default_value = "ocr")]
     task: String,
 
-    /// Device to run on: cpu, cuda, cuda:N, or metal (default: cpu)
-    #[arg(short, long, default_value = "cpu")]
+    /// Device to run on: auto, cpu, cuda, cuda:N, or metal (default: auto)
+    #[arg(short, long, default_value = "auto")]
     device: String,
 
     /// Maximum number of tokens to generate (default: 512)

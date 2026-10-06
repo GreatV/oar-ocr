@@ -15,7 +15,7 @@
 //! * `-m, --model-path` - Path to the document rectification model file
 //! * `-o, --output-dir` - Directory to save rectified images (required)
 //! * `--vis` - Enable visualization output (saves side-by-side comparison images)
-//! * `--device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
+//! * `--device` - Device to use for inference (e.g., 'auto', 'cpu', 'cuda', 'cuda:0')
 //! * `<IMAGES>...` - Paths to input document images to rectify
 //!
 //! # Example
@@ -59,8 +59,8 @@ struct Args {
     #[arg(long)]
     vis: bool,
 
-    /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
-    #[arg(long, default_value = "cpu")]
+    /// Device to use for inference (e.g., 'auto', 'cpu', 'cuda', 'cuda:0')
+    #[arg(long, default_value = "auto")]
     device: String,
 
     /// Enable verbose output

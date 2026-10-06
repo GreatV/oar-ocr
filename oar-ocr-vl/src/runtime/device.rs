@@ -3,6 +3,43 @@
 use crate::api::error::Error;
 use candle_core::{DType, Device, Tensor};
 
+/// Select CUDA device 0, then Metal device 0, then CPU.
+///
+/// Only compiled backends are tried. Accelerator initialization failures are
+/// logged at debug level and CPU is always available as the final fallback.
+pub fn auto_device() -> Device {
+    let candidates = &[
+        #[cfg(feature = "cuda")]
+        "CUDA",
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        "Metal",
+    ];
+    select_device(candidates, |name| match name {
+        #[cfg(feature = "cuda")]
+        "CUDA" => Device::new_cuda(0),
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        "Metal" => Device::new_metal(0),
+        _ => Err(candle_core::Error::Msg(format!("unknown backend {name}"))),
+    })
+}
+
+fn select_device(
+    candidates: &[&str],
+    mut create: impl FnMut(&str) -> candle_core::Result<Device>,
+) -> Device {
+    for name in candidates {
+        match create(name) {
+            Ok(device) => {
+                tracing::info!("automatically selected {name} device 0");
+                return device;
+            }
+            Err(error) => tracing::debug!("automatic {name} device selection failed: {error}"),
+        }
+    }
+    tracing::info!("automatically selected CPU device");
+    Device::Cpu
+}
+
 #[cfg(not(feature = "cuda"))]
 fn cuda_not_enabled() -> Error {
     Error::config("CUDA support not enabled. Compile with --features cuda")
@@ -33,6 +70,7 @@ fn parse_with_ordinal(
 pub fn parse_device(device: &str) -> Result<Device, Error> {
     let device = device.to_lowercase();
     match device.as_str() {
+        "auto" => Ok(auto_device()),
         "cpu" => Ok(Device::Cpu),
         "cuda" | "gpu" => {
             #[cfg(feature = "cuda")]
@@ -79,7 +117,7 @@ pub fn parse_device(device: &str) -> Result<Device, Error> {
             }
         }
         _ => Err(Error::config(format!(
-            "unknown device {device:?}; use cpu, cuda, cuda:N, metal, or metal:N"
+            "unknown device {device:?}; use auto, cpu, cuda, cuda:N, metal, or metal:N"
         ))),
     }
 }
@@ -151,4 +189,47 @@ pub fn free_device_memory(device: &Device) -> Option<usize> {
     }
     let _ = device;
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_falls_through_failed_backends_and_stops_at_success() {
+        let mut attempted = Vec::new();
+        let device = select_device(&["CUDA", "Metal", "unused"], |name| {
+            attempted.push(name.to_string());
+            if name == "CUDA" {
+                Err(candle_core::Error::Msg("driver unavailable".to_string()))
+            } else {
+                Ok(Device::Cpu)
+            }
+        });
+        assert!(device.is_cpu());
+        assert_eq!(attempted, ["CUDA", "Metal"]);
+    }
+
+    #[test]
+    fn selection_falls_back_to_cpu_when_every_backend_fails() {
+        let mut attempted = Vec::new();
+        let device = select_device(&["CUDA", "Metal"], |name| {
+            attempted.push(name.to_string());
+            Err(candle_core::Error::Msg("backend unavailable".to_string()))
+        });
+        assert!(device.is_cpu());
+        assert_eq!(attempted, ["CUDA", "Metal"]);
+        assert_eq!(select_dtype(&device), DType::F32);
+    }
+
+    #[cfg(not(any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+    #[test]
+    fn auto_without_accelerator_features_is_cpu_and_case_insensitive() {
+        assert!(auto_device().is_cpu());
+        for name in ["auto", "AUTO", "Auto"] {
+            let device = parse_device(name).unwrap();
+            assert!(device.is_cpu());
+            assert_eq!(select_dtype(&device), DType::F32);
+        }
+    }
 }

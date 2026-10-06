@@ -257,7 +257,9 @@ impl UniMERNetModelBuilder {
         model_source: impl Into<crate::core::ModelSource>,
     ) -> Result<UniMERNetModel, OCRError> {
         // Create ONNX inference engine
-        let ort_config = self.ort_config.map(Self::configure_unimernet_ort_for_cuda);
+        let ort_config = self
+            .ort_config
+            .map(|config| Self::prepare_ort_config(config, OrtSessionConfig::resolve_auto));
 
         let inference = if ort_config.is_some() {
             use crate::core::config::ModelInferenceConfig;
@@ -289,6 +291,15 @@ impl UniMERNetModelBuilder {
         }
 
         UniMERNetModel::new(inference, preprocess_config)
+    }
+
+    /// Resolves automatic provider selection before applying CUDA-only
+    /// settings, so a CPU fallback keeps the caller's optimization settings.
+    fn prepare_ort_config(
+        config: OrtSessionConfig,
+        resolve: impl FnOnce(OrtSessionConfig) -> OrtSessionConfig,
+    ) -> OrtSessionConfig {
+        Self::configure_unimernet_ort_for_cuda(resolve(config))
     }
 
     fn configure_unimernet_ort_for_cuda(mut config: OrtSessionConfig) -> OrtSessionConfig {
@@ -393,6 +404,38 @@ mod tests {
                 .map(String::as_str),
             Some("ConstantFolding")
         );
+    }
+
+    #[test]
+    fn auto_cpu_fallback_keeps_unimernet_ort_config_unchanged() {
+        let config = OrtSessionConfig::new()
+            .with_execution_providers(vec![
+                OrtExecutionProvider::CUDA {
+                    device_id: Some(0),
+                    gpu_mem_limit: None,
+                    arena_extend_strategy: None,
+                    cudnn_conv_algo_search: None,
+                    cudnn_conv_use_max_workspace: None,
+                },
+                OrtExecutionProvider::CPU,
+            ])
+            .with_pending_auto_selection()
+            .with_optimization_level(OrtGraphOptimizationLevel::All);
+
+        let configured = UniMERNetModelBuilder::prepare_ort_config(config, |config| {
+            config.resolve_auto_with_probe(|_| Err(ort::Error::new("CUDA unavailable")))
+        });
+
+        assert_eq!(
+            configured.get_execution_providers(),
+            [OrtExecutionProvider::CPU]
+        );
+        assert!(matches!(
+            configured.optimization_level,
+            Some(OrtGraphOptimizationLevel::All)
+        ));
+        assert_eq!(configured.enable_mem_pattern, None);
+        assert!(configured.session_config_entries.is_none());
     }
 
     #[test]

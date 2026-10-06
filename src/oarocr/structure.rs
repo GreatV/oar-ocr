@@ -760,6 +760,11 @@ impl OARStructureBuilder {
             }
         }
 
+        self.ort_session_config = self.ort_session_config.map(OrtSessionConfig::resolve_auto);
+        self.formula_ort_session_config = self
+            .formula_ort_session_config
+            .map(OrtSessionConfig::resolve_auto);
+
         // Resolve every model/dict/tokenizer path through the auto-download
         // cache when the `auto-download` feature is enabled. With the feature
         // off these calls are infallible no-ops.

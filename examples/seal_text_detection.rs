@@ -18,7 +18,7 @@
 //! * `--score-threshold` - Pixel-level threshold for text detection
 //! * `--box-threshold` - Box-level threshold for filtering detections
 //! * `--unclip-ratio` - Expansion ratio for detected regions
-//! * `--device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
+//! * `--device` - Device to use for inference (e.g., 'auto', 'cpu', 'cuda', 'cuda:0')
 //! * `<IMAGES>...` - Paths to input images to process
 
 mod utils;
@@ -69,8 +69,8 @@ struct Args {
     #[arg(long, default_value = "0.5")]
     unclip_ratio: f32,
 
-    /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
-    #[arg(long, default_value = "cpu")]
+    /// Device to use for inference (e.g., 'auto', 'cpu', 'cuda', 'cuda:0')
+    #[arg(long, default_value = "auto")]
     device: String,
 }
 

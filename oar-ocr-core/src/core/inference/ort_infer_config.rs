@@ -1,17 +1,39 @@
 use super::*;
 use crate::core::config::{
-    COREML_CONFIG_ENTRY, OrtCoreMLConfig, OrtExecutionProvider, OrtGraphOptimizationLevel as OG,
-    OrtSessionConfig,
+    AUTO_DEVICE_CONFIG_ENTRY, COREML_CONFIG_ENTRY, OrtCoreMLConfig, OrtExecutionProvider,
+    OrtGraphOptimizationLevel as OG, OrtSessionConfig,
 };
 use ort::ep::ExecutionProviderDispatch;
 use ort::logging::LogLevel;
 use ort::session::builder::{GraphOptimizationLevel as GOL, SessionBuilder};
 
 impl OrtInfer {
+    pub(crate) fn probe_execution_provider(provider: &OrtExecutionProvider) -> ort::Result<()> {
+        let providers = Self::build_execution_providers(std::slice::from_ref(provider), None)?;
+        let providers: Vec<_> = providers
+            .into_iter()
+            .map(ExecutionProviderDispatch::error_on_failure)
+            .collect();
+        // DirectML requires sequential execution and disabled memory patterns.
+        let builder = SessionBuilder::new()?
+            .with_intra_threads(1)?
+            .with_parallel_execution(false)?
+            .with_memory_pattern(false)?;
+        builder.with_execution_providers(providers)?;
+        Ok(())
+    }
+
     pub(super) fn apply_ort_config(
         mut builder: SessionBuilder,
         cfg: &OrtSessionConfig,
     ) -> Result<SessionBuilder, ort::Error> {
+        let resolved;
+        let cfg = if cfg.has_pending_auto_selection() {
+            resolved = cfg.clone().resolve_auto();
+            &resolved
+        } else {
+            cfg
+        };
         if let Some(intra) = cfg.intra_threads {
             builder = builder.with_intra_threads(intra)?;
         }
@@ -54,7 +76,7 @@ impl OrtInfer {
         }
         if let Some(entries) = &cfg.session_config_entries {
             for (key, value) in entries {
-                if key == COREML_CONFIG_ENTRY {
+                if key == COREML_CONFIG_ENTRY || key == AUTO_DEVICE_CONFIG_ENTRY {
                     continue;
                 }
                 builder = builder.with_config_entry(key, value)?;

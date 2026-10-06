@@ -26,6 +26,10 @@ fn reject_directml_parallel_execution(
     let Some(config) = config else {
         return Ok(());
     };
+    if config.has_pending_auto_selection() {
+        // Automatic selection is resolved by the builder; DirectML may be unavailable.
+        return Ok(());
+    }
     let uses_directml = config
         .execution_providers
         .iter()
@@ -86,6 +90,7 @@ pub fn apply_ort_overrides(
 ///
 /// # Supported formats
 ///
+/// - `"auto"` -> Available compiled accelerators, with CPU fallback
 /// - `"cpu"` -> CPU execution provider (returns None as CPU is default)
 /// - `"cuda"` or `"cuda:0"` -> CUDA execution provider with device ID
 /// - `"directml"`, `"directml:0"`, or `"dml:0"` -> DirectML execution provider
@@ -120,6 +125,10 @@ pub fn parse_device_config(
     device: &str,
 ) -> Result<Option<OrtSessionConfig>, Box<dyn std::error::Error>> {
     let device_lower = device.to_lowercase();
+
+    if device_lower == "auto" {
+        return Ok(Some(OrtSessionConfig::auto()));
+    }
 
     if device_lower == "cpu" {
         // CPU is the default, no need for special config
@@ -288,7 +297,7 @@ pub fn parse_device_config(
         }
     }
 
-    let mut supported = vec!["cpu"];
+    let mut supported = vec!["auto", "cpu"];
     if cfg!(feature = "cuda") {
         supported.push("cuda");
         supported.push("cuda:N");
@@ -312,6 +321,19 @@ pub fn parse_device_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(any(feature = "cuda", feature = "coreml", feature = "directml")))]
+    #[test]
+    fn auto_is_case_insensitive_and_falls_back_to_cpu() {
+        for name in ["auto", "AUTO", "Auto"] {
+            let config = parse_device_config(name).unwrap().unwrap();
+            assert!(!config.has_accelerator_provider());
+            assert_eq!(
+                config.get_execution_providers(),
+                [oar_ocr::core::config::OrtExecutionProvider::CPU]
+            );
+        }
+    }
 
     #[test]
     fn cpu_needs_no_explicit_session_config() {

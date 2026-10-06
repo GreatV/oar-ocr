@@ -101,6 +101,10 @@ The crate's custom CUDA kernels compile to PTX for the oldest GPU detected by `n
 
 The snippets below use canonical model repository IDs for the checkpoints.
 
+Examples default to `--device auto`: compiled CUDA(0), then Metal(0), then CPU, falling back on initialization failure.
+Library callers opt in with `auto_device()` or `utils::parse_device("auto")`; the existing dtype probe is unchanged.
+See [Automatic Device Selection](../docs/usage.md#automatic-device-selection) for details; use `--device cpu` to require CPU.
+
 ### PaddleOCR-VL
 
 Use PaddleOCR-VL to recognize a specific aspect of an image (e.g., just the table or text).

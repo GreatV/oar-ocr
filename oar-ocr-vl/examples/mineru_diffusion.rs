@@ -19,7 +19,7 @@ struct Args {
     model_dir: PathBuf,
     #[arg(required = true)]
     images: Vec<PathBuf>,
-    #[arg(short, long, default_value = "cpu")]
+    #[arg(short, long, default_value = "auto")]
     device: String,
     /// Run flat full-page recognition instead of two-stage parsing.
     #[arg(long, default_value_t = false)]

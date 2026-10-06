@@ -17,7 +17,7 @@
 //! * `--vis` - Enable visualization output
 //! * `--model-name` - Model name to explicitly specify the model type
 //! * `--score-threshold` - Score threshold for layout elements (default: 0.5)
-//! * `--device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
+//! * `--device` - Device to use for inference (e.g., 'auto', 'cpu', 'cuda', 'cuda:0')
 //! * `<IMAGES>...` - Paths to input document images to process
 //!
 //! # Example
@@ -84,8 +84,8 @@ struct Args {
     #[arg(long)]
     dump_json: bool,
 
-    /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
-    #[arg(long, default_value = "cpu")]
+    /// Device to use for inference (e.g., 'auto', 'cpu', 'cuda', 'cuda:0')
+    #[arg(long, default_value = "auto")]
     device: String,
 }
 

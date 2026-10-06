@@ -18,7 +18,7 @@
 //! * `--model-type` - Explicit model type override (e.g., 'rt-detr-l_wired_table_cell_det')
 //! * `--score-threshold` - Score threshold for detections (default: 0.3)
 //! * `--max-cells` - Maximum number of cells per image (default: 300)
-//! * `--device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
+//! * `--device` - Device to use for inference (e.g., 'auto', 'cpu', 'cuda', 'cuda:0')
 //! * `<IMAGES>...` - Input document images containing tables
 
 mod utils;
@@ -66,8 +66,8 @@ struct Args {
     #[arg(long, default_value_t = 300)]
     max_cells: usize,
 
-    /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
-    #[arg(long, default_value = "cpu")]
+    /// Device to use for inference (e.g., 'auto', 'cpu', 'cuda', 'cuda:0')
+    #[arg(long, default_value = "auto")]
     device: String,
 }
 
