@@ -135,6 +135,41 @@ The layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR) require a
 PP-DocLayout directory in the load options; loading fails with a clear error
 when it is missing.
 
+With the `auto-download` feature, `AnyPageParser::from_pretrained` downloads
+the checkpoint named by the model ID when it is not cached, then loads it
+through the same path:
+
+```rust
+use candle_core::Device;
+use oar_ocr_vl::{
+    AnyPageParser, AnyPageParserModel, AnyPageParserPretrainedOptions, DownloadSource,
+};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let parser = AnyPageParser::from_pretrained(
+    AnyPageParserModel::PaddleOcrVl1_5,
+    Device::Cpu,
+    &AnyPageParserPretrainedOptions::default(),
+)?;
+# let _ = parser;
+# Ok(())
+# }
+```
+
+ModelScope is the default source and Hugging Face is selectable with
+`with_source(DownloadSource::HuggingFace)`; `with_revision` pins a revision
+(the sources' defaults are `master` and `main`), and the revision used is
+recorded in a `.oar-revision` marker. Snapshots land under
+`$OAR_HOME/models/<org>/<name>` (`$OAR_HOME` defaults to `~/.oar`, shared
+with oar-ocr-core), each file is verified against the SHA-256 the source API
+publishes (Hugging Face publishes it for LFS files), and complete cached
+files are never re-downloaded. The layout-composed models also download a
+PP-DocLayout checkpoint — `PaddlePaddle/PP-DocLayoutV3_safetensors` by
+default, overridable with `with_layout` or replaced by a local directory with
+`with_layout_dir`. Note that a few model IDs are published on Hugging Face
+only; a repository missing from the selected source fails with an error
+suggesting the other source.
+
 ## Installation
 
 This crate is self-contained: everything runs on Candle, it does not depend on `oar-ocr-core`, and **no build of it links ONNX Runtime**.
@@ -147,6 +182,13 @@ To enable GPU acceleration (CUDA), add the feature flag:
 
 ```bash
 cargo add oar-ocr-vl --features cuda
+```
+
+To download checkpoints by model ID instead of managing local directories,
+enable `auto-download` (see [Unified Page Parsing](#unified-page-parsing)):
+
+```bash
+cargo add oar-ocr-vl --features auto-download
 ```
 
 On macOS, enable Metal instead:

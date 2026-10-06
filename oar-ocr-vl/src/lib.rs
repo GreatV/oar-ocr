@@ -126,6 +126,8 @@ pub use xiaomi_ocr::{XiaomiOcr, XiaomiOcrParseOptions};
 pub use api::any_page_parser::{
     AnyPageParser, AnyPageParserLoadOptions, AnyPageParserModel, AnyPageParserOptions,
 };
+#[cfg(feature = "auto-download")]
+pub use api::download::{AnyPageParserPretrainedOptions, DEFAULT_LAYOUT_REPO, DownloadSource};
 pub use api::generation::GenerationOptions;
 pub use api::page_parser::PageParser;
 pub use api::recognition::{BackendCapabilities, RecognitionBackend, RecognitionTask};
