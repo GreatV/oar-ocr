@@ -7,7 +7,8 @@ runs. Run it from the repository root.
 ## Run
 
 Put the pages to measure in the gitignored `benchmark-inputs/` directory, or pass
-image files and directories with repeated `--input` flags. Then:
+image files and directories (top-level images only) with repeated `--input`
+flags. Then:
 
 ```bash
 cargo run --release -p oar-ocr-bench --features cuda,nvml --bin oar-bench -- \

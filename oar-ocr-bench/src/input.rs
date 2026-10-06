@@ -41,25 +41,20 @@ pub(crate) fn from_paths(root: &Path, paths: &[PathBuf]) -> Result<Inputs> {
     Ok(inputs)
 }
 
-fn walk(path: &Path, files: &mut BTreeSet<PathBuf>) -> Result<()> {
-    for entry in
-        std::fs::read_dir(path).with_context(|| format!("read directory {}", path.display()))?
-    {
-        let path = entry?.path();
-        if path.is_dir() {
-            walk(&path, files)?;
-        } else if image_file(&path) {
-            files.insert(path);
-        }
-    }
-    Ok(())
-}
-
-/// Loads pages in sorted path order, up to `max_pages`.
+/// Loads pages in sorted path order, up to `max_pages`. Directories contribute
+/// their top-level image files; subdirectories are not searched.
 pub(crate) fn load(root: &Path, inputs: &Inputs) -> Result<Vec<Page>> {
     let mut files: BTreeSet<PathBuf> = inputs.images.iter().map(|p| root.join(p)).collect();
     for dir in &inputs.image_dirs {
-        walk(&root.join(dir), &mut files)?;
+        let dir = root.join(dir);
+        for entry in
+            std::fs::read_dir(&dir).with_context(|| format!("read directory {}", dir.display()))?
+        {
+            let path = entry?.path();
+            if path.is_file() && image_file(&path) {
+                files.insert(path);
+            }
+        }
     }
     let pages = files
         .into_iter()
@@ -89,11 +84,17 @@ mod tests {
     #[test]
     fn directories_are_sorted_and_limited() {
         let dir = tempfile::tempdir().unwrap();
-        for name in ["b.png", "a.png"] {
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        for name in ["b.png", "a.png", "nested/c.png"] {
             RgbImage::new(2, 3).save(dir.path().join(name)).unwrap();
         }
         let inputs = from_paths(dir.path(), &[".".into()]).unwrap();
         assert_eq!(inputs.image_dirs, ["."]);
+        let all = load(dir.path(), &inputs).unwrap();
+        assert_eq!(
+            all.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["a.png", "b.png"]
+        );
         let pages = load(
             dir.path(),
             &Inputs {
