@@ -3,6 +3,7 @@
 pub mod any_page_parser;
 pub mod error;
 pub mod generation;
+pub(crate) mod model_detect;
 pub mod page_parser;
 pub mod recognition;
 pub mod runtime;

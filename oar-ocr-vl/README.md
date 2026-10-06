@@ -104,6 +104,35 @@ maps to each model's generation budget (including `MinerUDiffusion`'s
 (`MinerU` and the layout-composed models); parsers without a matching concept
 ignore the knob.
 
+`AnyPageParser::from_dir` loads the right parser from a model directory by
+reading its `config.json`: the `architectures` entry identifies the model, with
+`vision_config.model_type` separating OvisOCR2 from Xiaomi-OCR-0 (they share a
+Qwen3.5 text tower but not a vision tower), and each model then loads through
+its own `from_dir` with its own defaults. Unsupported or ambiguous
+configurations fail with an error naming what was found and the supported
+architectures — there is no fallback:
+
+```rust
+use candle_core::Device;
+use oar_ocr_vl::{AnyPageParser, AnyPageParserLoadOptions};
+
+// PaddleOCR-VL composes an external PP-DocLayout detector.
+let options = AnyPageParserLoadOptions::default()
+    .with_layout_dir("PaddlePaddle/PP-DocLayoutV3_safetensors");
+let parser = AnyPageParser::from_dir_with_options(
+    "PaddlePaddle/PaddleOCR-VL-1.5",
+    Device::Cpu,
+    &options,
+)?;
+
+// Model-native parsers need no options.
+let parser = AnyPageParser::from_dir("tencent/HunyuanOCR", Device::Cpu)?;
+```
+
+The layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR) require a
+PP-DocLayout directory in the load options; loading fails with a clear error
+when it is missing.
+
 ## Installation
 
 This crate is self-contained: everything runs on Candle, it does not depend on `oar-ocr-core`, and **no build of it links ONNX Runtime**.

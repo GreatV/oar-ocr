@@ -1,6 +1,7 @@
-//! Model-agnostic complete-page parsing.
+//! Model-agnostic complete-page parsing and model-directory loading.
 
 use crate::api::error::Error;
+use crate::api::model_detect::{DetectedModel, detect_model};
 use crate::api::page_parser::PageParser;
 use crate::api::recognition::RecognitionBackend;
 use crate::document::page::PageDocument;
@@ -16,10 +17,14 @@ use crate::ovisocr2::{OvisOcr2, OvisOcr2ParseOptions};
 use crate::paddleocr_vl::PaddleOcrVl;
 use crate::pipeline::page_parser::{LayoutPageParser, LayoutPageParserOptions};
 use crate::pp_doclayout::PpDocLayout;
+use crate::runtime::checkpoint::load_json_config;
 use crate::teleocr::TeleOcr;
 use crate::wevisdoc::{WeVisDoc, WeVisDocParseOptions};
 use crate::xiaomi_ocr::{XiaomiOcr, XiaomiOcrParseOptions};
+use candle_core::Device;
 use image::RgbImage;
+use serde_json::Value;
+use std::path::{Path, PathBuf};
 
 /// Per-page knobs shared by every parser behind [`AnyPageParser`].
 ///
@@ -61,14 +66,36 @@ impl AnyPageParserOptions {
     }
 }
 
+/// Directory-loading options for [`AnyPageParser::from_dir_with_options`].
+///
+/// The layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR) combine their
+/// recognition backbone with an external PP-DocLayout detector, so loading
+/// them needs a PP-DocLayout checkpoint directory in `layout_dir`. Every
+/// other model ignores it.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct AnyPageParserLoadOptions {
+    /// PP-DocLayout checkpoint directory used by the layout-composed models.
+    pub layout_dir: Option<PathBuf>,
+}
+
+impl AnyPageParserLoadOptions {
+    /// Set the PP-DocLayout directory used by the layout-composed models.
+    pub fn with_layout_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.layout_dir = Some(dir.into());
+        self
+    }
+}
+
 /// A complete-page parser that dispatches to any of the crate's parsers.
 ///
 /// Every supported model parses through the same [`PageParser`] contract
 /// behind this enum, so callers can pick a parser at runtime — from a config
 /// file, CLI flag, or benchmark manifest — without writing per-model dispatch.
-/// Convert an already-loaded model with [`From`]; `AnyPageParserOptions`
-/// carries the knobs the parsers share and leaves every other model-specific
-/// option at its default.
+/// Convert an already-loaded model with [`From`], or load one from its model
+/// directory with [`from_dir`](Self::from_dir), which detects the model from
+/// its `config.json`. `AnyPageParserOptions` carries the knobs the parsers
+/// share and leaves every other model-specific option at its default.
 ///
 /// ```no_run
 /// use oar_ocr_vl::{
@@ -186,6 +213,103 @@ impl From<LayoutPageParser<PpDocLayout, TeleOcr>> for AnyPageParser {
     fn from(model: LayoutPageParser<PpDocLayout, TeleOcr>) -> Self {
         Self::TeleOcr(model)
     }
+}
+
+impl AnyPageParser {
+    /// Detects and loads the parser stored in a model directory.
+    ///
+    /// Detection reads the directory's `config.json`: the `architectures`
+    /// entries identify the model, with `vision_config.model_type` separating
+    /// the two Qwen3.5-based models (OvisOCR2 and Xiaomi-OCR-0 share a text
+    /// tower). The matching parser then loads through its own `from_dir` with
+    /// its own defaults. Unsupported or ambiguous configurations return an
+    /// error naming what was found and the supported architectures; there is
+    /// no fallback. Layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR)
+    /// additionally need a PP-DocLayout directory, which
+    /// [`from_dir_with_options`](Self::from_dir_with_options) accepts.
+    pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
+        Self::from_dir_with_options(model_dir, device, &AnyPageParserLoadOptions::default())
+    }
+
+    /// Detects and loads a parser from a model directory with loading options.
+    ///
+    /// See [`from_dir`](Self::from_dir) for how the model is detected; the
+    /// options only add the PP-DocLayout directory required by the
+    /// layout-composed models.
+    ///
+    /// ```no_run
+    /// use candle_core::Device;
+    /// use oar_ocr_vl::{AnyPageParser, AnyPageParserLoadOptions};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let options = AnyPageParserLoadOptions::default()
+    ///     .with_layout_dir("PaddlePaddle/PP-DocLayoutV3_safetensors");
+    /// let parser =
+    ///     AnyPageParser::from_dir_with_options("PaddlePaddle/PaddleOCR-VL-1.5", Device::Cpu, &options)?;
+    /// # let _ = parser;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn from_dir_with_options(
+        model_dir: impl AsRef<Path>,
+        device: Device,
+        options: &AnyPageParserLoadOptions,
+    ) -> Result<Self, Error> {
+        let model_dir = model_dir.as_ref();
+        let config_path = model_dir.join("config.json");
+        if !config_path.is_file() {
+            return Err(Error::config(format!(
+                "model directory {} has no config.json to detect a model from",
+                model_dir.display()
+            )));
+        }
+        let config: Value = load_json_config(&config_path, "AnyPageParser", "config.json")
+            .map_err(|error| {
+                Error::config(format!("{error}; model directory: {}", model_dir.display()))
+            })?;
+        let detected = detect_model(&config)?;
+        Ok(match detected {
+            DetectedModel::HpdParsing => HpdParsing::from_dir(model_dir, device)?.into(),
+            DetectedModel::HunyuanOcr => HunyuanOcr::from_dir(model_dir, device)?.into(),
+            DetectedModel::JinaOcr => JinaOcr::from_dir(model_dir, device)?.into(),
+            DetectedModel::MinerU => MinerU::from_dir(model_dir, device)?.into(),
+            DetectedModel::MinerUDiffusion => MinerUDiffusion::from_dir(model_dir, device)?.into(),
+            DetectedModel::MonkeyOcrV2 => MonkeyOcrV2::from_dir(model_dir, device)?.into(),
+            DetectedModel::OvisOcr2 => OvisOcr2::from_dir(model_dir, device)?.into(),
+            DetectedModel::WeVisDoc => WeVisDoc::from_dir(model_dir, device)?.into(),
+            DetectedModel::XiaomiOcr => XiaomiOcr::from_dir(model_dir, device)?.into(),
+            DetectedModel::PaddleOcrVl => LayoutPageParser::new(
+                PpDocLayout::from_dir(required_layout_dir(options, detected)?, device.clone())?,
+                PaddleOcrVl::from_dir(model_dir, device)?,
+            )
+            .into(),
+            DetectedModel::GlmOcr => LayoutPageParser::new(
+                PpDocLayout::from_dir(required_layout_dir(options, detected)?, device.clone())?,
+                GlmOcr::from_dir(model_dir, device)?,
+            )
+            .into(),
+            DetectedModel::TeleOcr => LayoutPageParser::new(
+                PpDocLayout::from_dir(required_layout_dir(options, detected)?, device.clone())?,
+                TeleOcr::from_dir(model_dir, device)?,
+            )
+            .into(),
+        })
+    }
+}
+
+/// Returns the configured layout directory for a layout-composed model,
+/// before any weights load, or explains how to provide one.
+fn required_layout_dir(
+    options: &AnyPageParserLoadOptions,
+    detected: DetectedModel,
+) -> Result<&Path, Error> {
+    options.layout_dir.as_deref().ok_or_else(|| {
+        Error::config(format!(
+            "{} parses with an external layout detector; pass a PP-DocLayout directory \
+             with AnyPageParserLoadOptions::with_layout_dir",
+            detected.name()
+        ))
+    })
 }
 
 impl PageParser for AnyPageParser {
@@ -312,6 +436,78 @@ mod tests {
     use crate::layout::LayoutDetections;
     use crate::monkeyocrv2::MonkeyOcrV2Task;
     use std::cell::Cell;
+
+    #[test]
+    fn load_options_carry_an_optional_layout_directory() {
+        let options = AnyPageParserLoadOptions::default();
+        assert!(options.layout_dir.is_none());
+        let options = options.with_layout_dir("some/layout_dir");
+        assert_eq!(
+            options.layout_dir.as_deref(),
+            Some(Path::new("some/layout_dir"))
+        );
+    }
+
+    fn model_dir_with(config: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.json"), config).unwrap();
+        dir
+    }
+
+    #[test]
+    fn from_dir_reports_a_missing_layout_directory_before_loading() {
+        let dir = model_dir_with(
+            r#"{"architectures": ["PaddleOCRVLForConditionalGeneration"], "model_type": "paddleocr_vl"}"#,
+        );
+        let error = AnyPageParser::from_dir(dir.path(), Device::Cpu)
+            .err()
+            .expect("detection should fail")
+            .to_string();
+        assert!(error.contains("PaddleOCR-VL"), "{error}");
+        assert!(error.contains("PP-DocLayout"), "{error}");
+        assert!(error.contains("with_layout_dir"), "{error}");
+    }
+
+    #[test]
+    fn from_dir_names_the_directory_when_config_json_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = AnyPageParser::from_dir(dir.path(), Device::Cpu)
+            .err()
+            .expect("detection should fail")
+            .to_string();
+        assert!(error.contains("no config.json"), "{error}");
+        assert!(error.contains(&dir.path().display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn from_dir_rejects_unknown_configs_without_fallback() {
+        let dir = model_dir_with(r#"{"architectures": ["LlamaForCausalLM"]}"#);
+        let error = AnyPageParser::from_dir(dir.path(), Device::Cpu)
+            .err()
+            .expect("detection should fail")
+            .to_string();
+        assert!(error.contains("LlamaForCausalLM"), "{error}");
+        assert!(error.contains("supported architectures"), "{error}");
+        assert!(
+            error.contains("PaddleOCRVLForConditionalGeneration"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn from_dir_loads_a_real_checkpoint_when_available() {
+        let Some(model_dir) = std::env::var_os("ANY_PAGE_PARSER_MODEL_DIR") else {
+            eprintln!("skipping: ANY_PAGE_PARSER_MODEL_DIR is not set");
+            return;
+        };
+        let mut options = AnyPageParserLoadOptions::default();
+        if let Some(layout_dir) = std::env::var_os("ANY_PAGE_PARSER_LAYOUT_DIR") {
+            options = options.with_layout_dir(layout_dir);
+        }
+        let parser =
+            AnyPageParser::from_dir_with_options(model_dir, Device::Cpu, &options).unwrap();
+        let _ = parser;
+    }
 
     #[test]
     fn none_knobs_reuse_each_models_default() {
