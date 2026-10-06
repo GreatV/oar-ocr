@@ -181,8 +181,9 @@ impl Manifest {
             };
             case.validate()?;
             ensure!(
-                names.insert(case.name.clone()),
-                "duplicate case name {}",
+                // Case names become output directories, which may be case-insensitive.
+                names.insert(case.name.to_lowercase()),
+                "duplicate case name {} (names are compared ignoring case)",
                 case.name
             );
             cases.push(case);
@@ -317,6 +318,8 @@ mod tests {
         assert!(Manifest::parse(&no_inputs, None, None).is_err());
         let second = SAMPLE.split("[[cases]]").nth(1).unwrap();
         assert!(Manifest::parse(&format!("{SAMPLE}\n[[cases]]{second}"), None, None).is_err());
+        let upper = second.replace("name='tiny'", "name='TINY'");
+        assert!(Manifest::parse(&format!("{SAMPLE}\n[[cases]]{upper}"), None, None).is_err());
     }
 
     #[test]

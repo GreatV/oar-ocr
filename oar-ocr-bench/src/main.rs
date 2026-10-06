@@ -283,10 +283,9 @@ fn run_case(request: &Request) -> Result<Measurement> {
 }
 
 fn page_output_paths(directory: &Path, case: &str, pages: &[input::Page]) -> Result<Vec<PathBuf>> {
-    let mut components = Path::new(case).components();
+    // Check the raw name: `Path` normalization would accept aliases like `ocr/.`.
     ensure!(
-        matches!(components.next(), Some(std::path::Component::Normal(_)))
-            && components.next().is_none(),
+        !case.is_empty() && case != "." && case != ".." && !case.contains(['/', '\\']),
         "saving outputs requires a case name without path components"
     );
     let directory = directory.join(case);
@@ -299,13 +298,15 @@ fn page_output_paths(directory: &Path, case: &str, pages: &[input::Page]) -> Res
             Ok(directory.join(name).with_extension("md"))
         })
         .collect::<Result<Vec<_>>>()?;
+    // Compare case-folded names so case-insensitive filesystems cannot merge two pages.
     ensure!(
         paths
             .iter()
+            .map(|path| path.to_string_lossy().to_lowercase())
             .collect::<std::collections::BTreeSet<_>>()
             .len()
             == paths.len(),
-        "saving outputs requires unique image stems within each case"
+        "saving outputs requires image stems that are unique, ignoring case, within each case"
     );
     fs::create_dir_all(directory)?;
     Ok(paths)
@@ -356,8 +357,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let collision = pages(&["first/page.png", "second/page.jpg"]);
         assert!(page_output_paths(directory.path(), "ocr-tiny", &collision).is_err());
+        let case_alias = pages(&["first/Page.png", "second/page.png"]);
+        assert!(page_output_paths(directory.path(), "ocr-tiny", &case_alias).is_err());
         assert!(!directory.path().join("ocr-tiny").exists());
-        for case in ["../escape", ".", "nested/case", ""] {
+        for case in [
+            "../escape",
+            ".",
+            "nested/case",
+            "",
+            "ocr/.",
+            "ocr/",
+            r"ocr\x",
+        ] {
             assert!(page_output_paths(directory.path(), case, &pages(&["page.png"])).is_err());
         }
     }
