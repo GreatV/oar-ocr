@@ -419,7 +419,7 @@ mod tests {
                 },
                 OrtExecutionProvider::CPU,
             ])
-            .add_config_entry(crate::core::config::onnx::AUTO_DEVICE_CONFIG_ENTRY, "1")
+            .with_pending_auto_selection()
             .with_optimization_level(OrtGraphOptimizationLevel::All);
 
         let configured = UniMERNetModelBuilder::prepare_ort_config(config, |config| {

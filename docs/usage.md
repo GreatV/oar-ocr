@@ -175,7 +175,7 @@ let structure = OARStructureBuilder::new("picodet-l_layout_17cls.onnx")
 
 Examples default to `--device auto` (case-insensitive). Classic pipelines try compiled CUDA(0), CoreML on Apple platforms, and DirectML(0) on Windows, then CPU. Library callers opt in with `OrtSessionConfig::auto()`; existing defaults remain CPU, and `resolve_auto()` explicitly queries the resolved configuration. Failed registrations are omitted during construction, before choosing CPU batch defaults. TensorRT, OpenVINO, and WebGPU remain explicit choices because of initialization cost and compatibility. When CUDA is compiled but no GPU is available, ONNX Runtime prints an ERROR log during probing: `CUDA failure 100: no CUDA-capable device is detected`. This is expected; execution then falls back to CPU.
 
-VL tries compiled CUDA(0), then Metal(0), then CPU. Use `oar_ocr_vl::auto_device()` or `oar_ocr_vl::utils::parse_device("auto")` in library code. Device creation failures fall back automatically; the existing dtype probe selects F32 on CPU, BF16 when BF16 operations succeed, or F16 when BF16 is unsupported. Use `--device cpu` to require CPU execution in either pipeline.
+VL tries compiled CUDA(0), then Metal(0), then CPU. Use `oar_ocr_vl::auto_device()` or `oar_ocr_vl::utils::parse_device("auto")` in library code. Device creation failures fall back automatically; the existing dtype probe selects F32 on CPU and on accelerators without BF16 support, BF16 when the device supports it and a BF16 probe succeeds, or F16 when that probe fails. Use `--device cpu` to require CPU execution in either pipeline.
 
 ### CUDA
 

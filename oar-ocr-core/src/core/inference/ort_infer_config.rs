@@ -1,7 +1,7 @@
 use super::*;
 use crate::core::config::{
-    COREML_CONFIG_ENTRY, OrtCoreMLConfig, OrtExecutionProvider, OrtGraphOptimizationLevel as OG,
-    OrtSessionConfig,
+    AUTO_DEVICE_CONFIG_ENTRY, COREML_CONFIG_ENTRY, OrtCoreMLConfig, OrtExecutionProvider,
+    OrtGraphOptimizationLevel as OG, OrtSessionConfig,
 };
 use ort::ep::ExecutionProviderDispatch;
 use ort::logging::LogLevel;
@@ -76,7 +76,7 @@ impl OrtInfer {
         }
         if let Some(entries) = &cfg.session_config_entries {
             for (key, value) in entries {
-                if key == COREML_CONFIG_ENTRY {
+                if key == COREML_CONFIG_ENTRY || key == AUTO_DEVICE_CONFIG_ENTRY {
                     continue;
                 }
                 builder = builder.with_config_entry(key, value)?;

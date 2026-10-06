@@ -81,6 +81,29 @@ pub struct OrtCoreMLConfig {
 pub(crate) const COREML_CONFIG_ENTRY: &str = "oar.internal.coreml_config";
 pub(crate) const AUTO_DEVICE_CONFIG_ENTRY: &str = "oar.internal.auto_device";
 
+/// Identifies automatic candidates by provider kind and device ID, ignoring
+/// tuning fields that model builders may adjust before resolution.
+fn auto_signature(providers: &[OrtExecutionProvider]) -> String {
+    let device = |id: &Option<i32>| id.map_or_else(String::new, |id| format!(":{id}"));
+    providers
+        .iter()
+        .map(|provider| match provider {
+            OrtExecutionProvider::CPU => "cpu".to_string(),
+            OrtExecutionProvider::CUDA { device_id, .. } => format!("cuda{}", device(device_id)),
+            OrtExecutionProvider::DirectML { device_id } => {
+                format!("directml{}", device(device_id))
+            }
+            OrtExecutionProvider::OpenVINO { .. } => "openvino".to_string(),
+            OrtExecutionProvider::TensorRT { device_id, .. } => {
+                format!("tensorrt{}", device(device_id))
+            }
+            OrtExecutionProvider::CoreML { .. } => "coreml".to_string(),
+            OrtExecutionProvider::WebGPU => "webgpu".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Execution providers for ONNX Runtime.
 ///
 /// This enum represents the different execution providers that can be used
@@ -225,10 +248,19 @@ impl OrtSessionConfig {
         candidates.push(OrtExecutionProvider::CPU);
         let config = Self::new().with_execution_providers(candidates);
         if has_candidates {
-            config.add_config_entry(AUTO_DEVICE_CONFIG_ENTRY, "1")
+            config.with_pending_auto_selection()
         } else {
             config
         }
+    }
+
+    /// Marks the current provider list as automatic candidates.
+    ///
+    /// The marker records the candidates' kinds and device IDs, so replacing
+    /// `execution_providers` directly cancels the pending selection.
+    pub(crate) fn with_pending_auto_selection(self) -> Self {
+        let signature = auto_signature(&self.get_execution_providers());
+        self.add_config_entry(AUTO_DEVICE_CONFIG_ENTRY, signature)
     }
 
     /// Whether automatic execution-provider selection is still pending.
@@ -236,7 +268,7 @@ impl OrtSessionConfig {
         self.session_config_entries
             .as_ref()
             .and_then(|entries| entries.get(AUTO_DEVICE_CONFIG_ENTRY))
-            .is_some_and(|value| value == "1")
+            .is_some_and(|value| *value == auto_signature(&self.get_execution_providers()))
     }
 
     /// Resolve automatic provider preferences into available providers.
@@ -253,10 +285,11 @@ impl OrtSessionConfig {
         mut self,
         probe: impl FnMut(&OrtExecutionProvider) -> ort::Result<()>,
     ) -> Self {
-        if !self.has_pending_auto_selection() {
+        let pending = self.has_pending_auto_selection();
+        self.clear_auto_selection();
+        if !pending {
             return self;
         }
-        self.clear_auto_selection();
         let candidates = self
             .get_execution_providers()
             .into_iter()
@@ -283,9 +316,6 @@ impl OrtSessionConfig {
     }
 
     fn clear_auto_selection(&mut self) {
-        if !self.has_pending_auto_selection() {
-            return;
-        }
         if let Some(entries) = self.session_config_entries.as_mut() {
             entries.remove(AUTO_DEVICE_CONFIG_ENTRY);
             if entries.is_empty() {
@@ -533,7 +563,7 @@ mod tests {
         candidates.push(OrtExecutionProvider::CPU);
         let config = OrtSessionConfig::new()
             .with_execution_providers(candidates)
-            .add_config_entry(AUTO_DEVICE_CONFIG_ENTRY, "1")
+            .with_pending_auto_selection()
             .add_config_entry("session.dynamic_block_base", "4")
             .with_intra_threads(2)
             .with_parallel_execution(true)
@@ -560,7 +590,7 @@ mod tests {
         candidates.push(OrtExecutionProvider::CPU);
         let config = OrtSessionConfig::new()
             .with_execution_providers(candidates)
-            .add_config_entry(AUTO_DEVICE_CONFIG_ENTRY, "1")
+            .with_pending_auto_selection()
             .with_parallel_execution(true)
             .with_memory_pattern(true);
         let resolved = config.resolve_auto_with_probe(|provider| {
@@ -582,6 +612,47 @@ mod tests {
     }
 
     #[test]
+    fn direct_provider_replacement_cancels_pending_auto_selection() {
+        let mut candidates = auto_candidates();
+        candidates.push(OrtExecutionProvider::CPU);
+        let mut config = OrtSessionConfig::new()
+            .with_execution_providers(candidates)
+            .with_pending_auto_selection();
+        assert!(config.has_pending_auto_selection());
+        let explicit = vec![
+            OrtExecutionProvider::OpenVINO {
+                device_type: None,
+                num_threads: None,
+            },
+            OrtExecutionProvider::CPU,
+        ];
+        config.execution_providers = Some(explicit.clone());
+        assert!(!config.has_pending_auto_selection());
+        let resolved =
+            config.resolve_auto_with_probe(|_| panic!("explicit providers must not be probed"));
+        assert_eq!(resolved.get_execution_providers(), explicit);
+        assert!(resolved.session_config_entries.is_none());
+    }
+
+    #[test]
+    fn tuning_a_candidate_keeps_auto_selection_pending() {
+        let mut config = OrtSessionConfig::new()
+            .with_execution_providers(auto_candidates())
+            .with_pending_auto_selection();
+        if let Some(OrtExecutionProvider::CUDA {
+            arena_extend_strategy,
+            ..
+        }) = config
+            .execution_providers
+            .as_mut()
+            .and_then(|eps| eps.first_mut())
+        {
+            *arena_extend_strategy = Some("SameAsRequested".to_string());
+        }
+        assert!(config.has_pending_auto_selection());
+    }
+
+    #[test]
     fn explicit_provider_resolution_never_probes_hardware() {
         let config = OrtSessionConfig::new().with_execution_providers(auto_candidates());
         let expected = serde_json::to_value(&config).unwrap();
@@ -594,7 +665,7 @@ mod tests {
     fn explicit_provider_setters_clear_pending_auto_selection() {
         let pending = OrtSessionConfig::new()
             .with_execution_providers(auto_candidates())
-            .add_config_entry(AUTO_DEVICE_CONFIG_ENTRY, "1");
+            .with_pending_auto_selection();
         let explicit = pending
             .clone()
             .with_execution_providers(vec![OrtExecutionProvider::CPU]);
