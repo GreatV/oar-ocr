@@ -109,18 +109,18 @@ name = "vl-paddleocr-vl"
 kind = "vl"
 model = "paddleocr-vl"
 model_path = "models/PaddlePaddle/PaddleOCR-VL-1.5"
-layout_path = "models/PaddlePaddle/PP-DocLayoutV3"
+layout_path = "models/PaddlePaddle/PP-DocLayoutV3_safetensors"
 
 [[cases]]
 name = "vl-glmocr"
 kind = "vl"
 model = "glmocr"
 model_path = "models/zai-org/GLM-OCR"
-layout_path = "models/PaddlePaddle/PP-DocLayoutV3"
+layout_path = "models/PaddlePaddle/PP-DocLayoutV3_safetensors"
 
 [[cases]]
 name = "vl-teleocr"
 kind = "vl"
 model = "teleocr"
 model_path = "models/XingChen-AGI/TeleOCR"
-layout_path = "models/PaddlePaddle/PP-DocLayoutV3"
+layout_path = "models/PaddlePaddle/PP-DocLayoutV3_safetensors"

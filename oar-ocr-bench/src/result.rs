@@ -68,8 +68,8 @@ pub(crate) struct RunResult {
     pub(crate) cases: Vec<CaseResult>,
 }
 
-fn git(root: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
+fn command(root: &Path, program: &str, args: &[&str]) -> Option<String> {
+    let out = Command::new(program)
         .args(args)
         .current_dir(root)
         .output()
@@ -88,7 +88,8 @@ impl Environment {
                     let (key, value) = line.split_once(':')?;
                     (key.trim() == "model name").then(|| value.trim().to_string())
                 })
-            });
+            })
+            .or_else(|| command(root, "sysctl", &["-n", "machdep.cpu.brand_string"]));
         let features = [
             ("cuda", cfg!(feature = "cuda")),
             ("metal", cfg!(feature = "metal")),
@@ -99,8 +100,8 @@ impl Environment {
         .map(|(name, _)| name.to_string())
         .collect();
         Self {
-            git_commit: git(root, &["rev-parse", "HEAD"]),
-            dirty: git(root, &["status", "--porcelain"]).map(|s| !s.is_empty()),
+            git_commit: command(root, "git", &["rev-parse", "HEAD"]),
+            dirty: command(root, "git", &["status", "--porcelain"]).map(|s| !s.is_empty()),
             cpu,
             features,
             release_build: !cfg!(debug_assertions),

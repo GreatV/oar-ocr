@@ -85,10 +85,30 @@ fn spawn(
     std::thread::JoinHandle<Option<GpuMemory>>,
     std::sync::mpsc::Sender<()>,
 )> {
+    use anyhow::Context;
     use std::{sync::mpsc, time::Duration};
     let nvml = nvml_wrapper::Nvml::init()?;
-    let baseline = nvml.device_by_index(index)?.memory_info()?.used;
-    let name = nvml.device_by_index(index)?.name()?;
+    // A CUDA ordinal indexes the visible devices, which NVML does not see.
+    let uuid = match std::env::var("CUDA_VISIBLE_DEVICES") {
+        Ok(visible) => {
+            let entry = visible
+                .split(',')
+                .nth(index as usize)
+                .context("CUDA ordinal is not visible")?
+                .trim()
+                .to_string();
+            if entry.starts_with("GPU-") {
+                entry
+            } else {
+                nvml.device_by_index(entry.parse()?)?.uuid()?
+            }
+        }
+        Err(_) => nvml.device_by_index(index)?.uuid()?,
+    };
+    let (baseline, name) = {
+        let device = nvml.device_by_uuid(uuid.as_str())?;
+        (device.memory_info()?.used, device.name()?)
+    };
     let (stop, stopped) = mpsc::channel();
     let worker = std::thread::spawn(move || {
         let mut memory = GpuMemory {
@@ -101,7 +121,12 @@ fn spawn(
                 stopped.recv_timeout(Duration::from_millis(10)),
                 Err(mpsc::RecvTimeoutError::Timeout)
             );
-            let used = nvml.device_by_index(index).ok()?.memory_info().ok()?.used;
+            let used = nvml
+                .device_by_uuid(uuid.as_str())
+                .ok()?
+                .memory_info()
+                .ok()?
+                .used;
             memory.peak_bytes = memory.peak_bytes.max(used);
             if done {
                 return Some(memory);

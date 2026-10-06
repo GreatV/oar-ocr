@@ -1,6 +1,14 @@
 use crate::result::{Measurement, RunResult};
 use anyhow::{Result, ensure};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Measurements by case name; `None` marks a failed case.
+fn measurements(run: &RunResult) -> BTreeMap<&str, Option<&Measurement>> {
+    run.cases
+        .iter()
+        .map(|c| (c.case.name.as_str(), c.measurement.as_ref()))
+        .collect()
+}
 
 pub(crate) struct Comparison {
     pub(crate) markdown: String,
@@ -55,14 +63,10 @@ pub(crate) fn compare(base: &RunResult, new: &RunResult, limit: f64) -> Result<C
     text.push_str(
         "| Case | Metric | Base | New | Change | Status |\n|---|---|---:|---:|---:|---|\n",
     );
-    let old: BTreeMap<_, _> = base.cases.iter().map(|c| (&c.case.name, c)).collect();
+    let (old, next) = (measurements(base), measurements(new));
     let mut failed = false;
-    for case in &new.cases {
-        let name = &case.case.name;
-        let (Some(x), Some(y)) = (
-            old.get(name).and_then(|c| c.measurement.as_ref()),
-            case.measurement.as_ref(),
-        ) else {
+    for name in old.keys().chain(next.keys()).collect::<BTreeSet<_>>() {
+        let (Some(Some(x)), Some(Some(y))) = (old.get(name), next.get(name)) else {
             text.push_str(&format!("| {name} | — | | | | MISSING OR FAILED |\n"));
             failed = true;
             continue;
@@ -154,5 +158,16 @@ mod tests {
         other.cases[0].measurement.as_mut().unwrap().pages = vec!["other.png".into()];
         let inputs = compare(&base, &other, 5.0).unwrap();
         assert!(inputs.failed && inputs.markdown.contains("INPUTS DIFFER"));
+    }
+
+    #[test]
+    fn cases_missing_from_either_report_fail() {
+        let base = run(100.0, "cpu");
+        let mut empty = base.clone();
+        empty.cases.clear();
+        for (a, b) in [(&base, &empty), (&empty, &base)] {
+            let comparison = compare(a, b, 5.0).unwrap();
+            assert!(comparison.failed && comparison.markdown.contains("MISSING OR FAILED"));
+        }
     }
 }

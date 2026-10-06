@@ -75,7 +75,9 @@ PP-DocLayout `layout_path`.
 | `gpu` | With `nvml`: device-wide used memory before loading and its sampled peak |
 
 Warmup runs are excluded. GPU memory is device-wide and sampled every 10 ms, so
-use an otherwise idle GPU and treat the peak as a lower bound.
+use an otherwise idle GPU and treat the peak as a lower bound. The sampled GPU
+honors `CUDA_VISIBLE_DEVICES`; on multi-GPU hosts also set
+`CUDA_DEVICE_ORDER=PCI_BUS_ID` so CUDA ordinals follow NVML's order.
 
 ## Compare
 
@@ -84,8 +86,11 @@ cargo run --release -p oar-ocr-bench --bin oar-bench -- \
   compare benchmark-results/base.json benchmark-results/new.json --threshold 5%
 ```
 
-For each case, latency, throughput, and memory changes worse than the threshold
-are reported as regressions. Cases whose input pages or actual devices differ are
-reported instead of compared. Environment differences (commit, CPU, features,
-build profile) are printed as a note. The command exits nonzero on any regression,
-missing case, or incomparable case.
+For each case, latency and throughput changes worse than the threshold are
+reported as regressions; memory peaks vary between identical runs and are shown
+as information only. Cases are matched by name, and inputs by page path, so keep
+the page images unchanged between the two runs. Cases whose pages or actual
+devices differ are reported instead of compared. Environment differences (commit,
+CPU, features, build profile) are printed as a note. The command exits nonzero on
+any regression, a case missing or failed in either report, or an incomparable
+case.

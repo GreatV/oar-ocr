@@ -15,10 +15,6 @@ homepage = "https://github.com/greatv/oar-ocr"
 oar-ocr-core = { version = "0.10.0", path = "oar-ocr-core", default-features = false }
 oar-ocr-derive = { version = "0.10.0", path = "oar-ocr-derive", default-features = false }
 
-# Pinned exactly because `ort` is pre-release and later release candidates may
-# make source-incompatible API changes on a fresh resolve.
-ort = { version = "=2.0.0-rc.13", default-features = false }
-
 # Shared third-party dependencies (kept in sync via workspace inheritance).
 clap = { version = "4.5.42", features = ["derive"] }
 hayro = "0.7"
