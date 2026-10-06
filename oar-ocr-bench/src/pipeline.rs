@@ -32,7 +32,7 @@ fn page_text(page: PageDocument) -> String {
     }
 }
 
-// This dispatch stays inside the harness until a unified parser is available.
+// Per-model dispatch until the VL crate offers a unified parser.
 enum VlModel {
     Hpd(Box<HpdParsing>),
     Hunyuan(Box<HunyuanOcr>),
