@@ -6,9 +6,7 @@ use oar_ocr::{
     oarocr::{OAROCR, OAROCRBuilder, OARStructure, OARStructureBuilder},
 };
 use oar_ocr_vl::{
-    AnyPageParser, AnyPageParserOptions, GlmOcr, HpdParsing, HunyuanOcr, JinaOcr, LayoutPageParser,
-    MinerU, MinerUDiffusion, MonkeyOcrV2, OvisOcr2, PaddleOcrVl, PageDocument, PageParser,
-    PpDocLayout, TeleOcr, WeVisDoc, XiaomiOcr,
+    AnyPageParser, AnyPageParserLoadOptions, AnyPageParserOptions, PageDocument, PageParser,
 };
 use std::path::Path;
 
@@ -30,8 +28,8 @@ fn page_text(page: PageDocument) -> String {
     }
 }
 
-/// One of the VL page parsers, chosen by name and driven through the crate's
-/// unified [`AnyPageParser`] contract.
+/// One of the VL page parsers, detected from the case's model directory and
+/// driven through the crate's unified [`AnyPageParser`] contract.
 struct VlModel(AnyPageParser);
 
 impl VlModel {
@@ -41,41 +39,15 @@ impl VlModel {
                 .as_deref()
                 .context("VL requires model_path")?,
         );
-        let layout = || -> Result<PpDocLayout> {
-            Ok(PpDocLayout::from_dir(
-                root.join(
-                    case.layout_path
-                        .as_deref()
-                        .context("external layout path missing")?,
-                ),
-                device.clone(),
-            )?)
-        };
-        // The shared knobs are applied per page in `parse`; only the model
-        // weights and layout source differ per case.
-        let parser = match case.model.as_deref().unwrap_or_default() {
-            "hpd-parsing" => HpdParsing::from_dir(path, device.clone())?.into(),
-            "hunyuanocr" => HunyuanOcr::from_dir(path, device.clone())?.into(),
-            "jina-ocr" => JinaOcr::from_dir(path, device.clone())?.into(),
-            "mineru" => MinerU::from_dir(path, device.clone())?.into(),
-            "mineru-diffusion" => MinerUDiffusion::from_dir(path, device.clone())?.into(),
-            "monkeyocrv2" => MonkeyOcrV2::from_dir(path, device.clone())?.into(),
-            "ovisocr2" => OvisOcr2::from_dir(path, device.clone())?.into(),
-            "wevisdoc" => WeVisDoc::from_dir(path, device.clone())?.into(),
-            "xiaomi-ocr-0" => XiaomiOcr::from_dir(path, device.clone())?.into(),
-            "paddleocr-vl" => {
-                LayoutPageParser::new(layout()?, PaddleOcrVl::from_dir(path, device.clone())?)
-                    .into()
-            }
-            "glmocr" => {
-                LayoutPageParser::new(layout()?, GlmOcr::from_dir(path, device.clone())?).into()
-            }
-            "teleocr" => {
-                LayoutPageParser::new(layout()?, TeleOcr::from_dir(path, device.clone())?).into()
-            }
-            model => bail!("unsupported VL model {model}"),
-        };
-        Ok(Self(parser))
+        let mut options = AnyPageParserLoadOptions::default();
+        if let Some(layout_path) = &case.layout_path {
+            options = options.with_layout_dir(root.join(layout_path));
+        }
+        Ok(Self(AnyPageParser::from_dir_with_options(
+            path,
+            device.clone(),
+            &options,
+        )?))
     }
 
     fn parse(&self, image: &RgbImage, case: &Case) -> Result<PageDocument> {
