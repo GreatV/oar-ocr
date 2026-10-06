@@ -15,6 +15,7 @@
 
 use crate::api::error::Error;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -62,22 +63,64 @@ impl DownloadSource {
     fn files_url(self, repo: &str, revision: &str) -> String {
         match self {
             Self::ModelScope => format!(
-                "https://www.modelscope.cn/api/v1/models/{repo}/repo/files?Revision={revision}&Recursive=true"
+                "https://www.modelscope.cn/api/v1/models/{}/repo/files?Revision={}&Recursive=true",
+                encode_path(repo),
+                encode_component(revision)
             ),
-            Self::HuggingFace => {
-                format!("https://huggingface.co/api/models/{repo}/tree/{revision}?recursive=true")
-            }
+            Self::HuggingFace => format!(
+                "https://huggingface.co/api/models/{}/tree/{}?recursive=true",
+                encode_path(repo),
+                encode_path(revision)
+            ),
         }
     }
 
     fn file_url(self, repo: &str, revision: &str, path: &str) -> String {
         match self {
             Self::ModelScope => format!(
-                "https://www.modelscope.cn/api/v1/models/{repo}/repo?Revision={revision}&FilePath={path}"
+                "https://www.modelscope.cn/api/v1/models/{}/repo?Revision={}&FilePath={}",
+                encode_path(repo),
+                encode_component(revision),
+                encode_path(path)
             ),
-            Self::HuggingFace => format!("https://huggingface.co/{repo}/resolve/{revision}/{path}"),
+            Self::HuggingFace => format!(
+                "https://huggingface.co/{}/resolve/{}/{}",
+                encode_path(repo),
+                encode_path(revision),
+                encode_path(path)
+            ),
         }
     }
+}
+
+/// Percent-encodes one URL component; only unreserved characters pass
+/// through. Slashes are the caller's business — see [`encode_path`].
+fn encode_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => {
+                out.push('%');
+                out.push(HEX[(byte >> 4) as usize] as char);
+                out.push(HEX[(byte & 0xf) as usize] as char);
+            }
+        }
+    }
+    out
+}
+
+/// Encodes a multi-segment path (repo id, revision like `refs/pr/123`, or a
+/// file path), keeping the `/` separators literal.
+fn encode_path(value: &str) -> String {
+    value
+        .split('/')
+        .map(encode_component)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Download options for [`AnyPageParser::from_pretrained`](crate::AnyPageParser::from_pretrained).
@@ -107,7 +150,8 @@ impl AnyPageParserPretrainedOptions {
         self
     }
 
-    /// Pin a specific revision on both the model and layout repos.
+    /// Pin a specific revision for the model repos; the layout checkpoint
+    /// always downloads at its source's default revision.
     pub fn with_revision(mut self, revision: impl Into<String>) -> Self {
         self.revision = Some(revision.into());
         self
@@ -285,6 +329,7 @@ pub(crate) fn snapshot(
         .new_agent();
 
     let files = list_files(&agent, source, &remote, revision)?;
+    prune_stale_files(&dir, &files)?;
     for file in &files {
         ensure_file(&agent, source, &remote, revision, &dir, file)?;
     }
@@ -302,6 +347,52 @@ pub(crate) fn snapshot(
     Ok(dir)
 }
 
+/// Removes cached files the new listing no longer carries, so a snapshot
+/// always matches the requested revision. Our own sidecar and revision-marker
+/// files stay; directories left empty are removed.
+fn prune_stale_files(dir: &Path, files: &[SnapshotFile]) -> Result<(), Error> {
+    let listed: HashSet<&str> = files.iter().map(|file| file.path.as_str()).collect();
+    prune_entry(dir, dir, &listed).map(|_| ()).map_err(|error| {
+        Error::Io(io::Error::new(
+            error.kind(),
+            format!("prune `{}`: {}", dir.display(), error),
+        ))
+    })
+}
+
+/// Returns whether the entry was removed; directories report `false` so their
+/// parent never disappears from under a surviving sibling.
+fn prune_entry(root: &Path, entry_path: &Path, listed: &HashSet<&str>) -> io::Result<bool> {
+    let metadata = fs::symlink_metadata(entry_path)?;
+    if !metadata.is_dir() {
+        let Some(relative) = entry_path.strip_prefix(root).ok().and_then(|p| p.to_str()) else {
+            return Ok(false);
+        };
+        if listed.contains(relative) || is_ours(relative) {
+            return Ok(false);
+        }
+        tracing::info!(path = %entry_path.display(), "pruned file no longer in the requested revision");
+        fs::remove_file(entry_path)?;
+        return Ok(true);
+    }
+    let mut removed_any = false;
+    for child in fs::read_dir(entry_path)? {
+        let child = child?;
+        removed_any |= prune_entry(root, &child.path(), listed)?;
+    }
+    if removed_any && entry_path != root && fs::read_dir(entry_path)?.next().is_none() {
+        // Best effort: drop directories the prune emptied out.
+        let _ = fs::remove_dir(entry_path);
+    }
+    Ok(false)
+}
+
+/// Whether a relative path is one of this module's bookkeeping files.
+fn is_ours(relative: &str) -> bool {
+    let name = relative.rsplit('/').next().unwrap_or(relative);
+    name == ".oar-revision" || (name.starts_with('.') && name.ends_with(".sha256"))
+}
+
 /// Lists a repo's files through the source API.
 fn list_files(
     agent: &ureq::Agent,
@@ -309,19 +400,44 @@ fn list_files(
     repo: &str,
     revision: &str,
 ) -> Result<Vec<SnapshotFile>, Error> {
-    let url = source.files_url(repo, revision);
-    let response = agent
-        .get(&url)
-        .call()
-        .map_err(|error| listing_error(source, repo, error))?;
-    let body = response
-        .into_body()
-        .read_to_string()
-        .map_err(|error| Error::Io(io::Error::other(format!("read {url}: {error}"))))?;
-    match source {
-        DownloadSource::ModelScope => parse_modelscope_listing(&body),
-        DownloadSource::HuggingFace => parse_huggingface_listing(&body),
+    let mut url = source.files_url(repo, revision);
+    let mut files = Vec::new();
+    loop {
+        let response = agent
+            .get(&url)
+            .call()
+            .map_err(|error| listing_error(source, repo, error))?;
+        // The tree endpoints paginate through a `Link: <...>; rel="next"`
+        // header; keep fetching until there is no next page.
+        let next = response
+            .headers()
+            .get("link")
+            .and_then(|value| value.to_str().ok())
+            .and_then(next_page)
+            .map(str::to_string);
+        let body = response
+            .into_body()
+            .read_to_string()
+            .map_err(|error| Error::Io(io::Error::other(format!("read {url}: {error}"))))?;
+        files.extend(match source {
+            DownloadSource::ModelScope => parse_modelscope_listing(&body)?,
+            DownloadSource::HuggingFace => parse_huggingface_listing(&body)?,
+        });
+        match next {
+            Some(next_url) => url = next_url,
+            None => return Ok(files),
+        }
     }
+}
+
+/// Extracts the `rel="next"` URL from a `Link` header, when present.
+fn next_page(link: &str) -> Option<&str> {
+    link.split(',').find_map(|part| {
+        let (url, rel) = part.split_once(';')?;
+        rel.trim()
+            .eq_ignore_ascii_case("rel=\"next\"")
+            .then(|| url.trim().trim_start_matches('<').trim_end_matches('>'))
+    })
 }
 
 /// Names a repo the source does not carry, and points at the other source.
@@ -393,8 +509,9 @@ fn cached_file_matches(target: &Path, file: &SnapshotFile) -> Result<bool, Error
         return Ok(false);
     }
     let Some(expected) = &file.sha256 else {
-        // The source published no hash; size is all we can check.
-        return Ok(true);
+        // Nothing vouches for a hashless cache entry, and these are small
+        // config and tokenizer files, so always take them fresh.
+        return Ok(false);
     };
     if sidecar_records_hash(target, expected) {
         return Ok(true);
@@ -413,6 +530,25 @@ fn cached_file_matches(target: &Path, file: &SnapshotFile) -> Result<bool, Error
         Err(error) => {
             tracing::warn!(path = %target.display(), error = %error, "failed to hash cached file; redownloading");
             Ok(false)
+        }
+    }
+}
+
+/// Accepts a rename destination that lost a race to a concurrent download:
+/// it matches when its size is right and its published hash (or sidecar)
+/// vouches for it — by size alone when the source published no hash.
+fn destination_matches(target: &Path, file: &SnapshotFile) -> bool {
+    let Ok(metadata) = fs::metadata(target) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() != file.size {
+        return false;
+    }
+    match &file.sha256 {
+        None => true,
+        Some(expected) => {
+            sidecar_records_hash(target, expected)
+                || hash_file(target).is_ok_and(|hash| hash == *expected)
         }
     }
 }
@@ -528,17 +664,24 @@ fn download_attempt(
         }
     }
 
-    fs::rename(guard.path(), target).map_err(|error| {
-        Error::Io(io::Error::new(
-            error.kind(),
-            format!(
-                "move `{}` -> `{}`: {}",
-                guard.path().display(),
-                target.display(),
-                error
-            ),
-        ))
-    })?;
+    if let Err(error) = fs::rename(guard.path(), target) {
+        // A concurrent download may have renamed its copy onto the target
+        // between our checks and this rename (notably on Windows); accept
+        // the winner when it matches what we asked for.
+        if !destination_matches(target, file) {
+            return Err(Error::Io(io::Error::new(
+                error.kind(),
+                format!(
+                    "move `{}` -> `{}`: {}",
+                    guard.path().display(),
+                    target.display(),
+                    error
+                ),
+            )));
+        }
+        // The guard's drop removes our now-redundant temp file.
+        return Ok(());
+    }
     guard.disarm();
 
     if let Some(hash) = &file.sha256
@@ -656,6 +799,40 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn prune_removes_unlisted_files_and_keeps_bookkeeping() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("config.json"), b"{}").unwrap();
+        std::fs::write(root.join("stale.bin"), b"x").unwrap();
+        std::fs::create_dir(root.join("v1.0")).unwrap();
+        std::fs::write(root.join("v1.0/stale.onnx"), b"x").unwrap();
+        std::fs::write(root.join(".stale.bin.sha256"), b"hash").unwrap();
+        std::fs::write(root.join(".oar-revision"), b"repo\nmaster\n").unwrap();
+        let files = [SnapshotFile {
+            path: "config.json".to_string(),
+            size: 2,
+            sha256: None,
+        }];
+        prune_stale_files(root, &files).unwrap();
+        assert!(root.join("config.json").exists());
+        assert!(root.join(".stale.bin.sha256").exists());
+        assert!(root.join(".oar-revision").exists());
+        assert!(!root.join("stale.bin").exists());
+        // The emptied v1.0 directory went with its file.
+        assert!(!root.join("v1.0").exists());
+
+        // URL components and Link pages, shared here to keep tests lean.
+        assert_eq!(encode_component("refs/pr 1#2"), "refs%2Fpr%201%232");
+        assert_eq!(encode_path("a b/c#d"), "a%20b/c%23d");
+        let link = r#"<https://huggingface.co/api/models/m/tree/main?recursive=true&page=2>; rel="next", <https://huggingface.co/api/models/m/tree/main?recursive=true&page=1>; rel="prev""#;
+        assert_eq!(
+            next_page(link),
+            Some("https://huggingface.co/api/models/m/tree/main?recursive=true&page=2")
+        );
+        assert_eq!(next_page(r#"<https://x?page=1>; rel="prev""#), None);
     }
 
     #[test]
