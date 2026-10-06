@@ -14,7 +14,7 @@
 //! * `-m, --model-path` - Path to the text detection model file
 //! * `-o, --output-dir` - Directory to save output results (visualizations, etc.)
 //! * `--vis` - Enable visualization output
-//! * `-d, --device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
+//! * `-d, --device` - Device to use for inference (e.g., 'auto', 'cpu', 'cuda', 'cuda:0')
 //! * `<IMAGES>...` - Paths to input images to process
 //!
 //! # Example
@@ -55,8 +55,8 @@ struct Args {
     #[arg(long)]
     vis: bool,
 
-    /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
-    #[arg(short, long, default_value = "cpu")]
+    /// Device to use for inference (e.g., 'auto', 'cpu', 'cuda', 'cuda:0')
+    #[arg(short, long, default_value = "auto")]
     device: String,
 
     /// Score threshold for detection (default: 0.3)

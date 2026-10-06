@@ -31,7 +31,7 @@ pub use crate::runtime::checkpoint::{
     collect_safetensors, default_rescale_factor, default_true, load_json_config,
     load_optional_json_config, validate_image_mean_std, validate_patch_merge_temporal,
 };
-pub use crate::runtime::device::{free_device_memory, parse_device, select_dtype};
+pub use crate::runtime::device::{auto_device, free_device_memory, parse_device, select_dtype};
 pub use crate::runtime::errors::{
     candle_to_ocr_inference, candle_to_ocr_processing, error_chain_message,
 };

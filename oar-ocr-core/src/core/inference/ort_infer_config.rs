@@ -8,10 +8,32 @@ use ort::logging::LogLevel;
 use ort::session::builder::{GraphOptimizationLevel as GOL, SessionBuilder};
 
 impl OrtInfer {
+    pub(crate) fn probe_execution_provider(provider: &OrtExecutionProvider) -> ort::Result<()> {
+        let providers = Self::build_execution_providers(std::slice::from_ref(provider), None)?;
+        let providers: Vec<_> = providers
+            .into_iter()
+            .map(ExecutionProviderDispatch::error_on_failure)
+            .collect();
+        // DirectML requires sequential execution and disabled memory patterns.
+        let builder = SessionBuilder::new()?
+            .with_intra_threads(1)?
+            .with_parallel_execution(false)?
+            .with_memory_pattern(false)?;
+        builder.with_execution_providers(providers)?;
+        Ok(())
+    }
+
     pub(super) fn apply_ort_config(
         mut builder: SessionBuilder,
         cfg: &OrtSessionConfig,
     ) -> Result<SessionBuilder, ort::Error> {
+        let resolved;
+        let cfg = if cfg.has_pending_auto_selection() {
+            resolved = cfg.clone().resolve_auto();
+            &resolved
+        } else {
+            cfg
+        };
         if let Some(intra) = cfg.intra_threads {
             builder = builder.with_intra_threads(intra)?;
         }

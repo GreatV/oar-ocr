@@ -246,7 +246,7 @@ impl OAROCRBuilder {
     /// Builds the OCR runtime.
     ///
     /// This instantiates all adapters and returns an `OAROCR` instance ready for prediction.
-    pub fn build(self) -> Result<OAROCR, OCRError> {
+    pub fn build(mut self) -> Result<OAROCR, OCRError> {
         if let Some(size) = self.image_batch_size {
             Self::validate_batch_size("image_batch_size", size)?;
         }
@@ -263,6 +263,7 @@ impl OAROCRBuilder {
         // much cheaper recognizer benefits from a wider batch, while larger
         // models regress beyond four on Windows. Accelerators retain their
         // throughput-oriented adapter defaults (8 detection / 64 recognition).
+        self.ort_session_config = self.ort_session_config.map(OrtSessionConfig::resolve_auto);
         let cpu_region_batch_size =
             default_cpu_region_batch_size(Some(&text_recognition_model), None);
         let (image_batch_size, region_batch_size) = resolve_device_batch_sizes(

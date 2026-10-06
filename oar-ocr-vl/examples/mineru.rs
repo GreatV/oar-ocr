@@ -20,8 +20,8 @@ struct Args {
     /// Paths to input images.
     #[arg(required = true)]
     images: Vec<PathBuf>,
-    /// Device: cpu, cuda, cuda:N, or metal.
-    #[arg(short, long, default_value = "cpu")]
+    /// Device: auto, cpu, cuda, cuda:N, or metal.
+    #[arg(short, long, default_value = "auto")]
     device: String,
     /// Maximum generated tokens per pass.
     #[arg(long, default_value = "4096")]

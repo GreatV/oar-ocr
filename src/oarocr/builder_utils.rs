@@ -141,6 +141,24 @@ mod tests {
         );
     }
 
+    #[cfg(not(any(feature = "cuda", feature = "coreml", feature = "directml")))]
+    #[test]
+    fn auto_cpu_uses_cpu_batch_defaults_and_preserves_overrides() {
+        let config = OrtSessionConfig::auto();
+        assert_eq!(
+            resolve_device_batch_sizes(Some(&config), None, None, 1, 4),
+            (Some(1), Some(4))
+        );
+        assert_eq!(
+            resolve_device_batch_sizes(Some(&config), None, None, 1, 16),
+            (Some(1), Some(16))
+        );
+        assert_eq!(
+            resolve_device_batch_sizes(Some(&config), Some(3), Some(7), 1, 4),
+            (Some(3), Some(7))
+        );
+    }
+
     #[test]
     fn accelerator_keeps_adapter_batch_defaults() {
         let config = OrtSessionConfig::new().with_execution_providers(vec![

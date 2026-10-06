@@ -21,7 +21,7 @@
 //! * `--rectification-model` - Optional document rectification model
 //! * `--text-type` - Text type hint (`seal` for curved seal text)
 //! * `--return-word-box` - Enable word-level boxes from recognition output
-//! * `--device` - Device to use (`cpu`, `cuda:0`, `directml:0`, etc.)
+//! * `--device` - Device to use (`auto`, `cpu`, `cuda:0`, `directml:0`, etc.)
 //! * CPU tuning: `--intra-threads`, `--global-thread-pool`, `--dynamic-block-base`
 //! * Detection config: `--det-score-thresh`, `--det-box-thresh`, `--det-unclip`, `--det-max-candidates`
 //! * Recognition config: `--rec-score-thresh`, `--rec-max-text-length`
@@ -92,8 +92,8 @@ struct Args {
     #[arg(long, default_value_t = false)]
     return_word_box: bool,
 
-    /// Device (cpu, cuda:N, directml:N, coreml[:gpu|ane|cpu], coreml-nn[:...])
-    #[arg(long, default_value = "cpu")]
+    /// Device (auto, cpu, cuda:N, directml:N, coreml[:gpu|ane|cpu], coreml-nn[:...])
+    #[arg(long, default_value = "auto")]
     device: String,
 
     /// ONNX Runtime intra-op thread count (defaults to the runtime's CPU policy)

@@ -15,7 +15,7 @@
 //! * `-m, --model-path` - Path to the text line orientation model file
 //! * `-o, --output-dir` - Directory to save output results
 //! * `--vis` - Enable visualization output
-//! * `--device` - Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
+//! * `--device` - Device to use for inference (e.g., 'auto', 'cpu', 'cuda', 'cuda:0')
 //! * `<IMAGES>...` - Paths to input text line images to process
 //!
 //! # Example
@@ -59,8 +59,8 @@ struct Args {
     #[arg(long)]
     vis: bool,
 
-    /// Device to use for inference (e.g., 'cpu', 'cuda', 'cuda:0')
-    #[arg(long, default_value = "cpu")]
+    /// Device to use for inference (e.g., 'auto', 'cpu', 'cuda', 'cuda:0')
+    #[arg(long, default_value = "auto")]
     device: String,
 
     /// Score threshold for classification (default: 0.5)

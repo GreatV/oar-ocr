@@ -57,7 +57,7 @@ cargo add oar-ocr --no-default-features --features download-binaries
 
 ## Execution Provider Features
 
-The execution provider features make their corresponding ONNX Runtime providers available to the crate. Enabling a feature does not select that provider automatically. Configure the provider explicitly and place the CPU provider last when a fallback is desired.
+The execution provider features make their corresponding ONNX Runtime providers available to the crate. Library session defaults remain CPU. Use automatic selection or configure providers explicitly, placing CPU last when a fallback is desired.
 
 ```rust
 use oar_ocr::core::config::{OrtExecutionProvider, OrtSessionConfig};
@@ -75,6 +75,9 @@ let ort_config = OrtSessionConfig::new().with_execution_providers(vec![
 ```
 
 Pass the configuration to `OAROCRBuilder::ort_session` or `OARStructureBuilder::ort_session`. Requesting a provider without its matching Cargo feature returns a configuration error.
+
+Examples default to `--device auto`; library callers opt in with `OrtSessionConfig::auto()` or `oar_ocr_vl::auto_device()`.
+See [Automatic Device Selection](usage.md#automatic-device-selection) for provider priorities, fallback behavior, and dtype selection.
 
 ### `cuda`
 

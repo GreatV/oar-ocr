@@ -31,7 +31,7 @@
 //!   - `--text-det-model`, `--text-det-model-name` - Text detection model
 //!   - `--text-rec-model`, `--text-rec-model-name` - Text recognition model
 //!   - `--text-dict-path` - Character dictionary
-//! * `--device` - Device to use (`cpu`, `cuda`, `cuda:0`, etc.) - Default: cuda
+//! * `--device` - Device to use (`auto`, `cpu`, `cuda`, `cuda:0`, etc.) - Default: auto
 //!
 //! # Supported Model Names
 //!
@@ -311,9 +311,9 @@ struct Args {
     #[arg(long = "textline-orientation-model")]
     textline_orientation_model: Option<PathBuf>,
 
-    /// Device to use for inference (default: cuda)
-    /// Supported with matching features: cpu, cuda:N, directml:N.
-    #[arg(long, default_value = "cuda")]
+    /// Device to use for inference (default: auto)
+    /// Supported with matching features: auto, cpu, cuda:N, directml:N.
+    #[arg(long, default_value = "auto")]
     device: String,
 
     /// ONNX Runtime intra-op thread count (defaults to the runtime's CPU policy)

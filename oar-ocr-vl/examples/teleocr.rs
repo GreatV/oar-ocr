@@ -78,8 +78,8 @@ struct Args {
     #[arg(required = true)]
     images: Vec<PathBuf>,
 
-    /// Device to run on: cpu, cuda, cuda:N, or metal (default: cpu)
-    #[arg(short, long, default_value = "cpu")]
+    /// Device to run on: auto, cpu, cuda, cuda:N, or metal (default: auto)
+    #[arg(short, long, default_value = "auto")]
     device: String,
 
     /// Recognition task (default: text)
