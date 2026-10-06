@@ -90,7 +90,9 @@ For each case, latency and throughput changes worse than the threshold are
 reported as regressions; memory peaks vary between identical runs and are shown
 as information only. Cases are matched by name, and inputs by page path, so keep
 the page images unchanged between the two runs. Cases whose pages or actual
-devices differ are reported instead of compared. Environment differences (commit,
+devices differ are reported instead of compared; with `nvml`, the GPU model is part
+of the device, so the same `cuda:0` on different GPUs is not compared. Without
+`nvml`, compare runs from the same machine. Environment differences (commit,
 CPU, features, build profile) are printed as a note. The command exits nonzero on
 any regression, a case missing or failed in either report, or an incomparable
 case.

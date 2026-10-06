@@ -14,15 +14,22 @@ use oar_ocr_vl::{
 };
 use std::path::Path;
 
-/// Text used for the VL output-rate metric: Markdown when available.
+/// Text used for the VL output-rate metric: Markdown, else block content, else
+/// the raw model output that some native parsers return exclusively.
 fn page_text(page: PageDocument) -> String {
-    page.markdown.unwrap_or_else(|| {
-        page.blocks
-            .into_iter()
-            .filter_map(|block| block.content)
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    })
+    if let Some(markdown) = page.markdown {
+        return markdown;
+    }
+    let blocks: Vec<_> = page
+        .blocks
+        .into_iter()
+        .filter_map(|block| block.content)
+        .collect();
+    if blocks.is_empty() {
+        page.raw_output.unwrap_or_default()
+    } else {
+        blocks.join("\n\n")
+    }
 }
 
 // This dispatch stays inside the harness until a unified parser is available.

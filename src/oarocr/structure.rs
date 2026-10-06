@@ -199,6 +199,16 @@ pub struct OARStructureBuilder {
     region_batch_size: Option<usize>,
 }
 
+/// Detection thresholds and merge rules for a layout preset without an explicit
+/// config; PP-StructureV3 defaults cover the earlier 20/23-class models.
+fn default_layout_detection_config(model_name: &str) -> LayoutDetectionConfig {
+    match model_name {
+        "pp-doclayoutv2" => LayoutDetectionConfig::with_pp_doclayoutv2_defaults(),
+        "pp-doclayoutv3" => LayoutDetectionConfig::with_pp_doclayoutv3_defaults(),
+        _ => LayoutDetectionConfig::with_pp_structurev3_defaults(),
+    }
+}
+
 /// Resolves a `layout_model_name` preset, falling back to PP-DocLayout_plus-L.
 fn layout_model_config_for(name: &str) -> oar_ocr_core::domain::adapters::LayoutModelConfig {
     use oar_ocr_core::domain::adapters::LayoutModelConfig;
@@ -886,13 +896,11 @@ impl OARStructureBuilder {
             None => crate::domain::adapters::LayoutModelConfig::pp_doclayout_plus_l(),
         };
 
-        layout_builder = layout_builder.model_config(layout_model_config);
-
-        // If caller didn't provide an explicit layout config, fall back to PP-StructureV3 defaults.
         let effective_layout_cfg = self
             .layout_detection_config
             .clone()
-            .unwrap_or_else(LayoutDetectionConfig::with_pp_structurev3_defaults);
+            .unwrap_or_else(|| default_layout_detection_config(&layout_model_config.model_name));
+        layout_builder = layout_builder.model_config(layout_model_config);
         layout_builder = layout_builder.with_config(effective_layout_cfg);
 
         if let Some(ref ort_config) = self.ort_session_config {
@@ -3585,6 +3593,32 @@ mod tests {
             layout_model_config_for("unknown").model_name,
             layout_model_config_for("PP-DocLayout_plus-L").model_name
         );
+    }
+
+    #[test]
+    fn layout_presets_select_their_detection_defaults() {
+        let json = |config: LayoutDetectionConfig| serde_json::to_value(config).unwrap();
+        for (preset, expected) in [
+            (
+                "PP-DocLayoutV2",
+                LayoutDetectionConfig::with_pp_doclayoutv2_defaults(),
+            ),
+            (
+                "PP-DocLayoutV3",
+                LayoutDetectionConfig::with_pp_doclayoutv3_defaults(),
+            ),
+            (
+                "PP-DocLayout_plus-L",
+                LayoutDetectionConfig::with_pp_structurev3_defaults(),
+            ),
+        ] {
+            let name = layout_model_config_for(preset).model_name;
+            assert_eq!(
+                json(default_layout_detection_config(&name)),
+                json(expected),
+                "{preset}"
+            );
+        }
     }
 
     #[test]

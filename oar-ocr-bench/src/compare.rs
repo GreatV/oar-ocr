@@ -76,10 +76,22 @@ pub(crate) fn compare(base: &RunResult, new: &RunResult, limit: f64) -> Result<C
             failed = true;
             continue;
         }
-        if x.device != y.device {
+        // A logical ordinal can name different hardware; the GPU model is known
+        // when both runs sampled memory with `nvml`.
+        let hardware = |m: &Measurement| m.gpu.as_ref().map(|g| g.name.clone());
+        let different_gpu = matches!(
+            (hardware(x), hardware(y)),
+            (Some(a), Some(b)) if a != b
+        );
+        if x.device != y.device || different_gpu {
+            let describe = |m: &Measurement| match hardware(m) {
+                Some(gpu) => format!("{} ({gpu})", m.device),
+                None => m.device.clone(),
+            };
             text.push_str(&format!(
                 "| {name} | device | {} | {} | | DEVICES DIFFER |\n",
-                x.device, y.device
+                describe(x),
+                describe(y)
             ));
             failed = true;
             continue;
@@ -112,6 +124,7 @@ mod tests {
     use super::*;
     use crate::{
         manifest::Manifest,
+        memory::GpuMemory,
         result::{CaseResult, Environment, Statistics},
     };
 
@@ -154,6 +167,22 @@ mod tests {
         let base = run(100.0, "cpu");
         let gpu = compare(&base, &run(10.0, "cuda:0"), 5.0).unwrap();
         assert!(gpu.failed && gpu.markdown.contains("DEVICES DIFFER"));
+        let on_gpu = |name: &str| {
+            let mut result = run(100.0, "cuda:0");
+            result.cases[0].measurement.as_mut().unwrap().gpu = Some(GpuMemory {
+                name: name.into(),
+                baseline_bytes: 0,
+                peak_bytes: 0,
+            });
+            result
+        };
+        let hardware = compare(&on_gpu("RTX 4090"), &on_gpu("A100"), 5.0).unwrap();
+        assert!(hardware.failed && hardware.markdown.contains("DEVICES DIFFER"));
+        assert!(
+            !compare(&on_gpu("RTX 4090"), &on_gpu("RTX 4090"), 5.0)
+                .unwrap()
+                .failed
+        );
         let mut other = run(100.0, "cpu");
         other.cases[0].measurement.as_mut().unwrap().pages = vec!["other.png".into()];
         let inputs = compare(&base, &other, 5.0).unwrap();
