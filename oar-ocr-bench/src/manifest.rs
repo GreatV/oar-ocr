@@ -28,10 +28,12 @@ pub(crate) struct Options {
 }
 
 impl Options {
+    /// Fills unset options from `other`, then records the effective batch size
+    /// and thread count so equivalent manifests produce equal cases.
     fn inherit(&self, other: &Self) -> Self {
         Self {
-            batch_size: self.batch_size.or(other.batch_size),
-            cpu_threads: self.cpu_threads.or(other.cpu_threads),
+            batch_size: Some(self.batch_size.or(other.batch_size).unwrap_or(1)),
+            cpu_threads: Some(self.cpu_threads.or(other.cpu_threads).unwrap_or(4)),
             region_batch_size: self.region_batch_size.or(other.region_batch_size),
             max_tokens: self.max_tokens.or(other.max_tokens),
         }
@@ -201,6 +203,10 @@ impl Case {
             self.options.region_batch_size != Some(0) && self.options.max_tokens != Some(0),
             "{name}: region batch size and max tokens must be positive"
         );
+        ensure!(
+            self.kind == Kind::Vl || self.options.max_tokens.is_none(),
+            "{name}: max_tokens applies only to VL cases"
+        );
         let m = &self.models;
         match self.kind {
             Kind::Ocr => ensure!(
@@ -278,6 +284,15 @@ mod tests {
         assert_eq!(manifest.cases[0].warmup, 2);
         assert_eq!(manifest.cases[0].device, "cuda:2");
         assert_eq!(manifest.cases[0].options.cpu_threads(), 2);
+        // Omitted options and their explicit defaults produce the same case.
+        let explicit = SAMPLE.replace("cpu_threads=2", "cpu_threads=2\nbatch_size=1");
+        assert_eq!(
+            Manifest::parse(&explicit, None, None).unwrap().cases,
+            Manifest::parse(SAMPLE, None, None).unwrap().cases
+        );
+        assert!(
+            Manifest::parse(&SAMPLE.replace("cpu_threads=2", "max_tokens=8"), None, None).is_err()
+        );
         let inputs = Inputs {
             images: vec!["a.png".into()],
             ..Default::default()

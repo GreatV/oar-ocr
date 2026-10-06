@@ -69,7 +69,7 @@ PP-DocLayout `layout_path`.
 | Field | Meaning |
 |---|---|
 | `load_ms` | Device setup and pipeline construction |
-| `latency_ms` | Mean, p50, and p95 per page over all repetitions; batched pages share the batch time |
+| `latency_ms` | Mean, p50, and p95 per page over all repetitions; a batched page takes the whole batch time |
 | `pages_per_second` | Measured pages divided by measured inference time |
 | `output_chars_per_second` | VL only; PageParser exposes no generated-token count |
 | `host_peak_bytes` | Linux `VmHWM` of the case process |

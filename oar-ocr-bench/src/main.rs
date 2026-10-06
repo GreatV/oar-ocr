@@ -235,11 +235,8 @@ fn run_case(request: &Request) -> Result<Measurement> {
                 .iter()
                 .map(|text| text.chars().count())
                 .sum::<usize>();
-            // Batched pages share the batch wall time.
-            latencies.extend(std::iter::repeat_n(
-                elapsed * 1000.0 / batch.len() as f64,
-                batch.len(),
-            ));
+            // Every page in a batch completes when the whole batch does.
+            latencies.extend(std::iter::repeat_n(elapsed * 1000.0, batch.len()));
         }
     }
     ensure!(measured > 0.0, "measurement timer returned zero");
