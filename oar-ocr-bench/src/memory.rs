@@ -97,7 +97,7 @@ fn spawn(
                 .context("CUDA ordinal is not visible")?
                 .trim()
                 .to_string();
-            if entry.starts_with("GPU-") {
+            if entry.starts_with("GPU-") || entry.starts_with("MIG-") {
                 entry
             } else {
                 nvml.device_by_index(entry.parse()?)?.uuid()?

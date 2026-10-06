@@ -97,6 +97,6 @@ Cases whose configuration (other than device, warmup, and repetitions), pages,
 or actual devices differ are reported instead of compared; with `nvml`, the GPU model is part
 of the device, so the same `cuda:0` on different GPUs is not compared. Without
 `nvml`, compare runs from the same machine. Environment differences (commit,
-CPU, features, build profile) are printed as a note. The command exits nonzero on
-any regression, a case missing or failed in either report, or an incomparable
-case.
+CPU, features, build profile, `OAR_*` overrides) are printed as a note. The command
+exits nonzero on any regression, a case missing or failed in either report, or an
+incomparable case.

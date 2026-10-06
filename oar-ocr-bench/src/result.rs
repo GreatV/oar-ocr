@@ -59,6 +59,8 @@ pub(crate) struct Environment {
     pub(crate) cpu: Option<String>,
     pub(crate) features: Vec<String>,
     pub(crate) release_build: bool,
+    /// `OAR_*` runtime overrides, such as a forced VL dtype.
+    pub(crate) overrides: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +107,9 @@ impl Environment {
             cpu,
             features,
             release_build: !cfg!(debug_assertions),
+            overrides: std::env::vars()
+                .filter(|(key, _)| key.starts_with("OAR_"))
+                .collect(),
         }
     }
 }
