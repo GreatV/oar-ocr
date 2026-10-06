@@ -101,10 +101,12 @@ impl<L: LayoutSource, B: RecognitionBackend> PageParser for LayoutPageParser<L, 
 /// Backwards-compatible borrowed adapter with unit per-page options.
 ///
 /// Use [`LayoutPageParser`] to own the components or override settings per page.
+#[deprecated(since = "0.10.1", note = "use LayoutPageParser")]
 pub struct LayoutFirstPageParser<'a, L: LayoutSource + ?Sized, B: RecognitionBackend + ?Sized> {
     inner: LayoutPageParser<&'a L, &'a B>,
 }
 
+#[allow(deprecated)]
 impl<'a, L: LayoutSource + ?Sized, B: RecognitionBackend + ?Sized> LayoutFirstPageParser<'a, L, B> {
     pub fn new(layout: &'a L, backend: &'a B) -> Self {
         Self {
@@ -124,6 +126,7 @@ impl<'a, L: LayoutSource + ?Sized, B: RecognitionBackend + ?Sized> LayoutFirstPa
     }
 }
 
+#[allow(deprecated)]
 impl<L: LayoutSource + ?Sized, B: RecognitionBackend + ?Sized> PageParser
     for LayoutFirstPageParser<'_, L, B>
 {
@@ -350,6 +353,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn empty_layout_falls_back_to_full_image_and_borrowed_adapter_still_works() {
         let layout = MockLayout::default();
         let backend = MockBackend::default();

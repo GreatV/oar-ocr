@@ -68,8 +68,7 @@ available for callers that supply layout on every call and need `StructureResult
 The new page output includes normalized blocks, Markdown, crop diagnostics, and
 `structure` with the original pixel coordinates and all structure metadata.
 Recognition failures still return an error, as in `DocParser`. The `doc_parser`
-example uses this new entry point; `--compare-legacy` checks its Markdown against
-`DocParser` using the same models and settings.
+example uses this new entry point.
 
 ## Installation
 

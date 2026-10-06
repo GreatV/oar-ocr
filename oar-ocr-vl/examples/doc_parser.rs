@@ -70,7 +70,7 @@ use tracing::{error, info};
 
 use oar_ocr_vl::utils::image::load_image;
 use oar_ocr_vl::utils::parse_device;
-use oar_ocr_vl::{DocParser, DocParserConfig, LayoutPageParser, PageParser, PpDocLayout};
+use oar_ocr_vl::{DocParserConfig, LayoutPageParser, PageParser, PpDocLayout};
 
 /// Recognition model type
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -139,10 +139,6 @@ struct Args {
     /// enable Metal's fused decode path.
     #[arg(long, default_value = "1")]
     region_batch_size: usize,
-
-    /// Verify that the legacy DocParser path produces identical Markdown.
-    #[arg(long)]
-    compare_legacy: bool,
 
     /// Enable verbose output
     #[arg(short, long)]
@@ -300,15 +296,6 @@ fn process_images<B: oar_ocr_vl::RecognitionBackend>(
                 info!("  Elements: {}", result.blocks.len());
 
                 let markdown = result.markdown.unwrap_or_default();
-                if args.compare_legacy {
-                    let legacy = DocParser::with_config(parser.backend(), parser.config().clone())
-                        .with_region_batch_size(parser.region_batch_size())
-                        .parse_to_markdown(parser.layout(), rgb_img)?;
-                    if markdown != legacy {
-                        return Err("PageParser and DocParser Markdown differ".into());
-                    }
-                    info!("  PageParser and DocParser Markdown are identical");
-                }
 
                 // Save or print
                 if let Some(ref dir) = args.output_dir {
@@ -340,12 +327,7 @@ fn process_images<B: oar_ocr_vl::RecognitionBackend>(
                     }
                 }
             }
-            Err(e) => {
-                error!("  Failed: {}", e);
-                if args.compare_legacy {
-                    return Err(e.into());
-                }
-            }
+            Err(e) => error!("  Failed: {}", e),
         }
     }
 
