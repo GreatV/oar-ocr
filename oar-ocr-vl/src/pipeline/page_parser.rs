@@ -15,11 +15,26 @@ use image::RgbImage;
 /// unless changed with the parser's builder. The config override replaces the
 /// whole configuration for this call without changing subsequent calls.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct LayoutPageParserOptions {
     /// Override crop padding, token limit, region filtering, and Markdown settings.
     pub config: Option<DocParserConfig>,
     /// Override the maximum same-task region batch size. Zero is treated as one.
     pub region_batch_size: Option<usize>,
+}
+
+impl LayoutPageParserOptions {
+    /// Override the document settings for this page.
+    pub fn with_config(mut self, config: DocParserConfig) -> Self {
+        self.config = Some(config);
+        self
+    }
+
+    /// Override the same-task region batch size. Zero is treated as one.
+    pub fn with_region_batch_size(mut self, size: usize) -> Self {
+        self.region_batch_size = Some(size.max(1));
+        self
+    }
 }
 
 /// A complete-page parser composed from a layout source and region recognizer.
@@ -335,17 +350,16 @@ mod tests {
             &backend as &dyn RecognitionBackend,
         );
         let image = RgbImage::new(100, 100);
-        let options = LayoutPageParserOptions {
-            config: Some(DocParserConfig {
+        let options = LayoutPageParserOptions::default()
+            .with_config(DocParserConfig {
                 max_tokens: 123,
                 crop_pad_ratio: 0.1,
                 skip_auxiliary_regions: false,
                 skip_region_blocks: false,
                 markdown_ignore_labels: vec!["doc_title".to_string()],
                 markdown_pretty: false,
-            }),
-            region_batch_size: Some(2),
-        };
+            })
+            .with_region_batch_size(2);
         let page = parser.parse_page(&image, &options).unwrap();
         let legacy = DocParser::with_config(&backend, options.config.clone().unwrap())
             .with_region_batch_size(2)

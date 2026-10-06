@@ -56,10 +56,9 @@ let page = parser.parse_page(&image, &LayoutPageParserOptions::default())?;
 println!("{}", page.markdown.as_deref().unwrap_or_default());
 
 // Override settings for one page; defaults use the parser's builder settings.
-let options = LayoutPageParserOptions {
-    config: Some(DocParserConfig { max_tokens: 8192, ..Default::default() }),
-    region_batch_size: Some(4),
-};
+let options = LayoutPageParserOptions::default()
+    .with_config(DocParserConfig { max_tokens: 8192, ..Default::default() })
+    .with_region_batch_size(4);
 let page = parser.parse_page(&image, &options)?;
 
 // Use the structure entry point when pixel coordinates and metadata are needed.
