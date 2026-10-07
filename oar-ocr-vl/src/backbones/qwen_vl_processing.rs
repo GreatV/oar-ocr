@@ -44,13 +44,11 @@ pub struct QwenVlImageSize {
 
 impl QwenVlImageProcessorConfig {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
-        let config: Self = crate::runtime::checkpoint::load_json_config(
+        crate::runtime::checkpoint::load_json_config(
             path,
             "Qwen-VL OCR",
             "preprocessor_config.json",
-        )?;
-        config.validate_with_rescale()?;
-        Ok(config)
+        )
     }
 
     /// A config for frames a caller already resized: preprocessing then only
@@ -104,6 +102,17 @@ impl QwenVlImageProcessorConfig {
     }
 
     pub fn validate(&self) -> Result<(), Error> {
+        self.validate_geometry()?;
+        if self.do_rescale && self.rescale_factor <= 0.0 {
+            return Err(Error::config("Qwen-VL OCR rescale_factor must be > 0"));
+        }
+        Ok(())
+    }
+
+    /// Everything [`validate`](Self::validate) checks except the Qwen-VL
+    /// rescale-factor rule. Configs from `for_resized_frames` carry another
+    /// model's already-validated factor, whose rules differ.
+    fn validate_geometry(&self) -> Result<(), Error> {
         if self.do_normalize {
             crate::runtime::checkpoint::validate_image_mean_std(
                 "Qwen-VL OCR",
@@ -133,20 +142,6 @@ impl QwenVlImageProcessorConfig {
                 )));
             }
         }
-        // Note: `rescale_factor > 0` is deliberately NOT checked here —
-        // tail-only configs built by `for_resized_frames` carry their own
-        // model's already-validated factor, whose rules differ. The Qwen-VL
-        // rule runs at checkpoint-load time, via `validate_with_rescale`.
-        Ok(())
-    }
-
-    /// `validate()` plus the Qwen-VL rescale-factor rule, for checkpoint
-    /// configs loaded from disk; tail-only configs skip the extra rule.
-    pub(crate) fn validate_with_rescale(&self) -> Result<(), Error> {
-        self.validate()?;
-        if self.do_rescale && self.rescale_factor <= 0.0 {
-            return Err(Error::config("Qwen-VL OCR rescale_factor must be > 0"));
-        }
         Ok(())
     }
 }
@@ -165,6 +160,30 @@ pub fn preprocess_images(
     model_name: &str,
 ) -> Result<QwenVlImageInputs, Error> {
     cfg.validate()?;
+    preprocess_validated(images, cfg, device, dtype, model_name)
+}
+
+/// [`preprocess_images`] for frames the caller already resized with a
+/// config from `for_resized_frames`. The caller's model has validated its
+/// own rescale factor, so only the geometry checks run here.
+pub(crate) fn preprocess_resized_frames(
+    images: &[RgbImage],
+    cfg: &QwenVlImageProcessorConfig,
+    device: &Device,
+    dtype: DType,
+    model_name: &str,
+) -> Result<QwenVlImageInputs, Error> {
+    cfg.validate_geometry()?;
+    preprocess_validated(images, cfg, device, dtype, model_name)
+}
+
+fn preprocess_validated(
+    images: &[RgbImage],
+    cfg: &QwenVlImageProcessorConfig,
+    device: &Device,
+    dtype: DType,
+    model_name: &str,
+) -> Result<QwenVlImageInputs, Error> {
     if images.is_empty() {
         return Err(Error::InvalidInput {
             message: format!("{model_name}: no images provided"),
@@ -365,7 +384,7 @@ mod tests {
             Some(1.0 / 255.0),
         );
         let white = RgbImage::from_pixel(64, 64, image::Rgb([255, 255, 255]));
-        let inputs = super::preprocess_images(
+        let inputs = super::preprocess_resized_frames(
             std::slice::from_ref(&white),
             &cfg,
             &Device::Cpu,

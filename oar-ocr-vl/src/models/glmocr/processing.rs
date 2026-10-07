@@ -162,7 +162,7 @@ pub fn preprocess_image(
         cfg.do_normalize,
         cfg.do_rescale.then_some(cfg.rescale_factor),
     );
-    let inputs = qwen_vl_processing::preprocess_images(
+    let inputs = qwen_vl_processing::preprocess_resized_frames(
         std::slice::from_ref(&resized),
         &shared_cfg,
         device,
