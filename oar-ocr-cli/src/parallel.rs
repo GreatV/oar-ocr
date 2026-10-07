@@ -109,6 +109,10 @@ where
     let gate = Arc::new(WriteGate::new());
     let aborting = Arc::new(AtomicBool::new(false));
     let make_replica = Arc::new(make_replica);
+    // Replicas are built one at a time: the first build populates the model
+    // cache, so the others load from it instead of racing to download the
+    // same files.
+    let build_lock = Arc::new(Mutex::new(()));
     let process = Arc::new(process);
 
     std::thread::scope(|scope| -> Result<()> {
@@ -116,9 +120,14 @@ where
             let work_rx = Arc::clone(&work_rx);
             let result_tx = result_tx.clone();
             let make_replica = Arc::clone(&make_replica);
+            let build_lock = Arc::clone(&build_lock);
             let process = Arc::clone(&process);
             scope.spawn(move || {
-                let mut replica = match make_replica() {
+                let built = {
+                    let _guard = build_lock.lock().expect("build lock poisoned");
+                    make_replica()
+                };
+                let mut replica = match built {
                     Ok(replica) => replica,
                     Err(error) => {
                         // No replica, no chunks: report and let the writer
