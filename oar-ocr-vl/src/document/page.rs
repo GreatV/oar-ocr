@@ -41,7 +41,93 @@ pub struct PageDocument {
     pub diagnostics: Vec<ParseDiagnostic>,
 }
 
+/// Maps built-in VL labels that `LayoutElementType::from_label` does not know
+/// (MinerU's native block types) onto the canonical page JSON vocabulary.
+fn canonical_alias(label: &str) -> &str {
+    match label {
+        "page_number" => "number",
+        "page_footnote" | "table_footnote" | "image_footnote" => "footnote",
+        "equation_block" => "formula",
+        "table_caption" => "table_title",
+        "image_caption" => "figure_title",
+        "ref_text" => "reference_content",
+        other => other,
+    }
+}
+
 impl PageDocument {
+    /// Exports this page in the shared page JSON format.
+    ///
+    /// This is the versioned interchange format documented in the
+    /// repository's `docs/page-format.md`, emitted identically by the
+    /// classic pipeline's `StructureResult::to_json`, so consumers get
+    /// one shape from either pipeline. Normalized block boxes become pixel
+    /// coordinates against `width` and `height` (the parsed image's
+    /// dimensions, which callers have at hand), model-native labels map to
+    /// the canonical `type` vocabulary with the original kept in `label`
+    /// when it differs, and blocks get sequential `order` indices because
+    /// the document stores them in reading order.
+    pub fn to_json(&self, width: u32, height: u32) -> serde_json::Value {
+        use crate::document::structure::LayoutElementType;
+        let scale_x = width.max(1) as f32;
+        let scale_y = height.max(1) as f32;
+        let blocks = self
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(position, block)| {
+                // Map the model label onto the canonical vocabulary; an
+                // unknown label passes through verbatim rather than
+                // collapsing into "other".
+                let mapped = LayoutElementType::from_label(canonical_alias(&block.block_type));
+                let canonical = if mapped == LayoutElementType::Other
+                    && !block.block_type.eq_ignore_ascii_case("other")
+                {
+                    block.block_type.as_str()
+                } else {
+                    mapped.as_str()
+                };
+                let mut value = serde_json::json!({
+                    "type": canonical,
+                    "bbox": [
+                        block.bbox[0] * scale_x,
+                        block.bbox[1] * scale_y,
+                        block.bbox[2] * scale_x,
+                        block.bbox[3] * scale_y,
+                    ],
+                    "order": position as u32 + 1,
+                    "confidence": null,
+                    "angle": block.angle,
+                    "content": block.content.as_deref(),
+                });
+                if !block.block_type.eq_ignore_ascii_case(canonical) {
+                    value["label"] = serde_json::Value::String(block.block_type.clone());
+                }
+                value
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "version": 1,
+            "pipeline": "vl",
+            "page": {
+                "index": null,
+                "width": width,
+                "height": height,
+                "angle": null,
+            },
+            "blocks": blocks,
+            "markdown": self.markdown.as_deref(),
+            // Parsers that only produce a raw transcript (no blocks or
+            // Markdown) keep it here so the page is not exported empty.
+            "raw_output": if self.blocks.is_empty() && self.markdown.is_none() {
+                self.raw_output.as_deref()
+            } else {
+                None
+            },
+            "diagnostics": &self.diagnostics,
+        })
+    }
+
     /// Converts a layout-first result using the default Markdown renderer.
     pub fn from_structure(result: StructureResult, image_width: u32, image_height: u32) -> Self {
         let markdown = result.to_markdown();
@@ -94,6 +180,44 @@ mod tests {
     use super::*;
     use crate::document::geometry::BoundingBox;
     use crate::document::structure::{LayoutElement, LayoutElementType};
+
+    #[test]
+    fn page_json_matches_the_documented_format() {
+        // The golden fixture from docs/page-format.md through the VL view:
+        // a normalized doc_title block over a 1000x2000 image. The VL
+        // pipeline knows no page index or detection confidence, and its
+        // label equals the canonical type so `label` is omitted.
+        let page = PageDocument {
+            blocks: vec![DocumentBlock {
+                block_type: "doc_title".to_string(),
+                bbox: [0.1, 0.1, 0.9, 0.2],
+                angle: None,
+                content: Some("Hello".to_string()),
+            }],
+            markdown: None,
+            raw_output: None,
+            diagnostics: Vec::new(),
+        };
+        let expected = serde_json::json!({
+            "version": 1,
+            "pipeline": "vl",
+            "page": { "index": null, "width": 1000, "height": 2000, "angle": null },
+            "blocks": [
+                {
+                    "type": "doc_title",
+                    "bbox": [100.0, 200.0, 900.0, 400.0],
+                    "order": 1,
+                    "confidence": null,
+                    "angle": null,
+                    "content": "Hello"
+                }
+            ],
+            "markdown": null,
+            "raw_output": null,
+            "diagnostics": []
+        });
+        assert_eq!(page.to_json(1000, 2000), expected);
+    }
 
     #[test]
     fn structure_conversion_preserves_blocks_and_markdown() {
