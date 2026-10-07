@@ -142,6 +142,11 @@ fn matches_python_reference_end_to_end() {
         .iter()
         .map(|[id, value]| (*id as u32, *value as f32))
         .collect();
+    assert_eq!(
+        expected.len(),
+        3,
+        "fixture must hold exactly three first-step logits"
+    );
     // With the production prompt through the chat template, ids and values
     // both agree: the apparent ~12% scale gap this test used to report was
     // an artifact of fixtures built with a generic instruction, which

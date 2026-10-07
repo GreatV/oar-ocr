@@ -92,6 +92,11 @@ fn matches_python_reference_end_to_end() {
         .iter()
         .map(|[id, value]| (*id as u32, *value as f32))
         .collect();
+    assert_eq!(
+        expected.len(),
+        3,
+        "fixture must hold exactly three first-step logits"
+    );
     // The fixture's first-step logits come from a plain reference forward
     // pass (generate()'s scores path shifts values on this architecture);
     // against those, ids and values both agree.
