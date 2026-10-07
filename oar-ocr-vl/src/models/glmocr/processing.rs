@@ -1,9 +1,7 @@
 use super::config::{GlmOcrImageProcessorConfig, GlmOcrVisionConfig};
+use crate::backbones::qwen_vl_processing::{self, QwenVlImageProcessorConfig};
 use crate::error::Error;
-use crate::utils::{
-    candle_to_ocr_processing,
-    image::{image_to_chw, patchify_merge_grouped, pil_resample_to_filter_type},
-};
+use crate::utils::image::pil_resample_to_filter_type;
 use candle_core::{DType, Device, Tensor};
 use image::{RgbImage, imageops::FilterType};
 
@@ -152,85 +150,31 @@ pub fn preprocess_image(
         });
     }
 
-    let mean = if cfg.do_normalize {
-        cfg.image_mean.clone()
-    } else {
-        vec![0.0, 0.0, 0.0]
-    };
-    let std = if cfg.do_normalize {
-        cfg.image_std.clone()
-    } else {
-        vec![1.0, 1.0, 1.0]
-    };
-
-    let rescale_factor = if cfg.do_rescale {
-        Some(cfg.rescale_factor)
-    } else {
-        None
-    };
-
-    let chw = image_to_chw(&resized, &mean, &std, rescale_factor);
-
-    let channel = 3usize;
-    let height = rh as usize;
-    let width = rw as usize;
-    let patch_size = cfg.patch_size;
-    let merge_size = cfg.merge_size;
-    let temporal_patch = cfg.temporal_patch_size;
-
-    // For static images the single CHW frame is repeated `temporal_patch` times
-    // to fill the temporal dimension expected by the vision encoder.
-    let frames: Vec<&[f32]> = std::iter::repeat_n(chw.as_slice(), temporal_patch).collect();
-
-    let grid_t = frames.len() / temporal_patch;
-    let grid_h = height / patch_size;
-    let grid_w = width / patch_size;
-
-    if !grid_h.is_multiple_of(merge_size) || !grid_w.is_multiple_of(merge_size) {
-        return Err(Error::Config {
-            message: format!(
-                "GLM-OCR preprocess produced non-divisible grid: grid_h={grid_h}, grid_w={grid_w}, merge_size={merge_size}"
-            ),
-        });
-    }
-
-    let patch_dim = channel * temporal_patch * patch_size * patch_size;
-    let num_patches = grid_t * grid_h * grid_w;
-
-    let flat = patchify_merge_grouped(
-        &frames,
-        channel,
-        height,
-        width,
-        grid_t,
-        grid_h,
-        grid_w,
-        patch_size,
-        merge_size,
-        temporal_patch,
+    // The resize above is GLM-OCR's temporal-volume-aware variant; the
+    // normalize, temporal repetition, and patchify tail is the shared
+    // Qwen-VL processing.
+    let shared_cfg = QwenVlImageProcessorConfig::for_resized_frames(
+        cfg.patch_size,
+        cfg.temporal_patch_size,
+        cfg.merge_size,
+        cfg.image_mean.clone(),
+        cfg.image_std.clone(),
+        cfg.do_normalize,
+        cfg.do_rescale.then_some(cfg.rescale_factor),
     );
-
-    let num_image_tokens = num_patches / (merge_size * merge_size);
-    let pixel_values = Tensor::from_vec(flat, (num_patches, patch_dim), device)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "GLM-OCR: failed to create pixel_values tensor",
-                e,
-            )
-        })?
-        .to_dtype(dtype)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "GLM-OCR: failed to cast pixel_values dtype",
-                e,
-            )
-        })?;
+    let inputs = qwen_vl_processing::preprocess_resized_frames(
+        std::slice::from_ref(&resized),
+        &shared_cfg,
+        device,
+        dtype,
+        "GLM-OCR",
+    )?;
+    let grid_thw = inputs.image_grid_thw[0];
+    let num_image_tokens = (grid_thw.1 * grid_thw.2) / (cfg.merge_size * cfg.merge_size);
 
     Ok(GlmOcrImageInputs {
-        pixel_values,
-        grid_thw: (grid_t, grid_h, grid_w),
+        pixel_values: inputs.pixel_values,
+        grid_thw,
         num_image_tokens,
     })
 }

@@ -1,8 +1,7 @@
 use super::config::MonkeyOcrV2ImageProcessorConfig;
+use crate::backbones::qwen_vl_processing::{self, QwenVlImageProcessorConfig};
 use crate::error::Error;
-use crate::utils::image::{
-    image_to_chw, patchify_merge_grouped, pil_resample_to_filter_type, smart_resize,
-};
+use crate::utils::image::{pil_resample_to_filter_type, smart_resize};
 use candle_core::{DType, Device, Tensor};
 use image::{RgbImage, imageops::FilterType};
 
@@ -59,67 +58,29 @@ pub fn preprocess_image(
         image
     };
 
-    let default_mean = [0.0_f32; 3];
-    let default_std = [1.0_f32; 3];
-    let mean = if cfg.do_normalize {
-        cfg.image_mean.as_slice()
-    } else {
-        &default_mean
-    };
-    let std = if cfg.do_normalize {
-        cfg.image_std.as_slice()
-    } else {
-        &default_std
-    };
-    let rescale = cfg.do_rescale.then_some(cfg.rescale_factor);
-    let frame = image_to_chw(resized, mean, std, rescale);
-    let frames: Vec<&[f32]> =
-        std::iter::repeat_n(frame.as_slice(), cfg.temporal_patch_size).collect();
-
-    let grid_t = 1;
-    let grid_h = resized_height as usize / cfg.patch_size;
-    let grid_w = resized_width as usize / cfg.patch_size;
-    if !grid_h.is_multiple_of(cfg.merge_size) || !grid_w.is_multiple_of(cfg.merge_size) {
-        return Err(Error::Config {
-            message: format!(
-                "MonkeyOCRv2 resized grid {grid_h}x{grid_w} is not divisible by merge_size {}",
-                cfg.merge_size
-            ),
-        });
-    }
-
-    let patches = patchify_merge_grouped(
-        &frames,
-        3,
-        resized_height as usize,
-        resized_width as usize,
-        grid_t,
-        grid_h,
-        grid_w,
+    // Resize above carries this model's own bounds; the normalize, temporal
+    // repetition, and patchify tail is the shared Qwen-VL processing.
+    let shared_cfg = QwenVlImageProcessorConfig::for_resized_frames(
         cfg.patch_size,
-        cfg.merge_size,
         cfg.temporal_patch_size,
+        cfg.merge_size,
+        cfg.image_mean.clone(),
+        cfg.image_std.clone(),
+        cfg.do_normalize,
+        cfg.do_rescale.then_some(cfg.rescale_factor),
     );
-    let patch_dim = 3 * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size;
-    let num_patches = grid_t * grid_h * grid_w;
-    if patches.len() != num_patches * patch_dim {
-        return Err(Error::InvalidInput {
-            message: format!(
-                "MonkeyOCRv2 patch extraction produced {} values, expected {}",
-                patches.len(),
-                num_patches * patch_dim
-            ),
-        });
-    }
-    let pixel_values = Tensor::from_vec(patches, (num_patches, patch_dim), device)
-        .and_then(|tensor| tensor.to_dtype(dtype))
-        .map_err(|e| {
-            crate::utils::candle_to_ocr_inference("MonkeyOCRv2", "create image patch tensor", e)
-        })?;
-    let num_image_tokens = num_patches / (cfg.merge_size * cfg.merge_size);
+    let inputs = qwen_vl_processing::preprocess_resized_frames(
+        std::slice::from_ref(resized),
+        &shared_cfg,
+        device,
+        dtype,
+        "MonkeyOCRv2",
+    )?;
+    let grid_thw = inputs.image_grid_thw[0];
+    let num_image_tokens = (grid_thw.1 * grid_thw.2) / (cfg.merge_size * cfg.merge_size);
     Ok(MonkeyOcrV2ImageInputs {
-        pixel_values,
-        grid_thw: (grid_t, grid_h, grid_w),
+        pixel_values: inputs.pixel_values,
+        grid_thw,
         num_image_tokens,
     })
 }

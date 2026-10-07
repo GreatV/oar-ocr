@@ -51,6 +51,39 @@ impl QwenVlImageProcessorConfig {
         )
     }
 
+    /// A config for frames a caller already resized: preprocessing then only
+    /// normalizes, repeats the frame across the temporal dimension, and
+    /// patchifies with this geometry. Models whose resize semantics differ
+    /// from [`preprocess_images`](fn@preprocess_images) (different bounds or
+    /// a temporal-volume-aware resize) resize themselves and delegate the
+    /// rest through this.
+    pub(crate) fn for_resized_frames(
+        patch_size: usize,
+        temporal_patch_size: usize,
+        merge_size: usize,
+        image_mean: Vec<f32>,
+        image_std: Vec<f32>,
+        do_normalize: bool,
+        rescale: Option<f32>,
+    ) -> Self {
+        Self {
+            min_pixels: None,
+            max_pixels: None,
+            size: None,
+            do_resize: false,
+            do_rescale: rescale.is_some(),
+            do_normalize,
+            do_convert_rgb: true,
+            patch_size,
+            temporal_patch_size,
+            merge_size,
+            image_mean,
+            image_std,
+            resample: None,
+            rescale_factor: rescale.unwrap_or(1.0 / 255.0),
+        }
+    }
+
     pub fn pixel_bounds(&self) -> Result<(u32, u32), Error> {
         if let Some(size) = &self.size {
             if size.shortest_edge == 0 || size.longest_edge == 0 {
@@ -69,6 +102,17 @@ impl QwenVlImageProcessorConfig {
     }
 
     pub fn validate(&self) -> Result<(), Error> {
+        self.validate_geometry()?;
+        if self.do_rescale && self.rescale_factor <= 0.0 {
+            return Err(Error::config("Qwen-VL OCR rescale_factor must be > 0"));
+        }
+        Ok(())
+    }
+
+    /// Everything [`validate`](Self::validate) checks except the Qwen-VL
+    /// rescale-factor rule. Configs from `for_resized_frames` carry another
+    /// model's already-validated factor, whose rules differ.
+    fn validate_geometry(&self) -> Result<(), Error> {
         if self.do_normalize {
             crate::runtime::checkpoint::validate_image_mean_std(
                 "Qwen-VL OCR",
@@ -98,9 +142,6 @@ impl QwenVlImageProcessorConfig {
                 )));
             }
         }
-        if self.do_rescale && self.rescale_factor <= 0.0 {
-            return Err(Error::config("Qwen-VL OCR rescale_factor must be > 0"));
-        }
         Ok(())
     }
 }
@@ -119,6 +160,30 @@ pub fn preprocess_images(
     model_name: &str,
 ) -> Result<QwenVlImageInputs, Error> {
     cfg.validate()?;
+    preprocess_validated(images, cfg, device, dtype, model_name)
+}
+
+/// [`preprocess_images`] for frames the caller already resized with a
+/// config from `for_resized_frames`. The caller's model has validated its
+/// own rescale factor, so only the geometry checks run here.
+pub(crate) fn preprocess_resized_frames(
+    images: &[RgbImage],
+    cfg: &QwenVlImageProcessorConfig,
+    device: &Device,
+    dtype: DType,
+    model_name: &str,
+) -> Result<QwenVlImageInputs, Error> {
+    cfg.validate_geometry()?;
+    preprocess_validated(images, cfg, device, dtype, model_name)
+}
+
+fn preprocess_validated(
+    images: &[RgbImage],
+    cfg: &QwenVlImageProcessorConfig,
+    device: &Device,
+    dtype: DType,
+    model_name: &str,
+) -> Result<QwenVlImageInputs, Error> {
     if images.is_empty() {
         return Err(Error::InvalidInput {
             message: format!("{model_name}: no images provided"),
@@ -173,10 +238,15 @@ pub fn preprocess_images(
             (h, w)
         };
 
-        let resized = if cfg.do_resize && (rh != h || rw != w) {
-            image::imageops::resize(img, rw, rh, resize_filter)
+        // Borrow the page when no resize happens — the tail-only configs
+        // hand in already-resized frames, and cloning each page's RGB buffer
+        // would copy tens of MiB per image for nothing.
+        let resized_on_heap;
+        let resized: &image::RgbImage = if cfg.do_resize && (rh != h || rw != w) {
+            resized_on_heap = image::imageops::resize(img, rw, rh, resize_filter);
+            &resized_on_heap
         } else {
-            img.clone()
+            img
         };
 
         if rh % patch != 0 || rw % patch != 0 {
@@ -197,7 +267,7 @@ pub fn preprocess_images(
             });
         }
 
-        let frame = image_to_chw(&resized, mean, std, rescale_factor);
+        let frame = image_to_chw(resized, mean, std, rescale_factor);
         // For static document images, repeat the same frame to match the expected
         // temporal_patch_size dimension. This is correct behavior for image-only
         // models - the temporal dimension exists in the architecture but since
@@ -241,7 +311,14 @@ pub fn preprocess_images(
             });
         }
 
-        all_patches.extend(flat_patches);
+        // The first image's patches move straight into the accumulator;
+        // later images append. Single-image callers (the common case) thus
+        // never copy their patch vector.
+        if all_patches.is_empty() {
+            all_patches = flat_patches;
+        } else {
+            all_patches.extend(flat_patches);
+        }
         grids.push((grid_t, grid_h, grid_w));
     }
 
@@ -290,6 +367,39 @@ mod tests {
             resample: None,
             rescale_factor: 1.0 / 255.0,
         }
+    }
+
+    #[test]
+    fn resized_frames_without_normalization_keep_raw_rescaled_pixels() {
+        // for_resized_frames callers pass frames they resized themselves; a
+        // do_normalize=false config must leave rescaled pixels untouched
+        // rather than applying default mean/std.
+        let cfg = super::QwenVlImageProcessorConfig::for_resized_frames(
+            16,
+            2,
+            2,
+            vec![0.5; 3],
+            vec![0.5; 3],
+            false,
+            Some(1.0 / 255.0),
+        );
+        let white = RgbImage::from_pixel(64, 64, image::Rgb([255, 255, 255]));
+        let inputs = super::preprocess_resized_frames(
+            std::slice::from_ref(&white),
+            &cfg,
+            &Device::Cpu,
+            DType::F32,
+            "FixtureModel",
+        )
+        .unwrap();
+        assert_eq!(inputs.image_grid_thw, [(1, 4, 4)]);
+        let values = inputs
+            .pixel_values
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        assert!(values.iter().all(|value| (*value - 1.0).abs() < 1e-6));
     }
 
     #[test]

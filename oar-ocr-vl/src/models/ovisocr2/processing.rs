@@ -1,9 +1,7 @@
 use super::config::{OvisOcr2ImageProcessorConfig, OvisOcr2VisionConfig};
+use crate::backbones::qwen_vl_processing::{self, QwenVlImageProcessorConfig};
 use crate::error::Error;
-use crate::utils::{
-    candle_to_ocr_processing,
-    image::{image_to_chw, patchify_merge_grouped, pil_resample_to_filter_type, smart_resize},
-};
+use crate::utils::image::{pil_resample_to_filter_type, smart_resize};
 use candle_core::{DType, Device, Tensor};
 use image::{RgbImage, imageops::FilterType};
 
@@ -104,83 +102,31 @@ pub fn preprocess_image(
         image.clone()
     };
 
-    let default_mean = [0.0_f32; 3];
-    let default_std = [1.0_f32; 3];
-    let mean = if cfg.do_normalize {
-        cfg.image_mean.as_slice()
-    } else {
-        &default_mean
-    };
-    let std = if cfg.do_normalize {
-        cfg.image_std.as_slice()
-    } else {
-        &default_std
-    };
-    let rescale_factor = cfg.do_rescale.then_some(cfg.rescale_factor);
-    let frame = image_to_chw(&resized, mean, std, rescale_factor);
-
-    // The image processor represents a still image as one temporal grid cell
-    // whose frame is repeated to fill the Conv3D temporal kernel.
-    let frames: Vec<&[f32]> =
-        std::iter::repeat_n(frame.as_slice(), cfg.temporal_patch_size).collect();
-    let grid_t = 1usize;
-    let grid_h = resized_height as usize / cfg.patch_size;
-    let grid_w = resized_width as usize / cfg.patch_size;
-    if !grid_h.is_multiple_of(cfg.merge_size) || !grid_w.is_multiple_of(cfg.merge_size) {
-        return Err(Error::Config {
-            message: format!(
-                "OvisOCR2 patch grid {grid_h}x{grid_w} must be divisible by merge_size {}",
-                cfg.merge_size
-            ),
-        });
-    }
-
-    let flat = patchify_merge_grouped(
-        &frames,
-        vision_cfg.in_channels,
-        resized_height as usize,
-        resized_width as usize,
-        grid_t,
-        grid_h,
-        grid_w,
+    // The resize above carries this model's semantics (fixed runtime pixel
+    // bounds); normalize, temporal repetition, and patchify are the shared
+    // Qwen-VL processing.
+    let shared_cfg = QwenVlImageProcessorConfig::for_resized_frames(
         cfg.patch_size,
-        cfg.merge_size,
         cfg.temporal_patch_size,
+        cfg.merge_size,
+        cfg.image_mean.clone(),
+        cfg.image_std.clone(),
+        cfg.do_normalize,
+        cfg.do_rescale.then_some(cfg.rescale_factor),
     );
-    let patch_dim =
-        vision_cfg.in_channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size;
-    let num_patches = grid_t * grid_h * grid_w;
-    if flat.len() != num_patches * patch_dim {
-        return Err(Error::InvalidInput {
-            message: format!(
-                "OvisOCR2 patch extraction produced {} values, expected {}",
-                flat.len(),
-                num_patches * patch_dim
-            ),
-        });
-    }
-
-    let pixel_values = Tensor::from_vec(flat, (num_patches, patch_dim), device)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "OvisOCR2: create pixel_values",
-                e,
-            )
-        })?
-        .to_dtype(dtype)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "OvisOCR2: cast pixel_values",
-                e,
-            )
-        })?;
-    let num_image_tokens = num_patches / (cfg.merge_size * cfg.merge_size);
+    let inputs = qwen_vl_processing::preprocess_resized_frames(
+        std::slice::from_ref(&resized),
+        &shared_cfg,
+        device,
+        dtype,
+        "OvisOCR2",
+    )?;
+    let grid_thw = inputs.image_grid_thw[0];
+    let num_image_tokens = (grid_thw.1 * grid_thw.2) / (cfg.merge_size * cfg.merge_size);
 
     Ok(OvisOcr2ImageInputs {
-        pixel_values,
-        grid_thw: (grid_t, grid_h, grid_w),
+        pixel_values: inputs.pixel_values,
+        grid_thw,
         num_image_tokens,
     })
 }
