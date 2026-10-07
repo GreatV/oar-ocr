@@ -17,9 +17,12 @@ On macOS, use `--features metal` for CoreML and Metal acceleration. Explicit acc
 oar ocr page.png
 oar structure page.png -o documents
 oar parse --model PaddlePaddle/PaddleOCR-VL-1.5 page.png -o parsed
+
+# Earlier PP-OCR versions, e.g. PP-OCRv5 mobile
+oar ocr --det pp-ocrv5_mobile_det.onnx --rec pp-ocrv5_mobile_rec.onnx --dict ppocrv5_dict.txt page.png
 ```
 
-OCR uses the PP-OCRv6 builder preset, defaulting to Tiny for fast initial downloads, low memory use, and responsive CPU inference. Select another preset size with `--size small` or `--size medium`. Custom models require `--det`, `--rec`, and `--dict` together, accepting local files or registered names; they cannot be combined with `--size` and use generic detection defaults rather than the PP-OCRv6 preset's tuned thresholds. Structure uses the PP-StructureV3 builder preset with PP-DocLayoutV3, PP-OCRv6 Tiny, and wired/wireless table models; the same three custom OCR options replace its OCR combination while retaining the layout and table preset.
+OCR uses the PP-OCRv6 builder preset, defaulting to Tiny for fast initial downloads, low memory use, and responsive CPU inference. Select another preset size with `--size small` or `--size medium`. Custom models require `--det`, `--rec`, and `--dict` together, accepting local files or registered names; they cannot be combined with `--size` and use generic detection defaults (the PaddleX values for PP-OCRv4/v5) rather than the PP-OCRv6 preset's tuned thresholds. Structure uses the PP-StructureV3 builder preset with PP-DocLayoutV3, PP-OCRv6 Tiny, and wired/wireless table models; the same three custom OCR options replace its OCR combination while retaining the layout and table preset.
 
 Use `--format json` for structured results; OCR JSON includes text regions, pixel coordinates, and confidence scores. Text output goes to stdout without headers. `-o/--output DIR` instead writes `<image-stem>.md` or `.json` per image, and refuses to overwrite existing files. Multiple images on JSON stdout produce an array; a single image produces an object. Logs go to stderr at warn level; `-v` enables info progress.
 
