@@ -7,7 +7,7 @@ mod adapter;
 mod config;
 mod model;
 mod parser;
-pub(crate) mod processing;
+pub mod processing;
 pub(crate) mod vision;
 
 pub use config::{
@@ -15,7 +15,7 @@ pub use config::{
     OvisOcr2ImageProcessorSize, OvisOcr2RopeParameters, OvisOcr2TextConfig, OvisOcr2VisionConfig,
 };
 pub use model::{
-    DEFAULT_MAX_NEW_TOKENS, DEFAULT_PROMPT, OvisOcr2, clean_truncated_repeats,
+    DEFAULT_MAX_NEW_TOKENS, DEFAULT_PROMPT, GenerationTrace, OvisOcr2, clean_truncated_repeats,
     filter_visual_image_tags,
 };
 pub use parser::OvisOcr2ParseOptions;

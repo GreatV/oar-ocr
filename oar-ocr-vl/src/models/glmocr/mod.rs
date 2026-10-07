@@ -13,4 +13,4 @@ pub use config::{
     GlmOcrConfig, GlmOcrImageProcessorConfig, GlmOcrRopeParameters, GlmOcrTextConfig,
     GlmOcrVisionConfig,
 };
-pub use model::GlmOcr;
+pub use model::{GenerationTrace, GlmOcr};

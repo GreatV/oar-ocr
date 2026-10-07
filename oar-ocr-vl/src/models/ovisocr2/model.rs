@@ -169,11 +169,29 @@ impl OvisOcr2 {
     ) -> crate::error::BatchResult<Vec<u32>> {
         Ok(images
             .iter()
-            .map(|image| self.generate_one(image, max_new_tokens))
+            .map(|image| self.generate_one(image, max_new_tokens, None))
             .collect())
     }
 
-    fn generate_one(&self, image: &RgbImage, max_new_tokens: usize) -> Result<Vec<u32>, Error> {
+    /// Greedy generation with per-step top-3 logits, for numerical
+    /// alignment against the upstream reference (see the
+    /// `ovisocr2_alignment` test).
+    pub fn generate_traced(
+        &self,
+        image: &RgbImage,
+        max_new_tokens: usize,
+    ) -> Result<GenerationTrace, Error> {
+        let mut step_top = Vec::new();
+        let tokens = self.generate_one(image, max_new_tokens, Some(&mut step_top))?;
+        Ok(GenerationTrace { tokens, step_top })
+    }
+
+    fn generate_one(
+        &self,
+        image: &RgbImage,
+        max_new_tokens: usize,
+        mut step_top: Option<&mut Vec<[(u32, f32); 3]>>,
+    ) -> Result<Vec<u32>, Error> {
         self.text.clear_cache();
         let _cache_guard = TextCacheGuard(&self.text);
         if max_new_tokens == 0 {
@@ -241,6 +259,14 @@ impl OvisOcr2 {
         self.text.prepare_decode_graph(prompt_len, max_new_tokens)?;
 
         for step in 0..max_new_tokens {
+            if let Some(step_top) = step_top.as_deref_mut() {
+                let scores = logits
+                    .flatten_all()
+                    .and_then(|logits| logits.to_dtype(DType::F32))
+                    .and_then(|logits| logits.to_vec1::<f32>())
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "trace logits", e))?;
+                step_top.push(top3(&scores));
+            }
             let token = select_greedy_token(&logits)?;
             if self.stop_token_ids.contains(&token) {
                 break;
@@ -538,6 +564,34 @@ fn text_position_ids(position: i64, device: &Device) -> Result<Tensor, Error> {
             e,
         )
     })
+}
+
+/// Greedy generation with per-step top-3 logits for alignment tests.
+#[derive(Debug, Clone)]
+pub struct GenerationTrace {
+    pub tokens: Vec<u32>,
+    pub step_top: Vec<[(u32, f32); 3]>,
+}
+
+fn top3(scores: &[f32]) -> [(u32, f32); 3] {
+    let mut best: [(usize, f32); 3] = [(0, f32::NEG_INFINITY); 3];
+    for (index, &value) in scores.iter().enumerate() {
+        if value > best[2].1 {
+            if value > best[1].1 {
+                if value > best[0].1 {
+                    best[2] = best[1];
+                    best[1] = best[0];
+                    best[0] = (index, value);
+                } else {
+                    best[2] = best[1];
+                    best[1] = (index, value);
+                }
+            } else {
+                best[2] = (index, value);
+            }
+        }
+    }
+    best.map(|(index, value)| (index as u32, value))
 }
 
 fn select_greedy_token(logits: &Tensor) -> Result<u32, Error> {
