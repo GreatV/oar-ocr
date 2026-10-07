@@ -134,7 +134,7 @@ impl XiaomiOcrProcessorConfig {
     }
 
     pub fn validate(&self) -> Result<(), Error> {
-        self.image_processor.validate()
+        self.image_processor.validate_with_rescale()
     }
 
     /// The image processor must agree with the vision tower on how pixels

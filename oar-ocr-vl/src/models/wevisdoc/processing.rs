@@ -38,7 +38,7 @@ pub(crate) fn load_image_processor_config(
 ) -> Result<QwenVlImageProcessorConfig, Error> {
     let cfg: QwenVlImageProcessorConfig =
         load_json_config(path, "WeVisDoc", "preprocessor_config.json")?;
-    cfg.validate()?;
+    cfg.validate_with_rescale()?;
     Ok(cfg)
 }
 

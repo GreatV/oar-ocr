@@ -44,11 +44,13 @@ pub struct QwenVlImageSize {
 
 impl QwenVlImageProcessorConfig {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
-        crate::runtime::checkpoint::load_json_config(
+        let config: Self = crate::runtime::checkpoint::load_json_config(
             path,
             "Qwen-VL OCR",
             "preprocessor_config.json",
-        )
+        )?;
+        config.validate_with_rescale()?;
+        Ok(config)
     }
 
     /// A config for frames a caller already resized: preprocessing then only
@@ -131,6 +133,17 @@ impl QwenVlImageProcessorConfig {
                 )));
             }
         }
+        // Note: `rescale_factor > 0` is deliberately NOT checked here —
+        // tail-only configs built by `for_resized_frames` carry their own
+        // model's already-validated factor, whose rules differ. The Qwen-VL
+        // rule runs at checkpoint-load time, via `validate_with_rescale`.
+        Ok(())
+    }
+
+    /// `validate()` plus the Qwen-VL rescale-factor rule, for checkpoint
+    /// configs loaded from disk; tail-only configs skip the extra rule.
+    pub(crate) fn validate_with_rescale(&self) -> Result<(), Error> {
+        self.validate()?;
         if self.do_rescale && self.rescale_factor <= 0.0 {
             return Err(Error::config("Qwen-VL OCR rescale_factor must be > 0"));
         }
@@ -206,10 +219,15 @@ pub fn preprocess_images(
             (h, w)
         };
 
-        let resized = if cfg.do_resize && (rh != h || rw != w) {
-            image::imageops::resize(img, rw, rh, resize_filter)
+        // Borrow the page when no resize happens — the tail-only configs
+        // hand in already-resized frames, and cloning each page's RGB buffer
+        // would copy tens of MiB per image for nothing.
+        let resized_on_heap;
+        let resized: &image::RgbImage = if cfg.do_resize && (rh != h || rw != w) {
+            resized_on_heap = image::imageops::resize(img, rw, rh, resize_filter);
+            &resized_on_heap
         } else {
-            img.clone()
+            img
         };
 
         if rh % patch != 0 || rw % patch != 0 {
@@ -230,7 +248,7 @@ pub fn preprocess_images(
             });
         }
 
-        let frame = image_to_chw(&resized, mean, std, rescale_factor);
+        let frame = image_to_chw(resized, mean, std, rescale_factor);
         // For static document images, repeat the same frame to match the expected
         // temporal_patch_size dimension. This is correct behavior for image-only
         // models - the temporal dimension exists in the architecture but since
@@ -274,7 +292,14 @@ pub fn preprocess_images(
             });
         }
 
-        all_patches.extend(flat_patches);
+        // The first image's patches move straight into the accumulator;
+        // later images append. Single-image callers (the common case) thus
+        // never copy their patch vector.
+        if all_patches.is_empty() {
+            all_patches = flat_patches;
+        } else {
+            all_patches.extend(flat_patches);
+        }
         grids.push((grid_t, grid_h, grid_w));
     }
 
