@@ -333,6 +333,87 @@ impl OAROCRBuilder {
         self
     }
 
+    /// Resolves the text detection config from an explicit config, a
+    /// preset's defaults, and the text type.
+    fn effective_text_detection_config(&self) -> TextDetectionConfig {
+        // Align text detection defaults with OCR pipeline.
+        // Defaults depend on text_type:
+        // - general: limit_side_len=960, limit_type="max", thresh=0.3, box_thresh=0.6, unclip_ratio=2.0
+        // - table: limit_side_len=960, limit_type="max", thresh=0.3, box_thresh=0.4, unclip_ratio=2.0
+        // - seal: limit_side_len=736, limit_type="min", thresh=0.2, box_thresh=0.6, unclip_ratio=0.5
+        // A preset's thresholds seed the general path only: explicit configs
+        // win, and the seal/table branches below replace them wholesale.
+        // The adapter matches text types case-insensitively, so do the same here.
+        let text_type = self
+            .text_type
+            .as_deref()
+            .unwrap_or("general")
+            .to_ascii_lowercase();
+        let preset_det_defaults = self.preset_text_detection_config.is_some()
+            && self.text_detection_config.is_none()
+            && !matches!(text_type.as_str(), "table" | "seal");
+        let mut effective_det_cfg = match (
+            &self.text_detection_config,
+            &self.preset_text_detection_config,
+        ) {
+            (Some(explicit), _) => explicit.clone(),
+            (None, Some(preset)) if preset_det_defaults => preset.clone(),
+            _ => TextDetectionConfig::default(),
+        };
+        let has_explicit_det_cfg = self.text_detection_config.is_some();
+        if !has_explicit_det_cfg {
+            match text_type.as_str() {
+                "table" => {
+                    effective_det_cfg.score_threshold = 0.3;
+                    effective_det_cfg.box_threshold = 0.4;
+                    effective_det_cfg.unclip_ratio = 2.0;
+                    if effective_det_cfg.limit_side_len.is_none() {
+                        effective_det_cfg.limit_side_len = Some(960);
+                    }
+                    if effective_det_cfg.limit_type.is_none() {
+                        effective_det_cfg.limit_type = Some(crate::processors::LimitType::Max);
+                    }
+                    if effective_det_cfg.max_side_len.is_none() {
+                        effective_det_cfg.max_side_len = Some(4000);
+                    }
+                }
+                "seal" => {
+                    effective_det_cfg.score_threshold = 0.2;
+                    effective_det_cfg.box_threshold = 0.6;
+                    effective_det_cfg.unclip_ratio = 0.5;
+                    if effective_det_cfg.limit_side_len.is_none() {
+                        effective_det_cfg.limit_side_len = Some(736);
+                    }
+                    if effective_det_cfg.limit_type.is_none() {
+                        effective_det_cfg.limit_type = Some(crate::processors::LimitType::Min);
+                    }
+                    if effective_det_cfg.max_side_len.is_none() {
+                        effective_det_cfg.max_side_len = Some(4000);
+                    }
+                }
+                _ => {
+                    // The preset already chose its thresholds; only fill the
+                    // limits around them.
+                    if !preset_det_defaults {
+                        effective_det_cfg.score_threshold = 0.3;
+                        effective_det_cfg.box_threshold = 0.6;
+                        effective_det_cfg.unclip_ratio = 2.0;
+                    }
+                    if effective_det_cfg.limit_side_len.is_none() {
+                        effective_det_cfg.limit_side_len = Some(960);
+                    }
+                    if effective_det_cfg.limit_type.is_none() {
+                        effective_det_cfg.limit_type = Some(crate::processors::LimitType::Max);
+                    }
+                    if effective_det_cfg.max_side_len.is_none() {
+                        effective_det_cfg.max_side_len = Some(4000);
+                    }
+                }
+            }
+        }
+        effective_det_cfg
+    }
+
     /// Sets the text type for sorting and cropping strategy.
     ///
     /// This matches the text_type parameter:
@@ -434,77 +515,7 @@ impl OAROCRBuilder {
             detection_builder = detection_builder.with_ort_config(ort_config.clone());
         }
 
-        // Align text detection defaults with OCR pipeline.
-        // Defaults depend on text_type:
-        // - general: limit_side_len=960, limit_type="max", thresh=0.3, box_thresh=0.6, unclip_ratio=2.0
-        // - table: limit_side_len=960, limit_type="max", thresh=0.3, box_thresh=0.4, unclip_ratio=2.0
-        // - seal: limit_side_len=736, limit_type="min", thresh=0.2, box_thresh=0.6, unclip_ratio=0.5
-        // A preset's thresholds seed the general path only: explicit configs
-        // win, and the seal/table branches below replace them wholesale.
-        let preset_det_defaults = self.preset_text_detection_config.is_some()
-            && self.text_detection_config.is_none()
-            && matches!(self.text_type.as_deref(), None | Some("general"));
-        let mut effective_det_cfg = match (
-            &self.text_detection_config,
-            &self.preset_text_detection_config,
-        ) {
-            (Some(explicit), _) => explicit.clone(),
-            (None, Some(preset)) if preset_det_defaults => preset.clone(),
-            _ => TextDetectionConfig::default(),
-        };
-        let has_explicit_det_cfg = self.text_detection_config.is_some();
-        if !has_explicit_det_cfg {
-            match self.text_type.as_deref().unwrap_or("general") {
-                "table" => {
-                    effective_det_cfg.score_threshold = 0.3;
-                    effective_det_cfg.box_threshold = 0.4;
-                    effective_det_cfg.unclip_ratio = 2.0;
-                    if effective_det_cfg.limit_side_len.is_none() {
-                        effective_det_cfg.limit_side_len = Some(960);
-                    }
-                    if effective_det_cfg.limit_type.is_none() {
-                        effective_det_cfg.limit_type = Some(crate::processors::LimitType::Max);
-                    }
-                    if effective_det_cfg.max_side_len.is_none() {
-                        effective_det_cfg.max_side_len = Some(4000);
-                    }
-                }
-                "seal" => {
-                    effective_det_cfg.score_threshold = 0.2;
-                    effective_det_cfg.box_threshold = 0.6;
-                    effective_det_cfg.unclip_ratio = 0.5;
-                    if effective_det_cfg.limit_side_len.is_none() {
-                        effective_det_cfg.limit_side_len = Some(736);
-                    }
-                    if effective_det_cfg.limit_type.is_none() {
-                        effective_det_cfg.limit_type = Some(crate::processors::LimitType::Min);
-                    }
-                    if effective_det_cfg.max_side_len.is_none() {
-                        effective_det_cfg.max_side_len = Some(4000);
-                    }
-                }
-                _ => {
-                    // The preset already chose its thresholds; only fill the
-                    // limits around them.
-                    if !preset_det_defaults {
-                        effective_det_cfg.score_threshold = 0.3;
-                        effective_det_cfg.box_threshold = 0.6;
-                        effective_det_cfg.unclip_ratio = 2.0;
-                    }
-                    if effective_det_cfg.limit_side_len.is_none() {
-                        effective_det_cfg.limit_side_len = Some(960);
-                    }
-                    if effective_det_cfg.limit_type.is_none() {
-                        effective_det_cfg.limit_type = Some(crate::processors::LimitType::Max);
-                    }
-                    if effective_det_cfg.max_side_len.is_none() {
-                        effective_det_cfg.max_side_len = Some(4000);
-                    }
-                }
-            }
-        }
-
-        detection_builder = detection_builder.with_config(effective_det_cfg);
+        detection_builder = detection_builder.with_config(self.effective_text_detection_config());
 
         // Pass text_type to detection adapter for proper preprocessing configuration
         if let Some(ref text_type) = self.text_type {
@@ -1268,13 +1279,16 @@ mod tests {
             assert_eq!(config.box_threshold, box_threshold);
             assert_eq!(config.unclip_ratio, 1.4);
             assert_eq!(config.max_candidates, 3000);
-            assert!(
+            // Text types match case-insensitively: seal/table replace the
+            // preset thresholds, anything else keeps them.
+            let resolve = |text_type: &str| {
                 OAROCRBuilder::pp_ocrv6(size)
-                    .text_type("seal")
-                    .text_detection_config
-                    .is_none(),
-                "seal keeps its own defaults after the preset"
-            );
+                    .text_type(text_type)
+                    .effective_text_detection_config()
+                    .unclip_ratio
+            };
+            assert_eq!(resolve("Seal"), 0.5);
+            assert_eq!(resolve("GENERAL"), 1.4);
         }
     }
 
