@@ -103,3 +103,13 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p oar-ocr-vl
+
+      - name: Wait for crates.io index update
+        run: |
+          echo "Waiting for crates.io to index oar-ocr-vl..."
+          sleep 30
+
+      - name: Publish oar-ocr-cli to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p oar-ocr-cli
