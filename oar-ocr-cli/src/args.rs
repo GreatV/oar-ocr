@@ -1,5 +1,5 @@
-use crate::default_models::MODELS;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use oar_ocr::oarocr::PpOcrV6Size;
 use oar_ocr_vl::AnyPageParserModel;
 use std::path::PathBuf;
 
@@ -31,9 +31,9 @@ pub(crate) struct Common {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
-    /// Recognize text with PP-OCRv6 Tiny
+    /// Recognize text with a PP-OCRv6 preset
     Ocr(Ocr),
-    /// Parse layout, text, and tables into Markdown
+    /// Parse layout, text, and tables with the PP-StructureV3 preset
     Structure(Structure),
     /// Parse pages with a supported vision-language model
     Parse(Parse),
@@ -41,15 +41,15 @@ pub(crate) enum Command {
 
 #[derive(Args)]
 pub(crate) struct ClassicModels {
-    /// Detection model file or registered model name
-    #[arg(long, default_value = MODELS.det)]
-    pub(crate) det: PathBuf,
-    /// Recognition model file or registered model name
-    #[arg(long, default_value = MODELS.rec)]
-    pub(crate) rec: PathBuf,
-    /// Character dictionary file or registered dictionary name
-    #[arg(long, default_value = MODELS.dict)]
-    pub(crate) dict: PathBuf,
+    /// Custom detection model; also requires --rec and --dict
+    #[arg(long, requires_all = ["rec", "dict"])]
+    pub(crate) det: Option<PathBuf>,
+    /// Custom recognition model; also requires --det and --dict
+    #[arg(long, requires_all = ["det", "dict"])]
+    pub(crate) rec: Option<PathBuf>,
+    /// Custom character dictionary; also requires --det and --rec
+    #[arg(long, requires_all = ["det", "rec"])]
+    pub(crate) dict: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -66,12 +66,32 @@ pub(crate) enum PageFormat {
 
 #[derive(Args)]
 pub(crate) struct Ocr {
+    /// PP-OCRv6 preset size
+    #[arg(long, value_enum, default_value = "tiny", conflicts_with_all = ["det", "rec", "dict"])]
+    pub(crate) size: OcrSize,
     #[command(flatten)]
     pub(crate) models: ClassicModels,
     #[arg(long, value_enum, default_value = "text")]
     pub(crate) format: OcrFormat,
     #[arg(required = true, value_name = "IMAGES", num_args = 1..)]
     pub(crate) images: Vec<PathBuf>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum OcrSize {
+    Tiny,
+    Small,
+    Medium,
+}
+
+impl From<OcrSize> for PpOcrV6Size {
+    fn from(size: OcrSize) -> Self {
+        match size {
+            OcrSize::Tiny => Self::Tiny,
+            OcrSize::Small => Self::Small,
+            OcrSize::Medium => Self::Medium,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -159,6 +179,10 @@ mod tests {
             "CUDA:2",
             "--rec",
             "custom.onnx",
+            "--det",
+            "det.onnx",
+            "--dict",
+            "dict.txt",
             "-o",
             "outputs",
         ])
@@ -169,7 +193,19 @@ mod tests {
             panic!("expected OCR")
         };
         assert!(args.format == OcrFormat::Json);
-        assert_eq!(args.models.rec, PathBuf::from("custom.onnx"));
+        assert_eq!(args.models.rec, Some(PathBuf::from("custom.onnx")));
+        for (extra, expected) in [
+            (vec![], PpOcrV6Size::Tiny),
+            (vec!["--size", "small"], PpOcrV6Size::Small),
+            (vec!["--size", "medium"], PpOcrV6Size::Medium),
+        ] {
+            let cli =
+                Cli::try_parse_from(["oar", "ocr", "page.png"].into_iter().chain(extra)).unwrap();
+            let Command::Ocr(args) = cli.command else {
+                panic!("expected OCR")
+            };
+            assert_eq!(PpOcrV6Size::from(args.size), expected);
+        }
         let cli = Cli::try_parse_from(["oar", "parse", "--list-models"]).unwrap();
         let Command::Parse(args) = cli.command else {
             panic!("expected parsing")
@@ -184,6 +220,8 @@ mod tests {
             assert!(Cli::try_parse_from(["oar", "ocr", "page.png", "--device", device]).is_err());
         }
         assert!(Cli::try_parse_from(["oar", "ocr", "page.png", "--format", "yaml"]).is_err());
+        assert!(Cli::try_parse_from(["oar", "ocr", "page.png", "--size", "large"]).is_err());
+        assert!(Cli::try_parse_from(["oar", "ocr", "page.png", "--det", "det.onnx"]).is_err());
         assert!(Cli::try_parse_from(["oar", "parse", "page.png"]).is_err());
         assert!(
             Cli::try_parse_from(["oar", "parse", "--model", "unknown/model", "page.png"]).is_err()

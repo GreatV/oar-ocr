@@ -1,10 +1,8 @@
 mod args;
-mod default_models;
 
 use anyhow::{Context, Result, bail, ensure};
 use args::{Cli, Command, Common, OcrFormat, PageFormat};
 use clap::Parser;
-use default_models::MODELS;
 use image::RgbImage;
 use oar_ocr::{
     core::config::{OrtExecutionProvider, OrtSessionConfig},
@@ -86,7 +84,12 @@ fn run(cli: Cli) -> Result<()> {
     let images = load_images(paths)?;
     let documents = match &cli.command {
         Command::Ocr(args) => {
-            let model = OAROCRBuilder::new(&args.models.det, &args.models.rec, &args.models.dict)
+            let builder = match (&args.models.det, &args.models.rec, &args.models.dict) {
+                (Some(det), Some(rec), Some(dict)) => OAROCRBuilder::new(det, rec, dict),
+                (None, None, None) => OAROCRBuilder::pp_ocrv6(args.size.into()),
+                _ => bail!("custom OCR models require --det, --rec, and --dict together"),
+            };
+            let model = builder
                 .ort_session(classic_device(&cli.common.device, cli.verbose)?)
                 .build().context("could not load OCR models; check the network or provide local --det, --rec, and --dict files")?;
             tracing::info!("OCR models loaded; recognizing {} image(s)", images.len());
@@ -105,14 +108,13 @@ fn run(cli: Cli) -> Result<()> {
                 .collect::<Result<Vec<_>>>()?
         }
         Command::Structure(args) => {
-            let model = OARStructureBuilder::new(MODELS.layout)
-                .layout_model_name("PP-DocLayoutV3")
-                .with_ocr(&args.models.det, &args.models.rec, &args.models.dict)
-                .table_structure_dict_path(MODELS.table_dict)
-                .with_table_classification(MODELS.table_classifier)
-                .with_wired_table_structure(MODELS.wired_structure)
-                .with_wireless_table_structure(MODELS.wireless_structure)
-                .with_wired_table_cell_detection(MODELS.wired_cells)
+            let builder = OARStructureBuilder::pp_structurev3();
+            let builder = match (&args.models.det, &args.models.rec, &args.models.dict) {
+                (Some(det), Some(rec), Some(dict)) => builder.with_ocr(det, rec, dict),
+                (None, None, None) => builder,
+                _ => bail!("custom OCR models require --det, --rec, and --dict together"),
+            };
+            let model = builder
                 .ort_session(classic_device(&cli.common.device, cli.verbose)?)
                 .build().context("could not load structure models; check model-download connectivity and try again")?;
             tracing::info!("Structure models loaded; parsing {} image(s)", images.len());
