@@ -41,6 +41,20 @@ pub struct PageDocument {
     pub diagnostics: Vec<ParseDiagnostic>,
 }
 
+/// Maps built-in VL labels that `LayoutElementType::from_label` does not know
+/// (MinerU's native block types) onto the canonical page JSON vocabulary.
+fn canonical_alias(label: &str) -> &str {
+    match label {
+        "page_number" => "number",
+        "page_footnote" | "table_footnote" | "image_footnote" => "footnote",
+        "equation_block" => "formula",
+        "table_caption" => "table_title",
+        "image_caption" => "figure_title",
+        "ref_text" => "reference_content",
+        other => other,
+    }
+}
+
 impl PageDocument {
     /// Exports this page in the shared page JSON format.
     ///
@@ -65,7 +79,7 @@ impl PageDocument {
                 // Map the model label onto the canonical vocabulary; an
                 // unknown label passes through verbatim rather than
                 // collapsing into "other".
-                let mapped = LayoutElementType::from_label(&block.block_type);
+                let mapped = LayoutElementType::from_label(canonical_alias(&block.block_type));
                 let canonical = if mapped == LayoutElementType::Other
                     && !block.block_type.eq_ignore_ascii_case("other")
                 {

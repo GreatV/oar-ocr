@@ -1066,22 +1066,26 @@ impl StructureResult {
     /// [`to_json_value`](Self::to_json_value), and `markdown` is the
     /// [`to_markdown`](Self::to_markdown) rendering.
     ///
-    /// `width` and `height` are the parsed image's pixel dimensions. With
-    /// UVDoc rectification the boxes are in the rectified image's coordinate
-    /// system, so when a rectified image is attached its dimensions are
-    /// reported instead. Table content comes from the paired [`TableResult`]
+    /// `width` and `height` are the pixel dimensions of the coordinate space
+    /// the boxes are in: the input image, whose coordinates orientation
+    /// correction maps boxes back to, or the rectified image when document
+    /// rectification (UVDoc) is enabled, since rectification cannot be
+    /// inverted. Table content comes from the paired [`TableResult`]
     /// HTML (the plain table, without the exporters' border and centering
     /// styling), because stitching leaves table element text empty.
     pub fn to_page_json(&self, width: u32, height: u32) -> serde_json::Value {
-        let (width, height) = match &self.rectified_img {
-            Some(rectified) => (rectified.width(), rectified.height()),
-            None => (width, height),
-        };
         let blocks = self
             .layout_elements
             .iter()
             .map(|element| {
-                let canonical = element.element_type.as_str();
+                // A label outside the canonical vocabulary passes through
+                // verbatim, as on the VL side.
+                let canonical = match &element.label {
+                    Some(label) if element.element_type == LayoutElementType::Other => {
+                        label.as_str()
+                    }
+                    _ => element.element_type.as_str(),
+                };
                 let mut block = serde_json::json!({
                     "type": canonical,
                     "bbox": [

@@ -3641,7 +3641,12 @@ impl OARStructure {
         let results: Vec<_> = prepared_pages
             .into_iter()
             .zip(per_page_formulas)
-            .map(|(prepared, formulas)| self.complete_page(prepared?, formulas))
+            .enumerate()
+            .map(|(index, (prepared, formulas))| {
+                let mut result = self.complete_page(prepared?, formulas)?;
+                result.index = index;
+                Ok(result)
+            })
             .collect();
         tracing::debug!(
             "structure batch: pages={}, preprocess={:.1} ms, layout/region={:.1} ms, formula={:.1} ms, ocr={:.1} ms, complete={:.1} ms, total={:.1} ms",
