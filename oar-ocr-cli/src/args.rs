@@ -3,6 +3,8 @@ use oar_ocr::oarocr::PpOcrV6Size;
 use oar_ocr_vl::AnyPageParserModel;
 use std::path::PathBuf;
 
+use crate::pdf::PageRanges;
+
 #[derive(Parser)]
 #[command(
     name = "oar",
@@ -24,9 +26,15 @@ pub(crate) struct Common {
     /// auto, cpu, cuda:N, or metal
     #[arg(long, global = true, default_value = "auto", value_parser = device)]
     pub(crate) device: String,
-    /// Write one .md or .json per image instead of stdout; use a fresh directory
+    /// Write one .md or .json per image or PDF page; use a fresh directory
     #[arg(short, long, global = true, value_name = "DIR")]
     pub(crate) output: Option<PathBuf>,
+    /// PDF pages to process, e.g. 1-3,5 (1-based; default: all)
+    #[arg(long, global = true, value_name = "RANGES")]
+    pub(crate) pages: Option<PageRanges>,
+    /// PDF rendering resolution in dots per inch
+    #[arg(long, global = true, default_value = "144", value_parser = dpi)]
+    pub(crate) dpi: f32,
 }
 
 #[derive(Subcommand)]
@@ -73,7 +81,7 @@ pub(crate) struct Ocr {
     pub(crate) models: ClassicModels,
     #[arg(long, value_enum, default_value = "text")]
     pub(crate) format: OcrFormat,
-    #[arg(required = true, value_name = "IMAGES", num_args = 1..)]
+    #[arg(required = true, value_name = "INPUTS", num_args = 1..)]
     pub(crate) images: Vec<PathBuf>,
 }
 
@@ -100,7 +108,7 @@ pub(crate) struct Structure {
     pub(crate) models: ClassicModels,
     #[arg(long, value_enum, default_value = "markdown")]
     pub(crate) format: PageFormat,
-    #[arg(required = true, value_name = "IMAGES", num_args = 1..)]
+    #[arg(required = true, value_name = "INPUTS", num_args = 1..)]
     pub(crate) images: Vec<PathBuf>,
 }
 
@@ -131,7 +139,7 @@ pub(crate) struct Parse {
     pub(crate) list_models: bool,
     #[arg(long, value_enum, default_value = "markdown")]
     pub(crate) format: PageFormat,
-    #[arg(required_unless_present = "list_models", value_name = "IMAGES", num_args = 1..)]
+    #[arg(required_unless_present = "list_models", value_name = "INPUTS", num_args = 1..)]
     pub(crate) images: Vec<PathBuf>,
 }
 
@@ -141,6 +149,14 @@ fn positive(value: &str) -> Result<usize, String> {
         .ok()
         .filter(|n| *n > 0)
         .ok_or_else(|| "must be a positive integer".into())
+}
+
+fn dpi(value: &str) -> Result<f32, String> {
+    value
+        .parse::<f32>()
+        .ok()
+        .filter(|dpi| dpi.is_finite() && *dpi > 0.0)
+        .ok_or_else(|| "DPI must be a finite positive number".into())
 }
 
 fn model(value: &str) -> Result<AnyPageParserModel, String> {
