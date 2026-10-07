@@ -1,4 +1,5 @@
 mod args;
+mod pdf;
 
 use anyhow::{Context, Result, bail, ensure};
 use args::{Cli, Command, Common, OcrFormat, PageFormat};
@@ -11,6 +12,7 @@ use oar_ocr::{
 use oar_ocr_vl::{
     AnyPageParser, AnyPageParserLoadOptions, AnyPageParserModel, AnyPageParserOptions, PageParser,
 };
+use pdf::Input;
 use serde_json::Value;
 use std::{
     collections::BTreeSet,
@@ -39,6 +41,9 @@ const PARSERS: &[AnyPageParserModel] = &[
     AnyPageParserModel::GlmOcr,
     AnyPageParserModel::TeleOcr,
 ];
+
+// Match the largest default image batch while bounding rendered page memory.
+const PAGE_BATCH_SIZE: usize = 8;
 
 struct Document {
     text: String,
@@ -80,9 +85,16 @@ fn run(cli: Cli) -> Result<()> {
         Command::Structure(args) => (&args.images, args.format == PageFormat::Json),
         Command::Parse(args) => (&args.images, args.format == PageFormat::Json),
     };
-    let destinations = output_paths(paths, &cli.common, json)?;
-    let images = load_images(paths)?;
-    let documents = match &cli.command {
+    let inputs = paths
+        .iter()
+        .map(|path| {
+            Input::open(path, cli.common.pages.as_ref())
+                .with_context(|| format!("could not open {}", path.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let destinations = output_paths(&inputs, &cli.common, json)?;
+    let total_pages: usize = inputs.iter().map(|input| input.pages.len()).sum();
+    match &cli.command {
         Command::Ocr(args) => {
             let builder = match (&args.models.det, &args.models.rec, &args.models.dict) {
                 (Some(det), Some(rec), Some(dict)) => OAROCRBuilder::new(det, rec, dict),
@@ -92,20 +104,30 @@ fn run(cli: Cli) -> Result<()> {
             let model = builder
                 .ort_session(classic_device(&cli.common.device, cli.verbose)?)
                 .build().context("could not load OCR models; check the network or provide local --det, --rec, and --dict files")?;
-            tracing::info!("OCR models loaded; recognizing {} image(s)", images.len());
-            model
-                .predict(images)?
-                .into_iter()
-                .enumerate()
-                .map(|(index, mut page)| {
-                    page.input_path = paths[index].to_string_lossy().into_owned().into();
-                    page.index = index;
-                    Ok(Document {
-                        text: page.concatenated_text("\n"),
-                        json: serde_json::to_value(page)?,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?
+            tracing::info!("OCR models loaded; recognizing {total_pages} page(s)");
+            process_inputs(
+                &inputs,
+                &cli.common,
+                destinations,
+                json,
+                PAGE_BATCH_SIZE,
+                |images, pages, first_index| {
+                    model
+                        .predict(images)?
+                        .into_iter()
+                        .zip(pages)
+                        .enumerate()
+                        .map(|(offset, (mut page, (input, _)))| {
+                            page.input_path = input.path.to_string_lossy().into_owned().into();
+                            page.index = first_index + offset;
+                            Ok(Document {
+                                text: page.concatenated_text("\n"),
+                                json: serde_json::to_value(page)?,
+                            })
+                        })
+                        .collect()
+                },
+            )
         }
         Command::Structure(args) => {
             let builder = OARStructureBuilder::pp_structurev3();
@@ -117,61 +139,80 @@ fn run(cli: Cli) -> Result<()> {
             let model = builder
                 .ort_session(classic_device(&cli.common.device, cli.verbose)?)
                 .build().context("could not load structure models; check model-download connectivity and try again")?;
-            tracing::info!("Structure models loaded; parsing {} image(s)", images.len());
-            model
-                .predict_images(images)
-                .into_iter()
-                .enumerate()
-                .map(|(index, page)| {
-                    let mut page = page?;
-                    page.input_path = paths[index].to_string_lossy().into_owned().into();
-                    page.index = index;
-                    Ok(Document {
-                        text: page.to_markdown(),
-                        json: serde_json::to_value(page)?,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?
+            tracing::info!("Structure models loaded; parsing {total_pages} page(s)");
+            process_inputs(
+                &inputs,
+                &cli.common,
+                destinations,
+                json,
+                PAGE_BATCH_SIZE,
+                |images, pages, first_index| {
+                    model
+                        .predict_images(images)
+                        .into_iter()
+                        .zip(pages)
+                        .enumerate()
+                        .map(|(offset, (page, (input, _)))| {
+                            let mut page = page?;
+                            page.input_path = input.path.to_string_lossy().into_owned().into();
+                            page.index = first_index + offset;
+                            Ok(Document {
+                                text: page.to_markdown(),
+                                json: serde_json::to_value(page)?,
+                            })
+                        })
+                        .collect()
+                },
+            )
         }
         Command::Parse(args) => {
             let parser = load_parser(args, &cli.common.device)?;
-            tracing::info!("Page parser loaded; parsing {} image(s)", images.len());
+            tracing::info!("Page parser loaded; parsing {total_pages} page(s)");
             let mut options = AnyPageParserOptions::default();
             if let Some(tokens) = args.max_tokens {
                 options = options.with_max_new_tokens(tokens);
             }
-            images
-                .iter()
-                .zip(paths)
-                .map(|(image, path)| {
-                    let page = parser
-                        .parse_page(image, &options)
-                        .with_context(|| format!("could not parse {}", path.display()))?;
-                    for diagnostic in &page.diagnostics {
-                        tracing::warn!("{}: {}", path.display(), diagnostic.message);
-                    }
-                    let text = page.markdown.clone().unwrap_or_else(|| {
-                        let blocks = page
-                            .blocks
-                            .iter()
-                            .filter_map(|b| b.content.as_deref())
-                            .collect::<Vec<_>>()
-                            .join("\n\n");
-                        if blocks.is_empty() {
-                            page.raw_output.clone().unwrap_or_default()
-                        } else {
-                            blocks
-                        }
-                    });
-                    Ok(Document {
-                        text,
-                        json: serde_json::to_value(page)?,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?
+            process_inputs(
+                &inputs,
+                &cli.common,
+                destinations,
+                json,
+                1,
+                |images, pages, _| {
+                    images
+                        .into_iter()
+                        .zip(pages)
+                        .map(|(image, (input, _))| {
+                            let path = &input.path;
+                            let page = parser
+                                .parse_page(&image, &options)
+                                .with_context(|| format!("could not parse {}", path.display()))?;
+                            for diagnostic in &page.diagnostics {
+                                tracing::warn!("{}: {}", path.display(), diagnostic.message);
+                            }
+                            let text = page.markdown.clone().unwrap_or_else(|| {
+                                let blocks = page
+                                    .blocks
+                                    .iter()
+                                    .filter_map(|b| b.content.as_deref())
+                                    .collect::<Vec<_>>()
+                                    .join("\n\n");
+                                if blocks.is_empty() {
+                                    page.raw_output.clone().unwrap_or_default()
+                                } else {
+                                    blocks
+                                }
+                            });
+                            Ok(Document {
+                                text,
+                                json: serde_json::to_value(page)?,
+                            })
+                        })
+                        .collect()
+                },
+            )
         }
-    };
-    write_documents(documents, destinations, json)
+    }
 }
 
 fn classic_device(device: &str, verbose: bool) -> Result<OrtSessionConfig> {
@@ -307,49 +348,34 @@ fn load_parser(args: &args::Parse, device: &str) -> Result<AnyPageParser> {
     )
 }
 
-fn load_images(paths: &[PathBuf]) -> Result<Vec<RgbImage>> {
-    paths
-        .iter()
-        .map(|path| {
-            ensure!(
-                path.is_file(),
-                "input {} is not an image file; pass individual image paths, not directories",
-                path.display()
-            );
-            ensure!(
-                !path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf")),
-                "PDF input is not supported; render pages to images first"
-            );
-            image::ImageReader::open(path)?
-                .with_guessed_format()?
-                .decode()
-                .map(|image| image.to_rgb8())
-                .with_context(|| {
-                    format!(
-                        "could not decode {}; use a PNG, JPEG, or other supported image",
-                        path.display()
-                    )
-                })
-        })
-        .collect()
-}
-
-fn output_paths(paths: &[PathBuf], common: &Common, json: bool) -> Result<Option<Vec<PathBuf>>> {
+fn output_paths(inputs: &[Input], common: &Common, json: bool) -> Result<Option<Vec<PathBuf>>> {
     let Some(directory) = &common.output else {
         return Ok(None);
     };
-    let outputs = paths
+    let outputs = inputs
         .iter()
         .map(|input| {
-            let name = input.file_name().context("input has no filename")?;
-            Ok(directory
-                .join(name)
-                .with_extension(if json { "json" } else { "md" }))
+            let name = input.path.file_name().context("input has no filename")?;
+            let stem = input.path.file_stem().context("input has no stem")?;
+            let extension = if json { "json" } else { "md" };
+            Ok(input
+                .pages
+                .iter()
+                .map(|page| {
+                    if input.is_pdf() {
+                        let mut name = stem.to_os_string();
+                        name.push(format!("_p{page}.{extension}"));
+                        directory.join(name)
+                    } else {
+                        directory.join(name).with_extension(extension)
+                    }
+                })
+                .collect::<Vec<_>>())
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     // Compare case-insensitively so names that only differ in case are caught
     // before inference on case-insensitive filesystems too.
     ensure!(
@@ -373,45 +399,90 @@ fn output_paths(paths: &[PathBuf], common: &Common, json: bool) -> Result<Option
     Ok(Some(outputs))
 }
 
-fn write_documents(
-    documents: Vec<Document>,
+fn process_inputs(
+    inputs: &[Input],
+    common: &Common,
     destinations: Option<Vec<PathBuf>>,
     json: bool,
+    batch_size: usize,
+    mut process: impl FnMut(Vec<RgbImage>, &[(&Input, usize)], usize) -> Result<Vec<Document>>,
 ) -> Result<()> {
-    if let Some(paths) = destinations {
-        for (path, document) in paths.iter().zip(documents) {
-            let text = if json {
-                serde_json::to_string_pretty(&document.json)?
-            } else {
-                document.text
-            };
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)
-                .with_context(|| {
-                    format!(
-                        "could not create {}; choose a fresh output directory",
-                        path.display()
-                    )
-                })?;
-            file.write_all(text.as_bytes())?;
+    let mut out = io::stdout().lock();
+    let array = inputs.iter().any(Input::is_pdf)
+        || inputs.iter().map(|input| input.pages.len()).sum::<usize>() != 1;
+    if destinations.is_none() && json && array {
+        writeln!(out, "[")?;
+    }
+    let mut index = 0;
+    let mut pages = inputs
+        .iter()
+        .flat_map(|input| input.pages.iter().map(move |number| (input, *number)));
+    loop {
+        let chunk = pages.by_ref().take(batch_size).collect::<Vec<_>>();
+        if chunk.is_empty() {
+            break;
         }
-    } else {
-        let mut out = io::stdout().lock();
-        if json {
-            let pages: Vec<_> = documents.into_iter().map(|doc| doc.json).collect();
-            if pages.len() == 1 {
-                serde_json::to_writer_pretty(&mut out, &pages[0])?;
-            } else {
-                serde_json::to_writer_pretty(&mut out, &pages)?;
+        let images = chunk
+            .iter()
+            .map(|(input, number)| {
+                input.render(*number, common.dpi).with_context(|| {
+                    format!("could not render {} page {number}", input.path.display())
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let documents = process(images, &chunk, index).with_context(|| {
+            let (input, number) = chunk[0];
+            format!(
+                "could not process batch starting at {} page {number}",
+                input.path.display()
+            )
+        })?;
+        ensure!(
+            documents.len() == chunk.len(),
+            "pipeline returned an unexpected number of pages"
+        );
+        for ((input, number), mut document) in chunk.into_iter().zip(documents) {
+            if input.is_pdf() {
+                document.json["page_number"] = number.into();
+                document.json["input_path"] = input.path.to_string_lossy().into_owned().into();
             }
-            writeln!(out)?;
-        } else {
-            for document in documents {
+            if let Some(paths) = &destinations {
+                let path = &paths[index];
+                let text = if json {
+                    serde_json::to_string_pretty(&document.json)?
+                } else {
+                    document.text
+                };
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .with_context(|| {
+                        format!(
+                            "could not create {}; choose a fresh output directory",
+                            path.display()
+                        )
+                    })?;
+                file.write_all(text.as_bytes())?;
+            } else if json {
+                if array && index > 0 {
+                    writeln!(out, ",")?;
+                }
+                serde_json::to_writer_pretty(&mut out, &document.json)?;
+            } else {
+                if input.is_pdf() {
+                    writeln!(out, "\n<!-- {}: page {number} -->\n", input.path.display())?;
+                }
                 writeln!(out, "{}", document.text)?;
             }
+            index += 1;
         }
+    }
+    if destinations.is_none() && json {
+        if array {
+            write!(out, "\n]")?;
+        }
+        writeln!(out)?;
     }
     Ok(())
 }

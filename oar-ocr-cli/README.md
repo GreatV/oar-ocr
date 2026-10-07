@@ -28,4 +28,12 @@ Use `--format json` for structured results; OCR JSON includes text regions, pixe
 
 `oar parse --list-models` lists the supported Hugging Face IDs without downloading anything. IDs are explicit, and downloading from ModelScope does not change their spelling. Use `--source huggingface` to choose that source, or `--model-dir DIR` to load a local checkpoint; local PaddleOCR-VL, GLM-OCR, and TeleOCR checkpoints also require `--layout-dir DIR`. Remote loading automatically downloads the required layout checkpoint unless `--layout-dir` is supplied. `--max-tokens N` limits VL generation and can produce partial output with warnings.
 
-Inputs must be individual image files. Render PDFs to images first; directory recursion and service modes are not supported.
+Inputs can be individual images or PDFs for all three commands. PDF detection uses the `%PDF-` content signature, regardless of the filename extension. Pages are rendered on a white background as needed: OCR and structure process batches of at most eight pages across inputs, while VL parsing processes one page at a time. Each batch is written before rendering the next, keeping rendered-image memory bounded. `--pages 1-3,5` selects 1-based PDF page numbers in document order, removing duplicates; without it, every page is processed. The selection applies to each PDF, and requesting a page beyond its page count is an error. `--dpi N` controls PDF rendering resolution; the default 144 DPI matches the examples' 2× scale. Both options leave image inputs unchanged. Directory recursion and service modes are not supported.
+
+With `-o DIR`, PDFs produce `<stem>_p<N>.md` or `.json` for each selected page, retaining the original 1-based page numbers. Text and Markdown on stdout include `<!-- filename: page N -->` markers. PDF JSON on stdout is always an array of per-page objects, including `page_number` and `input_path`, even when only one page is selected. Outputs are written incrementally; a later page error may leave earlier files or partial stdout output.
+
+```bash
+oar ocr document.pdf --pages 1-3,5 --dpi 144 -o pages
+oar structure document.pdf --format json
+oar parse --model PaddlePaddle/PaddleOCR-VL-1.5 document.pdf --pages 2
+```

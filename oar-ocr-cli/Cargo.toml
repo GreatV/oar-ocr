@@ -29,6 +29,7 @@ coreml = ["oar-ocr/coreml", "dep:ort", "ort/coreml"]
 [dependencies]
 anyhow = "1"
 clap.workspace = true
+hayro.workspace = true
 image.workspace = true
 oar-ocr = { version = "0.10.0", path = "..", default-features = false }
 oar-ocr-vl = { version = "0.10.0", path = "../oar-ocr-vl", default-features = false }
