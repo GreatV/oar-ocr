@@ -1,9 +1,9 @@
 use super::config::{GlmOcrImageProcessorConfig, GlmOcrVisionConfig};
 use crate::backbones::qwen_vl_processing::{self, QwenVlImageProcessorConfig};
 use crate::error::Error;
-use crate::utils::image::pil_resample_to_filter_type;
+use crate::utils::image::qwen_vl_resize;
 use candle_core::{DType, Device, Tensor};
-use image::{RgbImage, imageops::FilterType};
+use image::RgbImage;
 
 #[derive(Debug, Clone)]
 pub struct GlmOcrImageInputs {
@@ -115,11 +115,6 @@ pub fn preprocess_image(
         });
     }
 
-    let resize_filter = cfg
-        .resample
-        .and_then(pil_resample_to_filter_type)
-        .unwrap_or(FilterType::CatmullRom);
-
     let (h, w) = (image.height(), image.width());
     let factor = (cfg.patch_size * cfg.merge_size) as u32;
     let (rh, rw) = if cfg.do_resize {
@@ -136,8 +131,10 @@ pub fn preprocess_image(
         (h, w)
     };
 
+    // GLM's processor resamples with Pillow's bicubic, like the Qwen
+    // family it derives from.
     let resized = if rh != h || rw != w {
-        image::imageops::resize(image, rw, rh, resize_filter)
+        qwen_vl_resize(image, rw, rh, cfg.resample)?
     } else {
         image.clone()
     };

@@ -1,9 +1,9 @@
 use super::config::MonkeyOcrV2ImageProcessorConfig;
 use crate::backbones::qwen_vl_processing::{self, QwenVlImageProcessorConfig};
 use crate::error::Error;
-use crate::utils::image::{pil_resample_to_filter_type, smart_resize};
+use crate::utils::image::{qwen_vl_resize, smart_resize};
 use candle_core::{DType, Device, Tensor};
-use image::{RgbImage, imageops::FilterType};
+use image::RgbImage;
 
 #[derive(Debug, Clone)]
 pub struct MonkeyOcrV2ImageInputs {
@@ -46,13 +46,10 @@ pub fn preprocess_image(
     } else {
         (height, width)
     };
-    let filter = cfg
-        .resample
-        .and_then(pil_resample_to_filter_type)
-        .unwrap_or(FilterType::CatmullRom);
+    // The Qwen-family processor resamples with Pillow's bicubic.
     let resized_holder;
     let resized = if resized_height != height || resized_width != width {
-        resized_holder = image::imageops::resize(image, resized_width, resized_height, filter);
+        resized_holder = qwen_vl_resize(image, resized_width, resized_height, cfg.resample)?;
         &resized_holder
     } else {
         image

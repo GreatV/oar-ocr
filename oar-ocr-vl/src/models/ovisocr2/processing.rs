@@ -1,9 +1,9 @@
 use super::config::{OvisOcr2ImageProcessorConfig, OvisOcr2VisionConfig};
 use crate::backbones::qwen_vl_processing::{self, QwenVlImageProcessorConfig};
 use crate::error::Error;
-use crate::utils::image::{pil_resample_to_filter_type, smart_resize};
+use crate::utils::image::{qwen_vl_resize, smart_resize};
 use candle_core::{DType, Device, Tensor};
-use image::{RgbImage, imageops::FilterType};
+use image::RgbImage;
 
 #[derive(Debug, Clone)]
 pub struct OvisOcr2ImageInputs {
@@ -90,14 +90,10 @@ pub fn preprocess_image(
         });
     }
 
-    // Qwen's fast image processor defaults to bicubic when the checkpoint
-    // does not include an explicit PIL resampling enum.
-    let resize_filter = cfg
-        .resample
-        .and_then(pil_resample_to_filter_type)
-        .unwrap_or(FilterType::CatmullRom);
+    // Qwen's fast image processor resamples with Pillow's bicubic — the
+    // default when the checkpoint has no explicit PIL resampling enum.
     let resized = if resized_height != height || resized_width != width {
-        image::imageops::resize(image, resized_width, resized_height, resize_filter)
+        qwen_vl_resize(image, resized_width, resized_height, cfg.resample)?
     } else {
         image.clone()
     };

@@ -1,9 +1,7 @@
 use crate::error::Error;
-use crate::runtime::image::{
-    image_to_chw, patchify_merge_grouped, pil_resample_to_filter_type, smart_resize,
-};
+use crate::runtime::image::{image_to_chw, patchify_merge_grouped, qwen_vl_resize, smart_resize};
 use candle_core::{DType, Device, Tensor};
-use image::{RgbImage, imageops::FilterType};
+use image::RgbImage;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -198,10 +196,6 @@ fn preprocess_validated(
     } else {
         (0, 0)
     };
-    let resize_filter = cfg
-        .resample
-        .and_then(pil_resample_to_filter_type)
-        .unwrap_or(FilterType::CatmullRom);
     let default_mean = [0.0_f32; 3];
     let default_std = [1.0_f32; 3];
     let mean = if cfg.do_normalize {
@@ -240,10 +234,12 @@ fn preprocess_validated(
 
         // Borrow the page when no resize happens — the tail-only configs
         // hand in already-resized frames, and cloning each page's RGB buffer
-        // would copy tens of MiB per image for nothing.
+        // would copy tens of MiB per image for nothing. The Qwen-VL-family
+        // processors resample with Pillow's bicubic, so the resize goes
+        // through the PIL-exact path.
         let resized_on_heap;
         let resized: &image::RgbImage = if cfg.do_resize && (rh != h || rw != w) {
-            resized_on_heap = image::imageops::resize(img, rw, rh, resize_filter);
+            resized_on_heap = qwen_vl_resize(img, rw, rh, cfg.resample)?;
             &resized_on_heap
         } else {
             img
