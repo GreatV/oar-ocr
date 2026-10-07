@@ -51,6 +51,39 @@ impl QwenVlImageProcessorConfig {
         )
     }
 
+    /// A config for frames a caller already resized: preprocessing then only
+    /// normalizes, repeats the frame across the temporal dimension, and
+    /// patchifies with this geometry. Models whose resize semantics differ
+    /// from [`preprocess_images`](fn@preprocess_images) (different bounds or
+    /// a temporal-volume-aware resize) resize themselves and delegate the
+    /// rest through this.
+    pub(crate) fn for_resized_frames(
+        patch_size: usize,
+        temporal_patch_size: usize,
+        merge_size: usize,
+        image_mean: Vec<f32>,
+        image_std: Vec<f32>,
+        do_normalize: bool,
+        rescale: Option<f32>,
+    ) -> Self {
+        Self {
+            min_pixels: None,
+            max_pixels: None,
+            size: None,
+            do_resize: false,
+            do_rescale: rescale.is_some(),
+            do_normalize,
+            do_convert_rgb: true,
+            patch_size,
+            temporal_patch_size,
+            merge_size,
+            image_mean,
+            image_std,
+            resample: None,
+            rescale_factor: rescale.unwrap_or(1.0 / 255.0),
+        }
+    }
+
     pub fn pixel_bounds(&self) -> Result<(u32, u32), Error> {
         if let Some(size) = &self.size {
             if size.shortest_edge == 0 || size.longest_edge == 0 {
@@ -290,6 +323,39 @@ mod tests {
             resample: None,
             rescale_factor: 1.0 / 255.0,
         }
+    }
+
+    #[test]
+    fn resized_frames_without_normalization_keep_raw_rescaled_pixels() {
+        // for_resized_frames callers pass frames they resized themselves; a
+        // do_normalize=false config must leave rescaled pixels untouched
+        // rather than applying default mean/std.
+        let cfg = super::QwenVlImageProcessorConfig::for_resized_frames(
+            16,
+            2,
+            2,
+            vec![0.5; 3],
+            vec![0.5; 3],
+            false,
+            Some(1.0 / 255.0),
+        );
+        let white = RgbImage::from_pixel(64, 64, image::Rgb([255, 255, 255]));
+        let inputs = super::preprocess_images(
+            std::slice::from_ref(&white),
+            &cfg,
+            &Device::Cpu,
+            DType::F32,
+            "FixtureModel",
+        )
+        .unwrap();
+        assert_eq!(inputs.image_grid_thw, [(1, 4, 4)]);
+        let values = inputs
+            .pixel_values
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        assert!(values.iter().all(|value| (*value - 1.0).abs() < 1e-6));
     }
 
     #[test]
