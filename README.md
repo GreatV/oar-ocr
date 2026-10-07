@@ -13,17 +13,21 @@ A native Rust toolkit for OCR, document layout analysis, and vision-language doc
 - Document structure analysis for layout, tables, formulas, seals, orientation, and rectification.
 - Native Candle inference for compact document VLMs through the `oar-ocr-vl` crate.
 - CPU and GPU execution, model auto-download, and in-memory ONNX model loading.
+- Any supported VLM loads by its Hugging Face model ID and downloads on first use.
+- One documented [page JSON format](docs/page-format.md) from both the classic and vision-language pipelines.
+- The `oar` command-line tool for OCR, structure analysis, and VLM parsing of images and PDFs.
 
 ## Quick Start
 
 ### Command line
 
-Install the standalone tool with `cargo install oar-ocr-cli` (or add `--features cuda`). Models download automatically; `auto` selects an available compiled device.
+Install the standalone tool with `cargo install oar-ocr-cli` (or add `--features cuda`). Inputs can be images or PDFs. Models download automatically; `auto` selects an available compiled device.
 
 ```bash
 oar ocr page.png
 oar structure page.png -o documents
 oar parse --model PaddlePaddle/PaddleOCR-VL-1.5 page.png
+oar structure report.pdf --pages 1-3 --format json
 ```
 
 See the [CLI guide](https://github.com/GreatV/oar-ocr/blob/main/oar-ocr-cli/README.md) for JSON output, model overrides, and local checkpoints.
@@ -135,6 +139,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Vision-Language Page Parsing
+
+With `cargo add oar-ocr-vl --features auto-download` (plus `cargo add image` for decoding), any supported VLM loads by its Hugging Face model ID; the checkpoint downloads from ModelScope (or Hugging Face) on first use and is cached under `~/.oar`.
+
+```rust
+use oar_ocr_vl::{
+    AnyPageParser, AnyPageParserModel, AnyPageParserOptions, AnyPageParserPretrainedOptions,
+    PageParser, auto_device,
+};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let parser = AnyPageParser::from_pretrained(
+        AnyPageParserModel::PaddleOcrVl1_5,
+        auto_device(),
+        &AnyPageParserPretrainedOptions::default(),
+    )?;
+
+    let image = image::open("document.jpg")?.to_rgb8();
+    let page = parser.parse_page(&image, &AnyPageParserOptions::default())?;
+    println!("{}", page.markdown.unwrap_or_default());
+
+    Ok(())
+}
+```
+
+Both pipelines export the same [page JSON](docs/page-format.md): `page.to_json(width, height)` here, and `StructureResult::to_json(width, height)` for the classic structure pipeline.
+
 ## Supported Models
 
 The classic pipeline runs ONNX models through ONNX Runtime and supports the following model families. See the [pre-trained model guide](docs/models.md) for exact checkpoints, dictionaries, download links, and auto-download names.
@@ -183,6 +214,7 @@ See the [`oar-ocr-vl` guide](oar-ocr-vl/README.md) for setup and [`oar-ocr-vl/ex
 ## Documentation
 
 - [Usage guide](docs/usage.md) — APIs, builder patterns, accelerators, and model loading
+- [Page JSON format](docs/page-format.md) — the shared output schema of both pipelines
 - [Benchmarking](docs/benchmarking.md) — reproducible pipeline baselines and comparisons
 - [Cargo features](docs/features.md) — defaults, execution providers, and feature combinations
 - [Pre-trained models](docs/models.md) — model files, dictionaries, and auto-download behavior
