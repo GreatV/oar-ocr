@@ -88,7 +88,8 @@ pub(crate) fn run_parallel<M, T, R, B, F, O>(
 where
     T: Send + 'static,
     R: Send,
-    M: Send,
+    // Each replica is built and used on its own worker thread, so it need not
+    // be `Send` (CUDA-graph-holding parsers are not).
     B: Fn() -> Result<M> + Send + Sync,
     F: Fn(&mut M, usize, T) -> Result<R> + Send + Sync + 'static,
     O: FnMut(usize, Result<R>) -> Result<()>,

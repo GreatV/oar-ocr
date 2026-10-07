@@ -23,8 +23,8 @@ pub(crate) struct Cli {
 
 #[derive(Args)]
 pub(crate) struct Common {
-    /// auto, cpu, cuda:N, metal, or a comma list like cuda:0,cuda:1 to run
-    /// one pipeline replica per device (duplicates allowed)
+    /// auto, cpu, cuda:N, metal, or for ocr/structure a comma list like
+    /// cuda:0,cuda:1 to run one pipeline replica per device (duplicates allowed)
     #[arg(
         long,
         global = true,
