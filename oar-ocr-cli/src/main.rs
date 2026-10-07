@@ -147,6 +147,7 @@ fn run(cli: Cli) -> Result<()> {
                 json,
                 PAGE_BATCH_SIZE,
                 |images, pages, first_index| {
+                    let dimensions = images.iter().map(RgbImage::dimensions).collect::<Vec<_>>();
                     model
                         .predict_images(images)
                         .into_iter()
@@ -156,9 +157,10 @@ fn run(cli: Cli) -> Result<()> {
                             let mut page = page?;
                             page.input_path = input.path.to_string_lossy().into_owned().into();
                             page.index = first_index + offset;
+                            let (width, height) = dimensions[offset];
                             Ok(Document {
                                 text: page.to_markdown(),
-                                json: serde_json::to_value(page)?,
+                                json: page.to_json(width, height),
                             })
                         })
                         .collect()
@@ -205,7 +207,7 @@ fn run(cli: Cli) -> Result<()> {
                             });
                             Ok(Document {
                                 text,
-                                json: serde_json::to_value(page)?,
+                                json: page.to_json(image.width(), image.height()),
                             })
                         })
                         .collect()
@@ -442,7 +444,10 @@ fn process_inputs(
             "pipeline returned an unexpected number of pages"
         );
         for ((input, number), mut document) in chunk.into_iter().zip(documents) {
-            if input.is_pdf() {
+            if let Some(page) = document.json.get_mut("page") {
+                page["index"] = (number - 1).into();
+                document.json["source"] = input.path.to_string_lossy().into_owned().into();
+            } else if input.is_pdf() {
                 document.json["page_number"] = number.into();
                 document.json["input_path"] = input.path.to_string_lossy().into_owned().into();
             }
