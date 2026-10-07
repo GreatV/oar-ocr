@@ -82,13 +82,16 @@ fn matches_python_reference_end_to_end() {
             fixture.grid_thw[2]
         )
     );
-    let pixels_sum: f32 = inputs
+    // Sum in f64: four million f32 values accumulated in f32 pick up ~1e-3
+    // relative rounding on their own, which is the tolerance's whole budget.
+    let pixels_sum: f64 = inputs
         .pixel_values
-        .sum_all()
+        .to_dtype(DType::F64)
+        .and_then(|pixels| pixels.sum_all())
         .and_then(|sum| sum.to_scalar())
         .expect("pixel sum");
     let relative_error =
-        (pixels_sum as f64 - fixture.pixel_values_sum).abs() / fixture.pixel_values_sum.abs();
+        (pixels_sum - fixture.pixel_values_sum).abs() / fixture.pixel_values_sum.abs();
     assert!(
         relative_error < 1e-3,
         "pixel values sum {pixels_sum} != reference {} (relative error {relative_error})",
