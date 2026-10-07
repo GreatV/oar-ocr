@@ -6,6 +6,34 @@ This guide covers the detailed usage of OAROCR for text recognition and document
 
 ### Simple Usage
 
+The `pp_ocrv6` preset selects the models, dictionary, and official detection thresholds for a PP-OCRv6 size, so the pipeline is one line. With the `auto-download` feature the names resolve through the model registry; without it they resolve as local paths, like any other model source.
+
+```rust
+use oar_ocr::prelude::*;
+use std::path::Path;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Build a PP-OCRv6 pipeline at the chosen size
+    let ocr = OAROCRBuilder::pp_ocrv6(PpOcrV6Size::Small).build()?;
+
+    // Process a single image
+    let image = load_image(Path::new("document.jpg"))?;
+    let results = ocr.predict(vec![image])?;
+    let result = &results[0];
+
+    // Print extracted text with confidence scores
+    for text_region in &result.text_regions {
+        if let Some((text, confidence)) = text_region.text_with_confidence() {
+            println!("Text: {} (confidence: {:.2})", text, confidence);
+        }
+    }
+
+    Ok(())
+}
+```
+
+The explicit form, for choosing every model yourself:
+
 ```rust
 use oar_ocr::prelude::*;
 use std::path::Path;
@@ -123,7 +151,16 @@ In-memory sources skip auto-download resolution, and models that reference exter
 
 ### OARStructureBuilder - Document Structure Analysis
 
-The `OARStructureBuilder` enables document structure analysis with layout detection, table recognition, and formula extraction:
+The `OARStructureBuilder` enables document structure analysis with layout detection, table recognition, and formula extraction. The `pp_structurev3` preset wires the full PP-StructureV3-style stack in one call — PP-DocLayoutV3 layout, PP-OCRv6 Tiny OCR, table classification, SLANeXt wired and SLANet+ wireless table structure, wired cell detection, and the table dictionary:
+
+```rust
+use oar_ocr::oarocr::OARStructureBuilder;
+
+// Full PP-StructureV3-style document analysis in one call
+let structure = OARStructureBuilder::pp_structurev3().build()?;
+```
+
+Each component can also be selected explicitly to build a custom pipeline, for example with a single wired table model:
 
 ```rust
 use oar_ocr::oarocr::OARStructureBuilder;

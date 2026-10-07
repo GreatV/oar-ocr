@@ -83,9 +83,72 @@ pub struct OAROCRBuilder {
     region_batch_size: Option<usize>,
     gpu_memory_budget: Option<usize>,
 
+    // Detection defaults a preset chose; build() consults them only when the
+    // caller set no explicit detection config and the text type is general,
+    // so text-type defaults (seal, table) still take over.
+    preset_text_detection_config: Option<TextDetectionConfig>,
+
     // Text type and word box options
     text_type: Option<String>,
     return_word_box: bool,
+}
+
+/// PP-OCRv6 model sizes selectable through the [`OAROCRBuilder::pp_ocrv6`]
+/// preset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PpOcrV6Size {
+    /// Fastest models and a reduced 6,904-entry dictionary.
+    Tiny,
+    /// Balanced models over the full 18,708-entry dictionary.
+    Small,
+    /// Most accurate models over the full 18,708-entry dictionary.
+    Medium,
+}
+
+impl PpOcrV6Size {
+    /// Registry name of the detection model for this size.
+    pub(crate) fn detection_model(self) -> &'static str {
+        match self {
+            Self::Tiny => "pp-ocrv6_tiny_det.onnx",
+            Self::Small => "pp-ocrv6_small_det.onnx",
+            Self::Medium => "pp-ocrv6_medium_det.onnx",
+        }
+    }
+
+    /// Registry name of the recognition model for this size.
+    pub(crate) fn recognition_model(self) -> &'static str {
+        match self {
+            Self::Tiny => "pp-ocrv6_tiny_rec.onnx",
+            Self::Small => "pp-ocrv6_small_rec.onnx",
+            Self::Medium => "pp-ocrv6_medium_rec.onnx",
+        }
+    }
+
+    /// Registry name of the matching character dictionary; tiny ships its
+    /// own reduced dictionary, small and medium share the full one.
+    pub(crate) fn character_dict(self) -> &'static str {
+        match self {
+            Self::Tiny => "ppocrv6_tiny_dict.txt",
+            Self::Small | Self::Medium => "ppocrv6_dict.txt",
+        }
+    }
+}
+
+/// The official PaddleOCR detection defaults published for PP-OCRv6
+/// (`DBPostProcess`: `thresh` 0.2, `box_thresh` 0.45 — 0.4 for tiny —
+/// `unclip_ratio` 1.4, `max_candidates` 3000).
+pub(crate) fn pp_ocrv6_detection_config(size: PpOcrV6Size) -> TextDetectionConfig {
+    TextDetectionConfig {
+        score_threshold: 0.2,
+        box_threshold: match size {
+            PpOcrV6Size::Tiny => 0.4,
+            _ => 0.45,
+        },
+        unclip_ratio: 1.4,
+        max_candidates: 3000,
+        ..TextDetectionConfig::default()
+    }
 }
 
 impl OAROCRBuilder {
@@ -122,9 +185,50 @@ impl OAROCRBuilder {
             image_batch_size: None,
             region_batch_size: None,
             gpu_memory_budget: None,
+            preset_text_detection_config: None,
             text_type: None,
             return_word_box: false,
         }
+    }
+
+    /// Creates a PP-OCRv6 pipeline for the given model size.
+    ///
+    /// This fills in the registry model names (`pp-ocrv6_{size}_det.onnx`,
+    /// `pp-ocrv6_{size}_rec.onnx`), the matching dictionary (tiny ships its
+    /// own reduced one), and the official PP-OCRv6 detection defaults
+    /// (score 0.2, box 0.45 — 0.4 for tiny —, unclip 1.4, up to 3000
+    /// candidates), which behave as defaults: an explicit
+    /// [`text_detection_config`](Self::text_detection_config) or a
+    /// [`text_type`](Self::text_type) like seal or table still replaces
+    /// them. With the
+    /// `auto-download` feature the names resolve through the model registry;
+    /// without it they resolve as local paths like any other model source.
+    /// The returned builder is ordinary, so every setter can still override
+    /// anything.
+    ///
+    /// ```no_run
+    /// use oar_ocr::oarocr::{OAROCRBuilder, PpOcrV6Size};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ocr = OAROCRBuilder::pp_ocrv6(PpOcrV6Size::Small).build()?;
+    /// # let _ = ocr;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn pp_ocrv6(size: PpOcrV6Size) -> Self {
+        Self::new(
+            size.detection_model(),
+            size.recognition_model(),
+            size.character_dict(),
+        )
+        .with_preset_detection_config(pp_ocrv6_detection_config(size))
+    }
+
+    /// Records a preset's detection defaults without occupying the explicit
+    /// [`text_detection_config`](Self::text_detection_config) slot.
+    fn with_preset_detection_config(mut self, config: TextDetectionConfig) -> Self {
+        self.preset_text_detection_config = Some(config);
+        self
     }
 
     /// Sets the character dictionary from an in-memory string (e.g. from
@@ -229,6 +333,87 @@ impl OAROCRBuilder {
         self
     }
 
+    /// Resolves the text detection config from an explicit config, a
+    /// preset's defaults, and the text type.
+    fn effective_text_detection_config(&self) -> TextDetectionConfig {
+        // Align text detection defaults with OCR pipeline.
+        // Defaults depend on text_type:
+        // - general: limit_side_len=960, limit_type="max", thresh=0.3, box_thresh=0.6, unclip_ratio=2.0
+        // - table: limit_side_len=960, limit_type="max", thresh=0.3, box_thresh=0.4, unclip_ratio=2.0
+        // - seal: limit_side_len=736, limit_type="min", thresh=0.2, box_thresh=0.6, unclip_ratio=0.5
+        // A preset's thresholds seed the general path only: explicit configs
+        // win, and the seal/table branches below replace them wholesale.
+        // The adapter matches text types case-insensitively, so do the same here.
+        let text_type = self
+            .text_type
+            .as_deref()
+            .unwrap_or("general")
+            .to_ascii_lowercase();
+        let preset_det_defaults = self.preset_text_detection_config.is_some()
+            && self.text_detection_config.is_none()
+            && !matches!(text_type.as_str(), "table" | "seal");
+        let mut effective_det_cfg = match (
+            &self.text_detection_config,
+            &self.preset_text_detection_config,
+        ) {
+            (Some(explicit), _) => explicit.clone(),
+            (None, Some(preset)) if preset_det_defaults => preset.clone(),
+            _ => TextDetectionConfig::default(),
+        };
+        let has_explicit_det_cfg = self.text_detection_config.is_some();
+        if !has_explicit_det_cfg {
+            match text_type.as_str() {
+                "table" => {
+                    effective_det_cfg.score_threshold = 0.3;
+                    effective_det_cfg.box_threshold = 0.4;
+                    effective_det_cfg.unclip_ratio = 2.0;
+                    if effective_det_cfg.limit_side_len.is_none() {
+                        effective_det_cfg.limit_side_len = Some(960);
+                    }
+                    if effective_det_cfg.limit_type.is_none() {
+                        effective_det_cfg.limit_type = Some(crate::processors::LimitType::Max);
+                    }
+                    if effective_det_cfg.max_side_len.is_none() {
+                        effective_det_cfg.max_side_len = Some(4000);
+                    }
+                }
+                "seal" => {
+                    effective_det_cfg.score_threshold = 0.2;
+                    effective_det_cfg.box_threshold = 0.6;
+                    effective_det_cfg.unclip_ratio = 0.5;
+                    if effective_det_cfg.limit_side_len.is_none() {
+                        effective_det_cfg.limit_side_len = Some(736);
+                    }
+                    if effective_det_cfg.limit_type.is_none() {
+                        effective_det_cfg.limit_type = Some(crate::processors::LimitType::Min);
+                    }
+                    if effective_det_cfg.max_side_len.is_none() {
+                        effective_det_cfg.max_side_len = Some(4000);
+                    }
+                }
+                _ => {
+                    // The preset already chose its thresholds; only fill the
+                    // limits around them.
+                    if !preset_det_defaults {
+                        effective_det_cfg.score_threshold = 0.3;
+                        effective_det_cfg.box_threshold = 0.6;
+                        effective_det_cfg.unclip_ratio = 2.0;
+                    }
+                    if effective_det_cfg.limit_side_len.is_none() {
+                        effective_det_cfg.limit_side_len = Some(960);
+                    }
+                    if effective_det_cfg.limit_type.is_none() {
+                        effective_det_cfg.limit_type = Some(crate::processors::LimitType::Max);
+                    }
+                    if effective_det_cfg.max_side_len.is_none() {
+                        effective_det_cfg.max_side_len = Some(4000);
+                    }
+                }
+            }
+        }
+        effective_det_cfg
+    }
+
     /// Sets the text type for sorting and cropping strategy.
     ///
     /// This matches the text_type parameter:
@@ -330,61 +515,7 @@ impl OAROCRBuilder {
             detection_builder = detection_builder.with_ort_config(ort_config.clone());
         }
 
-        // Align text detection defaults with OCR pipeline.
-        // Defaults depend on text_type:
-        // - general: limit_side_len=960, limit_type="max", thresh=0.3, box_thresh=0.6, unclip_ratio=2.0
-        // - table: limit_side_len=960, limit_type="max", thresh=0.3, box_thresh=0.4, unclip_ratio=2.0
-        // - seal: limit_side_len=736, limit_type="min", thresh=0.2, box_thresh=0.6, unclip_ratio=0.5
-        let mut effective_det_cfg = self.text_detection_config.clone().unwrap_or_default();
-        let has_explicit_det_cfg = self.text_detection_config.is_some();
-        if !has_explicit_det_cfg {
-            match self.text_type.as_deref().unwrap_or("general") {
-                "table" => {
-                    effective_det_cfg.score_threshold = 0.3;
-                    effective_det_cfg.box_threshold = 0.4;
-                    effective_det_cfg.unclip_ratio = 2.0;
-                    if effective_det_cfg.limit_side_len.is_none() {
-                        effective_det_cfg.limit_side_len = Some(960);
-                    }
-                    if effective_det_cfg.limit_type.is_none() {
-                        effective_det_cfg.limit_type = Some(crate::processors::LimitType::Max);
-                    }
-                    if effective_det_cfg.max_side_len.is_none() {
-                        effective_det_cfg.max_side_len = Some(4000);
-                    }
-                }
-                "seal" => {
-                    effective_det_cfg.score_threshold = 0.2;
-                    effective_det_cfg.box_threshold = 0.6;
-                    effective_det_cfg.unclip_ratio = 0.5;
-                    if effective_det_cfg.limit_side_len.is_none() {
-                        effective_det_cfg.limit_side_len = Some(736);
-                    }
-                    if effective_det_cfg.limit_type.is_none() {
-                        effective_det_cfg.limit_type = Some(crate::processors::LimitType::Min);
-                    }
-                    if effective_det_cfg.max_side_len.is_none() {
-                        effective_det_cfg.max_side_len = Some(4000);
-                    }
-                }
-                _ => {
-                    effective_det_cfg.score_threshold = 0.3;
-                    effective_det_cfg.box_threshold = 0.6;
-                    effective_det_cfg.unclip_ratio = 2.0;
-                    if effective_det_cfg.limit_side_len.is_none() {
-                        effective_det_cfg.limit_side_len = Some(960);
-                    }
-                    if effective_det_cfg.limit_type.is_none() {
-                        effective_det_cfg.limit_type = Some(crate::processors::LimitType::Max);
-                    }
-                    if effective_det_cfg.max_side_len.is_none() {
-                        effective_det_cfg.max_side_len = Some(4000);
-                    }
-                }
-            }
-        }
-
-        detection_builder = detection_builder.with_config(effective_det_cfg);
+        detection_builder = detection_builder.with_config(self.effective_text_detection_config());
 
         // Pass text_type to detection adapter for proper preprocessing configuration
         if let Some(ref text_type) = self.text_type {
@@ -1104,6 +1235,62 @@ impl OAROCR {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pp_ocrv6_preset_sets_names_and_official_detection_defaults() {
+        for (size, det, rec, dict, box_threshold) in [
+            (
+                PpOcrV6Size::Tiny,
+                "pp-ocrv6_tiny_det.onnx",
+                "pp-ocrv6_tiny_rec.onnx",
+                "ppocrv6_tiny_dict.txt",
+                0.4,
+            ),
+            (
+                PpOcrV6Size::Small,
+                "pp-ocrv6_small_det.onnx",
+                "pp-ocrv6_small_rec.onnx",
+                "ppocrv6_dict.txt",
+                0.45,
+            ),
+            (
+                PpOcrV6Size::Medium,
+                "pp-ocrv6_medium_det.onnx",
+                "pp-ocrv6_medium_rec.onnx",
+                "ppocrv6_dict.txt",
+                0.45,
+            ),
+        ] {
+            let builder = OAROCRBuilder::pp_ocrv6(size);
+            assert_eq!(
+                builder.text_detection_model.as_path(),
+                Some(std::path::Path::new(det))
+            );
+            assert_eq!(
+                builder.text_recognition_model.as_path(),
+                Some(std::path::Path::new(rec))
+            );
+            assert_eq!(builder.character_dict_path, PathBuf::from(dict));
+            // The thresholds are preset defaults, not an explicit config, so
+            // text-type defaults and explicit configs still take over.
+            assert!(builder.text_detection_config.is_none());
+            let config = builder.preset_text_detection_config.as_ref().unwrap();
+            assert_eq!(config.score_threshold, 0.2);
+            assert_eq!(config.box_threshold, box_threshold);
+            assert_eq!(config.unclip_ratio, 1.4);
+            assert_eq!(config.max_candidates, 3000);
+            // Text types match case-insensitively: seal/table replace the
+            // preset thresholds, anything else keeps them.
+            let resolve = |text_type: &str| {
+                OAROCRBuilder::pp_ocrv6(size)
+                    .text_type(text_type)
+                    .effective_text_detection_config()
+                    .unclip_ratio
+            };
+            assert_eq!(resolve("Seal"), 0.5);
+            assert_eq!(resolve("GENERAL"), 1.4);
+        }
+    }
 
     #[test]
     fn test_oarocr_builder_new() {

@@ -36,27 +36,14 @@ Builders also accept raw ONNX bytes such as `include_bytes!`, allowing models to
 
 ### OCR Pipeline
 
-With `auto-download`, pass registered model names directly. Otherwise, replace them with local paths.
+The `pp_ocrv6` preset configures a PP-OCRv6 pipeline by model size, filling in the model names, the matching dictionary, and the official detection thresholds. With `auto-download`, the names resolve through the model registry; without it they resolve as local paths, so nothing changes for offline setups.
 
 ```rust
-use oar_ocr::domain::tasks::TextDetectionConfig;
 use oar_ocr::prelude::*;
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let ocr = OAROCRBuilder::new(
-        "pp-ocrv6_tiny_det.onnx",
-        "pp-ocrv6_tiny_rec.onnx",
-        "ppocrv6_tiny_dict.txt",
-    )
-    .text_detection_config(TextDetectionConfig {
-        score_threshold: 0.2,
-        box_threshold: 0.45,
-        unclip_ratio: 1.4,
-        max_candidates: 3000,
-        ..Default::default()
-    })
-    .build()?;
+    let ocr = OAROCRBuilder::pp_ocrv6(PpOcrV6Size::Small).build()?;
 
     let image = load_image(Path::new("document.jpg"))?;
     let results = ocr.predict(vec![image])?;
@@ -71,21 +58,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+The preset's detection thresholds are defaults, so a `text_type` like `seal` still applies its own detection settings, and an explicit `text_detection_config` overrides everything. Sizes pick the models, the dictionary, and PaddleOCR's per-size box threshold (0.4 for Tiny, 0.45 for Small and Medium): `PpOcrV6Size::Tiny` runs the fastest pair over its reduced dictionary.
+
+```rust
+use oar_ocr::prelude::*;
+use std::path::Path;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ocr = OAROCRBuilder::pp_ocrv6(PpOcrV6Size::Tiny).build()?;
+
+    let image = load_image(Path::new("document.jpg"))?;
+    let results = ocr.predict(vec![image])?;
+    for region in &results[0].text_regions {
+        if let Some((text, confidence)) = region.text_with_confidence() {
+            println!("{text} ({confidence:.2})");
+        }
+    }
+
+    Ok(())
+}
+```
+
 ### Document Structure Analysis
+
+The `pp_structurev3` preset configures the PP-StructureV3-style stack: PP-DocLayoutV3 layout, PP-OCRv6 Tiny text recognition, table classification, SLANeXt wired and SLANet+ wireless table structure, wired cell detection, and the table dictionary.
 
 ```rust
 use oar_ocr::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let structure = OARStructureBuilder::new("pp-doclayout_plus-l.onnx")
-        .with_table_classification("pp-lcnet_x1_0_table_cls.onnx")
-        .with_table_structure_recognition("slanet_plus.onnx", "wireless")
-        .table_structure_dict_path("table_structure_dict_ch.txt")
+    let structure = OARStructureBuilder::pp_structurev3().build()?;
+
+    let result = structure.predict("document.jpg")?;
+    println!("{}", result.to_markdown());
+
+    Ok(())
+}
+```
+
+The exact chain the preset expands to, for swapping individual models:
+
+```rust
+use oar_ocr::prelude::*;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let structure = OARStructureBuilder::new("pp-doclayoutv3.onnx")
+        .layout_model_name("PP-DocLayoutV3")
         .with_ocr(
-            "pp-ocrv5_mobile_det.onnx",
-            "pp-ocrv5_mobile_rec.onnx",
-            "ppocrv5_dict.txt",
+            "pp-ocrv6_tiny_det.onnx",
+            "pp-ocrv6_tiny_rec.onnx",
+            "ppocrv6_tiny_dict.txt",
         )
+        .with_table_classification("pp-lcnet_x1_0_table_cls.onnx")
+        .with_wired_table_structure("slanext_wired.onnx")
+        .with_wireless_table_structure("slanet_plus.onnx")
+        .with_wired_table_cell_detection("rt-detr-l_wired_table_cell_det.onnx")
+        .table_structure_dict_path("table_structure_dict_ch.txt")
         .build()?;
 
     let result = structure.predict("document.jpg")?;

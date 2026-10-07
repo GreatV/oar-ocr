@@ -319,6 +319,46 @@ impl OARStructureBuilder {
         }
     }
 
+    /// Creates a PP-StructureV3-style document analysis pipeline.
+    ///
+    /// This is the stack the benchmark tool's `structure-v3` case runs:
+    /// PP-DocLayoutV3 layout detection, PP-OCRv6 Tiny text detection and
+    /// recognition (the structure pipeline OCRs many small region crops, where
+    /// the tiny recognizer's throughput wins and the larger layout and table
+    /// models already dominate memory), PP-LCNet table classification,
+    /// SLANeXt wired and SLANet+ wireless table structure recognition, the
+    /// RT-DETR-L wired cell detector, and the Chinese table structure
+    /// dictionary. With the `auto-download` feature the names resolve through
+    /// the model registry; without it they resolve as local paths like any
+    /// other model source. The returned builder is ordinary, so every setter
+    /// can still override anything.
+    ///
+    /// ```no_run
+    /// use oar_ocr::oarocr::OARStructureBuilder;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let structure = OARStructureBuilder::pp_structurev3().build()?;
+    /// # let _ = structure;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn pp_structurev3() -> Self {
+        use super::ocr::PpOcrV6Size;
+        let size = PpOcrV6Size::Tiny;
+        Self::new("pp-doclayoutv3.onnx")
+            .layout_model_name("PP-DocLayoutV3")
+            .with_ocr(
+                size.detection_model(),
+                size.recognition_model(),
+                size.character_dict(),
+            )
+            .with_table_classification("pp-lcnet_x1_0_table_cls.onnx")
+            .with_wired_table_structure("slanext_wired.onnx")
+            .with_wireless_table_structure("slanet_plus.onnx")
+            .with_wired_table_cell_detection("rt-detr-l_wired_table_cell_det.onnx")
+            .table_structure_dict_path("table_structure_dict_ch.txt")
+    }
+
     /// Sets the ONNX Runtime session configuration.
     ///
     /// This configuration will be applied to all models in the pipeline.
@@ -567,13 +607,24 @@ impl OARStructureBuilder {
     ///
     /// * `model_path` - Path to the table cell detection model
     /// * `cell_type` - `"wired"`, `"wireless"`, or the corresponding [`TableType`]
+    ///
+    /// This replaces any model previously set for the same type with
+    /// [`with_wired_table_cell_detection`](Self::with_wired_table_cell_detection)
+    /// or [`with_wireless_table_cell_detection`](Self::with_wireless_table_cell_detection),
+    /// for example one chosen by [`pp_structurev3`](Self::pp_structurev3).
     pub fn with_table_cell_detection(
         mut self,
         model_source: impl Into<ModelSource>,
         cell_type: impl AsRef<str>,
     ) -> Self {
+        let cell_type = cell_type.as_ref().parse();
+        match cell_type {
+            Ok(TableType::Wired) => self.wired_table_cell_model = None,
+            Ok(TableType::Wireless) => self.wireless_table_cell_model = None,
+            _ => {}
+        }
         self.table_cell_detection_model = Some(model_source.into());
-        self.table_cell_detection_type = Some(cell_type.as_ref().parse());
+        self.table_cell_detection_type = Some(cell_type);
         self
     }
 
@@ -590,14 +641,24 @@ impl OARStructureBuilder {
     /// * `model_path` - Path to the table structure recognition model
     /// * `table_type` - `"wired"`, `"wireless"`, or the corresponding [`TableType`]
     ///
-    /// This component recognizes the structure of tables and outputs HTML.
+    /// This component recognizes the structure of tables and outputs HTML. It
+    /// replaces any model previously set for the same type with
+    /// [`with_wired_table_structure`](Self::with_wired_table_structure) or
+    /// [`with_wireless_table_structure`](Self::with_wireless_table_structure),
+    /// for example one chosen by [`pp_structurev3`](Self::pp_structurev3).
     pub fn with_table_structure_recognition(
         mut self,
         model_source: impl Into<ModelSource>,
         table_type: impl AsRef<str>,
     ) -> Self {
+        let table_type = table_type.as_ref().parse();
+        match table_type {
+            Ok(TableType::Wired) => self.wired_table_structure_model = None,
+            Ok(TableType::Wireless) => self.wireless_table_structure_model = None,
+            _ => {}
+        }
         self.table_structure_recognition_model = Some(model_source.into());
-        self.table_structure_recognition_type = Some(table_type.as_ref().parse());
+        self.table_structure_recognition_type = Some(table_type);
         self
     }
 
@@ -3601,6 +3662,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pp_structurev3_preset_sets_the_benchmark_stack() {
+        let builder = OARStructureBuilder::pp_structurev3();
+        assert_eq!(
+            builder.layout_detection_model.as_path(),
+            Some(std::path::Path::new("pp-doclayoutv3.onnx"))
+        );
+        assert_eq!(builder.layout_model_name.as_deref(), Some("PP-DocLayoutV3"));
+        assert_eq!(
+            builder
+                .text_detection_model
+                .as_ref()
+                .and_then(|m| m.as_path()),
+            Some(std::path::Path::new("pp-ocrv6_tiny_det.onnx"))
+        );
+        assert_eq!(
+            builder
+                .text_recognition_model
+                .as_ref()
+                .and_then(|m| m.as_path()),
+            Some(std::path::Path::new("pp-ocrv6_tiny_rec.onnx"))
+        );
+        assert_eq!(
+            builder.character_dict_path.as_deref(),
+            Some(std::path::Path::new("ppocrv6_tiny_dict.txt"))
+        );
+        assert_eq!(
+            builder
+                .table_classification_model
+                .as_ref()
+                .and_then(|m| m.as_path()),
+            Some(std::path::Path::new("pp-lcnet_x1_0_table_cls.onnx"))
+        );
+        assert_eq!(
+            builder
+                .wired_table_structure_model
+                .as_ref()
+                .and_then(|m| m.as_path()),
+            Some(std::path::Path::new("slanext_wired.onnx"))
+        );
+        assert_eq!(
+            builder
+                .wireless_table_structure_model
+                .as_ref()
+                .and_then(|m| m.as_path()),
+            Some(std::path::Path::new("slanet_plus.onnx"))
+        );
+        assert_eq!(
+            builder
+                .wired_table_cell_model
+                .as_ref()
+                .and_then(|m| m.as_path()),
+            Some(std::path::Path::new("rt-detr-l_wired_table_cell_det.onnx"))
+        );
+        assert_eq!(
+            builder.table_structure_dict_path.as_deref(),
+            Some(std::path::Path::new("table_structure_dict_ch.txt"))
+        );
+    }
+
+    #[test]
     fn layout_presets_include_doclayout_v2_and_v3() {
         for (name, expected) in [
             ("PP-DocLayoutV2", "pp-doclayoutv2"),
@@ -3669,6 +3790,16 @@ mod tests {
             OrtSessionConfig::new().with_execution_providers(vec![OrtExecutionProvider::CPU]);
         default_arena_shrinkage(&mut cpu);
         assert_eq!(cpu.arena_shrinkage, None);
+    }
+
+    #[test]
+    fn generic_table_setters_replace_same_type_preset_models() {
+        let builder = OARStructureBuilder::pp_structurev3()
+            .with_table_structure_recognition("custom_structure.onnx", "wired")
+            .with_table_cell_detection("custom_cells.onnx", "wired");
+        assert!(builder.wired_table_structure_model.is_none());
+        assert!(builder.wired_table_cell_model.is_none());
+        assert!(builder.wireless_table_structure_model.is_some());
     }
 
     #[test]
