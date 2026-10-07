@@ -9,7 +9,9 @@
 //! bounded no matter the input size. Completed chunks are delivered to
 //! `on_chunk` strictly in input order while the workers keep going. The
 //! first failed chunk aborts the run once the writer reaches it, and
-//! dispatch stops so no new chunks are taken.
+//! dispatch stops so no new chunks are taken. A worker whose replica
+//! fails to build reports that error and leaves; if no replica could be
+//! built at all, the first build error is returned.
 
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -54,6 +56,15 @@ impl WriteGate {
         *guard = next;
         self.progressed.notify_all();
     }
+
+    /// Abort the run: set the flag and wake a dispatcher parked on the
+    /// window. Storing under the gate mutex pairs with the check in
+    /// `wait_admissible`, so a dispatcher about to park cannot miss it.
+    fn abort(&self, aborting: &AtomicBool) {
+        let _guard = self.next_to_write.lock().expect("gate poisoned");
+        aborting.store(true, Ordering::SeqCst);
+        self.progressed.notify_all();
+    }
 }
 
 /// Run `process` concurrently, one replica per worker, streaming results in
@@ -64,6 +75,9 @@ impl WriteGate {
 /// is exactly today's. A job's failure is delivered to `on_chunk` at its
 /// input position and the run stops there; if `on_chunk` itself fails, the
 /// run aborts the same way. In both cases the offending error is returned.
+/// A worker whose replica fails to build leaves the pool and the run
+/// proceeds on the rest; if none could be built, that build error is
+/// returned.
 pub(crate) fn run_parallel<M, T, R, B, F, O>(
     replica_count: usize,
     jobs: Vec<T>,
@@ -152,17 +166,24 @@ where
         // never holds more than the window limit because dispatch cannot
         // outrun the writer by more than that.
         let mut buffered: BTreeMap<usize, Result<R>> = BTreeMap::new();
+        // Real chunk results only; build-failure reports do not count.
         let mut received = 0usize;
         let mut next_to_write = 0usize;
         let mut failure: Option<anyhow::Error> = None;
+        let mut build_failure: Option<anyhow::Error> = None;
         while received < job_count && failure.is_none() {
             let Ok((index, result)) = result_rx.recv() else {
                 break;
             };
-            received += 1;
             if index == usize::MAX {
+                // A worker could not build its replica. If every worker
+                // reports this, the channel disconnects below and the
+                // first error surfaces; if some worker succeeded, the run
+                // merely proceeds with fewer replicas.
+                build_failure = build_failure.or(result.err());
                 continue;
             }
+            received += 1;
             buffered.insert(index, result);
             while let Some(result) = buffered.remove(&next_to_write) {
                 if failure.is_none() {
@@ -175,18 +196,25 @@ where
                         failure = Some(anyhow::anyhow!("chunk {next_to_write} failed"));
                     }
                     if failure.is_some() {
-                        aborting.store(true, Ordering::SeqCst);
+                        gate.abort(&aborting);
                     }
                 }
                 next_to_write += 1;
                 gate.advance(next_to_write);
             }
         }
-        aborting.store(true, Ordering::SeqCst);
+        // Wake a dispatcher still parked on the window before joining it —
+        // storing the flag alone would leave it asleep forever.
+        gate.abort(&aborting);
         if failure.is_none() && next_to_write < job_count {
-            failure = Some(anyhow::anyhow!(
-                "a worker stopped before finishing its chunks"
-            ));
+            failure = match build_failure {
+                // Nothing was written, so the run never started: the build
+                // error says why.
+                Some(error) if next_to_write == 0 => Some(error),
+                _ => Some(anyhow::anyhow!(
+                    "a worker stopped before finishing its chunks"
+                )),
+            };
         }
         match failure {
             Some(error) => Err(error),
@@ -283,5 +311,32 @@ mod tests {
         // The failure is delivered at its position, so everything before it
         // was written and nothing after it.
         assert_eq!(delivered.load(Ordering::SeqCst), failure_index + 1);
+    }
+
+    #[test]
+    fn reports_the_build_error_when_no_replica_could_be_built() {
+        // More jobs than the window, so a dispatcher nobody wakes would
+        // park forever: the run must return the build error promptly.
+        let jobs: Vec<usize> = (0..32).collect();
+        let written = Arc::new(AtomicUsize::new(0));
+        let run = run_parallel(
+            3,
+            jobs,
+            || Err(anyhow::anyhow!("no such device")),
+            |_: &mut (), _index, _job| Ok(()),
+            {
+                let written = Arc::clone(&written);
+                move |_index, _result| {
+                    written.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+        );
+        let error = run.expect_err("the build failure is returned");
+        assert_eq!(written.load(Ordering::SeqCst), 0, "nothing is written");
+        assert!(
+            error.to_string().contains("no such device"),
+            "unexpected error: {error}"
+        );
     }
 }
