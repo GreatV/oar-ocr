@@ -2604,11 +2604,13 @@ mod tests {
                     .i((0, 0, ..))
                     .and_then(|last| last.unsqueeze(0))
                     .map_err(|e| {
-                        candle_to_ocr_inference(self.model_name, "eager reference input", e)
+                        candle_to_ocr_inference("qwen3_5 self-test", "eager reference input", e)
                     })?,
             )
             .and_then(|logits| logits.squeeze(0))
-            .map_err(|e| candle_to_ocr_inference(self.model_name, "eager reference logits", e))?;
+            .map_err(|e| {
+                candle_to_ocr_inference("qwen3_5 self-test", "eager reference logits", e)
+            })?;
         // The graph attends with masked SDPA while the eager path uses
         // flash attention; same math to bf16 resolution.
         let graph_f32 = logits_graph.to_dtype(DType::F32).unwrap();
@@ -2681,10 +2683,10 @@ mod tests {
                 &hidden
                     .i((0, 0, ..))
                     .and_then(|last| last.unsqueeze(0))
-                    .map_err(|e| candle_to_ocr_inference(self.model_name, "eager input", e))?,
+                    .map_err(|e| candle_to_ocr_inference("qwen3_5 self-test", "eager input", e))?,
             )
             .and_then(|logits| logits.squeeze(0))
-            .map_err(|e| candle_to_ocr_inference(self.model_name, "eager logits", e))?;
+            .map_err(|e| candle_to_ocr_inference("qwen3_5 self-test", "eager logits", e))?;
         Ok((model, logits, layouts))
     }
 
@@ -2717,10 +2719,12 @@ mod tests {
                 &hidden
                     .i((0, 0, ..))
                     .and_then(|last| last.unsqueeze(0))
-                    .map_err(|e| candle_to_ocr_inference(self.model_name, "reference input", e))?,
+                    .map_err(|e| {
+                        candle_to_ocr_inference("qwen3_5 self-test", "reference input", e)
+                    })?,
             )
             .and_then(|logits| logits.squeeze(0))
-            .map_err(|e| candle_to_ocr_inference(self.model_name, "reference logits", e))
+            .map_err(|e| candle_to_ocr_inference("qwen3_5 self-test", "reference logits", e))
     }
 
     /// max |a-b| in F32.
@@ -2880,17 +2884,17 @@ mod tests {
 
         // Fresh allocations and the eager fallback both work afterwards.
         Tensor::zeros((256, 256), DType::BF16, &device)
-            .map_err(|e| candle_to_ocr_inference(self.model_name, "post-failure alloc", e))?;
+            .map_err(|e| candle_to_ocr_inference("qwen3_5 self-test", "post-failure alloc", e))?;
         let hidden = model.forward(&embed, &pos4)?;
         let logits = lm_head
             .forward(
                 &hidden
                     .i((0, 0, ..))
                     .and_then(|last| last.unsqueeze(0))
-                    .map_err(|e| candle_to_ocr_inference(self.model_name, "eager input", e))?,
+                    .map_err(|e| candle_to_ocr_inference("qwen3_5 self-test", "eager input", e))?,
             )
             .and_then(|logits| logits.squeeze(0))
-            .map_err(|e| candle_to_ocr_inference(self.model_name, "eager logits", e))?;
+            .map_err(|e| candle_to_ocr_inference("qwen3_5 self-test", "eager logits", e))?;
         let reference = eager_reference_logits(&cfg, tensors, &device)?;
         let worst = max_abs_delta(&logits, &reference);
         assert!(
@@ -2973,10 +2977,10 @@ mod tests {
                 &hidden
                     .i((0, 0, ..))
                     .and_then(|last| last.unsqueeze(0))
-                    .map_err(|e| candle_to_ocr_inference(self.model_name, "eager input", e))?,
+                    .map_err(|e| candle_to_ocr_inference("qwen3_5 self-test", "eager input", e))?,
             )
             .and_then(|logits| logits.squeeze(0))
-            .map_err(|e| candle_to_ocr_inference(self.model_name, "eager logits", e))?;
+            .map_err(|e| candle_to_ocr_inference("qwen3_5 self-test", "eager logits", e))?;
 
         // Reference: a model whose ceiling stays high replays the second
         // step too (the ladder re-captures at bucket 32). Both sides share
