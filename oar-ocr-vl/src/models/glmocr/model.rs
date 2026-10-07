@@ -267,7 +267,9 @@ impl GlmOcr {
 
             self.text.clear_kv_cache();
             #[cfg(feature = "cuda")]
-            let use_mtp = self.mtp.is_some()
+            // Traced calls stay autoregressive so every step's logits are recorded.
+            let use_mtp = step_top.is_none()
+                && self.mtp.is_some()
                 && self.dtype == DType::BF16
                 && max_new_tokens >= 8
                 && std::env::var_os("OAR_VL_DISABLE_SPECULATIVE").is_none();
@@ -348,6 +350,7 @@ impl GlmOcr {
             if let Some(step_top) = step_top.as_deref_mut() {
                 let scores = logits
                     .flatten_all()
+                    .and_then(|logits| logits.to_dtype(DType::F32))
                     .and_then(|logits| logits.to_vec1::<f32>())
                     .map_err(|e| {
                         candle_to_ocr_processing(

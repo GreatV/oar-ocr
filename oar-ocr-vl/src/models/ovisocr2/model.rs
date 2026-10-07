@@ -262,6 +262,7 @@ impl OvisOcr2 {
             if let Some(step_top) = step_top.as_deref_mut() {
                 let scores = logits
                     .flatten_all()
+                    .and_then(|logits| logits.to_dtype(DType::F32))
                     .and_then(|logits| logits.to_vec1::<f32>())
                     .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "trace logits", e))?;
                 step_top.push(top3(&scores));

@@ -140,22 +140,18 @@ fn matches_python_reference_end_to_end() {
         .iter()
         .map(|[id, value]| (*id as u32, *value as f32))
         .collect();
-    // Finding (2026-10-07, transformers 5.8.0.dev0 f32 CPU): our greedy
-    // tokens match the reference exactly for every step, and the top-3 ids
-    // agree, but our logit values run ~11% above the reference's with the
-    // same ranking (34.09 vs 30.44 on this fixture). The ids are asserted;
-    // the value offset is reported rather than tolerated until its source
-    // (a reference-side logit transform) is identified.
+    // Known issue: greedy tokens and the top-3 ids match the reference
+    // exactly, but our first-step logit values run ~12% above a plain
+    // reference forward pass with the same ranking (34.09 vs 30.31 on this
+    // fixture). The cause is on our side and tracked separately; until it is
+    // fixed the ids are asserted and the value offset is only reported.
     assert_eq!(actual[0].0, expected[0].0, "first-step greedy id");
     let mut worst = 0f64;
     for (rank, ((actual_id, actual_value), (expected_id, expected_value))) in
         actual.iter().zip(expected.iter()).enumerate()
     {
-        if actual_id != expected_id {
-            continue;
-        }
+        assert_eq!(actual_id, expected_id, "first-step rank {rank} id");
         worst = worst.max((actual_value - expected_value).abs() as f64);
-        let _ = rank;
     }
     eprintln!(
         "alignment: {} tokens match, worst first-step logit delta {worst:.3} (systematic offset; ids agree)",
