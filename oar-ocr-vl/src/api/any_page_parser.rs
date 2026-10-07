@@ -260,100 +260,100 @@ impl AnyPageParserLoadOptions {
 #[non_exhaustive]
 pub enum AnyPageParser {
     /// HPD-Parsing model-native hierarchical full-page parsing.
-    HpdParsing(HpdParsing),
+    HpdParsing(Box<HpdParsing>),
     /// HunyuanOCR model-native prompt-driven parsing.
-    HunyuanOcr(HunyuanOcr),
+    HunyuanOcr(Box<HunyuanOcr>),
     /// jina-ocr-v1 end-to-end page parsing.
-    JinaOcr(JinaOcr),
+    JinaOcr(Box<JinaOcr>),
     /// MinerU2.5 / MinerU2.5-Pro two-step parsing.
-    MinerU(MinerU),
+    MinerU(Box<MinerU>),
     /// MinerU-Diffusion block-diffusion two-step parsing.
-    MinerUDiffusion(MinerUDiffusion),
+    MinerUDiffusion(Box<MinerUDiffusion>),
     /// MonkeyOCRv2 model-native parsing.
-    MonkeyOcrV2(MonkeyOcrV2),
+    MonkeyOcrV2(Box<MonkeyOcrV2>),
     /// OvisOCR2 end-to-end page parsing.
-    OvisOcr2(OvisOcr2),
+    OvisOcr2(Box<OvisOcr2>),
     /// WeVisDoc end-to-end page parsing.
-    WeVisDoc(WeVisDoc),
+    WeVisDoc(Box<WeVisDoc>),
     /// Xiaomi-OCR-0 end-to-end page parsing.
-    XiaomiOcr(XiaomiOcr),
+    XiaomiOcr(Box<XiaomiOcr>),
     /// PaddleOCR-VL over a native PP-DocLayout layout source.
-    PaddleOcrVl(LayoutPageParser<PpDocLayout, PaddleOcrVl>),
+    PaddleOcrVl(Box<LayoutPageParser<PpDocLayout, PaddleOcrVl>>),
     /// GLM-OCR over a native PP-DocLayout layout source.
-    GlmOcr(LayoutPageParser<PpDocLayout, GlmOcr>),
+    GlmOcr(Box<LayoutPageParser<PpDocLayout, GlmOcr>>),
     /// TeleOCR over a native PP-DocLayout layout source.
-    TeleOcr(LayoutPageParser<PpDocLayout, TeleOcr>),
+    TeleOcr(Box<LayoutPageParser<PpDocLayout, TeleOcr>>),
 }
 
 impl From<HpdParsing> for AnyPageParser {
     fn from(model: HpdParsing) -> Self {
-        Self::HpdParsing(model)
+        Self::HpdParsing(Box::new(model))
     }
 }
 
 impl From<HunyuanOcr> for AnyPageParser {
     fn from(model: HunyuanOcr) -> Self {
-        Self::HunyuanOcr(model)
+        Self::HunyuanOcr(Box::new(model))
     }
 }
 
 impl From<JinaOcr> for AnyPageParser {
     fn from(model: JinaOcr) -> Self {
-        Self::JinaOcr(model)
+        Self::JinaOcr(Box::new(model))
     }
 }
 
 impl From<MinerU> for AnyPageParser {
     fn from(model: MinerU) -> Self {
-        Self::MinerU(model)
+        Self::MinerU(Box::new(model))
     }
 }
 
 impl From<MinerUDiffusion> for AnyPageParser {
     fn from(model: MinerUDiffusion) -> Self {
-        Self::MinerUDiffusion(model)
+        Self::MinerUDiffusion(Box::new(model))
     }
 }
 
 impl From<MonkeyOcrV2> for AnyPageParser {
     fn from(model: MonkeyOcrV2) -> Self {
-        Self::MonkeyOcrV2(model)
+        Self::MonkeyOcrV2(Box::new(model))
     }
 }
 
 impl From<OvisOcr2> for AnyPageParser {
     fn from(model: OvisOcr2) -> Self {
-        Self::OvisOcr2(model)
+        Self::OvisOcr2(Box::new(model))
     }
 }
 
 impl From<WeVisDoc> for AnyPageParser {
     fn from(model: WeVisDoc) -> Self {
-        Self::WeVisDoc(model)
+        Self::WeVisDoc(Box::new(model))
     }
 }
 
 impl From<XiaomiOcr> for AnyPageParser {
     fn from(model: XiaomiOcr) -> Self {
-        Self::XiaomiOcr(model)
+        Self::XiaomiOcr(Box::new(model))
     }
 }
 
 impl From<LayoutPageParser<PpDocLayout, PaddleOcrVl>> for AnyPageParser {
     fn from(model: LayoutPageParser<PpDocLayout, PaddleOcrVl>) -> Self {
-        Self::PaddleOcrVl(model)
+        Self::PaddleOcrVl(Box::new(model))
     }
 }
 
 impl From<LayoutPageParser<PpDocLayout, GlmOcr>> for AnyPageParser {
     fn from(model: LayoutPageParser<PpDocLayout, GlmOcr>) -> Self {
-        Self::GlmOcr(model)
+        Self::GlmOcr(Box::new(model))
     }
 }
 
 impl From<LayoutPageParser<PpDocLayout, TeleOcr>> for AnyPageParser {
     fn from(model: LayoutPageParser<PpDocLayout, TeleOcr>) -> Self {
-        Self::TeleOcr(model)
+        Self::TeleOcr(Box::new(model))
     }
 }
 
