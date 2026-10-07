@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "oar-ocr-derive", "oar-ocr-core", "oar-ocr-vl", "oar-ocr-bench"]
+members = [".", "oar-ocr-derive", "oar-ocr-core", "oar-ocr-vl", "oar-ocr-bench", "oar-ocr-cli"]
 resolver = "2"
 
 [workspace.package]
