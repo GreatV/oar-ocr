@@ -58,27 +58,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-To pick every model yourself, build the same pipeline from explicit names or paths — the advanced form behind the preset:
+The preset's detection thresholds are defaults, so a `text_type` like `seal` still applies its own detection settings, and an explicit `text_detection_config` overrides everything. Sizes only change the models and dictionary: `PpOcrV6Size::Tiny` runs the fastest pair over its reduced dictionary.
 
 ```rust
-use oar_ocr::domain::tasks::TextDetectionConfig;
 use oar_ocr::prelude::*;
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let ocr = OAROCRBuilder::new(
-        "pp-ocrv6_tiny_det.onnx",
-        "pp-ocrv6_tiny_rec.onnx",
-        "ppocrv6_tiny_dict.txt",
-    )
-    .text_detection_config(TextDetectionConfig {
-        score_threshold: 0.2,
-        box_threshold: 0.45,
-        unclip_ratio: 1.4,
-        max_candidates: 3000,
-        ..Default::default()
-    })
-    .build()?;
+    let ocr = OAROCRBuilder::pp_ocrv6(PpOcrV6Size::Tiny).build()?;
 
     let image = load_image(Path::new("document.jpg"))?;
     let results = ocr.predict(vec![image])?;
@@ -109,21 +96,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The explicit form behind the preset, for choosing each model yourself:
+The exact chain the preset expands to, for swapping individual models:
 
 ```rust
 use oar_ocr::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let structure = OARStructureBuilder::new("pp-doclayout_plus-l.onnx")
-        .with_table_classification("pp-lcnet_x1_0_table_cls.onnx")
-        .with_table_structure_recognition("slanet_plus.onnx", "wireless")
-        .table_structure_dict_path("table_structure_dict_ch.txt")
+    let structure = OARStructureBuilder::new("pp-doclayoutv3.onnx")
+        .layout_model_name("PP-DocLayoutV3")
         .with_ocr(
-            "pp-ocrv5_mobile_det.onnx",
-            "pp-ocrv5_mobile_rec.onnx",
-            "ppocrv5_dict.txt",
+            "pp-ocrv6_tiny_det.onnx",
+            "pp-ocrv6_tiny_rec.onnx",
+            "ppocrv6_tiny_dict.txt",
         )
+        .with_table_classification("pp-lcnet_x1_0_table_cls.onnx")
+        .with_wired_table_structure("slanext_wired.onnx")
+        .with_wireless_table_structure("slanet_plus.onnx")
+        .with_wired_table_cell_detection("rt-detr-l_wired_table_cell_det.onnx")
+        .table_structure_dict_path("table_structure_dict_ch.txt")
         .build()?;
 
     let result = structure.predict("document.jpg")?;

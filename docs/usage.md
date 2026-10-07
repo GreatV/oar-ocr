@@ -160,7 +160,7 @@ use oar_ocr::oarocr::OARStructureBuilder;
 let structure = OARStructureBuilder::pp_structurev3().build()?;
 ```
 
-Each component can also be selected explicitly:
+Each component can also be selected explicitly — for example a lighter, wireless-only configuration:
 
 ```rust
 use oar_ocr::oarocr::OARStructureBuilder;
