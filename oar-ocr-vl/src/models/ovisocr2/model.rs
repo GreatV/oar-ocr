@@ -181,7 +181,7 @@ impl OvisOcr2 {
         image: &RgbImage,
         max_new_tokens: usize,
     ) -> Result<GenerationTrace, Error> {
-        let mut step_top = Vec::with_capacity(max_new_tokens);
+        let mut step_top = Vec::new();
         let tokens = self.generate_one(image, max_new_tokens, Some(&mut step_top))?;
         Ok(GenerationTrace { tokens, step_top })
     }

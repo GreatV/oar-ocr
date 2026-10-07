@@ -100,9 +100,7 @@ fn matches_python_reference_end_to_end() {
     for (rank, ((actual_id, actual_value), (expected_id, expected_value))) in
         actual.iter().zip(expected.iter()).enumerate()
     {
-        if rank > 0 && actual_id != expected_id {
-            continue;
-        }
+        assert_eq!(actual_id, expected_id, "first-step rank {rank} id");
         let delta = (actual_value - expected_value).abs() as f64;
         worst = worst.max(delta);
         let (abs_tol, rel_tol) = if rank == 0 { (0.35, 2e-2) } else { (0.5, 5e-2) };

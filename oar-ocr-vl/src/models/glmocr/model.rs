@@ -183,7 +183,7 @@ impl GlmOcr {
         max_new_tokens: usize,
     ) -> Result<GenerationTrace, Error> {
         let instructions = [instruction];
-        let mut step_top = Vec::with_capacity(max_new_tokens);
+        let mut step_top = Vec::new();
         let tokens = self.generate_tokens_internal(
             std::slice::from_ref(image),
             &instructions,
