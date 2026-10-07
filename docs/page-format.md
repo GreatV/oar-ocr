@@ -26,6 +26,7 @@ The page JSON is the shared, versioned interchange format for one parsed documen
     }
   ],
   "markdown": "# …",
+  "raw_output": null,
   "diagnostics": []
 }
 ```
@@ -40,8 +41,9 @@ The page JSON is the shared, versioned interchange format for one parsed documen
   - `order`: the 1-based reading-order position when the pipeline assigns explicit order indices (headers, footers, and other auxiliary elements may have `null`); the classic pipeline reports its explicit indices, the VL pipeline numbers blocks sequentially since it stores them in reading order.
   - `confidence`: the detection confidence when the pipeline reports one, else `null`.
   - `angle`: a per-block rotation in degrees applied before recognition when the pipeline reports one, else `null`.
-  - `content`: the recognized content — plain text for text blocks, HTML for tables, LaTeX for formulas — or `null` when the block was not recognized. The classic pipeline takes table content from the paired table result's HTML in plain form (no border attribute or centering wrapper), because table stitching leaves the element text empty.
+  - `content`: the recognized content — plain text for text blocks, HTML for tables, LaTeX for formulas — or `null` when the block was not recognized. The classic pipeline takes table content from the paired table result's HTML in plain form (no border attribute or centering wrapper), because table stitching leaves the element text empty, and formula content from the paired formula result, because inline formulas have their element text cleared.
 - `markdown` is the pipeline-rendered Markdown when one was produced, else `null`: the classic pipeline fills it with its `to_markdown` rendering and the VL pipeline with the document's Markdown. Markdown rendering stays pipeline-specific; the two renderers may differ in details (for example title-level inference), and the page JSON does not normalize that.
+- `raw_output` carries the parser's raw transcript only when a VL parser produced neither blocks nor Markdown (for example MonkeyOCRv2 and HPD-Parsing), so such pages are not exported empty; otherwise it is `null`, and it is always `null` for the classic pipeline.
 - `diagnostics` lists non-fatal parse issues (`block_index`, `stage`, `message`); the classic pipeline currently reports none and emits an empty array.
 
 Structured table and formula detail that the classic pipeline recognizes (cells, per-cell text, structure confidences) is not duplicated into blocks; it remains available by serializing the `StructureResult` itself (`serde_json::to_value`). Block content for tables carries the table HTML, and for formulas the LaTeX.
@@ -75,6 +77,7 @@ The example below is the golden fixture both crates test against: the same page 
     }
   ],
   "markdown": "# Hello\n\n<div style=\"text-align: center;\"><table border=\"1\"><tr><td>cell</td></tr></table></div>",
+  "raw_output": null,
   "diagnostics": []
 }
 ```

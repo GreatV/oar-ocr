@@ -117,6 +117,13 @@ impl PageDocument {
             },
             "blocks": blocks,
             "markdown": self.markdown.as_deref(),
+            // Parsers that only produce a raw transcript (no blocks or
+            // Markdown) keep it here so the page is not exported empty.
+            "raw_output": if self.blocks.is_empty() && self.markdown.is_none() {
+                self.raw_output.as_deref()
+            } else {
+                None
+            },
             "diagnostics": &self.diagnostics,
         })
     }
@@ -206,6 +213,7 @@ mod tests {
                 }
             ],
             "markdown": null,
+            "raw_output": null,
             "diagnostics": []
         });
         assert_eq!(page.to_json(1000, 2000), expected);

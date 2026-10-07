@@ -1128,22 +1128,32 @@ impl StructureResult {
             },
             "blocks": blocks,
             "markdown": self.to_markdown(),
+            "raw_output": null,
             "diagnostics": [],
         })
     }
 
-    /// A layout element's page-JSON content: table HTML from the paired
-    /// table result, otherwise the stitched element text.
+    /// A layout element's page-JSON content: table HTML or formula LaTeX
+    /// from the paired result, otherwise the stitched element text.
     fn block_content(&self, element: &LayoutElement) -> Option<String> {
-        if element.element_type == LayoutElementType::Table {
-            return self
+        match element.element_type {
+            LayoutElementType::Table => self
                 .tables
                 .iter()
                 .find(|table| table.bbox.iou(&element.bbox) > 0.5)
                 .and_then(|table| table.html_structure.as_deref())
-                .map(simplify_table_html);
+                .map(simplify_table_html),
+            // Inline formulas have their element text cleared after being
+            // injected into the surrounding text, so read the recognized LaTeX
+            // from the paired formula result.
+            LayoutElementType::Formula => self
+                .formulas
+                .iter()
+                .find(|formula| formula.bbox.iou(&element.bbox) > 0.5)
+                .map(|formula| formula.latex.clone())
+                .or_else(|| element.text.clone()),
+            _ => element.text.clone(),
         }
-        element.text.clone()
     }
 
     /// Saves the analysis results to the specified directory.
@@ -2785,6 +2795,7 @@ mod tests {
                 }
             ],
             "markdown": result.to_markdown(),
+            "raw_output": null,
             "diagnostics": []
         });
         let page = result.to_json(1000, 2000);
