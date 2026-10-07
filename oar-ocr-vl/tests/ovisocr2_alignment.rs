@@ -4,7 +4,9 @@
 //! The reference fixture is produced out of tree with transformers, loading
 //! `Qwen3_5ForConditionalGeneration` from the same checkpoint in float32 with eager
 //! attention on CPU, and building the inputs through the checkpoint's
-//! processor and chat template with the prompt the Rust implementation uses.
+//! processor and chat template with the production prompt the Rust
+//! implementation uses (`ovisocr2::DEFAULT_PROMPT`): the fixture's ids must
+//! tokenize to the same 775-token stream `build_prompt` produces.
 //! The first-step logits come from a plain forward pass
 //! (`model(**inputs).logits[0, -1]`), not from `generate()` scores, and the
 //! token ids from greedy `generate(do_sample=False, max_new_tokens=16)`. The
@@ -140,21 +142,28 @@ fn matches_python_reference_end_to_end() {
         .iter()
         .map(|[id, value]| (*id as u32, *value as f32))
         .collect();
-    // Known issue: greedy tokens and the top-3 ids match the reference
-    // exactly, but our first-step logit values run ~12% above a plain
-    // reference forward pass with the same ranking (34.09 vs 30.31 on this
-    // fixture). The cause is on our side and tracked separately; until it is
-    // fixed the ids are asserted and the value offset is only reported.
+    // With the production prompt through the chat template, ids and values
+    // both agree: the apparent ~12% scale gap this test used to report was
+    // an artifact of fixtures built with a generic instruction, which
+    // changes the last-position context the first-step logits are read
+    // from.
     assert_eq!(actual[0].0, expected[0].0, "first-step greedy id");
     let mut worst = 0f64;
     for (rank, ((actual_id, actual_value), (expected_id, expected_value))) in
         actual.iter().zip(expected.iter()).enumerate()
     {
         assert_eq!(actual_id, expected_id, "first-step rank {rank} id");
-        worst = worst.max((actual_value - expected_value).abs() as f64);
+        let delta = (actual_value - expected_value).abs() as f64;
+        worst = worst.max(delta);
+        let (abs_tol, rel_tol) = if rank == 0 { (0.35, 2e-2) } else { (0.5, 5e-2) };
+        assert!(
+            delta <= abs_tol
+                || delta / (*expected_value as f64).abs().max(f64::MIN_POSITIVE) <= rel_tol,
+            "first-step rank {rank} logit {actual_value} vs reference {expected_value}"
+        );
     }
     eprintln!(
-        "alignment: {} tokens match, worst first-step logit delta {worst:.3} (systematic offset; ids agree)",
+        "alignment: {} tokens match, worst first-step logit delta {worst:.3}",
         fixture.generated_ids.len()
     );
 }
