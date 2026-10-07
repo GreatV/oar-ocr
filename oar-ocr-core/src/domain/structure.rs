@@ -1050,9 +1050,13 @@ impl StructureResult {
 
     /// Serializes the full internal result to a JSON value.
     ///
-    /// This shape is specific to the classic pipeline; for the documented
-    /// page format shared with the vision-language pipeline, use
-    /// [`to_json`](Self::to_json).
+    /// Deprecated in favor of [`to_json`](Self::to_json), the documented page
+    /// format shared with the vision-language pipeline. For the raw internal
+    /// shape, call `serde_json::to_value(&result)` directly.
+    #[deprecated(
+        since = "0.10.1",
+        note = "use `to_json(width, height)` for the shared page format, or `serde_json::to_value` for the raw result"
+    )]
     pub fn to_json_value(&self) -> serde_json::Result<serde_json::Value> {
         serde_json::to_value(self)
     }
@@ -1067,7 +1071,7 @@ impl StructureResult {
     /// `label` when it differs), pixel bounding boxes, explicit reading
     /// order indices, and recognized content (text, table HTML, or formula
     /// LaTeX). Structured table and formula detail stays in
-    /// [`to_json_value`](Self::to_json_value), and `markdown` is the
+    /// the result's `Serialize` output (`serde_json::to_value`), and `markdown` is the
     /// [`to_markdown`](Self::to_markdown) rendering.
     ///
     /// `width` and `height` are the pixel dimensions of the coordinate space

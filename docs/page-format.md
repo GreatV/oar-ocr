@@ -1,6 +1,6 @@
 # Page JSON Format
 
-The page JSON is the shared, versioned interchange format for one parsed document page. Both pipelines emit it — the classic ONNX pipeline through `StructureResult::to_json` and the vision-language pipeline through `PageDocument::to_json` — so downstream consumers (CLIs, evaluation tools, post-processors) get one shape regardless of which models produced the page. It sits next to the existing `to_markdown` and `to_html` exporters; the classic `StructureResult::to_json_value` stays as the raw serialization of the internal result, which is pipeline-specific and not covered by this format.
+The page JSON is the shared, versioned interchange format for one parsed document page. Both pipelines emit it — the classic ONNX pipeline through `StructureResult::to_json` and the vision-language pipeline through `PageDocument::to_json` — so downstream consumers (CLIs, evaluation tools, post-processors) get one shape regardless of which models produced the page. It sits next to the existing `to_markdown` and `to_html` exporters; the classic `StructureResult::to_json_value` is deprecated in its favor (the raw internal result remains available through `serde_json::to_value`).
 
 ## Schema
 
@@ -44,7 +44,7 @@ The page JSON is the shared, versioned interchange format for one parsed documen
 - `markdown` is the pipeline-rendered Markdown when one was produced, else `null`: the classic pipeline fills it with its `to_markdown` rendering and the VL pipeline with the document's Markdown. Markdown rendering stays pipeline-specific; the two renderers may differ in details (for example title-level inference), and the page JSON does not normalize that.
 - `diagnostics` lists non-fatal parse issues (`block_index`, `stage`, `message`); the classic pipeline currently reports none and emits an empty array.
 
-Structured table and formula detail that the classic pipeline recognizes (cells, per-cell text, structure confidences) is not duplicated into blocks; it remains available through `StructureResult::to_json_value`. Block content for tables carries the table HTML, and for formulas the LaTeX.
+Structured table and formula detail that the classic pipeline recognizes (cells, per-cell text, structure confidences) is not duplicated into blocks; it remains available by serializing the `StructureResult` itself (`serde_json::to_value`). Block content for tables carries the table HTML, and for formulas the LaTeX.
 
 ## Worked example
 
