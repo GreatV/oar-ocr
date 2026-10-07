@@ -26,7 +26,7 @@ oar structure page.png -o documents
 oar parse --model PaddlePaddle/PaddleOCR-VL-1.5 page.png
 ```
 
-See the [CLI guide](oar-ocr-cli/README.md) for JSON output, model overrides, and local checkpoints.
+See the [CLI guide](https://github.com/GreatV/oar-ocr/blob/main/oar-ocr-cli/README.md) for JSON output, model overrides, and local checkpoints.
 
 ### Installation
 

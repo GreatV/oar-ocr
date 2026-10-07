@@ -25,9 +25,6 @@ cuda = ["oar-ocr/cuda", "oar-ocr-vl/cuda", "dep:ort", "ort/cuda"]
 metal = ["oar-ocr/coreml", "oar-ocr-vl/metal", "dep:ort", "ort/coreml"]
 directml = ["oar-ocr/directml"]
 coreml = ["oar-ocr/coreml", "dep:ort", "ort/coreml"]
-tensorrt = ["oar-ocr/tensorrt"]
-openvino = ["oar-ocr/openvino"]
-webgpu = ["oar-ocr/webgpu"]
 
 [dependencies]
 anyhow = "1"
