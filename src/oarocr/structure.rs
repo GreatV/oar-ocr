@@ -607,13 +607,24 @@ impl OARStructureBuilder {
     ///
     /// * `model_path` - Path to the table cell detection model
     /// * `cell_type` - `"wired"`, `"wireless"`, or the corresponding [`TableType`]
+    ///
+    /// This replaces any model previously set for the same type with
+    /// [`with_wired_table_cell_detection`](Self::with_wired_table_cell_detection)
+    /// or [`with_wireless_table_cell_detection`](Self::with_wireless_table_cell_detection),
+    /// for example one chosen by [`pp_structurev3`](Self::pp_structurev3).
     pub fn with_table_cell_detection(
         mut self,
         model_source: impl Into<ModelSource>,
         cell_type: impl AsRef<str>,
     ) -> Self {
+        let cell_type = cell_type.as_ref().parse();
+        match cell_type {
+            Ok(TableType::Wired) => self.wired_table_cell_model = None,
+            Ok(TableType::Wireless) => self.wireless_table_cell_model = None,
+            _ => {}
+        }
         self.table_cell_detection_model = Some(model_source.into());
-        self.table_cell_detection_type = Some(cell_type.as_ref().parse());
+        self.table_cell_detection_type = Some(cell_type);
         self
     }
 
@@ -630,14 +641,24 @@ impl OARStructureBuilder {
     /// * `model_path` - Path to the table structure recognition model
     /// * `table_type` - `"wired"`, `"wireless"`, or the corresponding [`TableType`]
     ///
-    /// This component recognizes the structure of tables and outputs HTML.
+    /// This component recognizes the structure of tables and outputs HTML. It
+    /// replaces any model previously set for the same type with
+    /// [`with_wired_table_structure`](Self::with_wired_table_structure) or
+    /// [`with_wireless_table_structure`](Self::with_wireless_table_structure),
+    /// for example one chosen by [`pp_structurev3`](Self::pp_structurev3).
     pub fn with_table_structure_recognition(
         mut self,
         model_source: impl Into<ModelSource>,
         table_type: impl AsRef<str>,
     ) -> Self {
+        let table_type = table_type.as_ref().parse();
+        match table_type {
+            Ok(TableType::Wired) => self.wired_table_structure_model = None,
+            Ok(TableType::Wireless) => self.wireless_table_structure_model = None,
+            _ => {}
+        }
         self.table_structure_recognition_model = Some(model_source.into());
-        self.table_structure_recognition_type = Some(table_type.as_ref().parse());
+        self.table_structure_recognition_type = Some(table_type);
         self
     }
 
@@ -3769,6 +3790,16 @@ mod tests {
             OrtSessionConfig::new().with_execution_providers(vec![OrtExecutionProvider::CPU]);
         default_arena_shrinkage(&mut cpu);
         assert_eq!(cpu.arena_shrinkage, None);
+    }
+
+    #[test]
+    fn generic_table_setters_replace_same_type_preset_models() {
+        let builder = OARStructureBuilder::pp_structurev3()
+            .with_table_structure_recognition("custom_structure.onnx", "wired")
+            .with_table_cell_detection("custom_cells.onnx", "wired");
+        assert!(builder.wired_table_structure_model.is_none());
+        assert!(builder.wired_table_cell_model.is_none());
+        assert!(builder.wireless_table_structure_model.is_some());
     }
 
     #[test]
