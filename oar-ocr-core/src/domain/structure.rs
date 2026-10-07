@@ -1053,6 +1053,87 @@ impl StructureResult {
         serde_json::to_value(self)
     }
 
+    /// Exports this page in the shared page JSON format.
+    ///
+    /// This is the versioned interchange format documented in
+    /// `docs/page-format.md`, emitted identically by the vision-language
+    /// pipeline's `PageDocument::to_page_json`, so consumers get one shape
+    /// from either pipeline. Blocks follow the layout elements in reading
+    /// order with canonical `type` labels (the original model label rides in
+    /// `label` when it differs), pixel bounding boxes, explicit reading
+    /// order indices, and recognized content (text, table HTML, or formula
+    /// LaTeX). Structured table and formula detail stays in
+    /// [`to_json_value`](Self::to_json_value), and `markdown` is the
+    /// [`to_markdown`](Self::to_markdown) rendering.
+    ///
+    /// `width` and `height` are the parsed image's pixel dimensions. With
+    /// UVDoc rectification the boxes are in the rectified image's coordinate
+    /// system, so when a rectified image is attached its dimensions are
+    /// reported instead. Table content comes from the paired [`TableResult`]
+    /// HTML (the plain table, without the exporters' border and centering
+    /// styling), because stitching leaves table element text empty.
+    pub fn to_page_json(&self, width: u32, height: u32) -> serde_json::Value {
+        let (width, height) = match &self.rectified_img {
+            Some(rectified) => (rectified.width(), rectified.height()),
+            None => (width, height),
+        };
+        let blocks = self
+            .layout_elements
+            .iter()
+            .map(|element| {
+                let canonical = element.element_type.as_str();
+                let mut block = serde_json::json!({
+                    "type": canonical,
+                    "bbox": [
+                        element.bbox.x_min(),
+                        element.bbox.y_min(),
+                        element.bbox.x_max(),
+                        element.bbox.y_max(),
+                    ],
+                    "order": element.order_index,
+                    "confidence": element.confidence,
+                    "angle": null,
+                    "content": self.block_content(element),
+                });
+                // The original label rides along only when it differs from
+                // the canonical type.
+                if let Some(label) = &element.label
+                    && !label.eq_ignore_ascii_case(canonical)
+                {
+                    block["label"] = serde_json::Value::String(label.clone());
+                }
+                block
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "version": 1,
+            "pipeline": "classic",
+            "page": {
+                "index": self.index,
+                "width": width,
+                "height": height,
+                "angle": self.orientation_angle,
+            },
+            "blocks": blocks,
+            "markdown": self.to_markdown(),
+            "diagnostics": [],
+        })
+    }
+
+    /// A layout element's page-JSON content: table HTML from the paired
+    /// table result, otherwise the stitched element text.
+    fn block_content(&self, element: &LayoutElement) -> Option<String> {
+        if element.element_type == LayoutElementType::Table {
+            return self
+                .tables
+                .iter()
+                .find(|table| table.bbox.iou(&element.bbox) > 0.5)
+                .and_then(|table| table.html_structure.as_deref())
+                .map(simplify_table_html);
+        }
+        element.text.clone()
+    }
+
     /// Saves the analysis results to the specified directory.
     ///
     /// This generates:
@@ -2636,6 +2717,69 @@ impl FormulaResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_json_matches_the_documented_format() {
+        // The golden fixture from docs/page-format.md — one titled block
+        // with a model label that differs from the canonical type — plus
+        // the table block the classic fixture adds: stitching leaves table
+        // element text empty, so its content is the plain HTML from the
+        // paired TableResult.
+        let element = LayoutElement::new(
+            BoundingBox::from_coords(100.0, 200.0, 900.0, 400.0),
+            LayoutElementType::DocTitle,
+            0.875,
+        )
+        .with_label("Title")
+        .with_text("Hello");
+        let mut element = element;
+        element.order_index = Some(1);
+        let mut table_element = LayoutElement::new(
+            BoundingBox::from_coords(100.0, 500.0, 900.0, 900.0),
+            LayoutElementType::Table,
+            0.75,
+        );
+        table_element.order_index = Some(2);
+        let mut table = TableResult::new(
+            BoundingBox::from_coords(100.0, 500.0, 900.0, 900.0),
+            TableType::Wired,
+        );
+        table.html_structure =
+            Some("<html><body><table><tr><td>cell</td></tr></table></body></html>".to_string());
+        let result = StructureResult::new("page.png", 0)
+            .with_layout_elements(vec![element, table_element])
+            .with_tables(vec![table]);
+        let expected = serde_json::json!({
+            "version": 1,
+            "pipeline": "classic",
+            "page": { "index": 0, "width": 1000, "height": 2000, "angle": null },
+            "blocks": [
+                {
+                    "type": "doc_title",
+                    "label": "Title",
+                    "bbox": [100.0, 200.0, 900.0, 400.0],
+                    "order": 1,
+                    "confidence": 0.875,
+                    "angle": null,
+                    "content": "Hello"
+                },
+                {
+                    "type": "table",
+                    "bbox": [100.0, 500.0, 900.0, 900.0],
+                    "order": 2,
+                    "confidence": 0.75,
+                    "angle": null,
+                    "content": "<table><tr><td>cell</td></tr></table>"
+                }
+            ],
+            "markdown": result.to_markdown(),
+            "diagnostics": []
+        });
+        let page = result.to_page_json(1000, 2000);
+        // The markdown wiring is pinned to the exporter rather than a
+        // literal string; the renderer has its own tests.
+        assert_eq!(page, expected);
+    }
 
     #[test]
     fn test_structure_result_creation() {
