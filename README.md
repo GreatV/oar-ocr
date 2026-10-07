@@ -58,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The preset's detection thresholds are defaults, so a `text_type` like `seal` still applies its own detection settings, and an explicit `text_detection_config` overrides everything. Sizes only change the models and dictionary: `PpOcrV6Size::Tiny` runs the fastest pair over its reduced dictionary.
+The preset's detection thresholds are defaults, so a `text_type` like `seal` still applies its own detection settings, and an explicit `text_detection_config` overrides everything. Sizes pick the models, the dictionary, and PaddleOCR's per-size box threshold (0.4 for Tiny, 0.45 for Small and Medium): `PpOcrV6Size::Tiny` runs the fastest pair over its reduced dictionary.
 
 ```rust
 use oar_ocr::prelude::*;

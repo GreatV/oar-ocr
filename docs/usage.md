@@ -160,7 +160,7 @@ use oar_ocr::oarocr::OARStructureBuilder;
 let structure = OARStructureBuilder::pp_structurev3().build()?;
 ```
 
-Each component can also be selected explicitly — for example a lighter, wireless-only configuration:
+Each component can also be selected explicitly to build a custom pipeline, for example with a single wired table model:
 
 ```rust
 use oar_ocr::oarocr::OARStructureBuilder;
