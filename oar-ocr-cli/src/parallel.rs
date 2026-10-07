@@ -96,7 +96,7 @@ where
 {
     let job_count = jobs.len();
     if replica_count <= 1 || job_count <= 1 {
-        let mut replica = make_replica()?;
+        let mut replica = first_replica(replica_count.max(1), &make_replica)?;
         for (index, job) in jobs.into_iter().enumerate() {
             on_chunk(index, process(&mut replica, index, job))?;
         }
@@ -231,6 +231,21 @@ where
             None => Ok(()),
         }
     })
+}
+
+/// Builds replicas until one succeeds, trying each listed device once, so a
+/// run that needs a single replica is not failed by one bad device entry.
+fn first_replica<M>(attempts: usize, make_replica: impl Fn() -> Result<M>) -> Result<M> {
+    let mut first_error = None;
+    for _ in 0..attempts {
+        match make_replica() {
+            Ok(replica) => return Ok(replica),
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    Err(first_error.expect("at least one build attempt"))
 }
 
 #[cfg(test)]
