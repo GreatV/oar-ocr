@@ -16,6 +16,18 @@ A native Rust toolkit for OCR, document layout analysis, and vision-language doc
 
 ## Quick Start
 
+### Command line
+
+Install the standalone tool with `cargo install oar-ocr-cli` (or add `--features cuda`). Models download automatically; `auto` selects an available compiled device.
+
+```bash
+oar ocr page.png
+oar structure page.png -o documents
+oar parse --model PaddlePaddle/PaddleOCR-VL-1.5 page.png
+```
+
+See the [CLI guide](https://github.com/GreatV/oar-ocr/blob/main/oar-ocr-cli/README.md) for JSON output, model overrides, and local checkpoints.
+
 ### Installation
 
 ```bash
