@@ -60,14 +60,14 @@ impl PageDocument {
     ///
     /// This is the versioned interchange format documented in the
     /// repository's `docs/page-format.md`, emitted identically by the
-    /// classic pipeline's `StructureResult::to_page_json`, so consumers get
+    /// classic pipeline's `StructureResult::to_json`, so consumers get
     /// one shape from either pipeline. Normalized block boxes become pixel
     /// coordinates against `width` and `height` (the parsed image's
     /// dimensions, which callers have at hand), model-native labels map to
     /// the canonical `type` vocabulary with the original kept in `label`
     /// when it differs, and blocks get sequential `order` indices because
     /// the document stores them in reading order.
-    pub fn to_page_json(&self, width: u32, height: u32) -> serde_json::Value {
+    pub fn to_json(&self, width: u32, height: u32) -> serde_json::Value {
         use crate::document::structure::LayoutElementType;
         let scale_x = width.max(1) as f32;
         let scale_y = height.max(1) as f32;
@@ -208,7 +208,7 @@ mod tests {
             "markdown": null,
             "diagnostics": []
         });
-        assert_eq!(page.to_page_json(1000, 2000), expected);
+        assert_eq!(page.to_json(1000, 2000), expected);
     }
 
     #[test]

@@ -1048,7 +1048,11 @@ impl StructureResult {
             .replace('\'', "&#39;")
     }
 
-    /// Converts the result to a JSON Value.
+    /// Serializes the full internal result to a JSON value.
+    ///
+    /// This shape is specific to the classic pipeline; for the documented
+    /// page format shared with the vision-language pipeline, use
+    /// [`to_json`](Self::to_json).
     pub fn to_json_value(&self) -> serde_json::Result<serde_json::Value> {
         serde_json::to_value(self)
     }
@@ -1057,7 +1061,7 @@ impl StructureResult {
     ///
     /// This is the versioned interchange format documented in
     /// `docs/page-format.md`, emitted identically by the vision-language
-    /// pipeline's `PageDocument::to_page_json`, so consumers get one shape
+    /// pipeline's `PageDocument::to_json`, so consumers get one shape
     /// from either pipeline. Blocks follow the layout elements in reading
     /// order with canonical `type` labels (the original model label rides in
     /// `label` when it differs), pixel bounding boxes, explicit reading
@@ -1073,7 +1077,7 @@ impl StructureResult {
     /// inverted. Table content comes from the paired [`TableResult`]
     /// HTML (the plain table, without the exporters' border and centering
     /// styling), because stitching leaves table element text empty.
-    pub fn to_page_json(&self, width: u32, height: u32) -> serde_json::Value {
+    pub fn to_json(&self, width: u32, height: u32) -> serde_json::Value {
         let blocks = self
             .layout_elements
             .iter()
@@ -2779,7 +2783,7 @@ mod tests {
             "markdown": result.to_markdown(),
             "diagnostics": []
         });
-        let page = result.to_page_json(1000, 2000);
+        let page = result.to_json(1000, 2000);
         // The markdown wiring is pinned to the exporter rather than a
         // literal string; the renderer has its own tests.
         assert_eq!(page, expected);

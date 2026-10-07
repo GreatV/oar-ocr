@@ -1,6 +1,6 @@
 # Page JSON Format
 
-The page JSON is the shared, versioned interchange format for one parsed document page. Both pipelines emit it — the classic ONNX pipeline through `StructureResult::to_page_json` and the vision-language pipeline through `PageDocument::to_page_json` — so downstream consumers (CLIs, evaluation tools, post-processors) get one shape regardless of which models produced the page. The existing `to_markdown`, `to_html`, and `to_json_value` exporters are unchanged; the page JSON is an additional view of the same page.
+The page JSON is the shared, versioned interchange format for one parsed document page. Both pipelines emit it — the classic ONNX pipeline through `StructureResult::to_json` and the vision-language pipeline through `PageDocument::to_json` — so downstream consumers (CLIs, evaluation tools, post-processors) get one shape regardless of which models produced the page. It sits next to the existing `to_markdown` and `to_html` exporters; the classic `StructureResult::to_json_value` stays as the raw serialization of the internal result, which is pipeline-specific and not covered by this format.
 
 ## Schema
 
