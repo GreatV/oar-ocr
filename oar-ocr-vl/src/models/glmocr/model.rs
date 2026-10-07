@@ -163,7 +163,7 @@ impl GlmOcr {
             });
         }
 
-        let results = self.generate_tokens_internal(images, instructions, max_new_tokens)?;
+        let results = self.generate_tokens_internal(images, instructions, max_new_tokens, None)?;
         Ok(results
             .into_iter()
             .map(|tokens| self.decode_generated_tokens(&tokens))
@@ -173,6 +173,32 @@ impl GlmOcr {
     /// Generate raw token ids without post-processing. Tokens are exactly the
     /// ids emitted by the decode loop, excluding stop tokens, before tokenizer
     /// decoding or repetition truncation.
+    /// Greedy generation with per-step top-3 logits, for numerical
+    /// alignment against the upstream reference (see the `glmocr_alignment`
+    /// test). Runs the autoregressive path (no P-MTP), like the reference.
+    pub fn generate_traced(
+        &self,
+        image: &RgbImage,
+        instruction: &str,
+        max_new_tokens: usize,
+    ) -> Result<GenerationTrace, Error> {
+        let instructions = [instruction];
+        let mut step_top = Vec::with_capacity(max_new_tokens);
+        let tokens = self.generate_tokens_internal(
+            std::slice::from_ref(image),
+            &instructions,
+            max_new_tokens,
+            Some(&mut step_top),
+        )?;
+        let tokens = tokens
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::InvalidInput {
+                message: "GLM-OCR: traced generation produced no result".to_string(),
+            })?;
+        Ok(GenerationTrace { tokens, step_top })
+    }
+
     pub fn generate_tokens(
         &self,
         images: &[RgbImage],
@@ -191,7 +217,7 @@ impl GlmOcr {
                 ),
             });
         }
-        self.generate_tokens_internal(images, instructions, max_new_tokens)
+        self.generate_tokens_internal(images, instructions, max_new_tokens, None)
     }
 
     fn generate_tokens_internal(
@@ -199,6 +225,7 @@ impl GlmOcr {
         images: &[RgbImage],
         instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
+        mut step_top: Option<&mut Vec<[(u32, f32); 3]>>,
     ) -> Result<Vec<Vec<u32>>, Error> {
         let mut results = Vec::with_capacity(images.len());
 
@@ -285,8 +312,13 @@ impl GlmOcr {
                 continue;
             }
 
-            let generated =
-                self.generate_ar_tokens(&hidden, seq_len, rope_delta, max_new_tokens)?;
+            let generated = self.generate_ar_tokens(
+                &hidden,
+                seq_len,
+                rope_delta,
+                max_new_tokens,
+                step_top.as_deref_mut(),
+            )?;
 
             results.push(generated);
         }
@@ -300,6 +332,7 @@ impl GlmOcr {
         seq_len: usize,
         rope_delta: i64,
         max_new_tokens: usize,
+        mut step_top: Option<&mut Vec<[(u32, f32); 3]>>,
     ) -> Result<Vec<u32>, Error> {
         let last = prompt_hidden.i((0, seq_len - 1, ..)).map_err(|e| {
             candle_to_ocr_processing(
@@ -312,6 +345,19 @@ impl GlmOcr {
         let mut generated = Vec::with_capacity(max_new_tokens);
 
         for (step, pos) in (seq_len as i64..).take(max_new_tokens).enumerate() {
+            if let Some(step_top) = step_top.as_deref_mut() {
+                let scores = logits
+                    .flatten_all()
+                    .and_then(|logits| logits.to_vec1::<f32>())
+                    .map_err(|e| {
+                        candle_to_ocr_processing(
+                            crate::error::ProcessingStage::TensorOperation,
+                            "GLM-OCR: trace logits",
+                            e,
+                        )
+                    })?;
+                step_top.push(top3(&scores));
+            }
             let tok = logits
                 .argmax(D::Minus1)
                 .and_then(|t| t.to_scalar::<u32>())
@@ -730,6 +776,34 @@ impl GlmOcr {
             )
         })
     }
+}
+
+/// Greedy generation with per-step top-3 logits for alignment tests.
+#[derive(Debug, Clone)]
+pub struct GenerationTrace {
+    pub tokens: Vec<u32>,
+    pub step_top: Vec<[(u32, f32); 3]>,
+}
+
+fn top3(scores: &[f32]) -> [(u32, f32); 3] {
+    let mut best: [(usize, f32); 3] = [(0, f32::NEG_INFINITY); 3];
+    for (index, &value) in scores.iter().enumerate() {
+        if value > best[2].1 {
+            if value > best[1].1 {
+                if value > best[0].1 {
+                    best[2] = best[1];
+                    best[1] = best[0];
+                    best[0] = (index, value);
+                } else {
+                    best[2] = best[1];
+                    best[1] = (index, value);
+                }
+            } else {
+                best[2] = (index, value);
+            }
+        }
+    }
+    best.map(|(index, value)| (index as u32, value))
 }
 
 fn token_tensor(token: u32, device: &Device) -> Result<Tensor, Error> {
