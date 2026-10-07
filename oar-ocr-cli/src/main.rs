@@ -350,8 +350,15 @@ fn output_paths(paths: &[PathBuf], common: &Common, json: bool) -> Result<Option
                 .with_extension(if json { "json" } else { "md" }))
         })
         .collect::<Result<Vec<_>>>()?;
+    // Compare case-insensitively so names that only differ in case are caught
+    // before inference on case-insensitive filesystems too.
     ensure!(
-        outputs.iter().collect::<BTreeSet<_>>().len() == outputs.len(),
+        outputs
+            .iter()
+            .map(|path| path.to_string_lossy().to_lowercase())
+            .collect::<BTreeSet<_>>()
+            .len()
+            == outputs.len(),
         "input filenames collide; use unique image stems or run them separately"
     );
     for path in &outputs {
