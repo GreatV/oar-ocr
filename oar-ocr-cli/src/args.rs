@@ -23,8 +23,14 @@ pub(crate) struct Cli {
 
 #[derive(Args)]
 pub(crate) struct Common {
-    /// auto, cpu, cuda:N, or metal
-    #[arg(long, global = true, default_value = "auto", value_parser = device)]
+    /// auto, cpu, cuda:N, metal, or for ocr/structure a comma list like
+    /// cuda:0,cuda:1 to run one pipeline replica per device (duplicates allowed)
+    #[arg(
+        long,
+        global = true,
+        default_value = "auto",
+        value_parser = device_list
+    )]
     pub(crate) device: String,
     /// Write one .md or .json per image or PDF page; use a fresh directory
     #[arg(short, long, global = true, value_name = "DIR")]
@@ -179,6 +185,36 @@ fn device(value: &str) -> Result<String, String> {
     Err("device must be auto, cpu, cuda:N (non-negative N), or metal".into())
 }
 
+/// Parse a comma-separated device list into validated device specs.
+/// Duplicates are allowed (`cuda:0,cuda:0` runs two replicas on one GPU);
+/// mixing `auto` with explicit devices or `metal` with anything is not.
+pub(crate) fn device_list(value: &str) -> Result<String, String> {
+    let parts: Vec<&str> = value.split(',').map(str::trim).collect();
+    if parts.len() > 1 && parts.contains(&"auto") {
+        return Err("auto cannot be combined with other devices".into());
+    }
+    if parts.len() > 1 && parts.contains(&"metal") {
+        return Err("metal cannot be combined with other devices".into());
+    }
+    let normalized: Vec<String> = parts
+        .iter()
+        .map(|part| device(part))
+        .collect::<Result<Vec<_>, _>>()?;
+    if normalized.len() > 1
+        && !normalized
+            .iter()
+            .all(|d| d.starts_with("cuda:") || d == "cpu")
+    {
+        return Err("multi-device lists may only contain cuda:N or cpu entries".into());
+    }
+    Ok(normalized.join(","))
+}
+
+/// Split a validated device list into individual device specs.
+pub(crate) fn split_devices(devices: &str) -> Vec<String> {
+    devices.split(',').map(str::to_string).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,6 +246,17 @@ mod tests {
         };
         assert!(args.format == OcrFormat::Json);
         assert_eq!(args.models.rec, Some(PathBuf::from("custom.onnx")));
+        // Device lists: duplicates allowed, mixing auto/metal rejected.
+        assert_eq!(device_list("cuda:0,cuda:1").unwrap(), "cuda:0,cuda:1");
+        assert_eq!(device_list("CUDA:0, cuda:0").unwrap(), "cuda:0,cuda:0");
+        assert_eq!(device_list("cpu,cuda:0").unwrap(), "cpu,cuda:0");
+        assert!(device_list("auto,cuda:0").is_err());
+        assert!(device_list("cuda:0,metal").is_err());
+        assert!(device_list("cuda:0,gpu").is_err());
+        let listed =
+            Cli::try_parse_from(["oar", "ocr", "page.png", "--device", "cuda:0,cuda:0"]).unwrap();
+        assert_eq!(listed.common.device, "cuda:0,cuda:0");
+        assert_eq!(split_devices(&listed.common.device).len(), 2);
         for (extra, expected) in [
             (vec![], PpOcrV6Size::Tiny),
             (vec!["--size", "small"], PpOcrV6Size::Small),
