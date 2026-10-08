@@ -125,9 +125,14 @@ where
             let make_replica = Arc::clone(&make_replica);
             let build_lock = Arc::clone(&build_lock);
             let process = Arc::clone(&process);
+            let aborting = Arc::clone(&aborting);
             scope.spawn(move || {
                 let built = {
                     let _guard = build_lock.lock().expect("build lock poisoned");
+                    // A run that already failed needs no more replicas.
+                    if aborting.load(Ordering::SeqCst) {
+                        return;
+                    }
                     make_replica()
                 };
                 let mut replica = match built {
@@ -147,6 +152,10 @@ where
                     let Ok((index, job)) = job else {
                         break;
                     };
+                    // Skip chunks still queued when the run aborts.
+                    if aborting.load(Ordering::SeqCst) {
+                        break;
+                    }
                     let result = process(&mut replica, index, job);
                     if result_tx.send((index, result)).is_err() {
                         break;
