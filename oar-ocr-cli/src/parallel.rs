@@ -116,6 +116,9 @@ where
     let process = Arc::new(process);
 
     std::thread::scope(|scope| -> Result<()> {
+        // Owned here so the writer can drop it on exit: workers still
+        // sending then fail fast instead of blocking the scope join.
+        let result_rx = result_rx;
         for _ in 0..replica_count {
             let work_rx = Arc::clone(&work_rx);
             let result_tx = result_tx.clone();
@@ -213,6 +216,10 @@ where
                 gate.advance(next_to_write);
             }
         }
+        // Stop receiving: any worker still sending a result (or a
+        // build-failure report) now gets an error and exits, so a full
+        // result channel cannot block the scope join.
+        drop(result_rx);
         // Wake a dispatcher still parked on the window before joining it —
         // storing the flag alone would leave it asleep forever.
         gate.abort(&aborting);
@@ -361,6 +368,34 @@ mod tests {
         assert_eq!(written.load(Ordering::SeqCst), 0, "nothing is written");
         assert!(
             error.to_string().contains("no such device"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn aborts_promptly_when_the_surviving_replica_fails() {
+        // The first replica builds and its first chunk fails, so the writer
+        // stops receiving; the other two builds fail only afterwards. Their
+        // late reports plus the survivor's remaining results exceed the
+        // result channel, which must not block the join.
+        let builds = AtomicUsize::new(0);
+        let run = run_parallel(
+            3,
+            (0..32).collect::<Vec<usize>>(),
+            || {
+                if builds.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok(())
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    Err(anyhow::anyhow!("no such device"))
+                }
+            },
+            |_: &mut (), _index, _job| Err::<(), _>(anyhow::anyhow!("chunk failed")),
+            |_index, result| result,
+        );
+        let error = run.expect_err("the chunk failure is returned");
+        assert!(
+            error.to_string().contains("chunk failed"),
             "unexpected error: {error}"
         );
     }

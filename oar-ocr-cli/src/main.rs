@@ -593,9 +593,6 @@ fn process_inputs(
     let mut out = io::stdout().lock();
     let json = mode.json;
     let array = mode.array;
-    if destinations.is_none() && json && array {
-        writeln!(out, "[")?;
-    }
     let mut index = 0;
     let mut pages = inputs
         .iter()
@@ -679,8 +676,10 @@ fn write_document(
             })?;
         file.write_all(text.as_bytes())?;
     } else if json {
-        if array && index > 0 {
-            writeln!(out, ",")?;
+        if array {
+            // The array opens with its first document, so a run that fails
+            // before writing anything leaves no unterminated `[` behind.
+            writeln!(out, "{}", if index == 0 { "[" } else { "," })?;
         }
         serde_json::to_writer_pretty(out, &document.json)?;
     } else {
@@ -742,9 +741,6 @@ where
     let array = mode.array;
     let _ = &total;
     let mut out = io::stdout().lock();
-    if destinations.is_none() && json && array {
-        writeln!(out, "[")?;
-    }
     let pages: Vec<(Arc<Input>, usize)> = inputs
         .iter()
         .flat_map(|input| {
