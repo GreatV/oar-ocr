@@ -149,10 +149,10 @@ fn merge_wrapped(rows: Vec<Vec<usize>>, boxes: &[[f32; 4]]) -> Vec<Vec<usize>> {
     out
 }
 
-/// An HTML table from cell lines. A first row that is one line across most
-/// of the table is a title that goes before the table; the first remaining
-/// row is the header.
-pub(super) fn table_html(boxes: &[[f32; 4]], texts: &[String]) -> String {
+/// An HTML table from cell lines, and the titles that go before it in the
+/// Markdown: a first row that is one line across most of the table is a
+/// title. The first remaining row is the header.
+pub(super) fn table_html(boxes: &[[f32; 4]], texts: &[String]) -> (Vec<String>, String) {
     let rows = rows(boxes);
     let span_x = boxes.iter().map(|b| b[2]).fold(f32::NEG_INFINITY, f32::max)
         - boxes.iter().map(|b| b[0]).fold(f32::INFINITY, f32::min);
@@ -163,7 +163,9 @@ pub(super) fn table_html(boxes: &[[f32; 4]], texts: &[String]) -> String {
             let keep: Vec<usize> = (0..texts.len()).filter(|&k| k != t).collect();
             let kb: Vec<[f32; 4]> = keep.iter().map(|&k| boxes[k]).collect();
             let kt: Vec<String> = keep.iter().map(|&k| texts[k].clone()).collect();
-            return format!("{}\n\n{}", texts[t], table_html(&kb, &kt));
+            let (mut titles, html) = table_html(&kb, &kt);
+            titles.insert(0, texts[t].clone());
+            return (titles, html);
         }
     }
     let full: Vec<&Vec<usize>> = rows.iter().filter(|r| r.len() == width).collect();
@@ -236,7 +238,7 @@ pub(super) fn table_html(boxes: &[[f32; 4]], texts: &[String]) -> String {
         out.push(format!("<tr>{tds}</tr>"));
     }
     out.push("</table>".to_string());
-    out.join("\n")
+    (Vec::new(), out.join("\n"))
 }
 
 /// One layout block of a page, in reading order.
@@ -245,6 +247,8 @@ pub(super) struct Block {
     pub class: usize,
     /// The block's Markdown; `None` for left-out page furniture.
     pub markdown: Option<String>,
+    /// A table block's HTML, without the titles its Markdown puts before it.
+    pub html: Option<String>,
 }
 
 /// Splits the reading order into blocks and renders each. `cells` holds a
@@ -263,6 +267,7 @@ pub(super) fn page_blocks(
         .map(|blk| {
             let class = group_class(cls, &blk);
             let lines: Vec<&str> = blk.iter().map(|&i| texts[i].as_str()).collect();
+            let mut html = None;
             let markdown = if matches!(class, HEADER | FOOTER) && !keep_furniture {
                 None
             } else if lines.iter().all(|t| WHOLE_MATH.is_match(t.trim())) {
@@ -292,7 +297,10 @@ pub(super) fn page_blocks(
                         }
                     }
                 }
-                Some(table_html(&cb, &ct))
+                let (mut parts, table) = table_html(&cb, &ct);
+                parts.push(table.clone());
+                html = Some(table);
+                Some(parts.join("\n\n"))
             } else if class == LIST {
                 let mut items: Vec<Vec<&str>> = Vec::new();
                 for t in &lines {
@@ -315,6 +323,7 @@ pub(super) fn page_blocks(
                 lines: blk,
                 class,
                 markdown,
+                html,
             }
         })
         .collect()

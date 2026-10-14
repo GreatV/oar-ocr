@@ -220,8 +220,10 @@ pub struct IndraBlock {
     /// `Page-Footer`, `List-Group`, `Table`, `Caption`, `Footnote`,
     /// `Table-Of-Contents` or `Form`.
     pub label: String,
-    /// `[x0, y0, x1, y1]`, the union of the block's lines, in pixels of the
-    /// upright page.
+    /// `[x0, y0, x1, y1]` in pixels of the upright page: the union of the
+    /// block's lines, or on a straightened page that union's rectangle
+    /// mapped back across the skew (as the reference does), which can be
+    /// slightly larger than the union of the mapped line boxes.
     pub bbox: [f32; 4],
     /// The block's lines, newline-joined.
     pub text: String,
@@ -317,8 +319,19 @@ impl IndraPage {
 }
 
 impl IndraOcr {
-    /// Reads pages; one [`IndraPage`] per image, in input order.
+    /// Reads pages; one [`IndraPage`] per image, in input order. An empty
+    /// image is an [`OCRError::InvalidInput`].
     pub fn predict(&self, images: Vec<RgbImage>) -> Result<Vec<IndraPage>, OCRError> {
+        if let Some(i) = images
+            .iter()
+            .position(|im| im.width() == 0 || im.height() == 0)
+        {
+            return Err(OCRError::invalid_input(format!(
+                "image {i} has no pixels ({}x{})",
+                images[i].width(),
+                images[i].height()
+            )));
+        }
         images
             .iter()
             .map(|image| self.read_page(cv::rgb_to_gray(image)))
@@ -688,9 +701,7 @@ impl IndraOcr {
                         .map(|&i| texts[i].as_str())
                         .collect::<Vec<_>>()
                         .join("\n"),
-                    html: (block.class == layout::TABLE && block.lines.len() > 1)
-                        .then_some(block.markdown)
-                        .flatten(),
+                    html: block.html,
                 }
             })
             .collect();
