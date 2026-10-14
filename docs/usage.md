@@ -206,6 +206,38 @@ let structure = OARStructureBuilder::new("picodet-l_layout_17cls.onnx")
 | `.region_batch_size(n)` | Set batch size for region processing |
 | `.ort_session(config)` | Apply ONNX Runtime configuration |
 
+### IndraOcrBuilder - Indra OCR
+
+[Indra OCR](https://huggingface.co/datalab-to/indra-ocr) is Datalab's CPU-first page reader: about 18 MB of ONNX models that turn a page into lines with boxes, layout blocks in reading order (text, section headers, lists, tables, captions, footnotes, page headers and footers), and Markdown with tables as HTML. It reads Latin, Cyrillic, Greek, Devanagari, Bengali, and Chinese, turns quarter-turned pages upright, and straightens small tilts. `oar_ocr::indra` reproduces the reference pipeline's OCR mode; reading a PDF's own text layer is not supported, so render PDF pages to images first. Download the models from Hugging Face; they are not part of the auto-download registry, and their weights use a modified OpenRAIL-M license.
+
+```bash
+hf download datalab-to/indra-ocr --local-dir models/datalab-to/indra-ocr
+```
+
+```rust,no_run
+use oar_ocr::indra::IndraOcrBuilder;
+use oar_ocr::utils::load_image;
+
+let ocr = IndraOcrBuilder::new("models/datalab-to/indra-ocr")
+    .math(true) // write lines with math as inline LaTeX
+    .build()?;
+let page = ocr.predict(vec![load_image("page.png")?])?.remove(0);
+println!("{}", page.markdown);
+for block in &page.blocks {
+    println!("{} {:?}", block.label, block.bbox);
+}
+let json = page.to_json(); // the shared page JSON, with pipeline "indra"
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+| Method | Description |
+|--------|-------------|
+| `.math(bool)` | Read lines with math as text with inline LaTeX (off by default; needs the `math_*` model files) |
+| `.keep_furniture(bool)` | Keep page headers and footers in the Markdown (left out by default; always listed in `blocks`) |
+| `.ort_session(config)` | Apply ONNX Runtime configuration to every model |
+
+Boxes are in the upright page: `page.rotation` is the quarter turn that was undone and `page.width` / `page.height` its size, and `page.skew` the small tilt that was straightened (boxes are mapped back across it). The pipeline is built for CPU; run `cargo run --release --example indra -- --model-dir models/datalab-to/indra-ocr page.png` to try it.
+
 ## GPU Acceleration
 
 ### Automatic Device Selection
