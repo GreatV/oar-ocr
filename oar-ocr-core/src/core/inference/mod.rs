@@ -96,6 +96,13 @@ impl OrtInfer {
         }
     }
 
+    /// Returns the run options applied to every inference (set when CUDA
+    /// arena shrinkage is enabled), for callers that run a session from
+    /// [`get_session`](Self::get_session) directly.
+    pub fn run_options(&self) -> Option<&ort::session::RunOptions> {
+        self.run_options.as_ref()
+    }
+
     /// Returns the declared output names and tensor shapes from the first session.
     ///
     /// This is intended for model adapters that need to choose among multiple

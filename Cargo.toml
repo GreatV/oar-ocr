@@ -74,7 +74,10 @@ image.workspace = true
 imageproc.workspace = true
 oar-ocr-core.workspace = true
 oar-ocr-derive.workspace = true
+# Indra OCR feeds integer and boolean tensors directly; same pin as oar-ocr-core.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std"] }
 rayon.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
@@ -84,6 +87,5 @@ ab_glyph = "0.2"
 clap.workspace = true
 fontdb = "0.23"
 hayro.workspace = true
-regex.workspace = true
 tempfile.workspace = true
 tracing-subscriber.workspace = true
