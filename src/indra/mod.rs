@@ -128,13 +128,7 @@ impl IndraOcrBuilder {
                 .map_err(|e| {
                 OCRError::config_error(format!("meta.json: {key} is not a vocabulary: {e}"))
             })?;
-            let chars = inner["chars"]
-                .as_array()
-                .ok_or_else(|| OCRError::config_error(format!("meta.json: {key} has no chars")))?;
-            Ok(chars
-                .iter()
-                .map(|c| c.as_str().unwrap_or_default().to_string())
-                .collect())
+            string_list(&inner["chars"], &format!("meta.json: {key}.chars"))
         };
         let size = |key: &str| {
             meta[key]
@@ -801,6 +795,17 @@ fn model(dir: &Path, name: &str, common: &ModelInferenceConfig) -> Result<OrtInf
     let mut common = common.clone();
     common.model_name = Some(format!("indra {name}"));
     OrtInfer::from_config(&common, dir.join(name), None)
+}
+
+/// A non-empty JSON array of strings (a vocabulary).
+fn string_list(value: &serde_json::Value, what: &str) -> Result<Vec<String>, OCRError> {
+    let list: Option<Vec<String>> = value
+        .as_array()
+        .filter(|a| !a.is_empty())
+        .and_then(|a| a.iter().map(|v| v.as_str().map(str::to_string)).collect());
+    list.ok_or_else(|| {
+        OCRError::config_error(format!("{what} must be a non-empty list of strings"))
+    })
 }
 
 fn read_json(path: &Path) -> Result<serde_json::Value, OCRError> {

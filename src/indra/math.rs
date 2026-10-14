@@ -44,25 +44,22 @@ impl MathReader {
         let meta = super::read_json(&dir.join("math_meta.json"))?;
         let cfg = &meta["config"];
         let get = |key: &str| {
-            cfg[key].as_u64().map(|v| v as usize).ok_or_else(|| {
-                OCRError::config_error(format!("math_meta.json: config.{key} is missing"))
-            })
+            cfg[key]
+                .as_u64()
+                .filter(|&v| v > 0)
+                .map(|v| v as usize)
+                .ok_or_else(|| {
+                    OCRError::config_error(format!(
+                        "math_meta.json: config.{key} must be a positive integer"
+                    ))
+                })
         };
-        let tokens = meta["tokens"]
-            .as_array()
-            .ok_or_else(|| OCRError::config_error("math_meta.json: tokens is missing"))?;
         let mut itos = vec![String::new(); N_SPECIAL as usize];
-        itos.extend(
-            tokens
-                .iter()
-                .map(|t| t.as_str().unwrap_or_default().to_string()),
-        );
+        itos.extend(super::string_list(
+            &meta["tokens"],
+            "math_meta.json: tokens",
+        )?);
         let heads = get("dec_heads")?;
-        if heads == 0 {
-            return Err(OCRError::config_error(
-                "math_meta.json: config.dec_heads must be positive",
-            ));
-        }
         Ok(Self {
             cls: model(dir, "mathcls.onnx", common)?,
             enc: model(dir, "math_enc.onnx", common)?,
