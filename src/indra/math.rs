@@ -183,6 +183,12 @@ impl MathReader {
             )?;
             (sk, sv, self_shape) = (nk, nv, nshape);
             let n_vocab = logits.len() / b;
+            if n_vocab != self.itos.len() {
+                return Err(OCRError::config_error(format!(
+                    "math_dec_step.onnx scores {n_vocab} tokens, math_meta.json lists {}",
+                    self.itos.len()
+                )));
+            }
             for i in 0..b {
                 let row = &logits[i * n_vocab..(i + 1) * n_vocab];
                 let mut arg = 0;
@@ -218,7 +224,7 @@ impl MathReader {
             .map(|(seq, p)| {
                 let tokens: Vec<&str> = seq
                     .iter()
-                    .map(|&i| self.itos.get(i as usize).map(String::as_str).unwrap_or(""))
+                    .map(|&i| self.itos[i as usize].as_str())
                     .collect();
                 let conf = if p.is_empty() {
                     0.0

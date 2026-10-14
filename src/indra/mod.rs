@@ -240,6 +240,8 @@ pub struct IndraBlock {
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct IndraPage {
+    /// Position of the page in the [`IndraOcr::predict`] batch.
+    pub index: usize,
     /// Width of the upright page the boxes are in.
     pub width: u32,
     /// Height of the upright page the boxes are in.
@@ -309,7 +311,7 @@ impl IndraPage {
             "version": 1,
             "pipeline": "indra",
             "page": {
-                "index": null,
+                "index": self.index,
                 "width": self.width,
                 "height": self.height,
                 "angle": (self.rotation != 0).then_some(self.rotation),
@@ -338,7 +340,12 @@ impl IndraOcr {
         }
         images
             .iter()
-            .map(|image| self.read_page(cv::rgb_to_gray(image)))
+            .enumerate()
+            .map(|(index, image)| {
+                let mut page = self.read_page(cv::rgb_to_gray(image))?;
+                page.index = index;
+                Ok(page)
+            })
             .collect()
     }
 
@@ -509,16 +516,28 @@ impl IndraOcr {
                     } else {
                         keep.iter().map(|&t| pm[t] as f64).sum::<f64>() / keep.len() as f64
                     };
+                    // An id past the vocabulary means meta.json does not
+                    // belong to this recognizer.
                     let tokens: Vec<Token> = keep
                         .iter()
-                        .filter_map(|&t| {
-                            let id = seq[t] as usize;
-                            vocab.get(id.wrapping_sub(1)).map(|s| Token {
-                                text: s.clone(),
+                        .map(|&t| {
+                            let id = seq[t];
+                            let text = usize::try_from(id - 1)
+                                .ok()
+                                .and_then(|i| vocab.get(i))
+                                .ok_or_else(|| {
+                                    OCRError::config_error(format!(
+                                        "{}: token id {id} is outside its {}-entry vocabulary",
+                                        session.model_name(),
+                                        vocab.len()
+                                    ))
+                                })?;
+                            Ok(Token {
+                                text: text.clone(),
                                 x: ix0 + (t as f64 + 0.5) * stride * f,
                             })
                         })
-                        .collect();
+                        .collect::<Result<_, OCRError>>()?;
                     out[j] = if conf_mean >= MIN_CONF {
                         LineText {
                             text: recognize::join_tokens(
@@ -618,6 +637,7 @@ impl IndraOcr {
         let texts: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
         let round1 = |v: f32| ((v as f64 * 10.0).round_ties_even() / 10.0) as f32;
         let mut page = IndraPage {
+            index: 0,
             width: pw,
             height: ph,
             rotation: 0,
