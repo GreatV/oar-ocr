@@ -267,7 +267,24 @@ pub(super) fn page_blocks(
         .map(|blk| {
             let class = group_class(cls, &blk);
             let lines: Vec<&str> = blk.iter().map(|&i| texts[i].as_str()).collect();
-            let mut html = None;
+            // Every table block gets HTML (the page JSON content); its
+            // Markdown renders as a table only with two or more lines, as in
+            // the reference.
+            let table = (class == TABLE).then(|| {
+                let (mut cb, mut ct) = (Vec::new(), Vec::new());
+                for &i in &blk {
+                    if cells[i].is_empty() {
+                        cb.push(boxes[i]);
+                        ct.push(texts[i].clone());
+                    } else {
+                        for (b, t) in &cells[i] {
+                            cb.push(*b);
+                            ct.push(t.clone());
+                        }
+                    }
+                }
+                table_html(&cb, &ct)
+            });
             let markdown = if matches!(class, HEADER | FOOTER) && !keep_furniture {
                 None
             } else if lines.iter().all(|t| WHOLE_MATH.is_match(t.trim())) {
@@ -284,22 +301,9 @@ pub(super) fn page_blocks(
                 )
             } else if class == SECTION {
                 Some(format!("## {}", join_lines(&lines)))
-            } else if class == TABLE && blk.len() > 1 {
-                let (mut cb, mut ct) = (Vec::new(), Vec::new());
-                for &i in &blk {
-                    if cells[i].is_empty() {
-                        cb.push(boxes[i]);
-                        ct.push(texts[i].clone());
-                    } else {
-                        for (b, t) in &cells[i] {
-                            cb.push(*b);
-                            ct.push(t.clone());
-                        }
-                    }
-                }
-                let (mut parts, table) = table_html(&cb, &ct);
-                parts.push(table.clone());
-                html = Some(table);
+            } else if let Some((titles, html)) = table.as_ref().filter(|_| blk.len() > 1) {
+                let mut parts = titles.clone();
+                parts.push(html.clone());
                 Some(parts.join("\n\n"))
             } else if class == LIST {
                 let mut items: Vec<Vec<&str>> = Vec::new();
@@ -323,7 +327,7 @@ pub(super) fn page_blocks(
                 lines: blk,
                 class,
                 markdown,
-                html,
+                html: table.map(|(_, html)| html),
             }
         })
         .collect()

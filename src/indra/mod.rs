@@ -720,6 +720,11 @@ fn estimate_skew(gray: &GrayImage) -> f64 {
         ((w * s).round_ties_even() as usize).max(1),
         ((h * s).round_ties_even() as usize).max(1),
     );
+    // A one-row thumbnail has no row profile to sharpen (every angle would
+    // score zero and the first, -5.5 degrees, would win).
+    if sh < 2 {
+        return 0.0;
+    }
     let small = cv::resize(gray, sw as u32, sh as u32, cv::Interp::Area);
     let ink: Vec<f32> = small
         .as_raw()

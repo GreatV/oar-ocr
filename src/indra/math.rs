@@ -58,6 +58,11 @@ impl MathReader {
                 .map(|t| t.as_str().unwrap_or_default().to_string()),
         );
         let heads = get("dec_heads")?;
+        if heads == 0 {
+            return Err(OCRError::config_error(
+                "math_meta.json: config.dec_heads must be positive",
+            ));
+        }
         Ok(Self {
             cls: model(dir, "mathcls.onnx", common)?,
             enc: model(dir, "math_enc.onnx", common)?,
