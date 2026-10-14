@@ -736,7 +736,9 @@ fn estimate_skew(gray: &GrayImage) -> f64 {
         .map(|&v| (255.0 - v as f32) / 255.0)
         .collect();
     let mean = ink.iter().map(|&v| v as f64).sum::<f64>() / ink.len() as f64;
-    if mean < 0.003 {
+    // A blank page, or a flat one with no structure at all, has no rows to
+    // straighten.
+    if mean < 0.003 || small.as_raw().iter().all(|&v| v == small.as_raw()[0]) {
         return 0.0;
     }
     let sharpness = |a: f64| -> f64 {
@@ -797,14 +799,17 @@ fn model(dir: &Path, name: &str, common: &ModelInferenceConfig) -> Result<OrtInf
     OrtInfer::from_config(&common, dir.join(name), None)
 }
 
-/// A non-empty JSON array of strings (a vocabulary).
+/// A non-empty JSON array of non-empty strings (a vocabulary).
 fn string_list(value: &serde_json::Value, what: &str) -> Result<Vec<String>, OCRError> {
-    let list: Option<Vec<String>> = value
-        .as_array()
-        .filter(|a| !a.is_empty())
-        .and_then(|a| a.iter().map(|v| v.as_str().map(str::to_string)).collect());
+    let list: Option<Vec<String>> = value.as_array().filter(|a| !a.is_empty()).and_then(|a| {
+        a.iter()
+            .map(|v| v.as_str().filter(|s| !s.is_empty()).map(str::to_string))
+            .collect()
+    });
     list.ok_or_else(|| {
-        OCRError::config_error(format!("{what} must be a non-empty list of strings"))
+        OCRError::config_error(format!(
+            "{what} must be a non-empty list of non-empty strings"
+        ))
     })
 }
 

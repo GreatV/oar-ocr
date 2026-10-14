@@ -60,16 +60,23 @@ impl MathReader {
             "math_meta.json: tokens",
         )?);
         let heads = get("dec_heads")?;
+        let (channels, max_tokens) = (get("channels")?, get("max_tokens")?);
+        if channels % heads != 0 || max_tokens < 2 {
+            return Err(OCRError::config_error(
+                "math_meta.json: config.channels must be a multiple of dec_heads, \
+                 and max_tokens at least 2",
+            ));
+        }
         Ok(Self {
             cls: model(dir, "mathcls.onnx", common)?,
             enc: model(dir, "math_enc.onnx", common)?,
             init: model(dir, "math_dec_init.onnx", common)?,
             step: model(dir, "math_dec_step.onnx", common)?,
             height: get("height")?,
-            max_tokens: get("max_tokens")?,
+            max_tokens,
             layers: get("dec_layers")?,
             heads,
-            head_dim: get("channels")? / heads,
+            head_dim: channels / heads,
             itos,
         })
     }
