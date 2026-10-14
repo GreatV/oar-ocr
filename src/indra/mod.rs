@@ -139,8 +139,11 @@ impl IndraOcrBuilder {
         let size = |key: &str| {
             meta[key]
                 .as_u64()
+                .filter(|&v| v > 0)
                 .map(|v| v as usize)
-                .ok_or_else(|| OCRError::config_error(format!("meta.json: {key} is missing")))
+                .ok_or_else(|| {
+                    OCRError::config_error(format!("meta.json: {key} must be a positive integer"))
+                })
         };
         let optional = |name: &str| -> Result<Option<OrtInfer>, OCRError> {
             if dir.join(name).exists() {
@@ -155,7 +158,14 @@ impl IndraOcrBuilder {
                 rec,
                 vocab: vocab("vocab_cjk")?,
             }),
-            _ => None,
+            (None, None) => None,
+            // Half a pair would silently read Chinese with the Latin recognizer.
+            _ => {
+                return Err(OCRError::config_error(format!(
+                    "{}: script.onnx and rec_cjk.onnx must be present together",
+                    dir.display()
+                )));
+            }
         };
         Ok(IndraOcr {
             det: model(dir, "det.onnx", &common)?,
@@ -809,9 +819,12 @@ fn run<R>(
     read: impl FnOnce(&SessionOutputs<'_>) -> ort::Result<R>,
 ) -> Result<R, OCRError> {
     let mut session = model.get_session(0)?;
-    let outputs = session
-        .run(inputs)
-        .map_err(|e| OCRError::inference_error(model.model_name(), "forward pass", e))?;
+    // Keep the run options (CUDA arena shrinkage) that `OrtInfer` applies.
+    let outputs = match model.run_options() {
+        Some(options) => session.run_with_options(inputs, options),
+        None => session.run(inputs),
+    }
+    .map_err(|e| OCRError::inference_error(model.model_name(), "forward pass", e))?;
     read(&outputs).map_err(|e| OCRError::inference_error(model.model_name(), "reading outputs", e))
 }
 
