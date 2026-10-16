@@ -85,7 +85,7 @@ tracing.workspace = true
 [dev-dependencies]
 ab_glyph = "0.2"
 clap.workspace = true
-fontdb = "0.23"
+fontdb = "0.24"
 hayro.workspace = true
 tempfile.workspace = true
 tracing-subscriber.workspace = true
