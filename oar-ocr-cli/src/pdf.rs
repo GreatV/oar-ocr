@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow, ensure};
-use hayro::{RenderCache, RenderSettings, hayro_syntax::Pdf};
+use hayro::{PixmapSettings, RenderCache, hayro_syntax::Pdf};
 use image::RgbImage;
 use std::{
     fs::File,
@@ -123,15 +123,20 @@ impl Input {
                 .all(|size| size.is_finite() && *size >= 1.0 && *size < 65536.0),
             "PDF page {number} dimensions exceed the renderer's 1–65535 pixel range; adjust --dpi"
         );
-        let settings = RenderSettings {
+        let pixmap_settings = PixmapSettings {
             x_scale: scale,
             y_scale: scale,
             bg_color: hayro::vello_cpu::color::palette::css::WHITE,
-            ..Default::default()
         };
         // A per-page cache releases decoded images before rendering the next page.
         let cache = RenderCache::new();
-        let pixmap = hayro::render(page, &cache, &Default::default(), &settings);
+        let pixmap = hayro::render(
+            page,
+            &cache,
+            &Default::default(),
+            &Default::default(),
+            &pixmap_settings,
+        );
         let data = pixmap
             .data_as_u8_slice()
             .as_chunks::<4>()
