@@ -43,6 +43,7 @@ const PARSERS: &[AnyPageParserModel] = &[
     AnyPageParserModel::PaddleOcrVl1_6,
     AnyPageParserModel::GlmOcr,
     AnyPageParserModel::TeleOcr,
+    AnyPageParserModel::YoutuParsingOmni,
 ];
 
 // Match the largest default image batch while bounding rendered page memory.

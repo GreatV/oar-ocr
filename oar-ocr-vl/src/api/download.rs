@@ -28,8 +28,14 @@ pub const DEFAULT_LAYOUT_REPO: &str = "PaddlePaddle/PP-DocLayoutV3_safetensors";
 
 /// Checkpoints ModelScope publishes under a different organization than
 /// Hugging Face. The mirrors were verified to carry the same files, with
-/// matching safetensors hashes; only `zai-org/GLM-OCR` has one.
-const MODELSCOPE_ALIASES: &[(&str, &str)] = &[("zai-org/GLM-OCR", "ZhipuAI/GLM-OCR")];
+/// matching safetensors hashes.
+const MODELSCOPE_ALIASES: &[(&str, &str)] = &[
+    ("zai-org/GLM-OCR", "ZhipuAI/GLM-OCR"),
+    (
+        "tencent/Youtu-Parsing-Omni",
+        "tencent-community/Youtu-Parsing-Omni",
+    ),
+];
 
 /// Checkpoints ModelScope does not carry at all; selecting ModelScope
 /// downloads these from Hugging Face instead. (`Tencent-Hunyuan/HunyuanOCR`
@@ -1037,6 +1043,13 @@ mod tests {
         assert_eq!(
             resolve_remote(DownloadSource::ModelScope, "zai-org/GLM-OCR"),
             (DownloadSource::ModelScope, "ZhipuAI/GLM-OCR".to_string())
+        );
+        assert_eq!(
+            resolve_remote(DownloadSource::ModelScope, "tencent/Youtu-Parsing-Omni"),
+            (
+                DownloadSource::ModelScope,
+                "tencent-community/Youtu-Parsing-Omni".to_string()
+            )
         );
         // Repos ModelScope lacks download from Hugging Face instead.
         for repo in [

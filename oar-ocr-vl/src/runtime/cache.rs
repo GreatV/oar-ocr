@@ -105,18 +105,22 @@ impl TrimmableKvCache {
             // e.g. 16K tokens of K/V per layer on its first token.
             let mut shape = k_new.dims().to_vec();
             shape[self.cat_dim] = required;
+            let mut v_shape = v_new.dims().to_vec();
+            v_shape[self.cat_dim] = required;
             self.capacity = required;
             self.storage = Some((
                 Tensor::zeros(shape.as_slice(), k_new.dtype(), k_new.device())?,
-                Tensor::zeros(shape.as_slice(), v_new.dtype(), v_new.device())?,
+                Tensor::zeros(v_shape.as_slice(), v_new.dtype(), v_new.device())?,
             ));
         } else if required > self.capacity {
             let grow_by = self.capacity.max(new_len);
             let mut shape = k_new.dims().to_vec();
             shape[self.cat_dim] = grow_by;
+            let mut v_shape = v_new.dims().to_vec();
+            v_shape[self.cat_dim] = grow_by;
             let (old_k, old_v) = self.storage.as_ref().expect("storage initialized");
             let extra_k = Tensor::zeros(shape.as_slice(), k_new.dtype(), k_new.device())?;
-            let extra_v = Tensor::zeros(shape.as_slice(), v_new.dtype(), v_new.device())?;
+            let extra_v = Tensor::zeros(v_shape.as_slice(), v_new.dtype(), v_new.device())?;
             self.storage = Some((
                 Tensor::cat(&[old_k, &extra_k], self.cat_dim)?.contiguous()?,
                 Tensor::cat(&[old_v, &extra_v], self.cat_dim)?.contiguous()?,
@@ -498,6 +502,23 @@ mod tests {
         let (k2, _) = c.append(&b, &b)?;
         assert_eq!(k2.dims(), &[1, 2, 8, 4]);
         assert_eq!(c.current_seq_len(), 8);
+        Ok(())
+    }
+
+    #[test]
+    fn latent_cache_preserves_different_key_and_value_widths() -> Result<()> {
+        let mut cache = TrimmableKvCache::new(2, 64);
+        let key = Tensor::ones((1, 1, 2, 4), DType::F32, &dev())?;
+        let value = Tensor::zeros((1, 1, 2, 6), DType::F32, &dev())?;
+        cache.append(&key, &value)?;
+        let (keys, values) = cache.append(&key, &value)?;
+        assert_eq!(keys.dims(), [1, 1, 4, 4]);
+        assert_eq!(values.dims(), [1, 1, 4, 6]);
+        assert_eq!(keys.flatten_all()?.to_vec1::<f32>()?, vec![1.0; 16]);
+        assert_eq!(values.flatten_all()?.to_vec1::<f32>()?, vec![0.0; 24]);
+        cache.trim_to(1)?;
+        let (_, values) = cache.append(&key, &value)?;
+        assert_eq!(values.dims(), [1, 1, 3, 6]);
         Ok(())
     }
 

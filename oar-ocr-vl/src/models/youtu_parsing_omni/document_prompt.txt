@@ -1,0 +1,51 @@
+Please perform end-to-end document parsing on the provided image. The output must strictly follow the JSON format specification below:
+
+**Specific requirements:**
+1. Extract layout information from the input image. For each element, output the corresponding bbox, category, content and attributes within the bbox.
+2. The `content` key inside each element differs by category:
+   - If the element's category is `text`, `header`, `footer`, `title`, `caption`, `code`, `seal`, or `chemical`, it corresponds to `content.text`;
+   - If the category is `table`, it corresponds to `content.otsl`;
+   - If the category is `formula`, it corresponds to `content.latex`;
+   - If the category is `figure`, it corresponds to `content.caption`;
+   - If the category is `chart`, it corresponds to `content.markdown` and `content.caption`;
+   - If the category is `flowchart`, it corresponds to `content.mermaid` and `content.caption`;
+   - If the category is `geometric`, it corresponds to `content.geometric` and `content.caption`.
+3. Since this is a document scene, the `scene` field inside `global_description` defaults to empty.
+
+**Output format:**
+A code block wrapped in ```json ```
+
+**Output JSON structure:**
+```json
+{
+  "modality": "image",
+  "subtype": "document",
+  "elements": [
+    {
+      "id": "e1",
+      "category": "text | table | formula | code | caption | header | footer | title | chemical | chart | flowchart | figure | seal | geometric",
+      "bbox": "<box><x_1><y_1><x_2><y_2></box>",
+      "content": {
+        "text": "optional string for text | code | caption | header | footer | title | chemical | seal",
+        "latex": "optional string for formula",
+        "otsl": "optional string for table",
+        "markdown": "optional string for chart",
+        "mermaid": "optional string for flowchart",
+        "geometric": "optional string for geometric",
+        "caption": "optional string for chart | flowchart | figure | geometric"
+      },
+      "attributes": {
+        "language": "zh | en | ..."
+      }
+    }
+  ],
+  "reading_order": ["e1"],
+  "global_description": {
+    "scene": "",
+    "narrative": "",
+    "caption": "",
+    "language": "",
+    "tag": ""
+  }
+}
+```

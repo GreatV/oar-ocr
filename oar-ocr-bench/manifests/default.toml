@@ -105,6 +105,12 @@ model = "SeerRay-Lab/Xiaomi-OCR-0"
 model_path = "models/SeerRay-Lab/Xiaomi-OCR-0"
 
 [[cases]]
+name = "vl-youtu-parsing-omni"
+kind = "vl"
+model = "tencent/Youtu-Parsing-Omni"
+model_path = "models/tencent/Youtu-Parsing-Omni"
+
+[[cases]]
 name = "vl-paddleocr-vl"
 kind = "vl"
 model = "PaddlePaddle/PaddleOCR-VL-1.5"

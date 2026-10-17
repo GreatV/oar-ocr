@@ -15,6 +15,7 @@ const MODEL_MODULES: &[&str] = &[
     "teleocr",
     "wevisdoc",
     "xiaomi_ocr",
+    "youtu_parsing_omni",
 ];
 
 fn collect_rust_sources(dir: &Path, sources: &mut Vec<std::path::PathBuf>) {

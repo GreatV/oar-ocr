@@ -21,6 +21,7 @@ use crate::pp_doclayout::PpDocLayout;
 use crate::teleocr::TeleOcr;
 use crate::wevisdoc::{WeVisDoc, WeVisDocParseOptions};
 use crate::xiaomi_ocr::{XiaomiOcr, XiaomiOcrParseOptions};
+use crate::youtu_parsing_omni::{YoutuParsingOmni, YoutuParsingOmniParseOptions};
 use candle_core::Device;
 use image::RgbImage;
 use std::fmt;
@@ -112,6 +113,8 @@ pub enum AnyPageParserModel {
     GlmOcr,
     /// XingChen-AGI/TeleOCR.
     TeleOcr,
+    /// tencent/Youtu-Parsing-Omni (image and document parsing).
+    YoutuParsingOmni,
 }
 
 /// The canonical ID table backing [`AnyPageParserModel`] string conversions.
@@ -154,6 +157,10 @@ const MODEL_IDS: &[(&str, AnyPageParserModel)] = &[
     ),
     ("zai-org/GLM-OCR", AnyPageParserModel::GlmOcr),
     ("XingChen-AGI/TeleOCR", AnyPageParserModel::TeleOcr),
+    (
+        "tencent/Youtu-Parsing-Omni",
+        AnyPageParserModel::YoutuParsingOmni,
+    ),
 ];
 
 impl AnyPageParserModel {
@@ -177,6 +184,7 @@ impl AnyPageParserModel {
             Self::PaddleOcrVl1_6 => "PaddlePaddle/PaddleOCR-VL-1.6",
             Self::GlmOcr => "zai-org/GLM-OCR",
             Self::TeleOcr => "XingChen-AGI/TeleOCR",
+            Self::YoutuParsingOmni => "tencent/Youtu-Parsing-Omni",
         }
     }
 }
@@ -283,6 +291,8 @@ pub enum AnyPageParser {
     GlmOcr(Box<LayoutPageParser<PpDocLayout, GlmOcr>>),
     /// TeleOCR over a native PP-DocLayout layout source.
     TeleOcr(Box<LayoutPageParser<PpDocLayout, TeleOcr>>),
+    /// Youtu-Parsing-Omni model-native JSON page parsing.
+    YoutuParsingOmni(Box<YoutuParsingOmni>),
 }
 
 impl From<HpdParsing> for AnyPageParser {
@@ -336,6 +346,12 @@ impl From<WeVisDoc> for AnyPageParser {
 impl From<XiaomiOcr> for AnyPageParser {
     fn from(model: XiaomiOcr) -> Self {
         Self::XiaomiOcr(Box::new(model))
+    }
+}
+
+impl From<YoutuParsingOmni> for AnyPageParser {
+    fn from(model: YoutuParsingOmni) -> Self {
+        Self::YoutuParsingOmni(Box::new(model))
     }
 }
 
@@ -431,6 +447,9 @@ impl AnyPageParser {
                 WeVisDoc::from_dir(model_dir, device)?.into()
             }
             AnyPageParserModel::XiaomiOcr => XiaomiOcr::from_dir(model_dir, device)?.into(),
+            AnyPageParserModel::YoutuParsingOmni => {
+                YoutuParsingOmni::from_dir(model_dir, device)?.into()
+            }
             AnyPageParserModel::PaddleOcrVl
             | AnyPageParserModel::PaddleOcrVl1_5
             | AnyPageParserModel::PaddleOcrVl1_6 => LayoutPageParser::new(
@@ -549,6 +568,13 @@ impl PageParser for AnyPageParser {
             Self::OvisOcr2(model) => model.parse_page(image, &ovisocr2_options(options)),
             Self::WeVisDoc(model) => model.parse_page(image, &wevisdoc_options(options)),
             Self::XiaomiOcr(model) => model.parse_page(image, &xiaomi_options(options)),
+            Self::YoutuParsingOmni(model) => {
+                let mut model_options = YoutuParsingOmniParseOptions::default();
+                if let Some(max_new_tokens) = options.max_new_tokens {
+                    model_options.max_new_tokens = max_new_tokens;
+                }
+                model.parse_page(image, &model_options)
+            }
             Self::PaddleOcrVl(model) => model.parse_page(image, &layout_options(model, options)),
             Self::GlmOcr(model) => model.parse_page(image, &layout_options(model, options)),
             Self::TeleOcr(model) => model.parse_page(image, &layout_options(model, options)),
