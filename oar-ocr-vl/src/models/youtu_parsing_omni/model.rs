@@ -102,6 +102,9 @@ impl YoutuParsingOmni {
         )?;
         let mut stop_ids = vec![
             tokenizer
+                .token_to_id("<|image_pad|>")
+                .expect("validated token"),
+            tokenizer
                 .token_to_id("<|end_of_text|>")
                 .expect("validated token"),
         ];
@@ -257,5 +260,64 @@ impl YoutuParsingOmni {
                 .forward(&Tensor::new(&[[token]], &self.device)?)?;
         }
         Ok((tokens, false))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokenizers::models::wordlevel::WordLevel;
+
+    #[test]
+    fn loading_without_generation_config_keeps_protocol_stop_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/reference.json")).unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            serde_json::to_vec(&reference["config"]).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("model.safetensors"),
+            include_bytes!("fixtures/tiny.safetensors"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("processor_config.json"),
+            r#"{"image_processor":{"patch_size":2,"spatial_merge_size":2,"temporal_patch_size":1,"image_min_num_tokens":1,"image_max_num_tokens":32,"mean":[0.5,0.5,0.5],"std":[0.5,0.5,0.5]}}"#,
+        )
+        .unwrap();
+        let vocab = [
+            "<unk>",
+            "<|vision_start|>",
+            "<|vision_end|>",
+            "<|image_pad|>",
+            "<|end_of_text|>",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(id, token)| (token.to_string(), id as u32))
+        .collect();
+        let tokenizer = Tokenizer::new(
+            WordLevel::builder()
+                .vocab(vocab)
+                .unk_token("<unk>".into())
+                .build()
+                .unwrap(),
+        );
+        tokenizer
+            .save(dir.path().join("tokenizer.json"), false)
+            .unwrap();
+
+        let model = YoutuParsingOmni::from_dir(dir.path(), Device::Cpu).unwrap();
+        for token in ["<|image_pad|>", "<|end_of_text|>"] {
+            assert!(
+                model
+                    .stop_ids
+                    .contains(&tokenizer.token_to_id(token).unwrap()),
+                "missing protocol stop token {token}"
+            );
+        }
     }
 }
