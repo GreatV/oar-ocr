@@ -24,6 +24,7 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 | [TeleOCR](https://huggingface.co/XingChen-AGI/TeleOCR) | 1.2B | Qwen2.5-VL document parser with text, table (OTSL), formula, code, and layout tasks (formerly NaviDC-OCR) |
 | [WeVisDoc-2B](https://huggingface.co/tencent/WeVisDoc-2B) / [4B](https://huggingface.co/tencent/WeVisDoc-4B) | 2B / 4B | Model-native full-page document-to-Markdown parsing (Qwen3-VL with DeepStack) |
 | [Xiaomi-OCR-0](https://huggingface.co/SeerRay-Lab/Xiaomi-OCR-0) | 0.8B | Model-native full-page document-to-Markdown parsing and text/table/formula/KIE region prompts (Qwen3.5) |
+| [Youtu-Parsing-Omni](https://huggingface.co/tencent/Youtu-Parsing-Omni) | 5B | Native image/document parsing to OmniSchema JSON, layout blocks, and Markdown (Youtu omni encoder and MLA decoder) |
 | [PP-DocLayoutV2](https://huggingface.co/PaddlePaddle/PP-DocLayoutV2_safetensors) / [V3](https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_safetensors) | 54M / 33M | Layout detection and reading-order prediction, feeding `DocParser` |
 
 See [`examples`](examples) for runnable examples.
@@ -35,7 +36,7 @@ See [`examples`](examples) for runnable examples.
 1. **Layout detection** to identify document regions and their reading order. `PpDocLayout` is a native Candle port of PP-DocLayoutV2/V3; any other detector can be plugged in through the `LayoutSource` trait.
 2. **VL-based recognition** to extract content from each region
 
-Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, TeleOCR, jina-ocr-v1, MonkeyOCRv2, OvisOCR2, WeVisDoc, Xiaomi-OCR-0, HunyuanOCR, MinerU2.5/Pro, or MinerU-Diffusion for externally detected crops. HPD-Parsing currently supports only its model-native full-page protocol. For complete pages, prefer each model's native path where available: MonkeyOCRv2 `Layout`/`EndToEnd`, OvisOCR2, jina-ocr-v1, WeVisDoc, Xiaomi-OCR-0, and HPD-Parsing full-page parsing, HunyuanOCR full-page prompts, and the MinerU two-step extraction examples.
+Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, TeleOCR, jina-ocr-v1, MonkeyOCRv2, OvisOCR2, WeVisDoc, Xiaomi-OCR-0, HunyuanOCR, MinerU2.5/Pro, or MinerU-Diffusion for externally detected crops. HPD-Parsing and Youtu-Parsing-Omni support their model-native page protocols. For complete pages, prefer each model's native path where available: MonkeyOCRv2 `Layout`/`EndToEnd`, OvisOCR2, jina-ocr-v1, WeVisDoc, Xiaomi-OCR-0, HPD-Parsing, and Youtu-Parsing-Omni full-page parsing, HunyuanOCR full-page prompts, and the MinerU two-step extraction examples.
 
 `LayoutPageParser` composes an owned layout source and recognition backend into `PageParser`, the same complete-page interface used by the model-native parsers:
 
@@ -85,7 +86,7 @@ let options = AnyPageParserOptions::default().with_max_new_tokens(8192);
 let page = parser.parse_page(&image, &options)?;
 ```
 
-Construct it from an already-loaded model with `From`: the model-native parsers (`HpdParsing`, `HunyuanOcr`, `JinaOcr`, `MinerU`, `MinerUDiffusion`, `MonkeyOcrV2`, `OvisOcr2`, `WeVisDoc`, `XiaomiOcr`) and `LayoutPageParser` compositions over `PpDocLayout` (`PaddleOcrVl`, `GlmOcr`, `TeleOcr`). `AnyPageParserOptions` carries the knobs every parser shares: `max_new_tokens` maps to each model's generation budget (including `MinerUDiffusion`'s `gen_length`), and `region_batch_size` applies to the region-batching parsers (`MinerU` and the layout-composed models); parsers without a matching concept ignore the knob.
+Construct it from an already-loaded model with `From`: the model-native parsers (`HpdParsing`, `HunyuanOcr`, `JinaOcr`, `MinerU`, `MinerUDiffusion`, `MonkeyOcrV2`, `OvisOcr2`, `WeVisDoc`, `XiaomiOcr`, `YoutuParsingOmni`) and `LayoutPageParser` compositions over `PpDocLayout` (`PaddleOcrVl`, `GlmOcr`, `TeleOcr`). `AnyPageParserOptions` carries the knobs every parser shares: `max_new_tokens` maps to each model's generation budget (including `MinerUDiffusion`'s `gen_length`), and `region_batch_size` applies to the region-batching parsers (`MinerU` and the layout-composed models); parsers without a matching concept ignore the knob.
 
 `AnyPageParser::from_dir` loads a named parser from a model directory. The model is always named explicitly by its Hugging Face repo ID (`tencent/HunyuanOCR`, `PaddlePaddle/PaddleOCR-VL-1.5`, …) — most supported models are fine-tunes whose checkpoint configs match their public base models, so the directory cannot identify the model reliably on its own. Each model then loads through its own `from_dir` with its own defaults:
 
@@ -259,6 +260,33 @@ println!("{markdown}");
 ```
 
 The processor resizes RGB input with bicubic antialiasing to a 32-pixel-aligned area between the advertised bounds (`256²`–`4096²` pixels). The official prompts cover whole-page parsing, text regions, OTSL tables, LaTeX formulas, and key-information extraction (see the `xiaomi_ocr` module constants); as a `RecognitionBackend`, tables come back in OTSL and are converted to HTML by the pipeline, and chart regions are left unrecognized because the model defines no chart prompt.
+
+### Youtu-Parsing-Omni
+
+Youtu-Parsing-Omni parses document images directly with its shared omni encoder and MLA decoder, using the official document prompt and greedy decoding. `PageParser` returns layout blocks in reading order and Markdown with LaTeX formulas and HTML tables; `raw_output` retains the native OmniSchema JSON, including special box-coordinate and table tokens. Input preprocessing preserves aspect ratio and pads the right and bottom edges; block coordinates are mapped from the padded canvas back to the input image. Audio and video inputs are outside this image-based API.
+
+```rust,no_run
+use candle_core::Device;
+use oar_ocr_vl::{PageParser, YoutuParsingOmni, YoutuParsingOmniParseOptions};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let model = YoutuParsingOmni::from_dir("tencent/Youtu-Parsing-Omni", Device::Cpu)?;
+let options = YoutuParsingOmniParseOptions::default()
+    .with_max_new_tokens(8192)
+    .with_max_pixels(1_048_576);
+let image = image::open("document.jpg")?.to_rgb8();
+let page = model.parse_page(&image, &options)?;
+println!("{}", page.markdown.unwrap_or_default());
+# Ok(())
+# }
+```
+
+The checkpoint's default image ceiling is retained unless `with_max_pixels` overrides it. Greedy decoding suppresses stop tokens for the first 16 generated tokens, bounded by the requested generation budget. `with_prompt` accepts another image-based task instruction; chart notes, captions, Mermaid diagrams, and geometric expressions are preserved together in block content. Natural-image tasks also append a full-image `global_description` block containing the caption, narrative, and scene. `generate` returns the native output without document post-processing. The model is also available as `AnyPageParserModel::YoutuParsingOmni`, with the explicit ID `tencent/Youtu-Parsing-Omni`; it needs no external layout model. Automatic ModelScope downloads use its verified `tencent-community/Youtu-Parsing-Omni` mirror while keeping the public model ID unchanged.
+
+```bash
+cargo run --release -p oar-ocr-vl --features cuda --example youtu_parsing_omni -- \
+    --model-dir tencent/Youtu-Parsing-Omni --device cuda:0 document.jpg
+```
 
 ### WeVisDoc
 
