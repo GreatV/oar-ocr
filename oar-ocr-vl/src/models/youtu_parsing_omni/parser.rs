@@ -145,37 +145,52 @@ fn table(raw: &str) -> String {
     }
 }
 
+fn text_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value
+        .get(key)?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
 fn content(element: &Value, category: &str) -> Option<String> {
     let content = element.get("content")?;
     let keys: &[&str] = match category {
         "table" => &["otsl", "html", "markdown", "text"],
         "formula" => &["latex", "text"],
-        "chart" => &["markdown", "caption", "text"],
+        "chart" => &["markdown", "notes", "caption", "text"],
         "flowchart" => &["mermaid", "caption", "text"],
-        "figure" | "geometric" => &["caption", "text", "geometric"],
+        "geometric" => &["geometric", "caption", "text"],
+        "figure" => &["caption", "text"],
         _ => &["text", "caption"],
     };
-    let text = keys
-        .iter()
-        .find_map(|key| {
-            content
-                .get(key)
-                .and_then(Value::as_str)
-                .filter(|s| !s.trim().is_empty())
-        })?
-        .trim();
-    Some(match category {
-        "table" => table(text),
-        "formula" => {
-            if text.starts_with('$') || text.starts_with("\\[") {
-                text.to_string()
-            } else {
+    let composite = matches!(
+        category,
+        "chart" | "flowchart" | "geometric" | "figure" | "entity"
+    );
+    let mut parts = Vec::new();
+    for key in keys {
+        let Some(text) = text_field(content, key) else {
+            continue;
+        };
+        let rendered = match category {
+            "table" => table(text),
+            "formula" if !text.starts_with('$') && !text.starts_with("\\[") => {
                 format!("$$\n{text}\n$$")
             }
+            "flowchart" if *key == "mermaid" && !text.starts_with("```") => {
+                format!("```mermaid\n{text}\n```")
+            }
+            _ => text.to_string(),
+        };
+        if !parts.contains(&rendered) {
+            parts.push(rendered);
         }
-        "flowchart" if content.get("mermaid").is_some() => format!("```mermaid\n{text}\n```"),
-        _ => text.to_string(),
-    })
+        if !composite {
+            break;
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
 pub(super) fn parse_output(raw: &str, plan: ImagePlan) -> PageDocument {
@@ -248,6 +263,24 @@ pub(super) fn parse_output(raw: &str, plan: ImagePlan) -> PageDocument {
             content: content(element, category),
         });
     }
+    // Document OCR follows the official element-only Markdown protocol.
+    // Natural-image tasks also expose their whole-image description.
+    if value.get("subtype").and_then(Value::as_str) == Some("natural_image")
+        && let Some(description) = value.get("global_description")
+    {
+        let parts = ["caption", "narrative", "scene"]
+            .iter()
+            .filter_map(|key| text_field(description, key))
+            .collect::<Vec<_>>();
+        if !parts.is_empty() {
+            document.blocks.push(DocumentBlock {
+                block_type: "global_description".into(),
+                bbox: [0.0, 0.0, 1.0, 1.0],
+                angle: None,
+                content: Some(parts.join("\n\n")),
+            });
+        }
+    }
     document.markdown = Some(
         document
             .blocks
@@ -293,5 +326,75 @@ mod tests {
         assert!(invalid.blocks.is_empty());
         assert_eq!(invalid.diagnostics.len(), 1);
         assert!(invalid.raw_output.is_some());
+    }
+
+    #[test]
+    fn composite_elements_keep_representations_notes_and_captions() {
+        let raw = serde_json::json!({
+            "subtype": "document",
+            "elements": [
+                {"category": "chart", "bbox": "<box><x_0><y_0><x_1000><y_300></box>",
+                 "content": {"markdown": "| A | B |", "notes": "Source notes", "caption": "Chart caption"}},
+                {"category": "flowchart", "bbox": "<box><x_0><y_300><x_1000><y_600></box>",
+                 "content": {"mermaid": "graph TD; A-->B;", "caption": "Flow caption"}},
+                {"category": "geometric", "bbox": "<box><x_0><y_600><x_1000><y_1000></box>",
+                 "content": {"geometric": "AB = CD", "caption": "Equal segments"}}
+            ]
+        });
+        let plan = ImagePlan {
+            width: 64,
+            height: 64,
+            resized_width: 64,
+            resized_height: 64,
+        };
+        let page = parse_output(&raw.to_string(), plan);
+        assert!(page.diagnostics.is_empty());
+        assert_eq!(
+            page.blocks[0].content.as_deref(),
+            Some("| A | B |\n\nSource notes\n\nChart caption")
+        );
+        assert_eq!(
+            page.blocks[1].content.as_deref(),
+            Some("```mermaid\ngraph TD; A-->B;\n```\n\nFlow caption")
+        );
+        assert_eq!(
+            page.blocks[2].content.as_deref(),
+            Some("AB = CD\n\nEqual segments")
+        );
+    }
+
+    #[test]
+    fn natural_image_keeps_global_description_and_entity_details() {
+        let mut raw = serde_json::json!({
+            "subtype": "natural_image",
+            "elements": [{"category": "entity", "bbox": "<box><x_0><y_0><x_1000><y_1000></box>",
+                          "content": {"text": "Park sign", "caption": "A green sign"}}],
+            "global_description": {"caption": "A park", "narrative": "A sign beside a path", "scene": "Outdoors"}
+        });
+        let plan = ImagePlan {
+            width: 64,
+            height: 64,
+            resized_width: 64,
+            resized_height: 64,
+        };
+        let page = parse_output(&raw.to_string(), plan);
+        assert!(page.diagnostics.is_empty());
+        assert_eq!(
+            page.blocks[0].content.as_deref(),
+            Some("Park sign\n\nA green sign")
+        );
+        assert_eq!(page.blocks[1].block_type, "global_description");
+        assert_eq!(page.blocks[1].bbox, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(
+            page.blocks[1].content.as_deref(),
+            Some("A park\n\nA sign beside a path\n\nOutdoors")
+        );
+        assert!(page.markdown.as_deref().unwrap().contains("Outdoors"));
+
+        raw["subtype"] = "document".into();
+        raw["elements"][0]["category"] = "text".into();
+        let document = parse_output(&raw.to_string(), plan);
+        assert_eq!(document.blocks.len(), 1);
+        assert_eq!(document.markdown.as_deref(), Some("Park sign"));
     }
 }

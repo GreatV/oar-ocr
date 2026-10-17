@@ -12,6 +12,8 @@ use image::RgbImage;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
+const MIN_NEW_TOKENS: usize = 16;
+
 fn greedy_token(logits: &Tensor) -> candle_core::Result<u32> {
     #[cfg(feature = "cuda")]
     if logits.device().is_cuda() {
@@ -29,6 +31,15 @@ fn greedy_token(logits: &Tensor) -> candle_core::Result<u32> {
     logits.squeeze(0)?.argmax(0)?.to_scalar::<u32>()
 }
 
+fn sample_token(logits: &Tensor, stop_mask: &Tensor, generated: usize) -> candle_core::Result<u32> {
+    if generated < MIN_NEW_TOKENS {
+        // Match the official request's min_tokens: suppress stops before sampling.
+        greedy_token(&(logits + stop_mask)?)
+    } else {
+        greedy_token(logits)
+    }
+}
+
 /// Image-to-OmniSchema parser for `tencent/Youtu-Parsing-Omni`.
 pub struct YoutuParsingOmni {
     cfg: Config,
@@ -38,6 +49,7 @@ pub struct YoutuParsingOmni {
     vision: VisionModel,
     head: Linear,
     stop_ids: Vec<u32>,
+    stop_mask: Tensor,
     device: Device,
     dtype: DType,
 }
@@ -122,11 +134,22 @@ impl YoutuParsingOmni {
                 stop_ids.push(id as u32);
             }
         }
-        if let Some(id) = tokenizer.token_to_id("<|eot_id|>") {
-            stop_ids.push(id);
-        }
         stop_ids.sort_unstable();
         stop_ids.dedup();
+        let stop_mask = Tensor::from_vec(
+            (0..cfg.text_config.vocab_size)
+                .map(|id| {
+                    if stop_ids.contains(&(id as u32)) {
+                        f32::NEG_INFINITY
+                    } else {
+                        0.0
+                    }
+                })
+                .collect::<Vec<_>>(),
+            (1, cfg.text_config.vocab_size),
+            &device,
+        )?
+        .to_dtype(dtype)?;
         Ok(Self {
             cfg,
             image_cfg,
@@ -135,6 +158,7 @@ impl YoutuParsingOmni {
             vision,
             head,
             stop_ids,
+            stop_mask,
             device,
             dtype,
         })
@@ -248,7 +272,7 @@ impl YoutuParsingOmni {
             let len = embeddings.dim(1)?;
             let hidden = self.text.forward(&embeddings, offset)?;
             let logits = self.head.forward(&hidden.i((.., len - 1, ..))?)?;
-            let token = greedy_token(&logits)?;
+            let token = sample_token(&logits, &self.stop_mask, tokens.len())?;
             if self.stop_ids.contains(&token) {
                 return Ok((tokens, true));
             }
@@ -269,7 +293,7 @@ mod tests {
     use tokenizers::models::wordlevel::WordLevel;
 
     #[test]
-    fn loading_without_generation_config_keeps_protocol_stop_tokens() {
+    fn loading_without_generation_config_keeps_stops_and_minimum_length() {
         let dir = tempfile::tempdir().unwrap();
         let reference: serde_json::Value =
             serde_json::from_str(include_str!("fixtures/reference.json")).unwrap();
@@ -319,5 +343,19 @@ mod tests {
                 "missing protocol stop token {token}"
             );
         }
+        let mut logits = vec![0.0f32; 32];
+        let regular = tokenizer.token_to_id("<|vision_end|>").unwrap();
+        let stop = tokenizer.token_to_id("<|image_pad|>").unwrap();
+        logits[regular as usize] = 2.0;
+        logits[stop as usize] = 10.0;
+        logits[tokenizer.token_to_id("<|end_of_text|>").unwrap() as usize] = 9.0;
+        let logits = Tensor::from_vec(logits, (1, 32), &Device::Cpu).unwrap();
+        for generated in 0..16 {
+            assert_eq!(
+                sample_token(&logits, &model.stop_mask, generated).unwrap(),
+                regular
+            );
+        }
+        assert_eq!(sample_token(&logits, &model.stop_mask, 16).unwrap(), stop);
     }
 }

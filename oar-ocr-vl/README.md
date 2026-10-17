@@ -281,7 +281,7 @@ println!("{}", page.markdown.unwrap_or_default());
 # }
 ```
 
-The checkpoint's default image ceiling is retained unless `with_max_pixels` overrides it. `with_prompt` accepts another image-based task instruction; `generate` returns the native output without document post-processing. The model is also available as `AnyPageParserModel::YoutuParsingOmni`, with the explicit ID `tencent/Youtu-Parsing-Omni`; it needs no external layout model. Automatic ModelScope downloads use its verified `tencent-community/Youtu-Parsing-Omni` mirror while keeping the public model ID unchanged.
+The checkpoint's default image ceiling is retained unless `with_max_pixels` overrides it. Greedy decoding suppresses stop tokens for the first 16 generated tokens, bounded by the requested generation budget. `with_prompt` accepts another image-based task instruction; chart notes, captions, Mermaid diagrams, and geometric expressions are preserved together in block content. Natural-image tasks also append a full-image `global_description` block containing the caption, narrative, and scene. `generate` returns the native output without document post-processing. The model is also available as `AnyPageParserModel::YoutuParsingOmni`, with the explicit ID `tencent/Youtu-Parsing-Omni`; it needs no external layout model. Automatic ModelScope downloads use its verified `tencent-community/Youtu-Parsing-Omni` mirror while keeping the public model ID unchanged.
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda --example youtu_parsing_omni -- \
