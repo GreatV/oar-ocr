@@ -1,10 +1,9 @@
 //! Complete-page Markdown or structured JSON parsing.
 
 use super::{DEFAULT_MAX_NEW_TOKENS, OvisOcr3, postprocess_text, prompts};
-use crate::document::geometry::BoundingBox;
-use crate::document::structure::{LayoutElement, LayoutElementType};
+use crate::document::structure::LayoutElementType;
 use crate::ovisocr2::filter_visual_image_tags;
-use crate::render::markdown::{default_markdown_ignore_labels, to_markdown};
+use crate::render::markdown::default_markdown_ignore_labels;
 use crate::{DocumentBlock, Error, PageDocument, PageParser, ParseDiagnostic};
 use image::RgbImage;
 use serde::Deserialize;
@@ -29,7 +28,7 @@ pub enum OvisOcr3ParseMode {
 pub struct OvisOcr3ParseOptions {
     /// Maximum number of generated tokens per page; defaults to 16,384.
     pub max_new_tokens: usize,
-    /// Retain image-tag blocks in Markdown, including the structured renderer
+    /// Retain image-tag blocks in Markdown, including structured-mode Markdown
     /// and invalid-JSON fallback. Structured block contents remain unchanged.
     pub keep_image_tags: bool,
     /// Page protocol to request; defaults to Markdown.
@@ -75,7 +74,7 @@ impl PageParser for OvisOcr3 {
             OvisOcr3ParseMode::Structured => prompts::DOCUMENT_STRUCTURED,
         };
         let text = self.generate_one(image, prompt, options.max_new_tokens)?;
-        Ok(parse_output(text, options, image.dimensions()))
+        Ok(parse_output(text, options))
     }
 }
 
@@ -86,11 +85,7 @@ struct Region {
     content: String,
 }
 
-fn parse_output(
-    text: String,
-    options: &OvisOcr3ParseOptions,
-    image_size: (u32, u32),
-) -> PageDocument {
+fn parse_output(text: String, options: &OvisOcr3ParseOptions) -> PageDocument {
     let mut diagnostics = Vec::new();
     if options.mode == OvisOcr3ParseMode::Structured {
         let message = match serde_json::from_str::<Vec<Region>>(&text) {
@@ -102,26 +97,20 @@ fn parse_output(
                         && top <= bottom
                 }) =>
             {
-                let elements: Vec<_> = regions
+                // The model card builds Markdown by concatenating each
+                // region's content in reading order; the content is already
+                // Markdown, LaTeX, or HTML. Default exclusions still apply.
+                let ignored = default_markdown_ignore_labels();
+                let markdown = regions
                     .iter()
-                    .map(|region| {
-                        let [left, top, right, bottom] =
-                            region.bbox.map(|coordinate| coordinate as f32 / 1000.0);
-                        let bbox = BoundingBox::from_coords(
-                            left * image_size.0 as f32,
-                            top * image_size.1 as f32,
-                            right * image_size.0 as f32,
-                            bottom * image_size.1 as f32,
-                        );
-                        let kind = LayoutElementType::from_label(&region.category);
-                        // Canonical labels let the renderer apply default
-                        // exclusions to aliases such as vision_footnote too.
-                        LayoutElement::new(bbox, kind, 1.0)
-                            .with_label(kind.as_str())
-                            .with_text(region.content.clone())
+                    .filter(|region| {
+                        let label = LayoutElementType::from_label(&region.category);
+                        !ignored.iter().any(|ignored| ignored == label.as_str())
                     })
-                    .collect();
-                let markdown = to_markdown(&elements, &default_markdown_ignore_labels(), false);
+                    .map(|region| region.content.trim())
+                    .filter(|content| !content.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
                 let markdown = if options.keep_image_tags {
                     markdown
                 } else {
@@ -181,19 +170,19 @@ mod tests {
     #[test]
     fn structured_regions_scale_map_categories_and_fall_back_on_truncation() {
         let options = OvisOcr3ParseOptions::default().with_mode(OvisOcr3ParseMode::Structured);
-        let text = r#"[
-            {"bbox":[0,0,999,100],"category":"doc_title","content":"Title"},
+        let text = r###"[
+            {"bbox":[0,0,999,100],"category":"doc_title","content":"# Title"},
             {"bbox":[125,250,875,500],"category":"display_formula","content":"x = 1"},
             {"bbox":[0,500,500,750],"category":"vertical_text","content":"Hello"},
             {"bbox":[500,750,875,999],"category":"vision_footnote","content":"Source"},
-            {"bbox":[0,750,500,800],"category":"paragraph_title","content":"Section"},
+            {"bbox":[0,750,500,800],"category":"paragraph_title","content":"## Section"},
             {"bbox":[0,0,999,50],"category":"header","content":"Header"},
             {"bbox":[0,950,999,999],"category":"footer","content":"Footer"},
             {"bbox":[0,950,100,999],"category":"number","content":"99"},
             {"bbox":[0,800,100,900],"category":"image","content":"<img src=\"images/bbox_0_800_100_900.jpg\" />"}
-        ]"#;
+        ]"###;
         let image_size = (1600, 1200);
-        let page = parse_output(text.to_string(), &options, image_size);
+        let page = parse_output(text.to_string(), &options);
         assert_eq!(page.raw_output.as_deref(), Some(text));
         let expected_markdown = "# Title\n\nx = 1\n\nHello\n\n## Section";
         assert_eq!(page.markdown.as_deref(), Some(expected_markdown));
@@ -212,7 +201,6 @@ mod tests {
         let with_images = parse_output(
             text.to_string(),
             &options.clone().with_keep_image_tags(true),
-            image_size,
         );
         assert_eq!(
             with_images.markdown.unwrap(),
@@ -222,7 +210,7 @@ mod tests {
         let truncated =
             "[{\"bbox\":[125,250,875,500],\"category\":\"text\",\"content\":\"unfinished";
         let raw = format!("  {truncated}\n\n<img src=\"images/bbox_1_2_3_4.jpg\" />\n ");
-        let fallback = parse_output(raw.clone(), &options, image_size);
+        let fallback = parse_output(raw.clone(), &options);
         assert!(fallback.blocks.is_empty());
         assert_eq!(fallback.markdown.as_deref(), Some(truncated));
         assert_eq!(fallback.raw_output.as_deref(), Some(raw.as_str()));
@@ -231,7 +219,7 @@ mod tests {
         assert_eq!(fallback.diagnostics[0].stage, "structured_json");
         assert!(fallback.diagnostics[0].message.contains("truncated"));
 
-        let markdown = parse_output(raw, &OvisOcr3ParseOptions::default(), image_size);
+        let markdown = parse_output(raw, &OvisOcr3ParseOptions::default());
         assert!(markdown.blocks.is_empty());
         assert!(markdown.diagnostics.is_empty());
         assert_eq!(markdown.markdown.as_deref(), Some(truncated));
