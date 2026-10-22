@@ -17,8 +17,8 @@ pub use config::{
     XiaomiOcrVisionConfig,
 };
 pub use model::{
-    DEFAULT_MAX_NEW_TOKENS, DEFAULT_PROMPT, FORMULA_REGION_PROMPT, KIE_PROMPT, TABLE_REGION_PROMPT,
-    TEXT_REGION_PROMPT, XiaomiOcr, convert_markdown_otsl_tables, finalize_markdown,
-    key_information_extraction_prompt,
+    DEFAULT_MAX_NEW_TOKENS, DEFAULT_PROMPT, FORMULA_REGION_PROMPT, GenerationTrace, KIE_PROMPT,
+    TABLE_REGION_PROMPT, TEXT_REGION_PROMPT, XiaomiOcr, convert_markdown_otsl_tables,
+    finalize_markdown, key_information_extraction_prompt,
 };
 pub use parser::XiaomiOcrParseOptions;

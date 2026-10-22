@@ -22,7 +22,7 @@ pub use config::{
     PaddleOcrVlConfig, PaddleOcrVlImageProcessorConfig, PaddleOcrVlRopeScaling,
     PaddleOcrVlVisionConfig,
 };
-pub use model::{PaddleOcrVl, PaddleOcrVlTask};
+pub use model::{GenerationTrace, PaddleOcrVl, PaddleOcrVlTask};
 pub use processing::{
     PaddleOcrVlImageInputs, postprocess_table_output, preprocess_images, smart_resize,
     strip_math_wrappers,

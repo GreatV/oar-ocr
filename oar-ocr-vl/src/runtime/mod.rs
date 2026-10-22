@@ -8,6 +8,7 @@ pub(crate) mod device;
 pub(crate) mod errors;
 pub(crate) mod image;
 pub(crate) mod tensor;
+pub(crate) mod trace;
 
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;
