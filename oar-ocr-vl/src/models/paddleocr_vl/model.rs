@@ -164,7 +164,7 @@ impl PaddleOcrVl {
         let merge = self.image_cfg.merge_size;
         let factor = patch.checked_mul(merge as u32)?;
         let (height, width) = if self.image_cfg.do_resize {
-            processing::smart_resize(
+            processing::reference_smart_resize(
                 image.height(),
                 image.width(),
                 factor,
