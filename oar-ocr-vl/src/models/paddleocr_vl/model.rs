@@ -11,10 +11,11 @@ use crate::attention::{
 use crate::error::Error;
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::CudaGraphDrainGuard;
+use crate::runtime::image::pil_lanczos_resize;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::Module;
-use image::{RgbImage, imageops::FilterType};
+use image::RgbImage;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
@@ -276,20 +277,18 @@ impl PaddleOcrVl {
             // The official spotting preprocessing hardcodes LANCZOS for the 2x
             // pre-upscale (README inference script), independent of the
             // processor's `resample` (which only governs the model-internal
-            // smart_resize). Match it with Lanczos3 here.
-            let resize_filter = FilterType::Lanczos3;
+            // smart_resize). Match Pillow's LANCZOS exactly here.
             let mut processed = Vec::with_capacity(images.len());
             for (img, task) in images.iter().zip(tasks.iter()) {
                 if task.needs_spotting_preprocess()
                     && img.width() < SPOTTING_UPSCALE_THRESHOLD
                     && img.height() < SPOTTING_UPSCALE_THRESHOLD
                 {
-                    processed.push(image::imageops::resize(
+                    processed.push(pil_lanczos_resize(
                         img,
                         img.width().saturating_mul(2),
                         img.height().saturating_mul(2),
-                        resize_filter,
-                    ));
+                    )?);
                 } else {
                     processed.push(img.clone());
                 }
