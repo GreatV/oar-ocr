@@ -357,7 +357,8 @@ pub fn round_up_to_multiple(value: u32, multiple: u32) -> u32 {
 
 /// Smart resize calculating new dimensions based on pixel constraints and factor alignment.
 ///
-/// Used by PaddleOCR-VL and HunyuanOCR.
+/// Mirrors the Qwen2-VL-family `smart_resize` in transformers, including
+/// Python's `round` (halves round to even).
 pub fn smart_resize(
     height: u32,
     width: u32,
@@ -386,8 +387,8 @@ pub fn smart_resize(
         });
     }
 
-    let mut h_bar = (height / factor_f).round() * factor_f;
-    let mut w_bar = (width / factor_f).round() * factor_f;
+    let mut h_bar = (height / factor_f).round_ties_even() * factor_f;
+    let mut w_bar = (width / factor_f).round_ties_even() * factor_f;
 
     let area = h_bar * w_bar;
     if area > max_pixels as f64 {
@@ -717,10 +718,10 @@ mod tests {
     }
 
     #[test]
-    fn test_smart_resize_factor_divisibility() -> Result<(), Error> {
-        let (h, w) = smart_resize(100, 200, 28, 147_384, 2_822_400)?;
-        assert_eq!(h % 28, 0);
-        assert_eq!(w % 28, 0);
+    fn test_smart_resize_matches_the_python_reference() -> Result<(), Error> {
+        // 70 / 28 = 2.5 rounds to 2 like Python's `round`.
+        assert_eq!(smart_resize(70, 210, 28, 3_136, 12_845_056)?, (56, 224));
+        assert_eq!(smart_resize(350, 630, 28, 3_136, 12_845_056)?, (336, 616));
         Ok(())
     }
 
