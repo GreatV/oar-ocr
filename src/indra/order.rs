@@ -17,7 +17,7 @@ pub(super) const BLOCK_CLASSES: [&str; 10] = [
 ];
 pub(super) const N_FEATS: usize = 16;
 /// Table, Table-Of-Contents and Form blocks read row by row.
-const GRID_CLASSES: [usize; 3] = [5, 8, 9];
+pub(super) const GRID_CLASSES: [usize; 3] = [5, 8, 9];
 
 /// A square matrix of logits, row-major.
 pub(super) struct Square<'a> {
@@ -52,6 +52,158 @@ pub(super) fn is_digit(c: char) -> bool {
             | '\u{4E00}'..='\u{9FFF}')
 }
 
+/// Characters that end a sentence, Latin and CJK.
+const SENTENCE_END: &str = ".!?:;。！？：；．";
+
+/// East Asian Wide and Fullwidth code point ranges (Unicode 15.0, as
+/// Python's `unicodedata` reports them to the reference).
+const WIDE: [(u32, u32); 121] = [
+    (0x1100, 0x115F),
+    (0x231A, 0x231B),
+    (0x2329, 0x232A),
+    (0x23E9, 0x23EC),
+    (0x23F0, 0x23F0),
+    (0x23F3, 0x23F3),
+    (0x25FD, 0x25FE),
+    (0x2614, 0x2615),
+    (0x2648, 0x2653),
+    (0x267F, 0x267F),
+    (0x2693, 0x2693),
+    (0x26A1, 0x26A1),
+    (0x26AA, 0x26AB),
+    (0x26BD, 0x26BE),
+    (0x26C4, 0x26C5),
+    (0x26CE, 0x26CE),
+    (0x26D4, 0x26D4),
+    (0x26EA, 0x26EA),
+    (0x26F2, 0x26F3),
+    (0x26F5, 0x26F5),
+    (0x26FA, 0x26FA),
+    (0x26FD, 0x26FD),
+    (0x2705, 0x2705),
+    (0x270A, 0x270B),
+    (0x2728, 0x2728),
+    (0x274C, 0x274C),
+    (0x274E, 0x274E),
+    (0x2753, 0x2755),
+    (0x2757, 0x2757),
+    (0x2795, 0x2797),
+    (0x27B0, 0x27B0),
+    (0x27BF, 0x27BF),
+    (0x2B1B, 0x2B1C),
+    (0x2B50, 0x2B50),
+    (0x2B55, 0x2B55),
+    (0x2E80, 0x2E99),
+    (0x2E9B, 0x2EF3),
+    (0x2F00, 0x2FD5),
+    (0x2FF0, 0x2FFB),
+    (0x3000, 0x303E),
+    (0x3041, 0x3096),
+    (0x3099, 0x30FF),
+    (0x3105, 0x312F),
+    (0x3131, 0x318E),
+    (0x3190, 0x31E3),
+    (0x31F0, 0x321E),
+    (0x3220, 0x3247),
+    (0x3250, 0x4DBF),
+    (0x4E00, 0xA48C),
+    (0xA490, 0xA4C6),
+    (0xA960, 0xA97C),
+    (0xAC00, 0xD7A3),
+    (0xF900, 0xFAFF),
+    (0xFE10, 0xFE19),
+    (0xFE30, 0xFE52),
+    (0xFE54, 0xFE66),
+    (0xFE68, 0xFE6B),
+    (0xFF01, 0xFF60),
+    (0xFFE0, 0xFFE6),
+    (0x16FE0, 0x16FE4),
+    (0x16FF0, 0x16FF1),
+    (0x17000, 0x187F7),
+    (0x18800, 0x18CD5),
+    (0x18D00, 0x18D08),
+    (0x1AFF0, 0x1AFF3),
+    (0x1AFF5, 0x1AFFB),
+    (0x1AFFD, 0x1AFFE),
+    (0x1B000, 0x1B122),
+    (0x1B132, 0x1B132),
+    (0x1B150, 0x1B152),
+    (0x1B155, 0x1B155),
+    (0x1B164, 0x1B167),
+    (0x1B170, 0x1B2FB),
+    (0x1F004, 0x1F004),
+    (0x1F0CF, 0x1F0CF),
+    (0x1F18E, 0x1F18E),
+    (0x1F191, 0x1F19A),
+    (0x1F200, 0x1F202),
+    (0x1F210, 0x1F23B),
+    (0x1F240, 0x1F248),
+    (0x1F250, 0x1F251),
+    (0x1F260, 0x1F265),
+    (0x1F300, 0x1F320),
+    (0x1F32D, 0x1F335),
+    (0x1F337, 0x1F37C),
+    (0x1F37E, 0x1F393),
+    (0x1F3A0, 0x1F3CA),
+    (0x1F3CF, 0x1F3D3),
+    (0x1F3E0, 0x1F3F0),
+    (0x1F3F4, 0x1F3F4),
+    (0x1F3F8, 0x1F43E),
+    (0x1F440, 0x1F440),
+    (0x1F442, 0x1F4FC),
+    (0x1F4FF, 0x1F53D),
+    (0x1F54B, 0x1F54E),
+    (0x1F550, 0x1F567),
+    (0x1F57A, 0x1F57A),
+    (0x1F595, 0x1F596),
+    (0x1F5A4, 0x1F5A4),
+    (0x1F5FB, 0x1F64F),
+    (0x1F680, 0x1F6C5),
+    (0x1F6CC, 0x1F6CC),
+    (0x1F6D0, 0x1F6D2),
+    (0x1F6D5, 0x1F6D7),
+    (0x1F6DC, 0x1F6DF),
+    (0x1F6EB, 0x1F6EC),
+    (0x1F6F4, 0x1F6FC),
+    (0x1F7E0, 0x1F7EB),
+    (0x1F7F0, 0x1F7F0),
+    (0x1F90C, 0x1F93A),
+    (0x1F93C, 0x1F945),
+    (0x1F947, 0x1F9FF),
+    (0x1FA70, 0x1FA7C),
+    (0x1FA80, 0x1FA88),
+    (0x1FA90, 0x1FABD),
+    (0x1FABF, 0x1FAC5),
+    (0x1FACE, 0x1FADB),
+    (0x1FAE0, 0x1FAE8),
+    (0x1FAF0, 0x1FAF8),
+    (0x20000, 0x2FFFD),
+    (0x30000, 0x3FFFD),
+];
+
+/// Length with East Asian wide characters counted twice, so a full CJK
+/// line does not read as a short table cell.
+fn display_len(chars: &[char]) -> usize {
+    chars
+        .iter()
+        .map(|&c| {
+            let c = c as u32;
+            let wide = WIDE
+                .binary_search_by(|&(lo, hi)| {
+                    if hi < c {
+                        std::cmp::Ordering::Less
+                    } else if lo > c {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
+                .is_ok();
+            1 + wide as usize
+        })
+        .sum()
+}
+
 /// `[N, 4]` boxes and their texts -> `[N, N_FEATS]` order-model features.
 pub(super) fn line_features(boxes: &[[f32; 4]], page_wh: (u32, u32), texts: &[String]) -> Vec<f32> {
     let n = boxes.len();
@@ -81,16 +233,17 @@ pub(super) fn line_features(boxes: &[[f32; 4]], page_wh: (u32, u32), texts: &[St
             continue;
         }
         let len = chars.len() as f64;
+        let display = display_len(&chars) as f64;
         let head: String = chars.iter().take(3).collect();
         let head = head.trim_end_matches(['.', ')']);
         let numbered = !head.is_empty() && head.chars().all(is_digit) && chars.len() > 3;
         let last = chars[chars.len() - 1];
         out.extend_from_slice(&[
-            (len.ln_1p() / 5.0) as f32,
+            (display.ln_1p() / 5.0) as f32,
             (chars.iter().filter(|c| is_digit(**c)).count() as f64 / len) as f32,
             ("•-–▪◦*·→".contains(chars[0]) || numbered) as u8 as f32,
             t.ends_with('-') as u8 as f32,
-            ".!?:;".contains(last) as u8 as f32,
+            SENTENCE_END.contains(last) as u8 as f32,
             chars[0].is_uppercase() as u8 as f32,
         ]);
     }
@@ -226,6 +379,57 @@ pub(super) fn order_xycut(boxes: &[[f32; 4]]) -> Vec<usize> {
         out
     }
     rec(boxes, (0..boxes.len()).collect())
+}
+
+/// Blocks in reading order by recursive XY-cut, for pages the order model
+/// does not know (vertical pages, read turned): a cut needs a whitespace gap
+/// of at least one median line height, the widest gap cuts first, the upper
+/// or left part first. Lines inside a block go by [`order_xycut`].
+pub(super) fn xycut_blocks(boxes: &[[f32; 4]]) -> Vec<Vec<usize>> {
+    if boxes.is_empty() {
+        return Vec::new();
+    }
+    let mut heights: Vec<f32> = boxes.iter().map(|b| b[3] - b[1]).collect();
+    let h = median_f32(&mut heights);
+    fn best_cut(
+        boxes: &[[f32; 4]],
+        ids: &[usize],
+        axis_y: bool,
+    ) -> (f32, Option<usize>, Vec<usize>) {
+        let (lo, hi) = if axis_y { (1, 3) } else { (0, 2) };
+        let mut o: Vec<usize> = (0..ids.len()).collect();
+        o.sort_by(|&i, &j| boxes[ids[i]][lo].total_cmp(&boxes[ids[j]][lo]));
+        let mut end = boxes[ids[o[0]]][hi];
+        let (mut best_gap, mut best_k) = (0f32, None);
+        for k in 1..o.len() {
+            let gap = boxes[ids[o[k]]][lo] - end;
+            if gap > best_gap {
+                best_gap = gap;
+                best_k = Some(k);
+            }
+            end = end.max(boxes[ids[o[k]]][hi]);
+        }
+        (best_gap, best_k, o)
+    }
+    fn rec(boxes: &[[f32; 4]], ids: Vec<usize>, h: f32, out: &mut Vec<Vec<usize>>) {
+        if ids.len() > 1 {
+            let (gy, ky, oy) = best_cut(boxes, &ids, true);
+            let (gx, kx, ox) = best_cut(boxes, &ids, false);
+            let (gap, k, o) = if gy >= gx { (gy, ky, oy) } else { (gx, kx, ox) };
+            if let Some(k) = k
+                && gap >= h
+            {
+                rec(boxes, o[..k].iter().map(|&i| ids[i]).collect(), h, out);
+                rec(boxes, o[k..].iter().map(|&i| ids[i]).collect(), h, out);
+                return;
+            }
+        }
+        let sub: Vec<[f32; 4]> = ids.iter().map(|&i| boxes[i]).collect();
+        out.push(order_xycut(&sub).into_iter().map(|k| ids[k]).collect());
+    }
+    let mut out = Vec::new();
+    rec(boxes, (0..boxes.len()).collect(), h, &mut out);
+    out
 }
 
 /// Average-linkage clustering of pairwise "same group" logits: merge the two

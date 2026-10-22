@@ -184,7 +184,7 @@ The classic pipeline runs ONNX models through ONNX Runtime and supports the foll
 
 Available text-recognition checkpoints cover Chinese, Traditional Chinese, English, Arabic, Cyrillic, Devanagari, Greek, Eastern Slavic, Japanese, Georgian, Korean, Latin, Tamil, Telugu, and Thai scripts or languages.
 
-[Indra OCR](https://huggingface.co/datalab-to/indra-ocr) runs as its own ONNX pipeline (`oar_ocr::indra`): about 18 MB of CPU-first models that read a page into lines, layout blocks in reading order, and Markdown with HTML tables, with optional inline LaTeX for math lines. See the [usage guide](docs/usage.md#indraocrbuilder---indra-ocr).
+[Indra OCR](https://huggingface.co/datalab-to/indra-ocr) runs as its own ONNX pipeline (`oar_ocr::indra`): small CPU-first models that read a page in 80+ languages into lines, layout blocks in reading order, and Markdown with HTML tables, with n-gram language models for unsure lines and optional inline LaTeX for math lines. See the [usage guide](docs/usage.md#indraocrbuilder---indra-ocr).
 
 ### Vision-Language Models
 

@@ -3,7 +3,7 @@
 //! (`we have $x _ { i } \leq 1$`), one token per step with cached keys and
 //! values.
 
-use super::recognize::{Crop, crop_line, line_batches, pad_batch, width_batches};
+use super::recognize::{Crop, crop_line, is_dark_line, line_batches, pad_batch, width_batches};
 use super::{input_error, model, run};
 use image::GrayImage;
 use oar_ocr_core::core::OCRError;
@@ -111,7 +111,7 @@ impl MathReader {
     ) -> Result<Vec<(String, f64)>, OCRError> {
         let crops: Vec<Crop> = boxes
             .iter()
-            .map(|&b| crop_line(gray, b, self.height))
+            .map(|&b| crop_line(gray, b, self.height, 1, is_dark_line(gray, b)))
             .collect();
         let mut out = vec![(String::new(), 0.0); crops.len()];
         // Few, wide batches: each is one decoding loop, and a step costs about

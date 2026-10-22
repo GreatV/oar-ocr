@@ -270,15 +270,6 @@ trait Pixel: Copy + Default + Send + Sync {
     fn put(v: f32) -> Self;
 }
 
-impl Pixel for f32 {
-    fn get(self) -> f32 {
-        self
-    }
-    fn put(v: f32) -> Self {
-        v
-    }
-}
-
 impl Pixel for u8 {
     fn get(self) -> f32 {
         self as f32
@@ -341,11 +332,13 @@ fn warp<T: Pixel>(src: &[T], w: usize, h: usize, m: &[f64; 6], replicate: bool) 
     out
 }
 
-/// A float plane rotated by `degrees` counter-clockwise about its center,
+/// An 8-bit plane rotated by `degrees` counter-clockwise about its center,
 /// zero outside (`cv2.warpAffine` defaults).
-pub(crate) fn rotate_f32(src: &[f32], w: usize, h: usize, degrees: f64) -> Vec<f32> {
+pub(crate) fn rotate_u8_zero(src: &GrayImage, degrees: f64) -> GrayImage {
+    let (w, h) = (src.width() as usize, src.height() as usize);
     let m = rotation_matrix(w as f64 / 2.0, h as f64 / 2.0, degrees);
-    warp(src, w, h, &m, false)
+    let data = warp(src.as_raw(), w, h, &m, false);
+    GrayImage::from_raw(w as u32, h as u32, data).expect("buffer matches dimensions")
 }
 
 /// An 8-bit page rotated by `degrees` counter-clockwise about its center,
