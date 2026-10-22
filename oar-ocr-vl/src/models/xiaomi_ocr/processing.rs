@@ -12,10 +12,10 @@ use super::config::{XiaomiOcrProcessorConfig, XiaomiOcrVisionConfig};
 use crate::error::Error;
 use crate::utils::{
     candle_to_ocr_processing,
-    image::{image_to_chw, patchify_merge_grouped, pil_resample_to_filter_type, smart_resize},
+    image::{image_to_chw, patchify_merge_grouped, qwen_vl_resize, smart_resize},
 };
 use candle_core::{DType, Device, Tensor};
-use image::{RgbImage, imageops::FilterType};
+use image::RgbImage;
 
 #[derive(Debug, Clone)]
 pub struct XiaomiOcrImageInputs {
@@ -64,15 +64,15 @@ pub fn preprocess_image(
         });
     }
 
-    // The checkpoint advertises PIL bicubic (`resample: 3`); fall back to the
-    // equivalent CatmullRom when the field is absent, like the Qwen fast
-    // processor does.
-    let resize_filter = image_processor
-        .resample
-        .and_then(pil_resample_to_filter_type)
-        .unwrap_or(FilterType::CatmullRom);
+    // The Qwen-family processor resamples with Pillow's bicubic — the
+    // default, and the meaning of an explicit `resample: 3`.
     let resized = if resized_height != height || resized_width != width {
-        image::imageops::resize(image, resized_width, resized_height, resize_filter)
+        qwen_vl_resize(
+            image,
+            resized_width,
+            resized_height,
+            image_processor.resample,
+        )?
     } else {
         image.clone()
     };

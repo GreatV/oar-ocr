@@ -4,6 +4,7 @@ use super::config::Qwen3VlVisionConfig;
 use crate::backbones::qwen_vl_processing::{QwenVlImageProcessorConfig, preprocess_images};
 use crate::error::Error;
 use crate::runtime::checkpoint::load_json_config;
+use crate::utils::image::qwen_vl_resize;
 use candle_core::{DType, Device, Tensor};
 use image::RgbImage;
 use std::path::Path;
@@ -163,7 +164,7 @@ pub fn preprocess_image(
     // pixels, blowing up peak memory.
     let image = pad_to_ratio(image, SMART_RESIZE_MAX_RATIO);
     let min_edge = (cfg.merge_size * cfg.patch_size) as u32;
-    let image = upscale_min_edge(&image, min_edge);
+    let image = upscale_min_edge(&image, min_edge)?;
     let inputs = preprocess_images(std::slice::from_ref(&image), cfg, device, dtype, "WeVisDoc")?;
     let grid_thw = *inputs
         .image_grid_thw
@@ -235,14 +236,15 @@ fn pad_to_ratio(image: &RgbImage, max_ratio: f32) -> RgbImage {
 
 /// Scale an image up until its shorter edge reaches `min_edge`, keeping the
 /// aspect ratio. Images already at or above `min_edge` pass through
-/// untouched.
-fn upscale_min_edge(image: &RgbImage, min_edge: u32) -> RgbImage {
+/// untouched. WeVisDoc's Qwen-family processor resamples with Pillow's
+/// bicubic.
+fn upscale_min_edge(image: &RgbImage, min_edge: u32) -> Result<RgbImage, Error> {
     let (w, h) = image.dimensions();
     let (new_w, new_h) = upscaled_dims(w, h, min_edge);
     if (new_w, new_h) == (w, h) {
-        return image.clone();
+        return Ok(image.clone());
     }
-    image::imageops::resize(image, new_w, new_h, image::imageops::FilterType::CatmullRom)
+    qwen_vl_resize(image, new_w, new_h, None)
 }
 
 #[cfg(test)]
@@ -299,7 +301,7 @@ mod tests {
             let padded = pad_to_ratio(&img, SMART_RESIZE_MAX_RATIO);
             assert_eq!((pw, ph), (padded.width(), padded.height()), "pad {w}x{h}");
             let (uw, uh) = upscaled_dims(pw, ph, 32);
-            let upscaled = upscale_min_edge(&padded, 32);
+            let upscaled = upscale_min_edge(&padded, 32).unwrap();
             assert_eq!(
                 (uw, uh),
                 (upscaled.width(), upscaled.height()),
@@ -387,7 +389,7 @@ mod tests {
         for (w, h) in [(1u32, 400u32), (400, 1)] {
             let img = RgbImage::from_pixel(w, h, Rgb([120, 140, 160]));
             let padded = pad_to_ratio(&img, SMART_RESIZE_MAX_RATIO);
-            let upscaled = upscale_min_edge(&padded, min_edge);
+            let upscaled = upscale_min_edge(&padded, min_edge).unwrap();
             assert!(upscaled.width() >= min_edge && upscaled.height() >= min_edge);
             let padded_pixels = padded.width() as u64 * padded.height() as u64;
             let final_pixels = upscaled.width() as u64 * upscaled.height() as u64;
