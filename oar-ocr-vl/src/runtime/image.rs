@@ -167,6 +167,24 @@ pub fn pil_resample_to_filter_type(resample: u32) -> Option<FilterType> {
 /// (`PRECISION_BITS = 32 - 8 - 2` in `Resample.c`).
 const PIL_RESAMPLE_PRECISION_BITS: u32 = 22;
 
+/// A Pillow resampling filter: kernel support (in source pixels at unit
+/// scale) and the kernel itself.
+#[derive(Clone, Copy)]
+struct PilFilter {
+    support: f64,
+    kernel: fn(f64) -> f64,
+}
+
+const PIL_BICUBIC: PilFilter = PilFilter {
+    support: 2.0,
+    kernel: pil_bicubic_kernel,
+};
+
+const PIL_LANCZOS: PilFilter = PilFilter {
+    support: 3.0,
+    kernel: pil_lanczos_kernel,
+};
+
 /// PIL's `bicubic` filter kernel: Keys a = -0.5 with support 2.
 fn pil_bicubic_kernel(t: f64) -> f64 {
     const A: f64 = -0.5;
@@ -175,6 +193,24 @@ fn pil_bicubic_kernel(t: f64) -> f64 {
         ((A + 2.0) * t - (A + 3.0)) * t * t + 1.0
     } else if t < 2.0 {
         (((t - 5.0) * t + 8.0) * t - 4.0) * A
+    } else {
+        0.0
+    }
+}
+
+fn pil_sinc(x: f64) -> f64 {
+    if x == 0.0 {
+        1.0
+    } else {
+        let x = x * std::f64::consts::PI;
+        x.sin() / x
+    }
+}
+
+/// PIL's `lanczos` filter kernel: sinc windowed by sinc over `[-3, 3)`.
+fn pil_lanczos_kernel(t: f64) -> f64 {
+    if (-3.0..3.0).contains(&t) {
+        pil_sinc(t) * pil_sinc(t / 3.0)
     } else {
         0.0
     }
@@ -191,13 +227,13 @@ struct PilResampleAxis {
 impl PilResampleAxis {
     /// Reproduce PIL's coefficient construction for one axis: the tap window
     /// spans `int(center - support + 0.5)` .. `int(center + support + 0.5)`
-    /// clamped to the source, weights are the bicubic kernel normalized to
+    /// clamped to the source, weights are the filter kernel normalized to
     /// unit sum and quantized with C `(int)` truncation at
     /// [`PIL_RESAMPLE_PRECISION_BITS`] fractional bits.
-    fn new(in_dim: u32, out_dim: u32) -> Self {
+    fn new(in_dim: u32, out_dim: u32, filter: PilFilter) -> Self {
         let scale = in_dim as f64 / out_dim as f64;
         let filterscale = scale.max(1.0);
-        let support = 2.0 * filterscale;
+        let support = filter.support * filterscale;
         let ksize = (support.ceil() as usize) * 2 + 1;
         let ss = 1.0 / filterscale;
         let quantize = |weight: f64| -> i32 {
@@ -220,7 +256,7 @@ impl PilResampleAxis {
             let mut row = vec![0f64; count];
             for (tap, weight) in row.iter_mut().enumerate() {
                 let distance = (xmin + tap) as f64 - center + 0.5;
-                *weight = pil_bicubic_kernel(distance * ss);
+                *weight = (filter.kernel)(distance * ss);
             }
             let sum: f64 = row.iter().sum();
             if sum != 0.0 {
@@ -272,9 +308,28 @@ pub fn qwen_vl_resize(
 /// edges, enough to shift vision-model logits — while this variant matches
 /// Pillow bit-for-bit.
 pub fn pil_bicubic_resize(image: &RgbImage, width: u32, height: u32) -> Result<RgbImage, Error> {
+    pil_resize(image, width, height, PIL_BICUBIC)
+}
+
+/// PIL-exact `Image.LANCZOS` resize of an RGB image; see
+/// [`pil_bicubic_resize`].
+pub(crate) fn pil_lanczos_resize(
+    image: &RgbImage,
+    width: u32,
+    height: u32,
+) -> Result<RgbImage, Error> {
+    pil_resize(image, width, height, PIL_LANCZOS)
+}
+
+fn pil_resize(
+    image: &RgbImage,
+    width: u32,
+    height: u32,
+    filter: PilFilter,
+) -> Result<RgbImage, Error> {
     if width == 0 || height == 0 {
         return Err(Error::InvalidInput {
-            message: format!("pil_bicubic_resize: invalid target {width}x{height}"),
+            message: format!("pil_resize: invalid target {width}x{height}"),
         });
     }
     let (in_w, in_h) = image.dimensions();
@@ -283,7 +338,7 @@ pub fn pil_bicubic_resize(image: &RgbImage, width: u32, height: u32) -> Result<R
     }
     // Horizontal pass into a rounded uint8 intermediate, like PIL.
     let mid = if width != in_w {
-        let axis = PilResampleAxis::new(in_w, width);
+        let axis = PilResampleAxis::new(in_w, width, filter);
         let src = image.as_raw();
         let src_stride = in_w as usize * 3;
         let out_stride = width as usize * 3;
@@ -310,14 +365,14 @@ pub fn pil_bicubic_resize(image: &RgbImage, width: u32, height: u32) -> Result<R
                 }
             });
         RgbImage::from_raw(width, in_h, buffer).ok_or_else(|| Error::InvalidInput {
-            message: "pil_bicubic_resize: intermediate buffer size mismatch".to_string(),
+            message: "pil_resize: intermediate buffer size mismatch".to_string(),
         })?
     } else {
         image.clone()
     };
     // Vertical pass over the intermediate.
     if height != in_h {
-        let axis = PilResampleAxis::new(in_h, height);
+        let axis = PilResampleAxis::new(in_h, height, filter);
         let mid_raw = mid.as_raw();
         let stride = width as usize * 3;
         let mut buffer = vec![0u8; stride * height as usize];
@@ -340,7 +395,7 @@ pub fn pil_bicubic_resize(image: &RgbImage, width: u32, height: u32) -> Result<R
                 }
             });
         RgbImage::from_raw(width, height, buffer).ok_or_else(|| Error::InvalidInput {
-            message: "pil_bicubic_resize: output buffer size mismatch".to_string(),
+            message: "pil_resize: output buffer size mismatch".to_string(),
         })
     } else {
         Ok(mid)
@@ -357,7 +412,8 @@ pub fn round_up_to_multiple(value: u32, multiple: u32) -> u32 {
 
 /// Smart resize calculating new dimensions based on pixel constraints and factor alignment.
 ///
-/// Used by PaddleOCR-VL and HunyuanOCR.
+/// Mirrors the Qwen2-VL-family `smart_resize` in transformers, including
+/// Python's `round` (halves round to even).
 pub fn smart_resize(
     height: u32,
     width: u32,
@@ -386,8 +442,8 @@ pub fn smart_resize(
         });
     }
 
-    let mut h_bar = (height / factor_f).round() * factor_f;
-    let mut w_bar = (width / factor_f).round() * factor_f;
+    let mut h_bar = (height / factor_f).round_ties_even() * factor_f;
+    let mut w_bar = (width / factor_f).round_ties_even() * factor_f;
 
     let area = h_bar * w_bar;
     if area > max_pixels as f64 {
@@ -628,6 +684,34 @@ mod tests {
         assert_eq!(identity.as_raw(), src.as_raw());
     }
 
+    /// PaddleOCR-VL's spotting upscale: Pillow 12.1.0
+    /// `Image.resize((10, 8), Image.LANCZOS)` of the 5x4 pattern below.
+    #[test]
+    fn pil_lanczos_resize_matches_pillow() {
+        let src: Vec<u8> = (0..4u32)
+            .flat_map(|y| (0..5u32).flat_map(move |x| (0..3u32).map(move |c| (x, y, c))))
+            .map(|(x, y, c)| ((x * 67 + y * 131 + c * 29) * 53 % 256) as u8)
+            .collect();
+        let expected = [
+            3, 3, 0, 39, 40, 51, 157, 158, 193, 240, 241, 255, 209, 210, 222, 173, 174, 169, 163,
+            164, 162, 143, 144, 146, 126, 127, 128, 118, 119, 120, 0, 0, 7, 52, 53, 39, 184, 185,
+            137, 255, 255, 209, 221, 222, 206, 177, 178, 188, 168, 169, 174, 151, 152, 151, 134,
+            135, 135, 125, 126, 127, 0, 0, 32, 72, 73, 20, 211, 212, 44, 255, 255, 94, 235, 236,
+            179, 188, 189, 220, 182, 183, 199, 168, 169, 164, 151, 152, 151, 142, 143, 144, 15, 16,
+            57, 69, 70, 13, 160, 161, 0, 221, 221, 27, 255, 255, 193, 234, 234, 255, 214, 215, 232,
+            183, 184, 178, 167, 168, 167, 161, 162, 163, 57, 58, 71, 45, 46, 30, 47, 48, 0, 119,
+            120, 62, 245, 246, 227, 255, 255, 255, 243, 244, 250, 191, 192, 191, 179, 180, 180,
+            176, 177, 178, 88, 89, 84, 51, 52, 61, 12, 13, 40, 47, 48, 75, 151, 152, 162, 212, 212,
+            208, 238, 239, 238, 216, 217, 219, 203, 204, 205, 191, 192, 193, 96, 97, 95, 79, 80,
+            85, 56, 57, 70, 32, 33, 47, 43, 44, 49, 109, 110, 109, 214, 215, 215, 246, 246, 247,
+            228, 229, 231, 201, 202, 203, 96, 97, 100, 97, 98, 97, 93, 94, 88, 36, 36, 29, 0, 0, 0,
+            46, 47, 50, 197, 198, 199, 255, 255, 255, 241, 242, 243, 206, 207, 208,
+        ];
+        let src = RgbImage::from_raw(5, 4, src).expect("source buffer");
+        let out = pil_lanczos_resize(&src, 10, 8).expect("resize");
+        assert_eq!(out.as_raw(), &expected[..], "must match Pillow bit-for-bit");
+    }
+
     /// Callers pass paths straight from a CLI, where an extensionless or
     /// mislabelled file is ordinary. The format must come from the bytes.
     #[test]
@@ -717,10 +801,10 @@ mod tests {
     }
 
     #[test]
-    fn test_smart_resize_factor_divisibility() -> Result<(), Error> {
-        let (h, w) = smart_resize(100, 200, 28, 147_384, 2_822_400)?;
-        assert_eq!(h % 28, 0);
-        assert_eq!(w % 28, 0);
+    fn test_smart_resize_matches_the_python_reference() -> Result<(), Error> {
+        // 70 / 28 = 2.5 rounds to 2 like Python's `round`.
+        assert_eq!(smart_resize(70, 210, 28, 3_136, 12_845_056)?, (56, 224));
+        assert_eq!(smart_resize(350, 630, 28, 3_136, 12_845_056)?, (336, 616));
         Ok(())
     }
 

@@ -38,13 +38,11 @@ fn smart_resize_glm(
     let mut width = width as f64;
     let factor_f = factor as f64;
 
-    if height < factor_f {
-        width = (width * factor_f / height).round();
-        height = factor_f;
-    }
-    if width < factor_f {
-        height = (height * factor_f / width).round();
-        width = factor_f;
+    // The reference scales both sides by one factor and truncates.
+    if height < factor_f || width < factor_f {
+        let scale = (factor_f / height).max(factor_f / width);
+        height = (height * scale).trunc();
+        width = (width * scale).trunc();
     }
 
     let max_dim = height.max(width);
@@ -58,9 +56,10 @@ fn smart_resize_glm(
         });
     }
 
-    let mut h_bar = (height / factor_f).round() * factor_f;
-    let mut w_bar = (width / factor_f).round() * factor_f;
-    let t_bar = (num_frames as f64 / temporal_factor as f64).round() * temporal_factor as f64;
+    let mut h_bar = (height / factor_f).round_ties_even() * factor_f;
+    let mut w_bar = (width / factor_f).round_ties_even() * factor_f;
+    let t_bar =
+        (num_frames as f64 / temporal_factor as f64).round_ties_even() * temporal_factor as f64;
 
     let volume = t_bar * h_bar * w_bar;
     if volume > max_pixels as f64 {
@@ -174,4 +173,26 @@ pub fn preprocess_image(
         grid_thw,
         num_image_tokens,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::smart_resize_glm;
+
+    #[test]
+    fn smart_resize_matches_the_python_processor() {
+        // Glm46VImageProcessor values for the GLM-OCR bounds: a halfway
+        // rounding case and two short-side pre-scales.
+        for ((height, width), expected) in [
+            ((28, 238), (28, 224)),
+            ((10, 175), (28, 476)),
+            ((8, 9), (84, 84)),
+        ] {
+            assert_eq!(
+                smart_resize_glm(2, height, width, 2, 28, 12_544, 9_633_792).unwrap(),
+                expected,
+                "{height}x{width}"
+            );
+        }
+    }
 }
