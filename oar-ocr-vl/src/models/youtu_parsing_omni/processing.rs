@@ -1,6 +1,6 @@
 use super::config::OmniConfig;
 use crate::Error;
-use crate::runtime::image::{image_to_chw, patchify_merge_grouped};
+use crate::runtime::image::{image_to_chw, patchify_merge_grouped, pil_bicubic_resize};
 use candle_core::{DType, Device, Tensor};
 use image::{Rgb, RgbImage, imageops};
 use serde::Deserialize;
@@ -139,12 +139,8 @@ pub(super) fn preprocess(
     dtype: DType,
     device: &Device,
 ) -> Result<Tensor, Error> {
-    let resized = imageops::resize(
-        image,
-        plan.resized_width,
-        plan.resized_height,
-        imageops::FilterType::CatmullRom,
-    );
+    // The reference processor resizes with PIL's bicubic filter.
+    let resized = pil_bicubic_resize(image, plan.resized_width, plan.resized_height)?;
     let mut canvas = RgbImage::from_pixel(
         plan.width,
         plan.height,
