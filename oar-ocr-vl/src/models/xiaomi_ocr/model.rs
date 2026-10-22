@@ -7,6 +7,8 @@ use crate::render::table::convert_otsl_to_html;
 use crate::render::text::clean_truncated_repeats;
 #[cfg(feature = "cuda")]
 use crate::runtime::cuda::{ArgmaxFirstBf16, ArgmaxFirstF32};
+pub use crate::runtime::trace::GenerationTrace;
+use crate::runtime::trace::top3;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};
@@ -172,7 +174,7 @@ impl XiaomiOcr {
     ) -> crate::error::BatchResult<Vec<u32>> {
         Ok(images
             .iter()
-            .map(|image| self.generate_one(image, DEFAULT_PROMPT, max_new_tokens))
+            .map(|image| self.generate_one(image, DEFAULT_PROMPT, max_new_tokens, None))
             .collect())
     }
 
@@ -217,7 +219,21 @@ impl XiaomiOcr {
         instruction: &str,
         max_new_tokens: usize,
     ) -> Result<Vec<u32>, Error> {
-        self.generate_one(image, instruction, max_new_tokens)
+        self.generate_one(image, instruction, max_new_tokens, None)
+    }
+
+    /// Greedy generation with per-step top-3 logits, for numerical
+    /// alignment against the upstream reference (see the
+    /// `xiaomi_ocr_alignment` test).
+    pub fn generate_traced(
+        &self,
+        image: &RgbImage,
+        instruction: &str,
+        max_new_tokens: usize,
+    ) -> Result<GenerationTrace, Error> {
+        let mut step_top = Vec::new();
+        let tokens = self.generate_one(image, instruction, max_new_tokens, Some(&mut step_top))?;
+        Ok(GenerationTrace { tokens, step_top })
     }
 
     fn generate_one(
@@ -225,6 +241,7 @@ impl XiaomiOcr {
         image: &RgbImage,
         instruction: &str,
         max_new_tokens: usize,
+        mut step_top: Option<&mut Vec<[(u32, f32); 3]>>,
     ) -> Result<Vec<u32>, Error> {
         self.text.clear_cache();
         let _cache_guard = TextCacheGuard(&self.text);
@@ -295,6 +312,12 @@ impl XiaomiOcr {
         self.text.prepare_decode_graph(prompt_len, max_new_tokens)?;
 
         for step in 0..max_new_tokens {
+            if let Some(step_top) = step_top.as_deref_mut() {
+                step_top.push(
+                    top3(&logits)
+                        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "trace logits", e))?,
+                );
+            }
             let token = select_greedy_token(&logits)?;
             if self.stop_token_ids.contains(&token) {
                 break;

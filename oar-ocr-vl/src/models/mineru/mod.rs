@@ -17,5 +17,5 @@ pub use config::{
     MinerUConfig, MinerUImageProcessorConfig, MinerUImageSize, MinerURopeScaling, MinerUTextConfig,
     MinerUVisionConfig, Qwen2VlVisionConfig, QwenVlImageProcessorConfig, QwenVlImageSize,
 };
-pub use model::MinerU;
+pub use model::{GenerationTrace, MinerU};
 pub use parser::MinerUParseOptions;

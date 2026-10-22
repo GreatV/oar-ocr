@@ -23,7 +23,7 @@ mod model;
 use crate::backbones::qwen25_vl as vision;
 
 pub use config::{TeleOcrConfig, TeleOcrRopeScaling, TeleOcrTextConfig, TeleOcrVisionConfig};
-pub use model::TeleOcr;
+pub use model::{GenerationTrace, TeleOcr};
 
 /// TeleOCR task with the official prompt from the model card's quickstart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

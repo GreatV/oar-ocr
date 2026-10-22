@@ -8,6 +8,8 @@ use crate::backbones::qwen3_5::text::Qwen35TextModel;
 use crate::error::Error;
 #[cfg(feature = "cuda")]
 use crate::runtime::cuda::{ArgmaxFirstBf16, ArgmaxFirstF32};
+pub use crate::runtime::trace::GenerationTrace;
+use crate::runtime::trace::top3;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};
@@ -260,12 +262,10 @@ impl OvisOcr2 {
 
         for step in 0..max_new_tokens {
             if let Some(step_top) = step_top.as_deref_mut() {
-                let scores = logits
-                    .flatten_all()
-                    .and_then(|logits| logits.to_dtype(DType::F32))
-                    .and_then(|logits| logits.to_vec1::<f32>())
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "trace logits", e))?;
-                step_top.push(top3(&scores));
+                step_top.push(
+                    top3(&logits)
+                        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "trace logits", e))?,
+                );
             }
             let token = select_greedy_token(&logits)?;
             if self.stop_token_ids.contains(&token) {
@@ -564,34 +564,6 @@ fn text_position_ids(position: i64, device: &Device) -> Result<Tensor, Error> {
             e,
         )
     })
-}
-
-/// Greedy generation with per-step top-3 logits for alignment tests.
-#[derive(Debug, Clone)]
-pub struct GenerationTrace {
-    pub tokens: Vec<u32>,
-    pub step_top: Vec<[(u32, f32); 3]>,
-}
-
-fn top3(scores: &[f32]) -> [(u32, f32); 3] {
-    let mut best: [(usize, f32); 3] = [(0, f32::NEG_INFINITY); 3];
-    for (index, &value) in scores.iter().enumerate() {
-        if value > best[2].1 {
-            if value > best[1].1 {
-                if value > best[0].1 {
-                    best[2] = best[1];
-                    best[1] = best[0];
-                    best[0] = (index, value);
-                } else {
-                    best[2] = best[1];
-                    best[1] = (index, value);
-                }
-            } else {
-                best[2] = (index, value);
-            }
-        }
-    }
-    best.map(|(index, value)| (index as u32, value))
 }
 
 fn select_greedy_token(logits: &Tensor) -> Result<u32, Error> {

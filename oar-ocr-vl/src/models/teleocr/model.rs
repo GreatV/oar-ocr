@@ -18,6 +18,8 @@ use crate::error::Error;
 use crate::runtime::cuda::{ArgmaxFirstBf16, ArgmaxFirstF32, MaskTokenIds};
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::CudaGraphDrainGuard;
+pub use crate::runtime::trace::GenerationTrace;
+use crate::runtime::trace::top3;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
@@ -270,7 +272,7 @@ impl TeleOcr {
             });
         }
 
-        let results = self.generate_tokens_internal(images, instructions, max_new_tokens)?;
+        let results = self.generate_tokens_internal(images, instructions, max_new_tokens, None)?;
         Ok(results
             .into_iter()
             .map(|tokens| self.decode_generated_tokens(&tokens))
@@ -297,7 +299,30 @@ impl TeleOcr {
                 ),
             });
         }
-        self.generate_tokens_internal(images, instructions, max_new_tokens)
+        self.generate_tokens_internal(images, instructions, max_new_tokens, None)
+    }
+
+    /// Greedy generation of one image with per-step top-3 logits, for
+    /// numerical alignment against the upstream reference (see the
+    /// `teleocr_alignment` test).
+    pub fn generate_traced(
+        &self,
+        image: &RgbImage,
+        instruction: &str,
+        max_new_tokens: usize,
+    ) -> Result<GenerationTrace, Error> {
+        let mut step_top = Vec::new();
+        let tokens = self
+            .generate_tokens_internal(
+                std::slice::from_ref(image),
+                &[instruction],
+                max_new_tokens,
+                Some(&mut step_top),
+            )?
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        Ok(GenerationTrace { tokens, step_top })
     }
 
     fn generate_tokens_internal(
@@ -305,6 +330,7 @@ impl TeleOcr {
         images: &[RgbImage],
         instructions: &[impl AsRef<str>],
         max_new_tokens: usize,
+        mut step_top: Option<&mut Vec<[(u32, f32); 3]>>,
     ) -> Result<Vec<Vec<u32>>, Error> {
         let batch_size = images.len();
 
@@ -516,6 +542,12 @@ impl TeleOcr {
         for step in 0..max_new_tokens {
             if finished.iter().all(|&f| f) {
                 break;
+            }
+            if let Some(step_top) = step_top.as_deref_mut() {
+                step_top.push(
+                    top3(&logits_list[0])
+                        .map_err(|e| candle_to_ocr_inference("TeleOCR", "trace logits", e))?,
+                );
             }
             let sampling_params = self.sampling_params();
             let mut next_tokens: Vec<u32> = Vec::with_capacity(batch_size);
