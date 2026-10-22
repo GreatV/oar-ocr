@@ -15,6 +15,7 @@ use crate::mineru::{MinerU, MinerUParseOptions};
 use crate::mineru_diffusion::{MinerUDiffusion, MinerUDiffusionParseOptions};
 use crate::monkeyocrv2::{MonkeyOcrV2, MonkeyOcrV2ParseOptions};
 use crate::ovisocr2::{OvisOcr2, OvisOcr2ParseOptions};
+use crate::ovisocr3::{OvisOcr3, OvisOcr3ParseOptions};
 use crate::oxr::Oxr;
 use crate::paddleocr_vl::PaddleOcrVl;
 use crate::pipeline::page_parser::{LayoutPageParser, LayoutPageParserOptions};
@@ -98,6 +99,8 @@ pub enum AnyPageParserModel {
     MonkeyOcrV2B,
     /// ATH-MaaS/OvisOCR2.
     OvisOcr2,
+    /// ATH-MaaS/OvisOCR3, using its Markdown page protocol by default.
+    OvisOcr3,
     /// SoMarkAI/OXR-1.0, with PP-DocLayout regions and reading order.
     /// Weights are subject to SoMark's OXR License.
     Oxr,
@@ -147,6 +150,7 @@ const MODEL_IDS: &[(&str, AnyPageParserModel)] = &[
         AnyPageParserModel::MonkeyOcrV2B,
     ),
     ("ATH-MaaS/OvisOCR2", AnyPageParserModel::OvisOcr2),
+    ("ATH-MaaS/OvisOCR3", AnyPageParserModel::OvisOcr3),
     ("SoMarkAI/OXR-1.0", AnyPageParserModel::Oxr),
     ("tencent/WeVisDoc-2B", AnyPageParserModel::WeVisDoc2B),
     ("tencent/WeVisDoc-4B", AnyPageParserModel::WeVisDoc4B),
@@ -181,6 +185,7 @@ impl AnyPageParserModel {
             Self::MonkeyOcrV2S => "zenosai/MonkeyOCRv2-S-Parsing",
             Self::MonkeyOcrV2B => "zenosai/MonkeyOCRv2-B-Parsing",
             Self::OvisOcr2 => "ATH-MaaS/OvisOCR2",
+            Self::OvisOcr3 => "ATH-MaaS/OvisOCR3",
             Self::Oxr => "SoMarkAI/OXR-1.0",
             Self::WeVisDoc2B => "tencent/WeVisDoc-2B",
             Self::WeVisDoc4B => "tencent/WeVisDoc-4B",
@@ -287,6 +292,8 @@ pub enum AnyPageParser {
     MonkeyOcrV2(Box<MonkeyOcrV2>),
     /// OvisOCR2 end-to-end page parsing.
     OvisOcr2(Box<OvisOcr2>),
+    /// OvisOCR3 end-to-end Markdown page parsing.
+    OvisOcr3(Box<OvisOcr3>),
     /// OXR recognition over PP-DocLayout regions; the official D-FINE is not used.
     Oxr(Box<LayoutPageParser<PpDocLayout, Oxr>>),
     /// WeVisDoc end-to-end page parsing.
@@ -342,6 +349,12 @@ impl From<MonkeyOcrV2> for AnyPageParser {
 impl From<OvisOcr2> for AnyPageParser {
     fn from(model: OvisOcr2) -> Self {
         Self::OvisOcr2(Box::new(model))
+    }
+}
+
+impl From<OvisOcr3> for AnyPageParser {
+    fn from(model: OvisOcr3) -> Self {
+        Self::OvisOcr3(Box::new(model))
     }
 }
 
@@ -457,6 +470,7 @@ impl AnyPageParser {
                 MonkeyOcrV2::from_dir(model_dir, device)?.into()
             }
             AnyPageParserModel::OvisOcr2 => OvisOcr2::from_dir(model_dir, device)?.into(),
+            AnyPageParserModel::OvisOcr3 => OvisOcr3::from_dir(model_dir, device)?.into(),
             AnyPageParserModel::Oxr => LayoutPageParser::new(
                 PpDocLayout::from_dir(required_layout_dir(options, model)?, device.clone())?,
                 Oxr::from_dir(model_dir, device)?,
@@ -586,6 +600,7 @@ impl PageParser for AnyPageParser {
             }
             Self::MonkeyOcrV2(model) => model.parse_page(image, &monkeyocrv2_options(options)),
             Self::OvisOcr2(model) => model.parse_page(image, &ovisocr2_options(options)),
+            Self::OvisOcr3(model) => model.parse_page(image, &ovisocr3_options(options)),
             Self::Oxr(model) => model.parse_page(image, &layout_options(model, options)),
             Self::WeVisDoc(model) => model.parse_page(image, &wevisdoc_options(options)),
             Self::XiaomiOcr(model) => model.parse_page(image, &xiaomi_options(options)),
@@ -656,6 +671,14 @@ fn monkeyocrv2_options(options: &AnyPageParserOptions) -> MonkeyOcrV2ParseOption
 
 fn ovisocr2_options(options: &AnyPageParserOptions) -> OvisOcr2ParseOptions {
     let mut model_options = OvisOcr2ParseOptions::default();
+    if let Some(max_new_tokens) = options.max_new_tokens {
+        model_options.max_new_tokens = max_new_tokens;
+    }
+    model_options
+}
+
+fn ovisocr3_options(options: &AnyPageParserOptions) -> OvisOcr3ParseOptions {
+    let mut model_options = OvisOcr3ParseOptions::default();
     if let Some(max_new_tokens) = options.max_new_tokens {
         model_options.max_new_tokens = max_new_tokens;
     }

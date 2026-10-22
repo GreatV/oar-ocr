@@ -1,0 +1,1 @@
+Extract the values for the following keys from the image: {keys_json}. Return a JSON object using exactly these keys. Keep the values exactly as shown, use empty strings for missing values, and use arrays for repeated values. Output JSON only.

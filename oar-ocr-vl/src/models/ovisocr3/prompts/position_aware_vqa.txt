@@ -1,0 +1,6 @@
+{question} Output the answer with 'answer' and 'bbox'. 'bbox' refers to the bounding box position of the 'answer' content in the image. The output format is "answer:gt, bbox:(x1,y1,x2,y2)", where the bbox is the coordinates of the top-left corner and the bottom-right corners. The 'bbox' should be normalized coordinates ranging from 0 to 1000 by the image width and height.
+Your answer should be in the JSON format:
+{
+    "answer": "..",  # The answer
+    "bbox": "(x1,y1,x2,y2)"     # The bounding box position of the 'answer'
+}

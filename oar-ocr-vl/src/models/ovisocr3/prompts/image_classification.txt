@@ -1,0 +1,5 @@
+Classify {target description} in the image. Select exactly one label from the candidate list.
+
+Candidate labels: {candidate_labels}
+
+Directly output the selected label exactly as written. Do not output explanations, punctuation, JSON, Markdown, or any other text.

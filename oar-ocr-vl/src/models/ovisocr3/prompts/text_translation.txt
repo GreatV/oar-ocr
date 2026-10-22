@@ -1,0 +1,9 @@
+Translate all readable text in the specified image region into {target_language}. Directly output the translated content.
+Target region: {target_region}
+
+Rules:
+1. Translate only the visible text inside the target region.
+2. Preserve the original meaning, names, numbers, symbols, and line order. Do not add explanations, corrections, or omitted context.
+3. Keep content that should not be translated unchanged.
+4. Output plain translated text only. Use spaces and line breaks only where needed to preserve the source separation.
+5. Do not output the source text, language labels, bounding boxes, Markdown, JSON, or code fences.

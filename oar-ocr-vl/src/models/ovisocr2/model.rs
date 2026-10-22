@@ -169,9 +169,18 @@ impl OvisOcr2 {
         images: &[RgbImage],
         max_new_tokens: usize,
     ) -> crate::error::BatchResult<Vec<u32>> {
+        self.generate_tokens_with_prompt(images, DEFAULT_PROMPT, max_new_tokens)
+    }
+
+    pub(crate) fn generate_tokens_with_prompt(
+        &self,
+        images: &[RgbImage],
+        task_prompt: &str,
+        max_new_tokens: usize,
+    ) -> crate::error::BatchResult<Vec<u32>> {
         Ok(images
             .iter()
-            .map(|image| self.generate_one(image, max_new_tokens, None))
+            .map(|image| self.generate_one(image, task_prompt, max_new_tokens, None))
             .collect())
     }
 
@@ -183,14 +192,24 @@ impl OvisOcr2 {
         image: &RgbImage,
         max_new_tokens: usize,
     ) -> Result<GenerationTrace, Error> {
+        self.generate_traced_with_prompt(image, DEFAULT_PROMPT, max_new_tokens)
+    }
+
+    pub(crate) fn generate_traced_with_prompt(
+        &self,
+        image: &RgbImage,
+        task_prompt: &str,
+        max_new_tokens: usize,
+    ) -> Result<GenerationTrace, Error> {
         let mut step_top = Vec::new();
-        let tokens = self.generate_one(image, max_new_tokens, Some(&mut step_top))?;
+        let tokens = self.generate_one(image, task_prompt, max_new_tokens, Some(&mut step_top))?;
         Ok(GenerationTrace { tokens, step_top })
     }
 
     fn generate_one(
         &self,
         image: &RgbImage,
+        task_prompt: &str,
         max_new_tokens: usize,
         mut step_top: Option<&mut Vec<[(u32, f32); 3]>>,
     ) -> Result<Vec<u32>, Error> {
@@ -214,7 +233,7 @@ impl OvisOcr2 {
             &self.device,
             self.dtype,
         )?;
-        let prompt = build_prompt(image_inputs.num_image_tokens);
+        let prompt = build_prompt(image_inputs.num_image_tokens, task_prompt);
         let encoding = self
             .tokenizer
             .encode(prompt, false)
@@ -453,14 +472,14 @@ fn validate_generation_length(
     Ok(())
 }
 
-fn build_prompt(num_image_tokens: usize) -> String {
-    let mut prompt = String::with_capacity(DEFAULT_PROMPT.len() + num_image_tokens * 13 + 128);
+fn build_prompt(num_image_tokens: usize, task_prompt: &str) -> String {
+    let mut prompt = String::with_capacity(task_prompt.len() + num_image_tokens * 13 + 128);
     prompt.push_str("<|im_start|>user\n<|vision_start|>");
     for _ in 0..num_image_tokens {
         prompt.push_str("<|image_pad|>");
     }
     prompt.push_str("<|vision_end|>");
-    prompt.push_str(DEFAULT_PROMPT);
+    prompt.push_str(task_prompt);
     prompt.push_str("<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
     prompt
 }
@@ -606,7 +625,7 @@ pub fn filter_visual_image_tags(text: &str) -> String {
         .join("\n\n")
 }
 
-fn postprocess_text(text: String, keep_image_tags: bool) -> String {
+pub(crate) fn postprocess_text(text: String, keep_image_tags: bool) -> String {
     let text = if keep_image_tags {
         text
     } else {
@@ -615,7 +634,7 @@ fn postprocess_text(text: String, keep_image_tags: bool) -> String {
     clean_truncated_repeats(&text)
 }
 
-pub(super) fn postprocess_recognition_text(text: String, task: RecognitionTask) -> String {
+pub(crate) fn postprocess_recognition_text(text: String, task: RecognitionTask) -> String {
     postprocess_text(text, task == RecognitionTask::Chart)
 }
 
@@ -662,7 +681,7 @@ mod tests {
 
     #[test]
     fn official_prompt_has_exact_no_think_framing() {
-        let prompt = build_prompt(2);
+        let prompt = build_prompt(2, DEFAULT_PROMPT);
         assert!(prompt.starts_with(
             "<|im_start|>user\n<|vision_start|><|image_pad|><|image_pad|><|vision_end|>\nExtract"
         ));

@@ -10,6 +10,7 @@ const MODEL_MODULES: &[&str] = &[
     "mineru_diffusion",
     "monkeyocrv2",
     "ovisocr2",
+    "ovisocr3",
     "oxr",
     "paddleocr_vl",
     "pp_doclayout",
@@ -66,6 +67,10 @@ fn validate_architecture() {
         }
         for model in MODEL_MODULES {
             if model_owner == Some(*model) {
+                continue;
+            }
+            // OvisOCR3 is a prompt/protocol wrapper around the OvisOCR2 engine.
+            if model_owner == Some("ovisocr3") && *model == "ovisocr2" {
                 continue;
             }
             let dependency = format!("crate::{model}::");

@@ -1,0 +1,8 @@
+Parse all key information in the chart and output one valid JSON object using exactly this top-level schema:
+{"title":"","source":"","x_title":"","y_title":"","values":{}}
+
+Rules:
+1. Preserve visible title, source, axis titles, series or category labels, x-axis labels, and values without explanation or inference.
+2. Use the literal string "None" when the chart has no visible value for title, source, or an axis title. For a dual-axis chart, `y_title` may be an array of two strings in visual order; otherwise it must be one string.
+3. `values` must be a non-empty object. Preserve the chart hierarchy and encode every scalar data value as a JSON string. An empty series name may be represented by the key "" when the chart has no visible series label.
+4. Output JSON only. Do not output Python syntax, Markdown fences, comments, prose, or extra keys.

@@ -1,0 +1,5 @@
+Find and reconstruct every table whose content continues across two or more consecutive input pages.
+
+Return only one JSON array. Each cross-page table is one object with exactly these fields: source_pages and html. source_pages contains the input-local 1-based pages of that table. html contains one complete HTML <table>...</table>.
+
+If no cross-page table exists, return [{"source_pages":[],"html":"No cross-page table exists between these pages."}]. Preserve figures inside cross-page tables as <img src="page_N/images/bbox_left_top_right_bottom.jpg" />; page_N is 1-based. Return no explanation or code fence.

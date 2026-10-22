@@ -19,3 +19,5 @@ pub use model::{
     filter_visual_image_tags,
 };
 pub use parser::OvisOcr2ParseOptions;
+
+pub(crate) use model::{postprocess_recognition_text, postprocess_text};

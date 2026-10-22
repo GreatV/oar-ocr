@@ -1,12 +1,12 @@
-//! Numerical alignment of the native OvisOCR2 implementation against the
+//! Numerical alignment of the native OvisOCR2/OvisOCR3 implementation against the
 //! transformers reference (Qwen3.5 arch).
 //!
 //! The reference fixture is produced out of tree with transformers, loading
 //! `Qwen3_5ForConditionalGeneration` from the same checkpoint in float32 with eager
 //! attention on CPU, and building the inputs through the checkpoint's
 //! processor and chat template with the production prompt the Rust
-//! implementation uses (`ovisocr2::DEFAULT_PROMPT`): the fixture's ids must
-//! tokenize to the same 775-token stream `build_prompt` produces.
+//! implementation uses (`ovisocr2::DEFAULT_PROMPT` or `ovisocr3::DEFAULT_PROMPT`).
+//! OvisOCR3 uses the verbatim document_markdown.txt without v2's leading newline.
 //! The first-step logits come from a plain forward pass
 //! (`model(**inputs).logits[0, -1]`), not from `generate()` scores, and the
 //! token ids from greedy `generate(do_sample=False, max_new_tokens=16)`. The
@@ -14,8 +14,10 @@
 //! directory or absolute), `grid_thw`, `pixel_values_sum`, `first_step_top3` (`[token_id, logit]`
 //! triples), and `generated_ids`.
 //!
-//! Both inputs come from environment variables and the test skips when
-//! either is unset:
+//! Each case skips when either of its environment variables is unset. The v3
+//! case reads `OVISOCR3_MODEL_DIR` and `OVISOCR3_ALIGNMENT_FIXTURE`; both versions
+//! use min_pixels=448*448 and max_pixels=2880*2880 explicitly in the reference.
+//! For v2:
 //!
 //! ```bash
 //! OVISOCR2_MODEL_DIR=<model_dir> \
@@ -23,11 +25,12 @@
 //!     cargo test -p oar-ocr-vl --test ovisocr2_alignment -- --nocapture
 //! ```
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use candle_core::{DType, Device};
 use oar_ocr_vl::RuntimeConfig;
-use oar_ocr_vl::ovisocr2::OvisOcr2;
+use oar_ocr_vl::ovisocr2::{GenerationTrace, OvisOcr2};
+use oar_ocr_vl::ovisocr3::OvisOcr3;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -41,12 +44,49 @@ struct Fixture {
 
 #[test]
 fn matches_python_reference_end_to_end() {
-    let Some(model_dir) = std::env::var_os("OVISOCR2_MODEL_DIR") else {
-        eprintln!("skipping: OVISOCR2_MODEL_DIR is not set");
+    assert_reference_alignment(
+        "OVISOCR2_MODEL_DIR",
+        "OVISOCR2_ALIGNMENT_FIXTURE",
+        |model_dir, image, max_new_tokens| {
+            OvisOcr2::from_dir_with_runtime(
+                model_dir,
+                RuntimeConfig::new(Device::Cpu).with_dtype(DType::F32),
+            )
+            .expect("OvisOCR2 loads")
+            .generate_traced(image, max_new_tokens)
+            .expect("OvisOCR2 traced generation")
+        },
+    );
+}
+
+#[test]
+fn ovisocr3_matches_python_reference_end_to_end() {
+    assert_reference_alignment(
+        "OVISOCR3_MODEL_DIR",
+        "OVISOCR3_ALIGNMENT_FIXTURE",
+        |model_dir, image, max_new_tokens| {
+            OvisOcr3::from_dir_with_runtime(
+                model_dir,
+                RuntimeConfig::new(Device::Cpu).with_dtype(DType::F32),
+            )
+            .expect("OvisOCR3 loads")
+            .generate_traced(image, max_new_tokens)
+            .expect("OvisOCR3 traced generation")
+        },
+    );
+}
+
+fn assert_reference_alignment(
+    model_env: &str,
+    fixture_env: &str,
+    generate: impl FnOnce(&Path, &image::RgbImage, usize) -> GenerationTrace,
+) {
+    let Some(model_dir) = std::env::var_os(model_env) else {
+        eprintln!("skipping: {model_env} is not set");
         return;
     };
-    let Some(fixture_path) = std::env::var_os("OVISOCR2_ALIGNMENT_FIXTURE") else {
-        eprintln!("skipping: OVISOCR2_ALIGNMENT_FIXTURE is not set");
+    let Some(fixture_path) = std::env::var_os(fixture_env) else {
+        eprintln!("skipping: {fixture_env} is not set");
         return;
     };
     let model_dir = PathBuf::from(model_dir);
@@ -63,12 +103,6 @@ fn matches_python_reference_end_to_end() {
     let image = image::open(&image_path)
         .unwrap_or_else(|err| panic!("failed to open {}: {}", image_path.display(), err))
         .to_rgb8();
-
-    let model = OvisOcr2::from_dir_with_runtime(
-        &model_dir,
-        RuntimeConfig::new(Device::Cpu).with_dtype(DType::F32),
-    )
-    .expect("model loads");
 
     // Preprocessing: the grid must match the reference processor exactly.
     let image_cfg: oar_ocr_vl::ovisocr2::OvisOcr2ImageProcessorConfig = serde_json::from_str(
@@ -122,9 +156,7 @@ fn matches_python_reference_end_to_end() {
 
     // The reference truncates at max_new_tokens without an EOS, so compare
     // the reference prefix; ours may legitimately continue past it.
-    let trace = model
-        .generate_traced(&image, fixture.generated_ids.len() + 1)
-        .expect("traced generation");
+    let trace = generate(&model_dir, &image, fixture.generated_ids.len() + 1);
     assert!(
         trace.tokens.len() >= fixture.generated_ids.len(),
         "ours stopped early: {:?}",

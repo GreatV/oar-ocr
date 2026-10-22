@@ -35,6 +35,7 @@ const PARSERS: &[AnyPageParserModel] = &[
     AnyPageParserModel::MonkeyOcrV2S,
     AnyPageParserModel::MonkeyOcrV2B,
     AnyPageParserModel::OvisOcr2,
+    AnyPageParserModel::OvisOcr3,
     AnyPageParserModel::Oxr,
     AnyPageParserModel::WeVisDoc2B,
     AnyPageParserModel::WeVisDoc4B,
