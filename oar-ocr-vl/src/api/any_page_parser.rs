@@ -15,6 +15,7 @@ use crate::mineru::{MinerU, MinerUParseOptions};
 use crate::mineru_diffusion::{MinerUDiffusion, MinerUDiffusionParseOptions};
 use crate::monkeyocrv2::{MonkeyOcrV2, MonkeyOcrV2ParseOptions};
 use crate::ovisocr2::{OvisOcr2, OvisOcr2ParseOptions};
+use crate::oxr::Oxr;
 use crate::paddleocr_vl::PaddleOcrVl;
 use crate::pipeline::page_parser::{LayoutPageParser, LayoutPageParserOptions};
 use crate::pp_doclayout::PpDocLayout;
@@ -73,8 +74,8 @@ impl AnyPageParserOptions {
 ///
 /// The [`as_str`](Self::as_str) IDs are the Hugging Face repo IDs exactly as
 /// published; a new protocol version gets a new ID only when it ships as a
-/// new repo, and the same IDs will later drive auto-download. Loading from a
-/// directory always names the model explicitly, because most of these models
+/// new repo. The same IDs drive auto-download. Loading from a directory
+/// always names the model explicitly, because most of these models
 /// are fine-tunes whose checkpoint configs match their public base models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -97,6 +98,9 @@ pub enum AnyPageParserModel {
     MonkeyOcrV2B,
     /// ATH-MaaS/OvisOCR2.
     OvisOcr2,
+    /// SoMarkAI/OXR-1.0, with PP-DocLayout regions and reading order.
+    /// Weights are subject to SoMark's OXR License.
+    Oxr,
     /// tencent/WeVisDoc-2B.
     WeVisDoc2B,
     /// tencent/WeVisDoc-4B.
@@ -143,6 +147,7 @@ const MODEL_IDS: &[(&str, AnyPageParserModel)] = &[
         AnyPageParserModel::MonkeyOcrV2B,
     ),
     ("ATH-MaaS/OvisOCR2", AnyPageParserModel::OvisOcr2),
+    ("SoMarkAI/OXR-1.0", AnyPageParserModel::Oxr),
     ("tencent/WeVisDoc-2B", AnyPageParserModel::WeVisDoc2B),
     ("tencent/WeVisDoc-4B", AnyPageParserModel::WeVisDoc4B),
     ("SeerRay-Lab/Xiaomi-OCR-0", AnyPageParserModel::XiaomiOcr),
@@ -176,6 +181,7 @@ impl AnyPageParserModel {
             Self::MonkeyOcrV2S => "zenosai/MonkeyOCRv2-S-Parsing",
             Self::MonkeyOcrV2B => "zenosai/MonkeyOCRv2-B-Parsing",
             Self::OvisOcr2 => "ATH-MaaS/OvisOCR2",
+            Self::Oxr => "SoMarkAI/OXR-1.0",
             Self::WeVisDoc2B => "tencent/WeVisDoc-2B",
             Self::WeVisDoc4B => "tencent/WeVisDoc-4B",
             Self::XiaomiOcr => "SeerRay-Lab/Xiaomi-OCR-0",
@@ -218,7 +224,7 @@ impl FromStr for AnyPageParserModel {
 
 /// Directory-loading options for [`AnyPageParser::from_dir_with_options`].
 ///
-/// The layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR) combine their
+/// The layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR, OXR) combine their
 /// recognition backbone with an external PP-DocLayout detector, so loading
 /// them needs a PP-DocLayout checkpoint directory in `layout_dir`. Every
 /// other model ignores it.
@@ -243,8 +249,8 @@ impl AnyPageParserLoadOptions {
 /// behind this enum, so callers can pick a parser at runtime — from a config
 /// file, CLI flag, or benchmark manifest — without writing per-model dispatch.
 /// Convert an already-loaded model with [`From`], or load one from its model
-/// directory with [`from_dir`](Self::from_dir), which detects the model from
-/// its `config.json`. `AnyPageParserOptions` carries the knobs the parsers
+/// directory with [`from_dir`](Self::from_dir), naming its repository ID
+/// explicitly. `AnyPageParserOptions` carries the knobs the parsers
 /// share and leaves every other model-specific option at its default.
 ///
 /// ```no_run
@@ -281,6 +287,8 @@ pub enum AnyPageParser {
     MonkeyOcrV2(Box<MonkeyOcrV2>),
     /// OvisOCR2 end-to-end page parsing.
     OvisOcr2(Box<OvisOcr2>),
+    /// OXR recognition over PP-DocLayout regions; the official D-FINE is not used.
+    Oxr(Box<LayoutPageParser<PpDocLayout, Oxr>>),
     /// WeVisDoc end-to-end page parsing.
     WeVisDoc(Box<WeVisDoc>),
     /// Xiaomi-OCR-0 end-to-end page parsing.
@@ -337,6 +345,12 @@ impl From<OvisOcr2> for AnyPageParser {
     }
 }
 
+impl From<LayoutPageParser<PpDocLayout, Oxr>> for AnyPageParser {
+    fn from(model: LayoutPageParser<PpDocLayout, Oxr>) -> Self {
+        Self::Oxr(Box::new(model))
+    }
+}
+
 impl From<WeVisDoc> for AnyPageParser {
     fn from(model: WeVisDoc) -> Self {
         Self::WeVisDoc(Box::new(model))
@@ -381,7 +395,7 @@ impl AnyPageParser {
     /// checkpoint configs match their public base models, so the directory
     /// cannot be identified reliably on its own. The parser loads through its own
     /// `from_dir` with its own defaults. Layout-composed models (PaddleOCR-VL,
-    /// GLM-OCR, TeleOCR) additionally need a PP-DocLayout directory, which
+    /// GLM-OCR, TeleOCR, OXR) additionally need a PP-DocLayout directory, which
     /// [`from_dir_with_options`](Self::from_dir_with_options) accepts.
     pub fn from_dir(
         model: AnyPageParserModel,
@@ -443,6 +457,11 @@ impl AnyPageParser {
                 MonkeyOcrV2::from_dir(model_dir, device)?.into()
             }
             AnyPageParserModel::OvisOcr2 => OvisOcr2::from_dir(model_dir, device)?.into(),
+            AnyPageParserModel::Oxr => LayoutPageParser::new(
+                PpDocLayout::from_dir(required_layout_dir(options, model)?, device.clone())?,
+                Oxr::from_dir(model_dir, device)?,
+            )
+            .into(),
             AnyPageParserModel::WeVisDoc2B | AnyPageParserModel::WeVisDoc4B => {
                 WeVisDoc::from_dir(model_dir, device)?.into()
             }
@@ -483,7 +502,7 @@ impl AnyPageParser {
     /// published only once complete. The layout checkpoint uses its source's
     /// default revision.
     /// ModelScope is the default source; Hugging Face is selectable. The
-    /// layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR) also download
+    /// layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR, OXR) also download
     /// a PP-DocLayout checkpoint (DEFAULT_LAYOUT_REPO by default) unless the
     /// options point at a local layout directory. Loading then goes
     /// through [`from_dir`](Self::from_dir) with each model's own defaults.
@@ -534,6 +553,7 @@ impl AnyPageParser {
                 | AnyPageParserModel::PaddleOcrVl1_6
                 | AnyPageParserModel::GlmOcr
                 | AnyPageParserModel::TeleOcr
+                | AnyPageParserModel::Oxr
         )
     }
 }
@@ -566,6 +586,7 @@ impl PageParser for AnyPageParser {
             }
             Self::MonkeyOcrV2(model) => model.parse_page(image, &monkeyocrv2_options(options)),
             Self::OvisOcr2(model) => model.parse_page(image, &ovisocr2_options(options)),
+            Self::Oxr(model) => model.parse_page(image, &layout_options(model, options)),
             Self::WeVisDoc(model) => model.parse_page(image, &wevisdoc_options(options)),
             Self::XiaomiOcr(model) => model.parse_page(image, &xiaomi_options(options)),
             Self::YoutuParsingOmni(model) => {
@@ -687,14 +708,15 @@ mod tests {
     #[test]
     fn from_dir_reports_a_missing_layout_directory_before_loading() {
         let dir = tempfile::tempdir().unwrap();
-        let error =
-            AnyPageParser::from_dir(AnyPageParserModel::PaddleOcrVl1_5, dir.path(), Device::Cpu)
+        for model in [AnyPageParserModel::PaddleOcrVl1_5, AnyPageParserModel::Oxr] {
+            let error = AnyPageParser::from_dir(model, dir.path(), Device::Cpu)
                 .err()
                 .expect("the layout directory should be required")
                 .to_string();
-        assert!(error.contains("PaddlePaddle/PaddleOCR-VL-1.5"), "{error}");
-        assert!(error.contains("PP-DocLayout"), "{error}");
-        assert!(error.contains("with_layout_dir"), "{error}");
+            assert!(error.contains(model.as_str()), "{error}");
+            assert!(error.contains("PP-DocLayout"), "{error}");
+            assert!(error.contains("with_layout_dir"), "{error}");
+        }
     }
 
     #[test]

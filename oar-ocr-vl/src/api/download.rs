@@ -42,6 +42,7 @@ const MODELSCOPE_ALIASES: &[(&str, &str)] = &[
 /// exists on ModelScope but is a different, 1.0-style repo layout rather than
 /// a mirror of the Hugging Face one, so it is deliberately not aliased.)
 const HF_FALLBACK_REPOS: &[&str] = &[
+    "SoMarkAI/OXR-1.0",
     "tencent/HunyuanOCR",
     "tencent/WeVisDoc-2B",
     "tencent/WeVisDoc-4B",
@@ -1053,6 +1054,7 @@ mod tests {
         );
         // Repos ModelScope lacks download from Hugging Face instead.
         for repo in [
+            "SoMarkAI/OXR-1.0",
             "tencent/HunyuanOCR",
             "tencent/WeVisDoc-2B",
             "tencent/WeVisDoc-4B",
