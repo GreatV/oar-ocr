@@ -384,7 +384,12 @@ fn table_html_heads(boxes: &[[f32; 4]], texts: &[&str], tab: &[Vec<f32>; 3]) -> 
         let mut c = 0;
         while c < cols.len() {
             if let Some((span, text)) = grid.get(&(r, c)) {
-                let attr = if *span > 1 {
+                // A span stops at the next occupied slot, so close columns
+                // keep their cells (the reference skips them, dropping text).
+                let span = (1..*span)
+                    .find(|&k| grid.contains_key(&(r, c + k)))
+                    .unwrap_or(*span);
+                let attr = if span > 1 {
                     format!(" colspan=\"{span}\"")
                 } else {
                     String::new()
@@ -528,4 +533,36 @@ pub(super) fn page_markdown(blocks: &[Block]) -> String {
 /// The block label of a class id.
 pub(super) fn label(class: usize) -> &'static str {
     BLOCK_CLASSES[class]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two close columns: each wide left cell reaches the right column's
+    /// center within a line height, but the right cells still render.
+    #[test]
+    fn head_spans_stop_at_occupied_cells() {
+        let boxes = [
+            [0., 0., 20., 10.],
+            [22., 0., 26., 10.],
+            [0., 20., 20., 30.],
+            [22., 20., 26., 30.],
+        ];
+        let (row, col) = ([0, 0, 1, 1], [0, 1, 0, 1]);
+        let logits = |same: &dyn Fn(usize, usize) -> bool| -> Vec<f32> {
+            (0..16)
+                .map(|k| if same(k / 4, k % 4) { 5.0 } else { -5.0 })
+                .collect()
+        };
+        let tab = [
+            logits(&|i, j| row[i] == row[j]),
+            logits(&|i, j| col[i] == col[j]),
+            logits(&|i, j| i == j),
+        ];
+        assert_eq!(
+            table_html_heads(&boxes, &["A", "B", "C", "D"], &tab),
+            "<table>\n<tr><th>A</th><th>B</th></tr>\n<tr><td>C</td><td>D</td></tr>\n</table>"
+        );
+    }
 }

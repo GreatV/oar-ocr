@@ -15,7 +15,9 @@
 //! `orient.onnx`, `script.onnx`, the group recognizers `rec_<group>.onnx`
 //! and the language models `lm.npz` and `lm_<group>.npz` used when present.
 //! It reproduces the reference pipeline's OCR mode (`indra-ocr` 1.1.2;
-//! the earlier v3.1 model set loads too). Reading a PDF's own text layer is
+//! the earlier v3.1 model set loads too) with two fixes: token positions
+//! of a tall-window recognizer map back through the crop it read, and a
+//! table built from the table heads never spans over a neighbouring cell. Reading a PDF's own text layer is
 //! not supported: render PDF pages to images first.
 //!
 //! The model weights use a modified OpenRAIL-M license; see the model
@@ -707,7 +709,10 @@ impl IndraOcr {
                     let h = (boxes[j][3] as f64 - y0).max(1.0);
                     let ix0 = (x0 - recognize::PAD_X * h).floor();
                     let cw = (x1 + recognize::PAD_X * h).ceil() - ix0;
-                    let f = cw / crops[j].width as f64;
+                    // Timesteps map back through the crop the recognizer
+                    // read (the reference scales by the one-band crop even
+                    // for a tall window, which stretches token positions).
+                    let f = cw / src[j].width as f64;
                     let line_conf = if keep.is_empty() {
                         0.0
                     } else {
