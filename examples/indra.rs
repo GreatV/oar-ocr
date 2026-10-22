@@ -15,6 +15,7 @@
 //! * `--format` - `markdown` (default), `json` (the shared page JSON), or `text` (one line per detected line)
 //! * `--math` - Write lines with math as inline LaTeX (needs the math models)
 //! * `--keep-furniture` - Keep page headers and footers in the Markdown
+//! * `--table-heads` - Build tables from the order model's row, column and cell heads
 //! * `--device` - Device to use (`cpu`, `auto`, `cuda:0`, ...)
 //! * `<IMAGES>...` - One or more page images
 //!
@@ -67,6 +68,10 @@ struct Args {
     #[arg(long)]
     keep_furniture: bool,
 
+    /// Build tables from the order model's row, column and cell heads
+    #[arg(long)]
+    table_heads: bool,
+
     /// Device (cpu, auto, cuda:N, ...); the models are built for CPU
     #[arg(long, default_value = "cpu")]
     device: String,
@@ -78,7 +83,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut builder = IndraOcrBuilder::new(&args.model_dir)
         .math(args.math)
-        .keep_furniture(args.keep_furniture);
+        .keep_furniture(args.keep_furniture)
+        .table_heads(args.table_heads);
     if let Some(config) = parse_device_config(&args.device)? {
         builder = builder.ort_session(config);
     }
@@ -91,12 +97,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let start = Instant::now();
         let page = ocr.predict(vec![image])?.remove(0);
         info!(
-            "{}: {} lines, {} blocks, rotation {}, skew {} in {:.0?}",
+            "{}: {} lines, {} blocks, rotation {}, skew {}, vertical {} in {:.0?}",
             path.display(),
             page.lines.len(),
             page.blocks.len(),
             page.rotation,
             page.skew,
+            page.vertical,
             start.elapsed()
         );
         match args.format {

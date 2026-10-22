@@ -81,6 +81,12 @@ regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+# Indra OCR: Hangul jamo composition, right-to-left lines, and its n-gram
+# language models (.npz archives).
+unicode-bidi = "0.3.18"
+unicode-normalization = "0.1.25"
+unicode-properties = { version = "0.1.4", default-features = false, features = ["general-category"] }
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 ab_glyph = "0.2"

@@ -2,7 +2,7 @@
 //! a new block starts wherever the same-block logit between consecutive
 //! lines is negative, and each block renders by its class.
 
-use super::order::{BLOCK_CLASSES, Square, group_class, median_f32};
+use super::order::{BLOCK_CLASSES, Square, cluster, group_class, median_f32};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -241,6 +241,172 @@ pub(super) fn table_html(boxes: &[[f32; 4]], texts: &[String]) -> (Vec<String>, 
     (Vec::new(), out.join("\n"))
 }
 
+/// The order model's table heads for some lines: same row, same column and
+/// same cell logits, `[3, n, n]` row-major.
+pub(super) struct TableHeads<'a> {
+    pub n: usize,
+    pub data: &'a [f32],
+}
+
+impl TableHeads<'_> {
+    /// The `[n, n]` logits of head `k` between the lines `ids` (row-major).
+    fn sub(&self, k: usize, ids: &[usize]) -> Vec<f32> {
+        let base = k * self.n * self.n;
+        ids.iter()
+            .flat_map(|&i| ids.iter().map(move |&j| self.data[base + i * self.n + j]))
+            .collect()
+    }
+}
+
+/// The lines of one cell are stacked (they overlap horizontally). When the
+/// cell head joins side-by-side lines in more than 10% of its cells, it has
+/// failed on this table and the geometric assembly is used instead.
+fn heads_plausible(boxes: &[[f32; 4]], same_cell: &[f32]) -> bool {
+    let cells = cluster(&Square {
+        n: boxes.len(),
+        data: same_cell,
+    });
+    let bad = cells
+        .iter()
+        .filter(|c| {
+            c.len() >= 2
+                && c.iter().any(|&i| {
+                    c.iter()
+                        .any(|&j| boxes[i][2].min(boxes[j][2]) - boxes[i][0].max(boxes[j][0]) < 0.0)
+                })
+        })
+        .count();
+    bad as f64 <= 0.1 * cells.len() as f64
+}
+
+/// An HTML table from the order model's table heads (`tab`: the heads of
+/// the table's own lines): cells from the same-cell head, then rows and
+/// columns of cells from the mean same-row and same-column logits.
+fn table_html_heads(boxes: &[[f32; 4]], texts: &[&str], tab: &[Vec<f32>; 3]) -> String {
+    let n = boxes.len();
+    let cells = cluster(&Square { n, data: &tab[2] });
+    let m = cells.len();
+    let cb: Vec<[f32; 4]> = cells
+        .iter()
+        .map(|c| {
+            let bx = |k: usize| c.iter().map(move |&i| boxes[i][k]);
+            [
+                bx(0).fold(f32::INFINITY, f32::min),
+                bx(1).fold(f32::INFINITY, f32::min),
+                bx(2).fold(f32::NEG_INFINITY, f32::max),
+                bx(3).fold(f32::NEG_INFINITY, f32::max),
+            ]
+        })
+        .collect();
+    let ctext: Vec<String> = cells
+        .iter()
+        .map(|c| {
+            let mut c = c.clone();
+            c.sort_by(|&a, &b| {
+                boxes[a][1]
+                    .total_cmp(&boxes[b][1])
+                    .then(boxes[a][0].total_cmp(&boxes[b][0]))
+            });
+            c.iter().map(|&k| texts[k]).collect::<Vec<_>>().join(" ")
+        })
+        .collect();
+    let cell_logits = |k: usize| -> Vec<f32> {
+        let mut out = vec![0f32; m * m];
+        for a in 0..m {
+            for b in a + 1..m {
+                let pairs: Vec<f32> = cells[a]
+                    .iter()
+                    .flat_map(|&i| cells[b].iter().map(move |&j| tab[k][i * n + j]))
+                    .collect();
+                let v = super::mean_f32(&pairs) as f32;
+                out[a * m + b] = v;
+                out[b * m + a] = v;
+            }
+        }
+        out
+    };
+    let groups = |k: usize, edge: usize| {
+        let mut g = cluster(&Square {
+            n: m,
+            data: &cell_logits(k),
+        });
+        let key = |g: &Vec<usize>| g.iter().map(|&c| cb[c][edge]).fold(f32::INFINITY, f32::min);
+        g.sort_by(|a, b| key(a).total_cmp(&key(b)));
+        g
+    };
+    let rows = groups(0, 1);
+    let cols = groups(1, 0);
+    let mut row_of = vec![0; m];
+    let mut col_of = vec![0; m];
+    for (r, g) in rows.iter().enumerate() {
+        for &c in g {
+            row_of[c] = r;
+        }
+    }
+    for (k, g) in cols.iter().enumerate() {
+        for &c in g {
+            col_of[c] = k;
+        }
+    }
+    let centers: Vec<f32> = cols
+        .iter()
+        .map(|g| {
+            median_f32(
+                &mut g
+                    .iter()
+                    .map(|&c| (cb[c][0] + cb[c][2]) / 2.0)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    let h = median_f32(&mut boxes.iter().map(|b| b[3] - b[1]).collect::<Vec<_>>());
+    let mut grid: std::collections::HashMap<(usize, usize), (usize, String)> = Default::default();
+    for c in 0..m {
+        let c0 = col_of[c];
+        let mut span = 1;
+        while c0 + span < cols.len()
+            && cb[c][0] - h <= centers[c0 + span]
+            && centers[c0 + span] <= cb[c][2] + h
+        {
+            span += 1;
+        }
+        // Two cells on one slot keep both texts.
+        let cell = match grid.remove(&(row_of[c], c0)) {
+            Some((n, text)) => (n.max(span), format!("{text} {}", ctext[c])),
+            None => (span, ctext[c].clone()),
+        };
+        grid.insert((row_of[c], c0), cell);
+    }
+    let mut out = vec!["<table>".to_string()];
+    for r in 0..rows.len() {
+        let tag = if r == 0 && rows.len() > 1 { "th" } else { "td" };
+        let mut tds = String::new();
+        let mut c = 0;
+        while c < cols.len() {
+            if let Some((span, text)) = grid.get(&(r, c)) {
+                // A span stops at the next occupied slot, so close columns
+                // keep their cells (the reference skips them, dropping text).
+                let span = (1..*span)
+                    .find(|&k| grid.contains_key(&(r, c + k)))
+                    .unwrap_or(*span);
+                let attr = if span > 1 {
+                    format!(" colspan=\"{span}\"")
+                } else {
+                    String::new()
+                };
+                tds.push_str(&format!("<{tag}{attr}>{}</{tag}>", escape_html(text)));
+                c += span;
+            } else {
+                tds.push_str(&format!("<{tag}></{tag}>"));
+                c += 1;
+            }
+        }
+        out.push(format!("<tr>{tds}</tr>"));
+    }
+    out.push("</table>".to_string());
+    out.join("\n")
+}
+
 /// One layout block of a page, in reading order.
 pub(super) struct Block {
     pub lines: Vec<usize>,
@@ -251,39 +417,60 @@ pub(super) struct Block {
     pub html: Option<String>,
 }
 
+/// The order model's layout heads for a page's lines.
+pub(super) struct Heads<'a> {
+    /// Block class logits, `[n, classes]`.
+    pub cls: &'a [f32],
+    /// Same-block logits.
+    pub same: Square<'a>,
+    /// The table heads, when tables are built from them.
+    pub tab: Option<TableHeads<'a>>,
+}
+
 /// Splits the reading order into blocks and renders each. `cells` holds a
 /// line's table cells `(box, text)` when it splits into several.
 pub(super) fn page_blocks(
     boxes: &[[f32; 4]],
     texts: &[String],
     order: &[usize],
-    cls: &[f32],
-    same: &Square,
+    heads: &Heads,
     keep_furniture: bool,
     cells: &[Vec<([f32; 4], String)>],
 ) -> Vec<Block> {
-    split_blocks(order, same)
+    let (cls, tab) = (heads.cls, heads.tab.as_ref());
+    split_blocks(order, &heads.same)
         .into_iter()
         .map(|blk| {
             let class = group_class(cls, &blk);
             let lines: Vec<&str> = blk.iter().map(|&i| texts[i].as_str()).collect();
             // Every table block gets HTML (the page JSON content); its
             // Markdown renders as a table only with two or more lines, as in
-            // the reference.
-            let table = (class == TABLE).then(|| {
-                let (mut cb, mut ct) = (Vec::new(), Vec::new());
-                for &i in &blk {
-                    if cells[i].is_empty() {
-                        cb.push(boxes[i]);
-                        ct.push(texts[i].clone());
-                    } else {
-                        for (b, t) in &cells[i] {
-                            cb.push(*b);
-                            ct.push(t.clone());
+            // the reference. With the table heads, a table of two or more
+            // lines is built from them when they look sound.
+            let heads = tab
+                .filter(|_| class == TABLE && blk.len() > 1)
+                .and_then(|tab| {
+                    let bx: Vec<[f32; 4]> = blk.iter().map(|&i| boxes[i]).collect();
+                    let sub = [0, 1, 2].map(|k| tab.sub(k, &blk));
+                    heads_plausible(&bx, &sub[2])
+                        .then(|| (Vec::new(), table_html_heads(&bx, &lines, &sub)))
+                });
+            let table = heads.or_else(|| {
+                (class == TABLE).then(|| {
+                    let (mut cb, mut ct) = (Vec::new(), Vec::new());
+                    for &i in &blk {
+                        if cells[i].is_empty() {
+                            cb.push(boxes[i]);
+                            ct.push(texts[i].clone());
+                        } else {
+                            for (b, t) in &cells[i] {
+                                cb.push(*b);
+                                ct.push(t.clone());
+                            }
                         }
                     }
-                }
-                table_html(&cb, &ct)
+                    table_html(&cb, &ct)
+                })
             });
             let markdown = if matches!(class, HEADER | FOOTER) && !keep_furniture {
                 None
@@ -346,4 +533,36 @@ pub(super) fn page_markdown(blocks: &[Block]) -> String {
 /// The block label of a class id.
 pub(super) fn label(class: usize) -> &'static str {
     BLOCK_CLASSES[class]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two close columns: each wide left cell reaches the right column's
+    /// center within a line height, but the right cells still render.
+    #[test]
+    fn head_spans_stop_at_occupied_cells() {
+        let boxes = [
+            [0., 0., 20., 10.],
+            [22., 0., 26., 10.],
+            [0., 20., 20., 30.],
+            [22., 20., 26., 30.],
+        ];
+        let (row, col) = ([0, 0, 1, 1], [0, 1, 0, 1]);
+        let logits = |same: &dyn Fn(usize, usize) -> bool| -> Vec<f32> {
+            (0..16)
+                .map(|k| if same(k / 4, k % 4) { 5.0 } else { -5.0 })
+                .collect()
+        };
+        let tab = [
+            logits(&|i, j| row[i] == row[j]),
+            logits(&|i, j| col[i] == col[j]),
+            logits(&|i, j| i == j),
+        ];
+        assert_eq!(
+            table_html_heads(&boxes, &["A", "B", "C", "D"], &tab),
+            "<table>\n<tr><th>A</th><th>B</th></tr>\n<tr><td>C</td><td>D</td></tr>\n</table>"
+        );
+    }
 }

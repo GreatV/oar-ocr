@@ -208,7 +208,7 @@ let structure = OARStructureBuilder::new("picodet-l_layout_17cls.onnx")
 
 ### IndraOcrBuilder - Indra OCR
 
-[Indra OCR](https://huggingface.co/datalab-to/indra-ocr) is Datalab's CPU-first page reader: about 18 MB of ONNX models that turn a page into lines with boxes, layout blocks in reading order (text, section headers, lists, tables, captions, footnotes, page headers and footers), and Markdown with tables as HTML. It reads Latin, Cyrillic, Greek, Devanagari, Bengali, and Chinese, turns quarter-turned pages upright, and straightens small tilts. `oar_ocr::indra` reproduces the reference pipeline's OCR mode; reading a PDF's own text layer is not supported, so render PDF pages to images first. Download the models from Hugging Face; they are not part of the auto-download registry, and their weights use a modified OpenRAIL-M license.
+[Indra OCR](https://huggingface.co/datalab-to/indra-ocr) is Datalab's CPU-first page reader: small ONNX models (about 76 MB, 46 MB of them n-gram language models for lines a recognizer is unsure of) that turn a page into lines with boxes, layout blocks in reading order (text, section headers, lists, tables, captions, footnotes, page headers and footers), and Markdown with tables as HTML. A script classifier sends each line to one of four recognizers: Latin, Cyrillic, and Greek (including handwriting); Chinese, Japanese, and Korean; Arabic, Persian, Urdu, and Hebrew (read into logical order, with right-to-left pages read right column first); and Indic, Thai, Lao, Khmer, Georgian, Armenian, and other scripts. It turns quarter-turned pages upright, straightens tilts up to 45 degrees, reads light text on dark ground, and reads Chinese and Japanese pages set in vertical columns. `oar_ocr::indra` reproduces the reference pipeline's OCR mode (`indra-ocr` 1.1.2 with the v1.1.0 models; the earlier v3.1 model set still loads), with two fixes: token positions from the tall-window recognizer are no longer stretched, which moves some split-line boxes, and tables built from the table heads no longer drop a cell that a neighbour's span would cover. Reading a PDF's own text layer is not supported, so render PDF pages to images first. Download the models from Hugging Face; they are not part of the auto-download registry, and their weights use a modified OpenRAIL-M license.
 
 ```bash
 hf download datalab-to/indra-ocr --local-dir models/datalab-to/indra-ocr
@@ -234,9 +234,10 @@ let json = page.to_json(); // the shared page JSON, with pipeline "indra"
 |--------|-------------|
 | `.math(bool)` | Read lines with math as text with inline LaTeX (off by default; needs the `math_*` model files) |
 | `.keep_furniture(bool)` | Keep page headers and footers in the Markdown (left out by default; always listed in `blocks`) |
+| `.table_heads(bool)` | Build tables from the order model's row, column and cell heads instead of from line geometry (off by default, as in the reference; a table the heads fail on falls back to geometry) |
 | `.ort_session(config)` | Apply ONNX Runtime configuration to every model |
 
-Boxes are in the upright page: `page.rotation` is the quarter turn that was undone and `page.width` / `page.height` its size, and `page.skew` the small tilt that was straightened (boxes are mapped back across it). The pipeline is built for CPU; run `cargo run --release --example indra -- --model-dir models/datalab-to/indra-ocr page.png` to try it.
+Boxes are in the upright page: `page.rotation` is the quarter turn that was undone and `page.width` / `page.height` its size, and `page.skew` the tilt that was straightened (boxes are mapped back across it). A page set in vertical columns has `page.vertical` set; it is read turned a quarter turn, but its boxes are on the page as it is and `page.rotation` stays 0. The pipeline is built for CPU; run `cargo run --release --example indra -- --model-dir models/datalab-to/indra-ocr page.png` to try it.
 
 ## GPU Acceleration
 
