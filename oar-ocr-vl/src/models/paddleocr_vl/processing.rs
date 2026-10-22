@@ -1,11 +1,11 @@
 use super::config::PaddleOcrVlImageProcessorConfig;
 use crate::error::Error;
-use crate::utils::image::pil_resample_to_filter_type;
+use crate::utils::image::qwen_vl_resize;
 pub use crate::utils::image::smart_resize;
 use crate::utils::table::{convert_otsl_to_html, looks_like_table_tokens};
 pub use crate::utils::text::strip_math_wrappers;
 use candle_core::{DType, Device, Tensor};
-use image::{RgbImage, imageops::FilterType};
+use image::RgbImage;
 use rayon::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -20,6 +20,63 @@ pub fn postprocess_table_output(input: &str) -> String {
         return trimmed.to_string();
     }
     convert_otsl_to_html(input)
+}
+
+/// `smart_resize` exactly as PaddleOCR-VL's reference image processor
+/// computes it: a side shorter than `factor` is first scaled up to `factor`
+/// (keeping the aspect ratio), and rounding follows Python's `round`, which
+/// rounds halves to even.
+pub(crate) fn reference_smart_resize(
+    height: u32,
+    width: u32,
+    factor: u32,
+    min_pixels: u32,
+    max_pixels: u32,
+) -> Result<(u32, u32), Error> {
+    if factor == 0 || height == 0 || width == 0 {
+        return Err(Error::InvalidInput {
+            message: format!(
+                "PaddleOCR-VL smart_resize: invalid size {width}x{height} or factor {factor}"
+            ),
+        });
+    }
+    let factor = f64::from(factor);
+    let (mut height, mut width) = (f64::from(height), f64::from(width));
+    if height < factor {
+        width = (width * factor / height).round_ties_even();
+        height = factor;
+    }
+    if width < factor {
+        height = (height * factor / width).round_ties_even();
+        width = factor;
+    }
+    if height.max(width) / height.min(width) > 200.0 {
+        return Err(Error::InvalidInput {
+            message: format!(
+                "PaddleOCR-VL smart_resize: absolute aspect ratio must be <= 200, got {:.3}",
+                height.max(width) / height.min(width)
+            ),
+        });
+    }
+    let mut h_bar = (height / factor).round_ties_even() * factor;
+    let mut w_bar = (width / factor).round_ties_even() * factor;
+    if h_bar * w_bar > f64::from(max_pixels) {
+        let beta = (height * width / f64::from(max_pixels)).sqrt();
+        h_bar = (height / beta / factor).floor() * factor;
+        w_bar = (width / beta / factor).floor() * factor;
+    } else if h_bar * w_bar < f64::from(min_pixels) {
+        let beta = (f64::from(min_pixels) / (height * width)).sqrt();
+        h_bar = (height * beta / factor).ceil() * factor;
+        w_bar = (width * beta / factor).ceil() * factor;
+    }
+    if h_bar < factor || w_bar < factor {
+        return Err(Error::InvalidInput {
+            message: format!(
+                "PaddleOCR-VL smart_resize: {width}x{height} resizes below one patch group"
+            ),
+        });
+    }
+    Ok((h_bar as u32, w_bar as u32))
 }
 
 pub fn preprocess_images(
@@ -47,10 +104,6 @@ pub(crate) fn preprocess_images_with_max_pixels(
 
     let factor = (cfg.patch_size * cfg.merge_size) as u32;
     let patch = cfg.patch_size as u32;
-    let resize_filter = cfg
-        .resample
-        .and_then(pil_resample_to_filter_type)
-        .unwrap_or(FilterType::CatmullRom);
 
     let mut all_patches: Vec<Tensor> = Vec::with_capacity(images.len());
     let mut grids = Vec::with_capacity(images.len());
@@ -58,13 +111,15 @@ pub(crate) fn preprocess_images_with_max_pixels(
     for img in images {
         let (h, w) = (img.height(), img.width());
         let (rh, rw) = if cfg.do_resize {
-            smart_resize(h, w, factor, cfg.min_pixels, max_pixels)?
+            reference_smart_resize(h, w, factor, cfg.min_pixels, max_pixels)?
         } else {
             (h, w)
         };
 
+        // The reference processor resizes with PIL (bicubic for `resample: 3`
+        // and by default), so use the PIL-exact resize.
         let resized = if rh != h || rw != w {
-            image::imageops::resize(img, rw, rh, resize_filter)
+            qwen_vl_resize(img, rw, rh, cfg.resample)?
         } else {
             img.clone()
         };
@@ -163,6 +218,24 @@ mod tests {
     use super::PaddleOcrVlImageProcessorConfig;
     use super::*;
     use image::{Rgb, RgbImage};
+
+    #[test]
+    fn reference_smart_resize_matches_the_python_processor() {
+        // Expected sizes from the reference processor's smart_resize
+        // (PaddleOCR-VL-1.5 bounds): 350 / 28 = 12.5 rounds half to even,
+        // and sides shorter than 28 px are scaled up before rounding.
+        for ((height, width), expected) in [
+            ((350, 630), (336, 616)),
+            ((22, 500), (84, 1624)),
+            ((18, 40), (252, 504)),
+        ] {
+            assert_eq!(
+                reference_smart_resize(height, width, 28, 112_896, 1_003_520).unwrap(),
+                expected,
+                "{height}x{width}"
+            );
+        }
+    }
 
     #[test]
     fn test_preprocess_outputs_expected_shapes() -> Result<(), Error> {
