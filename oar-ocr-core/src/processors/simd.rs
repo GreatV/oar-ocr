@@ -481,6 +481,25 @@ mod tests {
                 }
             }
         }
+        // A later finite value in the same SIMD lane must not replace an
+        // earlier maximum across an intervening NaN (including payload NaNs).
+        for nan in [
+            f32::NAN,
+            f32::from_bits(0xffc0_0123),
+            f32::from_bits(0x7f80_0001),
+        ] {
+            for lane in 0..8 {
+                let mut row = vec![f32::NEG_INFINITY; 25];
+                row[lane] = 9.0;
+                row[lane + 8] = nan;
+                row[lane + 16] = 5.0;
+                #[cfg(feature = "simd")]
+                let expected = argmax_two_pass_simd(&row);
+                #[cfg(not(feature = "simd"))]
+                let expected = argmax_scalar(&row);
+                assert_eq!(bits(argmax(&row)), bits(expected), "lane={lane}");
+            }
+        }
     }
 
     #[test]
