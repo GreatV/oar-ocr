@@ -10,6 +10,10 @@ use std::path::{Path, PathBuf};
 
 use crate::{Document, args::IndraFormat};
 
+// datalab-to/indra-ocr revision validated by the CPU/CUDA parity run.
+#[cfg(feature = "auto-download")]
+const MODEL_REVISION: &str = "5993a956d7ea1d43c0d40d409962bb0b033ac1e8";
+
 const REQUIRED: &[&str] = &["meta.json", "det.onnx", "rec.onnx", "order.onnx"];
 const MATH: &[&str] = &[
     "math_meta.json",
@@ -24,12 +28,6 @@ pub(crate) fn devices(
     workers: usize,
     verbose: bool,
 ) -> Result<Vec<OrtSessionConfig>> {
-    // Reject explicit incompatible devices before probing runtimes or downloading.
-    ensure!(workers > 0, "--workers must be a positive integer");
-    ensure!(
-        workers == 1 || devices.iter().all(|d| d == "cpu" || d == "auto"),
-        "Indra accelerator devices require --workers 1; use --device cpu for CPU workers"
-    );
     let configs = devices
         .iter()
         .map(|device| {
@@ -71,7 +69,7 @@ pub(crate) fn model_dir(local: Option<&Path>, math: bool) -> Result<PathBuf> {
             oar_ocr_vl::download_snapshot(
                 oar_ocr_vl::DownloadSource::HuggingFace,
                 "datalab-to/indra-ocr",
-                Some("main"),
+                Some(MODEL_REVISION),
             )
             .context("could not download Indra models from Hugging Face; check connectivity or provide --model-dir DIR")
         }
@@ -157,7 +155,6 @@ mod tests {
         assert!(validate_workers(1, std::slice::from_ref(&gpu)).is_ok());
         assert!(validate_workers(3, &[cpu.clone(), gpu]).is_err());
         assert!(validate_workers(0, &[cpu]).is_err());
-        assert!(devices(&["cuda:0".into()], 3, false).is_err());
         for flag in ["--workers", "--batch-size"] {
             assert!(
                 crate::args::Cli::try_parse_from(["oar", "indra", "page.png", flag, "0"]).is_err()
