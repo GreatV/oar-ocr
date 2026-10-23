@@ -210,8 +210,11 @@ pub(crate) fn capture_decoder_graph<M, I: DecoderGraphInputs>(
         }
     }
 
+    // Thread-local mode: only this thread's unsafe calls (allocations,
+    // synchronization) can invalidate the capture. Global mode would let
+    // another parser replica's allocation on a different thread abort it.
     if let Err(error) = stream
-        .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL)
+        .begin_capture(CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
         .map_err(|e| cuda_graph_error(model_name, "begin decoder CUDA graph capture", e))
     {
         bail_drained!(error);
