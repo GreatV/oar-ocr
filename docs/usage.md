@@ -235,9 +235,23 @@ let json = page.to_json(); // the shared page JSON, with pipeline "indra"
 | `.math(bool)` | Read lines with math as text with inline LaTeX (off by default; needs the `math_*` model files) |
 | `.keep_furniture(bool)` | Keep page headers and footers in the Markdown (left out by default; always listed in `blocks`) |
 | `.table_heads(bool)` | Build tables from the order model's row, column and cell heads instead of from line geometry (off by default, as in the reference; a table the heads fail on falls back to geometry) |
+| `.workers(usize)` | CPU page workers (default: 1); each has its own ONNX sessions and shares vocabularies and language models |
 | `.ort_session(config)` | Apply ONNX Runtime configuration to every model |
 
-Boxes are in the upright page: `page.rotation` is the quarter turn that was undone and `page.width` / `page.height` its size, and `page.skew` the tilt that was straightened (boxes are mapped back across it). A page set in vertical columns has `page.vertical` set; it is read turned a quarter turn, but its boxes are on the page as it is and `page.rotation` stays 0. The pipeline is built for CPU; run `cargo run --release --example indra -- --model-dir models/datalab-to/indra-ocr page.png` to try it.
+Pass several images to one `predict` call to use the workers; up to the configured number of pages are read concurrently, and pages and errors retain input order. With multiple workers, unset ONNX intra/inter-op thread counts default to one. Explicit thread settings are honored; keep workers times threads within the available cores. Per-page preprocessing uses those worker threads rather than the global pool, so a small worker count also limits preprocessing parallelism. An application-configured global ONNX Runtime thread pool retains its process-wide settings. The default single-worker path is unchanged.
+
+On an Intel Core i9-13900KF (8 performance cores and 16 efficiency cores), warmed runs with the v1.1.0 models, ONNX intra/inter-op threads set to one, and optional math and table heads disabled measured 1.62 pages/s with one worker on 48 pages. Repeating those pages six times (288 pages) measured 7.9 pages/s with 8 workers, 8.6 with 16, and 8.5 with 32. Throughput stopped rising beyond the 16 performance-core threads in this test; start with workers equal to the number of performance-core threads and measure on your own hardware.
+
+Memory grows with the number of workers: peak RSS on the 48-page set rose from about 3 GB with 1 worker to about 5 GB with 16. Each worker owns model sessions, activation arenas, and temporary page buffers, while vocabularies and n-gram language models are shared.
+
+For CUDA, build with `--features cuda` and select the CUDA execution provider through `.ort_session(config)`, as in [GPU Acceleration](#gpu-acceleration). Accelerator configurations require `.workers(1)`; larger values return a configuration error. The example accepts `--device cuda:0`. On an RTX 4090, the 48-page set reached 2.6 pages/s, about 1.6 times one CPU worker, with about 13 GB of VRAM; several CPU workers were faster on this workload. Recognized text matched CPU, but near-tie reading-order or table-column decisions can differ on a few pages.
+
+```bash
+cargo run --release --example indra -- --model-dir models/datalab-to/indra-ocr --workers 4 page1.png page2.png page3.png page4.png
+cargo run --release --features cuda --example indra -- --model-dir models/datalab-to/indra-ocr --device cuda:0 page.png
+```
+
+Boxes are in the upright page: `page.rotation` is the quarter turn that was undone and `page.width` / `page.height` its size, and `page.skew` the tilt that was straightened (boxes are mapped back across it). A page set in vertical columns has `page.vertical` set; it is read turned a quarter turn, but its boxes are on the page as it is and `page.rotation` stays 0.
 
 ## GPU Acceleration
 

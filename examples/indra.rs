@@ -17,6 +17,7 @@
 //! * `--keep-furniture` - Keep page headers and footers in the Markdown
 //! * `--table-heads` - Build tables from the order model's row, column and cell heads
 //! * `--device` - Device to use (`cpu`, `auto`, `cuda:0`, ...)
+//! * `--workers` - CPU page workers, each with its own model sessions (default: 1)
 //! * `<IMAGES>...` - One or more page images
 //!
 //! # Example
@@ -72,9 +73,13 @@ struct Args {
     #[arg(long)]
     table_heads: bool,
 
-    /// Device (cpu, auto, cuda:N, ...); the models are built for CPU
+    /// Device (cpu, auto, cuda:N, ...); accelerators require one worker
     #[arg(long, default_value = "cpu")]
     device: String,
+
+    /// CPU page workers; unset ONNX thread counts default to one with multiple workers
+    #[arg(long, default_value_t = 1)]
+    workers: usize,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -84,7 +89,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = IndraOcrBuilder::new(&args.model_dir)
         .math(args.math)
         .keep_furniture(args.keep_furniture)
-        .table_heads(args.table_heads);
+        .table_heads(args.table_heads)
+        .workers(args.workers);
     if let Some(config) = parse_device_config(&args.device)? {
         builder = builder.ort_session(config);
     }
@@ -92,19 +98,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ocr = builder.build()?;
     info!("Loaded the models in {:.0?}", start.elapsed());
 
-    for path in &args.images {
-        let image = load_image(path)?;
-        let start = Instant::now();
-        let page = ocr.predict(vec![image])?.remove(0);
+    let images = args
+        .images
+        .iter()
+        .map(|path| {
+            load_image(path).map_err(|error| format!("Failed to read {}: {error}", path.display()))
+        })
+        .collect::<Result<_, _>>()?;
+    let start = Instant::now();
+    let pages = ocr.predict(images)?;
+    info!("Read {} pages in {:.0?}", pages.len(), start.elapsed());
+    for (path, page) in args.images.iter().zip(pages) {
         info!(
-            "{}: {} lines, {} blocks, rotation {}, skew {}, vertical {} in {:.0?}",
+            "{}: {} lines, {} blocks, rotation {}, skew {}, vertical {}",
             path.display(),
             page.lines.len(),
             page.blocks.len(),
             page.rotation,
             page.skew,
-            page.vertical,
-            start.elapsed()
+            page.vertical
         );
         match args.format {
             Format::Markdown => println!("{}", page.markdown),
