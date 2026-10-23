@@ -10,9 +10,10 @@
 
 use super::config::{XiaomiOcrProcessorConfig, XiaomiOcrVisionConfig};
 use crate::error::Error;
+use crate::runtime::image::image_to_merge_grouped_patches;
 use crate::utils::{
     candle_to_ocr_processing,
-    image::{image_to_chw, patchify_merge_grouped, qwen_vl_resize, smart_resize},
+    image::{qwen_vl_resize, smart_resize},
 };
 use candle_core::{DType, Device, Tensor};
 use image::RgbImage;
@@ -92,12 +93,8 @@ pub fn preprocess_image(
     let rescale_factor = image_processor
         .do_rescale
         .then_some(image_processor.rescale_factor);
-    let frame = image_to_chw(&resized, mean, std, rescale_factor);
-
     // A still image is one temporal grid cell whose frame is repeated to fill
     // the Conv3D temporal kernel.
-    let frames: Vec<&[f32]> =
-        std::iter::repeat_n(frame.as_slice(), image_processor.temporal_patch_size).collect();
     let grid_t = 1usize;
     let grid_h = resized_height as usize / image_processor.patch_size;
     let grid_w = resized_width as usize / image_processor.patch_size;
@@ -112,14 +109,11 @@ pub fn preprocess_image(
         });
     }
 
-    let flat = patchify_merge_grouped(
-        &frames,
-        vision_cfg.in_channels,
-        resized_height as usize,
-        resized_width as usize,
-        grid_t,
-        grid_h,
-        grid_w,
+    let flat = image_to_merge_grouped_patches(
+        &resized,
+        mean,
+        std,
+        rescale_factor,
         image_processor.patch_size,
         image_processor.merge_size,
         image_processor.temporal_patch_size,
