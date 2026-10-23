@@ -15,6 +15,8 @@ use crate::backbones::qwen_vl_processing::{QwenVlImageProcessorConfig, preproces
 use crate::backbones::qwen2_vl::Qwen2VlTextModel;
 use crate::error::Error;
 #[cfg(feature = "cuda")]
+use crate::runtime::cuda::dynamic_kv::RepetitionPenaltyF32;
+#[cfg(feature = "cuda")]
 use crate::runtime::cuda::{ArgmaxFirstBf16, ArgmaxFirstF32, MaskTokenIds};
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::CudaGraphDrainGuard;
@@ -389,6 +391,15 @@ impl TeleOcr {
         let mut batch_position_ids: Vec<Tensor> = Vec::with_capacity(batch_size);
         let mut embed_offset = 0usize;
         let mut history_tokens: Vec<Vec<u32>> = all_input_ids.clone();
+        let sampling_params = self.sampling_params();
+        let mut repetition_histories: Vec<RepetitionHistory> = if sampling_params.is_greedy() {
+            all_input_ids
+                .iter()
+                .map(|tokens| RepetitionHistory::from_tokens(self.cfg.vocab_size, tokens))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         for (i, input_ids) in all_input_ids.iter().enumerate() {
             let seq_len = input_ids.len();
@@ -549,18 +560,24 @@ impl TeleOcr {
                         .map_err(|e| candle_to_ocr_inference("TeleOCR", "trace logits", e))?,
                 );
             }
-            let sampling_params = self.sampling_params();
             let mut next_tokens: Vec<u32> = Vec::with_capacity(batch_size);
             for (i, logits) in logits_list.iter().enumerate() {
                 if finished[i] {
                     next_tokens.push(0);
                 } else {
-                    let tok = select_next_token(logits, &history_tokens[i], &sampling_params)?;
+                    let unique = repetition_histories
+                        .get(i)
+                        .map_or(&[][..], |history| history.unique.as_slice());
+                    let tok =
+                        select_next_token(logits, &history_tokens[i], unique, &sampling_params)?;
                     if self.eos_token_ids.contains(&tok) {
                         finished[i] = true;
                     } else {
                         generated[i].push(tok);
                         history_tokens[i].push(tok);
+                        if let Some(history) = repetition_histories.get_mut(i) {
+                            history.insert(tok);
+                        }
                     }
                     next_tokens.push(tok);
                 }
@@ -694,14 +711,61 @@ impl SamplingParams {
     }
 }
 
+// Like HunyuanOCR's presence history, each id appears once. TeleOCR seeds it
+// from the prompt as well as generated tokens; the ordered history remains
+// separate for the existing no-repeat-ngram and non-greedy processors.
+struct RepetitionHistory {
+    present: Vec<bool>,
+    unique: Vec<u32>,
+}
+
+impl RepetitionHistory {
+    fn from_tokens(vocab_size: usize, tokens: &[u32]) -> Self {
+        let mut history = Self {
+            present: vec![false; vocab_size],
+            unique: Vec::new(),
+        };
+        for &token in tokens {
+            history.insert(token);
+        }
+        history
+    }
+
+    fn insert(&mut self, token: u32) {
+        if let Some(present) = self.present.get_mut(token as usize)
+            && !*present
+        {
+            *present = true;
+            self.unique.push(token);
+        }
+    }
+}
+
 fn select_next_token(
     logits: &Tensor,
     history: &[u32],
+    unique_history: &[u32],
     params: &SamplingParams,
 ) -> Result<u32, Error> {
     // TeleOCR's generation config sets top_k=1, so decoding is greedy
-    // even though do_sample=true; repetition_penalty=1.05 still runs as a
-    // logits processor, which keeps this on the CPU path below.
+    // even though do_sample=true. Keep the default repetition processor in
+    // F32 on CUDA and copy only the selected id back to the host.
+    #[cfg(feature = "cuda")]
+    if params.gpu_greedy_sampling
+        && logits.device().is_cuda()
+        && params.is_greedy()
+        && params.repetition_penalty > 1.0
+        && params.repetition_penalty.is_finite()
+        && params.no_repeat_ngram_size == 0
+        && matches!(logits.dtype(), DType::BF16 | DType::F32)
+    {
+        return select_penalized_greedy_token_cuda(
+            logits,
+            unique_history,
+            params.repetition_penalty,
+        );
+    }
+
     #[cfg(feature = "cuda")]
     if params.gpu_greedy_sampling
         && logits.device().is_cuda()
@@ -744,18 +808,62 @@ fn select_next_token(
         .to_vec1::<f32>()
         .map_err(|e| candle_to_ocr_inference("TeleOCR", "logits to vec", e))?;
 
-    apply_sampling_processors(&mut logits_vec, history, params);
-
     if params.is_greedy() {
+        apply_unique_repetition_penalty(&mut logits_vec, unique_history, params.repetition_penalty);
+        apply_no_repeat_ngram(&mut logits_vec, history, params.no_repeat_ngram_size);
         return Ok(argmax_token(&logits_vec));
     }
 
+    apply_sampling_processors(&mut logits_vec, history, params);
     let probs = softmax(&logits_vec);
     if let Some(idx) = sample_from_probs(&probs) {
         Ok(idx as u32)
     } else {
         Ok(argmax_token(&logits_vec))
     }
+}
+
+#[cfg(feature = "cuda")]
+fn select_penalized_greedy_token_cuda(
+    logits: &Tensor,
+    unique_history: &[u32],
+    penalty: f32,
+) -> Result<u32, Error> {
+    let adjusted = logits
+        .reshape((1, logits.elem_count()))
+        .and_then(|logits| {
+            // In-place processing must not modify an F32 decoder output or a
+            // graph buffer. The BF16 cast already creates separate storage.
+            if logits.dtype() == DType::F32 {
+                logits.copy()
+            } else {
+                logits.to_dtype(DType::F32)
+            }
+        })
+        .and_then(|logits| logits.contiguous())
+        .map_err(|e| candle_to_ocr_inference("TeleOCR", "copy F32 repetition logits", e))?;
+    if !unique_history.is_empty() {
+        let ids = Tensor::new(unique_history, logits.device())
+            .and_then(|ids| ids.unsqueeze(0))
+            .map_err(|e| candle_to_ocr_inference("TeleOCR", "upload unique repetition ids", e))?;
+        adjusted
+            .inplace_op2(&ids, &RepetitionPenaltyF32 { penalty })
+            .map_err(|e| candle_to_ocr_inference("TeleOCR", "GPU repetition penalty", e))?;
+    }
+    // The CPU scan returns id 0 if every value is NaN or -inf. Replacing
+    // NaNs with -inf preserves that case as well as ordinary lowest-id ties.
+    let not_nan = adjusted
+        .eq(&adjusted)
+        .map_err(|e| candle_to_ocr_inference("TeleOCR", "penalized NaN mask", e))?;
+    let neg_inf = Tensor::new(f32::NEG_INFINITY, logits.device())
+        .and_then(|value| value.broadcast_as(adjusted.dims()))
+        .map_err(|e| candle_to_ocr_inference("TeleOCR", "penalized NaN replacement", e))?;
+    not_nan
+        .where_cond(&adjusted, &neg_inf)
+        .and_then(|logits| logits.apply_op1_no_bwd(&ArgmaxFirstF32))
+        .and_then(|tokens| tokens.i(0))
+        .and_then(|token| token.to_scalar::<u32>())
+        .map_err(|e| candle_to_ocr_inference("TeleOCR", "GPU penalized argmax", e))
 }
 
 #[cfg(feature = "cuda")]
@@ -850,6 +958,21 @@ fn apply_repetition_penalty(logits: &mut [f32], history: &[u32], penalty: f32) {
         } else {
             val / penalty
         };
+    }
+}
+
+fn apply_unique_repetition_penalty(logits: &mut [f32], unique: &[u32], penalty: f32) {
+    if penalty <= 1.0 {
+        return;
+    }
+    for &token in unique {
+        if let Some(value) = logits.get_mut(token as usize) {
+            *value = if *value < 0.0 {
+                *value * penalty
+            } else {
+                *value / penalty
+            };
+        }
     }
 }
 
@@ -1104,6 +1227,79 @@ fn get_rope_index(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_greedy_matches_processors(device: &Device) -> Result<(), Error> {
+        let mut tied = vec![0.0; 1030];
+        tied[1] = 10.0;
+        tied[1024] = 10.0;
+        let cases = [
+            vec![10.0f32, 9.0, 8.0, -1.0],
+            vec![-1.0, -1.05, -1.1, -1.3],
+            // Rounding a penalized BF16 value back to BF16 changes the winner.
+            vec![1.0, 0.953125, 0.94921875, 0.9],
+            vec![f32::NAN, -0.0, 0.0, f32::NEG_INFINITY],
+            vec![f32::NAN, f32::NEG_INFINITY, f32::NAN, f32::NEG_INFINITY],
+            vec![f32::NAN; 4],
+            vec![f32::INFINITY, f32::INFINITY, -1.0, f32::NEG_INFINITY],
+            tied,
+        ];
+        for values in cases {
+            for dtype in [DType::F32, DType::BF16] {
+                let cpu = Tensor::new(values.as_slice(), &Device::Cpu)?.to_dtype(dtype)?;
+                let original = cpu.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+                let logits = cpu.to_device(device)?;
+                for no_repeat_ngram_size in [0, 2] {
+                    let params = SamplingParams {
+                        repetition_penalty: 1.05,
+                        no_repeat_ngram_size,
+                        do_sample: true,
+                        temperature: 0.7,
+                        top_p: 0.8,
+                        top_k: 1,
+                        #[cfg(feature = "cuda")]
+                        gpu_greedy_sampling: true,
+                    };
+                    let mut ordered = vec![0, 0, 2, 2, 99];
+                    let mut history = RepetitionHistory::from_tokens(values.len(), &ordered);
+                    for token in [1, 1, 3, 0] {
+                        let mut expected = original.clone();
+                        // Retain the original HashSet-based processors as the oracle.
+                        apply_sampling_processors(&mut expected, &ordered, &params);
+                        assert_eq!(
+                            select_next_token(&logits, &ordered, &history.unique, &params)?,
+                            argmax_token(&expected),
+                            "dtype {dtype:?}, ngram {no_repeat_ngram_size}, history {ordered:?}"
+                        );
+                        let unchanged = logits
+                            .to_device(&Device::Cpu)?
+                            .to_dtype(DType::F32)?
+                            .to_vec1::<f32>()?;
+                        assert_eq!(
+                            unchanged.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            original.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+                        );
+                        ordered.push(token);
+                        history.insert(token);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_greedy_history_matches_existing_processors() -> Result<(), Error> {
+        assert_greedy_matches_processors(&Device::Cpu)
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn device_greedy_matches_existing_processors() -> Result<(), Error> {
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        assert_greedy_matches_processors(&device)
+    }
 
     #[test]
     fn build_prompt_places_instruction_directly_after_vision_end() {
