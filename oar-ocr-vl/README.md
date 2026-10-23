@@ -18,6 +18,7 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 | [MonkeyOCRv2-B-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-B-Parsing) | 0.7B | Higher-capacity ViT-B variant with the same parsing and recognition tasks |
 | [MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) | 0.6B | Model-native layout, end-to-end parsing, text, formula, and OTSL-table recognition |
 | [OvisOCR2](https://huggingface.co/ATH-MaaS/OvisOCR2) | 0.8B | Model-native full-page document-to-Markdown parsing |
+| [OXR-1.0](https://huggingface.co/SoMarkAI/OXR-1.0) | 1.4B | PP-DocLayout page parsing and text, formula, HTML table, code, and chemical-structure recognition |
 | [PaddleOCR-VL](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) | 0.9B | External-layout page parsing, text, table, formula, and chart recognition |
 | [PaddleOCR-VL-1.5](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5) | 0.9B | PaddleOCR-VL tasks plus text spotting and seal recognition |
 | [PaddleOCR-VL-1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) | 0.9B | Region-aware refinement, drop-in compatible with the 1.5 loader |
@@ -37,6 +38,8 @@ See [`examples`](examples) for runnable examples.
 2. **VL-based recognition** to extract content from each region
 
 Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, TeleOCR, jina-ocr-v1, MonkeyOCRv2, OvisOCR2, WeVisDoc, Xiaomi-OCR-0, HunyuanOCR, MinerU2.5/Pro, or MinerU-Diffusion for externally detected crops. HPD-Parsing and Youtu-Parsing-Omni support their model-native page protocols. For complete pages, prefer each model's native path where available: MonkeyOCRv2 `Layout`/`EndToEnd`, OvisOCR2, jina-ocr-v1, WeVisDoc, Xiaomi-OCR-0, HPD-Parsing, and Youtu-Parsing-Omni full-page parsing, HunyuanOCR full-page prompts, and the MinerU two-step extraction examples.
+
+OXR also implements `RecognitionBackend` for text, formula, and table crops, composing with any `LayoutSource` through the shared `LayoutPageParser`/`DocParser` pipeline. Direct model inference additionally supports code and chemical-structure prompts.
 
 `LayoutPageParser` composes an owned layout source and recognition backend into `PageParser`, the same complete-page interface used by the model-native parsers:
 
@@ -86,7 +89,7 @@ let options = AnyPageParserOptions::default().with_max_new_tokens(8192);
 let page = parser.parse_page(&image, &options)?;
 ```
 
-Construct it from an already-loaded model with `From`: the model-native parsers (`HpdParsing`, `HunyuanOcr`, `JinaOcr`, `MinerU`, `MinerUDiffusion`, `MonkeyOcrV2`, `OvisOcr2`, `WeVisDoc`, `XiaomiOcr`, `YoutuParsingOmni`) and `LayoutPageParser` compositions over `PpDocLayout` (`PaddleOcrVl`, `GlmOcr`, `TeleOcr`). `AnyPageParserOptions` carries the knobs every parser shares: `max_new_tokens` maps to each model's generation budget (including `MinerUDiffusion`'s `gen_length`), and `region_batch_size` applies to the region-batching parsers (`MinerU` and the layout-composed models); parsers without a matching concept ignore the knob.
+Construct it from an already-loaded model with `From`: the model-native parsers (`HpdParsing`, `HunyuanOcr`, `JinaOcr`, `MinerU`, `MinerUDiffusion`, `MonkeyOcrV2`, `OvisOcr2`, `WeVisDoc`, `XiaomiOcr`, `YoutuParsingOmni`) and `LayoutPageParser` compositions over `PpDocLayout` (`PaddleOcrVl`, `GlmOcr`, `TeleOcr`, `Oxr`). `AnyPageParserOptions` carries the knobs every parser shares: `max_new_tokens` maps to each model's generation budget (including `MinerUDiffusion`'s `gen_length`), and `region_batch_size` applies to the region-batching parsers (`MinerU` and the layout-composed models); parsers without a matching concept ignore the knob. OXR handles each scheduled region sequentially.
 
 `AnyPageParser::from_dir` loads a named parser from a model directory. The model is always named explicitly by its Hugging Face repo ID (`tencent/HunyuanOCR`, `PaddlePaddle/PaddleOCR-VL-1.5`, …) — most supported models are fine-tunes whose checkpoint configs match their public base models, so the directory cannot identify the model reliably on its own. Each model then loads through its own `from_dir` with its own defaults:
 
@@ -110,7 +113,7 @@ let parser = AnyPageParser::from_dir(AnyPageParserModel::HunyuanOcr, "tencent/Hu
 let model: AnyPageParserModel = "tencent/hunyuanocr".parse()?;
 ```
 
-The layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR) require a PP-DocLayout directory in the load options; loading fails with a clear error when it is missing.
+The layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR, OXR) require a PP-DocLayout directory in the load options; loading fails with a clear error when it is missing.
 
 With the `auto-download` feature, `AnyPageParser::from_pretrained` downloads the checkpoint named by the model ID when it is not cached, then loads it through the same path:
 
@@ -238,6 +241,31 @@ println!("{markdown}");
 ```
 
 The official runtime resizes RGB input with bicubic antialiasing to a 32-pixel-aligned area between `448²` and `2880²` pixels. Its fixed prompt requests reading-order Markdown, LaTeX formulas, HTML tables, and bounding-box `<img>` tags for visual regions. `parse` removes those visual-region blocks by default before applying truncated-repeat cleanup; call `parse_with_image_tags(..., true)` or `generate` to retain the references. The library does not create the referenced bounding-box crop files.
+
+### OXR-1.0
+
+OXR combines a SigLIP2 NaViT visual tokenizer with a tied Qwen3-0.6B decoder. Use the explicit repository ID `SoMarkAI/OXR-1.0`. Page parsing uses PP-DocLayout for regions and reading order; the official separate D-FINE `.pth` layout model is not used.
+
+OXR-1.0 weights are under [SoMark's OXR License](https://huggingface.co/SoMarkAI/OXR-1.0/blob/main/LICENSE): Apache 2.0 plus additional terms covering commercial thresholds, an attribution duty, and a ban on competing hosted APIs. Users must accept these terms before using the weights. Load a local directory as below, or use `AnyPageParser::from_pretrained` with the `auto-download` feature to fetch weights from SoMark's public Hugging Face repo and compose them with PP-DocLayout.
+
+```rust
+use candle_core::Device;
+use oar_ocr_vl::{AnyPageParser, AnyPageParserLoadOptions, AnyPageParserModel, AnyPageParserOptions, PageParser};
+use oar_ocr_vl::utils::image::load_image;
+
+let parser = AnyPageParser::from_dir_with_options(
+    AnyPageParserModel::Oxr,
+    "SoMarkAI/OXR-1.0",
+    Device::Cpu,
+    &AnyPageParserLoadOptions::default()
+        .with_layout_dir("PaddlePaddle/PP-DocLayoutV3_safetensors"),
+)?;
+let page = parser.parse_page(&load_image("document.png")?, &AnyPageParserOptions::default())?;
+```
+
+For region inference, `Oxr::generate` accepts `OxrTask::{Text, Formula, Table, Code, ChemicalStructure, WholePage}` and returns raw decoded text. `generate_with_options` accepts `OxrGenerationOptions`, including explicit `with_min_pixels` and `with_max_pixels` controls. Defaults match the official vLLM service: Pillow bilinear RGB resize, a 32-pixel alignment factor, area bounds of 200,704–921,600 pixels, greedy decoding, repetition penalty 1.0, and stop IDs 151643 and 151645. Generation is sequential without CUDA graphs. Checkpoints with non-null `fullatt_block_indexes` are rejected.
+
+`LayoutPageParser::new(layout, model)` accepts any `LayoutSource` and an `Oxr` backend, using the crate's shared `DocParser` for region selection, cropping, text/formula/table routing, generic post-processing, and Markdown rendering. Set pixel bounds and repetition penalty on the backend with `Oxr::with_generation_options`; the parser's `DocParserConfig::max_tokens` supplies the region token limit. The same backend defaults apply to `Oxr::generate`, while methods taking explicit generation options use those instead. Region order comes from the layout source, with the shared parser's filtering and adjacent-text merging. Generation returns at the token limit without an automatic retry. The model's reading-order request is future work. `WholePage` is available for direct inference and does not replace layout-driven page parsing.
 
 ### Xiaomi-OCR-0
 

@@ -10,6 +10,7 @@ const MODEL_MODULES: &[&str] = &[
     "mineru_diffusion",
     "monkeyocrv2",
     "ovisocr2",
+    "oxr",
     "paddleocr_vl",
     "pp_doclayout",
     "teleocr",

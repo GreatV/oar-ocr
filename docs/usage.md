@@ -530,6 +530,33 @@ cargo run -p oar-ocr-vl --features cuda --example ovisocr2 -- \
 
 Add `--keep-image-tags` to retain visual-region image-tag references, or use `--max-tokens` to override the 16,384-token default. The example does not create the referenced bounding-box crop files.
 
+## OXR-1.0
+
+[OXR-1.0](https://huggingface.co/SoMarkAI/OXR-1.0) recognizes regions supplied by PP-DocLayout through the explicit model ID `SoMarkAI/OXR-1.0`.
+
+```rust,no_run
+use candle_core::Device;
+use oar_ocr_vl::{AnyPageParser, AnyPageParserLoadOptions, AnyPageParserModel, AnyPageParserOptions, PageParser};
+use oar_ocr_vl::utils::image::load_image;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let parser = AnyPageParser::from_dir_with_options(
+        AnyPageParserModel::Oxr,
+        "SoMarkAI/OXR-1.0",
+        Device::Cpu,
+        &AnyPageParserLoadOptions::default()
+            .with_layout_dir("PaddlePaddle/PP-DocLayoutV3_safetensors"),
+    )?;
+    let page = parser.parse_page(&load_image("document.png")?, &AnyPageParserOptions::default())?;
+    println!("{}", page.markdown.unwrap_or_default());
+    Ok(())
+}
+```
+
+The weights are under [SoMark's OXR License](https://huggingface.co/SoMarkAI/OXR-1.0/blob/main/LICENSE), Apache 2.0 plus commercial thresholds, an attribution duty, and a ban on competing hosted APIs; users must accept these terms before using the weights.
+
+See the [crate guide](../oar-ocr-vl/README.md#oxr-10) for OXR tasks, PP-DocLayout integration, and generation options.
+
 ## MonkeyOCRv2-S/B-Parsing
 
 [MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) and [MonkeyOCRv2-B-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-B-Parsing) are 0.6B and 0.7B document parsers. They pair Monkey ViT-S and ViT-B vision encoders, respectively, with the same Qwen3-0.6B decoder. The native Candle implementation reads either checkpoint's dimensions from its configuration and supports the five official tasks: `Layout`, `EndToEnd`, `Text`, `Formula`, and `Table`.
@@ -817,7 +844,7 @@ cargo run -p oar-ocr-vl --features cuda \
 
 ## DocParser
 
-DocParser provides a unified API for external layout-first document parsing with VL-based recognition. PaddleOCR-VL, GLM-OCR, MonkeyOCRv2, OvisOCR2, HunyuanOCR, MinerU2.5/Pro, and MinerU-Diffusion implement `RecognitionBackend`. The `doc_parser` CLI example exposes the PaddleOCR-VL and GLM-OCR paths; use the other backends through the library API. HPD-Parsing currently supports only its model-native full-page protocol.
+DocParser provides a unified API for external layout-first document parsing with VL-based recognition. PaddleOCR-VL, GLM-OCR, MonkeyOCRv2, OvisOCR2, OXR, HunyuanOCR, MinerU2.5/Pro, and MinerU-Diffusion implement `RecognitionBackend`. The `doc_parser` CLI example exposes the PaddleOCR-VL and GLM-OCR paths; use the other backends through the library API. HPD-Parsing currently supports only its model-native full-page protocol.
 
 Use `parse(&layout, image)` with any `LayoutSource` — `PpDocLayout` is the built-in one and runs on Candle, so no ONNX Runtime is involved. Regions are recognized in layout order and may be grouped into bounded recognition batches. For complete pages, prefer the model-native paths for MonkeyOCRv2, OvisOCR2, HPD-Parsing, HunyuanOCR, and the MinerU family. Except for HPD-Parsing, their `RecognitionBackend` implementations are intended for externally detected crops.
 

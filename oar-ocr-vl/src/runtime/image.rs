@@ -180,6 +180,11 @@ const PIL_BICUBIC: PilFilter = PilFilter {
     kernel: pil_bicubic_kernel,
 };
 
+const PIL_BILINEAR: PilFilter = PilFilter {
+    support: 1.0,
+    kernel: |t| (1.0 - t.abs()).max(0.0),
+};
+
 const PIL_LANCZOS: PilFilter = PilFilter {
     support: 3.0,
     kernel: pil_lanczos_kernel,
@@ -309,6 +314,15 @@ pub fn qwen_vl_resize(
 /// Pillow bit-for-bit.
 pub fn pil_bicubic_resize(image: &RgbImage, width: u32, height: u32) -> Result<RgbImage, Error> {
     pil_resize(image, width, height, PIL_BICUBIC)
+}
+
+/// Pillow-exact bilinear RGB resize, including the rounded uint8 intermediate.
+pub(crate) fn pil_bilinear_resize(
+    image: &RgbImage,
+    width: u32,
+    height: u32,
+) -> Result<RgbImage, Error> {
+    pil_resize(image, width, height, PIL_BILINEAR)
 }
 
 /// PIL-exact `Image.LANCZOS` resize of an RGB image; see
@@ -710,6 +724,39 @@ mod tests {
         let src = RgbImage::from_raw(5, 4, src).expect("source buffer");
         let out = pil_lanczos_resize(&src, 10, 8).expect("resize");
         assert_eq!(out.as_raw(), &expected[..], "must match Pillow bit-for-bit");
+    }
+
+    #[test]
+    fn pil_bilinear_resize_matches_pillow() {
+        // Pillow Image.resize(..., Image.Resampling.BILINEAR), RGB uint8.
+        let src = RgbImage::from_fn(5, 4, |x, y| {
+            image::Rgb([
+                ((x * 71 + y * 13) % 256) as u8,
+                ((x * 31 + y * 83) % 256) as u8,
+                ((x * 109 + y * 47) % 256) as u8,
+            ])
+        });
+        let down = pil_bilinear_resize(&src, 3, 2).unwrap();
+        assert_eq!(
+            down.as_raw(),
+            &[
+                39, 72, 81, 151, 113, 113, 116, 134, 146, 60, 156, 154, 172, 118, 126, 137, 81,
+                115,
+            ]
+        );
+        let up = pil_bilinear_resize(&src, 7, 6).unwrap();
+        assert_eq!(
+            up.as_raw(),
+            &[
+                0, 0, 0, 41, 18, 62, 91, 40, 140, 142, 62, 218, 193, 84, 113, 134, 106, 118, 28,
+                124, 180, 7, 42, 24, 48, 60, 86, 98, 82, 127, 149, 104, 114, 200, 126, 100, 141,
+                148, 142, 35, 166, 204, 15, 97, 55, 56, 115, 117, 106, 137, 122, 157, 159, 17, 208,
+                150, 95, 149, 160, 154, 43, 178, 192, 24, 152, 86, 65, 170, 148, 115, 192, 153,
+                166, 214, 48, 217, 84, 126, 158, 45, 113, 52, 63, 53, 33, 208, 118, 74, 152, 180,
+                124, 120, 185, 175, 142, 80, 226, 72, 158, 167, 58, 126, 61, 76, 42, 39, 249, 141,
+                80, 120, 203, 130, 33, 208, 181, 55, 103, 232, 77, 181, 173, 99, 149, 67, 117, 65,
+            ]
+        );
     }
 
     /// Callers pass paths straight from a CLI, where an extensionless or
