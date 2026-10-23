@@ -11,8 +11,8 @@
 //! block begins.
 
 use super::config::MinerUDiffusionConfig;
-use super::projector::VisionAbstractor;
 use super::text::{SdarKvCache, SdarModel};
+use crate::backbones::patch_merger::{MergerKeys, SpatialPatchMerger};
 use crate::backbones::qwen_vl_processing::{QwenVlImageProcessorConfig, preprocess_images};
 use crate::backbones::qwen2_vl::Qwen2VlVisionModel;
 use crate::error::Error;
@@ -85,7 +85,7 @@ pub struct MinerUDiffusion {
     image_cfg: QwenVlImageProcessorConfig,
     tokenizer: Tokenizer,
     vision: Qwen2VlVisionModel,
-    abstractor: VisionAbstractor,
+    abstractor: SpatialPatchMerger,
     text: SdarModel,
     image_token_id: u32,
     mask_token_id: u32,
@@ -141,11 +141,16 @@ impl MinerUDiffusion {
 
         let merge_size = cfg.projector_merge_size()?;
         let vision = Qwen2VlVisionModel::load_backbone(&cfg.vision_config, vb.pp("vision_model"))?;
-        let abstractor = VisionAbstractor::load(
+        // `patch_merger2x`: the reference Qwen2-VL `PatchMerger` over the
+        // backbone's per-patch hidden states.
+        let abstractor = SpatialPatchMerger::load(
             vb.pp("vision_abstractor").pp("projection"),
+            MergerKeys::QWEN2_VL,
             cfg.vision_config.embed_dim,
-            cfg.text_config.hidden_size,
             merge_size,
+            cfg.text_config.hidden_size,
+            false,
+            "MinerU-Diffusion",
         )?;
         let text = SdarModel::load(&cfg.text_config, vb.pp("language_model"), dtype)?;
 

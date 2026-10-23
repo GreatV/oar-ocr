@@ -13,7 +13,6 @@ mod adapter;
 mod config;
 mod model;
 mod parser;
-mod projector;
 pub(crate) use crate::backbones::sdar as text;
 
 pub use config::{MinerUDiffusionConfig, SdarConfig};

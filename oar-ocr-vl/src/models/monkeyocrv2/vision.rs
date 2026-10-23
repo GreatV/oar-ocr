@@ -3,13 +3,11 @@ use crate::attention::{
     VISION_CHUNKED_ATTN_CHUNK_SIZE, VISION_CHUNKED_ATTN_SEQ_THRESHOLD, chunked_vision_attention,
     flash_attention, scaled_dot_product_attention,
 };
+use crate::backbones::patch_merger::{MergerKeys, SpatialPatchMerger};
 use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{IndexOp, Tensor};
-use candle_nn::{
-    LayerNorm, LayerNormConfig, Linear, Module, RmsNorm, VarBuilder, layer_norm, linear,
-    linear_no_bias, rms_norm,
-};
+use candle_nn::{Linear, Module, RmsNorm, VarBuilder, linear_no_bias, rms_norm};
 
 const MODEL_NAME: &str = "MonkeyOCRv2";
 
@@ -233,75 +231,11 @@ impl VisionBlock {
     }
 }
 
-#[derive(Debug, Clone)]
-struct PatchMerger {
-    norm: LayerNorm,
-    mlp1: Linear,
-    mlp2: Linear,
-    merged_dim: usize,
-    merge_group: usize,
-}
-
-impl PatchMerger {
-    fn load(cfg: &MonkeyOcrV2VisionConfig, vb: VarBuilder) -> Result<Self, Error> {
-        let vb = vb.pp("merger");
-        let norm = layer_norm(
-            cfg.embed_dim,
-            LayerNormConfig {
-                eps: 1e-6,
-                ..Default::default()
-            },
-            vb.pp("ln_q"),
-        )
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load merger LayerNorm", e))?;
-        let merge_group = cfg.spatial_merge_size * cfg.spatial_merge_size;
-        let merged_dim = cfg.embed_dim * merge_group;
-        let mlp1 = linear(merged_dim, merged_dim, vb.pp("mlp").pp("0"))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load merger MLP 0", e))?;
-        let mlp2 = linear(merged_dim, cfg.hidden_size, vb.pp("mlp").pp("2"))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load merger MLP 2", e))?;
-        Ok(Self {
-            norm,
-            mlp1,
-            mlp2,
-            merged_dim,
-            merge_group,
-        })
-    }
-
-    fn forward(&self, hidden: &Tensor) -> Result<Tensor, Error> {
-        let num_patches = hidden
-            .dim(0)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "read merger patch count", e))?;
-        if !num_patches.is_multiple_of(self.merge_group) {
-            return Err(Error::InvalidInput {
-                message: format!(
-                    "MonkeyOCRv2 merger patch count {num_patches} is not divisible by {}",
-                    self.merge_group
-                ),
-            });
-        }
-        let hidden = self
-            .norm
-            .forward(hidden)
-            .and_then(|hidden| hidden.reshape((num_patches / self.merge_group, self.merged_dim)))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "merger norm/reshape", e))?;
-        let hidden = self
-            .mlp1
-            .forward(&hidden)
-            .and_then(|hidden| hidden.gelu_erf())
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "merger MLP 0", e))?;
-        self.mlp2
-            .forward(&hidden)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "merger MLP 2", e))
-    }
-}
-
 pub struct MonkeyOcrV2VisionModel {
     patch_embed: PatchEmbed,
     blocks: Vec<VisionBlock>,
     post_norm: Option<RmsNorm>,
-    merger: PatchMerger,
+    merger: SpatialPatchMerger,
     head_dim: usize,
     merge_size: usize,
 }
@@ -319,7 +253,15 @@ impl MonkeyOcrV2VisionModel {
             .then(|| rms_norm(cfg.embed_dim, cfg.rms_norm_eps, vb.pp("post_trunk_norm")))
             .transpose()
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load vision post norm", e))?;
-        let merger = PatchMerger::load(cfg, vb.clone())?;
+        let merger = SpatialPatchMerger::load(
+            vb.pp("merger"),
+            MergerKeys::QWEN2_VL,
+            cfg.embed_dim,
+            cfg.spatial_merge_size,
+            cfg.hidden_size,
+            false,
+            MODEL_NAME,
+        )?;
         Ok(Self {
             patch_embed,
             blocks,

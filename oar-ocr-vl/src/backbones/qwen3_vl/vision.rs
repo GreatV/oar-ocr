@@ -8,6 +8,7 @@
 //! and are returned alongside the merged embeddings for the text model to
 //! inject into its first decoder layers.
 
+use crate::backbones::patch_merger::{MergerKeys, SpatialPatchMerger};
 use crate::error::Error;
 use crate::runtime::errors::{candle_to_ocr_inference, candle_to_ocr_processing};
 use crate::runtime::tensor::{
@@ -421,103 +422,13 @@ impl VisionBlock {
     }
 }
 
-/// Spatial merger applied either to the main tower output (LayerNorm over
-/// `hidden_size` before the merge reshape) or, for DeepStack taps, to the
-/// reshaped merge blocks (`use_postshuffle_norm`, LayerNorm over
-/// `hidden_size * merge²`).
-#[derive(Debug, Clone)]
-struct VisionPatchMerger {
-    norm: LayerNorm,
-    linear_fc1: Linear,
-    linear_fc2: Linear,
-    merged_hidden_size: usize,
-    merge_group: usize,
-    postshuffle_norm: bool,
-}
-
-impl VisionPatchMerger {
-    /// `vb` must point at the merger directory itself: `merger` for the main
-    /// head, `deepstack_merger_list.<i>` for a DeepStack tap (their key
-    /// layouts match from there).
-    fn load(
-        cfg: &Qwen3VlVisionConfig,
-        vb: VarBuilder,
-        postshuffle_norm: bool,
-    ) -> Result<Self, Error> {
-        let merge_group = cfg.spatial_merge_size * cfg.spatial_merge_size;
-        let merged_hidden_size = cfg.hidden_size * merge_group;
-        let norm_cfg = LayerNormConfig {
-            eps: 1e-6,
-            ..Default::default()
-        };
-        let norm_size = if postshuffle_norm {
-            merged_hidden_size
-        } else {
-            cfg.hidden_size
-        };
-        let norm = layer_norm(norm_size, norm_cfg, vb.pp("norm"))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load vision merger norm", e))?;
-        let linear_fc1 = linear(merged_hidden_size, merged_hidden_size, vb.pp("linear_fc1"))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load vision merger fc1", e))?;
-        let linear_fc2 = linear(merged_hidden_size, cfg.out_hidden_size, vb.pp("linear_fc2"))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load vision merger fc2", e))?;
-        Ok(Self {
-            norm,
-            linear_fc1,
-            linear_fc2,
-            merged_hidden_size,
-            merge_group,
-            postshuffle_norm,
-        })
-    }
-
-    fn forward(&self, hidden_states: &Tensor) -> Result<Tensor, Error> {
-        let num_patches = hidden_states
-            .dim(0)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision merger patch count", e))?;
-        if !num_patches.is_multiple_of(self.merge_group) {
-            return Err(Error::InvalidInput {
-                message: format!(
-                    "{MODEL_NAME} vision merger expected patch count divisible by {}, got {num_patches}",
-                    self.merge_group
-                ),
-            });
-        }
-        let merged_view = hidden_states
-            .reshape((num_patches / self.merge_group, self.merged_hidden_size))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision merger reshape", e))?;
-        // Pre-shuffle norm runs over raw patches and is reshaped afterwards;
-        // post-shuffle norm runs over the concatenated merge blocks.
-        let hidden_states = if self.postshuffle_norm {
-            self.norm
-                .forward(&merged_view)
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision merger norm", e))?
-        } else {
-            self.norm
-                .forward(hidden_states)
-                .and_then(|normed| {
-                    normed.reshape((num_patches / self.merge_group, self.merged_hidden_size))
-                })
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision merger norm", e))?
-        };
-        let hidden_states = self
-            .linear_fc1
-            .forward(&hidden_states)
-            .and_then(|value| value.gelu_erf())
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision merger fc1", e))?;
-        self.linear_fc2
-            .forward(&hidden_states)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision merger fc2", e))
-    }
-}
-
 pub struct Qwen3VlVisionModel {
     patch_embed: PatchEmbed,
     position_embedding: Tensor,
     position_grid_size: usize,
     blocks: Vec<VisionBlock>,
-    merger: VisionPatchMerger,
-    deepstack_mergers: Vec<VisionPatchMerger>,
+    merger: SpatialPatchMerger,
+    deepstack_mergers: Vec<SpatialPatchMerger>,
     deepstack_visual_indexes: Vec<usize>,
     rotary_embedding: VisionRotaryEmbedding,
     spatial_merge_size: usize,
@@ -538,14 +449,21 @@ impl Qwen3VlVisionModel {
         for index in 0..cfg.depth {
             blocks.push(VisionBlock::load(cfg, vb.pp("blocks").pp(index))?);
         }
-        let merger = VisionPatchMerger::load(cfg, vb.pp("merger"), false)?;
+        let load_merger = |vb: VarBuilder, postshuffle_norm: bool| {
+            SpatialPatchMerger::load(
+                vb,
+                MergerKeys::QWEN3_VL,
+                cfg.hidden_size,
+                cfg.spatial_merge_size,
+                cfg.out_hidden_size,
+                postshuffle_norm,
+                MODEL_NAME,
+            )
+        };
+        let merger = load_merger(vb.pp("merger"), false)?;
         let mut deepstack_mergers = Vec::with_capacity(cfg.deepstack_visual_indexes.len());
         for index in 0..cfg.deepstack_visual_indexes.len() {
-            deepstack_mergers.push(VisionPatchMerger::load(
-                cfg,
-                vb.pp("deepstack_merger_list").pp(index),
-                true,
-            )?);
+            deepstack_mergers.push(load_merger(vb.pp("deepstack_merger_list").pp(index), true)?);
         }
         let rotary_embedding =
             VisionRotaryEmbedding::new(cfg.head_dim()? / 2, 10_000.0, MODEL_NAME, vb.device())?;

@@ -2,6 +2,7 @@ use crate::attention::{
     VISION_CHUNKED_ATTN_CHUNK_SIZE, VISION_CHUNKED_ATTN_SEQ_THRESHOLD, chunked_vision_attention,
     scaled_dot_product_attention,
 };
+use crate::backbones::patch_merger::{MergerKeys, SpatialPatchMerger};
 use crate::error::Error;
 use crate::runtime::errors::{candle_to_ocr_inference, candle_to_ocr_processing};
 use crate::runtime::tensor::{
@@ -358,78 +359,10 @@ impl VisionBlock {
     }
 }
 
-#[derive(Debug, Clone)]
-struct PatchMerger {
-    ln_q: LayerNorm,
-    mlp1: Linear,
-    mlp2: Linear,
-    merge_size: usize,
-    hidden_size: usize,
-}
-
-impl PatchMerger {
-    fn load(cfg: &Qwen2VlVisionConfig, vb: VarBuilder) -> Result<Self, Error> {
-        let norm_cfg = LayerNormConfig {
-            eps: 1e-6,
-            ..Default::default()
-        };
-        let ln_q = layer_norm(cfg.embed_dim, norm_cfg, vb.pp("merger.ln_q"))
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "load merger ln_q", e))?;
-        let hidden_size = cfg.embed_dim * cfg.spatial_merge_size * cfg.spatial_merge_size;
-        let mlp1 = linear(hidden_size, hidden_size, vb.pp("merger.mlp.0"))
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "load merger mlp1", e))?;
-        let mlp2 = linear(hidden_size, cfg.hidden_size, vb.pp("merger.mlp.2"))
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "load merger mlp2", e))?;
-        Ok(Self {
-            ln_q,
-            mlp1,
-            mlp2,
-            merge_size: cfg.spatial_merge_size,
-            hidden_size,
-        })
-    }
-
-    fn forward(&self, x: &Tensor) -> Result<Tensor, Error> {
-        let num_patches = x
-            .dim(0)
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "merger dim", e))?;
-        let group = self.merge_size * self.merge_size;
-        if num_patches % group != 0 {
-            return Err(Error::InvalidInput {
-                message: format!(
-                    "MinerU2.5: merger expects num_patches divisible by {}, got {}",
-                    group, num_patches
-                ),
-            });
-        }
-        let x = self
-            .ln_q
-            .forward(x)
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "merger ln_q", e))?;
-        let x = x
-            .reshape((num_patches / group, self.hidden_size))
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "merger reshape", e))?;
-        let x = self
-            .mlp1
-            .forward(&x)
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "merger mlp1", e))?;
-        let x = x.gelu_erf().map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "MinerU2.5: merger gelu failed",
-                e,
-            )
-        })?;
-        self.mlp2
-            .forward(&x)
-            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "merger mlp2", e))
-    }
-}
-
 pub struct Qwen2VlVisionModel {
     patch_embed: PatchEmbed,
     blocks: Vec<VisionBlock>,
-    merger: Option<PatchMerger>,
+    merger: Option<SpatialPatchMerger>,
     rotary_pos_emb: VisionRotaryEmbedding,
     spatial_merge_size: usize,
 }
@@ -462,7 +395,15 @@ impl Qwen2VlVisionModel {
             blocks.push(VisionBlock::load(cfg, block_vb)?);
         }
         let merger = if with_merger {
-            Some(PatchMerger::load(cfg, vb.clone())?)
+            Some(SpatialPatchMerger::load(
+                vb.pp("merger"),
+                MergerKeys::QWEN2_VL,
+                cfg.embed_dim,
+                cfg.spatial_merge_size,
+                cfg.hidden_size,
+                false,
+                "MinerU2.5",
+            )?)
         } else {
             None
         };
