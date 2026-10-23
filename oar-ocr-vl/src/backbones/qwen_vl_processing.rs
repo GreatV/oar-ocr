@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::runtime::image::{image_to_chw, patchify_merge_grouped, qwen_vl_resize, smart_resize};
+use crate::runtime::image::{image_to_merge_grouped_patches, qwen_vl_resize, smart_resize};
 use candle_core::{DType, Device, Tensor};
 use image::RgbImage;
 use serde::Deserialize;
@@ -263,30 +263,16 @@ fn preprocess_validated(
             });
         }
 
-        let frame = image_to_chw(resized, mean, std, rescale_factor);
-        // For static document images, repeat the same frame to match the expected
-        // temporal_patch_size dimension. This is correct behavior for image-only
-        // models - the temporal dimension exists in the architecture but since
-        // there's only one "frame" (the document image), it's repeated to match
-        // the tensor shape expected by the vision encoder.
-        let frames: Vec<&[f32]> =
-            std::iter::repeat_n(frame.as_slice(), cfg.temporal_patch_size).collect();
-
-        let grid_t = frames.len() / cfg.temporal_patch_size;
+        let grid_t = 1;
         let channel = 3usize;
-        let height = rh as usize;
-        let width = rw as usize;
         let patch_dim = channel * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size;
         let num_patches = grid_t * grid_h * grid_w;
 
-        let flat_patches = patchify_merge_grouped(
-            &frames,
-            channel,
-            height,
-            width,
-            grid_t,
-            grid_h,
-            grid_w,
+        let flat_patches = image_to_merge_grouped_patches(
+            resized,
+            mean,
+            std,
+            rescale_factor,
             cfg.patch_size,
             merge,
             cfg.temporal_patch_size,
@@ -363,6 +349,73 @@ mod tests {
             resample: None,
             rescale_factor: 1.0 / 255.0,
         }
+    }
+
+    #[test]
+    fn direct_patches_match_chw_then_patchify_bits() -> Result<(), crate::Error> {
+        use crate::runtime::image::{
+            image_to_chw, patchify_merge_grouped, qwen_vl_resize, smart_resize,
+        };
+
+        let mut cfg = fixture_config();
+        cfg.patch_size = 2;
+        cfg.min_pixels = Some(64);
+        cfg.max_pixels = Some(1024);
+        cfg.image_mean = vec![0.48145466, 0.4578275, 0.40821073];
+        cfg.image_std = vec![0.26862954, 0.2613026, 0.2757771];
+        for (w, h) in [(7, 11), (37, 23), (59, 53), (16, 24)] {
+            let image = RgbImage::from_fn(w, h, |x, y| {
+                image::Rgb(std::array::from_fn(|c| {
+                    ((x * 37 + y * 71 + c as u32 * 53) % 256) as u8
+                }))
+            });
+            for (rescale, normalize) in [(false, false), (false, true), (true, false), (true, true)]
+            {
+                cfg.do_rescale = rescale;
+                cfg.do_normalize = normalize;
+                let (rh, rw) = smart_resize(h, w, 4, 64, 1024)?;
+                let resized = qwen_vl_resize(&image, rw, rh, cfg.resample)?;
+                let mean = if normalize {
+                    cfg.image_mean.as_slice()
+                } else {
+                    &[0.0; 3]
+                };
+                let std = if normalize {
+                    cfg.image_std.as_slice()
+                } else {
+                    &[1.0; 3]
+                };
+                let chw = image_to_chw(&resized, mean, std, rescale.then_some(cfg.rescale_factor));
+                let (gh, gw) = (rh as usize / 2, rw as usize / 2);
+                let expected = patchify_merge_grouped(
+                    &[&chw, &chw],
+                    3,
+                    rh as usize,
+                    rw as usize,
+                    1,
+                    gh,
+                    gw,
+                    2,
+                    2,
+                    2,
+                );
+                let actual = preprocess_images(
+                    std::slice::from_ref(&image),
+                    &cfg,
+                    &Device::Cpu,
+                    DType::F32,
+                    "test",
+                )?;
+                assert_eq!(actual.image_grid_thw, vec![(1, gh, gw)]);
+                let actual = actual.pixel_values.flatten_all()?.to_vec1::<f32>()?;
+                assert_eq!(
+                    actual.into_iter().map(f32::to_bits).collect::<Vec<_>>(),
+                    expected.into_iter().map(f32::to_bits).collect::<Vec<_>>(),
+                    "{w}x{h}, rescale={rescale}, normalize={normalize}",
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]
