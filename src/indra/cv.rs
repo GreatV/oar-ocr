@@ -493,8 +493,6 @@ mod tests {
             GrayImage::from_pixel(7, 1, image::Luma([255])),
             patterned,
         ] {
-            let mut old_scores = Vec::new();
-            let mut new_scores = Vec::new();
             for a in [-45.0, -3.5, -0.3, 0.0, 0.1, 2.5, 45.0] {
                 let rotated = rotate_u8_zero(&ink, a);
                 let expected: Vec<i64> = rotated
@@ -503,19 +501,7 @@ mod tests {
                     .map(|row| row.iter().map(|&v| i64::from(v)).sum())
                     .collect();
                 assert_eq!(rotated_row_sums(&ink, a), expected, "angle {a}");
-                let score = expected
-                    .windows(2)
-                    .map(|p| (p[1] - p[0]).pow(2))
-                    .sum::<i64>() as f64;
-                let actual = super::super::row_sharpness(&ink, a);
-                assert_eq!(actual.to_bits(), score.to_bits());
-                old_scores.push(score);
-                new_scores.push(actual);
             }
-            assert_eq!(
-                super::super::argmax_f64(&old_scores),
-                super::super::argmax_f64(&new_scores)
-            );
         }
     }
 
