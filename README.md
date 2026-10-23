@@ -25,6 +25,7 @@ Install the standalone tool with `cargo install oar-ocr-cli` (or add `--features
 
 ```bash
 oar ocr page.png
+oar indra page.png --device cpu
 oar structure page.png -o documents
 oar parse --model PaddlePaddle/PaddleOCR-VL-1.5 page.png
 oar structure report.pdf --pages 1-3 --format json

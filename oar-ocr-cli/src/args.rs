@@ -23,7 +23,7 @@ pub(crate) struct Cli {
 
 #[derive(Args)]
 pub(crate) struct Common {
-    /// auto, cpu, cuda:N, metal, or for ocr/structure a comma list like
+    /// auto, cpu, cuda:N, metal, or a comma list like
     /// cuda:0,cuda:1 to run one pipeline replica per device (duplicates allowed)
     #[arg(
         long,
@@ -49,6 +49,8 @@ pub(crate) enum Command {
     Ocr(Ocr),
     /// Parse layout, text, and tables with the PP-StructureV3 preset
     Structure(Structure),
+    /// Read lines, layout blocks, and Markdown with Indra OCR
+    Indra(Indra),
     /// Parse pages with a supported vision-language model
     Parse(Parse),
 }
@@ -114,6 +116,39 @@ pub(crate) struct Structure {
     pub(crate) models: ClassicModels,
     #[arg(long, value_enum, default_value = "markdown")]
     pub(crate) format: PageFormat,
+    #[arg(required = true, value_name = "INPUTS", num_args = 1..)]
+    pub(crate) images: Vec<PathBuf>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum IndraFormat {
+    Markdown,
+    Json,
+    Text,
+}
+
+#[derive(Args)]
+pub(crate) struct Indra {
+    /// Local Indra checkpoint; otherwise download datalab-to/indra-ocr from Hugging Face
+    #[arg(long, value_name = "DIR")]
+    pub(crate) model_dir: Option<PathBuf>,
+    /// CPU page workers per device entry; accelerators require one worker
+    #[arg(long, default_value = "1", value_parser = positive)]
+    pub(crate) workers: usize,
+    /// Pages per batch per replica (default: max(8, 4 * workers))
+    #[arg(long, value_parser = positive)]
+    pub(crate) batch_size: Option<usize>,
+    #[arg(long, value_enum, default_value = "markdown")]
+    pub(crate) format: IndraFormat,
+    /// Read math lines as inline LaTeX; requires the optional math models
+    #[arg(long)]
+    pub(crate) math: bool,
+    /// Keep page headers and footers in Markdown
+    #[arg(long)]
+    pub(crate) keep_furniture: bool,
+    /// Build tables using the reading-order model's table heads
+    #[arg(long)]
+    pub(crate) table_heads: bool,
     #[arg(required = true, value_name = "INPUTS", num_args = 1..)]
     pub(crate) images: Vec<PathBuf>,
 }
