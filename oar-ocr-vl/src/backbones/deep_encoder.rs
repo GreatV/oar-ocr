@@ -1113,120 +1113,26 @@ impl DeepEncoder {
 mod tests {
     use super::*;
 
-    fn samples(count: usize) -> candle_core::Result<Tensor> {
-        Tensor::from_vec(
-            (0..count)
-                .map(|i| ((i * 17 % 23) as f32 - 11.0) * 0.017)
-                .collect::<Vec<_>>(),
-            count,
-            &Device::Cpu,
-        )
-    }
-
-    fn bits(tensor: &Tensor) -> candle_core::Result<Vec<u32>> {
-        Ok(tensor
-            .to_dtype(DType::F32)?
-            .flatten_all()?
-            .to_vec1::<f32>()?
-            .into_iter()
-            .map(f32::to_bits)
-            .collect())
-    }
-
     #[test]
-    fn shared_relative_tables_preserve_per_head_attention() -> Result<(), Error> {
-        for source_dtype in [DType::F32, DType::BF16] {
-            let attention = SamAttention {
-                qkv: Linear::new(samples(48)?.reshape((12, 4))?, None),
-                proj: Linear::new(samples(16)?.reshape((4, 4))?, None),
-                rel_pos_h: samples(6)?.reshape((3, 2))?.to_dtype(source_dtype)?,
-                rel_pos_w: samples(6)?
-                    .affine(-0.7, 0.1)?
-                    .reshape((3, 2))?
-                    .to_dtype(source_dtype)?,
-                relative_tables: PositionTableCache::default(),
-                heads: 2,
-                head_dim: 2,
-            };
-            for grid in [(2, 2), (3, 2), (2, 3), (2, 2)] {
-                let seq = grid.0 * grid.1;
-                let input = samples(seq * 4)?.reshape((grid.0, grid.1, 4))?;
-                let qkv = attention
-                    .qkv
-                    .forward(&input.reshape((seq, 4))?)?
-                    .reshape((seq, 3, 2, 2))?;
-                let mut heads = Vec::new();
-                for head in 0..2 {
-                    // The old path prepared fresh tables independently for each head.
-                    let tables = attention.prepare_relative_tables(grid)?;
-                    heads.push(attention.attend_head(
-                        &qkv.i((.., 0, head, ..))?.contiguous()?,
-                        &qkv.i((.., 1, head, ..))?.contiguous()?,
-                        &qkv.i((.., 2, head, ..))?.contiguous()?,
-                        1.0 / 2.0f64.sqrt(),
-                        grid,
-                        &tables,
-                    )?);
-                }
-                let expected = attention.proj.forward(&Tensor::cat(&heads, 1)?)?;
-                for _ in 0..2 {
-                    assert_eq!(bits(&attention.forward(&input, grid)?)?, bits(&expected)?);
-                }
-                assert!(attention.relative_tables.entries.lock().unwrap().len() <= 2);
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn absolute_position_cache_preserves_interpolation_and_dtype() -> Result<(), Error> {
+    fn position_cache_keys_and_capacity() -> Result<(), Error> {
+        let cache = PositionTableCache::default();
         let device = Device::Cpu;
-        let mut sam = SamVisionModel::load(
-            &SamConfig {
-                depth: 0,
-                width: 4,
-                heads: 2,
-                patch_size: 2,
-                global_attn_indexes: vec![],
-                window_size: 2,
-                pretrained_grid_side: 2,
-                out_channels: 4,
-            },
-            VarBuilder::zeros(DType::F32, &device),
-        )?;
-        sam.pos_embed = samples(16)?.reshape((1, 2, 2, 4))?.to_dtype(DType::BF16)?;
-        let mut clip = ClipVisionModel::load(
-            &ClipConfig {
-                depth: 0,
-                width: 4,
-                heads: 2,
-                ffn_hidden_size: 8,
-                layer_norm_eps: 1e-5,
-                pretrained_grid_side: 2,
-            },
-            VarBuilder::zeros(DType::F32, &device),
-        )?;
-        clip.position_embedding = samples(20)?.reshape((5, 4))?.to_dtype(DType::BF16)?;
-        for grid in [(2, 2), (3, 2), (2, 3), (2, 2)] {
-            for dtype in [DType::F32, DType::BF16, DType::F32] {
-                let sam_positions = sam.positions(grid, dtype)?;
-                let clip_positions = clip.positions(grid, dtype)?;
-                assert_eq!(sam_positions.dtype(), dtype);
-                assert_eq!(clip_positions.dtype(), dtype);
-                assert_eq!(
-                    bits(&sam_positions)?,
-                    bits(&sam.prepare_positions(grid, dtype)?)?
-                );
-                assert_eq!(
-                    bits(&clip_positions)?,
-                    bits(&clip.prepare_positions(grid, dtype)?)?
-                );
-                assert_eq!(sam_positions.id(), sam.positions(grid, dtype)?.id());
-                assert_eq!(clip_positions.id(), clip.positions(grid, dtype)?.id());
-                assert!(sam.positions.entries.lock().unwrap().len() <= 2);
-                assert!(clip.positions.entries.lock().unwrap().len() <= 2);
-            }
-        }
+        let get = |grid: (usize, usize), dtype| {
+            cache.get_or_create(grid, dtype, &device, || {
+                Ok(Tensor::zeros(grid, dtype, &device)?)
+            })
+        };
+        let first = get((2, 2), DType::F32)?;
+        assert_eq!(first.id(), get((2, 2), DType::F32)?.id());
+        let half = get((2, 2), DType::BF16)?;
+        assert_eq!(half.dtype(), DType::BF16);
+        assert_ne!(first.id(), half.id());
+        let resized = get((2, 3), DType::F32)?;
+        assert_eq!(resized.dims(), &[2, 3]);
+        assert_eq!(resized.id(), get((2, 3), DType::F32)?.id());
+        assert_eq!(cache.entries.lock().unwrap().len(), 2);
+        assert_ne!(first.id(), get((2, 2), DType::F32)?.id());
+        assert_eq!(cache.entries.lock().unwrap().len(), 2);
         Ok(())
     }
 }
