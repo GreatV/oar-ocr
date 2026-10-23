@@ -8,7 +8,7 @@ use crate::runtime::attention::{
     ATTENTION_CHUNK_SCRATCH_BUDGET, attention_query_chunk, chunked_vision_attention,
     flash_attention,
 };
-use crate::runtime::tensor::rotate_half;
+use crate::runtime::tensor::apply_rotary_f32;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{LayerNorm, Linear, Module, VarBuilder, layer_norm, linear, linear_no_bias};
 
@@ -54,31 +54,28 @@ impl PatchAttention {
 
     fn forward(&self, input: &Tensor, rotary: &(Tensor, Tensor)) -> Result<Tensor, Error> {
         let length = input.dim(0).map_err(infer)?;
-        let project = |layer: &Linear, rotate: bool| -> Result<Tensor, Error> {
-            let projected = layer
+        let project = |layer: &Linear| -> Result<Tensor, Error> {
+            layer
                 .forward(input)
                 .and_then(|x| x.reshape((length, self.heads, self.head_dim)))
-                .map_err(infer)?;
-            let projected = if rotate {
-                let dtype = projected.dtype();
-                let x = projected.to_dtype(DType::F32).map_err(infer)?;
-                let real = x.broadcast_mul(&rotary.0).map_err(infer)?;
-                let imaginary = rotate_half(&x)?.broadcast_mul(&rotary.1).map_err(infer)?;
-                (real + imaginary)
-                    .and_then(|x| x.to_dtype(dtype))
-                    .map_err(infer)?
-            } else {
-                projected
-            };
-            projected
-                .transpose(0, 1)
+                .map_err(infer)
+        };
+        let to_heads = |x: Tensor| -> Result<Tensor, Error> {
+            x.transpose(0, 1)
                 .and_then(|x| x.unsqueeze(0))
                 .and_then(|x| x.contiguous())
                 .map_err(infer)
         };
-        let query = project(&self.query, true)?;
-        let key = project(&self.key, true)?;
-        let value = project(&self.value, false)?;
+        let (query, key) = apply_rotary_f32(
+            &project(&self.query)?,
+            &project(&self.key)?,
+            &rotary.0,
+            &rotary.1,
+            "OXR",
+        )?;
+        let query = to_heads(query)?;
+        let key = to_heads(key)?;
+        let value = to_heads(project(&self.value)?)?;
         let scale = 1.0 / (self.head_dim as f64).sqrt();
         let context = match flash_attention(&query, &key, &value, scale, false).map_err(infer)? {
             Some(context) => context,

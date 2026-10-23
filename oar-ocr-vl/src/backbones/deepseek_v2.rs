@@ -20,7 +20,7 @@ use crate::error::Error;
 use crate::runtime::attention::{RotaryEmbedding, flash_attention, scaled_dot_product_attention};
 use crate::runtime::cache::TrimmableKvCache;
 use crate::runtime::errors::candle_to_ocr_inference;
-use crate::runtime::tensor::rotate_half;
+use crate::runtime::tensor::rope_native;
 use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::{
     Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, linear_no_bias, rms_norm,
@@ -362,13 +362,7 @@ impl DeepSeekV2Attention {
         let (batch, seq_len, _) = hidden_states
             .dims3()
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention input", e))?;
-        let apply_rope = |tensor: &Tensor| -> Result<Tensor, Error> {
-            let rotated = rotate_half(tensor)?;
-            tensor
-                .broadcast_mul(cos)
-                .and_then(|lhs| rotated.broadcast_mul(sin).and_then(|rhs| &lhs + &rhs))
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "apply RoPE", e))
-        };
+        let apply_rope = |tensor: &Tensor| rope_native(tensor, cos, sin, MODEL_NAME);
         let project = |linear: &Linear| -> Result<Tensor, Error> {
             linear
                 .forward(hidden_states)

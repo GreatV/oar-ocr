@@ -13,7 +13,8 @@ use crate::runtime::decoder_graph::{
     CudaGraphDrainGuard, CudaGraphKvLengths, DecoderCudaGraph, DecoderGraphInputs,
     capture_decoder_graph, cuda_graph_error, decoder_attention_is_causal, drop_and_drain,
 };
-use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
+use crate::runtime::tensor::apply_rotary_f32;
+use crate::utils::candle_to_ocr_inference;
 #[cfg(feature = "cuda")]
 use candle_core::Device;
 use candle_core::{D, Tensor};
@@ -41,84 +42,6 @@ fn ar_cuda_graph_capacity(prompt_len: usize, max_new_tokens: usize) -> Option<us
             .next_power_of_two()
             .min(DECODE_ROPE_CACHE_LEN),
     )
-}
-
-/// Apply XDRoPE to `(q, k)` using already-section-mixed F32 `cos`/`sin`.
-///
-/// The section-mix (`select_rope_sections`) and the F32 cast of cos/sin are
-/// layer-invariant — only q/k change between layers — so the caller
-/// ([`HunyuanLlm::forward`]) hoists those steps out of the layer loop and
-/// hands us the prepared tensors. Each layer then only pays the q/k F32 cast
-/// and the actual rotary multiply.
-fn apply_xdrope_rotary_pos_emb(
-    q: &Tensor,
-    k: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
-) -> Result<(Tensor, Tensor), Error> {
-    // Match upstream HF (`apply_rotary_pos_emb_xdrope`): apply the rotary
-    // mix in F32, then cast q/k back to the original dtype.
-    use candle_core::DType;
-    let origin_dtype = q.dtype();
-    let q_f32 = q
-        .to_dtype(DType::F32)
-        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "xdrope q to_dtype f32", e))?;
-    let k_f32 = k
-        .to_dtype(DType::F32)
-        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "xdrope k to_dtype f32", e))?;
-
-    let q_mul = q_f32.broadcast_mul(cos).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "HunyuanOCR: xdrope q*cos failed",
-            e,
-        )
-    })?;
-    let q_half = rotate_half(&q_f32)?;
-    let q_half_mul = q_half.broadcast_mul(sin).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "HunyuanOCR: xdrope rotate_half(q)*sin failed",
-            e,
-        )
-    })?;
-    let q_rot = (&q_mul + &q_half_mul)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "HunyuanOCR: xdrope apply on q failed",
-                e,
-            )
-        })?
-        .to_dtype(origin_dtype)
-        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "xdrope q to_dtype back", e))?;
-
-    let k_mul = k_f32.broadcast_mul(cos).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "HunyuanOCR: xdrope k*cos failed",
-            e,
-        )
-    })?;
-    let k_half = rotate_half(&k_f32)?;
-    let k_half_mul = k_half.broadcast_mul(sin).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "HunyuanOCR: xdrope rotate_half(k)*sin failed",
-            e,
-        )
-    })?;
-    let k_rot = (&k_mul + &k_half_mul)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "HunyuanOCR: xdrope apply on k failed",
-                e,
-            )
-        })?
-        .to_dtype(origin_dtype)
-        .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "xdrope k to_dtype back", e))?;
-    Ok((q_rot, k_rot))
 }
 
 #[derive(Debug)]
@@ -424,7 +347,8 @@ impl HunyuanAttention {
                     .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn k reshape", e))?
                     .transpose(1, 2)
                     .map_err(|e| candle_to_ocr_inference("HunyuanOCR", "attn k transpose", e))?;
-                apply_xdrope_rotary_pos_emb(&q, &k, cos, sin)?
+                // Upstream `apply_rotary_pos_emb_xdrope` rotates in F32.
+                apply_rotary_f32(&q, &k, cos, sin, "HunyuanOCR")?
             }
         };
 
@@ -848,7 +772,7 @@ pub struct HunyuanLlm {
     decode_sin: Tensor,
     /// XDRoPE section sizes (`config.rope_scaling.xdrope_section`). Used once
     /// per `forward` to section-mix the rotary `cos`/`sin` tensors before they
-    /// fan out to every layer — see [`apply_xdrope_rotary_pos_emb`].
+    /// fan out to every layer.
     xdrope_section: Vec<usize>,
     // Must stay the last field: it drops last and drains CUDA errors the
     // other fields' frees may stash (see CudaGraphDrainGuard).
@@ -952,7 +876,7 @@ impl HunyuanLlm {
 
         // XDRoPE section-mix + F32 cast: the result is layer-invariant
         // (depends only on position_ids and xdrope_section), so do it once
-        // here instead of per-layer inside `apply_xdrope_rotary_pos_emb`.
+        // here instead of per layer inside the rotary apply.
         // Saves ~num_layers × (2 select_rope_sections + 2 to_dtype) ops per
         // forward.
         let cos = select_rope_sections(&cos, &self.xdrope_section, 4)?

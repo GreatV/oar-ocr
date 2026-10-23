@@ -1,7 +1,6 @@
 use super::config::PaddleOcrVlConfig;
-use crate::attention::{
-    RotaryEmbedding, flash_attention, scaled_dot_product_attention_gqa, select_rope_sections,
-};
+use crate::attention::{RotaryEmbedding, flash_attention, scaled_dot_product_attention_gqa};
+use crate::backbones::qwen2_vl::apply_multimodal_rotary_pos_emb;
 use crate::error::Error;
 use crate::runtime::cache::TrimmableKvCache;
 #[cfg(feature = "cuda")]
@@ -13,7 +12,7 @@ use crate::runtime::decoder_graph::{
     CudaGraphDrainGuard, CudaGraphInputs, CudaGraphKvLengths, DecoderCudaGraph,
     capture_decoder_graph, cuda_graph_error, decoder_attention_is_causal,
 };
-use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
+use crate::utils::candle_to_ocr_inference;
 #[cfg(feature = "cuda")]
 use candle_core::DType;
 use candle_core::{IndexOp, Tensor};
@@ -22,64 +21,6 @@ use std::cell::RefCell;
 
 #[cfg(feature = "cuda")]
 const PADDLE_DECODE_CACHE_LEN: usize = 16_384;
-
-fn apply_multimodal_rotary_pos_emb(
-    q: &Tensor,
-    k: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
-    mrope_section: &[usize],
-) -> Result<(Tensor, Tensor), Error> {
-    // MRoPE uses 3 position dimensions
-    let cos = select_rope_sections(cos, mrope_section, 3)?;
-    let sin = select_rope_sections(sin, mrope_section, 3)?;
-    let q_mul = q.broadcast_mul(&cos).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "PaddleOCR-VL: mrope q*cos failed",
-            e,
-        )
-    })?;
-    let q_half = rotate_half(q)?;
-    let q_half_mul = q_half.broadcast_mul(&sin).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "PaddleOCR-VL: mrope rotate_half(q)*sin failed",
-            e,
-        )
-    })?;
-    let q_rot = (&q_mul + &q_half_mul).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "PaddleOCR-VL: mrope apply on q failed",
-            e,
-        )
-    })?;
-
-    let k_mul = k.broadcast_mul(&cos).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "PaddleOCR-VL: mrope k*cos failed",
-            e,
-        )
-    })?;
-    let k_half = rotate_half(k)?;
-    let k_half_mul = k_half.broadcast_mul(&sin).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "PaddleOCR-VL: mrope rotate_half(k)*sin failed",
-            e,
-        )
-    })?;
-    let k_rot = (&k_mul + &k_half_mul).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "PaddleOCR-VL: mrope apply on k failed",
-            e,
-        )
-    })?;
-    Ok((q_rot, k_rot))
-}
 
 #[derive(Debug, Clone)]
 struct Ernie4_5Mlp {
@@ -252,7 +193,8 @@ impl Ernie4_5Attention {
             .transpose(1, 2)
             .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "attn v transpose", e))?;
 
-        let (q, k) = apply_multimodal_rotary_pos_emb(&q, &k, cos, sin, &self.mrope_section)?;
+        let (q, k) =
+            apply_multimodal_rotary_pos_emb(&q, &k, cos, sin, &self.mrope_section, "PaddleOCR-VL")?;
 
         let q = q
             .contiguous()

@@ -1,6 +1,7 @@
 use super::config::GlmOcrVisionConfig;
 use crate::error::Error;
 use crate::runtime::attention::on_compute_device;
+use crate::runtime::tensor::rope_native;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::{
@@ -129,76 +130,6 @@ impl GlmOcrVisionRotaryEmbedding {
     }
 }
 
-fn apply_rotary_pos_emb_vision(
-    q: &Tensor,
-    k: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
-) -> Result<(Tensor, Tensor), Error> {
-    let cos = cos.unsqueeze(D::Minus2).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "GLM-OCR: vision cos unsqueeze",
-            e,
-        )
-    })?;
-    let sin = sin.unsqueeze(D::Minus2).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "GLM-OCR: vision sin unsqueeze",
-            e,
-        )
-    })?;
-
-    let q_rot = crate::utils::rotate_half(q)?;
-    let k_rot = crate::utils::rotate_half(k)?;
-
-    let q_mul = q.broadcast_mul(&cos).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "GLM-OCR: vision q*cos",
-            e,
-        )
-    })?;
-    let q_rot_mul = q_rot.broadcast_mul(&sin).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "GLM-OCR: vision rotate_half(q)*sin",
-            e,
-        )
-    })?;
-    let q_out = (&q_mul + &q_rot_mul).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "GLM-OCR: vision q apply rope",
-            e,
-        )
-    })?;
-
-    let k_mul = k.broadcast_mul(&cos).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "GLM-OCR: vision k*cos",
-            e,
-        )
-    })?;
-    let k_rot_mul = k_rot.broadcast_mul(&sin).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "GLM-OCR: vision rotate_half(k)*sin",
-            e,
-        )
-    })?;
-    let k_out = (&k_mul + &k_rot_mul).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "GLM-OCR: vision k apply rope",
-            e,
-        )
-    })?;
-    Ok((q_out, k_out))
-}
-
 #[derive(Debug, Clone)]
 struct GlmOcrVisionAttention {
     qkv: Linear,
@@ -297,7 +228,15 @@ impl GlmOcrVisionAttention {
             .forward(&k)
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "vision k_norm forward", e))?;
 
-        let (q, k) = apply_rotary_pos_emb_vision(&q, &k, cos, sin)?;
+        // GLM-OCR rotates in the model dtype (no F32 upcast).
+        let cos = cos
+            .unsqueeze(D::Minus2)
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "vision cos layout", e))?;
+        let sin = sin
+            .unsqueeze(D::Minus2)
+            .map_err(|e| candle_to_ocr_inference("GLM-OCR", "vision sin layout", e))?;
+        let q = rope_native(&q, &cos, &sin, "GLM-OCR")?;
+        let k = rope_native(&k, &cos, &sin, "GLM-OCR")?;
 
         let q = q
             .transpose(0, 1)

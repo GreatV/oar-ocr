@@ -23,7 +23,7 @@ use crate::runtime::decoder_graph::{
     capture_decoder_graph, cuda_graph_error, decoder_attention_is_causal,
 };
 use crate::runtime::errors::{candle_to_ocr_inference, candle_to_ocr_processing};
-use crate::runtime::tensor::rotate_half;
+use crate::runtime::tensor::rope_native;
 #[cfg(feature = "cuda")]
 use candle_core::DType;
 use candle_core::{IndexOp, Tensor};
@@ -67,7 +67,9 @@ pub struct Qwen2VlTextConfig {
     pub decode_cache_len: usize,
 }
 
-fn apply_multimodal_rotary_pos_emb(
+/// M-RoPE: section-mix the `(3, B, S, D)` cos/sin over the
+/// temporal/height/width axes, then rotate `q`/`k` in their own dtype.
+pub(crate) fn apply_multimodal_rotary_pos_emb(
     q: &Tensor,
     k: &Tensor,
     cos: &Tensor,
@@ -77,54 +79,10 @@ fn apply_multimodal_rotary_pos_emb(
 ) -> Result<(Tensor, Tensor), Error> {
     let cos = select_rope_sections(cos, mrope_section, 3)?;
     let sin = select_rope_sections(sin, mrope_section, 3)?;
-
-    let q_mul = q.broadcast_mul(&cos).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            format!("{model_name}: mrope q*cos failed"),
-            e,
-        )
-    })?;
-    let q_half = rotate_half(q)?;
-    let q_half_mul = q_half.broadcast_mul(&sin).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            format!("{model_name}: mrope rotate_half(q)*sin failed"),
-            e,
-        )
-    })?;
-    let q_rot = (&q_mul + &q_half_mul).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            format!("{model_name}: mrope apply on q failed"),
-            e,
-        )
-    })?;
-
-    let k_mul = k.broadcast_mul(&cos).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            format!("{model_name}: mrope k*cos failed"),
-            e,
-        )
-    })?;
-    let k_half = rotate_half(k)?;
-    let k_half_mul = k_half.broadcast_mul(&sin).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            format!("{model_name}: mrope rotate_half(k)*sin failed"),
-            e,
-        )
-    })?;
-    let k_rot = (&k_mul + &k_half_mul).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            format!("{model_name}: mrope apply on k failed"),
-            e,
-        )
-    })?;
-
-    Ok((q_rot, k_rot))
+    Ok((
+        rope_native(q, &cos, &sin, model_name)?,
+        rope_native(k, &cos, &sin, model_name)?,
+    ))
 }
 
 #[derive(Debug, Clone)]

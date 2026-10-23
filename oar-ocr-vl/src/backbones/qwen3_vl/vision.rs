@@ -8,10 +8,13 @@
 //! and are returned alongside the merged embeddings for the text model to
 //! inject into its first decoder layers.
 
+use crate::backbones::patch_merger::{MergerKeys, SpatialPatchMerger};
 use crate::error::Error;
 use crate::runtime::errors::{candle_to_ocr_inference, candle_to_ocr_processing};
-use crate::runtime::tensor::rotate_half;
-use candle_core::{DType, Device, IndexOp, Tensor};
+use crate::runtime::tensor::{
+    VisionRotaryEmbedding, apply_rotary_f32, merge_grouped_positions, vision_rotary_cos_sin,
+};
+use candle_core::{IndexOp, Tensor};
 use candle_nn::{
     Activation, LayerNorm, LayerNormConfig, Linear, Module, VarBuilder, layer_norm, linear,
 };
@@ -160,76 +163,6 @@ impl PatchEmbed {
     }
 }
 
-/// One-dimensional inverse frequencies for the 2D vision RoPE
-/// (`Qwen3VLVisionRotaryEmbedding(head_dim // 2)`, theta 10000).
-#[derive(Debug, Clone)]
-struct VisionRotaryEmbedding {
-    inv_freq: Tensor,
-}
-
-impl VisionRotaryEmbedding {
-    fn new(dim: usize, device: &Device) -> Result<Self, Error> {
-        let inv_freq = crate::runtime::tensor::vision_inv_freq(dim, 10_000.0, MODEL_NAME, device)?;
-        Ok(Self { inv_freq })
-    }
-
-    fn forward(&self, sequence_length: usize, device: &Device) -> Result<Tensor, Error> {
-        crate::runtime::attention::on_compute_device(device, |compute_device| {
-            let positions = Tensor::arange(0u32, sequence_length as u32, compute_device)?
-                .to_dtype(DType::F32)?;
-            let inv_freq = self
-                .inv_freq
-                .to_device(compute_device)?
-                .to_dtype(DType::F32)?;
-            positions.unsqueeze(1)?.matmul(&inv_freq.unsqueeze(0)?)
-        })
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                format!("{MODEL_NAME}: build vision rotary table"),
-                e,
-            )
-        })
-    }
-}
-
-fn apply_rotary_pos_emb_vision(
-    q: &Tensor,
-    k: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
-) -> Result<(Tensor, Tensor), Error> {
-    let q_dtype = q.dtype();
-    let k_dtype = k.dtype();
-    let q = q
-        .to_dtype(DType::F32)
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "cast vision query", e))?;
-    let k = k
-        .to_dtype(DType::F32)
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "cast vision key", e))?;
-    let cos = cos
-        .unsqueeze(1)
-        .and_then(|value| value.to_dtype(DType::F32))
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "prepare vision cos", e))?;
-    let sin = sin
-        .unsqueeze(1)
-        .and_then(|value| value.to_dtype(DType::F32))
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "prepare vision sin", e))?;
-    let q_rot = rotate_half(&q)?;
-    let k_rot = rotate_half(&k)?;
-    let q = q
-        .broadcast_mul(&cos)
-        .and_then(|value| value.broadcast_add(&q_rot.broadcast_mul(&sin)?))
-        .and_then(|value| value.to_dtype(q_dtype))
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "apply vision query rotary", e))?;
-    let k = k
-        .broadcast_mul(&cos)
-        .and_then(|value| value.broadcast_add(&k_rot.broadcast_mul(&sin)?))
-        .and_then(|value| value.to_dtype(k_dtype))
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "apply vision key rotary", e))?;
-    Ok((q, k))
-}
-
 /// Largest query chunk whose F32 score matrix stays within the scratch
 /// budget. Sequences short enough for the shared default keep it, so
 /// behavior is unchanged until a page grows past ~6.9K patches.
@@ -299,7 +232,13 @@ impl VisionAttention {
         let v = qkv
             .i((.., 2, .., ..))
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "slice vision value", e))?;
-        let (q, k) = apply_rotary_pos_emb_vision(&q, &k, cos, sin)?;
+        let cos = cos
+            .unsqueeze(1)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision cos layout", e))?;
+        let sin = sin
+            .unsqueeze(1)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision sin layout", e))?;
+        let (q, k) = apply_rotary_f32(&q, &k, &cos, &sin, MODEL_NAME)?;
 
         let q = q
             .transpose(0, 1)
@@ -483,103 +422,13 @@ impl VisionBlock {
     }
 }
 
-/// Spatial merger applied either to the main tower output (LayerNorm over
-/// `hidden_size` before the merge reshape) or, for DeepStack taps, to the
-/// reshaped merge blocks (`use_postshuffle_norm`, LayerNorm over
-/// `hidden_size * merge²`).
-#[derive(Debug, Clone)]
-struct VisionPatchMerger {
-    norm: LayerNorm,
-    linear_fc1: Linear,
-    linear_fc2: Linear,
-    merged_hidden_size: usize,
-    merge_group: usize,
-    postshuffle_norm: bool,
-}
-
-impl VisionPatchMerger {
-    /// `vb` must point at the merger directory itself: `merger` for the main
-    /// head, `deepstack_merger_list.<i>` for a DeepStack tap (their key
-    /// layouts match from there).
-    fn load(
-        cfg: &Qwen3VlVisionConfig,
-        vb: VarBuilder,
-        postshuffle_norm: bool,
-    ) -> Result<Self, Error> {
-        let merge_group = cfg.spatial_merge_size * cfg.spatial_merge_size;
-        let merged_hidden_size = cfg.hidden_size * merge_group;
-        let norm_cfg = LayerNormConfig {
-            eps: 1e-6,
-            ..Default::default()
-        };
-        let norm_size = if postshuffle_norm {
-            merged_hidden_size
-        } else {
-            cfg.hidden_size
-        };
-        let norm = layer_norm(norm_size, norm_cfg, vb.pp("norm"))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load vision merger norm", e))?;
-        let linear_fc1 = linear(merged_hidden_size, merged_hidden_size, vb.pp("linear_fc1"))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load vision merger fc1", e))?;
-        let linear_fc2 = linear(merged_hidden_size, cfg.out_hidden_size, vb.pp("linear_fc2"))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load vision merger fc2", e))?;
-        Ok(Self {
-            norm,
-            linear_fc1,
-            linear_fc2,
-            merged_hidden_size,
-            merge_group,
-            postshuffle_norm,
-        })
-    }
-
-    fn forward(&self, hidden_states: &Tensor) -> Result<Tensor, Error> {
-        let num_patches = hidden_states
-            .dim(0)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision merger patch count", e))?;
-        if !num_patches.is_multiple_of(self.merge_group) {
-            return Err(Error::InvalidInput {
-                message: format!(
-                    "{MODEL_NAME} vision merger expected patch count divisible by {}, got {num_patches}",
-                    self.merge_group
-                ),
-            });
-        }
-        let merged_view = hidden_states
-            .reshape((num_patches / self.merge_group, self.merged_hidden_size))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision merger reshape", e))?;
-        // Pre-shuffle norm runs over raw patches and is reshaped afterwards;
-        // post-shuffle norm runs over the concatenated merge blocks.
-        let hidden_states = if self.postshuffle_norm {
-            self.norm
-                .forward(&merged_view)
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision merger norm", e))?
-        } else {
-            self.norm
-                .forward(hidden_states)
-                .and_then(|normed| {
-                    normed.reshape((num_patches / self.merge_group, self.merged_hidden_size))
-                })
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision merger norm", e))?
-        };
-        let hidden_states = self
-            .linear_fc1
-            .forward(&hidden_states)
-            .and_then(|value| value.gelu_erf())
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision merger fc1", e))?;
-        self.linear_fc2
-            .forward(&hidden_states)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision merger fc2", e))
-    }
-}
-
 pub struct Qwen3VlVisionModel {
     patch_embed: PatchEmbed,
     position_embedding: Tensor,
     position_grid_size: usize,
     blocks: Vec<VisionBlock>,
-    merger: VisionPatchMerger,
-    deepstack_mergers: Vec<VisionPatchMerger>,
+    merger: SpatialPatchMerger,
+    deepstack_mergers: Vec<SpatialPatchMerger>,
     deepstack_visual_indexes: Vec<usize>,
     rotary_embedding: VisionRotaryEmbedding,
     spatial_merge_size: usize,
@@ -600,16 +449,24 @@ impl Qwen3VlVisionModel {
         for index in 0..cfg.depth {
             blocks.push(VisionBlock::load(cfg, vb.pp("blocks").pp(index))?);
         }
-        let merger = VisionPatchMerger::load(cfg, vb.pp("merger"), false)?;
+        let load_merger = |vb: VarBuilder, postshuffle_norm: bool| {
+            SpatialPatchMerger::load(
+                vb,
+                MergerKeys::QWEN3_VL,
+                cfg.hidden_size,
+                cfg.spatial_merge_size,
+                cfg.out_hidden_size,
+                postshuffle_norm,
+                MODEL_NAME,
+            )
+        };
+        let merger = load_merger(vb.pp("merger"), false)?;
         let mut deepstack_mergers = Vec::with_capacity(cfg.deepstack_visual_indexes.len());
         for index in 0..cfg.deepstack_visual_indexes.len() {
-            deepstack_mergers.push(VisionPatchMerger::load(
-                cfg,
-                vb.pp("deepstack_merger_list").pp(index),
-                true,
-            )?);
+            deepstack_mergers.push(load_merger(vb.pp("deepstack_merger_list").pp(index), true)?);
         }
-        let rotary_embedding = VisionRotaryEmbedding::new(cfg.head_dim()? / 2, vb.device())?;
+        let rotary_embedding =
+            VisionRotaryEmbedding::new(cfg.head_dim()? / 2, 10_000.0, MODEL_NAME, vb.device())?;
         Ok(Self {
             patch_embed,
             position_embedding,
@@ -663,10 +520,13 @@ impl Qwen3VlVisionModel {
             hidden_states = hidden_states
                 .broadcast_add(&pos_embeds)
                 .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "add position embedding", e))?;
-            let (cos, sin) = build_vision_rotary_embeddings(
+            let (height_ids, width_ids) =
+                merge_grouped_positions((t, h, w), self.spatial_merge_size, MODEL_NAME)?;
+            let (cos, sin) = vision_rotary_cos_sin(
                 &frequency_table,
-                (t, h, w),
-                self.spatial_merge_size,
+                &height_ids,
+                &width_ids,
+                MODEL_NAME,
                 device,
             )?;
 
@@ -699,51 +559,6 @@ impl Qwen3VlVisionModel {
     }
 }
 
-/// Merge-grouped patch coordinates: block-major raster
-/// `(hb, wb)` followed by the intra-block `(h_inner, w_inner)` offsets, the
-/// patchifier's output order.
-fn merge_grouped_spatial_coordinates(
-    grid_thw: (usize, usize, usize),
-    merge_size: usize,
-) -> Result<Vec<(usize, usize)>, Error> {
-    let (grid_t, grid_h, grid_w) = grid_thw;
-    if grid_t == 0
-        || grid_h == 0
-        || grid_w == 0
-        || merge_size == 0
-        || !grid_h.is_multiple_of(merge_size)
-        || !grid_w.is_multiple_of(merge_size)
-    {
-        return Err(Error::InvalidInput {
-            message: format!(
-                "{MODEL_NAME} invalid merge-grouped grid: grid={grid_thw:?}, merge={merge_size}"
-            ),
-        });
-    }
-    let num_patches = grid_t
-        .checked_mul(grid_h)
-        .and_then(|value| value.checked_mul(grid_w))
-        .ok_or_else(|| Error::InvalidInput {
-            message: format!("{MODEL_NAME} merge-grouped patch count overflow"),
-        })?;
-    let mut coordinates = Vec::with_capacity(num_patches);
-    for _ in 0..grid_t {
-        for height_block in 0..(grid_h / merge_size) {
-            for width_block in 0..(grid_w / merge_size) {
-                for height_inner in 0..merge_size {
-                    for width_inner in 0..merge_size {
-                        coordinates.push((
-                            height_block * merge_size + height_inner,
-                            width_block * merge_size + width_inner,
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    Ok(coordinates)
-}
-
 /// Bilinearly interpolate the learned `(side², hidden)` position grid to the
 /// patch grid, mirroring `fast_pos_embed_interpolate`: per-axis indices are
 /// `linspace(0, side - 1, grid)` floored, with the fractional part as weight.
@@ -772,8 +587,8 @@ fn interpolate_position_embedding(
         });
     }
 
-    let coordinates = merge_grouped_spatial_coordinates(grid_thw, merge_size)?;
-    let num_patches = coordinates.len();
+    let (height_ids, width_ids) = merge_grouped_positions(grid_thw, merge_size, MODEL_NAME)?;
+    let num_patches = height_ids.len();
     let mut index00 = Vec::with_capacity(num_patches);
     let mut index01 = Vec::with_capacity(num_patches);
     let mut index10 = Vec::with_capacity(num_patches);
@@ -796,7 +611,7 @@ fn interpolate_position_embedding(
         (base_grid_size - 1) as f32 / (grid_w - 1) as f32
     };
     let last = base_grid_size - 1;
-    for (height, width) in coordinates {
+    for (height, width) in height_ids.into_iter().zip(width_ids) {
         let source_h = height as f32 * h_step;
         let source_w = width as f32 * w_step;
         let h0 = (source_h as usize).min(last);
@@ -868,46 +683,11 @@ fn interpolate_position_embedding(
     })
 }
 
-fn build_vision_rotary_embeddings(
-    frequency_table: &Tensor,
-    grid_thw: (usize, usize, usize),
-    merge_size: usize,
-    device: &Device,
-) -> Result<(Tensor, Tensor), Error> {
-    let coordinates = merge_grouped_spatial_coordinates(grid_thw, merge_size)?;
-    let num_patches = coordinates.len();
-    let (height_ids, width_ids): (Vec<u32>, Vec<u32>) = coordinates
-        .into_iter()
-        .map(|(height, width)| (height as u32, width as u32))
-        .unzip();
-    let height_ids = Tensor::from_vec(height_ids, num_patches, device)
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision height positions", e))?;
-    let width_ids = Tensor::from_vec(width_ids, num_patches, device)
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision width positions", e))?;
-    let height_frequencies = frequency_table
-        .index_select(&height_ids, 0)
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "gather vision height frequencies", e))?;
-    let width_frequencies = frequency_table
-        .index_select(&width_ids, 0)
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "gather vision width frequencies", e))?;
-    let rotary = Tensor::cat(&[&height_frequencies, &width_frequencies], 1)
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "join vision rotary frequencies", e))?;
-    let embedding = Tensor::cat(&[&rotary, &rotary], 1)
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "expand vision rotary frequencies", e))?;
-    let cos = embedding
-        .cos()
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision rotary cos", e))?;
-    let sin = embedding
-        .sin()
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision rotary sin", e))?;
-    Ok((cos, sin))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::runtime::attention::{chunked_vision_attention, scaled_dot_product_attention};
-    use candle_core::{Device, Tensor};
+    use candle_core::{DType, Device, Tensor};
     use std::collections::HashMap;
 
     fn tiny_config() -> Qwen3VlVisionConfig {
@@ -1027,45 +807,6 @@ mod tests {
             ]
         );
         Ok(())
-    }
-
-    #[test]
-    fn merge_grouped_coordinates_match_patchifier_order() {
-        let coords = merge_grouped_spatial_coordinates((1, 4, 6), 2).unwrap();
-        // 2x3 merge blocks, each block listing its 4 inner patches.
-        let expected = [
-            (0, 0),
-            (0, 1),
-            (1, 0),
-            (1, 1),
-            (0, 2),
-            (0, 3),
-            (1, 2),
-            (1, 3),
-            (0, 4),
-            (0, 5),
-            (1, 4),
-            (1, 5),
-            (2, 0),
-            (2, 1),
-            (3, 0),
-            (3, 1),
-            (2, 2),
-            (2, 3),
-            (3, 2),
-            (3, 3),
-            (2, 4),
-            (2, 5),
-            (3, 4),
-            (3, 5),
-        ];
-        assert_eq!(coords, expected);
-    }
-
-    #[test]
-    fn rejects_invalid_grid() {
-        assert!(merge_grouped_spatial_coordinates((1, 3, 4), 2).is_err());
-        assert!(merge_grouped_spatial_coordinates((0, 4, 4), 2).is_err());
     }
 
     /// The vision MLP chunk path (CPU, intermediate above the budget) must

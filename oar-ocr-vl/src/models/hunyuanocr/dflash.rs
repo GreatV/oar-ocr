@@ -19,12 +19,15 @@ use crate::runtime::decoder_graph::{
     CudaGraphDrainGuard, CudaGraphKvLengths, DecoderCudaGraph, DecoderGraphInputs,
     capture_decoder_graph, cuda_graph_error, drop_and_drain,
 };
-use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing, rotate_half};
+use crate::runtime::tensor::rope_native;
+use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
 use candle_core::{D, DType, Device, Tensor};
 use candle_nn::{Linear, Module, RmsNorm, VarBuilder, linear_no_bias, rms_norm};
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::path::Path;
+
+const DFLASH: &str = "HunyuanOCR DFlash";
 
 const ROPE_CACHE_LEN: usize = 16_384;
 
@@ -337,16 +340,6 @@ impl ContextKv {
     }
 }
 
-fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
-    let a = x
-        .broadcast_mul(cos)
-        .map_err(|e| tensor_err("HunyuanOCR DFlash: rope x*cos", e))?;
-    let b = rotate_half(x)?
-        .broadcast_mul(sin)
-        .map_err(|e| tensor_err("HunyuanOCR DFlash: rope rotate_half*sin", e))?;
-    (a + b).map_err(|e| tensor_err("HunyuanOCR DFlash: rope sum", e))
-}
-
 #[derive(Debug)]
 struct DFlashAttention {
     qkv_proj: Linear,
@@ -455,7 +448,7 @@ impl DFlashAttention {
         cache: &mut ContextKv,
     ) -> Result<(), Error> {
         let k = self.shape_projected(raw_k, self.num_kv_heads, Some(&self.k_norm))?;
-        let k = apply_rope(&k, cos, sin)?;
+        let k = rope_native(&k, cos, sin, DFLASH)?;
         let v = self.shape_projected(raw_v, self.num_kv_heads, None)?;
         cache.append(&k, &v)
     }
@@ -568,7 +561,7 @@ impl DFlashAttention {
                 .map_err(|e| tensor_err("HunyuanOCR DFlash: fused BF16 RoPE", e))?;
             return Ok(output);
         }
-        apply_rope(input, cos, sin)
+        rope_native(input, cos, sin, DFLASH)
     }
 
     fn attend_projected(
