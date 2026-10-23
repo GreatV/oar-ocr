@@ -91,13 +91,6 @@ fn run(cli: Cli) -> Result<()> {
         Command::Structure(args) => (&args.images, args.format == PageFormat::Json),
         Command::Parse(args) => (&args.images, args.format == PageFormat::Json),
     };
-    // VL parsers capture CUDA graphs, which cannot be captured or replayed
-    // from several threads at once, so parsing stays on one device for now.
-    ensure!(
-        !matches!(cli.command, Command::Parse(_))
-            || args::split_devices(&cli.common.device).len() == 1,
-        "oar parse runs on a single device; pass one --device value"
-    );
     let inputs = paths
         .iter()
         .map(|path| {
