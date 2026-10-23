@@ -207,7 +207,8 @@ fn argmax_simd(row: &[f32]) -> Option<(usize, f32)> {
     for chunk in chunks {
         let next = f32x8::new(*chunk);
         let replace: u32x8 = cast(next.simd_ge(values));
-        indices = replace.blend(positions, indices);
+        // Comparison masks have all-zero or all-one lanes, as select requires.
+        indices = replace.select(positions, indices);
         // Retain max's NaN/zero handling and the original confidence bits.
         values = values.max(next);
         positions += u32x8::splat(8);
