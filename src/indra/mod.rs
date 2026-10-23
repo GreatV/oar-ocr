@@ -353,6 +353,21 @@ struct Lm {
     weights: lm::Weights,
 }
 
+/// Compact greedy output and, only below the LM gate, retained beam inputs.
+struct LineRead {
+    ids: Vec<i64>,
+    steps: Vec<usize>,
+    confidence: f64,
+    lm: Option<LmInput>,
+}
+
+struct LmInput {
+    blank: Vec<f32>,
+    topv: Vec<f32>,
+    topi: Vec<i64>,
+    k: usize,
+}
+
 /// The Indra OCR pipeline. Build it with [`IndraOcrBuilder`].
 #[derive(Debug)]
 pub struct IndraOcr {
@@ -800,38 +815,64 @@ impl Engine {
                         let (shape, ids) = o["ids"].try_extract_tensor::<i64>()?;
                         let (_, conf) = o["conf"].try_extract_tensor::<f32>()?;
                         let (_, lengths) = o["lengths"].try_extract_tensor::<i64>()?;
-                        let lm = if rec.lm.is_some() {
+                        // Borrow all outputs while reducing greedy CTC. Only rows
+                        // inside the unchanged confidence gate retain LM arrays.
+                        let lm_outputs = if rec.lm.is_some() {
                             let (_, blank) = o["blank"].try_extract_tensor::<f32>()?;
                             let (top_shape, topv) = o["topv"].try_extract_tensor::<f32>()?;
                             let (_, topi) = o["topi"].try_extract_tensor::<i64>()?;
-                            Some((
-                                blank.to_vec(),
-                                topv.to_vec(),
-                                topi.to_vec(),
-                                top_shape[2] as usize,
-                            ))
+                            Some((blank, topv, topi, top_shape[2] as usize))
                         } else {
                             None
                         };
-                        Ok((
-                            ids.to_vec(),
-                            conf.to_vec(),
-                            lengths.to_vec(),
-                            shape[1] as usize,
-                            lm,
-                        ))
+                        let t_len = shape[1] as usize;
+                        let reads = (0..b)
+                            .map(|k| {
+                                let len = (lengths[k].max(0) as usize).min(t_len);
+                                let row = k * t_len;
+                                let seq = &ids[row..row + len];
+                                let pm = &conf[row..row + len];
+                                let keep: Vec<usize> = (0..len)
+                                    .filter(|&t| seq[t] != 0 && (t == 0 || seq[t] != seq[t - 1]))
+                                    .collect();
+                                let confidence = if keep.is_empty() {
+                                    0.0
+                                } else {
+                                    mean_f32(&keep.iter().map(|&t| pm[t]).collect::<Vec<_>>())
+                                };
+                                let lm = match (&rec.lm, lm_outputs) {
+                                    (Some(lm), Some((blank, topv, topi, k)))
+                                        if (MIN_CONF..lm.gate).contains(&confidence) =>
+                                    {
+                                        Some(LmInput {
+                                            blank: blank[row..row + len].to_vec(),
+                                            topv: topv[row * k..(row + len) * k].to_vec(),
+                                            topi: topi[row * k..(row + len) * k].to_vec(),
+                                            k,
+                                        })
+                                    }
+                                    _ => None,
+                                };
+                                LineRead {
+                                    ids: keep.iter().map(|&t| seq[t]).collect(),
+                                    steps: keep,
+                                    confidence,
+                                    lm,
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        Ok((t_len, reads))
                     },
                 )?;
-                let (ids, conf, lengths, t_len, lm_inputs) = read;
+                let (t_len, reads) = read;
                 let stride = wm as f64 / t_len.max(1) as f64;
-                for (k, &j) in idx.iter().enumerate() {
-                    let len = (lengths[k].max(0) as usize).min(t_len);
-                    let row = k * t_len;
-                    let seq = &ids[row..row + len];
-                    let pm = &conf[row..row + len];
-                    let mut keep: Vec<usize> = (0..len)
-                        .filter(|&t| seq[t] != 0 && (t == 0 || seq[t] != seq[t - 1]))
-                        .collect();
+                for (read, &j) in reads.into_iter().zip(&idx) {
+                    let LineRead {
+                        ids: mut line_ids,
+                        steps: mut keep,
+                        confidence: line_conf,
+                        lm: lm_input,
+                    } = read;
                     let [x0, y0, x1, _] =
                         [boxes[j][0], boxes[j][1], boxes[j][2], boxes[j][3]].map(f64::from);
                     let h = (boxes[j][3] as f64 - y0).max(1.0);
@@ -841,20 +882,13 @@ impl Engine {
                     // read (the reference scales by the one-band crop even
                     // for a tall window, which stretches token positions).
                     let f = cw / src[j].width as f64;
-                    let line_conf = if keep.is_empty() {
-                        0.0
-                    } else {
-                        mean_f32(&keep.iter().map(|&t| pm[t]).collect::<Vec<_>>())
-                    };
-                    let mut line_ids: Vec<i64> = keep.iter().map(|&t| seq[t]).collect();
-                    if let (Some(lm), Some((blank, topv, topi, top_k))) = (&rec.lm, &lm_inputs)
-                        && (MIN_CONF..lm.gate).contains(&line_conf)
-                    {
+                    // Expensive beam search stays outside the session lock.
+                    if let (Some(lm), Some(input)) = (&rec.lm, lm_input) {
                         let steps = lm::Steps {
-                            blank: &blank[row..row + len],
-                            topv: &topv[row * top_k..(row + len) * top_k],
-                            topi: &topi[row * top_k..(row + len) * top_k],
-                            k: *top_k,
+                            blank: &input.blank,
+                            topv: &input.topv,
+                            topi: &input.topi,
+                            k: input.k,
                         };
                         (line_ids, keep) = lm::beam_search(&steps, &lm.model, lm.weights);
                     }
