@@ -18,6 +18,7 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 | [MonkeyOCRv2-B-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-B-Parsing) | 0.7B | Higher-capacity ViT-B variant with the same parsing and recognition tasks |
 | [MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) | 0.6B | Model-native layout, end-to-end parsing, text, formula, and OTSL-table recognition |
 | [OvisOCR2](https://huggingface.co/ATH-MaaS/OvisOCR2) | 0.8B | Model-native full-page document-to-Markdown parsing |
+| [OvisOCR3](https://huggingface.co/ATH-MaaS/OvisOCR3) | 0.8B | Model-native Markdown or structured page parsing, text, formula, HTML table, and chart recognition |
 | [OXR-1.0](https://huggingface.co/SoMarkAI/OXR-1.0) | 1.4B | PP-DocLayout page parsing and text, formula, HTML table, code, and chemical-structure recognition |
 | [PaddleOCR-VL](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) | 0.9B | External-layout page parsing, text, table, formula, and chart recognition |
 | [PaddleOCR-VL-1.5](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5) | 0.9B | PaddleOCR-VL tasks plus text spotting and seal recognition |
@@ -37,7 +38,7 @@ See [`examples`](examples) for runnable examples.
 1. **Layout detection** to identify document regions and their reading order. `PpDocLayout` is a native Candle port of PP-DocLayoutV2/V3; any other detector can be plugged in through the `LayoutSource` trait.
 2. **VL-based recognition** to extract content from each region
 
-Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, TeleOCR, jina-ocr-v1, MonkeyOCRv2, OvisOCR2, WeVisDoc, Xiaomi-OCR-0, HunyuanOCR, MinerU2.5/Pro, or MinerU-Diffusion for externally detected crops. HPD-Parsing and Youtu-Parsing-Omni support their model-native page protocols. For complete pages, prefer each model's native path where available: MonkeyOCRv2 `Layout`/`EndToEnd`, OvisOCR2, jina-ocr-v1, WeVisDoc, Xiaomi-OCR-0, HPD-Parsing, and Youtu-Parsing-Omni full-page parsing, HunyuanOCR full-page prompts, and the MinerU two-step extraction examples.
+Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, TeleOCR, jina-ocr-v1, MonkeyOCRv2, OvisOCR2, OvisOCR3, WeVisDoc, Xiaomi-OCR-0, HunyuanOCR, MinerU2.5/Pro, or MinerU-Diffusion for externally detected crops. HPD-Parsing and Youtu-Parsing-Omni support their model-native page protocols. For complete pages, prefer each model's native path where available: MonkeyOCRv2 `Layout`/`EndToEnd`, OvisOCR2, OvisOCR3, jina-ocr-v1, WeVisDoc, Xiaomi-OCR-0, HPD-Parsing, and Youtu-Parsing-Omni full-page parsing, HunyuanOCR full-page prompts, and the MinerU two-step extraction examples.
 
 OXR also implements `RecognitionBackend` for text, formula, and table crops, composing with any `LayoutSource` through the shared `LayoutPageParser`/`DocParser` pipeline. Direct model inference additionally supports code and chemical-structure prompts.
 
@@ -241,6 +242,26 @@ println!("{markdown}");
 ```
 
 The official runtime resizes RGB input with bicubic antialiasing to a 32-pixel-aligned area between `448²` and `2880²` pixels. Its fixed prompt requests reading-order Markdown, LaTeX formulas, HTML tables, and bounding-box `<img>` tags for visual regions. `parse` removes those visual-region blocks by default before applying truncated-repeat cleanup; call `parse_with_image_tags(..., true)` or `generate` to retain the references. The library does not create the referenced bounding-box crop files.
+
+### OvisOCR3
+
+Select `ATH-MaaS/OvisOCR3` through `AnyPageParser` or load `OvisOcr3` directly. The v3 wrapper reuses the OvisOCR2 image processor and Qwen3.5 engine, with the same `448²`–`2880²` pixel profile, greedy decoding, EOS IDs `[248044, 248046]`, and disabled thinking. Version selection is explicit; the loader does not infer it from configuration. OvisOCR2's leading prompt newline comes from its upstream example and remains unchanged; v3 uses `document_markdown.txt` verbatim, without that newline.
+
+```rust
+use candle_core::Device;
+use oar_ocr_vl::{OvisOcr3, OvisOcr3ParseMode, OvisOcr3ParseOptions, PageParser};
+use oar_ocr_vl::utils::image::load_image;
+
+let image = load_image("document.png")?;
+let model = OvisOcr3::from_dir("ATH-MaaS/OvisOCR3", Device::Cpu)?;
+let options = OvisOcr3ParseOptions::default().with_mode(OvisOcr3ParseMode::Structured);
+let page = model.parse_page(&image, &options)?;
+println!("{}", page.to_json(image.width(), image.height()));
+```
+
+Markdown is the default mode, including through `AnyPageParser`. It strips outer whitespace, optionally filters image-tag blocks, and then applies repeated-tail cleanup regardless of whether generation reached its token limit. `with_keep_image_tags(true)` retains image references. Structured mode requests a JSON array and preserves region content and reading order in its blocks. Its Markdown joins the region contents in reading order, as the model card describes, since the model already writes them as Markdown, LaTeX, or HTML; default exclusions remove headers, footers, page numbers, and related marginal content, and `keep_image_tags` controls visual references. `PageDocument` holds normalized boxes; `page.to_json(image.width(), image.height())` converts upstream `[0,1000)` coordinates into pixels of the supplied image (or crop). Existing layout types map categories such as `display_formula`/`inline_formula` to `formula`, `vertical_text` to `text`, and `vision_footnote` to `footnote`, retaining the original label. Invalid or truncated JSON, including invalid boxes, logs a warning and falls back to Markdown without blocks, retaining the raw text and a `structured_json` diagnostic; no JSON repair is attempted. Markdown mode also returns no layout blocks.
+
+For `RecognitionBackend` crops, `Ocr` uses `plain_ocr`, `Formula` uses `formula_recognition`, and `Chart` uses `chart_parsing`. `Table` uses `document_markdown` on the crop because there is no table-only prompt; tables are requested as HTML. All region tasks use the OvisOCR2 adapter cleanup: repeated-tail cleanup everywhere, keeping image-tag blocks only for charts. The 18 upstream task prompts ship inside the crate under `ovisocr3/prompts/` and are exposed as `ovisocr3::prompts` constants. Use literal replacement, for example `prompts::REGION_OCR.replace("{target_region}", "[0,0,999,999]")`, before calling `generate_with_prompt`; JSON and LaTeX braces are left intact. These constants include KIE templates, but no KIE, cross-page reconstruction, translation, VQA, grounding, word-spotting, or classification pipeline is added. Each input image is an independent request.
 
 ### OXR-1.0
 
@@ -482,7 +503,7 @@ cargo run --release -p oar-ocr-vl --features cuda --example doc_parser -- \
     document.jpg
 ```
 
-The CLI example exposes the layout-first PaddleOCR-VL, GLM-OCR, TeleOCR, and jina-ocr-v1 paths. MonkeyOCRv2, OvisOCR2, Xiaomi-OCR-0, HunyuanOCR, and the MinerU models also implement `RecognitionBackend`; their dedicated examples remain the preferred complete-page paths. HPD-Parsing uses its model-native full-page protocol instead of `RecognitionBackend`.
+The CLI example exposes the layout-first PaddleOCR-VL, GLM-OCR, TeleOCR, and jina-ocr-v1 paths. MonkeyOCRv2, OvisOCR2, OvisOCR3, Xiaomi-OCR-0, HunyuanOCR, and the MinerU models also implement `RecognitionBackend`; their model-native parsers remain the preferred complete-page paths. HPD-Parsing uses its model-native full-page protocol instead of `RecognitionBackend`.
 
 ### PaddleOCR-VL Direct Inference
 
@@ -550,6 +571,14 @@ cargo run --release -p oar-ocr-vl --features cuda --example ovisocr2 -- \
     --model-dir ATH-MaaS/OvisOCR2 \
     --device cuda:0 \
     document-1.jpg document-2.jpg
+```
+
+### OvisOCR3 Full-Page Parsing
+
+The shared CLI selects the v3 Markdown protocol by its explicit model ID. Use the library's `OvisOcr3ParseOptions` for structured mode.
+
+```bash
+oar parse --model ATH-MaaS/OvisOCR3 --device cpu document.png
 ```
 
 ### Xiaomi-OCR-0 Full-Page Parsing

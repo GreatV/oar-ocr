@@ -1,0 +1,15 @@
+Analyze the document structure and extract text content. Return a single JSON array in natural reading order.
+
+Each element follows this schema:
+`{"bbox": [x_min, y_min, x_max, y_max], "category": "string", "content": "string"}`
+
+Rules:
+1. The bbox coordinates are integers scaled to [0, 1000).
+2. The category is exactly one of:
+["abstract", "algorithm", "aside_text", "chart", "content", "display_formula", "doc_title", "figure_title", "footer", "footer_image", "footnote", "formula_number", "header", "header_image", "image", "inline_formula", "number", "paragraph_title", "reference_content", "seal", "table", "text", "vertical_text", "vision_footnote"].
+3. The content formatting depends on category:
+- For "footer_image", "header_image", "image", or "chart": write as an HTML image tag <img src="images/bbox_{x_min}_{y_min}_{x_max}_{y_max}.jpg" />.
+- For "display_formula" or "inline_formula": write in LaTeX.
+- For "table": write as a standard HTML `<table>...</table>`.
+- Otherwise: write in Markdown.
+4. Output must be strictly valid JSON. Properly escape quotes and special characters inside content.

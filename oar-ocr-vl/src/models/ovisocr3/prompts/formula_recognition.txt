@@ -1,0 +1,8 @@
+Recognize and transcribe every mathematical expression in the image as LaTeX. Directly output the formula content.
+
+Rules:
+1. Preserve every visible symbol, operator, delimiter, superscript, subscript, accent, matrix row, alignment, and line break without translation, paraphrasing, correction, completion, or omission.
+2. Wrap each standalone or display expression as `$$ ... $$`.
+3. If multiple standalone expressions are visible, output one `$$ ... $$` block per expression in natural reading order, separated by a single line break.
+4. Use one decoded backslash for a LaTeX command and two decoded backslashes for a LaTeX row break. JSON serialization may escape these backslashes on disk, but the decoded target must retain valid LaTeX semantics.
+5. Output formula content only. Do not output prose, explanations, translations, Markdown code fences, HTML, document-level table markup, or JSON.

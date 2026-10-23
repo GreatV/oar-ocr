@@ -1,0 +1,9 @@
+Transcribe all readable text in the specified image region. Directly output the content.
+Target region: {target_region}
+
+Rules:
+1. Read only the visible text inside the target region.
+2. Preserve the original text exactly without translation, paraphrasing, correction, completion, or omission.
+3. Follow the natural human reading order within the target region.
+4. Output plain text only. Use spaces and line breaks only where needed to preserve text separation and reading order.
+5. Do not output the target region, bounding boxes, coordinates, category labels, Markdown formatting, HTML, JSON, explanations, or code fences.

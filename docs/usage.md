@@ -530,6 +530,27 @@ cargo run -p oar-ocr-vl --features cuda --example ovisocr2 -- \
 
 Add `--keep-image-tags` to retain visual-region image-tag references, or use `--max-tokens` to override the 16,384-token default. The example does not create the referenced bounding-box crop files.
 
+## OvisOCR3
+
+[OvisOCR3](https://huggingface.co/ATH-MaaS/OvisOCR3) reuses the OvisOCR2 engine with its own verbatim task prompts. The explicit ID `ATH-MaaS/OvisOCR3` selects Markdown parsing through `AnyPageParser` and `oar parse --model ATH-MaaS/OvisOCR3`. Load the typed model to select structured output:
+
+```rust,no_run
+use candle_core::Device;
+use oar_ocr_vl::{OvisOcr3, OvisOcr3ParseMode, OvisOcr3ParseOptions, PageParser};
+use oar_ocr_vl::utils::image::load_image;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model = OvisOcr3::from_dir("ATH-MaaS/OvisOCR3", Device::Cpu)?;
+    let image = load_image("document.png")?;
+    let options = OvisOcr3ParseOptions::default().with_mode(OvisOcr3ParseMode::Structured);
+    let page = model.parse_page(&image, &options)?;
+    println!("{}", page.to_json(image.width(), image.height()));
+    Ok(())
+}
+```
+
+Structured boxes refer to the image supplied to the model, including cropped inputs. Invalid or truncated JSON logs a warning and falls back to Markdown without blocks, retaining the raw text and a `structured_json` diagnostic. See the [crate guide](../oar-ocr-vl/README.md#ovisocr3) for coordinate conversion, task mappings, prompt constants, and post-processing options.
+
 ## OXR-1.0
 
 [OXR-1.0](https://huggingface.co/SoMarkAI/OXR-1.0) recognizes regions supplied by PP-DocLayout through the explicit model ID `SoMarkAI/OXR-1.0`.
@@ -844,9 +865,9 @@ cargo run -p oar-ocr-vl --features cuda \
 
 ## DocParser
 
-DocParser provides a unified API for external layout-first document parsing with VL-based recognition. PaddleOCR-VL, GLM-OCR, MonkeyOCRv2, OvisOCR2, OXR, HunyuanOCR, MinerU2.5/Pro, and MinerU-Diffusion implement `RecognitionBackend`. The `doc_parser` CLI example exposes the PaddleOCR-VL and GLM-OCR paths; use the other backends through the library API. HPD-Parsing currently supports only its model-native full-page protocol.
+DocParser provides a unified API for external layout-first document parsing with VL-based recognition. PaddleOCR-VL, GLM-OCR, MonkeyOCRv2, OvisOCR2, OvisOCR3, OXR, HunyuanOCR, MinerU2.5/Pro, and MinerU-Diffusion implement `RecognitionBackend`. The `doc_parser` CLI example exposes the PaddleOCR-VL and GLM-OCR paths; use the other backends through the library API. HPD-Parsing currently supports only its model-native full-page protocol.
 
-Use `parse(&layout, image)` with any `LayoutSource` — `PpDocLayout` is the built-in one and runs on Candle, so no ONNX Runtime is involved. Regions are recognized in layout order and may be grouped into bounded recognition batches. For complete pages, prefer the model-native paths for MonkeyOCRv2, OvisOCR2, HPD-Parsing, HunyuanOCR, and the MinerU family. Except for HPD-Parsing, their `RecognitionBackend` implementations are intended for externally detected crops.
+Use `parse(&layout, image)` with any `LayoutSource` — `PpDocLayout` is the built-in one and runs on Candle, so no ONNX Runtime is involved. Regions are recognized in layout order and may be grouped into bounded recognition batches. For complete pages, prefer the model-native paths for MonkeyOCRv2, OvisOCR2, OvisOCR3, HPD-Parsing, HunyuanOCR, and the MinerU family. Except for HPD-Parsing, their `RecognitionBackend` implementations are intended for externally detected crops.
 
 ### Basic Usage
 

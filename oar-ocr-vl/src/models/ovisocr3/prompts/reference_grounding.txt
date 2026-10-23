@@ -1,0 +1,19 @@
+Locate every visible region corresponding to the requested reference or references in the image.
+
+Requested references (JSON array, source order):
+{references}
+
+Return a single JSON array in the requested reference order.
+
+Each element follows this schema:
+`{"bbox": [x_min, y_min, x_max, y_max], "reference": "string"}`
+
+Rules:
+1. Each element must represent exactly one requested reference and one corresponding visible region. If one requested reference corresponds to multiple separate regions, output one element for each bbox and repeat the same reference.
+2. The bbox coordinates are integers scaled to [0, 1000).
+3. Each bbox must tightly enclose its corresponding referenced entity or region and must not include unrelated content.
+4. Copy each reference exactly from the requested-references array without translation, paraphrasing, correction, or completion. Do not output any reference that was not requested.
+5. Do not add leading or trailing whitespace to reference.
+6. Return bounding boxes only. Do not return points, polygons, masks, explanations, or confidence scores.
+7. Every requested reference must appear in at least one output element.
+8. Output strictly valid JSON only. Do not output Markdown, explanations, or code fences. Properly escape quotes, backslashes, and other special characters inside reference.

@@ -1,0 +1,7 @@
+Read all the text in the image. Directly output the content.
+
+Rules:
+1. Preserve the original text exactly without translation, paraphrasing, correction, or completion.
+2. Follow the natural human reading order.
+3. Output plain text only. Use spaces and line breaks only to preserve text separation and reading order.
+4. Do not output Markdown, HTML, JSON, bounding boxes, category labels, explanations, or code fences.

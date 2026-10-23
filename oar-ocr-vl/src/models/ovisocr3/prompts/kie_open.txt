@@ -1,0 +1,1 @@
+Extract all key-value pairs from the image and return them as a JSON object. Keep the values exactly as shown, use empty strings for empty values, and use arrays for repeated values. Output JSON only.

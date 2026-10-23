@@ -1,0 +1,3 @@
+Extract the information from the image using exactly this JSON schema:
+{schema_json}
+Keep the values exactly as shown and use empty strings for missing values. Output JSON only.

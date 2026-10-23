@@ -19,6 +19,7 @@
 //! - `teleocr` - TeleOCR document parsing VLM (Qwen2.5-VL backbone
 //!   with a windowed vision tower)
 //! - `ovisocr2` - OvisOCR2 end-to-end page-to-Markdown parser (Qwen3.5)
+//! - `ovisocr3` - OvisOCR3 Markdown, structured-page, and region recognition (Qwen3.5)
 //! - `oxr` - SoMark OXR-1.0 region recognition and PP-DocLayout page parsing
 //! - `wevisdoc` - WeVisDoc end-to-end page-to-Markdown parser (Qwen3-VL
 //!   backbone with DeepStack)
@@ -88,6 +89,8 @@ pub mod mineru_diffusion;
 pub mod monkeyocrv2;
 #[path = "models/ovisocr2/mod.rs"]
 pub mod ovisocr2;
+#[path = "models/ovisocr3/mod.rs"]
+pub mod ovisocr3;
 #[path = "models/oxr/mod.rs"]
 pub mod oxr;
 #[path = "models/paddleocr_vl/mod.rs"]
@@ -125,6 +128,7 @@ pub use mineru_diffusion::{
 };
 pub use monkeyocrv2::{MonkeyOcrV2, MonkeyOcrV2ParseOptions, MonkeyOcrV2Task};
 pub use ovisocr2::{OvisOcr2, OvisOcr2ParseOptions};
+pub use ovisocr3::{OvisOcr3, OvisOcr3ParseMode, OvisOcr3ParseOptions};
 pub use oxr::{Oxr, OxrGenerationOptions, OxrTask};
 pub use teleocr::{TeleOcr, TeleOcrTask};
 pub use wevisdoc::{WeVisDoc, WeVisDocParseOptions};
