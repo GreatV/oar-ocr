@@ -20,6 +20,10 @@
 //! table built from the table heads never spans over a neighbouring cell. Reading a PDF's own text layer is
 //! not supported: render PDF pages to images first.
 //!
+//! [`IndraOcrBuilder::workers`] enables CPU page concurrency with separate
+//! model sessions and shared language models. Select execution providers
+//! through [`IndraOcrBuilder::ort_session`]; accelerators require one worker.
+//!
 //! The model weights use a modified OpenRAIL-M license; see the model
 //! repository before using them commercially.
 //!
@@ -58,6 +62,8 @@ use recognize::{Crop, LineText, Token};
 use serde::Serialize;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use unicode_normalization::UnicodeNormalization;
 
 /// A median line height (detector input pixels) under this triggers a
@@ -110,6 +116,7 @@ pub struct IndraOcrBuilder {
     math: bool,
     keep_furniture: bool,
     table_heads: bool,
+    workers: usize,
     ort_session: Option<OrtSessionConfig>,
 }
 
@@ -122,6 +129,7 @@ impl IndraOcrBuilder {
             math: false,
             keep_furniture: false,
             table_heads: false,
+            workers: 1,
             ort_session: None,
         }
     }
@@ -159,11 +167,50 @@ impl IndraOcrBuilder {
         self
     }
 
+    /// Sets the number of CPU page workers (default: one).
+    ///
+    /// Each worker owns a copy of every ONNX session; vocabularies and
+    /// language models are shared. More workers increase memory use for
+    /// sessions and page buffers. With multiple workers, unset ONNX intra-
+    /// and inter-op thread counts default to one. Explicit settings are
+    /// retained: keep workers times threads within the available CPU cores.
+    /// A process-wide ORT thread pool retains its own thread configuration.
+    /// Accelerator execution providers currently require one worker.
+    /// Zero workers is a configuration error.
+    pub fn workers(mut self, workers: usize) -> Self {
+        self.workers = workers;
+        self
+    }
+
     /// Loads the models.
     pub fn build(self) -> Result<IndraOcr, OCRError> {
+        if self.workers == 0 {
+            return Err(OCRError::config_error(
+                "Indra OCR needs at least one worker",
+            ));
+        }
         let dir = self.model_dir.as_path();
         let mut common = ModelInferenceConfig::new();
-        common.ort_session = self.ort_session;
+        common.ort_session = self.ort_session.map(OrtSessionConfig::resolve_auto);
+        let pool = if self.workers > 1 {
+            let config = common.ort_session.get_or_insert_with(OrtSessionConfig::new);
+            if config.has_accelerator_provider() {
+                return Err(OCRError::config_error(
+                    "Indra OCR accelerator execution requires workers(1); multiple workers are CPU-only",
+                ));
+            }
+            config.intra_threads.get_or_insert(1);
+            config.inter_threads.get_or_insert(1);
+            Some(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(self.workers)
+                    .thread_name(|i| format!("indra-{i}"))
+                    .build()
+                    .map_err(|e| OCRError::config_error(format!("Indra OCR worker pool: {e}")))?,
+            )
+        } else {
+            None
+        };
         let meta = read_json(&dir.join("meta.json"))?;
         let vocab = |key: &str| -> Result<Vec<String>, OCRError> {
             let inner: serde_json::Value = serde_json::from_str(meta[key].as_str().unwrap_or(""))
@@ -194,7 +241,7 @@ impl IndraOcrBuilder {
             {
                 let params = &meta["lm_params"][name];
                 let param = |key: &str, default: f64| params[key].as_f64().unwrap_or(default);
-                Some(Lm {
+                Some(Arc::new(Lm {
                     model: lm::NgramLm::load(&lm_path)?,
                     gate: param("gate", LM_GATE),
                     weights: lm::Weights {
@@ -203,14 +250,14 @@ impl IndraOcrBuilder {
                         beam: LM_BEAM,
                         cand_floor: LM_CAND_FLOOR,
                     },
-                })
+                }))
             } else {
                 None
             };
             let jamo = vocab.iter().any(|c| c == "\u{1100}");
             Ok::<_, OCRError>(Recognizer {
                 model,
-                vocab,
+                vocab: vocab.into(),
                 jamo,
                 lm,
             })
@@ -248,7 +295,7 @@ impl IndraOcrBuilder {
                 Ok(None)
             }
         };
-        Ok(IndraOcr {
+        let first = Engine {
             det: model(dir, "det.onnx", &common)?,
             base: recognizer("base", "rec.onnx", "lm.npz", vocab("vocab")?)?,
             order: model(dir, "order.onnx", &common)?,
@@ -266,7 +313,13 @@ impl IndraOcrBuilder {
             window: size("rec_window", Some(1))?,
             keep_furniture: self.keep_furniture,
             table_heads: self.table_heads,
-        })
+        };
+        let mut engines = Vec::with_capacity(self.workers);
+        engines.push(first);
+        for _ in 1..self.workers {
+            engines.push(engines[0].new_worker(&common)?);
+        }
+        Ok(IndraOcr { engines, pool })
     }
 }
 
@@ -274,10 +327,21 @@ impl IndraOcrBuilder {
 #[derive(Debug)]
 struct Recognizer {
     model: OrtInfer,
-    vocab: Vec<String>,
+    vocab: Arc<[String]>,
     /// The vocabulary reads Hangul as jamo, composed back into syllables.
     jamo: bool,
-    lm: Option<Lm>,
+    lm: Option<Arc<Lm>>,
+}
+
+impl Recognizer {
+    fn new_worker(&self, common: &ModelInferenceConfig) -> Result<Self, OCRError> {
+        Ok(Self {
+            model: reload_model(&self.model, common)?,
+            vocab: Arc::clone(&self.vocab),
+            jamo: self.jamo,
+            lm: self.lm.clone(),
+        })
+    }
 }
 
 /// A recognizer's language model and when to use it.
@@ -292,6 +356,13 @@ struct Lm {
 /// The Indra OCR pipeline. Build it with [`IndraOcrBuilder`].
 #[derive(Debug)]
 pub struct IndraOcr {
+    engines: Vec<Engine>,
+    pool: Option<rayon::ThreadPool>,
+}
+
+/// One worker's ONNX sessions and shared recognition data.
+#[derive(Debug)]
+struct Engine {
     det: OrtInfer,
     /// `rec.onnx`: Latin, Cyrillic and Greek, and every line no group
     /// recognizer reads.
@@ -439,6 +510,8 @@ impl IndraPage {
 impl IndraOcr {
     /// Reads pages; one [`IndraPage`] per image, in input order. An empty
     /// image is an [`OCRError::InvalidInput`].
+    /// With multiple workers, pages are assigned as engines become free;
+    /// results (or the first page error) are returned in input order.
     pub fn predict(&self, images: Vec<RgbImage>) -> Result<Vec<IndraPage>, OCRError> {
         if let Some(i) = images
             .iter()
@@ -450,15 +523,70 @@ impl IndraOcr {
                 images[i].height()
             )));
         }
-        images
-            .iter()
-            .enumerate()
-            .map(|(index, image)| {
-                let mut page = self.read_page(cv::rgb_to_gray(image))?;
-                page.index = index;
-                Ok(page)
+        let read = |engine: &Engine, index: usize| {
+            let mut page = engine.read_page(cv::rgb_to_gray(&images[index]))?;
+            page.index = index;
+            Ok(page)
+        };
+        let Some(pool) = &self.pool else {
+            return (0..images.len())
+                .map(|index| read(&self.engines[0], index))
+                .collect();
+        };
+        if images.is_empty() {
+            return Ok(Vec::new());
+        }
+        let next = AtomicUsize::new(self.engines.len());
+        // One loop per engine. Nested Rayon image processing stays in this
+        // pool, and never creates an additional global preprocessing pool.
+        let mut results: Vec<_> = pool
+            .broadcast(|worker| {
+                let engine = &self.engines[worker.index()];
+                let mut results = Vec::new();
+                // Give each engine its first page before taking more work.
+                // A batch of at least N pages therefore warms every engine.
+                let mut index = worker.index();
+                while index < images.len() {
+                    results.push((index, read(engine, index)));
+                    index = next.fetch_add(1, Ordering::Relaxed);
+                }
+                results
             })
-            .collect()
+            .into_iter()
+            .flatten()
+            .collect();
+        results.sort_unstable_by_key(|(index, _)| *index);
+        results.into_iter().map(|(_, result)| result).collect()
+    }
+}
+
+impl Engine {
+    fn new_worker(&self, common: &ModelInferenceConfig) -> Result<Self, OCRError> {
+        let optional =
+            |model: &Option<OrtInfer>| model.as_ref().map(|m| reload_model(m, common)).transpose();
+        Ok(Self {
+            det: reload_model(&self.det, common)?,
+            base: self.base.new_worker(common)?,
+            order: reload_model(&self.order, common)?,
+            orient: optional(&self.orient)?,
+            groups: self
+                .groups
+                .iter()
+                .map(|(name, rec)| Ok((name.clone(), rec.new_worker(common)?)))
+                .collect::<Result<_, OCRError>>()?,
+            script: optional(&self.script)?,
+            script_groups: self.script_groups.clone(),
+            math: self
+                .math
+                .as_ref()
+                .map(|m| m.new_worker(common))
+                .transpose()?,
+            long_side: self.long_side,
+            rec_height: self.rec_height,
+            window: self.window,
+            keep_furniture: self.keep_furniture,
+            table_heads: self.table_heads,
+        })
     }
 
     fn read_page(&self, gray: GrayImage) -> Result<IndraPage, OCRError> {
@@ -1073,7 +1201,7 @@ struct Layout {
     tab: Option<Vec<f32>>,
 }
 
-impl IndraOcr {
+impl Engine {
     /// Runs the order model on line boxes (two or more) and decodes the
     /// reading order: blocks from the same-block head, lines inside a block
     /// by geometry, blocks by the order head.
@@ -1300,6 +1428,13 @@ fn model(dir: &Path, name: &str, common: &ModelInferenceConfig) -> Result<OrtInf
     OrtInfer::from_config(&common, dir.join(name), None)
 }
 
+/// Creates a separate session for another worker without reloading metadata.
+fn reload_model(original: &OrtInfer, common: &ModelInferenceConfig) -> Result<OrtInfer, OCRError> {
+    let mut common = common.clone();
+    common.model_name = Some(original.model_name().to_owned());
+    OrtInfer::from_config(&common, original.model_path(), Some(original.input_name()))
+}
+
 /// A non-empty JSON array of non-empty strings (a vocabulary).
 fn string_list(value: &serde_json::Value, what: &str) -> Result<Vec<String>, OCRError> {
     let list: Option<Vec<String>> = value.as_array().filter(|a| !a.is_empty()).and_then(|a| {
@@ -1356,5 +1491,77 @@ mod tests {
         let angles = arange(-0.5, 0.5 + 1e-6, 0.1);
         assert_eq!(angles.len(), 11);
         assert!(angles[2].abs() >= DESKEW_MIN);
+    }
+
+    #[test]
+    fn parallel_pages_match_sequential() {
+        use oar_ocr_core::core::config::OrtExecutionProvider;
+
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("models/datalab-to/indra-ocr-v1.1.0");
+        if !dir.join("meta.json").is_file() {
+            eprintln!("skipping Indra page concurrency test: local models are absent");
+            return;
+        }
+        // A small raster page spelling TEST twice; no font or image fixture
+        // dependency. Unequal sizes, rotation, a blank and a repeated page
+        // make misplaced or lost results visible in a five-page batch.
+        let glyphs = [
+            [31u8, 4, 4, 4, 4, 4, 4],
+            [31, 16, 16, 30, 16, 16, 31],
+            [15, 16, 16, 14, 1, 1, 30],
+            [31, 4, 4, 4, 4, 4, 4],
+        ];
+        let mut page = RgbImage::from_pixel(256, 160, image::Rgb([255; 3]));
+        for y0 in [30, 90] {
+            for (letter, rows) in glyphs.iter().enumerate() {
+                for (row, bits) in rows.iter().enumerate() {
+                    for col in 0..5 {
+                        if bits & (1 << (4 - col)) != 0 {
+                            for dy in 0..4 {
+                                for dx in 0..4 {
+                                    page.put_pixel(
+                                        24 + letter as u32 * 28 + col * 4 + dx,
+                                        y0 + row as u32 * 4 + dy,
+                                        image::Rgb([0; 3]),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let images = vec![
+            page.clone(),
+            image::imageops::rotate90(&page),
+            RgbImage::from_pixel(192, 128, image::Rgb([255; 3])),
+            page.clone(),
+            image::imageops::rotate180(&page),
+        ];
+        let cpu = OrtSessionConfig::new().with_execution_providers(vec![OrtExecutionProvider::CPU]);
+        let serial = IndraOcrBuilder::new(&dir)
+            .ort_session(cpu.clone().with_intra_threads(1).with_inter_threads(1))
+            .build()
+            .unwrap();
+        let expected = serial.predict(images.clone()).unwrap();
+        drop(serial);
+        let parallel = IndraOcrBuilder::new(&dir)
+            .workers(3)
+            .ort_session(cpu)
+            .build()
+            .unwrap();
+        for _ in 0..2 {
+            let actual = parallel.predict(images.clone()).unwrap();
+            // Serialize all public fields, including lines and confidences;
+            // the shared export additionally checks the private table HTML.
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+            for (index, (a, e)) in actual.iter().zip(&expected).enumerate() {
+                assert_eq!(a.index, index);
+                assert_eq!(a.to_json(), e.to_json());
+            }
+        }
     }
 }

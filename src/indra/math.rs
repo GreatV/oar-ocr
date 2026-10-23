@@ -4,13 +4,14 @@
 //! values.
 
 use super::recognize::{Crop, crop_line, is_dark_line, line_batches, pad_batch, width_batches};
-use super::{input_error, model, run};
+use super::{input_error, model, reload_model, run};
 use image::GrayImage;
 use oar_ocr_core::core::OCRError;
 use oar_ocr_core::core::config::ModelInferenceConfig;
 use oar_ocr_core::core::inference::OrtInfer;
 use ort::value::{Tensor, TensorRef};
 use std::path::Path;
+use std::sync::Arc;
 
 /// Classifier probability above which a line is read as math.
 const MATH_MIN: f32 = 0.5;
@@ -36,7 +37,7 @@ pub(super) struct MathReader {
     heads: usize,
     head_dim: usize,
     /// Token strings by id; the special ids map to empty strings.
-    itos: Vec<String>,
+    itos: Arc<[String]>,
 }
 
 impl MathReader {
@@ -77,7 +78,22 @@ impl MathReader {
             layers: get("dec_layers")?,
             heads,
             head_dim: channels / heads,
-            itos,
+            itos: itos.into(),
+        })
+    }
+
+    pub(super) fn new_worker(&self, common: &ModelInferenceConfig) -> Result<Self, OCRError> {
+        Ok(Self {
+            cls: reload_model(&self.cls, common)?,
+            enc: reload_model(&self.enc, common)?,
+            init: reload_model(&self.init, common)?,
+            step: reload_model(&self.step, common)?,
+            height: self.height,
+            max_tokens: self.max_tokens,
+            layers: self.layers,
+            heads: self.heads,
+            head_dim: self.head_dim,
+            itos: Arc::clone(&self.itos),
         })
     }
 
