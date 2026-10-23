@@ -262,9 +262,9 @@ impl CRNNModel {
 
         // Reduce straight from ONNX Runtime's output buffer. Building an owned
         // `Array3` here would force a multi-hundred-MB (often multi-GB) copy of
-        // the `(batch, time, vocab)` logits per call. Only argmax must run while
-        // that borrowed buffer (and therefore the session lock) is alive; CTC
-        // collapse and string construction happen after this call returns.
+        // the `(batch, time, vocab)` logits per call. The callback retains the
+        // ORT buffer without holding the session lock; CTC collapse and string
+        // construction happen after this call returns.
         let input_name = self.inference.input_name();
         let inputs = vec![(input_name, TensorInput::Array4(&batch_tensor))];
         let output = self

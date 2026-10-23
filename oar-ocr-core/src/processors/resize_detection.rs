@@ -18,9 +18,55 @@
 
 use crate::core::constants::{DEFAULT_LIMIT_SIDE_LEN, DEFAULT_MAX_SIDE_LIMIT};
 use crate::processors::types::{ImageScaleInfo, LimitType, ResizeType};
-use image::{DynamicImage, GenericImageView};
+use image::{DynamicImage, GenericImageView, RgbImage};
 use rayon::prelude::*;
+use std::borrow::Cow;
 use tracing::{error, warn};
+
+// Share geometry and operation order between the owned public API and DB's
+// borrowed RGB path. Identity resizes return the source without copying it.
+trait ResizeSource: Sized {
+    fn dimensions(&self) -> (u32, u32);
+    fn resized(&self, width: u32, height: u32, filter: image::imageops::FilterType) -> Self;
+    fn padded(&self, width: u32, height: u32) -> Self;
+}
+
+impl ResizeSource for DynamicImage {
+    fn dimensions(&self) -> (u32, u32) {
+        GenericImageView::dimensions(self)
+    }
+
+    fn resized(&self, width: u32, height: u32, filter: image::imageops::FilterType) -> Self {
+        self.resize_exact(width, height, filter)
+    }
+
+    fn padded(&self, width: u32, height: u32) -> Self {
+        let mut padded = DynamicImage::new_rgb8(width, height);
+        image::imageops::overlay(&mut padded, self, 0, 0);
+        padded
+    }
+}
+
+impl ResizeSource for Cow<'_, RgbImage> {
+    fn dimensions(&self) -> (u32, u32) {
+        self.as_ref().dimensions()
+    }
+
+    fn resized(&self, width: u32, height: u32, filter: image::imageops::FilterType) -> Self {
+        Cow::Owned(image::imageops::resize(
+            self.as_ref(),
+            width,
+            height,
+            filter,
+        ))
+    }
+
+    fn padded(&self, width: u32, height: u32) -> Self {
+        let mut padded = RgbImage::new(width, height);
+        image::imageops::overlay(&mut padded, self.as_ref(), 0, 0);
+        Cow::Owned(padded)
+    }
+}
 
 /// A struct for resizing images for OCR testing
 ///
@@ -144,6 +190,16 @@ impl DetResizeForTest {
         (resize_imgs, img_shapes)
     }
 
+    /// Resizes owned or borrowed RGB pages, allocating pixels only for resize/padding.
+    pub(crate) fn apply_rgb<'a>(
+        &self,
+        imgs: Vec<Cow<'a, RgbImage>>,
+    ) -> Vec<(Cow<'a, RgbImage>, ImageScaleInfo)> {
+        imgs.into_par_iter()
+            .map(|img| self.resize(img, None, None, None))
+            .collect()
+    }
+
     /// Resizes a single image based on the configured resize type
     ///
     /// This method applies the appropriate resize operation based on the
@@ -160,13 +216,13 @@ impl DetResizeForTest {
     /// A tuple containing:
     /// 1. The resized image
     /// 2. Image scale information (original dimensions and resize ratios)
-    fn resize(
+    fn resize<I: ResizeSource>(
         &self,
-        mut img: DynamicImage,
+        mut img: I,
         limit_side_len: Option<u32>,
         limit_type: Option<&LimitType>,
         max_side_limit: Option<u32>,
-    ) -> (DynamicImage, ImageScaleInfo) {
+    ) -> (I, ImageScaleInfo) {
         let (src_w, src_h) = img.dimensions();
 
         // Pad small images to avoid issues with OCR processing
@@ -201,7 +257,7 @@ impl DetResizeForTest {
     ///
     /// # Returns
     /// The padded image (or original if no padding was needed)
-    fn image_padding(&self, img: DynamicImage) -> DynamicImage {
+    fn image_padding<I: ResizeSource>(&self, img: I) -> I {
         let (w, h) = img.dimensions();
         // Ensure minimum dimension of 32 pixels for both width and height
         let new_w = w.max(32);
@@ -212,11 +268,7 @@ impl DetResizeForTest {
             return img;
         }
 
-        // Create a new image with the padded dimensions
-        let mut padded = DynamicImage::new_rgb8(new_w, new_h);
-        // Overlay the original image onto the padded image at position (0,0)
-        image::imageops::overlay(&mut padded, &img, 0, 0);
-        padded
+        img.padded(new_w, new_h)
     }
 
     /// Resize type 0: Resize based on limit side length
@@ -240,13 +292,13 @@ impl DetResizeForTest {
     /// A tuple containing:
     /// 1. The resized image
     /// 2. Array with resize ratios [ratio_h, ratio_w]
-    fn resize_image_type0(
+    fn resize_image_type0<I: ResizeSource>(
         &self,
-        img: DynamicImage,
+        img: I,
         limit_side_len: Option<u32>,
         limit_type: Option<&LimitType>,
         max_side_limit: Option<u32>,
-    ) -> (DynamicImage, [f32; 2]) {
+    ) -> (I, [f32; 2]) {
         let (w, h) = img.dimensions();
         let limit_side_len = limit_side_len
             .or(self.limit_side_len)
@@ -311,7 +363,7 @@ impl DetResizeForTest {
             return (img, [1.0, 1.0]);
         }
 
-        let resized_img = img.resize_exact(resize_w, resize_h, self.filter);
+        let resized_img = img.resized(resize_w, resize_h, self.filter);
         let ratio_h = resize_h as f32 / h as f32;
         let ratio_w = resize_w as f32 / w as f32;
 
@@ -334,12 +386,12 @@ impl DetResizeForTest {
     /// A tuple containing:
     /// 1. The resized image
     /// 2. Array with resize ratios [ratio_h, ratio_w]
-    fn resize_image_type1(
+    fn resize_image_type1<I: ResizeSource>(
         &self,
-        img: DynamicImage,
+        img: I,
         image_shape: (u32, u32),
         keep_ratio: bool,
-    ) -> (DynamicImage, [f32; 2]) {
+    ) -> (I, [f32; 2]) {
         let (ori_w, ori_h) = img.dimensions();
         let (resize_h, mut resize_w) = image_shape;
 
@@ -359,7 +411,7 @@ impl DetResizeForTest {
 
         let ratio_h = resize_h as f32 / ori_h as f32;
         let ratio_w = resize_w as f32 / ori_w as f32;
-        let resized_img = img.resize_exact(resize_w, resize_h, self.filter);
+        let resized_img = img.resized(resize_w, resize_h, self.filter);
 
         (resized_img, [ratio_h, ratio_w])
     }
@@ -378,7 +430,7 @@ impl DetResizeForTest {
     /// A tuple containing:
     /// 1. The resized image
     /// 2. Array with resize ratios [ratio_h, ratio_w]
-    fn resize_image_type2(&self, img: DynamicImage, resize_long: u32) -> (DynamicImage, [f32; 2]) {
+    fn resize_image_type2<I: ResizeSource>(&self, img: I, resize_long: u32) -> (I, [f32; 2]) {
         let (w, h) = img.dimensions();
 
         // Calculate resize ratio based on which side is longer
@@ -403,7 +455,7 @@ impl DetResizeForTest {
             return (img, [1.0, 1.0]);
         }
 
-        let resized_img = img.resize_exact(resize_w, resize_h, self.filter);
+        let resized_img = img.resized(resize_w, resize_h, self.filter);
         let ratio_h = resize_h as f32 / h as f32;
         let ratio_w = resize_w as f32 / w as f32;
 
@@ -423,11 +475,11 @@ impl DetResizeForTest {
     /// A tuple containing:
     /// 1. The resized image
     /// 2. Array with resize ratios [ratio_h, ratio_w]
-    fn resize_image_type3(
+    fn resize_image_type3<I: ResizeSource>(
         &self,
-        img: DynamicImage,
+        img: I,
         input_shape: (u32, u32, u32),
-    ) -> (DynamicImage, [f32; 2]) {
+    ) -> (I, [f32; 2]) {
         let (ori_w, ori_h) = img.dimensions();
         let (_, resize_h, resize_w) = input_shape;
 
@@ -438,8 +490,64 @@ impl DetResizeForTest {
 
         let ratio_h = resize_h as f32 / ori_h as f32;
         let ratio_w = resize_w as f32 / ori_w as f32;
-        let resized_img = img.resize_exact(resize_w, resize_h, self.filter);
+        let resized_img = img.resized(resize_w, resize_h, self.filter);
 
         (resized_img, [ratio_h, ratio_w])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_rgb_matches_owned_resize() {
+        let images: Vec<_> = [(5, 7), (64, 96), (113, 79)]
+            .into_iter()
+            .map(|(w, h)| {
+                RgbImage::from_fn(w, h, |x, y| {
+                    image::Rgb([(x * 17 + y) as u8, (x + y * 29) as u8, (x * y) as u8])
+                })
+            })
+            .collect();
+        let mut resizer = DetResizeForTest::new(None, None, None, Some(128), None, None, None);
+        for resize_type in [
+            ResizeType::Type0,
+            ResizeType::Type1 {
+                image_shape: (96, 64),
+                keep_ratio: false,
+            },
+            ResizeType::Type1 {
+                image_shape: (96, 64),
+                keep_ratio: true,
+            },
+            ResizeType::Type2 { resize_long: 128 },
+            ResizeType::Type3 {
+                input_shape: (3, 96, 64),
+            },
+        ] {
+            resizer.resize_type = resize_type;
+            let borrowed = resizer.apply_rgb(images.iter().map(Cow::Borrowed).collect());
+            let (owned, shapes) = resizer.apply(
+                images
+                    .iter()
+                    .cloned()
+                    .map(DynamicImage::ImageRgb8)
+                    .collect(),
+                None,
+                None,
+                None,
+            );
+            for (index, ((actual, shape), expected)) in borrowed.iter().zip(&owned).enumerate() {
+                assert_eq!(actual.as_ref(), expected.as_rgb8().unwrap());
+                let bits =
+                    |s: &ImageScaleInfo| [s.src_h, s.src_w, s.ratio_h, s.ratio_w].map(f32::to_bits);
+                assert_eq!(bits(shape), bits(&shapes[index]));
+                if matches!(resizer.resize_type, ResizeType::Type0) && index == 1 {
+                    assert!(matches!(actual, Cow::Borrowed(_)));
+                    assert!(std::ptr::eq(actual.as_ref(), &images[index]));
+                }
+            }
+        }
     }
 }

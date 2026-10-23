@@ -39,11 +39,12 @@ impl ModelAdapter for TextDetectionAdapter {
         config: Option<&<Self::Task as Task>::Config>,
     ) -> Result<<Self::Task as Task>::Output, OCRError> {
         let effective_config = config.unwrap_or(&self.config);
+        let image_refs: Vec<_> = input.images.iter().map(AsRef::as_ref).collect();
 
         // Use the DB model to detect text with error context
         let model_output = self.model
-            .forward(
-                input.into_owned_images(),
+            .forward_refs(
+                &image_refs,
                 effective_config.score_threshold,
                 effective_config.box_threshold,
                 effective_config.unclip_ratio,

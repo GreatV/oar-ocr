@@ -9,7 +9,8 @@ use crate::processors::{
     BoundingBox, BoxType, DBPostProcess, DBPostProcessConfig, DetResizeForTest, ImageScaleInfo,
     LimitType, NormalizeImage, ScoreMode, TensorLayout,
 };
-use image::{DynamicImage, GenericImageView, RgbImage};
+use image::{DynamicImage, RgbImage};
+use std::borrow::Cow;
 use tracing::debug;
 
 /// Configuration for DB model preprocessing.
@@ -161,19 +162,13 @@ impl DBModel {
         Ok((batch_tensor, img_shapes))
     }
 
-    fn resize_images(&self, images: Vec<RgbImage>) -> Vec<(usize, DynamicImage, ImageScaleInfo)> {
-        let dynamic_images: Vec<DynamicImage> =
-            images.into_iter().map(DynamicImage::ImageRgb8).collect();
-        let (resized_images, img_shapes) = self.resizer.apply(
-            dynamic_images,
-            None, // Use default limit_side_len
-            None, // Use default limit_type
-            None, // Use default max_side_limit
-        );
-
-        resized_images
+    fn resize_images<'a>(
+        &self,
+        images: Vec<Cow<'a, RgbImage>>,
+    ) -> Vec<(usize, Cow<'a, RgbImage>, ImageScaleInfo)> {
+        self.resizer
+            .apply_rgb(images)
             .into_iter()
-            .zip(img_shapes)
             .enumerate()
             .map(|(idx, (image, shape))| (idx, image, shape))
             .collect()
@@ -234,7 +229,7 @@ impl DBModel {
 
     fn forward_resized_batch(
         &self,
-        batch: Vec<(usize, DynamicImage, ImageScaleInfo)>,
+        batch: Vec<(usize, Cow<'_, RgbImage>, ImageScaleInfo)>,
         boxes_by_image: &mut [Vec<BoundingBox>],
         scores_by_image: &mut [Vec<f32>],
         score_threshold: f32,
@@ -251,15 +246,45 @@ impl DBModel {
             img_shapes.push(img_shape);
         }
 
-        let batch_tensor = self.normalizer.normalize_batch_to(resized_images)?;
-        let predictions = self.infer(&batch_tensor)?;
-        let group_output = self.postprocess(
-            &predictions,
-            img_shapes,
-            score_threshold,
-            box_threshold,
-            unclip_ratio,
-        );
+        let image_refs: Vec<_> = resized_images.iter().map(AsRef::as_ref).collect();
+        let batch_tensor = self.normalizer.normalize_batch_refs(&image_refs)?;
+        drop(image_refs);
+        drop(resized_images);
+
+        // The callback borrows the ORT-owned output after releasing the session
+        // lock. Contours/scoring/unclip can run without copying the heatmap or
+        // serializing another caller's inference behind postprocessing.
+        let config = DBPostProcessConfig::new(score_threshold, box_threshold, unclip_ratio);
+        let inputs = [(
+            self.inference.input_name(),
+            TensorInput::Array4(&batch_tensor),
+        )];
+        let group_output = self
+            .inference
+            .infer_first_output_f32(&inputs, |shape, data| {
+                let &[batch, channels, height, width] = shape else {
+                    return Err(OCRError::InvalidInput {
+                        message: format!("DB: expected 4D output, got shape {shape:?}"),
+                    });
+                };
+                let predictions =
+                    ndarray::ArrayView4::from_shape((batch, channels, height, width), data)
+                        .map_err(|e| OCRError::InvalidInput {
+                            message: format!("DB: failed to view output as 4D array: {e}"),
+                        })?;
+                let (boxes, scores) =
+                    self.postprocessor
+                        .apply_view(predictions, &img_shapes, Some(&config));
+                Ok(DBModelOutput { boxes, scores })
+            })
+            .map_err(|e| OCRError::Inference {
+                model_name: "DB".to_string(),
+                context: format!(
+                    "failed to process inference on batch with shape {:?}",
+                    batch_tensor.shape()
+                ),
+                source: Box::new(e),
+            })?;
 
         for (group_idx, original_idx) in original_indices.into_iter().enumerate() {
             boxes_by_image[original_idx] = group_output
@@ -285,6 +310,29 @@ impl DBModel {
         box_threshold: f32,
         unclip_ratio: f32,
     ) -> Result<DBModelOutput, OCRError> {
+        let images = images.into_iter().map(Cow::Owned).collect();
+        self.forward_images(images, score_threshold, box_threshold, unclip_ratio)
+    }
+
+    /// Keeps shared page pixels borrowed through resizing and normalization.
+    pub(crate) fn forward_refs(
+        &self,
+        images: &[&RgbImage],
+        score_threshold: f32,
+        box_threshold: f32,
+        unclip_ratio: f32,
+    ) -> Result<DBModelOutput, OCRError> {
+        let images = images.iter().map(|&image| Cow::Borrowed(image)).collect();
+        self.forward_images(images, score_threshold, box_threshold, unclip_ratio)
+    }
+
+    fn forward_images(
+        &self,
+        images: Vec<Cow<'_, RgbImage>>,
+        score_threshold: f32,
+        box_threshold: f32,
+        unclip_ratio: f32,
+    ) -> Result<DBModelOutput, OCRError> {
         if images.is_empty() {
             return Ok(DBModelOutput {
                 boxes: Vec::new(),
@@ -294,7 +342,7 @@ impl DBModel {
 
         let image_count = images.len();
         let resized = self.resize_images(images);
-        let mut groups: Vec<Vec<(usize, DynamicImage, ImageScaleInfo)>> = Vec::new();
+        let mut groups: Vec<Vec<(usize, Cow<'_, RgbImage>, ImageScaleInfo)>> = Vec::new();
 
         for item in resized {
             let dims = item.1.dimensions();
