@@ -5,7 +5,7 @@ use crate::attention::{
 };
 use crate::error::Error;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
-use candle_core::{DType, IndexOp, Tensor};
+use candle_core::{IndexOp, Tensor};
 use candle_nn::{
     LayerNorm, LayerNormConfig, Linear, Module, RmsNorm, VarBuilder, layer_norm, linear,
     linear_no_bias, rms_norm,
@@ -104,7 +104,7 @@ impl VisionAttention {
         let v = qkv
             .i((.., 2, .., ..))
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "slice vision value", e))?;
-        let (q, k) = apply_vision_rope(&q, &k, cos, sin)?;
+        let (q, k) = crate::runtime::tensor::apply_rotary_f32(&q, &k, cos, sin, MODEL_NAME)?;
         let q = q
             .transpose(0, 1)
             .and_then(|q| q.unsqueeze(0))
@@ -142,41 +142,6 @@ impl VisionAttention {
             .forward(&attention)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision output projection", e))
     }
-}
-
-fn apply_vision_rope(
-    q: &Tensor,
-    k: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
-) -> Result<(Tensor, Tensor), Error> {
-    let q_dtype = q.dtype();
-    let k_dtype = k.dtype();
-    let q = q
-        .to_dtype(DType::F32)
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "cast vision query", e))?;
-    let k = k
-        .to_dtype(DType::F32)
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "cast vision key", e))?;
-    let cos = cos
-        .to_dtype(DType::F32)
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "cast vision cosine", e))?;
-    let sin = sin
-        .to_dtype(DType::F32)
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "cast vision sine", e))?;
-    let q_rotated = crate::utils::rotate_half(&q)?;
-    let k_rotated = crate::utils::rotate_half(&k)?;
-    let q = q
-        .broadcast_mul(&cos)
-        .and_then(|value| value.broadcast_add(&q_rotated.broadcast_mul(&sin)?))
-        .and_then(|value| value.to_dtype(q_dtype))
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "apply query vision RoPE", e))?;
-    let k = k
-        .broadcast_mul(&cos)
-        .and_then(|value| value.broadcast_add(&k_rotated.broadcast_mul(&sin)?))
-        .and_then(|value| value.to_dtype(k_dtype))
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "apply key vision RoPE", e))?;
-    Ok((q, k))
 }
 
 #[derive(Debug, Clone)]
@@ -455,6 +420,7 @@ fn build_vision_rope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::DType;
 
     #[test]
     fn rope_follows_merge_grouped_patch_order() {

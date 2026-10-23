@@ -12,12 +12,14 @@
 
 use crate::attention::{
     VISION_CHUNKED_ATTN_CHUNK_SIZE, VISION_CHUNKED_ATTN_SEQ_THRESHOLD, chunked_vision_attention,
-    on_compute_device, scaled_dot_product_attention,
+    scaled_dot_product_attention,
 };
 use crate::error::Error;
 use crate::runtime::errors::{candle_to_ocr_inference, candle_to_ocr_processing};
-use crate::runtime::tensor::{rotate_half, vision_inv_freq};
-use candle_core::{DType, Device, IndexOp, Tensor};
+use crate::runtime::tensor::{
+    VisionRotaryEmbedding, apply_rotary_f32, merge_grouped_positions, vision_rotary_cos_sin,
+};
+use candle_core::{IndexOp, Tensor};
 use candle_nn::{Linear, Module, VarBuilder, linear, rms_norm};
 use serde::Deserialize;
 
@@ -62,167 +64,6 @@ impl TeleOcrVisionConfig {
             )));
         }
         Ok(self.hidden_size / self.num_heads)
-    }
-}
-
-fn apply_rotary_pos_emb_vision(
-    q: &Tensor,
-    k: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
-) -> Result<(Tensor, Tensor), Error> {
-    let orig_q_dtype = q.dtype();
-    let orig_k_dtype = k.dtype();
-    let q = q.to_dtype(DType::F32).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "TeleOCR: vision q cast failed",
-            e,
-        )
-    })?;
-    let k = k.to_dtype(DType::F32).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "TeleOCR: vision k cast failed",
-            e,
-        )
-    })?;
-    let cos = cos
-        .unsqueeze(1)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "TeleOCR: vision cos unsqueeze failed",
-                e,
-            )
-        })?
-        .to_dtype(DType::F32)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "TeleOCR: vision cos cast failed",
-                e,
-            )
-        })?;
-    let sin = sin
-        .unsqueeze(1)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "TeleOCR: vision sin unsqueeze failed",
-                e,
-            )
-        })?
-        .to_dtype(DType::F32)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "TeleOCR: vision sin cast failed",
-                e,
-            )
-        })?;
-
-    let q_rot = rotate_half(&q)?;
-    let q_embed = q
-        .broadcast_mul(&cos)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "TeleOCR: vision q*cos failed",
-                e,
-            )
-        })?
-        .broadcast_add(&q_rot.broadcast_mul(&sin).map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "TeleOCR: vision rotate_half(q)*sin failed",
-                e,
-            )
-        })?)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "TeleOCR: vision q rope add failed",
-                e,
-            )
-        })?;
-
-    let k_rot = rotate_half(&k)?;
-    let k_embed = k
-        .broadcast_mul(&cos)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "TeleOCR: vision k*cos failed",
-                e,
-            )
-        })?
-        .broadcast_add(&k_rot.broadcast_mul(&sin).map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "TeleOCR: vision rotate_half(k)*sin failed",
-                e,
-            )
-        })?)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "TeleOCR: vision k rope add failed",
-                e,
-            )
-        })?;
-
-    let q_embed = q_embed.to_dtype(orig_q_dtype).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "TeleOCR: vision q_embed cast back failed",
-            e,
-        )
-    })?;
-    let k_embed = k_embed.to_dtype(orig_k_dtype).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "TeleOCR: vision k_embed cast back failed",
-            e,
-        )
-    })?;
-
-    Ok((q_embed, k_embed))
-}
-
-#[derive(Debug, Clone)]
-struct VisionRotaryEmbedding {
-    inv_freq: Tensor,
-    dim: usize,
-}
-
-impl VisionRotaryEmbedding {
-    fn new(dim: usize, theta: f64, device: &Device) -> Result<Self, Error> {
-        let inv_freq = vision_inv_freq(dim, theta, "TeleOCR", device)?;
-        Ok(Self { inv_freq, dim })
-    }
-
-    fn forward(&self, seqlen: usize, device: &Device) -> Result<Tensor, Error> {
-        // Use on_compute_device to handle Metal's lack of support for arange
-        on_compute_device(device, |compute_device| {
-            let seq = Tensor::arange(0u32, seqlen as u32, compute_device)?.to_dtype(DType::F32)?;
-            let inv = self
-                .inv_freq
-                .to_device(compute_device)?
-                .to_dtype(DType::F32)?;
-            seq.unsqueeze(1)?.matmul(&inv.unsqueeze(0)?)
-        })
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "TeleOCR: vision rope forward failed",
-                e,
-            )
-        })
-    }
-
-    fn dim(&self) -> usize {
-        self.dim
     }
 }
 
@@ -382,110 +223,6 @@ pub(crate) fn window_plan(
     })
 }
 
-/// (h, w) rotary position ids for every patch of one image, in the
-/// merge-grouped raster order produced by the patchifier (merge block rows:
-/// `hb, wb, h_inner, w_inner`). All patches of a merge unit do NOT share a
-/// position: the id is the raw patch coordinate.
-fn vision_position_ids(t: usize, h: usize, w: usize, merge: usize) -> (Vec<i64>, Vec<i64>) {
-    let mut hpos = Vec::with_capacity(t * h * w);
-    let mut wpos = Vec::with_capacity(t * h * w);
-    for _ in 0..t {
-        for hb in 0..(h / merge) {
-            for wb in 0..(w / merge) {
-                for h_inner in 0..merge {
-                    for w_inner in 0..merge {
-                        hpos.push((hb * merge + h_inner) as i64);
-                        wpos.push((wb * merge + w_inner) as i64);
-                    }
-                }
-            }
-        }
-    }
-    (hpos, wpos)
-}
-
-/// Build `(cos, sin)` of shape `(patches, head_dim)` from per-patch `(h, w)`
-/// position ids, mirroring `rot_pos_emb` + `emb = cat(rot, rot)` in the
-/// reference: gather the frequency table at each coordinate, concatenate the
-/// axes, then double for rotate_half.
-fn gather_vision_pos_emb(
-    rotary_full: &Tensor,
-    freq_dim: usize,
-    hpos: &[i64],
-    wpos: &[i64],
-    device: &Device,
-) -> Result<(Tensor, Tensor), Error> {
-    let num_patches = hpos.len();
-    let make_index = |values: &[i64]| -> Result<Tensor, Error> {
-        let index =
-            Tensor::from_vec(values.to_vec(), (num_patches, 1usize), device).map_err(|e| {
-                candle_to_ocr_processing(
-                    crate::error::ProcessingStage::TensorOperation,
-                    "TeleOCR: vision pos tensor failed",
-                    e,
-                )
-            })?;
-        index
-            .broadcast_as((num_patches, freq_dim))
-            .and_then(|index| index.contiguous())
-            .map_err(|e| {
-                candle_to_ocr_processing(
-                    crate::error::ProcessingStage::TensorOperation,
-                    "TeleOCR: vision pos broadcast failed",
-                    e,
-                )
-            })
-    };
-    let h_index = make_index(hpos)?;
-    let w_index = make_index(wpos)?;
-
-    let freqs_h = rotary_full
-        .gather(&h_index, 0)
-        .map_err(|e| candle_to_ocr_inference("TeleOCR", "vision gather h", e))?;
-    let freqs_w = rotary_full
-        .gather(&w_index, 0)
-        .map_err(|e| candle_to_ocr_inference("TeleOCR", "vision gather w", e))?;
-    let rotary = Tensor::cat(&[&freqs_h, &freqs_w], candle_core::D::Minus1)
-        .map_err(|e| candle_to_ocr_inference("TeleOCR", "vision pos cat", e))?;
-    let emb = Tensor::cat(&[&rotary, &rotary], candle_core::D::Minus1)
-        .map_err(|e| candle_to_ocr_inference("TeleOCR", "vision emb cat", e))?;
-    let cos = emb
-        .cos()
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "TeleOCR: vision cos failed",
-                e,
-            )
-        })?
-        .contiguous()
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "TeleOCR: vision cos contiguous failed",
-                e,
-            )
-        })?;
-    let sin = emb
-        .sin()
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "TeleOCR: vision sin failed",
-                e,
-            )
-        })?
-        .contiguous()
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "TeleOCR: vision sin contiguous failed",
-                e,
-            )
-        })?;
-    Ok((cos, sin))
-}
-
 /// Non-causal attention over one contiguous segment. Segments longer than
 /// [`VISION_CHUNKED_ATTN_SEQ_THRESHOLD`] fall back to query chunking to cap
 /// the attention-score memory (full-attention blocks on large pages).
@@ -557,7 +294,13 @@ impl TeleOcrVisionAttention {
             .i((.., 2, .., ..))
             .map_err(|e| candle_to_ocr_inference("TeleOCR", "vision v slice", e))?;
 
-        let (q, k) = apply_rotary_pos_emb_vision(&q, &k, cos, sin)?;
+        let cos = cos
+            .unsqueeze(1)
+            .map_err(|e| candle_to_ocr_inference("TeleOCR", "vision cos layout", e))?;
+        let sin = sin
+            .unsqueeze(1)
+            .map_err(|e| candle_to_ocr_inference("TeleOCR", "vision sin layout", e))?;
+        let (q, k) = apply_rotary_f32(&q, &k, &cos, &sin, "TeleOCR")?;
 
         let q = q
             .transpose(0, 1)
@@ -814,7 +557,8 @@ impl TeleOcrVisionModel {
         }
         // Matches Qwen2_5_VisionRotaryEmbedding(head_dim // 2): 20
         // frequencies per axis for head_dim 80.
-        let rotary_pos_emb = VisionRotaryEmbedding::new(head_dim / 2, 10000.0, vb.device())?;
+        let rotary_pos_emb =
+            VisionRotaryEmbedding::new(head_dim / 2, 10000.0, "TeleOCR", vb.device())?;
         Ok(Self {
             patch_embed,
             blocks,
@@ -841,7 +585,6 @@ impl TeleOcrVisionModel {
             .max()
             .unwrap_or(0);
         let rotary_full = self.rotary_pos_emb.forward(max_grid, device)?;
-        let freq_dim = self.rotary_pos_emb.dim() / 2;
         let merge_unit = self.spatial_merge_size * self.spatial_merge_size;
 
         let mut outputs: Vec<Tensor> = Vec::with_capacity(grid_thw.len());
@@ -855,7 +598,8 @@ impl TeleOcrVisionModel {
 
             let mut hidden = self.patch_embed.forward(&patches)?;
 
-            let (hpos, wpos) = vision_position_ids(t, h, w, self.spatial_merge_size);
+            let (hpos, wpos) =
+                merge_grouped_positions((t, h, w), self.spatial_merge_size, "TeleOCR")?;
             let plan = window_plan(
                 &[(t, h, w)],
                 self.spatial_merge_size,
@@ -885,7 +629,7 @@ impl TeleOcrVisionModel {
                 }
             }
             let (cos, sin) =
-                gather_vision_pos_emb(&rotary_full, freq_dim, &hpos_window, &wpos_window, device)?;
+                vision_rotary_cos_sin(&rotary_full, &hpos_window, &wpos_window, "TeleOCR", device)?;
 
             let index = Tensor::from_vec(
                 plan.window_index.iter().map(|&u| u as i64).collect(),
@@ -1043,15 +787,5 @@ mod tests {
     fn window_plan_rejects_misaligned_window_size() {
         let err = window_plan(&[(1, 16, 16)], MERGE, PATCH, 100).unwrap_err();
         assert!(err.to_string().contains("window_size"), "{err}");
-    }
-
-    #[test]
-    fn vision_position_ids_follow_merge_grouped_raster_order() {
-        let (hpos, wpos) = vision_position_ids(1, 4, 4, 2);
-        // Merge blocks of 2×2 patches come block-raster-first (hb, wb), and
-        // within a block the four patches enumerate the inner 2×2 offsets in
-        // (h_inner, w_inner) order — the layout of HF's permute(0, 2, 1, 3).
-        assert_eq!(hpos, vec![0, 0, 1, 1, 0, 0, 1, 1, 2, 2, 3, 3, 2, 2, 3, 3]);
-        assert_eq!(wpos, vec![0, 1, 0, 1, 2, 3, 2, 3, 0, 1, 0, 1, 2, 3, 2, 3]);
     }
 }

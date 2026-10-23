@@ -1,11 +1,13 @@
 use crate::attention::{
     VISION_CHUNKED_ATTN_CHUNK_SIZE, VISION_CHUNKED_ATTN_SEQ_THRESHOLD, chunked_vision_attention,
-    on_compute_device, scaled_dot_product_attention,
+    scaled_dot_product_attention,
 };
 use crate::error::Error;
 use crate::runtime::errors::{candle_to_ocr_inference, candle_to_ocr_processing};
-use crate::runtime::tensor::{rotate_half, vision_inv_freq};
-use candle_core::{DType, Device, IndexOp, Tensor};
+use crate::runtime::tensor::{
+    VisionRotaryEmbedding, apply_rotary_f32, merge_grouped_positions, vision_rotary_cos_sin,
+};
+use candle_core::{IndexOp, Tensor};
 use candle_nn::{LayerNorm, LayerNormConfig, Linear, Module, VarBuilder, layer_norm, linear};
 use serde::Deserialize;
 
@@ -106,168 +108,6 @@ impl VisionAct {
                 )
             }),
         }
-    }
-}
-
-fn apply_rotary_pos_emb_vision(
-    q: &Tensor,
-    k: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
-) -> Result<(Tensor, Tensor), Error> {
-    let orig_q_dtype = q.dtype();
-    let orig_k_dtype = k.dtype();
-    let q = q.to_dtype(DType::F32).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "MinerU2.5: vision q cast failed",
-            e,
-        )
-    })?;
-    let k = k.to_dtype(DType::F32).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "MinerU2.5: vision k cast failed",
-            e,
-        )
-    })?;
-
-    let cos = cos
-        .unsqueeze(1)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "MinerU2.5: vision cos unsqueeze failed",
-                e,
-            )
-        })?
-        .to_dtype(DType::F32)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "MinerU2.5: vision cos cast failed",
-                e,
-            )
-        })?;
-    let sin = sin
-        .unsqueeze(1)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "MinerU2.5: vision sin unsqueeze failed",
-                e,
-            )
-        })?
-        .to_dtype(DType::F32)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "MinerU2.5: vision sin cast failed",
-                e,
-            )
-        })?;
-
-    let q_rot = rotate_half(&q)?;
-    let q_embed = q
-        .broadcast_mul(&cos)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "MinerU2.5: vision q*cos failed",
-                e,
-            )
-        })?
-        .broadcast_add(&q_rot.broadcast_mul(&sin).map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "MinerU2.5: vision rotate_half(q)*sin failed",
-                e,
-            )
-        })?)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "MinerU2.5: vision q rope add failed",
-                e,
-            )
-        })?;
-
-    let k_rot = rotate_half(&k)?;
-    let k_embed = k
-        .broadcast_mul(&cos)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "MinerU2.5: vision k*cos failed",
-                e,
-            )
-        })?
-        .broadcast_add(&k_rot.broadcast_mul(&sin).map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "MinerU2.5: vision rotate_half(k)*sin failed",
-                e,
-            )
-        })?)
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "MinerU2.5: vision k rope add failed",
-                e,
-            )
-        })?;
-
-    let q_embed = q_embed.to_dtype(orig_q_dtype).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "MinerU2.5: vision q_embed cast back failed",
-            e,
-        )
-    })?;
-    let k_embed = k_embed.to_dtype(orig_k_dtype).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "MinerU2.5: vision k_embed cast back failed",
-            e,
-        )
-    })?;
-
-    Ok((q_embed, k_embed))
-}
-
-#[derive(Debug, Clone)]
-struct VisionRotaryEmbedding {
-    inv_freq: Tensor,
-    dim: usize,
-}
-
-impl VisionRotaryEmbedding {
-    fn new(dim: usize, theta: f64, device: &Device) -> Result<Self, Error> {
-        let inv_freq = vision_inv_freq(dim, theta, "MinerU2.5", device)?;
-        Ok(Self { inv_freq, dim })
-    }
-
-    fn forward(&self, seqlen: usize, device: &Device) -> Result<Tensor, Error> {
-        // Use on_compute_device to handle Metal's lack of support for arange
-        on_compute_device(device, |compute_device| {
-            let seq = Tensor::arange(0u32, seqlen as u32, compute_device)?.to_dtype(DType::F32)?;
-            let inv = self
-                .inv_freq
-                .to_device(compute_device)?
-                .to_dtype(DType::F32)?;
-            seq.unsqueeze(1)?.matmul(&inv.unsqueeze(0)?)
-        })
-        .map_err(|e| {
-            candle_to_ocr_processing(
-                crate::error::ProcessingStage::TensorOperation,
-                "MinerU2.5: vision rope forward failed",
-                e,
-            )
-        })
-    }
-
-    fn dim(&self) -> usize {
-        self.dim
     }
 }
 
@@ -380,7 +220,13 @@ impl VisionAttention {
             .i((.., 2, .., ..))
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "vision v slice", e))?;
 
-        let (q, k) = apply_rotary_pos_emb_vision(&q, &k, cos, sin)?;
+        let cos = cos
+            .unsqueeze(1)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "vision cos layout", e))?;
+        let sin = sin
+            .unsqueeze(1)
+            .map_err(|e| candle_to_ocr_inference("MinerU2.5", "vision sin layout", e))?;
+        let (q, k) = apply_rotary_f32(&q, &k, &cos, &sin, "MinerU2.5")?;
 
         let q = q
             .transpose(0, 1)
@@ -629,7 +475,8 @@ impl Qwen2VlVisionModel {
                 ),
             });
         }
-        let rotary_pos_emb = VisionRotaryEmbedding::new(head_dim / 2, 10000.0, vb.device())?;
+        let rotary_pos_emb =
+            VisionRotaryEmbedding::new(head_dim / 2, 10000.0, "MinerU2.5", vb.device())?;
         Ok(Self {
             patch_embed,
             blocks,
@@ -655,7 +502,6 @@ impl Qwen2VlVisionModel {
         let rotary_full = self
             .rotary_pos_emb
             .forward(max_grid, pixel_values.device())?;
-        let freq_dim = self.rotary_pos_emb.dim() / 2;
 
         let mut outputs: Vec<Tensor> = Vec::with_capacity(grid_thw.len());
         let mut offset = 0usize;
@@ -667,13 +513,13 @@ impl Qwen2VlVisionModel {
             offset += num_patches;
 
             let mut hidden = self.patch_embed.forward(&patches)?;
-            let (cos, sin) = build_vision_pos_emb(
+            let (hpos, wpos) =
+                merge_grouped_positions((t, h, w), self.spatial_merge_size, "MinerU2.5")?;
+            let (cos, sin) = vision_rotary_cos_sin(
                 &rotary_full,
-                freq_dim,
-                t,
-                h,
-                w,
-                self.spatial_merge_size,
+                &hpos,
+                &wpos,
+                "MinerU2.5",
                 pixel_values.device(),
             )?;
             for block in &self.blocks {
@@ -705,7 +551,6 @@ impl Qwen2VlVisionModel {
         let rotary_full = self
             .rotary_pos_emb
             .forward(max_grid, pixel_values.device())?;
-        let freq_dim = self.rotary_pos_emb.dim() / 2;
 
         let mut offset = 0usize;
         for &(t, h, w) in grid_thw {
@@ -717,13 +562,13 @@ impl Qwen2VlVisionModel {
 
             let mut hidden = self.patch_embed.forward(&patches)?;
 
-            let (cos, sin) = build_vision_pos_emb(
+            let (hpos, wpos) =
+                merge_grouped_positions((t, h, w), self.spatial_merge_size, "MinerU2.5")?;
+            let (cos, sin) = vision_rotary_cos_sin(
                 &rotary_full,
-                freq_dim,
-                t,
-                h,
-                w,
-                self.spatial_merge_size,
+                &hpos,
+                &wpos,
+                "MinerU2.5",
                 pixel_values.device(),
             )?;
 
@@ -739,99 +584,4 @@ impl Qwen2VlVisionModel {
         Tensor::cat(&refs, 0)
             .map_err(|e| candle_to_ocr_inference("MinerU2.5", "vision outputs cat", e))
     }
-}
-
-fn build_vision_pos_emb(
-    rotary_full: &Tensor,
-    freq_dim: usize,
-    t: usize,
-    h: usize,
-    w: usize,
-    merge_size: usize,
-    device: &Device,
-) -> Result<(Tensor, Tensor), Error> {
-    let mut hpos: Vec<i64> = Vec::with_capacity(t * h * w);
-    let mut wpos: Vec<i64> = Vec::with_capacity(t * h * w);
-    for _ in 0..t {
-        for hb in 0..(h / merge_size) {
-            for wb in 0..(w / merge_size) {
-                for h_inner in 0..merge_size {
-                    for w_inner in 0..merge_size {
-                        hpos.push((hb * merge_size + h_inner) as i64);
-                        wpos.push((wb * merge_size + w_inner) as i64);
-                    }
-                }
-            }
-        }
-    }
-
-    let num_patches = hpos.len();
-    let hpos = Tensor::from_vec(hpos, (num_patches, 1usize), device).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "MinerU2.5: vision hpos tensor failed",
-            e,
-        )
-    })?;
-    let wpos = Tensor::from_vec(wpos, (num_patches, 1usize), device).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "MinerU2.5: vision wpos tensor failed",
-            e,
-        )
-    })?;
-    let hpos = hpos.broadcast_as((num_patches, freq_dim)).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "MinerU2.5: vision hpos broadcast failed",
-            e,
-        )
-    })?;
-    let hpos = hpos.contiguous().map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "MinerU2.5: vision hpos contiguous failed",
-            e,
-        )
-    })?;
-    let wpos = wpos.broadcast_as((num_patches, freq_dim)).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "MinerU2.5: vision wpos broadcast failed",
-            e,
-        )
-    })?;
-    let wpos = wpos.contiguous().map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "MinerU2.5: vision wpos contiguous failed",
-            e,
-        )
-    })?;
-
-    let freqs_h = rotary_full
-        .gather(&hpos, 0)
-        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "vision gather h", e))?;
-    let freqs_w = rotary_full
-        .gather(&wpos, 0)
-        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "vision gather w", e))?;
-    let rotary = Tensor::cat(&[&freqs_h, &freqs_w], candle_core::D::Minus1)
-        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "vision pos cat", e))?;
-    let emb = Tensor::cat(&[&rotary, &rotary], candle_core::D::Minus1)
-        .map_err(|e| candle_to_ocr_inference("MinerU2.5", "vision emb cat", e))?;
-    let cos = emb.cos().map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "MinerU2.5: vision cos failed",
-            e,
-        )
-    })?;
-    let sin = emb.sin().map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "MinerU2.5: vision sin failed",
-            e,
-        )
-    })?;
-    Ok((cos, sin))
 }
