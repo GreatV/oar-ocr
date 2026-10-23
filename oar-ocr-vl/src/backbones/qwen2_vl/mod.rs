@@ -7,5 +7,6 @@
 mod text;
 mod vision;
 
+pub(crate) use text::apply_multimodal_rotary_pos_emb;
 pub use text::{Qwen2VlTextConfig, Qwen2VlTextModel};
 pub use vision::{Qwen2VlVisionConfig, Qwen2VlVisionModel};

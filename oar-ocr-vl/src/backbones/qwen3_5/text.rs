@@ -11,7 +11,8 @@
 //! env var at load time.
 
 use super::gated_delta::gated_delta_rule;
-use crate::attention::{RotaryEmbedding, flash_attention, scaled_dot_product_attention_gqa};
+use crate::attention::{flash_attention, scaled_dot_product_attention_gqa};
+use crate::backbones::qwen3_vl::text::InterleavedMropeEmbedding;
 use crate::error::Error;
 #[cfg(feature = "cuda")]
 use crate::runtime::attention::masked_score;
@@ -25,10 +26,10 @@ use crate::runtime::decoder_graph::{
     next_decode_bucket, prompt_decode_bucket,
 };
 use crate::runtime::errors::candle_to_ocr_inference;
-use crate::runtime::tensor::rotate_half;
+use crate::runtime::tensor::rope_partial;
+use candle_core::{D, DType, Tensor};
 #[cfg(feature = "cuda")]
-use candle_core::IndexOp;
-use candle_core::{D, DType, Device, Tensor};
+use candle_core::{Device, IndexOp};
 use candle_nn::{
     Conv1d, Conv1dConfig, Embedding, Linear, Module, RmsNorm, VarBuilder, embedding,
     linear_no_bias, rms_norm,
@@ -879,28 +880,13 @@ impl FullAttention {
     }
 
     fn apply_rope(&self, tensor: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
-        let rotary_dim = cos.dim(D::Minus1).map_err(|e| {
-            candle_to_ocr_inference(self.model_name, "attention rotary dimension", e)
-        })?;
-        let rotary = tensor
-            .narrow(D::Minus1, 0, rotary_dim)
-            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention rotary slice", e))?;
-        let pass = tensor
-            .narrow(D::Minus1, rotary_dim, self.head_dim - rotary_dim)
-            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention pass slice", e))?;
         let cos = cos
             .unsqueeze(1)
             .map_err(|e| candle_to_ocr_inference(self.model_name, "attention cos layout", e))?;
         let sin = sin
             .unsqueeze(1)
             .map_err(|e| candle_to_ocr_inference(self.model_name, "attention sin layout", e))?;
-        let rotated = rotate_half(&rotary)?;
-        let embedded = (rotary
-            .broadcast_mul(&cos)
-            .and_then(|lhs| rotated.broadcast_mul(&sin).and_then(|rhs| &lhs + &rhs)))
-        .map_err(|e| candle_to_ocr_inference(self.model_name, "apply attention RoPE", e))?;
-        Tensor::cat(&[&embedded, &pass], D::Minus1)
-            .map_err(|e| candle_to_ocr_inference(self.model_name, "attention RoPE output", e))
+        rope_partial(tensor, &cos, &sin, self.model_name)
     }
 
     fn forward(&self, hidden_states: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
@@ -1358,97 +1344,11 @@ impl DecoderLayer {
     }
 }
 
-#[derive(Debug, Clone)]
-struct TextRotaryEmbedding {
-    rotary: RotaryEmbedding,
-    axis_ids: Tensor,
-    model_name: &'static str,
-}
-
-impl TextRotaryEmbedding {
-    fn new(
-        cfg: &Qwen35TextConfig,
-        model_name: &'static str,
-        device: &Device,
-    ) -> Result<Self, Error> {
-        let rotary_dim = (cfg.head_dim as f64 * cfg.rope_parameters.partial_rotary_factor) as usize;
-        if rotary_dim == 0 || !rotary_dim.is_multiple_of(2) {
-            return Err(Error::Config {
-                message: format!("{model_name}: invalid rotary dimension {rotary_dim}"),
-            });
-        }
-        let half = rotary_dim / 2;
-        if cfg.rope_parameters.mrope_section.iter().sum::<usize>() != half {
-            return Err(Error::Config {
-                message: format!(
-                    "{model_name}: mrope_section {:?} must sum to rotary_dim/2 ({half})",
-                    cfg.rope_parameters.mrope_section
-                ),
-            });
-        }
-        let rotary =
-            RotaryEmbedding::new_multi_axis(rotary_dim, cfg.rope_parameters.rope_theta, 3, device)?;
-        let axis_ids = Tensor::from_vec(
-            interleaved_axis_ids(rotary_dim, &cfg.rope_parameters.mrope_section),
-            (1, 1, rotary_dim, 1),
-            device,
-        )
-        .map_err(|e| candle_to_ocr_inference(model_name, "create mRoPE axis map", e))?;
-        Ok(Self {
-            rotary,
-            axis_ids,
-            model_name,
-        })
-    }
-
-    fn forward(&self, position_ids: &Tensor, dtype: DType) -> Result<(Tensor, Tensor), Error> {
-        let (cos, sin) = self.rotary.forward_multi_axis(position_ids, dtype)?;
-        Ok((self.select_axes(&cos)?, self.select_axes(&sin)?))
-    }
-
-    fn select_axes(&self, values: &Tensor) -> Result<Tensor, Error> {
-        let (_, batch, seq_len, rotary_dim) = values
-            .dims4()
-            .map_err(|e| candle_to_ocr_inference(self.model_name, "mRoPE tensor shape", e))?;
-        let values = values
-            .permute((1, 2, 3, 0))
-            .and_then(|values| values.contiguous())
-            .map_err(|e| candle_to_ocr_inference(self.model_name, "mRoPE axis layout", e))?;
-        let axis_ids = self
-            .axis_ids
-            .expand((batch, seq_len, rotary_dim, 1))
-            .and_then(|axis_ids| axis_ids.contiguous())
-            .map_err(|e| candle_to_ocr_inference(self.model_name, "expand mRoPE axis map", e))?;
-        values
-            .gather(&axis_ids, 3)
-            .and_then(|values| values.squeeze(3))
-            .map_err(|e| candle_to_ocr_inference(self.model_name, "select mRoPE axes", e))
-    }
-}
-
-fn interleaved_axis_ids(rotary_dim: usize, mrope_section: &[usize]) -> Vec<u32> {
-    let half = rotary_dim / 2;
-    let h_limit = mrope_section[1] * 3;
-    let w_limit = mrope_section[2] * 3;
-    (0..rotary_dim)
-        .map(|dimension| {
-            let freq_idx = dimension % half;
-            if freq_idx % 3 == 1 && freq_idx < h_limit {
-                1
-            } else if freq_idx % 3 == 2 && freq_idx < w_limit {
-                2
-            } else {
-                0
-            }
-        })
-        .collect()
-}
-
 pub(crate) struct Qwen35TextModel {
     embed_tokens: Embedding,
     layers: Vec<DecoderLayer>,
     norm: AdditiveRmsNorm,
-    rotary_emb: TextRotaryEmbedding,
+    rotary_emb: InterleavedMropeEmbedding,
     /// Display name used in every error message and log line.
     model_name: &'static str,
     /// Extra env var (besides `OAR_VL_DISABLE_CUDA_GRAPH`) that disables the
@@ -1581,7 +1481,14 @@ impl Qwen35TextModel {
         }
         let norm =
             AdditiveRmsNorm::load(cfg.hidden_size, cfg.rms_norm_eps, model_name, vb.pp("norm"))?;
-        let rotary_emb = TextRotaryEmbedding::new(cfg, model_name, vb.device())?;
+        let rotary_dim = (cfg.head_dim as f64 * cfg.rope_parameters.partial_rotary_factor) as usize;
+        let rotary_emb = InterleavedMropeEmbedding::new(
+            rotary_dim,
+            cfg.rope_parameters.rope_theta,
+            &cfg.rope_parameters.mrope_section,
+            model_name,
+            vb.device(),
+        )?;
         Ok(Self {
             model_name,
             graph_disable_env,
@@ -2158,7 +2065,7 @@ impl Drop for Qwen35TextModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::IndexOp;
+    use candle_core::{Device, IndexOp};
 
     #[test]
     fn decode_state_updates_write_in_place() {
@@ -2348,16 +2255,14 @@ mod tests {
     fn qwen35_mrope_axes_are_interleaved() {
         let rotary_dim = 64;
         let sections = [11, 11, 10];
-        let rope = TextRotaryEmbedding {
-            rotary: RotaryEmbedding::new_multi_axis(rotary_dim, 1.0, 3, &Device::Cpu).unwrap(),
-            axis_ids: Tensor::from_vec(
-                interleaved_axis_ids(rotary_dim, &sections),
-                (1, 1, rotary_dim, 1),
-                &Device::Cpu,
-            )
-            .unwrap(),
-            model_name: "Qwen3.5-test",
-        };
+        let rope = InterleavedMropeEmbedding::new(
+            rotary_dim,
+            1.0,
+            &sections,
+            "Qwen3.5-test",
+            &Device::Cpu,
+        )
+        .unwrap();
         let ids = Tensor::from_vec(
             [vec![10i64; 32], vec![20i64; 32], vec![30i64; 32]].concat(),
             (3, 1, 32),

@@ -21,7 +21,7 @@ use crate::attention::{
 use crate::error::Error;
 use crate::runtime::cache::TrimmableKvCache;
 use crate::runtime::errors::{candle_to_ocr_inference, candle_to_ocr_processing};
-use crate::runtime::tensor::rotate_half;
+use crate::runtime::tensor::rope_native;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{
     Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, linear, linear_no_bias, rms_norm,
@@ -311,16 +311,6 @@ impl SdarKvCache {
     }
 }
 
-fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, Error> {
-    let a = x
-        .broadcast_mul(cos)
-        .map_err(|e| proc_err("SDAR rope x*cos", e))?;
-    let b = rotate_half(x)?
-        .broadcast_mul(sin)
-        .map_err(|e| proc_err("SDAR rope rotate_half*sin", e))?;
-    (a + b).map_err(|e| proc_err("SDAR rope sum", e))
-}
-
 #[derive(Debug)]
 struct SdarAttention {
     q_proj: Linear,
@@ -418,8 +408,8 @@ impl SdarAttention {
         let k = project(&self.k_proj, self.num_kv_heads, Some(&self.k_norm))?;
         let v = project(&self.v_proj, self.num_kv_heads, None)?;
 
-        let q = apply_rope(&q, cos, sin)?;
-        let k = apply_rope(&k, cos, sin)?;
+        let q = rope_native(&q, cos, sin, "SDAR")?;
+        let k = rope_native(&k, cos, sin, "SDAR")?;
 
         // Committed causal/decode KV uses appendable backing storage. SDAR's
         // in-flight denoising block remains transient and is concatenated only
@@ -528,8 +518,8 @@ impl SdarAttention {
             .and_then(|x| x.squeeze(0))
             .and_then(|x| x.unsqueeze(1))
             .map_err(|e| proc_err("batched Qwen3 rope sin shape", e))?;
-        let q = apply_rope(&q, &cos, &sin)?;
-        let k = apply_rope(&k, &cos, &sin)?;
+        let q = rope_native(&q, &cos, &sin, "SDAR")?;
+        let k = rope_native(&k, &cos, &sin, "SDAR")?;
         let n_rep = self.num_heads / self.num_kv_heads;
         let mut rows = Vec::with_capacity(b);
         // Projection and MLP work stay batched, but variable-length forked KV

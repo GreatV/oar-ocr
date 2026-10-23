@@ -209,6 +209,47 @@ pub(crate) fn vision_rotary_cos_sin(
     Ok((cos, sin))
 }
 
+/// `x * cos + rotate_half(x) * sin` in the input dtype (no upcast).
+/// `cos`/`sin` must broadcast against `x`.
+pub(crate) fn rope_native(
+    x: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    model_name: &str,
+) -> Result<Tensor, Error> {
+    let rotated = rotate_half(x)?;
+    x.broadcast_mul(cos)
+        .and_then(|lhs| rotated.broadcast_mul(sin).and_then(|rhs| &lhs + &rhs))
+        .map_err(|e| rotary_err(model_name, "apply", e))
+}
+
+/// [`rope_native`] over the leading `cos.dim(-1)` channels of `x`; the
+/// remaining channels pass through unchanged (partial rotary).
+pub(crate) fn rope_partial(
+    x: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    model_name: &str,
+) -> Result<Tensor, Error> {
+    let rotary_dim = cos
+        .dim(D::Minus1)
+        .map_err(|e| rotary_err(model_name, "rotary dimension", e))?;
+    let head_dim = x
+        .dim(D::Minus1)
+        .map_err(|e| rotary_err(model_name, "head dimension", e))?;
+    if rotary_dim == head_dim {
+        return rope_native(x, cos, sin, model_name);
+    }
+    let rotary = x
+        .narrow(D::Minus1, 0, rotary_dim)
+        .map_err(|e| rotary_err(model_name, "rotary slice", e))?;
+    let pass = x
+        .narrow(D::Minus1, rotary_dim, head_dim - rotary_dim)
+        .map_err(|e| rotary_err(model_name, "pass-through slice", e))?;
+    let embedded = rope_native(&rotary, cos, sin, model_name)?;
+    Tensor::cat(&[&embedded, &pass], D::Minus1).map_err(|e| rotary_err(model_name, "output", e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
