@@ -438,6 +438,7 @@ mod tests {
                     .unwrap()
                     .to_vec1::<f32>()
                     .unwrap();
+                    assert_eq!(actual.len(), expected.len());
                     assert!(
                         actual
                             .iter()
