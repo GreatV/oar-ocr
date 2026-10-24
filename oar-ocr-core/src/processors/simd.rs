@@ -10,8 +10,8 @@
 //!
 //! Normalization keeps the scalar `value * alpha + beta` form (plain
 //! multiply-add, *not* FMA). Argmax preserves the last winning index and the
-//! existing confidence reduction: SIMD ignores NaNs and reduces signed zeros
-//! in lane order, whereas the scalar fallback uses `Iterator::max_by`.
+//! existing confidence reduction: SIMD retains the target's max behavior for
+//! NaNs and signed zeros, whereas the scalar fallback uses `Iterator::max_by`.
 //!
 //! [`wide`]: https://docs.rs/wide
 //! [`multiversion`]: https://docs.rs/multiversion
@@ -201,11 +201,13 @@ fn argmax_simd(row: &[f32]) -> Option<(usize, f32)> {
     }
 
     let mut values = f32x8::splat(f32::NEG_INFINITY);
+    let mut nan_mask = f32x8::splat(0.0);
     let mut indices = u32x8::splat(0);
     let mut positions = u32x8::new([0, 1, 2, 3, 4, 5, 6, 7]);
     let (chunks, remainder) = row.as_chunks::<8>();
     for chunk in chunks {
         let next = f32x8::new(*chunk);
+        nan_mask |= next.simd_ne(next);
         let replace: u32x8 = cast(next.simd_ge(values));
         // Comparison masks have all-zero or all-one lanes, as select requires.
         indices = replace.select(positions, indices);
@@ -224,17 +226,18 @@ fn argmax_simd(row: &[f32]) -> Option<(usize, f32)> {
         best = best.max(value);
     }
     let offset = chunks.len() * 8;
+    let mut has_nan = nan_mask.any();
     for (i, &value) in remainder.iter().enumerate() {
+        has_nan |= value.is_nan();
         if value >= best {
             index = offset + i;
         }
         best = best.max(value);
     }
-    // Signed-zero max has target-dependent bit selection. Reuse the exact
-    // previous reduction for this exceptional confidence, without rescanning
-    // ordinary (nonzero) recognition scores.
-    if best == 0.0 {
-        best = reduce_max_simd(row);
+    // NaN max/compare behavior and signed-zero selection differ across targets.
+    // Preserve both the index and confidence via the original two-pass path.
+    if has_nan || best == 0.0 {
+        return argmax_two_pass_simd(row);
     }
     Some((index, best))
 }
@@ -459,6 +462,17 @@ mod tests {
                     assert_eq!(bits(argmax(&row)), bits(argmax_scalar(&row)));
                 }
             }
+            for zero in [-0.0, 0.0] {
+                for (i, value) in row.iter_mut().enumerate() {
+                    *value = if i.is_multiple_of(2) { zero } else { -zero };
+                }
+                #[cfg(feature = "simd")]
+                let expected = argmax_two_pass_simd(&row);
+                #[cfg(not(feature = "simd"))]
+                let expected = argmax_scalar(&row);
+                assert_eq!(bits(argmax(&row)), bits(expected), "zero ties, len={len}");
+                assert_eq!(argmax(&row).unwrap().0, len - 1);
+            }
             for value in [
                 f32::NEG_INFINITY,
                 f32::INFINITY,
@@ -482,8 +496,8 @@ mod tests {
                 }
             }
         }
-        // A later finite value in the same SIMD lane must not replace an
-        // earlier maximum across an intervening NaN (including payload NaNs).
+        // A 9, NaN, 5 lane sequence must match the target's two-pass reduction,
+        // including payload and signaling NaNs.
         for nan in [
             f32::NAN,
             f32::from_bits(0xffc0_0123),
@@ -500,6 +514,14 @@ mod tests {
                 let expected = argmax_scalar(&row);
                 assert_eq!(bits(argmax(&row)), bits(expected), "lane={lane}");
             }
+            let mut row = vec![1.0; 17];
+            row[0] = 9.0;
+            row[16] = nan; // The only NaN is in the scalar tail.
+            #[cfg(feature = "simd")]
+            let expected = argmax_two_pass_simd(&row);
+            #[cfg(not(feature = "simd"))]
+            let expected = argmax_scalar(&row);
+            assert_eq!(bits(argmax(&row)), bits(expected), "tail NaN");
         }
     }
 
