@@ -1395,6 +1395,26 @@ pub(crate) struct Qwen3VlTextModel {
 }
 
 impl Qwen3VlTextModel {
+    /// Live fixed K/V tensor bytes, excluding graph inputs and allocator slack.
+    #[cfg(all(test, feature = "cuda"))]
+    pub(crate) fn fixed_storage_bytes_for_test(&self) -> usize {
+        self.layers
+            .iter()
+            .map(|layer| {
+                let attention = &layer.attention;
+                attention
+                    .fixed_storage_layout()
+                    .map_or(0, |(batch, capacity)| {
+                        2 * batch
+                            * capacity
+                            * attention.num_kv_heads
+                            * attention.head_dim
+                            * attention.q_proj.weight().dtype().size_in_bytes()
+                    })
+            })
+            .sum()
+    }
+
     /// Test-only injection point: fail the capture right after this
     /// layer's fixed-KV allocation. The inert production variant keeps
     /// the call site (and its loop index) compiled in non-test builds.
@@ -1511,18 +1531,6 @@ impl Qwen3VlTextModel {
     pub(crate) fn recover_failed_capture(&self) -> Result<(), Error> {
         self.invalidate_cuda_graph();
         self.invalidate_batch_cuda_graph();
-        #[cfg(test)]
-        {
-            let output = std::process::Command::new("nvidia-smi")
-                .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-                .output();
-            if let Ok(out) = output {
-                eprintln!(
-                    "DBGM2 at-failure used={}MiB",
-                    String::from_utf8_lossy(&out.stdout).trim()
-                );
-            }
-        }
         #[cfg(all(test, feature = "cuda"))]
         if self.hooks.skip_release {
             // Test-only control: skip the storage release so the memory
@@ -2018,22 +2026,6 @@ impl Qwen3VlTextModel {
                 );
                 self.invalidate_cuda_graph();
                 self.invalidate_batch_cuda_graph();
-                #[cfg(test)]
-                {
-                    let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
-                        return Ok(None);
-                    };
-                    cuda.cuda_stream().synchronize().unwrap();
-                    let output = std::process::Command::new("nvidia-smi")
-                        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-                        .output();
-                    if let Ok(out) = output {
-                        eprintln!(
-                            "DBGM8 batch at-growth-failure used={}MiB",
-                            String::from_utf8_lossy(&out.stdout).trim()
-                        );
-                    }
-                }
                 return Ok(None);
             }
             if let Err(error) =
@@ -2404,22 +2396,6 @@ impl Qwen3VlTextModel {
                 );
                 self.invalidate_cuda_graph();
                 self.invalidate_batch_cuda_graph();
-                #[cfg(test)]
-                {
-                    let Device::Cuda(cuda) = self.embed_tokens.embeddings().device() else {
-                        return Ok(None);
-                    };
-                    cuda.cuda_stream().synchronize().unwrap();
-                    let output = std::process::Command::new("nvidia-smi")
-                        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-                        .output();
-                    if let Ok(out) = output {
-                        eprintln!(
-                            "DBGM8 single at-growth-failure used={}MiB",
-                            String::from_utf8_lossy(&out.stdout).trim()
-                        );
-                    }
-                }
                 return Ok(None);
             }
             if let Err(error) = self.capture_cuda_graph(next, ceiling, lm_head, kv_len - 1) {
@@ -2478,12 +2454,6 @@ impl Qwen3VlTextModel {
         if let Some(graph) = self.decode_graph.borrow_mut().take() {
             graph.dispose();
         }
-    }
-
-    /// Test-only accessor for the production-entry memory checks.
-    #[cfg(all(test, feature = "cuda"))]
-    pub(crate) fn cuda_device(&self) -> Option<&Device> {
-        Some(self.embed_tokens.embeddings().device())
     }
 
     /// Whether the batched decode graph is currently captured — asserted
@@ -2810,16 +2780,9 @@ mod tests {
 
             // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
             let _gpu = GPU_SELFTEST_LOCK.lock();
-            let mut cfg = valid_tiny_config();
             // Real-model attention dims: the tiny shapes take different
             // kernels than production decode.
-            cfg.hidden_size = 2048;
-            cfg.intermediate_size = 6144;
-            cfg.num_attention_heads = 16;
-            cfg.num_key_value_heads = 8;
-            cfg.head_dim = 128;
-            cfg.num_hidden_layers = 28;
-            cfg.vocab_size = 32768;
+            let cfg = real_dims_config(28);
             // The decode graph is bf16/f16-gated: build in bf16 so the
             // test really exercises capture and replay. Both instances
             // share the weight tensors, so the audit scenarios stay
@@ -2960,14 +2923,7 @@ mod tests {
 
             // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
             let _gpu = GPU_SELFTEST_LOCK.lock();
-            let mut cfg = valid_tiny_config();
-            cfg.hidden_size = 2048;
-            cfg.intermediate_size = 6144;
-            cfg.num_attention_heads = 16;
-            cfg.num_key_value_heads = 8;
-            cfg.head_dim = 128;
-            cfg.num_hidden_layers = 2;
-            cfg.vocab_size = 32768;
+            let cfg = real_dims_config(2);
             let seq = 4096usize;
             let q = Tensor::randn(0f32, 1f32, (1, 16, seq, cfg.head_dim), &device)
                 .unwrap()
@@ -2983,7 +2939,6 @@ mod tests {
                 .unwrap();
             attention_masked_chunked(&q, &k, &v, None, 1.0, 2).unwrap();
             let used = LAST_CAUSAL_CHUNK.load(std::sync::atomic::Ordering::Relaxed);
-            eprintln!("DBGM6 call-site chunk at 16 heads x 4096 = {used}");
             assert_eq!(used, 440, "call site must size the chunk by head count");
         }
         #[cfg(not(feature = "cuda"))]
@@ -3206,14 +3161,7 @@ mod tests {
             let _gpu = GPU_SELFTEST_LOCK.lock();
             // Production-shape depth: 28 layers at the 8192 bucket hold
             // ~940 MiB of fixed KV, far past the pool's slack.
-            let mut cfg = valid_tiny_config();
-            cfg.hidden_size = 2048;
-            cfg.intermediate_size = 6144;
-            cfg.num_attention_heads = 16;
-            cfg.num_key_value_heads = 8;
-            cfg.head_dim = 128;
-            cfg.num_hidden_layers = 28;
-            cfg.vocab_size = 32768;
+            let cfg = real_dims_config(28);
             let tensors = random_var_map(&cfg, &device, DType::BF16);
             let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
             let mut model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
@@ -3235,7 +3183,6 @@ mod tests {
                 )
                 .unwrap();
             let baseline = measured(&model);
-            eprintln!("DBGM1 baseline={baseline}MiB");
             assert!(baseline > 0, "nvidia-smi unavailable; cannot measure");
 
             model.hooks.fail_capture = true;
@@ -3246,7 +3193,6 @@ mod tests {
                 .prepare_ar_cuda_graph(600, 8192, &lm_head, false)
                 .unwrap();
             let after_single = measured(&model);
-            eprintln!("DBGM1 after-single-fallback={after_single}MiB");
             assert!(
                 after_single.saturating_sub(baseline) <= 16,
                 "single-row fallback leaked {} MiB",
@@ -3260,7 +3206,6 @@ mod tests {
                 .prepare_ar_cuda_graph(600, 8192, &lm_head, false)
                 .unwrap();
             let after_partial = measured(&model);
-            eprintln!("DBGM1 after-partial-fallback={after_partial}MiB");
             assert!(after_partial.saturating_sub(baseline) <= 16);
             model.hooks.fail_capture_after_layer = None;
 
@@ -3269,21 +3214,18 @@ mod tests {
                 .prepare_batch_ar_cuda_graph(2, 600, 8192, &[0, 10], &lm_head, false)
                 .unwrap();
             let after_batch = measured(&model);
-            eprintln!("DBGM1 after-batch-fallback={after_batch}MiB");
             assert!(after_batch.saturating_sub(baseline) <= 16);
             assert!(!model.batch_decode_graph_captured());
             assert!(!model.decode_graph_captured());
 
             // Control: with the storage release skipped, the preallocated
             // buckets stay resident — proving the assertion above catches
-            // a missing release. (The DBGM2 line printed by the recovery
-            // is the at-failure reading, taken before the release runs.)
+            // a missing release.
             model.hooks.skip_release = true;
             model
                 .prepare_batch_ar_cuda_graph(2, 600, 8192, &[0, 10], &lm_head, false)
                 .unwrap();
             let no_release = measured(&model);
-            eprintln!("DBGM1 control (release skipped)={no_release}MiB");
             assert!(
                 no_release.saturating_sub(baseline) >= 300,
                 "the memory assertion failed to catch a missing release"
@@ -3292,7 +3234,6 @@ mod tests {
             model.hooks.fail_capture = false;
             model.recover_failed_capture().unwrap();
             let settled = measured(&model);
-            eprintln!("DBGM1 settled after control={settled}MiB");
             assert!(settled.saturating_sub(baseline) <= 16);
 
             // With the injection cleared, decoding captures normally again
@@ -3330,14 +3271,7 @@ mod tests {
 
             // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
             let _gpu = GPU_SELFTEST_LOCK.lock();
-            let mut cfg = valid_tiny_config();
-            cfg.hidden_size = 2048;
-            cfg.intermediate_size = 6144;
-            cfg.num_attention_heads = 16;
-            cfg.num_key_value_heads = 8;
-            cfg.head_dim = 128;
-            cfg.num_hidden_layers = 28;
-            cfg.vocab_size = 32768;
+            let cfg = real_dims_config(28);
             let tensors = random_var_map(&cfg, &device, DType::BF16);
             let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
             let mut model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
@@ -3359,7 +3293,6 @@ mod tests {
                 )
                 .unwrap();
             let baseline = measured(&model);
-            eprintln!("DBGM3 baseline={baseline}MiB");
             assert!(baseline > 0, "nvidia-smi unavailable; cannot measure");
 
             // Region-style batch request captures a batch graph.
@@ -3378,7 +3311,6 @@ mod tests {
                 .release_incompatible_fixed_storage(None, Some(8192))
                 .unwrap();
             let pre_upload = measured(&model);
-            eprintln!("DBGM3 single-entry pre-upload={pre_upload}MiB");
             assert!(
                 pre_upload.saturating_sub(baseline) <= 64,
                 "batch storage survived the single-page entry: {} MiB",
@@ -3398,7 +3330,6 @@ mod tests {
                 .release_incompatible_fixed_storage(None, Some(8192))
                 .unwrap();
             let skipped = measured(&model);
-            eprintln!("DBGM3 single-entry control (skipped)={skipped}MiB");
             assert!(
                 skipped.saturating_sub(baseline) >= 500,
                 "the memory assertion failed to catch a missing release"
@@ -3408,7 +3339,6 @@ mod tests {
                 .release_incompatible_fixed_storage(None, Some(8192))
                 .unwrap();
             let settled = measured(&model);
-            eprintln!("DBGM3 single-entry settled={settled}MiB");
             assert!(settled.saturating_sub(baseline) <= 64);
 
             // Single-page decoding captures a single-row graph.
@@ -3423,7 +3353,6 @@ mod tests {
                 .release_incompatible_fixed_storage(Some(2), Some(8192))
                 .unwrap();
             let after = measured(&model);
-            eprintln!("DBGM3 after-batch-entry-release={after}MiB");
             // Same small pool/fragmentation residue as the single-page
             // entry; the release-skipped control proves the assertion
             // catches the real 1.9 GiB leak.
@@ -3442,7 +3371,6 @@ mod tests {
                 .release_incompatible_fixed_storage(Some(2), Some(1024))
                 .unwrap();
             let after_shrink = measured(&model);
-            eprintln!("DBGM3 after-small-bucket-release={after_shrink}MiB");
             assert!(
                 after_shrink.saturating_sub(baseline) <= 64,
                 "8192-bucket storage survived a 1024-bucket request: {} MiB",
@@ -3475,7 +3403,6 @@ mod tests {
                 .release_incompatible_fixed_storage(None, None)
                 .unwrap();
             let skipped = measured(&model);
-            eprintln!("DBGM3 control (release skipped)={skipped}MiB");
             assert!(
                 skipped.saturating_sub(baseline) >= 500,
                 "the memory assertion failed to catch a missing release"
@@ -3485,7 +3412,6 @@ mod tests {
                 .release_incompatible_fixed_storage(None, None)
                 .unwrap();
             let settled = measured(&model);
-            eprintln!("DBGM3 settled after control={settled}MiB");
             assert!(settled.saturating_sub(baseline) <= 64);
 
             // Decoding still matches eager after all of this.
@@ -3517,14 +3443,7 @@ mod tests {
 
             // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
             let _gpu = GPU_SELFTEST_LOCK.lock();
-            let mut cfg = valid_tiny_config();
-            cfg.hidden_size = 2048;
-            cfg.intermediate_size = 6144;
-            cfg.num_attention_heads = 16;
-            cfg.num_key_value_heads = 8;
-            cfg.head_dim = 128;
-            cfg.num_hidden_layers = 28;
-            cfg.vocab_size = 32768;
+            let cfg = real_dims_config(28);
             let tensors = random_var_map(&cfg, &device, DType::BF16);
             let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
             let mut model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
@@ -3546,7 +3465,6 @@ mod tests {
                 )
                 .unwrap();
             let baseline = measured(&model);
-            eprintln!("DBGM5 baseline={baseline}MiB");
             assert!(baseline > 0, "nvidia-smi unavailable; cannot measure");
 
             // Single-row graph captured, then the ceiling fallback state:
@@ -3559,7 +3477,6 @@ mod tests {
             model.invalidate_cuda_graph();
             model.invalidate_batch_cuda_graph();
             let orphaned = measured(&model);
-            eprintln!("DBGM5 single orphaned={orphaned}MiB");
             assert!(
                 orphaned.saturating_sub(baseline) >= 300,
                 "the orphaned single-row storage was not resident"
@@ -3570,7 +3487,6 @@ mod tests {
                 .release_incompatible_fixed_storage(Some(2), Some(8192))
                 .unwrap();
             let released = measured(&model);
-            eprintln!("DBGM5 single orphan released={released}MiB");
             assert!(released.saturating_sub(baseline) <= 64);
             assert!(!model.decode_graph_captured());
             assert!(!model.batch_decode_graph_captured());
@@ -3584,7 +3500,6 @@ mod tests {
             model.invalidate_cuda_graph();
             model.invalidate_batch_cuda_graph();
             let orphaned = measured(&model);
-            eprintln!("DBGM5 batch orphaned={orphaned}MiB");
             assert!(
                 orphaned.saturating_sub(baseline) >= 300,
                 "the orphaned batch storage was not resident"
@@ -3596,7 +3511,6 @@ mod tests {
                 .release_incompatible_fixed_storage(None, None)
                 .unwrap();
             let skipped = measured(&model);
-            eprintln!("DBGM5 control (release skipped)={skipped}MiB");
             assert!(
                 skipped.saturating_sub(baseline) >= 300,
                 "the memory assertion failed to catch a missing release"
@@ -3606,7 +3520,6 @@ mod tests {
                 .release_incompatible_fixed_storage(None, Some(8192))
                 .unwrap();
             let released = measured(&model);
-            eprintln!("DBGM5 batch orphan released={released}MiB");
             assert!(released.saturating_sub(baseline) <= 64);
 
             // Compatible graph-backed storage still survives its entry.
@@ -3657,14 +3570,7 @@ mod tests {
 
             // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
             let _gpu = GPU_SELFTEST_LOCK.lock();
-            let mut cfg = valid_tiny_config();
-            cfg.hidden_size = 2048;
-            cfg.intermediate_size = 6144;
-            cfg.num_attention_heads = 16;
-            cfg.num_key_value_heads = 8;
-            cfg.head_dim = 128;
-            cfg.num_hidden_layers = 4;
-            cfg.vocab_size = 32768;
+            let cfg = real_dims_config(4);
             let tensors = random_var_map(&cfg, &device, DType::BF16);
             let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
             let mut model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
@@ -3728,14 +3634,7 @@ mod tests {
 
             // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
             let _gpu = GPU_SELFTEST_LOCK.lock();
-            let mut cfg = valid_tiny_config();
-            cfg.hidden_size = 2048;
-            cfg.intermediate_size = 6144;
-            cfg.num_attention_heads = 16;
-            cfg.num_key_value_heads = 8;
-            cfg.head_dim = 128;
-            cfg.num_hidden_layers = 4;
-            cfg.vocab_size = 32768;
+            let cfg = real_dims_config(4);
             let tensors = random_var_map(&cfg, &device, DType::BF16);
             let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
             let model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
@@ -3861,14 +3760,7 @@ mod tests {
                 combine_masks, create_causal_mask, create_generation_mask_if_needed,
                 create_left_padding_mask,
             };
-            let mut cfg = valid_tiny_config();
-            cfg.hidden_size = 2048;
-            cfg.intermediate_size = 6144;
-            cfg.num_attention_heads = 16;
-            cfg.num_key_value_heads = 8;
-            cfg.head_dim = 128;
-            cfg.num_hidden_layers = 28;
-            cfg.vocab_size = 32768;
+            let cfg = real_dims_config(28);
             // F16 model: the mask fill must be finite in this dtype.
             let tensors = random_var_map(&cfg, &device, DType::F16);
             let vb = VarBuilder::from_tensors(tensors, DType::F16, &device);
@@ -3999,14 +3891,7 @@ mod tests {
 
             // Serialize with the other GPU self-tests: see GPU_SELFTEST_LOCK.
             let _gpu = GPU_SELFTEST_LOCK.lock();
-            let mut cfg = valid_tiny_config();
-            cfg.hidden_size = 2048;
-            cfg.intermediate_size = 6144;
-            cfg.num_attention_heads = 16;
-            cfg.num_key_value_heads = 8;
-            cfg.head_dim = 128;
-            cfg.num_hidden_layers = 4;
-            cfg.vocab_size = 32768;
+            let cfg = real_dims_config(4);
             let tensors = random_var_map(&cfg, &device, DType::BF16);
             let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
             let model = Qwen3VlTextModel::load(&cfg, vb.pp("model")).unwrap();
@@ -4659,6 +4544,20 @@ mod tests {
             );
         }
         tensors
+    }
+
+    #[cfg(feature = "cuda")]
+    fn real_dims_config(num_hidden_layers: usize) -> Qwen3VlTextConfig {
+        let mut cfg = valid_tiny_config();
+        cfg.hidden_size = 2048;
+        cfg.intermediate_size = 6144;
+        cfg.num_attention_heads = 16;
+        cfg.num_key_value_heads = 8;
+        cfg.head_dim = 128;
+        cfg.num_hidden_layers = num_hidden_layers;
+        cfg.vocab_size = 32768;
+        cfg.rope_scaling.mrope_section = vec![24, 20, 20];
+        cfg
     }
 
     fn valid_tiny_config() -> Qwen3VlTextConfig {
