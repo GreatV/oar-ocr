@@ -210,6 +210,13 @@ let structure = OARStructureBuilder::new("picodet-l_layout_17cls.onnx")
 
 [Indra OCR](https://huggingface.co/datalab-to/indra-ocr) is Datalab's CPU-first page reader: small ONNX models (about 76 MB, 46 MB of them n-gram language models for lines a recognizer is unsure of) that turn a page into lines with boxes, layout blocks in reading order (text, section headers, lists, tables, captions, footnotes, page headers and footers), and Markdown with tables as HTML. A script classifier sends each line to one of four recognizers: Latin, Cyrillic, and Greek (including handwriting); Chinese, Japanese, and Korean; Arabic, Persian, Urdu, and Hebrew (read into logical order, with right-to-left pages read right column first); and Indic, Thai, Lao, Khmer, Georgian, Armenian, and other scripts. It turns quarter-turned pages upright, straightens tilts up to 45 degrees, reads light text on dark ground, and reads Chinese and Japanese pages set in vertical columns. `oar_ocr::indra` reproduces the reference pipeline's OCR mode (`indra-ocr` 1.1.2 with the v1.1.0 models; the earlier v3.1 model set still loads), with two fixes: token positions from the tall-window recognizer are no longer stretched, which moves some split-line boxes, and tables built from the table heads no longer drop a cell that a neighbour's span would cover. Reading a PDF's own text layer is not supported, so render PDF pages to images first. Download the models from Hugging Face; they are not part of the auto-download registry, and their weights use a modified OpenRAIL-M license.
 
+The [`oar indra` command](../oar-ocr-cli/README.md#indra-ocr) downloads its checkpoint directly from Hugging Face and accepts images or rasterized PDF pages. Use `--model-dir` for an existing local checkpoint.
+
+```bash
+oar indra document.pdf --device cpu --workers 4 --pages 1-8 -o pages
+oar indra page.png --device cuda:0 --format json
+```
+
 ```bash
 hf download datalab-to/indra-ocr --local-dir models/datalab-to/indra-ocr
 ```

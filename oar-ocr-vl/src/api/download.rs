@@ -1,4 +1,4 @@
-//! Snapshot download of VL checkpoints (feature `auto-download`).
+//! Snapshot download of model checkpoints (feature `auto-download`).
 //!
 //! [`AnyPageParser::from_pretrained`](crate::AnyPageParser::from_pretrained)
 //! downloads a checkpoint repo by its [`AnyPageParserModel`](crate::AnyPageParserModel)
@@ -421,6 +421,21 @@ fn resolve_remote(source: DownloadSource, repo: &str) -> (DownloadSource, String
         return (DownloadSource::HuggingFace, repo.to_string());
     }
     (source, repo.to_string())
+}
+
+/// Download a model repository snapshot without loading its models.
+///
+/// Available with `auto-download`. All repository files are cached using the
+/// same verification and immutable snapshots as VL checkpoints. `revision: None`
+/// selects the source's default branch (`main` for Hugging Face, `master` for
+/// ModelScope). If revision resolution fails, a previously cached snapshot for
+/// that revision can be reused. No repository code is executed.
+pub fn download_snapshot(
+    source: DownloadSource,
+    repo: &str,
+    revision: Option<&str>,
+) -> Result<PathBuf, Error> {
+    snapshot(source, repo, revision)
 }
 
 /// Downloads (or reuses) the snapshot of `repo` at `revision` and returns

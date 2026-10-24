@@ -1,13 +1,15 @@
 mod args;
+mod indra;
 mod parallel;
 mod pdf;
 
 use anyhow::{Context, Result, bail, ensure};
-use args::{Cli, Command, Common, OcrFormat, PageFormat};
+use args::{Cli, Command, Common, IndraFormat, OcrFormat, PageFormat};
 use clap::Parser;
 use image::RgbImage;
 use oar_ocr::{
     core::config::{OrtExecutionProvider, OrtSessionConfig},
+    indra::IndraOcrBuilder,
     oarocr::{OAROCR, OAROCRBuilder, OARStructure, OARStructureBuilder},
 };
 use oar_ocr_vl::{
@@ -89,6 +91,7 @@ fn run(cli: Cli) -> Result<()> {
     let (paths, json) = match &cli.command {
         Command::Ocr(args) => (&args.images, args.format == OcrFormat::Json),
         Command::Structure(args) => (&args.images, args.format == PageFormat::Json),
+        Command::Indra(args) => (&args.images, args.format == IndraFormat::Json),
         Command::Parse(args) => (&args.images, args.format == PageFormat::Json),
     };
     let inputs = paths
@@ -113,6 +116,44 @@ fn run(cli: Cli) -> Result<()> {
     };
     let total_pages: usize = inputs.iter().map(|input| input.pages.len()).sum();
     match &cli.command {
+        Command::Indra(args) => {
+            let configs = indra::devices(&devices, args.workers, cli.verbose)?;
+            let model_dir = indra::model_dir(args.model_dir.as_deref(), args.math)?;
+            let next = AtomicUsize::new(0);
+            let make_replica = || {
+                let index = next.fetch_add(1, Ordering::SeqCst);
+                IndraOcrBuilder::new(&model_dir)
+                    .workers(args.workers)
+                    .math(args.math)
+                    .keep_furniture(args.keep_furniture)
+                    .table_heads(args.table_heads)
+                    .ort_session(configs[index].clone())
+                    .build()
+                    .with_context(|| {
+                        format!("could not load Indra models from {}", model_dir.display())
+                    })
+            };
+            let format = args.format;
+            tracing::info!(
+                "Indra models loading on {} device(s), {} worker(s) each; reading {total_pages} page(s)",
+                devices.len(),
+                args.workers
+            );
+            process_inputs_parallel(
+                inputs.to_vec(),
+                ParallelRun {
+                    dpi: cli.common.dpi,
+                    destinations,
+                    mode,
+                    batch_size: args
+                        .batch_size
+                        .unwrap_or_else(|| args.workers.saturating_mul(4).max(8)),
+                    replica_count: devices.len(),
+                },
+                make_replica,
+                move |model, images, _, _| indra::recognize(model, images, format),
+            )
+        }
         Command::Ocr(args) => {
             let build = |device: &str| -> Result<_> {
                 let builder = match (&args.models.det, &args.models.rec, &args.models.dict) {
@@ -395,6 +436,11 @@ where
 }
 
 fn classic_device(device: &str, verbose: bool) -> Result<OrtSessionConfig> {
+    Ok(ort_device(device, verbose)?.with_intra_threads(4))
+}
+
+// Shared provider selection; each pipeline retains its own thread defaults.
+fn ort_device(device: &str, verbose: bool) -> Result<OrtSessionConfig> {
     let config = match device {
         "auto" => OrtSessionConfig::auto().resolve_auto(),
         "cpu" => OrtSessionConfig::new().with_execution_providers(vec![OrtExecutionProvider::CPU]),
@@ -432,7 +478,6 @@ fn classic_device(device: &str, verbose: bool) -> Result<OrtSessionConfig> {
         }
         _ => bail!("unsupported device; use auto, cpu, cuda:N, or metal"),
     };
-    let config = config.with_intra_threads(4);
     #[cfg(any(feature = "cuda", feature = "metal", feature = "coreml"))]
     if device != "auto" && device != "cpu" {
         probe_classic_device(device)
