@@ -119,19 +119,31 @@ impl Attention {
             c.rope_interleave,
             false,
         )?;
-        let (k_rot, latent) = self
-            .cache
-            .borrow_mut()
-            .append(&k_rot.contiguous()?, &latent.contiguous()?)?;
+        let (k_rot, latent) = self.append_cache(&k_rot, &latent)?;
         let out = if len == 1 {
             self.decode(&q_pass, &q_rot, &k_rot, &latent)?
         } else {
-            self.prefill(&q_pass, &q_rot, &k_rot, &latent)?
+            // The expanded prefill projections retain their original dtype.
+            self.prefill(
+                &q_pass,
+                &q_rot,
+                &k_rot.to_dtype(xs.dtype())?,
+                &latent.to_dtype(xs.dtype())?,
+            )?
         };
         self.output.forward(
             &out.transpose(1, 2)?
                 .reshape((batch, len, c.num_attention_heads * c.v_head_dim))?
                 .contiguous()?,
+        )
+    }
+
+    fn append_cache(&self, k_rot: &Tensor, latent: &Tensor) -> Result<(Tensor, Tensor)> {
+        // Decode consumes F32 keys and latents. Convert only newly appended
+        // values, after their native-dtype projection/normalization/RoPE.
+        self.cache.borrow_mut().append(
+            &k_rot.contiguous()?.to_dtype(DType::F32)?,
+            &latent.contiguous()?.to_dtype(DType::F32)?,
         )
     }
 
@@ -149,12 +161,12 @@ impl Attention {
             .to_dtype(DType::F32)?
             .broadcast_matmul(&self.key_weight)?
             .reshape((batch, heads, self.cfg.kv_lora_rank))?;
-        let latent = latent.squeeze(1)?.to_dtype(DType::F32)?.contiguous()?;
+        let latent = latent.squeeze(1)?.contiguous()?;
         let scores = (q_latent.matmul(&latent.transpose(1, 2)?)?
             + q_rot
                 .to_dtype(DType::F32)?
                 .reshape((batch, heads, self.cfg.qk_rope_head_dim))?
-                .matmul(&k_rot.squeeze(1)?.to_dtype(DType::F32)?.transpose(1, 2)?)?)?;
+                .matmul(&k_rot.squeeze(1)?.transpose(1, 2)?)?)?;
         let scores = (scores * (self.cfg.qk_head_dim as f64).powf(-0.5))?;
         let probabilities = candle_nn::ops::softmax_last_dim(&scores)?;
         probabilities
@@ -321,5 +333,75 @@ impl TextModel {
         for layer in &self.layers {
             layer.attention.cache.borrow_mut().reset();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::Device;
+
+    #[test]
+    fn incremental_f32_cache_matches_full_cache_cast() -> Result<()> {
+        let reference: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/reference.json")).unwrap();
+        let cfg: TextConfig =
+            serde_json::from_value(reference["config"]["text_config"].clone()).unwrap();
+        let device = Device::Cpu;
+        let vb = VarBuilder::from_slice_safetensors(
+            include_bytes!("fixtures/tiny.safetensors"),
+            DType::F32,
+            &device,
+        )?;
+        let attention = Attention::load(&cfg, vb.pp("model.language_model.layers.0.self_attn"))?;
+        for dtype in [DType::F32, DType::BF16] {
+            for batch in [1, 2] {
+                attention.cache.borrow_mut().reset();
+                let mut native = TrimmableKvCache::new(2, 32);
+                let tensor = |shape: (usize, usize, usize, usize), offset: usize| {
+                    let count = shape.0 * shape.1 * shape.2 * shape.3;
+                    Tensor::from_vec(
+                        (offset..offset + count)
+                            .map(|i| (i as f32 * 0.17).sin())
+                            .collect(),
+                        shape,
+                        &device,
+                    )?
+                    .to_dtype(dtype)
+                };
+                for len in [3, 1, 1, 2] {
+                    let k = tensor((batch, 1, len, cfg.qk_rope_head_dim), len)?;
+                    let v = tensor((batch, 1, len, cfg.kv_lora_rank), len + 7)?;
+                    let (old_k, old_v) = native.append(&k, &v)?;
+                    let (new_k, new_v) = attention.append_cache(&k, &v)?;
+                    let q = tensor(
+                        (batch, cfg.num_attention_heads, 1, cfg.qk_nope_head_dim),
+                        11,
+                    )?;
+                    let qr = tensor(
+                        (batch, cfg.num_attention_heads, 1, cfg.qk_rope_head_dim),
+                        19,
+                    )?;
+                    // Old decode widens the entire native cache on every step.
+                    let old = attention.decode(
+                        &q,
+                        &qr,
+                        &old_k.to_dtype(DType::F32)?,
+                        &old_v.to_dtype(DType::F32)?,
+                    )?;
+                    let new = attention.decode(&q, &qr, &new_k, &new_v)?;
+                    let bits = |t: Tensor| -> Result<Vec<u32>> {
+                        Ok(t.to_dtype(DType::F32)?
+                            .flatten_all()?
+                            .to_vec1::<f32>()?
+                            .into_iter()
+                            .map(f32::to_bits)
+                            .collect())
+                    };
+                    assert_eq!(bits(new)?, bits(old)?);
+                }
+            }
+        }
+        Ok(())
     }
 }
