@@ -338,28 +338,31 @@ impl ScaleAwareDetectorModel {
         inputs: &[(&str, TensorInput)],
         batch_size: usize,
     ) -> Result<ndarray::Array4<f32>, OCRError> {
-        let outputs = self
-            .inference
-            .infer(inputs)
+        // Layout consumes only the first output. In particular, do not copy or
+        // widen PP-DocLayoutV3's unused integer masks into an owned tensor.
+        // Keep output-validation errors separate from inference errors.
+        self.inference
+            .infer_first_output_f32(inputs, |shape, data| {
+                Ok(Self::reshape_predictions(shape, data, batch_size))
+            })
             .map_err(|e| OCRError::Inference {
                 model_name: "Scale-Aware Detector".to_string(),
                 context: "failed to run inference".to_string(),
                 source: Box::new(e),
-            })?;
+            })?
+    }
 
-        // Extract output - use first available output
-        let output = outputs.first().ok_or_else(|| OCRError::InvalidInput {
-            message: "No output tensors available from model".to_string(),
-        })?;
-
-        let output_shape = output.1.shape();
-
+    fn reshape_predictions(
+        output_shape: &[usize],
+        data: &[f32],
+        batch_size: usize,
+    ) -> Result<ndarray::Array4<f32>, OCRError> {
         // Handle both 2D and 4D output formats
         match output_shape.len() {
             2 => {
                 // 2D format: [num_boxes, N] where N can be 6, 7, or 8
-                let num_boxes = output_shape[0] as usize;
-                let box_dim = output_shape[1] as usize;
+                let num_boxes = output_shape[0];
+                let box_dim = output_shape[1];
 
                 if ![6, 7, 8].contains(&box_dim) {
                     return Err(OCRError::InvalidInput {
@@ -382,29 +385,28 @@ impl ScaleAwareDetectorModel {
                 // Convert flattened 2D output back to [batch, boxes_per_image, 1, N].
                 // PP-DocLayout exports output as [300 * batch, N].
                 let boxes_per_image = num_boxes / batch_size;
-                let output_array =
-                    output
-                        .1
-                        .clone()
-                        .try_into_array_f32()
-                        .map_err(|e| OCRError::InvalidInput {
-                            message: format!("Failed to extract output tensor: {}", e),
-                        })?;
-                let (data, _offset) = output_array.into_raw_vec_and_offset();
-                ndarray::Array::from_shape_vec((batch_size, boxes_per_image, 1, box_dim), data)
-                    .map_err(|e| OCRError::InvalidInput {
-                        message: format!("Failed to reshape 2D output to 4D: {}", e),
-                    })
+                ndarray::Array::from_shape_vec(
+                    (batch_size, boxes_per_image, 1, box_dim),
+                    data.to_vec(),
+                )
+                .map_err(|e| OCRError::InvalidInput {
+                    message: format!("Failed to reshape 2D output to 4D: {}", e),
+                })
             }
             4 => {
-                // Standard 4D output format
-                output
-                    .1
-                    .clone()
-                    .try_into_array4_f32()
-                    .map_err(|e| OCRError::InvalidInput {
-                        message: format!("Failed to convert to 4D array: {}", e),
-                    })
+                // Standard 4D output format; retain the public owned array.
+                ndarray::Array::from_shape_vec(
+                    (
+                        output_shape[0],
+                        output_shape[1],
+                        output_shape[2],
+                        output_shape[3],
+                    ),
+                    data.to_vec(),
+                )
+                .map_err(|e| OCRError::InvalidInput {
+                    message: format!("Failed to convert to 4D array: {}", e),
+                })
             }
             _ => Err(OCRError::InvalidInput {
                 message: format!(
