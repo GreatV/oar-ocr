@@ -11,6 +11,7 @@ use crate::runtime::attention::{
 use crate::runtime::tensor::apply_rotary_f32;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{LayerNorm, Linear, Module, VarBuilder, layer_norm, linear, linear_no_bias};
+use rayon::prelude::*;
 
 const GROUP_AREA: usize = MERGE_SIZE * MERGE_SIZE;
 const RESERVED_CODES: usize = 4;
@@ -209,7 +210,7 @@ pub(super) struct ImageEmbedding {
 
 pub(super) struct ImageEncoder {
     patch_projection: Linear,
-    learned_positions: Vec<Vec<f32>>,
+    learned_positions: Vec<f32>,
     learned_side: usize,
     head_dim: usize,
     layers: Vec<VisionLayer>,
@@ -238,8 +239,8 @@ impl ImageEncoder {
                 "position_embedding.weight",
             )
             .and_then(|x| x.to_dtype(DType::F32))
-            .and_then(|x| x.transpose(0, 1))
-            .and_then(|x| x.to_vec2::<f32>())
+            .and_then(|x| x.flatten_all())
+            .and_then(|x| x.to_vec1::<f32>())
             .map_err(infer)?;
         let layers = (0..vision.num_hidden_layers)
             .map(|index| VisionLayer::load(vision, tower.pp(format!("encoder.layers.{index}"))))
@@ -316,35 +317,46 @@ fn cubic_weights(t: f32) -> [f32; 4] {
 }
 
 fn interpolate_positions(
-    channels: &[Vec<f32>],
+    positions: &[f32],
     side: usize,
     height: usize,
     width: usize,
     device: &Device,
     dtype: DType,
 ) -> Result<Tensor, Error> {
-    let dim = channels.len();
-    let mut output = Vec::with_capacity(height * width * dim);
-    for (row, column) in patch_coordinates(height, width) {
-        let y = (side as f32 / height as f32) * (row as f32 + 0.5) - 0.5;
-        let x = (side as f32 / width as f32) * (column as f32 + 0.5) - 0.5;
-        let (iy, ix) = (y.floor() as isize, x.floor() as isize);
-        let wy = cubic_weights(y - y.floor());
-        let wx = cubic_weights(x - x.floor());
-        for channel in channels {
-            let mut value = 0f32;
-            for (dy, &weight_y) in wy.iter().enumerate() {
+    let dim = positions.len() / (side * side);
+    let coordinates: Vec<_> = patch_coordinates(height, width).collect();
+    let mut output = vec![0f32; height * width * dim];
+    output
+        .par_chunks_mut(dim)
+        .zip(coordinates)
+        .for_each(|(values, (row, column))| {
+            let y = (side as f32 / height as f32) * (row as f32 + 0.5) - 0.5;
+            let x = (side as f32 / width as f32) * (column as f32 + 0.5) - 0.5;
+            let (iy, ix) = (y.floor() as isize, x.floor() as isize);
+            let wy = cubic_weights(y - y.floor());
+            let wx = cubic_weights(x - x.floor());
+            // The sixteen source locations are shared by every channel. Keep
+            // channels adjacent in the table and preserve each scalar sum's order.
+            let offsets: [[usize; 4]; 4] = std::array::from_fn(|dy| {
                 let yy = (iy + dy as isize - 1).clamp(0, side as isize - 1) as usize;
-                let mut row = 0f32;
-                for (dx, &weight_x) in wx.iter().enumerate() {
+                std::array::from_fn(|dx| {
                     let xx = (ix + dx as isize - 1).clamp(0, side as isize - 1) as usize;
-                    row += channel[yy * side + xx] * weight_x;
+                    (yy * side + xx) * dim
+                })
+            });
+            for (channel, out) in values.iter_mut().enumerate() {
+                let mut value = 0f32;
+                for (dy, &weight_y) in wy.iter().enumerate() {
+                    let mut row = 0f32;
+                    for (dx, &weight_x) in wx.iter().enumerate() {
+                        row += positions[offsets[dy][dx] + channel] * weight_x;
+                    }
+                    value += row * weight_y;
                 }
-                value += row * weight_y;
+                *out = value;
             }
-            output.push(value);
-        }
-    }
+        });
     Tensor::from_vec(output, (height * width, dim), device)
         .and_then(|x| x.to_dtype(dtype))
         .map_err(infer)
@@ -356,7 +368,7 @@ mod tests {
 
     #[test]
     fn bicubic_positions_use_half_pixel_coordinates_and_merge_order() {
-        let table = vec![vec![1f32, 2.0, 3.0, 4.0]];
+        let table = vec![1f32, 2.0, 3.0, 4.0];
         let values = interpolate_positions(&table, 2, 4, 4, &Device::Cpu, DType::F32)
             .unwrap()
             .flatten_all()
@@ -371,5 +383,70 @@ mod tests {
             .to_vec1::<f32>()
             .unwrap();
         assert_eq!(identity, [1.0, 2.0, 3.0, 4.0]);
+
+        // Original channel-major scalar loop, including edge clamping and
+        // the exact horizontal-then-vertical accumulation order.
+        fn original(channels: &[Vec<f32>], side: usize, height: usize, width: usize) -> Vec<f32> {
+            let mut output = Vec::new();
+            for (row, column) in patch_coordinates(height, width) {
+                let y = (side as f32 / height as f32) * (row as f32 + 0.5) - 0.5;
+                let x = (side as f32 / width as f32) * (column as f32 + 0.5) - 0.5;
+                let (iy, ix) = (y.floor() as isize, x.floor() as isize);
+                let wy = cubic_weights(y - y.floor());
+                let wx = cubic_weights(x - x.floor());
+                for channel in channels {
+                    let mut value = 0f32;
+                    for (dy, &weight_y) in wy.iter().enumerate() {
+                        let yy = (iy + dy as isize - 1).clamp(0, side as isize - 1) as usize;
+                        let mut row = 0f32;
+                        for (dx, &weight_x) in wx.iter().enumerate() {
+                            let xx = (ix + dx as isize - 1).clamp(0, side as isize - 1) as usize;
+                            row += channel[yy * side + xx] * weight_x;
+                        }
+                        value += row * weight_y;
+                    }
+                    output.push(value);
+                }
+            }
+            output
+        }
+        for side in [2, 3, 5] {
+            for dim in [1, 3, 17] {
+                let table: Vec<f32> = (0..side * side * dim)
+                    .map(|i| ((i * 13 % 101) as f32 - 40.0) * 0.03125)
+                    .collect();
+                let channels: Vec<Vec<f32>> = (0..dim)
+                    .map(|channel| {
+                        table
+                            .chunks_exact(dim)
+                            .map(|pixel| pixel[channel])
+                            .collect()
+                    })
+                    .collect();
+                for (height, width) in [(2, 2), (4, 6), (6, 2), (2, 8), (8, 4)] {
+                    let expected = original(&channels, side, height, width);
+                    let actual = interpolate_positions(
+                        &table,
+                        side,
+                        height,
+                        width,
+                        &Device::Cpu,
+                        DType::F32,
+                    )
+                    .unwrap()
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap();
+                    assert_eq!(actual.len(), expected.len());
+                    assert!(
+                        actual
+                            .iter()
+                            .zip(expected)
+                            .all(|(a, b)| a.to_bits() == b.to_bits())
+                    );
+                }
+            }
+        }
     }
 }
