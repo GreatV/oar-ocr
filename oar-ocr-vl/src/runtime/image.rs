@@ -142,6 +142,61 @@ pub fn patchify_merge_grouped(
     flat
 }
 
+/// Normalize a static RGB frame directly into merge-grouped patches.
+///
+/// Geometry is validated by the caller. Ordering matches
+/// [`patchify_merge_grouped`], with each channel's normalized patch copied
+/// across the temporal samples instead of normalizing the same pixels again.
+pub(crate) fn image_to_merge_grouped_patches(
+    image: &RgbImage,
+    mean: &[f32],
+    std: &[f32],
+    rescale_factor: Option<f32>,
+    patch_size: usize,
+    merge_size: usize,
+    temporal_patch: usize,
+) -> Vec<f32> {
+    let width = image.width() as usize;
+    let height = image.height() as usize;
+    let grid_h = height / patch_size;
+    let grid_w = width / patch_size;
+    debug_assert_eq!(height % patch_size, 0);
+    debug_assert_eq!(width % patch_size, 0);
+    debug_assert_eq!(grid_h % merge_size, 0);
+    debug_assert_eq!(grid_w % merge_size, 0);
+
+    let patch_area = patch_size * patch_size;
+    let channel_len = temporal_patch * patch_area;
+    let patch_dim = 3 * channel_len;
+    let merge_area = merge_size * merge_size;
+    let grid_w_blocks = grid_w / merge_size;
+    let scale = rescale_factor.unwrap_or(1.0);
+    let rgb = image.as_raw();
+    let mut flat = vec![0.0; grid_h * grid_w * patch_dim];
+    flat.par_chunks_exact_mut(patch_dim)
+        .enumerate()
+        .for_each(|(index, patch)| {
+            let block = index / merge_area;
+            let within_block = index % merge_area;
+            let y = (block / grid_w_blocks * merge_size + within_block / merge_size) * patch_size;
+            let x = (block % grid_w_blocks * merge_size + within_block % merge_size) * patch_size;
+            for (c, channel) in patch.chunks_exact_mut(channel_len).enumerate() {
+                let (first, repeated) = channel.split_at_mut(patch_area);
+                for (ph, out_row) in first.chunks_exact_mut(patch_size).enumerate() {
+                    let row_start = ((y + ph) * width + x) * 3;
+                    for (pw, out) in out_row.iter_mut().enumerate() {
+                        let scaled = rgb[row_start + pw * 3 + c] as f32 * scale;
+                        *out = (scaled - mean[c]) / std[c];
+                    }
+                }
+                for frame in repeated.chunks_exact_mut(patch_area) {
+                    frame.copy_from_slice(first);
+                }
+            }
+        });
+    flat
+}
+
 /// Convert PIL/Transformers integer resampling constants to `image::FilterType`.
 ///
 /// Mappings:
@@ -393,21 +448,24 @@ fn pil_resize(
         buffer
             .par_chunks_exact_mut(stride)
             .enumerate()
-            .for_each(|(y, out_row)| {
-                let base = axis.bases[y];
-                let weights = &axis.weights[y];
-                let mut acc = vec![0i64; stride];
-                for (tap, weight) in weights.iter().enumerate() {
-                    let weight = *weight as i64;
-                    let src_row = &mid_raw[(base + tap) * stride..(base + tap + 1) * stride];
-                    for (accumulator, sample) in acc.iter_mut().zip(src_row) {
-                        *accumulator += weight * *sample as i64;
+            .for_each_init(
+                || vec![0i64; stride],
+                |acc, (y, out_row)| {
+                    let base = axis.bases[y];
+                    let weights = &axis.weights[y];
+                    acc.fill(0);
+                    for (tap, weight) in weights.iter().enumerate() {
+                        let weight = *weight as i64;
+                        let src_row = &mid_raw[(base + tap) * stride..(base + tap + 1) * stride];
+                        for (accumulator, sample) in acc.iter_mut().zip(src_row) {
+                            *accumulator += weight * *sample as i64;
+                        }
                     }
-                }
-                for (sample, accumulator) in out_row.iter_mut().zip(acc) {
-                    *sample = pil_fixed_to_u8(accumulator);
-                }
-            });
+                    for (sample, &accumulator) in out_row.iter_mut().zip(acc.iter()) {
+                        *sample = pil_fixed_to_u8(accumulator);
+                    }
+                },
+            );
         RgbImage::from_raw(width, height, buffer).ok_or_else(|| Error::InvalidInput {
             message: "pil_resize: output buffer size mismatch".to_string(),
         })
