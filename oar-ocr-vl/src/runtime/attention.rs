@@ -818,6 +818,58 @@ pub(crate) fn create_generation_mask_if_needed(
     }
 }
 
+/// Request-local decode mask: padding stays fixed while attendable KV grows.
+/// The backing tensor grows geometrically; each step only takes a logical view.
+/// Eager attention broadcasts that strided view directly, without repacking it.
+pub(crate) struct GenerationMask {
+    pad_lens: Vec<usize>,
+    dtype: DType,
+    device: Device,
+    storage: Option<Tensor>,
+    capacity: usize,
+}
+
+impl GenerationMask {
+    pub(crate) fn new(pad_lens: Vec<usize>, dtype: DType, device: &Device) -> Self {
+        Self {
+            pad_lens,
+            dtype,
+            device: device.clone(),
+            storage: None,
+            capacity: 0,
+        }
+    }
+
+    pub(crate) fn view(&mut self, kv_len: usize) -> Result<Option<Tensor>> {
+        if self.pad_lens.iter().all(|&pad| pad == 0) {
+            return Ok(None);
+        }
+        // Validate the logical length, not the larger backing allocation.
+        if let Some(&pad) = self.pad_lens.iter().find(|&&pad| pad >= kv_len) {
+            candle_core::bail!(
+                "create_generation_mask: pad_len {pad} leaves no attendable position in kv_len {kv_len}"
+            );
+        }
+        if kv_len > self.capacity {
+            let capacity = kv_len
+                .checked_next_power_of_two()
+                .filter(|&n| n <= u32::MAX as usize)
+                .unwrap_or(kv_len);
+            // Preserve the integer comparison and dtype casts of the original
+            // mask builder; every newly available key is already zero-filled.
+            let storage =
+                create_generation_mask(&self.pad_lens, capacity, self.dtype, &self.device)?;
+            self.storage = Some(storage);
+            self.capacity = capacity;
+        }
+        self.storage
+            .as_ref()
+            .expect("allocated decode mask")
+            .narrow(D::Minus1, 0, kv_len)
+            .map(Some)
+    }
+}
+
 // Rotary Positional Embedding (RoPE)
 
 /// Unified Rotary Positional Embedding supporting single-axis RoPE, MRoPE
@@ -1629,13 +1681,33 @@ mod tests {
     }
 
     #[test]
-    fn generation_mask_is_omitted_for_equal_length_batch() -> Result<()> {
+    fn generation_mask_growth_matches_per_step_mask() -> Result<()> {
         let device = Device::Cpu;
-        assert!(create_generation_mask_if_needed(&[0, 0, 0], 32, DType::F32, &device)?.is_none());
-
-        let mask = create_generation_mask_if_needed(&[3, 0, 1], 32, DType::F32, &device)?
-            .expect("unequal prompts need a padding mask");
-        assert_eq!(mask.dims(), &[3, 1, 1, 32]);
+        for dtype in [DType::F32, DType::F16, DType::BF16] {
+            let mut equal = GenerationMask::new(vec![0, 0, 0], dtype, &device);
+            assert!(equal.view(32)?.is_none());
+            let mut mask = GenerationMask::new(vec![3, 0, 1], dtype, &device);
+            for kv_len in [4, 7, 8, 9, 16, 17, 2049] {
+                let previous = mask.storage.as_ref().map(Tensor::id);
+                let capacity = mask.capacity;
+                let actual = mask.view(kv_len)?.expect("unequal prompts need a mask");
+                let expected = create_generation_mask(&[3, 0, 1], kv_len, dtype, &device)?;
+                assert_eq!(actual.dims(), expected.dims());
+                let bits = |tensor: &Tensor| -> Result<Vec<u32>> {
+                    Ok(tensor
+                        .to_dtype(DType::F32)?
+                        .flatten_all()?
+                        .to_vec1::<f32>()?
+                        .into_iter()
+                        .map(f32::to_bits)
+                        .collect())
+                };
+                assert_eq!(bits(&actual)?, bits(&expected)?, "{dtype:?}, {kv_len}");
+                if kv_len <= capacity {
+                    assert_eq!(mask.storage.as_ref().map(Tensor::id), previous);
+                }
+            }
+        }
         Ok(())
     }
 

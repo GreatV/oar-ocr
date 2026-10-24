@@ -6,7 +6,7 @@ use super::processing;
 use super::projector::Projector;
 use super::vision::VisionModel;
 use crate::attention::{
-    combine_masks, create_causal_mask, create_generation_mask_if_needed, create_left_padding_mask,
+    GenerationMask, combine_masks, create_causal_mask, create_left_padding_mask,
 };
 use crate::error::Error;
 #[cfg(feature = "cuda")]
@@ -20,6 +20,18 @@ use candle_nn::Module;
 use image::RgbImage;
 use std::path::Path;
 use tokenizers::Tokenizer;
+
+fn greedy_batch_tokens(logits: &Tensor, finished: &[bool]) -> candle_core::Result<Vec<u32>> {
+    // Keep Candle's existing argmax semantics, including backend-specific
+    // ties/NaNs. Reducing the same last axis batches its unchanged row kernels.
+    let mut tokens = logits.argmax(D::Minus1)?.to_vec1::<u32>()?;
+    for (token, &done) in tokens.iter_mut().zip(finished) {
+        if done {
+            *token = 0;
+        }
+    }
+    Ok(tokens)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaddleOcrVlTask {
@@ -526,18 +538,10 @@ impl PaddleOcrVl {
             .i((.., max_seq_len - 1, ..))
             .and_then(|hidden| hidden.contiguous())
             .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "get last hidden", e))?;
-        let batched_logits = self
+        let mut batched_logits = self
             .lm_head
             .forward(&last_hidden)
             .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "lm_head", e))?;
-        let mut logits_list: Vec<Tensor> = Vec::with_capacity(batch_size);
-        for i in 0..batch_size {
-            logits_list.push(
-                batched_logits
-                    .i(i)
-                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "select logits", e))?,
-            );
-        }
 
         // 9. Autoregressive decode
         let mut generated: Vec<Vec<u32>> = vec![Vec::new(); batch_size];
@@ -552,6 +556,7 @@ impl PaddleOcrVl {
         // each decode step). Used to mask out padding KV during generation so a
         // batch with unequal prompt lengths does not attend to padding positions.
         let pad_lens: Vec<usize> = seq_lens.iter().map(|&len| max_seq_len - len).collect();
+        let mut generation_mask = GenerationMask::new(pad_lens, self.dtype, &self.device);
         let mut kv_len = max_seq_len;
 
         for step in 0..max_new_tokens {
@@ -560,26 +565,21 @@ impl PaddleOcrVl {
             }
             if let Some(step_top) = step_top.as_deref_mut() {
                 step_top.push(
-                    top3(&logits_list[0])
+                    batched_logits
+                        .i(0)
+                        .and_then(|logits| top3(&logits))
                         .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "trace logits", e))?,
                 );
             }
-            let mut next_tokens: Vec<u32> = Vec::with_capacity(batch_size);
-            for (i, logits) in logits_list.iter().enumerate() {
-                if finished[i] {
-                    next_tokens.push(0);
-                } else {
-                    let tok = logits
-                        .argmax(D::Minus1)
-                        .and_then(|t| t.to_scalar::<u32>())
-                        .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "argmax", e))?;
-
+            let next_tokens = greedy_batch_tokens(&batched_logits, &finished)
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "argmax", e))?;
+            for (i, &tok) in next_tokens.iter().enumerate() {
+                if !finished[i] {
                     if tok == self.eos_token_id || self.sep_token_id.is_some_and(|id| id == tok) {
                         finished[i] = true;
                     } else {
                         generated[i].push(tok);
                     }
-                    next_tokens.push(tok);
                 }
             }
 
@@ -603,34 +603,22 @@ impl PaddleOcrVl {
 
             // Mask out left-padding positions in the KV cache for this step.
             kv_len += 1;
-            let gen_mask = if batch_size == 1 {
-                None
-            } else {
-                create_generation_mask_if_needed(&pad_lens, kv_len, self.dtype, &self.device)
-                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create gen mask", e))?
-            };
+            let gen_mask = generation_mask
+                .view(kv_len)
+                .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "create gen mask", e))?;
 
-            logits_list.clear();
-            if batch_size == 1 {
-                logits_list.push(self.llm.forward_decode_logits(
-                    &embeds,
-                    &pos,
-                    gen_mask.as_ref(),
-                    &self.lm_head,
-                )?);
+            batched_logits = if batch_size == 1 {
+                self.llm
+                    .forward_decode_logits(&embeds, &pos, gen_mask.as_ref(), &self.lm_head)?
+                    .unsqueeze(0)
+                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "batch logits", e))?
             } else {
                 let hs = self.llm.forward(&embeds, &pos, gen_mask.as_ref())?;
-                let batched_logits = self
-                    .lm_head
+                self.lm_head
                     .forward(&hs)
                     .and_then(|t| t.squeeze(1))
-                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "lm_head step", e))?;
-                for i in 0..batch_size {
-                    logits_list.push(batched_logits.i(i).map_err(|e| {
-                        candle_to_ocr_inference("PaddleOCR-VL", "select step logits", e)
-                    })?);
-                }
-            }
+                    .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "lm_head step", e))?
+            };
 
             for (i, p) in positions.iter_mut().enumerate() {
                 if !finished[i] {
@@ -792,4 +780,52 @@ fn get_rope_index(
         })?;
 
     Ok((position_ids, rope_deltas))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batched_greedy_matches_row_readbacks() -> candle_core::Result<()> {
+        let width = 1033;
+        let mut rows = vec![vec![-2f32; width]; 6];
+        for i in [7, 32, 1024] {
+            rows[0][i] = f32::INFINITY;
+        }
+        rows[1].fill(f32::NAN);
+        rows[2][0] = f32::NAN;
+        rows[2][1026] = 9.0;
+        rows[3].fill(-0.0);
+        rows[3][1] = 0.0;
+        rows[4][4] = 7.0;
+        rows[4][17] = f32::NAN;
+        rows[4][1028] = 7.0;
+        rows[5].fill(f32::NEG_INFINITY);
+        rows[5][2] = 5.0;
+        let logits = Tensor::from_vec(rows.concat(), (rows.len(), width), &Device::Cpu)?;
+        for dtype in [DType::F32, DType::F16, DType::BF16] {
+            let logits = logits.to_dtype(dtype)?;
+            for finished in [[false; 6], [true, false, true, false, false, true]] {
+                // The former decode loop: reduce and read back each active row.
+                let expected = finished
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &done)| {
+                        if done {
+                            Ok(0)
+                        } else {
+                            logits.i(i)?.argmax(D::Minus1)?.to_scalar::<u32>()
+                        }
+                    })
+                    .collect::<candle_core::Result<Vec<_>>>()?;
+                assert_eq!(
+                    greedy_batch_tokens(&logits, &finished)?,
+                    expected,
+                    "{dtype:?}"
+                );
+            }
+        }
+        Ok(())
+    }
 }
