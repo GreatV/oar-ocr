@@ -236,7 +236,9 @@ pub(crate) fn projection_by_bboxes(boxes: &[[i32; 4]], axis: usize) -> Vec<i32> 
 
     let mut projection = vec![0i32; max_length + 1];
 
-    // Increment projection histogram over the interval defined by each bounding box
+    // Mark interval endpoints, then accumulate once instead of walking every
+    // box's span. Keep the original endpoint conversion and clipping: reversed
+    // boxes can extend past the length derived from their original end coordinate.
     for b in boxes {
         let start = b[axis].unsigned_abs() as usize;
         let end = b[axis + 2].unsigned_abs() as usize;
@@ -245,9 +247,19 @@ pub(crate) fn projection_by_bboxes(boxes: &[[i32; 4]], axis: usize) -> Vec<i32> 
         } else {
             (end, start)
         };
-        for i in start..end.min(projection.len()) {
-            projection[i] += 1;
+        let end = end.min(projection.len());
+        if start < end {
+            projection[start] += 1;
+            if end < projection.len() {
+                projection[end] -= 1;
+            }
         }
+    }
+
+    let mut count = 0;
+    for value in &mut projection {
+        count += *value;
+        *value = count;
     }
 
     projection
@@ -869,15 +881,56 @@ mod tests {
     }
 
     #[test]
-    fn test_projection_by_bboxes() {
-        let boxes = vec![[10i32, 0, 20, 10], [15, 0, 25, 10]];
+    fn projection_matches_span_loop_at_boundaries() {
+        fn reference(boxes: &[[i32; 4]], axis: usize) -> Vec<i32> {
+            let max_length = boxes
+                .iter()
+                .map(|b| b[axis + 2].unsigned_abs() as usize)
+                .max()
+                .unwrap_or(0);
+            if max_length == 0 {
+                return Vec::new();
+            }
+            let mut projection = vec![0; max_length + 1];
+            for b in boxes {
+                let start = b[axis].unsigned_abs() as usize;
+                let end = b[axis + 2].unsigned_abs() as usize;
+                let (start, end) = if start <= end {
+                    (start, end)
+                } else {
+                    (end, start)
+                };
+                for i in start..end.min(projection.len()) {
+                    projection[i] += 1;
+                }
+            }
+            projection
+        }
 
-        // X-axis projection
-        let x_proj = projection_by_bboxes(&boxes, 0);
-        assert!(!x_proj.is_empty());
-        // Should have overlap in 15-20 range (count = 2)
-        assert_eq!(x_proj[15], 2);
-        assert_eq!(x_proj[10], 1);
+        let cases = [
+            vec![],
+            vec![[0; 4]],
+            vec![[9, -13, 0, 0]], // Zero original ends still produce no histogram.
+            vec![[10, 0, 20, 10], [15, 0, 25, 10]],
+            vec![
+                [8, 9, 2, 3],
+                [-5, -7, -2, -4],
+                [4, 6, 4, 6],
+                [-3, 4, 3, -4],
+                [100, -100, 6, -6],
+                [i32::MIN, i32::MIN, 2, 3],
+                [i32::MAX, i32::MAX, 1, 1],
+            ],
+        ];
+        for boxes in cases {
+            for axis in 0..2 {
+                assert_eq!(
+                    projection_by_bboxes(&boxes, axis),
+                    reference(&boxes, axis),
+                    "axis {axis}, boxes {boxes:?}"
+                );
+            }
+        }
     }
 
     #[test]
