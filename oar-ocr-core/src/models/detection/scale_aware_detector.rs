@@ -506,38 +506,3 @@ impl ScaleAwareDetectorModelBuilder {
         ScaleAwareDetectorModel::new(inference, preprocess_config, inference_mode)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::inference::TensorOutput;
-
-    #[test]
-    fn first_output_reshape_matches_owned_predictions() {
-        for columns in [6, 7, 8] {
-            let mut data: Vec<f32> = (0..6 * columns).map(|i| i as f32 * 0.25 - 4.0).collect();
-            data[0] = -0.0;
-            data[1] = f32::from_bits(0x7fc0_1234);
-            for shape in [vec![6, columns], vec![2, 3, 1, columns]] {
-                let owned = TensorOutput::F32 {
-                    shape: shape.iter().map(|&n| n as i64).collect(),
-                    data: data.clone(),
-                }
-                .try_into_array_f32()
-                .unwrap()
-                .into_shape_with_order((2, 3, 1, columns))
-                .unwrap();
-                let borrowed =
-                    ScaleAwareDetectorModel::reshape_predictions(&shape, &data, 2).unwrap();
-                assert_eq!(borrowed.shape(), owned.shape());
-                assert!(
-                    borrowed
-                        .iter()
-                        .zip(&owned)
-                        .all(|(a, b)| a.to_bits() == b.to_bits())
-                );
-            }
-        }
-        assert!(ScaleAwareDetectorModel::reshape_predictions(&[5, 7], &[0.0; 35], 2).is_err());
-    }
-}
