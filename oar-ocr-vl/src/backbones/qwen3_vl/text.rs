@@ -4274,12 +4274,30 @@ mod tests {
 
             // After the batch graph ran and the fallback dropped both
             // graphs, a fresh single-row capture must work again at the
-            // production bucket and match eager token for token.
+            // production bucket. Eager flash attention and captured masked
+            // attention round differently in BF16: near-tied logits can
+            // select different tokens even without any previous request.
+            // Teacher-force the graph's tokens, as in the batch probe above.
             let long = make_ids(4200);
-            assert_eq!(
-                greedy_eager(&model, &lm_head, &long, 8),
-                greedy_graphed(&model, &lm_head, &long, 8, true),
-                "capture after the eager fallback must match eager"
+            let (graph, graph_logits) =
+                single_row_logit_trace(&model, &lm_head, &long, 8, true, None);
+            let (_, eager_logits) =
+                single_row_logit_trace(&model, &lm_head, &long, 8, false, Some(&graph));
+            assert_eq!(graph_logits.len(), eager_logits.len());
+            let mut worst_delta = 0.0f32;
+            for (g, e) in graph_logits.iter().zip(&eager_logits) {
+                assert_eq!(g.len(), e.len());
+                assert!(g.iter().chain(e).all(|value| value.is_finite()));
+                let delta = g
+                    .iter()
+                    .zip(e)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0f32, f32::max);
+                worst_delta = worst_delta.max(delta);
+            }
+            assert!(
+                worst_delta < 2.0,
+                "capture after the eager fallback must track eager: teacher-forced |delta logit| reached {worst_delta}"
             );
 
             // The reverse fallback: with the single-row graph alive, an
@@ -4317,6 +4335,77 @@ mod tests {
         }
         #[cfg(not(feature = "cuda"))]
         eprintln!("skipping: built without the cuda feature");
+    }
+
+    /// Record single-row logits, optionally replaying a fixed token sequence.
+    /// The graph pass uses the production entry and requires successful capture.
+    #[cfg(feature = "cuda")]
+    fn single_row_logit_trace(
+        model: &Qwen3VlTextModel,
+        lm_head: &candle_nn::Linear,
+        ids: &[u32],
+        steps: usize,
+        graph: bool,
+        forced: Option<&[u32]>,
+    ) -> (Vec<u32>, Vec<Vec<f32>>) {
+        let device = model.embed_tokens.embeddings().device();
+        let seq_len = ids.len();
+        let token_ids = Tensor::from_vec(ids.to_vec(), (1, seq_len), device).unwrap();
+        let embeds = model.embed(&token_ids).unwrap();
+        let positions = text_position_ids_range(seq_len, device);
+        model.clear_cache();
+        if graph {
+            model
+                .prepare_ar_cuda_graph(seq_len, steps, lm_head, true)
+                .unwrap();
+            assert!(model.decode_graph_captured());
+        }
+        let hidden = model
+            .forward(&embeds, &positions, None, None, None)
+            .unwrap();
+        let mut logits = lm_head
+            .forward(
+                &hidden
+                    .i((0, seq_len - 1, ..))
+                    .unwrap()
+                    .unsqueeze(0)
+                    .unwrap(),
+            )
+            .unwrap()
+            .squeeze(0)
+            .unwrap();
+        let mut tokens = Vec::new();
+        let mut trace = Vec::new();
+        for step in 0..steps {
+            trace.push(
+                logits
+                    .flatten_all()
+                    .unwrap()
+                    .to_dtype(DType::F32)
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap(),
+            );
+            let token = forced.map_or_else(|| argmax_of(&logits) as u32, |tokens| tokens[step]);
+            tokens.push(token);
+            let token = Tensor::from_vec(vec![token], (1, 1), device).unwrap();
+            let embed = model.embed(&token).unwrap();
+            let pos =
+                Tensor::from_vec(vec![(seq_len + step) as i64; 3], (3, 1, 1), device).unwrap();
+            logits = if graph {
+                model
+                    .forward_decode_logits(&embed, &pos, None, lm_head)
+                    .unwrap()
+            } else {
+                let hidden = model.forward(&embed, &pos, None, None, None).unwrap();
+                lm_head
+                    .forward(&hidden.i((0, 0, ..)).unwrap().unsqueeze(0).unwrap())
+                    .unwrap()
+                    .squeeze(0)
+                    .unwrap()
+            };
+        }
+        (tokens, trace)
     }
 
     /// Greedy decode driven by plain `forward` calls: never captures or
