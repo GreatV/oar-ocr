@@ -606,10 +606,8 @@ impl Qwen3Attention {
 
     /// Batched CUDA-graph decode step: every row appends at its own
     /// device-side offset and attends over `[pad_row, start_row + query_len)`
-    /// inside the shared fixed-capacity storage. `kv_positions` is a
-    /// capture-time constant (its values depend only on the pinned
-    /// `cache_len`); `row_starts` and `pad_bounds` are rewritten before
-    /// every replay, so no input survives from a previous batch.
+    /// inside the shared fixed-capacity storage. The model builds the
+    /// attention mask once per step from the current row bounds.
     #[cfg(feature = "cuda")]
     fn forward_dynamic_batch(
         &self,
@@ -617,8 +615,7 @@ impl Qwen3Attention {
         cos: &Tensor,
         sin: &Tensor,
         row_starts: &Tensor,
-        kv_positions: &Tensor,
-        pad_bounds: &Tensor,
+        attention_mask: &Tensor,
     ) -> Result<Tensor, Error> {
         let (batch, query_len, _) = hidden_states
             .dims3()
@@ -642,25 +639,11 @@ impl Qwen3Attention {
             .inplace_op3(&v, row_starts, &append)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "batched value cache append", e))?;
 
-        // Live span per row: [pad_row, start_row + query_len). Both bounds
-        // are device tensors, so nothing uploads during replay.
-        let ends = row_starts
-            .reshape((batch, 1, 1))?
-            .affine(1.0, query_len as f64)?
-            .unsqueeze(2)?;
-        let after_pad = kv_positions.broadcast_ge(pad_bounds)?;
-        let before_end = kv_positions.broadcast_lt(&ends)?;
-        let live = after_pad.broadcast_mul(&before_end)?;
-        // masked_score stays finite in F16: 1e9 saturates to -inf there,
-        // and 0 * inf - inf is exactly the all-NaN row this mask exists to
-        // prevent.
-        let fill = masked_score(hidden_states.dtype());
-        let mask = live.to_dtype(hidden_states.dtype())?.affine(-fill, fill)?;
         let attn = scaled_dot_product_attention_gqa(
             &q,
             &cache_k,
             &cache_v,
-            Some(&mask),
+            Some(attention_mask),
             self.scaling,
             false,
             self.num_kv_groups,
@@ -670,9 +653,8 @@ impl Qwen3Attention {
     }
 
     /// CUDA-graph decode step: appends into fixed-capacity storage and runs
-    /// masked attention over `[0, kv_len]`. `kv_positions` is the constant
-    /// `(1, 1, cache_len)` index row (built before capture — `arange`
-    /// uploads from host, which capture forbids).
+    /// masked attention over `[0, kv_len]`. The shared attention mask is
+    /// computed once inside the captured model forward.
     #[cfg(feature = "cuda")]
     fn forward_dynamic(
         &self,
@@ -681,7 +663,7 @@ impl Qwen3Attention {
         sin: &Tensor,
         query_lengths: &Tensor,
         kv_lengths: &Tensor,
-        kv_positions: &Tensor,
+        attention_mask: &Tensor,
     ) -> Result<Tensor, Error> {
         let (batch, query_len, _) = hidden_states
             .dims3()
@@ -711,30 +693,11 @@ impl Qwen3Attention {
             .inplace_op3(&v, kv_lengths, &append)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "dynamic value cache append", e))?;
 
-        // Attention over the fixed-capacity storage with a device-side
-        // additive mask derived from `kv_lengths`: FA2's varlen kernel runs
-        // one 128-row query block per head on this shape (a handful of the
-        // GPU's SMs) and reads the cache far below bandwidth, while the
-        // eager gemm kernels stay fast. Masked positions get a very negative
-        // score, so stale storage beyond the live length contributes exactly
-        // zero after the softmax — identical math to the narrowed eager path.
-        let kv_bound = kv_lengths
-            .i(1..)
-            .and_then(|bound| bound.reshape((1, 1, 1)))
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "dynamic KV bound", e))?;
-        let live = kv_positions.broadcast_lt(&kv_bound)?;
-        // live -> 0, dead -> -1e9 via a scalar affine (host scalars ride
-        // as kernel parameters, so nothing uploads during graph capture).
-        let fill = masked_score(hidden_states.dtype());
-        let mask = live
-            .to_dtype(hidden_states.dtype())?
-            .affine(-fill, fill)?
-            .unsqueeze(1)?;
         let attn = scaled_dot_product_attention_gqa(
             &q,
             &cache_k,
             &cache_v,
-            Some(&mask),
+            Some(attention_mask),
             self.scaling,
             false,
             self.num_kv_groups,
@@ -1050,7 +1013,7 @@ impl DecoderLayer {
         sin: &Tensor,
         query_lengths: &Tensor,
         kv_lengths: &Tensor,
-        kv_positions: &Tensor,
+        attention_mask: &Tensor,
     ) -> Result<Tensor, Error> {
         let residual = hidden_states.clone();
         let normalized = self.input_layernorm.forward(hidden_states)?;
@@ -1060,7 +1023,7 @@ impl DecoderLayer {
             sin,
             query_lengths,
             kv_lengths,
-            kv_positions,
+            attention_mask,
         )?;
         let hidden_states = (&residual + &mixed)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention residual", e))?;
@@ -1125,8 +1088,7 @@ impl DecoderLayer {
         cos: &Tensor,
         sin: &Tensor,
         row_starts: &Tensor,
-        kv_positions: &Tensor,
-        pad_bounds: &Tensor,
+        attention_mask: &Tensor,
     ) -> Result<Tensor, Error> {
         let residual = hidden_states.clone();
         let normalized = self.input_layernorm.forward(hidden_states)?;
@@ -1135,8 +1097,7 @@ impl DecoderLayer {
             cos,
             sin,
             row_starts,
-            kv_positions,
-            pad_bounds,
+            attention_mask,
         )?;
         let hidden_states = (&residual + &mixed)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "attention residual", e))?;
@@ -1700,6 +1661,25 @@ impl Qwen3VlTextModel {
         let (cos, sin) = self
             .rotary_emb
             .forward(position_ids, inputs_embeds.dtype())?;
+        // Attention over the fixed-capacity storage with a device-side
+        // additive mask derived from `kv_lengths`: FA2's varlen kernel runs
+        // one 128-row query block per head on this shape (a handful of the
+        // GPU's SMs) and reads the cache far below bandwidth, while the
+        // eager gemm kernels stay fast. Masked positions get a very negative
+        // score, so stale storage beyond the live length contributes exactly
+        // zero after the softmax — identical math to the narrowed eager path.
+        let kv_bound = kv_lengths
+            .i(1..)
+            .and_then(|bound| bound.reshape((1, 1, 1)))
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "dynamic KV bound", e))?;
+        let live = kv_positions.broadcast_lt(&kv_bound)?;
+        // live -> 0, dead -> -1e9 via a scalar affine (host scalars ride
+        // as kernel parameters, so nothing uploads during graph capture).
+        let fill = masked_score(inputs_embeds.dtype());
+        let mask = live
+            .to_dtype(inputs_embeds.dtype())?
+            .affine(-fill, fill)?
+            .unsqueeze(1)?;
         let mut hidden_states = inputs_embeds.clone();
         for layer in &self.layers {
             hidden_states = layer.forward_dynamic(
@@ -1708,7 +1688,7 @@ impl Qwen3VlTextModel {
                 &sin,
                 query_lengths,
                 kv_lengths,
-                kv_positions,
+                &mask,
             )?;
         }
         self.norm
@@ -1730,16 +1710,27 @@ impl Qwen3VlTextModel {
         let (cos, sin) = self
             .rotary_emb
             .forward(position_ids, inputs_embeds.dtype())?;
+        let (batch, query_len, _) = inputs_embeds
+            .dims3()
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "batched dynamic input", e))?;
+        // Live span per row: [pad_row, start_row + query_len). Both bounds
+        // are device tensors, so nothing uploads during replay.
+        let ends = row_starts
+            .reshape((batch, 1, 1))?
+            .affine(1.0, query_len as f64)?
+            .unsqueeze(2)?;
+        let after_pad = kv_positions.broadcast_ge(pad_bounds)?;
+        let before_end = kv_positions.broadcast_lt(&ends)?;
+        let live = after_pad.broadcast_mul(&before_end)?;
+        // masked_score stays finite in F16: 1e9 saturates to -inf there,
+        // and 0 * inf - inf is exactly the all-NaN row this mask exists to
+        // prevent.
+        let fill = masked_score(inputs_embeds.dtype());
+        let mask = live.to_dtype(inputs_embeds.dtype())?.affine(-fill, fill)?;
         let mut hidden_states = inputs_embeds.clone();
         for layer in &self.layers {
-            hidden_states = layer.forward_dynamic_batch(
-                &hidden_states,
-                &cos,
-                &sin,
-                row_starts,
-                kv_positions,
-                pad_bounds,
-            )?;
+            hidden_states =
+                layer.forward_dynamic_batch(&hidden_states, &cos, &sin, row_starts, &mask)?;
         }
         self.norm
             .forward(&hidden_states)

@@ -84,12 +84,8 @@ fn rotate_half_interleaved(x: &Tensor) -> Result<Tensor, Error> {
     })
 }
 
-pub(super) fn apply_rotary_pos_emb(
-    q: &Tensor,
-    k: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
-) -> Result<(Tensor, Tensor), Error> {
+// Position-dependent interleaving is shared by all target layers and MTP.
+fn interleave_rotary(cos: &Tensor, sin: &Tensor) -> Result<(Tensor, Tensor), Error> {
     let cos = cos.unsqueeze(1).map_err(|e| {
         candle_to_ocr_processing(
             crate::error::ProcessingStage::TensorOperation,
@@ -160,6 +156,23 @@ pub(super) fn apply_rotary_pos_emb(
             )
         })?;
 
+    Ok((cos, sin))
+}
+
+pub(super) fn apply_rotary_pos_emb(
+    q: &Tensor,
+    k: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+) -> Result<(Tensor, Tensor), Error> {
+    let rot_dim = cos.dim(D::Minus1).map_err(|e| {
+        candle_to_ocr_processing(
+            crate::error::ProcessingStage::TensorOperation,
+            "GLM-OCR: prepared rotary dimension",
+            e,
+        )
+    })?;
+
     let head_dim = q.dim(D::Minus1).map_err(|e| {
         candle_to_ocr_processing(
             crate::error::ProcessingStage::TensorOperation,
@@ -186,14 +199,14 @@ pub(super) fn apply_rotary_pos_emb(
     let q_rotated = rotate_half_interleaved(&q_rot)?;
     let k_rotated = rotate_half_interleaved(&k_rot)?;
 
-    let q_mul = q_rot.broadcast_mul(&cos).map_err(|e| {
+    let q_mul = q_rot.broadcast_mul(cos).map_err(|e| {
         candle_to_ocr_processing(
             crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: q*cos",
             e,
         )
     })?;
-    let q_rot_mul = q_rotated.broadcast_mul(&sin).map_err(|e| {
+    let q_rot_mul = q_rotated.broadcast_mul(sin).map_err(|e| {
         candle_to_ocr_processing(
             crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: rotate_half(q)*sin",
@@ -208,14 +221,14 @@ pub(super) fn apply_rotary_pos_emb(
         )
     })?;
 
-    let k_mul = k_rot.broadcast_mul(&cos).map_err(|e| {
+    let k_mul = k_rot.broadcast_mul(cos).map_err(|e| {
         candle_to_ocr_processing(
             crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: k*cos",
             e,
         )
     })?;
-    let k_rot_mul = k_rotated.broadcast_mul(&sin).map_err(|e| {
+    let k_rot_mul = k_rotated.broadcast_mul(sin).map_err(|e| {
         candle_to_ocr_processing(
             crate::error::ProcessingStage::TensorOperation,
             "GLM-OCR: rotate_half(k)*sin",
@@ -456,7 +469,7 @@ impl GlmOcrTextRotaryEmbedding {
                 e,
             )
         })?;
-        Ok((cos, sin))
+        interleave_rotary(&cos, &sin)
     }
 }
 

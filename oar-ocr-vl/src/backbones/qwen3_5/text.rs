@@ -286,19 +286,20 @@ impl Qwen35TextConfig {
 
 #[derive(Debug, Clone)]
 struct AdditiveRmsNorm {
-    weight: Tensor,
+    scale: Tensor,
     eps: f64,
     model_name: &'static str,
 }
 
 impl AdditiveRmsNorm {
     fn load(dim: usize, eps: f64, model_name: &'static str, vb: VarBuilder) -> Result<Self, Error> {
-        let weight = vb
+        let scale = vb
             .get(dim, "weight")
             .and_then(|weight| weight.to_dtype(DType::F32))
+            .and_then(|weight| weight + 1.0)
             .map_err(|e| candle_to_ocr_inference(model_name, "load additive RMSNorm", e))?;
         Ok(Self {
-            weight,
+            scale,
             eps,
             model_name,
         })
@@ -320,10 +321,8 @@ impl AdditiveRmsNorm {
                     .map_err(|e| candle_to_ocr_inference(self.model_name, "RMSNorm rsqrt", e))?,
             )
             .map_err(|e| candle_to_ocr_inference(self.model_name, "RMSNorm normalize", e))?;
-        let scale = (&self.weight + 1.0)
-            .map_err(|e| candle_to_ocr_inference(self.model_name, "RMSNorm scale", e))?;
         normalized
-            .broadcast_mul(&scale)
+            .broadcast_mul(&self.scale)
             .and_then(|xs| xs.to_dtype(dtype))
             .map_err(|e| candle_to_ocr_inference(self.model_name, "RMSNorm output", e))
     }
@@ -1067,8 +1066,8 @@ impl FullAttention {
     /// op; only the cache append and the attention call differ (the graph
     /// needs static shapes, so it reads the full bucket with a device-side
     /// mask instead of narrowing to the live length and calling flash
-    /// attention). `kv_positions` is the constant `(1, 1, cache_len)` index
-    /// row built before capture.
+    /// attention). The mask is built once per captured forward and shared
+    /// by every full-attention layer.
     #[cfg(feature = "cuda")]
     fn forward_dynamic(
         &self,
@@ -1076,7 +1075,7 @@ impl FullAttention {
         cos: &Tensor,
         sin: &Tensor,
         kv_lengths: &Tensor,
-        kv_positions: &Tensor,
+        attention_mask: &Tensor,
     ) -> Result<Tensor, Error> {
         let model_name = self.model_name;
         let (batch, seq_len, _) = hidden_states
@@ -1151,25 +1150,11 @@ impl FullAttention {
             candle_to_ocr_inference(self.model_name, "dynamic value cache append", e)
         })?;
 
-        // Attention over the fixed-capacity storage with a device-side
-        // additive mask derived from `kv_lengths`; masked positions get a
-        // very negative score, so stale storage beyond the live length
-        // contributes exactly zero after the softmax.
-        let kv_bound = kv_lengths
-            .i(1..)
-            .and_then(|bound| bound.reshape((1, 1, 1)))
-            .map_err(|e| candle_to_ocr_inference(self.model_name, "dynamic KV bound", e))?;
-        let live = kv_positions.broadcast_lt(&kv_bound)?;
-        let fill = masked_score(hidden_states.dtype());
-        let mask = live
-            .to_dtype(hidden_states.dtype())?
-            .affine(-fill, fill)?
-            .unsqueeze(1)?;
         let output = scaled_dot_product_attention_gqa(
             &q,
             &cache_k,
             &cache_v,
-            Some(&mask),
+            Some(attention_mask),
             self.scaling,
             false,
             self.num_kv_groups,
@@ -1276,14 +1261,14 @@ impl DecoderLayer {
         cos: &Tensor,
         sin: &Tensor,
         kv_lengths: &Tensor,
-        kv_positions: &Tensor,
+        attention_mask: &Tensor,
     ) -> Result<Tensor, Error> {
         let residual = hidden_states.clone();
         let normalized = self.input_layernorm.forward(hidden_states)?;
         let mixed = match &self.mixer {
             TokenMixer::Linear(layer) => layer.forward(&normalized)?,
             TokenMixer::Full(layer) => {
-                layer.forward_dynamic(&normalized, cos, sin, kv_lengths, kv_positions)?
+                layer.forward_dynamic(&normalized, cos, sin, kv_lengths, attention_mask)?
             }
         };
         let hidden_states = (&residual + &mixed)
@@ -1763,6 +1748,22 @@ impl Qwen35TextModel {
         let (cos, sin) = this
             .rotary_emb
             .forward(&inputs.positions, inputs.hidden.dtype())?;
+        // Attention over the fixed-capacity storage with a device-side
+        // additive mask derived from `kv_lengths`; masked positions get a
+        // very negative score, so stale storage beyond the live length
+        // contributes exactly zero after the softmax.
+        let kv_bound = inputs
+            .kv_lengths
+            .tensor()
+            .i(1..)
+            .and_then(|bound| bound.reshape((1, 1, 1)))
+            .map_err(|e| candle_to_ocr_inference(this.model_name, "dynamic KV bound", e))?;
+        let live = inputs.kv_positions.broadcast_lt(&kv_bound)?;
+        let fill = masked_score(inputs.hidden.dtype());
+        let mask = live
+            .to_dtype(inputs.hidden.dtype())?
+            .affine(-fill, fill)?
+            .unsqueeze(1)?;
         let mut hidden_states = inputs.hidden.clone();
         for layer in &this.layers {
             hidden_states = layer.forward_dynamic(
@@ -1770,7 +1771,7 @@ impl Qwen35TextModel {
                 &cos,
                 &sin,
                 inputs.kv_lengths.tensor(),
-                &inputs.kv_positions,
+                &mask,
             )?;
         }
         let hidden = this.norm.forward(&hidden_states)?;

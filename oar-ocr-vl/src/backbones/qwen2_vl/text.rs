@@ -67,24 +67,6 @@ pub struct Qwen2VlTextConfig {
     pub decode_cache_len: usize,
 }
 
-/// M-RoPE: section-mix the `(3, B, S, D)` cos/sin over the
-/// temporal/height/width axes, then rotate `q`/`k` in their own dtype.
-pub(crate) fn apply_multimodal_rotary_pos_emb(
-    q: &Tensor,
-    k: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
-    mrope_section: &[usize],
-    model_name: &str,
-) -> Result<(Tensor, Tensor), Error> {
-    let cos = select_rope_sections(cos, mrope_section, 3)?;
-    let sin = select_rope_sections(sin, mrope_section, 3)?;
-    Ok((
-        rope_native(q, &cos, &sin, model_name)?,
-        rope_native(k, &cos, &sin, model_name)?,
-    ))
-}
-
 #[derive(Debug, Clone)]
 struct Qwen2VlMlp {
     gate_proj: Linear,
@@ -151,7 +133,6 @@ struct Qwen2VlAttention {
     num_kv_groups: usize,
     head_dim: usize,
     scaling: f64,
-    mrope_section: Vec<usize>,
     model_name: &'static str,
     kv_cache: RefCell<TrimmableKvCache>,
 }
@@ -253,7 +234,6 @@ impl Qwen2VlAttention {
             num_kv_groups: cfg.num_attention_heads / cfg.num_key_value_heads,
             head_dim,
             scaling: (head_dim as f64).powf(-0.5),
-            mrope_section: cfg.mrope_section.clone(),
             model_name: cfg.model_name,
             kv_cache: RefCell::new(kv_cache),
         })
@@ -312,14 +292,8 @@ impl Qwen2VlAttention {
             .transpose(1, 2)
             .map_err(|e| candle_to_ocr_inference(self.model_name, "attn v transpose", e))?;
 
-        let (q, k) = apply_multimodal_rotary_pos_emb(
-            &q,
-            &k,
-            cos,
-            sin,
-            &self.mrope_section,
-            self.model_name,
-        )?;
+        let q = rope_native(&q, cos, sin, self.model_name)?;
+        let k = rope_native(&k, cos, sin, self.model_name)?;
         let k = k
             .contiguous()
             .map_err(|e| candle_to_ocr_inference(self.model_name, "attn k contiguous", e))?;
@@ -628,6 +602,7 @@ pub struct Qwen2VlTextModel {
     layers: Vec<Qwen2VlDecoderLayer>,
     norm: candle_nn::RmsNorm,
     rotary_emb: Arc<RotaryEmbedding>,
+    mrope_section: Vec<usize>,
     model_name: &'static str,
     graph_disable_env: &'static str,
     #[cfg(feature = "cuda")]
@@ -667,6 +642,7 @@ impl Qwen2VlTextModel {
             layers,
             norm,
             rotary_emb,
+            mrope_section: cfg.mrope_section.clone(),
             model_name: cfg.model_name,
             graph_disable_env: cfg.graph_disable_env,
             #[cfg(feature = "cuda")]
@@ -691,6 +667,10 @@ impl Qwen2VlTextModel {
         let (cos, sin) = self
             .rotary_emb
             .forward_multi_axis(position_ids, inputs_embeds.dtype())?;
+
+        // The axis selection depends only on positions, not on the layer.
+        let cos = select_rope_sections(&cos, &self.mrope_section, 3)?;
+        let sin = select_rope_sections(&sin, &self.mrope_section, 3)?;
 
         let mut hidden_states = inputs_embeds.clone();
         for layer in &self.layers {
@@ -737,6 +717,9 @@ impl Qwen2VlTextModel {
         let (cos, sin) = self
             .rotary_emb
             .forward_multi_axis(position_ids, inputs_embeds.dtype())?;
+        // Keep these operations inside capture so replay selects new positions.
+        let cos = select_rope_sections(&cos, &self.mrope_section, 3)?;
+        let sin = select_rope_sections(&sin, &self.mrope_section, 3)?;
         let mut hidden_states = inputs_embeds.clone();
         for layer in &self.layers {
             hidden_states =
