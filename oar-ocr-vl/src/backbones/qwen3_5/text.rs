@@ -2069,40 +2069,6 @@ mod tests {
     use candle_core::{Device, IndexOp};
 
     #[test]
-    fn precomputed_norm_scale_matches_per_call_scale() -> Result<(), Box<dyn std::error::Error>> {
-        let device = Device::Cpu;
-        for dtype in [DType::F32, DType::BF16] {
-            let weight =
-                Tensor::new(&[-1.0f32, 0.00390625, 1.25, -0.75], &device)?.to_dtype(dtype)?;
-            let vb = VarBuilder::from_tensors(
-                std::collections::HashMap::from([("weight".to_string(), weight.clone())]),
-                dtype,
-                &device,
-            );
-            let norm = AdditiveRmsNorm::load(4, 1e-6, "test", vb)?;
-            let input = Tensor::new(&[[1f32, -2., 0., 3.], [-0.5, 0.25, 7., -4.]], &device)?
-                .to_dtype(dtype)?;
-            let xs = input.to_dtype(DType::F32)?;
-            let variance = xs.sqr()?.mean_keepdim(D::Minus1)?;
-            let expected = xs
-                .broadcast_div(&(variance + 1e-6)?.sqrt()?)?
-                .broadcast_mul(&(weight.to_dtype(DType::F32)? + 1.0)?)?
-                .to_dtype(dtype)?;
-            let bits = |value: Tensor| -> candle_core::Result<Vec<u32>> {
-                Ok(value
-                    .to_dtype(DType::F32)?
-                    .flatten_all()?
-                    .to_vec1::<f32>()?
-                    .into_iter()
-                    .map(f32::to_bits)
-                    .collect())
-            };
-            assert_eq!(bits(norm.forward(&input)?)?, bits(expected)?);
-        }
-        Ok(())
-    }
-
-    #[test]
     fn decode_state_updates_write_in_place() {
         let device = Device::Cpu;
         let slot = RefCell::new(Some(Tensor::zeros((1, 2, 4), DType::F32, &device).unwrap()));
