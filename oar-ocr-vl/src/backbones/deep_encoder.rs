@@ -12,13 +12,65 @@
 use crate::error::Error;
 use crate::runtime::attention::scaled_dot_product_attention;
 use crate::runtime::errors::{candle_to_ocr_inference, candle_to_ocr_processing};
-use candle_core::{DType, IndexOp, Tensor};
+use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{
     Conv2d, Conv2dConfig, LayerNorm, LayerNormConfig, Linear, Module, VarBuilder, layer_norm,
     linear,
 };
+use std::sync::Mutex;
 
 const MODEL_NAME: &str = "DeepEncoder";
+
+// Two grids cover the global view and local tiles without retaining an
+// unbounded set of tables for callers using different image dimensions.
+struct PositionTableCache<T> {
+    entries: Mutex<Vec<PositionTableEntry<T>>>,
+}
+
+struct PositionTableEntry<T> {
+    grid: (usize, usize),
+    dtype: DType,
+    device: Device,
+    value: T,
+}
+
+impl<T> Default for PositionTableCache<T> {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl<T: Clone> PositionTableCache<T> {
+    fn get_or_create(
+        &self,
+        grid: (usize, usize),
+        dtype: DType,
+        device: &Device,
+        create: impl FnOnce() -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let mut entries = self.entries.lock().map_err(|_| Error::Config {
+            message: "DeepEncoder position table cache lock poisoned".into(),
+        })?;
+        if let Some(entry) = entries.iter().find(|entry| {
+            entry.grid == grid && entry.dtype == dtype && entry.device.same_device(device)
+        }) {
+            return Ok(entry.value.clone());
+        }
+        let value = create()?;
+        if entries.len() == 2 {
+            entries.remove(0);
+        }
+        entries.push(PositionTableEntry {
+            grid,
+            dtype,
+            device: device.clone(),
+            value: value.clone(),
+        });
+        Ok(value)
+    }
+}
 
 fn quick_gelu(xs: &Tensor) -> Result<Tensor, Error> {
     let scaled =
@@ -216,6 +268,7 @@ struct SamAttention {
     proj: Linear,
     rel_pos_h: Tensor,
     rel_pos_w: Tensor,
+    relative_tables: PositionTableCache<(Tensor, Tensor)>,
     heads: usize,
     head_dim: usize,
 }
@@ -245,6 +298,7 @@ impl SamAttention {
             proj,
             rel_pos_h,
             rel_pos_w,
+            relative_tables: PositionTableCache::default(),
             heads: cfg.heads,
             head_dim: cfg.width / cfg.heads,
         })
@@ -270,6 +324,12 @@ impl SamAttention {
         let k = qkv.i((.., 1, .., ..))?;
         let v = qkv.i((.., 2, .., ..))?;
         let scale = 1.0 / (self.head_dim as f64).sqrt();
+        let tables = self.relative_tables.get_or_create(
+            grid,
+            DType::F32,
+            self.rel_pos_h.device(),
+            || self.prepare_relative_tables(grid),
+        )?;
 
         let mut outputs = Vec::with_capacity(self.heads);
         for head in 0..self.heads {
@@ -278,7 +338,7 @@ impl SamAttention {
             let q_head = q.i((.., head, ..))?.contiguous()?;
             let k_head = k.i((.., head, ..))?.contiguous()?;
             let v_head = v.i((.., head, ..))?.contiguous()?;
-            outputs.push(self.attend_head(&q_head, &k_head, &v_head, scale, grid)?);
+            outputs.push(self.attend_head(&q_head, &k_head, &v_head, scale, grid, &tables)?);
         }
         let refs: Vec<&Tensor> = outputs.iter().collect();
         let attn = Tensor::cat(&refs, 1)
@@ -289,17 +349,7 @@ impl SamAttention {
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "SAM proj", e))
     }
 
-    fn attend_head(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        scale: f64,
-        grid: (usize, usize),
-    ) -> Result<Tensor, Error> {
-        let seq = q
-            .dim(0)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "SAM attend shape", e))?;
+    fn prepare_relative_tables(&self, grid: (usize, usize)) -> Result<(Tensor, Tensor), Error> {
         let (query_h, query_w) = grid;
         let key_side = query_h.max(query_w);
         // `get_rel_pos`: interpolate the (2N-1, dim) table only when the grid
@@ -317,6 +367,21 @@ impl SamAttention {
         };
         let table_h = gather_rel_table(&rel_h.to_dtype(DType::F32)?, (query_h, query_h))?;
         let table_w = gather_rel_table(&rel_w.to_dtype(DType::F32)?, (query_w, query_w))?;
+        Ok((table_h, table_w))
+    }
+
+    fn attend_head(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        scale: f64,
+        grid: (usize, usize),
+        tables: &(Tensor, Tensor),
+    ) -> Result<Tensor, Error> {
+        let seq = q
+            .dim(0)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "SAM attend shape", e))?;
 
         let k_t = k
             .t()?
@@ -327,14 +392,7 @@ impl SamAttention {
         while start < seq {
             let len = (seq - start).min(REL_POS_ATTN_CHUNK);
             let q_chunk = q.narrow(0, start, len)?;
-            let bias = self.rel_pos_bias_chunk(
-                &q_chunk,
-                start,
-                len,
-                (query_h, query_w),
-                &table_h,
-                &table_w,
-            )?;
+            let bias = self.rel_pos_bias_chunk(&q_chunk, start, len, grid, &tables.0, &tables.1)?;
             let scores = q_chunk
                 .matmul(&k_t)?
                 .affine(scale, 0.0)?
@@ -589,6 +647,7 @@ pub struct SamVisionModel {
     patch_embed_weight: Tensor,
     patch_embed_bias: Tensor,
     pos_embed: Tensor,
+    positions: PositionTableCache<Tensor>,
     blocks: Vec<SamBlock>,
     neck_conv1: Conv2d,
     neck_norm1: (Tensor, Tensor),
@@ -662,6 +721,7 @@ impl SamVisionModel {
             patch_embed_weight,
             patch_embed_bias,
             pos_embed,
+            positions: PositionTableCache::default(),
             blocks,
             neck_conv1,
             neck_norm1,
@@ -698,16 +758,7 @@ impl SamVisionModel {
             .broadcast_add(&self.patch_embed_bias)?;
         let x = x.reshape((grid_h, grid_w, width_out))?;
 
-        // `get_abs_pos_sam`: bicubic-interpolate the pretrained grid (f32).
-        let pos_embed =
-            if self.pretrained_grid_side == grid_h && self.pretrained_grid_side == grid_w {
-                self.pos_embed.squeeze(0)?
-            } else {
-                bicubic_antialias_resize(&self.pos_embed.permute((0, 3, 1, 2))?, grid_h, grid_w)?
-                    .permute((0, 2, 3, 1))?
-                    .squeeze(0)?
-            }
-            .to_dtype(x.dtype())?;
+        let pos_embed = self.positions((grid_h, grid_w), x.dtype())?;
         let x = x.broadcast_add(&pos_embed)?;
 
         let mut x = x;
@@ -725,6 +776,30 @@ impl SamVisionModel {
         self.net_3
             .forward(&x)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "SAM downsampler", e))
+    }
+
+    fn positions(&self, grid: (usize, usize), dtype: DType) -> Result<Tensor, Error> {
+        self.positions
+            .get_or_create(grid, dtype, self.pos_embed.device(), || {
+                self.prepare_positions(grid, dtype)
+            })
+    }
+
+    fn prepare_positions(
+        &self,
+        (grid_h, grid_w): (usize, usize),
+        dtype: DType,
+    ) -> Result<Tensor, Error> {
+        // `get_abs_pos_sam`: retain the original f32 CPU interpolation and cast.
+        let positions =
+            if self.pretrained_grid_side == grid_h && self.pretrained_grid_side == grid_w {
+                self.pos_embed.squeeze(0)?
+            } else {
+                bicubic_antialias_resize(&self.pos_embed.permute((0, 3, 1, 2))?, grid_h, grid_w)?
+                    .permute((0, 2, 3, 1))?
+                    .squeeze(0)?
+            };
+        Ok(positions.to_dtype(dtype)?)
     }
 }
 
@@ -851,6 +926,7 @@ fn clip_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor, Error> {
 pub struct ClipVisionModel {
     class_embedding: Tensor,
     position_embedding: Tensor,
+    positions: PositionTableCache<Tensor>,
     pre_layer_norm: LayerNorm,
     blocks: Vec<ClipBlock>,
     pretrained_grid_side: usize,
@@ -885,6 +961,7 @@ impl ClipVisionModel {
         Ok(Self {
             class_embedding,
             position_embedding,
+            positions: PositionTableCache::default(),
             pre_layer_norm,
             blocks,
             pretrained_grid_side: cfg.pretrained_grid_side,
@@ -907,6 +984,31 @@ impl ClipVisionModel {
             .broadcast_as((batch, 1, self.class_embedding.dim(0)?))?;
         let embeddings = Tensor::cat(&[&class, &patches], 1)?;
 
+        let positions = self.positions((grid_h, grid_w), embeddings.dtype())?;
+        let x = embeddings.broadcast_add(&positions)?;
+        let mut x = self
+            .pre_layer_norm
+            .forward(&x)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "CLIP pre layernorm", e))?;
+        for block in &self.blocks {
+            x = block.forward(&x)?;
+        }
+        Ok(x)
+    }
+
+    fn positions(&self, grid: (usize, usize), dtype: DType) -> Result<Tensor, Error> {
+        self.positions
+            .get_or_create(grid, dtype, self.position_embedding.device(), || {
+                self.prepare_positions(grid, dtype)
+            })
+    }
+
+    fn prepare_positions(
+        &self,
+        (grid_h, grid_w): (usize, usize),
+        dtype: DType,
+    ) -> Result<Tensor, Error> {
+        let seq = grid_h * grid_w;
         // `get_abs_pos`: interpolate the grid part, keep the class row.
         let positions =
             if grid_h == self.pretrained_grid_side && grid_w == self.pretrained_grid_side {
@@ -931,15 +1033,7 @@ impl ClipVisionModel {
                     .unsqueeze(0)?
                     .contiguous()?
             };
-        let x = embeddings.broadcast_add(&positions.to_dtype(embeddings.dtype())?)?;
-        let mut x = self
-            .pre_layer_norm
-            .forward(&x)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "CLIP pre layernorm", e))?;
-        for block in &self.blocks {
-            x = block.forward(&x)?;
-        }
-        Ok(x)
+        Ok(positions.to_dtype(dtype)?)
     }
 }
 
@@ -1012,5 +1106,33 @@ impl DeepEncoder {
         self.projector
             .forward(&concat)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "vision projector", e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn position_cache_keys_and_capacity() -> Result<(), Error> {
+        let cache = PositionTableCache::default();
+        let device = Device::Cpu;
+        let get = |grid: (usize, usize), dtype| {
+            cache.get_or_create(grid, dtype, &device, || {
+                Ok(Tensor::zeros(grid, dtype, &device)?)
+            })
+        };
+        let first = get((2, 2), DType::F32)?;
+        assert_eq!(first.id(), get((2, 2), DType::F32)?.id());
+        let half = get((2, 2), DType::BF16)?;
+        assert_eq!(half.dtype(), DType::BF16);
+        assert_ne!(first.id(), half.id());
+        let resized = get((2, 3), DType::F32)?;
+        assert_eq!(resized.dims(), &[2, 3]);
+        assert_eq!(resized.id(), get((2, 3), DType::F32)?.id());
+        assert_eq!(cache.entries.lock().unwrap().len(), 2);
+        assert_ne!(first.id(), get((2, 2), DType::F32)?.id());
+        assert_eq!(cache.entries.lock().unwrap().len(), 2);
+        Ok(())
     }
 }
