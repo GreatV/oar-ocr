@@ -58,7 +58,7 @@ thiserror = "2.0"
 tokenizers.workspace = true
 tracing.workspace = true
 ureq = { version = "3.0", default-features = false, features = ["rustls", "platform-verifier"], optional = true }
-wide = { version = "1.5", optional = true }
+wide = { version = "1.6", optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
