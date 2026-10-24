@@ -92,13 +92,29 @@ fn proc_err(msg: &'static str, e: candle_core::Error) -> Error {
 
 /// Per-layer committed KV (rope already applied to keys).
 /// Shape `(batch=1, num_kv_heads, len, head_dim)`.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct LayerKvCache {
     /// Immutable prefix inherited from another request. Tensor views are
     /// reference counted by Candle, so fork is O(layers) metadata and does not
-    /// copy K/V data. Only `committed` is ever mutated by this branch.
+    /// copy K/V data. This branch never writes to the shared prefix.
     shared_prefix: Option<(Tensor, Tensor)>,
     committed: TrimmableKvCache,
+    /// Exact-sized local prefix + current block, reused between denoising
+    /// passes. Unlike committed storage, these views are overwritten on the
+    /// next transient pass and must be consumed before then.
+    transient: Option<(Tensor, Tensor)>,
+}
+
+impl Clone for LayerKvCache {
+    fn clone(&self) -> Self {
+        Self {
+            shared_prefix: self.shared_prefix.clone(),
+            committed: self.committed.clone(),
+            // Preserve the committed cache's shallow Clone contract, but never
+            // let independent denoising passes overwrite each other's scratch.
+            transient: None,
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -111,6 +127,7 @@ impl LayerKvCache {
         Self {
             shared_prefix: None,
             committed: TrimmableKvCache::new(2, capacity),
+            transient: None,
         }
     }
 
@@ -121,27 +138,14 @@ impl LayerKvCache {
         v: &Tensor,
         store_kv: bool,
     ) -> candle_core::Result<(Tensor, Tensor)> {
-        let (local_k, local_v) = if store_kv {
-            if self.committed.storage_capacity() == 0 && self.committed.max_seq_len() > 0 {
-                self.committed.initialize_storage(k)?;
-            }
-            self.committed.append(k, v)?
-        } else {
-            match (self.committed.k(), self.committed.v()) {
-                (Some(committed_k), Some(committed_v)) => (
-                    Tensor::cat(&[committed_k, k], 2)?,
-                    Tensor::cat(&[committed_v, v], 2)?,
-                ),
-                _ => (k.clone(), v.clone()),
-            }
-        };
-        match &self.shared_prefix {
-            Some((prefix_k, prefix_v)) => Ok((
-                Tensor::cat(&[prefix_k, &local_k], 2)?,
-                Tensor::cat(&[prefix_v, &local_v], 2)?,
-            )),
-            None => Ok((local_k, local_v)),
+        let segments = self.kv_segments(k, v, store_kv)?;
+        if segments.len() == 1 {
+            return Ok(segments[0].clone());
         }
+        Ok((
+            Tensor::cat(&segments.iter().map(|(k, _)| k).collect::<Vec<_>>(), 2)?,
+            Tensor::cat(&segments.iter().map(|(_, v)| v).collect::<Vec<_>>(), 2)?,
+        ))
     }
 
     fn kv_segments(
@@ -151,16 +155,44 @@ impl LayerKvCache {
         store_kv: bool,
     ) -> candle_core::Result<Vec<(Tensor, Tensor)>> {
         let (local_k, local_v) = if store_kv {
+            self.transient = None;
             if self.committed.storage_capacity() == 0 && self.committed.max_seq_len() > 0 {
                 self.committed.initialize_storage(k)?;
             }
             self.committed.append(k, v)?
         } else {
             match (self.committed.k(), self.committed.v()) {
-                (Some(committed_k), Some(committed_v)) => (
-                    Tensor::cat(&[committed_k, k], 2)?,
-                    Tensor::cat(&[committed_v, v], 2)?,
-                ),
+                (Some(committed_k), Some(committed_v)) => {
+                    let prefix_len = self.committed.current_seq_len();
+                    let fits = |full: &Tensor, block: &Tensor| {
+                        full.dtype() == block.dtype()
+                            && full.device().same_device(block.device())
+                            && full.rank() == block.rank()
+                            && full.dims().iter().zip(block.dims()).enumerate().all(
+                                |(dim, (&stored, &new))| {
+                                    stored == new + if dim == 2 { prefix_len } else { 0 }
+                                },
+                            )
+                    };
+                    match &self.transient {
+                        Some((full_k, full_v)) if fits(full_k, k) && fits(full_v, v) => {
+                            full_k.slice_set(&k.contiguous()?, 2, prefix_len)?;
+                            full_v.slice_set(&v.contiguous()?, 2, prefix_len)?;
+                        }
+                        _ => {
+                            // Exact cat layout, not spare capacity: attention sees
+                            // the same strides and segment count on every pass.
+                            self.transient = Some((
+                                Tensor::cat(&[committed_k, k], 2)?,
+                                Tensor::cat(&[committed_v, v], 2)?,
+                            ));
+                        }
+                    }
+                    self.transient
+                        .as_ref()
+                        .expect("scratch initialized")
+                        .clone()
+                }
                 _ => (k.clone(), v.clone()),
             }
         };
@@ -217,6 +249,7 @@ impl LayerKvCache {
         Ok(Self {
             shared_prefix,
             committed: TrimmableKvCache::new(2, 0),
+            transient: None,
         })
     }
 
@@ -224,6 +257,7 @@ impl LayerKvCache {
         if len >= self.seq_len() {
             return Ok(());
         }
+        self.transient = None;
         let prefix_len = self.shared_prefix_len();
         if len < prefix_len {
             let (k, v) = self.shared_prefix.as_ref().expect("non-empty prefix");
@@ -412,8 +446,8 @@ impl SdarAttention {
         let k = rope_native(&k, cos, sin, "SDAR")?;
 
         // Committed causal/decode KV uses appendable backing storage. SDAR's
-        // in-flight denoising block remains transient and is concatenated only
-        // for that attention pass.
+        // in-flight block overwrites private contiguous scratch; the committed
+        // prefix and the attention segment count stay unchanged.
         let segments = cache
             .kv_segments(&k, &v, mode.store_kv)
             .map_err(|e| proc_err("SDAR kv cache update", e))?;
@@ -862,6 +896,37 @@ impl SdarModel {
 mod tests {
     use super::*;
 
+    // The old transient path concatenated local committed KV on every call.
+    fn check_transient(
+        cache: &mut LayerKvCache,
+        k: &Tensor,
+        v: &Tensor,
+    ) -> candle_core::Result<()> {
+        let local = match (cache.committed.k(), cache.committed.v()) {
+            (Some(pk), Some(pv)) => (Tensor::cat(&[pk, k], 2)?, Tensor::cat(&[pv, v], 2)?),
+            _ => (k.clone(), v.clone()),
+        };
+        let mut expected = cache.shared_prefix.iter().cloned().collect::<Vec<_>>();
+        expected.push(local);
+        let actual = cache.kv_segments(k, v, false)?;
+        assert_eq!(actual.len(), expected.len());
+        for ((ak, av), (ek, ev)) in actual.iter().zip(&expected) {
+            for (a, e) in [(ak, ek), (av, ev)] {
+                assert_eq!(a.dims(), e.dims());
+                assert_eq!(a.stride(), e.stride());
+                let bits = |t: &Tensor| -> candle_core::Result<Vec<u32>> {
+                    Ok(t.flatten_all()?
+                        .to_vec1::<f32>()?
+                        .into_iter()
+                        .map(f32::to_bits)
+                        .collect())
+                };
+                assert_eq!(bits(a)?, bits(e)?);
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn committed_cache_appends_in_place_between_growths() -> candle_core::Result<()> {
         let device = Device::Cpu;
@@ -885,6 +950,29 @@ mod tests {
         let (transient_k, _) = cache.full_kv(&transient, &transient, false)?;
         assert_eq!(transient_k.dims(), &[1, 2, 7, 4]);
         assert_eq!(cache.committed.current_seq_len(), 5);
+
+        let scratch_id = transient_k.id();
+        let values = [f32::from_bits(0x7fc0_0001), -0.0, f32::INFINITY, -3.0].repeat(4);
+        let changed = Tensor::from_vec(values, (1, 2, 2, 4), &device)?;
+        check_transient(&mut cache, &changed, &transient)?;
+        assert_eq!(cache.transient.as_ref().unwrap().0.id(), scratch_id);
+        assert_eq!(cache.committed.current_seq_len(), 5);
+        // Change block size in both directions, including a strided source.
+        check_transient(&mut cache, &token, &token)?;
+        check_transient(&mut cache, &changed.narrow(2, 0, 1)?, &token)?;
+        check_transient(&mut cache, &changed, &transient)?;
+        assert!(cache.clone().transient.is_none());
+        cache.full_kv(&token, &token, true)?;
+        assert!(cache.transient.is_none());
+        check_transient(&mut cache, &changed, &transient)?;
+        cache.trim_to(4)?;
+        assert!(cache.transient.is_none());
+        check_transient(&mut cache, &changed, &transient)?;
+        // Recommit different values at the same length: no stale prefix reuse.
+        cache.full_kv(&transient, &transient, true)?;
+        check_transient(&mut cache, &changed, &transient)?;
+        cache.trim_to(0)?;
+        check_transient(&mut cache, &changed, &transient)?;
         Ok(())
     }
 
@@ -918,6 +1006,33 @@ mod tests {
         );
         assert_eq!(child.seq_len(), 4);
         assert_eq!(child.shared_prefix_len(), 3);
+        let block = Tensor::ones((1, 2, 2, 4), DType::F32, &device).unwrap();
+        for layer in &mut parent.layers {
+            check_transient(layer, &block, &block).unwrap(); // one segment
+        }
+        for layer in &mut child.layers {
+            check_transient(layer, &block, &block).unwrap(); // two segments
+            let scratch_id = layer.transient.as_ref().unwrap().0.id();
+            let zeros = block.zeros_like().unwrap();
+            check_transient(layer, &zeros, &block).unwrap();
+            assert_eq!(layer.transient.as_ref().unwrap().0.id(), scratch_id);
+        }
+        let mut grandchild = child.fork_at(4)?;
+        assert!(
+            grandchild
+                .layers
+                .iter()
+                .all(|layer| layer.transient.is_none())
+        );
+        for layer in &mut grandchild.layers {
+            check_transient(layer, &block, &block).unwrap();
+        }
+        child.trim_to(2)?; // shorten the inherited prefix and discard local KV
+        for layer in &mut child.layers {
+            check_transient(layer, &block, &block).unwrap();
+        }
+        assert_eq!(parent.seq_len(), 6);
+        assert_eq!(grandchild.seq_len(), 4);
         Ok(())
     }
 }
