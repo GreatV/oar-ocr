@@ -1356,12 +1356,7 @@ fn ink_thumb(gray: &GrayImage, side: f64) -> GrayImage {
 /// turned by `a` degrees: highest when the text rows are level. Integer row
 /// sums keep the score exact.
 fn row_sharpness(ink: &GrayImage, a: f64) -> f64 {
-    let r = cv::rotate_u8_zero(ink, a);
-    let rows: Vec<i64> = r
-        .as_raw()
-        .chunks_exact(ink.width() as usize)
-        .map(|row| row.iter().map(|&v| v as i64).sum())
-        .collect();
+    let rows = cv::rotated_row_sums(ink, a);
     rows.windows(2).map(|p| (p[1] - p[0]).pow(2)).sum::<i64>() as f64
 }
 

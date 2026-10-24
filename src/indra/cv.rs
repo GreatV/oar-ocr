@@ -283,8 +283,25 @@ impl Pixel for u8 {
 /// `BORDER_REPLICATE` (`replicate`) or a constant zero border. Rows are
 /// computed in parallel.
 fn warp<T: Pixel>(src: &[T], w: usize, h: usize, m: &[f64; 6], replicate: bool) -> Vec<T> {
-    let inv = invert_affine(m);
-    let im = inv.map(|v| v as f32);
+    let im = invert_affine(m).map(|v| v as f32);
+    let mut out = vec![T::default(); w * h];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        warp_row(src, w, h, &im, y, replicate, |x, value| row[x] = value);
+    });
+    out
+}
+
+// Both sinks consume the same rounded pixels: coordinate arithmetic,
+// interpolation order, border handling and saturation stay in one place.
+fn warp_row<T: Pixel>(
+    src: &[T],
+    w: usize,
+    h: usize,
+    im: &[f32; 6],
+    y: usize,
+    replicate: bool,
+    mut put: impl FnMut(usize, T),
+) {
     let at = |x: i64, y: i64| -> f32 {
         if replicate {
             T::get(src[y.clamp(0, h as i64 - 1) as usize * w + x.clamp(0, w as i64 - 1) as usize])
@@ -294,46 +311,56 @@ fn warp<T: Pixel>(src: &[T], w: usize, h: usize, m: &[f64; 6], replicate: bool) 
             T::get(src[y as usize * w + x as usize])
         }
     };
-    let mut out = vec![T::default(); w * h];
-    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        let yf = y as f32;
-        let (bx, by) = (yf * im[1] + im[2], yf * im[4] + im[5]);
-        for (x, o) in row.iter_mut().enumerate() {
-            // OpenCV 5's float-coordinate warp: a fused multiply-add per
-            // coordinate and lerp-form interpolation.
-            let xf = x as f32;
-            let sx = xf.mul_add(im[0], bx);
-            let sy = xf.mul_add(im[3], by);
-            let (x0, y0) = (sx.floor(), sy.floor());
-            let (fx, fy) = (sx - x0, sy - y0);
-            let (x0, y0) = (x0 as i64, y0 as i64);
-            let (p00, p01, p10, p11) =
-                if x0 >= 0 && y0 >= 0 && x0 + 1 < w as i64 && y0 + 1 < h as i64 {
-                    let i = y0 as usize * w + x0 as usize;
-                    (
-                        T::get(src[i]),
-                        T::get(src[i + 1]),
-                        T::get(src[i + w]),
-                        T::get(src[i + w + 1]),
-                    )
-                } else {
-                    (
-                        at(x0, y0),
-                        at(x0 + 1, y0),
-                        at(x0, y0 + 1),
-                        at(x0 + 1, y0 + 1),
-                    )
-                };
-            let top = p00 + fx * (p01 - p00);
-            let bottom = p10 + fx * (p11 - p10);
-            *o = T::put(top + fy * (bottom - top));
-        }
+    let yf = y as f32;
+    let (bx, by) = (yf * im[1] + im[2], yf * im[4] + im[5]);
+    for x in 0..w {
+        // OpenCV 5's float-coordinate warp: a fused multiply-add per
+        // coordinate and lerp-form interpolation.
+        let xf = x as f32;
+        let sx = xf.mul_add(im[0], bx);
+        let sy = xf.mul_add(im[3], by);
+        let (x0, y0) = (sx.floor(), sy.floor());
+        let (fx, fy) = (sx - x0, sy - y0);
+        let (x0, y0) = (x0 as i64, y0 as i64);
+        let (p00, p01, p10, p11) = if x0 >= 0 && y0 >= 0 && x0 + 1 < w as i64 && y0 + 1 < h as i64 {
+            let i = y0 as usize * w + x0 as usize;
+            (
+                T::get(src[i]),
+                T::get(src[i + 1]),
+                T::get(src[i + w]),
+                T::get(src[i + w + 1]),
+            )
+        } else {
+            (
+                at(x0, y0),
+                at(x0 + 1, y0),
+                at(x0, y0 + 1),
+                at(x0 + 1, y0 + 1),
+            )
+        };
+        let top = p00 + fx * (p01 - p00);
+        let bottom = p10 + fx * (p11 - p10);
+        put(x, T::put(top + fy * (bottom - top)));
+    }
+}
+
+/// Integer row sums of the zero-bordered rotation, without storing its pixels.
+pub(super) fn rotated_row_sums(src: &GrayImage, degrees: f64) -> Vec<i64> {
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    let m = rotation_matrix(w as f64 / 2.0, h as f64 / 2.0, degrees);
+    let im = invert_affine(&m).map(|v| v as f32);
+    let mut rows = vec![0i64; h];
+    rows.par_iter_mut().enumerate().for_each(|(y, sum)| {
+        warp_row(src.as_raw(), w, h, &im, y, false, |_, value| {
+            *sum += value as i64;
+        });
     });
-    out
+    rows
 }
 
 /// An 8-bit plane rotated by `degrees` counter-clockwise about its center,
 /// zero outside (`cv2.warpAffine` defaults).
+#[cfg(test)]
 pub(crate) fn rotate_u8_zero(src: &GrayImage, degrees: f64) -> GrayImage {
     let (w, h) = (src.width() as usize, src.height() as usize);
     let m = rotation_matrix(w as f64 / 2.0, h as f64 / 2.0, degrees);
@@ -449,6 +476,34 @@ pub(crate) fn connected_components(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_sum_sink_matches_materialized_rotation() {
+        let patterned = GrayImage::from_fn(37, 29, |x, y| {
+            image::Luma([if x == 0 || y == 28 || (y + x / 4) % 7 < 2 {
+                255
+            } else {
+                ((x * 31 + y * 17) % 256) as u8
+            }])
+        });
+        for ink in [
+            GrayImage::new(13, 9),
+            GrayImage::from_pixel(13, 9, image::Luma([127])),
+            GrayImage::from_pixel(1, 7, image::Luma([255])),
+            GrayImage::from_pixel(7, 1, image::Luma([255])),
+            patterned,
+        ] {
+            for a in [-45.0, -3.5, -0.3, 0.0, 0.1, 2.5, 45.0] {
+                let rotated = rotate_u8_zero(&ink, a);
+                let expected: Vec<i64> = rotated
+                    .as_raw()
+                    .chunks_exact(ink.width() as usize)
+                    .map(|row| row.iter().map(|&v| i64::from(v)).sum())
+                    .collect();
+                assert_eq!(rotated_row_sums(&ink, a), expected, "angle {a}");
+            }
+        }
+    }
 
     /// Outputs of `cv2.resize` (OpenCV 5.0) on a fixed ramp; the models
     /// expect crops made with OpenCV's exact arithmetic.
