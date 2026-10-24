@@ -103,6 +103,16 @@ impl DBPostProcess {
         img_shapes: Vec<ImageScaleInfo>,
         config: Option<&DBPostProcessConfig>,
     ) -> (Vec<Vec<BoundingBox>>, Vec<Vec<f32>>) {
+        self.apply_view(preds.view(), &img_shapes, config)
+    }
+
+    /// Processes a borrowed ORT heatmap with the same arithmetic as `apply`.
+    pub(crate) fn apply_view(
+        &self,
+        preds: ndarray::ArrayView4<'_, f32>,
+        img_shapes: &[ImageScaleInfo],
+        config: Option<&DBPostProcessConfig>,
+    ) -> (Vec<Vec<BoundingBox>>, Vec<Vec<f32>>) {
         // Use provided config or fall back to stored defaults
         let thresh = config.map(|c| c.thresh).unwrap_or(self.thresh);
         let box_thresh = config.map(|c| c.box_thresh).unwrap_or(self.box_thresh);

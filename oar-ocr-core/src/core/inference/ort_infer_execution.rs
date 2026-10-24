@@ -240,10 +240,9 @@ impl OrtInfer {
     /// after the session lock is dropped. For text recognition that copy is
     /// ruinous: the `(batch, time, vocab)` logits tensor can total **gigabytes**
     /// per pipeline run (vocab is 6.9k–18.7k), and the copy alone can exceed the
-    /// inference time. This variant keeps the ONNX Runtime output alive and lets
-    /// the caller reduce it straight from the borrowed buffer under the lock.
-    /// Callers should return a compact owned result from `f` so heavier
-    /// postprocessing can proceed after the session lock is released.
+    /// inference time. This variant retains the first output's owned ORT value
+    /// without copying its tensor data, releases the session lock, then borrows
+    /// its buffer for `f`. Postprocessing does not hold up the next session run.
     ///
     /// `f` receives `(shape, data)` where `data` is row-major contiguous.
     pub fn infer_first_output_f32<R>(
@@ -272,7 +271,7 @@ impl OrtInfer {
                 ),
             })?;
 
-        // Read the first output by position (`outputs[0]`) below to avoid
+        // Take the first output by position below to avoid
         // allocating its name as a `String` on every call; validate it exists here.
         if session_guard.outputs().is_empty() {
             return Err(OCRError::InvalidInput {
@@ -308,7 +307,17 @@ impl OrtInfer {
                     .build(e)
             })?;
 
-        let value = &outputs[0];
+        // SessionOutputs borrows the session's output names; its DynValues own
+        // their buffers and retain the session's allocator through an Arc.
+        // Discard the borrowed names before unlocking, keeping only that handle.
+        let value = outputs
+            .into_iter()
+            .next()
+            .map(|(_, value)| value)
+            .ok_or_else(|| OCRError::InvalidInput {
+                message: format!("Model '{}': no output returned", self.model_name),
+            })?;
+        drop(session_guard);
         let (shape, data) =
             value
                 .try_extract_tensor::<f32>()
