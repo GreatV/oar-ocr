@@ -236,15 +236,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let elements = &output.elements[0];
             info!("Detected {} layout elements", elements.len());
 
-            // Group elements by type
-            let mut type_counts = std::collections::HashMap::new();
+            // Group elements by type, sorted so the summary is stable across runs
+            let mut type_counts = std::collections::BTreeMap::new();
             for element in elements {
-                *type_counts.entry(element.element_type.clone()).or_insert(0) += 1;
+                *type_counts
+                    .entry(element.element_type.as_str())
+                    .or_insert(0) += 1;
             }
 
             info!("Layout element summary:");
             for (element_type, count) in type_counts {
-                let type_name = format_element_type(&element_type);
+                let type_name = format_element_type(element_type);
                 info!("  {}: {}", type_name, count);
             }
 
