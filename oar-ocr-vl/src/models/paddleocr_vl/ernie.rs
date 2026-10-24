@@ -1,6 +1,7 @@
 use super::config::PaddleOcrVlConfig;
-use crate::attention::{RotaryEmbedding, flash_attention, scaled_dot_product_attention_gqa};
-use crate::backbones::qwen2_vl::apply_multimodal_rotary_pos_emb;
+use crate::attention::{
+    RotaryEmbedding, flash_attention, scaled_dot_product_attention_gqa, select_rope_sections,
+};
 use crate::error::Error;
 use crate::runtime::cache::TrimmableKvCache;
 #[cfg(feature = "cuda")]
@@ -12,6 +13,7 @@ use crate::runtime::decoder_graph::{
     CudaGraphDrainGuard, CudaGraphInputs, CudaGraphKvLengths, DecoderCudaGraph,
     capture_decoder_graph, cuda_graph_error, decoder_attention_is_causal,
 };
+use crate::runtime::tensor::rope_native;
 use crate::utils::candle_to_ocr_inference;
 #[cfg(feature = "cuda")]
 use candle_core::DType;
@@ -89,7 +91,6 @@ struct Ernie4_5Attention {
     num_kv_groups: usize,
     head_dim: usize,
     scaling: f64,
-    mrope_section: Vec<usize>,
     kv_cache: RefCell<TrimmableKvCache>,
 }
 
@@ -151,7 +152,6 @@ impl Ernie4_5Attention {
             num_kv_groups: cfg.num_attention_heads / cfg.num_key_value_heads,
             head_dim: cfg.head_dim,
             scaling: (cfg.head_dim as f64).powf(-0.5),
-            mrope_section: cfg.rope_scaling.mrope_section.clone(),
             kv_cache: RefCell::new(kv_cache),
         })
     }
@@ -193,8 +193,8 @@ impl Ernie4_5Attention {
             .transpose(1, 2)
             .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "attn v transpose", e))?;
 
-        let (q, k) =
-            apply_multimodal_rotary_pos_emb(&q, &k, cos, sin, &self.mrope_section, "PaddleOCR-VL")?;
+        let q = rope_native(&q, cos, sin, "PaddleOCR-VL")?;
+        let k = rope_native(&k, cos, sin, "PaddleOCR-VL")?;
 
         let q = q
             .contiguous()
@@ -479,6 +479,7 @@ pub struct Ernie4_5Model {
     layers: Vec<Ernie4_5DecoderLayer>,
     norm: candle_nn::RmsNorm,
     rotary: RotaryEmbedding,
+    mrope_section: Vec<usize>,
     // Must stay the last field: it drops last and drains CUDA errors the
     // other fields' frees may stash (see CudaGraphDrainGuard).
     #[cfg(feature = "cuda")]
@@ -509,6 +510,7 @@ impl Ernie4_5Model {
             layers,
             norm,
             rotary,
+            mrope_section: cfg.rope_scaling.mrope_section.clone(),
             #[cfg(feature = "cuda")]
             _drain_guard,
         })
@@ -529,6 +531,9 @@ impl Ernie4_5Model {
         let (cos, sin) = self
             .rotary
             .forward_multi_axis(position_ids, inputs_embeds.dtype())?;
+
+        let cos = select_rope_sections(&cos, &self.mrope_section, 3)?;
+        let sin = select_rope_sections(&sin, &self.mrope_section, 3)?;
 
         self.forward_prepared(inputs_embeds, &cos, &sin, causal_mask)
     }
@@ -585,6 +590,8 @@ impl Ernie4_5Model {
         let (cos, sin) = self
             .rotary
             .forward_multi_axis(position_ids, inputs_embeds.dtype())?;
+        let cos = select_rope_sections(&cos, &self.mrope_section, 3)?;
+        let sin = select_rope_sections(&sin, &self.mrope_section, 3)?;
         let mut hidden_states = inputs_embeds.clone();
         for layer in &self.layers {
             hidden_states =
