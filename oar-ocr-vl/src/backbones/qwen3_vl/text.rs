@@ -3842,8 +3842,8 @@ mod tests {
                 let ids_t = Tensor::from_vec(tokens.clone(), (rows.len(), 1), &device).unwrap();
                 let embed = model.embed(&ids_t).unwrap();
                 let mut pos_data = Vec::with_capacity(3 * rows.len());
-                for &seq_len in &seq_lens {
-                    for _ in 0..3 {
+                for _ in 0..3 {
+                    for &seq_len in &seq_lens {
                         pos_data.push((seq_len + step) as i64);
                     }
                 }
@@ -4045,8 +4045,8 @@ mod tests {
                     let ids = Tensor::from_vec(tokens.clone(), (batch, 1), &device).unwrap();
                     let embed = model.embed(&ids).unwrap();
                     let mut pos_data = Vec::with_capacity(3 * batch);
-                    for &seq_len in &seq_lens {
-                        for _ in 0..3 {
+                    for _ in 0..3 {
+                        for &seq_len in &seq_lens {
                             pos_data.push((seq_len + step) as i64);
                         }
                     }
@@ -4168,8 +4168,8 @@ mod tests {
                     let ids = Tensor::from_vec(tokens, (probe_batch, 1), &device).unwrap();
                     let embed = model.embed(&ids).unwrap();
                     let mut pos_data = Vec::with_capacity(3 * probe_batch);
-                    for &seq_len in &seq_lens {
-                        for _ in 0..3 {
+                    for _ in 0..3 {
+                        for &seq_len in &seq_lens {
                             pos_data.push((seq_len + step) as i64);
                         }
                     }
