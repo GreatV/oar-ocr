@@ -25,6 +25,8 @@ impl OrtInfer {
             model_path: source.display_path(),
             model_name,
             run_options: None,
+            #[cfg(feature = "cuda")]
+            cuda_device: None,
         })
     }
 
@@ -61,6 +63,20 @@ impl OrtInfer {
             .clone()
             .unwrap_or_else(|| "unknown_model".to_string());
         let run_options = Self::arena_shrinkage_run_options(common, &session)?;
+        #[cfg(feature = "cuda")]
+        let cuda_device = common
+            .ort_session
+            .as_ref()
+            .and_then(|cfg| cfg.execution_providers.as_ref())
+            .and_then(|eps| {
+                eps.iter().find_map(|ep| match ep {
+                    crate::core::config::OrtExecutionProvider::CUDA { device_id, .. } => {
+                        Some(device_id.unwrap_or(0))
+                    }
+                    _ => None,
+                })
+            })
+            .filter(|&id| Self::session_has_cuda_allocator(&session, id));
 
         Ok(OrtInfer {
             sessions: vec![Mutex::new(session)],
@@ -69,6 +85,8 @@ impl OrtInfer {
             model_path: source.display_path(),
             model_name,
             run_options,
+            #[cfg(feature = "cuda")]
+            cuda_device,
         })
     }
 

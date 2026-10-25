@@ -63,6 +63,61 @@ impl<'a> TensorInput<'a> {
 }
 
 impl OrtInfer {
+    /// Retains a single float output on the registered CUDA device. Multi-output
+    /// models keep the normal path so binding cannot prune other outputs.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn infer_cuda_output(
+        &self,
+        inputs: &[(&str, TensorInput)],
+    ) -> Result<Option<ort::value::Tensor<f32>>, OCRError> {
+        let Some(device) = self.cuda_device else {
+            return Ok(None);
+        };
+        let idx = self
+            .next_idx
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut session = self.get_session(idx)?;
+        if session.outputs().len() != 1 {
+            return Ok(None);
+        }
+        let mut run = || -> ort::Result<ort::value::Tensor<f32>> {
+            use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
+            let name = session.outputs()[0].name().to_owned();
+            let mut binding = session.create_binding()?;
+            // Keep borrowed host buffers alive through input synchronization/run.
+            let tensors = inputs
+                .iter()
+                .map(|(_, input)| input.to_tensor_ref())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| ort::Error::new(e.to_string()))?;
+            for ((name, _), tensor) in inputs.iter().zip(&tensors) {
+                binding.bind_input(*name, tensor)?;
+            }
+            let memory = MemoryInfo::new(
+                AllocationDevice::CUDA,
+                device,
+                AllocatorType::Device,
+                MemoryType::Default,
+            )?;
+            binding.bind_output_to_device(&name, &memory)?;
+            binding.synchronize_inputs()?;
+            let mut outputs = match &self.run_options {
+                Some(options) => session.run_binding_with_options(&binding, options)?,
+                None => session.run_binding(&binding)?,
+            };
+            binding.synchronize_outputs()?;
+            outputs
+                .remove(&name)
+                .ok_or_else(|| ort::Error::new("missing bound output"))?
+                .downcast()
+        };
+        run().map(Some).map_err(|e| OCRError::Inference {
+            model_name: self.model_name.clone(),
+            context: "CUDA output binding".into(),
+            source: Box::new(e),
+        })
+    }
+
     /// Runs one inference, applying the instance's run options (CUDA arena
     /// shrinkage) when configured.
     fn run_session<'s>(

@@ -26,10 +26,10 @@ pub type PositionedDecodeResult = (
 /// lifetime of an ONNX Runtime output buffer.
 #[derive(Debug, PartialEq)]
 pub(crate) struct CTCArgmaxOutput {
-    batch_size: usize,
-    sequence_length: usize,
-    indices: Vec<usize>,
-    probabilities: Vec<f32>,
+    pub(crate) batch_size: usize,
+    pub(crate) sequence_length: usize,
+    pub(crate) indices: Vec<usize>,
+    pub(crate) probabilities: Vec<f32>,
 }
 
 static ALPHANUMERIC_REGEX: LazyLock<Regex> = LazyLock::new(|| {

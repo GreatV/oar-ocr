@@ -36,6 +36,9 @@ pub struct OrtInfer {
     pub(self) input_name: String,
     pub(self) model_path: std::path::PathBuf,
     pub(self) model_name: String,
+    /// Device with an actually registered CUDA allocator, not merely a requested EP.
+    #[cfg(feature = "cuda")]
+    pub(crate) cuda_device: Option<i32>,
     /// Run options applied to every `session.run`; set when CUDA arena
     /// shrinkage is enabled.
     pub(self) run_options: Option<ort::session::RunOptions>,
