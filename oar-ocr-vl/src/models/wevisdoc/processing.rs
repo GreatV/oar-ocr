@@ -34,6 +34,41 @@ pub(crate) fn take_last_upload_probe_mib() -> u64 {
     LAST_UPLOAD_PROBE_MIB.with(|probe| probe.replace(0))
 }
 
+/// Measure live device memory consistently at baseline and upload probes.
+#[cfg(all(test, feature = "cuda"))]
+pub(crate) fn measured_device_mib(device: &Device) -> u64 {
+    use candle_core::cuda_backend::cudarc::driver::sys;
+    let Device::Cuda(cuda) = device else {
+        panic!("the memory probe requires CUDA");
+    };
+    cuda.cuda_stream().synchronize().unwrap();
+    // Cached, unused pool pages must not conceal a freed KV bucket.
+    let mut pool = std::ptr::null_mut();
+    unsafe {
+        assert_eq!(
+            sys::cuDeviceGetDefaultMemPool(
+                &mut pool,
+                cuda.cuda_stream().context().ordinal() as i32
+            ),
+            sys::CUresult::CUDA_SUCCESS
+        );
+        assert_eq!(sys::cuMemPoolTrimTo(pool, 0), sys::CUresult::CUDA_SUCCESS);
+    }
+    let output = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=memory.used",
+            "--format=csv,noheader,nounits",
+            &format!("--id={}", cuda.cuda_stream().context().ordinal()),
+        ])
+        .output()
+        .expect("nvidia-smi memory probe");
+    assert!(output.status.success(), "nvidia-smi memory probe failed");
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("nvidia-smi memory in MiB")
+}
+
 pub(crate) fn load_image_processor_config(
     path: impl AsRef<Path>,
 ) -> Result<QwenVlImageProcessorConfig, Error> {
@@ -140,22 +175,9 @@ pub fn preprocess_image(
     // (thread-local, so parallel tests stay isolated) and records device
     // memory at the upload point, before the pixel values are uploaded.
     #[cfg(all(test, feature = "cuda"))]
-    if let Device::Cuda(cuda) = device {
-        cuda.cuda_stream().synchronize().unwrap();
-        let output = std::process::Command::new("nvidia-smi")
-            .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-            .output();
-        let mib = match output {
-            Ok(out) => String::from_utf8_lossy(&out.stdout)
-                .trim()
-                .lines()
-                .next()
-                .and_then(|line| line.trim().parse().ok())
-                .unwrap_or(0),
-            Err(_) => 0,
-        };
+    if matches!(device, Device::Cuda(_)) {
+        let mib = measured_device_mib(device);
         LAST_UPLOAD_PROBE_MIB.with(|probe| probe.set(mib));
-        eprintln!("DBGM9 pre-upload used={mib}MiB");
     }
     // Document-parser crops can be narrower than the patch grid on one
     // side (for example a 10x200 rule). Pad the aspect ratio first, then

@@ -753,12 +753,6 @@ impl WeVisDoc {
             })
     }
 
-    /// Test-only access for the production-entry self-check.
-    #[cfg(all(test, feature = "cuda"))]
-    pub(crate) fn text_model(&self) -> &Qwen3VlTextModel {
-        &self.text
-    }
-
     pub fn tokenizer(&self) -> &Tokenizer {
         &self.tokenizer
     }
@@ -785,22 +779,6 @@ fn expected_decode_bucket(prompt_len: usize, max_new_tokens: usize, region: bool
         crate::runtime::decoder_graph::prompt_decode_bucket(prompt_len, limit)
     } else {
         crate::runtime::decoder_graph::decoder_cache_capacity(prompt_len, max_new_tokens, limit)
-    }
-}
-
-#[cfg(all(test, feature = "cuda"))]
-fn smi_used() -> u64 {
-    let output = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-        .output();
-    match output {
-        Ok(out) => String::from_utf8_lossy(&out.stdout)
-            .trim()
-            .lines()
-            .next()
-            .and_then(|line| line.trim().parse().ok())
-            .unwrap_or(0),
-        Err(_) => 0,
     }
 }
 
@@ -1503,7 +1481,7 @@ mod tests {
     /// Production-entry memory check with a real checkpoint (env-gated:
     /// OAR_WEVISDOC_ENTRY_TEST_MODEL_DIR / _IMAGE_A / _IMAGE_B). A
     /// single-token request runs eager with no graph captured; after a
-    /// region batch leaves a multi-GiB fixed bucket behind, the
+    /// region batch leaves an incompatible fixed bucket behind, the
     /// single-page entry (generate_one) and the batch entry
     /// (generate_tokens) must both release stale fixed KV before pixel
     /// values are uploaded — verified via the preprocess_image upload
@@ -1534,30 +1512,6 @@ mod tests {
             let image_b = crate::utils::image::load_image(std::path::Path::new(&image_b))
                 .expect("load image b");
 
-            let baseline = {
-                let Some(device) = model.text_model().cuda_device() else {
-                    unreachable!()
-                };
-                if let Device::Cuda(cuda) = device {
-                    cuda.cuda_stream().synchronize().unwrap();
-                    // The async allocator hides pool-internal reuse from
-                    // nvidia-smi; trim to live allocations before reading.
-                    use candle_core::cuda_backend::cudarc::driver::sys::{
-                        cuDeviceGetDefaultMemPool, cuMemPoolTrimTo,
-                    };
-                    let ordinal = cuda.cuda_stream().context().ordinal();
-                    let mut pool: candle_core::cuda_backend::cudarc::driver::sys::CUmemoryPool =
-                        std::ptr::null_mut();
-                    unsafe {
-                        cuDeviceGetDefaultMemPool(&mut pool, ordinal as i32);
-                        cuMemPoolTrimTo(pool, 0);
-                    }
-                    crate::runtime::decoder_graph::drain_cuda_context_errors(device);
-                }
-                smi_used()
-            };
-            eprintln!("DBGM7 baseline={baseline}MiB");
-
             // A single-token page request runs eager: the production
             // entries skip graph preparation when max_new_tokens <= 1, so
             // a fresh model must end the request with no graph captured
@@ -1576,60 +1530,66 @@ mod tests {
                 "a single-token request must not capture a graph"
             );
 
-            // Region-style batch request: captures a same-width graph and
-            // preallocates the big fixed buckets.
-            let texts = model
-                .generate(&[image_a.clone(), image_b.clone()], 64)
-                .unwrap();
-            assert_eq!(texts.len(), 2);
+            // Warm both request shapes before measuring: library initialization
+            // and vision allocations must not be mistaken for retained KV.
+            let batch = [image_a.clone(), image_b];
+            let run = |model: &mut WeVisDoc, batched: bool| {
+                if batched {
+                    assert_eq!(model.generate(&batch, 64).unwrap().len(), 2);
+                    assert!(model.text.batch_decode_graph_captured());
+                } else {
+                    let tokens = model
+                        .generate_one(&image_a, 64, LoopGuard::Standard)
+                        .unwrap();
+                    assert!(!tokens.0.is_empty());
+                    assert!(model.text.decode_graph_captured());
+                }
+            };
+            run(&mut model, true);
+            run(&mut model, false);
 
-            // Single-page entry: the release must land before
-            // preprocess_image uploads pixel values; the (thread-local)
-            // upload probe stores the reading from this request.
-            let tokens = model
-                .generate_one(&image_a, 64, LoopGuard::Standard)
-                .expect("single-page generation succeeds");
-            assert!(!tokens.0.is_empty());
-            let probe = crate::wevisdoc::processing::take_last_upload_probe_mib();
-            eprintln!("DBGM7 single-entry pre-upload probe={probe}MiB");
-            // Batch-round activations leave ~100-200 MiB of live residue;
-            // the released bucket would be ~940 MiB. The control below
-            // proves the assertion catches the real leak.
-            assert!(
-                probe.saturating_sub(baseline) <= 256,
-                "stale KV survived into the single-page upload: {} MiB",
-                probe.saturating_sub(baseline)
-            );
-
-            // Control: with the entry release skipped, the upload point
-            // sees the stale bucket.
-            model.text.hooks.skip_incompatible_release = true;
-            let _ = model
-                .generate_one(&image_a, 64, LoopGuard::Standard)
-                .unwrap();
-            let probe = crate::wevisdoc::processing::take_last_upload_probe_mib();
-            eprintln!("DBGM7 control (release skipped) probe={probe}MiB");
-            assert!(
-                probe.saturating_sub(baseline) >= 500,
-                "the memory assertion failed to catch a missing release"
-            );
-            model.text.hooks.skip_incompatible_release = false;
-
-            // Batch entry: after the single-page phase the single-row
-            // bucket is stale for a batch request; the entry must release
-            // it before the upload.
-            let texts = model.generate(&[image_a, image_b], 64).unwrap();
-            assert_eq!(texts.len(), 2);
-            let probe = crate::wevisdoc::processing::take_last_upload_probe_mib();
-            eprintln!("DBGM7 batch-entry pre-upload probe={probe}MiB");
-            // The stale single-row bucket (~470 MiB) must already be gone;
-            // the remaining delta is batch-round activation residue. A
-            // skipped release would push this past ~470 MiB on top.
-            assert!(
-                probe.saturating_sub(baseline) <= 512,
-                "stale KV survived into the batch upload: {} MiB",
-                probe.saturating_sub(baseline)
-            );
+            for batched in [false, true] {
+                // Seed the opposite request shape before EACH measurement.
+                // A second single-page request would reuse its compatible
+                // bucket and cannot serve as a missing-release control.
+                run(&mut model, !batched);
+                let stale_bytes = model.text.fixed_storage_bytes_for_test() as u64;
+                assert!(stale_bytes > 0, "the test must seed fixed KV storage");
+                // Recovery preserves live history; the no-request baseline
+                // must first end the previous batch's logical cache contents.
+                model.text.clear_cache();
+                model.text.recover_failed_capture().unwrap();
+                assert_eq!(model.text.fixed_storage_bytes_for_test(), 0);
+                let baseline = crate::wevisdoc::processing::measured_device_mib(&device);
+                // Half the actual tensor bytes separates a released bucket
+                // from a retained one, allowing MiB rounding and graph inputs.
+                let threshold = stale_bytes / 2;
+                let mut released_delta = 0;
+                for skip_release in [false, true] {
+                    run(&mut model, !batched);
+                    assert_eq!(
+                        model.text.fixed_storage_bytes_for_test() as u64,
+                        stale_bytes
+                    );
+                    model.text.hooks.skip_incompatible_release = skip_release;
+                    run(&mut model, batched);
+                    model.text.hooks.skip_incompatible_release = false;
+                    let probe = crate::wevisdoc::processing::take_last_upload_probe_mib();
+                    let delta = probe.saturating_sub(baseline) * 1024 * 1024;
+                    if skip_release {
+                        assert!(
+                            delta >= threshold && delta.saturating_sub(released_delta) >= threshold,
+                            "missing-release control: batch={batched}, stale={stale_bytes} bytes, baseline={baseline} MiB, probe={probe} MiB, released_delta={released_delta} bytes"
+                        );
+                    } else {
+                        assert!(
+                            delta < threshold,
+                            "stale KV at upload: batch={batched}, stale={stale_bytes} bytes, baseline={baseline} MiB, probe={probe} MiB"
+                        );
+                        released_delta = delta;
+                    }
+                }
+            }
         }
         #[cfg(not(feature = "cuda"))]
         eprintln!("skipping: built without the cuda feature");
