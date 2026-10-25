@@ -23,6 +23,8 @@ use rayon::prelude::*;
 use std::borrow::Cow;
 use tracing::{error, warn};
 
+mod exact_resize;
+
 // Share geometry and operation order between the owned public API and DB's
 // borrowed RGB path. Identity resizes return the source without copying it.
 trait ResizeSource: Sized {
@@ -37,7 +39,12 @@ impl ResizeSource for DynamicImage {
     }
 
     fn resized(&self, width: u32, height: u32, filter: image::imageops::FilterType) -> Self {
-        self.resize_exact(width, height, filter)
+        match self {
+            DynamicImage::ImageRgb8(image) => {
+                DynamicImage::ImageRgb8(exact_resize::resize_rgb8(image, width, height, filter))
+            }
+            _ => self.resize_exact(width, height, filter),
+        }
     }
 
     fn padded(&self, width: u32, height: u32) -> Self {
@@ -53,7 +60,7 @@ impl ResizeSource for Cow<'_, RgbImage> {
     }
 
     fn resized(&self, width: u32, height: u32, filter: image::imageops::FilterType) -> Self {
-        Cow::Owned(image::imageops::resize(
+        Cow::Owned(exact_resize::resize_rgb8(
             self.as_ref(),
             width,
             height,
