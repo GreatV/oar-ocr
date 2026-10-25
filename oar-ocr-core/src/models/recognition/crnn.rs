@@ -37,6 +37,8 @@ pub struct CRNNModel {
     resizer: OCRResize,
     /// CTC decoder for postprocessing
     decoder: CTCLabelDecode,
+    #[cfg(feature = "cuda")]
+    cuda_reducer: super::ctc_cuda::CtcReducer,
 }
 
 impl CRNNModel {
@@ -46,6 +48,8 @@ impl CRNNModel {
             inference,
             resizer,
             decoder,
+            #[cfg(feature = "cuda")]
+            cuda_reducer: super::ctc_cuda::CtcReducer::default(),
         }
     }
 
@@ -267,6 +271,15 @@ impl CRNNModel {
         // construction happen after this call returns.
         let input_name = self.inference.input_name();
         let inputs = vec![(input_name, TensorInput::Array4(&batch_tensor))];
+        #[cfg(feature = "cuda")]
+        if let Some(predictions) = self.inference.infer_cuda_output(&inputs)? {
+            let output = self.cuda_reducer.reduce(
+                &predictions,
+                self.inference.cuda_device.expect("bound CUDA output"),
+                &self.decoder,
+            )?;
+            return Ok(self.postprocess_argmax(&output, return_positions));
+        }
         let output = self
             .inference
             .infer_first_output_f32(&inputs, |shape, data| {

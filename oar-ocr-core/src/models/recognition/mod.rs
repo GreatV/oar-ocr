@@ -3,6 +3,8 @@
 //! This module contains pure model implementations for recognition tasks.
 
 pub mod crnn;
+#[cfg(feature = "cuda")]
+mod ctc_cuda;
 pub mod pp_formulanet;
 pub mod slanet;
 pub mod unimernet;
