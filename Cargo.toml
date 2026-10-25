@@ -18,7 +18,7 @@ oar-ocr-derive = { version = "0.10.1", path = "oar-ocr-derive", default-features
 # Shared third-party dependencies (kept in sync via workspace inheritance).
 clap = { version = "4.5.42", features = ["derive"] }
 hayro = "0.8"
-image = "0.25.6"
+image = "0.25.10"
 imageproc = "0.27.0"
 rayon = "1.8"
 regex = "1.11.1"
