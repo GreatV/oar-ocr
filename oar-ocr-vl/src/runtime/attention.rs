@@ -369,12 +369,25 @@ pub fn scaled_dot_product_attention_gqa(
         return Ok(output);
     }
 
-    let grouped_batch = batch * num_kv_heads;
     let grouped_queries = num_kv_groups * query_len;
-    let grouped_q = q.reshape((grouped_batch, grouped_queries, head_dim))?;
-    let grouped_k = k
-        .reshape((grouped_batch, kv_len, head_dim))?
-        .transpose(1, 2)?;
+    let grouped_q = q.reshape((batch, num_kv_heads, grouped_queries, head_dim))?;
+    // Preserve the cache's batch/head strides: flattening these axes would
+    // materialize the entire logical history when capacity exceeds kv_len.
+    let cache_layout = |tensor: &Tensor| -> Result<Tensor> {
+        let stride = tensor.stride();
+        if stride[3] == 1
+            && stride[2] == head_dim
+            && stride[1] >= kv_len * head_dim
+            && stride[0] == num_kv_heads * stride[1]
+        {
+            Ok(tensor.clone())
+        } else {
+            // Arbitrary public-API inputs can have nonuniform batch strides;
+            // retain the old materialization for layouts matmul cannot use.
+            tensor.contiguous()
+        }
+    };
+    let grouped_k = cache_layout(k)?.transpose(2, 3)?;
     let mut weights =
         (grouped_q.matmul(&grouped_k)? * scale)?.reshape((batch, num_heads, query_len, kv_len))?;
 
@@ -396,10 +409,9 @@ pub fn scaled_dot_product_attention_gqa(
     } else {
         candle_nn::ops::softmax_last_dim(&weights.to_dtype(DType::F32)?)?.to_dtype(weight_dtype)?
     }
-    .reshape((grouped_batch, grouped_queries, kv_len))?;
-    let grouped_v = v.reshape((grouped_batch, kv_len, head_dim))?;
+    .reshape((batch, num_kv_heads, grouped_queries, kv_len))?;
     weights
-        .matmul(&grouped_v)?
+        .matmul(&cache_layout(v)?)?
         .reshape((batch, num_heads, query_len, head_dim))
 }
 
@@ -1167,6 +1179,83 @@ pub fn select_rope_sections(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn check_gqa_cache_views(device: &Device, dtype: DType) -> Result<()> {
+        let (batch, groups, len, cap, dim) = (2, 3, 7, 13, 16);
+        let tensor = |shape: (usize, usize, usize, usize), seed: usize| {
+            let values = (0..shape.0 * shape.1 * shape.2 * shape.3)
+                .map(|i| ((i * 37 + seed) % 101) as f32 / 51.0 - 1.0)
+                .collect::<Vec<_>>();
+            Tensor::from_vec(values, shape, device)?.to_dtype(dtype)
+        };
+        for heads in [1, 2, 4] {
+            for queries in [1, 3] {
+                let q = tensor((batch, heads * groups, queries, dim), 7)?;
+                let k = tensor((batch, heads, cap, dim), 19)?.narrow(2, 0, len)?;
+                let v = tensor((batch, heads, cap, dim), 43)?.narrow(2, 0, len)?;
+                // Also preserve support for public callers with nonuniform
+                // outer strides (the two outer axes both have length two).
+                let (k, v) = if heads == 2 && queries == 3 {
+                    (k.transpose(0, 1)?, v.transpose(0, 1)?)
+                } else {
+                    (k, v)
+                };
+                assert!(!k.is_contiguous());
+                let mask = create_causal_mask(queries, len, dtype, device)?;
+                for mask in [None, Some(&mask)] {
+                    // Original eager path: reshape copies narrow KV views.
+                    let old_q = q.reshape((batch * heads, groups * queries, dim))?;
+                    let old_k = k.reshape((batch * heads, len, dim))?.transpose(1, 2)?;
+                    let scores = (old_q.matmul(&old_k)? * 0.25)?.reshape((
+                        batch,
+                        heads * groups,
+                        queries,
+                        len,
+                    ))?;
+                    let scores = match mask {
+                        Some(mask) => scores.broadcast_add(mask)?,
+                        None => scores,
+                    };
+                    let weights = candle_nn::ops::softmax_last_dim(&scores.to_dtype(DType::F32)?)?
+                        .to_dtype(dtype)?
+                        .reshape((batch * heads, groups * queries, len))?;
+                    let expected = weights.matmul(&v.reshape((batch * heads, len, dim))?)?;
+                    let actual =
+                        scaled_dot_product_attention_gqa(&q, &k, &v, mask, 0.25, false, groups)?;
+                    let bits = |t: Tensor| -> Result<Vec<u32>> {
+                        Ok(t.to_dtype(DType::F32)?
+                            .flatten_all()?
+                            .to_vec1::<f32>()?
+                            .into_iter()
+                            .map(f32::to_bits)
+                            .collect())
+                    };
+                    assert_eq!(
+                        bits(actual)?,
+                        bits(expected)?,
+                        "dtype={dtype:?}, heads={heads}, queries={queries}, masked={}",
+                        mask.is_some()
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn gqa_cache_views_match_flattened_history_bits() -> Result<()> {
+        check_gqa_cache_views(&Device::Cpu, DType::F32)
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_gqa_cache_views_match_flattened_history_bits() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        check_gqa_cache_views(&device, DType::F32)?;
+        check_gqa_cache_views(&device, DType::BF16)
+    }
 
     #[test]
     fn padding_masks_mark_exactly_the_padded_prefix_in_bf16() -> Result<()> {
