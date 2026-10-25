@@ -331,15 +331,50 @@ impl SamAttention {
             || self.prepare_relative_tables(grid),
         )?;
 
-        let mut outputs = Vec::with_capacity(self.heads);
-        for head in 0..self.heads {
-            // Per-head slices are strided views; CUDA matmul needs contiguous
-            // operands, unlike the CPU kernels.
-            let q_head = q.i((.., head, ..))?.contiguous()?;
-            let k_head = k.i((.., head, ..))?.contiguous()?;
-            let v_head = v.i((.., head, ..))?.contiguous()?;
-            outputs.push(self.attend_head(&q_head, &k_head, &v_head, scale, grid, &tables)?);
+        // Lay out every head once. Keep the GEMMs per head and per chunk so
+        // their accumulation order is unchanged.
+        let q = q.transpose(0, 1)?.contiguous()?;
+        let q32 = q.to_dtype(DType::F32)?;
+        let k_t = k.transpose(0, 1)?.transpose(1, 2)?.contiguous()?;
+        let v = v.transpose(0, 1)?.contiguous()?;
+        let mut out_rows: Vec<Vec<Tensor>> = (0..self.heads)
+            .map(|_| Vec::with_capacity(seq.div_ceil(REL_POS_ATTN_CHUNK)))
+            .collect();
+        for start in (0..seq).step_by(REL_POS_ATTN_CHUNK) {
+            let len = (seq - start).min(REL_POS_ATTN_CHUNK);
+            // Coordinates and gathered tables depend on the grid/chunk, not
+            // the head. Retain only this chunk's gathers, even on large grids.
+            let rows: Vec<u32> = (start..start + len).map(|i| (i / grid.1) as u32).collect();
+            let cols: Vec<u32> = (start..start + len).map(|i| (i % grid.1) as u32).collect();
+            let rel_h = tables
+                .0
+                .index_select(&Tensor::from_vec(rows, len, q.device())?, 0)?
+                .transpose(1, 2)?;
+            let rel_w = tables
+                .1
+                .index_select(&Tensor::from_vec(cols, len, q.device())?, 0)?
+                .transpose(1, 2)?;
+            for (head, out_rows) in out_rows.iter_mut().enumerate() {
+                let q_chunk = q.i(head)?.narrow(0, start, len)?;
+                let bias = Self::rel_pos_bias_chunk(
+                    &q32.i(head)?.narrow(0, start, len)?,
+                    grid,
+                    &rel_h,
+                    &rel_w,
+                )?;
+                let scores = q_chunk
+                    .matmul(&k_t.i(head)?)?
+                    .affine(scale, 0.0)?
+                    .to_dtype(DType::F32)?
+                    .broadcast_add(&bias)?;
+                let weights = candle_nn::ops::softmax_last_dim(&scores)?.to_dtype(q.dtype())?;
+                out_rows.push(weights.matmul(&v.i(head)?)?);
+            }
         }
+        let outputs = out_rows
+            .into_iter()
+            .map(|rows| Tensor::cat(&rows, 0))
+            .collect::<candle_core::Result<Vec<_>>>()?;
         let refs: Vec<&Tensor> = outputs.iter().collect();
         let attn = Tensor::cat(&refs, 1)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "SAM heads cat", e))?;
@@ -370,79 +405,18 @@ impl SamAttention {
         Ok((table_h, table_w))
     }
 
-    fn attend_head(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        scale: f64,
-        grid: (usize, usize),
-        tables: &(Tensor, Tensor),
-    ) -> Result<Tensor, Error> {
-        let seq = q
-            .dim(0)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "SAM attend shape", e))?;
-
-        let k_t = k
-            .t()?
-            .contiguous()
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "SAM key layout", e))?;
-        let mut out_rows: Vec<Tensor> = Vec::with_capacity(seq.div_ceil(REL_POS_ATTN_CHUNK));
-        let mut start = 0usize;
-        while start < seq {
-            let len = (seq - start).min(REL_POS_ATTN_CHUNK);
-            let q_chunk = q.narrow(0, start, len)?;
-            let bias = self.rel_pos_bias_chunk(&q_chunk, start, len, grid, &tables.0, &tables.1)?;
-            let scores = q_chunk
-                .matmul(&k_t)?
-                .affine(scale, 0.0)?
-                // The rel-pos bias is accumulated in f32; bring the scores
-                // up before the add so bf16 runs stay dtype-consistent.
-                .to_dtype(DType::F32)?
-                .broadcast_add(&bias)?;
-            let weights = candle_nn::ops::softmax_last_dim(&scores)?.to_dtype(q.dtype())?;
-            out_rows.push(
-                weights
-                    .matmul(v)
-                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "SAM rel-pos attend", e))?,
-            );
-            start += len;
-        }
-        let refs: Vec<&Tensor> = out_rows.iter().collect();
-        Tensor::cat(&refs, 0).map_err(|e| candle_to_ocr_inference(MODEL_NAME, "SAM attend cat", e))
-    }
-
-    /// Rel-pos bias for one contiguous query chunk of a `query_h×query_w`
-    /// grid: `(len, query_h*query_w)` where
-    /// `bias[i, r*query_w + c] = q_i·rel_h[ri, r, :] + q_i·rel_w[ci, c, :]`.
+    /// Decomposed bias for a query chunk, using shared `(len, dim, side)`
+    /// relative-position gathers. Both dot products still accumulate in f32.
     fn rel_pos_bias_chunk(
-        &self,
-        q_chunk: &Tensor,
-        chunk_start: usize,
-        len: usize,
+        q32: &Tensor,
         (query_h, query_w): (usize, usize),
-        table_h: &Tensor,
-        table_w: &Tensor,
+        rel_h: &Tensor,
+        rel_w: &Tensor,
     ) -> Result<Tensor, Error> {
-        let device = q_chunk.device();
-        let q32 = q_chunk.to_dtype(DType::F32)?;
-        let gather_axis = |table: &Tensor, coords: Vec<u32>| -> Result<Tensor, Error> {
-            // table: (query_side, key_side, dim) gathered per query coordinate.
-            let idx: Vec<u32> = (0..len).map(|i| coords[chunk_start + i]).collect();
-            let selected = table.index_select(&Tensor::from_vec(idx, len, device)?, 0)?; // (len, side, dim)
-            q32.unsqueeze(1)? // (len, 1, dim)
-                .matmul(&selected.transpose(1, 2)?) // (len, 1, side)
-                .and_then(|t| t.squeeze(1))
-                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "rel pos dot", e))
-        };
-        let query_rows: Vec<u32> = (0..query_h * query_w)
-            .map(|i| (i / query_w) as u32)
-            .collect();
-        let query_cols: Vec<u32> = (0..query_h * query_w)
-            .map(|i| (i % query_w) as u32)
-            .collect();
-        let rel_h_q = gather_axis(table_h, query_rows)?; // (len, query_h)
-        let rel_w_q = gather_axis(table_w, query_cols)?; // (len, query_w)
+        let len = q32.dim(0)?;
+        let q32 = q32.unsqueeze(1)?;
+        let rel_h_q = q32.matmul(rel_h)?.squeeze(1)?;
+        let rel_w_q = q32.matmul(rel_w)?.squeeze(1)?;
         rel_h_q
             .unsqueeze(2)?
             .broadcast_add(&rel_w_q.unsqueeze(1)?)?
@@ -1112,6 +1086,102 @@ impl DeepEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sam_chunk_gathers_preserve_vision_output_bits() -> Result<(), Error> {
+        // Original per-head/per-chunk path, including its repeated gathers
+        // and f32 casts. Nonzero projections/relative positions exercise both
+        // dot products and the final head concatenation/projection.
+        fn original(
+            attn: &SamAttention,
+            x: &Tensor,
+            grid: (usize, usize),
+        ) -> Result<Tensor, Error> {
+            let seq = grid.0 * grid.1;
+            let width = attn.heads * attn.head_dim;
+            let qkv = attn.qkv.forward(&x.reshape((seq, width))?)?.reshape((
+                seq,
+                3,
+                attn.heads,
+                attn.head_dim,
+            ))?;
+            let tables = attn.prepare_relative_tables(grid)?;
+            let mut heads = Vec::new();
+            for head in 0..attn.heads {
+                let q = qkv.i((.., 0, head, ..))?.contiguous()?;
+                let k = qkv.i((.., 1, head, ..))?.contiguous()?.t()?.contiguous()?;
+                let v = qkv.i((.., 2, head, ..))?.contiguous()?;
+                let mut chunks = Vec::new();
+                for start in (0..seq).step_by(REL_POS_ATTN_CHUNK) {
+                    let len = (seq - start).min(REL_POS_ATTN_CHUNK);
+                    let q = q.narrow(0, start, len)?;
+                    let q32 = q.to_dtype(DType::F32)?.unsqueeze(1)?;
+                    let gather = |table: &Tensor, coords: Vec<u32>| -> Result<Tensor, Error> {
+                        let ids =
+                            Tensor::from_vec(coords[start..start + len].to_vec(), len, x.device())?;
+                        Ok(q32
+                            .matmul(&table.index_select(&ids, 0)?.transpose(1, 2)?)?
+                            .squeeze(1)?)
+                    };
+                    let h = gather(&tables.0, (0..seq).map(|i| (i / grid.1) as u32).collect())?;
+                    let w = gather(&tables.1, (0..seq).map(|i| (i % grid.1) as u32).collect())?;
+                    let bias = h
+                        .unsqueeze(2)?
+                        .broadcast_add(&w.unsqueeze(1)?)?
+                        .reshape((len, seq))?;
+                    let scores = q
+                        .matmul(&k)?
+                        .affine(1.0 / (attn.head_dim as f64).sqrt(), 0.0)?
+                        .to_dtype(DType::F32)?
+                        .broadcast_add(&bias)?;
+                    chunks.push(
+                        candle_nn::ops::softmax_last_dim(&scores)?
+                            .to_dtype(q.dtype())?
+                            .matmul(&v)?,
+                    );
+                }
+                heads.push(Tensor::cat(&chunks, 0)?);
+            }
+            Ok(attn
+                .proj
+                .forward(&Tensor::cat(&heads, 1)?)?
+                .reshape((grid.0, grid.1, width))?)
+        }
+        let tensor = |shape: &[usize], seed: usize| -> candle_core::Result<Tensor> {
+            let values = (0..shape.iter().product())
+                .map(|i| ((i * 37 + seed) % 101) as f32 / 503.0 - 0.1)
+                .collect::<Vec<_>>();
+            Tensor::from_vec(values, shape, &Device::Cpu)
+        };
+        let attention = SamAttention {
+            qkv: Linear::new(tensor(&[36, 12], 7)?, Some(tensor(&[36], 11)?)),
+            proj: Linear::new(tensor(&[12, 12], 19)?, Some(tensor(&[12], 23)?)),
+            rel_pos_h: tensor(&[9, 4], 31)?,
+            rel_pos_w: tensor(&[9, 4], 43)?,
+            relative_tables: PositionTableCache::default(),
+            heads: 3,
+            head_dim: 4,
+        };
+        for grid in [(5, 7), (17, 19)] {
+            let input = tensor(&[grid.0, grid.1, 12], 59)?;
+            let actual = attention
+                .forward(&input, grid)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            let expected = original(&attention, &input, grid)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            assert_eq!(actual.len(), expected.len());
+            assert!(
+                actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "grid {grid:?}"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn position_cache_keys_and_capacity() -> Result<(), Error> {
