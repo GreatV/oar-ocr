@@ -293,6 +293,10 @@ impl PPFormulaNetModelBuilder {
     /// — the session balloons to ~5 GB in the structure pipeline vs ~2.7 GB
     /// standalone. Stacked on the other resident models that pushes peak VRAM
     /// into the ceiling and OOMs later forwards. Scoped to this session only.
+    ///
+    /// Memory-pattern replay with exact-size growth and idle arena shrinkage
+    /// fragments the arena as the Loop's self-attention caches grow, so a later
+    /// long formula can exhaust the device.
     fn configure_ppformulanet_ort_for_cuda(
         mut config: crate::core::config::OrtSessionConfig,
     ) -> crate::core::config::OrtSessionConfig {
@@ -306,6 +310,9 @@ impl PPFormulaNetModelBuilder {
                     && arena_extend_strategy.is_none()
                 {
                     *arena_extend_strategy = Some("SameAsRequested".to_string());
+                }
+                if matches!(ep, OrtExecutionProvider::CUDA { .. }) {
+                    config.enable_mem_pattern.get_or_insert(false);
                 }
             }
         }
