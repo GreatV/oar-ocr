@@ -48,7 +48,7 @@ ndarray = "0.17"
 oar-ocr-derive.workspace = true
 # Pinned exactly because `ort` is pre-release and later release candidates may
 # make source-incompatible API changes on a fresh resolve.
-ort = { version = "=2.0.0-rc.13", default-features = false, features = [ "std", "ndarray", "tracing", "copy-dylibs" ] }
+ort = { version = "=2.0.0-rc.15", default-features = false, features = [ "std", "ndarray", "tracing", "copy-dylibs" ] }
 rayon.workspace = true
 regex.workspace = true
 serde.workspace = true
