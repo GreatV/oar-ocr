@@ -3,6 +3,7 @@ use super::processing::{HpdImageInputs, preprocess_image};
 use super::vision::HpdVisionModel;
 use crate::backbones::sdar::{SdarKvCache, SdarModel};
 use crate::error::Error;
+use crate::runtime::attention::CausalMaskCache;
 #[cfg(feature = "cuda")]
 use crate::runtime::cuda::{ArgmaxFirstBf16, ArgmaxFirstF32};
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
@@ -475,6 +476,7 @@ impl HpdParsing {
         parent: BranchState,
         generation: &HpdGenerationConfig,
     ) -> Result<SchedulerOutput, Error> {
+        let mut masks = CausalMaskCache::default();
         let mut active = vec![parent];
         let mut waiting = VecDeque::new();
         let mut parent_tokens = None;
@@ -494,9 +496,9 @@ impl HpdParsing {
             stats.scheduler_rounds += 1;
             stats.peak_active_branches = stats.peak_active_branches.max(active.len());
             let events = if generation.use_mtp {
-                self.advance_mtp_batch(&mut active, generation, &mut stats)?
+                self.advance_mtp_batch(&mut active, generation, &mut stats, &mut masks)?
             } else {
-                self.advance_greedy_batch(&mut active)?
+                self.advance_greedy_batch(&mut active, &mut masks)?
             };
 
             // Fork immediately from the post-verification cache at the exact
@@ -571,7 +573,11 @@ impl HpdParsing {
         })
     }
 
-    fn advance_greedy_batch(&self, branches: &mut [BranchState]) -> Result<Vec<ForkEvent>, Error> {
+    fn advance_greedy_batch(
+        &self,
+        branches: &mut [BranchState],
+        masks: &mut CausalMaskCache,
+    ) -> Result<Vec<ForkEvent>, Error> {
         let ids = branches.iter().map(|b| b.pending_token).collect::<Vec<_>>();
         let input = Tensor::from_vec(ids, (branches.len(), 1), &self.device)
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create greedy batch", e))?;
@@ -590,7 +596,7 @@ impl HpdParsing {
             .collect::<Vec<_>>();
         let hidden = self
             .text
-            .forward_causal_batch(&embeddings, &positions, &mut caches)?;
+            .forward_causal_batch(&embeddings, &positions, &mut caches, masks)?;
         drop(caches);
         let next = greedy_batch_last(&self.text.lm_logits(&hidden)?)?;
         let mut events = Vec::new();
@@ -610,6 +616,7 @@ impl HpdParsing {
         branches: &mut [BranchState],
         generation: &HpdGenerationConfig,
         stats: &mut HpdRuntimeStats,
+        masks: &mut CausalMaskCache,
     ) -> Result<Vec<ForkEvent>, Error> {
         let batch = branches.len();
         let k = branches
@@ -669,7 +676,7 @@ impl HpdParsing {
             .collect::<Vec<_>>();
         let hidden = self
             .text
-            .forward_causal_batch(&embeddings, &positions, &mut caches)?;
+            .forward_causal_batch(&embeddings, &positions, &mut caches, masks)?;
         drop(caches);
         let targets = greedy_batch_rows(&self.text.lm_logits(&hidden)?)?;
         let mut events = Vec::new();

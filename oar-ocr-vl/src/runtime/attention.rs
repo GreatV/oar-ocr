@@ -22,6 +22,7 @@
 use crate::error::Error;
 use crate::runtime::errors::candle_to_ocr_processing;
 use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
+use std::collections::VecDeque;
 use std::sync::OnceLock;
 
 fn grouped_query_attention_disabled() -> bool {
@@ -562,6 +563,63 @@ pub fn flash_attention(
 
     let _ = (q, k, v, scale, causal);
     Ok(None)
+}
+
+/// Request-local reuse for HPD's eager verification/decode masks. Entries are
+/// immutable and keyed by exact logical lengths, dtype and device, so cache
+/// forks and rollbacks need no invalidation. Never pass these masks to an
+/// otherwise unmasked flash/Metal path: an explicit mask changes dispatch.
+pub(crate) struct CausalMaskCache {
+    entries: VecDeque<Tensor>,
+    bytes: usize,
+    max_bytes: usize,
+    max_entries: usize,
+}
+
+impl Default for CausalMaskCache {
+    fn default() -> Self {
+        Self {
+            entries: VecDeque::new(),
+            bytes: 0,
+            max_bytes: 32 * 1024 * 1024,
+            max_entries: 64,
+        }
+    }
+}
+
+impl CausalMaskCache {
+    pub(crate) fn get(
+        &mut self,
+        query_len: usize,
+        kv_len: usize,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Tensor> {
+        if let Some(mask) = self.entries.iter().find(|mask| {
+            mask.dims() == [1, 1, query_len, kv_len]
+                && mask.dtype() == dtype
+                && mask.device().same_device(device)
+        }) {
+            return Ok(mask.clone());
+        }
+        // Use exactly the uncached integer comparison and dtype conversion.
+        // In particular, do not compare positions in BF16 or skip the zero
+        // mask for a one-token query.
+        let mask = create_causal_mask(query_len, kv_len, dtype, device)?;
+        let bytes = mask.elem_count() * dtype.size_in_bytes();
+        if bytes <= self.max_bytes && self.max_entries != 0 {
+            while self.entries.len() >= self.max_entries || self.bytes + bytes > self.max_bytes {
+                let old = self
+                    .entries
+                    .pop_front()
+                    .expect("cache has an entry to evict");
+                self.bytes -= old.elem_count() * old.dtype().size_in_bytes();
+            }
+            self.entries.push_back(mask.clone());
+            self.bytes += bytes;
+        }
+        Ok(mask)
+    }
 }
 
 /// Create a causal (lower-triangular) attention mask.
@@ -1589,6 +1647,29 @@ mod tests {
             true,
             2,
         )?;
+        let mask = CausalMaskCache::default().get(3, 8, DType::F32, &device)?;
+        let cached = segmented_scaled_dot_product_attention_gqa(
+            &q,
+            &[(&prefix_k, &prefix_v), (&tail_k, &tail_v)],
+            Some(&mask),
+            scale,
+            true,
+            2,
+        )?;
+        assert_eq!(
+            cached
+                .flatten_all()?
+                .to_vec1::<f32>()?
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            segmented
+                .flatten_all()?
+                .to_vec1::<f32>()?
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
         let contiguous = contiguous.flatten_all()?.to_vec1::<f32>()?;
         let segmented = segmented.flatten_all()?.to_vec1::<f32>()?;
         assert!(
@@ -1617,6 +1698,43 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("expected 8 across all segments"));
+        Ok(())
+    }
+
+    #[test]
+    fn causal_mask_cache_handles_forks_trims_dtypes_and_eviction() -> Result<()> {
+        let device = Device::Cpu;
+        let mut cache = CausalMaskCache {
+            max_bytes: 4096,
+            max_entries: 2,
+            ..Default::default()
+        };
+        for (q, kv, dtype) in [
+            (3, 257, DType::F32),
+            (3, 258, DType::F32),
+            (1, 9, DType::F32),
+            (3, 258, DType::BF16),
+            (1, 8, DType::F32),
+            (3, 257, DType::F32),
+            (3, 1000, DType::F32),
+        ] {
+            let mask = cache.get(q, kv, dtype, &device)?;
+            let values = mask.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            assert_eq!(values.len(), q * kv);
+            for (i, value) in values.iter().enumerate() {
+                let expected = if i % kv <= kv - q + i / kv {
+                    0f32
+                } else {
+                    f32::NEG_INFINITY
+                };
+                assert_eq!(value.to_bits(), expected.to_bits());
+            }
+            if q * kv * dtype.size_in_bytes() <= cache.max_bytes {
+                assert_eq!(mask.id(), cache.get(q, kv, dtype, &device)?.id());
+            }
+            assert!(cache.entries.len() <= 2 && cache.bytes <= 4096);
+        }
+        assert!(cache.get(4, 3, DType::F32, &device).is_err());
         Ok(())
     }
 

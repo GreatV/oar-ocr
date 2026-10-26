@@ -19,6 +19,7 @@ use crate::attention::{
     segmented_scaled_dot_product_attention_gqa,
 };
 use crate::error::Error;
+use crate::runtime::attention::CausalMaskCache;
 use crate::runtime::cache::TrimmableKvCache;
 use crate::runtime::errors::{candle_to_ocr_inference, candle_to_ocr_processing};
 use crate::runtime::tensor::rope_native;
@@ -509,6 +510,7 @@ impl SdarAttention {
         sin: &Tensor,
         caches: &mut [&mut LayerKvCache],
         mode: AttentionMode,
+        masks: &mut CausalMaskCache,
     ) -> Result<Tensor, Error> {
         let (b, s, _) = hidden
             .dims3()
@@ -573,11 +575,24 @@ impl SdarAttention {
                 .kv_segments(&k_row, &v_row, mode.store_kv)
                 .map_err(|e| proc_err("batched Qwen3 KV update", e))?;
             let refs = segments.iter().map(|(k, v)| (k, v)).collect::<Vec<_>>();
+            // This path never attempts flash attention. Preserve Metal's
+            // unmasked dispatch; CPU/CUDA reach the same eager arithmetic
+            // with the same mask, shared across layers and equal-length rows.
+            let mask = if mode.is_causal && !q_row.device().is_metal() {
+                let kv_len = segments.iter().map(|(k, _)| k.dims()[2]).sum();
+                Some(
+                    masks
+                        .get(s, kv_len, q_row.dtype(), q_row.device())
+                        .map_err(|e| proc_err("batched Qwen3 causal mask", e))?,
+                )
+            } else {
+                None
+            };
             rows.push(
                 segmented_scaled_dot_product_attention_gqa(
                     &q_row,
                     &refs,
-                    None,
+                    mask.as_ref(),
                     self.scale,
                     mode.is_causal,
                     n_rep,
@@ -691,6 +706,7 @@ impl SdarLayer {
         sin: &Tensor,
         caches: &mut [&mut LayerKvCache],
         mode: AttentionMode,
+        masks: &mut CausalMaskCache,
     ) -> Result<Tensor, Error> {
         let normed = self
             .input_layernorm
@@ -698,7 +714,7 @@ impl SdarLayer {
             .map_err(|e| candle_to_ocr_inference("Qwen3", "batched input_layernorm", e))?;
         let attn = self
             .self_attn
-            .forward_batch(&normed, cos, sin, caches, mode)?;
+            .forward_batch(&normed, cos, sin, caches, mode, masks)?;
         let hidden = (hidden + attn).map_err(|e| proc_err("batched Qwen3 attn residual", e))?;
         let normed = self
             .post_attention_layernorm
@@ -827,6 +843,7 @@ impl SdarModel {
         inputs_embeds: &Tensor,
         positions: &[Vec<i64>],
         caches: &mut [&mut SdarKvCache],
+        masks: &mut CausalMaskCache,
     ) -> Result<Tensor, Error> {
         let (batch, seq, _) = inputs_embeds
             .dims3()
@@ -854,7 +871,7 @@ impl SdarModel {
                 .iter_mut()
                 .map(|cache| &mut cache.layers[layer_index])
                 .collect::<Vec<_>>();
-            hidden = layer.forward_batch(&hidden, &cos, &sin, &mut layer_caches, mode)?;
+            hidden = layer.forward_batch(&hidden, &cos, &sin, &mut layer_caches, mode, masks)?;
         }
         self.norm
             .forward(&hidden)
