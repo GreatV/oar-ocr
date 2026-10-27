@@ -436,7 +436,14 @@ where
 }
 
 fn classic_device(device: &str, verbose: bool) -> Result<OrtSessionConfig> {
-    Ok(ort_device(device, verbose)?.with_intra_threads(4))
+    let config = ort_device(device, verbose)?;
+    // Intra-op scaling flattens out around eight threads on CPU.
+    let threads = if config.has_accelerator_provider() {
+        4
+    } else {
+        std::thread::available_parallelism().map_or(4, |count| count.get().min(8))
+    };
+    Ok(config.with_intra_threads(threads))
 }
 
 // Shared provider selection; each pipeline retains its own thread defaults.
