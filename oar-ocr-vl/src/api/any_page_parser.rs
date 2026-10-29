@@ -22,6 +22,7 @@ use crate::paddleocr_vl::PaddleOcrVl;
 use crate::pipeline::page_parser::{LayoutPageParser, LayoutPageParserOptions};
 use crate::pp_doclayout::PpDocLayout;
 use crate::teleocr::TeleOcr;
+use crate::unlimited_ocr::{UnlimitedOcr, UnlimitedOcrParseOptions};
 use crate::wevisdoc::{WeVisDoc, WeVisDocParseOptions};
 use crate::xiaomi_ocr::{XiaomiOcr, XiaomiOcrParseOptions};
 use crate::youtu_parsing_omni::{YoutuParsingOmni, YoutuParsingOmniParseOptions};
@@ -107,6 +108,8 @@ pub enum AnyPageParserModel {
     /// SoMarkAI/OXR-1.0, with PP-DocLayout regions and reading order.
     /// Weights are subject to SoMark's OXR License.
     Oxr,
+    /// baidu/Unlimited-OCR-2.
+    UnlimitedOcr2,
     /// tencent/WeVisDoc-2B.
     WeVisDoc2B,
     /// tencent/WeVisDoc-4B.
@@ -156,6 +159,7 @@ const MODEL_IDS: &[(&str, AnyPageParserModel)] = &[
     ("ATH-MaaS/OvisOCR2", AnyPageParserModel::OvisOcr2),
     ("ATH-MaaS/OvisOCR3", AnyPageParserModel::OvisOcr3),
     ("SoMarkAI/OXR-1.0", AnyPageParserModel::Oxr),
+    ("baidu/Unlimited-OCR-2", AnyPageParserModel::UnlimitedOcr2),
     ("tencent/WeVisDoc-2B", AnyPageParserModel::WeVisDoc2B),
     ("tencent/WeVisDoc-4B", AnyPageParserModel::WeVisDoc4B),
     ("SeerRay-Lab/Xiaomi-OCR-0", AnyPageParserModel::XiaomiOcr),
@@ -192,6 +196,7 @@ impl AnyPageParserModel {
             Self::OvisOcr2 => "ATH-MaaS/OvisOCR2",
             Self::OvisOcr3 => "ATH-MaaS/OvisOCR3",
             Self::Oxr => "SoMarkAI/OXR-1.0",
+            Self::UnlimitedOcr2 => "baidu/Unlimited-OCR-2",
             Self::WeVisDoc2B => "tencent/WeVisDoc-2B",
             Self::WeVisDoc4B => "tencent/WeVisDoc-4B",
             Self::XiaomiOcr => "SeerRay-Lab/Xiaomi-OCR-0",
@@ -303,6 +308,8 @@ pub enum AnyPageParser {
     OvisOcr3(Box<OvisOcr3>),
     /// OXR recognition over PP-DocLayout regions; the official D-FINE is not used.
     Oxr(Box<LayoutPageParser<PpDocLayout, Oxr>>),
+    /// Unlimited-OCR-2 end-to-end page parsing.
+    UnlimitedOcr(Box<UnlimitedOcr>),
     /// WeVisDoc end-to-end page parsing.
     WeVisDoc(Box<WeVisDoc>),
     /// Xiaomi-OCR-0 end-to-end page parsing.
@@ -374,6 +381,12 @@ impl From<OvisOcr3> for AnyPageParser {
 impl From<LayoutPageParser<PpDocLayout, Oxr>> for AnyPageParser {
     fn from(model: LayoutPageParser<PpDocLayout, Oxr>) -> Self {
         Self::Oxr(Box::new(model))
+    }
+}
+
+impl From<UnlimitedOcr> for AnyPageParser {
+    fn from(model: UnlimitedOcr) -> Self {
+        Self::UnlimitedOcr(Box::new(model))
     }
 }
 
@@ -494,6 +507,7 @@ impl AnyPageParser {
                 Oxr::from_dir(model_dir, device)?,
             )
             .into(),
+            AnyPageParserModel::UnlimitedOcr2 => UnlimitedOcr::from_dir(model_dir, device)?.into(),
             AnyPageParserModel::WeVisDoc2B | AnyPageParserModel::WeVisDoc4B => {
                 WeVisDoc::from_dir(model_dir, device)?.into()
             }
@@ -622,6 +636,7 @@ impl PageParser for AnyPageParser {
             Self::OvisOcr2(model) => model.parse_page(image, &ovisocr2_options(options)),
             Self::OvisOcr3(model) => model.parse_page(image, &ovisocr3_options(options)),
             Self::Oxr(model) => model.parse_page(image, &layout_options(model, options)),
+            Self::UnlimitedOcr(model) => model.parse_page(image, &unlimited_ocr_options(options)),
             Self::WeVisDoc(model) => model.parse_page(image, &wevisdoc_options(options)),
             Self::XiaomiOcr(model) => model.parse_page(image, &xiaomi_options(options)),
             Self::YoutuParsingOmni(model) => {
@@ -709,6 +724,14 @@ fn wevisdoc_options(options: &AnyPageParserOptions) -> WeVisDocParseOptions {
     let mut model_options = WeVisDocParseOptions::default();
     if let Some(max_new_tokens) = options.max_new_tokens {
         model_options.max_new_tokens = max_new_tokens;
+    }
+    model_options
+}
+
+fn unlimited_ocr_options(options: &AnyPageParserOptions) -> UnlimitedOcrParseOptions {
+    let mut model_options = UnlimitedOcrParseOptions::default();
+    if let Some(max_new_tokens) = options.max_new_tokens {
+        model_options.generation = model_options.generation.with_max_new_tokens(max_new_tokens);
     }
     model_options
 }

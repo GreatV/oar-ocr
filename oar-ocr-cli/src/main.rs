@@ -48,6 +48,7 @@ const PARSERS: &[AnyPageParserModel] = &[
     AnyPageParserModel::PaddleOcrVl1_6,
     AnyPageParserModel::GlmOcr,
     AnyPageParserModel::TeleOcr,
+    AnyPageParserModel::UnlimitedOcr2,
     AnyPageParserModel::YoutuParsingOmni,
 ];
 

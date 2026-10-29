@@ -210,11 +210,12 @@ The [`oar-ocr-vl`](oar-ocr-vl/README.md) crate provides native [Candle](https://
 | [PaddleOCR-VL-1.5](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5) | 0.9B | PaddleOCR-VL tasks plus text spotting and seal recognition |
 | [PaddleOCR-VL-1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) | 0.9B | Region-aware page parsing and task-specific recognition |
 | [TeleOCR](https://huggingface.co/XingChen-AGI/TeleOCR) | 1.2B | Text, table (OTSL), formula, code, and layout recognition for digital and camera-captured documents (formerly NaviDC-OCR) |
+| [Unlimited-OCR-2](https://huggingface.co/baidu/Unlimited-OCR-2) | 3B (570M active) | Single- and multi-page document-to-Markdown parsing (DeepEncoder over a DeepSeek-V2 MoE decoder with DASH block-sparse attention) |
 | [WeVisDoc-2B](https://huggingface.co/tencent/WeVisDoc-2B) / [4B](https://huggingface.co/tencent/WeVisDoc-4B) | 2B / 4B | Model-native full-page document-to-Markdown parsing (Qwen3-VL with DeepStack) |
 | [Xiaomi-OCR-0](https://huggingface.co/SeerRay-Lab/Xiaomi-OCR-0) | 0.8B | Model-native full-page document-to-Markdown parsing (Qwen3.5; tables as OTSL converted to HTML) |
 | [Youtu-Parsing-Omni](https://huggingface.co/tencent/Youtu-Parsing-Omni) | 5B | Native image/document parsing to structured JSON, layout blocks, and Markdown (Youtu omni encoder and MLA decoder) |
 
-PaddleOCR-VL variants, GLM-OCR, TeleOCR, MiniCPM-OCR, OXR, jina-ocr-v1, and WeVisDoc integrate with the external-layout [`DocParser`](oar-ocr-vl/README.md#document-parsing-pipeline). OvisOCR2, OvisOCR3, WeVisDoc, Xiaomi-OCR-0, HPD-Parsing, Youtu-Parsing-Omni, and the MonkeyOCRv2 S/B parsing models also provide model-native full-page paths. HunyuanOCR and the MinerU models also use their model-native parsing pipelines.
+PaddleOCR-VL variants, GLM-OCR, TeleOCR, MiniCPM-OCR, OXR, jina-ocr-v1, and WeVisDoc integrate with the external-layout [`DocParser`](oar-ocr-vl/README.md#document-parsing-pipeline). OvisOCR2, OvisOCR3, WeVisDoc, Xiaomi-OCR-0, HPD-Parsing, Youtu-Parsing-Omni, and the MonkeyOCRv2 S/B parsing models also provide model-native full-page paths. Unlimited-OCR-2 parses whole pages, alone or several per request, through its model-native path only. HunyuanOCR and the MinerU models also use their model-native parsing pipelines.
 
 MiniCPM-OCR uses the explicit repository ID `openbmb/MiniCPM-OCR-1.0` through `AnyPageParser` and, like its official SDK, reads the regions PP-DocLayoutV3 detects; see the [MiniCPM-OCR guide](oar-ocr-vl/README.md#minicpm-ocr-10).
 

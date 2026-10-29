@@ -624,6 +624,25 @@ The weights are under [SoMark's OXR License](https://huggingface.co/SoMarkAI/OXR
 
 See the [crate guide](../oar-ocr-vl/README.md#oxr-10) for OXR tasks, PP-DocLayout integration, and generation options.
 
+## Unlimited-OCR-2
+
+[Unlimited-OCR-2](https://huggingface.co/baidu/Unlimited-OCR-2) parses whole pages to Markdown without an external layout model, and can read several pages in one request. Load it through the explicit model ID `baidu/Unlimited-OCR-2`:
+
+```rust,no_run
+use candle_core::Device;
+use oar_ocr_vl::{AnyPageParser, AnyPageParserModel, AnyPageParserOptions, PageParser};
+use oar_ocr_vl::utils::image::load_image;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let parser = AnyPageParser::from_dir(AnyPageParserModel::UnlimitedOcr2, "baidu/Unlimited-OCR-2", Device::Cpu)?;
+    let page = parser.parse_page(&load_image("document.png")?, &AnyPageParserOptions::default())?;
+    println!("{}", page.markdown.unwrap_or_default());
+    Ok(())
+}
+```
+
+From the command line: `oar parse --model baidu/Unlimited-OCR-2 document.png`. The page's layout blocks, with boxes, are in `page.blocks`. Multi-page requests, the layout-block output protocol, view modes, and the decoding guards are covered in the [crate guide](../oar-ocr-vl/README.md#unlimited-ocr-2).
+
 ## MonkeyOCRv2-S/B-Parsing
 
 [MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) and [MonkeyOCRv2-B-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-B-Parsing) are 0.6B and 0.7B document parsers. They pair Monkey ViT-S and ViT-B vision encoders, respectively, with the same Qwen3-0.6B decoder. The native Candle implementation reads either checkpoint's dimensions from its configuration and supports the five official tasks: `Layout`, `EndToEnd`, `Text`, `Formula`, and `Table`.

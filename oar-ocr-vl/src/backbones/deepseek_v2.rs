@@ -540,7 +540,7 @@ impl DeepSeekV2Attention {
 }
 
 #[derive(Debug)]
-struct DenseMlp {
+pub(crate) struct DenseMlp {
     gate_proj: Linear,
     up_proj: Linear,
     down_proj: Linear,
@@ -584,7 +584,7 @@ impl DenseMlp {
 /// half-precision) so the layer is CUDA-graph safe and never streams expert
 /// outputs through the host.
 #[derive(Debug)]
-struct MoeFeedForward {
+pub(crate) struct MoeFeedForward {
     gate: Tensor,
     /// Stacked `[gate; up]` expert weights, `(E, 2I, H)`.
     gate_up_w: Tensor,
@@ -881,29 +881,49 @@ struct DecoderLayer {
     post_attention_layernorm: RmsNorm,
 }
 
+/// The feed-forward block of one decoder layer: the dense MLP for the first
+/// `first_k_dense_replace` layers, the MoE block after them. Shared with
+/// checkpoints that keep this MLP but replace the attention.
 #[derive(Debug)]
-enum FeedForward {
+pub(crate) enum FeedForward {
     Dense(DenseMlp),
     Moe(MoeFeedForward),
 }
 
-impl DecoderLayer {
-    fn load(cfg: &DeepSeekV2TextConfig, index: usize, vb: VarBuilder) -> Result<Self, Error> {
+impl FeedForward {
+    /// Load layer `index`'s `mlp` block; `vb` is the layer prefix.
+    pub(crate) fn load(
+        cfg: &DeepSeekV2TextConfig,
+        index: usize,
+        vb: VarBuilder,
+    ) -> Result<Self, Error> {
         let is_moe = cfg.n_routed_experts > 0
             && index >= cfg.first_k_dense_replace
             && index.is_multiple_of(cfg.moe_layer_freq);
-        let mlp = if is_moe {
-            FeedForward::Moe(MoeFeedForward::load(cfg, vb.pp("mlp"))?)
+        Ok(if is_moe {
+            Self::Moe(MoeFeedForward::load(cfg, vb.pp("mlp"))?)
         } else {
-            FeedForward::Dense(DenseMlp::load(
+            Self::Dense(DenseMlp::load(
                 cfg.hidden_size,
                 cfg.intermediate_size,
                 vb.pp("mlp"),
             )?)
-        };
+        })
+    }
+
+    pub(crate) fn forward(&self, normalized: &Tensor) -> Result<Tensor, Error> {
+        match self {
+            Self::Dense(mlp) => mlp.forward(normalized),
+            Self::Moe(moe) => moe.forward(normalized),
+        }
+    }
+}
+
+impl DecoderLayer {
+    fn load(cfg: &DeepSeekV2TextConfig, index: usize, vb: VarBuilder) -> Result<Self, Error> {
         Ok(Self {
             attention: DeepSeekV2Attention::load(cfg, vb.pp("self_attn"))?,
-            mlp,
+            mlp: FeedForward::load(cfg, index, vb.clone())?,
             input_layernorm: rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))
                 .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load input_layernorm", e))?,
             post_attention_layernorm: rms_norm(
@@ -936,10 +956,7 @@ impl DecoderLayer {
     }
 
     fn forward_mlp(&self, normalized: &Tensor) -> Result<Tensor, Error> {
-        match &self.mlp {
-            FeedForward::Dense(mlp) => mlp.forward(normalized),
-            FeedForward::Moe(moe) => moe.forward(normalized),
-        }
+        self.mlp.forward(normalized)
     }
 
     #[cfg(feature = "cuda")]

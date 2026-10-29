@@ -30,6 +30,7 @@ pub const DEFAULT_LAYOUT_REPO: &str = "PaddlePaddle/PP-DocLayoutV3_safetensors";
 /// Hugging Face. The mirrors were verified to carry the same files, with
 /// matching safetensors hashes.
 const MODELSCOPE_ALIASES: &[(&str, &str)] = &[
+    ("baidu/Unlimited-OCR-2", "PaddlePaddle/Unlimited-OCR-2"),
     ("zai-org/GLM-OCR", "ZhipuAI/GLM-OCR"),
     (
         "tencent/Youtu-Parsing-Omni",
