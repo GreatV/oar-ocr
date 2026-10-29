@@ -31,8 +31,7 @@ use candle_core::{D, DType, Tensor};
 #[cfg(feature = "cuda")]
 use candle_core::{Device, IndexOp};
 use candle_nn::{
-    Conv1d, Conv1dConfig, Embedding, Linear, Module, RmsNorm, VarBuilder, embedding,
-    linear_no_bias, rms_norm,
+    Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, linear_no_bias, rms_norm,
 };
 use serde::Deserialize;
 use std::cell::RefCell;
@@ -381,7 +380,6 @@ struct GatedDeltaNet {
     in_proj_z: Linear,
     in_proj_b: Linear,
     in_proj_a: Linear,
-    conv1d: Conv1d,
     decode_conv_weight: Tensor,
     dt_bias: Tensor,
     neg_a: Tensor,
@@ -395,6 +393,32 @@ struct GatedDeltaNet {
     conv_state: RefCell<Option<Tensor>>,
     recurrent_state: RefCell<Option<Tensor>>,
     model_name: &'static str,
+}
+
+/// Causal depthwise convolution over `context`, which holds the
+/// `kernel_size - 1` preceding inputs followed by the `seq_len` new ones,
+/// as `kernel_size` shifted multiply-adds accumulated in F32 like
+/// [`cached_depthwise_conv_step`]. Candle runs a grouped `Conv1d` as one
+/// convolution per channel, thousands of launches per layer, so prefill
+/// avoids it too.
+fn depthwise_causal_conv(
+    context: &Tensor,
+    weight: &Tensor,
+    kernel_size: usize,
+    seq_len: usize,
+) -> candle_core::Result<Tensor> {
+    let dtype = context.dtype();
+    let context = context.to_dtype(DType::F32)?;
+    let mut output = context
+        .narrow(2, 0, seq_len)?
+        .broadcast_mul(&weight.narrow(2, 0, 1)?)?;
+    for tap in 1..kernel_size {
+        output = (output
+            + context
+                .narrow(2, tap, seq_len)?
+                .broadcast_mul(&weight.narrow(2, tap, 1)?)?)?;
+    }
+    output.to_dtype(dtype)
 }
 
 fn cached_depthwise_conv_step(
@@ -506,15 +530,6 @@ impl GatedDeltaNet {
             .and_then(|weight| weight.squeeze(1))
             .and_then(|weight| weight.unsqueeze(0))
             .map_err(|e| candle_to_ocr_inference(model_name, "load GDN decode conv weight", e))?;
-        let conv1d = Conv1d::new(
-            conv_weight,
-            None,
-            Conv1dConfig {
-                padding: cfg.linear_conv_kernel_dim.saturating_sub(1),
-                groups: conv_dim,
-                ..Default::default()
-            },
-        );
         let dt_bias = vb
             .get(cfg.linear_num_value_heads, "dt_bias")
             .and_then(|x| x.to_dtype(DType::F32))
@@ -538,7 +553,6 @@ impl GatedDeltaNet {
             in_proj_z,
             in_proj_b,
             in_proj_a,
-            conv1d,
             decode_conv_weight,
             dt_bias,
             neg_a,
@@ -562,13 +576,23 @@ impl GatedDeltaNet {
         let previous = self.conv_state.borrow().clone();
         let (output, new_state) = match previous.as_ref() {
             None => {
-                let output = self
-                    .conv1d
-                    .forward(mixed)
-                    .and_then(|output| output.narrow(2, 0, seq_len))
-                    .map_err(|e| {
-                        candle_to_ocr_inference(self.model_name, "GDN causal convolution", e)
-                    })?;
+                let output = Tensor::zeros(
+                    (batch, channels, self.conv_kernel_size - 1),
+                    mixed.dtype(),
+                    mixed.device(),
+                )
+                .and_then(|padding| Tensor::cat(&[&padding, mixed], 2))
+                .and_then(|context| {
+                    depthwise_causal_conv(
+                        &context,
+                        &self.decode_conv_weight,
+                        self.conv_kernel_size,
+                        seq_len,
+                    )
+                })
+                .map_err(|e| {
+                    candle_to_ocr_inference(self.model_name, "GDN causal convolution", e)
+                })?;
                 let new_state = if seq_len >= self.conv_kernel_size {
                     mixed.narrow(2, seq_len - self.conv_kernel_size, self.conv_kernel_size)
                 } else {
@@ -606,17 +630,16 @@ impl GatedDeltaNet {
                 let joined = Tensor::cat(&[state, mixed], 2).map_err(|e| {
                     candle_to_ocr_inference(self.model_name, "join GDN convolution context", e)
                 })?;
-                let conv = Conv1d::new(
-                    self.conv1d.weight().clone(),
-                    None,
-                    Conv1dConfig {
-                        groups: channels,
-                        ..Default::default()
-                    },
-                );
-                let output = conv
-                    .forward(&joined)
-                    .and_then(|output| output.narrow(2, 1, seq_len))
+                let output = joined
+                    .narrow(2, 1, self.conv_kernel_size - 1 + seq_len)
+                    .and_then(|context| {
+                        depthwise_causal_conv(
+                            &context,
+                            &self.decode_conv_weight,
+                            self.conv_kernel_size,
+                            seq_len,
+                        )
+                    })
                     .map_err(|e| {
                         candle_to_ocr_inference(self.model_name, "GDN causal convolution", e)
                     })?;
@@ -2067,6 +2090,7 @@ impl Drop for Qwen35TextModel {
 mod tests {
     use super::*;
     use candle_core::{Device, IndexOp};
+    use candle_nn::{Conv1d, Conv1dConfig};
 
     #[test]
     fn decode_state_updates_write_in_place() {
@@ -2169,6 +2193,42 @@ mod tests {
             new_state.to_vec3::<f32>()?,
             joined.narrow(2, 1, 4)?.to_vec3::<f32>()?
         );
+        Ok(())
+    }
+
+    #[test]
+    fn prefill_depthwise_conv_matches_padded_grouped_convolution() -> candle_core::Result<()> {
+        let mixed = Tensor::arange(0f32, 12., &Device::Cpu)?.reshape((1, 2, 6))?;
+        let weight = Tensor::from_vec(
+            vec![0.1f32, 0.2, 0.3, 0.4, -0.5, 0.25, 0.75, 1.0],
+            (2, 1, 4),
+            &Device::Cpu,
+        )?;
+        let decode_weight = weight.squeeze(1)?.unsqueeze(0)?;
+        let context = Tensor::cat(
+            &[&Tensor::zeros((1, 2, 3), DType::F32, &Device::Cpu)?, &mixed],
+            2,
+        )?;
+        let actual = depthwise_causal_conv(&context, &decode_weight, 4, 6)?;
+        let conv = Conv1d::new(
+            weight,
+            None,
+            Conv1dConfig {
+                padding: 3,
+                groups: 2,
+                ..Default::default()
+            },
+        );
+        let expected = conv.forward(&mixed)?.narrow(2, 0, 6)?;
+        let (actual, expected) = (actual.to_vec3::<f32>()?, expected.to_vec3::<f32>()?);
+        for (a, e) in actual
+            .iter()
+            .flatten()
+            .flatten()
+            .zip(expected.iter().flatten().flatten())
+        {
+            assert!((a - e).abs() < 1e-5, "{actual:?} != {expected:?}");
+        }
         Ok(())
     }
 

@@ -13,6 +13,8 @@
 //!   backbone)
 //! - `mineru_diffusion` - MinerU-Diffusion-V1 block-diffusion document OCR
 //!   (Qwen2-VL vision + SDAR decoder)
+//! - `minicpm_ocr` - MiniCPM-OCR 1.0 region recognition and PP-DocLayout
+//!   page parsing (SigLIP vision + Qwen3.5)
 //! - `monkeyocrv2` - MonkeyOCRv2-S/B-Parsing full-page and region parsing
 //! - `jina_ocr` - jina-ocr-v1 end-to-end page-to-Markdown parser (SAM+CLIP
 //!   DeepEncoder over a DeepSeek-V2 MoE decoder)
@@ -85,6 +87,8 @@ pub mod layout;
 pub mod mineru;
 #[path = "models/mineru_diffusion/mod.rs"]
 pub mod mineru_diffusion;
+#[path = "models/minicpm_ocr/mod.rs"]
+pub mod minicpm_ocr;
 #[path = "models/monkeyocrv2/mod.rs"]
 pub mod monkeyocrv2;
 #[path = "models/ovisocr2/mod.rs"]
@@ -126,6 +130,7 @@ pub use mineru::{MinerU, MinerUParseOptions};
 pub use mineru_diffusion::{
     DiffusionGenerationConfig, MinerUDiffusion, MinerUDiffusionParseOptions,
 };
+pub use minicpm_ocr::{MiniCpmOcr, MiniCpmOcrGenerationOptions, MiniCpmOcrTask};
 pub use monkeyocrv2::{MonkeyOcrV2, MonkeyOcrV2ParseOptions, MonkeyOcrV2Task};
 pub use ovisocr2::{OvisOcr2, OvisOcr2ParseOptions};
 pub use ovisocr3::{OvisOcr3, OvisOcr3ParseMode, OvisOcr3ParseOptions};

@@ -572,6 +572,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Structured boxes refer to the image supplied to the model, including cropped inputs. Invalid or truncated JSON logs a warning and falls back to Markdown without blocks, retaining the raw text and a `structured_json` diagnostic. See the [crate guide](../oar-ocr-vl/README.md#ovisocr3) for coordinate conversion, task mappings, prompt constants, and post-processing options.
 
+## MiniCPM-OCR 1.0
+
+[MiniCPM-OCR 1.0](https://huggingface.co/openbmb/MiniCPM-OCR-1.0) recognizes regions supplied by PP-DocLayout through the explicit model ID `openbmb/MiniCPM-OCR-1.0`, following the official SDK's layout-then-recognize pipeline.
+
+```rust,no_run
+use candle_core::Device;
+use oar_ocr_vl::{AnyPageParser, AnyPageParserLoadOptions, AnyPageParserModel, AnyPageParserOptions, PageParser};
+use oar_ocr_vl::utils::image::load_image;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let parser = AnyPageParser::from_dir_with_options(
+        AnyPageParserModel::MiniCpmOcr,
+        "openbmb/MiniCPM-OCR-1.0",
+        Device::Cpu,
+        &AnyPageParserLoadOptions::default()
+            .with_layout_dir("PaddlePaddle/PP-DocLayoutV3_safetensors"),
+    )?;
+    let page = parser.parse_page(&load_image("document.png")?, &AnyPageParserOptions::default())?;
+    println!("{}", page.markdown.unwrap_or_default());
+    Ok(())
+}
+```
+
+From the command line: `oar parse --model openbmb/MiniCPM-OCR-1.0 document.png`. See the [crate guide](../oar-ocr-vl/README.md#minicpm-ocr-10) for region tasks, slicing, and generation options.
+
 ## OXR-1.0
 
 [OXR-1.0](https://huggingface.co/SoMarkAI/OXR-1.0) recognizes regions supplied by PP-DocLayout through the explicit model ID `SoMarkAI/OXR-1.0`.
@@ -886,7 +911,7 @@ cargo run -p oar-ocr-vl --features cuda \
 
 ## DocParser
 
-DocParser provides a unified API for external layout-first document parsing with VL-based recognition. PaddleOCR-VL, GLM-OCR, MonkeyOCRv2, OvisOCR2, OvisOCR3, OXR, HunyuanOCR, MinerU2.5/Pro, and MinerU-Diffusion implement `RecognitionBackend`. The `doc_parser` CLI example exposes the PaddleOCR-VL and GLM-OCR paths; use the other backends through the library API. HPD-Parsing currently supports only its model-native full-page protocol.
+DocParser provides a unified API for external layout-first document parsing with VL-based recognition. PaddleOCR-VL, GLM-OCR, MonkeyOCRv2, OvisOCR2, OvisOCR3, MiniCPM-OCR, OXR, HunyuanOCR, MinerU2.5/Pro, and MinerU-Diffusion implement `RecognitionBackend`. The `doc_parser` CLI example exposes the PaddleOCR-VL and GLM-OCR paths; use the other backends through the library API. HPD-Parsing currently supports only its model-native full-page protocol.
 
 Use `parse(&layout, image)` with any `LayoutSource` — `PpDocLayout` is the built-in one and runs on Candle, so no ONNX Runtime is involved. Regions are recognized in layout order and may be grouped into bounded recognition batches. For complete pages, prefer the model-native paths for MonkeyOCRv2, OvisOCR2, OvisOCR3, HPD-Parsing, HunyuanOCR, and the MinerU family. Except for HPD-Parsing, their `RecognitionBackend` implementations are intended for externally detected crops.
 
