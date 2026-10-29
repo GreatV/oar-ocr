@@ -23,6 +23,8 @@
 //! - `ovisocr2` - OvisOCR2 end-to-end page-to-Markdown parser (Qwen3.5)
 //! - `ovisocr3` - OvisOCR3 Markdown, structured-page, and region recognition (Qwen3.5)
 //! - `oxr` - SoMark OXR-1.0 region recognition and PP-DocLayout page parsing
+//! - `unlimited_ocr` - Unlimited-OCR-2 single- and multi-page parsing
+//!   (DeepEncoder + DeepSeek-V2 MoE with DASH block-sparse attention)
 //! - `wevisdoc` - WeVisDoc end-to-end page-to-Markdown parser (Qwen3-VL
 //!   backbone with DeepStack)
 //! - `xiaomi_ocr` - Xiaomi-OCR-0 end-to-end page-to-Markdown parser
@@ -104,6 +106,8 @@ pub mod pp_doclayout;
 pub mod structure;
 #[path = "models/teleocr/mod.rs"]
 pub mod teleocr;
+#[path = "models/unlimited_ocr/mod.rs"]
+pub mod unlimited_ocr;
 pub mod utils;
 #[path = "models/wevisdoc/mod.rs"]
 pub mod wevisdoc;
@@ -136,6 +140,9 @@ pub use ovisocr2::{OvisOcr2, OvisOcr2ParseOptions};
 pub use ovisocr3::{OvisOcr3, OvisOcr3ParseMode, OvisOcr3ParseOptions};
 pub use oxr::{Oxr, OxrGenerationOptions, OxrTask};
 pub use teleocr::{TeleOcr, TeleOcrTask};
+pub use unlimited_ocr::{
+    UnlimitedOcr, UnlimitedOcrGenerationOptions, UnlimitedOcrParseOptions, UnlimitedOcrViewMode,
+};
 pub use wevisdoc::{WeVisDoc, WeVisDocParseOptions};
 pub use xiaomi_ocr::{XiaomiOcr, XiaomiOcrParseOptions};
 pub use youtu_parsing_omni::{YoutuParsingOmni, YoutuParsingOmniParseOptions};

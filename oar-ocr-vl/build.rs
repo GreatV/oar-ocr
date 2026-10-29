@@ -16,6 +16,7 @@ const MODEL_MODULES: &[&str] = &[
     "paddleocr_vl",
     "pp_doclayout",
     "teleocr",
+    "unlimited_ocr",
     "wevisdoc",
     "xiaomi_ocr",
     "youtu_parsing_omni",

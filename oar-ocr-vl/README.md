@@ -25,6 +25,7 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 | [PaddleOCR-VL-1.5](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5) | 0.9B | PaddleOCR-VL tasks plus text spotting and seal recognition |
 | [PaddleOCR-VL-1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) | 0.9B | Region-aware refinement, drop-in compatible with the 1.5 loader |
 | [TeleOCR](https://huggingface.co/XingChen-AGI/TeleOCR) | 1.2B | Qwen2.5-VL document parser with text, table (OTSL), formula, code, and layout tasks (formerly NaviDC-OCR) |
+| [Unlimited-OCR-2](https://huggingface.co/baidu/Unlimited-OCR-2) | 3B (570M active) | Single- and multi-page document-to-Markdown parsing (DeepEncoder over a DeepSeek-V2 MoE decoder with DASH block-sparse attention) |
 | [WeVisDoc-2B](https://huggingface.co/tencent/WeVisDoc-2B) / [4B](https://huggingface.co/tencent/WeVisDoc-4B) | 2B / 4B | Model-native full-page document-to-Markdown parsing (Qwen3-VL with DeepStack) |
 | [Xiaomi-OCR-0](https://huggingface.co/SeerRay-Lab/Xiaomi-OCR-0) | 0.8B | Model-native full-page document-to-Markdown parsing and text/table/formula/KIE region prompts (Qwen3.5) |
 | [Youtu-Parsing-Omni](https://huggingface.co/tencent/Youtu-Parsing-Omni) | 5B | Native image/document parsing to OmniSchema JSON, layout blocks, and Markdown (Youtu omni encoder and MLA decoder) |
@@ -91,7 +92,7 @@ let options = AnyPageParserOptions::default().with_max_new_tokens(8192);
 let page = parser.parse_page(&image, &options)?;
 ```
 
-Construct it from an already-loaded model with `From`: the model-native parsers (`HpdParsing`, `HunyuanOcr`, `JinaOcr`, `MinerU`, `MinerUDiffusion`, `MonkeyOcrV2`, `OvisOcr2`, `WeVisDoc`, `XiaomiOcr`, `YoutuParsingOmni`) and `LayoutPageParser` compositions over `PpDocLayout` (`PaddleOcrVl`, `GlmOcr`, `TeleOcr`, `MiniCpmOcr`, `Oxr`). `AnyPageParserOptions` carries the knobs every parser shares: `max_new_tokens` maps to each model's generation budget (including `MinerUDiffusion`'s `gen_length`), and `region_batch_size` applies to the region-batching parsers (`MinerU` and the layout-composed models); parsers without a matching concept ignore the knob. OXR handles each scheduled region sequentially.
+Construct it from an already-loaded model with `From`: the model-native parsers (`HpdParsing`, `HunyuanOcr`, `JinaOcr`, `MinerU`, `MinerUDiffusion`, `MonkeyOcrV2`, `OvisOcr2`, `UnlimitedOcr`, `WeVisDoc`, `XiaomiOcr`, `YoutuParsingOmni`) and `LayoutPageParser` compositions over `PpDocLayout` (`PaddleOcrVl`, `GlmOcr`, `TeleOcr`, `MiniCpmOcr`, `Oxr`). `AnyPageParserOptions` carries the knobs every parser shares: `max_new_tokens` maps to each model's generation budget (including `MinerUDiffusion`'s `gen_length`), and `region_batch_size` applies to the region-batching parsers (`MinerU` and the layout-composed models); parsers without a matching concept ignore the knob. OXR handles each scheduled region sequentially.
 
 `AnyPageParser::from_dir` loads a named parser from a model directory. The model is always named explicitly by its Hugging Face repo ID (`tencent/HunyuanOCR`, `PaddlePaddle/PaddleOCR-VL-1.5`, …) — most supported models are fine-tunes whose checkpoint configs match their public base models, so the directory cannot identify the model reliably on its own. Each model then loads through its own `from_dir` with its own defaults:
 
@@ -510,6 +511,24 @@ println!("{markdown}");
 
 Output is Markdown with LaTeX formulas and HTML tables; the same `generate` path serves `DocParser` region crops. On CUDA the single-token decode step runs as a CUDA graph. The checkpoint's FastMTP head can add speculative decoding that is token-identical to plain autoregressive decoding in exact arithmetic (greedy verification plus the host-side no-repeat-ngram guard; in bf16 the verification block's kernel batching can flip near-tie picks, measured max |Δlogit| ≈ 0.25-0.56 on identical KV state), but it is **opt-in**: measured on the OmniDocBench demo pages (RTX 4090, bf16), adaptive MTP won on no page (median 3.7% slower than graphed plain decoding, +0.7% in total). Enable it with `OAR_JINAOCR_ENABLE_MTP=1` or `JinaOcrLoadOptions::with_mtp(true)` (`--mtp` in the example). Multi-image calls use a padded batch prefill and decode.
 
+### Unlimited-OCR-2
+
+Unlimited-OCR-2 (MIT) parses one or several pages in a single request. It shares jina-ocr-v1's DeepSeek-OCR backbone, a SAM ViT-B + CLIP-L DeepEncoder over a 12-layer DeepSeek-V2 MoE decoder, but replaces the decoder's dense attention with DASH block-sparse attention: every query sees a 128-token local window plus up to 12 routed 32-token blocks of its own page's image tokens, chosen by a learned router, under a two-axis (page, token) RoPE. Like the reference `infer`, a single page is encoded as up to 16 dynamic 640px tiles plus a letterboxed 1024px global view, and several pages use the global view only; `UnlimitedOcrViewMode` overrides that choice.
+
+```rust
+use oar_ocr_vl::utils::image::load_image;
+use oar_ocr_vl::utils::parse_device;
+use oar_ocr_vl::unlimited_ocr::to_markdown;
+use oar_ocr_vl::{UnlimitedOcr, UnlimitedOcrGenerationOptions};
+
+let pages = [load_image("page-1.png")?, load_image("page-2.png")?];
+let model = UnlimitedOcr::from_dir("baidu/Unlimited-OCR-2", parse_device("cpu")?)?;
+let raw = model.generate(&pages, &UnlimitedOcrGenerationOptions::default())?;
+println!("{}", to_markdown(&raw, false));
+```
+
+The model does not emit Markdown. Its raw output is a layout-block protocol: each page starts with `<PAGE>`, and each block is declared as `<BLOCK>label<LEVELn>[x1,y1,x2,y2]<FORK>content` with boxes on a 0-1000 grid, `cross_`/`append_` label prefixes that continue a text or table across pages, and `<MERGE>` between same-page columns. `to_markdown` ports the official converter: it groups the continued blocks, merges cross-page tables without their repeated header rows, turns titles into headings, and joins all pages into one document. With `keep_image_refs` it emits the official `![](page{N}_x1_y1_x2_y2.jpg)` figure references; otherwise figures keep only their captions. Decoding is greedy under two guards. The reference page-count guard forces the next `<PAGE>` (or the end, on the last page) after `max_page_tokens` (20,000) tokens on one page, and holds back the end token until every page has begun. The no-repeat n-gram guard from the official serving setup bans the 35-token repeats within the last 128 generated tokens for one page, or 1024 for several (`no_repeat_ngram_size`, `ngram_window`). `max_new_tokens` caps the whole request and defaults to the rest of the 131,072-token context. `AnyPageParserModel::UnlimitedOcr2` (`oar parse --model baidu/Unlimited-OCR-2`) parses each page as its own request, returning the converted Markdown, the layout blocks with normalized boxes, and the raw output. Each decode step gathers only the routed blocks and the local window, so its attention cost does not grow with the document; it does not use a CUDA graph because the routed blocks change at every step.
+
 ## Running Examples
 
 The `oar-ocr-vl` crate includes several examples demonstrating its capabilities.
@@ -614,6 +633,17 @@ cargo run --release -p oar-ocr-vl --features cuda --example xiaomi_ocr -- \
     --model-dir SeerRay-Lab/Xiaomi-OCR-0 \
     --device cuda:0 \
     document-1.jpg document-2.jpg
+```
+
+### Unlimited-OCR-2 Multi-Page Parsing
+
+The example sends all page images to the model in one request, in order, and prints the official converter's Markdown for the whole document; `--raw` prints the layout-block output instead. A single page uses dynamic tiles, several pages the global view.
+
+```bash
+cargo run --release -p oar-ocr-vl --features cuda --example unlimited_ocr -- \
+    --model-dir baidu/Unlimited-OCR-2 \
+    --device cuda:0 \
+    page-1.png page-2.png
 ```
 
 ### MonkeyOCRv2-S/B-Parsing Direct Inference
