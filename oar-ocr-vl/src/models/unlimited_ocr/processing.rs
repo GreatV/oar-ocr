@@ -96,33 +96,33 @@ pub fn tile_grid(width: u32, height: u32, max_tiles: u32) -> (usize, usize) {
     (best.0 as usize, best.1 as usize)
 }
 
-/// `ImageOps.pad(image, (size, size), color=127)`: Pillow bicubic fit, then
-/// a centred paste whose offset rounds half to even like Python's `round`.
+/// `ImageOps.pad(image, (size, size), color=127)`: a Pillow bicubic
+/// `contain` fit, which always resizes, then a centred paste whose offset
+/// rounds half to even like Python's `round`.
 pub fn letterbox(image: &RgbImage, size: u32) -> Result<RgbImage, Error> {
     let (width, height) = image.dimensions();
-    if width == height {
-        return pil_bicubic_resize(image, size, size);
+    let round = |value: f64| (value.round_ties_even() as u32).max(1);
+    let (new_width, new_height) = match width.cmp(&height) {
+        std::cmp::Ordering::Equal => (size, size),
+        std::cmp::Ordering::Greater => (
+            size,
+            round(f64::from(height) / f64::from(width) * f64::from(size)),
+        ),
+        std::cmp::Ordering::Less => (
+            round(f64::from(width) / f64::from(height) * f64::from(size)),
+            size,
+        ),
+    };
+    let resized = pil_bicubic_resize(image, new_width, new_height)?;
+    if (new_width, new_height) == (size, size) {
+        return Ok(resized);
     }
     let mut canvas = RgbImage::from_pixel(size, size, Rgb([PAD_GRAY; 3]));
-    let round = |value: f64| value.round_ties_even() as i64;
-    if width > height {
-        let new_height = round(f64::from(height) / f64::from(width) * f64::from(size)) as u32;
-        let resized = if new_height == size {
-            image.clone()
-        } else {
-            pil_bicubic_resize(image, size, new_height.max(1))?
-        };
-        let y = (f64::from(size) - f64::from(new_height)) * 0.5;
-        imageops::overlay(&mut canvas, &resized, 0, y.round_ties_even() as i64);
+    let offset = |free: u32| (f64::from(free) * 0.5).round_ties_even() as i64;
+    if new_width != size {
+        imageops::overlay(&mut canvas, &resized, offset(size - new_width), 0);
     } else {
-        let new_width = round(f64::from(width) / f64::from(height) * f64::from(size)) as u32;
-        let resized = if new_width == size {
-            image.clone()
-        } else {
-            pil_bicubic_resize(image, new_width.max(1), size)?
-        };
-        let x = (f64::from(size) - f64::from(new_width)) * 0.5;
-        imageops::overlay(&mut canvas, &resized, x.round_ties_even() as i64, 0);
+        imageops::overlay(&mut canvas, &resized, 0, offset(size - new_height));
     }
     Ok(canvas)
 }
@@ -231,5 +231,12 @@ mod tests {
             grid: (2, 3),
         };
         assert_eq!(page.num_tokens(), 273 + 21 * 30);
+        // A near-square page whose short side rounds to the full size is
+        // still resized (Pillow's `contain`), not pasted uncropped.
+        let near_square = RgbImage::from_fn(100, 99, |x, y| Rgb([x as u8, y as u8, 7]));
+        assert_eq!(
+            letterbox(&near_square, 32).unwrap(),
+            pil_bicubic_resize(&near_square, 32, 32).unwrap()
+        );
     }
 }

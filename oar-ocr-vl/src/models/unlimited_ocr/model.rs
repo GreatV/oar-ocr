@@ -425,10 +425,12 @@ impl PageCountGuard {
             }
         }
         self.scanned = generated.len();
+        // A forced token stays selectable even when the n-gram guard has
+        // banned it; the reference would fall back to token 0 there.
         let keep_only = |scores: &mut [f32], token: u32| {
             let kept = scores[token as usize];
             scores.fill(f32::NEG_INFINITY);
-            scores[token as usize] = kept;
+            scores[token as usize] = if kept.is_finite() { kept } else { 0.0 };
         };
         if self.markers > self.expected {
             keep_only(scores, eos);
@@ -468,6 +470,12 @@ mod tests {
             scores,
             vec![f32::NEG_INFINITY, f32::NEG_INFINITY, 0.0, f32::NEG_INFINITY]
         );
+        // The page cap still forces `<PAGE>` after the n-gram guard banned it.
+        let mut guard = PageCountGuard::new(2, 1);
+        let mut scores = vec![0.0f32; 4];
+        scores[page as usize] = f32::NEG_INFINITY;
+        guard.apply(&mut scores, &[page, 3], page, eos);
+        assert_eq!(argmax(&scores), page);
 
         // `5 6` was followed by 7 inside the window, so 7 is banned; a
         // window that no longer holds that n-gram bans nothing.
