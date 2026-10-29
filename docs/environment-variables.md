@@ -45,7 +45,7 @@ OAR_HOME=/data/oar-models cargo run --release --example ocr -- doc.jpg
 
 ## `OAR_VL_DTYPE`
 
-Overrides the automatic weight/compute dtype selection for Vision-Language models (PaddleOCR-VL, GLM-OCR, OvisOCR2, OvisOCR3, [OXR](../oar-ocr-vl/README.md#oxr-10), MonkeyOCRv2, HunyuanOCR, MinerU2.5/Pro, and MinerU-Diffusion).
+Overrides the automatic weight/compute dtype selection for Vision-Language models (PaddleOCR-VL, GLM-OCR, OvisOCR2, OvisOCR3, [MiniCPM-OCR](../oar-ocr-vl/README.md#minicpm-ocr-10), [OXR](../oar-ocr-vl/README.md#oxr-10), MonkeyOCRv2, HunyuanOCR, MinerU2.5/Pro, and MinerU-Diffusion).
 
 Accepted values (case-insensitive):
 
@@ -80,7 +80,7 @@ The following presence-based switches select portable fallbacks, disable optiona
 | `OAR_VL_METAL_NATIVE_SOFTMAX` | Metal VLM backends | Keep F16/BF16 eager-attention softmax in its input dtype instead of converting to F32 |
 | `OAR_VL_METAL_F32_SOFTMAX` | Metal VLM backends | Keep the default F32 round trip for eager attention; this takes precedence over `OAR_VL_METAL_NATIVE_SOFTMAX` |
 | `OAR_VL_DISABLE_METAL_SDPA` | Metal VLM backends | Disable fused Metal SDPA and use the portable grouped-query attention path |
-| `OAR_VL_DISABLE_CUDA_GRAPH` | PaddleOCR-VL, GLM-OCR, MinerU2.5/Pro, OvisOCR2, OvisOCR3, Xiaomi-OCR-0 | Disable decoder CUDA graph capture and replay |
+| `OAR_VL_DISABLE_CUDA_GRAPH` | PaddleOCR-VL, GLM-OCR, MinerU2.5/Pro, MiniCPM-OCR, OvisOCR2, OvisOCR3, Xiaomi-OCR-0 | Disable decoder CUDA graph capture and replay |
 | `OAR_VL_DISABLE_SPECULATIVE` | GLM-OCR | Disable MTP speculative decoding |
 | `OAR_PADDLEOCR_VL_DISABLE_CUDA_GRAPH` | PaddleOCR-VL variants | Disable decoder CUDA graphs only for PaddleOCR-VL |
 | `OAR_GLMOCR_DISABLE_MTP` | GLM-OCR | Do not load or use the MTP predictor |

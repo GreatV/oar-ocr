@@ -8,6 +8,7 @@ const MODEL_MODULES: &[&str] = &[
     "jina_ocr",
     "mineru",
     "mineru_diffusion",
+    "minicpm_ocr",
     "monkeyocrv2",
     "ovisocr2",
     "ovisocr3",

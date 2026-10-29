@@ -200,6 +200,7 @@ The [`oar-ocr-vl`](oar-ocr-vl/README.md) crate provides native [Candle](https://
 | [MinerU-Diffusion-V1-0320](https://huggingface.co/opendatalab/MinerU-Diffusion-V1-0320-2.5B) | 2.5B | Block-diffusion OCR with structured two-step extraction or single-pass text recognition |
 | [MinerU2.5-2509](https://huggingface.co/opendatalab/MinerU2.5-2509-1.2B) | 1.2B | Model-native two-step layout detection and content extraction |
 | [MinerU2.5-Pro-2605](https://huggingface.co/opendatalab/MinerU2.5-Pro-2605-1.2B) | 1.2B | Newer MinerU2.5 checkpoint using the same two-step pipeline |
+| [MiniCPM-OCR 1.0](https://huggingface.co/openbmb/MiniCPM-OCR-1.0) | 1.3B | PP-DocLayout page parsing and text, formula, OTSL table, chart, and seal recognition (SigLIP + Qwen3.5) |
 | [MonkeyOCRv2-B-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-B-Parsing) | 0.7B | Higher-capacity ViT-B variant with the same parsing and recognition tasks |
 | [MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) | 0.6B | Model-native layout, end-to-end parsing, text, formula, and OTSL-table recognition |
 | [OvisOCR2](https://huggingface.co/ATH-MaaS/OvisOCR2) | 0.8B | Model-native full-page document-to-Markdown parsing |
@@ -213,7 +214,9 @@ The [`oar-ocr-vl`](oar-ocr-vl/README.md) crate provides native [Candle](https://
 | [Xiaomi-OCR-0](https://huggingface.co/SeerRay-Lab/Xiaomi-OCR-0) | 0.8B | Model-native full-page document-to-Markdown parsing (Qwen3.5; tables as OTSL converted to HTML) |
 | [Youtu-Parsing-Omni](https://huggingface.co/tencent/Youtu-Parsing-Omni) | 5B | Native image/document parsing to structured JSON, layout blocks, and Markdown (Youtu omni encoder and MLA decoder) |
 
-PaddleOCR-VL variants, GLM-OCR, TeleOCR, OXR, jina-ocr-v1, and WeVisDoc integrate with the external-layout [`DocParser`](oar-ocr-vl/README.md#document-parsing-pipeline). OvisOCR2, OvisOCR3, WeVisDoc, Xiaomi-OCR-0, HPD-Parsing, Youtu-Parsing-Omni, and the MonkeyOCRv2 S/B parsing models also provide model-native full-page paths. HunyuanOCR and the MinerU models also use their model-native parsing pipelines.
+PaddleOCR-VL variants, GLM-OCR, TeleOCR, MiniCPM-OCR, OXR, jina-ocr-v1, and WeVisDoc integrate with the external-layout [`DocParser`](oar-ocr-vl/README.md#document-parsing-pipeline). OvisOCR2, OvisOCR3, WeVisDoc, Xiaomi-OCR-0, HPD-Parsing, Youtu-Parsing-Omni, and the MonkeyOCRv2 S/B parsing models also provide model-native full-page paths. HunyuanOCR and the MinerU models also use their model-native parsing pipelines.
+
+MiniCPM-OCR uses the explicit repository ID `openbmb/MiniCPM-OCR-1.0` through `AnyPageParser` and, like its official SDK, reads the regions PP-DocLayoutV3 detects; see the [MiniCPM-OCR guide](oar-ocr-vl/README.md#minicpm-ocr-10).
 
 OXR uses the explicit repository ID `SoMarkAI/OXR-1.0` through `AnyPageParser`. PP-DocLayout supplies its regions and reading order; the official separate D-FINE layout model is not used. See the [OXR guide](oar-ocr-vl/README.md#oxr-10) for weight-license terms, region tasks, and pixel controls.
 

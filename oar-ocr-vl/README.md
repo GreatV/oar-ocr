@@ -15,6 +15,7 @@ This crate provides native Rust inference for document VLMs using [Candle](https
 | [MinerU-Diffusion-V1-0320](https://huggingface.co/opendatalab/MinerU-Diffusion-V1-0320-2.5B) | 2.5B | Block-diffusion OCR with two-step structured extraction or single-pass recognition |
 | [MinerU2.5-2509](https://huggingface.co/opendatalab/MinerU2.5-2509-1.2B) | 1.2B | Model-native two-step layout detection and content extraction |
 | [MinerU2.5-Pro-2605](https://huggingface.co/opendatalab/MinerU2.5-Pro-2605-1.2B) | 1.2B | Newer compatible checkpoint using the MinerU2.5 two-step pipeline |
+| [MiniCPM-OCR 1.0](https://huggingface.co/openbmb/MiniCPM-OCR-1.0) | 1.3B | PP-DocLayout page parsing and text, formula, OTSL table, chart, and seal recognition (SigLIP + Qwen3.5) |
 | [MonkeyOCRv2-B-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-B-Parsing) | 0.7B | Higher-capacity ViT-B variant with the same parsing and recognition tasks |
 | [MonkeyOCRv2-S-Parsing](https://huggingface.co/zenosai/MonkeyOCRv2-S-Parsing) | 0.6B | Model-native layout, end-to-end parsing, text, formula, and OTSL-table recognition |
 | [OvisOCR2](https://huggingface.co/ATH-MaaS/OvisOCR2) | 0.8B | Model-native full-page document-to-Markdown parsing |
@@ -38,7 +39,7 @@ See [`examples`](examples) for runnable examples.
 1. **Layout detection** to identify document regions and their reading order. `PpDocLayout` is a native Candle port of PP-DocLayoutV2/V3; any other detector can be plugged in through the `LayoutSource` trait.
 2. **VL-based recognition** to extract content from each region
 
-Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, TeleOCR, jina-ocr-v1, MonkeyOCRv2, OvisOCR2, OvisOCR3, WeVisDoc, Xiaomi-OCR-0, HunyuanOCR, MinerU2.5/Pro, or MinerU-Diffusion for externally detected crops. HPD-Parsing and Youtu-Parsing-Omni support their model-native page protocols. For complete pages, prefer each model's native path where available: MonkeyOCRv2 `Layout`/`EndToEnd`, OvisOCR2, OvisOCR3, jina-ocr-v1, WeVisDoc, Xiaomi-OCR-0, HPD-Parsing, and Youtu-Parsing-Omni full-page parsing, HunyuanOCR full-page prompts, and the MinerU two-step extraction examples.
+Use DocParser with PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, GLM-OCR, TeleOCR, MiniCPM-OCR, jina-ocr-v1, MonkeyOCRv2, OvisOCR2, OvisOCR3, WeVisDoc, Xiaomi-OCR-0, HunyuanOCR, MinerU2.5/Pro, or MinerU-Diffusion for externally detected crops. HPD-Parsing and Youtu-Parsing-Omni support their model-native page protocols. For complete pages, prefer each model's native path where available: MonkeyOCRv2 `Layout`/`EndToEnd`, OvisOCR2, OvisOCR3, jina-ocr-v1, WeVisDoc, Xiaomi-OCR-0, HPD-Parsing, and Youtu-Parsing-Omni full-page parsing, HunyuanOCR full-page prompts, and the MinerU two-step extraction examples.
 
 OXR also implements `RecognitionBackend` for text, formula, and table crops, composing with any `LayoutSource` through the shared `LayoutPageParser`/`DocParser` pipeline. Direct model inference additionally supports code and chemical-structure prompts.
 
@@ -90,7 +91,7 @@ let options = AnyPageParserOptions::default().with_max_new_tokens(8192);
 let page = parser.parse_page(&image, &options)?;
 ```
 
-Construct it from an already-loaded model with `From`: the model-native parsers (`HpdParsing`, `HunyuanOcr`, `JinaOcr`, `MinerU`, `MinerUDiffusion`, `MonkeyOcrV2`, `OvisOcr2`, `WeVisDoc`, `XiaomiOcr`, `YoutuParsingOmni`) and `LayoutPageParser` compositions over `PpDocLayout` (`PaddleOcrVl`, `GlmOcr`, `TeleOcr`, `Oxr`). `AnyPageParserOptions` carries the knobs every parser shares: `max_new_tokens` maps to each model's generation budget (including `MinerUDiffusion`'s `gen_length`), and `region_batch_size` applies to the region-batching parsers (`MinerU` and the layout-composed models); parsers without a matching concept ignore the knob. OXR handles each scheduled region sequentially.
+Construct it from an already-loaded model with `From`: the model-native parsers (`HpdParsing`, `HunyuanOcr`, `JinaOcr`, `MinerU`, `MinerUDiffusion`, `MonkeyOcrV2`, `OvisOcr2`, `WeVisDoc`, `XiaomiOcr`, `YoutuParsingOmni`) and `LayoutPageParser` compositions over `PpDocLayout` (`PaddleOcrVl`, `GlmOcr`, `TeleOcr`, `MiniCpmOcr`, `Oxr`). `AnyPageParserOptions` carries the knobs every parser shares: `max_new_tokens` maps to each model's generation budget (including `MinerUDiffusion`'s `gen_length`), and `region_batch_size` applies to the region-batching parsers (`MinerU` and the layout-composed models); parsers without a matching concept ignore the knob. OXR handles each scheduled region sequentially.
 
 `AnyPageParser::from_dir` loads a named parser from a model directory. The model is always named explicitly by its Hugging Face repo ID (`tencent/HunyuanOCR`, `PaddlePaddle/PaddleOCR-VL-1.5`, …) — most supported models are fine-tunes whose checkpoint configs match their public base models, so the directory cannot identify the model reliably on its own. Each model then loads through its own `from_dir` with its own defaults:
 
@@ -114,7 +115,7 @@ let parser = AnyPageParser::from_dir(AnyPageParserModel::HunyuanOcr, "tencent/Hu
 let model: AnyPageParserModel = "tencent/hunyuanocr".parse()?;
 ```
 
-The layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR, OXR) require a PP-DocLayout directory in the load options; loading fails with a clear error when it is missing.
+The layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR, MiniCPM-OCR, OXR) require a PP-DocLayout directory in the load options; loading fails with a clear error when it is missing.
 
 With the `auto-download` feature, `AnyPageParser::from_pretrained` downloads the checkpoint named by the model ID when it is not cached, then loads it through the same path:
 
@@ -262,6 +263,29 @@ println!("{}", page.to_json(image.width(), image.height()));
 Markdown is the default mode, including through `AnyPageParser`. It strips outer whitespace, optionally filters image-tag blocks, and then applies repeated-tail cleanup regardless of whether generation reached its token limit. `with_keep_image_tags(true)` retains image references. Structured mode requests a JSON array and preserves region content and reading order in its blocks. Its Markdown joins the region contents in reading order, as the model card describes, since the model already writes them as Markdown, LaTeX, or HTML; default exclusions remove headers, footers, page numbers, and related marginal content, and `keep_image_tags` controls visual references. `PageDocument` holds normalized boxes; `page.to_json(image.width(), image.height())` converts upstream `[0,1000)` coordinates into pixels of the supplied image (or crop). Existing layout types map categories such as `display_formula`/`inline_formula` to `formula`, `vertical_text` to `text`, and `vision_footnote` to `footnote`, retaining the original label. Invalid or truncated JSON, including invalid boxes, logs a warning and falls back to Markdown without blocks, retaining the raw text and a `structured_json` diagnostic; no JSON repair is attempted. Markdown mode also returns no layout blocks.
 
 For `RecognitionBackend` crops, `Ocr` uses `plain_ocr`, `Formula` uses `formula_recognition`, and `Chart` uses `chart_parsing`. `Table` uses `document_markdown` on the crop because there is no table-only prompt; tables are requested as HTML. All region tasks use the OvisOCR2 adapter cleanup: repeated-tail cleanup everywhere, keeping image-tag blocks only for charts. The 18 upstream task prompts ship inside the crate under `ovisocr3/prompts/` and are exposed as `ovisocr3::prompts` constants. Use literal replacement, for example `prompts::REGION_OCR.replace("{target_region}", "[0,0,999,999]")`, before calling `generate_with_prompt`; JSON and LaTeX braces are left intact. These constants include KIE templates, but no KIE, cross-page reconstruction, translation, VQA, grounding, word-spotting, or classification pipeline is added. Each input image is an independent request.
+
+### MiniCPM-OCR 1.0
+
+MiniCPM-OCR 1.0 combines a SigLIP vision tower and a 2x2 merger MLP with a tied Qwen3.5 text decoder (1.3B parameters in total). Use the explicit repository ID `openbmb/MiniCPM-OCR-1.0`. As in the official `minicpmvocr` SDK, pages are parsed region by region: PP-DocLayout supplies the regions and their reading order, and the model reads each crop with the SDK's prompts. The weights and the reference code are Apache-2.0.
+
+```rust
+use candle_core::Device;
+use oar_ocr_vl::{AnyPageParser, AnyPageParserLoadOptions, AnyPageParserModel, AnyPageParserOptions, PageParser};
+use oar_ocr_vl::utils::image::load_image;
+
+let parser = AnyPageParser::from_dir_with_options(
+    AnyPageParserModel::MiniCpmOcr,
+    "openbmb/MiniCPM-OCR-1.0",
+    Device::Cpu,
+    &AnyPageParserLoadOptions::default()
+        .with_layout_dir("PaddlePaddle/PP-DocLayoutV3_safetensors"),
+)?;
+let page = parser.parse_page(&load_image("document.png")?, &AnyPageParserOptions::default())?;
+```
+
+For direct inference, `MiniCpmOcr::generate` accepts `MiniCpmOcrTask::{Text, Table, Formula, Chart, Seal}` (`Text Recognition:`, `Table Recognition:`, `Formula Recognition:`, `Chart to Table:`, `Seal Recognition:`) and returns raw decoded text; `generate_with_prompt` takes any instruction, such as the SDK's key-information-extraction prompt. Preprocessing matches the Transformers `MiniCPMOcrImageProcessor` defaults: an overview image plus up to nine 448-pixel slices (`MiniCpmOcrGenerationOptions::with_max_slice_nums`), small crops upscaled to the slice budget, and 4x visual-token downsampling. Decoding is greedy and stops on `<|endoftext|>` or `<|im_end|>`; on CUDA it uses the shared Qwen3.5 decode graph.
+
+As a `RecognitionBackend`, tables come back as OTSL and are converted to HTML by `DocParser`; chart data tables are converted to Markdown pipe tables. `DocParser` skips seal regions, so `Seal` is only available through direct inference. The `16x` downsampling mode and the SDK's adaptive small-image resampling, test-time scaling and cross-page table merging are not implemented.
 
 ### OXR-1.0
 

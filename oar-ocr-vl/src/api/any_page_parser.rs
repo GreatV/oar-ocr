@@ -13,6 +13,7 @@ use crate::jina_ocr::{JinaOcr, JinaOcrParseOptions};
 use crate::layout::LayoutSource;
 use crate::mineru::{MinerU, MinerUParseOptions};
 use crate::mineru_diffusion::{MinerUDiffusion, MinerUDiffusionParseOptions};
+use crate::minicpm_ocr::MiniCpmOcr;
 use crate::monkeyocrv2::{MonkeyOcrV2, MonkeyOcrV2ParseOptions};
 use crate::ovisocr2::{OvisOcr2, OvisOcr2ParseOptions};
 use crate::ovisocr3::{OvisOcr3, OvisOcr3ParseOptions};
@@ -93,6 +94,8 @@ pub enum AnyPageParserModel {
     MinerUPro,
     /// opendatalab/MinerU-Diffusion-V1-0320-2.5B.
     MinerUDiffusion,
+    /// openbmb/MiniCPM-OCR-1.0, with PP-DocLayout regions and reading order.
+    MiniCpmOcr,
     /// zenosai/MonkeyOCRv2-S-Parsing.
     MonkeyOcrV2S,
     /// zenosai/MonkeyOCRv2-B-Parsing.
@@ -141,6 +144,7 @@ const MODEL_IDS: &[(&str, AnyPageParserModel)] = &[
         "opendatalab/MinerU-Diffusion-V1-0320-2.5B",
         AnyPageParserModel::MinerUDiffusion,
     ),
+    ("openbmb/MiniCPM-OCR-1.0", AnyPageParserModel::MiniCpmOcr),
     (
         "zenosai/MonkeyOCRv2-S-Parsing",
         AnyPageParserModel::MonkeyOcrV2S,
@@ -182,6 +186,7 @@ impl AnyPageParserModel {
             Self::MinerU2509 => "opendatalab/MinerU2.5-2509-1.2B",
             Self::MinerUPro => "opendatalab/MinerU2.5-Pro-2605-1.2B",
             Self::MinerUDiffusion => "opendatalab/MinerU-Diffusion-V1-0320-2.5B",
+            Self::MiniCpmOcr => "openbmb/MiniCPM-OCR-1.0",
             Self::MonkeyOcrV2S => "zenosai/MonkeyOCRv2-S-Parsing",
             Self::MonkeyOcrV2B => "zenosai/MonkeyOCRv2-B-Parsing",
             Self::OvisOcr2 => "ATH-MaaS/OvisOCR2",
@@ -229,7 +234,7 @@ impl FromStr for AnyPageParserModel {
 
 /// Directory-loading options for [`AnyPageParser::from_dir_with_options`].
 ///
-/// The layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR, OXR) combine their
+/// The layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR, MiniCPM-OCR, OXR) combine their
 /// recognition backbone with an external PP-DocLayout detector, so loading
 /// them needs a PP-DocLayout checkpoint directory in `layout_dir`. Every
 /// other model ignores it.
@@ -288,6 +293,8 @@ pub enum AnyPageParser {
     MinerU(Box<MinerU>),
     /// MinerU-Diffusion block-diffusion two-step parsing.
     MinerUDiffusion(Box<MinerUDiffusion>),
+    /// MiniCPM-OCR recognition over PP-DocLayout regions.
+    MiniCpmOcr(Box<LayoutPageParser<PpDocLayout, MiniCpmOcr>>),
     /// MonkeyOCRv2 model-native parsing.
     MonkeyOcrV2(Box<MonkeyOcrV2>),
     /// OvisOCR2 end-to-end page parsing.
@@ -337,6 +344,12 @@ impl From<MinerU> for AnyPageParser {
 impl From<MinerUDiffusion> for AnyPageParser {
     fn from(model: MinerUDiffusion) -> Self {
         Self::MinerUDiffusion(Box::new(model))
+    }
+}
+
+impl From<LayoutPageParser<PpDocLayout, MiniCpmOcr>> for AnyPageParser {
+    fn from(model: LayoutPageParser<PpDocLayout, MiniCpmOcr>) -> Self {
+        Self::MiniCpmOcr(Box::new(model))
     }
 }
 
@@ -408,7 +421,7 @@ impl AnyPageParser {
     /// checkpoint configs match their public base models, so the directory
     /// cannot be identified reliably on its own. The parser loads through its own
     /// `from_dir` with its own defaults. Layout-composed models (PaddleOCR-VL,
-    /// GLM-OCR, TeleOCR, OXR) additionally need a PP-DocLayout directory, which
+    /// GLM-OCR, TeleOCR, MiniCPM-OCR, OXR) additionally need a PP-DocLayout directory, which
     /// [`from_dir_with_options`](Self::from_dir_with_options) accepts.
     pub fn from_dir(
         model: AnyPageParserModel,
@@ -466,6 +479,11 @@ impl AnyPageParser {
             AnyPageParserModel::MinerUDiffusion => {
                 MinerUDiffusion::from_dir(model_dir, device)?.into()
             }
+            AnyPageParserModel::MiniCpmOcr => LayoutPageParser::new(
+                PpDocLayout::from_dir(required_layout_dir(options, model)?, device.clone())?,
+                MiniCpmOcr::from_dir(model_dir, device)?,
+            )
+            .into(),
             AnyPageParserModel::MonkeyOcrV2S | AnyPageParserModel::MonkeyOcrV2B => {
                 MonkeyOcrV2::from_dir(model_dir, device)?.into()
             }
@@ -516,7 +534,7 @@ impl AnyPageParser {
     /// published only once complete. The layout checkpoint uses its source's
     /// default revision.
     /// ModelScope is the default source; Hugging Face is selectable. The
-    /// layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR, OXR) also download
+    /// layout-composed models (PaddleOCR-VL, GLM-OCR, TeleOCR, MiniCPM-OCR, OXR) also download
     /// a PP-DocLayout checkpoint (DEFAULT_LAYOUT_REPO by default) unless the
     /// options point at a local layout directory. Loading then goes
     /// through [`from_dir`](Self::from_dir) with each model's own defaults.
@@ -567,6 +585,7 @@ impl AnyPageParser {
                 | AnyPageParserModel::PaddleOcrVl1_6
                 | AnyPageParserModel::GlmOcr
                 | AnyPageParserModel::TeleOcr
+                | AnyPageParserModel::MiniCpmOcr
                 | AnyPageParserModel::Oxr
         )
     }
@@ -598,6 +617,7 @@ impl PageParser for AnyPageParser {
             Self::MinerUDiffusion(model) => {
                 model.parse_page(image, &mineru_diffusion_options(options))
             }
+            Self::MiniCpmOcr(model) => model.parse_page(image, &layout_options(model, options)),
             Self::MonkeyOcrV2(model) => model.parse_page(image, &monkeyocrv2_options(options)),
             Self::OvisOcr2(model) => model.parse_page(image, &ovisocr2_options(options)),
             Self::OvisOcr3(model) => model.parse_page(image, &ovisocr3_options(options)),

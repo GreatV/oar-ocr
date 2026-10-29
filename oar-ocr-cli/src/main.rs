@@ -34,6 +34,7 @@ const PARSERS: &[AnyPageParserModel] = &[
     AnyPageParserModel::MinerU2509,
     AnyPageParserModel::MinerUPro,
     AnyPageParserModel::MinerUDiffusion,
+    AnyPageParserModel::MiniCpmOcr,
     AnyPageParserModel::MonkeyOcrV2S,
     AnyPageParserModel::MonkeyOcrV2B,
     AnyPageParserModel::OvisOcr2,
