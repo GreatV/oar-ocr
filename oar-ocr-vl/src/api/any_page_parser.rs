@@ -42,7 +42,7 @@ use std::str::FromStr;
 ///   `HpdGenerationConfig::max_new_tokens`, the `max_new_tokens` fields of the
 ///   model-native `*ParseOptions`, `MinerUParseOptions::max_tokens`, the
 ///   block-diffusion analog `MinerUDiffusionParseOptions::generation.gen_length`,
-///   and `DocParserConfig::max_tokens` for the layout-composed models.
+///   and `DocParserOptions::max_tokens` for the layout-composed models.
 /// - `region_batch_size` overrides same-task region batching where the parser
 ///   has it (`MinerUParseOptions::region_batch_size` and
 ///   [`LayoutPageParserOptions::region_batch_size`], zero treated as one) and
@@ -105,7 +105,7 @@ pub enum AnyPageParserModel {
     OvisOcr2,
     /// ATH-MaaS/OvisOCR3, using its Markdown page protocol by default.
     OvisOcr3,
-    /// SoMarkAI/OXR-1.0, with PP-DocLayout regions and reading order.
+    /// SoMarkAI/OXR-1.0, with PP-DocLayout regions and OXR reading order.
     /// Weights are subject to SoMark's OXR License.
     Oxr,
     /// baidu/Unlimited-OCR-2.
@@ -248,9 +248,25 @@ impl FromStr for AnyPageParserModel {
 pub struct AnyPageParserLoadOptions {
     /// PP-DocLayout checkpoint directory used by the layout-composed models.
     pub layout_dir: Option<PathBuf>,
+    /// GLM-OCR load options.
+    pub glm: crate::GlmOcrLoadOptions,
+    /// Jina OCR load options.
+    pub jina: crate::jina_ocr::JinaOcrLoadOptions,
 }
 
 impl AnyPageParserLoadOptions {
+    /// Set the GLM-OCR load options.
+    pub fn with_glm_options(mut self, options: crate::GlmOcrLoadOptions) -> Self {
+        self.glm = options;
+        self
+    }
+
+    /// Set the Jina OCR load options.
+    pub fn with_jina_options(mut self, options: crate::jina_ocr::JinaOcrLoadOptions) -> Self {
+        self.jina = options;
+        self
+    }
+
     /// Set the PP-DocLayout directory used by the layout-composed models.
     pub fn with_layout_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.layout_dir = Some(dir.into());
@@ -485,7 +501,12 @@ impl AnyPageParser {
         Ok(match model {
             AnyPageParserModel::HpdParsing => HpdParsing::from_dir(model_dir, device)?.into(),
             AnyPageParserModel::HunyuanOcr => HunyuanOcr::from_dir(model_dir, device)?.into(),
-            AnyPageParserModel::JinaOcr => JinaOcr::from_dir(model_dir, device)?.into(),
+            AnyPageParserModel::JinaOcr => JinaOcr::from_dir_with_options(
+                model_dir,
+                crate::RuntimeConfig::new(device),
+                options.jina.clone(),
+            )?
+            .into(),
             AnyPageParserModel::MinerU2509 | AnyPageParserModel::MinerUPro => {
                 MinerU::from_dir(model_dir, device)?.into()
             }
@@ -524,7 +545,11 @@ impl AnyPageParser {
             .into(),
             AnyPageParserModel::GlmOcr => LayoutPageParser::new(
                 PpDocLayout::from_dir(required_layout_dir(options, model)?, device.clone())?,
-                GlmOcr::from_dir(model_dir, device)?,
+                GlmOcr::from_dir_with_options(
+                    model_dir,
+                    crate::RuntimeConfig::new(device),
+                    options.glm.clone(),
+                )?,
             )
             .into(),
             AnyPageParserModel::TeleOcr => LayoutPageParser::new(
@@ -576,7 +601,9 @@ impl AnyPageParser {
         let source = options.source();
         let model_dir =
             crate::api::download::snapshot(source, model.as_str(), options.revision.as_deref())?;
-        let mut load_options = AnyPageParserLoadOptions::default();
+        let mut load_options = AnyPageParserLoadOptions::default()
+            .with_glm_options(options.glm.clone())
+            .with_jina_options(options.jina.clone());
         if Self::needs_layout_dir(model) {
             // The layout checkpoint always uses its source's default
             // revision; a pinned model revision never applies to it.
@@ -621,6 +648,21 @@ fn required_layout_dir(
 
 impl PageParser for AnyPageParser {
     type Options = AnyPageParserOptions;
+
+    fn parse_document(
+        &self,
+        images: &[RgbImage],
+        options: &Self::Options,
+    ) -> Result<crate::DocumentOutput, Error> {
+        if let Self::UnlimitedOcr(model) = self {
+            return model.parse_document(images, &unlimited_ocr_options(options));
+        }
+        images
+            .iter()
+            .map(|image| self.parse_page(image, options))
+            .collect::<Result<Vec<_>, _>>()
+            .map(crate::DocumentOutput::from_pages)
+    }
 
     fn parse_page(&self, image: &RgbImage, options: &Self::Options) -> Result<PageDocument, Error> {
         match self {
@@ -744,17 +786,16 @@ fn xiaomi_options(options: &AnyPageParserOptions) -> XiaomiOcrParseOptions {
     model_options
 }
 
-/// Starts from the parser's own configuration so `None` knobs keep the
-/// settings chosen at construction time, then applies the unified overrides.
+/// Pass explicit unified overrides to the composed parser.
 fn layout_options<L: LayoutSource, B: RecognitionBackend>(
-    parser: &LayoutPageParser<L, B>,
+    _parser: &LayoutPageParser<L, B>,
     options: &AnyPageParserOptions,
 ) -> LayoutPageParserOptions {
-    let mut config = parser.config().clone();
+    let mut document = crate::DocParserOptions::default();
     if let Some(max_new_tokens) = options.max_new_tokens {
-        config.max_tokens = max_new_tokens;
+        document = document.with_max_tokens(max_new_tokens);
     }
-    let mut model_options = LayoutPageParserOptions::default().with_config(config);
+    let mut model_options = LayoutPageParserOptions::default().with_doc_parser_options(document);
     if let Some(region_batch_size) = options.region_batch_size {
         model_options = model_options.with_region_batch_size(region_batch_size);
     }
@@ -983,8 +1024,9 @@ mod tests {
     fn layout_options_keep_the_parser_configuration_by_default() {
         let parser = recording_parser();
         let produced = layout_options(&parser, &AnyPageParserOptions::default());
-        assert_eq!(produced.config.as_ref().unwrap().max_tokens, 1234);
-        assert_eq!(produced.config.as_ref().unwrap().crop_pad_ratio, 0.0);
+        assert!(produced.config.is_none());
+        assert!(produced.doc_parser.max_tokens.is_none());
+        assert_eq!(parser.config().max_tokens, 1234);
         assert!(produced.region_batch_size.is_none());
 
         let produced = layout_options(
@@ -993,9 +1035,8 @@ mod tests {
                 .with_max_new_tokens(777)
                 .with_region_batch_size(5),
         );
-        assert_eq!(produced.config.as_ref().unwrap().max_tokens, 777);
-        // The parser's other configuration settings survive the override.
-        assert_eq!(produced.config.as_ref().unwrap().crop_pad_ratio, 0.0);
+        assert_eq!(produced.doc_parser.max_tokens, Some(777));
+        assert!(produced.config.is_none());
         assert_eq!(produced.region_batch_size, Some(5));
     }
 

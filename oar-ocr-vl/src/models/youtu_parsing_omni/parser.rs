@@ -198,15 +198,17 @@ pub(super) fn parse_output(raw: &str, plan: ImagePlan) -> PageDocument {
         raw_output: Some(raw.to_string()),
         ..Default::default()
     };
-    let json = raw
-        .trim()
-        .strip_prefix("```json")
-        .or_else(|| raw.trim().strip_prefix("```"))
-        .unwrap_or(raw.trim())
-        .trim();
-    let json = json.strip_suffix("```").unwrap_or(json).trim();
-    let value = match serde_json::from_str::<Value>(json) {
-        Ok(value) => value,
+    let value = match super::json_output::decode(raw) {
+        Ok((value, messages)) => {
+            document
+                .diagnostics
+                .extend(messages.into_iter().map(|message| ParseDiagnostic {
+                    block_index: None,
+                    stage: "postprocessing".into(),
+                    message,
+                }));
+            value
+        }
         Err(error) => {
             document.diagnostics.push(ParseDiagnostic {
                 block_index: None,
@@ -326,6 +328,19 @@ mod tests {
         assert!(invalid.blocks.is_empty());
         assert_eq!(invalid.diagnostics.len(), 1);
         assert!(invalid.raw_output.is_some());
+        let decorated = parse_output("json\n{\"elements\":[]}\n```<|end_of_text|>", plan);
+        assert!(decorated.diagnostics.is_empty());
+        let repaired = parse_output(
+            r#"{"elements":[{"category":"formula","content":{"latex":"\alpha"}}]}"#,
+            plan,
+        );
+        assert!(repaired.markdown.unwrap().contains(r"\alpha"));
+        let prefix = parse_output(
+            r#"{"elements":[{"category":"text","content":{"text":"keep"}}, {"category":"text","content":{"text":"partial"#,
+            plan,
+        );
+        assert_eq!(prefix.blocks.len(), 2);
+        assert!(prefix.markdown.unwrap().contains("keep"));
     }
 
     #[test]

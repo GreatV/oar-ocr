@@ -5,6 +5,7 @@
 //! decoder. Audio and video inputs are outside this image-based API.
 
 mod config;
+mod json_output;
 mod layers;
 mod model;
 mod parser;

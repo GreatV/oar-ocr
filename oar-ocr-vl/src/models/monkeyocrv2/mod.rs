@@ -6,6 +6,7 @@
 
 mod adapter;
 mod config;
+mod dewarp;
 mod model;
 mod parser;
 mod processing;
@@ -14,3 +15,5 @@ mod vision;
 pub use config::{MonkeyOcrV2Config, MonkeyOcrV2ImageProcessorConfig, MonkeyOcrV2VisionConfig};
 pub use model::{DEFAULT_MAX_NEW_TOKENS, LAYOUT_MIN_PIXELS, MonkeyOcrV2, MonkeyOcrV2Task};
 pub use parser::MonkeyOcrV2ParseOptions;
+
+pub use dewarp::MonkeyOcrV2Dewarp;

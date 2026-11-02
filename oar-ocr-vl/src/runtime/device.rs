@@ -123,15 +123,6 @@ pub fn parse_device(device: &str) -> Result<Device, Error> {
 }
 
 pub fn select_dtype(device: &Device) -> DType {
-    if let Ok(value) = std::env::var("OAR_VL_DTYPE") {
-        if let Some(dtype) = dtype_from_str(&value) {
-            tracing::info!("using dtype {dtype:?} from OAR_VL_DTYPE={value}");
-            return dtype;
-        }
-        tracing::warn!(
-            "ignoring invalid OAR_VL_DTYPE value {value:?} (expected bf16, f16, or f32)"
-        );
-    }
     if !device.supports_bf16() {
         return DType::F32;
     }
@@ -140,15 +131,6 @@ pub fn select_dtype(device: &Device) -> DType {
     } else {
         tracing::warn!("BF16 probe failed; falling back to F16");
         DType::F16
-    }
-}
-
-pub(crate) fn dtype_from_str(value: &str) -> Option<DType> {
-    match value.to_lowercase().as_str() {
-        "bf16" | "bfloat16" => Some(DType::BF16),
-        "f16" | "fp16" | "float16" | "half" => Some(DType::F16),
-        "f32" | "fp32" | "float32" => Some(DType::F32),
-        _ => None,
     }
 }
 

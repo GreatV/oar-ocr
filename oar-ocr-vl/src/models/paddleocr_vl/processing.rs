@@ -1,5 +1,7 @@
 use super::config::PaddleOcrVlImageProcessorConfig;
+use super::model::PaddleOcrVlTask;
 use crate::error::Error;
+use crate::runtime::image::pil_lanczos_resize;
 use crate::utils::image::qwen_vl_resize;
 pub use crate::utils::image::smart_resize;
 use crate::utils::table::{convert_otsl_to_html, looks_like_table_tokens};
@@ -7,6 +9,10 @@ pub use crate::utils::text::strip_math_wrappers;
 use candle_core::{DType, Device, Tensor};
 use image::RgbImage;
 use rayon::prelude::*;
+use std::borrow::Cow;
+
+const SPOTTING_UPSCALE_THRESHOLD: u32 = 1500;
+const SPOTTING_MAX_LONG_SIDE: u32 = 2048;
 
 #[derive(Debug, Clone)]
 pub struct PaddleOcrVlImageInputs {
@@ -85,15 +91,15 @@ pub fn preprocess_images(
     device: &Device,
     dtype: DType,
 ) -> Result<PaddleOcrVlImageInputs, Error> {
-    preprocess_images_with_max_pixels(images, cfg, device, dtype, cfg.max_pixels)
+    preprocess_images_impl(images, cfg, device, dtype, None)
 }
 
-pub(crate) fn preprocess_images_with_max_pixels(
+fn preprocess_images_impl(
     images: &[RgbImage],
     cfg: &PaddleOcrVlImageProcessorConfig,
     device: &Device,
     dtype: DType,
-    max_pixels: u32,
+    tasks: Option<&[PaddleOcrVlTask]>,
 ) -> Result<PaddleOcrVlImageInputs, Error> {
     cfg.validate()?;
     if images.is_empty() {
@@ -108,7 +114,26 @@ pub(crate) fn preprocess_images_with_max_pixels(
     let mut all_patches: Vec<Tensor> = Vec::with_capacity(images.len());
     let mut grids = Vec::with_capacity(images.len());
 
-    for img in images {
+    for (index, image) in images.iter().enumerate() {
+        let spotting = tasks.is_some_and(|tasks| tasks[index].needs_spotting_preprocess());
+        // Upscale only this task's image. Other batch members stay borrowed.
+        let img = if spotting
+            && image.width() < SPOTTING_UPSCALE_THRESHOLD
+            && image.height() < SPOTTING_UPSCALE_THRESHOLD
+        {
+            Cow::Owned(pil_lanczos_resize(
+                image,
+                image.width().saturating_mul(2),
+                image.height().saturating_mul(2),
+            )?)
+        } else {
+            Cow::Borrowed(image)
+        };
+        let max_pixels = if spotting {
+            cfg.max_pixels.max(SPOTTING_MAX_LONG_SIDE * factor * factor)
+        } else {
+            cfg.max_pixels
+        };
         let (h, w) = (img.height(), img.width());
         let (rh, rw) = if cfg.do_resize {
             reference_smart_resize(h, w, factor, cfg.min_pixels, max_pixels)?
@@ -119,9 +144,9 @@ pub(crate) fn preprocess_images_with_max_pixels(
         // The reference processor resizes with PIL (bicubic for `resample: 3`
         // and by default), so use the PIL-exact resize.
         let resized = if rh != h || rw != w {
-            qwen_vl_resize(img, rw, rh, cfg.resample)?
+            Cow::Owned(qwen_vl_resize(&img, rw, rh, cfg.resample)?)
         } else {
-            img.clone()
+            img
         };
 
         if rh % patch != 0 || rw % patch != 0 {
@@ -213,11 +238,85 @@ pub(crate) fn preprocess_images_with_max_pixels(
     })
 }
 
+/// Apply task-specific resizing before one shared encoder batch.
+pub(super) fn preprocess_tasks(
+    images: &[RgbImage],
+    tasks: &[PaddleOcrVlTask],
+    cfg: &PaddleOcrVlImageProcessorConfig,
+    device: &Device,
+    dtype: DType,
+) -> Result<PaddleOcrVlImageInputs, Error> {
+    if images.len() != tasks.len() {
+        return Err(Error::invalid_input(
+            "PaddleOCR-VL image and task counts differ",
+        ));
+    }
+    preprocess_images_impl(images, cfg, device, dtype, Some(tasks))
+}
+
 #[cfg(test)]
 mod tests {
     use super::PaddleOcrVlImageProcessorConfig;
     use super::*;
     use image::{Rgb, RgbImage};
+
+    fn processor_config() -> PaddleOcrVlImageProcessorConfig {
+        PaddleOcrVlImageProcessorConfig {
+            do_resize: true,
+            do_rescale: true,
+            do_normalize: true,
+            do_convert_rgb: true,
+            rescale_factor: 1.0 / 255.0,
+            image_mean: vec![0.5, 0.5, 0.5],
+            image_std: vec![0.5, 0.5, 0.5],
+            min_pixels: 28 * 28 * 130,
+            max_pixels: 28 * 28 * 1280,
+            resample: None,
+            patch_size: 14,
+            temporal_patch_size: 1,
+            merge_size: 2,
+        }
+    }
+
+    #[test]
+    fn mixed_tasks_keep_independent_pixel_budgets() {
+        let cfg = processor_config();
+        let image = RgbImage::from_pixel(2000, 2000, Rgb([127; 3]));
+        let solo = preprocess_tasks(
+            std::slice::from_ref(&image),
+            &[PaddleOcrVlTask::Ocr],
+            &cfg,
+            &Device::Cpu,
+            DType::F32,
+        )
+        .unwrap();
+        let mixed = preprocess_tasks(
+            &[image.clone(), image],
+            &[PaddleOcrVlTask::Ocr, PaddleOcrVlTask::Spotting],
+            &cfg,
+            &Device::Cpu,
+            DType::F32,
+        )
+        .unwrap();
+        assert_eq!(solo.image_grid_thw, [(1, 70, 70)]);
+        assert_eq!(mixed.image_grid_thw, [(1, 70, 70), (1, 90, 90)]);
+        let count = solo.pixel_values.dim(0).unwrap();
+        assert_eq!(
+            mixed
+                .pixel_values
+                .narrow(0, 0, count)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+            solo.pixel_values
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+        );
+    }
 
     #[test]
     fn reference_smart_resize_matches_the_python_processor() {
@@ -239,21 +338,7 @@ mod tests {
 
     #[test]
     fn test_preprocess_outputs_expected_shapes() -> Result<(), Error> {
-        let cfg = PaddleOcrVlImageProcessorConfig {
-            do_resize: true,
-            do_rescale: true,
-            do_normalize: true,
-            do_convert_rgb: true,
-            rescale_factor: 1.0 / 255.0,
-            image_mean: vec![0.5, 0.5, 0.5],
-            image_std: vec![0.5, 0.5, 0.5],
-            min_pixels: 28 * 28 * 130,
-            max_pixels: 28 * 28 * 1280,
-            resample: None,
-            patch_size: 14,
-            temporal_patch_size: 1,
-            merge_size: 2,
-        };
+        let cfg = processor_config();
 
         let mut img = RgbImage::new(64, 64);
         for p in img.pixels_mut() {

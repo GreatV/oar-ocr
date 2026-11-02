@@ -65,8 +65,8 @@ pub fn preprocess_image(
         });
     }
 
-    // The Qwen-family processor resamples with Pillow's bicubic — the
-    // default, and the meaning of an explicit `resample: 3`.
+    // The reference fast processor uses torchvision antialiased bicubic;
+    // our Pillow implementation can differ in uint8 rounding.
     let resized = if resized_height != height || resized_width != width {
         qwen_vl_resize(
             image,

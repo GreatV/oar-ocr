@@ -878,6 +878,8 @@ impl DecoderGraphInputs for DFlashGraphInputs {
 /// Loaded DFlash draft and its incremental target-context K/V caches.
 pub(crate) struct DFlashModel {
     #[cfg(feature = "cuda")]
+    cuda_graphs: bool,
+    #[cfg(feature = "cuda")]
     decode_graph: RefCell<Option<DecoderCudaGraph<DFlashGraphInputs>>>,
     cfg: DFlashConfig,
     fc: Linear,
@@ -899,6 +901,18 @@ pub(crate) struct DFlashModel {
 }
 
 impl DFlashModel {
+    pub(crate) fn set_cuda_graphs(&mut self, enabled: bool) {
+        #[cfg(feature = "cuda")]
+        {
+            self.cuda_graphs = enabled;
+            if !enabled {
+                self.invalidate_cuda_graph();
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        let _ = enabled;
+    }
+
     pub(crate) fn from_dir(
         model_dir: impl AsRef<Path>,
         dtype: DType,
@@ -961,7 +975,9 @@ impl DFlashModel {
         let caches = (0..cfg.num_hidden_layers)
             .map(|_| ContextKv::default())
             .collect();
-        let model = Self {
+        Ok(Self {
+            #[cfg(feature = "cuda")]
+            cuda_graphs: true,
             #[cfg(feature = "cuda")]
             decode_graph: RefCell::new(None),
             cfg,
@@ -979,9 +995,7 @@ impl DFlashModel {
             device: device.clone(),
             #[cfg(feature = "cuda")]
             _drain_guard: CudaGraphDrainGuard::new(device),
-        };
-        model.prepare_cuda_graph()?;
-        Ok(model)
+        })
     }
 
     pub(crate) fn config(&self) -> &DFlashConfig {
@@ -991,7 +1005,8 @@ impl DFlashModel {
     pub(crate) fn prepare_cuda_graph(&self) -> Result<(), Error> {
         #[cfg(feature = "cuda")]
         {
-            if std::env::var_os("OAR_HUNYUAN_DISABLE_CUDA_GRAPH").is_some() {
+            #[cfg(feature = "cuda")]
+            if !self.cuda_graphs {
                 self.invalidate_cuda_graph();
                 return Ok(());
             }

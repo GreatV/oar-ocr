@@ -3,8 +3,8 @@
 use crate::error::Error;
 use crate::runtime::checkpoint::load_json_config;
 use crate::runtime::errors::candle_to_ocr_inference;
+use crate::runtime::image::{pil_bicubic_resize, pil_pad_to_square};
 use candle_core::{DType, Device, Tensor};
-use image::{Rgb, imageops::FilterType};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -48,6 +48,11 @@ fn default_tile_size() -> u32 {
 impl JinaOcrProcessorConfig {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
         let cfg: Self = load_json_config(path, "JinaOCR", "processor_config.json")?;
+        if !cfg.crop_mode {
+            return Err(Error::Config {
+                message: "JinaOCR crop_mode=false uses a 640-pixel global view, which this runtime does not support".into(),
+            });
+        }
         if cfg.base_size != BASE_SIZE {
             return Err(Error::Config {
                 message: format!(
@@ -87,21 +92,10 @@ pub struct JinaOcrImageInputs {
     pub global_queries: usize,
 }
 
-/// `ImageOps.pad`: aspect-preserving resize to fit `size × size`, then pad
-/// with the normalization mean color.
+/// `ImageOps.pad`: aspect-preserving resize to fit `size × size`, then pad with the normalization mean color. Empty images produce a mean-colored canvas; a zero size produces an empty canvas.
 pub fn pad_to_square(image: &image::RgbImage, size: u32) -> image::RgbImage {
-    let (width, height) = (image.width(), image.height());
-    let scale = f64::from(size) / f64::from(width.max(height));
-    let new_w = ((f64::from(width) * scale).round() as u32).max(1).min(size);
-    let new_h = ((f64::from(height) * scale).round() as u32)
-        .max(1)
-        .min(size);
-    let resized = image::imageops::resize(image, new_w, new_h, FilterType::CatmullRom);
-    let mut canvas = image::RgbImage::from_pixel(size, size, Rgb([PAD_GRAY, PAD_GRAY, PAD_GRAY]));
-    let x = size.saturating_sub(new_w) / 2;
-    let y = size.saturating_sub(new_h) / 2;
-    image::imageops::overlay(&mut canvas, &resized, x as i64, y as i64);
-    canvas
+    pil_pad_to_square(image, size, [PAD_GRAY; 3])
+        .unwrap_or_else(|_| image::RgbImage::from_pixel(size, size, image::Rgb([PAD_GRAY; 3])))
 }
 
 /// Aspect-ratio tile grid whose layout best matches the image
@@ -199,7 +193,7 @@ pub fn preprocess_image(
         tile_grid = dynamic_tile_grid(image.width(), image.height());
         let target_w = processor.image_size * tile_grid.0 as u32;
         let target_h = processor.image_size * tile_grid.1 as u32;
-        let resized = image::imageops::resize(image, target_w, target_h, FilterType::CatmullRom);
+        let resized = pil_bicubic_resize(image, target_w, target_h)?;
         for row in 0..tile_grid.1 {
             for col in 0..tile_grid.0 {
                 let tile = image::imageops::crop_imm(
@@ -271,6 +265,10 @@ mod tests {
         assert_eq!(inputs.tiles.dims(), &[0, 3, 640, 640]);
         // 16*17 + 1 = 273 global tokens only.
         assert_eq!(inputs.num_image_tokens, 273);
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("processor_config.json");
+        std::fs::write(&path, r#"{"crop_mode":false}"#)?;
+        assert!(JinaOcrProcessorConfig::from_path(&path).is_err());
         Ok(())
     }
 
@@ -362,6 +360,10 @@ mod tests {
         // Center rows contain the resized white image; corners are gray pad.
         assert_eq!(padded.get_pixel(0, 0).0, [127, 127, 127]);
         assert_eq!(padded.get_pixel(32, 32).0, [255, 255, 255]);
+        let empty = pad_to_square(&RgbImage::new(0, 50), 4);
+        assert_eq!(empty.dimensions(), (4, 4));
+        assert!(empty.pixels().all(|pixel| pixel.0 == [PAD_GRAY; 3]));
+        assert_eq!(pad_to_square(&image, 0).dimensions(), (0, 0));
     }
 
     #[test]

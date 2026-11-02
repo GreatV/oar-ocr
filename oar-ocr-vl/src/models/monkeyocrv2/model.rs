@@ -1,5 +1,5 @@
 use super::config::{MonkeyOcrV2Config, MonkeyOcrV2ImageProcessorConfig};
-use super::processing::{MonkeyOcrV2ImageInputs, preprocess_image};
+use super::processing::{MonkeyOcrV2ImageInputs, prepare_image, preprocess_image};
 use super::vision::MonkeyOcrV2VisionModel;
 use crate::backbones::sdar::{SdarKvCache, SdarModel};
 use crate::error::Error;
@@ -62,6 +62,9 @@ pub struct MonkeyOcrV2 {
     text: SdarModel,
     stop_token_ids: Vec<u32>,
     image_token_id: u32,
+    pub(super) two_stage_parsing: bool,
+    pub(super) dewarp: Option<super::MonkeyOcrV2Dewarp>,
+    dewarp_dir: std::path::PathBuf,
 }
 
 impl MonkeyOcrV2 {
@@ -108,7 +111,19 @@ impl MonkeyOcrV2 {
         stop_token_ids.sort_unstable();
         stop_token_ids.dedup();
         let image_token_id = cfg.image_token_id;
+        let dewarp = if model_dir.join("preprocessor1.pth").is_file()
+            && model_dir.join("preprocessor2.pth").is_file()
+        {
+            Some(super::MonkeyOcrV2Dewarp::from_dir(
+                model_dir,
+                device.clone(),
+            )?)
+        } else {
+            None
+        };
         Ok(Self {
+            dewarp,
+            dewarp_dir: model_dir.to_path_buf(),
             device,
             dtype,
             cfg,
@@ -118,7 +133,30 @@ impl MonkeyOcrV2 {
             text,
             stop_token_ids,
             image_token_id,
+            two_stage_parsing: true,
         })
+    }
+
+    /// Enable or disable full-page dewarp. Disabling releases the networks.
+    /// Enabling loads both preprocessor files from this model's directory.
+    pub fn with_dewarp(mut self, enabled: bool) -> Result<Self, Error> {
+        if enabled && self.dewarp.is_none() {
+            self.dewarp = Some(super::MonkeyOcrV2Dewarp::from_dir(
+                &self.dewarp_dir,
+                self.device.clone(),
+            )?);
+        } else if !enabled {
+            self.dewarp = None;
+        }
+        Ok(self)
+    }
+
+    /// Select the native layout-then-recognition page pipeline (default: enabled).
+    /// Disable it for one-pass `PageParser` parsing with the `EndToEnd` task.
+    /// Explicit `generate` requests always use their requested single task.
+    pub fn with_two_stage_parsing(mut self, enabled: bool) -> Self {
+        self.two_stage_parsing = enabled;
+        self
     }
 
     /// Run official task prompts for one or more images.
@@ -185,12 +223,8 @@ impl MonkeyOcrV2 {
         if max_new_tokens == 0 {
             return Ok(Vec::new());
         }
-        let mut image_cfg = self.image_cfg.clone();
-        if let Some(min_pixels) = min_pixels_override {
-            image_cfg.min_pixels = image_cfg.min_pixels.max(min_pixels);
-            image_cfg.min_pixels = image_cfg.min_pixels.min(image_cfg.max_pixels);
-        }
-        let image_inputs = preprocess_image(image, &image_cfg, &self.device, self.dtype)?;
+        let image = prepare_image(image, min_pixels_override)?;
+        let image_inputs = preprocess_image(&image, &self.image_cfg, &self.device, self.dtype)?;
         let prompt = build_prompt(instruction, image_inputs.num_image_tokens);
         let encoding = self
             .tokenizer
@@ -340,7 +374,6 @@ impl MonkeyOcrV2 {
 
 fn build_prompt(instruction: &str, num_image_tokens: usize) -> String {
     let mut prompt = String::with_capacity(instruction.len() + num_image_tokens * 13 + 128);
-    prompt.push_str("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n");
     prompt.push_str("<|im_start|>user\n<|vision_start|>");
     for _ in 0..num_image_tokens {
         prompt.push_str("<|image_pad|>");
@@ -433,7 +466,7 @@ mod tests {
     fn prompt_matches_official_template() {
         assert_eq!(
             build_prompt("Question", 2),
-            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|image_pad|><|vision_end|>Question<|im_end|>\n<|im_start|>assistant\n"
+            "<|im_start|>user\n<|vision_start|><|image_pad|><|image_pad|><|vision_end|>Question<|im_end|>\n<|im_start|>assistant\n"
         );
     }
 

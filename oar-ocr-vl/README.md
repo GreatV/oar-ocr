@@ -48,7 +48,7 @@ OXR also implements `RecognitionBackend` for text, formula, and table crops, com
 
 ```rust
 use oar_ocr_vl::{
-    DocParserConfig, LayoutPageParser, LayoutPageParserOptions, PageParser,
+    DocParserOptions, LayoutPageParser, LayoutPageParserOptions, PageParser,
     PaddleOcrVl, PpDocLayout,
 };
 use oar_ocr_vl::utils::{image::load_image, parse_device};
@@ -63,7 +63,7 @@ println!("{}", page.markdown.as_deref().unwrap_or_default());
 
 // Override settings for one page; defaults use the parser's builder settings.
 let options = LayoutPageParserOptions::default()
-    .with_config(DocParserConfig { max_tokens: 8192, ..Default::default() })
+    .with_doc_parser_options(DocParserOptions::default().with_max_tokens(8192))
     .with_region_batch_size(4);
 let page = parser.parse_page(&image, &options)?;
 
@@ -71,7 +71,7 @@ let page = parser.parse_page(&image, &options)?;
 let structure = parser.parse_structure(&image, &options)?;
 ```
 
-Pass `&layout` and `&backend` instead to borrow existing models. `DocParser` remains available for callers that supply layout on every call and need `StructureResult`. The new page output includes normalized blocks, Markdown, and crop diagnostics. Use `LayoutPageParser::parse_structure` with the same options to obtain the original pixel coordinates, confidence, reading order, source metadata, tables, and formulas. Recognition failures still return an error, as in `DocParser`. The `doc_parser` example uses this new entry point.
+Pass `&layout` and `&backend` instead to borrow existing models. `DocParser` remains available for callers that supply layout on every call and need `StructureResult`. The new page output includes normalized blocks, Markdown, and crop diagnostics. Use `LayoutPageParser::parse_structure` with the same options to obtain the original pixel coordinates, confidence, reading order, source metadata, tables, and formulas. Region failures follow the backend profile; `DocParserOptions::with_region_errors` selects propagation or a retained region with a diagnostic. The `doc_parser` example uses this new entry point.
 
 ## Unified Page Parsing
 
@@ -92,7 +92,7 @@ let options = AnyPageParserOptions::default().with_max_new_tokens(8192);
 let page = parser.parse_page(&image, &options)?;
 ```
 
-Construct it from an already-loaded model with `From`: the model-native parsers (`HpdParsing`, `HunyuanOcr`, `JinaOcr`, `MinerU`, `MinerUDiffusion`, `MonkeyOcrV2`, `OvisOcr2`, `UnlimitedOcr`, `WeVisDoc`, `XiaomiOcr`, `YoutuParsingOmni`) and `LayoutPageParser` compositions over `PpDocLayout` (`PaddleOcrVl`, `GlmOcr`, `TeleOcr`, `MiniCpmOcr`, `Oxr`). `AnyPageParserOptions` carries the knobs every parser shares: `max_new_tokens` maps to each model's generation budget (including `MinerUDiffusion`'s `gen_length`), and `region_batch_size` applies to the region-batching parsers (`MinerU` and the layout-composed models); parsers without a matching concept ignore the knob. OXR handles each scheduled region sequentially.
+Construct it from an already-loaded model with `From`: the model-native parsers (`HpdParsing`, `HunyuanOcr`, `JinaOcr`, `MinerU`, `MinerUDiffusion`, `MonkeyOcrV2`, `OvisOcr2`, `UnlimitedOcr`, `WeVisDoc`, `XiaomiOcr`, `YoutuParsingOmni`) and `LayoutPageParser` compositions over `PpDocLayout` (`PaddleOcrVl`, `GlmOcr`, `TeleOcr`, `MiniCpmOcr`, `Oxr`). `AnyPageParserOptions` carries the knobs every parser shares: `max_new_tokens` maps to each model's generation budget (including `MinerUDiffusion`'s `gen_length`), and `region_batch_size` applies to the region-batching parsers (`MinerU` and the layout-composed models); parsers without a matching concept ignore the knob. OXR handles regions one at a time and first predicts their reading order with its own page request; `Oxr::with_reading_order(false)` keeps the detector order instead. Code and chemical-structure regions use OXR's dedicated prompts. The layout detector is any `LayoutSource`; the built-in loader uses PP-DocLayout.
 
 `AnyPageParser::from_dir` loads a named parser from a model directory. The model is always named explicitly by its Hugging Face repo ID (`tencent/HunyuanOCR`, `PaddlePaddle/PaddleOCR-VL-1.5`, …) — most supported models are fine-tunes whose checkpoint configs match their public base models, so the directory cannot identify the model reliably on its own. Each model then loads through its own `from_dir` with its own defaults:
 
@@ -139,6 +139,12 @@ let parser = AnyPageParser::from_pretrained(
 
 ModelScope is the default source and Hugging Face is selectable with `with_source(DownloadSource::HuggingFace)`; `with_revision` pins a revision (the sources' defaults are `master` and `main`), which resolves to an immutable commit before anything downloads. Snapshots land under `$OAR_HOME/models/<org>/<name>/<commit>` (`$OAR_HOME` defaults to `~/.oar`, shared with oar-ocr-core): each file is verified against the SHA-256 the source API publishes (Hugging Face publishes it for LFS files), a snapshot is staged and published atomically, and published snapshots are never modified — a cached commit is reused without any network listing. The layout-composed models also download a PP-DocLayout checkpoint — `PaddlePaddle/PP-DocLayoutV3_safetensors` by default, overridable with `with_layout` or replaced by a local directory with `with_layout_dir`. ModelScope publishes GLM-OCR under `ZhipuAI/GLM-OCR` and that mirror is used automatically; HunyuanOCR and WeVisDoc are not on ModelScope and download from Hugging Face instead (logged once via `tracing`), with the cache still keyed by the model ID.
 
+`PageParser::parse_document(&images, &options)` returns a `DocumentOutput` with the parsed pages and the document Markdown. Most backends parse each page separately. Unlimited-OCR-2, also through `AnyPageParser`, reads all pages in one request: text and tables that cross a page break are merged in the document Markdown, and `pages` keeps each page's own fragments. Pages left unparsed when generation hits its limit get a diagnostic, and a request longer than the model's context window returns an error.
+
+HunyuanOCR 1.5's `generate_joint(&images, instruction, max_new_tokens)` and OvisOCR3's `generate_joint_with_prompt(&images, prompt, max_new_tokens)` generate one response from several images; the batch APIs still answer each image separately. OvisOCR3's `reconstruct_tables(&two_images, &two_page_markdowns, max_new_tokens)` rebuilds tables that span two adjacent pages and returns them as HTML with their source pages, or an empty vector when no table crosses the break. When the Markdown uses document-level `page_N/images/` references, call `reconstruct_tables_with_page_numbers(&two_images, &two_page_markdowns, [first_page, second_page], max_new_tokens)` so image references map to the right pages. To merge tables across more pages, apply the results pairwise from the last page backwards, re-rendering each page in between, as the official flow does.
+
+HPD-Parsing and MonkeyOCRv2 page results include the raw model output alongside the parsed blocks and Markdown. The two MinerU parsers share layout and equation post-processing. Layout-composed backends receive each region's original label, so MiniCPM-OCR uses its seal and inline-formula prompts and per-label token budgets, capped by the caller's limit.
+
 ## Installation
 
 This crate is self-contained: everything runs on Candle, it does not depend on `oar-ocr-core`, and **no build of it links ONNX Runtime**.
@@ -165,9 +171,11 @@ On macOS, enable Metal instead:
 cargo add oar-ocr-vl --features metal
 ```
 
-Metal inference uses Candle's fused SDPA kernels for supported attention shapes, including GQA without expanding K/V heads. For the best measured Apple Silicon throughput, explicitly set `OAR_VL_DTYPE=f16`. Use `OAR_VL_DISABLE_METAL_SDPA=1` for compatibility comparisons. The optional `OAR_VL_METAL_NATIVE_SOFTMAX=1` switch only changes the eager fallback; eager attention otherwise preserves the F32 softmax round trip.
+Metal inference uses Candle's fused SDPA kernels for supported attention shapes, including GQA without expanding K/V heads. Select F16 with `RuntimeConfig::with_dtype(DType::F16)` for the best measured Apple Silicon throughput. Eager attention computes softmax in F32.
 
 The crate's custom CUDA kernels compile to PTX for the oldest GPU detected by `nvidia-smi` at build time. For headless, container, or cross-machine builds, set the target explicitly, for example `CUDA_COMPUTE_CAP=89 cargo build -p oar-ocr-vl --features cuda`. These kernels require compute capability 8.0 or newer.
+
+Runtime settings are code options, not environment variables. `RuntimeConfig::with_dtype` picks the compute dtype, and `with_cuda_graphs(false)` on a model switches decoding to eager mode. GLM-OCR loads its MTP head on CUDA by default; `GlmOcrLoadOptions::default().with_mtp(false)` turns it off. jina-ocr-v1 loads FastMTP only with `JinaOcrLoadOptions::default().with_mtp(true)`. `AnyPageParserLoadOptions` and `AnyPageParserPretrainedOptions` pass both through `with_glm_options` and `with_jina_options`.
 
 ## Usage
 
@@ -201,6 +209,10 @@ println!("Result: {}", result);
 
 PaddleOCR-VL-1.5 and PaddleOCR-VL-1.6 are loaded the same way, with additional tasks. PaddleOCR-VL-1.6 is plug-compatible with the 1.5 loader; point the same API at its checkpoint directory.
 
+Region recognition uses the PaddleX pipeline's pixel bounds (112,896–1,003,520, or up to 1,605,632 for spotting); standalone generation uses the checkpoint's processor settings. Charts are skipped by default; `PaddleOcrVl::with_chart_recognition(true)` recognizes them and formats the result as an HTML table. Region text gets the pipeline's math-delimiter rewrites and repetition cleanup (above 50 characters, or 5000 for tables), and formulas keep their line breaks. `paddleocr_vl::postprocess_spotting_output(raw, width, height)` turns raw spotting output into texts, pixel quadrilaterals and Markdown.
+
+Decoding stops at `</s>` or `<|end_of_sentence|>`, while the official generation configuration lists only `</s>`. Direct `PaddleOcrVlTask::Formula` generation trims math wrappers, while the PaddleX element-mode path also crops margins and rewrites delimiters.
+
 ```rust
 use oar_ocr_vl::utils::image::load_image;
 use oar_ocr_vl::{PaddleOcrVl, PaddleOcrVlTask};
@@ -221,7 +233,7 @@ println!("Result: {}", result);
 
 `PpDocLayout` detects layout regions and predicts their reading order, and implements `LayoutSource`, so it plugs straight into `DocParser` (see below). PP-DocLayoutV2 and PP-DocLayoutV3 load through the same API; the generation is read from `config.json`. Use the `_safetensors` repositories, which carry the `model.safetensors` weights this port loads.
 
-PP-DocLayoutV2 applies the per-class thresholds from its `config.json`; PP-DocLayoutV3 uses a single threshold, adjustable with `with_score_threshold`.
+PP-DocLayoutV2 applies the per-class thresholds from its `config.json`; PP-DocLayoutV3 uses a single threshold, adjustable with `with_score_threshold`. Shared post-processing applies strict score thresholds, same/cross-class NMS, large-image filtering and class-specific containment. V3 masks select rectangular, quadrilateral or polygon crops through `LayoutShapeMode`; `Auto` follows the PaddleX geometry rules. `LayoutSource::detect_with_options` returns the rectangles, aligned crop polygons and trace in `LayoutPrediction`. The default cap is 100 regions after detector filtering; `with_max_elements` changes it, and `with_postprocess_options` selects the shared parameters.
 
 ### OvisOCR2
 
@@ -261,9 +273,9 @@ let page = model.parse_page(&image, &options)?;
 println!("{}", page.to_json(image.width(), image.height()));
 ```
 
-Markdown is the default mode, including through `AnyPageParser`. It strips outer whitespace, optionally filters image-tag blocks, and then applies repeated-tail cleanup regardless of whether generation reached its token limit. `with_keep_image_tags(true)` retains image references. Structured mode requests a JSON array and preserves region content and reading order in its blocks. Its Markdown joins the region contents in reading order, as the model card describes, since the model already writes them as Markdown, LaTeX, or HTML; default exclusions remove headers, footers, page numbers, and related marginal content, and `keep_image_tags` controls visual references. `PageDocument` holds normalized boxes; `page.to_json(image.width(), image.height())` converts upstream `[0,1000)` coordinates into pixels of the supplied image (or crop). Existing layout types map categories such as `display_formula`/`inline_formula` to `formula`, `vertical_text` to `text`, and `vision_footnote` to `footnote`, retaining the original label. Invalid or truncated JSON, including invalid boxes, logs a warning and falls back to Markdown without blocks, retaining the raw text and a `structured_json` diagnostic; no JSON repair is attempted. Markdown mode also returns no layout blocks.
+Markdown is the default mode, including through `AnyPageParser`. It trims the output, drops image-tag blocks unless `with_keep_image_tags(true)` is set, and cleans repeated tails. Structured mode strips JSON code fences and recovers the complete objects of a truncated response; content with an invalid box gets a full-page box and a diagnostic, and missing or unknown categories are diagnosed. Its Markdown applies the crate's default label exclusions, so use raw generation or keep image tags when preparing input for cross-page table reconstruction. In structured mode `raw_output` is the original response; in Markdown mode it is the cleaned Markdown. `PageDocument` stores normalized boxes, and `to_json(width, height)` converts them to pixels.
 
-For `RecognitionBackend` crops, `Ocr` uses `plain_ocr`, `Formula` uses `formula_recognition`, and `Chart` uses `chart_parsing`. `Table` uses `document_markdown` on the crop because there is no table-only prompt; tables are requested as HTML. All region tasks use the OvisOCR2 adapter cleanup: repeated-tail cleanup everywhere, keeping image-tag blocks only for charts. The 18 upstream task prompts ship inside the crate under `ovisocr3/prompts/` and are exposed as `ovisocr3::prompts` constants. Use literal replacement, for example `prompts::REGION_OCR.replace("{target_region}", "[0,0,999,999]")`, before calling `generate_with_prompt`; JSON and LaTeX braces are left intact. These constants include KIE templates, but no KIE, cross-page reconstruction, translation, VQA, grounding, word-spotting, or classification pipeline is added. Each input image is an independent request.
+For `RecognitionBackend` crops, `Ocr` uses `plain_ocr`, `Formula` uses `formula_recognition`, and `Chart` uses `chart_parsing`. `Table` uses `document_markdown` on the crop because there is no table-only prompt; tables are requested as HTML. All region tasks use the OvisOCR2 adapter cleanup: repeated-tail cleanup everywhere, keeping image-tag blocks only for charts. The 18 upstream task prompts ship inside the crate under `ovisocr3/prompts/` and are exposed as `ovisocr3::prompts` constants. Use literal replacement, for example `prompts::REGION_OCR.replace("{target_region}", "[0,0,999,999]")`, before calling `generate_with_prompt`; JSON and LaTeX braces are left intact. Use `reconstruct_tables` for the adjacent-page table request and `reconstruct_tables_with_page_numbers` to remap document-qualified crop references. `parse_page` handles one image per request.
 
 ### MiniCPM-OCR 1.0
 
@@ -286,11 +298,11 @@ let page = parser.parse_page(&load_image("document.png")?, &AnyPageParserOptions
 
 For direct inference, `MiniCpmOcr::generate` accepts `MiniCpmOcrTask::{Text, Table, Formula, Chart, Seal}` (`Text Recognition:`, `Table Recognition:`, `Formula Recognition:`, `Chart to Table:`, `Seal Recognition:`) and returns raw decoded text; `generate_with_prompt` takes any instruction, such as the SDK's key-information-extraction prompt. Preprocessing matches the Transformers `MiniCPMOcrImageProcessor` defaults: an overview image plus up to nine 448-pixel slices (`MiniCpmOcrGenerationOptions::with_max_slice_nums`), small crops upscaled to the slice budget, and 4x visual-token downsampling. Decoding is greedy and stops on `<|endoftext|>` or `<|im_end|>`; on CUDA it uses the shared Qwen3.5 decode graph.
 
-As a `RecognitionBackend`, tables come back as OTSL and are converted to HTML by `DocParser`; chart data tables are converted to Markdown pipe tables. `DocParser` skips seal regions, so `Seal` is only available through direct inference. The `16x` downsampling mode and the SDK's adaptive small-image resampling, test-time scaling and cross-page table merging are not implemented.
+The composed parser uses the SDK's label budgets, including 8192 tokens for tables and 256 for seals and formula numbers, within an explicit caller cap. Tables and chart data share the HTML OTSL converter. Seal and auxiliary text are recognized; the SDK's margin labels are hidden in Markdown, while vision footnotes and formula numbers remain. Display math follows the SDK's ordered repairs, mixed inline math keeps its surrounding prose, and paragraph splitting preserves code, tables and math. Recognition uses the checkpoint's 4x image path and fixed-scale crops.
 
 ### OXR-1.0
 
-OXR combines a SigLIP2 NaViT visual tokenizer with a tied Qwen3-0.6B decoder. Use the explicit repository ID `SoMarkAI/OXR-1.0`. Page parsing uses PP-DocLayout for regions and reading order; the official separate D-FINE `.pth` layout model is not used.
+OXR combines a SigLIP2 NaViT visual tokenizer with a tied Qwen3-0.6B decoder. Use the explicit repository ID `SoMarkAI/OXR-1.0`. Page parsing uses PP-DocLayout for regions and OXR for reading order, in place of the official D-FINE layout model.
 
 OXR-1.0 weights are under [SoMark's OXR License](https://huggingface.co/SoMarkAI/OXR-1.0/blob/main/LICENSE): Apache 2.0 plus additional terms covering commercial thresholds, an attribution duty, and a ban on competing hosted APIs. Users must accept these terms before using the weights. Load a local directory as below, or use `AnyPageParser::from_pretrained` with the `auto-download` feature to fetch weights from SoMark's public Hugging Face repo and compose them with PP-DocLayout.
 
@@ -309,13 +321,15 @@ let parser = AnyPageParser::from_dir_with_options(
 let page = parser.parse_page(&load_image("document.png")?, &AnyPageParserOptions::default())?;
 ```
 
-For region inference, `Oxr::generate` accepts `OxrTask::{Text, Formula, Table, Code, ChemicalStructure, WholePage}` and returns raw decoded text. `generate_with_options` accepts `OxrGenerationOptions`, including explicit `with_min_pixels` and `with_max_pixels` controls. Defaults match the official vLLM service: Pillow bilinear RGB resize, a 32-pixel alignment factor, area bounds of 200,704–921,600 pixels, greedy decoding, repetition penalty 1.0, and stop IDs 151643 and 151645. Generation is sequential without CUDA graphs. Checkpoints with non-null `fullatt_block_indexes` are rejected.
+For region inference, `Oxr::generate` accepts `OxrTask::{Text, Formula, Table, Code, ChemicalStructure, WholePage}` and returns the decoded text; `generate_with_options` takes `OxrGenerationOptions`, including `with_min_pixels` and `with_max_pixels`. Defaults follow the official vLLM service: a 32-pixel alignment factor, 200,704–921,600 pixel area bounds, greedy decoding, repetition penalty 1.0 and stop IDs 151643 and 151645. Images are resized with Pillow-exact bilinear filtering; the official fast processor uses torchvision, which can differ by one intensity level. Generation runs sequentially without CUDA graphs. Checkpoints with non-null `fullatt_block_indexes` are rejected.
 
-`LayoutPageParser::new(layout, model)` accepts any `LayoutSource` and an `Oxr` backend, using the crate's shared `DocParser` for region selection, cropping, text/formula/table routing, generic post-processing, and Markdown rendering. Set pixel bounds and repetition penalty on the backend with `Oxr::with_generation_options`; the parser's `DocParserConfig::max_tokens` supplies the region token limit. The same backend defaults apply to `Oxr::generate`, while methods taking explicit generation options use those instead. Region order comes from the layout source, with the shared parser's filtering and adjacent-text merging. Generation returns at the token limit without an automatic retry. The model's reading-order request is future work. `WholePage` is available for direct inference and does not replace layout-driven page parsing.
+`LayoutPageParser::new(layout, model)` combines any `LayoutSource` with an `Oxr` backend through the shared `DocParser`, which selects, crops and routes regions by label and renders Markdown. Set pixel bounds and repetition penalty with `Oxr::with_generation_options`; `DocParserConfig::max_tokens` sets the region token limit. OXR orders the regions with the official grounding-box prompt and keeps the detector order when the prediction is not a valid permutation; `Oxr::with_reading_order(false)` skips that request. Code and chemical structures use their dedicated prompts, and their formatting keeps indentation, SMILES notation and repeated lines. `WholePage` is available for direct inference.
+
+Token-limited regions keep their first response, while the official pipeline retries tables at 0.75× scale and text-like blocks with repetition penalty at least 1.1. Fractional crop bounds truncate toward zero through the shared crop helper, while the official pipeline rounds ties to even before clipping.
 
 ### Xiaomi-OCR-0
 
-Xiaomi-OCR-0 performs model-native full-page parsing without an external layout detector, sharing its Qwen3.5 text tower with OvisOCR2. `parse` applies the official prompt and image preprocessing and returns one Markdown document per page with the official post-processing applied: truncated-repeat cleanup and OTSL table blocks converted to HTML.
+Xiaomi-OCR-0 parses full pages natively, without an external layout detector, and shares its Qwen3.5 text tower with OvisOCR2. `parse` returns one Markdown document per page, with repeat cleanup, LaTeX delimiter normalization and OTSL-to-HTML tables. `PageParser` first shrinks pages to a 2048-pixel maximum edge with Lanczos, as the evaluation pipeline does; direct generation uses the checkpoint's image bounds. The default output limit is the quickstart's 4096 tokens; the evaluation pipeline uses 16384, which you can pass explicitly.
 
 ```rust
 use oar_ocr_vl::utils::image::load_image;
@@ -334,6 +348,8 @@ println!("{markdown}");
 ```
 
 The processor resizes RGB input with bicubic antialiasing to a 32-pixel-aligned area between the advertised bounds (`256²`–`4096²` pixels). The official prompts cover whole-page parsing, text regions, OTSL tables, LaTeX formulas, and key-information extraction (see the `xiaomi_ocr` module constants); as a `RecognitionBackend`, tables come back in OTSL and are converted to HTML by the pipeline, and chart regions are left unrecognized because the model defines no chart prompt.
+
+Requests use the model card's image-before-text chat layout, while the evaluation pipelines put the instruction before the image. Native Markdown uses the shared HTML-escaping OTSL converter, while the evaluation pipelines use their own unescaped converter and two-stage region assembly.
 
 ### Youtu-Parsing-Omni
 
@@ -356,6 +372,10 @@ println!("{}", page.markdown.unwrap_or_default());
 ```
 
 The checkpoint's default image ceiling is retained unless `with_max_pixels` overrides it. Greedy decoding suppresses stop tokens for the first 16 generated tokens, bounded by the requested generation budget. `with_prompt` accepts another image-based task instruction; chart notes, captions, Mermaid diagrams, and geometric expressions are preserved together in block content. Natural-image tasks also append a full-image `global_description` block containing the caption, narrative, and scene. `generate` returns the native output without document post-processing. The model is also available as `AnyPageParserModel::YoutuParsingOmni`, with the explicit ID `tencent/Youtu-Parsing-Omni`; it needs no external layout model. Automatic ModelScope downloads use its verified `tencent-community/Youtu-Parsing-Omni` mirror while keeping the public model ID unchanged.
+
+Document JSON parsing takes the first complete JSON value, strips trailing protocol tokens, trims repeated tails and repairs malformed escapes, recovering category and content records with diagnostics when needed; the raw output stays available. Boxes are read as relative to the padded image canvas (not yet checked on padded inputs). The image-token ceiling defaults to the HF configuration's 32768; the published vLLM benchmark used 16384.
+
+Document Markdown keeps visual blocks, wraps bare formulas in `$$` and prefers OTSL tables, while the official converter drops visual blocks, keeps raw LaTeX and tries HTML then Markdown before OTSL.
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda --example youtu_parsing_omni -- \
@@ -384,6 +404,8 @@ println!("{markdown}");
 
 Pages are resized with the Qwen2-VL smart-resize rule to a 32-pixel-aligned area between `256²` and `4096²` pixels. Output is Markdown with LaTeX (`\\(...\\)`, `\\[...\\]`) formulas and HTML tables; the same `generate` path serves `DocParser` region crops.
 
+`PageParser` retains token-limited output with a diagnostic, while the official local recipe raises an error when generation reaches its limit before EOS.
+
 ### MonkeyOCRv2-S/B-Parsing
 
 MonkeyOCRv2-S-Parsing and MonkeyOCRv2-B-Parsing use native Monkey ViT-S and ViT-B encoders, respectively, with the same Qwen3-0.6B decoder. The API reads either checkpoint's dimensions from its configuration and exposes the official full-page layout and end-to-end prompts as well as cropped text, formula, and OTSL-table recognition.
@@ -391,22 +413,24 @@ MonkeyOCRv2-S-Parsing and MonkeyOCRv2-B-Parsing use native Monkey ViT-S and ViT-
 ```rust
 use oar_ocr_vl::utils::image::load_image;
 use oar_ocr_vl::utils::parse_device;
-use oar_ocr_vl::{MonkeyOcrV2, MonkeyOcrV2Task};
+use oar_ocr_vl::{MonkeyOcrV2, MonkeyOcrV2ParseOptions, PageParser};
 
 let image = load_image("document.png")?;
 let model = MonkeyOcrV2::from_dir(
     "zenosai/MonkeyOCRv2-S-Parsing",
     parse_device("cuda:0")?,
 )?;
-let parsed = model
-    .generate(&[image], &[MonkeyOcrV2Task::EndToEnd], 10_000)?
-    .into_iter()
-    .next()
-    .expect("one result")?;
-println!("{parsed}");
+let parsed = model.parse_page(&image, &MonkeyOcrV2ParseOptions::default())?;
+println!("{}", parsed.markdown.as_deref().unwrap_or_default());
 ```
 
-`EndToEnd` emits a reading-order list whose items contain normalized `bbox`, `label`, and `content` fields. `Layout` emits `bbox` and `label`; its preprocessing follows the official one-megapixel minimum used by the reference layout pass. `Text`, `Formula`, and `Table` can be used directly or through `RecognitionBackend`; table output is OTSL and is converted by `DocParser`.
+`PageParser` runs the native layout pass through `LayoutSource` (4096 tokens), then the shared `DocParser` recognizes rounded crops with label-specific prompts (5000 tokens), within the caller's cap. Pictures keep their boxes, failed regions get a diagnostic, and `raw_output` holds the layout reply. `with_two_stage_parsing(false)` selects one-pass parsing; explicit `generate` calls run the requested task. Images are capped at 1,003,520 pixels with Lanczos, and layout requests upscale small pages first. The shared OTSL parser selects ragged rows, spans and embedded HTML; formulas keep their equation numbers.
+
+`EndToEnd` generation emits a reading-order list of `bbox`, `label` and `content` records; `Layout` emits boxes and labels only. `Text`, `Formula` and `Table` also work through `RecognitionBackend`.
+
+`from_dir` enables full-page dewarp when `preprocessor1.pth` and `preprocessor2.pth` are present. The shared `PagePreprocessor` stage runs the mask and point-grid networks once before layout or one-pass page generation. `with_dewarp(false)` releases the networks; `with_dewarp(true)` loads the pair from the model directory. `monkeyocrv2::MonkeyOcrV2Dewarp` also provides standalone `from_dir` and `preprocess` methods. Boxes describe the rectified canvas, which keeps the input dimensions. Both S and B snapshots include the two files, and `from_pretrained` downloads them with the rest of the snapshot.
+
+One-pass `EndToEnd` Markdown uses shared label mapping, headings and exclusions, while the official END2END path joins nonempty content with table conversion and page-margin exclusions. Generation uses one greedy attempt, while the official `--retry-repeat` option retries loops with rising temperature up to 0.8 and `top_p=0.95`.
 
 ### HPD-Parsing
 
@@ -434,6 +458,10 @@ println!("{parsed}");
 
 The returned text is the model-native reading-order `<BLOCK>type [bbox]<CHILD>content` stream. Set `use_mtp: false` in `HpdGenerationConfig` for ordinary greedy decoding. The native path uses the P-MTP weights embedded in the main checkpoint; the duplicate `P-MTP/model.safetensors` bundle is not required.
 
+Prompts keep the InternVL system turn used by the Transformers demo, while the official vLLM benchmark sends user-only requests. Branches stop at protocol terminators or their token budget, while the official vLLM benchmark also stops 64–128-token patterns after ten repeats.
+
+Page parsing follows the official converter's formula formatting by default; `.with_reference_inline_formulas(false)` on `HpdParsing` keeps the model's display-math delimiters.
+
 ### DocParser
 
 Parse an entire page into Markdown. This path is intended for external layout-first backends such as PaddleOCR-VL, PaddleOCR-VL-1.5, PaddleOCR-VL-1.6, and GLM-OCR.
@@ -450,8 +478,22 @@ let vl = PaddleOcrVl::from_dir("PaddlePaddle/PaddleOCR-VL-1.5", device)?;
 let parser = DocParser::new(&vl);
 
 let result = parser.parse(&layout, load_image("page.jpg")?)?;
-println!("{}", result.to_markdown());
+println!("{}", parser.render_markdown(&result));
 ```
+
+Document settings resolve in three levels: the backend's `DocParserProfile`, an explicitly supplied `DocParserConfig`, then `DocParserOptions`. Per-call options override parser options. Use `with_options` on either parser and `LayoutPageParserOptions::with_doc_parser_options` for individual overrides. `StructureResult::to_markdown` uses the shared renderer; `DocParser::render_markdown` and the cached page Markdown use the selected profile.
+
+| Backend | Region budget | Assembly |
+| --- | --- | --- |
+| PaddleOCR-VL | 4096 | Recognize margins and hide them in Markdown; centered captions/tables; optional following formula number through `FormulaNumberComposition::FollowingStarTag` |
+| GLM-OCR | 8192 | Separate crops, SDK label map and thousandth-grid bounds; adjacent formula numbers with `\tag`; plain tables and fixed section headings |
+| MiniCPM-OCR | SDK label budgets, up to 8192 | Text/vertical-text crop merging, repaired math, italic figure captions and separate formula-number paragraphs |
+| OXR | 8192 | Separate crops, retained body footnotes as Markdown definitions, native code and chemistry formatting |
+| MonkeyOCRv2 | 5000 | Separate crops, per-line titles, retained region errors and its formula/table dialects |
+
+Custom backends use the default profile. Empty layouts return empty pages for PaddleOCR-VL, GLM-OCR, MiniCPM-OCR and MonkeyOCRv2; OXR retains full-page OCR fallback. `RenderStyle` carries title, caption, table, prose, footnote and image-template parameters. GLM hyphen joins use the SDK's dependency-free word-shape rule, and its resized crops use lossless RGB transport.
+
+`PagePreprocessor` transforms a page once before layout. Supply it with `DocParser::with_page_preprocessor` or an owned `Arc` through `LayoutPageParser::with_page_preprocessor`; region coordinates follow the prepared canvas. Images remain structured regions, and callers supply their Markdown asset references. PaddleOCR-VL follows the official pipeline for figures inside tables: it paints `[F#]` tokens over them in the table crop and replaces the tokens in the reply with `<img src="image_{index}.png" alt="Image" />`, where `index` is the one-based region index. The figure regions stay in the structured output, and Markdown shows them only inside the table.
 
 ### MinerU2.5 / MinerU2.5-Pro
 
@@ -468,6 +510,14 @@ let model = MinerU::from_dir("opendatalab/MinerU2.5-2509-1.2B", device)?;
 let document = model.parse_page(&image, &MinerUParseOptions::default())?;
 println!("{:#?}", document.blocks);
 ```
+
+The MinerU 2.5/Pro parser removes near-duplicate regions, accepts the extended layout labels, drops image captions inside images and text inside tables, repairs equations and inline math, and merges `txt_contd_tgt` text continuations. Its shared OTSL dialect pads rows to the widest row and handles empty `fcel` cells. Image Analysis is enabled by default for eligible image and chart regions, following MinerU main; `MinerU::with_image_analysis(false)` turns it off. As in MinerU, a reply can turn the region into a table or equation, charts keep their data table, natural images use their caption, and flowcharts get Mermaid repairs. `raw_output` holds the layout reply followed by each Image Analysis reply. A reply without a class tag leaves an image region with an empty caption, as in MinerU, and adds a diagnostic; On chart pages MinerU2.5-2509 answers this prompt with untagged tables, so pass `with_image_analysis(false)` to skip the extra decoding on that checkpoint. Sampling follows the Transformers recipe: greedy with a 100-token no-repeat n-gram guard and a 16,384-token limit.
+
+Pro table crops keep their original image pixels, while the official Pro extractor masks in-table images with tokens and restores `<img>` references. Text, table and equation crops use shared repetition truncation, while the official MinerU postprocessor keeps their repeated content. Markdown uses shared heading and auxiliary-label policies, while official `json2md` joins every nonempty block without adding headings.
+
+MinerU-Diffusion uses its own rules: 2048-token budgets for layout and tables and 1024 for text and formulas, capped by `MinerUDiffusionParseOptions::generation.gen_length` (default 2048; standalone `DiffusionGenerationConfig` defaults to 1024). Crops use floor/ceil bounds, small crops are upscaled with round-to-even sizes, and lists and unknown labels are recognized as text. Equations are wrapped as generated, without MinerU 2.5's repairs, and tables select the diffusion dialect of the shared OTSL parser. The sampler is seeded, so runs are reproducible, though not identical to PyTorch's random stream.
+
+Diffusion block content also uses shared repetition truncation, while the official end-to-end script keeps repeated content.
 
 ### TeleOCR
 
@@ -489,6 +539,10 @@ let raw = model
 println!("{}", convert_otsl_to_html(raw.trim()));
 ```
 
+TeleOCR's region adapter uses the pipeline's newline-prefixed prompts, including seal recognition and the scientific-figure prompt for charts, and converts chart OTSL to HTML. `TeleOcrTask` prompts keep the model-card wording, and decoding uses the model card's repetition penalty of 1.05.
+
+Formula output uses the model-card unwrap/rewrap helper, while the official pipeline applies its seven-step LaTeX repair chain. `AnyPageParser` uses PP-DocLayout for regions, while the official pipeline asks TeleOCR for its own layout pass.
+
 ### jina-ocr-v1
 
 jina-ocr-v1 performs end-to-end page-to-Markdown parsing on a DeepSeek-OCR backbone: a SAM ViT-B + CLIP-L DeepEncoder produces visual tokens for a padded 1024px global view plus up to nine 640px dynamic tiles, and a 12-layer DeepSeek-V2 MoE decoder (64 routed + 2 shared experts, top-6, ~570M active parameters) generates greedily under the official sliding-window no-repeat-ngram guard.
@@ -509,11 +563,13 @@ let markdown = model
 println!("{markdown}");
 ```
 
-Output is Markdown with LaTeX formulas and HTML tables; the same `generate` path serves `DocParser` region crops. On CUDA the single-token decode step runs as a CUDA graph. The checkpoint's FastMTP head can add speculative decoding that is token-identical to plain autoregressive decoding in exact arithmetic (greedy verification plus the host-side no-repeat-ngram guard; in bf16 the verification block's kernel batching can flip near-tie picks, measured max |Δlogit| ≈ 0.25-0.56 on identical KV state), but it is **opt-in**: measured on the OmniDocBench demo pages (RTX 4090, bf16), adaptive MTP won on no page (median 3.7% slower than graphed plain decoding, +0.7% in total). Enable it with `OAR_JINAOCR_ENABLE_MTP=1` or `JinaOcrLoadOptions::with_mtp(true)` (`--mtp` in the example). Multi-image calls use a padded batch prefill and decode.
+Output is Markdown with LaTeX formulas and HTML tables; the same `generate` path serves `DocParser` region crops. On CUDA the single-token decode step runs as a CUDA graph. The checkpoint's FastMTP head can add speculative decoding that is token-identical to plain autoregressive decoding in exact arithmetic (greedy verification plus the host-side no-repeat-ngram guard; in bf16 the verification block's kernel batching can flip near-tie picks, measured max |Δlogit| ≈ 0.25-0.56 on identical KV state), but it is **opt-in**: measured on the OmniDocBench demo pages (RTX 4090, bf16), adaptive MTP won on no page (median 3.7% slower than graphed plain decoding, +0.7% in total). Enable it with `JinaOcrLoadOptions::with_mtp(true)` (`--mtp` in the example). Multi-image calls use a padded batch prefill and decode.
+
+The loader rejects `crop_mode=false` (the 640-pixel single-view mode). Region recognition uses the page prompt and keeps the first table for table crops. Decoding follows the Transformers recipe with its sliding n-gram guard.
 
 ### Unlimited-OCR-2
 
-Unlimited-OCR-2 (MIT) parses one or several pages in a single request. It shares jina-ocr-v1's DeepSeek-OCR backbone, a SAM ViT-B + CLIP-L DeepEncoder over a 12-layer DeepSeek-V2 MoE decoder, but replaces the decoder's dense attention with DASH block-sparse attention: every query sees a 128-token local window plus up to 12 routed 32-token blocks of its own page's image tokens, chosen by a learned router, under a two-axis (page, token) RoPE. Like the reference `infer`, a single page is encoded as up to 16 dynamic 640px tiles plus a letterboxed 1024px global view, and several pages use the global view only; `UnlimitedOcrViewMode` overrides that choice.
+Unlimited-OCR-2 (MIT) parses one or several pages in a single request. It shares jina-ocr-v1's DeepSeek-OCR backbone, a SAM ViT-B + CLIP-L DeepEncoder over a 12-layer DeepSeek-V2 MoE decoder, but replaces the decoder's dense attention with DASH block-sparse attention: every query sees a 128-token local window plus up to 12 routed 32-token blocks of its own page's image tokens, chosen by a learned router, under a two-axis (page, token) RoPE. Direct `generate` with `UnlimitedOcrViewMode::Auto` follows the reference `infer`: one page uses up to 16 dynamic 640px tiles plus a letterboxed 1024px view, and several pages use global views. Multi-page `PageParser::parse_document` resolves `Auto` to `Tiled`, following the [official evaluation/serving recipe](https://huggingface.co/baidu/Unlimited-OCR-2/blob/c14071b549f4fcab10909f3c4acc6a2edb366947/README.md), which selects `crop_mode=True`. Explicit `Global` selects global views for joint parsing.
 
 ```rust
 use oar_ocr_vl::utils::image::load_image;
@@ -527,7 +583,9 @@ let raw = model.generate(&pages, &UnlimitedOcrGenerationOptions::default())?;
 println!("{}", to_markdown(&raw, false));
 ```
 
-The model does not emit Markdown. Its raw output is a layout-block protocol: each page starts with `<PAGE>`, and each block is declared as `<BLOCK>label<LEVELn>[x1,y1,x2,y2]<FORK>content` with boxes on a 0-1000 grid, `cross_`/`append_` label prefixes that continue a text or table across pages, and `<MERGE>` between same-page columns. `to_markdown` ports the official converter: it groups the continued blocks, merges cross-page tables without their repeated header rows, turns titles into headings, and joins all pages into one document. With `keep_image_refs` it emits the official `![](page{N}_x1_y1_x2_y2.jpg)` figure references; otherwise figures keep only their captions. Decoding is greedy under two guards. The reference page-count guard forces the next `<PAGE>` (or the end, on the last page) after `max_page_tokens` (20,000) tokens on one page, and holds back the end token until every page has begun. The no-repeat n-gram guard from the official serving setup bans the 35-token repeats within the last 128 generated tokens for one page, or 1024 for several (`no_repeat_ngram_size`, `ngram_window`). `max_new_tokens` caps the whole request and defaults to the rest of the 131,072-token context. `AnyPageParserModel::UnlimitedOcr2` (`oar parse --model baidu/Unlimited-OCR-2`) parses each page as its own request, returning the converted Markdown, the layout blocks with normalized boxes, and the raw output. Each decode step gathers only the routed blocks and the local window, so its attention cost does not grow with the document; it does not use a CUDA graph because the routed blocks change at every step.
+The model does not emit Markdown. Its raw output is a layout-block protocol: each page starts with `<PAGE>`, and each block is declared as `<BLOCK>label<LEVELn>[x1,y1,x2,y2]<FORK>content` with boxes on a 0-1000 grid, `cross_`/`append_` label prefixes that continue a text or table across pages, and `<MERGE>` between same-page columns. `to_markdown` ports the official converter: it groups the continued blocks, merges cross-page tables without their repeated header rows, turns titles into headings, and joins all pages into one document. With `keep_image_refs` it emits the official `![](page{N}_x1_y1_x2_y2.jpg)` figure references; otherwise figures keep only their captions. Decoding is greedy under two guards. The reference page-count guard forces the next `<PAGE>` (or the end, on the last page) after `max_page_tokens` (20,000) tokens on one page, and holds back the end token until every page has begun. The no-repeat n-gram guard from the official serving setup bans the 35-token repeats within the last 128 generated tokens for one page, or 1024 for several (`no_repeat_ngram_size`, `ngram_window`). `max_new_tokens` caps the whole request and defaults to the rest of the 131,072-token context. `AnyPageParserModel::UnlimitedOcr2` returns converted Markdown, normalized layout blocks and raw output. `parse_page` sends one page, and `parse_document` sends the ordered pages in one joint request. Each decode step gathers only the routed blocks and the local window, so its attention cost does not grow with the document; it does not use a CUDA graph because the routed blocks change at every step.
+
+The page-count guard follows SGLang by banning `<PAGE>` after the last expected page begins, while the Hugging Face guard permits it and forces EOS after a surplus marker.
 
 ## Running Examples
 
@@ -595,7 +653,13 @@ cargo run --release -p oar-ocr-vl --features cuda --example hunyuanocr -- \
 
 The model repository root contains HunyuanOCR 1.5, which the loader detects automatically. To use the archived 1.0 checkpoint, pass its directory to `--model-dir`. `--dflash-dir` enables the official 15-token parallel draft path for 1.5. Omit it for ordinary autoregressive decoding. Library callers can use `HunyuanOcr::from_dirs(target_dir, dflash_dir, device)` or `HunyuanOcr::from_dir_with_dflash(model_dir, device)` when the draft is stored in the official `dflash/` subdirectory.
 
+Page parsing uses the loaded version's official document prompt when `HunyuanOcrParseOptions::prompt` is empty. Version 1.5 uses the official Chinese task prompts and the benchmark's empty system turn. Region OCR asks for plain text without coordinates. Both versions use area-based smart resizing and the +0.1 positional interpolation from training and vLLM. Repeated suffixes are cleaned once output passes 2000 characters (1.5) or 8000 (1.0). The default output limit is 16,384 tokens.
+
+Page Markdown keeps the model's task formatting after repetition cleanup, while the official document benchmark also applies `normalize_doc_parse_markdown` for OmniDocBench. Generation stops at EOS or the token budget and then cleans repeated suffixes, while the official streaming clients also stop repeated tails during decoding.
+
 ### GLM-OCR Direct Inference
+
+Generation uses the SDK's repetition penalty of 1.1 over prompt and generated tokens, including MTP verification; `with_repetition_penalty(1.0)` gives plain greedy decoding. Region crops get the SDK's preliminary smart resize. Repetition cleanup starts at 2048 characters and leaves complete HTML tables alone, and formulas keep their line breaks.
 
 ```bash
 cargo run --release -p oar-ocr-vl --features cuda --example glmocr -- \

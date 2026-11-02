@@ -60,9 +60,6 @@ pub struct Qwen2VlTextConfig {
     /// Whether each head is normalised by `self_attn.q_norm`/`k_norm`
     /// (RMSNorm over `head_dim`) before RoPE.
     pub qk_head_norm: bool,
-    /// Extra env var (besides `OAR_VL_DISABLE_CUDA_GRAPH`) that disables
-    /// the decode graph for this model.
-    pub graph_disable_env: &'static str,
     /// Upper bound on the decode-graph KV bucket.
     pub decode_cache_len: usize,
 }
@@ -597,6 +594,8 @@ impl Qwen2VlDecoderLayer {
 
 pub struct Qwen2VlTextModel {
     #[cfg(feature = "cuda")]
+    cuda_graphs: bool,
+    #[cfg(feature = "cuda")]
     decode_graph: RefCell<Option<DecoderCudaGraph<CudaGraphInputs>>>,
     embed_tokens: Embedding,
     layers: Vec<Qwen2VlDecoderLayer>,
@@ -604,7 +603,6 @@ pub struct Qwen2VlTextModel {
     rotary_emb: Arc<RotaryEmbedding>,
     mrope_section: Vec<usize>,
     model_name: &'static str,
-    graph_disable_env: &'static str,
     #[cfg(feature = "cuda")]
     decode_cache_len: usize,
     // Must stay the last field: it drops last and drains CUDA errors the
@@ -614,6 +612,18 @@ pub struct Qwen2VlTextModel {
 }
 
 impl Qwen2VlTextModel {
+    pub(crate) fn set_cuda_graphs(&mut self, enabled: bool) {
+        #[cfg(feature = "cuda")]
+        {
+            self.cuda_graphs = enabled;
+            if !enabled {
+                self.invalidate_cuda_graph();
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        let _ = enabled;
+    }
+
     pub fn load(cfg: &Qwen2VlTextConfig, vb: VarBuilder) -> Result<Self, Error> {
         let embed_tokens = embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("embed_tokens"))
             .map_err(|e| candle_to_ocr_inference(cfg.model_name, "load embed_tokens", e))?;
@@ -637,6 +647,8 @@ impl Qwen2VlTextModel {
         let _drain_guard = CudaGraphDrainGuard::new(vb.device());
         Ok(Self {
             #[cfg(feature = "cuda")]
+            cuda_graphs: true,
+            #[cfg(feature = "cuda")]
             decode_graph: RefCell::new(None),
             embed_tokens,
             layers,
@@ -644,7 +656,6 @@ impl Qwen2VlTextModel {
             rotary_emb,
             mrope_section: cfg.mrope_section.clone(),
             model_name: cfg.model_name,
-            graph_disable_env: cfg.graph_disable_env,
             #[cfg(feature = "cuda")]
             decode_cache_len: cfg.decode_cache_len,
             #[cfg(feature = "cuda")]
@@ -736,10 +747,8 @@ impl Qwen2VlTextModel {
         max_new_tokens: usize,
         lm_head: &Linear,
     ) -> Result<(), Error> {
-        if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
-            || std::env::var_os(self.graph_disable_env).is_some()
-        {
-            #[cfg(feature = "cuda")]
+        #[cfg(feature = "cuda")]
+        if !self.cuda_graphs {
             self.invalidate_cuda_graph();
             return Ok(());
         }
@@ -984,7 +993,6 @@ mod tests {
             mrope_section: vec![2, 1, 1],
             attention_bias: tuning.attention_bias,
             qk_head_norm: tuning.qk_head_norm,
-            graph_disable_env: "OAR_UNIT_TEST_DISABLE_CUDA_GRAPH",
             decode_cache_len: 512,
         }
     }
@@ -1220,7 +1228,6 @@ mod tests {
             mrope_section: vec![16, 24, 24],
             attention_bias: tuning.attention_bias,
             qk_head_norm: tuning.qk_head_norm,
-            graph_disable_env: "OAR_VL_DISABLE_CUDA_GRAPH",
             decode_cache_len: 16_384,
         }
     }

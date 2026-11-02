@@ -3,3 +3,5 @@
 pub mod geometry;
 pub mod page;
 pub mod structure;
+
+pub(crate) mod decoding;

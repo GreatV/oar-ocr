@@ -1,0 +1,98 @@
+[
+  {
+    "name": "natural caption",
+    "raw": "<|class_start|>natural_image<|class_end|>\n<|sub_class_start|>bar<|sub_class_end|>\n<|caption_start|>Photo of a cat<|caption_end|>\n<|content_start|>visible content<|content_end|>",
+    "type": "image",
+    "content": "Photo of a cat"
+  },
+  {
+    "name": "pure table html",
+    "raw": "<|class_start|>pure_table<|class_end|>\n<|sub_class_start|>bar<|sub_class_end|>\n<|caption_start|><|caption_end|>\n<|content_start|><table><tr><td>\\( x \\)</td><td><eq>\\(y\\)</eq> \\[ z \\] \\(\\)</td></tr></table><|content_end|>",
+    "type": "table",
+    "content": "<table><tr><td><eq>x</eq></td><td><eq>\\(y\\)</eq> <eq>z</eq> \\(\\)</td></tr></table>"
+  },
+  {
+    "name": "pure table otsl",
+    "raw": "<|class_start|>pure_table<|class_end|>\n<|sub_class_start|>bar<|sub_class_end|>\n<|caption_start|><|caption_end|>\n<|content_start|><fcel>A<fcel>B<nl><|content_end|>",
+    "type": "table",
+    "content": "<table><tr><td>A</td><td>B</td></tr></table>"
+  },
+  {
+    "name": "pure table grid",
+    "raw": "<|class_start|>pure_table<|class_end|>\n<|sub_class_start|>bar<|sub_class_end|>\n<|caption_start|><|caption_end|>\n<|content_start|>| <A> | B |\n| --- | --- |\n| x\\|y | z |<|content_end|>",
+    "type": "table",
+    "content": "<table><tr><th>&lt;A&gt;</th><th>B</th></tr><tr><td>x|y</td><td>z</td></tr></table>"
+  },
+  {
+    "name": "pure formula",
+    "raw": "<|class_start|>pure_formula<|class_end|>\n<|sub_class_start|>bar<|sub_class_end|>\n<|caption_start|><|caption_end|>\n<|content_start|>x^2<|content_end|>",
+    "type": "equation",
+    "content": "x^2"
+  },
+  {
+    "name": "chart grid",
+    "raw": "<|class_start|>chart<|class_end|>\n<|sub_class_start|>bar<|sub_class_end|>\n<|caption_start|>chart caption<|caption_end|>\n<|content_start|>| A | B |\n| --- | --- |\n| 1 | 2 |<|content_end|>",
+    "type": "chart",
+    "content": "| A | B |\n| --- | --- |\n| 1 | 2 |"
+  },
+  {
+    "name": "malformed chart",
+    "raw": "<|class_start|>chart<|class_end|>\n<|sub_class_start|>bar<|sub_class_end|>\n<|caption_start|>chart caption<|caption_end|>\n<|content_start|>| A | B |\n| --- | --- |\n| 1 | 2 | 3 |<|content_end|>",
+    "type": "chart",
+    "content": ""
+  },
+  {
+    "name": "mermaid node ids",
+    "raw": "<|class_start|>flowchart<|class_end|>\n<|sub_class_start|>bar<|sub_class_end|>\n<|caption_start|>diagram<|caption_end|>\n<|content_start|>graph TD\n1 node --> two node;\nsubgraph 1) Trigger\nA -->|path (ok)| B\nend<|content_end|>",
+    "type": "image",
+    "content": "```mermaid\ngraph TD\n  n1Node[\"1 node\"] --> twoNode[\"two node\"];\nsubgraph sg_1_Trigger[\"1) Trigger\"]\n  A -->|path ok| B\nend\n```"
+  },
+  {
+    "name": "mermaid invalid edge",
+    "raw": "<|class_start|>flowchart<|class_end|>\n<|sub_class_start|>bar<|sub_class_end|>\n<|caption_start|>diagram<|caption_end|>\n<|content_start|>graph TD\nA -->|ok| B\nG -->node(DRAM)| H\nC --> D<|content_end|>",
+    "type": "image",
+    "content": "```mermaid\ngraph TD\n  A -->|ok| B\n  C --> D\n```"
+  },
+  {
+    "name": "mermaid arrows",
+    "raw": "<|class_start|>flowchart<|class_end|>\n<|sub_class_start|>bar<|sub_class_end|>\n<|caption_start|>diagram<|caption_end|>\n<|content_start|>grap TD\n  A - -> B\n  B < -- > C\n  C[one \"quoted\" value] --> D<|content_end|>",
+    "type": "image",
+    "content": "```mermaid\ngraph TD\n  A --> B\n  B <--> C\n  C[\"one &quot;quoted&quot; value\"] --> D\n```"
+  },
+  {
+    "name": "mermaid nested quoting",
+    "raw": "<|class_start|>flowchart<|class_end|>\n<|sub_class_start|>bar<|sub_class_end|>\n<|caption_start|>diagram<|caption_end|>\n<|content_start|>```mermaid\nflowchart LR\n A[\"[array]\"] --> B[\"two\nlines\"]\n```<|content_end|>",
+    "type": "image",
+    "content": "```mermaid\nflowchart LR\n  A[\"[array]\"] --> B[\"two<br>lines\"]\n```"
+  },
+  {
+    "name": "repeated mermaid",
+    "raw": "<|class_start|>flowchart<|class_end|>\n<|sub_class_start|>bar<|sub_class_end|>\n<|caption_start|>fallback diagram<|caption_end|>\n<|content_start|>graph TD\nA --> B\nA --> B\nA --> B\nA --> B\nA --> B\nA --> B\nA --> B\nA --> B\n<|content_end|>",
+    "type": "image",
+    "content": "fallback diagram"
+  },
+  {
+    "name": "chart tie",
+    "raw": "<|class_start|>chart<|class_end|>\n<|sub_class_start|>bar<|sub_class_end|>\n<|caption_start|>chart caption<|caption_end|>\n<|content_start|>| A | B |\n| --- | --- |\n| 1 | 2 |\n\n\n\n\n| A | B |\n| --- | --- |\n| 9 | 8 |\n\n\n\n\n| A | B |\n| --- | --- |\n| 9 | 8 |<|content_end|>",
+    "type": "chart",
+    "content": "| A | B |\n| --- | --- |\n| 1 | 2 |"
+  },
+  {
+    "name": "chemical fallback",
+    "raw": "<|class_start|>chemical<|class_end|>\n<|sub_class_start|>bar<|sub_class_end|>\n<|caption_start|>Water molecule<|caption_end|>\n<|content_start|>chemical markup<|content_end|>",
+    "type": "image",
+    "content": "Water molecule"
+  },
+  {
+    "name": "chart repair",
+    "raw": "<|class_start|>chart<|class_end|>\n<|sub_class_start|>bar<|sub_class_end|>\n<|caption_start|>chart caption<|caption_end|>\n<|content_start|>| A | B |\n| --- | --- |\n| 1 | 2 |\n| A | B |\n| --- | --- |\n| 1 | 2 |\n| A | B |\n| --- | --- |\n| 1 | 2 |<|content_end|>",
+    "type": "chart",
+    "content": "| A | B |\n| --- | --- |\n| 1 | 2 |\n| A | B |\n| --- | --- |\n| 1 | 2 |\n| A | B |\n| --- | --- |\n| 1 | 2 |"
+  },
+  {
+    "name": "truncated content tag",
+    "raw": "<|class_start|>pure_formula<|class_end|><|content_start|>x+1\n",
+    "type": "equation",
+    "content": "x+1\n"
+  }
+]

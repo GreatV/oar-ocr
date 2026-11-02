@@ -1,16 +1,26 @@
 //! Region-recognition adapter for HunyuanOCR.
 
-use super::HunyuanOcr;
+use super::{HunyuanOcr, HunyuanOcrVersion, parser::clean_output};
 use crate::api::error::{BatchResult, Error};
 use crate::api::recognition::{RecognitionBackend, RecognitionTask};
-use crate::utils::truncate_repetitive_content;
 use image::RgbImage;
 
-fn prompt(task: RecognitionTask) -> &'static str {
+fn prompt(task: RecognitionTask, version: HunyuanOcrVersion) -> &'static str {
+    if version == HunyuanOcrVersion::V1_5 {
+        // Official inference/utils/tasks.py fixed task wording.
+        return match task {
+            RecognitionTask::Ocr => "提取图中的文字。",
+            RecognitionTask::Table => "把图中的表格解析为HTML。",
+            RecognitionTask::Formula => "识别图片中的公式，用LaTeX格式表示。",
+            RecognitionTask::Chart => {
+                "解析图中的图表，对于流程图使用Mermaid格式表示，其他图表使用Markdown格式表示。"
+            }
+        };
+    }
     match task {
-        RecognitionTask::Ocr => {
-            "Detect and recognize text in the image, and output the text coordinates in a formatted manner."
-        }
+        // V1 has no published plain-region recipe; avoid its spotting prompt,
+        // which requests coordinates in otherwise plain recognized text.
+        RecognitionTask::Ocr => "Extract all text from the image.",
         RecognitionTask::Table => "Parse the table in the image into HTML.",
         RecognitionTask::Formula => {
             "Identify the formula in the image and represent it using LaTeX format."
@@ -21,12 +31,6 @@ fn prompt(task: RecognitionTask) -> &'static str {
     }
 }
 
-fn clean(output: String) -> String {
-    truncate_repetitive_content(&output, 10, 10, 10)
-        .trim()
-        .to_string()
-}
-
 impl RecognitionBackend for HunyuanOcr {
     fn recognize(
         &self,
@@ -34,11 +38,11 @@ impl RecognitionBackend for HunyuanOcr {
         task: RecognitionTask,
         max_tokens: usize,
     ) -> Result<String, Error> {
-        self.generate(&[image], &[prompt(task)], max_tokens)?
+        self.generate(&[image], &[prompt(task, self.version())], max_tokens)?
             .into_iter()
             .next()
             .ok_or_else(|| Error::invalid_input("HunyuanOCR: no result returned"))?
-            .map(clean)
+            .map(|text| clean_output(&text, self.version()))
     }
 
     fn recognize_batch(
@@ -47,11 +51,14 @@ impl RecognitionBackend for HunyuanOcr {
         tasks: &[RecognitionTask],
         max_tokens: usize,
     ) -> BatchResult<String> {
-        let prompts: Vec<_> = tasks.iter().copied().map(prompt).collect();
+        let prompts: Vec<_> = tasks
+            .iter()
+            .map(|&task| prompt(task, self.version()))
+            .collect();
         Ok(self
             .generate(&images, &prompts, max_tokens)?
             .into_iter()
-            .map(|result| result.map(clean))
+            .map(|result| result.map(|text| clean_output(&text, self.version())))
             .collect())
     }
 

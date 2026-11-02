@@ -314,11 +314,18 @@ impl UnlimitedOcr {
                 "Unlimited-OCR needs at least one page",
             ));
         }
+        if options.max_new_tokens == Some(0) {
+            return Ok(Vec::new());
+        }
         let inputs = self.preprocess_pages(pages, options.view_mode)?;
         let ids = self.prompt_ids(&inputs, instruction)?;
-        let max_new_tokens = options
-            .max_new_tokens
-            .unwrap_or_else(|| MAX_LENGTH.saturating_sub(ids.len()).max(1));
+        if ids.len() >= MAX_LENGTH {
+            return Err(Error::invalid_input(
+                "Unlimited-OCR prompt exceeds its context window; use fewer pages per request",
+            ));
+        }
+        let remaining = MAX_LENGTH - ids.len();
+        let max_new_tokens = options.max_new_tokens.unwrap_or(remaining).min(remaining);
         let embeds = self.embeddings(&ids, &inputs)?;
         drop(inputs);
 
@@ -416,6 +423,9 @@ impl PageCountGuard {
     }
 
     fn apply(&mut self, scores: &mut [f32], generated: &[u32], page: u32, eos: u32) {
+        if self.expected == 0 {
+            return;
+        }
         for &token in &generated[self.scanned..] {
             if token == page {
                 self.markers += 1;
@@ -445,6 +455,8 @@ impl PageCountGuard {
             );
         } else if self.markers < self.expected {
             scores[eos as usize] = f32::NEG_INFINITY;
+        } else {
+            scores[page as usize] = f32::NEG_INFINITY;
         }
     }
 }
@@ -476,6 +488,21 @@ mod tests {
         scores[page as usize] = f32::NEG_INFINITY;
         guard.apply(&mut scores, &[page, 3], page, eos);
         assert_eq!(argmax(&scores), page);
+
+        let mut guard = PageCountGuard::new(2, 0);
+        let mut scores = vec![0.0f32; 4];
+        guard.apply(&mut scores, &[page, 3, page], page, eos);
+        assert_eq!(scores[page as usize], f32::NEG_INFINITY);
+        assert_eq!(scores[eos as usize], 0.0);
+        let mut scores = vec![0.0f32; 4];
+        guard.apply(&mut scores, &[page, 3, page, page], page, eos);
+        assert_eq!(argmax(&scores), eos);
+        assert_eq!(scores.iter().filter(|s| s.is_finite()).count(), 1);
+
+        let mut guard = PageCountGuard::new(0, 3);
+        let mut scores = vec![0.0f32; 4];
+        guard.apply(&mut scores, &[page], page, eos);
+        assert!(scores.iter().all(|s| s.is_finite()));
 
         // `5 6` was followed by 7 inside the window, so 7 is banned; a
         // window that no longer holds that n-gram bans nothing.

@@ -97,8 +97,9 @@ pub(super) fn preprocess(
     let mut chw = vec![0f32; pixels * 3];
     for (index, pixel) in resized.pixels().enumerate() {
         for channel in 0..3 {
-            // The PIL backend first rescales in NumPy float64, then casts to
-            // float32 before normalization. Do not fuse these operations.
+            // Our Pillow path rescales in f64 before f32 normalization.
+            // The reference fast processor uses torchvision antialiased
+            // bilinear instead, so uint8 rounding can differ.
             let scaled = (pixel[channel] as f64 * config.rescale_factor) as f32;
             chw[channel * pixels + index] =
                 (scaled - config.image_mean[channel]) / config.image_std[channel];

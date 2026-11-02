@@ -142,6 +142,7 @@ type ScaleAwareDetectorPreprocessResult = Result<ScaleAwareDetectorPreprocessArt
 pub struct ScaleAwareDetectorModel {
     inference: OrtInfer,
     resizer: DetResizeForTest,
+    cv2_cubic_resize: bool,
     normalizer: NormalizeImage,
     inference_mode: ScaleAwareDetectorInferenceMode,
     _preprocess_config: ScaleAwareDetectorPreprocessConfig,
@@ -184,6 +185,7 @@ impl ScaleAwareDetectorModel {
         Ok(Self {
             inference,
             resizer,
+            cv2_cubic_resize: false,
             normalizer,
             inference_mode,
             _preprocess_config: preprocess_config,
@@ -212,12 +214,16 @@ impl ScaleAwareDetectorModel {
             images.into_iter().map(DynamicImage::ImageRgb8).collect();
 
         // Resize images
-        let (resized_images, img_shapes) = self.resizer.apply(
-            dynamic_images,
-            None, // Use configured limit_side_length
-            None, // Use configured limit_type
-            None,
-        );
+        let (resized_images, img_shapes) = if self.cv2_cubic_resize {
+            self.resizer.apply_with_cv2_cubic(dynamic_images)
+        } else {
+            self.resizer.apply(
+                dynamic_images,
+                None, // Use configured limit_side_length
+                None, // Use configured limit_type
+                None,
+            )
+        };
 
         // Get resized dimensions
         let resized_shapes: Vec<[f32; 2]> = resized_images
@@ -445,6 +451,7 @@ impl ScaleAwareDetectorModel {
 /// Builder for scale-aware detection models.
 #[derive(Debug, Default)]
 pub struct ScaleAwareDetectorModelBuilder {
+    cv2_cubic_resize: bool,
     preprocess_config: Option<ScaleAwareDetectorPreprocessConfig>,
     inference_mode: Option<ScaleAwareDetectorInferenceMode>,
 }
@@ -458,6 +465,7 @@ impl ScaleAwareDetectorModelBuilder {
     /// Configures as PicoDet model (ScaleFactorOnly mode).
     pub fn picodet() -> Self {
         Self {
+            cv2_cubic_resize: false,
             preprocess_config: Some(ScaleAwareDetectorPreprocessConfig::picodet()),
             inference_mode: Some(ScaleAwareDetectorInferenceMode::ScaleFactorOnly),
         }
@@ -466,9 +474,16 @@ impl ScaleAwareDetectorModelBuilder {
     /// Configures as PP-DocLayout model (ScaleFactorAndImageShape mode).
     pub fn pp_doclayout() -> Self {
         Self {
+            cv2_cubic_resize: true,
             preprocess_config: Some(ScaleAwareDetectorPreprocessConfig::pp_doclayout()),
             inference_mode: Some(ScaleAwareDetectorInferenceMode::ScaleFactorAndImageShape),
         }
+    }
+
+    /// Set whether to resize with OpenCV's generic cubic kernel. PP-DocLayout enables it by default.
+    pub fn with_cv2_cubic_resize(mut self, enabled: bool) -> Self {
+        self.cv2_cubic_resize = enabled;
+        self
     }
 
     /// Sets the preprocessing configuration.
@@ -503,6 +518,8 @@ impl ScaleAwareDetectorModelBuilder {
             .inference_mode
             .unwrap_or(ScaleAwareDetectorInferenceMode::ScaleFactorOnly);
 
-        ScaleAwareDetectorModel::new(inference, preprocess_config, inference_mode)
+        let mut model = ScaleAwareDetectorModel::new(inference, preprocess_config, inference_mode)?;
+        model.cv2_cubic_resize = self.cv2_cubic_resize;
+        Ok(model)
     }
 }

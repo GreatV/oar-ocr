@@ -19,8 +19,14 @@ impl Point {
     }
 }
 
-/// A polygon bounding box. Detectors here emit axis-aligned rectangles, but the
-/// representation keeps arbitrary point lists so rotated regions stay exact.
+pub(crate) fn point_from_grid(point: [f32; 2], grid: f32, width: u32, height: u32) -> Point {
+    Point::new(
+        point[0] / grid * width as f32,
+        point[1] / grid * height as f32,
+    )
+}
+
+/// A polygon storing detector rectangles or mask-derived crop geometry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BoundingBox {
     /// Corner points, in order.

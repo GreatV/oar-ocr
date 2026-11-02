@@ -17,31 +17,6 @@ const ATTN_CHUNK_SIZE: usize = 512;
 /// Free-memory headroom for allocations after the softmax scratch peak.
 const ATTN_FREE_MEM_HEADROOM: usize = 256 * 1024 * 1024;
 
-/// [`ATTN_FULL_SEQ_THRESHOLD`], overridable via the
-/// `OAR_VL_ATTN_FULL_SEQ_THRESHOLD` env var (`0` forces chunked attention).
-fn attn_full_seq_threshold() -> usize {
-    static THRESHOLD: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *THRESHOLD.get_or_init(|| {
-        match std::env::var("OAR_VL_ATTN_FULL_SEQ_THRESHOLD") {
-            Ok(v) => match v.trim().parse() {
-                Ok(t) => {
-                    tracing::info!(
-                        "vision attention full-seq threshold {t} from OAR_VL_ATTN_FULL_SEQ_THRESHOLD"
-                    );
-                    t
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        "ignoring invalid OAR_VL_ATTN_FULL_SEQ_THRESHOLD value '{v}' (expected an integer)"
-                    );
-                    ATTN_FULL_SEQ_THRESHOLD
-                }
-            },
-            Err(_) => ATTN_FULL_SEQ_THRESHOLD,
-        }
-    })
-}
-
 /// Peak transient bytes of the full-matrix path: the `[b, heads, seq, seq]`
 /// scores in the compute dtype, their F32 copy, the F32 softmax output, and
 /// the cast back are all live at once. `None` on `usize` overflow.
@@ -260,12 +235,9 @@ impl VisionAttention {
 
         // Metal's fused SDPA supports head_dim 72 and replaces the materialized
         // `[b, heads, seq, seq]` scores and their F32 softmax with one dispatch.
-        // Metal-only: the eager path stays byte-stable for CUDA. Still gated on
-        // the threshold so `OAR_VL_ATTN_FULL_SEQ_THRESHOLD` keeps forcing the
-        // chunked path as documented, even though the fused kernel is the
-        // leanest of the three.
+        // Keep the same full-sequence threshold for fused Metal attention.
         if hidden_states.device().is_metal()
-            && seq <= attn_full_seq_threshold()
+            && seq <= ATTN_FULL_SEQ_THRESHOLD
             && let Some(fused) =
                 crate::attention::try_fused_sdpa(&q, &k, &v, None, self.scale, false)
                     .map_err(|e| candle_to_ocr_inference("PaddleOCR-VL", "vision fused sdpa", e))?
@@ -292,7 +264,7 @@ impl VisionAttention {
         // small-VRAM GPUs (issue #147) and thrash the unified-memory working set
         // on small Macs (issue #177). The chunked fallback is numerically
         // equivalent (mirrors PyTorch SDPA's memory profile).
-        let attn_output = if seq <= attn_full_seq_threshold()
+        let attn_output = if seq <= ATTN_FULL_SEQ_THRESHOLD
             && eager_attn_fits(
                 hidden_states.device(),
                 eager_attn_scratch_bytes(b, self.num_heads, seq, q.dtype()),

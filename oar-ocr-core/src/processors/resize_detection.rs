@@ -23,6 +23,7 @@ use rayon::prelude::*;
 use std::borrow::Cow;
 use tracing::{error, warn};
 
+mod cv2_resize;
 mod exact_resize;
 
 // Share geometry and operation order between the owned public API and DB's
@@ -72,6 +73,25 @@ impl ResizeSource for Cow<'_, RgbImage> {
         let mut padded = RgbImage::new(width, height);
         image::imageops::overlay(&mut padded, self.as_ref(), 0, 0);
         Cow::Owned(padded)
+    }
+}
+
+// Select the sampler independently of the shared resize geometry.
+struct CubicImage(DynamicImage);
+
+impl ResizeSource for CubicImage {
+    fn dimensions(&self) -> (u32, u32) {
+        GenericImageView::dimensions(&self.0)
+    }
+
+    fn resized(&self, width: u32, height: u32, _filter: image::imageops::FilterType) -> Self {
+        let rgb = self.0.to_rgb8();
+        let resized = cv2_resize::cv2_cubic_resize(&rgb, width, height).unwrap_or(rgb);
+        Self(DynamicImage::ImageRgb8(resized))
+    }
+
+    fn padded(&self, width: u32, height: u32) -> Self {
+        Self(self.0.padded(width, height))
     }
 }
 
@@ -205,6 +225,19 @@ impl DetResizeForTest {
         imgs.into_par_iter()
             .map(|img| self.resize(img, None, None, None))
             .collect()
+    }
+
+    pub(crate) fn apply_with_cv2_cubic(
+        &self,
+        images: Vec<DynamicImage>,
+    ) -> (Vec<DynamicImage>, Vec<ImageScaleInfo>) {
+        images
+            .into_par_iter()
+            .map(|image| {
+                let (image, info) = self.resize(CubicImage(image), None, None, None);
+                (image.0, info)
+            })
+            .unzip()
     }
 
     /// Resizes a single image based on the configured resize type
@@ -556,5 +589,21 @@ mod tests {
                 }
             }
         }
+        resizer.resize_type = ResizeType::Type1 {
+            image_shape: (2, 3),
+            keep_ratio: false,
+        };
+        let sample = RgbImage::from_fn(64, 48, |x, y| {
+            image::Rgb(std::array::from_fn(|channel| {
+                let index = ((y * 64 + x) * 3) as usize + channel;
+                ((index * 37 + index / 11 * 19) % 256) as u8
+            }))
+        });
+        let (images, scales) = resizer.apply_with_cv2_cubic(vec![DynamicImage::ImageRgb8(sample)]);
+        let output = images[0].as_rgb8().unwrap();
+        assert_eq!(output.dimensions(), (3, 2));
+        assert_eq!(output.get_pixel(0, 0).0, [131, 52, 88]);
+        assert_eq!(output.get_pixel(2, 1).0, [153, 188, 255]);
+        assert_eq!([scales[0].ratio_h, scales[0].ratio_w], [2. / 48., 3. / 64.]);
     }
 }

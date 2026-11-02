@@ -70,7 +70,7 @@ use tracing::{error, info};
 
 use oar_ocr_vl::utils::image::load_image;
 use oar_ocr_vl::utils::parse_device;
-use oar_ocr_vl::{DocParserConfig, LayoutPageParser, PageParser, PpDocLayout};
+use oar_ocr_vl::{DocParserOptions, LayoutPageParser, PageParser, PpDocLayout};
 
 /// Recognition model type
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -130,9 +130,9 @@ struct Args {
     #[arg(short, long)]
     output_dir: Option<PathBuf>,
 
-    /// Maximum tokens to generate per region
-    #[arg(long, default_value = "4096")]
-    max_tokens: usize,
+    /// Generation limit per region; omitted uses the backend default.
+    #[arg(long)]
+    max_tokens: Option<usize>,
 
     /// Maximum same-task crops per region batch. Increase cautiously;
     /// VLM batches trade more memory for throughput; equal-token batches also
@@ -188,10 +188,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let layout = PpDocLayout::from_dir(&args.layout_dir, device.clone())?;
     info!("Layout model: {:?}", layout.version());
 
-    // Create config
-    let config = DocParserConfig {
-        max_tokens: args.max_tokens,
-        ..DocParserConfig::default()
+    let options = match args.max_tokens {
+        Some(limit) => DocParserOptions::default().with_max_tokens(limit),
+        None => DocParserOptions::default(),
     };
 
     // Process images with the selected model
@@ -205,7 +204,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
 
-            let parser = LayoutPageParser::with_config(layout, vl, config)
+            let parser = LayoutPageParser::new(layout, vl)
+                .with_options(options)
                 .with_region_batch_size(args.region_batch_size);
             process_images(&parser, &existing_images, &args)?;
         }
@@ -218,7 +218,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
 
-            let parser = LayoutPageParser::with_config(layout, model, config)
+            let parser = LayoutPageParser::new(layout, model)
+                .with_options(options)
                 .with_region_batch_size(args.region_batch_size);
             process_images(&parser, &existing_images, &args)?;
         }
@@ -231,7 +232,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
 
-            let parser = LayoutPageParser::with_config(layout, model, config)
+            let parser = LayoutPageParser::new(layout, model)
+                .with_options(options)
                 .with_region_batch_size(args.region_batch_size);
             process_images(&parser, &existing_images, &args)?;
         }
@@ -244,7 +246,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
 
-            let parser = LayoutPageParser::with_config(layout, model, config)
+            let parser = LayoutPageParser::new(layout, model)
+                .with_options(options)
                 .with_region_batch_size(args.region_batch_size);
             process_images(&parser, &existing_images, &args)?;
         }
@@ -257,7 +260,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
 
-            let parser = LayoutPageParser::with_config(layout, model, config)
+            let parser = LayoutPageParser::new(layout, model)
+                .with_options(options)
                 .with_region_batch_size(args.region_batch_size);
             process_images(&parser, &existing_images, &args)?;
         }

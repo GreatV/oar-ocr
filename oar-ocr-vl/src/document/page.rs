@@ -11,7 +11,7 @@ pub struct DocumentBlock {
     pub block_type: String,
     /// Normalized `[x1, y1, x2, y2]` coordinates in `[0, 1]`.
     pub bbox: [f32; 4],
-    /// Clockwise rotation applied before recognition.
+    /// Model-native rotation angle; its direction follows the model protocol.
     pub angle: Option<u16>,
     /// Recognized block content.
     pub content: Option<String>,
@@ -41,6 +41,34 @@ pub struct PageDocument {
     pub diagnostics: Vec<ParseDiagnostic>,
 }
 
+/// A complete document, retaining joint model output and cross-page Markdown.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct DocumentOutput {
+    /// Parsed pages in input order, including pages without Markdown.
+    pub pages: Vec<PageDocument>,
+    /// Joint model Markdown, or the joined Markdown of pages that provide it.
+    pub markdown: Option<String>,
+    /// Raw joint model output, when the document was generated in one request.
+    pub raw_output: Option<String>,
+}
+
+impl DocumentOutput {
+    /// Build a document by joining available page Markdown in input order. Returns no document Markdown only when every page has `markdown: None`.
+    pub fn from_pages(pages: Vec<PageDocument>) -> Self {
+        let chunks: Vec<_> = pages
+            .iter()
+            .filter_map(|page| page.markdown.as_deref())
+            .collect();
+        let markdown = (!chunks.is_empty()).then(|| chunks.join("\n\n"));
+        Self {
+            pages,
+            markdown,
+            raw_output: None,
+        }
+    }
+}
+
 /// Maps built-in VL labels that `LayoutElementType::from_label` does not know
 /// (MinerU's native block types) onto the canonical page JSON vocabulary.
 fn canonical_alias(label: &str) -> &str {
@@ -56,6 +84,49 @@ fn canonical_alias(label: &str) -> &str {
 }
 
 impl PageDocument {
+    /// Render normalized blocks with the shared label and Markdown policy.
+    pub fn render_markdown(&self) -> String {
+        use crate::document::{
+            geometry::BoundingBox,
+            structure::{LayoutElement, LayoutElementType},
+        };
+        let elements: Vec<_> = self
+            .blocks
+            .iter()
+            .filter(|block| {
+                block
+                    .content
+                    .as_deref()
+                    .is_some_and(|text| !text.trim().is_empty())
+            })
+            .map(|block| {
+                let label = canonical_alias(&block.block_type);
+                let kind = LayoutElementType::from_label(label);
+                let [x1, y1, x2, y2] = block.bbox;
+                LayoutElement::new(BoundingBox::from_coords(x1, y1, x2, y2), kind, 1.0)
+                    .with_label(if kind == LayoutElementType::Other {
+                        label
+                    } else {
+                        kind.as_str()
+                    })
+                    .with_text(block.content.as_deref().unwrap_or_default())
+            })
+            .collect();
+        let ignore_labels = crate::render::markdown::default_markdown_ignore_labels();
+        elements
+            .iter()
+            .map(|element| {
+                crate::render::markdown::to_markdown(
+                    std::slice::from_ref(element),
+                    &ignore_labels,
+                    false,
+                )
+            })
+            .filter(|chunk| !chunk.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
     /// Exports this page in the shared page JSON format.
     ///
     /// This is the versioned interchange format documented in the
@@ -180,6 +251,67 @@ mod tests {
     use super::*;
     use crate::document::geometry::BoundingBox;
     use crate::document::structure::{LayoutElement, LayoutElementType};
+
+    #[test]
+    fn document_joins_only_pages_with_markdown() {
+        let document = DocumentOutput::from_pages(vec![
+            PageDocument {
+                markdown: Some("first".into()),
+                ..PageDocument::default()
+            },
+            PageDocument::default(),
+            PageDocument {
+                markdown: Some("last".into()),
+                ..PageDocument::default()
+            },
+        ]);
+        assert_eq!(document.pages.len(), 3);
+        assert_eq!(document.markdown.as_deref(), Some("first\n\nlast"));
+        assert!(
+            DocumentOutput::from_pages(vec![PageDocument::default()])
+                .markdown
+                .is_none()
+        );
+        assert!(DocumentOutput::from_pages(Vec::new()).markdown.is_none());
+        assert_eq!(
+            DocumentOutput::from_pages(vec![PageDocument {
+                markdown: Some(String::new()),
+                ..PageDocument::default()
+            }])
+            .markdown
+            .as_deref(),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn rendering_skips_empty_blocks_and_headings() {
+        let blocks = [
+            ("text", Some("first")),
+            ("image", None),
+            ("doc_title", Some("  ")),
+            ("paragraph_title", Some("")),
+            ("text", None),
+            ("table", Some("<html></html>")),
+            ("text", Some("last")),
+        ]
+        .into_iter()
+        .map(|(label, content)| DocumentBlock {
+            block_type: label.into(),
+            bbox: [0.0, 0.0, 1.0, 1.0],
+            angle: None,
+            content: content.map(str::to_string),
+        })
+        .collect();
+        assert_eq!(
+            PageDocument {
+                blocks,
+                ..PageDocument::default()
+            }
+            .render_markdown(),
+            "first\n\nlast"
+        );
+    }
 
     #[test]
     fn page_json_matches_the_documented_format() {

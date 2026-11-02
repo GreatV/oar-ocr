@@ -5,7 +5,7 @@ use crate::api::page_parser::PageParser;
 use crate::api::recognition::RecognitionBackend;
 use crate::document::page::PageDocument;
 use crate::document::structure::StructureResult;
-use crate::pipeline::doc_parser::{DocParser, DocParserConfig};
+use crate::pipeline::doc_parser::{DocParser, DocParserConfig, DocParserOptions};
 use crate::pipeline::layout::LayoutSource;
 use image::RgbImage;
 
@@ -21,9 +21,17 @@ pub struct LayoutPageParserOptions {
     pub config: Option<DocParserConfig>,
     /// Override the maximum same-task region batch size. Zero is treated as one.
     pub region_batch_size: Option<usize>,
+    /// Document overrides applied after the profile and chosen config.
+    pub doc_parser: DocParserOptions,
 }
 
 impl LayoutPageParserOptions {
+    /// Set document overrides for this call.
+    pub fn with_doc_parser_options(mut self, options: DocParserOptions) -> Self {
+        self.doc_parser = options;
+        self
+    }
+
     /// Override the document settings for this page.
     pub fn with_config(mut self, config: DocParserConfig) -> Self {
         self.config = Some(config);
@@ -46,13 +54,26 @@ pub struct LayoutPageParser<L: LayoutSource, B: RecognitionBackend> {
     layout: L,
     backend: B,
     config: DocParserConfig,
+    config_override: Option<DocParserConfig>,
+    options: DocParserOptions,
     region_batch_size: usize,
+    page_preprocessor:
+        Option<std::panic::AssertUnwindSafe<std::sync::Arc<dyn crate::PagePreprocessor>>>,
 }
 
 impl<L: LayoutSource, B: RecognitionBackend> LayoutPageParser<L, B> {
     /// Compose a layout source and backend with default document settings.
     pub fn new(layout: L, backend: B) -> Self {
-        Self::with_config(layout, backend, DocParserConfig::default())
+        let config = DocParser::new(&backend).config().clone();
+        Self {
+            layout,
+            backend,
+            config,
+            config_override: None,
+            options: DocParserOptions::default(),
+            region_batch_size: 1,
+            page_preprocessor: None,
+        }
     }
 
     /// Compose a layout source and backend with custom document settings.
@@ -60,9 +81,31 @@ impl<L: LayoutSource, B: RecognitionBackend> LayoutPageParser<L, B> {
         Self {
             layout,
             backend,
-            config,
+            config: config.clone(),
+            config_override: Some(config),
+            options: DocParserOptions::default(),
             region_batch_size: 1,
+            page_preprocessor: None,
         }
+    }
+
+    /// Apply document overrides above the profile and explicit configuration.
+    pub fn with_options(mut self, options: DocParserOptions) -> Self {
+        self.options = self.options.merge(&options);
+        self.config = self
+            .doc_parser(&LayoutPageParserOptions::default())
+            .config()
+            .clone();
+        self
+    }
+
+    /// Set an owned page transform applied before layout detection.
+    pub fn with_page_preprocessor(
+        mut self,
+        preprocessor: std::sync::Arc<dyn crate::PagePreprocessor>,
+    ) -> Self {
+        self.page_preprocessor = Some(std::panic::AssertUnwindSafe(preprocessor));
+        self
     }
 
     /// Set the default same-task region batch size. Zero is treated as one.
@@ -103,12 +146,21 @@ impl<L: LayoutSource, B: RecognitionBackend> LayoutPageParser<L, B> {
     ) -> Result<StructureResult, Error> {
         self.doc_parser(options)
             .parse_image(&self.layout, image)
-            .map(|(result, _)| result)
+            .map(|parsed| parsed.structure)
     }
 
     fn doc_parser(&self, options: &LayoutPageParserOptions) -> DocParser<'_, B> {
-        let config = options.config.as_ref().unwrap_or(&self.config);
-        DocParser::with_config(&self.backend, config.clone())
+        let config = options.config.as_ref().or(self.config_override.as_ref());
+        let parser = match config {
+            Some(config) => DocParser::with_config(&self.backend, config.clone()),
+            None => DocParser::new(&self.backend),
+        };
+        let parser = match &self.page_preprocessor {
+            Some(preprocessor) => parser.with_page_preprocessor(preprocessor.0.as_ref()),
+            None => parser,
+        };
+        parser
+            .with_options(self.options.clone().merge(&options.doc_parser))
             .with_region_batch_size(options.region_batch_size.unwrap_or(self.region_batch_size))
     }
 }
@@ -118,20 +170,16 @@ impl<L: LayoutSource, B: RecognitionBackend> PageParser for LayoutPageParser<L, 
 
     fn parse_page(&self, image: &RgbImage, options: &Self::Options) -> Result<PageDocument, Error> {
         let parser = self.doc_parser(options);
-        let (result, diagnostics) = parser.parse_image(&self.layout, image)?;
-        let config = parser.config();
-        let markdown = crate::render::markdown::to_markdown(
-            &result.layout_elements,
-            &config.markdown_ignore_labels,
-            config.markdown_pretty,
-        );
+        let parsed = parser.parse_image(&self.layout, image)?;
+        let markdown = parser.render_markdown(&parsed.structure);
         let mut page = PageDocument::from_structure_with_markdown(
-            result,
-            image.width(),
-            image.height(),
+            parsed.structure,
+            parsed.width,
+            parsed.height,
             markdown,
         );
-        page.diagnostics = diagnostics;
+        page.diagnostics = parsed.diagnostics;
+        page.raw_output = parsed.raw_output;
         Ok(page)
     }
 }
@@ -183,6 +231,7 @@ impl<L: LayoutSource + ?Sized, B: RecognitionBackend + ?Sized> PageParser
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DocParserProfile;
     use crate::api::error::BatchResult;
     use crate::api::generation::GenerationOptions;
     use crate::api::recognition::{BackendCapabilities, RecognitionTask};
@@ -220,9 +269,30 @@ mod tests {
         keys: Cell<usize>,
         full_image_calls: Cell<usize>,
         fail: bool,
+        profile: DocParserProfile,
+        label_budgets: bool,
+        preprocessor: Option<std::sync::Arc<dyn crate::PagePreprocessor>>,
     }
 
     impl RecognitionBackend for MockBackend {
+        fn page_preprocessor(&self) -> Option<&dyn crate::PagePreprocessor> {
+            self.preprocessor.as_deref()
+        }
+        fn doc_parser_profile(&self) -> DocParserProfile {
+            self.profile.clone()
+        }
+
+        fn region_token_budget(&self, label: &str, task: RecognitionTask) -> Option<usize> {
+            self.label_budgets
+                .then_some(if task == RecognitionTask::Table {
+                    8192
+                } else if label == "doc_title" {
+                    512
+                } else {
+                    4096
+                })
+        }
+
         fn recognize(
             &self,
             _image: RgbImage,
@@ -308,6 +378,83 @@ mod tests {
 
     #[test]
     fn owned_parser_matches_legacy_markdown_and_retains_structure() {
+        struct BulletBackend;
+        impl RecognitionBackend for BulletBackend {
+            fn doc_parser_profile(&self) -> DocParserProfile {
+                DocParserProfile::default()
+                    .with_merge_labels(Vec::new())
+                    .with_crop(
+                        crate::pipeline::crop::CropOptions::default()
+                            .with_coordinate_grid(Some(1000)),
+                    )
+                    .with_render_style(
+                        crate::render::markdown::RenderStyle::default()
+                            .with_normalize_bullets(true),
+                    )
+            }
+            fn recognize(
+                &self,
+                image: RgbImage,
+                _: RecognitionTask,
+                _: usize,
+            ) -> Result<String, Error> {
+                Ok(if image.width() == 60 {
+                    "- item"
+                } else {
+                    "middle"
+                }
+                .into())
+            }
+        }
+        fn thread_safe<T: Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+        thread_safe::<DocParser<'_, BulletBackend>>();
+        thread_safe::<LayoutPageParser<crate::StaticLayout, BulletBackend>>();
+        let bullets = crate::StaticLayout::new(vec![
+            region("text", [100., 0., 160., 30.]),
+            region("text", [119., 40., 180., 70.]),
+            region("text", [100., 80., 160., 110.]),
+        ]);
+        let page = LayoutPageParser::new(bullets, BulletBackend)
+            .parse_page(&RgbImage::new(2000, 150), &Default::default())
+            .unwrap();
+        assert_eq!(
+            page.markdown.as_deref(),
+            Some("- item\n\n- middle\n\n- item")
+        );
+
+        struct Prepare(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl crate::PagePreprocessor for Prepare {
+            fn preprocess(&self, image: &RgbImage) -> Result<RgbImage, Error> {
+                assert_eq!(image.dimensions(), (100, 100));
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(RgbImage::new(200, 100))
+            }
+        }
+        struct PreparedLayout(MockLayout);
+        impl LayoutSource for PreparedLayout {
+            fn detect(&self, image: &RgbImage) -> Result<LayoutDetections, Error> {
+                assert_eq!(image.dimensions(), (200, 100));
+                self.0.detect(image)
+            }
+        }
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let preprocessor = std::sync::Arc::new(Prepare(count.clone()));
+        let backend = MockBackend {
+            preprocessor: Some(preprocessor.clone()),
+            ..Default::default()
+        };
+        let prepared = LayoutPageParser::new(PreparedLayout(layout()), &backend);
+        let page = prepared
+            .parse_page(&RgbImage::new(100, 100), &Default::default())
+            .unwrap();
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(page.blocks[0].bbox, [0.05, 0.1, 0.2, 0.2]);
+        let prepared = prepared.with_page_preprocessor(preprocessor);
+        prepared
+            .parse_page(&RgbImage::new(100, 100), &Default::default())
+            .unwrap();
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
+
         let parser =
             LayoutPageParser::new(layout(), MockBackend::default()).with_region_batch_size(2);
         let image = RgbImage::new(100, 100);
@@ -338,6 +485,90 @@ mod tests {
                 .borrow()
                 .iter()
                 .any(|batch| batch.tasks.len() == 2)
+        );
+        let native = LayoutPageParser::new(
+            layout(),
+            MockBackend {
+                profile: DocParserProfile::default().with_max_tokens(8192),
+                label_budgets: true,
+                ..Default::default()
+            },
+        )
+        .with_region_batch_size(2);
+        native.parse_page(&image, &Default::default()).unwrap();
+        assert!(
+            native
+                .backend()
+                .batches
+                .borrow()
+                .iter()
+                .any(
+                    |batch| batch.tasks == [RecognitionTask::Table, RecognitionTask::Table]
+                        && batch.max_tokens == 8192
+                )
+        );
+        assert!(
+            native
+                .backend()
+                .batches
+                .borrow()
+                .iter()
+                .any(|batch| batch.tasks == [RecognitionTask::Ocr] && batch.max_tokens == 512)
+        );
+        let explicit = LayoutPageParser::with_config(
+            layout(),
+            MockBackend {
+                profile: DocParserProfile::default().with_max_tokens(8192),
+                label_budgets: true,
+                ..Default::default()
+            },
+            DocParserConfig::default(),
+        );
+        explicit.parse_page(&image, &Default::default()).unwrap();
+        assert!(
+            explicit
+                .backend()
+                .batches
+                .borrow()
+                .iter()
+                .filter(|batch| batch.tasks == [RecognitionTask::Table])
+                .all(|batch| batch.max_tokens == 4096)
+        );
+        let explicit = explicit.with_options(DocParserOptions::default().with_max_tokens(777));
+        explicit.backend().batches.borrow_mut().clear();
+        explicit
+            .parse_page(
+                &image,
+                &LayoutPageParserOptions::default().with_config(DocParserConfig {
+                    max_tokens: 1024,
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        assert!(
+            explicit
+                .backend()
+                .batches
+                .borrow()
+                .iter()
+                .filter(|batch| batch.tasks == [RecognitionTask::Table])
+                .all(|batch| batch.max_tokens == 777)
+        );
+        explicit.backend().batches.borrow_mut().clear();
+        explicit
+            .parse_page(
+                &image,
+                &LayoutPageParserOptions::default()
+                    .with_doc_parser_options(DocParserOptions::default().with_max_tokens(333)),
+            )
+            .unwrap();
+        assert!(
+            explicit
+                .backend()
+                .batches
+                .borrow()
+                .iter()
+                .all(|batch| batch.max_tokens == 333)
         );
     }
 
@@ -425,6 +656,20 @@ mod tests {
         assert_eq!(page.blocks[0].content.as_deref(), Some("whole page"));
         assert_eq!(backend.full_image_calls.get(), 1);
         assert!(backend.batches.borrow().is_empty());
+        let backend = MockBackend {
+            profile: DocParserProfile::default()
+                .with_empty_layout(crate::api::recognition::EmptyLayoutBehavior::Empty),
+            ..Default::default()
+        };
+        let parser = LayoutPageParser::new(&layout, &backend);
+        assert!(
+            parser
+                .parse_page(&RgbImage::new(100, 100), &Default::default())
+                .unwrap()
+                .blocks
+                .is_empty()
+        );
+        assert_eq!(backend.full_image_calls.get(), 0);
     }
 
     #[test]
@@ -485,5 +730,12 @@ mod tests {
                 .to_string()
                 .contains("recognition failure")
         );
+        let parser = parser.with_options(
+            DocParserOptions::default()
+                .with_region_errors(crate::api::recognition::RegionErrorBehavior::KeepRegion),
+        );
+        let page = parser.parse_page(&image, &Default::default()).unwrap();
+        assert_eq!(page.blocks.len(), 4);
+        assert_eq!(page.diagnostics.len(), 3);
     }
 }

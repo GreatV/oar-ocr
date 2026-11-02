@@ -7,8 +7,7 @@
 //!
 //! The checkpoint-facing [`Qwen35TextConfig`] and the decode-graph lifecycle
 //! live here so both models stay byte-identical in behavior; each model
-//! contributes its own display name (for error messages) and graph-disable
-//! env var at load time.
+//! contributes its own display name and CUDA graph setting.
 
 use super::gated_delta::gated_delta_rule;
 use crate::attention::{flash_attention, scaled_dot_product_attention_gqa};
@@ -1353,17 +1352,14 @@ impl DecoderLayer {
 }
 
 pub(crate) struct Qwen35TextModel {
+    #[cfg(feature = "cuda")]
+    cuda_graphs: bool,
     embed_tokens: Embedding,
     layers: Vec<DecoderLayer>,
     norm: AdditiveRmsNorm,
     rotary_emb: InterleavedMropeEmbedding,
     /// Display name used in every error message and log line.
     model_name: &'static str,
-    /// Extra env var (besides `OAR_VL_DISABLE_CUDA_GRAPH`) that disables the
-    /// decode graph for the owning model. Only read by the CUDA decode-graph
-    /// gate; the CPU-only build never captures.
-    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
-    graph_disable_env: &'static str,
     #[cfg(feature = "cuda")]
     decode_graph: RefCell<Option<DecoderCudaGraph<Qwen35DecodeGraphInputs>>>,
     /// Bucket a lazy capture will use at the first decode step, set by
@@ -1455,16 +1451,24 @@ pub(crate) struct TestHooks {
 }
 
 impl Qwen35TextModel {
+    pub(crate) fn set_cuda_graphs(&mut self, enabled: bool) {
+        #[cfg(feature = "cuda")]
+        {
+            self.cuda_graphs = enabled;
+            if !enabled {
+                self.invalidate_decode_graph();
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        let _ = enabled;
+    }
+
     /// Load the decoder from `model.language_model` weights.
     ///
-    /// `model_name` prefixes every error message and log line so both
-    /// consuming models report their own name; `graph_disable_env` names the
-    /// model-specific switch that forces eager decode (checked alongside the
-    /// shared `OAR_VL_DISABLE_CUDA_GRAPH`).
+    /// `model_name` prefixes errors and log messages.
     pub(crate) fn load(
         cfg: &Qwen35TextConfig,
         model_name: &'static str,
-        graph_disable_env: &'static str,
         vb: VarBuilder,
     ) -> Result<Self, Error> {
         if cfg.layer_types.len() != cfg.num_hidden_layers {
@@ -1499,11 +1503,12 @@ impl Qwen35TextModel {
         )?;
         Ok(Self {
             model_name,
-            graph_disable_env,
             embed_tokens,
             layers,
             norm,
             rotary_emb,
+            #[cfg(feature = "cuda")]
+            cuda_graphs: true,
             #[cfg(feature = "cuda")]
             decode_graph: RefCell::new(None),
             #[cfg(feature = "cuda")]
@@ -1582,9 +1587,8 @@ impl Qwen35TextModel {
         if max_new_tokens <= 1 {
             return Ok(());
         }
-        if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
-            || std::env::var_os(self.graph_disable_env).is_some()
-        {
+        #[cfg(feature = "cuda")]
+        if !self.cuda_graphs {
             self.invalidate_decode_graph();
             self.pending_capture_bucket.borrow_mut().take();
             return Ok(());
@@ -2138,7 +2142,7 @@ mod tests {
         cfg.validate()?;
         let tensors = tiny_graph_tensors(&cfg, &device);
         let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
-        let model = Qwen35TextModel::load(&cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
+        let model = Qwen35TextModel::load(&cfg, "Qwen3.5-test", vb)?;
 
         // Prefill four tokens through the production forward.
         let prompt = Tensor::from_vec(vec![1u32, 2, 3, 4], (1, 4), &device).unwrap();
@@ -2513,8 +2517,7 @@ mod tests {
         let tensors = tiny_graph_tensors(&cfg, &device);
 
         let vb = VarBuilder::from_tensors(tensors.clone(), DType::BF16, &device);
-        let graphed =
-            Qwen35TextModel::load(&cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
+        let graphed = Qwen35TextModel::load(&cfg, "Qwen3.5-test", vb)?;
         // Tied LM head, built exactly as `OvisOcr2::from_dir` builds it.
         let lm_head = Linear::new(graphed.token_embedding_weight(), None);
 
@@ -2560,7 +2563,7 @@ mod tests {
 
         // Eager reference: an identical model without a captured graph.
         let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
-        let eager = Qwen35TextModel::load(&cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
+        let eager = Qwen35TextModel::load(&cfg, "Qwen3.5-test", vb)?;
         let embeds = eager.embed(&prompt)?;
         eager.forward(&embeds, &prompt_positions)?;
         let hidden = eager.forward(&eager.embed(&token)?, &pos4)?;
@@ -2625,8 +2628,7 @@ mod tests {
         let token = Tensor::from_vec(vec![7u32], (1, 1), device).unwrap();
         let pos4 = Tensor::from_vec(vec![4i64; 3], (3, 1, 1), device).unwrap();
         let vb = VarBuilder::from_tensors(tensors.clone(), DType::BF16, device);
-        let mut model =
-            Qwen35TextModel::load(cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
+        let mut model = Qwen35TextModel::load(cfg, "Qwen3.5-test", vb)?;
         configure(&mut model.hooks);
         let lm_head = Linear::new(model.token_embedding_weight(), None);
         let embeds = model.embed(&prompt)?;
@@ -2673,8 +2675,7 @@ mod tests {
         .unwrap();
         let pos4 = Tensor::from_vec(vec![4i64; 3], (3, 1, 1), device).unwrap();
         let vb = VarBuilder::from_tensors(tensors, DType::BF16, device);
-        let reference =
-            Qwen35TextModel::load(cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
+        let reference = Qwen35TextModel::load(cfg, "Qwen3.5-test", vb)?;
         let lm_head = Linear::new(reference.token_embedding_weight(), None);
         let embeds = reference.embed(&prompt)?;
         reference.forward(&embeds, &prompt_positions)?;
@@ -2824,8 +2825,7 @@ mod tests {
         let pos4 = Tensor::from_vec(vec![4i64; 3], (3, 1, 1), &device).unwrap();
 
         let vb = VarBuilder::from_tensors(tensors.clone(), DType::BF16, &device);
-        let mut model =
-            Qwen35TextModel::load(&cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
+        let mut model = Qwen35TextModel::load(&cfg, "Qwen3.5-test", vb)?;
         // The body's second invocation is the capture itself.
         model.hooks.fail_body_on_call = Some(2);
         let lm_head = Linear::new(model.token_embedding_weight(), None);
@@ -2905,8 +2905,7 @@ mod tests {
         // prompt_decode_bucket(7, 8) = 8: one replayed step fills the
         // bucket (KV 7 -> 8); the second step retires the graph.
         let vb = VarBuilder::from_tensors(tensors.clone(), DType::BF16, &device);
-        let mut model =
-            Qwen35TextModel::load(&cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
+        let mut model = Qwen35TextModel::load(&cfg, "Qwen3.5-test", vb)?;
         model.hooks.decode_cache_ceiling = Some(8);
         let lm_head = Linear::new(model.token_embedding_weight(), None);
         let embeds = model.embed(&prompt)?;
@@ -2954,8 +2953,7 @@ mod tests {
         // eager-vs-graph comparison — the same horizon the
         // decode_graph_captures_and_replays tolerance covers.
         let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
-        let reference =
-            Qwen35TextModel::load(&cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
+        let reference = Qwen35TextModel::load(&cfg, "Qwen3.5-test", vb)?;
         let lm_head_ref = Linear::new(reference.token_embedding_weight(), None);
         let embeds = reference.embed(&prompt)?;
         reference.forward(&embeds, &prompt_positions)?;
@@ -3004,8 +3002,7 @@ mod tests {
         let position_at = |p: i64| Tensor::from_vec(vec![p; 3], (3, 1, 1), &device).unwrap();
 
         let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
-        let mut model =
-            Qwen35TextModel::load(&cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
+        let mut model = Qwen35TextModel::load(&cfg, "Qwen3.5-test", vb)?;
         model.hooks.decode_cache_ceiling = Some(8);
         let lm_head = Linear::new(model.token_embedding_weight(), None);
         let embeds = model.embed(&prompt)?;
@@ -3056,7 +3053,7 @@ mod tests {
         let pos4 = Tensor::from_vec(vec![4i64; 3], (3, 1, 1), &device).unwrap();
 
         let vb = VarBuilder::from_tensors(tensors, DType::BF16, &device);
-        let model = Qwen35TextModel::load(&cfg, "Qwen3.5-test", "OAR_TEST_DISABLE_CUDA_GRAPH", vb)?;
+        let model = Qwen35TextModel::load(&cfg, "Qwen3.5-test", vb)?;
         let lm_head = Linear::new(model.token_embedding_weight(), None);
         let embeds = model.embed(&prompt)?;
         model.forward(&embeds, &prompt_positions)?;

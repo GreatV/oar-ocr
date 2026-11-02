@@ -1,10 +1,7 @@
 //! PP-DocLayoutV2 / V3 assembly: backbone, hybrid encoder, query selection,
 //! decoder and reading order, plus the public [`PpDocLayout`] entry point.
 //!
-//! V3 also runs a mask branch: its prototypes set the decoder's initial
-//! reference boxes when `mask_enhanced` is on (the upstream default), so it is
-//! ported here. The per-layer instance masks it can also produce are not,
-//! because every consumer of this detector works with axis-aligned boxes.
+//! V3 instance masks supply polygon geometry for the shared crop pipeline.
 
 use super::config::{PpDocLayoutConfig, PpDocLayoutVersion};
 use super::decoder::{Decoder, LevelShape, MlpPredictionHead, SharedHeads, inverse_sigmoid};
@@ -18,8 +15,12 @@ use super::processing::{PreprocessedImage, preprocess};
 use super::reading_order::ReadingOrder;
 use crate::error::Error;
 use crate::geometry::BoundingBox;
-use crate::layout::LayoutDetectionElement;
-use crate::layout::{LayoutDetections, LayoutSource};
+use crate::pipeline::geometry::layout_filter::{LayoutCandidate, filter_candidates};
+use crate::pipeline::geometry::polygon::{mask_polygon, normalize_polygon};
+use crate::pipeline::layout::{
+    LayoutDetectionElement, LayoutDetections, LayoutPostprocessOptions, LayoutPrediction,
+    LayoutShapeMode, LayoutSource, ScoreComparison,
+};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{LayerNorm, Linear, Module, VarBuilder, layer_norm, linear};
 use image::RgbImage;
@@ -217,6 +218,7 @@ pub struct PpDocLayout {
     dtype: DType,
     score_threshold: f32,
     max_elements: usize,
+    postprocess_options: LayoutPostprocessOptions,
 }
 
 impl PpDocLayout {
@@ -284,6 +286,7 @@ impl PpDocLayout {
             dtype,
             score_threshold: Self::DEFAULT_SCORE_THRESHOLD,
             max_elements: Self::DEFAULT_MAX_ELEMENTS,
+            postprocess_options: LayoutPostprocessOptions::paddlex(),
         })
     }
 
@@ -304,6 +307,12 @@ impl PpDocLayout {
         self
     }
 
+    /// Set shared suppression, containment, and crop-geometry parameters.
+    pub fn with_postprocess_options(mut self, options: LayoutPostprocessOptions) -> Self {
+        self.postprocess_options = options;
+        self
+    }
+
     /// Which generation this instance runs.
     pub fn version(&self) -> PpDocLayoutVersion {
         self.version
@@ -316,9 +325,97 @@ impl PpDocLayout {
 
     /// Detects layout regions, returning them in predicted reading order.
     pub fn detect(&self, image: &RgbImage) -> Result<Vec<Detection>, Error> {
+        let prediction = self.predict(image, &self.postprocess_options, false)?;
+        Ok(prediction
+            .into_iter()
+            .map(|(candidate, _)| Detection {
+                bbox: candidate.bbox,
+                class_id: candidate.class_id,
+                score: candidate.score,
+            })
+            .collect())
+    }
+
+    fn predict(
+        &self,
+        image: &RgbImage,
+        options: &LayoutPostprocessOptions,
+        geometry: bool,
+    ) -> Result<Vec<(LayoutCandidate, Option<BoundingBox>)>, Error> {
         let prepared = preprocess(image, &self.device, self.dtype)?;
-        let (logits, boxes, hidden) = self.forward_detector(&prepared)?;
-        self.postprocess(&logits, &boxes, &hidden, &prepared)
+        let output = self.forward_detector(
+            &prepared,
+            geometry && options.shape_mode != LayoutShapeMode::Rect,
+        )?;
+        let mut candidates = self.postprocess(
+            &output.logits,
+            &output.boxes,
+            &output.hidden,
+            &prepared,
+            options,
+        )?;
+        candidates = filter_candidates(candidates, image.width(), image.height(), options);
+        let masks = output
+            .masks
+            .map(|m| m.squeeze(0).and_then(|m| m.to_vec3::<f32>()))
+            .transpose()
+            .map_err(|e| infer_err("instance masks to host", e))?;
+        // PaddleX uses xmax - ymin to select its custom-vertex distance.
+        let max_box_width = candidates
+            .iter()
+            .map(|c| f64::from(c.bbox[2] - c.bbox[1]))
+            .fold(f64::NEG_INFINITY, f64::max);
+        let mut predicted = Vec::with_capacity(candidates.len());
+        let mut previous = None;
+        for mut candidate in candidates {
+            let polygon = masks
+                .as_ref()
+                .and_then(|m| m.get(candidate.query))
+                .map(|mask| {
+                    let height = mask.len();
+                    let width = mask.first().map_or(0, Vec::len);
+                    // The exported Paddle detector thresholds mask probabilities at 0.5.
+                    let binary: Vec<_> = mask
+                        .iter()
+                        .flatten()
+                        .map(|&v| u8::from(sigmoid(v) > 0.5))
+                        .collect();
+                    let polygon = mask_polygon(
+                        &binary,
+                        width,
+                        height,
+                        candidate.bbox,
+                        image.dimensions(),
+                        max_box_width,
+                    );
+                    normalize_polygon(
+                        candidate.bbox,
+                        polygon,
+                        options.shape_mode,
+                        previous.as_ref(),
+                    )
+                });
+            previous = polygon.clone();
+            if options.clip_boxes {
+                candidate.bbox = [
+                    candidate.bbox[0].clamp(0., image.width() as f32).trunc(),
+                    candidate.bbox[1].clamp(0., image.height() as f32).trunc(),
+                    candidate.bbox[2].clamp(0., image.width() as f32).trunc(),
+                    candidate.bbox[3].clamp(0., image.height() as f32).trunc(),
+                ];
+                if candidate.bbox[2] <= candidate.bbox[0] || candidate.bbox[3] <= candidate.bbox[1]
+                {
+                    continue;
+                }
+            }
+            predicted.push((candidate, polygon));
+        }
+        if predicted.len() > self.max_elements {
+            predicted.sort_by(|(a, _), (b, _)| b.score.total_cmp(&a.score));
+            predicted.truncate(self.max_elements);
+            predicted.sort_by_key(|(candidate, _)| candidate.rank);
+        }
+        Ok(predicted)
     }
 
     /// Runs backbone, encoder and decoder, returning last-layer logits, boxes
@@ -326,7 +423,8 @@ impl PpDocLayout {
     fn forward_detector(
         &self,
         prepared: &PreprocessedImage,
-    ) -> Result<(Tensor, Tensor, Tensor), Error> {
+        with_masks: bool,
+    ) -> Result<DetectorOutput, Error> {
         let detector = &self.detector;
         let features = detector.backbone.forward(&prepared.pixel_values)?;
 
@@ -447,11 +545,41 @@ impl PpDocLayout {
             detector
                 .decoder
                 .forward(&queries, &source, &reference_points, &shapes, shared)?;
-        Ok((
-            output.logits,
-            output.reference_points,
-            output.last_hidden_state,
-        ))
+        let masks = if with_masks {
+            match (&self.v3_order, mask_features) {
+                (Some(order), Some(features)) => {
+                    let query = order
+                        .norm
+                        .forward(&output.last_hidden_state)
+                        .map_err(|e| infer_err("final mask norm", e))?;
+                    let query = order.mask_query_head.forward(&query)?;
+                    let (batch, _, height, width) = features
+                        .dims4()
+                        .map_err(|e| infer_err("mask features shape", e))?;
+                    Some(
+                        query
+                            .matmul(
+                                &features
+                                    .flatten_from(2)
+                                    .map_err(|e| infer_err("flatten final masks", e))?,
+                            )
+                            .and_then(|t| {
+                                t.reshape((batch, self.config.num_queries, height, width))
+                            })
+                            .map_err(|e| infer_err("final instance masks", e))?,
+                    )
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        Ok(DetectorOutput {
+            logits: output.logits,
+            boxes: output.reference_points,
+            hidden: output.last_hidden_state,
+            masks,
+        })
     }
 
     /// Indices of the `k` highest per-position maximum class logits, in
@@ -481,7 +609,8 @@ impl PpDocLayout {
         boxes: &Tensor,
         hidden: &Tensor,
         prepared: &PreprocessedImage,
-    ) -> Result<Vec<Detection>, Error> {
+        options: &LayoutPostprocessOptions,
+    ) -> Result<Vec<LayoutCandidate>, Error> {
         let logit_values = logits
             .flatten_all()
             .and_then(|t| t.to_vec1::<f32>())
@@ -494,6 +623,7 @@ impl PpDocLayout {
         let selection = self.select(
             &logit_values,
             logits.dim(1).map_err(|e| infer_err("logits shape", e))?,
+            options.score_comparison,
         )?;
         if selection.num_valid == 0 {
             return Ok(Vec::new());
@@ -512,7 +642,12 @@ impl PpDocLayout {
     /// two labels. Keeping the per-query argmax gives one box per query, which
     /// is what every consumer of this detector expects; the two agree whenever
     /// a query has a single class above its threshold.
-    fn select(&self, logits: &[f32], num_queries: usize) -> Result<Selection, Error> {
+    fn select(
+        &self,
+        logits: &[f32],
+        num_queries: usize,
+        comparison: ScoreComparison,
+    ) -> Result<Selection, Error> {
         let num_labels = self.config.num_labels();
         let thresholds = match self.version {
             PpDocLayoutVersion::V2 => Some(self.config.class_thresholds.as_ref().ok_or_else(
@@ -528,7 +663,11 @@ impl PpDocLayout {
         for q in 0..num_queries {
             let row = &logits[q * num_labels..(q + 1) * num_labels];
             let passes = |class_id: usize, logit: f32| {
-                sigmoid(logit) >= thresholds.map_or(self.score_threshold, |t| t[class_id])
+                let threshold = thresholds.map_or(self.score_threshold, |t| t[class_id]);
+                match comparison {
+                    ScoreComparison::Inclusive => sigmoid(logit) >= threshold,
+                    ScoreComparison::Strict => sigmoid(logit) > threshold,
+                }
             };
             // Thresholds are per class for V2, so the highest-scoring class is
             // not necessarily the one that qualifies: a 0.49 class gated at
@@ -677,9 +816,9 @@ impl PpDocLayout {
         logits: &[f32],
         boxes: &[f32],
         prepared: &PreprocessedImage,
-    ) -> Result<Vec<Detection>, Error> {
+    ) -> Result<Vec<LayoutCandidate>, Error> {
         let num_labels = self.config.num_labels();
-        let mut detections: Vec<(usize, Detection)> = Vec::with_capacity(selection.num_valid);
+        let mut detections: Vec<LayoutCandidate> = Vec::with_capacity(selection.num_valid);
         for (slot, &query) in selection
             .permutation
             .iter()
@@ -695,23 +834,20 @@ impl PpDocLayout {
                 corners[2] * prepared.original_width as f32,
                 corners[3] * prepared.original_height as f32,
             ];
-            detections.push((
-                self.rank_of(sequence, slot, query),
-                Detection {
-                    bbox,
-                    class_id,
-                    score,
-                },
-            ));
+            detections.push(LayoutCandidate {
+                rank: self.rank_of(sequence, slot, query),
+                query,
+                bbox,
+                class_id,
+                score,
+                label: NATIVE_LABELS
+                    .get(class_id)
+                    .copied()
+                    .unwrap_or("unknown")
+                    .into(),
+            });
         }
-        // Over the cap, drop the least confident regions rather than an
-        // arbitrary tail, then restore reading order among the survivors.
-        if detections.len() > self.max_elements {
-            detections.sort_by(|(_, a), (_, b)| b.score.total_cmp(&a.score));
-            detections.truncate(self.max_elements);
-        }
-        detections.sort_by_key(|(rank, _)| *rank);
-        Ok(detections.into_iter().map(|(_, d)| d).collect())
+        Ok(detections)
     }
 
     /// Reading-order rank of one surviving query.
@@ -775,19 +911,75 @@ fn scaled_corners_f32(box_cxcywh: &[f32], scale: f32) -> [f32; 4] {
     ]
 }
 
+const NATIVE_LABELS: [&str; 25] = [
+    "abstract",
+    "algorithm",
+    "aside_text",
+    "chart",
+    "content",
+    "display_formula",
+    "doc_title",
+    "figure_title",
+    "footer",
+    "footer_image",
+    "footnote",
+    "formula_number",
+    "header",
+    "header_image",
+    "image",
+    "inline_formula",
+    "number",
+    "paragraph_title",
+    "reference",
+    "reference_content",
+    "seal",
+    "table",
+    "text",
+    "vertical_text",
+    "vision_footnote",
+];
+
+struct DetectorOutput {
+    logits: Tensor,
+    boxes: Tensor,
+    hidden: Tensor,
+    masks: Option<Tensor>,
+}
+
 impl LayoutSource for PpDocLayout {
     fn detect(&self, image: &RgbImage) -> Result<LayoutDetections, Error> {
-        let detections = PpDocLayout::detect(self, image)?;
-        let elements = detections
-            .into_iter()
-            .map(|d| LayoutDetectionElement {
-                bbox: BoundingBox::from_coords(d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3]),
-                element_type: self.config.label(d.class_id).to_string(),
-                score: d.score,
-            })
-            .collect();
-        // `detect` already returns the regions in predicted reading order.
-        Ok(LayoutDetections::new(elements))
+        self.predict(image, &self.postprocess_options, false)
+            .map(layout_prediction)
+            .map(|p| p.detections)
+    }
+
+    fn detect_with_options(
+        &self,
+        image: &RgbImage,
+        options: &LayoutPostprocessOptions,
+    ) -> Result<LayoutPrediction, Error> {
+        self.predict(image, options, true).map(layout_prediction)
+    }
+}
+
+fn layout_prediction(detected: Vec<(LayoutCandidate, Option<BoundingBox>)>) -> LayoutPrediction {
+    let (elements, polygons) = detected
+        .into_iter()
+        .map(|(d, polygon)| {
+            (
+                LayoutDetectionElement {
+                    bbox: BoundingBox::from_coords(d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3]),
+                    element_type: d.label,
+                    score: d.score,
+                },
+                polygon,
+            )
+        })
+        .unzip();
+    LayoutPrediction {
+        detections: LayoutDetections::new(elements),
+        polygons,
+        ..Default::default()
     }
 }
 
@@ -861,10 +1053,9 @@ mod tests {
     /// `order_logits` from `PPDocLayoutV{2,3}ForObjectDetection`. Per-stage
     /// deviations are printed so a failure points at the offending module.
     ///
-    /// One caveat for V2: `torch.argsort` is not stable, so the reference
-    /// feeds the pointer network in an arbitrary order. Set `OAR_PP_PERM` to
-    /// that order (a comma-separated query list) to compare `order_logits`
-    /// against it; without it only the detector outputs are meaningful.
+    /// V2 uses unstable `torch.argsort` ordering. An optional U32
+    /// `order_permutation` tensor in the reference dump supplies that order
+    /// for the pointer-network comparison.
     #[test]
     #[ignore = "requires a local checkpoint and a PyTorch reference dump"]
     fn matches_the_pytorch_reference() {
@@ -917,7 +1108,12 @@ mod tests {
             original_width: 800,
             original_height: 800,
         };
-        let (logits, boxes, hidden) = model.forward_detector(&prepared).expect("detector");
+        let DetectorOutput {
+            logits,
+            boxes,
+            hidden,
+            ..
+        } = model.forward_detector(&prepared, false).expect("detector");
         // V2 returns its outputs already permuted, so compare against the raw
         // per-layer stacks, which both versions expose unpermuted.
         let last_layer = |name: &str| -> Tensor {
@@ -943,9 +1139,21 @@ mod tests {
 
         let box_values = boxes.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         let logit_values = logits.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-        let mut selection = model.select(&logit_values, 300).expect("selection");
+        let mut selection = model
+            .select(&logit_values, 300, ScoreComparison::Strict)
+            .expect("selection");
         println!("num_valid: {}", selection.num_valid);
-        if let Some(head) = order_permutation_override() {
+        if let Some(permutation) = reference.get("order_permutation") {
+            let head: Vec<usize> = permutation
+                .flatten_all()
+                .unwrap()
+                .to_dtype(DType::U32)
+                .unwrap()
+                .to_vec1::<u32>()
+                .unwrap()
+                .into_iter()
+                .map(|q| q as usize)
+                .collect();
             let mut rest: Vec<usize> = selection
                 .permutation
                 .iter()
@@ -961,23 +1169,11 @@ mod tests {
             .expect("order logits");
         let diff = maxdiff(&order_logits, &reference["order_logits"]);
         println!("order_logits: {diff}");
-        if model.version == PpDocLayoutVersion::V3 || std::env::var("OAR_PP_PERM").is_ok() {
+        if model.version == PpDocLayoutVersion::V3 || reference.contains_key("order_permutation") {
             assert!(
                 diff < 1.0,
                 "order_logits differ from the reference by {diff}"
             );
         }
-    }
-
-    /// Replays `torch.argsort`'s unstable ordering when `OAR_PP_PERM` is set.
-    fn order_permutation_override() -> Option<Vec<usize>> {
-        std::env::var("OAR_PP_PERM")
-            .ok()
-            .filter(|spec| !spec.trim().is_empty())
-            .map(|spec| {
-                spec.split(',')
-                    .map(|entry| entry.trim().parse().expect("query index"))
-                    .collect()
-            })
     }
 }

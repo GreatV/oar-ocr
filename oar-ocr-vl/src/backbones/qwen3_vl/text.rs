@@ -1379,6 +1379,8 @@ impl BatchedDecodeGraph {
 
 pub(crate) struct Qwen3VlTextModel {
     #[cfg(feature = "cuda")]
+    cuda_graphs: bool,
+    #[cfg(feature = "cuda")]
     decode_graph: RefCell<Option<SingleRowDecodeGraph>>,
     #[cfg(feature = "cuda")]
     batch_decode_graph: RefCell<Option<BatchedDecodeGraph>>,
@@ -1395,6 +1397,19 @@ pub(crate) struct Qwen3VlTextModel {
 }
 
 impl Qwen3VlTextModel {
+    pub(crate) fn set_cuda_graphs(&mut self, enabled: bool) {
+        #[cfg(feature = "cuda")]
+        {
+            self.cuda_graphs = enabled;
+            if !enabled {
+                self.invalidate_cuda_graph();
+                self.invalidate_batch_cuda_graph();
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        let _ = enabled;
+    }
+
     /// Live fixed K/V tensor bytes, excluding graph inputs and allocator slack.
     #[cfg(all(test, feature = "cuda"))]
     pub(crate) fn fixed_storage_bytes_for_test(&self) -> usize {
@@ -1607,6 +1622,8 @@ impl Qwen3VlTextModel {
         let _drain_guard = CudaGraphDrainGuard::new(vb.device());
         Ok(Self {
             #[cfg(feature = "cuda")]
+            cuda_graphs: true,
+            #[cfg(feature = "cuda")]
             decode_graph: RefCell::new(None),
             #[cfg(feature = "cuda")]
             batch_decode_graph: RefCell::new(None),
@@ -1766,9 +1783,8 @@ impl Qwen3VlTextModel {
         if max_new_tokens <= 1 {
             return Ok(());
         }
-        if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
-            || std::env::var_os("OAR_WEVISDOC_DISABLE_CUDA_GRAPH").is_some()
-        {
+        #[cfg(feature = "cuda")]
+        if !self.cuda_graphs {
             self.invalidate_cuda_graph();
             self.invalidate_batch_cuda_graph();
             return Ok(());
@@ -2179,9 +2195,8 @@ impl Qwen3VlTextModel {
         if max_new_tokens <= 1 {
             return Ok(());
         }
-        if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
-            || std::env::var_os("OAR_WEVISDOC_DISABLE_CUDA_GRAPH").is_some()
-        {
+        #[cfg(feature = "cuda")]
+        if !self.cuda_graphs {
             // The gate removes every graph, not just this path's: a live
             // batch graph would keep replaying against KV storage the
             // single-row layout no longer matches.

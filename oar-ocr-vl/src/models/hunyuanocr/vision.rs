@@ -920,20 +920,18 @@ fn interpolate_bilinear_align_corners_false(
     out_h: usize,
     out_w: usize,
     dim: usize,
-    version: HunyuanOcrVersion,
+    _version: HunyuanOcrVersion,
 ) -> Vec<f32> {
     let mut out = vec![0f32; out_h * out_w * dim];
     if in_h == 0 || in_w == 0 || out_h == 0 || out_w == 0 {
         return out;
     }
 
-    let (inv_scale_y, inv_scale_x) = match version {
-        HunyuanOcrVersion::V1 => (
-            in_h as f32 / (out_h as f32 + 0.1),
-            in_w as f32 / (out_w as f32 + 0.1),
-        ),
-        HunyuanOcrVersion::V1_5 => (in_h as f32 / out_h as f32, in_w as f32 / out_w as f32),
-    };
+    // Both training and vLLM use scale_factor=(output + 0.1) / input.
+    let (inv_scale_y, inv_scale_x) = (
+        in_h as f32 / (out_h as f32 + 0.1),
+        in_w as f32 / (out_w as f32 + 0.1),
+    );
 
     let row = |oy: usize, out_row: &mut [f32]| {
         let fy = ((oy as f32 + 0.5) * inv_scale_y - 0.5).max(0.0);
@@ -975,4 +973,18 @@ fn interpolate_bilinear_align_corners_false(
             .for_each(|(oy, out_row)| row(oy, out_row));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn position_interpolation_uses_the_training_scale_offset() {
+        for version in [HunyuanOcrVersion::V1, HunyuanOcrVersion::V1_5] {
+            let values =
+                interpolate_bilinear_align_corners_false(&[0., 1., 2., 3.], 2, 2, 3, 3, 1, version);
+            assert!((values[4] - 1.403_225_8).abs() < 1e-5);
+        }
+    }
 }

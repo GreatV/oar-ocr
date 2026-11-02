@@ -1077,6 +1077,8 @@ impl GlmOcrTextDecoderLayer {
 #[derive(Debug)]
 pub struct GlmOcrTextModel {
     #[cfg(feature = "cuda")]
+    cuda_graphs: bool,
+    #[cfg(feature = "cuda")]
     decode_graph: RefCell<Option<DecoderCudaGraph<CudaGraphInputs>>>,
     #[cfg(feature = "cuda")]
     verification_graph: RefCell<Option<DecoderCudaGraph<CudaGraphInputs>>>,
@@ -1091,6 +1093,18 @@ pub struct GlmOcrTextModel {
 }
 
 impl GlmOcrTextModel {
+    pub(crate) fn set_cuda_graphs(&mut self, enabled: bool) {
+        #[cfg(feature = "cuda")]
+        {
+            self.cuda_graphs = enabled;
+            if !enabled {
+                self.invalidate_cuda_graph();
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        let _ = enabled;
+    }
+
     pub fn load(cfg: &GlmOcrTextConfig, vb: VarBuilder) -> Result<Self, Error> {
         let embed_tokens = embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("embed_tokens"))
             .map_err(|e| candle_to_ocr_inference("GLM-OCR", "text embed_tokens", e))?;
@@ -1107,6 +1121,8 @@ impl GlmOcrTextModel {
         #[cfg(feature = "cuda")]
         let _drain_guard = CudaGraphDrainGuard::new(vb.device());
         Ok(Self {
+            #[cfg(feature = "cuda")]
+            cuda_graphs: true,
             #[cfg(feature = "cuda")]
             decode_graph: RefCell::new(None),
             #[cfg(feature = "cuda")]
@@ -1246,9 +1262,8 @@ impl GlmOcrTextModel {
         max_new_tokens: usize,
         lm_head: &Linear,
     ) -> Result<(), Error> {
-        if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
-            || std::env::var_os("OAR_GLMOCR_DISABLE_CUDA_GRAPH").is_some()
-        {
+        #[cfg(feature = "cuda")]
+        if !self.cuda_graphs {
             #[cfg(feature = "cuda")]
             self.invalidate_cuda_graph();
             return Ok(());
@@ -1293,10 +1308,7 @@ impl GlmOcrTextModel {
         query_len: usize,
         lm_head: &Linear,
     ) -> Result<Option<usize>, Error> {
-        if query_len == 0
-            || std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
-            || std::env::var_os("OAR_GLMOCR_DISABLE_CUDA_GRAPH").is_some()
-        {
+        if query_len == 0 || !self.cuda_graphs {
             self.invalidate_cuda_graph();
             return Ok(None);
         }

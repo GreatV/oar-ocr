@@ -54,6 +54,12 @@ impl Drop for TextCacheGuard<'_> {
 }
 
 impl OvisOcr2 {
+    /// Set whether to use CUDA graphs for decoding. Enabled by default.
+    pub fn with_cuda_graphs(mut self, enabled: bool) -> Self {
+        self.text.set_cuda_graphs(enabled);
+        self
+    }
+
     /// Load an OvisOCR2 Hugging Face model directory.
     pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         Self::from_dir_with_runtime(model_dir, crate::RuntimeConfig::new(device))
@@ -92,7 +98,6 @@ impl OvisOcr2 {
         let text = Qwen35TextModel::load(
             &cfg.text_config,
             MODEL_NAME,
-            "OAR_OVISOCR2_DISABLE_CUDA_GRAPH",
             vb.pp("model").pp("language_model"),
         )?;
         let vision = OvisOcr2VisionModel::load(&cfg.vision_config, vb.pp("model").pp("visual"))?;
@@ -211,8 +216,28 @@ impl OvisOcr2 {
         image: &RgbImage,
         task_prompt: &str,
         max_new_tokens: usize,
+        step_top: Option<&mut Vec<[(u32, f32); 3]>>,
+    ) -> Result<Vec<u32>, Error> {
+        self.generate_request(
+            std::slice::from_ref(image),
+            task_prompt,
+            max_new_tokens,
+            step_top,
+        )
+    }
+
+    pub(crate) fn generate_request(
+        &self,
+        images: &[RgbImage],
+        task_prompt: &str,
+        max_new_tokens: usize,
         mut step_top: Option<&mut Vec<[(u32, f32); 3]>>,
     ) -> Result<Vec<u32>, Error> {
+        if images.is_empty() {
+            return Err(Error::invalid_input(
+                "OvisOCR needs at least one image per request",
+            ));
+        }
         self.text.clear_cache();
         let _cache_guard = TextCacheGuard(&self.text);
         if max_new_tokens == 0 {
@@ -226,14 +251,22 @@ impl OvisOcr2 {
                 ),
             });
         }
-        let image_inputs = preprocess_image(
-            image,
-            &self.image_cfg,
-            &self.cfg.vision_config,
-            &self.device,
-            self.dtype,
-        )?;
-        let prompt = build_prompt(image_inputs.num_image_tokens, task_prompt);
+        let image_inputs = images
+            .iter()
+            .map(|image| {
+                preprocess_image(
+                    image,
+                    &self.image_cfg,
+                    &self.cfg.vision_config,
+                    &self.device,
+                    self.dtype,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let prompt = build_request_prompt(
+            image_inputs.iter().map(|image| image.num_image_tokens),
+            task_prompt,
+        );
         let encoding = self
             .tokenizer
             .encode(prompt, false)
@@ -253,9 +286,10 @@ impl OvisOcr2 {
         )?;
 
         let inputs_embeds = self.prepare_inputs(&input_ids, &image_inputs)?;
-        let (position_ids, rope_delta) = build_position_ids(
+        let grids: Vec<_> = image_inputs.iter().map(|image| image.grid_thw).collect();
+        let (position_ids, rope_delta) = build_request_position_ids(
             &input_ids,
-            image_inputs.grid_thw,
+            &grids,
             self.cfg.vision_config.spatial_merge_size,
             self.image_token_id,
             &self.device,
@@ -325,65 +359,54 @@ impl OvisOcr2 {
     fn prepare_inputs(
         &self,
         input_ids: &[u32],
-        image_inputs: &OvisOcr2ImageInputs,
+        images: &[OvisOcr2ImageInputs],
     ) -> Result<Tensor, Error> {
-        let seq_len = input_ids.len();
-        let token_ids = Tensor::from_vec(input_ids.to_vec(), (1, seq_len), &self.device)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "create prompt token ids", e))?;
+        let spans = image_spans(input_ids, self.image_token_id);
+        if spans.len() != images.len() {
+            return Err(Error::invalid_input(
+                "OvisOCR image groups do not match supplied images",
+            ));
+        }
+        let token_ids = Tensor::from_vec(input_ids.to_vec(), (1, input_ids.len()), &self.device)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "prompt ids", e))?;
         let embeds = self.text.embed(&token_ids)?;
-        let image_embeds = self
-            .vision
-            .forward(&image_inputs.pixel_values, image_inputs.grid_thw)?
-            .to_dtype(self.dtype)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "cast image embeddings", e))?;
-
-        let image_positions: Vec<usize> = input_ids
-            .iter()
-            .enumerate()
-            .filter_map(|(index, &token)| (token == self.image_token_id).then_some(index))
-            .collect();
-        let image_len = image_embeds
-            .dim(0)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "image embedding length", e))?;
-        if image_positions.len() != image_len || image_positions.is_empty() {
-            return Err(Error::InvalidInput {
-                message: format!(
-                    "OvisOCR2: image placeholder count ({}) != image embedding count ({image_len})",
-                    image_positions.len()
-                ),
-            });
+        let mut parts = Vec::new();
+        let mut cursor = 0;
+        for ((start, len), image) in spans.into_iter().zip(images) {
+            let visual = self
+                .vision
+                .forward(&image.pixel_values, image.grid_thw)?
+                .to_dtype(self.dtype)
+                .and_then(|t| t.unsqueeze(0))
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "image embeddings", e))?;
+            if visual
+                .dim(1)
+                .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "image token count", e))?
+                != len
+            {
+                return Err(Error::invalid_input(
+                    "OvisOCR visual token count does not match prompt",
+                ));
+            }
+            if start > cursor {
+                parts.push(
+                    embeds
+                        .narrow(1, cursor, start - cursor)
+                        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "prompt text", e))?,
+                );
+            }
+            parts.push(visual);
+            cursor = start + len;
         }
-        let start = image_positions[0];
-        if image_positions
-            .iter()
-            .enumerate()
-            .any(|(offset, &position)| position != start + offset)
-        {
-            return Err(Error::InvalidInput {
-                message: "OvisOCR2: image placeholder tokens must be contiguous".to_string(),
-            });
+        if cursor < input_ids.len() {
+            parts.push(
+                embeds
+                    .narrow(1, cursor, input_ids.len() - cursor)
+                    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "prompt suffix", e))?,
+            );
         }
-        let end = start + image_positions.len();
-        let hidden_size = embeds
-            .dim(2)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "embedding hidden size", e))?;
-        let prefix = if start == 0 {
-            Tensor::zeros((1, 0, hidden_size), embeds.dtype(), embeds.device())
-        } else {
-            embeds.narrow(1, 0, start)
-        }
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "embedding prefix", e))?;
-        let suffix = if end == seq_len {
-            Tensor::zeros((1, 0, hidden_size), embeds.dtype(), embeds.device())
-        } else {
-            embeds.narrow(1, end, seq_len - end)
-        }
-        .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "embedding suffix", e))?;
-        let image_embeds = image_embeds
-            .unsqueeze(0)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "image embedding batch", e))?;
-        Tensor::cat(&[&prefix, &image_embeds, &suffix], 1)
-            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "merge multimodal embeddings", e))
+        Tensor::cat(&parts, 1)
+            .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "multimodal embeddings", e))
     }
 
     fn logits_from_hidden(&self, hidden: &Tensor) -> Result<Tensor, Error> {
@@ -472,107 +495,98 @@ fn validate_generation_length(
     Ok(())
 }
 
-fn build_prompt(num_image_tokens: usize, task_prompt: &str) -> String {
-    let mut prompt = String::with_capacity(task_prompt.len() + num_image_tokens * 13 + 128);
-    prompt.push_str("<|im_start|>user\n<|vision_start|>");
-    for _ in 0..num_image_tokens {
-        prompt.push_str("<|image_pad|>");
+fn build_request_prompt(counts: impl IntoIterator<Item = usize>, task_prompt: &str) -> String {
+    let mut prompt = String::from("<|im_start|>user\n");
+    for count in counts {
+        prompt.push_str("<|vision_start|>");
+        for _ in 0..count {
+            prompt.push_str("<|image_pad|>");
+        }
+        prompt.push_str("<|vision_end|>");
     }
-    prompt.push_str("<|vision_end|>");
-    prompt.push_str(task_prompt);
+    prompt.push_str(task_prompt.trim_end());
     prompt.push_str("<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
     prompt
 }
 
-fn build_position_ids(
+fn image_spans(ids: &[u32], image_token_id: u32) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+    while cursor < ids.len() {
+        if ids[cursor] != image_token_id {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        while cursor < ids.len() && ids[cursor] == image_token_id {
+            cursor += 1;
+        }
+        spans.push((start, cursor - start));
+    }
+    spans
+}
+
+fn build_request_position_ids(
     input_ids: &[u32],
-    grid_thw: (usize, usize, usize),
-    spatial_merge_size: usize,
+    grids: &[(usize, usize, usize)],
+    merge: usize,
     image_token_id: u32,
     device: &Device,
 ) -> Result<(Tensor, i64), Error> {
-    let image_start = input_ids
-        .iter()
-        .position(|&token| token == image_token_id)
-        .ok_or_else(|| Error::InvalidInput {
-            message: "OvisOCR2: image token missing from prompt".to_string(),
-        })?;
-    let image_len = input_ids
-        .iter()
-        .skip(image_start)
-        .take_while(|&&token| token == image_token_id)
-        .count();
-    if input_ids[image_start + image_len..].contains(&image_token_id) {
-        return Err(Error::InvalidInput {
-            message: "OvisOCR2: non-contiguous image token span".to_string(),
-        });
+    let spans = image_spans(input_ids, image_token_id);
+    if merge == 0 || spans.len() != grids.len() || spans.is_empty() {
+        return Err(Error::invalid_input(
+            "OvisOCR image grids do not match prompt groups",
+        ));
     }
-    let (grid_t, grid_h, grid_w) = grid_thw;
-    if spatial_merge_size == 0
-        || !grid_h.is_multiple_of(spatial_merge_size)
-        || !grid_w.is_multiple_of(spatial_merge_size)
-    {
-        return Err(Error::Config {
-            message: format!(
-                "OvisOCR2: invalid image grid {grid_thw:?} for merge size {spatial_merge_size}"
-            ),
-        });
+    let mut axes = [Vec::new(), Vec::new(), Vec::new()];
+    let mut cursor = 0;
+    let mut position = 0i64;
+    for ((start, len), &(t, h, w)) in spans.into_iter().zip(grids) {
+        if !h.is_multiple_of(merge)
+            || !w.is_multiple_of(merge)
+            || t == 0
+            || h == 0
+            || w == 0
+            || len != t * (h / merge) * (w / merge)
+        {
+            return Err(Error::invalid_input(
+                "OvisOCR prompt image tokens do not match merged grid",
+            ));
+        }
+        for _ in cursor..start {
+            for axis in &mut axes {
+                axis.push(position);
+            }
+            position += 1;
+        }
+        let (h, w) = (h / merge, w / merge);
+        for temporal in 0..t {
+            for row in 0..h {
+                for col in 0..w {
+                    axes[0].push(position + temporal as i64);
+                    axes[1].push(position + row as i64);
+                    axes[2].push(position + col as i64);
+                }
+            }
+        }
+        position += t.max(h).max(w) as i64;
+        cursor = start + len;
     }
-    let llm_h = grid_h / spatial_merge_size;
-    let llm_w = grid_w / spatial_merge_size;
-    if image_len != grid_t * llm_h * llm_w {
-        return Err(Error::InvalidInput {
-            message: format!(
-                "OvisOCR2: image token count {image_len} != merged grid token count {}",
-                grid_t * llm_h * llm_w
-            ),
-        });
-    }
-
-    let seq_len = input_ids.len();
-    let mut axes = [
-        Vec::with_capacity(seq_len),
-        Vec::with_capacity(seq_len),
-        Vec::with_capacity(seq_len),
-    ];
-    for position in 0..image_start as i64 {
+    for _ in cursor..input_ids.len() {
         for axis in &mut axes {
             axis.push(position);
         }
+        position += 1;
     }
-    let vision_start = image_start as i64;
-    for temporal in 0..grid_t {
-        for row in 0..llm_h {
-            for col in 0..llm_w {
-                axes[0].push(vision_start + temporal as i64);
-                axes[1].push(vision_start + row as i64);
-                axes[2].push(vision_start + col as i64);
-            }
-        }
-    }
-    let text_start = vision_start + llm_h.max(llm_w) as i64;
-    for (offset, _) in (image_start + image_len..seq_len).enumerate() {
-        let current = text_start + offset as i64;
-        for axis in &mut axes {
-            axis.push(current);
-        }
-    }
-    let max_position = axes
-        .iter()
-        .flat_map(|axis| axis.iter())
-        .copied()
-        .max()
-        .unwrap_or(0);
-    let rope_delta = max_position + 1 - seq_len as i64;
-    let data: Vec<i64> = axes.into_iter().flatten().collect();
-    let tensor = Tensor::from_vec(data, (3, 1, seq_len), device).map_err(|e| {
-        candle_to_ocr_processing(
-            crate::error::ProcessingStage::TensorOperation,
-            "OvisOCR2: create multimodal position ids",
-            e,
-        )
-    })?;
-    Ok((tensor, rope_delta))
+    let delta = position - input_ids.len() as i64;
+    let tensor = Tensor::from_vec(
+        axes.into_iter().flatten().collect::<Vec<_>>(),
+        (3, 1, input_ids.len()),
+        device,
+    )
+    .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "multimodal positions", e))?;
+    Ok((tensor, delta))
 }
 
 fn text_position_ids(position: i64, device: &Device) -> Result<Tensor, Error> {
@@ -648,6 +662,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn joint_image_grids_advance_text_positions_between_images() {
+        let ids = [9, 8, 42, 42, 42, 42, 42, 42, 7, 8, 42, 42, 7, 9];
+        let (pos, delta) =
+            build_request_position_ids(&ids, &[(1, 4, 6), (1, 2, 4)], 2, 42, &Device::Cpu).unwrap();
+        let axes = pos.to_vec3::<i64>().unwrap();
+        assert_eq!(axes[0][0], [0, 1, 2, 2, 2, 2, 2, 2, 5, 6, 7, 7, 9, 10]);
+        assert_eq!(axes[1][0], [0, 1, 2, 2, 2, 3, 3, 3, 5, 6, 7, 7, 9, 10]);
+        assert_eq!(axes[2][0], [0, 1, 2, 3, 4, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(delta, -3);
+        assert!(build_request_position_ids(&ids, &[(1, 4, 6)], 2, 42, &Device::Cpu).is_err());
+        let prompt = build_request_prompt([6, 2], "table prompt");
+        assert_eq!(prompt.matches("<|vision_start|>").count(), 2);
+        assert_eq!(prompt.matches("<|image_pad|>").count(), 8);
+    }
+
+    #[test]
     fn stop_tokens_include_model_and_tokenizer_eos() {
         assert_eq!(build_stop_token_ids(248_044, 248_046), [248_044, 248_046]);
         assert_eq!(build_stop_token_ids(248_044, 248_044), [248_044]);
@@ -681,7 +711,11 @@ mod tests {
 
     #[test]
     fn official_prompt_has_exact_no_think_framing() {
-        let prompt = build_prompt(2, DEFAULT_PROMPT);
+        assert_eq!(
+            build_request_prompt([2], "read \n\t"),
+            build_request_prompt([2], "read")
+        );
+        let prompt = build_request_prompt([2], DEFAULT_PROMPT);
         assert!(prompt.starts_with(
             "<|im_start|>user\n<|vision_start|><|image_pad|><|image_pad|><|vision_end|>\nExtract"
         ));
@@ -693,7 +727,7 @@ mod tests {
         let mut ids = vec![1u32; 775];
         ids[4..652].fill(248_056);
         let (positions, delta) =
-            build_position_ids(&ids, (1, 54, 48), 2, 248_056, &Device::Cpu).unwrap();
+            build_request_position_ids(&ids, &[(1, 54, 48)], 2, 248_056, &Device::Cpu).unwrap();
         assert_eq!(delta, -621);
         let positions = positions.to_vec3::<i64>().unwrap();
         assert_eq!(positions[0][0][4], 4);

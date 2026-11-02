@@ -531,7 +531,6 @@ fn sample_tokens_and_conf(
         && matches!(logits.dtype(), DType::BF16 | DType::F32)
         && top_k == 0
         && top_p >= 1.0
-        && std::env::var_os("OAR_MINERU_DIFFUSION_DISABLE_GPU_SAMPLING").is_none()
     {
         return sample_tokens_and_conf_cuda(logits, temperature, rng);
     }
@@ -586,8 +585,7 @@ fn sample_tokens_and_conf(
 /// Fast path for the reference/default sampling configuration. The model's
 /// logits remain on the GPU; only two F32 values per block position (token id
 /// and selected probability) cross to the host. The CPU fallback above stays
-/// available for top-k/top-p filters and as a numerical/debugging oracle via
-/// `OAR_MINERU_DIFFUSION_DISABLE_GPU_SAMPLING=1`.
+/// handles top-k/top-p filters.
 #[cfg(feature = "cuda")]
 fn sample_tokens_and_conf_cuda(
     logits: &Tensor,

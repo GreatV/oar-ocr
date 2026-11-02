@@ -7,6 +7,8 @@
 //! so OvisOCR3's zero MTP depth requires no speculative-decoding path.
 
 mod adapter;
+mod crosspage;
+pub use crosspage::CrossPageTable;
 mod parser;
 pub mod prompts;
 
@@ -27,6 +29,12 @@ pub struct OvisOcr3 {
 }
 
 impl OvisOcr3 {
+    /// Set whether to use CUDA graphs for decoding. Enabled by default.
+    pub fn with_cuda_graphs(mut self, enabled: bool) -> Self {
+        self.engine = self.engine.with_cuda_graphs(enabled);
+        self
+    }
+
     /// Load an explicitly selected OvisOCR3 checkpoint directory.
     pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         Self::from_dir_with_runtime(model_dir, RuntimeConfig::new(device))
@@ -83,6 +91,21 @@ impl OvisOcr3 {
             .into_iter()
             .map(|result| result.and_then(|tokens| self.decode_tokens_raw(&tokens)))
             .collect())
+    }
+
+    /// Generate one response conditioned on all supplied page images.
+    /// This is the official two-page cross-table prompt's inference primitive;
+    /// the caller supplies the current page Markdown in the task prompt.
+    pub fn generate_joint_with_prompt(
+        &self,
+        images: &[RgbImage],
+        prompt: &str,
+        max_new_tokens: usize,
+    ) -> Result<String, Error> {
+        let tokens = self
+            .engine
+            .generate_request(images, prompt, max_new_tokens, None)?;
+        self.decode_tokens_raw(&tokens)
     }
 
     /// Generate token IDs with the verbatim v3 Markdown prompt.

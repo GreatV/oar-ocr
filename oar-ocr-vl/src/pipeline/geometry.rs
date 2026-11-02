@@ -1,8 +1,33 @@
 //! Geometry and crop preparation used by parsing pipelines.
 
 use crate::document::geometry::BoundingBox;
-use image::{GrayImage, RgbImage};
-use std::collections::HashSet;
+use image::RgbImage;
+mod calipers;
+pub(crate) mod layout_filter;
+pub(crate) mod polygon;
+mod raster;
+
+pub(crate) fn cover_ratio(container: [f32; 4], bbox: [f32; 4]) -> f32 {
+    let area = (bbox[2] - bbox[0]).max(0.0) * (bbox[3] - bbox[1]).max(0.0);
+    if area == 0.0 {
+        return 0.0;
+    }
+    (container[2].min(bbox[2]) - container[0].max(bbox[0])).max(0.0)
+        * (container[3].min(bbox[3]) - container[1].max(bbox[1])).max(0.0)
+        / area
+}
+
+pub(crate) fn bbox_iou(a: [f32; 4], b: [f32; 4], pixel_offset: f64) -> f64 {
+    let a = a.map(f64::from);
+    let b = b.map(f64::from);
+    let intersection = (a[2].min(b[2]) - a[0].max(b[0]) + pixel_offset).max(0.)
+        * (a[3].min(b[3]) - a[1].max(b[1]) + pixel_offset).max(0.);
+    let area = |bbox: [f64; 4]| {
+        (bbox[2] - bbox[0] + pixel_offset).max(0.) * (bbox[3] - bbox[1] + pixel_offset).max(0.)
+    };
+    let union = area(a) + area(b) - intersection;
+    if union > 0. { intersection / union } else { 0. }
+}
 
 #[inline]
 pub fn calculate_bbox_area(bbox: &BoundingBox) -> f32 {
@@ -66,44 +91,46 @@ pub struct DetectedBox {
 }
 
 pub fn filter_overlap_boxes(boxes: Vec<DetectedBox>, overlap_threshold: f32) -> Vec<DetectedBox> {
-    let boxes: Vec<_> = boxes
+    let mut prediction = crate::pipeline::layout::LayoutPrediction::from(
+        crate::pipeline::layout::LayoutDetections::new(
+            boxes
+                .into_iter()
+                .map(|b| crate::pipeline::layout::LayoutDetectionElement {
+                    bbox: b.bbox,
+                    element_type: b.label,
+                    score: b.score,
+                })
+                .collect(),
+        ),
+    );
+    layout_filter::filter_document_layout(
+        &mut prediction,
+        &crate::pipeline::layout::LayoutPostprocessOptions::default()
+            .with_overlap_threshold(Some(f64::from(overlap_threshold))),
+    );
+    prediction
+        .detections
+        .elements
         .into_iter()
-        .filter(|candidate| candidate.label != "reference")
-        .collect();
-    let mut dropped = HashSet::new();
-    for i in 0..boxes.len() {
-        for j in (i + 1)..boxes.len() {
-            if dropped.contains(&i) || dropped.contains(&j) {
-                continue;
-            }
-            if calculate_overlap_ratio(&boxes[i].bbox, &boxes[j].bbox, "small") <= overlap_threshold
-            {
-                continue;
-            }
-            if (boxes[i].label == "image" || boxes[j].label == "image")
-                && boxes[i].label != boxes[j].label
-            {
-                continue;
-            }
-            if calculate_bbox_area(&boxes[i].bbox) >= calculate_bbox_area(&boxes[j].bbox) {
-                dropped.insert(j);
-            } else {
-                dropped.insert(i);
-            }
-        }
-    }
-    boxes
-        .into_iter()
-        .enumerate()
-        .filter(|(index, _)| !dropped.contains(index))
-        .map(|(_, candidate)| candidate)
+        .map(|b| DetectedBox {
+            bbox: b.bbox,
+            label: b.element_type,
+            score: b.score,
+        })
         .collect()
 }
 
 pub fn crop_margin(image: &RgbImage) -> RgbImage {
-    let gray: GrayImage = image::imageops::grayscale(image);
-    let (min_value, max_value) = gray.pixels().fold((255u8, 0u8), |(min, max), pixel| {
-        (min.min(pixel.0[0]), max.max(pixel.0[0]))
+    // OpenCV BT.601 RGB-to-gray coefficients, rather than image's Rec.709.
+    let gray: Vec<u8> = image
+        .pixels()
+        .map(|p| {
+            ((9798u32 * p[0] as u32 + 19235u32 * p[1] as u32 + 3735u32 * p[2] as u32 + 16384) >> 15)
+                as u8
+        })
+        .collect();
+    let (min_value, max_value) = gray.iter().fold((255u8, 0u8), |(min, max), &pixel| {
+        (min.min(pixel), max.max(pixel))
     });
     if max_value == min_value {
         return image.clone();
@@ -111,11 +138,11 @@ pub fn crop_margin(image: &RgbImage) -> RgbImage {
     let (mut x_min, mut y_min) = (image.width(), image.height());
     let (mut x_max, mut y_max) = (0, 0);
     let mut found = false;
-    for (x, y, pixel) in gray.enumerate_pixels() {
-        let normalized = ((pixel.0[0] as f32 - min_value as f32)
-            / (max_value as f32 - min_value as f32)
+    for (index, pixel) in gray.into_iter().enumerate() {
+        let (x, y) = (index as u32 % image.width(), index as u32 / image.width());
+        let normalized = ((pixel as f64 - min_value as f64) / (max_value as f64 - min_value as f64)
             * 255.0) as u8;
-        if normalized < 200 {
+        if normalized <= 200 {
             x_min = x_min.min(x);
             x_max = x_max.max(x);
             y_min = y_min.min(y);
@@ -128,8 +155,30 @@ pub fn crop_margin(image: &RgbImage) -> RgbImage {
     }
     let width = (x_max - x_min + 1).min(image.width() - x_min);
     let height = (y_max - y_min + 1).min(image.height() - y_min);
-    if width == 0 || height == 0 {
+    if width <= 2 || height <= 2 {
         return image.clone();
     }
     image::imageops::crop_imm(image, x_min, y_min, width, height).to_image()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formula_margins_use_bt601_inclusive_threshold_and_two_pixel_guard() {
+        let mut image = RgbImage::from_pixel(7, 5, image::Rgb([255; 3]));
+        for y in 1..4 {
+            for x in 3..6 {
+                image.put_pixel(x, y, image::Rgb([0; 3]));
+            }
+        }
+        image.put_pixel(2, 1, image::Rgb([200; 3]));
+        image.put_pixel(1, 1, image::Rgb([120, 255, 0]));
+        image.put_pixel(0, 1, image::Rgb([201; 3]));
+        assert_eq!(crop_margin(&image).dimensions(), (5, 3));
+        let mut single = RgbImage::from_pixel(5, 5, image::Rgb([255; 3]));
+        single.put_pixel(2, 2, image::Rgb([0; 3]));
+        assert_eq!(crop_margin(&single).dimensions(), (5, 5));
+    }
 }

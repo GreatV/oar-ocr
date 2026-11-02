@@ -7,6 +7,7 @@
 
 mod adapter;
 mod config;
+mod image_analysis;
 mod model;
 mod parser;
 pub(crate) use crate::backbones::qwen_vl_processing as processing;

@@ -16,20 +16,31 @@ use crate::document::page::ParseDiagnostic;
 use crate::document::structure::{
     LayoutElement, LayoutElementType, StructureResult, TableResult, TableType,
 };
-use crate::pipeline::crop::crop_bounding_box;
 use crate::pipeline::geometry::{
-    DetectedBox, calculate_overlap_ratio, calculate_projection_overlap_ratio, crop_margin,
-    filter_overlap_boxes,
+    calculate_overlap_ratio, calculate_projection_overlap_ratio, crop_margin,
 };
 use crate::pipeline::layout::LayoutSource;
-use crate::render::table::convert_otsl_to_html;
+use crate::render::table::convert_otsl_to_html_with_options;
 use crate::render::text::{self, truncate_repetitive_content};
 use image::RgbImage;
 use image::{Rgb, imageops};
 use std::borrow::Cow;
 use std::sync::Arc;
 
-pub use crate::api::recognition::{RecognitionBackend, RecognitionTask};
+pub use crate::api::recognition::{
+    AuxiliaryLabelAction, AuxiliaryLabelRule, DocParserOptions, DocParserProfile,
+    EmptyLayoutBehavior, FormulaNumberComposition, RecognitionBackend, RecognitionTask,
+    RegionErrorBehavior,
+};
+
+#[derive(Debug)]
+pub(crate) struct ParsedPage {
+    pub structure: StructureResult,
+    pub diagnostics: Vec<ParseDiagnostic>,
+    pub raw_output: Option<String>,
+    pub width: u32,
+    pub height: u32,
+}
 
 /// Configuration for the unified document parser.
 #[derive(Debug, Clone)]
@@ -67,26 +78,186 @@ impl Default for DocParserConfig {
 pub struct DocParser<'a, B: RecognitionBackend + ?Sized> {
     backend: &'a B,
     config: DocParserConfig,
+    config_override: Option<DocParserConfig>,
+    options: DocParserOptions,
+    profile: DocParserProfile,
     region_batch_size: usize,
+    page_preprocessor: Option<std::panic::AssertUnwindSafe<&'a dyn crate::PagePreprocessor>>,
 }
 
 impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
     /// Create a new document parser with the given backend.
     pub fn new(backend: &'a B) -> Self {
-        Self {
+        Self::build(backend, None)
+    }
+
+    /// Create a document parser with an explicit six-field configuration.
+    pub fn with_config(backend: &'a B, config: DocParserConfig) -> Self {
+        Self::build(backend, Some(config))
+    }
+
+    fn build(backend: &'a B, config_override: Option<DocParserConfig>) -> Self {
+        let mut parser = Self {
             backend,
             config: DocParserConfig::default(),
+            config_override,
+            options: DocParserOptions::default(),
+            profile: DocParserProfile::default(),
             region_batch_size: 1,
+            page_preprocessor: None,
+        };
+        parser.resolve_options();
+        parser
+    }
+
+    /// Apply document overrides above the backend profile and explicit config.
+    pub fn with_options(mut self, options: DocParserOptions) -> Self {
+        self.options = self.options.merge(&options);
+        self.resolve_options();
+        self
+    }
+
+    /// Set the page transform applied before layout detection.
+    pub fn with_page_preprocessor(mut self, preprocessor: &'a dyn crate::PagePreprocessor) -> Self {
+        self.page_preprocessor = Some(std::panic::AssertUnwindSafe(preprocessor));
+        self
+    }
+
+    fn resolve_options(&mut self) {
+        let mut profile = self
+            .options
+            .profile
+            .clone()
+            .unwrap_or_else(|| self.backend.doc_parser_profile());
+        if self.options.profile.is_none()
+            && self.options.merge_labels.is_none()
+            && !self.backend.merge_adjacent_text_regions()
+        {
+            profile.merge_labels.clear();
+        }
+        if let Some(config) = &self.config_override {
+            profile.crop_pad_ratio = config.crop_pad_ratio;
+            profile.max_tokens = config.max_tokens;
+            profile.skip_auxiliary_regions = config.skip_auxiliary_regions;
+            profile.skip_region_blocks = config.skip_region_blocks;
+            profile.markdown_ignore_labels = config.markdown_ignore_labels.clone();
+            profile.markdown_pretty = config.markdown_pretty;
+        }
+        self.options.apply(&mut profile);
+        self.config = DocParserConfig {
+            crop_pad_ratio: profile.crop_pad_ratio,
+            max_tokens: profile.max_tokens,
+            skip_auxiliary_regions: profile.skip_auxiliary_regions,
+            skip_region_blocks: profile.skip_region_blocks,
+            markdown_ignore_labels: profile.markdown_ignore_labels.clone(),
+            markdown_pretty: profile.markdown_pretty,
+        };
+        self.profile = profile;
+    }
+
+    fn skips_auxiliary(&self, label: &str, kind: LayoutElementType) -> bool {
+        if let Some(skip) = self.options.skip_auxiliary_regions {
+            return skip && is_auxiliary_element(kind);
+        }
+        if let Some(rules) = &self.options.auxiliary_labels
+            && let Some(rule) = rules.iter().find(|rule| rule.label == label)
+        {
+            return rule.action == AuxiliaryLabelAction::Drop;
+        }
+        if let Some(config) = &self.config_override {
+            return config.skip_auxiliary_regions && is_auxiliary_element(kind);
+        }
+        match self
+            .profile
+            .auxiliary_labels
+            .iter()
+            .find(|rule| rule.label == label)
+        {
+            Some(rule) => rule.action == AuxiliaryLabelAction::Drop,
+            None => self.profile.skip_auxiliary_regions && is_auxiliary_element(kind),
         }
     }
 
-    /// Create a new document parser with custom configuration.
-    pub fn with_config(backend: &'a B, config: DocParserConfig) -> Self {
-        Self {
-            backend,
-            config,
-            region_batch_size: 1,
+    fn crop_region(
+        &self,
+        image: &RgbImage,
+        bbox: &BoundingBox,
+        polygon: Option<&BoundingBox>,
+        figures: Option<(&super::table_figures::TableFigures, usize)>,
+    ) -> Result<RgbImage, Error> {
+        super::crop::crop_with_polygon_and_paint(
+            image,
+            [bbox.x_min(), bbox.y_min(), bbox.x_max(), bbox.y_max()].map(f64::from),
+            polygon,
+            &self.profile.crop,
+            |crop, origin| {
+                if let Some((figures, index)) = figures {
+                    figures.paint(index, crop, origin);
+                }
+            },
+        )
+    }
+
+    fn empty_layout_result(
+        &self,
+        input_path: Arc<str>,
+        index: usize,
+        image: Cow<'_, RgbImage>,
+        raw_output: Option<String>,
+        diagnostics: Vec<ParseDiagnostic>,
+    ) -> Result<ParsedPage, Error> {
+        let (width, height) = image.dimensions();
+        let result = match self.profile.empty_layout {
+            EmptyLayoutBehavior::Empty => StructureResult::new(input_path, index),
+            EmptyLayoutBehavior::FullPageOcr => {
+                self.recognize_full_image(input_path, index, image.into_owned())?
+            }
+        };
+        Ok(ParsedPage {
+            structure: result,
+            diagnostics,
+            raw_output,
+            width,
+            height,
+        })
+    }
+
+    /// Render recognized regions with this parser's document settings.
+    pub fn render_markdown(&self, result: &StructureResult) -> String {
+        let mut ignored = self.config.markdown_ignore_labels.clone();
+        if self.options.markdown_ignore_labels.is_none()
+            && (self.options.auxiliary_labels.is_some() || self.config_override.is_none())
+        {
+            for rule in &self.profile.auxiliary_labels {
+                match rule.action {
+                    AuxiliaryLabelAction::HideAtRender if !ignored.contains(&rule.label) => {
+                        ignored.push(rule.label.clone())
+                    }
+                    AuxiliaryLabelAction::Recognize => ignored.retain(|label| label != &rule.label),
+                    _ => {}
+                }
+            }
         }
+        let mut projected = std::borrow::Cow::Borrowed(result.layout_elements.as_slice());
+        if self.profile.table_figure_tokens {
+            let figures = super::table_figures::TableFigures::new(&projected);
+            ignored.push("__table_figure".into());
+            for (index, element) in projected.to_mut().iter_mut().enumerate() {
+                if figures.absorbed(index) {
+                    element.label = Some("__table_figure".into());
+                }
+            }
+        }
+        let elements = crate::render::markdown::assembly::compose_formula_numbers(
+            &projected,
+            self.profile.formula_numbers,
+        );
+        crate::render::markdown::to_markdown_with_style(
+            &elements,
+            &ignored,
+            self.config.markdown_pretty,
+            &self.profile.render_style,
+        )
     }
 
     /// Set the maximum number of same-task regions sent to the recognition
@@ -131,7 +302,14 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
     /// Use this for end-to-end models that handle layout internally.
     /// For models requiring separate layout detection, use [`parse`](Self::parse) instead.
     pub fn parse_without_layout(&self, image: RgbImage) -> Result<StructureResult, Error> {
-        self.recognize_full_image("<memory>".into(), 0, image)
+        let image = super::page_preprocessing::prepare_page(
+            Cow::Owned(image),
+            self.page_preprocessor
+                .as_ref()
+                .map(|hook| hook.0)
+                .or_else(|| self.backend.page_preprocessor()),
+        )?;
+        self.recognize_full_image("<memory>".into(), 0, image.into_owned())
     }
 
     /// Parse a document image with source path information.
@@ -143,14 +321,14 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
         image: RgbImage,
     ) -> Result<StructureResult, Error> {
         self.parse_with_path_image(layout, input_path.into(), index, Cow::Owned(image))
-            .map(|(result, _)| result)
+            .map(|parsed| parsed.structure)
     }
 
     pub(crate) fn parse_image<L: LayoutSource + ?Sized>(
         &self,
         layout: &L,
         image: &RgbImage,
-    ) -> Result<(StructureResult, Vec<ParseDiagnostic>), Error> {
+    ) -> Result<ParsedPage, Error> {
         self.parse_with_path_image(layout, "<memory>".into(), 0, Cow::Borrowed(image))
     }
 
@@ -160,57 +338,108 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
         input_path: Arc<str>,
         index: usize,
         image: Cow<'_, RgbImage>,
-    ) -> Result<(StructureResult, Vec<ParseDiagnostic>), Error> {
+    ) -> Result<ParsedPage, Error> {
+        let image = super::page_preprocessing::prepare_page(
+            image,
+            self.page_preprocessor
+                .as_ref()
+                .map(|hook| hook.0)
+                .or_else(|| self.backend.page_preprocessor()),
+        )?;
         let (page_w, page_h) = (image.width() as f32, image.height() as f32);
 
-        // Step 1: Layout detection
-        let layout_result = layout.detect(&image)?;
-        let detected = layout_result.elements;
-
-        // Remove redundant layout boxes whose overlap against the smaller box
-        // exceeds 0.7.
-        let detected: Vec<DetectedBox> = detected
-            .into_iter()
-            .map(|e| DetectedBox {
-                bbox: e.bbox,
-                label: e.element_type,
-                score: e.score,
-            })
-            .collect();
-        let detected = filter_overlap_boxes(detected, 0.7);
+        let mut prediction = match &self.profile.layout {
+            Some(options) => layout.detect_with_options(&image, options)?,
+            None => layout.detect(&image)?.into(),
+        };
+        let table_figure_pool = self.profile.table_figure_tokens.then(|| {
+            prediction
+                .detections
+                .elements
+                .iter()
+                .map(|element| {
+                    LayoutElement::new(
+                        element.bbox.clone(),
+                        LayoutElementType::from_label(&element.element_type),
+                        element.score,
+                    )
+                    .with_label(element.element_type.clone())
+                })
+                .collect::<Vec<_>>()
+        });
+        super::geometry::layout_filter::filter_document_layout(
+            &mut prediction,
+            self.profile.layout.as_ref().unwrap_or(&Default::default()),
+        );
+        let detected = prediction.detections.elements;
+        let mut polygons = Vec::with_capacity(detected.len());
+        let mut crop_polygons = prediction.polygons.into_iter();
 
         // If no layout elements detected, run OCR on the whole image
         if detected.is_empty() {
-            return self
-                .recognize_full_image(input_path, index, image.into_owned())
-                .map(|result| (result, Vec::new()));
+            return self.empty_layout_result(
+                input_path,
+                index,
+                image,
+                prediction.raw_output,
+                prediction.diagnostics,
+            );
         }
 
         // Step 2: Filter and prepare elements
         let mut elements: Vec<LayoutElement> = Vec::with_capacity(detected.len());
         for element in detected {
-            let element_type = LayoutElementType::from_label(&element.label);
+            let polygon = crop_polygons.next().flatten();
+            let element_type = LayoutElementType::from_label(&element.element_type);
             if self.config.skip_region_blocks && element_type == LayoutElementType::Region {
                 continue;
             }
-            if self.config.skip_auxiliary_regions && is_auxiliary_element(element_type) {
+            if self.skips_auxiliary(&element.element_type, element_type) {
                 continue;
             }
 
             elements.push(
                 LayoutElement::new(element.bbox, element_type, element.score)
-                    .with_label(element.label),
+                    .with_label(element.element_type),
             );
+            polygons.push(polygon);
         }
 
         if elements.is_empty() {
-            return self
-                .recognize_full_image(input_path, index, image.into_owned())
-                .map(|result| (result, Vec::new()));
+            return self.empty_layout_result(
+                input_path,
+                index,
+                image,
+                prediction.raw_output,
+                prediction.diagnostics,
+            );
         }
 
-        // Step 3: Number the elements. A `LayoutSource` hands them over in
-        // reading order, so there is nothing to sort here.
+        // A backend may refine detector order using its trained page protocol.
+        // Invalid predictions preserve every region and report a diagnostic.
+        let mut diagnostics = prediction.diagnostics;
+        if elements.len() > 1
+            && let Some(order) =
+                self.backend
+                    .predict_reading_order(&image, &elements, self.config.max_tokens)?
+        {
+            let mut sorted_ids = order.clone();
+            sorted_ids.sort_unstable();
+            if sorted_ids.iter().copied().eq(0..elements.len()) {
+                let mut slots: Vec<_> = elements.into_iter().map(Some).collect();
+                polygons = order.iter().map(|&i| polygons[i].clone()).collect();
+                elements = order
+                    .into_iter()
+                    .map(|index| slots[index].take().expect("validated permutation"))
+                    .collect();
+            } else {
+                diagnostics.push(ParseDiagnostic {
+                    block_index: None,
+                    stage: "reading_order".into(),
+                    message: "Invalid reading-order permutation; retained detector order".into(),
+                });
+            }
+        }
         let mut sorted_elements = elements;
         assign_order_indices(&mut sorted_elements);
 
@@ -218,7 +447,11 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
         //
         // Vertically stack compatible adjacent text crops before recognition.
         // This improves recognition quality for fragmented detections.
-        let merge_groups = compute_adjacent_text_merge_groups(&sorted_elements);
+        let merge_groups = if !self.profile.merge_labels.is_empty() {
+            compute_adjacent_text_merge_groups_with_profile(&sorted_elements, &self.profile)
+        } else {
+            Vec::new()
+        };
         let mut group_first_for_index: Vec<Option<usize>> = vec![None; sorted_elements.len()];
         let mut group_by_first: std::collections::HashMap<usize, MergeGroup> =
             std::collections::HashMap::new();
@@ -239,10 +472,14 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             element_index: usize,
             image: RgbImage,
             task: RecognitionTask,
+            label: String,
+            max_tokens: usize,
         }
 
-        let mut jobs_by_batch: std::collections::BTreeMap<(usize, u64), Vec<RecognitionJob>> =
-            std::collections::BTreeMap::new();
+        let mut jobs_by_batch: std::collections::BTreeMap<
+            (usize, usize, u64),
+            Vec<RecognitionJob>,
+        > = std::collections::BTreeMap::new();
         let max_pending_jobs = self.region_batch_size.saturating_mul(8).max(8);
         let mut pending_jobs = 0usize;
         let mut tasks_by_element = vec![None; sorted_elements.len()];
@@ -253,14 +490,18 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
         let flush_batch = |jobs: &mut Vec<RecognitionJob>,
                            generated: &mut [Option<Result<String, Error>>]|
          -> Result<(), Error> {
+            let max_tokens = jobs[0].max_tokens;
             let batch = std::mem::take(jobs);
             let element_indices: Vec<usize> = batch.iter().map(|job| job.element_index).collect();
             let tasks: Vec<RecognitionTask> = batch.iter().map(|job| job.task).collect();
-            let images: Vec<RgbImage> = batch.into_iter().map(|job| job.image).collect();
-            let results = self.backend.recognize_batch_with_options(
+            let (images, labels): (Vec<_>, Vec<_>) =
+                batch.into_iter().map(|job| (job.image, job.label)).unzip();
+            let labels: Vec<_> = labels.iter().map(String::as_str).collect();
+            let results = self.backend.recognize_labeled_batch_with_options(
                 images,
                 &tasks,
-                &GenerationOptions::new(self.config.max_tokens),
+                &labels,
+                &GenerationOptions::new(max_tokens),
             )?;
             if results.len() != element_indices.len() {
                 return Err(Error::InvalidInput {
@@ -277,7 +518,9 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             }
             Ok(())
         };
-        let mut diagnostics = Vec::new();
+        let table_figures = table_figure_pool
+            .as_ref()
+            .map(|pool| super::table_figures::TableFigures::from_pool(&sorted_elements, pool));
         let mut merged_by_first: std::collections::HashMap<usize, bool> =
             std::collections::HashMap::new();
         for (idx, element) in sorted_elements.iter_mut().enumerate() {
@@ -292,7 +535,14 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             }
 
             // Determine task for element
-            let Some(task) = task_for_element_type(element.element_type) else {
+            let label = element
+                .label
+                .as_deref()
+                .unwrap_or(element.element_type.as_str());
+            let Some(task) = self
+                .backend
+                .recognition_task_for_label(label, task_for_element_type(element.element_type))
+            else {
                 continue;
             };
             // Backends that cannot read charts leave those regions
@@ -316,7 +566,12 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
                     } else {
                         bbox.clone()
                     };
-                    let crop = match crop_bounding_box(&image, &crop_bbox) {
+                    let crop = match self.crop_region(
+                        &image,
+                        &crop_bbox,
+                        polygons.get(g_idx).and_then(Option::as_ref),
+                        table_figures.as_ref().map(|figures| (figures, g_idx)),
+                    ) {
                         Ok(crop) => crop,
                         Err(error) => {
                             diagnostics.push(ParseDiagnostic {
@@ -348,7 +603,12 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
                     } else {
                         element.bbox.clone()
                     };
-                    match crop_bounding_box(&image, &crop_bbox) {
+                    match self.crop_region(
+                        &image,
+                        &crop_bbox,
+                        polygons.get(idx).and_then(Option::as_ref),
+                        table_figures.as_ref().map(|figures| (figures, idx)),
+                    ) {
                         Ok(crop) => crop,
                         Err(error) => {
                             diagnostics.push(ParseDiagnostic {
@@ -369,7 +629,12 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
                 } else {
                     element.bbox.clone()
                 };
-                match crop_bounding_box(&image, &crop_bbox) {
+                match self.crop_region(
+                    &image,
+                    &crop_bbox,
+                    polygons.get(idx).and_then(Option::as_ref),
+                    table_figures.as_ref().map(|figures| (figures, idx)),
+                ) {
                     Ok(cropped) => cropped,
                     Err(error) => {
                         diagnostics.push(ParseDiagnostic {
@@ -390,8 +655,15 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             }
 
             tasks_by_element[idx] = Some(task);
+            let max_tokens = self
+                .backend
+                .region_token_budget(label, task)
+                .map_or(self.config.max_tokens, |budget| {
+                    budget.min(self.config.max_tokens)
+                });
             let batch_key = (
                 recognition_task_index(task),
+                max_tokens,
                 self.backend.recognition_batch_key(&cropped, task),
             );
             {
@@ -400,6 +672,8 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
                     element_index: idx,
                     image: cropped,
                     task,
+                    label: label.to_string(),
+                    max_tokens,
                 });
                 pending_jobs += 1;
                 if jobs.len() == self.region_batch_size {
@@ -436,6 +710,7 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
         }
 
         let mut tables: Vec<TableResult> = Vec::new();
+        let mut table_indices = Vec::new();
         for (idx, generated) in generated_by_element.into_iter().enumerate() {
             let Some(generated) = generated else {
                 continue;
@@ -444,7 +719,18 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
                 continue;
             };
             let element = &mut sorted_elements[idx];
-            let mut generated = generated?;
+            let mut generated = match generated {
+                Ok(value) => value,
+                Err(error) if self.profile.region_errors == RegionErrorBehavior::KeepRegion => {
+                    diagnostics.push(ParseDiagnostic {
+                        block_index: Some(idx),
+                        stage: "recognition".into(),
+                        message: error.to_string(),
+                    });
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if generated.trim().is_empty() {
                 continue;
             }
@@ -452,7 +738,10 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             // Apply repetition truncation if needed. Table markup is
             // exempt: legitimate tables repeat identical rows well past
             // the threshold, and collapsing them yields invalid HTML.
-            if self.backend.capabilities().truncate_repetitive_output
+            if let Some(options) = &self.profile.repetition {
+                generated =
+                    text::clean_repetition(&generated, task == RecognitionTask::Table, options);
+            } else if self.backend.capabilities().truncate_repetitive_output
                 && task != RecognitionTask::Table
             {
                 generated = truncate_repetitive_content(&generated, 10, 10, 10);
@@ -462,19 +751,31 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             //
             // Note: Table blocks should remain HTML/OTSL-derived HTML; do not run the text normalizer
             // on table markup.
-            let processed = if task == RecognitionTask::Table {
+            let label = element
+                .label
+                .as_deref()
+                .unwrap_or(element.element_type.as_str());
+            let processed = if let Some(native) = self
+                .backend
+                .postprocess_region_output(label, task, &generated)
+            {
+                native
+            } else if task == RecognitionTask::Table {
                 if self.backend.capabilities().table_output_is_otsl {
-                    convert_otsl_to_html(&generated)
+                    convert_otsl_to_html_with_options(&generated, &self.profile.table)
                 } else {
                     generated.trim().to_string()
                 }
             } else if task == RecognitionTask::Formula {
-                text::format_formula(&generated)
+                text::format_formula_with_options(&generated, &self.profile.formula)
+            } else if let Some(options) = &self.profile.delimiters {
+                text::normalize_math_delimiters(&generated, options)
             } else {
                 text::format_text(&generated)
             };
 
             if element.element_type == LayoutElementType::Table {
+                table_indices.push(idx);
                 tables.push(
                     TableResult::new(element.bbox.clone(), TableType::Unknown)
                         .with_html_structure(processed.clone()),
@@ -484,10 +785,60 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             element.text = Some(processed);
         }
 
+        if let Some(figures) = &table_figures {
+            for (&index, table) in table_indices.iter().zip(&mut tables) {
+                if let Some(content) = sorted_elements[index].text.as_deref() {
+                    let restored = figures.restore(index, content, &sorted_elements);
+                    sorted_elements[index].text = Some(restored.clone());
+                    table.html_structure = Some(restored);
+                }
+            }
+        }
+
+        if self.profile.render_style.normalize_bullets {
+            let formulas = crate::render::markdown::assembly::compose_formula_numbers(
+                &sorted_elements,
+                self.profile.formula_numbers,
+            );
+            let projected = crate::render::markdown::assembly::prepare_text(
+                &formulas,
+                self.profile.render_style.merge_hyphenated_text,
+                Some(crate::render::markdown::assembly::BulletAlignment {
+                    page_width: page_w,
+                    grid: self.profile.crop.coordinate_grid.unwrap_or(1000),
+                    tolerance: 10.,
+                }),
+            );
+            let numbered: Vec<_> = projected
+                .iter()
+                .filter(|element| {
+                    element.label.as_deref() == Some("text")
+                        && element.text.as_deref().is_some_and(|s| s.starts_with("- "))
+                })
+                .filter_map(|element| element.order_index)
+                .collect();
+            for element in &mut sorted_elements {
+                if element
+                    .order_index
+                    .is_some_and(|index| numbered.contains(&index))
+                    && element.label.as_deref() == Some("text")
+                    && !element.text.as_deref().unwrap_or("").starts_with("- ")
+                {
+                    element.text = Some(format!("- {}", element.text.as_deref().unwrap_or("")));
+                }
+            }
+        }
+
         let result = StructureResult::new(input_path, index)
             .with_layout_elements(sorted_elements)
             .with_tables(tables);
-        Ok((result, diagnostics))
+        Ok(ParsedPage {
+            structure: result,
+            diagnostics,
+            raw_output: prediction.raw_output,
+            width: page_w as u32,
+            height: page_h as u32,
+        })
     }
 
     /// Parse a document and convert to markdown.
@@ -500,11 +851,7 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
         image: RgbImage,
     ) -> Result<String, Error> {
         let result = self.parse(layout, image)?;
-        Ok(crate::render::markdown::to_markdown(
-            &result.layout_elements,
-            &self.config.markdown_ignore_labels,
-            self.config.markdown_pretty,
-        ))
+        Ok(self.render_markdown(&result))
     }
 
     fn recognize_full_image(
@@ -663,8 +1010,11 @@ fn merge_images_vertically(images: &[RgbImage], aligns: &[MergeAlign]) -> RgbIma
     merged
 }
 
-fn compute_adjacent_text_merge_groups(elements: &[LayoutElement]) -> Vec<MergeGroup> {
-    // Merge only plain text blocks; images, tables, and semantic blocks remain separate.
+fn compute_adjacent_text_merge_groups_with_profile(
+    elements: &[LayoutElement],
+    profile: &DocParserProfile,
+) -> Vec<MergeGroup> {
+    // Keep semantic regions in the sequence and apply the configured merge labels.
     const NON_MERGE_LABELS: [&str; 6] = [
         "image",
         "header_image",
@@ -677,7 +1027,11 @@ fn compute_adjacent_text_merge_groups(elements: &[LayoutElement]) -> Vec<MergeGr
     let mut blocks_to_merge: Vec<usize> = Vec::new();
     for (idx, element) in elements.iter().enumerate() {
         let label = element.label.as_deref().unwrap_or("");
-        if NON_MERGE_LABELS.contains(&label) {
+        let blocked = profile.merge_blocker_labels.as_ref().map_or_else(
+            || NON_MERGE_LABELS.contains(&label),
+            |labels| labels.iter().any(|v| v == label),
+        );
+        if blocked {
             continue;
         }
         blocks_to_merge.push(idx);
@@ -713,6 +1067,7 @@ fn compute_adjacent_text_merge_groups(elements: &[LayoutElement]) -> Vec<MergeGr
         block_idx: usize,
         prev_idx: usize,
         elements: &[LayoutElement],
+        blockers: Option<&[String]>,
     ) -> bool {
         let prev_bbox = &elements[prev_idx].bbox;
         let block_bbox = &elements[block_idx].bbox;
@@ -725,6 +1080,13 @@ fn compute_adjacent_text_merge_groups(elements: &[LayoutElement]) -> Vec<MergeGr
 
         for (idx, other) in elements.iter().enumerate() {
             if idx == block_idx || idx == prev_idx {
+                continue;
+            }
+            let label = other
+                .label
+                .as_deref()
+                .unwrap_or(other.element_type.as_str());
+            if blockers.is_some_and(|labels| !labels.iter().any(|v| v == label)) {
                 continue;
             }
             if calculate_overlap_ratio(&min_box, &other.bbox, "union") > 0.0 {
@@ -760,7 +1122,7 @@ fn compute_adjacent_text_merge_groups(elements: &[LayoutElement]) -> Vec<MergeGr
         let curr_h = (curr_rect.3 - curr_rect.1).max(0.0);
 
         let is_cross = iou_h == 0.0
-            && curr_label == "text"
+            && profile.merge_labels.iter().any(|label| label == curr_label)
             && curr_label == prev_label
             && curr_rect.0 > prev_rect.2
             && curr_rect.1 < prev_rect.3
@@ -770,12 +1132,17 @@ fn compute_adjacent_text_merge_groups(elements: &[LayoutElement]) -> Vec<MergeGr
         let right_aligned = is_aligned(curr_rect.2, prev_rect.2);
 
         let is_updown_align = iou_h > 0.0
-            && curr_label == "text"
+            && profile.merge_labels.iter().any(|label| label == curr_label)
             && curr_label == prev_label
             && curr_rect.3 >= prev_rect.1
             && (curr_rect.1 - prev_rect.3).abs() < prev_h.max(curr_h) * 0.5
             && (left_aligned ^ right_aligned)
-            && overlapwith_other_box(idx, prev_idx, elements);
+            && overlapwith_other_box(
+                idx,
+                prev_idx,
+                elements,
+                profile.merge_blocker_labels.as_deref(),
+            );
 
         let align_mode = if is_cross {
             Some(MergeAlign::Center)
@@ -944,19 +1311,34 @@ mod tests {
     /// Truncation-enabled backend echoing a table whose rows repeat
     /// identically — the shape text-level repetition truncation must not
     /// touch.
-    struct TableEchoBackend;
+    struct TableEchoBackend {
+        crops: RefCell<Vec<RgbImage>>,
+    }
 
     impl RecognitionBackend for TableEchoBackend {
+        fn recognition_task_for_label(
+            &self,
+            label: &str,
+            suggested: Option<RecognitionTask>,
+        ) -> Option<RecognitionTask> {
+            if label == "seal" {
+                Some(RecognitionTask::Ocr)
+            } else {
+                suggested
+            }
+        }
+
         fn recognize(
             &self,
-            _image: RgbImage,
+            image: RgbImage,
             task: RecognitionTask,
             _max_tokens: usize,
         ) -> Result<String, Error> {
+            self.crops.borrow_mut().push(image);
             if task == RecognitionTask::Table {
                 let mut rows = String::new();
                 for _ in 0..12 {
-                    rows.push_str("<tr><td></td><td></td></tr>\n");
+                    rows.push_str("<tr><td>[F2] [F3]</td><td>[F404]</td></tr>\n");
                 }
                 Ok(format!("<table>\n{rows}</table>"))
             } else {
@@ -1000,6 +1382,215 @@ mod tests {
     }
 
     #[test]
+    fn backend_order_and_native_formatting_preserve_regions_and_code() {
+        struct NativeBackend {
+            invalid: bool,
+            inference_error: bool,
+        }
+        impl RecognitionBackend for NativeBackend {
+            fn recognize(
+                &self,
+                image: RgbImage,
+                _: RecognitionTask,
+                _: usize,
+            ) -> Result<String, Error> {
+                assert!(image.pixels().any(|p| p.0 == [0; 3]));
+                assert!(image.pixels().any(|p| p.0 == [255; 3]));
+                Ok("```\n    a_____b....c\n```".into())
+            }
+            fn predict_reading_order(
+                &self,
+                _: &RgbImage,
+                _: &[LayoutElement],
+                _: usize,
+            ) -> Result<Option<Vec<usize>>, Error> {
+                if self.inference_error {
+                    return Err(Error::Inference {
+                        model_name: "test".into(),
+                        context: "reading-order inference failed".into(),
+                        source: Box::new(std::io::Error::other("device failure")),
+                    });
+                }
+                Ok(Some(if self.invalid { vec![0, 0] } else { vec![1, 0] }))
+            }
+            fn doc_parser_profile(&self) -> DocParserProfile {
+                DocParserProfile::default()
+                    .with_layout(Some(crate::LayoutPostprocessOptions::default()))
+                    .with_crop(
+                        crate::pipeline::crop::CropOptions::default()
+                            .with_shape_mode(crate::pipeline::layout::LayoutShapeMode::Poly),
+                    )
+            }
+            fn merge_adjacent_text_regions(&self) -> bool {
+                false
+            }
+            fn postprocess_region_output(
+                &self,
+                _: &str,
+                _: RecognitionTask,
+                raw: &str,
+            ) -> Option<String> {
+                Some(raw.to_string())
+            }
+        }
+        struct PolygonLayout(StaticLayout);
+        impl LayoutSource for PolygonLayout {
+            fn detect(&self, image: &RgbImage) -> Result<crate::LayoutDetections, Error> {
+                self.0.detect(image)
+            }
+            fn detect_with_options(
+                &self,
+                image: &RgbImage,
+                _: &crate::LayoutPostprocessOptions,
+            ) -> Result<crate::LayoutPrediction, Error> {
+                Ok(crate::LayoutPrediction {
+                    detections: self.detect(image)?,
+                    polygons: vec![
+                        Some(BoundingBox::from_coords(20., 10., 180., 90.)),
+                        Some(BoundingBox::from_coords(20., 100., 180., 180.)),
+                    ],
+                    raw_output: Some("layout trace".into()),
+                    ..Default::default()
+                })
+            }
+        }
+        let layout = PolygonLayout(StaticLayout::new(vec![
+            element("text", 10., 10., 190., 90.),
+            element("code", 10., 100., 190., 180.),
+        ]));
+        for invalid in [false, true] {
+            let backend = NativeBackend {
+                invalid,
+                inference_error: false,
+            };
+            let parser = DocParser::new(&backend);
+            let ParsedPage {
+                structure: output,
+                diagnostics,
+                raw_output,
+                ..
+            } = parser
+                .parse_image(&layout, &RgbImage::new(200, 200))
+                .unwrap();
+            assert_eq!(raw_output.as_deref(), Some("layout trace"));
+            assert_eq!(output.layout_elements.len(), 2);
+            assert_eq!(
+                output.layout_elements[0].label.as_deref(),
+                Some(if invalid { "text" } else { "code" })
+            );
+            assert_eq!(
+                output.layout_elements[0].text.as_deref(),
+                Some("```\n    a_____b....c\n```")
+            );
+            assert_eq!(diagnostics.len(), usize::from(invalid));
+            if invalid {
+                assert_eq!(diagnostics[0].stage, "reading_order");
+            }
+        }
+        let backend = NativeBackend {
+            invalid: false,
+            inference_error: true,
+        };
+        let error = DocParser::new(&backend)
+            .parse_image(&layout, &RgbImage::new(200, 200))
+            .unwrap_err();
+        assert!(matches!(error, Error::Inference { .. }));
+        let formula = LayoutElement::new(
+            BoundingBox::from_coords(0., 0., 100., 30.),
+            LayoutElementType::Formula,
+            1.,
+        )
+        .with_label("display_formula")
+        .with_text("$$\nx=1\n$$");
+        let number = LayoutElement::new(
+            BoundingBox::from_coords(100., 0., 120., 30.),
+            LayoutElementType::FormulaNumber,
+            1.,
+        )
+        .with_label("formula_number")
+        .with_text("(3)");
+        let result = StructureResult::new("<memory>", 0)
+            .with_layout_elements(vec![number.clone(), formula.clone()]);
+        let parser = DocParser::new(&backend).with_options(
+            DocParserOptions::default().with_formula_numbers(FormulaNumberComposition::AdjacentTag),
+        );
+        assert_eq!(parser.render_markdown(&result), "$$\nx=1 \\tag{3}\n$$");
+        assert_eq!(result.layout_elements.len(), 2);
+        assert_eq!(
+            result.layout_elements[1].text.as_deref(),
+            Some("$$\nx=1\n$$")
+        );
+        let result =
+            StructureResult::new("<memory>", 0).with_layout_elements(vec![formula, number]);
+        let parser = parser.with_options(
+            DocParserOptions::default()
+                .with_formula_numbers(FormulaNumberComposition::FollowingStarTag),
+        );
+        assert_eq!(parser.render_markdown(&result), "$$\nx=1\n \\tag*{(3)}$$");
+        let parser = parser.with_options(
+            DocParserOptions::default()
+                .with_formula_numbers(FormulaNumberComposition::SeparateParagraph)
+                .with_markdown_ignore_labels(Vec::new()),
+        );
+        assert_eq!(parser.render_markdown(&result), "$$\nx=1\n$$\n\n(3)");
+    }
+
+    #[test]
+    fn borrowed_backends_receive_native_region_labels_and_can_enable_seals() {
+        struct LabeledBackend;
+        impl RecognitionBackend for LabeledBackend {
+            fn recognize(
+                &self,
+                _: RgbImage,
+                _: RecognitionTask,
+                _: usize,
+            ) -> Result<String, Error> {
+                panic!("labeled dispatch expected");
+            }
+            fn recognition_task_for_label(
+                &self,
+                label: &str,
+                suggested: Option<RecognitionTask>,
+            ) -> Option<RecognitionTask> {
+                if matches!(label, "seal" | "inline_formula") {
+                    Some(RecognitionTask::Ocr)
+                } else {
+                    suggested
+                }
+            }
+            fn recognize_labeled_batch_with_options(
+                &self,
+                images: Vec<RgbImage>,
+                tasks: &[RecognitionTask],
+                labels: &[&str],
+                _: &GenerationOptions,
+            ) -> crate::BatchResult<String> {
+                assert_eq!(images.len(), labels.len());
+                assert!(tasks.iter().all(|task| *task == RecognitionTask::Ocr));
+                Ok(labels
+                    .iter()
+                    .map(|label| Ok(format!("recognized {label}")))
+                    .collect())
+            }
+        }
+        let backend = LabeledBackend;
+        let parser = DocParser::new(&backend);
+        let layout = StaticLayout::new(vec![
+            element("seal", 10., 10., 190., 90.),
+            element("inline_formula", 10., 100., 190., 180.),
+        ]);
+        let output = parser.parse(&layout, RgbImage::new(200, 200)).unwrap();
+        assert_eq!(
+            output.layout_elements[0].text.as_deref(),
+            Some("recognized seal")
+        );
+        assert_eq!(
+            output.layout_elements[1].text.as_deref(),
+            Some("recognized inline_formula")
+        );
+    }
+
+    #[test]
     fn unsupported_chart_regions_are_skipped_not_recognized() {
         assert!(crate::api::recognition::BackendCapabilities::default().supports_chart);
         let backend = NoChartBackend;
@@ -1025,7 +1616,9 @@ mod tests {
 
     #[test]
     fn table_output_survives_repetition_truncation() {
-        let backend = TableEchoBackend;
+        let backend = TableEchoBackend {
+            crops: RefCell::new(Vec::new()),
+        };
         let parser = DocParser::new(&backend);
         let layout = StaticLayout::new(vec![
             element("table", 10.0, 10.0, 190.0, 100.0),
@@ -1049,6 +1642,106 @@ mod tests {
         assert!(
             !text.contains("plain text\nplain text"),
             "repeated text should still be truncated"
+        );
+    }
+
+    #[test]
+    fn table_figure_tokens_follow_paddlex() {
+        let backend = TableEchoBackend {
+            crops: RefCell::new(Vec::new()),
+        };
+        let profile = crate::DocParserProfile::default()
+            .with_table_figure_tokens(true)
+            .with_layout(Some(
+                crate::pipeline::layout::LayoutPostprocessOptions::default()
+                    .with_visual_labels(vec!["image".into(), "seal".into()])
+                    .with_min_size(6.),
+            ))
+            .with_render_style(
+                crate::render::markdown::RenderStyle::default()
+                    .with_image_template(Some("FIGURE-{index}".into())),
+            );
+        let parser = DocParser::new(&backend)
+            .with_options(crate::DocParserOptions::default().with_profile(profile));
+        let layout = StaticLayout::new(vec![
+            element("table", 10., 10., 190., 100.),
+            element("image", 30., 30., 70., 70.),
+        ]);
+        let result = parser.parse(&layout, RgbImage::new(200, 210)).unwrap();
+        let html = result.layout_elements[0].text.as_deref().unwrap();
+        assert!(html.contains("<img src=\"image_2.png\" alt=\"Image\" />"));
+        assert!(html.contains("[F404]"));
+        assert!(!html.contains("[F2]"));
+        assert_eq!(result.layout_elements.len(), 2);
+        assert_eq!(result.tables[0].html_structure.as_deref(), Some(html));
+        assert!(!parser.render_markdown(&result).contains("FIGURE-"));
+        let crops = backend.crops.borrow();
+        let crop = crops.last().unwrap();
+        assert_eq!(crop.get_pixel(20, 20).0, [255; 3]);
+        assert_eq!(crop.get_pixel(10, 10).0, [0; 3]);
+        drop(crops);
+
+        let tiny = StaticLayout::new(vec![
+            element("table", 10., 10., 190., 100.),
+            element("image", 30., 30., 40., 40.),
+        ]);
+        let result = parser.parse(&tiny, RgbImage::new(200, 210)).unwrap();
+        assert!(
+            result.layout_elements[0]
+                .text
+                .as_deref()
+                .unwrap()
+                .contains("[F2]")
+        );
+        assert!(
+            backend
+                .crops
+                .borrow()
+                .last()
+                .unwrap()
+                .pixels()
+                .all(|p| p.0 == [0; 3])
+        );
+        assert!(!parser.render_markdown(&result).contains("FIGURE-"));
+        let fractional = StaticLayout::new(vec![
+            element("table", 10.8, 10.8, 190.8, 100.8),
+            element("image", 30.8, 30.8, 70.8, 70.8),
+        ]);
+        parser.parse(&fractional, RgbImage::new(200, 210)).unwrap();
+        let crops = backend.crops.borrow();
+        let crop = crops.last().unwrap();
+        assert_eq!(crop.get_pixel(19, 19).0, [255; 3]);
+        assert_eq!(crop.get_pixel(18, 19).0, [0; 3]);
+        drop(crops);
+        let seal = StaticLayout::new(vec![
+            element("table", 10., 10., 190., 100.),
+            element("seal", 30., 30., 70., 70.),
+        ]);
+        let result = parser.parse(&seal, RgbImage::new(200, 210)).unwrap();
+        let html = result.layout_elements[0].text.as_deref().unwrap();
+        assert!(html.contains("image_2.png"));
+        assert!(html.contains("plain text"));
+        let discarded = StaticLayout::new(vec![
+            element("table", 10., 10., 190., 100.),
+            element("image", 30., 30., 70., 70.),
+            element("image", 195., 30., 199., 34.),
+        ]);
+        let result = parser.parse(&discarded, RgbImage::new(200, 210)).unwrap();
+        let html = result.layout_elements[0].text.as_deref().unwrap();
+        assert!(html.contains("image_2.png"));
+        assert!(!html.contains("[F3]"));
+        assert!(html.contains("[F2]"));
+        let header = StaticLayout::new(vec![
+            element("table", 10., 10., 190., 100.),
+            element("header_image", 30., 30., 70., 70.),
+        ]);
+        let result = parser.parse(&header, RgbImage::new(200, 210)).unwrap();
+        assert!(
+            result.layout_elements[0]
+                .text
+                .as_deref()
+                .unwrap()
+                .contains("[F2]")
         );
     }
 

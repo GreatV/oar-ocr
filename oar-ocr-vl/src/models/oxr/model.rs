@@ -44,9 +44,9 @@ pub struct OxrGenerationOptions {
     pub max_new_tokens: usize,
     pub min_pixels: u32,
     pub max_pixels: u32,
-    /// Applies only to generated tokens, matching reference generation from
-    /// input embeddings. Prompt IDs are not penalized. One disables the penalty;
-    /// generation never changes it automatically.
+    /// Applies only to generated tokens; prompt IDs are not penalized. This
+    /// differs from the reference vLLM service when the penalty is not one.
+    /// 1.0 disables the penalty.
     pub repetition_penalty: f32,
 }
 
@@ -116,6 +116,7 @@ pub struct Oxr {
     device: Device,
     dtype: DType,
     pub(super) generation_options: OxrGenerationOptions,
+    pub(super) use_reading_order: bool,
 }
 
 impl Oxr {
@@ -175,6 +176,7 @@ impl Oxr {
             device,
             dtype,
             generation_options: OxrGenerationOptions::default(),
+            use_reading_order: true,
         })
     }
 
@@ -184,6 +186,13 @@ impl Oxr {
     /// Methods that take explicit generation options use those instead.
     pub fn with_generation_options(mut self, options: OxrGenerationOptions) -> Self {
         self.generation_options = options;
+        self
+    }
+
+    /// Enable model-predicted page order in layout-composed parsing (default:
+    /// enabled). Disable it to use the layout source's order directly.
+    pub fn with_reading_order(mut self, enabled: bool) -> Self {
+        self.use_reading_order = enabled;
         self
     }
 

@@ -3,7 +3,21 @@
 use super::{DiffusionGenerationConfig, MinerUDiffusion};
 use crate::api::error::Error;
 use crate::api::recognition::{BackendCapabilities, RecognitionBackend, RecognitionTask};
+use crate::render::table::{CellMarkup, HtmlInput, NoTokens, OtslOptions, RowPadding};
 use image::RgbImage;
+
+pub(super) fn table_options() -> OtslOptions {
+    OtslOptions {
+        row_padding: RowPadding::Widest,
+        cell_markup: CellMarkup::EscapeAll,
+        no_tokens: NoTokens::Preserve,
+        html_input: HtmlInput::CompletePassThrough,
+        empty_fcel_is_anchor: true,
+        preserve_ecel_text: true,
+        trim_input: false,
+        ..Default::default()
+    }
+}
 
 impl RecognitionBackend for MinerUDiffusion {
     fn recognize(
@@ -19,18 +33,27 @@ impl RecognitionBackend for MinerUDiffusion {
             RecognitionTask::Ocr => "\nText Recognition:",
             RecognitionTask::Table => "\nTable Recognition:",
             RecognitionTask::Formula => "\nFormula Recognition:",
-            RecognitionTask::Chart => "\nDocument Parsing:",
+            RecognitionTask::Chart => "\nText Recognition:",
         };
         let mut generation = DiffusionGenerationConfig::default();
-        generation.gen_length = max_tokens
+        let budget = super::layout::task_budget(
+            if task == RecognitionTask::Table {
+                "table"
+            } else {
+                "text"
+            },
+            max_tokens,
+        );
+        generation.gen_length = budget
             .checked_next_multiple_of(generation.block_length)
             .ok_or_else(|| {
                 Error::invalid_input(format!(
                     "MinerU-Diffusion max_tokens {max_tokens} is too large"
                 ))
             })?;
+        let image = super::layout::resize_crop(&image, 28, 50.)?;
         let mut tokens = self.generate_token_ids(&image, prompt, &generation)?;
-        tokens.truncate(max_tokens);
+        tokens.truncate(budget);
         self.decode_tokens(&tokens, true)
     }
 
@@ -40,5 +63,19 @@ impl RecognitionBackend for MinerUDiffusion {
             truncate_repetitive_output: true,
             ..BackendCapabilities::default()
         }
+    }
+
+    fn postprocess_region_output(
+        &self,
+        _label: &str,
+        task: RecognitionTask,
+        raw: &str,
+    ) -> Option<String> {
+        let kind = match task {
+            RecognitionTask::Table => "table",
+            RecognitionTask::Formula => "equation",
+            _ => "text",
+        };
+        Some(super::layout::format_content(kind, raw))
     }
 }

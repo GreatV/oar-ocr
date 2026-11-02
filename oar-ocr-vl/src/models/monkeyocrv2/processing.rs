@@ -5,6 +5,30 @@ use crate::utils::image::{qwen_vl_resize, smart_resize};
 use candle_core::{DType, Device, Tensor};
 use image::RgbImage;
 
+pub(super) fn prepare_image(image: &RgbImage, min_pixels: Option<u32>) -> Result<RgbImage, Error> {
+    // MonkeyOCRv2 core_runner.load_image (Apache-2.0): Lanczos precedes the
+    // processor's bicubic smart_resize; layout requests pre-upscale first.
+    const MAX_PIXELS: u32 = 1_003_520;
+    if image.width() == 0 || image.height() == 0 {
+        return Err(Error::invalid_input(
+            "MonkeyOCRv2 cannot process an empty image",
+        ));
+    }
+    let mut image = image.clone();
+    for (limit, upscale) in [(min_pixels.unwrap_or(0), true), (MAX_PIXELS, false)] {
+        let area = image.width() as f64 * image.height() as f64;
+        if (upscale && area < limit as f64) || (!upscale && area > limit as f64) {
+            let scale = (limit as f64 / area).sqrt();
+            image = crate::runtime::image::pil_lanczos_resize(
+                &image,
+                (image.width() as f64 * scale).max(1.) as u32,
+                (image.height() as f64 * scale).max(1.) as u32,
+            )?;
+        }
+    }
+    Ok(image)
+}
+
 #[derive(Debug, Clone)]
 pub struct MonkeyOcrV2ImageInputs {
     pub pixel_values: Tensor,
@@ -46,7 +70,7 @@ pub fn preprocess_image(
     } else {
         (height, width)
     };
-    // The Qwen-family processor resamples with Pillow's bicubic.
+    // Use the portable Pillow bicubic path after the request's Lanczos pass.
     let resized_holder;
     let resized = if resized_height != height || resized_width != width {
         resized_holder = qwen_vl_resize(image, resized_width, resized_height, cfg.resample)?;
@@ -110,6 +134,18 @@ mod tests {
         assert_eq!(inputs.grid_thw, (1, 4, 6));
         assert_eq!(inputs.num_image_tokens, 6);
         assert_eq!(inputs.pixel_values.dims(), &[24, 588]);
+        assert_eq!(
+            prepare_image(&RgbImage::new(2000, 1000), None)
+                .unwrap()
+                .dimensions(),
+            (1416, 708)
+        );
+        assert_eq!(
+            prepare_image(&RgbImage::new(200, 100), Some(1_003_520))
+                .unwrap()
+                .dimensions(),
+            (1416, 708)
+        );
     }
 
     #[test]

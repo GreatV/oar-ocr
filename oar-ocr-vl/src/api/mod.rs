@@ -7,4 +7,5 @@ pub mod error;
 pub mod generation;
 pub mod page_parser;
 pub mod recognition;
+mod recognition_profile;
 pub mod runtime;

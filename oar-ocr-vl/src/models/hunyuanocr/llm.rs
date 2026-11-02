@@ -388,8 +388,7 @@ impl HunyuanAttention {
         // Keep the model in BF16 but use FP16 inside CUDA attention. The
         // FlashAttention BF16 verification path can amplify tiny per-round
         // differences into a different greedy branch on long documents. Only
-        // BF16 gets downcast this way: an explicit `OAR_VL_DTYPE=f32`
-        // override is meant to raise precision, not get silently discarded.
+        // BF16 uses FP16 attention; an explicit F32 runtime keeps F32 attention.
         let attention_dtype = if q.device().is_cuda() && q.dtype() == candle_core::DType::BF16 {
             candle_core::DType::F16
         } else {
@@ -763,6 +762,8 @@ pub(crate) struct HunyuanLlmOutput {
 #[derive(Debug)]
 pub struct HunyuanLlm {
     #[cfg(feature = "cuda")]
+    cuda_graphs: bool,
+    #[cfg(feature = "cuda")]
     decode_graph: RefCell<Option<DecoderCudaGraph<TargetGraphInputs>>>,
     embed_tokens: candle_nn::Embedding,
     layers: Vec<HunyuanDecoderLayer>,
@@ -781,6 +782,18 @@ pub struct HunyuanLlm {
 }
 
 impl HunyuanLlm {
+    pub(crate) fn set_cuda_graphs(&mut self, enabled: bool) {
+        #[cfg(feature = "cuda")]
+        {
+            self.cuda_graphs = enabled;
+            if !enabled {
+                self.invalidate_cuda_graph();
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        let _ = enabled;
+    }
+
     pub fn load(cfg: &HunyuanOcrConfig, vb: candle_nn::VarBuilder) -> Result<Self, Error> {
         let embed_tokens =
             candle_nn::embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("embed_tokens"))
@@ -821,6 +834,8 @@ impl HunyuanLlm {
         #[cfg(feature = "cuda")]
         let _drain_guard = CudaGraphDrainGuard::new(vb.device());
         Ok(Self {
+            #[cfg(feature = "cuda")]
+            cuda_graphs: true,
             #[cfg(feature = "cuda")]
             decode_graph: RefCell::new(None),
             embed_tokens,
@@ -1153,7 +1168,8 @@ impl HunyuanLlm {
         query_len: usize,
         aux_layer_ids: &[usize],
     ) -> Result<(), Error> {
-        if std::env::var_os("OAR_HUNYUAN_DISABLE_CUDA_GRAPH").is_some() {
+        #[cfg(feature = "cuda")]
+        if !self.cuda_graphs {
             #[cfg(feature = "cuda")]
             self.invalidate_cuda_graph();
             return Ok(());
@@ -1196,9 +1212,8 @@ impl HunyuanLlm {
         prompt_len: usize,
         max_new_tokens: usize,
     ) -> Result<(), Error> {
-        if std::env::var_os("OAR_HUNYUAN_DISABLE_CUDA_GRAPH").is_some()
-            || std::env::var_os("OAR_HUNYUAN_DISABLE_AR_CUDA_GRAPH").is_some()
-        {
+        #[cfg(feature = "cuda")]
+        if !self.cuda_graphs {
             #[cfg(feature = "cuda")]
             self.invalidate_cuda_graph();
             return Ok(());

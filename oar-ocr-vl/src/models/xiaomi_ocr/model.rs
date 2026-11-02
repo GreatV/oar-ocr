@@ -20,10 +20,6 @@ use tokenizers::Tokenizer;
 
 const MODEL_NAME: &str = "Xiaomi-OCR-0";
 
-/// Env var that forces the decode-graph path off for this model (the shared
-/// `OAR_VL_DISABLE_CUDA_GRAPH` switch applies on top of it).
-const GRAPH_DISABLE_ENV: &str = "OAR_XIAOMI_OCR_DISABLE_CUDA_GRAPH";
-
 /// Official Xiaomi-OCR-0 whole-page document parsing instruction.
 pub const DEFAULT_PROMPT: &str = "Extract all information from the main body of the document image and represent it in markdown format, ignoring headers and footers. Tables should be expressed in OTSL format, formulas in the document should be represented using LATEX format, and the parsing should be organized according to the reading order.";
 
@@ -89,6 +85,12 @@ impl Drop for TextCacheGuard<'_> {
 }
 
 impl XiaomiOcr {
+    /// Set whether to use CUDA graphs for decoding. Enabled by default.
+    pub fn with_cuda_graphs(mut self, enabled: bool) -> Self {
+        self.text.set_cuda_graphs(enabled);
+        self
+    }
+
     /// Load a Xiaomi-OCR-0 Hugging Face model directory.
     pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         Self::from_dir_with_runtime(model_dir, crate::RuntimeConfig::new(device))
@@ -127,7 +129,6 @@ impl XiaomiOcr {
         let text = Qwen35TextModel::load(
             &cfg.text_config,
             MODEL_NAME,
-            GRAPH_DISABLE_ENV,
             vb.pp("model").pp("language_model"),
         )?;
         let vision = Qwen3VlVisionModel::load(
@@ -662,9 +663,19 @@ fn select_greedy_token(logits: &Tensor) -> Result<u32, Error> {
 }
 
 /// Official whole-page post-processing: collapse degenerate repeated tails,
-/// then convert OTSL table blocks to HTML tables.
+/// normalize LaTeX delimiters, then convert OTSL table blocks to HTML tables.
 pub fn finalize_markdown(text: &str) -> String {
-    convert_markdown_otsl_tables(&clean_truncated_repeats(text))
+    let text = crate::render::text::normalize_math_delimiters(
+        &clean_truncated_repeats(text),
+        &crate::render::text::DelimiterOptions {
+            matching: crate::render::text::BracketMatching::Spans,
+            inline: (" $ ", " $"),
+            collapse_brackets: true,
+            unwrap_dollar_brackets: true,
+            ..Default::default()
+        },
+    );
+    convert_markdown_otsl_tables(&text)
 }
 
 /// Convert OTSL table blocks inside whole-page Markdown to HTML tables,
@@ -797,6 +808,10 @@ mod tests {
 
     #[test]
     fn otsl_blocks_in_markdown_become_html_tables() {
+        assert_eq!(
+            finalize_markdown(r"A \( x \) B \[ y \]"),
+            "A  $ x $ B  $$ y $$ "
+        );
         let otsl = "<fcel>Item<fcel>Qty<nl><fcel>Tea<fcel>2<nl>";
         let markdown = format!("# Receipt\n\n{otsl}\n\nThat is all.");
         let converted = convert_markdown_otsl_tables(&markdown);

@@ -16,6 +16,7 @@ mod ernie;
 mod model;
 mod processing;
 mod projector;
+mod spotting;
 mod vision;
 
 pub use config::{
@@ -27,3 +28,4 @@ pub use processing::{
     PaddleOcrVlImageInputs, postprocess_table_output, preprocess_images, smart_resize,
     strip_math_wrappers,
 };
+pub use spotting::{PaddleOcrVlSpottingOutput, postprocess_spotting_output};

@@ -258,8 +258,8 @@ fn pad_to_ratio(image: &RgbImage, max_ratio: f32) -> RgbImage {
 
 /// Scale an image up until its shorter edge reaches `min_edge`, keeping the
 /// aspect ratio. Images already at or above `min_edge` pass through
-/// untouched. WeVisDoc's Qwen-family processor resamples with Pillow's
-/// bicubic.
+/// untouched. We use Pillow bicubic; the reference Qwen-family fast processor
+/// uses torchvision antialiased bicubic and can round uint8 pixels differently.
 fn upscale_min_edge(image: &RgbImage, min_edge: u32) -> Result<RgbImage, Error> {
     let (w, h) = image.dimensions();
     let (new_w, new_h) = upscaled_dims(w, h, min_edge);

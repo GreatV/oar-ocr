@@ -9,3 +9,7 @@ pub(crate) mod qwen3_5;
 pub(crate) mod qwen3_vl;
 pub(crate) mod qwen_vl_processing;
 pub(crate) mod sdar;
+
+pub(crate) mod swin_v2;
+
+pub(crate) mod u2net;

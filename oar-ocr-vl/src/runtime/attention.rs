@@ -23,29 +23,6 @@ use crate::error::Error;
 use crate::runtime::errors::candle_to_ocr_processing;
 use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use std::collections::VecDeque;
-use std::sync::OnceLock;
-
-fn grouped_query_attention_disabled() -> bool {
-    static DISABLED: OnceLock<bool> = OnceLock::new();
-    *DISABLED.get_or_init(|| std::env::var_os("OAR_VL_DISABLE_GQA").is_some())
-}
-
-/// Native half-precision eager softmax is opt-in on Metal. Fused SDPA has its
-/// own softmax implementation and is unaffected by these switches.
-fn metal_native_softmax_enabled(dtype: DType) -> bool {
-    static FORCE_NATIVE: OnceLock<bool> = OnceLock::new();
-    static FORCE_F32: OnceLock<bool> = OnceLock::new();
-    let force_native =
-        *FORCE_NATIVE.get_or_init(|| std::env::var_os("OAR_VL_METAL_NATIVE_SOFTMAX").is_some());
-    let force_f32 =
-        *FORCE_F32.get_or_init(|| std::env::var_os("OAR_VL_METAL_F32_SOFTMAX").is_some());
-    !force_f32 && force_native && matches!(dtype, DType::F16 | DType::BF16)
-}
-
-fn metal_sdpa_disabled() -> bool {
-    static DISABLED: OnceLock<bool> = OnceLock::new();
-    *DISABLED.get_or_init(|| std::env::var_os("OAR_VL_DISABLE_METAL_SDPA").is_some())
-}
 
 /// Fused Metal SDPA attempt; `Ok(None)` when unavailable or declined, so
 /// callers keep their own eager fallback.
@@ -70,7 +47,7 @@ fn try_metal_sdpa(
     is_causal: bool,
     allow_vector_kernel: bool,
 ) -> Result<Option<Tensor>> {
-    if metal_sdpa_disabled() || !q.device().is_metal() {
+    if !q.device().is_metal() {
         return Ok(None);
     }
     let Ok((batch, num_heads, query_len, head_dim)) = q.dims4() else {
@@ -155,12 +132,6 @@ fn try_metal_sdpa(
     Ok(fused.ok())
 }
 
-#[cfg(feature = "cuda")]
-fn flash_attention_disabled() -> bool {
-    static DISABLED: OnceLock<bool> = OnceLock::new();
-    *DISABLED.get_or_init(|| std::env::var_os("OAR_VL_DISABLE_FLASH_ATTN").is_some())
-}
-
 /// Whether `flash_attention` will run per-row attention for `dtype` tensors
 /// on `device`. Callers use it to skip work the flash path makes redundant
 /// — for example materializing a quadratic batch attention mask that the
@@ -168,7 +139,7 @@ fn flash_attention_disabled() -> bool {
 pub fn row_flash_attention_available(device: &Device, dtype: DType) -> bool {
     #[cfg(feature = "cuda")]
     {
-        !flash_attention_disabled() && device.is_cuda() && flash_attention_dtype_supported(dtype)
+        device.is_cuda() && flash_attention_dtype_supported(dtype)
     }
     #[cfg(not(feature = "cuda"))]
     {
@@ -250,19 +221,10 @@ pub fn scaled_dot_product_attention(
         None => attn_weights,
     };
 
-    // Softmax: cast to F32 for numerical stability, then cast back. Metal can
-    // opt into its native half-precision kernel to avoid two conversions.
+    // Compute eager softmax in F32, then restore the input dtype.
     let input_dtype = attn_weights.dtype();
-    let use_native_metal_softmax = q.device().is_metal()
-        && input_dtype != DType::F32
-        && metal_native_softmax_enabled(input_dtype);
-    let attn_weights = if use_native_metal_softmax {
-        candle_nn::ops::softmax_last_dim(&attn_weights)?
-    } else {
-        let attn_weights = attn_weights.to_dtype(DType::F32)?;
-        let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
-        attn_weights.to_dtype(input_dtype)?
-    };
+    let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights.to_dtype(DType::F32)?)?
+        .to_dtype(input_dtype)?;
 
     // Attention @ V
     attn_weights.matmul(v)
@@ -341,11 +303,6 @@ pub fn scaled_dot_product_attention_gqa(
     if num_kv_groups == 1 {
         return scaled_dot_product_attention(q, k, v, mask, scale, is_causal);
     }
-    if grouped_query_attention_disabled() {
-        let k = repeat_kv(k, num_kv_groups)?;
-        let v = repeat_kv(v, num_kv_groups)?;
-        return scaled_dot_product_attention(q, &k, &v, mask, scale, is_causal);
-    }
 
     let (batch, num_heads, query_len, head_dim) = q.dims4()?;
     let (k_batch, num_kv_heads, kv_len, k_head_dim) = k.dims4()?;
@@ -402,15 +359,9 @@ pub fn scaled_dot_product_attention_gqa(
     };
 
     let weight_dtype = weights.dtype();
-    let use_native_metal_softmax = q.device().is_metal()
-        && weight_dtype != DType::F32
-        && metal_native_softmax_enabled(weight_dtype);
-    let weights = if use_native_metal_softmax {
-        candle_nn::ops::softmax_last_dim(&weights)?
-    } else {
-        candle_nn::ops::softmax_last_dim(&weights.to_dtype(DType::F32)?)?.to_dtype(weight_dtype)?
-    }
-    .reshape((batch, num_kv_heads, grouped_queries, kv_len))?;
+    let weights = candle_nn::ops::softmax_last_dim(&weights.to_dtype(DType::F32)?)?
+        .to_dtype(weight_dtype)?
+        .reshape((batch, num_kv_heads, grouped_queries, kv_len))?;
     weights
         .matmul(&cache_layout(v)?)?
         .reshape((batch, num_heads, query_len, head_dim))
@@ -546,8 +497,7 @@ pub fn flash_attention(
     causal: bool,
 ) -> Result<Option<Tensor>> {
     #[cfg(feature = "cuda")]
-    if !flash_attention_disabled()
-        && q.device().is_cuda()
+    if q.device().is_cuda()
         && flash_attention_dtype_supported(q.dtype())
         && k.dtype() == q.dtype()
         && v.dtype() == q.dtype()
@@ -1985,7 +1935,7 @@ mod tests {
     ///
     /// F16 caps at 65504, so a fill chosen for wider dtypes saturates to -inf
     /// there and reintroduces the all-masked-row NaN. F16 is reachable via
-    /// `OAR_VL_DTYPE=f16` and via `select_dtype`'s fallback on CUDA devices
+    /// `RuntimeConfig::with_dtype` and via `select_dtype`'s fallback on CUDA devices
     /// without BF16 kernels.
     #[test]
     fn padding_mask_is_finite_in_every_dtype() -> Result<()> {

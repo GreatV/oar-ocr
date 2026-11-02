@@ -11,7 +11,6 @@ use crate::attention::{
 use crate::error::Error;
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::CudaGraphDrainGuard;
-use crate::runtime::image::pil_lanczos_resize;
 pub use crate::runtime::trace::GenerationTrace;
 use crate::runtime::trace::top3;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
@@ -64,13 +63,10 @@ impl PaddleOcrVlTask {
         }
     }
 
-    fn needs_spotting_preprocess(self) -> bool {
+    pub(super) fn needs_spotting_preprocess(self) -> bool {
         matches!(self, Self::Spotting)
     }
 }
-
-const SPOTTING_UPSCALE_THRESHOLD: u32 = 1500;
-const SPOTTING_MAX_LONG_SIDE: u32 = 2048;
 
 pub struct PaddleOcrVl {
     device: Device,
@@ -88,6 +84,7 @@ pub struct PaddleOcrVl {
     image_placeholder_token_id: u32,
     /// Assistant prefix derived from chat template (e.g., "Assistant: " vs "Assistant:\n")
     assistant_prefix: String,
+    pub(super) use_chart_recognition: bool,
     // Must stay the last field: the captured decoder graphs read the LM head
     // owned here, so this guard drops last and drains CUDA errors the head's
     // free may stash (see CudaGraphDrainGuard).
@@ -96,6 +93,12 @@ pub struct PaddleOcrVl {
 }
 
 impl PaddleOcrVl {
+    /// Set whether to use CUDA graphs for decoding. Enabled by default.
+    pub fn with_cuda_graphs(mut self, enabled: bool) -> Self {
+        self.llm.set_cuda_graphs(enabled);
+        self
+    }
+
     pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         Self::from_dir_with_runtime(model_dir, crate::RuntimeConfig::new(device))
     }
@@ -167,10 +170,42 @@ impl PaddleOcrVl {
             eos_token_id,
             sep_token_id,
             image_placeholder_token_id,
+            use_chart_recognition: false,
             assistant_prefix,
             #[cfg(feature = "cuda")]
             _drain_guard,
         })
+    }
+
+    /// Recognize chart regions in DocParser (default: disabled, matching PaddleX).
+    /// Explicit standalone `Chart` generation is always available.
+    pub fn with_chart_recognition(mut self, enabled: bool) -> Self {
+        self.use_chart_recognition = enabled;
+        self
+    }
+
+    pub(super) fn generate_pipeline_raw(
+        &self,
+        images: &[RgbImage],
+        tasks: &[PaddleOcrVlTask],
+        max_new_tokens: usize,
+    ) -> crate::error::BatchResult<String> {
+        if images.len() != tasks.len() {
+            return Err(Error::invalid_input(
+                "PaddleOCR-VL image and task counts differ",
+            ));
+        }
+        if images.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut config = self.image_cfg.clone();
+        config.min_pixels = 112_896;
+        config.max_pixels = 1_003_520;
+        Ok(self
+            .generate_tokens_internal(images, tasks, max_new_tokens, None, Some(&config))?
+            .into_iter()
+            .map(|tokens| self.decode_tokens_raw(&tokens))
+            .collect())
     }
 
     /// Image-token count used to form padding-free document-parser batches.
@@ -242,7 +277,7 @@ impl PaddleOcrVl {
             });
         }
 
-        let results = self.generate_tokens_internal(images, tasks, max_new_tokens, None)?;
+        let results = self.generate_tokens_internal(images, tasks, max_new_tokens, None, None)?;
         Ok(results
             .into_iter()
             .enumerate()
@@ -272,7 +307,7 @@ impl PaddleOcrVl {
                 ),
             });
         }
-        self.generate_tokens_internal(images, tasks, max_new_tokens, None)
+        self.generate_tokens_internal(images, tasks, max_new_tokens, None, None)
     }
 
     /// Internal generation implementation supporting batched inference.
@@ -292,6 +327,7 @@ impl PaddleOcrVl {
                 &[task],
                 max_new_tokens,
                 Some(&mut step_top),
+                None,
             )?
             .into_iter()
             .next()
@@ -305,52 +341,16 @@ impl PaddleOcrVl {
         tasks: &[PaddleOcrVlTask],
         max_new_tokens: usize,
         mut step_top: Option<&mut Vec<[(u32, f32); 3]>>,
+        image_config: Option<&PaddleOcrVlImageProcessorConfig>,
     ) -> Result<Vec<Vec<u32>>, Error> {
         let batch_size = images.len();
 
-        // 1. Preprocess all images
-        let needs_spotting = tasks.iter().any(|t| t.needs_spotting_preprocess());
-        let resized_images: Vec<RgbImage>;
-        let images_for_preprocess = if needs_spotting {
-            // The official spotting preprocessing hardcodes LANCZOS for the 2x
-            // pre-upscale (README inference script), independent of the
-            // processor's `resample` (which only governs the model-internal
-            // smart_resize). Match Pillow's LANCZOS exactly here.
-            let mut processed = Vec::with_capacity(images.len());
-            for (img, task) in images.iter().zip(tasks.iter()) {
-                if task.needs_spotting_preprocess()
-                    && img.width() < SPOTTING_UPSCALE_THRESHOLD
-                    && img.height() < SPOTTING_UPSCALE_THRESHOLD
-                {
-                    processed.push(pil_lanczos_resize(
-                        img,
-                        img.width().saturating_mul(2),
-                        img.height().saturating_mul(2),
-                    )?);
-                } else {
-                    processed.push(img.clone());
-                }
-            }
-            resized_images = processed;
-            resized_images.as_slice()
-        } else {
-            images
-        };
-        let max_pixels = if needs_spotting {
-            let factor = (self.image_cfg.patch_size * self.image_cfg.merge_size) as u32;
-            let spotting_max_pixels = SPOTTING_MAX_LONG_SIDE
-                .saturating_mul(factor)
-                .saturating_mul(factor);
-            self.image_cfg.max_pixels.max(spotting_max_pixels)
-        } else {
-            self.image_cfg.max_pixels
-        };
-        let image_inputs = processing::preprocess_images_with_max_pixels(
-            images_for_preprocess,
-            &self.image_cfg,
+        let image_inputs = processing::preprocess_tasks(
+            images,
+            tasks,
+            image_config.unwrap_or(&self.image_cfg),
             &self.device,
             self.dtype,
-            max_pixels,
         )?;
 
         // 2. Build prompts for each sample
