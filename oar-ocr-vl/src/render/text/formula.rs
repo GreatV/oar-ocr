@@ -12,6 +12,7 @@ pub(crate) enum BracketMatching {
     AnyPair,
     All,
     Spans,
+    NonemptySpans,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -53,7 +54,10 @@ pub(crate) fn normalize_math_delimiters(input: &str, options: &DelimiterOptions)
     if options.collapse_brackets {
         text = text.replace(r"\[\[", r"\[").replace(r"\]\]", r"\]");
     }
-    if matches!(options.matching, BracketMatching::Spans) {
+    if matches!(
+        options.matching,
+        BracketMatching::Spans | BracketMatching::NonemptySpans
+    ) {
         static DISPLAY_DOLLARS: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"(?s)\$\$?\s*\\\[\s*(.*?)\s*\\\]\s*\$\$?").unwrap());
         static INLINE_DOLLARS: LazyLock<Regex> =
@@ -62,6 +66,28 @@ pub(crate) fn normalize_math_delimiters(input: &str, options: &DelimiterOptions)
             LazyLock::new(|| Regex::new(r"(?s)\\\[\s*(.*?)\s*\\\]").unwrap());
         static INLINE: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"(?s)\\\(\s*(.*?)\s*\\\)").unwrap());
+        static NONEMPTY_DISPLAY: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"(?s)\\\[(.+?)\\\]").unwrap());
+        static NONEMPTY_INLINE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"(?s)\\\((.+?)\\\)").unwrap());
+        let nonempty = matches!(options.matching, BracketMatching::NonemptySpans);
+        let display = if nonempty {
+            &*NONEMPTY_DISPLAY
+        } else {
+            &*DISPLAY
+        };
+        let inline = if nonempty {
+            &*NONEMPTY_INLINE
+        } else {
+            &*INLINE
+        };
+        let body = |caps: &Captures<'_>| {
+            if nonempty {
+                caps[1].trim().to_string()
+            } else {
+                caps[1].to_string()
+            }
+        };
         if options.unwrap_dollar_brackets {
             text = DISPLAY_DOLLARS
                 .replace_all(&text, |caps: &Captures<'_>| {
@@ -74,14 +100,14 @@ pub(crate) fn normalize_math_delimiters(input: &str, options: &DelimiterOptions)
                 })
                 .into_owned();
         }
-        text = DISPLAY
+        text = display
             .replace_all(&text, |caps: &Captures<'_>| {
-                format!("{}{}{}", options.display.0, &caps[1], options.display.1)
+                format!("{}{}{}", options.display.0, body(caps), options.display.1)
             })
             .into_owned();
-        return INLINE
+        return inline
             .replace_all(&text, |caps: &Captures<'_>| {
-                format!("{}{}{}", options.inline.0, &caps[1], options.inline.1)
+                format!("{}{}{}", options.inline.0, body(caps), options.inline.1)
             })
             .into_owned();
     }

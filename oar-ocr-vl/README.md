@@ -171,9 +171,11 @@ On macOS, enable Metal instead:
 cargo add oar-ocr-vl --features metal
 ```
 
-Metal inference uses Candle's fused SDPA kernels for supported attention shapes, including GQA without expanding K/V heads. For the best measured Apple Silicon throughput, explicitly set `OAR_VL_DTYPE=f16`. Use `OAR_VL_DISABLE_METAL_SDPA=1` for compatibility comparisons. The optional `OAR_VL_METAL_NATIVE_SOFTMAX=1` switch only changes the eager fallback; eager attention otherwise preserves the F32 softmax round trip.
+Metal inference uses Candle's fused SDPA kernels for supported attention shapes, including GQA without expanding K/V heads. Select F16 with `RuntimeConfig::with_dtype(DType::F16)` for the best measured Apple Silicon throughput. Eager attention computes softmax in F32.
 
 The crate's custom CUDA kernels compile to PTX for the oldest GPU detected by `nvidia-smi` at build time. For headless, container, or cross-machine builds, set the target explicitly, for example `CUDA_COMPUTE_CAP=89 cargo build -p oar-ocr-vl --features cuda`. These kernels require compute capability 8.0 or newer.
+
+Runtime settings are code options, not environment variables. `RuntimeConfig::with_dtype` picks the compute dtype, and `with_cuda_graphs(false)` on a model switches decoding to eager mode. GLM-OCR loads its MTP head on CUDA by default; `GlmOcrLoadOptions::default().with_mtp(false)` turns it off. jina-ocr-v1 loads FastMTP only with `JinaOcrLoadOptions::default().with_mtp(true)`. `AnyPageParserLoadOptions` and `AnyPageParserPretrainedOptions` pass both through `with_glm_options` and `with_jina_options`.
 
 ## Usage
 
@@ -491,7 +493,7 @@ Document settings resolve in three levels: the backend's `DocParserProfile`, an 
 
 Custom backends use the default profile. Empty layouts return empty pages for PaddleOCR-VL, GLM-OCR, MiniCPM-OCR and MonkeyOCRv2; OXR retains full-page OCR fallback. `RenderStyle` carries title, caption, table, prose, footnote and image-template parameters. GLM hyphen joins use the SDK's dependency-free word-shape rule, and its resized crops use lossless RGB transport.
 
-`PagePreprocessor` transforms a page once before layout. Supply it with `DocParser::with_page_preprocessor` or an owned `Arc` through `LayoutPageParser::with_page_preprocessor`; region coordinates follow the prepared canvas. Images remain structured regions, and callers supply their Markdown asset references. PaddleOCR-VL table crops keep the pixels of figures inside the table; the official pipeline replaces them with `[F#]` tokens and restores the images afterwards.
+`PagePreprocessor` transforms a page once before layout. Supply it with `DocParser::with_page_preprocessor` or an owned `Arc` through `LayoutPageParser::with_page_preprocessor`; region coordinates follow the prepared canvas. Images remain structured regions, and callers supply their Markdown asset references. PaddleOCR-VL follows the official pipeline for figures inside tables: it paints `[F#]` tokens over them in the table crop and replaces the tokens in the reply with `<img src="image_{index}.png" alt="Image" />`, where `index` is the one-based region index. The figure regions stay in the structured output, and Markdown shows them only inside the table.
 
 ### MinerU2.5 / MinerU2.5-Pro
 
@@ -509,9 +511,9 @@ let document = model.parse_page(&image, &MinerUParseOptions::default())?;
 println!("{:#?}", document.blocks);
 ```
 
-The MinerU 2.5/Pro parser removes near-duplicate regions, accepts the extended layout labels, drops image captions inside images and text inside tables, repairs equations and inline math, and merges `txt_contd_tgt` text continuations. Its shared OTSL dialect pads rows to the widest row and handles empty `fcel` cells. Images and charts keep their boxes but are not recognized, since MinerU's Image Analysis is off, and pages with charts get a diagnostic. Sampling follows the Transformers recipe: greedy with a 100-token no-repeat n-gram guard and a 16,384-token limit.
+The MinerU 2.5/Pro parser removes near-duplicate regions, accepts the extended layout labels, drops image captions inside images and text inside tables, repairs equations and inline math, and merges `txt_contd_tgt` text continuations. Its shared OTSL dialect pads rows to the widest row and handles empty `fcel` cells. Image Analysis is enabled by default for eligible image and chart regions, following MinerU main; `MinerU::with_image_analysis(false)` turns it off. As in MinerU, a reply can turn the region into a table or equation, charts keep their data table, natural images use their caption, and flowcharts get Mermaid repairs. `raw_output` holds the layout reply followed by each Image Analysis reply. A reply without a class tag leaves an image region with an empty caption, as in MinerU, and adds a diagnostic; On chart pages MinerU2.5-2509 answers this prompt with untagged tables, so pass `with_image_analysis(false)` to skip the extra decoding on that checkpoint. Sampling follows the Transformers recipe: greedy with a 100-token no-repeat n-gram guard and a 16,384-token limit.
 
-Pro table crops keep their original image pixels, while the official Pro extractor masks in-table images with tokens and restores `<img>` references. Block output uses shared repetition truncation, while the official MinerU postprocessor keeps repeated content. Markdown uses shared heading and auxiliary-label policies, while official `json2md` joins every nonempty block without adding headings.
+Pro table crops keep their original image pixels, while the official Pro extractor masks in-table images with tokens and restores `<img>` references. Text, table and equation crops use shared repetition truncation, while the official MinerU postprocessor keeps their repeated content. Markdown uses shared heading and auxiliary-label policies, while official `json2md` joins every nonempty block without adding headings.
 
 MinerU-Diffusion uses its own rules: 2048-token budgets for layout and tables and 1024 for text and formulas, capped by `MinerUDiffusionParseOptions::generation.gen_length` (default 2048; standalone `DiffusionGenerationConfig` defaults to 1024). Crops use floor/ceil bounds, small crops are upscaled with round-to-even sizes, and lists and unknown labels are recognized as text. Equations are wrapped as generated, without MinerU 2.5's repairs, and tables select the diffusion dialect of the shared OTSL parser. The sampler is seeded, so runs are reproducible, though not identical to PyTorch's random stream.
 
@@ -561,7 +563,7 @@ let markdown = model
 println!("{markdown}");
 ```
 
-Output is Markdown with LaTeX formulas and HTML tables; the same `generate` path serves `DocParser` region crops. On CUDA the single-token decode step runs as a CUDA graph. The checkpoint's FastMTP head can add speculative decoding that is token-identical to plain autoregressive decoding in exact arithmetic (greedy verification plus the host-side no-repeat-ngram guard; in bf16 the verification block's kernel batching can flip near-tie picks, measured max |Δlogit| ≈ 0.25-0.56 on identical KV state), but it is **opt-in**: measured on the OmniDocBench demo pages (RTX 4090, bf16), adaptive MTP won on no page (median 3.7% slower than graphed plain decoding, +0.7% in total). Enable it with `OAR_JINAOCR_ENABLE_MTP=1` or `JinaOcrLoadOptions::with_mtp(true)` (`--mtp` in the example). Multi-image calls use a padded batch prefill and decode.
+Output is Markdown with LaTeX formulas and HTML tables; the same `generate` path serves `DocParser` region crops. On CUDA the single-token decode step runs as a CUDA graph. The checkpoint's FastMTP head can add speculative decoding that is token-identical to plain autoregressive decoding in exact arithmetic (greedy verification plus the host-side no-repeat-ngram guard; in bf16 the verification block's kernel batching can flip near-tie picks, measured max |Δlogit| ≈ 0.25-0.56 on identical KV state), but it is **opt-in**: measured on the OmniDocBench demo pages (RTX 4090, bf16), adaptive MTP won on no page (median 3.7% slower than graphed plain decoding, +0.7% in total). Enable it with `JinaOcrLoadOptions::with_mtp(true)` (`--mtp` in the example). Multi-image calls use a padded batch prefill and decode.
 
 The loader rejects `crop_mode=false` (the 640-pixel single-view mode). Region recognition uses the page prompt and keeps the first table for table crops. Decoding follows the Transformers recipe with its sliding n-gram guard.
 

@@ -162,11 +162,14 @@ fn encode_path(value: &str) -> String {
 /// Download options for [`AnyPageParser::from_pretrained`](crate::AnyPageParser::from_pretrained).
 ///
 /// Defaults download from ModelScope at the source's default revision, and
-/// the layout-composed models get [`DEFAULT_LAYOUT_REPO`]. Every knob is
-/// optional and `None` keeps its default.
+/// the layout-composed models get [`DEFAULT_LAYOUT_REPO`].
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct AnyPageParserPretrainedOptions {
+    /// GLM-OCR load options.
+    pub glm: crate::GlmOcrLoadOptions,
+    /// Jina OCR load options.
+    pub jina: crate::jina_ocr::JinaOcrLoadOptions,
     /// Checkpoint source. `None` means ModelScope.
     pub source: Option<DownloadSource>,
     /// Revision to pin. `None` means the source's default (`master` on
@@ -180,6 +183,18 @@ pub struct AnyPageParserPretrainedOptions {
 }
 
 impl AnyPageParserPretrainedOptions {
+    /// Set the GLM-OCR load options.
+    pub fn with_glm_options(mut self, options: crate::GlmOcrLoadOptions) -> Self {
+        self.glm = options;
+        self
+    }
+
+    /// Set the Jina OCR load options.
+    pub fn with_jina_options(mut self, options: crate::jina_ocr::JinaOcrLoadOptions) -> Self {
+        self.jina = options;
+        self
+    }
+
     /// Download from a specific source.
     pub fn with_source(mut self, source: DownloadSource) -> Self {
         self.source = Some(source);

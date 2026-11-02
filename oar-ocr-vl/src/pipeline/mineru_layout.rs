@@ -200,6 +200,22 @@ pub fn prepare_for_extract(
     min_image_edge: u32,
     max_image_edge_ratio: f32,
 ) -> (Vec<RgbImage>, Vec<String>, Vec<usize>) {
+    prepare_for_extract_with_image_analysis(
+        image,
+        blocks,
+        min_image_edge,
+        max_image_edge_ratio,
+        false,
+    )
+}
+
+pub(crate) fn prepare_for_extract_with_image_analysis(
+    image: &RgbImage,
+    blocks: &[ContentBlock],
+    min_image_edge: u32,
+    max_image_edge_ratio: f32,
+    image_analysis: bool,
+) -> (Vec<RgbImage>, Vec<String>, Vec<usize>) {
     let mut block_images = Vec::new();
     let mut prompts = Vec::new();
     let mut indices = Vec::new();
@@ -210,9 +226,22 @@ pub fn prepare_for_extract(
     for (idx, block) in blocks.iter().enumerate() {
         if matches!(
             block.block_type.as_str(),
-            "image" | "chart" | "image_block" | "list" | "equation_block"
+            "image_block" | "list" | "equation_block"
         ) {
             continue;
+        }
+        if matches!(block.block_type.as_str(), "image" | "chart") {
+            let width = block.bbox[2] - block.bbox[0];
+            let height = block.bbox[3] - block.bbox[1];
+            let eligible = (width > 0.1 && height > 0.1) || width * height > 0.01;
+            let covered = blocks.iter().any(|other| {
+                (other.block_type == "image_block"
+                    || (block.block_type == "image" && other.block_type == "table"))
+                    && cover_ratio(other.bbox, block.bbox) >= 0.9
+            });
+            if !image_analysis || !eligible || covered {
+                continue;
+            }
         }
         let Ok(mut crop) = super::crop::crop_with_options(
             image,
@@ -245,7 +274,7 @@ fn prompt_for_block(block_type: &str) -> &'static str {
     match block_type {
         "table" => TABLE_PROMPT,
         "equation" => EQUATION_PROMPT,
-        "chart" => "\nImage Analysis:",
+        "image" | "chart" => "\nImage Analysis:",
         _ => DEFAULT_PROMPT,
     }
 }
@@ -343,5 +372,27 @@ mod tests {
         assert_eq!(images.len(), 1);
         assert_eq!(prompts, [TABLE_PROMPT]);
         assert_eq!(indices, [0]);
+
+        let (images, prompts, indices) =
+            prepare_for_extract_with_image_analysis(&image, &blocks, 28, 50., true);
+        assert_eq!(images.len(), 2);
+        assert_eq!(prompts, [TABLE_PROMPT, "\nImage Analysis:"]);
+        assert_eq!(indices, [0, 1]);
+        let visual = |kind: &str, bbox| ContentBlock {
+            block_type: kind.into(),
+            bbox,
+            angle: None,
+            content: None,
+        };
+        let visuals = vec![
+            visual("image", [0., 0., 0.09, 0.09]),
+            visual("image", [0., 0., 0.3, 0.04]),
+            visual("chart", [0.5, 0.5, 0.7, 0.7]),
+            visual("image_block", [0.4, 0.4, 0.8, 0.8]),
+        ];
+        let (_, prompts, indices) =
+            prepare_for_extract_with_image_analysis(&image, &visuals, 28, 50., true);
+        assert_eq!(prompts, ["\nImage Analysis:"]);
+        assert_eq!(indices, [1]);
     }
 }

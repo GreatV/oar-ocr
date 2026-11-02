@@ -11,7 +11,7 @@
 //! |Δlogit| ≈ 0.25-0.56 on identical KV state, measured on the real
 //! checkpoint; see the model module docs). The head is loaded only on
 //! explicit
-//! request (`JinaOcrLoadOptions::with_mtp` / `OAR_JINAOCR_ENABLE_MTP`):
+//! request (`JinaOcrLoadOptions::with_mtp`):
 //! measured on the OmniDocBench demo pages (RTX 4090, bf16), adaptive MTP
 //! won on no page (median 3.7% slower than graphed plain decoding).
 
@@ -64,6 +64,8 @@ impl DecoderGraphInputs for MtpGraphInputs {
 #[derive(Debug)]
 pub(crate) struct JinaOcrMtp {
     #[cfg(feature = "cuda")]
+    cuda_graphs: bool,
+    #[cfg(feature = "cuda")]
     graph: RefCell<Option<DecoderCudaGraph<MtpGraphInputs>>>,
     embed_tokens: Embedding,
     enorm: RmsNorm,
@@ -76,6 +78,18 @@ pub(crate) struct JinaOcrMtp {
 }
 
 impl JinaOcrMtp {
+    pub(crate) fn set_cuda_graphs(&mut self, enabled: bool) {
+        #[cfg(feature = "cuda")]
+        {
+            self.cuda_graphs = enabled;
+            if !enabled {
+                self.invalidate_cuda_graph();
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        let _ = enabled;
+    }
+
     /// Load the FastMTP head. The embedding table, final norm, and LM head
     /// tensors are shared with the target model (zero-copy clones).
     pub(crate) fn load(
@@ -103,6 +117,8 @@ impl JinaOcrMtp {
         let rotary =
             RotaryEmbedding::new_dynamic(text_cfg.head_dim()?, text_cfg.rope_theta, vb.device())?;
         Ok(Self {
+            #[cfg(feature = "cuda")]
+            cuda_graphs: true,
             #[cfg(feature = "cuda")]
             graph: RefCell::new(None),
             embed_tokens,
@@ -319,9 +335,8 @@ impl JinaOcrMtp {
 
     #[cfg(feature = "cuda")]
     pub(crate) fn prepare_cuda_graph(&self, cache_len: usize) -> Result<(), Error> {
-        if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
-            || std::env::var_os("OAR_JINAOCR_DISABLE_CUDA_GRAPH").is_some()
-        {
+        #[cfg(feature = "cuda")]
+        if !self.cuda_graphs {
             self.invalidate_cuda_graph();
             return Ok(());
         }

@@ -119,7 +119,6 @@ impl MinerUConfig {
             mrope_section: self.rope_scaling.mrope_section.clone(),
             attention_bias: true,
             qk_head_norm: false,
-            graph_disable_env: "OAR_MINERU_DISABLE_CUDA_GRAPH",
             decode_cache_len: 16_384,
         })
     }

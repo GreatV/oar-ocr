@@ -474,6 +474,8 @@ impl Ernie4_5DecoderLayer {
 #[derive(Debug)]
 pub struct Ernie4_5Model {
     #[cfg(feature = "cuda")]
+    cuda_graphs: bool,
+    #[cfg(feature = "cuda")]
     decode_graph: RefCell<Option<DecoderCudaGraph<CudaGraphInputs>>>,
     embed_tokens: candle_nn::Embedding,
     layers: Vec<Ernie4_5DecoderLayer>,
@@ -487,6 +489,18 @@ pub struct Ernie4_5Model {
 }
 
 impl Ernie4_5Model {
+    pub(crate) fn set_cuda_graphs(&mut self, enabled: bool) {
+        #[cfg(feature = "cuda")]
+        {
+            self.cuda_graphs = enabled;
+            if !enabled {
+                self.invalidate_cuda_graph();
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        let _ = enabled;
+    }
+
     pub fn load(cfg: &PaddleOcrVlConfig, vb: candle_nn::VarBuilder) -> Result<Self, Error> {
         let embed_tokens =
             candle_nn::embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("embed_tokens"))
@@ -504,6 +518,8 @@ impl Ernie4_5Model {
         #[cfg(feature = "cuda")]
         let _drain_guard = CudaGraphDrainGuard::new(vb.device());
         Ok(Self {
+            #[cfg(feature = "cuda")]
+            cuda_graphs: true,
             #[cfg(feature = "cuda")]
             decode_graph: RefCell::new(None),
             embed_tokens,
@@ -608,9 +624,8 @@ impl Ernie4_5Model {
         max_new_tokens: usize,
         lm_head: &Linear,
     ) -> Result<(), Error> {
-        if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
-            || std::env::var_os("OAR_PADDLEOCR_VL_DISABLE_CUDA_GRAPH").is_some()
-        {
+        #[cfg(feature = "cuda")]
+        if !self.cuda_graphs {
             #[cfg(feature = "cuda")]
             self.invalidate_cuda_graph();
             return Ok(());

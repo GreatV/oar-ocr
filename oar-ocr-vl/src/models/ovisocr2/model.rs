@@ -54,6 +54,12 @@ impl Drop for TextCacheGuard<'_> {
 }
 
 impl OvisOcr2 {
+    /// Set whether to use CUDA graphs for decoding. Enabled by default.
+    pub fn with_cuda_graphs(mut self, enabled: bool) -> Self {
+        self.text.set_cuda_graphs(enabled);
+        self
+    }
+
     /// Load an OvisOCR2 Hugging Face model directory.
     pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         Self::from_dir_with_runtime(model_dir, crate::RuntimeConfig::new(device))
@@ -92,7 +98,6 @@ impl OvisOcr2 {
         let text = Qwen35TextModel::load(
             &cfg.text_config,
             MODEL_NAME,
-            "OAR_OVISOCR2_DISABLE_CUDA_GRAPH",
             vb.pp("model").pp("language_model"),
         )?;
         let vision = OvisOcr2VisionModel::load(&cfg.vision_config, vb.pp("model").pp("visual"))?;

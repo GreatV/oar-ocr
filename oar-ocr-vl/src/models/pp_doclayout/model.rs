@@ -1053,10 +1053,9 @@ mod tests {
     /// `order_logits` from `PPDocLayoutV{2,3}ForObjectDetection`. Per-stage
     /// deviations are printed so a failure points at the offending module.
     ///
-    /// One caveat for V2: `torch.argsort` is not stable, so the reference
-    /// feeds the pointer network in an arbitrary order. Set `OAR_PP_PERM` to
-    /// that order (a comma-separated query list) to compare `order_logits`
-    /// against it; without it only the detector outputs are meaningful.
+    /// V2 uses unstable `torch.argsort` ordering. An optional U32
+    /// `order_permutation` tensor in the reference dump supplies that order
+    /// for the pointer-network comparison.
     #[test]
     #[ignore = "requires a local checkpoint and a PyTorch reference dump"]
     fn matches_the_pytorch_reference() {
@@ -1144,7 +1143,17 @@ mod tests {
             .select(&logit_values, 300, ScoreComparison::Strict)
             .expect("selection");
         println!("num_valid: {}", selection.num_valid);
-        if let Some(head) = order_permutation_override() {
+        if let Some(permutation) = reference.get("order_permutation") {
+            let head: Vec<usize> = permutation
+                .flatten_all()
+                .unwrap()
+                .to_dtype(DType::U32)
+                .unwrap()
+                .to_vec1::<u32>()
+                .unwrap()
+                .into_iter()
+                .map(|q| q as usize)
+                .collect();
             let mut rest: Vec<usize> = selection
                 .permutation
                 .iter()
@@ -1160,23 +1169,11 @@ mod tests {
             .expect("order logits");
         let diff = maxdiff(&order_logits, &reference["order_logits"]);
         println!("order_logits: {diff}");
-        if model.version == PpDocLayoutVersion::V3 || std::env::var("OAR_PP_PERM").is_ok() {
+        if model.version == PpDocLayoutVersion::V3 || reference.contains_key("order_permutation") {
             assert!(
                 diff < 1.0,
                 "order_logits differ from the reference by {diff}"
             );
         }
-    }
-
-    /// Replays `torch.argsort`'s unstable ordering when `OAR_PP_PERM` is set.
-    fn order_permutation_override() -> Option<Vec<usize>> {
-        std::env::var("OAR_PP_PERM")
-            .ok()
-            .filter(|spec| !spec.trim().is_empty())
-            .map(|spec| {
-                spec.split(',')
-                    .map(|entry| entry.trim().parse().expect("query index"))
-                    .collect()
-            })
     }
 }

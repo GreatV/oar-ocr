@@ -80,6 +80,7 @@ impl MinerUTaskPrompt {
 }
 
 pub struct MinerU {
+    pub(super) image_analysis: bool,
     device: Device,
     dtype: DType,
     cfg: MinerUConfig,
@@ -137,6 +138,18 @@ struct MinerUGenerationConfig {
 }
 
 impl MinerU {
+    /// Set whether native page parsing recognizes eligible images and charts. Enabled by default.
+    pub fn with_image_analysis(mut self, enabled: bool) -> Self {
+        self.image_analysis = enabled;
+        self
+    }
+
+    /// Set whether to use CUDA graphs for decoding. Enabled by default.
+    pub fn with_cuda_graphs(mut self, enabled: bool) -> Self {
+        self.text.set_cuda_graphs(enabled);
+        self
+    }
+
     pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         Self::from_dir_with_runtime(model_dir, crate::RuntimeConfig::new(device))
     }
@@ -261,6 +274,7 @@ impl MinerU {
         #[cfg(feature = "cuda")]
         let _drain_guard = CudaGraphDrainGuard::new(&device);
         Ok(Self {
+            image_analysis: true,
             device,
             dtype,
             cfg,
@@ -282,7 +296,7 @@ impl MinerU {
             top_p,
             top_k,
             #[cfg(feature = "cuda")]
-            gpu_greedy_sampling: std::env::var_os("OAR_MINERU_DISABLE_GPU_SAMPLING").is_none(),
+            gpu_greedy_sampling: true,
             #[cfg(feature = "cuda")]
             _drain_guard,
         })

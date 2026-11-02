@@ -16,7 +16,6 @@ use crate::document::page::ParseDiagnostic;
 use crate::document::structure::{
     LayoutElement, LayoutElementType, StructureResult, TableResult, TableType,
 };
-use crate::pipeline::crop::crop_with_polygon;
 use crate::pipeline::geometry::{
     calculate_overlap_ratio, calculate_projection_overlap_ratio, crop_margin,
 };
@@ -184,12 +183,18 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
         image: &RgbImage,
         bbox: &BoundingBox,
         polygon: Option<&BoundingBox>,
+        figures: Option<(&super::table_figures::TableFigures, usize)>,
     ) -> Result<RgbImage, Error> {
-        crop_with_polygon(
+        super::crop::crop_with_polygon_and_paint(
             image,
             [bbox.x_min(), bbox.y_min(), bbox.x_max(), bbox.y_max()].map(f64::from),
             polygon,
             &self.profile.crop,
+            |crop, origin| {
+                if let Some((figures, index)) = figures {
+                    figures.paint(index, crop, origin);
+                }
+            },
         )
     }
 
@@ -233,8 +238,18 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
                 }
             }
         }
+        let mut projected = std::borrow::Cow::Borrowed(result.layout_elements.as_slice());
+        if self.profile.table_figure_tokens {
+            let figures = super::table_figures::TableFigures::new(&projected);
+            ignored.push("__table_figure".into());
+            for (index, element) in projected.to_mut().iter_mut().enumerate() {
+                if figures.absorbed(index) {
+                    element.label = Some("__table_figure".into());
+                }
+            }
+        }
         let elements = crate::render::markdown::assembly::compose_formula_numbers(
-            &result.layout_elements,
+            &projected,
             self.profile.formula_numbers,
         );
         crate::render::markdown::to_markdown_with_style(
@@ -337,6 +352,21 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             Some(options) => layout.detect_with_options(&image, options)?,
             None => layout.detect(&image)?.into(),
         };
+        let table_figure_pool = self.profile.table_figure_tokens.then(|| {
+            prediction
+                .detections
+                .elements
+                .iter()
+                .map(|element| {
+                    LayoutElement::new(
+                        element.bbox.clone(),
+                        LayoutElementType::from_label(&element.element_type),
+                        element.score,
+                    )
+                    .with_label(element.element_type.clone())
+                })
+                .collect::<Vec<_>>()
+        });
         super::geometry::layout_filter::filter_document_layout(
             &mut prediction,
             self.profile.layout.as_ref().unwrap_or(&Default::default()),
@@ -488,6 +518,9 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             }
             Ok(())
         };
+        let table_figures = table_figure_pool
+            .as_ref()
+            .map(|pool| super::table_figures::TableFigures::from_pool(&sorted_elements, pool));
         let mut merged_by_first: std::collections::HashMap<usize, bool> =
             std::collections::HashMap::new();
         for (idx, element) in sorted_elements.iter_mut().enumerate() {
@@ -537,6 +570,7 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
                         &image,
                         &crop_bbox,
                         polygons.get(g_idx).and_then(Option::as_ref),
+                        table_figures.as_ref().map(|figures| (figures, g_idx)),
                     ) {
                         Ok(crop) => crop,
                         Err(error) => {
@@ -573,6 +607,7 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
                         &image,
                         &crop_bbox,
                         polygons.get(idx).and_then(Option::as_ref),
+                        table_figures.as_ref().map(|figures| (figures, idx)),
                     ) {
                         Ok(crop) => crop,
                         Err(error) => {
@@ -598,6 +633,7 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
                     &image,
                     &crop_bbox,
                     polygons.get(idx).and_then(Option::as_ref),
+                    table_figures.as_ref().map(|figures| (figures, idx)),
                 ) {
                     Ok(cropped) => cropped,
                     Err(error) => {
@@ -674,6 +710,7 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
         }
 
         let mut tables: Vec<TableResult> = Vec::new();
+        let mut table_indices = Vec::new();
         for (idx, generated) in generated_by_element.into_iter().enumerate() {
             let Some(generated) = generated else {
                 continue;
@@ -738,6 +775,7 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             };
 
             if element.element_type == LayoutElementType::Table {
+                table_indices.push(idx);
                 tables.push(
                     TableResult::new(element.bbox.clone(), TableType::Unknown)
                         .with_html_structure(processed.clone()),
@@ -745,6 +783,16 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             }
 
             element.text = Some(processed);
+        }
+
+        if let Some(figures) = &table_figures {
+            for (&index, table) in table_indices.iter().zip(&mut tables) {
+                if let Some(content) = sorted_elements[index].text.as_deref() {
+                    let restored = figures.restore(index, content, &sorted_elements);
+                    sorted_elements[index].text = Some(restored.clone());
+                    table.html_structure = Some(restored);
+                }
+            }
         }
 
         if self.profile.render_style.normalize_bullets {
@@ -1263,19 +1311,34 @@ mod tests {
     /// Truncation-enabled backend echoing a table whose rows repeat
     /// identically — the shape text-level repetition truncation must not
     /// touch.
-    struct TableEchoBackend;
+    struct TableEchoBackend {
+        crops: RefCell<Vec<RgbImage>>,
+    }
 
     impl RecognitionBackend for TableEchoBackend {
+        fn recognition_task_for_label(
+            &self,
+            label: &str,
+            suggested: Option<RecognitionTask>,
+        ) -> Option<RecognitionTask> {
+            if label == "seal" {
+                Some(RecognitionTask::Ocr)
+            } else {
+                suggested
+            }
+        }
+
         fn recognize(
             &self,
-            _image: RgbImage,
+            image: RgbImage,
             task: RecognitionTask,
             _max_tokens: usize,
         ) -> Result<String, Error> {
+            self.crops.borrow_mut().push(image);
             if task == RecognitionTask::Table {
                 let mut rows = String::new();
                 for _ in 0..12 {
-                    rows.push_str("<tr><td></td><td></td></tr>\n");
+                    rows.push_str("<tr><td>[F2] [F3]</td><td>[F404]</td></tr>\n");
                 }
                 Ok(format!("<table>\n{rows}</table>"))
             } else {
@@ -1553,7 +1616,9 @@ mod tests {
 
     #[test]
     fn table_output_survives_repetition_truncation() {
-        let backend = TableEchoBackend;
+        let backend = TableEchoBackend {
+            crops: RefCell::new(Vec::new()),
+        };
         let parser = DocParser::new(&backend);
         let layout = StaticLayout::new(vec![
             element("table", 10.0, 10.0, 190.0, 100.0),
@@ -1577,6 +1642,106 @@ mod tests {
         assert!(
             !text.contains("plain text\nplain text"),
             "repeated text should still be truncated"
+        );
+    }
+
+    #[test]
+    fn table_figure_tokens_follow_paddlex() {
+        let backend = TableEchoBackend {
+            crops: RefCell::new(Vec::new()),
+        };
+        let profile = crate::DocParserProfile::default()
+            .with_table_figure_tokens(true)
+            .with_layout(Some(
+                crate::pipeline::layout::LayoutPostprocessOptions::default()
+                    .with_visual_labels(vec!["image".into(), "seal".into()])
+                    .with_min_size(6.),
+            ))
+            .with_render_style(
+                crate::render::markdown::RenderStyle::default()
+                    .with_image_template(Some("FIGURE-{index}".into())),
+            );
+        let parser = DocParser::new(&backend)
+            .with_options(crate::DocParserOptions::default().with_profile(profile));
+        let layout = StaticLayout::new(vec![
+            element("table", 10., 10., 190., 100.),
+            element("image", 30., 30., 70., 70.),
+        ]);
+        let result = parser.parse(&layout, RgbImage::new(200, 210)).unwrap();
+        let html = result.layout_elements[0].text.as_deref().unwrap();
+        assert!(html.contains("<img src=\"image_2.png\" alt=\"Image\" />"));
+        assert!(html.contains("[F404]"));
+        assert!(!html.contains("[F2]"));
+        assert_eq!(result.layout_elements.len(), 2);
+        assert_eq!(result.tables[0].html_structure.as_deref(), Some(html));
+        assert!(!parser.render_markdown(&result).contains("FIGURE-"));
+        let crops = backend.crops.borrow();
+        let crop = crops.last().unwrap();
+        assert_eq!(crop.get_pixel(20, 20).0, [255; 3]);
+        assert_eq!(crop.get_pixel(10, 10).0, [0; 3]);
+        drop(crops);
+
+        let tiny = StaticLayout::new(vec![
+            element("table", 10., 10., 190., 100.),
+            element("image", 30., 30., 40., 40.),
+        ]);
+        let result = parser.parse(&tiny, RgbImage::new(200, 210)).unwrap();
+        assert!(
+            result.layout_elements[0]
+                .text
+                .as_deref()
+                .unwrap()
+                .contains("[F2]")
+        );
+        assert!(
+            backend
+                .crops
+                .borrow()
+                .last()
+                .unwrap()
+                .pixels()
+                .all(|p| p.0 == [0; 3])
+        );
+        assert!(!parser.render_markdown(&result).contains("FIGURE-"));
+        let fractional = StaticLayout::new(vec![
+            element("table", 10.8, 10.8, 190.8, 100.8),
+            element("image", 30.8, 30.8, 70.8, 70.8),
+        ]);
+        parser.parse(&fractional, RgbImage::new(200, 210)).unwrap();
+        let crops = backend.crops.borrow();
+        let crop = crops.last().unwrap();
+        assert_eq!(crop.get_pixel(19, 19).0, [255; 3]);
+        assert_eq!(crop.get_pixel(18, 19).0, [0; 3]);
+        drop(crops);
+        let seal = StaticLayout::new(vec![
+            element("table", 10., 10., 190., 100.),
+            element("seal", 30., 30., 70., 70.),
+        ]);
+        let result = parser.parse(&seal, RgbImage::new(200, 210)).unwrap();
+        let html = result.layout_elements[0].text.as_deref().unwrap();
+        assert!(html.contains("image_2.png"));
+        assert!(html.contains("plain text"));
+        let discarded = StaticLayout::new(vec![
+            element("table", 10., 10., 190., 100.),
+            element("image", 30., 30., 70., 70.),
+            element("image", 195., 30., 199., 34.),
+        ]);
+        let result = parser.parse(&discarded, RgbImage::new(200, 210)).unwrap();
+        let html = result.layout_elements[0].text.as_deref().unwrap();
+        assert!(html.contains("image_2.png"));
+        assert!(!html.contains("[F3]"));
+        assert!(html.contains("[F2]"));
+        let header = StaticLayout::new(vec![
+            element("table", 10., 10., 190., 100.),
+            element("header_image", 30., 30., 70., 70.),
+        ]);
+        let result = parser.parse(&header, RgbImage::new(200, 210)).unwrap();
+        assert!(
+            result.layout_elements[0]
+                .text
+                .as_deref()
+                .unwrap()
+                .contains("[F2]")
         );
     }
 

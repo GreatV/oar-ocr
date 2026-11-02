@@ -79,6 +79,16 @@ pub(crate) fn crop_with_polygon(
     polygon: Option<&BoundingBox>,
     options: &CropOptions,
 ) -> Result<RgbImage, Error> {
+    crop_with_polygon_and_paint(image, bounds, polygon, options, |_, _| {})
+}
+
+pub(crate) fn crop_with_polygon_and_paint(
+    image: &RgbImage,
+    bounds: [f64; 4],
+    polygon: Option<&BoundingBox>,
+    options: &CropOptions,
+    paint: impl FnOnce(&mut RgbImage, [f64; 2]),
+) -> Result<RgbImage, Error> {
     if image.width() == 0 || image.height() == 0 || bounds.iter().any(|v| !v.is_finite()) {
         return Err(crop_error(
             "crop requires a nonempty image and finite bounds".into(),
@@ -118,6 +128,7 @@ pub(crate) fn crop_with_polygon(
     {
         super::geometry::polygon::mask_crop(&mut crop, polygon, (x1, y1));
     }
+    paint(&mut crop, [bounds[0], bounds[1]]);
     Ok(match options.angle {
         Some(90) => image::imageops::rotate270(&crop),
         Some(180) => image::imageops::rotate180(&crop),
@@ -169,6 +180,20 @@ mod tests {
         .unwrap();
         assert_eq!(quantized.dimensions(), (30, 50));
         assert_eq!(quantized.get_pixel(0, 0).0, [9, 9, 0]);
+        let polygon = BoundingBox::new(vec![
+            crate::document::geometry::Point::new(0., 0.),
+            crate::document::geometry::Point::new(4., 0.),
+            crate::document::geometry::Point::new(0., 4.),
+        ]);
+        let painted = crop_with_polygon_and_paint(
+            &image,
+            [0., 0., 4., 4.],
+            Some(&polygon),
+            &CropOptions::default().with_shape_mode(super::super::layout::LayoutShapeMode::Poly),
+            |crop, _| crop.put_pixel(3, 3, image::Rgb([0; 3])),
+        )
+        .unwrap();
+        assert_eq!(painted.get_pixel(3, 3).0, [0; 3]);
     }
 
     /// Boxes reaching past the edges are clamped rather than rejected.

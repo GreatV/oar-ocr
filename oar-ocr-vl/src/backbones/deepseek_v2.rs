@@ -51,15 +51,6 @@ const FUSED_MOE_MAX_PAIRS: usize = 4096;
 #[cfg(feature = "cuda")]
 const DECODE_CACHE_LEN: usize = 16_384;
 
-fn graphs_disabled() -> bool {
-    // OAR_JINAOCR_DISABLE_CUDA_GRAPH covers all three jina graphs (target AR
-    // decode, verification, and the MTP draft — the draft checks it too, in
-    // mtp.rs), like OAR_GLMOCR_DISABLE_CUDA_GRAPH does for GLM-OCR.
-    std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
-        || std::env::var_os("OAR_DEEPSEEK_V2_DISABLE_CUDA_GRAPH").is_some()
-        || std::env::var_os("OAR_JINAOCR_DISABLE_CUDA_GRAPH").is_some()
-}
-
 /// The captured verification graph plus its block width, which the reuse
 /// check in `prepare_verification_cuda_graph` matches against.
 #[cfg(feature = "cuda")]
@@ -1066,6 +1057,8 @@ fn storage_k_device(cache: &TrimmableKvCache) -> Device {
 
 pub(crate) struct DeepSeekV2TextModel {
     #[cfg(feature = "cuda")]
+    cuda_graphs: bool,
+    #[cfg(feature = "cuda")]
     decode_graph: RefCell<Option<DecoderCudaGraph<CudaGraphInputs>>>,
     #[cfg(feature = "cuda")]
     verification_graph: RefCell<Option<VerificationGraph>>,
@@ -1080,6 +1073,18 @@ pub(crate) struct DeepSeekV2TextModel {
 }
 
 impl DeepSeekV2TextModel {
+    pub(crate) fn set_cuda_graphs(&mut self, enabled: bool) {
+        #[cfg(feature = "cuda")]
+        {
+            self.cuda_graphs = enabled;
+            if !enabled {
+                self.invalidate_cuda_graph();
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        let _ = enabled;
+    }
+
     pub(crate) fn load(cfg: &DeepSeekV2TextConfig, vb: VarBuilder) -> Result<Self, Error> {
         let embed_tokens = embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("embed_tokens"))
             .map_err(|e| candle_to_ocr_inference(MODEL_NAME, "load token embeddings", e))?;
@@ -1098,6 +1103,8 @@ impl DeepSeekV2TextModel {
         #[cfg(feature = "cuda")]
         let _drain_guard = CudaGraphDrainGuard::new(vb.device());
         Ok(Self {
+            #[cfg(feature = "cuda")]
+            cuda_graphs: true,
             #[cfg(feature = "cuda")]
             decode_graph: RefCell::new(None),
             #[cfg(feature = "cuda")]
@@ -1277,7 +1284,8 @@ impl DeepSeekV2TextModel {
         max_new_tokens: usize,
         lm_head: &Linear,
     ) -> Result<(), Error> {
-        if graphs_disabled() {
+        #[cfg(feature = "cuda")]
+        if !self.cuda_graphs {
             #[cfg(feature = "cuda")]
             self.invalidate_cuda_graph();
             return Ok(());
@@ -1323,7 +1331,7 @@ impl DeepSeekV2TextModel {
         query_len: usize,
         lm_head: &Linear,
     ) -> Result<Option<usize>, Error> {
-        if query_len == 0 || graphs_disabled() {
+        if query_len == 0 || !self.cuda_graphs {
             self.invalidate_cuda_graph();
             return Ok(None);
         }

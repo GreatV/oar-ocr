@@ -124,7 +124,7 @@ pub use paddleocr_vl::{
     PaddleOcrVl, PaddleOcrVlConfig, PaddleOcrVlImageProcessorConfig, PaddleOcrVlTask,
 };
 
-pub use glmocr::GlmOcr;
+pub use glmocr::{GlmOcr, GlmOcrLoadOptions};
 pub use hpd_parsing::{HpdGenerationConfig, HpdOutput, HpdParsing, HpdRuntimeStats};
 pub use hunyuanocr::{
     DFlashConfig, DFlashTargetConfig, HunyuanOcr, HunyuanOcrParseOptions, HunyuanOcrVersion,

@@ -35,6 +35,7 @@ impl RecognitionBackend for PaddleOcrVl {
             blockers.push("chart".into());
         }
         crate::DocParserProfile {
+            table_figure_tokens: true,
             skip_auxiliary_regions: false,
             merge_blocker_labels: Some(blockers),
             auxiliary_labels: ignored

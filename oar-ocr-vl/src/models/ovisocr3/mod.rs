@@ -29,6 +29,12 @@ pub struct OvisOcr3 {
 }
 
 impl OvisOcr3 {
+    /// Set whether to use CUDA graphs for decoding. Enabled by default.
+    pub fn with_cuda_graphs(mut self, enabled: bool) -> Self {
+        self.engine = self.engine.with_cuda_graphs(enabled);
+        self
+    }
+
     /// Load an explicitly selected OvisOCR3 checkpoint directory.
     pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         Self::from_dir_with_runtime(model_dir, RuntimeConfig::new(device))

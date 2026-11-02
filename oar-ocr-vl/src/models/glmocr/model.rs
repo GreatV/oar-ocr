@@ -24,6 +24,28 @@ const GLM_MTP_DRAFT_TOKENS: usize = 4;
 #[cfg(feature = "cuda")]
 const GLM_MTP_QUERY_LEN: usize = GLM_MTP_DRAFT_TOKENS + 1;
 
+/// Load-time options for GLM-OCR.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct GlmOcrLoadOptions {
+    /// Load the MTP head on supported CUDA checkpoints. Enabled by default.
+    pub mtp: bool,
+}
+
+impl Default for GlmOcrLoadOptions {
+    fn default() -> Self {
+        Self { mtp: true }
+    }
+}
+
+impl GlmOcrLoadOptions {
+    /// Set whether to load the MTP speculative decoding head.
+    pub fn with_mtp(mut self, enabled: bool) -> Self {
+        self.mtp = enabled;
+        self
+    }
+}
+
 pub struct GlmOcr {
     device: Device,
     dtype: DType,
@@ -46,6 +68,16 @@ pub struct GlmOcr {
 }
 
 impl GlmOcr {
+    /// Set whether to use CUDA graphs for decoding. Enabled by default.
+    pub fn with_cuda_graphs(mut self, enabled: bool) -> Self {
+        self.text.set_cuda_graphs(enabled);
+        #[cfg(feature = "cuda")]
+        if let Some(mtp) = &mut self.mtp {
+            mtp.set_cuda_graphs(enabled);
+        }
+        self
+    }
+
     pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         Self::from_dir_with_runtime(model_dir, crate::RuntimeConfig::new(device))
     }
@@ -54,6 +86,17 @@ impl GlmOcr {
         model_dir: impl AsRef<Path>,
         runtime: crate::RuntimeConfig,
     ) -> Result<Self, Error> {
+        Self::from_dir_with_options(model_dir, runtime, GlmOcrLoadOptions::default())
+    }
+
+    /// Load with explicit runtime and MTP options.
+    pub fn from_dir_with_options(
+        model_dir: impl AsRef<Path>,
+        runtime: crate::RuntimeConfig,
+        options: GlmOcrLoadOptions,
+    ) -> Result<Self, Error> {
+        #[cfg(not(feature = "cuda"))]
+        let _ = options;
         let (device, dtype) = runtime.resolve();
         let model_dir = model_dir.as_ref();
         let cfg = GlmOcrConfig::from_path(model_dir.join("config.json"))?;
@@ -87,19 +130,16 @@ impl GlmOcr {
         let vb_language_model = vb.pp("model").pp("language_model");
         let text = GlmOcrTextModel::load(&cfg.text_config, vb_language_model.clone())?;
         #[cfg(feature = "cuda")]
-        let mtp = if device.is_cuda()
-            && cfg.text_config.num_nextn_predict_layers == 1
-            && std::env::var_os("OAR_GLMOCR_DISABLE_MTP").is_none()
-            && std::env::var_os("OAR_VL_DISABLE_SPECULATIVE").is_none()
-        {
-            Some(GlmOcrMtpModel::load(
-                &cfg.text_config,
-                cfg.text_config.num_hidden_layers,
-                vb_language_model,
-            )?)
-        } else {
-            None
-        };
+        let mtp =
+            if device.is_cuda() && cfg.text_config.num_nextn_predict_layers == 1 && options.mtp {
+                Some(GlmOcrMtpModel::load(
+                    &cfg.text_config,
+                    cfg.text_config.num_hidden_layers,
+                    vb_language_model,
+                )?)
+            } else {
+                None
+            };
         let vision = GlmOcrVisionModel::load(&cfg.vision_config, vb.pp("model").pp("visual"))?;
 
         let lm_head = if cfg.text_config.tie_word_embeddings || cfg.tie_word_embeddings {
@@ -282,8 +322,7 @@ impl GlmOcr {
             let use_mtp = step_top.is_none()
                 && self.mtp.is_some()
                 && self.dtype == DType::BF16
-                && max_new_tokens >= 8
-                && std::env::var_os("OAR_VL_DISABLE_SPECULATIVE").is_none();
+                && max_new_tokens >= 8;
             #[cfg(not(feature = "cuda"))]
             let use_mtp = false;
 

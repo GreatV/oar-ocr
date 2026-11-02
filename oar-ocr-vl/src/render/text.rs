@@ -1,3 +1,5 @@
+mod mermaid;
+pub(crate) use mermaid::format_mermaid;
 mod paragraph;
 mod structured_math;
 pub(crate) use paragraph::{
@@ -11,7 +13,9 @@ pub(crate) use formula::{
     ensure_math_wrappers, format_formula_with_options, has_bracket_math, normalize_math_delimiters,
     repair_math_in_text,
 };
-pub(crate) use repetition::{RepeatAlgorithm, RepetitionOptions, clean_repetition};
+pub(crate) use repetition::{
+    RepeatAlgorithm, RepetitionOptions, clean_repetition, has_repeated_lines,
+};
 
 use once_cell::sync::Lazy;
 use regex::Regex;

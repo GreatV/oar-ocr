@@ -20,6 +20,8 @@ use std::cell::RefCell;
 
 #[derive(Debug)]
 pub(super) struct GlmOcrMtpModel {
+    #[cfg(feature = "cuda")]
+    cuda_graphs: bool,
     graph: RefCell<Option<DecoderCudaGraph<MtpGraphInputs>>>,
     embed_tokens: Embedding,
     enorm: RmsNorm,
@@ -64,6 +66,18 @@ impl DecoderGraphInputs for MtpGraphInputs {
 }
 
 impl GlmOcrMtpModel {
+    pub(crate) fn set_cuda_graphs(&mut self, enabled: bool) {
+        #[cfg(feature = "cuda")]
+        {
+            self.cuda_graphs = enabled;
+            if !enabled {
+                self.invalidate_cuda_graph();
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        let _ = enabled;
+    }
+
     pub(super) fn load(
         cfg: &GlmOcrTextConfig,
         layer_index: usize,
@@ -95,6 +109,9 @@ impl GlmOcrMtpModel {
 
         let _drain_guard = CudaGraphDrainGuard::new(vb_language_model.device());
         Ok(Self {
+            #[cfg(feature = "cuda")]
+            cuda_graphs: true,
+            #[cfg(feature = "cuda")]
             graph: RefCell::new(None),
             embed_tokens,
             enorm,
@@ -234,9 +251,8 @@ impl GlmOcrMtpModel {
     }
 
     pub(super) fn prepare_cuda_graph(&self, cache_len: usize) -> Result<(), Error> {
-        if std::env::var_os("OAR_VL_DISABLE_CUDA_GRAPH").is_some()
-            || std::env::var_os("OAR_GLMOCR_DISABLE_CUDA_GRAPH").is_some()
-        {
+        #[cfg(feature = "cuda")]
+        if !self.cuda_graphs {
             self.invalidate_cuda_graph();
             return Ok(());
         }

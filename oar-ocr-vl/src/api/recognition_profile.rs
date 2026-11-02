@@ -116,6 +116,8 @@ pub struct DocParserProfile {
     pub layout: Option<LayoutPostprocessOptions>,
     /// Formatting parameters for the page renderer.
     pub render_style: RenderStyle,
+    /// Paint figure tokens in table crops and restore their image references.
+    pub table_figure_tokens: bool,
     pub(crate) repetition: Option<RepetitionOptions>,
     pub(crate) formula: FormulaOptions,
     pub(crate) delimiters: Option<DelimiterOptions>,
@@ -140,6 +142,7 @@ impl Default for DocParserProfile {
             crop: CropOptions::default(),
             layout: None,
             render_style: RenderStyle::default(),
+            table_figure_tokens: false,
             repetition: None,
             formula: FormulaOptions::default(),
             delimiters: None,
@@ -149,6 +152,12 @@ impl Default for DocParserProfile {
 }
 
 impl DocParserProfile {
+    /// Set whether to paint figure tokens in table crops and restore image references.
+    pub fn with_table_figure_tokens(mut self, enabled: bool) -> Self {
+        self.table_figure_tokens = enabled;
+        self
+    }
+
     /// Set the region generation limit.
     pub fn with_max_tokens(mut self, value: usize) -> Self {
         self.max_tokens = value;

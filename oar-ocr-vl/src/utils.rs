@@ -43,7 +43,7 @@ mod tests {
     use crate::api::error::Error;
     use crate::document::geometry::BoundingBox;
     use crate::document::structure::{LayoutElement, LayoutElementType};
-    use crate::runtime::device::{bf16_works, dtype_from_str};
+    use crate::runtime::device::bf16_works;
     use candle_core::{DType, Device};
 
     fn element(label: &str, text: &str) -> LayoutElement {
@@ -64,14 +64,6 @@ mod tests {
     #[test]
     fn parse_device_invalid() {
         assert!(parse_device("invalid").is_err());
-    }
-
-    #[test]
-    fn dtype_names_are_case_insensitive() {
-        assert_eq!(dtype_from_str("BF16"), Some(DType::BF16));
-        assert_eq!(dtype_from_str("fp16"), Some(DType::F16));
-        assert_eq!(dtype_from_str("float32"), Some(DType::F32));
-        assert_eq!(dtype_from_str("f64"), None);
     }
 
     #[test]

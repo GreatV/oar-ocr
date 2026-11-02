@@ -1,3 +1,7 @@
+mod pipe;
+pub(crate) use pipe::{
+    malformed_table as malformed_markdown_table, markdown_table_to_html, repair_chart_table,
+};
 mod otsl;
 pub(crate) use otsl::{
     CellMarkup, HtmlInput, NoTokens, OtslOptions, RowPadding, SpanSearch,

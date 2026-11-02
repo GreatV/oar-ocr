@@ -58,6 +58,32 @@ impl Default for RepetitionOptions {
     }
 }
 
+pub(crate) fn has_repeated_lines(
+    input: &str,
+    consecutive: usize,
+    total: usize,
+    minimum_chars: usize,
+) -> bool {
+    let mut counts = HashMap::new();
+    let mut previous = "";
+    let mut run = 0;
+    for line in input.lines().map(str::trim) {
+        if line.is_empty() || line.chars().count() < minimum_chars {
+            previous = "";
+            run = 0;
+            continue;
+        }
+        run = if line == previous { run + 1 } else { 1 };
+        previous = line;
+        let count = counts.entry(line).or_insert(0usize);
+        *count += 1;
+        if (consecutive > 0 && run >= consecutive) || (total > 0 && *count >= total) {
+            return true;
+        }
+    }
+    false
+}
+
 pub(crate) fn clean_repetition(input: &str, is_table: bool, options: &RepetitionOptions) -> String {
     let text = if options.trim { input.trim() } else { input };
     let chars: Vec<_> = text.chars().collect();

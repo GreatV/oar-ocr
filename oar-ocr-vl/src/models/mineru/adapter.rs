@@ -28,7 +28,7 @@ fn prompt(task: RecognitionTask) -> &'static str {
         RecognitionTask::Ocr => "\nText Recognition:",
         RecognitionTask::Table => "\nTable Recognition:",
         RecognitionTask::Formula => "\nFormula Recognition:",
-        RecognitionTask::Chart => "\nText Recognition:",
+        RecognitionTask::Chart => "\nImage Analysis:",
     }
 }
 
@@ -74,7 +74,7 @@ impl RecognitionBackend for MinerU {
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             table_output_is_otsl: true,
-            supports_chart: false,
+            supports_chart: true,
             ..BackendCapabilities::default()
         }
     }
@@ -85,8 +85,26 @@ impl RecognitionBackend for MinerU {
         task: RecognitionTask,
         raw: &str,
     ) -> Option<String> {
+        if task == RecognitionTask::Chart {
+            let (kind, content) = super::image_analysis::parse_reply(raw, &table_options());
+            let block = crate::DocumentBlock {
+                block_type: kind,
+                bbox: [0., 0., 1., 1.],
+                angle: None,
+                content: Some(content),
+            };
+            return Some(
+                crate::pipeline::mineru_postprocess::postprocess_blocks(vec![block])
+                    .into_iter()
+                    .next()
+                    .and_then(|block| block.content)
+                    .unwrap_or_default(),
+            );
+        }
         if task == RecognitionTask::Table {
-            return Some(convert_otsl_to_html_with_options(raw, &table_options()));
+            return Some(super::image_analysis::wrap_table_formulas(
+                &convert_otsl_to_html_with_options(raw, &table_options()),
+            ));
         }
         let block = crate::DocumentBlock {
             block_type: if task == RecognitionTask::Formula {

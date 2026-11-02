@@ -408,6 +408,15 @@ pub struct HunyuanOcr {
 }
 
 impl HunyuanOcr {
+    /// Set whether to use CUDA graphs for decoding. Enabled by default.
+    pub fn with_cuda_graphs(mut self, enabled: bool) -> Self {
+        self.llm.set_cuda_graphs(enabled);
+        if let Some(draft) = &mut self.dflash {
+            draft.set_cuda_graphs(enabled);
+        }
+        self
+    }
+
     pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         Self::from_dir_with_runtime(model_dir, crate::RuntimeConfig::new(device))
     }
@@ -554,16 +563,6 @@ impl HunyuanOcr {
                 ),
             });
         }
-        let target_layers: Vec<usize> = dflash
-            .config()
-            .dflash_config
-            .target_layer_ids
-            .iter()
-            .map(|id| id + 1)
-            .collect();
-        model
-            .llm
-            .prepare_dflash_cuda_graphs(dflash.config().block_size, &target_layers)?;
         model.dflash = Some(dflash);
         Ok(model)
     }
@@ -887,9 +886,7 @@ impl HunyuanOcr {
         self.llm.clear_kv_cache();
         let active_dflash = if batch_size == 1 {
             if let Some(dflash) = self.dflash.as_ref() {
-                // A previous multi-image request or an over-capacity decode
-                // may have invalidated either graph. Recreate them before
-                // prefill; steady state is an inexpensive capacity check.
+                // Capture or reuse the target and draft graphs before prefill.
                 dflash.prepare_cuda_graph()?;
                 let target_layers: Vec<usize> = dflash
                     .config()

@@ -20,10 +20,6 @@ use tokenizers::Tokenizer;
 
 const MODEL_NAME: &str = "Xiaomi-OCR-0";
 
-/// Env var that forces the decode-graph path off for this model (the shared
-/// `OAR_VL_DISABLE_CUDA_GRAPH` switch applies on top of it).
-const GRAPH_DISABLE_ENV: &str = "OAR_XIAOMI_OCR_DISABLE_CUDA_GRAPH";
-
 /// Official Xiaomi-OCR-0 whole-page document parsing instruction.
 pub const DEFAULT_PROMPT: &str = "Extract all information from the main body of the document image and represent it in markdown format, ignoring headers and footers. Tables should be expressed in OTSL format, formulas in the document should be represented using LATEX format, and the parsing should be organized according to the reading order.";
 
@@ -89,6 +85,12 @@ impl Drop for TextCacheGuard<'_> {
 }
 
 impl XiaomiOcr {
+    /// Set whether to use CUDA graphs for decoding. Enabled by default.
+    pub fn with_cuda_graphs(mut self, enabled: bool) -> Self {
+        self.text.set_cuda_graphs(enabled);
+        self
+    }
+
     /// Load a Xiaomi-OCR-0 Hugging Face model directory.
     pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         Self::from_dir_with_runtime(model_dir, crate::RuntimeConfig::new(device))
@@ -127,7 +129,6 @@ impl XiaomiOcr {
         let text = Qwen35TextModel::load(
             &cfg.text_config,
             MODEL_NAME,
-            GRAPH_DISABLE_ENV,
             vb.pp("model").pp("language_model"),
         )?;
         let vision = Qwen3VlVisionModel::load(

@@ -115,6 +115,12 @@ impl Drop for TextCacheGuard<'_> {
 }
 
 impl MiniCpmOcr {
+    /// Set whether to use CUDA graphs for decoding. Enabled by default.
+    pub fn with_cuda_graphs(mut self, enabled: bool) -> Self {
+        self.text.set_cuda_graphs(enabled);
+        self
+    }
+
     /// Load an `openbmb/MiniCPM-OCR-1.0` model directory.
     pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         Self::from_dir_with_runtime(model_dir, RuntimeConfig::new(device))
@@ -184,7 +190,6 @@ impl MiniCpmOcr {
         let text = Qwen35TextModel::load(
             &config.text_config,
             MODEL_NAME,
-            "OAR_VL_DISABLE_CUDA_GRAPH",
             vb.pp("model.language_model"),
         )?;
         let vision = VisionTower::load(

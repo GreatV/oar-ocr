@@ -248,9 +248,25 @@ impl FromStr for AnyPageParserModel {
 pub struct AnyPageParserLoadOptions {
     /// PP-DocLayout checkpoint directory used by the layout-composed models.
     pub layout_dir: Option<PathBuf>,
+    /// GLM-OCR load options.
+    pub glm: crate::GlmOcrLoadOptions,
+    /// Jina OCR load options.
+    pub jina: crate::jina_ocr::JinaOcrLoadOptions,
 }
 
 impl AnyPageParserLoadOptions {
+    /// Set the GLM-OCR load options.
+    pub fn with_glm_options(mut self, options: crate::GlmOcrLoadOptions) -> Self {
+        self.glm = options;
+        self
+    }
+
+    /// Set the Jina OCR load options.
+    pub fn with_jina_options(mut self, options: crate::jina_ocr::JinaOcrLoadOptions) -> Self {
+        self.jina = options;
+        self
+    }
+
     /// Set the PP-DocLayout directory used by the layout-composed models.
     pub fn with_layout_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.layout_dir = Some(dir.into());
@@ -485,7 +501,12 @@ impl AnyPageParser {
         Ok(match model {
             AnyPageParserModel::HpdParsing => HpdParsing::from_dir(model_dir, device)?.into(),
             AnyPageParserModel::HunyuanOcr => HunyuanOcr::from_dir(model_dir, device)?.into(),
-            AnyPageParserModel::JinaOcr => JinaOcr::from_dir(model_dir, device)?.into(),
+            AnyPageParserModel::JinaOcr => JinaOcr::from_dir_with_options(
+                model_dir,
+                crate::RuntimeConfig::new(device),
+                options.jina.clone(),
+            )?
+            .into(),
             AnyPageParserModel::MinerU2509 | AnyPageParserModel::MinerUPro => {
                 MinerU::from_dir(model_dir, device)?.into()
             }
@@ -524,7 +545,11 @@ impl AnyPageParser {
             .into(),
             AnyPageParserModel::GlmOcr => LayoutPageParser::new(
                 PpDocLayout::from_dir(required_layout_dir(options, model)?, device.clone())?,
-                GlmOcr::from_dir(model_dir, device)?,
+                GlmOcr::from_dir_with_options(
+                    model_dir,
+                    crate::RuntimeConfig::new(device),
+                    options.glm.clone(),
+                )?,
             )
             .into(),
             AnyPageParserModel::TeleOcr => LayoutPageParser::new(
@@ -576,7 +601,9 @@ impl AnyPageParser {
         let source = options.source();
         let model_dir =
             crate::api::download::snapshot(source, model.as_str(), options.revision.as_deref())?;
-        let mut load_options = AnyPageParserLoadOptions::default();
+        let mut load_options = AnyPageParserLoadOptions::default()
+            .with_glm_options(options.glm.clone())
+            .with_jina_options(options.jina.clone());
         if Self::needs_layout_dir(model) {
             // The layout checkpoint always uses its source's default
             // revision; a pinned model revision never applies to it.

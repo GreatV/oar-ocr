@@ -120,7 +120,6 @@ impl TeleOcrConfig {
             mrope_section: self.rope_scaling.mrope_section.clone(),
             attention_bias: false,
             qk_head_norm: true,
-            graph_disable_env: "OAR_TELEOCR_DISABLE_CUDA_GRAPH",
             decode_cache_len: 16_384,
         })
     }

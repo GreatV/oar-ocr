@@ -11,8 +11,7 @@
 //! logits host-side, so speculation cannot change the official recipe), but
 //! speculation is OPT-IN: on the OmniDocBench demo pages (RTX 4090, bf16)
 //! adaptive MTP won on no page (median 3.7% slower than graphed plain
-//! decoding, +0.7% in total), so the draft head is only loaded on request — see [`JinaOcrLoadOptions::with_mtp`] and
-//! `OAR_JINAOCR_ENABLE_MTP`.
+//! decoding, +0.7% in total), so the draft head is only loaded on request — see [`JinaOcrLoadOptions::with_mtp`].
 //!
 //! Token-identity caveat: in exact arithmetic greedy verification emits the
 //! plain-greedy sequence, but the 4-token verification pass computes logits
@@ -91,8 +90,7 @@ pub struct JinaOcrLoadOptions {
     /// to plain decoding in exact arithmetic (bf16 kernel noise can flip
     /// near-tie picks — see the module documentation), but speculation is
     /// slower than graphed plain decoding on typical pages, so the head
-    /// is only loaded when explicitly requested here or via
-    /// `OAR_JINAOCR_ENABLE_MTP`.
+    /// is loaded when requested here.
     pub mtp: bool,
 }
 
@@ -123,6 +121,15 @@ pub struct JinaOcr {
 }
 
 impl JinaOcr {
+    /// Set whether to use CUDA graphs for decoding. Enabled by default.
+    pub fn with_cuda_graphs(mut self, enabled: bool) -> Self {
+        self.text.set_cuda_graphs(enabled);
+        if let Some(mtp) = &mut self.mtp {
+            mtp.set_cuda_graphs(enabled);
+        }
+        self
+    }
+
     /// Load a jina-ocr-v1 Hugging Face model directory.
     pub fn from_dir(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, Error> {
         Self::from_dir_with_runtime(model_dir, crate::RuntimeConfig::new(device))
@@ -180,7 +187,6 @@ impl JinaOcr {
         let mtp = if mtp_load_decision(
             cfg.num_nextn_predict_layers.unwrap_or(0) >= 1,
             options.mtp,
-            std::env::var_os("OAR_JINAOCR_ENABLE_MTP").is_some(),
             device.is_cuda(),
         )? {
             Some(JinaOcrMtp::load(
@@ -470,8 +476,7 @@ impl JinaOcr {
     }
 
     /// FastMTP speculation runs only where the draft head was loaded — an
-    /// explicit opt-in via [`JinaOcrLoadOptions::with_mtp`] or
-    /// `OAR_JINAOCR_ENABLE_MTP`, because graphed plain decoding beat adaptive
+    /// explicit opt-in via [`JinaOcrLoadOptions::with_mtp`]. Graphed plain decoding beat adaptive
     /// MTP on every OmniDocBench demo page (RTX 4090, bf16). Greedy
     /// verification keeps the output token-identical to plain autoregressive
     /// decoding in exact arithmetic (near-tie picks can flip on bf16 kernel
@@ -724,8 +729,7 @@ pub(crate) struct AdaptiveSpec {
     /// fallback quadruples the next interval so pages that keep rejecting
     /// stay in plain decoding.
     pub probe_interval: usize,
-    /// Capture the decode graph at the first probe (default true;
-    /// `OAR_JINAOCR_DISABLE_LAZY_DECODE_GRAPH` forces it off regardless).
+    /// Capture the decode graph at the first probe (default true).
     /// Exposed for the GPU self-check, which A/B-compares the two settings.
     pub lazy_decode_graph: bool,
 }
@@ -1065,9 +1069,7 @@ impl GreedyEngine<'_> {
     /// Capture the target verification and draft graphs (CUDA only; a no-op
     /// elsewhere). Instrumented with `tracing::debug!` at each stage and the
     /// committed-token position it happens at, so divergences can be checked
-    /// against the nearest KV restore. `OAR_JINAOCR_DISABLE_LAZY_DECODE_GRAPH`
-    /// keeps cooldown decoding eager (the verification graph and the
-    /// snapshot/restore cycle still run) for A/B numerics experiments.
+    /// against the nearest KV restore.
     pub(crate) fn prepare_speculation_graphs(
         &self,
         prompt_len: usize,
@@ -1103,8 +1105,7 @@ impl GreedyEngine<'_> {
                 // decode graph keeps cooldown decoding eager (the
                 // verification graph and snapshot/restore still run) for
                 // A/B numerics experiments.
-                let capture_decode_graph = lazy_decode_graph
-                    && std::env::var_os("OAR_JINAOCR_DISABLE_LAZY_DECODE_GRAPH").is_none();
+                let capture_decode_graph = lazy_decode_graph;
                 if capture_decode_graph
                     && let Err(error) = self
                         .text
@@ -1223,28 +1224,14 @@ impl GreedyEngine<'_> {
 /// non-CUDA device is a configuration error, while the environment variable
 /// alone just skips loading with a warning — it may be set globally and must
 /// not break CPU inference.
-fn mtp_load_decision(
-    draft_available: bool,
-    api_opt_in: bool,
-    env_opt_in: bool,
-    cuda: bool,
-) -> Result<bool, Error> {
-    if !draft_available || !(api_opt_in || env_opt_in) {
+fn mtp_load_decision(draft_available: bool, enabled: bool, cuda: bool) -> Result<bool, Error> {
+    if !draft_available || !enabled {
         return Ok(false);
     }
-    if cuda {
-        return Ok(true);
+    if !cuda {
+        return Err(Error::config("JinaOCR FastMTP requires a CUDA device"));
     }
-    if api_opt_in {
-        return Err(Error::Config {
-            message: "JinaOCR FastMTP speculative decoding is only supported on CUDA devices"
-                .to_string(),
-        });
-    }
-    tracing::warn!(
-        "OAR_JINAOCR_ENABLE_MTP is set but the device is not CUDA; skipping the FastMTP draft head"
-    );
-    Ok(false)
+    Ok(true)
 }
 
 fn require_token_id(
@@ -1460,17 +1447,10 @@ mod tests {
 
     #[test]
     fn mtp_load_decision_gates_on_device_and_opt_in_source() {
-        // No draft head in the checkpoint, or no opt-in at all: never load.
-        assert!(!mtp_load_decision(false, true, true, true).unwrap());
-        assert!(!mtp_load_decision(true, false, false, true).unwrap());
-        // Either opt-in loads on CUDA.
-        assert!(mtp_load_decision(true, true, false, true).unwrap());
-        assert!(mtp_load_decision(true, false, true, true).unwrap());
-        // API opt-in on a non-CUDA device is a hard error.
-        assert!(mtp_load_decision(true, true, false, false).is_err());
-        assert!(mtp_load_decision(true, true, true, false).is_err());
-        // The environment variable alone only skips with a warning.
-        assert!(!mtp_load_decision(true, false, true, false).unwrap());
+        assert!(!mtp_load_decision(false, true, true).unwrap());
+        assert!(!mtp_load_decision(true, false, true).unwrap());
+        assert!(mtp_load_decision(true, true, true).unwrap());
+        assert!(mtp_load_decision(true, true, false).is_err());
     }
 
     #[test]
