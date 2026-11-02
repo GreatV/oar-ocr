@@ -3,7 +3,21 @@
 use super::{DiffusionGenerationConfig, MinerUDiffusion};
 use crate::api::error::Error;
 use crate::api::recognition::{BackendCapabilities, RecognitionBackend, RecognitionTask};
+use crate::render::table::{CellMarkup, HtmlInput, NoTokens, OtslOptions, RowPadding};
 use image::RgbImage;
+
+pub(super) fn table_options() -> OtslOptions {
+    OtslOptions {
+        row_padding: RowPadding::Widest,
+        cell_markup: CellMarkup::EscapeAll,
+        no_tokens: NoTokens::Preserve,
+        html_input: HtmlInput::CompletePassThrough,
+        empty_fcel_is_anchor: true,
+        preserve_ecel_text: true,
+        trim_input: false,
+        ..Default::default()
+    }
+}
 
 impl RecognitionBackend for MinerUDiffusion {
     fn recognize(

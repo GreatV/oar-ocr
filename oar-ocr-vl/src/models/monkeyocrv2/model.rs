@@ -63,6 +63,8 @@ pub struct MonkeyOcrV2 {
     stop_token_ids: Vec<u32>,
     image_token_id: u32,
     pub(super) two_stage_parsing: bool,
+    pub(super) dewarp: Option<super::MonkeyOcrV2Dewarp>,
+    dewarp_dir: std::path::PathBuf,
 }
 
 impl MonkeyOcrV2 {
@@ -109,7 +111,19 @@ impl MonkeyOcrV2 {
         stop_token_ids.sort_unstable();
         stop_token_ids.dedup();
         let image_token_id = cfg.image_token_id;
+        let dewarp = if model_dir.join("preprocessor1.pth").is_file()
+            && model_dir.join("preprocessor2.pth").is_file()
+        {
+            Some(super::MonkeyOcrV2Dewarp::from_dir(
+                model_dir,
+                device.clone(),
+            )?)
+        } else {
+            None
+        };
         Ok(Self {
+            dewarp,
+            dewarp_dir: model_dir.to_path_buf(),
             device,
             dtype,
             cfg,
@@ -121,6 +135,20 @@ impl MonkeyOcrV2 {
             image_token_id,
             two_stage_parsing: true,
         })
+    }
+
+    /// Enable or disable full-page dewarp. Disabling releases the networks.
+    /// Enabling loads both preprocessor files from this model's directory.
+    pub fn with_dewarp(mut self, enabled: bool) -> Result<Self, Error> {
+        if enabled && self.dewarp.is_none() {
+            self.dewarp = Some(super::MonkeyOcrV2Dewarp::from_dir(
+                &self.dewarp_dir,
+                self.device.clone(),
+            )?);
+        } else if !enabled {
+            self.dewarp = None;
+        }
+        Ok(self)
     }
 
     /// Select the native layout-then-recognition page pipeline (default: enabled).

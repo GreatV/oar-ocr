@@ -3,8 +3,15 @@
 use super::{PaddleOcrVl, PaddleOcrVlTask};
 use crate::api::error::{BatchResult, Error};
 use crate::api::recognition::{BackendCapabilities, RecognitionBackend, RecognitionTask};
-use crate::utils::truncate_repetitive_content;
 use image::RgbImage;
+
+pub(super) fn table_options() -> crate::render::table::OtslOptions {
+    crate::render::table::OtslOptions {
+        cell_markup: crate::render::table::CellMarkup::EscapeAll,
+        emit_unowned_cells: true,
+        ..Default::default()
+    }
+}
 
 fn task(task: RecognitionTask) -> PaddleOcrVlTask {
     match task {
@@ -16,6 +23,50 @@ fn task(task: RecognitionTask) -> PaddleOcrVlTask {
 }
 
 impl RecognitionBackend for PaddleOcrVl {
+    fn doc_parser_profile(&self) -> crate::DocParserProfile {
+        use crate::api::recognition::{
+            AuxiliaryLabelAction, AuxiliaryLabelRule, EmptyLayoutBehavior,
+        };
+        let ignored = crate::render::markdown::default_markdown_ignore_labels();
+        let mut blockers: Vec<String> = ["image", "header_image", "footer_image", "seal", "table"]
+            .map(str::to_string)
+            .into();
+        if !self.use_chart_recognition {
+            blockers.push("chart".into());
+        }
+        crate::DocParserProfile {
+            skip_auxiliary_regions: false,
+            merge_blocker_labels: Some(blockers),
+            auxiliary_labels: ignored
+                .iter()
+                .map(|label| AuxiliaryLabelRule {
+                    label: label.clone(),
+                    action: AuxiliaryLabelAction::HideAtRender,
+                })
+                .collect(),
+            empty_layout: EmptyLayoutBehavior::Empty,
+            crop: crate::pipeline::crop::CropOptions::default()
+                .with_shape_mode(crate::pipeline::layout::LayoutShapeMode::Auto),
+            layout: Some(crate::pipeline::layout::LayoutPostprocessOptions::paddlex()),
+            render_style: crate::render::markdown::RenderStyle::default()
+                .with_skip_empty_chunks(true)
+                .with_normalize_vision_footnotes(true),
+            table: table_options(),
+            ..Default::default()
+        }
+    }
+
+    fn recognition_task_for_label(
+        &self,
+        label: &str,
+        suggested: Option<RecognitionTask>,
+    ) -> Option<RecognitionTask> {
+        match label {
+            "image" | "header_image" | "footer_image" => None,
+            _ => suggested,
+        }
+    }
+
     fn recognize(
         &self,
         image: RgbImage,
@@ -64,33 +115,31 @@ impl RecognitionBackend for PaddleOcrVl {
 
 fn format_region(label: &str, task: RecognitionTask, raw: &str) -> String {
     // PaddleX paddleocr_vl/pipeline.py (Apache-2.0), before Markdown rendering.
-    let minimum = if task == RecognitionTask::Table {
-        5000
-    } else {
-        50
-    };
-    let mut text = if raw.chars().count() < minimum {
-        raw.into()
-    } else {
-        truncate_repetitive_content(raw, 10, 10, 10)
-    };
-    if (text.contains(r"\(") && text.contains(r"\)"))
-        || (text.contains(r"\[") && text.contains(r"\]"))
-    {
-        text = text
-            .replace('$', "")
-            .replace(r"\(", " $ ")
-            .replace(r"\)", " $")
-            .replace(r"\[\[", r"\[")
-            .replace(r"\]\]", r"\]")
-            .replace(r"\[", " $$ ")
-            .replace(r"\]", " $$ ");
-        if label == "formula_number" {
-            text = text.replace('$', "");
-        }
+    let text = crate::render::text::clean_repetition(
+        raw,
+        task == RecognitionTask::Table,
+        &crate::render::text::RepetitionOptions {
+            minimum_chars: 50,
+            table_minimum_chars: Some(5000),
+            ..Default::default()
+        },
+    );
+    let paired_math = crate::render::text::has_bracket_math(&text);
+    let mut text = crate::render::text::normalize_math_delimiters(
+        &text,
+        &crate::render::text::DelimiterOptions {
+            matching: crate::render::text::BracketMatching::AnyPair,
+            inline: (" $ ", " $"),
+            remove_dollars: true,
+            collapse_brackets: true,
+            ..Default::default()
+        },
+    );
+    if paired_math && label == "formula_number" {
+        text = text.replace('$', "");
     }
     if task == RecognitionTask::Table && crate::render::table::looks_like_table_tokens(&text) {
-        let html = crate::render::table::convert_otsl_to_html(&text);
+        let html = crate::render::table::convert_otsl_to_html_with_options(&text, &table_options());
         if !html.is_empty() {
             text = html;
         }

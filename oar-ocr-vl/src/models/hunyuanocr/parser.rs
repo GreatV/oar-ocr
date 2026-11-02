@@ -60,30 +60,20 @@ fn document_prompt(version: HunyuanOcrVersion) -> &'static str {
 }
 
 pub(super) fn clean_output(text: &str, version: HunyuanOcrVersion) -> String {
-    // Match the reference clean_repeated_substrings behavior on Unicode
-    // characters: retain one copy of the shortest suffix repeated >=10 times.
-    let chars: Vec<_> = text.chars().collect();
-    let minimum = match version {
-        HunyuanOcrVersion::V1 => 8000,
-        HunyuanOcrVersion::V1_5 => 2000,
-    };
-    if chars.len() >= minimum {
-        for period in 2..=chars.len() / 10 {
-            let suffix = &chars[chars.len() - period..];
-            let count = chars
-                .rchunks_exact(period)
-                .take_while(|chunk| *chunk == suffix)
-                .count();
-            if count >= 10 {
-                return chars[..chars.len() - period * (count - 1)]
-                    .iter()
-                    .collect::<String>()
-                    .trim()
-                    .into();
-            }
-        }
-    }
-    text.trim().into()
+    crate::render::text::clean_repetition(
+        text,
+        false,
+        &crate::render::text::RepetitionOptions {
+            algorithm: crate::render::text::RepeatAlgorithm::ExactSuffix,
+            minimum_chars: match version {
+                HunyuanOcrVersion::V1 => 8000,
+                HunyuanOcrVersion::V1_5 => 2000,
+            },
+            min_period: 2,
+            trim_result: true,
+            ..Default::default()
+        },
+    )
 }
 
 #[cfg(test)]

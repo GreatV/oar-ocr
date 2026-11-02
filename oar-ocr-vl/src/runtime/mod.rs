@@ -12,3 +12,7 @@ pub(crate) mod trace;
 
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;
+
+pub(crate) mod layers;
+
+pub(crate) mod resampling;

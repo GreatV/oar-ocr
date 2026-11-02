@@ -81,39 +81,21 @@ impl PageParser for OvisOcr3 {
 fn structured_regions(text: &str) -> (Vec<Value>, Option<String>) {
     // OvisOCR3 document_crosspage.py structured_to_markdown (Apache-2.0).
     // Recover only complete values.
-    let mut text = text.trim();
-    if let Some(body) = text.strip_prefix("```") {
-        text = body
-            .strip_prefix("json")
-            .or_else(|| body.strip_prefix("JSON"))
-            .unwrap_or(body)
-            .trim_start();
-        text = text.strip_suffix("```").unwrap_or(text).trim_end();
-    }
-    let error = match serde_json::from_str::<Vec<Value>>(text) {
-        Ok(regions) => return (regions, None),
+    let text = crate::document::decoding::strip_json_fence(
+        text,
+        crate::document::decoding::JsonFenceOptions {
+            uppercase_language: true,
+            ..Default::default()
+        },
+    );
+    let error = match crate::document::decoding::decode_json::<Vec<Value>>(
+        text,
+        crate::document::decoding::JsonTrailing::Reject,
+    ) {
+        Ok((regions, _)) => return (regions, None),
         Err(error) => error,
     };
-    let mut regions = Vec::new();
-    if let Some(mut tail) = text.strip_prefix('[') {
-        loop {
-            tail = tail.trim_start();
-            if tail.is_empty() || tail.starts_with(']') {
-                break;
-            }
-            let mut stream = serde_json::Deserializer::from_str(tail).into_iter::<Value>();
-            let Some(Ok(value)) = stream.next() else {
-                break;
-            };
-            regions.push(value);
-            tail = tail[stream.byte_offset()..].trim_start();
-            if let Some(next) = tail.strip_prefix(',') {
-                tail = next;
-            } else {
-                break;
-            }
-        }
-    }
+    let regions = crate::document::decoding::complete_array_prefix(text);
     (
         regions,
         Some(format!(

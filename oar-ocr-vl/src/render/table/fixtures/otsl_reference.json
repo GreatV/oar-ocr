@@ -1,0 +1,42 @@
+[
+  {
+    "dialect": "repair",
+    "input": "<fcel>A<fcel>B<nl><fcel><lcel><fcel>C<nl>",
+    "expected": "<table><tr><td>A</td><td>B</td><td></td></tr><tr><td>&lt;lcel&gt;</td><td></td><td>C</td></tr></table>"
+  },
+  {
+    "dialect": "repair",
+    "input": "<fcel>A<lcel><nl><ucel><xcel><nl>",
+    "expected": "<table><tr><td rowspan=\"2\" colspan=\"2\">A</td></tr><tr></tr></table>"
+  },
+  {
+    "dialect": "repair",
+    "input": "<fcel>\"a\" & 'b'<nl>",
+    "expected": "<table><tr><td>&quot;a&quot; &amp; &#x27;b&#x27;</td></tr></table>"
+  },
+  {
+    "dialect": "repair",
+    "input": "<ecel><lcel><nl><ucel><xcel><nl>",
+    "expected": "<table><tr><td rowspan=\"2\" colspan=\"2\"></td></tr><tr></tr></table>"
+  },
+  {
+    "dialect": "widest",
+    "input": "<fcel>A<fcel>B<nl><fcel><lcel><fcel>C<nl>",
+    "expected": "<table><tr><td>A</td><td>B</td><td></td></tr><tr><td colspan=\"2\"></td><td>C</td></tr></table>"
+  },
+  {
+    "dialect": "widest",
+    "input": "<fcel>A<lcel><nl><ucel><xcel><nl>",
+    "expected": "<table><tr><td rowspan=\"2\" colspan=\"2\">A</td></tr><tr></tr></table>"
+  },
+  {
+    "dialect": "widest",
+    "input": "<fcel>\"a\" & 'b'<nl>",
+    "expected": "<table><tr><td>&quot;a&quot; &amp; &#x27;b&#x27;</td></tr></table>"
+  },
+  {
+    "dialect": "widest",
+    "input": "<ecel><lcel><nl><ucel><xcel><nl>",
+    "expected": "<table><tr><td rowspan=\"2\" colspan=\"2\"></td></tr><tr></tr></table>"
+  }
+]

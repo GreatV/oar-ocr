@@ -11,6 +11,8 @@ use image::RgbImage;
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct UnlimitedOcrParseOptions {
+    /// Generation options. Multi-page parsing resolves Auto views to Tiled;
+    /// select Global explicitly for global-view joint parsing.
     pub generation: UnlimitedOcrGenerationOptions,
     /// Keep figures as the official converter's
     /// `![](page1_x1_y1_x2_y2.jpg)` references (0-1000 grid); dropped by
@@ -46,9 +48,22 @@ impl PageParser for UnlimitedOcr {
         if images.is_empty() {
             return Ok(DocumentOutput::default());
         }
-        let raw = self.generate(images, &options.generation)?;
+        let generation = document_generation(&options.generation, images.len());
+        let raw = self.generate(images, &generation)?;
         document_from_raw(raw, images.len(), options)
     }
+}
+
+fn document_generation(
+    options: &UnlimitedOcrGenerationOptions,
+    pages: usize,
+) -> UnlimitedOcrGenerationOptions {
+    let mut generation = options.clone();
+    // The official serving/evaluation example selects crop_mode=True.
+    if pages > 1 && generation.view_mode == super::UnlimitedOcrViewMode::Auto {
+        generation.view_mode = super::UnlimitedOcrViewMode::Tiled;
+    }
+    generation
 }
 
 fn document_from_raw(
@@ -129,6 +144,21 @@ mod tests {
     use super::*;
     #[test]
     fn document_keeps_joint_markdown_and_reports_missing_pages() {
+        let defaults = UnlimitedOcrGenerationOptions::default();
+        assert_eq!(
+            document_generation(&defaults, 2).view_mode,
+            super::super::UnlimitedOcrViewMode::Tiled
+        );
+        assert_eq!(
+            document_generation(&defaults, 1).view_mode,
+            super::super::UnlimitedOcrViewMode::Auto
+        );
+        let global = defaults.with_view_mode(super::super::UnlimitedOcrViewMode::Global);
+        assert_eq!(
+            document_generation(&global, 2).view_mode,
+            super::super::UnlimitedOcrViewMode::Global
+        );
+
         let raw = "<PAGE><BLOCK>cross_text[0,0,1000,100]<FORK>Hello<PAGE><BLOCK>append_text[0,0,1000,100]<FORK> world<BLOCK>image[0,100,1000,900]<FORK>";
         let options = UnlimitedOcrParseOptions::default().with_keep_image_refs(true);
         let document = document_from_raw(raw.into(), 3, &options).unwrap();

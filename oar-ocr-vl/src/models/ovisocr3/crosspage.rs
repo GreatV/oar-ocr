@@ -7,8 +7,6 @@ use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
-static TABLE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)<table\b[^>]*>.*?</table\s*>").unwrap());
 const NEGATIVE: &str = "No cross-page table exists between these pages.";
 
 /// One reconstructed table; page numbers are local to this two-page request.
@@ -112,15 +110,17 @@ fn remap_images(
 }
 
 fn parse_tables(raw: &str, page_numbers: [usize; 2]) -> Result<Vec<CrossPageTable>, Error> {
-    static COMPLETE_TABLE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?is)\A<table\b[^>]*>.*?</table\s*>\z").unwrap());
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct ResponseTable {
         source_pages: Vec<usize>,
         html: String,
     }
-    let tables: Vec<ResponseTable> = serde_json::from_str(raw).map_err(|e| {
+    let (tables, _): (Vec<ResponseTable>, usize) = crate::document::decoding::decode_json(
+        raw,
+        crate::document::decoding::JsonTrailing::Reject,
+    )
+    .map_err(|e| {
         Error::invalid_input(format!(
             "OvisOCR3 cross-page response is not a table array: {e}"
         ))
@@ -131,7 +131,12 @@ fn parse_tables(raw: &str, page_numbers: [usize; 2]) -> Result<Vec<CrossPageTabl
     if tables.is_empty()
         || tables.iter().any(|table| {
             let html = table.html.trim();
-            table.source_pages != [1, 2] || !COMPLETE_TABLE.is_match(html)
+            table.source_pages != [1, 2]
+                || crate::render::table::table_span(
+                    html,
+                    crate::render::table::TableWrapper::Document,
+                )
+                .is_none()
         })
     {
         return Err(Error::invalid_input(
@@ -153,7 +158,10 @@ fn reconstruction_prompt(
     markdown: &[&str],
     page_numbers: [usize; 2],
 ) -> Result<Option<String>, Error> {
-    if !markdown.iter().all(|page| TABLE.is_match(page)) {
+    if !markdown.iter().all(|page| {
+        crate::render::table::table_span(page, crate::render::table::TableWrapper::Fragment)
+            .is_some()
+    }) {
         return Ok(None);
     }
     let context = markdown

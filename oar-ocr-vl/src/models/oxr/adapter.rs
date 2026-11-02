@@ -5,6 +5,43 @@ use crate::{BackendCapabilities, Error, RecognitionBackend, RecognitionTask};
 use image::RgbImage;
 
 impl RecognitionBackend for Oxr {
+    fn doc_parser_profile(&self) -> crate::DocParserProfile {
+        use crate::api::recognition::{AuxiliaryLabelAction, AuxiliaryLabelRule};
+        let margins: Vec<String> = [
+            "header",
+            "header_image",
+            "footer",
+            "footer_image",
+            "page_header",
+            "page_footer",
+            "page-header",
+            "page-footer",
+        ]
+        .map(str::to_string)
+        .into();
+        crate::DocParserProfile {
+            max_tokens: 8192,
+            skip_auxiliary_regions: false,
+            merge_labels: Vec::new(),
+            auxiliary_labels: margins
+                .iter()
+                .map(|label| AuxiliaryLabelRule {
+                    label: label.clone(),
+                    action: AuxiliaryLabelAction::Drop,
+                })
+                .collect(),
+            markdown_ignore_labels: margins,
+            layout: Some(
+                crate::pipeline::layout::LayoutPostprocessOptions::paddlex()
+                    .with_shape_mode(crate::pipeline::layout::LayoutShapeMode::Rect),
+            ),
+            render_style: crate::render::markdown::RenderStyle::default()
+                .with_skip_empty_chunks(true)
+                .with_footnote_definitions(true),
+            ..Default::default()
+        }
+    }
+
     fn recognize(
         &self,
         image: RgbImage,

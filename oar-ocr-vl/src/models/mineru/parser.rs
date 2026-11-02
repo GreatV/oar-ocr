@@ -1,13 +1,14 @@
 //! Model-native two-stage MinerU page parser.
 
 use super::MinerU;
+use super::adapter::table_options;
 use crate::api::error::Error;
 use crate::api::page_parser::PageParser;
 use crate::document::page::{PageDocument, ParseDiagnostic};
 use crate::pipeline::mineru_layout::{
     LAYOUT_IMAGE_SIZE, LAYOUT_PROMPT, parse_layout_details, prepare_for_extract,
 };
-use crate::pipeline::mineru_table::mineru_otsl_to_html;
+use crate::render::table::convert_otsl_to_html_with_options;
 use crate::render::text::truncate_repetitive_content;
 use crate::runtime::image::pil_bicubic_resize;
 use image::RgbImage;
@@ -100,7 +101,7 @@ impl PageParser for MinerU {
                         let content = truncate_repetitive_content(&content, 10, 10, 10);
                         blocks[block_index].content =
                             Some(if blocks[block_index].block_type == "table" {
-                                mineru_otsl_to_html(&content)
+                                convert_otsl_to_html_with_options(&content, &table_options())
                             } else {
                                 content.trim().to_string()
                             });

@@ -139,6 +139,26 @@ pub fn validate_patch_merge_temporal(
     Ok(())
 }
 
+/// Open a PyTorch state dictionary stored directly or under `model`.
+pub(crate) fn pytorch_builder(
+    path: &Path,
+    probe: &str,
+    device: &candle_core::Device,
+) -> candle_core::Result<candle_nn::VarBuilder<'static>> {
+    let plain = candle_nn::VarBuilder::from_pth(path, candle_core::DType::F32, device);
+    if let Ok(builder) = &plain
+        && builder.contains_tensor(probe)
+    {
+        return plain;
+    }
+    let builder =
+        candle_nn::VarBuilder::from_pth_with_state(path, candle_core::DType::F32, "model", device)?;
+    if !builder.contains_tensor(probe) {
+        candle_core::bail!("PyTorch checkpoint {} is missing {probe}", path.display());
+    }
+    Ok(builder)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

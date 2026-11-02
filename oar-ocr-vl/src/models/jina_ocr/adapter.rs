@@ -5,22 +5,14 @@ use crate::api::error::{BatchResult, Error};
 use crate::api::recognition::{BackendCapabilities, RecognitionBackend, RecognitionTask};
 use image::RgbImage;
 
-/// Extract the first `<table>…</table>` span; region crops often carry a
-/// heading or caption around the table, and `DocParser` feeds the result
-/// straight into `TableResult.html`. Verbatim when no table is found.
-fn extract_html_table(raw: &str) -> &str {
-    let Some(start) = raw.find("<table>") else {
-        return raw;
-    };
-    let Some(end) = raw[start..].find("</table>") else {
-        return raw;
-    };
-    &raw[start..start + end + "</table>".len()]
-}
-
 fn postprocess(task: RecognitionTask, raw: &str) -> String {
     match task {
-        RecognitionTask::Table => extract_html_table(raw).trim().to_string(),
+        RecognitionTask::Table => {
+            crate::render::table::table_span(raw, crate::render::table::TableWrapper::Literal)
+                .unwrap_or(raw)
+                .trim()
+                .to_string()
+        }
         _ => raw.trim().to_string(),
     }
 }

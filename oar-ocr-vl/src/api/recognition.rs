@@ -4,6 +4,11 @@ use crate::api::error::{BatchResult, Error};
 use crate::api::generation::GenerationOptions;
 use image::RgbImage;
 
+pub use super::recognition_profile::{
+    AuxiliaryLabelAction, AuxiliaryLabelRule, DocParserOptions, DocParserProfile,
+    EmptyLayoutBehavior, FormulaNumberComposition, RegionErrorBehavior,
+};
+
 /// Region-recognition behavior consumed by the pipeline scheduler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BackendCapabilities {
@@ -42,9 +47,23 @@ pub enum RecognitionTask {
 
 /// A model adapter that recognizes cropped document regions.
 ///
-/// This contract deliberately lives below the document parser so model
-/// implementations never need to depend on pipeline orchestration.
+/// Backends supply recognition requests and parameters for the shared parser.
 pub trait RecognitionBackend {
+    /// Supply a page transform run once before layout detection.
+    fn page_preprocessor(&self) -> Option<&dyn crate::PagePreprocessor> {
+        None
+    }
+
+    /// Supply document defaults as behavior parameters.
+    fn doc_parser_profile(&self) -> DocParserProfile {
+        DocParserProfile::default()
+    }
+
+    /// Return a label-specific token budget; None uses the profile default.
+    fn region_token_budget(&self, _label: &str, _task: RecognitionTask) -> Option<usize> {
+        None
+    }
+
     /// Generate text/content for one cropped image region.
     fn recognize(
         &self,
@@ -162,6 +181,18 @@ pub trait RecognitionBackend {
 }
 
 impl<T: RecognitionBackend + ?Sized> RecognitionBackend for &T {
+    fn page_preprocessor(&self) -> Option<&dyn crate::PagePreprocessor> {
+        (**self).page_preprocessor()
+    }
+
+    fn doc_parser_profile(&self) -> DocParserProfile {
+        (**self).doc_parser_profile()
+    }
+
+    fn region_token_budget(&self, label: &str, task: RecognitionTask) -> Option<usize> {
+        (**self).region_token_budget(label, task)
+    }
+
     fn recognize(
         &self,
         image: RgbImage,

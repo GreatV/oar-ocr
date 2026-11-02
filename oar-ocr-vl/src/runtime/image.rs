@@ -749,18 +749,31 @@ pub fn clamp_to_max_image_size(
 ///
 /// Empty images are returned unchanged.
 pub fn resize_for_mineru(image: &RgbImage, min_edge: u32, max_aspect_ratio: f32) -> RgbImage {
-    use image::{Rgb, imageops};
-    use std::borrow::Cow;
+    resize_padded(image, min_edge, max_aspect_ratio, ResizeRounding::Up)
+        .unwrap_or_else(|_| image.clone())
+}
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ResizeRounding {
+    Up,
+    Nearest,
+}
+
+pub(crate) fn resize_padded(
+    image: &RgbImage,
+    min_edge: u32,
+    max_aspect_ratio: f32,
+    rounding: ResizeRounding,
+) -> Result<RgbImage, Error> {
+    use std::borrow::Cow;
     let (mut w, mut h) = image.dimensions();
-    if w == 0 || h == 0 {
-        return image.clone();
+    if w == 0 || h == 0 || !max_aspect_ratio.is_finite() || max_aspect_ratio <= 0. {
+        return Err(Error::invalid_input(
+            "resize requires a nonempty image and a positive aspect bound",
+        ));
     }
     let mut out = Cow::Borrowed(image);
-
-    // Handle extreme aspect ratios by padding
-    let ratio = f64::from(w.max(h)) / f64::from(w.min(h).max(1));
-    if ratio > f64::from(max_aspect_ratio) {
+    if f64::from(w.max(h)) / f64::from(w.min(h)) > f64::from(max_aspect_ratio) {
         let (new_w, new_h) = if w > h {
             (
                 w,
@@ -772,26 +785,32 @@ pub fn resize_for_mineru(image: &RgbImage, min_edge: u32, max_aspect_ratio: f32)
                 h,
             )
         };
-        let mut canvas = RgbImage::from_pixel(new_w, new_h, Rgb([255, 255, 255]));
-        let x = ((new_w - w) / 2) as i64;
-        let y = ((new_h - h) / 2) as i64;
-        imageops::overlay(&mut canvas, &*out, x, y);
+        let mut canvas = RgbImage::from_pixel(new_w, new_h, image::Rgb([255; 3]));
+        imageops::overlay(
+            &mut canvas,
+            image,
+            ((new_w - w) / 2) as i64,
+            ((new_h - h) / 2) as i64,
+        );
         out = Cow::Owned(canvas);
         (w, h) = out.dimensions();
     }
-
-    // Scale up if minimum edge is too small
-    let min_dim = w.min(h);
-    if min_dim < min_edge {
-        let scale = f64::from(min_edge) / f64::from(min_dim);
-        let new_w = (f64::from(w) * scale).ceil() as u32;
-        let new_h = (f64::from(h) * scale).ceil() as u32;
-        if let Ok(resized) = pil_bicubic_resize(&out, new_w, new_h) {
-            out = Cow::Owned(resized);
-        }
+    if w.min(h) < min_edge {
+        let scale = f64::from(min_edge) / f64::from(w.min(h));
+        let round = |value: f64| {
+            match rounding {
+                ResizeRounding::Up => value.ceil(),
+                ResizeRounding::Nearest => value.round_ties_even(),
+            }
+            .max(1.) as u32
+        };
+        out = Cow::Owned(pil_bicubic_resize(
+            &out,
+            round(f64::from(w) * scale),
+            round(f64::from(h) * scale),
+        )?);
     }
-
-    out.into_owned()
+    Ok(out.into_owned())
 }
 
 /// Loads an image from disk and converts it to RGB.

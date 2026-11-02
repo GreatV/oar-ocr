@@ -2,7 +2,32 @@
 
 use crate::document::geometry::BoundingBox;
 use image::RgbImage;
-use std::collections::HashSet;
+mod calipers;
+pub(crate) mod layout_filter;
+pub(crate) mod polygon;
+mod raster;
+
+pub(crate) fn cover_ratio(container: [f32; 4], bbox: [f32; 4]) -> f32 {
+    let area = (bbox[2] - bbox[0]).max(0.0) * (bbox[3] - bbox[1]).max(0.0);
+    if area == 0.0 {
+        return 0.0;
+    }
+    (container[2].min(bbox[2]) - container[0].max(bbox[0])).max(0.0)
+        * (container[3].min(bbox[3]) - container[1].max(bbox[1])).max(0.0)
+        / area
+}
+
+pub(crate) fn bbox_iou(a: [f32; 4], b: [f32; 4], pixel_offset: f64) -> f64 {
+    let a = a.map(f64::from);
+    let b = b.map(f64::from);
+    let intersection = (a[2].min(b[2]) - a[0].max(b[0]) + pixel_offset).max(0.)
+        * (a[3].min(b[3]) - a[1].max(b[1]) + pixel_offset).max(0.);
+    let area = |bbox: [f64; 4]| {
+        (bbox[2] - bbox[0] + pixel_offset).max(0.) * (bbox[3] - bbox[1] + pixel_offset).max(0.)
+    };
+    let union = area(a) + area(b) - intersection;
+    if union > 0. { intersection / union } else { 0. }
+}
 
 #[inline]
 pub fn calculate_bbox_area(bbox: &BoundingBox) -> f32 {
@@ -66,37 +91,32 @@ pub struct DetectedBox {
 }
 
 pub fn filter_overlap_boxes(boxes: Vec<DetectedBox>, overlap_threshold: f32) -> Vec<DetectedBox> {
-    let boxes: Vec<_> = boxes
+    let mut prediction = crate::pipeline::layout::LayoutPrediction::from(
+        crate::pipeline::layout::LayoutDetections::new(
+            boxes
+                .into_iter()
+                .map(|b| crate::pipeline::layout::LayoutDetectionElement {
+                    bbox: b.bbox,
+                    element_type: b.label,
+                    score: b.score,
+                })
+                .collect(),
+        ),
+    );
+    layout_filter::filter_document_layout(
+        &mut prediction,
+        &crate::pipeline::layout::LayoutPostprocessOptions::default()
+            .with_overlap_threshold(Some(f64::from(overlap_threshold))),
+    );
+    prediction
+        .detections
+        .elements
         .into_iter()
-        .filter(|candidate| candidate.label != "reference")
-        .collect();
-    let mut dropped = HashSet::new();
-    for i in 0..boxes.len() {
-        for j in (i + 1)..boxes.len() {
-            if dropped.contains(&i) || dropped.contains(&j) {
-                continue;
-            }
-            if calculate_overlap_ratio(&boxes[i].bbox, &boxes[j].bbox, "small") <= overlap_threshold
-            {
-                continue;
-            }
-            if (boxes[i].label == "image" || boxes[j].label == "image")
-                && boxes[i].label != boxes[j].label
-            {
-                continue;
-            }
-            if calculate_bbox_area(&boxes[i].bbox) >= calculate_bbox_area(&boxes[j].bbox) {
-                dropped.insert(j);
-            } else {
-                dropped.insert(i);
-            }
-        }
-    }
-    boxes
-        .into_iter()
-        .enumerate()
-        .filter(|(index, _)| !dropped.contains(index))
-        .map(|(_, candidate)| candidate)
+        .map(|b| DetectedBox {
+            bbox: b.bbox,
+            label: b.element_type,
+            score: b.score,
+        })
         .collect()
 }
 

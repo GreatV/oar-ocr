@@ -38,10 +38,13 @@ pub fn postprocess_spotting_output(
             .collect();
         (values.len() == 8).then(|| {
             std::array::from_fn(|i| {
-                [
-                    values[2 * i] / 1000. * width as f32,
-                    values[2 * i + 1] / 1000. * height as f32,
-                ]
+                let point = crate::document::geometry::point_from_grid(
+                    [values[2 * i], values[2 * i + 1]],
+                    1000.,
+                    width,
+                    height,
+                );
+                [point.x, point.y]
             })
         })
     };

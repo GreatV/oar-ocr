@@ -1,7 +1,8 @@
 //! MinerU 2.5 layout parsing and crop preparation. Diffusion reuses the raw
 //! protocol records, with its own extraction and post-processing rules.
 
-use image::{RgbImage, imageops};
+use super::geometry::cover_ratio;
+use image::RgbImage;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -87,13 +88,7 @@ pub(crate) fn parse_layout_details(output: &str) -> Vec<(ContentBlock, bool)> {
             if previous.block_type != block.block_type || previous.angle != block.angle {
                 return false;
             }
-            let a = previous.bbox.map(f64::from);
-            let b = block.bbox.map(f64::from);
-            let intersection = (a[2].min(b[2]) - a[0].max(b[0])).max(0.)
-                * (a[3].min(b[3]) - a[1].max(b[1])).max(0.);
-            let union =
-                (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - intersection;
-            union > 0. && intersection / union > 0.9
+            super::geometry::bbox_iou(previous.bbox, block.bbox, 0.) > 0.9
         }) {
             continue;
         }
@@ -125,16 +120,6 @@ pub(crate) fn parse_layout_details(output: &str) -> Vec<(ContentBlock, bool)> {
                 .any(|&outer| cover_ratio(outer, block.bbox) >= 0.9)
     });
     blocks
-}
-
-pub(crate) fn cover_ratio(container: [f32; 4], bbox: [f32; 4]) -> f32 {
-    let area = (bbox[2] - bbox[0]).max(0.0) * (bbox[3] - bbox[1]).max(0.0);
-    if area == 0.0 {
-        return 0.0;
-    }
-    (container[2].min(bbox[2]) - container[0].max(bbox[0])).max(0.0)
-        * (container[3].min(bbox[3]) - container[1].max(bbox[1])).max(0.0)
-        / area
 }
 
 fn normalize_bbox(x1: i32, y1: i32, x2: i32, y2: i32) -> Option<(f32, f32, f32, f32)> {
@@ -229,29 +214,24 @@ pub fn prepare_for_extract(
         ) {
             continue;
         }
-        let (x1, y1, x2, y2) = (
-            (block.bbox[0] * width).round_ties_even(),
-            (block.bbox[1] * height).round_ties_even(),
-            (block.bbox[2] * width).round_ties_even(),
-            (block.bbox[3] * height).round_ties_even(),
-        );
-        let x1 = x1.clamp(0.0, width - 1.0) as u32;
-        let y1 = y1.clamp(0.0, height - 1.0) as u32;
-        let x2 = x2.clamp(0.0, width) as u32;
-        let y2 = y2.clamp(0.0, height) as u32;
-        if x2 <= x1 || y2 <= y1 {
+        let Ok(mut crop) = super::crop::crop_with_options(
+            image,
+            [
+                block.bbox[0] * width,
+                block.bbox[1] * height,
+                block.bbox[2] * width,
+                block.bbox[3] * height,
+            ]
+            .map(f64::from),
+            &super::crop::CropOptions {
+                rounding: super::crop::CropRounding::Nearest,
+                minimum_one_pixel: false,
+                angle: block.angle,
+                ..Default::default()
+            },
+        ) else {
             continue;
-        }
-        let mut crop = imageops::crop_imm(image, x1, y1, x2 - x1, y2 - y1).to_image();
-        if let Some(angle) = block.angle {
-            crop = match angle {
-                // Pillow positive angles rotate counterclockwise.
-                90 => imageops::rotate270(&crop),
-                180 => imageops::rotate180(&crop),
-                270 => imageops::rotate90(&crop),
-                _ => crop,
-            };
-        }
+        };
         crop = resize_for_mineru(&crop, min_image_edge, max_image_edge_ratio);
         block_images.push(crop);
         prompts.push(prompt_for_block(&block.block_type).to_string());

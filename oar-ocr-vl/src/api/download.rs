@@ -981,6 +981,16 @@ mod tests {
 
     #[test]
     fn file_listings_parse_hashes_and_skip_directories() {
+        let dewarp = r#"[{"path":"preprocessor1.pth","size":100,"type":"file"},{"path":"preprocessor2.pth","size":200,"type":"file"}]"#;
+        assert_eq!(
+            parse_huggingface_listing(dewarp)
+                .unwrap()
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["preprocessor1.pth", "preprocessor2.pth"]
+        );
+
         // ModelScope publishes a SHA-256 for every blob.
         let listing = r#"{"Code":200,"Data":{"Files":[
             {"Path":".gitattributes","Sha256":"443f","Size":2082,"Type":"blob"},

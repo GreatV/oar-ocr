@@ -5,6 +5,10 @@ use crate::document::page::{DocumentOutput, PageDocument};
 use image::RgbImage;
 
 /// A model or composed pipeline capable of parsing a complete page.
+///
+/// Layout compositions select backend defaults through `DocParserProfile`.
+/// Use `DocParserOptions` to override individual settings; a `PagePreprocessor`
+/// runs once before layout and supplies the canvas used by region boxes.
 pub trait PageParser {
     /// Parser-specific generation and scheduling options.
     type Options;

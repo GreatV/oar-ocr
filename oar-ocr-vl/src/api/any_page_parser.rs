@@ -42,7 +42,7 @@ use std::str::FromStr;
 ///   `HpdGenerationConfig::max_new_tokens`, the `max_new_tokens` fields of the
 ///   model-native `*ParseOptions`, `MinerUParseOptions::max_tokens`, the
 ///   block-diffusion analog `MinerUDiffusionParseOptions::generation.gen_length`,
-///   and `DocParserConfig::max_tokens` for the layout-composed models.
+///   and `DocParserOptions::max_tokens` for the layout-composed models.
 /// - `region_batch_size` overrides same-task region batching where the parser
 ///   has it (`MinerUParseOptions::region_batch_size` and
 ///   [`LayoutPageParserOptions::region_batch_size`], zero treated as one) and
@@ -759,17 +759,16 @@ fn xiaomi_options(options: &AnyPageParserOptions) -> XiaomiOcrParseOptions {
     model_options
 }
 
-/// Starts from the parser's own configuration so `None` knobs keep the
-/// settings chosen at construction time, then applies the unified overrides.
+/// Pass explicit unified overrides to the composed parser.
 fn layout_options<L: LayoutSource, B: RecognitionBackend>(
-    parser: &LayoutPageParser<L, B>,
+    _parser: &LayoutPageParser<L, B>,
     options: &AnyPageParserOptions,
 ) -> LayoutPageParserOptions {
-    let mut config = parser.config().clone();
+    let mut document = crate::DocParserOptions::default();
     if let Some(max_new_tokens) = options.max_new_tokens {
-        config.max_tokens = max_new_tokens;
+        document = document.with_max_tokens(max_new_tokens);
     }
-    let mut model_options = LayoutPageParserOptions::default().with_config(config);
+    let mut model_options = LayoutPageParserOptions::default().with_doc_parser_options(document);
     if let Some(region_batch_size) = options.region_batch_size {
         model_options = model_options.with_region_batch_size(region_batch_size);
     }
@@ -998,8 +997,9 @@ mod tests {
     fn layout_options_keep_the_parser_configuration_by_default() {
         let parser = recording_parser();
         let produced = layout_options(&parser, &AnyPageParserOptions::default());
-        assert_eq!(produced.config.as_ref().unwrap().max_tokens, 1234);
-        assert_eq!(produced.config.as_ref().unwrap().crop_pad_ratio, 0.0);
+        assert!(produced.config.is_none());
+        assert!(produced.doc_parser.max_tokens.is_none());
+        assert_eq!(parser.config().max_tokens, 1234);
         assert!(produced.region_batch_size.is_none());
 
         let produced = layout_options(
@@ -1008,9 +1008,8 @@ mod tests {
                 .with_max_new_tokens(777)
                 .with_region_batch_size(5),
         );
-        assert_eq!(produced.config.as_ref().unwrap().max_tokens, 777);
-        // The parser's other configuration settings survive the override.
-        assert_eq!(produced.config.as_ref().unwrap().crop_pad_ratio, 0.0);
+        assert_eq!(produced.doc_parser.max_tokens, Some(777));
+        assert!(produced.config.is_none());
         assert_eq!(produced.region_batch_size, Some(5));
     }
 

@@ -664,27 +664,16 @@ fn select_greedy_token(logits: &Tensor) -> Result<u32, Error> {
 /// Official whole-page post-processing: collapse degenerate repeated tails,
 /// normalize LaTeX delimiters, then convert OTSL table blocks to HTML tables.
 pub fn finalize_markdown(text: &str) -> String {
-    static DISPLAY_DOLLARS: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?s)\$\$?\s*\\\[\s*(.*?)\s*\\\]\s*\$\$?").unwrap());
-    static INLINE_DOLLARS: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?s)\$\s*\\\(\s*(.*?)\s*\\\)\s*\$").unwrap());
-    static DISPLAY: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)\\\[\s*(.*?)\s*\\\]").unwrap());
-    static INLINE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)\\\(\s*(.*?)\s*\\\)").unwrap());
-    let text = clean_truncated_repeats(text)
-        .replace(r"\[\[", r"\[")
-        .replace(r"\]\]", r"\]");
-    let text = DISPLAY_DOLLARS.replace_all(&text, |caps: &regex::Captures<'_>| {
-        format!(" $$ {} $$ ", &caps[1])
-    });
-    let text = INLINE_DOLLARS.replace_all(&text, |caps: &regex::Captures<'_>| {
-        format!(" $ {} $", &caps[1])
-    });
-    let text = DISPLAY.replace_all(&text, |caps: &regex::Captures<'_>| {
-        format!(" $$ {} $$ ", &caps[1])
-    });
-    let text = INLINE.replace_all(&text, |caps: &regex::Captures<'_>| {
-        format!(" $ {} $", &caps[1])
-    });
+    let text = crate::render::text::normalize_math_delimiters(
+        &clean_truncated_repeats(text),
+        &crate::render::text::DelimiterOptions {
+            matching: crate::render::text::BracketMatching::Spans,
+            inline: (" $ ", " $"),
+            collapse_brackets: true,
+            unwrap_dollar_brackets: true,
+            ..Default::default()
+        },
+    );
     convert_markdown_otsl_tables(&text)
 }
 

@@ -30,6 +30,10 @@ use crate::document::geometry::BoundingBox;
 use image::RgbImage;
 use serde::{Deserialize, Serialize};
 
+pub use super::layout_options::{
+    ContainmentMode, ContainmentRule, LayoutPostprocessOptions, LayoutShapeMode, ScoreComparison,
+};
+
 /// One region reported by a detector, before it becomes a
 /// [`LayoutElement`](crate::LayoutElement).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +60,30 @@ impl LayoutDetections {
     }
 }
 
+/// Layout regions with aligned crop geometry and parser trace.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct LayoutPrediction {
+    /// Regions in reading order, with page-pixel rectangles.
+    pub detections: LayoutDetections,
+    /// Optional page-pixel crop polygons aligned with the regions.
+    /// An empty vector selects rectangular geometry for every region.
+    pub polygons: Vec<Option<BoundingBox>>,
+    /// Raw generation from a generative layout source.
+    pub raw_output: Option<String>,
+    /// Diagnostics produced during layout parsing.
+    pub diagnostics: Vec<crate::document::page::ParseDiagnostic>,
+}
+
+impl From<LayoutDetections> for LayoutPrediction {
+    fn from(detections: LayoutDetections) -> Self {
+        Self {
+            detections,
+            ..Default::default()
+        }
+    }
+}
+
 /// A source of layout detections for a page image.
 ///
 /// Implement this to plug a custom detector into
@@ -69,11 +97,28 @@ pub trait LayoutSource {
     ///
     /// [`DocParser`]: crate::DocParser
     fn detect(&self, image: &RgbImage) -> Result<LayoutDetections, Error>;
+
+    /// Detect regions with configured suppression and crop geometry.
+    fn detect_with_options(
+        &self,
+        image: &RgbImage,
+        _options: &LayoutPostprocessOptions,
+    ) -> Result<LayoutPrediction, Error> {
+        self.detect(image).map(Into::into)
+    }
 }
 
 impl<T: LayoutSource + ?Sized> LayoutSource for &T {
     fn detect(&self, image: &RgbImage) -> Result<LayoutDetections, Error> {
         (**self).detect(image)
+    }
+
+    fn detect_with_options(
+        &self,
+        image: &RgbImage,
+        options: &LayoutPostprocessOptions,
+    ) -> Result<LayoutPrediction, Error> {
+        (**self).detect_with_options(image, options)
     }
 }
 

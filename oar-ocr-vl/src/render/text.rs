@@ -1,6 +1,20 @@
+mod paragraph;
+mod structured_math;
+pub(crate) use paragraph::{
+    has_mixed_inline_math, normalize_crop_text, split_protected_paragraphs,
+};
+pub(crate) use structured_math::repair_display_math;
+mod formula;
+mod repetition;
+pub(crate) use formula::{
+    BracketMatching, DelimiterOptions, FormulaOptions, FormulaRepair, MathStripping,
+    ensure_math_wrappers, format_formula_with_options, has_bracket_math, normalize_math_delimiters,
+    repair_math_in_text,
+};
+pub(crate) use repetition::{RepeatAlgorithm, RepetitionOptions, clean_repetition};
+
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::collections::HashMap;
 
 // Shared regex patterns
 pub static UNDERSCORE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"_{4,}").expect("static regex"));
@@ -34,22 +48,7 @@ pub fn process_text(text: &str) -> String {
 
 /// Format formula text with LaTeX delimiters.
 pub fn format_formula(text: &str) -> String {
-    let mut result = text.to_string();
-    // Clean special tokens
-    result = clean_special_tokens(&result);
-    // Standardize mu
-    result = result.replace(r"\upmu", r"\mu");
-    // Remove existing delimiters to avoid double wrapping
-    result = result.replace("\\[", "");
-    result = result.replace("\\]", "");
-    result = result.replace("\\(", "");
-    result = result.replace("\\)", "");
-    result = result.trim().trim_matches('$').to_string();
-
-    result = result.replace('\n', "\\\\\n");
-    result = fix_latex_brackets(&result);
-    // Wrap in display math delimiters
-    format!("$${}$$", result.trim())
+    format_formula_with_options(text, &FormulaOptions::default())
 }
 
 /// Format table HTML content.
@@ -63,8 +62,15 @@ pub fn format_table(text: &str) -> String {
     result = clean_special_tokens(&result);
 
     // Fix LaTeX delimiters
-    result = result.replace("\\(", "$").replace("\\)", "$");
-    result = result.replace("\\[", "$$").replace("\\]", "$$");
+    result = normalize_math_delimiters(
+        &result,
+        &DelimiterOptions {
+            matching: BracketMatching::All,
+            inline: ("$", "$"),
+            display: ("$$", "$$"),
+            ..Default::default()
+        },
+    );
 
     // Collapse newlines between tags
     result = TAG_NEWLINES_RE.replace_all(&result, ">").to_string();
@@ -75,13 +81,7 @@ pub fn format_table(text: &str) -> String {
 /// Format regular text output with LaTeX normalization.
 pub fn format_text(text: &str) -> String {
     let mut result = clean_special_tokens(text);
-    // Convert inline LaTeX delimiters
-    if result.contains("\\(") && result.contains("\\)") {
-        result = result.replace("\\(", " $ ").replace("\\)", " $ ");
-    }
-    if result.contains("\\[") && result.contains("\\]") {
-        result = result.replace("\\[", " $$ ").replace("\\]", " $$ ");
-    }
+    result = normalize_math_delimiters(&result, &DelimiterOptions::default());
     result = result.replace(r"$\bullet$", "•");
     // Strip HTML table tags if present in text mode
     if result.contains("<table>") {
@@ -202,61 +202,6 @@ pub fn remove_space_before_punctuation(text: &str) -> String {
     out
 }
 
-fn find_shortest_repeating_substring(chars: &[char]) -> Option<&[char]> {
-    let n = chars.len();
-    for i in 1..=n / 2 {
-        if n.is_multiple_of(i) {
-            let unit = &chars[..i];
-            let mut matches = true;
-            for start in (0..n).step_by(i) {
-                if &chars[start..start + i] != unit {
-                    matches = false;
-                    break;
-                }
-            }
-            if matches {
-                return Some(unit);
-            }
-        }
-    }
-    None
-}
-
-fn find_repeating_suffix(
-    chars: &[char],
-    min_len: usize,
-    min_repeats: usize,
-) -> Option<(&[char], &[char], usize)> {
-    let n = chars.len();
-    for i in (min_len..=n / min_repeats).rev() {
-        let total = i * min_repeats;
-        if n < total {
-            continue;
-        }
-        let unit = &chars[n - i..n];
-        let mut matches = true;
-        let start = n - total;
-        for offset in 0..min_repeats {
-            let chunk_start = start + offset * i;
-            if &chars[chunk_start..chunk_start + i] != unit {
-                matches = false;
-                break;
-            }
-        }
-        if matches {
-            let mut count = 0;
-            let mut end = n;
-            while end >= i && &chars[end - i..end] == unit {
-                count += 1;
-                end -= i;
-            }
-            let prefix = &chars[..end];
-            return Some((prefix, unit, count));
-        }
-    }
-    None
-}
-
 /// Detect and truncate repetitive content.
 pub fn truncate_repetitive_content(
     content: &str,
@@ -264,105 +209,37 @@ pub fn truncate_repetitive_content(
     char_threshold: usize,
     min_len: usize,
 ) -> String {
-    let stripped = content.trim();
-    if stripped.is_empty() {
-        return content.to_string();
-    }
-    let chars: Vec<char> = stripped.chars().collect();
-    let stripped_chars = chars.len();
-
-    if !stripped.contains('\n')
-        && stripped_chars > 100
-        && let Some((prefix, unit, count)) = find_repeating_suffix(&chars, 8, 5)
-        && unit.len() * count > stripped_chars / 2
-    {
-        return prefix.iter().collect();
-    }
-
-    if !stripped.contains('\n')
-        && stripped_chars > min_len
-        && let Some(unit) = find_shortest_repeating_substring(&chars)
-    {
-        let count = stripped_chars / unit.len();
-        if count >= char_threshold {
-            return unit.iter().collect();
-        }
-    }
-
-    let lines: Vec<&str> = content
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .collect();
-
-    if lines.is_empty() {
-        return content.to_string();
-    }
-
-    let total_lines = lines.len();
-    if total_lines < line_threshold {
-        return content.to_string();
-    }
-
-    let mut counts = HashMap::new();
-    for line in &lines {
-        *counts.entry(*line).or_insert(0usize) += 1;
-    }
-
-    if let Some((most_common, count)) = counts.into_iter().max_by_key(|(_, c)| *c)
-        && count >= line_threshold
-        && (count as f32 / total_lines as f32) >= 0.8
-    {
-        return most_common.to_string();
-    }
-
-    content.to_string()
+    clean_repetition(
+        content,
+        false,
+        &RepetitionOptions {
+            line_threshold,
+            char_threshold,
+            min_len,
+            ..Default::default()
+        },
+    )
 }
 
-/// Clean a truncated repetitive tail using the shared Qwen3.5-models
-/// heuristic (identical constants in the official OvisOCR2 and Xiaomi-OCR-0
-/// post-processing).
-///
-/// Only outputs of at least 8,000 characters are touched: when a period of up
-/// to 200 characters repeats at least 5 times and the repeated run spans at
-/// least 100 characters, the tail collapses to one period plus the
-/// partial-period remainder.
+/// Collapse a repeated tail after 8000 characters, retaining its partial period.
 pub fn clean_truncated_repeats(text: &str) -> String {
-    const MIN_TEXT_LEN: usize = 8_000;
-    const MAX_PERIOD: usize = 200;
-    const MIN_REPEAT_CHARS: usize = 100;
-    const MIN_REPEAT_TIMES: usize = 5;
-
-    let chars: Vec<char> = text.chars().collect();
-    let n = chars.len();
-    if n < MIN_TEXT_LEN {
-        return text.to_string();
-    }
-    for unit_len in 1..=MAX_PERIOD.min(n - 1) {
-        if chars[n - 1] != chars[n - 1 - unit_len] {
-            continue;
-        }
-        let mut match_len = 1usize;
-        let mut index = n - 2;
-        while index >= unit_len && chars[index] == chars[index - unit_len] {
-            match_len += 1;
-            index -= 1;
-        }
-        let total_len = match_len + unit_len;
-        let repeat_times = total_len / unit_len;
-        let tail_len = total_len % unit_len;
-        if repeat_times >= MIN_REPEAT_TIMES && total_len >= MIN_REPEAT_CHARS {
-            let prefix_end = n - total_len + unit_len;
-            let mut output: String = chars[..prefix_end].iter().collect();
-            output.extend(chars[n - tail_len..].iter());
-            return output;
-        }
-    }
-    text.to_string()
+    clean_repetition(
+        text,
+        false,
+        &RepetitionOptions {
+            algorithm: RepeatAlgorithm::PartialSuffix,
+            minimum_chars: 8000,
+            max_period: Some(200),
+            min_repeats: 5,
+            min_repeat_chars: 100,
+            ..Default::default()
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use super::repetition::find_shortest_repeating_substring;
     use super::*;
 
     #[test]
@@ -409,6 +286,26 @@ mod tests {
 
     #[test]
     fn test_format_formula() {
+        let numbered = FormulaOptions {
+            opening: "$$\n",
+            closing: "\n$$\n",
+            stripping: MathStripping::Dollars,
+            repair: FormulaRepair::EquationNumber,
+            normalize_mu: false,
+            newline_to_break: false,
+            clean_tokens: false,
+        };
+        assert_eq!(
+            format_formula_with_options(
+                r"$$\begin{aligned}x=1\quad\quad\quad\quad\quad\quad (3)\end{aligned}$$",
+                &numbered
+            ),
+            "$$\n\\begin{aligned}\nx=1\n\\end{aligned}\n$$\n3"
+        );
+        assert_eq!(
+            format_formula_with_options(r"x=1\tag{4}", &numbered),
+            "$$\nx=1\n$$\n4"
+        );
         assert_eq!(format_formula("x + y = z"), "$$x + y = z$$");
         assert_eq!(format_formula("\\[x^2\\]"), "$$x^2$$");
     }
@@ -453,5 +350,23 @@ mod tests {
         let cleaned = clean_truncated_repeats(&text);
         assert!(cleaned.len() < text.len());
         assert!(cleaned.starts_with(&prefix));
+        let options = RepetitionOptions {
+            algorithm: RepeatAlgorithm::StrongestSuffix,
+            max_period: Some(512),
+            min_repeats: 3,
+            min_repeat_chars: 80,
+            search_window: Some(4096),
+            retain_partial_tail: false,
+            ..Default::default()
+        };
+        let prefix = "正文: ";
+        assert_eq!(
+            clean_repetition(
+                &format!("{prefix}{}甲", "甲乙丙".repeat(40)),
+                false,
+                &options
+            ),
+            format!("{prefix}甲乙丙")
+        );
     }
 }

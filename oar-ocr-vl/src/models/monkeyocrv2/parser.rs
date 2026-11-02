@@ -1,9 +1,19 @@
 //! Complete-page parser adapter for MonkeyOCRv2.
 
+use super::adapter::{formula_options, table_options};
 use super::{DEFAULT_MAX_NEW_TOKENS, MonkeyOcrV2, MonkeyOcrV2Task};
 use crate::api::error::Error;
 use crate::api::page_parser::PageParser;
+use crate::document::decoding::normalize_python_literals as normalize_literals;
+use crate::document::geometry::BoundingBox;
 use crate::document::page::{DocumentBlock, PageDocument, ParseDiagnostic};
+use crate::pipeline::doc_parser::DocParserOptions;
+use crate::pipeline::layout::{
+    LayoutDetectionElement, LayoutDetections, LayoutPrediction, LayoutSource,
+};
+use crate::pipeline::page_parser::{LayoutPageParser, LayoutPageParserOptions};
+use crate::render::table::convert_otsl_to_html_with_options;
+use crate::render::text::format_formula_with_options;
 use image::RgbImage;
 
 /// MonkeyOCRv2 complete-page parsing options.
@@ -33,9 +43,21 @@ impl PageParser for MonkeyOcrV2 {
         if self.two_stage_parsing && options.task == MonkeyOcrV2Task::EndToEnd {
             return self.parse_two_stage(image, options.max_new_tokens);
         }
+        let preprocessor = if matches!(
+            options.task,
+            MonkeyOcrV2Task::EndToEnd | MonkeyOcrV2Task::Layout
+        ) {
+            crate::RecognitionBackend::page_preprocessor(self)
+        } else {
+            None
+        };
+        let image = crate::pipeline::page_preprocessing::prepare_page(
+            std::borrow::Cow::Borrowed(image),
+            preprocessor,
+        )?;
         let raw = self
             .generate(
-                std::slice::from_ref(image),
+                std::slice::from_ref(image.as_ref()),
                 &[options.task],
                 options.max_new_tokens,
             )?
@@ -47,131 +69,85 @@ impl PageParser for MonkeyOcrV2 {
 }
 
 impl MonkeyOcrV2 {
-    /// Parse a page with the reference layout and per-region recognition stages.
-    ///
-    /// The caller cap applies to each request, up to 4096 layout tokens and
-    /// 5000 recognition tokens. Crops are rounded in source-image coordinates.
-    /// Raw output contains the layout reply; recognized contents live in blocks.
-    /// Picture boxes are kept without exporting crop files. Dewarp is not applied.
+    /// Parse a page using its native layout pass and the shared region pipeline.
+    /// The caller cap applies up to 4096 layout tokens and 5000 region tokens.
     pub fn parse_two_stage(
         &self,
         image: &RgbImage,
         max_new_tokens: usize,
     ) -> Result<PageDocument, Error> {
-        if image.width() == 0 || image.height() == 0 {
-            return Err(Error::invalid_input(
-                "MonkeyOCRv2 cannot parse an empty page",
-            ));
-        }
+        let layout = MonkeyLayout {
+            model: self,
+            max_tokens: max_new_tokens.min(4096),
+        };
+        LayoutPageParser::new(layout, self)
+            .with_options(DocParserOptions::default().with_max_tokens(max_new_tokens.min(5000)))
+            .parse_page(image, &LayoutPageParserOptions::default())
+    }
+}
+
+struct MonkeyLayout<'a> {
+    model: &'a MonkeyOcrV2,
+    max_tokens: usize,
+}
+impl LayoutSource for MonkeyLayout<'_> {
+    fn detect(&self, image: &RgbImage) -> Result<LayoutDetections, Error> {
+        self.detect_with_options(image, &Default::default())
+            .map(|prediction| prediction.detections)
+    }
+    fn detect_with_options(
+        &self,
+        image: &RgbImage,
+        _: &crate::LayoutPostprocessOptions,
+    ) -> Result<LayoutPrediction, Error> {
         let raw = self
+            .model
             .generate(
                 std::slice::from_ref(image),
                 &[MonkeyOcrV2Task::Layout],
-                max_new_tokens.min(4096),
+                self.max_tokens,
             )?
-            .into_iter()
-            .next()
+            .pop()
             .ok_or_else(|| Error::invalid_input("MonkeyOCRv2 returned no layout result"))??;
-        finish_two_stage(
-            image,
-            parse_output(raw, MonkeyOcrV2Task::Layout),
-            max_new_tokens,
-            |crop, task, budget| {
-                self.generate(&[crop], &[task], budget)?
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| Error::invalid_input("MonkeyOCRv2 returned no region result"))?
-            },
-        )
+        Ok(layout_prediction(raw, image))
     }
 }
 
-fn region_task(label: &str) -> Option<MonkeyOcrV2Task> {
-    match label {
-        "text" | "figure_title" | "doc_title" | "paragraph_title" | "header" | "footer" => {
-            Some(MonkeyOcrV2Task::Text)
-        }
-        "formula" => Some(MonkeyOcrV2Task::Formula),
-        "table" => Some(MonkeyOcrV2Task::Table),
-        _ => None,
-    }
-}
-
-fn region_crop(image: &RgbImage, block: &DocumentBlock) -> RgbImage {
-    let (width, height) = image.dimensions();
-    let x1 = (block.bbox[0] * width as f32)
-        .round_ties_even()
-        .clamp(0., (width - 1) as f32) as u32;
-    let y1 = (block.bbox[1] * height as f32)
-        .round_ties_even()
-        .clamp(0., (height - 1) as f32) as u32;
-    let x2 = (block.bbox[2] * width as f32)
-        .round_ties_even()
-        .clamp((x1 + 1) as f32, width as f32) as u32;
-    let y2 = (block.bbox[3] * height as f32)
-        .round_ties_even()
-        .clamp((y1 + 1) as f32, height as f32) as u32;
-    image::imageops::crop_imm(image, x1, y1, x2 - x1, y2 - y1).to_image()
-}
-
-fn finish_two_stage(
-    image: &RgbImage,
-    mut page: PageDocument,
-    cap: usize,
-    mut recognize: impl FnMut(RgbImage, MonkeyOcrV2Task, usize) -> Result<String, Error>,
-) -> Result<PageDocument, Error> {
-    if image.width() == 0 || image.height() == 0 {
-        return Err(Error::invalid_input(
-            "MonkeyOCRv2 cannot crop an empty page",
-        ));
-    }
-    // MonkeyOCRv2 core_runner.py _build_page_tasks/_format_block_fields
-    // (Apache-2.0). Bound retained crop memory by recognizing one at a time.
-    let mut chunks = Vec::new();
-    for (index, block) in page.blocks.iter_mut().enumerate() {
-        let Some(task) = region_task(&block.block_type) else {
-            continue;
-        };
-        match recognize(region_crop(image, block), task, cap.min(5000)) {
-            Ok(raw) => {
-                let content = match task {
-                    MonkeyOcrV2Task::Formula => super::formatting::format_formula(&raw),
-                    MonkeyOcrV2Task::Table => super::formatting::otsl_to_html(&raw),
-                    _ => raw.trim().to_string(),
-                };
-                if !content.trim().is_empty()
-                    && !matches!(block.block_type.as_str(), "header" | "footer")
-                {
-                    let prefix = match block.block_type.as_str() {
-                        "doc_title" => "# ",
-                        "paragraph_title" => "## ",
-                        _ => "",
-                    };
-                    chunks.push(if prefix.is_empty() {
-                        content.clone()
-                    } else {
-                        content
-                            .lines()
-                            .map(|line| format!("{prefix}{line}"))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    });
-                }
-                block.content = Some(content);
+fn layout_prediction(raw: String, image: &RgbImage) -> LayoutPrediction {
+    let page = parse_output(raw, MonkeyOcrV2Task::Layout);
+    let elements = page
+        .blocks
+        .into_iter()
+        .map(|block| {
+            let [x1, y1, x2, y2] = block.bbox;
+            let start = crate::document::geometry::point_from_grid(
+                [x1, y1],
+                1.,
+                image.width(),
+                image.height(),
+            );
+            let end = crate::document::geometry::point_from_grid(
+                [x2, y2],
+                1.,
+                image.width(),
+                image.height(),
+            );
+            LayoutDetectionElement {
+                bbox: BoundingBox::from_coords(start.x, start.y, end.x, end.y),
+                element_type: block.block_type,
+                score: 1.,
             }
-            Err(error) => page.diagnostics.push(ParseDiagnostic {
-                block_index: Some(index),
-                stage: "recognition".into(),
-                message: error.to_string(),
-            }),
-        }
+        })
+        .collect();
+    LayoutPrediction {
+        detections: LayoutDetections::new(elements),
+        raw_output: page.raw_output,
+        diagnostics: page.diagnostics,
+        ..Default::default()
     }
-    page.markdown = Some(chunks.join("\n\n"));
-    Ok(page)
 }
 
 fn parse_output(raw: String, task: MonkeyOcrV2Task) -> PageDocument {
-    use super::formatting::{format_formula, otsl_to_html};
     let mut page = PageDocument {
         raw_output: Some(raw.clone()),
         ..PageDocument::default()
@@ -181,8 +157,8 @@ fn parse_output(raw: String, task: MonkeyOcrV2Task) -> PageDocument {
         MonkeyOcrV2Task::Text | MonkeyOcrV2Task::Formula | MonkeyOcrV2Task::Table
     ) {
         page.markdown = Some(match task {
-            MonkeyOcrV2Task::Table => otsl_to_html(&raw),
-            MonkeyOcrV2Task::Formula => format_formula(&raw),
+            MonkeyOcrV2Task::Table => convert_otsl_to_html_with_options(&raw, &table_options()),
+            MonkeyOcrV2Task::Formula => format_formula_with_options(&raw, &formula_options()),
             _ => raw.trim().to_string(),
         });
         return page;
@@ -190,40 +166,7 @@ fn parse_output(raw: String, task: MonkeyOcrV2Task) -> PageDocument {
     // The official protocol uses Python literal dictionaries as well as JSON.
     // Decode strings without evaluating model output, then normalize the literals.
     let normalized = normalize_literals(&raw);
-    let mut objects = Vec::new();
-    let mut start = None;
-    let mut depth = 0usize;
-    let mut quoted = false;
-    let mut escaped = false;
-    for (index, ch) in normalized.char_indices() {
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                quoted = false;
-            }
-            continue;
-        }
-        if ch == '"' {
-            quoted = true;
-        } else if ch == '{' {
-            if depth == 0 {
-                start = Some(index);
-            }
-            depth += 1;
-        } else if ch == '}' && depth > 0 {
-            depth -= 1;
-            if depth == 0
-                && let Some(start) = start.take()
-                && let Ok(value) =
-                    serde_json::from_str::<serde_json::Value>(&normalized[start..=index])
-            {
-                objects.push(value);
-            }
-        }
-    }
+    let objects = crate::document::decoding::complete_objects(&normalized);
     for object in objects {
         let Some(label) = object.get("label").and_then(|v| v.as_str()) else {
             continue;
@@ -267,7 +210,7 @@ fn parse_output(raw: String, task: MonkeyOcrV2Task) -> PageDocument {
             .and_then(|v| v.as_str())
             .map(|content| {
                 if label == "table" {
-                    otsl_to_html(content)
+                    convert_otsl_to_html_with_options(content, &table_options())
                 } else {
                     content.trim().to_string()
                 }
@@ -291,92 +234,102 @@ fn parse_output(raw: String, task: MonkeyOcrV2Task) -> PageDocument {
     page
 }
 
-fn normalize_literals(text: &str) -> String {
-    let mut output = String::new();
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch != '\'' && ch != '"' {
-            if ch.is_alphabetic() || ch == '_' {
-                let mut word = String::from(ch);
-                while chars
-                    .peek()
-                    .is_some_and(|ch| ch.is_alphanumeric() || *ch == '_')
-                {
-                    word.push(chars.next().unwrap());
-                }
-                output.push_str(match word.as_str() {
-                    "None" => "null",
-                    "True" => "true",
-                    "False" => "false",
-                    _ => &word,
-                });
-            } else {
-                output.push(ch);
-            }
-            continue;
-        }
-        let quote = ch;
-        let mut encoded = String::from("\"");
-        while let Some(ch) = chars.next() {
-            if ch == quote {
-                break;
-            }
-            if ch == '\\' {
-                match chars.next() {
-                    Some('\'') => encoded.push('\''),
-                    Some(next) => {
-                        if !matches!(next, 'n' | 'r' | 't' | 'b' | 'f' | 'u' | '"' | '/' | '\\') {
-                            encoded.push('\\');
-                        }
-                        encoded.push('\\');
-                        encoded.push(next);
-                    }
-                    None => break,
-                }
-            } else if ch == '"' {
-                encoded.push_str("\\\"");
-            } else {
-                encoded.push(ch);
-            }
-        }
-        encoded.push('"');
-        output.push_str(&encoded);
-    }
-    output
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn two_stage_routes_rounded_crops_and_retains_region_failures() {
-        let raw = "[{'label':'Title','bbox':[350,0,1000,200]}, {'label':'Formula','bbox':[0,200,1000,500]}, {'label':'Page-footer','bbox':[0,800,1000,900]}, {'label':'Text','bbox':[0,900,1000,1000]}]";
-        let mut calls = 0;
-        let page = finish_two_stage(
-            &RgbImage::new(10, 10),
-            parse_output(raw.into(), MonkeyOcrV2Task::Layout),
-            777,
-            |crop, task, budget| {
-                assert_eq!(budget, 777);
-                calls += 1;
-                match calls {
-                    1 => {
-                        assert_eq!(crop.dimensions(), (6, 2));
-                        Ok("Heading".into())
-                    }
-                    2 => {
-                        assert_eq!(task, MonkeyOcrV2Task::Formula);
-                        Ok(r"x\eqno (3)".into())
-                    }
-                    3 => Ok("hidden margin".into()),
-                    _ => Err(Error::invalid_input("region failed")),
-                }
-            },
-        )
-        .unwrap();
-        assert_eq!(calls, 4);
-        assert_eq!(page.blocks.len(), 4);
+        let raw = "[{'label':'Title','bbox':[350,0,1000,200]}, {'label':'Formula','bbox':[0,200,1000,500]}, {'label':'Page-footer','bbox':[0,800,1000,900]}, {'label':'Text','bbox':[0,900,1000,1000]}, {'label':'Region','bbox':[0,0,1000,1000]}]";
+        struct Layout(String);
+        impl LayoutSource for Layout {
+            fn detect(&self, image: &RgbImage) -> Result<LayoutDetections, Error> {
+                Ok(layout_prediction(self.0.clone(), image).detections)
+            }
+            fn detect_with_options(
+                &self,
+                image: &RgbImage,
+                _: &crate::LayoutPostprocessOptions,
+            ) -> Result<LayoutPrediction, Error> {
+                Ok(layout_prediction(self.0.clone(), image))
+            }
+        }
+        struct Backend {
+            calls: std::cell::Cell<usize>,
+        }
+        impl crate::RecognitionBackend for Backend {
+            fn doc_parser_profile(&self) -> crate::DocParserProfile {
+                super::super::adapter::parsing_profile()
+            }
+            fn recognition_task_for_label(
+                &self,
+                label: &str,
+                _: Option<crate::RecognitionTask>,
+            ) -> Option<crate::RecognitionTask> {
+                super::super::adapter::task_for_label(label)
+            }
+            fn recognize(
+                &self,
+                _: RgbImage,
+                _: crate::RecognitionTask,
+                _: usize,
+            ) -> Result<String, Error> {
+                panic!("labeled dispatch")
+            }
+            fn recognize_labeled_batch_with_options(
+                &self,
+                images: Vec<RgbImage>,
+                tasks: &[crate::RecognitionTask],
+                labels: &[&str],
+                options: &crate::GenerationOptions,
+            ) -> crate::BatchResult<String> {
+                assert_eq!(options.max_new_tokens, 777);
+                Ok(images
+                    .into_iter()
+                    .zip(tasks)
+                    .zip(labels)
+                    .map(|((crop, task), label)| {
+                        self.calls.set(self.calls.get() + 1);
+                        match *label {
+                            "doc_title" => {
+                                assert_eq!(crop.dimensions(), (6, 2));
+                                Ok("Heading".into())
+                            }
+                            "formula" => {
+                                assert_eq!(*task, crate::RecognitionTask::Formula);
+                                Ok(r"x\eqno (3)".into())
+                            }
+                            "footer" => Ok("hidden margin".into()),
+                            _ => Err(Error::invalid_input("region failed")),
+                        }
+                    })
+                    .collect())
+            }
+            fn postprocess_region_output(
+                &self,
+                _: &str,
+                task: crate::RecognitionTask,
+                raw: &str,
+            ) -> Option<String> {
+                Some(if task == crate::RecognitionTask::Formula {
+                    format_formula_with_options(raw, &formula_options())
+                } else {
+                    raw.trim().into()
+                })
+            }
+        }
+        let backend = Backend {
+            calls: std::cell::Cell::new(0),
+        };
+        let parser = LayoutPageParser::new(Layout(raw.into()), &backend)
+            .with_options(DocParserOptions::default().with_max_tokens(777));
+        let page = parser
+            .parse_page(&RgbImage::new(10, 10), &Default::default())
+            .unwrap();
+        assert_eq!(backend.calls.get(), 4);
+        assert_eq!(page.blocks.len(), 5);
+        assert_eq!(page.blocks[4].block_type, "region");
+        assert_eq!(page.blocks[4].content, None);
         assert_eq!(page.blocks[2].content.as_deref(), Some("hidden margin"));
         assert_eq!(page.markdown.as_deref(), Some("# Heading\n\n$$\nx\n$$\n3"));
         assert_eq!(page.raw_output.as_deref(), Some(raw));

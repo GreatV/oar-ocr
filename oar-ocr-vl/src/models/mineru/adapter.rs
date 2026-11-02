@@ -3,9 +3,25 @@
 use super::MinerU;
 use crate::api::error::{BatchResult, Error};
 use crate::api::recognition::{BackendCapabilities, RecognitionBackend, RecognitionTask};
+use crate::render::table::{
+    CellMarkup, HtmlInput, NoTokens, OtslOptions, RowPadding, convert_otsl_to_html_with_options,
+};
 use crate::utils::image::resize_for_mineru;
 use crate::utils::truncate_repetitive_content;
 use image::RgbImage;
+
+pub(super) fn table_options() -> OtslOptions {
+    OtslOptions {
+        row_padding: RowPadding::Widest,
+        cell_markup: CellMarkup::EscapeAll,
+        no_tokens: NoTokens::Empty,
+        html_input: HtmlInput::CompletePassThrough,
+        empty_fcel_is_anchor: true,
+        emit_unowned_cells: true,
+        trim_input: false,
+        ..Default::default()
+    }
+}
 
 fn prompt(task: RecognitionTask) -> &'static str {
     match task {
@@ -70,7 +86,7 @@ impl RecognitionBackend for MinerU {
         raw: &str,
     ) -> Option<String> {
         if task == RecognitionTask::Table {
-            return Some(crate::pipeline::mineru_table::mineru_otsl_to_html(raw));
+            return Some(convert_otsl_to_html_with_options(raw, &table_options()));
         }
         let block = crate::DocumentBlock {
             block_type: if task == RecognitionTask::Formula {

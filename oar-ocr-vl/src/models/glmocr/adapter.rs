@@ -14,63 +14,18 @@ fn prompt(task: RecognitionTask) -> &'static str {
 }
 
 fn clean(output: String) -> String {
-    let text = output.trim();
-    if text.starts_with("<table") && text.ends_with("</table>") {
-        return text.into();
-    }
-    let chars: Vec<_> = text.chars().collect();
-    if chars.len() < 2048 {
-        return text.into();
-    }
-    // GLM SDK clean_repeated_content (Apache-2.0) keeps the prefix and one
-    // repeat unit, including multiline units.
-    for start in 0..chars.len() {
-        for period in 10..=(chars.len() - start) / 10 {
-            let unit = &chars[start..start + period];
-            if (1..10).all(|i| chars[start + i * period..start + (i + 1) * period] == *unit) {
-                return chars[..start + period].iter().collect();
-            }
-        }
-    }
-    let lines: Vec<_> = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    let mut counts = std::collections::HashMap::<&str, usize>::new();
-    for line in &lines {
-        *counts.entry(line.trim()).or_default() += 1;
-    }
-    if let Some(common) = lines
-        .iter()
-        .map(|line| line.trim())
-        .max_by_key(|line| counts[line])
-        && counts[common] >= 10
-        && counts[common] * 5 >= lines.len() * 4
-    {
-        for (index, _) in lines.iter().enumerate() {
-            if lines[index].trim() == common
-                && lines[index..]
-                    .iter()
-                    .take(3)
-                    .filter(|line| line.trim() == common)
-                    .count()
-                    == 3
-            {
-                let mut seen = 0;
-                let mut kept = Vec::new();
-                for line in text.lines() {
-                    kept.push(line);
-                    if !line.trim().is_empty() {
-                        seen += 1;
-                    }
-                    if seen == index + 1 {
-                        return kept.join("\n");
-                    }
-                }
-            }
-        }
-    }
-    text.into()
+    crate::render::text::clean_repetition(
+        &output,
+        false,
+        &crate::render::text::RepetitionOptions {
+            algorithm: crate::render::text::RepeatAlgorithm::Content,
+            minimum_chars: 2048,
+            preserve_complete_tables: true,
+            min_period: 10,
+            trim: true,
+            ..Default::default()
+        },
+    )
 }
 
 fn prepare_region(image: &RgbImage) -> Result<RgbImage, Error> {
@@ -97,6 +52,86 @@ fn prepare_region(image: &RgbImage) -> Result<RgbImage, Error> {
 }
 
 impl RecognitionBackend for GlmOcr {
+    fn doc_parser_profile(&self) -> crate::DocParserProfile {
+        use crate::api::recognition::{
+            AuxiliaryLabelAction, AuxiliaryLabelRule, EmptyLayoutBehavior, FormulaNumberComposition,
+        };
+        use crate::pipeline::layout::{
+            ContainmentMode, ContainmentRule, LayoutPostprocessOptions, LayoutShapeMode,
+        };
+        let layout = LayoutPostprocessOptions::paddlex()
+            .with_containment_ratio(0.8)
+            .with_containment_rules(
+                (0..25)
+                    .map(|class_id| ContainmentRule {
+                        class_id,
+                        mode: if class_id == 18 {
+                            ContainmentMode::Small
+                        } else {
+                            ContainmentMode::Large
+                        },
+                    })
+                    .collect(),
+            )
+            .with_preserved_labels(["image", "seal", "chart"].map(str::to_string).into())
+            .with_min_size(0.)
+            .with_overlap_threshold(None)
+            .with_inline_formula_overlap(None)
+            .with_polygon_overlap_threshold(None)
+            .with_drop_labels(Vec::new())
+            .with_shape_mode(LayoutShapeMode::Rect)
+            .with_round_boxes(false);
+        crate::DocParserProfile {
+            max_tokens: 8192,
+            skip_auxiliary_regions: false,
+            merge_labels: Vec::new(),
+            markdown_pretty: false,
+            auxiliary_labels: [
+                "header",
+                "header_image",
+                "footer",
+                "footer_image",
+                "number",
+                "footnote",
+                "aside_text",
+                "reference",
+            ]
+            .into_iter()
+            .map(|label| AuxiliaryLabelRule {
+                label: label.into(),
+                action: AuxiliaryLabelAction::Drop,
+            })
+            .collect(),
+            formula_numbers: FormulaNumberComposition::AdjacentTag,
+            empty_layout: EmptyLayoutBehavior::Empty,
+            crop: crate::pipeline::crop::CropOptions::default().with_coordinate_grid(Some(1000)),
+            layout: Some(layout),
+            render_style: crate::render::markdown::RenderStyle::default()
+                .with_table_leading_newline(false)
+                .with_strip_table_envelope(false)
+                .with_section_templates(false)
+                .with_collapse_title_newlines(false)
+                .with_section_heading_level(Some(2))
+                .with_skip_empty_chunks(true)
+                .with_strip_title_markers(true)
+                .with_normalize_bullets(true)
+                .with_merge_hyphenated_text(true),
+            ..Default::default()
+        }
+    }
+
+    fn recognition_task_for_label(
+        &self,
+        label: &str,
+        suggested: Option<RecognitionTask>,
+    ) -> Option<RecognitionTask> {
+        match label {
+            "chart" | "image" => None,
+            "seal" | "vision_footnote" => Some(RecognitionTask::Ocr),
+            _ => suggested,
+        }
+    }
+
     fn recognize(
         &self,
         image: RgbImage,
@@ -132,20 +167,36 @@ impl RecognitionBackend for GlmOcr {
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             truncate_repetitive_output: false,
+            supports_chart: false,
             ..BackendCapabilities::default()
         }
     }
 
     fn postprocess_region_output(
         &self,
-        _label: &str,
+        label: &str,
         task: RecognitionTask,
         raw: &str,
     ) -> Option<String> {
         Some(if task == RecognitionTask::Formula {
-            format!("$$\n{}\n$$", crate::render::text::strip_math_wrappers(raw))
+            crate::render::text::format_formula_with_options(
+                raw,
+                &crate::render::text::FormulaOptions {
+                    opening: "$$\n",
+                    closing: "\n$$",
+                    stripping: crate::render::text::MathStripping::OuterDollars,
+                    repair: crate::render::text::FormulaRepair::None,
+                    normalize_mu: false,
+                    newline_to_break: false,
+                    clean_tokens: false,
+                },
+            )
         } else {
-            raw.trim().to_string()
+            if matches!(label, "doc_title" | "paragraph_title") {
+                raw.trim().to_string()
+            } else {
+                crate::render::markdown::assembly::normalize_bullet(raw)
+            }
         })
     }
 }
