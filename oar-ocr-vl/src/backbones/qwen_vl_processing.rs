@@ -234,9 +234,9 @@ fn preprocess_validated(
 
         // Borrow the page when no resize happens — the tail-only configs
         // hand in already-resized frames, and cloning each page's RGB buffer
-        // would copy tens of MiB per image for nothing. The Qwen-VL-family
-        // processors resample with Pillow's bicubic, so the resize goes
-        // through the PIL-exact path.
+        // would copy tens of MiB per image for nothing. Use the portable
+        // Pillow path; fast torchvision processors (including TeleOCR and
+        // MinerU 2.5) can differ in uint8 resampling rounding.
         let resized_on_heap;
         let resized: &image::RgbImage = if cfg.do_resize && (rh != h || rw != w) {
             resized_on_heap = qwen_vl_resize(img, rw, rh, cfg.resample)?;

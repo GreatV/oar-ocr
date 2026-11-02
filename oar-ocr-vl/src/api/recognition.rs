@@ -98,6 +98,58 @@ pub trait RecognitionBackend {
         self.recognize_batch(images, tasks, options.max_new_tokens)
     }
 
+    /// Refine the scheduled task using the layout's original semantic label.
+    /// Returning `None` leaves the region unrecognized.
+    fn recognition_task_for_label(
+        &self,
+        _label: &str,
+        suggested: Option<RecognitionTask>,
+    ) -> Option<RecognitionTask> {
+        suggested
+    }
+
+    /// Recognize labeled regions, allowing model-native prompts and token
+    /// budgets without adding every model task to the shared task enum.
+    fn recognize_labeled_batch_with_options(
+        &self,
+        images: Vec<RgbImage>,
+        tasks: &[RecognitionTask],
+        labels: &[&str],
+        options: &GenerationOptions,
+    ) -> BatchResult<String> {
+        if labels.len() != tasks.len() {
+            return Err(Error::invalid_input("region label and task counts differ"));
+        }
+        self.recognize_batch_with_options(images, tasks, options)
+    }
+
+    /// Optionally predict a reading-order permutation for detected regions.
+    /// Boxes use source-image pixels. `None` preserves the detector's order.
+    fn predict_reading_order(
+        &self,
+        _image: &RgbImage,
+        _regions: &[crate::document::structure::LayoutElement],
+        _max_tokens: usize,
+    ) -> Result<Option<Vec<usize>>, Error> {
+        Ok(None)
+    }
+
+    /// Whether adjacent text crops may be merged into one recognition request.
+    fn merge_adjacent_text_regions(&self) -> bool {
+        true
+    }
+
+    /// Supply model-native final formatting for one region. `None` uses the
+    /// shared task formatter; `Some` preserves the backend's returned markup.
+    fn postprocess_region_output(
+        &self,
+        _label: &str,
+        _task: RecognitionTask,
+        _raw: &str,
+    ) -> Option<String> {
+        None
+    }
+
     /// Stable grouping key for requests with compatible prepared shapes.
     fn recognition_batch_key(&self, _image: &RgbImage, _task: RecognitionTask) -> u64 {
         0
@@ -144,6 +196,46 @@ impl<T: RecognitionBackend + ?Sized> RecognitionBackend for &T {
         options: &GenerationOptions,
     ) -> BatchResult<String> {
         (**self).recognize_batch_with_options(images, tasks, options)
+    }
+
+    fn recognition_task_for_label(
+        &self,
+        label: &str,
+        suggested: Option<RecognitionTask>,
+    ) -> Option<RecognitionTask> {
+        (**self).recognition_task_for_label(label, suggested)
+    }
+
+    fn recognize_labeled_batch_with_options(
+        &self,
+        images: Vec<RgbImage>,
+        tasks: &[RecognitionTask],
+        labels: &[&str],
+        options: &GenerationOptions,
+    ) -> BatchResult<String> {
+        (**self).recognize_labeled_batch_with_options(images, tasks, labels, options)
+    }
+
+    fn predict_reading_order(
+        &self,
+        image: &RgbImage,
+        regions: &[crate::document::structure::LayoutElement],
+        max_tokens: usize,
+    ) -> Result<Option<Vec<usize>>, Error> {
+        (**self).predict_reading_order(image, regions, max_tokens)
+    }
+
+    fn merge_adjacent_text_regions(&self) -> bool {
+        (**self).merge_adjacent_text_regions()
+    }
+
+    fn postprocess_region_output(
+        &self,
+        label: &str,
+        task: RecognitionTask,
+        raw: &str,
+    ) -> Option<String> {
+        (**self).postprocess_region_output(label, task, raw)
     }
 
     fn recognition_batch_key(&self, image: &RgbImage, task: RecognitionTask) -> u64 {

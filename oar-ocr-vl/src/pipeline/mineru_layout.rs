@@ -18,7 +18,8 @@ const DEFAULT_PROMPT: &str = "\nText Recognition:";
 /// Square edge length the page is resized to before layout detection.
 pub const LAYOUT_IMAGE_SIZE: u32 = 1036;
 
-const LAYOUT_RE: &str = r"^<\|box_start\|>(\d+)\s+(\d+)\s+(\d+)\s+(\d+)<\|box_end\|><\|ref_start\|>(\w+?)<\|ref_end\|>(.*)$";
+const LAYOUT_RE: &str =
+    r"<\|box_start\|>(\d+)\s+(\d+)\s+(\d+)\s+(\d+)<\|box_end\|><\|ref_start\|>(\w+?)<\|ref_end\|>";
 
 static LAYOUT_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(LAYOUT_RE).expect("layout regex"));
 
@@ -28,10 +29,8 @@ pub type ContentBlock = DocumentBlock;
 /// Parse the raw layout-detection output into a list of [`ContentBlock`]s.
 pub fn parse_layout_output(output: &str) -> Vec<ContentBlock> {
     let mut blocks = Vec::new();
-    for line in output.lines() {
-        let Some(caps) = LAYOUT_REGEX.captures(line) else {
-            continue;
-        };
+    let records: Vec<_> = LAYOUT_REGEX.captures_iter(output).collect();
+    for (index, caps) in records.iter().enumerate() {
         let Some((x1, y1, x2, y2)) = (|| {
             Some((
                 caps.get(1)?.as_str().parse().ok()?,
@@ -46,7 +45,10 @@ pub fn parse_layout_output(output: &str) -> Vec<ContentBlock> {
             .get(5)
             .map(|m| m.as_str().to_lowercase())
             .unwrap_or_default();
-        let tail = caps.get(6).map(|m| m.as_str()).unwrap_or("");
+        let end = records
+            .get(index + 1)
+            .map_or(output.len(), |record| record.get(0).unwrap().start());
+        let tail = &output[caps.get(0).unwrap().end()..end];
 
         let Some((x1, y1, x2, y2)) = normalize_bbox(x1, y1, x2, y2) else {
             continue;
@@ -55,6 +57,9 @@ pub fn parse_layout_output(output: &str) -> Vec<ContentBlock> {
             continue;
         }
 
+        if ref_type == "inline_formula" {
+            continue;
+        }
         let angle = parse_angle(tail);
         blocks.push(ContentBlock {
             block_type: ref_type,
@@ -63,7 +68,34 @@ pub fn parse_layout_output(output: &str) -> Vec<ContentBlock> {
             content: None,
         });
     }
+    // Table-internal text/formulas are recognized by the table pass itself.
+    let tables: Vec<_> = blocks
+        .iter()
+        .filter(|block| block.block_type == "table")
+        .map(|block| block.bbox)
+        .collect();
+    blocks.retain(|block| {
+        !matches!(
+            block.block_type.as_str(),
+            "text" | "equation" | "equation_block"
+        ) || !tables
+            .iter()
+            .any(|table| cover_ratio(*table, block.bbox) > 0.9)
+    });
+    blocks.dedup_by(|next, prev| {
+        next.block_type == prev.block_type && next.bbox == prev.bbox && next.angle == prev.angle
+    });
     blocks
+}
+
+pub(crate) fn cover_ratio(container: [f32; 4], bbox: [f32; 4]) -> f32 {
+    let area = (bbox[2] - bbox[0]).max(0.0) * (bbox[3] - bbox[1]).max(0.0);
+    if area == 0.0 {
+        return 0.0;
+    }
+    (container[2].min(bbox[2]) - container[0].max(bbox[0])).max(0.0)
+        * (container[3].min(bbox[3]) - container[1].max(bbox[1])).max(0.0)
+        / area
 }
 
 fn normalize_bbox(x1: i32, y1: i32, x2: i32, y2: i32) -> Option<(f32, f32, f32, f32)> {
@@ -104,6 +136,9 @@ fn is_block_type(value: &str) -> bool {
             | "title"
             | "table"
             | "image"
+            | "chart"
+            | "image_block"
+            | "inline_formula"
             | "code"
             | "algorithm"
             | "header"
@@ -144,15 +179,15 @@ pub fn prepare_for_extract(
     for (idx, block) in blocks.iter().enumerate() {
         if matches!(
             block.block_type.as_str(),
-            "image" | "list" | "equation_block"
+            "image" | "image_block" | "list" | "equation_block"
         ) {
             continue;
         }
         let (x1, y1, x2, y2) = (
-            (block.bbox[0] * width).round(),
-            (block.bbox[1] * height).round(),
-            (block.bbox[2] * width).round(),
-            (block.bbox[3] * height).round(),
+            (block.bbox[0] * width).round_ties_even(),
+            (block.bbox[1] * height).round_ties_even(),
+            (block.bbox[2] * width).round_ties_even(),
+            (block.bbox[3] * height).round_ties_even(),
         );
         let x1 = x1.clamp(0.0, width - 1.0) as u32;
         let y1 = y1.clamp(0.0, height - 1.0) as u32;
@@ -164,9 +199,10 @@ pub fn prepare_for_extract(
         let mut crop = imageops::crop_imm(image, x1, y1, x2 - x1, y2 - y1).to_image();
         if let Some(angle) = block.angle {
             crop = match angle {
-                90 => imageops::rotate90(&crop),
+                // Pillow positive angles rotate counterclockwise.
+                90 => imageops::rotate270(&crop),
                 180 => imageops::rotate180(&crop),
-                270 => imageops::rotate270(&crop),
+                270 => imageops::rotate90(&crop),
                 _ => crop,
             };
         }
@@ -183,6 +219,7 @@ fn prompt_for_block(block_type: &str) -> &'static str {
     match block_type {
         "table" => TABLE_PROMPT,
         "equation" => EQUATION_PROMPT,
+        "chart" => "\nImage Analysis:",
         _ => DEFAULT_PROMPT,
     }
 }
@@ -190,6 +227,38 @@ fn prompt_for_block(block_type: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adjacent_layout_records_keep_angles_and_filter_table_internal_text() {
+        let raw = concat!(
+            "<|box_start|>0 0 500 500<|box_end|><|ref_start|>table<|ref_end|><|rotate_right|>",
+            "<|box_start|>10 10 100 100<|box_end|><|ref_start|>text<|ref_end|><|rotate_up|>",
+            "<|box_start|>500 0 1000 500<|box_end|><|ref_start|>chart<|ref_end|><|rotate_left|>"
+        );
+        let blocks = parse_layout_output(raw);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].angle, Some(90));
+        assert_eq!(blocks[1].angle, Some(270));
+        assert_eq!(prompt_for_block(&blocks[1].block_type), "\nImage Analysis:");
+    }
+
+    #[test]
+    fn crop_rotation_matches_pillow_positive_angles() {
+        let image = RgbImage::from_fn(3, 2, |x, y| image::Rgb([(y * 3 + x + 1) as u8, 0, 0]));
+        for (angle, expected) in [(90, vec![3, 6, 2, 5, 1, 4]), (270, vec![4, 1, 5, 2, 6, 3])] {
+            let block = ContentBlock {
+                block_type: "text".into(),
+                bbox: [0.0, 0.0, 1.0, 1.0],
+                angle: Some(angle),
+                content: None,
+            };
+            let (images, _, _) = prepare_for_extract(&image, &[block], 1, 50.0);
+            assert_eq!(
+                images[0].pixels().map(|p| p[0]).collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn parses_normalized_layout_and_rotation() {

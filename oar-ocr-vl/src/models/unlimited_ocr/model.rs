@@ -314,11 +314,18 @@ impl UnlimitedOcr {
                 "Unlimited-OCR needs at least one page",
             ));
         }
+        if options.max_new_tokens == Some(0) {
+            return Ok(Vec::new());
+        }
         let inputs = self.preprocess_pages(pages, options.view_mode)?;
         let ids = self.prompt_ids(&inputs, instruction)?;
-        let max_new_tokens = options
-            .max_new_tokens
-            .unwrap_or_else(|| MAX_LENGTH.saturating_sub(ids.len()).max(1));
+        if ids.len() >= MAX_LENGTH {
+            return Err(Error::invalid_input(
+                "Unlimited-OCR prompt exceeds its context window; use fewer pages per request",
+            ));
+        }
+        let remaining = MAX_LENGTH - ids.len();
+        let max_new_tokens = options.max_new_tokens.unwrap_or(remaining).min(remaining);
         let embeds = self.embeddings(&ids, &inputs)?;
         drop(inputs);
 

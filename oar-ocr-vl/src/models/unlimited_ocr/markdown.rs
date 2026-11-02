@@ -16,7 +16,7 @@
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex};
 
-static PAGE_SPLIT_RE: Lazy<Regex> = Lazy::new(|| re(r"(?i)<\s*/?\s*PAGE\s*\d*\s*>"));
+pub(super) static PAGE_SPLIT_RE: Lazy<Regex> = Lazy::new(|| re(r"(?i)<\s*/?\s*PAGE\s*\d*\s*>"));
 static MERGE_RE: Lazy<Regex> = Lazy::new(|| re(r"(?i)<\s*/?\s*MERGE\s*>"));
 static STRAY_TOKEN_RE: Lazy<Regex> = Lazy::new(|| {
     re(concat!(

@@ -11,7 +11,6 @@ use crate::attention::{
 use crate::error::Error;
 #[cfg(feature = "cuda")]
 use crate::runtime::decoder_graph::CudaGraphDrainGuard;
-use crate::runtime::image::pil_lanczos_resize;
 pub use crate::runtime::trace::GenerationTrace;
 use crate::runtime::trace::top3;
 use crate::utils::{candle_to_ocr_inference, candle_to_ocr_processing};
@@ -64,13 +63,10 @@ impl PaddleOcrVlTask {
         }
     }
 
-    fn needs_spotting_preprocess(self) -> bool {
+    pub(super) fn needs_spotting_preprocess(self) -> bool {
         matches!(self, Self::Spotting)
     }
 }
-
-const SPOTTING_UPSCALE_THRESHOLD: u32 = 1500;
-const SPOTTING_MAX_LONG_SIDE: u32 = 2048;
 
 pub struct PaddleOcrVl {
     device: Device,
@@ -308,50 +304,8 @@ impl PaddleOcrVl {
     ) -> Result<Vec<Vec<u32>>, Error> {
         let batch_size = images.len();
 
-        // 1. Preprocess all images
-        let needs_spotting = tasks.iter().any(|t| t.needs_spotting_preprocess());
-        let resized_images: Vec<RgbImage>;
-        let images_for_preprocess = if needs_spotting {
-            // The official spotting preprocessing hardcodes LANCZOS for the 2x
-            // pre-upscale (README inference script), independent of the
-            // processor's `resample` (which only governs the model-internal
-            // smart_resize). Match Pillow's LANCZOS exactly here.
-            let mut processed = Vec::with_capacity(images.len());
-            for (img, task) in images.iter().zip(tasks.iter()) {
-                if task.needs_spotting_preprocess()
-                    && img.width() < SPOTTING_UPSCALE_THRESHOLD
-                    && img.height() < SPOTTING_UPSCALE_THRESHOLD
-                {
-                    processed.push(pil_lanczos_resize(
-                        img,
-                        img.width().saturating_mul(2),
-                        img.height().saturating_mul(2),
-                    )?);
-                } else {
-                    processed.push(img.clone());
-                }
-            }
-            resized_images = processed;
-            resized_images.as_slice()
-        } else {
-            images
-        };
-        let max_pixels = if needs_spotting {
-            let factor = (self.image_cfg.patch_size * self.image_cfg.merge_size) as u32;
-            let spotting_max_pixels = SPOTTING_MAX_LONG_SIDE
-                .saturating_mul(factor)
-                .saturating_mul(factor);
-            self.image_cfg.max_pixels.max(spotting_max_pixels)
-        } else {
-            self.image_cfg.max_pixels
-        };
-        let image_inputs = processing::preprocess_images_with_max_pixels(
-            images_for_preprocess,
-            &self.image_cfg,
-            &self.device,
-            self.dtype,
-            max_pixels,
-        )?;
+        let image_inputs =
+            processing::preprocess_tasks(images, tasks, &self.image_cfg, &self.device, self.dtype)?;
 
         // 2. Build prompts for each sample
         let mut all_input_ids: Vec<Vec<u32>> = Vec::with_capacity(batch_size);

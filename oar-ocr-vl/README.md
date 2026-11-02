@@ -92,7 +92,7 @@ let options = AnyPageParserOptions::default().with_max_new_tokens(8192);
 let page = parser.parse_page(&image, &options)?;
 ```
 
-Construct it from an already-loaded model with `From`: the model-native parsers (`HpdParsing`, `HunyuanOcr`, `JinaOcr`, `MinerU`, `MinerUDiffusion`, `MonkeyOcrV2`, `OvisOcr2`, `UnlimitedOcr`, `WeVisDoc`, `XiaomiOcr`, `YoutuParsingOmni`) and `LayoutPageParser` compositions over `PpDocLayout` (`PaddleOcrVl`, `GlmOcr`, `TeleOcr`, `MiniCpmOcr`, `Oxr`). `AnyPageParserOptions` carries the knobs every parser shares: `max_new_tokens` maps to each model's generation budget (including `MinerUDiffusion`'s `gen_length`), and `region_batch_size` applies to the region-batching parsers (`MinerU` and the layout-composed models); parsers without a matching concept ignore the knob. OXR handles each scheduled region sequentially.
+Construct it from an already-loaded model with `From`: the model-native parsers (`HpdParsing`, `HunyuanOcr`, `JinaOcr`, `MinerU`, `MinerUDiffusion`, `MonkeyOcrV2`, `OvisOcr2`, `UnlimitedOcr`, `WeVisDoc`, `XiaomiOcr`, `YoutuParsingOmni`) and `LayoutPageParser` compositions over `PpDocLayout` (`PaddleOcrVl`, `GlmOcr`, `TeleOcr`, `MiniCpmOcr`, `Oxr`). `AnyPageParserOptions` carries the knobs every parser shares: `max_new_tokens` maps to each model's generation budget (including `MinerUDiffusion`'s `gen_length`), and `region_batch_size` applies to the region-batching parsers (`MinerU` and the layout-composed models); parsers without a matching concept ignore the knob. OXR handles each scheduled region sequentially. It refines the detected regions with its native reading-order request; `Oxr::with_reading_order(false)` keeps detector order when that extra page request is not wanted. Invalid order predictions retain all regions and add a page diagnostic. Code and chemical-structure labels select their native prompts, and OXR formatting preserves code indentation and SMILES markup. The detector remains pluggable through `LayoutSource`; the built-in loader uses PP-DocLayout, while the official D-FINE detector and its service are separate implementations.
 
 `AnyPageParser::from_dir` loads a named parser from a model directory. The model is always named explicitly by its Hugging Face repo ID (`tencent/HunyuanOCR`, `PaddlePaddle/PaddleOCR-VL-1.5`, …) — most supported models are fine-tunes whose checkpoint configs match their public base models, so the directory cannot identify the model reliably on its own. Each model then loads through its own `from_dir` with its own defaults:
 
@@ -138,6 +138,12 @@ let parser = AnyPageParser::from_pretrained(
 ```
 
 ModelScope is the default source and Hugging Face is selectable with `with_source(DownloadSource::HuggingFace)`; `with_revision` pins a revision (the sources' defaults are `master` and `main`), which resolves to an immutable commit before anything downloads. Snapshots land under `$OAR_HOME/models/<org>/<name>/<commit>` (`$OAR_HOME` defaults to `~/.oar`, shared with oar-ocr-core): each file is verified against the SHA-256 the source API publishes (Hugging Face publishes it for LFS files), a snapshot is staged and published atomically, and published snapshots are never modified — a cached commit is reused without any network listing. The layout-composed models also download a PP-DocLayout checkpoint — `PaddlePaddle/PP-DocLayoutV3_safetensors` by default, overridable with `with_layout` or replaced by a local directory with `with_layout_dir`. ModelScope publishes GLM-OCR under `ZhipuAI/GLM-OCR` and that mirror is used automatically; HunyuanOCR and WeVisDoc are not on ModelScope and download from Hugging Face instead (logged once via `tracing`), with the cache still keyed by the model ID.
+
+`PageParser::parse_document(&images, &options)` returns `DocumentOutput` with ordered pages and document-level Markdown. Most backends parse pages independently; Unlimited-OCR-2 makes one joint request, retaining cross-page text/table merges in the document Markdown and preserving individual page fragments in `pages`. Its unified `AnyPageParser` entry point uses that same joint path. Missing pages after a generation limit are reported in page diagnostics; requests beyond the model context window return an error.
+
+HunyuanOCR 1.5's `generate_joint(&images, instruction, max_new_tokens)` and OvisOCR3's `generate_joint_with_prompt(&images, prompt, max_new_tokens)` condition one response on every supplied image. Existing batch generation APIs continue to return independent responses. OvisOCR3 additionally offers `reconstruct_tables(&two_images, &two_page_markdowns, max_new_tokens)`, returning typed cross-page HTML tables with input-local page provenance. For reconstruction over more pages, the caller owns the official reverse-order placement and re-rendering step, keeping browser/PDF rendering outside the inference library.
+
+Native HPD-Parsing and MonkeyOCRv2 page outputs retain raw model protocols alongside parsed blocks and Markdown. Both MinerU parsers share layout and equation-container post-processing. Layout-first backends also receive original region labels: MiniCPM-OCR uses its native seal/inline-formula prompts and per-label token budgets, bounded by the caller's generation cap.
 
 ## Installation
 
@@ -290,7 +296,7 @@ As a `RecognitionBackend`, tables come back as OTSL and are converted to HTML by
 
 ### OXR-1.0
 
-OXR combines a SigLIP2 NaViT visual tokenizer with a tied Qwen3-0.6B decoder. Use the explicit repository ID `SoMarkAI/OXR-1.0`. Page parsing uses PP-DocLayout for regions and reading order; the official separate D-FINE `.pth` layout model is not used.
+OXR combines a SigLIP2 NaViT visual tokenizer with a tied Qwen3-0.6B decoder. Use the explicit repository ID `SoMarkAI/OXR-1.0`. Page parsing uses PP-DocLayout for regions and OXR for reading-order refinement; the official separate D-FINE `.pth` layout model is not used.
 
 OXR-1.0 weights are under [SoMark's OXR License](https://huggingface.co/SoMarkAI/OXR-1.0/blob/main/LICENSE): Apache 2.0 plus additional terms covering commercial thresholds, an attribution duty, and a ban on competing hosted APIs. Users must accept these terms before using the weights. Load a local directory as below, or use `AnyPageParser::from_pretrained` with the `auto-download` feature to fetch weights from SoMark's public Hugging Face repo and compose them with PP-DocLayout.
 
@@ -311,7 +317,7 @@ let page = parser.parse_page(&load_image("document.png")?, &AnyPageParserOptions
 
 For region inference, `Oxr::generate` accepts `OxrTask::{Text, Formula, Table, Code, ChemicalStructure, WholePage}` and returns raw decoded text. `generate_with_options` accepts `OxrGenerationOptions`, including explicit `with_min_pixels` and `with_max_pixels` controls. Defaults match the official vLLM service: Pillow bilinear RGB resize, a 32-pixel alignment factor, area bounds of 200,704–921,600 pixels, greedy decoding, repetition penalty 1.0, and stop IDs 151643 and 151645. Generation is sequential without CUDA graphs. Checkpoints with non-null `fullatt_block_indexes` are rejected.
 
-`LayoutPageParser::new(layout, model)` accepts any `LayoutSource` and an `Oxr` backend, using the crate's shared `DocParser` for region selection, cropping, text/formula/table routing, generic post-processing, and Markdown rendering. Set pixel bounds and repetition penalty on the backend with `Oxr::with_generation_options`; the parser's `DocParserConfig::max_tokens` supplies the region token limit. The same backend defaults apply to `Oxr::generate`, while methods taking explicit generation options use those instead. Region order comes from the layout source, with the shared parser's filtering and adjacent-text merging. Generation returns at the token limit without an automatic retry. The model's reading-order request is future work. `WholePage` is available for direct inference and does not replace layout-driven page parsing.
+`LayoutPageParser::new(layout, model)` accepts any `LayoutSource` and an `Oxr` backend, using the crate's shared `DocParser` for region selection, cropping, label-aware task routing, and Markdown rendering. Set pixel bounds and repetition penalty on the backend with `Oxr::with_generation_options`; the parser's `DocParserConfig::max_tokens` supplies the region token limit. The same backend defaults apply to `Oxr::generate`, while methods taking explicit generation options use those instead. OXR refines region order with the official grounding-box prompt; invalid permutations retain detector order with a diagnostic. Disable this request with `Oxr::with_reading_order(false)`. Regions are recognized separately, with native code/chemical-structure prompts and formatting that preserves indentation, SMILES notation, and repeated source content. Generation returns at the token limit without an automatic retry. `WholePage` is available for direct inference and does not replace layout-driven page parsing.
 
 ### Xiaomi-OCR-0
 
@@ -433,6 +439,8 @@ println!("{parsed}");
 ```
 
 The returned text is the model-native reading-order `<BLOCK>type [bbox]<CHILD>content` stream. Set `use_mtp: false` in `HpdGenerationConfig` for ordinary greedy decoding. The native path uses the P-MTP weights embedded in the main checkpoint; the duplicate `P-MTP/model.safetensors` bundle is not required.
+
+Page parsing follows the official converter's inline-formula formatting by default; call `.with_reference_inline_formulas(false)` on `HpdParsing` to preserve display-math delimiters and adjacent-formula spacing while retaining the other structural cleaning.
 
 ### DocParser
 

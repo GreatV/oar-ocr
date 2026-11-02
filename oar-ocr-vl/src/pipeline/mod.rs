@@ -5,4 +5,5 @@ pub mod doc_parser;
 pub mod geometry;
 pub mod layout;
 pub mod mineru_layout;
+pub(crate) mod mineru_postprocess;
 pub mod page_parser;

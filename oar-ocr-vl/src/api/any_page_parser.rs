@@ -105,7 +105,7 @@ pub enum AnyPageParserModel {
     OvisOcr2,
     /// ATH-MaaS/OvisOCR3, using its Markdown page protocol by default.
     OvisOcr3,
-    /// SoMarkAI/OXR-1.0, with PP-DocLayout regions and reading order.
+    /// SoMarkAI/OXR-1.0, with PP-DocLayout regions and OXR reading order.
     /// Weights are subject to SoMark's OXR License.
     Oxr,
     /// baidu/Unlimited-OCR-2.
@@ -621,6 +621,21 @@ fn required_layout_dir(
 
 impl PageParser for AnyPageParser {
     type Options = AnyPageParserOptions;
+
+    fn parse_document(
+        &self,
+        images: &[RgbImage],
+        options: &Self::Options,
+    ) -> Result<crate::DocumentOutput, Error> {
+        if let Self::UnlimitedOcr(model) = self {
+            return model.parse_document(images, &unlimited_ocr_options(options));
+        }
+        images
+            .iter()
+            .map(|image| self.parse_page(image, options))
+            .collect::<Result<Vec<_>, _>>()
+            .map(crate::DocumentOutput::from_pages)
+    }
 
     fn parse_page(&self, image: &RgbImage, options: &Self::Options) -> Result<PageDocument, Error> {
         match self {

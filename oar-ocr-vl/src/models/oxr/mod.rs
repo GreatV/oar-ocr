@@ -7,12 +7,14 @@
 //! Apache 2.0 plus commercial thresholds, an attribution duty, and a ban on
 //! competing hosted APIs. Users must accept these terms before using the weights.
 //! Page parsing uses PP-DocLayout and the crate's shared document pipeline.
-//! A model reading-order request remains follow-up work.
+//! OXR predicts page reading order after detection; invalid predictions keep
+//! the detector order and produce a page diagnostic.
 
 mod adapter;
 mod config;
 mod model;
 pub mod processing;
+mod reading_order;
 mod vision;
 
 pub use model::{GenerationTrace, Oxr, OxrGenerationOptions, OxrTask};

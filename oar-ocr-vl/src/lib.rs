@@ -159,7 +159,7 @@ pub use api::page_parser::PageParser;
 pub use api::recognition::{BackendCapabilities, RecognitionBackend, RecognitionTask};
 pub use api::runtime::{DTypePolicy, RuntimeConfig};
 pub use doc_parser::{DocParser, DocParserConfig};
-pub use document::page::{DocumentBlock, PageDocument, ParseDiagnostic};
+pub use document::page::{DocumentBlock, DocumentOutput, PageDocument, ParseDiagnostic};
 pub use error::{BatchResult, Error, ProcessingStage, Result};
 pub use geometry::{BoundingBox, Point};
 pub use layout::{LayoutDetectionElement, LayoutDetections, LayoutSource, StaticLayout};

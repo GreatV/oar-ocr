@@ -209,8 +209,30 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
                 .map(|result| (result, Vec::new()));
         }
 
-        // Step 3: Number the elements. A `LayoutSource` hands them over in
-        // reading order, so there is nothing to sort here.
+        // A backend may refine detector order using its trained page protocol.
+        // Invalid predictions preserve every region and report a diagnostic.
+        let mut diagnostics = Vec::new();
+        if elements.len() > 1
+            && let Some(order) =
+                self.backend
+                    .predict_reading_order(&image, &elements, self.config.max_tokens)?
+        {
+            let mut sorted_ids = order.clone();
+            sorted_ids.sort_unstable();
+            if sorted_ids.iter().copied().eq(0..elements.len()) {
+                let mut slots: Vec<_> = elements.into_iter().map(Some).collect();
+                elements = order
+                    .into_iter()
+                    .map(|index| slots[index].take().expect("validated permutation"))
+                    .collect();
+            } else {
+                diagnostics.push(ParseDiagnostic {
+                    block_index: None,
+                    stage: "reading_order".into(),
+                    message: "Invalid reading-order permutation; retained detector order".into(),
+                });
+            }
+        }
         let mut sorted_elements = elements;
         assign_order_indices(&mut sorted_elements);
 
@@ -218,7 +240,11 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
         //
         // Vertically stack compatible adjacent text crops before recognition.
         // This improves recognition quality for fragmented detections.
-        let merge_groups = compute_adjacent_text_merge_groups(&sorted_elements);
+        let merge_groups = if self.backend.merge_adjacent_text_regions() {
+            compute_adjacent_text_merge_groups(&sorted_elements)
+        } else {
+            Vec::new()
+        };
         let mut group_first_for_index: Vec<Option<usize>> = vec![None; sorted_elements.len()];
         let mut group_by_first: std::collections::HashMap<usize, MergeGroup> =
             std::collections::HashMap::new();
@@ -239,6 +265,7 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             element_index: usize,
             image: RgbImage,
             task: RecognitionTask,
+            label: String,
         }
 
         let mut jobs_by_batch: std::collections::BTreeMap<(usize, u64), Vec<RecognitionJob>> =
@@ -256,10 +283,13 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             let batch = std::mem::take(jobs);
             let element_indices: Vec<usize> = batch.iter().map(|job| job.element_index).collect();
             let tasks: Vec<RecognitionTask> = batch.iter().map(|job| job.task).collect();
-            let images: Vec<RgbImage> = batch.into_iter().map(|job| job.image).collect();
-            let results = self.backend.recognize_batch_with_options(
+            let (images, labels): (Vec<_>, Vec<_>) =
+                batch.into_iter().map(|job| (job.image, job.label)).unzip();
+            let labels: Vec<_> = labels.iter().map(String::as_str).collect();
+            let results = self.backend.recognize_labeled_batch_with_options(
                 images,
                 &tasks,
+                &labels,
                 &GenerationOptions::new(self.config.max_tokens),
             )?;
             if results.len() != element_indices.len() {
@@ -277,7 +307,6 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             }
             Ok(())
         };
-        let mut diagnostics = Vec::new();
         let mut merged_by_first: std::collections::HashMap<usize, bool> =
             std::collections::HashMap::new();
         for (idx, element) in sorted_elements.iter_mut().enumerate() {
@@ -292,7 +321,14 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             }
 
             // Determine task for element
-            let Some(task) = task_for_element_type(element.element_type) else {
+            let label = element
+                .label
+                .as_deref()
+                .unwrap_or(element.element_type.as_str());
+            let Some(task) = self
+                .backend
+                .recognition_task_for_label(label, task_for_element_type(element.element_type))
+            else {
                 continue;
             };
             // Backends that cannot read charts leave those regions
@@ -400,6 +436,7 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
                     element_index: idx,
                     image: cropped,
                     task,
+                    label: label.to_string(),
                 });
                 pending_jobs += 1;
                 if jobs.len() == self.region_batch_size {
@@ -462,7 +499,16 @@ impl<'a, B: RecognitionBackend + ?Sized> DocParser<'a, B> {
             //
             // Note: Table blocks should remain HTML/OTSL-derived HTML; do not run the text normalizer
             // on table markup.
-            let processed = if task == RecognitionTask::Table {
+            let label = element
+                .label
+                .as_deref()
+                .unwrap_or(element.element_type.as_str());
+            let processed = if let Some(native) = self
+                .backend
+                .postprocess_region_output(label, task, &generated)
+            {
+                native
+            } else if task == RecognitionTask::Table {
                 if self.backend.capabilities().table_output_is_otsl {
                     convert_otsl_to_html(&generated)
                 } else {
@@ -997,6 +1043,140 @@ mod tests {
                 ..crate::api::recognition::BackendCapabilities::default()
             }
         }
+    }
+
+    #[test]
+    fn backend_order_and_native_formatting_preserve_regions_and_code() {
+        struct NativeBackend {
+            invalid: bool,
+            inference_error: bool,
+        }
+        impl RecognitionBackend for NativeBackend {
+            fn recognize(
+                &self,
+                _: RgbImage,
+                _: RecognitionTask,
+                _: usize,
+            ) -> Result<String, Error> {
+                Ok("```\n    a_____b....c\n```".into())
+            }
+            fn predict_reading_order(
+                &self,
+                _: &RgbImage,
+                _: &[LayoutElement],
+                _: usize,
+            ) -> Result<Option<Vec<usize>>, Error> {
+                if self.inference_error {
+                    return Err(Error::Inference {
+                        model_name: "test".into(),
+                        context: "reading-order inference failed".into(),
+                        source: Box::new(std::io::Error::other("device failure")),
+                    });
+                }
+                Ok(Some(if self.invalid { vec![0, 0] } else { vec![1, 0] }))
+            }
+            fn merge_adjacent_text_regions(&self) -> bool {
+                false
+            }
+            fn postprocess_region_output(
+                &self,
+                _: &str,
+                _: RecognitionTask,
+                raw: &str,
+            ) -> Option<String> {
+                Some(raw.to_string())
+            }
+        }
+        let layout = StaticLayout::new(vec![
+            element("text", 10., 10., 190., 90.),
+            element("code", 10., 100., 190., 180.),
+        ]);
+        for invalid in [false, true] {
+            let backend = NativeBackend {
+                invalid,
+                inference_error: false,
+            };
+            let parser = DocParser::new(&backend);
+            let (output, diagnostics) = parser
+                .parse_image(&layout, &RgbImage::new(200, 200))
+                .unwrap();
+            assert_eq!(output.layout_elements.len(), 2);
+            assert_eq!(
+                output.layout_elements[0].label.as_deref(),
+                Some(if invalid { "text" } else { "code" })
+            );
+            assert_eq!(
+                output.layout_elements[0].text.as_deref(),
+                Some("```\n    a_____b....c\n```")
+            );
+            assert_eq!(diagnostics.len(), usize::from(invalid));
+            if invalid {
+                assert_eq!(diagnostics[0].stage, "reading_order");
+            }
+        }
+        let backend = NativeBackend {
+            invalid: false,
+            inference_error: true,
+        };
+        let error = DocParser::new(&backend)
+            .parse_image(&layout, &RgbImage::new(200, 200))
+            .unwrap_err();
+        assert!(matches!(error, Error::Inference { .. }));
+    }
+
+    #[test]
+    fn borrowed_backends_receive_native_region_labels_and_can_enable_seals() {
+        struct LabeledBackend;
+        impl RecognitionBackend for LabeledBackend {
+            fn recognize(
+                &self,
+                _: RgbImage,
+                _: RecognitionTask,
+                _: usize,
+            ) -> Result<String, Error> {
+                panic!("labeled dispatch expected");
+            }
+            fn recognition_task_for_label(
+                &self,
+                label: &str,
+                suggested: Option<RecognitionTask>,
+            ) -> Option<RecognitionTask> {
+                if matches!(label, "seal" | "inline_formula") {
+                    Some(RecognitionTask::Ocr)
+                } else {
+                    suggested
+                }
+            }
+            fn recognize_labeled_batch_with_options(
+                &self,
+                images: Vec<RgbImage>,
+                tasks: &[RecognitionTask],
+                labels: &[&str],
+                _: &GenerationOptions,
+            ) -> crate::BatchResult<String> {
+                assert_eq!(images.len(), labels.len());
+                assert!(tasks.iter().all(|task| *task == RecognitionTask::Ocr));
+                Ok(labels
+                    .iter()
+                    .map(|label| Ok(format!("recognized {label}")))
+                    .collect())
+            }
+        }
+        let backend = LabeledBackend;
+        let parser = DocParser::new(&backend);
+        let layout = StaticLayout::new(vec![
+            element("seal", 10., 10., 190., 90.),
+            element("inline_formula", 10., 100., 190., 180.),
+        ]);
+        let output = parser.parse(&layout, RgbImage::new(200, 200)).unwrap();
+        assert_eq!(
+            output.layout_elements[0].text.as_deref(),
+            Some("recognized seal")
+        );
+        assert_eq!(
+            output.layout_elements[1].text.as_deref(),
+            Some("recognized inline_formula")
+        );
     }
 
     #[test]

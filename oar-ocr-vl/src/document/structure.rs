@@ -247,7 +247,7 @@ impl LayoutElementType {
             "abstract" => LayoutElementType::Abstract,
 
             // Visual Elements
-            "image" | "figure" => LayoutElementType::Image,
+            "image" | "figure" | "picture" => LayoutElementType::Image,
             "table" => LayoutElementType::Table,
             "chart" | "flowchart" => LayoutElementType::Chart,
             "formula" | "equation" | "display_formula" | "inline_formula" => {
@@ -261,14 +261,14 @@ impl LayoutElementType {
             "figure_table_chart_title" | "caption" => LayoutElementType::FigureTableChartTitle,
 
             // Page Structure
-            "header" => LayoutElementType::Header,
+            "header" | "page-header" => LayoutElementType::Header,
             "header_image" => LayoutElementType::HeaderImage,
-            "footer" => LayoutElementType::Footer,
+            "footer" | "page-footer" => LayoutElementType::Footer,
             "footer_image" => LayoutElementType::FooterImage,
             "footnote" | "vision_footnote" => LayoutElementType::Footnote,
 
             // Special Elements
-            "seal" => LayoutElementType::Seal,
+            "seal" | "stamp" => LayoutElementType::Seal,
             "number" => LayoutElementType::Number,
             "reference" => LayoutElementType::Reference,
             "reference_content" => LayoutElementType::ReferenceContent,

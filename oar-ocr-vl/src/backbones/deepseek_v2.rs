@@ -733,8 +733,8 @@ impl MoeFeedForward {
 
     /// Generic device-resident path: one small router-id readback groups
     /// (token, slot) pairs by expert, each expert runs one dense batch, and
-    /// the f32 combine uses `index_add` in expert order — bit-identical to
-    /// the reference `moe_infer` accumulation.
+    /// the f32 combine uses `index_add` in expert order. The reference sums
+    /// unsorted router slots, so floating-point accumulation can differ.
     fn forward_indexed(
         &self,
         flat: &Tensor,

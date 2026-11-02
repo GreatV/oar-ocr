@@ -116,6 +116,7 @@ pub struct Oxr {
     device: Device,
     dtype: DType,
     pub(super) generation_options: OxrGenerationOptions,
+    pub(super) use_reading_order: bool,
 }
 
 impl Oxr {
@@ -175,6 +176,7 @@ impl Oxr {
             device,
             dtype,
             generation_options: OxrGenerationOptions::default(),
+            use_reading_order: true,
         })
     }
 
@@ -184,6 +186,13 @@ impl Oxr {
     /// Methods that take explicit generation options use those instead.
     pub fn with_generation_options(mut self, options: OxrGenerationOptions) -> Self {
         self.generation_options = options;
+        self
+    }
+
+    /// Enable model-predicted page order in layout-composed parsing (default:
+    /// enabled). Disable it to use the layout source's order directly.
+    pub fn with_reading_order(mut self, enabled: bool) -> Self {
+        self.use_reading_order = enabled;
         self
     }
 

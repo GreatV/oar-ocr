@@ -173,8 +173,8 @@ fn prompt_pages(
             (tok, page)
         })
         .collect();
-    // Prompt tokens all count as prefill for `pf_cnt` (the reference's
-    // `in_prefill` only gates the page numbering).
+    // `pf_cnt` includes prompt tokens only through the last image token;
+    // trailing instruction tokens already belong to the decoding segment.
     let mut prefill_counts = vec![0i64; buckets];
     for (index, &page) in rope_pages.iter().enumerate() {
         if index <= last_image {

@@ -217,6 +217,7 @@ pub struct HpdParsing {
     fork_token_id: u32,
     child_token_id: u32,
     stop_token_ids: Vec<u32>,
+    pub(super) reference_inline_formulas: bool,
 }
 
 impl HpdParsing {
@@ -269,7 +270,18 @@ impl HpdParsing {
             fork_token_id,
             child_token_id,
             stop_token_ids,
+            reference_inline_formulas: true,
         })
+    }
+
+    /// Apply the reference display-to-inline formula rewrite in page parsing
+    /// (default: enabled). Content containing `\[` followed by a newline and
+    /// no `\\` is rewritten to `\( … \)`; adjacent inline formulas split
+    /// into paragraphs. Disable it to retain display math. Structural cleaning
+    /// still applies; scoring-only formula rewrites are not enabled here.
+    pub fn with_reference_inline_formulas(mut self, enabled: bool) -> Self {
+        self.reference_inline_formulas = enabled;
+        self
     }
 
     /// Parse complete pages with the official fork-enabled prompt.
@@ -867,10 +879,9 @@ fn decode_protocol_tokens(
         .copied()
         .filter(|token| !stop_token_ids.contains(token))
         .collect::<Vec<_>>();
-    // HPD's <BLOCK>/<FORK>/<CHILD> markers are output protocol, not chat
-    // framing. Decode all remaining IDs explicitly so checkpoint metadata
-    // cannot accidentally hide structural markers.
-    tokenizer.decode(&visible, false)
+    // The released tokenizer marks <BLOCK>/<FORK>/<CHILD> as ordinary added
+    // tokens, so skipping chat specials preserves the output protocol.
+    tokenizer.decode(&visible, true)
 }
 
 fn greedy_batch_last(logits: &Tensor) -> Result<Vec<u32>, Error> {
@@ -955,20 +966,31 @@ mod tests {
     fn protocol_decode_keeps_structure_and_removes_terminators() {
         let mut tokenizer = Tokenizer::new(WordLevel::default());
         tokenizer
+            .add_tokens([
+                AddedToken::from("<BLOCK>", false),
+                AddedToken::from("<FORK>", false),
+                AddedToken::from("<CHILD>", false),
+            ])
+            .unwrap();
+        tokenizer
             .add_special_tokens([
-                AddedToken::from("<BLOCK>", true),
-                AddedToken::from("<CHILD>", true),
                 AddedToken::from("<|im_end|>", true),
+                AddedToken::from("<|im_start|>", true),
             ])
             .unwrap();
         let block = tokenizer.token_to_id("<BLOCK>").unwrap();
         let child = tokenizer.token_to_id("<CHILD>").unwrap();
+        let fork = tokenizer.token_to_id("<FORK>").unwrap();
         let end = tokenizer.token_to_id("<|im_end|>").unwrap();
+        let start = tokenizer.token_to_id("<|im_start|>").unwrap();
 
-        let decoded = decode_protocol_tokens(&tokenizer, &[block, child, end], &[end]).unwrap();
+        let decoded =
+            decode_protocol_tokens(&tokenizer, &[start, block, fork, child, end], &[end]).unwrap();
         assert!(decoded.contains("<BLOCK>"));
+        assert!(decoded.contains("<FORK>"));
         assert!(decoded.contains("<CHILD>"));
         assert!(!decoded.contains("<|im_end|>"));
+        assert!(!decoded.contains("<|im_start|>"));
     }
 
     #[cfg(feature = "cuda")]

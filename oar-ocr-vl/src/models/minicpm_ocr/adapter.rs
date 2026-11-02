@@ -55,24 +55,19 @@ fn chart_otsl_to_markdown(text: &str) -> String {
     lines.join("\n")
 }
 
-impl RecognitionBackend for MiniCpmOcr {
-    fn recognize(
+impl MiniCpmOcr {
+    fn recognize_region(
         &self,
-        image: RgbImage,
+        image: &RgbImage,
         task: RecognitionTask,
+        model_task: MiniCpmOcrTask,
         max_tokens: usize,
     ) -> Result<String, Error> {
-        let model_task = match task {
-            RecognitionTask::Ocr => MiniCpmOcrTask::Text,
-            RecognitionTask::Table => MiniCpmOcrTask::Table,
-            RecognitionTask::Formula => MiniCpmOcrTask::Formula,
-            RecognitionTask::Chart => MiniCpmOcrTask::Chart,
-        };
         let options = self
             .generation_options
             .clone()
             .with_max_new_tokens(max_tokens);
-        let text = self.generate_with_prompt(&image, model_task.prompt(), &options)?;
+        let text = self.generate_with_prompt(image, model_task.prompt(), &options)?;
         // Tables go on to DocParser's OTSL-to-HTML conversion; other task
         // formatting is owned by DocParser and the shared render helpers.
         Ok(match task {
@@ -80,6 +75,51 @@ impl RecognitionBackend for MiniCpmOcr {
             RecognitionTask::Chart => chart_otsl_to_markdown(&text),
             _ => text,
         })
+    }
+}
+
+impl RecognitionBackend for MiniCpmOcr {
+    fn recognize(
+        &self,
+        image: RgbImage,
+        task: RecognitionTask,
+        max_tokens: usize,
+    ) -> Result<String, Error> {
+        self.recognize_region(&image, task, region_recipe("", task).0, max_tokens)
+    }
+
+    fn recognition_task_for_label(
+        &self,
+        label: &str,
+        suggested: Option<RecognitionTask>,
+    ) -> Option<RecognitionTask> {
+        match label {
+            "seal" | "inline_formula" => Some(RecognitionTask::Ocr),
+            _ => suggested,
+        }
+    }
+
+    fn recognize_labeled_batch_with_options(
+        &self,
+        images: Vec<RgbImage>,
+        tasks: &[RecognitionTask],
+        labels: &[&str],
+        options: &crate::GenerationOptions,
+    ) -> crate::BatchResult<String> {
+        if images.len() != tasks.len() || labels.len() != tasks.len() {
+            return Err(Error::invalid_input(
+                "MiniCPM-OCR image, label and task counts differ",
+            ));
+        }
+        Ok(images
+            .into_iter()
+            .zip(tasks)
+            .zip(labels)
+            .map(|((image, &task), &label)| {
+                let (model_task, budget) = region_recipe(label, task);
+                self.recognize_region(&image, task, model_task, options.max_new_tokens.min(budget))
+            })
+            .collect())
     }
 
     fn capabilities(&self) -> BackendCapabilities {
@@ -91,10 +131,43 @@ impl RecognitionBackend for MiniCpmOcr {
     }
 }
 
+// Official minicpmvocr prompt-map budgets; the caller's cap always wins.
+fn region_recipe(label: &str, task: RecognitionTask) -> (MiniCpmOcrTask, usize) {
+    let model_task = match label {
+        "seal" => MiniCpmOcrTask::Seal,
+        "inline_formula" => MiniCpmOcrTask::Text,
+        _ => match task {
+            RecognitionTask::Ocr => MiniCpmOcrTask::Text,
+            RecognitionTask::Formula => MiniCpmOcrTask::Formula,
+            RecognitionTask::Table => MiniCpmOcrTask::Table,
+            RecognitionTask::Chart => MiniCpmOcrTask::Chart,
+        },
+    };
+    let budget = match label {
+        "table" => 8192,
+        "seal" | "formula_number" | "number" => 256,
+        "doc_title" | "paragraph_title" | "figure_title" | "header" | "footer" => 512,
+        "inline_formula" | "footnote" | "vision_footnote" | "aside_text" => 1024,
+        "reference" | "reference_content" | "vertical_text" | "display_formula" => 2048,
+        _ => 4096,
+    };
+    (model_task, budget)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::render::table::convert_otsl_to_html;
+
+    #[test]
+    fn layout_labels_select_native_prompts_and_budgets() {
+        let (task, budget) = region_recipe("seal", RecognitionTask::Ocr);
+        assert_eq!((task.prompt(), budget), ("Seal Recognition:", 256));
+        let (task, budget) = region_recipe("inline_formula", RecognitionTask::Formula);
+        assert_eq!((task.prompt(), budget), ("Text Recognition:", 1024));
+        assert_eq!(region_recipe("table", RecognitionTask::Table).1, 8192);
+        assert_eq!(region_recipe("number", RecognitionTask::Ocr).1, 256);
+    }
 
     #[test]
     fn otsl_tables_and_charts_lose_their_envelope() {

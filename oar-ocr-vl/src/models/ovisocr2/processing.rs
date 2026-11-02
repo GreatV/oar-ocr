@@ -90,8 +90,8 @@ pub fn preprocess_image(
         });
     }
 
-    // Qwen's fast image processor resamples with Pillow's bicubic — the
-    // default when the checkpoint has no explicit PIL resampling enum.
+    // OvisOCR2/3 reference fast processors use torchvision antialiased
+    // bicubic. This portable Pillow path can differ in uint8 rounding.
     let resized = if resized_height != height || resized_width != width {
         qwen_vl_resize(image, resized_width, resized_height, cfg.resample)?
     } else {

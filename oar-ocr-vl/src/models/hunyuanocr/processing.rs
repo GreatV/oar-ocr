@@ -5,7 +5,7 @@ use crate::utils::{
     image::{clamp_to_max_image_size, image_to_chw, smart_resize},
 };
 use candle_core::{DType, Device, Tensor};
-use image::{RgbImage, imageops::FilterType};
+use image::RgbImage;
 
 #[derive(Debug, Clone)]
 pub struct HunyuanOcrImageInputs {
@@ -117,7 +117,6 @@ pub fn preprocess_image(
     // resample argument but calls PIL `image.resize((w, h))` without passing it.
     // HunyuanOCR therefore ignores cfg.resample and always uses the Pillow
     // default BICUBIC-equivalent path, even when the config says `resample: 1`.
-    let resize_filter = FilterType::CatmullRom;
 
     let (h, w) = (image.height(), image.width());
     let factor = (cfg.patch_size * cfg.merge_size) as u32;
@@ -127,7 +126,7 @@ pub fn preprocess_image(
     let (rh, rw) = resized_dimensions(h, w, cfg, vision_cfg, version)?;
 
     let resized = if rh != h || rw != w {
-        image::imageops::resize(image, rw, rh, resize_filter)
+        crate::runtime::image::pil_bicubic_resize(image, rw, rh)?
     } else {
         image.clone()
     };

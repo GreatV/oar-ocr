@@ -1,15 +1,14 @@
 //! PP-DocLayout image preprocessing.
 //!
-//! `preprocessor_config.json` asks for a bicubic resize to 800x800, a `1/255`
-//! rescale and an identity normalization (mean 0, std 1). The filter matches
-//! the one `oar-ocr-core`'s ONNX PP-DocLayout path uses, so both backends see
-//! the same pixels.
+//! PaddleX uses OpenCV `INTER_CUBIC` to 800x800, a `1/255` rescale and an
+//! identity normalization (mean 0, std 1). We reproduce its generic uint8
+//! kernel; accelerated OpenCV paths can differ in final pixel rounding.
 
 use super::err::proc_err;
 use crate::error::Error;
+use crate::runtime::image::cv2_cubic_resize;
 use candle_core::{DType, Device, Tensor};
 use image::RgbImage;
-use image::imageops::FilterType;
 
 /// Input size both checkpoints are trained and exported at.
 pub(super) const INPUT_SIZE: u32 = 800;
@@ -35,7 +34,7 @@ pub(super) fn preprocess(
         });
     }
 
-    let resized = image::imageops::resize(image, INPUT_SIZE, INPUT_SIZE, FilterType::CatmullRom);
+    let resized = cv2_cubic_resize(image, INPUT_SIZE, INPUT_SIZE)?;
 
     let pixels = INPUT_SIZE as usize * INPUT_SIZE as usize;
     let mut data = vec![0f32; 3 * pixels];
@@ -83,6 +82,37 @@ mod tests {
             .unwrap();
         assert!(values.iter().all(|v| (0.0..=1.0).contains(v)));
         assert!((values[0] - 1.0).abs() < 1e-6);
+
+        // cv2 4.13.0 INTER_CUBIC, setUseOptimized(False): borders, clipping,
+        // coefficient quantization and downsampling without an antialias pass.
+        let sample = |width, height| {
+            RgbImage::from_fn(width, height, |x, y| {
+                image::Rgb(std::array::from_fn(|channel| {
+                    let i = ((y * width + x) * 3) as usize + channel;
+                    ((i * 37 + i / 11 * 19) % 256) as u8
+                }))
+            })
+        };
+        let up = cv2_cubic_resize(&sample(4, 3), 7, 5).unwrap();
+        assert_eq!(
+            up.as_raw(),
+            &[
+                0, 4, 68, 19, 74, 127, 103, 153, 191, 198, 68, 101, 223, 0, 21, 138, 61, 112, 67,
+                130, 190, 83, 120, 27, 81, 128, 87, 90, 134, 164, 168, 109, 156, 202, 86, 123, 105,
+                97, 141, 25, 108, 158, 221, 255, 14, 151, 188, 56, 65, 102, 124, 118, 153, 214,
+                170, 208, 245, 84, 134, 171, 14, 72, 109, 208, 245, 153, 129, 165, 125, 33, 69, 99,
+                67, 128, 177, 146, 193, 230, 162, 109, 145, 165, 38, 73, 168, 205, 255, 97, 134,
+                187, 11, 48, 87, 36, 99, 134, 133, 154, 191, 229, 80, 117, 255, 18, 55,
+            ]
+        );
+        let down = cv2_cubic_resize(&sample(12, 9), 3, 2).unwrap();
+        assert_eq!(
+            down.as_raw(),
+            &[
+                139, 142, 101, 91, 141, 177, 195, 55, 129, 115, 124, 161, 164, 90, 112, 117, 154,
+                74,
+            ]
+        );
     }
 
     #[test]

@@ -339,12 +339,9 @@ fn pil_fixed_to_u8(value: i64) -> u8 {
     rounded.clamp(0, 255) as u8
 }
 
-/// Resize for pipelines whose upstream is the transformers Qwen-VL-family
-/// processor (Qwen2VLImageProcessor and its Fast/Qwen3VL/Glm46V variants):
-/// those resample with Pillow's bicubic — the family default and the
-/// meaning of an explicit `resample=3` — so bicubic goes through the
-/// PIL-exact path. An explicit non-bicubic `resample` keeps the `image`
-/// crate approximation, as before.
+/// Resize using the Pillow implementation of the Qwen-VL resampling filter.
+/// Bicubic is the default (`resample=3`). Transformers' torchvision fast
+/// processors round differently and can differ by one intensity level.
 pub fn qwen_vl_resize(
     image: &RgbImage,
     width: u32,
@@ -353,6 +350,8 @@ pub fn qwen_vl_resize(
 ) -> Result<RgbImage, Error> {
     match resample {
         None | Some(3) => pil_bicubic_resize(image, width, height),
+        Some(1) => pil_lanczos_resize(image, width, height),
+        Some(2) => pil_bilinear_resize(image, width, height),
         Some(other) => {
             let filter = pil_resample_to_filter_type(other).unwrap_or(FilterType::CatmullRom);
             Ok(imageops::resize(image, width, height, filter))
@@ -369,6 +368,91 @@ pub fn qwen_vl_resize(
 /// Pillow bit-for-bit.
 pub fn pil_bicubic_resize(image: &RgbImage, width: u32, height: u32) -> Result<RgbImage, Error> {
     pil_resize(image, width, height, PIL_BICUBIC)
+}
+
+/// OpenCV's generic uint8 `INTER_CUBIC` path, without antialiasing.
+/// Optimized OpenCV SIMD/IPP paths can round some pixels differently.
+pub(crate) fn cv2_cubic_resize(
+    image: &RgbImage,
+    width: u32,
+    height: u32,
+) -> Result<RgbImage, Error> {
+    if image.width() == 0 || image.height() == 0 || width == 0 || height == 0 {
+        return Err(Error::invalid_input(
+            "Cubic resize requires nonempty images",
+        ));
+    }
+    if image.dimensions() == (width, height) {
+        return Ok(image.clone());
+    }
+    let horizontal = cv2_cubic_taps(image.width(), width);
+    let vertical = cv2_cubic_taps(image.height(), height);
+    let stride = width as usize * 3;
+    let mut rows = vec![0i32; stride * image.height() as usize];
+    rows.par_chunks_mut(stride)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for (x, tap) in horizontal.iter().enumerate() {
+                for channel in 0..3 {
+                    row[x * 3 + channel] = tap
+                        .indices
+                        .iter()
+                        .zip(tap.weights)
+                        .map(|(&sx, weight)| {
+                            image.get_pixel(sx as u32, y as u32)[channel] as i32 * weight
+                        })
+                        .sum();
+                }
+            }
+        });
+    let mut output = RgbImage::new(width, height);
+    output
+        .as_mut()
+        .par_chunks_mut(stride)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let tap = &vertical[y];
+            for (index, value) in row.iter_mut().enumerate() {
+                let sum: i32 = tap
+                    .indices
+                    .iter()
+                    .zip(tap.weights)
+                    .map(|(&sy, weight)| rows[sy * stride + index] * weight)
+                    .sum();
+                *value = ((sum + (1 << 21)) >> 22).clamp(0, 255) as u8;
+            }
+        });
+    Ok(output)
+}
+
+struct Cv2CubicTap {
+    indices: [usize; 4],
+    weights: [i32; 4],
+}
+
+fn cv2_cubic_taps(input: u32, output: u32) -> Vec<Cv2CubicTap> {
+    // Adapted from OpenCV 4.13.0 imgproc/src/resize.cpp (Apache-2.0):
+    // interpolateCubic, HResizeCubic and FixedPtCast. Coefficients are f32,
+    // quantized to 11 bits with cvRound's ties-to-even; pixels round at 22 bits.
+    let scale = 1. / (output as f64 / input as f64);
+    (0..output)
+        .map(|position| {
+            let center = ((position as f64 + 0.5) * scale - 0.5) as f32;
+            let base = center.floor() as i64;
+            let x = center - base as f32;
+            let a = -0.75f32;
+            let c0 = ((a * (x + 1.) - 5. * a) * (x + 1.) + 8. * a) * (x + 1.) - 4. * a;
+            let c1 = ((a + 2.) * x - (a + 3.)) * x * x + 1.;
+            let c2 = ((a + 2.) * (1. - x) - (a + 3.)) * (1. - x) * (1. - x) + 1.;
+            Cv2CubicTap {
+                indices: std::array::from_fn(|k| {
+                    (base + k as i64 - 1).clamp(0, input as i64 - 1) as usize
+                }),
+                weights: [c0, c1, c2, 1. - c0 - c1 - c2]
+                    .map(|weight| (weight * 2048.).round_ties_even() as i32),
+            }
+        })
+        .collect()
 }
 
 /// Pillow-exact bilinear RGB resize, including the rounded uint8 intermediate.
@@ -388,6 +472,45 @@ pub(crate) fn pil_lanczos_resize(
     height: u32,
 ) -> Result<RgbImage, Error> {
     pil_resize(image, width, height, PIL_LANCZOS)
+}
+
+/// Pillow `ImageOps.pad` for a square RGB canvas, including ties-to-even
+/// rounding of both the contained size and the centered paste offset.
+pub(crate) fn pil_pad_to_square(
+    image: &RgbImage,
+    size: u32,
+    color: [u8; 3],
+) -> Result<RgbImage, Error> {
+    if image.width() == 0 || image.height() == 0 || size == 0 {
+        return Err(Error::invalid_input(
+            "square padding requires nonzero dimensions",
+        ));
+    }
+    let (width, height) = image.dimensions();
+    let round = |value: f64| (value.round_ties_even() as u32).max(1);
+    let (new_width, new_height) = match width.cmp(&height) {
+        std::cmp::Ordering::Equal => (size, size),
+        std::cmp::Ordering::Greater => (
+            size,
+            round(f64::from(height) / f64::from(width) * f64::from(size)),
+        ),
+        std::cmp::Ordering::Less => (
+            round(f64::from(width) / f64::from(height) * f64::from(size)),
+            size,
+        ),
+    };
+    let resized = pil_bicubic_resize(image, new_width, new_height)?;
+    if (new_width, new_height) == (size, size) {
+        return Ok(resized);
+    }
+    let mut canvas = RgbImage::from_pixel(size, size, image::Rgb(color));
+    let offset = |free: u32| (f64::from(free) * 0.5).round_ties_even() as i64;
+    if new_width != size {
+        imageops::overlay(&mut canvas, &resized, offset(size - new_width), 0);
+    } else {
+        imageops::overlay(&mut canvas, &resized, 0, offset(size - new_height));
+    }
+    Ok(canvas)
 }
 
 fn pil_resize(
@@ -433,11 +556,13 @@ fn pil_resize(
                     }
                 }
             });
-        RgbImage::from_raw(width, in_h, buffer).ok_or_else(|| Error::InvalidInput {
-            message: "pil_resize: intermediate buffer size mismatch".to_string(),
-        })?
+        std::borrow::Cow::Owned(RgbImage::from_raw(width, in_h, buffer).ok_or_else(|| {
+            Error::InvalidInput {
+                message: "pil_resize: intermediate buffer size mismatch".to_string(),
+            }
+        })?)
     } else {
-        image.clone()
+        std::borrow::Cow::Borrowed(image)
     };
     // Vertical pass over the intermediate.
     if height != in_h {
@@ -470,7 +595,7 @@ fn pil_resize(
             message: "pil_resize: output buffer size mismatch".to_string(),
         })
     } else {
-        Ok(mid)
+        Ok(mid.into_owned())
     }
 }
 
@@ -621,20 +746,31 @@ pub fn clamp_to_max_image_size(
 /// 1. If the aspect ratio exceeds `max_aspect_ratio`, the image is padded with
 ///    white to bring it within bounds.
 /// 2. If the minimum edge is below `min_edge`, the image is scaled up.
+///
+/// Empty images are returned unchanged.
 pub fn resize_for_mineru(image: &RgbImage, min_edge: u32, max_aspect_ratio: f32) -> RgbImage {
     use image::{Rgb, imageops};
     use std::borrow::Cow;
 
     let (mut w, mut h) = image.dimensions();
+    if w == 0 || h == 0 {
+        return image.clone();
+    }
     let mut out = Cow::Borrowed(image);
 
     // Handle extreme aspect ratios by padding
-    let ratio = (w.max(h) as f32) / (w.min(h).max(1) as f32);
-    if ratio > max_aspect_ratio {
+    let ratio = f64::from(w.max(h)) / f64::from(w.min(h).max(1));
+    if ratio > f64::from(max_aspect_ratio) {
         let (new_w, new_h) = if w > h {
-            (w, (w as f32 / max_aspect_ratio).ceil() as u32)
+            (
+                w,
+                (f64::from(w) / f64::from(max_aspect_ratio)).ceil() as u32,
+            )
         } else {
-            ((h as f32 / max_aspect_ratio).ceil() as u32, h)
+            (
+                (f64::from(h) / f64::from(max_aspect_ratio)).ceil() as u32,
+                h,
+            )
         };
         let mut canvas = RgbImage::from_pixel(new_w, new_h, Rgb([255, 255, 255]));
         let x = ((new_w - w) / 2) as i64;
@@ -647,15 +783,12 @@ pub fn resize_for_mineru(image: &RgbImage, min_edge: u32, max_aspect_ratio: f32)
     // Scale up if minimum edge is too small
     let min_dim = w.min(h);
     if min_dim < min_edge {
-        let scale = min_edge as f32 / min_dim as f32;
-        let new_w = (w as f32 * scale).ceil() as u32;
-        let new_h = (h as f32 * scale).ceil() as u32;
-        out = Cow::Owned(imageops::resize(
-            &*out,
-            new_w,
-            new_h,
-            imageops::FilterType::CatmullRom,
-        ));
+        let scale = f64::from(min_edge) / f64::from(min_dim);
+        let new_w = (f64::from(w) * scale).ceil() as u32;
+        let new_h = (f64::from(h) * scale).ceil() as u32;
+        if let Ok(resized) = pil_bicubic_resize(&out, new_w, new_h) {
+            out = Cow::Owned(resized);
+        }
     }
 
     out.into_owned()
@@ -682,6 +815,32 @@ pub fn load_image_from_memory(bytes: &[u8]) -> Result<RgbImage, crate::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mineru_resize_preserves_empty_images() {
+        for (width, height) in [(0, 0), (0, 10)] {
+            let image = RgbImage::new(width, height);
+            assert_eq!(resize_for_mineru(&image, 28, 50.0), image);
+        }
+    }
+
+    #[test]
+    fn square_padding_matches_pillow_size_and_offset_rounding() {
+        let white = image::Rgb([255; 3]);
+        let gray = image::Rgb([127; 3]);
+        let source = RgbImage::from_pixel(2048, 1025, white);
+        let out = pil_pad_to_square(&source, 1024, [127; 3]).unwrap();
+        assert_eq!(out.get_pixel(512, 255), &gray);
+        assert_eq!(out.get_pixel(512, 256), &white);
+        assert_eq!(out.get_pixel(512, 767), &white);
+        assert_eq!(out.get_pixel(512, 768), &gray);
+        // Three free rows center at round(1.5) = 2, rather than floor(1.5).
+        let out = pil_pad_to_square(&RgbImage::from_pixel(2, 1, white), 6, [127; 3]).unwrap();
+        assert_eq!(out.get_pixel(3, 1), &gray);
+        assert_eq!(out.get_pixel(3, 2), &white);
+        assert_eq!(out.get_pixel(3, 4), &white);
+        assert_eq!(out.get_pixel(3, 5), &gray);
+    }
 
     /// Bit-exactness against Pillow is the entire point of the PIL resize:
     /// the golden pairs below were produced with Pillow 12.1.0

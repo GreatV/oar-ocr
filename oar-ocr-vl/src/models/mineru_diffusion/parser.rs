@@ -9,7 +9,8 @@ use crate::pipeline::mineru_layout::{
 };
 use crate::render::table::convert_otsl_to_html;
 use crate::render::text::truncate_repetitive_content;
-use image::{RgbImage, imageops};
+use crate::runtime::image::pil_bicubic_resize;
+use image::RgbImage;
 
 /// Options for MinerU-Diffusion's native two-stage page parser.
 #[derive(Debug, Clone)]
@@ -33,12 +34,7 @@ impl PageParser for MinerUDiffusion {
     type Options = MinerUDiffusionParseOptions;
 
     fn parse_page(&self, image: &RgbImage, options: &Self::Options) -> Result<PageDocument, Error> {
-        let layout_image = imageops::resize(
-            image,
-            LAYOUT_IMAGE_SIZE,
-            LAYOUT_IMAGE_SIZE,
-            imageops::FilterType::CatmullRom,
-        );
+        let layout_image = pil_bicubic_resize(image, LAYOUT_IMAGE_SIZE, LAYOUT_IMAGE_SIZE)?;
         let raw_layout = self.generate_raw(&layout_image, LAYOUT_PROMPT, &options.generation)?;
         let mut blocks = parse_layout_output(&raw_layout);
         let mut diagnostics = Vec::new();
@@ -68,11 +64,14 @@ impl PageParser for MinerUDiffusion {
             }
         }
 
-        Ok(PageDocument {
+        let blocks = crate::pipeline::mineru_postprocess::postprocess_blocks(blocks);
+        let mut page = PageDocument {
             blocks,
             raw_output: Some(raw_layout),
             diagnostics,
             ..PageDocument::default()
-        })
+        };
+        page.markdown = Some(page.render_markdown());
+        Ok(page)
     }
 }

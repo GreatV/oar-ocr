@@ -6,7 +6,9 @@ use crate::Error;
 use crate::runtime::image::pil_bicubic_resize;
 use candle_core::{DType, Device, Tensor};
 use half::bf16;
-use image::{Rgb, RgbImage, imageops};
+#[cfg(test)]
+use image::Rgb;
+use image::{RgbImage, imageops};
 use tokenizers::Tokenizer;
 
 /// Global view side: every page is letterboxed into this square.
@@ -100,31 +102,7 @@ pub fn tile_grid(width: u32, height: u32, max_tiles: u32) -> (usize, usize) {
 /// `contain` fit, which always resizes, then a centred paste whose offset
 /// rounds half to even like Python's `round`.
 pub fn letterbox(image: &RgbImage, size: u32) -> Result<RgbImage, Error> {
-    let (width, height) = image.dimensions();
-    let round = |value: f64| (value.round_ties_even() as u32).max(1);
-    let (new_width, new_height) = match width.cmp(&height) {
-        std::cmp::Ordering::Equal => (size, size),
-        std::cmp::Ordering::Greater => (
-            size,
-            round(f64::from(height) / f64::from(width) * f64::from(size)),
-        ),
-        std::cmp::Ordering::Less => (
-            round(f64::from(width) / f64::from(height) * f64::from(size)),
-            size,
-        ),
-    };
-    let resized = pil_bicubic_resize(image, new_width, new_height)?;
-    if (new_width, new_height) == (size, size) {
-        return Ok(resized);
-    }
-    let mut canvas = RgbImage::from_pixel(size, size, Rgb([PAD_GRAY; 3]));
-    let offset = |free: u32| (f64::from(free) * 0.5).round_ties_even() as i64;
-    if new_width != size {
-        imageops::overlay(&mut canvas, &resized, offset(size - new_width), 0);
-    } else {
-        imageops::overlay(&mut canvas, &resized, 0, offset(size - new_height));
-    }
-    Ok(canvas)
+    crate::runtime::image::pil_pad_to_square(image, size, [PAD_GRAY; 3])
 }
 
 /// `ToTensor` + `Normalize(0.5, 0.5)`, rounded through bfloat16 like the
